@@ -20,7 +20,11 @@ const {
   pendingKeyStatus,
   toastFns,
 } = vi.hoisted(() => ({
-  catalog: { entries: [] as unknown[] },
+  catalog: {
+    entries: [] as unknown[],
+    allEntries: null as unknown[] | null,
+    requests: [] as boolean[],
+  },
   // Status the OAuth step's placeholder-key poll observes. `null` = still
   // `pending_auth` (the user hasn't finished at the provider yet).
   pendingKeyStatus: { value: null as string | null },
@@ -41,7 +45,16 @@ const {
 }));
 
 vi.mock("@/hooks/use-keys", () => ({
-  useCatalog: () => ({ data: catalog.entries, isLoading: false }),
+  useCatalog: (options: { readonly includeAll?: boolean } = {}) => {
+    const includeAll = options.includeAll ?? false;
+    catalog.requests.push(includeAll);
+    return {
+      data: includeAll
+        ? (catalog.allEntries ?? catalog.entries)
+        : catalog.entries,
+      isLoading: false,
+    };
+  },
   useCreateKey: () => ({
     mutate: createKeyMutate,
     mutateAsync: createKeyMutateAsync,
@@ -188,7 +201,10 @@ function makeReconnectKey(overrides: Partial<KeyInfo> = {}): KeyInfo {
 
 beforeEach(() => {
   vi.clearAllMocks();
+  window.history.replaceState({}, "", "/");
   catalog.entries = [OPENAI_ENTRY];
+  catalog.allEntries = null;
+  catalog.requests = [];
   pendingKeyStatus.value = null;
   createKeyMutateAsync.mockResolvedValue({ id: "created-service-1" });
   initiateOAuthMutateAsync.mockResolvedValue({
@@ -220,19 +236,46 @@ async function typeInto(
 }
 
 describe("AddKeyDialog — custom endpoint path", () => {
+  it("opens the assistant custom-service path with every mappable field prefilled", async () => {
+    const user = userEvent.setup();
+    render(
+      <AddKeyDialog
+        open
+        onOpenChange={vi.fn()}
+        prefillCustom={{
+          name: "Build API",
+          endpointUrl: "https://build.example.test/v1",
+          authMethod: "header",
+          authKeyName: "X-Build-Key",
+        }}
+      />,
+    );
+
+    await user.click(
+      await screen.findByRole("button", { name: /Next: Enter Credentials/i }),
+    );
+
+    expect(document.querySelector("#add-key-label")).toHaveValue("Build API");
+    expect(document.querySelector("#add-key-endpoint")).toHaveValue(
+      "https://build.example.test/v1",
+    );
+    expect(document.querySelector("#add-key-auth-key")).toHaveValue(
+      "X-Build-Key",
+    );
+    expect(document.querySelector("#add-key-auth-method")).toHaveTextContent(
+      "Header",
+    );
+  });
+
   it("creates a key from a hand-entered endpoint and navigates to it", async () => {
     createKeyMutate.mockImplementation((_params, opts) => {
       opts?.onSuccess?.({ id: "new-key-1" });
     });
     const user = userEvent.setup();
-    render(
-      <AddKeyDialog open onOpenChange={vi.fn()} />,
-    );
+    render(<AddKeyDialog open onOpenChange={vi.fn()} />);
 
     // Catalog step → choose "Custom Endpoint".
-    await user.click(
-      screen.getByRole("button", { name: /Custom Endpoint/i }),
-    );
+    await user.click(screen.getByRole("button", { name: /Custom Endpoint/i }));
     // Routing step → keep the default "Direct" routing.
     await user.click(
       screen.getByRole("button", { name: /Next: Enter Credentials/i }),
@@ -241,11 +284,7 @@ describe("AddKeyDialog — custom endpoint path", () => {
     // Form step → fill the custom endpoint, label and credential.
     await typeInto(user, "add-key-label", "My Custom API");
     await typeInto(user, "add-key-credential", "sk-custom-123");
-    await typeInto(
-      user,
-      "add-key-endpoint",
-      "https://my.endpoint/v1",
-    );
+    await typeInto(user, "add-key-endpoint", "https://my.endpoint/v1");
 
     await user.click(screen.getByRole("button", { name: "Connect Service" }));
 
@@ -289,13 +328,9 @@ describe("AddKeyDialog — custom endpoint path", () => {
       );
     });
     const user = userEvent.setup();
-    render(
-      <AddKeyDialog open onOpenChange={vi.fn()} />,
-    );
+    render(<AddKeyDialog open onOpenChange={vi.fn()} />);
 
-    await user.click(
-      screen.getByRole("button", { name: /Custom Endpoint/i }),
-    );
+    await user.click(screen.getByRole("button", { name: /Custom Endpoint/i }));
     await user.click(
       screen.getByRole("button", { name: /Next: Enter Credentials/i }),
     );
@@ -316,9 +351,7 @@ describe("AddKeyDialog — custom endpoint path", () => {
     const user = userEvent.setup();
     render(<AddKeyDialog open onOpenChange={vi.fn()} />);
 
-    await user.click(
-      screen.getByRole("button", { name: /Custom Endpoint/i }),
-    );
+    await user.click(screen.getByRole("button", { name: /Custom Endpoint/i }));
     await user.click(
       screen.getByRole("button", { name: /Next: Enter Credentials/i }),
     );
@@ -341,14 +374,52 @@ describe("AddKeyDialog — custom endpoint path", () => {
 });
 
 describe("AddKeyDialog — catalog template path", () => {
+  it("resolves an action prefill by exact slug from the full catalog", async () => {
+    catalog.entries = [OAUTH_ENTRY];
+    catalog.allEntries = [{ ...OAUTH_ENTRY, slug: "api-github" }];
+    render(
+      <AddKeyDialog
+        open
+        onOpenChange={vi.fn()}
+        prefillSlug="api-github"
+        prefillIncludeAllCatalog
+      />,
+    );
+
+    expect(
+      await screen.findByRole("heading", {
+        name: "Configure routing for GitHub",
+      }),
+    ).toBeInTheDocument();
+    expect(catalog.requests).toContain(true);
+  });
+
+  it("stays on the catalog step instead of substituting a slug alias", () => {
+    catalog.entries = [OAUTH_ENTRY];
+    catalog.allEntries = [OAUTH_ENTRY];
+    render(
+      <AddKeyDialog
+        open
+        onOpenChange={vi.fn()}
+        prefillSlug="api-github"
+        prefillIncludeAllCatalog
+      />,
+    );
+
+    expect(
+      screen.getByRole("heading", { name: "Add AI Service" }),
+    ).toBeInTheDocument();
+    expect(
+      screen.queryByRole("heading", { name: "Configure routing for GitHub" }),
+    ).not.toBeInTheDocument();
+  });
+
   it("creates a key from a catalog entry, omitting params that match catalog defaults", async () => {
     createKeyMutate.mockImplementation((_params, opts) => {
       opts?.onSuccess?.({ id: "new-key-2" });
     });
     const user = userEvent.setup();
-    render(
-      <AddKeyDialog open onOpenChange={vi.fn()} />,
-    );
+    render(<AddKeyDialog open onOpenChange={vi.fn()} />);
 
     // Catalog step → pick the OpenAI template (prefills label + endpoint).
     await user.click(screen.getByRole("button", { name: /OpenAI/i }));
@@ -426,6 +497,47 @@ describe("AddKeyDialog — platform one-click path (credential_mode=both)", () =
     ).not.toBeInTheDocument();
   });
 
+  it("advances the managed OAuth path to verify inside dev mock mode", async () => {
+    window.history.replaceState({}, "", "/assistant?mock");
+    catalog.entries = [PLATFORM_OAUTH_ENTRY];
+    catalog.allEntries = [{ ...PLATFORM_OAUTH_ENTRY, slug: "api-github" }];
+    createKeyMutateAsync.mockResolvedValue({
+      id: "mock-user-service",
+      slug: "github-action-demo",
+    });
+    const onSuccess = vi.fn();
+    const user = userEvent.setup();
+    render(
+      <AddKeyDialog
+        open
+        onOpenChange={vi.fn()}
+        prefillSlug="api-github"
+        prefillIncludeAllCatalog
+        onSuccess={onSuccess}
+      />,
+    );
+
+    await user.click(
+      await screen.findByRole("button", { name: "Next: Connect" }),
+    );
+    await user.click(
+      screen.getByRole("button", { name: "Connect with GitHub" }),
+    );
+
+    expect(
+      await screen.findByRole("heading", {
+        name: /Service.*GitHub.*connected/i,
+      }),
+    ).toBeInTheDocument();
+    expect(initiateOAuthMutateAsync).not.toHaveBeenCalled();
+    expect(mockHardRedirect).not.toHaveBeenCalled();
+
+    await user.click(screen.getByRole("button", { name: "Maybe later" }));
+    expect(onSuccess).toHaveBeenCalledWith({
+      userServiceId: "mock-user-service",
+    });
+  });
+
   it("hides the OAuth-client choice and goes to the BYO form when platform credentials are absent", async () => {
     catalog.entries = [BYO_ONLY_BOTH_ENTRY];
     const user = userEvent.setup();
@@ -448,7 +560,9 @@ describe("AddKeyDialog — platform one-click path (credential_mode=both)", () =
     render(<AddKeyDialog open onOpenChange={vi.fn()} />);
 
     await gotoRouting(user);
-    await user.click(screen.getByRole("radio", { name: /Your own OAuth app/i }));
+    await user.click(
+      screen.getByRole("radio", { name: /Your own OAuth app/i }),
+    );
     await user.click(
       screen.getByRole("button", { name: /Next: Enter Credentials/i }),
     );
@@ -470,8 +584,17 @@ describe("AddKeyDialog — platform one-click path (credential_mode=both)", () =
         ...PLATFORM_OAUTH_ENTRY,
         default_scopes: ["read:user"],
         scope_catalog: [
-          { scope: "read:user", label: "Read profile", description: "Read profile." },
-          { scope: "delete_repo", label: "Delete repos", description: "Delete repositories.", sensitive: true },
+          {
+            scope: "read:user",
+            label: "Read profile",
+            description: "Read profile.",
+          },
+          {
+            scope: "delete_repo",
+            label: "Delete repos",
+            description: "Delete repositories.",
+            sensitive: true,
+          },
         ],
         platform_scope_allowlist: ["read:user", "user:email"],
       } as unknown as CatalogEntry,
@@ -496,7 +619,9 @@ describe("AddKeyDialog — platform one-click path (credential_mode=both)", () =
     render(<AddKeyDialog open onOpenChange={vi.fn()} />);
 
     await gotoRouting(user);
-    await user.click(screen.getByRole("radio", { name: /Your own OAuth app/i }));
+    await user.click(
+      screen.getByRole("radio", { name: /Your own OAuth app/i }),
+    );
     await user.click(
       screen.getByRole("button", { name: /Next: Enter Credentials/i }),
     );
@@ -544,7 +669,9 @@ describe("AddKeyDialog — reconnect path", () => {
       />,
     );
 
-    await user.click(screen.getByRole("button", { name: /Connect with GitHub/i }));
+    await user.click(
+      screen.getByRole("button", { name: /Connect with GitHub/i }),
+    );
 
     await waitFor(() => {
       expect(initiateOAuthMutateAsync).toHaveBeenCalledTimes(1);
@@ -588,12 +715,19 @@ describe("AddKeyDialog — reconnect path", () => {
       />,
     );
 
-    await user.click(screen.getByRole("button", { name: /Connect with GitHub/i }));
+    await user.click(
+      screen.getByRole("button", { name: /Connect with GitHub/i }),
+    );
 
     await waitFor(() => {
       expect(screen.getByRole("status")).toHaveTextContent(/Connected/i);
     });
     expect(mockHardRedirect).not.toHaveBeenCalled();
+
+    await user.click(screen.getByRole("button", { name: "Continue" }));
+    expect(
+      await screen.findByRole("heading", { name: /connected/i }),
+    ).toBeInTheDocument();
   });
 
   it("offers a retry when the provider denies authorization", async () => {
@@ -608,7 +742,9 @@ describe("AddKeyDialog — reconnect path", () => {
       />,
     );
 
-    await user.click(screen.getByRole("button", { name: /Connect with GitHub/i }));
+    await user.click(
+      screen.getByRole("button", { name: /Connect with GitHub/i }),
+    );
 
     await waitFor(() => {
       expect(screen.getByRole("status")).toHaveTextContent(
@@ -642,7 +778,9 @@ describe("AddKeyDialog — reconnect path", () => {
       />,
     );
 
-    await user.click(screen.getByRole("button", { name: /Connect with GitHub/i }));
+    await user.click(
+      screen.getByRole("button", { name: /Connect with GitHub/i }),
+    );
 
     expect(initiateOAuthMutateAsync).toHaveBeenCalledWith(
       expect.objectContaining({
@@ -672,7 +810,9 @@ describe("AddKeyDialog — reconnect path", () => {
       />,
     );
 
-    await user.click(screen.getByRole("button", { name: /Connect with GitHub/i }));
+    await user.click(
+      screen.getByRole("button", { name: /Connect with GitHub/i }),
+    );
     await waitFor(() =>
       expect(screen.getByText("provider unavailable")).toBeInTheDocument(),
     );
@@ -766,10 +906,7 @@ describe("AddKeyDialog — reconnect path", () => {
 // `service_type`, `requires_gateway_url`, and `provider_type` from each entry
 // when rendering the tile; everything else can be cast through `unknown` so
 // we don't duplicate the full `CatalogEntry` shape just for icon assertions.
-function minCatalogEntry(
-  slug: string,
-  name = slug,
-): CatalogEntry {
+function minCatalogEntry(slug: string, name = slug): CatalogEntry {
   return {
     slug,
     name,
@@ -804,6 +941,41 @@ function minCatalogEntry(
 }
 
 describe("AddKeyDialog → ConnectVerifyStep integration (end-to-end wiring)", () => {
+  it("reports the created UserService id only when the success step is finished", async () => {
+    createKeyMutate.mockImplementation((_params, opts) => {
+      opts?.onSuccess?.({
+        id: "user-service-from-action",
+        slug: "custom-action-service",
+      });
+    });
+    const onOpenChange = vi.fn();
+    const onSuccess = vi.fn();
+    const user = userEvent.setup();
+    render(
+      <AddKeyDialog open onOpenChange={onOpenChange} onSuccess={onSuccess} />,
+    );
+
+    await user.click(screen.getByRole("button", { name: /Custom Endpoint/i }));
+    await user.click(
+      screen.getByRole("button", { name: /Next: Enter Credentials/i }),
+    );
+    await typeInto(user, "add-key-label", "Action Service");
+    await typeInto(user, "add-key-credential", "obviously-fake-credential");
+    await typeInto(user, "add-key-endpoint", "https://action.example.test/v1");
+    await user.click(screen.getByRole("button", { name: "Connect Service" }));
+
+    expect(onSuccess).not.toHaveBeenCalled();
+    await user.click(
+      await screen.findByRole("button", { name: "Maybe later" }),
+    );
+
+    expect(onSuccess).toHaveBeenCalledOnce();
+    expect(onSuccess).toHaveBeenCalledWith({
+      userServiceId: "user-service-from-action",
+    });
+    expect(onOpenChange).toHaveBeenCalledWith(false);
+  }, 10_000);
+
   // GLM #8 + Kimi — the intentionally-swallowed createApiKeyMutate
   // in the other tests hides the real dialog → verify-step wiring.
   // This test lets the mint fire onSuccess so we can assert the

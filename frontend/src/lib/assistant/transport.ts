@@ -6,6 +6,11 @@ import {
   resetAssistantMockStore,
 } from "@/lib/assistant/mock-data";
 import { toTerminalBlock } from "@/lib/assistant/stream";
+import {
+  actionReportSchema,
+  buildActionContinueBody,
+  type ActionReport,
+} from "@/schemas/assistant-actions";
 import type {
   AssistantTransport,
   Conversation,
@@ -29,8 +34,15 @@ interface RunningScript {
   finished: boolean;
 }
 
+interface PendingMockActionBatch {
+  readonly originTurnId: string;
+  readonly reports: readonly ActionReport[];
+  readonly onEvent: (event: TurnEvent) => void;
+}
+
 class MockAssistantTransport implements AssistantTransport {
   private readonly running = new Map<string, RunningScript>();
+  private readonly pendingActions = new Map<string, PendingMockActionBatch[]>();
 
   async listConversations(): Promise<Conversation[]> {
     return assistantMockStore.listConversations();
@@ -47,6 +59,7 @@ class MockAssistantTransport implements AssistantTransport {
   async deleteConversation(conversationId: string): Promise<void> {
     const script = this.running.get(conversationId);
     if (script) this.cancelScript(conversationId, script);
+    this.pendingActions.delete(conversationId);
     assistantMockStore.deleteConversation(conversationId);
   }
 
@@ -66,45 +79,7 @@ class MockAssistantTransport implements AssistantTransport {
     const messageId = assistantMockStore.nextId("assistant-message");
     const blockId = assistantMockStore.nextId("assistant-block");
     const events = createScriptedTurn(turnId, messageId, blockId);
-    const script: RunningScript = {
-      turnId,
-      messageId,
-      onEvent,
-      timers: new Set(),
-      openBlockIds: new Set(),
-      cancelled: false,
-      finished: false,
-    };
-    this.running.set(conversationId, script);
-
-    const emit = (event: TurnEvent) => {
-      if (script.cancelled || script.finished) return;
-      assistantMockStore.applyEvent(conversationId, event);
-      this.trackLifecycle(script, event);
-      onEvent(event);
-      if (event.event === "turn.completed") {
-        script.finished = true;
-        this.running.delete(conversationId);
-      }
-    };
-
-    const first = events[0];
-    if (first) emit(first);
-    events.slice(1).forEach((event, index) => {
-      const timer = setTimeout(
-        () => {
-          script.timers.delete(timer);
-          emit(event);
-        },
-        (index + 1) * EVENT_CADENCE_MS,
-      );
-      script.timers.add(timer);
-    });
-
-    return {
-      turnId,
-      cancel: () => this.cancelScript(conversationId, script),
-    };
+    return this.startScript(conversationId, turnId, messageId, events, onEvent);
   }
 
   cancelActiveTurn(conversationId: string): void {
@@ -123,13 +98,210 @@ class MockAssistantTransport implements AssistantTransport {
     return null;
   }
 
+  setActionCardInProgress(
+    conversationId: string,
+    blockId: string,
+    inProgress: boolean,
+    onEvent: (event: TurnEvent) => void = () => undefined,
+  ): void {
+    const block = assistantMockStore.findBlock(conversationId, blockId);
+    if (block?.type !== "action_card") {
+      throw new Error("Action request was not found.");
+    }
+    if (
+      block.status === "completed" ||
+      block.status === "declined" ||
+      block.status === "failed" ||
+      block.status === "unsupported"
+    ) {
+      return;
+    }
+    this.emitLocalActionPatch(
+      conversationId,
+      blockId,
+      {
+        status: inProgress ? "in_progress" : "pending",
+        outcome_note: "",
+      },
+      onEvent,
+    );
+  }
+
+  continueActions(
+    conversationId: string,
+    originTurnId: string,
+    reports: readonly ActionReport[],
+    onEvent: (event: TurnEvent) => void = () => undefined,
+  ): TurnHandle | null {
+    const validated = reports.map((report) => actionReportSchema.parse(report));
+    buildActionContinueBody(crypto.randomUUID(), originTurnId, validated);
+    for (const report of validated) {
+      const messages = assistantMockStore.getHistory(conversationId).messages;
+      const card = messages
+        .flatMap((message) => message.blocks)
+        .find(
+          (block) =>
+            block.type === "action_card" &&
+            block.action_request_id === report.actionRequestId,
+        );
+      if (card?.type !== "action_card") continue;
+      const status =
+        report.disposition === "completed"
+          ? "completed"
+          : report.disposition === "declined"
+            ? "declined"
+            : "failed";
+      const outcomeNote =
+        report.disposition === "completed"
+          ? "Connected in NyxID. The assistant received only the new service reference."
+          : report.disposition === "declined"
+            ? "You declined this request. No service was connected and no credential was shared."
+            : "The connection could not be completed. Ask the assistant to request it again.";
+      this.emitLocalActionPatch(
+        conversationId,
+        card.block_id,
+        { status, outcome_note: outcomeNote },
+        onEvent,
+      );
+    }
+    const pending = this.pendingActions.get(conversationId) ?? [];
+    pending.push({ originTurnId, reports: validated, onEvent });
+    this.pendingActions.set(conversationId, pending);
+    return this.startPendingAction(conversationId);
+  }
+
   reset(now: () => number = Date.now): void {
     for (const script of this.running.values()) {
       script.cancelled = true;
       for (const timer of script.timers) clearTimeout(timer);
     }
     this.running.clear();
+    this.pendingActions.clear();
     resetAssistantMockStore(now);
+  }
+
+  private emitLocalActionPatch(
+    conversationId: string,
+    blockId: string,
+    patch: Extract<TurnEvent, { event: "block.updated" }>["patch"],
+    onEvent: (event: TurnEvent) => void,
+  ): void {
+    const event: TurnEvent = {
+      cursor: assistantMockStore.getTurnState(conversationId).lastCursor + 1,
+      event: "block.updated",
+      block_id: blockId,
+      patch,
+    };
+    assistantMockStore.applyEvent(conversationId, event);
+    onEvent(event);
+  }
+
+  private startPendingAction(conversationId: string): TurnHandle | null {
+    if (this.running.has(conversationId)) return null;
+    const pending = this.pendingActions.get(conversationId);
+    const batch = pending?.shift();
+    if (!batch) return null;
+    if (pending?.length === 0) this.pendingActions.delete(conversationId);
+
+    const turnId = assistantMockStore.nextId("turn-action");
+    const messageId = assistantMockStore.nextId("assistant-action-message");
+    const blockId = assistantMockStore.nextId("assistant-action-block");
+    const declined = batch.reports.every(
+      (report) => report.disposition === "declined",
+    );
+    const text = declined
+      ? "Understood. I did not connect the service, and I will continue without it."
+      : "The service connection is ready. I can now continue with brokered access.";
+    const events: TurnEvent[] = [
+      { cursor: 1, event: "turn.status", turn_id: turnId, status: "running" },
+      {
+        cursor: 2,
+        event: "message.started",
+        message_id: messageId,
+        role: "assistant",
+      },
+      {
+        cursor: 3,
+        event: "block.started",
+        message_id: messageId,
+        block_id: blockId,
+        index: 0,
+        block: { type: "text", block_id: blockId, text },
+      },
+      {
+        cursor: 4,
+        event: "block.completed",
+        block_id: blockId,
+        block: { type: "text", block_id: blockId, text },
+      },
+      { cursor: 5, event: "message.completed", message_id: messageId },
+      {
+        cursor: 6,
+        event: "turn.completed",
+        turn_id: turnId,
+        status: "completed",
+        error: null,
+      },
+    ];
+    return this.startScript(
+      conversationId,
+      turnId,
+      messageId,
+      events,
+      batch.onEvent,
+    );
+  }
+
+  private startScript(
+    conversationId: string,
+    turnId: string,
+    messageId: string,
+    events: readonly TurnEvent[],
+    onEvent: (event: TurnEvent) => void,
+  ): TurnHandle {
+    const script: RunningScript = {
+      turnId,
+      messageId,
+      onEvent,
+      timers: new Set(),
+      openBlockIds: new Set(),
+      cancelled: false,
+      finished: false,
+    };
+    this.running.set(conversationId, script);
+
+    const emit = (sourceEvent: TurnEvent) => {
+      if (script.cancelled || script.finished) return;
+      const event = {
+        ...sourceEvent,
+        cursor: assistantMockStore.getTurnState(conversationId).lastCursor + 1,
+      } as TurnEvent;
+      assistantMockStore.applyEvent(conversationId, event);
+      this.trackLifecycle(script, event);
+      onEvent(event);
+      if (event.event === "turn.completed") {
+        script.finished = true;
+        this.running.delete(conversationId);
+        queueMicrotask(() => this.startPendingAction(conversationId));
+      }
+    };
+
+    const first = events[0];
+    if (first) emit(first);
+    events.slice(1).forEach((event, index) => {
+      const timer = setTimeout(
+        () => {
+          script.timers.delete(timer);
+          emit(event);
+        },
+        (index + 1) * EVENT_CADENCE_MS,
+      );
+      script.timers.add(timer);
+    });
+    return {
+      turnId,
+      cancel: () => this.cancelScript(conversationId, script),
+    };
   }
 
   private trackLifecycle(script: RunningScript, event: TurnEvent): void {
@@ -188,6 +360,7 @@ class MockAssistantTransport implements AssistantTransport {
     });
     script.finished = true;
     this.running.delete(conversationId);
+    queueMicrotask(() => this.startPendingAction(conversationId));
   }
 }
 

@@ -261,4 +261,25 @@ describe("toTerminalBlock", () => {
     const text = { type: "text", block_id: "text-1", text: "hello" } as const;
     expect(toTerminalBlock(text)).toBe(text);
   });
+
+  it("keeps a pending action card interactive when its turn is cancelled", () => {
+    const action = {
+      type: "action_card",
+      block_id: "action-1",
+      action: "service.connect",
+      action_request_id: "act-1",
+      origin_turn_id: "turn-1",
+      params: {
+        variant: "catalog",
+        service_slug: "api-github",
+        requested_scopes: ["repo"],
+        via_node_id: null,
+        target_org_id: null,
+      },
+      status: "pending",
+      outcome_note: "",
+    } as const;
+
+    expect(toTerminalBlock(action)).toBe(action);
+  });
 });

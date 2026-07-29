@@ -113,7 +113,11 @@ export async function apiClient<T>(
   if (import.meta.env.DEV) {
     const { isMockMode, getMockResponse } = await import("./mock-data");
     if (isMockMode()) {
-      const mock = getMockResponse(endpoint);
+      const mock = getMockResponse(
+        endpoint,
+        options.method ?? "GET",
+        options.body,
+      );
       if (mock !== undefined) return mock as T;
     }
   }

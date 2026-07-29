@@ -1,4 +1,6 @@
 import { applyTurnEvent } from "@/lib/assistant/stream";
+import { resolveAssistantAction } from "@/lib/assistant/action-registry";
+import { assistantActionRequestSchema } from "@/schemas/assistant-actions";
 import type {
   ApprovalCardContentBlock,
   AssistantMessage,
@@ -556,9 +558,7 @@ export class MockAssistantStore {
         for (const block of message.blocks) {
           if (block.type !== "run" || isTerminalRun(block.state)) continue;
           if (
-            !block.steps.some(
-              (step) => step.approval_request_id === requestId,
-            )
+            !block.steps.some((step) => step.approval_request_id === requestId)
           ) {
             continue;
           }
@@ -692,6 +692,7 @@ export function createScriptedTurn(
   // screen (it must never vanish when the call ends). Appended after the text
   // block (which stays blocks[0]) so it renders as a second block below.
   const runBlockId = `${blockId}-run`;
+  const actionBlockId = `${blockId}-action`;
   const toolStep = {
     index: 1,
     label: "lark.postMessage",
@@ -699,6 +700,22 @@ export function createScriptedTurn(
     artifact_id: null,
     approval_request_id: null,
   } as const;
+  const actionRequest = assistantActionRequestSchema.parse({
+    schemaVersion: 4,
+    actorId: "mock-conversation",
+    originTurnId: turnId,
+    taskId: "task-mock-github",
+    stepId: "step-connect-github",
+    actionRequestId: `act-${turnId}`,
+    action: "service.connect",
+    params: {
+      catalogService: {
+        serviceSlug: "api-github",
+        requestedScopes: ["repo"],
+      },
+    },
+  });
+  const resolvedAction = resolveAssistantAction(actionRequest);
 
   return [
     { cursor: 1, event: "turn.status", turn_id: turnId, status: "running" },
@@ -758,12 +775,31 @@ export function createScriptedTurn(
         steps_total: 1,
         steps_complete: 1,
         state: "completed",
-        steps: [{ ...toolStep, status: "done", meta: "Posted to #payments-oncall" }],
+        steps: [
+          { ...toolStep, status: "done", meta: "Posted to #payments-oncall" },
+        ],
       },
     },
-    { cursor: 11, event: "message.completed", message_id: messageId },
     {
-      cursor: 12,
+      cursor: 11,
+      event: "block.started",
+      message_id: messageId,
+      block_id: actionBlockId,
+      index: 2,
+      block: {
+        type: "action_card",
+        block_id: actionBlockId,
+        action: actionRequest.action,
+        action_request_id: actionRequest.actionRequestId,
+        origin_turn_id: actionRequest.originTurnId,
+        params: resolvedAction.params,
+        status: "pending",
+        outcome_note: "",
+      },
+    },
+    { cursor: 12, event: "message.completed", message_id: messageId },
+    {
+      cursor: 13,
       event: "turn.completed",
       turn_id: turnId,
       status: "completed",

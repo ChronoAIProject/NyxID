@@ -11,6 +11,7 @@ import {
   describeHistoryError,
   describeSendFailure,
   useAssistantTurn,
+  useActionCardActions,
   useCancelTurn,
   useConversation,
   useConversations,
@@ -105,6 +106,7 @@ export function AssistantPage({
   const sendMessage = useSendMessage(selectedId);
   const cancelTurn = useCancelTurn(selectedId);
   const decideApproval = useDecideApproval(selectedId);
+  const actionCards = useActionCardActions(selectedId);
   const deleteConversation = useDeleteConversation();
   const selectedConversationExists = (conversations.data ?? []).some(
     (conversation) => conversation.id === selectedId,
@@ -308,6 +310,8 @@ export function AssistantPage({
             onDecideApproval={(blockId, approved) =>
               decideApproval.mutateAsync({ blockId, approved })
             }
+            onActionProgress={actionCards.setInProgress}
+            onResolveAction={actionCards.continueAction}
           />
         )}
         <div ref={composerRef} className="absolute inset-x-0 bottom-0 z-10">

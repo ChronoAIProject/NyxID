@@ -22,11 +22,7 @@ import { Label } from "@/components/ui/label";
 import { Switch } from "@/components/ui/switch";
 import { OrgScopeSelect } from "@/components/shared/org-scope-select";
 import { OAuthCallbackGuidance } from "@/components/shared/twitter-oauth-guidance";
-import {
-  Dialog,
-  DialogContent,
-  DialogFooter,
-} from "@/components/ui/dialog";
+import { Dialog, DialogContent, DialogFooter } from "@/components/ui/dialog";
 import {
   Select,
   SelectContent,
@@ -160,11 +156,20 @@ function parseAwsSigv4Credential(credential: string): AwsSigv4Fields {
     const parsed = JSON.parse(credential);
     if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
       return {
-        access_key_id: typeof parsed.access_key_id === "string" ? parsed.access_key_id : "",
+        access_key_id:
+          typeof parsed.access_key_id === "string" ? parsed.access_key_id : "",
         secret_access_key:
-          typeof parsed.secret_access_key === "string" ? parsed.secret_access_key : "",
-        region: typeof parsed.region === "string" ? parsed.region : AWS_SIGV4_DEFAULTS.region,
-        service: typeof parsed.service === "string" ? parsed.service : AWS_SIGV4_DEFAULTS.service,
+          typeof parsed.secret_access_key === "string"
+            ? parsed.secret_access_key
+            : "",
+        region:
+          typeof parsed.region === "string"
+            ? parsed.region
+            : AWS_SIGV4_DEFAULTS.region,
+        service:
+          typeof parsed.service === "string"
+            ? parsed.service
+            : AWS_SIGV4_DEFAULTS.service,
         session_token:
           typeof parsed.session_token === "string" ? parsed.session_token : "",
       };
@@ -216,7 +221,10 @@ function getCredentialFieldMeta(
         .filter(Boolean)
         .map((part) => part.charAt(0).toUpperCase() + part.slice(1))
         .join(" ");
-      return { label: pretty || "Credential", placeholder: `Enter ${fieldName}` };
+      return {
+        label: pretty || "Credential",
+        placeholder: `Enter ${fieldName}`,
+      };
     }
     return { label: "Credential", placeholder: "Enter credential value" };
   }
@@ -276,11 +284,7 @@ function composeTokenExchangeCredential(
 // header/query/body field name. `bot_bearer` is a fixed Authorization format,
 // OAuth flows handle their own token storage, and `token_exchange` ignores
 // auth_key_name entirely (the credential is a structured JSON blob).
-function isValidIntInRange(
-  value: string,
-  min: number,
-  max: number,
-): boolean {
+function isValidIntInRange(value: string, min: number, max: number): boolean {
   const trimmed = value.trim();
   if (!/^\d+$/.test(trimmed)) return false;
   const parsed = Number(trimmed);
@@ -514,8 +518,7 @@ function RoutingStep({
             : "Configure routing"
         }
         description={
-          catalogEntry?.description ??
-          "Choose how requests reach the endpoint."
+          catalogEntry?.description ?? "Choose how requests reach the endpoint."
         }
       />
 
@@ -602,7 +605,11 @@ function RoutingStep({
       {showClientChoice && (
         <div className="space-y-3">
           <Label>Which OAuth app authorizes this?</Label>
-          <div role="radiogroup" aria-label="OAuth client" className="grid grid-cols-2 gap-3">
+          <div
+            role="radiogroup"
+            aria-label="OAuth client"
+            className="grid grid-cols-2 gap-3"
+          >
             <button
               type="button"
               role="radio"
@@ -617,7 +624,8 @@ function RoutingStep({
               <NyxidIcon className="h-5 w-5" />
               <span className="text-xs font-medium">NyxID managed</span>
               <span className="text-[10px] text-muted-foreground">
-                One click. NyxID’s OAuth app handles authorization. Curated scopes.
+                One click. NyxID’s OAuth app handles authorization. Curated
+                scopes.
               </span>
             </button>
             <button
@@ -685,7 +693,8 @@ function KeyForm({
   const requiresCredential = isCustom
     ? form.authMethod !== "none"
     : (catalogEntry?.auth_method ?? "bearer") !== "none";
-  const requiresEndpoint = isCustom || (catalogEntry?.requires_gateway_url ?? false);
+  const requiresEndpoint =
+    isCustom || (catalogEntry?.requires_gateway_url ?? false);
   const credentialMeta = getCredentialFieldMeta(
     form.authMethod,
     form.authKeyName,
@@ -717,7 +726,9 @@ function KeyForm({
 
       <StepHeader
         slug={catalogEntry?.slug}
-        title={catalogEntry ? `Configure ${catalogEntry.name}` : "Custom endpoint"}
+        title={
+          catalogEntry ? `Configure ${catalogEntry.name}` : "Custom endpoint"
+        }
         description={
           catalogEntry?.description ??
           "Configure your custom endpoint and credentials."
@@ -744,7 +755,9 @@ function KeyForm({
 
       <div className="space-y-3">
         <div className="space-y-1.5">
-          <Label htmlFor="add-key-label">Label <span className="text-destructive">*</span></Label>
+          <Label htmlFor="add-key-label">
+            Label <span className="text-destructive">*</span>
+          </Label>
           <Input
             id="add-key-label"
             placeholder={
@@ -781,7 +794,8 @@ function KeyForm({
                       id={`add-key-te-${field.name}`}
                       type={field.secret ? "password" : "text"}
                       placeholder={
-                        field.placeholder ?? `Enter ${field.label.toLowerCase()}`
+                        field.placeholder ??
+                        `Enter ${field.label.toLowerCase()}`
                       }
                       value={values[field.name] ?? ""}
                       onChange={(e) =>
@@ -795,9 +809,9 @@ function KeyForm({
                     />
                     {field.secret && (
                       <p className="text-[11px] text-muted-foreground">
-                        Stored encrypted. NyxID exchanges this server-side
-                        for an access token and caches it -- you never have
-                        to refresh tokens, and the secret never leaves NyxID.
+                        Stored encrypted. NyxID exchanges this server-side for
+                        an access token and caches it -- you never have to
+                        refresh tokens, and the secret never leaves NyxID.
                       </p>
                     )}
                   </div>
@@ -817,7 +831,9 @@ function KeyForm({
                 <div className="space-y-1.5">
                   <Label htmlFor="add-key-aws-akid">
                     Access Key ID
-                    {requiresCredential && <span className="text-destructive"> *</span>}
+                    {requiresCredential && (
+                      <span className="text-destructive"> *</span>
+                    )}
                   </Label>
                   <Input
                     id="add-key-aws-akid"
@@ -829,14 +845,18 @@ function KeyForm({
                 <div className="space-y-1.5">
                   <Label htmlFor="add-key-aws-secret">
                     Secret Access Key
-                    {requiresCredential && <span className="text-destructive"> *</span>}
+                    {requiresCredential && (
+                      <span className="text-destructive"> *</span>
+                    )}
                   </Label>
                   <Input
                     id="add-key-aws-secret"
                     type="password"
                     placeholder="40-character secret"
                     value={fields.secret_access_key}
-                    onChange={(e) => update({ secret_access_key: e.target.value })}
+                    onChange={(e) =>
+                      update({ secret_access_key: e.target.value })
+                    }
                   />
                   <p className="text-[11px] text-muted-foreground">
                     Stored encrypted. The IAM policy attached to this key
@@ -864,13 +884,16 @@ function KeyForm({
                   </div>
                 </div>
                 <p className="text-[11px] text-muted-foreground">
-                  Cost Explorer is single-region (us-east-1, service=ce).
-                  For other AWS services, change `service` to match
-                  (e.g. `s3`, `dynamodb`).
+                  Cost Explorer is single-region (us-east-1, service=ce). For
+                  other AWS services, change `service` to match (e.g. `s3`,
+                  `dynamodb`).
                 </p>
                 <div className="space-y-1.5">
                   <Label htmlFor="add-key-aws-session-token">
-                    Session Token <span className="text-text-tertiary">(optional, for STS temporary credentials)</span>
+                    Session Token{" "}
+                    <span className="text-text-tertiary">
+                      (optional, for STS temporary credentials)
+                    </span>
                   </Label>
                   <Input
                     id="add-key-aws-session-token"
@@ -887,7 +910,9 @@ function KeyForm({
           <div className="space-y-1.5">
             <Label htmlFor="add-key-credential">
               {credentialMeta.label}
-              {requiresCredential && <span className="text-destructive"> *</span>}
+              {requiresCredential && (
+                <span className="text-destructive"> *</span>
+              )}
             </Label>
             <Input
               id="add-key-credential"
@@ -900,11 +925,14 @@ function KeyForm({
               value={requiresCredential ? form.credential : ""}
               onChange={(e) => onChange({ credential: e.target.value })}
               disabled={!requiresCredential}
-              className={!requiresCredential ? "bg-muted text-muted-foreground" : ""}
+              className={
+                !requiresCredential ? "bg-muted text-muted-foreground" : ""
+              }
             />
             {!requiresCredential && (
               <p className="text-[11px] text-muted-foreground">
-                This service can be used without storing a user credential in NyxID.
+                This service can be used without storing a user credential in
+                NyxID.
               </p>
             )}
             {requiresCredential && form.authMethod === "body" && (
@@ -915,7 +943,11 @@ function KeyForm({
             )}
             {requiresCredential && form.authMethod === "bot_bearer" && (
               <p className="text-[11px] text-muted-foreground">
-                Sent as <code className="font-mono">Authorization: Bot &lt;token&gt;</code>.
+                Sent as{" "}
+                <code className="font-mono">
+                  Authorization: Bot &lt;token&gt;
+                </code>
+                .
               </p>
             )}
           </div>
@@ -948,7 +980,8 @@ function KeyForm({
 
         <div className="space-y-1.5">
           <Label htmlFor="add-key-openapi-spec">
-            OpenAPI spec URL <span className="text-muted-foreground">(optional)</span>
+            OpenAPI spec URL{" "}
+            <span className="text-muted-foreground">(optional)</span>
           </Label>
           <Input
             id="add-key-openapi-spec"
@@ -962,8 +995,8 @@ function KeyForm({
             <p className="text-xs text-destructive">{openapiSpecUrlError}</p>
           )}
           <p className="text-[11px] text-muted-foreground">
-            When set, AI agents discover concrete operations from the spec instead
-            of being limited to a single generic proxy tool.
+            When set, AI agents discover concrete operations from the spec
+            instead of being limited to a single generic proxy tool.
           </p>
         </div>
 
@@ -990,7 +1023,9 @@ function KeyForm({
                   <SelectItem value="path">Path Prefix</SelectItem>
                   <SelectItem value="basic">Basic Auth</SelectItem>
                   <SelectItem value="body">JSON Body Injection</SelectItem>
-                  <SelectItem value="bot_bearer">Bot Token (Discord)</SelectItem>
+                  <SelectItem value="bot_bearer">
+                    Bot Token (Discord)
+                  </SelectItem>
                   <SelectItem value="token_exchange">
                     Token Exchange (Lark / OAuth client_credentials)
                   </SelectItem>
@@ -1249,7 +1284,9 @@ function NodeSetupStep({
                     <SelectItem value="path">Path Prefix</SelectItem>
                     <SelectItem value="basic">Basic Auth</SelectItem>
                     <SelectItem value="body">JSON Body Injection</SelectItem>
-                    <SelectItem value="bot_bearer">Bot Token (Discord)</SelectItem>
+                    <SelectItem value="bot_bearer">
+                      Bot Token (Discord)
+                    </SelectItem>
                     <SelectItem value="oauth2">OAuth 2.0</SelectItem>
                     <SelectItem value="oidc">OIDC</SelectItem>
                     <SelectItem value="none">None</SelectItem>
@@ -1264,12 +1301,12 @@ function NodeSetupStep({
                   <Input
                     id="node-auth-key"
                     placeholder={
-                      form.authMethod === "body" ? "app_secret" : "Authorization"
+                      form.authMethod === "body"
+                        ? "app_secret"
+                        : "Authorization"
                     }
                     value={form.authKeyName}
-                    onChange={(e) =>
-                      onChange({ authKeyName: e.target.value })
-                    }
+                    onChange={(e) => onChange({ authKeyName: e.target.value })}
                   />
                 </div>
               )}
@@ -1398,11 +1435,19 @@ function entryOffersClientSourceChoice(entry: CatalogEntry): boolean {
   );
 }
 
+function isDevMockMode(): boolean {
+  return (
+    import.meta.env.DEV &&
+    new URLSearchParams(window.location.search).has("mock")
+  );
+}
+
 function OAuthStep({
   catalogEntry,
   ensureKey,
   onKeyCleared,
   onBack,
+  onComplete,
   platformScopeAllowlist,
   targetOrgId,
   reconnectMode,
@@ -1413,6 +1458,7 @@ function OAuthStep({
   readonly ensureKey: () => Promise<KeyInfo>;
   readonly onKeyCleared: () => void;
   readonly onBack: () => void;
+  readonly onComplete: (keyId: string) => void;
   /**
    * When this connection rides the shared platform app, the scopes it may
    * request (`platform_scope_allowlist`). Passed only on the platform path so
@@ -1440,7 +1486,9 @@ function OAuthStep({
   // pre-selected) so an unedited add requests today's scopes. The full
   // selection is sent as `scopeOverride`.
   const [selectedScopes, setSelectedScopes] = useState<readonly string[]>(
-    grantedScopes.length > 0 ? grantedScopes : (catalogEntry.default_scopes ?? []),
+    grantedScopes.length > 0
+      ? grantedScopes
+      : (catalogEntry.default_scopes ?? []),
   );
   // In-dialog authorization handoff. The whole-tab `hardRedirect` this
   // replaced destroyed any surface hosting the dialog — fatal for the
@@ -1471,6 +1519,13 @@ function OAuthStep({
     let key: KeyInfo | null = null;
     try {
       key = await ensureKey();
+      // The development mock has no external provider callback to return
+      // through. Preserve the real state machine by advancing this same
+      // OAuth step to the shipped verify step after the mock key is created.
+      if (isDevMockMode()) {
+        onComplete(key.id);
+        return;
+      }
       const response = await initiateOAuth.mutateAsync({
         providerId: catalogEntry.provider_config_id,
         redirectPath: `/keys/${key.id}`,
@@ -1546,6 +1601,16 @@ function OAuthStep({
           )}
         </div>
 
+        {authorized && pendingKeyId ? (
+          <Button
+            variant="primary"
+            className="w-full"
+            onClick={() => onComplete(pendingKeyId)}
+          >
+            Continue
+          </Button>
+        ) : null}
+
         {authorizationFailed && (
           <Button
             variant="outline"
@@ -1605,17 +1670,20 @@ function OAuthStep({
       >
         {initiateOAuth.isPending ? (
           <>
-            <ButtonIcon><Loader2 className="h-3 w-3 animate-spin" /></ButtonIcon>
+            <ButtonIcon>
+              <Loader2 className="h-3 w-3 animate-spin" />
+            </ButtonIcon>
             Connecting...
           </>
         ) : (
           <>
-            <ButtonIcon><ExternalLink className="h-4 w-4" /></ButtonIcon>
+            <ButtonIcon>
+              <ExternalLink className="h-4 w-4" />
+            </ButtonIcon>
             Connect with {catalogEntry.name}
           </>
         )}
       </Button>
-
     </div>
   );
 }
@@ -1664,7 +1732,9 @@ function DeviceCodeStep({
   // existing connection, else provider defaults. Only used for non-openai
   // device-code providers (openai rejects scopes).
   const [selectedScopes, setSelectedScopes] = useState<readonly string[]>(
-    grantedScopes.length > 0 ? grantedScopes : (catalogEntry.default_scopes ?? []),
+    grantedScopes.length > 0
+      ? grantedScopes
+      : (catalogEntry.default_scopes ?? []),
   );
 
   const pollTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -1877,7 +1947,9 @@ function DeviceCodeStep({
       // providers reject a `scope` parameter at the backend, so omit the
       // override there entirely. Otherwise send the picker's complete set.
       const scopeOverride =
-        catalogEntry.device_code_format === "openai" ? undefined : selectedScopes;
+        catalogEntry.device_code_format === "openai"
+          ? undefined
+          : selectedScopes;
       const response = await initiateMutation.mutateAsync({
         providerId: catalogEntry.provider_config_id,
         scopeOverride,
@@ -1982,12 +2054,16 @@ function DeviceCodeStep({
           />
         ) : (
           <p className="text-xs text-muted-foreground">
-            This provider does not accept additional scopes -- they are fixed
-            by the upstream client registration.
+            This provider does not accept additional scopes -- they are fixed by
+            the upstream client registration.
           </p>
         )}
 
-        <Button variant="primary" className="w-full" onClick={() => void handleInitiate()}>
+        <Button
+          variant="primary"
+          className="w-full"
+          onClick={() => void handleInitiate()}
+        >
           Continue
         </Button>
       </div>
@@ -2062,7 +2138,9 @@ function DeviceCodeStep({
         />
         <div className="flex flex-col items-center gap-3 py-4">
           <AlertCircle className="h-8 w-8 text-destructive" />
-          <p className="text-[12px] text-destructive text-center">{errorMessage}</p>
+          <p className="text-[12px] text-destructive text-center">
+            {errorMessage}
+          </p>
         </div>
         <div className="flex justify-end gap-2">
           <Button variant="outline" className="flex-1" onClick={onBack}>
@@ -2117,7 +2195,9 @@ function DeviceCodeStep({
       <div className="flex justify-center">
         <Button type="button" variant="default" size="lg" asChild>
           <a href={verificationUri} target="_blank" rel="noopener noreferrer">
-            <ButtonIcon><ExternalLink className="h-4 w-4" /></ButtonIcon>
+            <ButtonIcon>
+              <ExternalLink className="h-4 w-4" />
+            </ButtonIcon>
             Open {catalogEntry.name} Authentication
           </a>
         </Button>
@@ -2320,8 +2400,8 @@ function OwnerPicker({
         </div>
       </div>
       <p className="mt-1 text-[11px] text-muted-foreground">
-        Org-owned services are shared with every admin of that organization
-        and can be proxied by its members.
+        Org-owned services are shared with every admin of that organization and
+        can be proxied by its members.
       </p>
     </div>
   );
@@ -2355,11 +2435,27 @@ function AccessPolicyPicker({
   );
 }
 
+export interface AddKeyDialogCompletion {
+  readonly userServiceId: string;
+}
+
+export interface AddKeyDialogCustomPrefill {
+  readonly name?: string;
+  readonly endpointUrl?: string;
+  readonly authMethod?: string;
+  readonly authKeyName?: string;
+}
+
 export function AddKeyDialog({
   open,
   onOpenChange,
   prefillSlug,
+  prefillIncludeAllCatalog = false,
+  prefillNodeId,
+  prefillTargetOrgId,
+  prefillCustom,
   reconnectKey,
+  onSuccess,
 }: {
   readonly open: boolean;
   readonly onOpenChange: (open: boolean) => void;
@@ -2371,10 +2467,21 @@ export function AddKeyDialog({
    * generic catalog grid and have to hunt for the right entry.
    */
   readonly prefillSlug?: string;
+  /** Action cards use the unfiltered catalog for exact slug resolution. */
+  readonly prefillIncludeAllCatalog?: boolean;
+  /** Optional routing defaults supplied by an assistant browser action. */
+  readonly prefillNodeId?: string;
+  readonly prefillTargetOrgId?: string;
+  /** Opens the existing custom-endpoint route with every mappable field set. */
+  readonly prefillCustom?: AddKeyDialogCustomPrefill;
   readonly reconnectKey?: KeyInfo | null;
+  /** Fires only when the user finishes the post-connect success step. */
+  readonly onSuccess?: (result: AddKeyDialogCompletion) => void;
 }) {
   const createKey = useCreateKey();
-  const { data: catalogEntries } = useCatalog();
+  const { data: catalogEntries } = useCatalog({
+    includeAll: prefillIncludeAllCatalog,
+  });
   const [step, setStep] = useState<WizardStep>("catalog");
   const [selectedEntry, setSelectedEntry] = useState<CatalogEntry | null>(null);
   const [form, setForm] = useState<FormState>(INITIAL_FORM);
@@ -2391,7 +2498,9 @@ export function AddKeyDialog({
   // has no client_id to use. See `designs/multi-connection-custom-
   // app-credentials.md` §6.1.
   const [byoOAuthClientId, setByoOAuthClientId] = useState<string | null>(null);
-  const [byoOAuthClientSecret, setByoOAuthClientSecret] = useState<string | null>(null);
+  const [byoOAuthClientSecret, setByoOAuthClientSecret] = useState<
+    string | null
+  >(null);
   // OAuth client source chosen inline on the routing screen (F5). Only used
   // for entries that offer the choice; defaults to the managed one-click app.
   const [clientSource, setClientSource] = useState<"managed" | "self">(
@@ -2427,7 +2536,13 @@ export function AddKeyDialog({
     onOpenChange(next);
   }
 
-  function handleSelectCatalog(entry: CatalogEntry) {
+  function handleSelectCatalog(
+    entry: CatalogEntry,
+    routing: {
+      readonly nodeId?: string;
+      readonly targetOrgId?: string;
+    } = {},
+  ) {
     setSelectedEntry(entry);
     setAuthKey(null);
     // Fresh entry → default back to the managed one-click choice so a prior
@@ -2441,7 +2556,11 @@ export function AddKeyDialog({
       endpointUrl: entry.base_url,
       authMethod: entry.auth_method ?? "bearer",
       authKeyName: entry.auth_key_name ?? "Authorization",
+      nodeId: routing.nodeId ?? "",
     });
+    if (routing.targetOrgId !== undefined) {
+      setTargetOrgId(routing.targetOrgId || null);
+    }
     setStep("routing");
   }
 
@@ -2481,12 +2600,52 @@ export function AddKeyDialog({
     if (!open || !prefillSlug || !catalogEntries) return;
     if (isReconnect) return;
     if (appliedPrefillRef.current === prefillSlug) return;
-    const match = catalogEntries.find((e) => e.slug === prefillSlug);
+    const match = catalogEntries.find((entry) => entry.slug === prefillSlug);
     if (!match) return;
     appliedPrefillRef.current = prefillSlug;
     // eslint-disable-next-line react-hooks/set-state-in-effect -- prefill selection is guarded to run once per slug
-    handleSelectCatalog(match);
-  }, [open, prefillSlug, catalogEntries, isReconnect]);
+    handleSelectCatalog(match, {
+      nodeId: prefillNodeId,
+      targetOrgId: prefillTargetOrgId,
+    });
+  }, [
+    open,
+    prefillSlug,
+    prefillNodeId,
+    prefillTargetOrgId,
+    catalogEntries,
+    isReconnect,
+  ]);
+
+  useEffect(() => {
+    if (!open || !prefillCustom || isReconnect || prefillSlug) return;
+    if (appliedPrefillRef.current === "custom-action") return;
+    appliedPrefillRef.current = "custom-action";
+    const authMethod = prefillCustom.authMethod?.trim() || "bearer";
+    // eslint-disable-next-line react-hooks/set-state-in-effect -- action prefill is guarded to run once per dialog open
+    setSelectedEntry(null);
+    setAuthKey(null);
+    setTargetOrgId(prefillTargetOrgId?.trim() || null);
+    setForm({
+      ...INITIAL_FORM,
+      label: prefillCustom.name?.trim() ?? "",
+      endpointUrl: prefillCustom.endpointUrl?.trim() ?? "",
+      authMethod,
+      authKeyName:
+        prefillCustom.authKeyName?.trim() ||
+        AUTH_METHOD_DEFAULTS[authMethod] ||
+        "Authorization",
+      nodeId: prefillNodeId?.trim() ?? "",
+    });
+    setStep("routing");
+  }, [
+    open,
+    prefillCustom,
+    prefillNodeId,
+    prefillTargetOrgId,
+    prefillSlug,
+    isReconnect,
+  ]);
 
   function handleSelectCustom() {
     setSelectedEntry(null);
@@ -2636,28 +2795,20 @@ export function AddKeyDialog({
     // For OAuth/device-code flows we don't always have the slug back —
     // `ensureAuthKey` returns the just-created KeyInfo into authKey, so
     // pull from there.
-    const slug =
-      authKey?.slug ??
-      selectedEntry?.slug ??
-      "";
+    const slug = authKey?.slug ?? selectedEntry?.slug ?? "";
     // `catalogSlug` drives the ServiceIcon brand-glyph lookup. Repeat
     // connects get suffixed user_service slugs (`-2`, `-3`, …), so
     // prefer the catalog entry's canonical slug and only fall back to
     // the KeyInfo's `catalog_service_slug` when we don't have the
     // catalog entry in scope.
     const catalogSlug =
-      selectedEntry?.slug ??
-      authKey?.catalog_service_slug ??
-      slug;
+      selectedEntry?.slug ?? authKey?.catalog_service_slug ?? slug;
     setCreatedKey({
       id: keyId,
       slug,
       catalogSlug,
       serviceName:
-        selectedEntry?.name ??
-        authKey?.label ??
-        form.label.trim() ??
-        slug,
+        selectedEntry?.name ?? authKey?.label ?? form.label.trim() ?? slug,
       completionMode,
     });
     setStep("verify");
@@ -2708,18 +2859,13 @@ export function AddKeyDialog({
           id: key.id,
           slug: key.slug,
           catalogSlug:
-            selectedEntry?.slug ??
-            key.catalog_service_slug ??
-            key.slug,
+            selectedEntry?.slug ?? key.catalog_service_slug ?? key.slug,
           // Prefer the catalog entry's display name (e.g. "OpenAI"); fall
           // through to the user-typed form label, the API response label,
           // and finally the slug so we never end up with an "undefined
           // connected" header.
           serviceName:
-            selectedEntry?.name ??
-            form.label.trim() ??
-            key.label ??
-            key.slug,
+            selectedEntry?.name ?? form.label.trim() ?? key.label ?? key.slug,
           completionMode: pickCompletionMode(selectedEntry, form.authMethod),
         });
         setStep("verify");
@@ -2787,14 +2933,9 @@ export function AddKeyDialog({
           id: key.id,
           slug: key.slug,
           catalogSlug:
-            selectedEntry?.slug ??
-            key.catalog_service_slug ??
-            key.slug,
+            selectedEntry?.slug ?? key.catalog_service_slug ?? key.slug,
           serviceName:
-            selectedEntry?.name ??
-            form.label.trim() ??
-            key.label ??
-            key.slug,
+            selectedEntry?.name ?? form.label.trim() ?? key.label ?? key.slug,
           completionMode: pickCompletionMode(selectedEntry, form.authMethod),
         });
         setStep("verify");
@@ -2919,9 +3060,12 @@ export function AddKeyDialog({
             catalogEntry={selectedEntry}
             ensureKey={ensureAuthKey}
             onKeyCleared={() => setAuthKey(null)}
+            onComplete={handleAuthComplete}
             targetOrgId={targetOrgId}
             reconnectMode={isReconnect}
-            grantedScopes={isReconnect ? (reconnectKey?.granted_scopes ?? []) : []}
+            grantedScopes={
+              isReconnect ? (reconnectKey?.granted_scopes ?? []) : []
+            }
             lockedScopes={
               isReconnect && selectedEntry.scope_removal === "unsupported"
                 ? (reconnectKey?.granted_scopes ?? [])
@@ -2959,7 +3103,9 @@ export function AddKeyDialog({
             onKeyCleared={() => setAuthKey(null)}
             targetOrgId={targetOrgId}
             reconnectMode={isReconnect}
-            grantedScopes={isReconnect ? (reconnectKey?.granted_scopes ?? []) : []}
+            grantedScopes={
+              isReconnect ? (reconnectKey?.granted_scopes ?? []) : []
+            }
             lockedScopes={
               isReconnect && selectedEntry.scope_removal === "unsupported"
                 ? (reconnectKey?.granted_scopes ?? [])
@@ -2985,6 +3131,7 @@ export function AddKeyDialog({
             createdKey={createdKey}
             isNodeRouted={Boolean(form.nodeId.trim())}
             onDone={() => {
+              onSuccess?.({ userServiceId: createdKey.id });
               handleOpenChange(false);
             }}
           />

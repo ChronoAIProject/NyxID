@@ -81,6 +81,33 @@ const OBSERVED_FRAMES = [
   { type: "RUN_FINISHED" },
 ];
 
+function actionRequestFrame(
+  overrides: Record<string, unknown> = {},
+): Record<string, unknown> {
+  return {
+    type: "CUSTOM",
+    custom: {
+      name: "nyxid.action.request",
+      payload: {
+        schemaVersion: 4,
+        actorId: CONVERSATION_ID,
+        originTurnId: TURN_ID,
+        taskId: "task-action-1",
+        stepId: "step-action-1",
+        actionRequestId: "act-action-1",
+        action: "service.connect",
+        params: {
+          catalogService: {
+            serviceSlug: "api-github",
+            requestedScopes: ["repo"],
+          },
+        },
+        ...overrides,
+      },
+    },
+  };
+}
+
 type FetchRoute = (
   url: string,
   init: RequestInit | undefined,
@@ -848,7 +875,10 @@ describe("AevatarAssistantTransport", () => {
     const mock = vi.fn(
       (input: RequestInfo | URL, init?: RequestInit): Promise<Response> => {
         const url = String(input);
-        if (url === `${ASSISTANT_BASE}/conversations` && init?.method === "POST") {
+        if (
+          url === `${ASSISTANT_BASE}/conversations` &&
+          init?.method === "POST"
+        ) {
           return Promise.resolve(
             jsonResponse({ status: "accepted", actorId: CONVERSATION_ID }),
           );
@@ -925,7 +955,10 @@ describe("AevatarAssistantTransport", () => {
     const mock = vi.fn(
       (input: RequestInfo | URL, init?: RequestInit): Promise<Response> => {
         const url = String(input);
-        if (url === `${ASSISTANT_BASE}/conversations` && init?.method === "POST") {
+        if (
+          url === `${ASSISTANT_BASE}/conversations` &&
+          init?.method === "POST"
+        ) {
           return Promise.resolve(
             jsonResponse({ status: "accepted", actorId: CONVERSATION_ID }),
           );
@@ -1010,7 +1043,10 @@ describe("AevatarAssistantTransport", () => {
     const mock = vi.fn(
       (input: RequestInfo | URL, init?: RequestInit): Promise<Response> => {
         const url = String(input);
-        if (url === `${ASSISTANT_BASE}/conversations` && init?.method === "POST") {
+        if (
+          url === `${ASSISTANT_BASE}/conversations` &&
+          init?.method === "POST"
+        ) {
           return Promise.resolve(
             jsonResponse({ status: "accepted", actorId: CONVERSATION_ID }),
           );
@@ -1106,7 +1142,10 @@ describe("AevatarAssistantTransport", () => {
     const mock = vi.fn(
       (input: RequestInfo | URL, init?: RequestInit): Promise<Response> => {
         const url = String(input);
-        if (url === `${ASSISTANT_BASE}/conversations` && init?.method === "POST") {
+        if (
+          url === `${ASSISTANT_BASE}/conversations` &&
+          init?.method === "POST"
+        ) {
           return Promise.resolve(
             jsonResponse({ status: "accepted", actorId: CONVERSATION_ID }),
           );
@@ -1189,7 +1228,10 @@ describe("AevatarAssistantTransport", () => {
     const mock = vi.fn(
       (input: RequestInfo | URL, init?: RequestInit): Promise<Response> => {
         const url = String(input);
-        if (url === `${ASSISTANT_BASE}/conversations` && init?.method === "POST") {
+        if (
+          url === `${ASSISTANT_BASE}/conversations` &&
+          init?.method === "POST"
+        ) {
           return Promise.resolve(
             jsonResponse({ status: "accepted", actorId: CONVERSATION_ID }),
           );
@@ -1294,18 +1336,14 @@ describe("AevatarAssistantTransport", () => {
       const transport = new AevatarAssistantTransport();
       await seedActorConversation(transport);
 
-      const firstOutcome = transport
-        .deleteConversation(CONVERSATION_ID)
-        .then(
-          () => "resolved",
-          () => "rejected",
-        );
-      const secondOutcome = transport
-        .deleteConversation(CONVERSATION_ID)
-        .then(
-          () => "resolved",
-          () => "rejected",
-        );
+      const firstOutcome = transport.deleteConversation(CONVERSATION_ID).then(
+        () => "resolved",
+        () => "rejected",
+      );
+      const secondOutcome = transport.deleteConversation(CONVERSATION_ID).then(
+        () => "resolved",
+        () => "rejected",
+      );
 
       // Just before the deadline: still one DELETE, still reserved.
       await vi.advanceTimersByTimeAsync(14_000);
@@ -1387,7 +1425,10 @@ describe("AevatarAssistantTransport", () => {
     const mock = vi.fn(
       (input: RequestInfo | URL, init?: RequestInit): Promise<Response> => {
         const url = String(input);
-        if (url === `${ASSISTANT_BASE}/conversations` && init?.method === "POST") {
+        if (
+          url === `${ASSISTANT_BASE}/conversations` &&
+          init?.method === "POST"
+        ) {
           return Promise.resolve(
             jsonResponse({ status: "accepted", actorId: CONVERSATION_ID }),
           );
@@ -1451,7 +1492,10 @@ describe("AevatarAssistantTransport", () => {
     const mock = vi.fn(
       (input: RequestInfo | URL, init?: RequestInit): Promise<Response> => {
         const url = String(input);
-        if (url === `${ASSISTANT_BASE}/conversations` && init?.method === "POST") {
+        if (
+          url === `${ASSISTANT_BASE}/conversations` &&
+          init?.method === "POST"
+        ) {
           return Promise.resolve(
             jsonResponse({ status: "accepted", actorId: CONVERSATION_ID }),
           );
@@ -1503,8 +1547,7 @@ describe("AevatarAssistantTransport", () => {
     const turn1 = await collectTurn(transport, "Post the digest");
     const card = turn1.find(
       (event) =>
-        event.event === "block.started" &&
-        event.block.type === "approval_card",
+        event.event === "block.started" && event.block.type === "approval_card",
     );
     if (!card || card.event !== "block.started") {
       throw new Error("approval card never appeared");
@@ -1558,7 +1601,10 @@ describe("AevatarAssistantTransport", () => {
     const mock = vi.fn(
       (input: RequestInfo | URL, init?: RequestInit): Promise<Response> => {
         const url = String(input);
-        if (url === `${ASSISTANT_BASE}/conversations` && init?.method === "POST") {
+        if (
+          url === `${ASSISTANT_BASE}/conversations` &&
+          init?.method === "POST"
+        ) {
           return Promise.resolve(
             jsonResponse({ status: "accepted", actorId: CONVERSATION_ID }),
           );
@@ -1917,9 +1963,7 @@ describe("captured production wire shapes", () => {
   // Both shapes must map to the identical transcript, and the wrapper must
   // not be confused with a body that merely happens to be an object.
   it("maps the PR #2923 wrapped transcript identically to the legacy array", async () => {
-    stubFetch(
-      routeHistory({ messages: capturedHistory, stateVersion: 7 }),
-    );
+    stubFetch(routeHistory({ messages: capturedHistory, stateVersion: 7 }));
     const transport = new AevatarAssistantTransport();
 
     const wrapped = await transport.getHistory(CONVERSATION_ID);
@@ -1971,9 +2015,7 @@ describe("captured production wire shapes", () => {
           url === `${ASSISTANT_BASE}/conversations` &&
           (init?.method ?? "GET") === "GET"
             ? jsonResponse({
-                conversations: [
-                  { id: CONVERSATION_ID, title: "Server title" },
-                ],
+                conversations: [{ id: CONVERSATION_ID, title: "Server title" }],
               })
             : undefined,
         routeHistory(body),
@@ -2014,16 +2056,17 @@ describe("captured production wire shapes", () => {
       Accept: "text/event-stream",
     });
     const body = JSON.parse(String(init.body)) as {
+      type: string;
       prompt: string;
       clientRequestId: string;
-      type: string;
       sessionId?: string;
     };
+    expect(Object.keys(body)).toEqual(["type", "prompt", "clientRequestId"]);
+    expect(body.type).toBe("text");
     expect(body.prompt).toBe("Hello there");
     expect(body.clientRequestId).toMatch(
       /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/,
     );
-    expect(body.type).toBe("text");
     expect(Object.keys(body).sort()).toEqual([
       "clientRequestId",
       "prompt",
@@ -3590,6 +3633,744 @@ describe("live AG-UI frame taxonomy", () => {
   });
 });
 
+describe("chat action cards", () => {
+  it("creates one card and upgrades an idempotently re-emitted request", async () => {
+    stubFetch(
+      routeStream([
+        { type: "RUN_STARTED", turnId: TURN_ID },
+        actionRequestFrame({ schemaVersion: 3 }),
+        actionRequestFrame(),
+        {
+          type: "CUSTOM",
+          custom: { name: "nyxid.task.snapshot", payload: { ignored: true } },
+        },
+        {
+          type: "RUN_FINISHED",
+          runFinished: { status: "blocked" },
+        },
+      ]),
+    );
+    const transport = new AevatarAssistantTransport();
+    await seedActorConversation(transport);
+
+    const events = await collectTurn(transport, "Read my repositories");
+    const starts = events.filter(
+      (event) =>
+        event.event === "block.started" && event.block.type === "action_card",
+    );
+    expect(starts).toHaveLength(1);
+    const upgrade = events.find(
+      (event) =>
+        event.event === "block.updated" &&
+        "status" in event.patch &&
+        event.patch.status === "pending",
+    );
+    expect(upgrade).toBeDefined();
+
+    const history = await transport.getHistory(CONVERSATION_ID);
+    const cards = history.messages
+      .flatMap((message) => message.blocks)
+      .filter((block) => block.type === "action_card");
+    expect(cards).toHaveLength(1);
+    expect(cards[0]).toMatchObject({
+      action_request_id: "act-action-1",
+      origin_turn_id: TURN_ID,
+      status: "pending",
+      params: {
+        variant: "catalog",
+        service_slug: "api-github",
+        requested_scopes: ["repo"],
+      },
+    });
+    expect(events.at(-1)).toMatchObject({ status: "blocked" });
+  });
+
+  it("posts the exact action.continue body and streams the follow-up", async () => {
+    const fetchMock = stubFetch((url, init) => {
+      if (!url.endsWith("/stream") || init?.method !== "POST") return undefined;
+      const body = JSON.parse(String(init.body)) as { readonly type: string };
+      if (body.type === "text") {
+        return sseResponse([
+          { type: "RUN_STARTED", turnId: TURN_ID },
+          actionRequestFrame(),
+          { type: "RUN_FINISHED", runFinished: { status: "blocked" } },
+        ]);
+      }
+      return sseResponse([
+        { type: "RUN_STARTED", turnId: "turn-action-follow-up" },
+        {
+          type: "TEXT_MESSAGE_START",
+          textMessageStart: { messageId: "m-action-follow-up" },
+        },
+        {
+          type: "TEXT_MESSAGE_CONTENT",
+          textMessageContent: { delta: "GitHub is connected." },
+        },
+        { type: "TEXT_MESSAGE_END" },
+        { type: "RUN_FINISHED" },
+      ]);
+    });
+    const transport = new AevatarAssistantTransport();
+    await seedActorConversation(transport);
+    await collectTurn(transport, "Read my repositories");
+
+    const events: TurnEvent[] = [];
+    await new Promise<void>((resolve) => {
+      const handle = transport.continueActions(
+        CONVERSATION_ID,
+        TURN_ID,
+        [
+          {
+            actionRequestId: "act-action-1",
+            originTurnId: TURN_ID,
+            disposition: "completed",
+            resource: {
+              userService: {
+                userServiceId: "00000000-0000-4000-8000-000000000123",
+              },
+            },
+          },
+        ],
+        (event) => {
+          events.push(event);
+          if (event.event === "turn.completed") resolve();
+        },
+      );
+      expect(handle).not.toBeNull();
+    });
+
+    const actionCall = fetchMock.mock.calls.find(([, init]) => {
+      const body = JSON.parse(
+        String((init as RequestInit | undefined)?.body),
+      ) as {
+        readonly type?: string;
+      };
+      return body.type === "action.continue";
+    });
+    const actionBody = JSON.parse(
+      String((actionCall?.[1] as RequestInit | undefined)?.body),
+    ) as Record<string, unknown>;
+    expect(Object.keys(actionBody)).toEqual([
+      "type",
+      "clientRequestId",
+      "originTurnId",
+      "actions",
+    ]);
+    expect(actionBody).toMatchObject({
+      type: "action.continue",
+      originTurnId: TURN_ID,
+      actions: [
+        {
+          actionRequestId: "act-action-1",
+          originTurnId: TURN_ID,
+          disposition: "completed",
+          resource: {
+            userService: {
+              userServiceId: "00000000-0000-4000-8000-000000000123",
+            },
+          },
+        },
+      ],
+    });
+    expect(actionBody).not.toHaveProperty("prompt");
+    expect(actionBody).not.toHaveProperty("inputParts");
+    expect(actionBody).not.toHaveProperty("sessionId");
+    expect(events.at(-1)).toMatchObject({
+      event: "turn.completed",
+      turn_id: "turn-action-follow-up",
+      status: "completed",
+    });
+  });
+
+  it("batches reports that resolve during the active origin turn", async () => {
+    let originFinished = false;
+    const actionBodies: Array<{ readonly actions: readonly unknown[] }> = [];
+    stubFetch((url, init) => {
+      if (!url.endsWith("/stream") || init?.method !== "POST") return undefined;
+      const body = JSON.parse(String(init.body)) as {
+        readonly type: string;
+        readonly actions?: readonly unknown[];
+      };
+      if (body.type === "text") {
+        return sseResponse([
+          { type: "RUN_STARTED", turnId: TURN_ID },
+          actionRequestFrame(),
+          actionRequestFrame({ actionRequestId: "act-action-2" }),
+          { type: "RUN_FINISHED", runFinished: { status: "blocked" } },
+        ]);
+      }
+      expect(originFinished).toBe(true);
+      actionBodies.push({ actions: body.actions ?? [] });
+      return sseResponse([
+        { type: "RUN_STARTED", turnId: "turn-batched-action" },
+        { type: "RUN_FINISHED" },
+      ]);
+    });
+    const transport = new AevatarAssistantTransport();
+    await seedActorConversation(transport);
+
+    const resolvedIds = new Set<string>();
+    await new Promise<void>((resolve) => {
+      transport.sendMessage(CONVERSATION_ID, "Connect both", (event) => {
+        if (
+          event.event === "block.started" &&
+          event.block.type === "action_card"
+        ) {
+          const id = event.block.action_request_id;
+          if (!resolvedIds.has(id)) {
+            resolvedIds.add(id);
+            expect(
+              transport.continueActions(
+                CONVERSATION_ID,
+                TURN_ID,
+                [
+                  {
+                    actionRequestId: id,
+                    originTurnId: TURN_ID,
+                    disposition: "declined",
+                  },
+                ],
+                (continuationEvent) => {
+                  if (continuationEvent.event === "turn.completed") resolve();
+                },
+              ),
+            ).toBeNull();
+          }
+        }
+        if (event.event === "turn.completed") originFinished = true;
+      });
+    });
+
+    expect(actionBodies).toHaveLength(1);
+    expect(actionBodies[0]?.actions).toHaveLength(2);
+  });
+
+  // The decline button is only disabled once the patched status has rendered,
+  // so a fast double-click can reach the transport twice before React repaints.
+  it("sends one report per action request when a decline is double-fired", async () => {
+    const actionBodies: Array<{ readonly actions: readonly unknown[] }> = [];
+    stubFetch((url, init) => {
+      if (!url.endsWith("/stream") || init?.method !== "POST") return undefined;
+      const body = JSON.parse(String(init.body)) as {
+        readonly type: string;
+        readonly actions?: readonly unknown[];
+      };
+      if (body.type === "text") {
+        return sseResponse([
+          { type: "RUN_STARTED", turnId: TURN_ID },
+          actionRequestFrame(),
+          { type: "RUN_FINISHED", runFinished: { status: "blocked" } },
+        ]);
+      }
+      actionBodies.push({ actions: body.actions ?? [] });
+      return sseResponse([
+        { type: "RUN_STARTED", turnId: "turn-double-decline" },
+        { type: "RUN_FINISHED" },
+      ]);
+    });
+    const transport = new AevatarAssistantTransport();
+    await seedActorConversation(transport);
+    await collectTurn(transport, "Connect GitHub");
+
+    const report = {
+      actionRequestId: "act-action-1",
+      originTurnId: TURN_ID,
+      disposition: "declined",
+    } as const;
+    await new Promise<void>((resolve) => {
+      transport.continueActions(CONVERSATION_ID, TURN_ID, [report], (event) => {
+        if (event.event === "turn.completed") resolve();
+      });
+      // Second click lands before the first continuation settles.
+      expect(
+        transport.continueActions(CONVERSATION_ID, TURN_ID, [report]),
+      ).toBeNull();
+    });
+
+    expect(actionBodies).toHaveLength(1);
+    expect(actionBodies[0]?.actions).toHaveLength(1);
+  });
+
+  it("reuses the continuation clientRequestId for automatic delivery retry", async () => {
+    let actionAttempts = 0;
+    const actionRequestIds: string[] = [];
+    stubFetch((url, init) => {
+      if (!url.endsWith("/stream") || init?.method !== "POST") return undefined;
+      const body = JSON.parse(String(init.body)) as {
+        readonly type: string;
+        readonly clientRequestId: string;
+      };
+      if (body.type === "text") {
+        return sseResponse([
+          { type: "RUN_STARTED", turnId: TURN_ID },
+          actionRequestFrame(),
+          { type: "RUN_FINISHED", runFinished: { status: "blocked" } },
+        ]);
+      }
+      actionAttempts += 1;
+      actionRequestIds.push(body.clientRequestId);
+      return actionAttempts === 1
+        ? jsonResponse({ message: "try again" }, 503)
+        : sseResponse([
+            { type: "RUN_STARTED", turnId: "turn-action-retry" },
+            { type: "RUN_FINISHED" },
+          ]);
+    });
+    const transport = new AevatarAssistantTransport();
+    await seedActorConversation(transport);
+    await collectTurn(transport, "Connect GitHub");
+
+    await new Promise<void>((resolve) => {
+      transport.continueActions(
+        CONVERSATION_ID,
+        TURN_ID,
+        [
+          {
+            actionRequestId: "act-action-1",
+            originTurnId: TURN_ID,
+            disposition: "declined",
+          },
+        ],
+        (event) => {
+          if (event.event === "turn.completed") resolve();
+        },
+      );
+    });
+
+    expect(actionRequestIds).toHaveLength(2);
+    expect(actionRequestIds[0]).toBe(actionRequestIds[1]);
+  });
+
+  it("requeues a continuation when a successful response is not SSE", async () => {
+    let textTurns = 0;
+    let actionAttempts = 0;
+    const actionRequestIds: string[] = [];
+    stubFetch((url, init) => {
+      if (!url.endsWith("/stream") || init?.method !== "POST") return undefined;
+      const body = JSON.parse(String(init.body)) as {
+        readonly type: string;
+        readonly clientRequestId: string;
+      };
+      if (body.type === "text") {
+        textTurns += 1;
+        return textTurns === 1
+          ? sseResponse([
+              { type: "RUN_STARTED", turnId: TURN_ID },
+              actionRequestFrame(),
+              { type: "RUN_FINISHED", runFinished: { status: "blocked" } },
+            ])
+          : sseResponse([
+              { type: "RUN_STARTED", turnId: "turn-after-json-response" },
+              { type: "RUN_FINISHED" },
+            ]);
+      }
+      actionAttempts += 1;
+      actionRequestIds.push(body.clientRequestId);
+      return actionAttempts === 1
+        ? jsonResponse({ accepted: true })
+        : sseResponse([
+            { type: "RUN_STARTED", turnId: "turn-retried-after-json" },
+            { type: "RUN_FINISHED" },
+          ]);
+    });
+    const transport = new AevatarAssistantTransport();
+    await seedActorConversation(transport);
+    await collectTurn(transport, "Connect GitHub");
+
+    let resolveFailed: () => void = () => undefined;
+    let resolveRetried: () => void = () => undefined;
+    const failed = new Promise<void>((resolve) => {
+      resolveFailed = resolve;
+    });
+    const retried = new Promise<void>((resolve) => {
+      resolveRetried = resolve;
+    });
+    transport.continueActions(
+      CONVERSATION_ID,
+      TURN_ID,
+      [
+        {
+          actionRequestId: "act-action-1",
+          originTurnId: TURN_ID,
+          disposition: "completed",
+          resource: {
+            userService: {
+              userServiceId: "00000000-0000-4000-8000-000000000123",
+            },
+          },
+        },
+      ],
+      (event) => {
+        if (event.event !== "turn.completed") return;
+        if (event.status === "failed") resolveFailed();
+        if (event.status === "completed") resolveRetried();
+      },
+    );
+    await failed;
+
+    expect(actionAttempts).toBe(1);
+    let history = await transport.getHistory(CONVERSATION_ID);
+    let card = history.messages
+      .flatMap((message) => message.blocks)
+      .find((block) => block.type === "action_card");
+    expect(card).toMatchObject({ status: "completed" });
+    expect(card?.type === "action_card" ? card.outcome_note : "").toContain(
+      "has not reached the assistant",
+    );
+    expect(card?.type === "action_card" ? card.outcome_note : "").not.toContain(
+      "assistant received",
+    );
+
+    await collectTurn(transport, "Continue when idle");
+    await retried;
+
+    expect(actionAttempts).toBe(2);
+    expect(actionRequestIds[0]).toBe(actionRequestIds[1]);
+    history = await transport.getHistory(CONVERSATION_ID);
+    card = history.messages
+      .flatMap((message) => message.blocks)
+      .find((block) => block.type === "action_card");
+    expect(card?.type === "action_card" ? card.outcome_note : "").toContain(
+      "assistant received",
+    );
+  });
+
+  it("keeps a rejected report queued and retries after the next idle turn", async () => {
+    let textTurns = 0;
+    let actionAttempts = 0;
+    const actionRequestIds: string[] = [];
+    stubFetch((url, init) => {
+      if (!url.endsWith("/stream") || init?.method !== "POST") return undefined;
+      const body = JSON.parse(String(init.body)) as {
+        readonly type: string;
+        readonly clientRequestId: string;
+      };
+      if (body.type === "text") {
+        textTurns += 1;
+        return textTurns === 1
+          ? sseResponse([
+              { type: "RUN_STARTED", turnId: TURN_ID },
+              actionRequestFrame(),
+              { type: "RUN_FINISHED", runFinished: { status: "blocked" } },
+            ])
+          : sseResponse([
+              { type: "RUN_STARTED", turnId: "turn-user-after-rejection" },
+              { type: "RUN_FINISHED" },
+            ]);
+      }
+      actionAttempts += 1;
+      actionRequestIds.push(body.clientRequestId);
+      return actionAttempts === 1
+        ? sseResponse([
+            { type: "RUN_STARTED", turnId: "turn-rejected-action" },
+            {
+              type: "RUN_ERROR",
+              runError: {
+                code: "NYXID_ACTION_CONTINUATION_ACTIVE_TURN",
+                message: "Another conversation turn is active.",
+              },
+            },
+          ])
+        : sseResponse([
+            { type: "RUN_STARTED", turnId: "turn-retried-action" },
+            { type: "RUN_FINISHED" },
+          ]);
+    });
+    const transport = new AevatarAssistantTransport();
+    await seedActorConversation(transport);
+    await collectTurn(transport, "Connect GitHub");
+
+    let resolveRejected: () => void = () => undefined;
+    let resolveRetried: () => void = () => undefined;
+    const rejected = new Promise<void>((resolve) => {
+      resolveRejected = resolve;
+    });
+    const retried = new Promise<void>((resolve) => {
+      resolveRetried = resolve;
+    });
+    transport.continueActions(
+      CONVERSATION_ID,
+      TURN_ID,
+      [
+        {
+          actionRequestId: "act-action-1",
+          originTurnId: TURN_ID,
+          disposition: "declined",
+        },
+      ],
+      (event) => {
+        if (event.event !== "turn.completed") return;
+        if (event.status === "failed") resolveRejected();
+        if (event.status === "completed") resolveRetried();
+      },
+    );
+    await rejected;
+    expect(actionAttempts).toBe(1);
+
+    await collectTurn(transport, "Continue when idle");
+    await retried;
+
+    expect(actionAttempts).toBe(2);
+    expect(actionRequestIds[0]).toBe(actionRequestIds[1]);
+    const history = await transport.getHistory(CONVERSATION_ID);
+    const card = history.messages
+      .flatMap((message) => message.blocks)
+      .find((block) => block.type === "action_card");
+    expect(card).toMatchObject({ status: "declined" });
+  });
+
+  // Aevatar publishes a rejected continuation admission to the *origin* turn's
+  // session (`nyxid.continuation.changed`), never as a reason code on the
+  // continuation stream. The client therefore only ever observes a generic
+  // terminal error — the report must still survive it.
+  it("requeues a report after a generic continuation stream error", async () => {
+    let textTurns = 0;
+    let actionAttempts = 0;
+    const actionRequestIds: string[] = [];
+    stubFetch((url, init) => {
+      if (!url.endsWith("/stream") || init?.method !== "POST") return undefined;
+      const body = JSON.parse(String(init.body)) as {
+        readonly type: string;
+        readonly clientRequestId: string;
+      };
+      if (body.type === "text") {
+        textTurns += 1;
+        return textTurns === 1
+          ? sseResponse([
+              { type: "RUN_STARTED", turnId: TURN_ID },
+              actionRequestFrame(),
+              { type: "RUN_FINISHED", runFinished: { status: "blocked" } },
+            ])
+          : sseResponse([
+              { type: "RUN_STARTED", turnId: "turn-user-after-error" },
+              { type: "RUN_FINISHED" },
+            ]);
+      }
+      actionAttempts += 1;
+      actionRequestIds.push(body.clientRequestId);
+      return actionAttempts === 1
+        ? sseResponse([
+            { type: "RUN_STARTED", turnId: "turn-stalled-action" },
+            {
+              type: "RUN_ERROR",
+              runError: {
+                code: "STREAM_TIMEOUT",
+                message: "The chat request timed out. Please try again.",
+              },
+            },
+          ])
+        : sseResponse([
+            { type: "RUN_STARTED", turnId: "turn-retried-action" },
+            { type: "RUN_FINISHED" },
+          ]);
+    });
+    const transport = new AevatarAssistantTransport();
+    await seedActorConversation(transport);
+    await collectTurn(transport, "Connect GitHub");
+
+    let resolveFailed: () => void = () => undefined;
+    let resolveRetried: () => void = () => undefined;
+    const failed = new Promise<void>((resolve) => {
+      resolveFailed = resolve;
+    });
+    const retried = new Promise<void>((resolve) => {
+      resolveRetried = resolve;
+    });
+    transport.continueActions(
+      CONVERSATION_ID,
+      TURN_ID,
+      [
+        {
+          actionRequestId: "act-action-1",
+          originTurnId: TURN_ID,
+          disposition: "completed",
+        },
+      ],
+      (event) => {
+        if (event.event !== "turn.completed") return;
+        if (event.status === "failed") resolveFailed();
+        if (event.status === "completed") resolveRetried();
+      },
+    );
+    await failed;
+    expect(actionAttempts).toBe(1);
+
+    await collectTurn(transport, "Anything else?");
+    await retried;
+
+    expect(actionAttempts).toBe(2);
+    expect(actionRequestIds[0]).toBe(actionRequestIds[1]);
+  });
+
+  it("requeues a report when the continuation stalls into the watchdog", async () => {
+    vi.useFakeTimers();
+    try {
+      const encoder = new TextEncoder();
+      let textTurns = 0;
+      let actionAttempts = 0;
+      const actionRequestIds: string[] = [];
+      // RUN_STARTED then silence: exactly what a rejected continuation looks
+      // like on the wire once the server's keepalives are filtered out.
+      const stalledStream = new ReadableStream<Uint8Array>({
+        start(controller) {
+          controller.enqueue(
+            encoder.encode(
+              `data: ${JSON.stringify({
+                type: "RUN_STARTED",
+                turnId: "turn-stalled-action",
+              })}\n\n`,
+            ),
+          );
+        },
+      });
+      stubFetch((url, init) => {
+        if (!url.endsWith("/stream") || init?.method !== "POST")
+          return undefined;
+        const body = JSON.parse(String(init.body)) as {
+          readonly type: string;
+          readonly clientRequestId: string;
+        };
+        if (body.type === "text") {
+          textTurns += 1;
+          return textTurns === 1
+            ? sseResponse([
+                { type: "RUN_STARTED", turnId: TURN_ID },
+                actionRequestFrame(),
+                { type: "RUN_FINISHED", runFinished: { status: "blocked" } },
+              ])
+            : sseResponse([
+                { type: "RUN_STARTED", turnId: "turn-user-after-stall" },
+                { type: "RUN_FINISHED" },
+              ]);
+        }
+        actionAttempts += 1;
+        actionRequestIds.push(body.clientRequestId);
+        return actionAttempts === 1
+          ? new Response(stalledStream, {
+              status: 200,
+              headers: { "Content-Type": "text/event-stream" },
+            })
+          : sseResponse([
+              { type: "RUN_STARTED", turnId: "turn-retried-action" },
+              { type: "RUN_FINISHED" },
+            ]);
+      });
+      const transport = new AevatarAssistantTransport();
+      await seedActorConversation(transport);
+      await collectTurn(transport, "Connect GitHub");
+
+      let resolveRetried: () => void = () => undefined;
+      const retried = new Promise<void>((resolve) => {
+        resolveRetried = resolve;
+      });
+      transport.continueActions(
+        CONVERSATION_ID,
+        TURN_ID,
+        [
+          {
+            actionRequestId: "act-action-1",
+            originTurnId: TURN_ID,
+            disposition: "completed",
+          },
+        ],
+        (event) => {
+          if (
+            event.event === "turn.completed" &&
+            event.status === "completed"
+          ) {
+            resolveRetried();
+          }
+        },
+      );
+      await vi.advanceTimersByTimeAsync(120_001);
+      expect(actionAttempts).toBe(1);
+
+      const idle = new Promise<void>((resolve) => {
+        transport.sendMessage(CONVERSATION_ID, "Anything else?", (event) => {
+          if (event.event === "turn.completed") resolve();
+        });
+      });
+      await vi.advanceTimersByTimeAsync(1);
+      await idle;
+      await retried;
+
+      expect(actionAttempts).toBe(2);
+      expect(actionRequestIds[0]).toBe(actionRequestIds[1]);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("downgrades a re-emitted card the client can no longer service", async () => {
+    stubFetch(
+      routeStream([
+        { type: "RUN_STARTED", turnId: TURN_ID },
+        actionRequestFrame(),
+        // Aevatar rolled forward to a schema this build cannot service.
+        actionRequestFrame({ schemaVersion: 5 }),
+        { type: "RUN_FINISHED", runFinished: { status: "blocked" } },
+      ]),
+    );
+    const transport = new AevatarAssistantTransport();
+    await seedActorConversation(transport);
+    await collectTurn(transport, "Read my repositories");
+
+    const history = await transport.getHistory(CONVERSATION_ID);
+    const cards = history.messages
+      .flatMap((message) => message.blocks)
+      .filter((block) => block.type === "action_card");
+    expect(cards).toHaveLength(1);
+    expect(cards[0]).toMatchObject({ status: "unsupported" });
+  });
+
+  it("renders malformed recognizable action requests as decline-only cards", async () => {
+    stubFetch(
+      routeStream([
+        { type: "RUN_STARTED", turnId: TURN_ID },
+        actionRequestFrame({
+          actionRequestId: "act-extra-member",
+          unexpected: true,
+        }),
+        actionRequestFrame({
+          actionRequestId: "act-bogus-auth",
+          params: {
+            customService: {
+              name: "Build API",
+              endpointUrl: "https://build.example.test/v1",
+              authMethod: "bogus",
+            },
+          },
+        }),
+        actionRequestFrame({
+          actionRequestId: "act-empty-slug",
+          params: { catalogService: { serviceSlug: "   " } },
+        }),
+        { type: "RUN_FINISHED", runFinished: { status: "blocked" } },
+      ]),
+    );
+    const transport = new AevatarAssistantTransport();
+    await seedActorConversation(transport);
+    await collectTurn(transport, "Connect the requested services");
+
+    const history = await transport.getHistory(CONVERSATION_ID);
+    const cards = history.messages
+      .flatMap((message) => message.blocks)
+      .filter((block) => block.type === "action_card");
+    expect(cards).toHaveLength(3);
+    expect(cards.map((card) => card.action_request_id)).toEqual([
+      "act-extra-member",
+      "act-bogus-auth",
+      "act-empty-slug",
+    ]);
+    for (const card of cards) {
+      expect(card).toMatchObject({
+        status: "unsupported",
+        params: { variant: "unknown" },
+      });
+    }
+  });
+});
+
 describe("redaction and tool summaries", () => {
   it("redacts secret assignments and token shapes from display text", () => {
     expect(
@@ -3937,8 +4718,7 @@ describe("live/history convergence for connect markers", () => {
   it.each(
     CASES.flatMap(([label, content]) =>
       CHUNKINGS.map(
-        (size) =>
-          [`${label} (chunk ${String(size)})`, content, size] as const,
+        (size) => [`${label} (chunk ${String(size)})`, content, size] as const,
       ),
     ),
   )("%s", async (_label, content, chunkSize) => {
@@ -4014,7 +4794,10 @@ describe("cancel runs the same projection as a normal close", () => {
           const encoder = new TextEncoder();
           const frames = [
             { type: "RUN_STARTED", turnId: TURN_ID, actorId: CONVERSATION_ID },
-            { type: "TEXT_MESSAGE_START", textMessageStart: { messageId: "mC" } },
+            {
+              type: "TEXT_MESSAGE_START",
+              textMessageStart: { messageId: "mC" },
+            },
             ...deltas.map((delta) => ({
               type: "TEXT_MESSAGE_CONTENT",
               textMessageContent: { delta },
@@ -4119,11 +4902,7 @@ describe("connect markers survive the PR #2923 wrapped transcript", () => {
     const history = await transport.getHistory(CONVERSATION_ID);
 
     const blocks = history.messages.find((m) => m.id === "w1")?.blocks ?? [];
-    expect(blocks.map((b) => b.type)).toEqual([
-      "text",
-      "connect_card",
-      "text",
-    ]);
+    expect(blocks.map((b) => b.type)).toEqual(["text", "connect_card", "text"]);
   });
 
   it("renders identically from the legacy flat array", async () => {
@@ -4133,11 +4912,7 @@ describe("connect markers survive the PR #2923 wrapped transcript", () => {
     const history = await transport.getHistory(CONVERSATION_ID);
 
     const blocks = history.messages.find((m) => m.id === "w1")?.blocks ?? [];
-    expect(blocks.map((b) => b.type)).toEqual([
-      "text",
-      "connect_card",
-      "text",
-    ]);
+    expect(blocks.map((b) => b.type)).toEqual(["text", "connect_card", "text"]);
   });
 });
 
@@ -4199,6 +4974,7 @@ describe("workflow chat turns (studio engine)", () => {
   const WORKFLOW_CONVERSATION = "chatc-8bd999c402fb37d60cdcd81e3b78cfd";
   const WORKFLOW_TURN = "turn-d619940adcd817c4aeb5d1c3e57f1ca5";
   const RUN_ACTOR = "workflow-definition:studio:run:43bfe86961b44fc2a6422d0b";
+  const ACTION_ACTOR = "nyxid-chat-workflow-action-1";
 
   function workflowContextFrame(stateVersion: string): unknown {
     return {
@@ -4346,8 +5122,7 @@ describe("workflow chat turns (studio engine)", () => {
         (event) =>
           event.event === "block.completed" &&
           event.block.type === "text" &&
-          event.block.text ===
-            "Here's what's available on your NyxID account.",
+          event.block.text === "Here's what's available on your NyxID account.",
       ),
     ).toBe(true);
     expect(events[events.length - 1]?.event).toBe("turn.completed");
@@ -4371,8 +5146,7 @@ describe("workflow chat turns (studio engine)", () => {
     const turnBodies = mock.mock.calls
       .filter(([input]) => String(input) === WORKFLOW_URL)
       .map(
-        ([, init]) =>
-          JSON.parse(String(init?.body)) as Record<string, unknown>,
+        ([, init]) => JSON.parse(String(init?.body)) as Record<string, unknown>,
       );
     expect(turnBodies).toHaveLength(2);
     expect(turnBodies[0]?.["conversationId"]).toBeUndefined();
@@ -4380,9 +5154,7 @@ describe("workflow chat turns (studio engine)", () => {
     // from the first turn's chat.context (stateVersion "3").
     expect(turnBodies[1]?.["conversationId"]).toBe(WORKFLOW_CONVERSATION);
     expect(turnBodies[1]?.["minimumStateVersion"]).toBe(3);
-    expect(turnBodies[1]?.["commandId"]).not.toBe(
-      turnBodies[0]?.["commandId"],
-    );
+    expect(turnBodies[1]?.["commandId"]).not.toBe(turnBodies[0]?.["commandId"]);
   });
 
   it("maps runError to a failed turn with its upstream code", async () => {
@@ -4439,17 +5211,13 @@ describe("workflow chat turns (studio engine)", () => {
 
     const events: TurnEvent[] = [];
     const terminal = new Promise<void>((resolve) => {
-      const handle = transport.sendMessage(
-        conversation.id,
-        "hi",
-        (event) => {
-          events.push(event);
-          if (event.event === "turn.completed") resolve();
-          if (event.event === "turn.status" && event.status === "running") {
-            handle.cancel();
-          }
-        },
-      );
+      const handle = transport.sendMessage(conversation.id, "hi", (event) => {
+        events.push(event);
+        if (event.event === "turn.completed") resolve();
+        if (event.event === "turn.status" && event.status === "running") {
+          handle.cancel();
+        }
+      });
     });
     await terminal;
 
@@ -4493,9 +5261,107 @@ describe("workflow chat turns (studio engine)", () => {
     await expect(transport.getHistory(conversation.id)).rejects.toThrow(
       "Conversation was not found.",
     );
-    await expect(
-      transport.getHistory(WORKFLOW_CONVERSATION),
-    ).rejects.toThrow("Conversation was not found.");
+    await expect(transport.getHistory(WORKFLOW_CONVERSATION)).rejects.toThrow(
+      "Conversation was not found.",
+    );
+  });
+
+  it("posts a workflow action continuation to the actor named by its frame", async () => {
+    const actionBodies: Record<string, unknown>[] = [];
+    const mock = stubFetch(
+      routeWorkflow([
+        ...WORKFLOW_PREAMBLE,
+        actionRequestFrame({
+          actorId: ACTION_ACTOR,
+          originTurnId: WORKFLOW_TURN,
+        }),
+        { runFinished: { threadId: RUN_ACTOR, status: "blocked" } },
+        { stateSnapshot: { snapshot: { actorId: RUN_ACTOR } } },
+      ]),
+      (url, init) => {
+        if (
+          url !== `${ASSISTANT_BASE}/conversations/${ACTION_ACTOR}/stream` ||
+          init?.method !== "POST"
+        ) {
+          return undefined;
+        }
+        actionBodies.push(
+          JSON.parse(String(init.body)) as Record<string, unknown>,
+        );
+        return sseResponse([
+          {
+            type: "RUN_STARTED",
+            actorId: ACTION_ACTOR,
+            turnId: "turn-action-continuation-1",
+          },
+          { type: "RUN_FINISHED" },
+        ]);
+      },
+    );
+    const transport = new AevatarAssistantTransport();
+    const conversation = await transport.createConversation();
+    await collectWorkflowTurn(transport, conversation.id, "Connect GitHub");
+
+    const events: TurnEvent[] = [];
+    await new Promise<void>((resolve) => {
+      const handle = transport.continueActions(
+        conversation.id,
+        WORKFLOW_TURN,
+        [
+          {
+            actionRequestId: "act-action-1",
+            originTurnId: WORKFLOW_TURN,
+            disposition: "completed",
+            resource: {
+              userService: {
+                userServiceId: "00000000-0000-4000-8000-000000000123",
+              },
+            },
+          },
+        ],
+        (event) => {
+          events.push(event);
+          if (event.event === "turn.completed") resolve();
+        },
+      );
+      expect(handle).not.toBeNull();
+    });
+
+    expect(
+      mock.mock.calls.some(
+        ([input]) =>
+          String(input).includes(
+            `/conversations/${WORKFLOW_CONVERSATION}/stream`,
+          ) ||
+          String(input).includes(`/conversations/${conversation.id}/stream`),
+      ),
+    ).toBe(false);
+    expect(
+      mock.mock.calls
+        .filter(([input]) => String(input) === WORKFLOW_URL)
+        .map(([, init]) => JSON.parse(String(init?.body)) as { type?: string })
+        .some((body) => body.type === "action.continue"),
+    ).toBe(false);
+    expect(actionBodies).toHaveLength(1);
+    expect(actionBodies[0]).toMatchObject({
+      type: "action.continue",
+      originTurnId: WORKFLOW_TURN,
+      actions: [
+        {
+          actionRequestId: "act-action-1",
+          originTurnId: WORKFLOW_TURN,
+          disposition: "completed",
+        },
+      ],
+    });
+    expect(
+      events.some(
+        (event) =>
+          event.event === "block.updated" &&
+          "outcome_note" in event.patch &&
+          event.patch.outcome_note?.includes("assistant received"),
+      ),
+    ).toBe(true);
   });
 });
 

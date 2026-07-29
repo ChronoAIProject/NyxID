@@ -1,0 +1,3040 @@
+<!doctype html>
+<html lang="en" class="theme-dark">
+  <head>
+    <meta charset="UTF-8" />
+    <meta
+      name="viewport"
+      content="width=device-width, initial-scale=1.0, maximum-scale=1.0"
+    />
+    <meta name="color-scheme" content="dark light" />
+    <title>NyxID Assistant Action Cards</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link
+      href="https://fonts.googleapis.com/css2?family=Mona+Sans:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap"
+      rel="stylesheet"
+    />
+    <style>
+      :root {
+        --color-nyx-50: #ede5fe;
+        --color-nyx-200: #b894fb;
+        --color-nyx-500: #5a2af1;
+        --color-nyx-secondary-400: #a672fb;
+        --color-nyx-secondary-500: #9555f5;
+        --color-background: #0d0d0d;
+        --color-foreground: #fafafa;
+        --color-card: #171717;
+        --color-card-foreground: #fafafa;
+        --color-muted: #262626;
+        --color-muted-foreground: #a3a3a3;
+        --color-destructive: #ef4444;
+        --color-border: #262626;
+        --color-success: #10b981;
+        --color-warning: #f59e0b;
+        --color-text-tertiary: #525252;
+        --color-hairline: rgba(255, 255, 255, 0.08);
+        --color-hairline-strong: rgba(255, 255, 255, 0.15);
+        --color-overlay: rgba(255, 255, 255, 0.03);
+        --color-overlay-strong: rgba(255, 255, 255, 0.06);
+        --radius-sm: 0.375rem;
+        --radius-md: 0.625rem;
+        --radius-lg: 0.75rem;
+        --radius-xl: 0.875rem;
+        --font-sans: "Mona Sans", system-ui, -apple-system, sans-serif;
+        --font-mono: "JetBrains Mono", ui-monospace, monospace;
+      }
+
+      html.theme-light {
+        color-scheme: light;
+        --color-background: #fafafa;
+        --color-foreground: #18181b;
+        --color-card: #ffffff;
+        --color-card-foreground: #18181b;
+        --color-muted: #f4f4f5;
+        --color-muted-foreground: #52525b;
+        --color-destructive: #dc2626;
+        --color-border: #e4e4e7;
+        --color-success: #059669;
+        --color-warning: #b45309;
+        --color-text-tertiary: #71717a;
+        --color-hairline: rgba(0, 0, 0, 0.1);
+        --color-hairline-strong: rgba(0, 0, 0, 0.18);
+        --color-overlay: rgba(0, 0, 0, 0.04);
+        --color-overlay-strong: rgba(0, 0, 0, 0.07);
+      }
+
+      html.theme-dark {
+        color-scheme: dark;
+      }
+
+      * {
+        box-sizing: border-box;
+      }
+
+      html {
+        min-width: 320px;
+        background: var(--color-background);
+        scroll-behavior: smooth;
+      }
+
+      body {
+        margin: 0;
+        min-height: 100vh;
+        overflow-x: hidden;
+        background: var(--color-background);
+        color: var(--color-foreground);
+        font-family: var(--font-sans);
+        font-size: 13px;
+        line-height: 1.4;
+        transition:
+          background-color 180ms ease,
+          color 180ms ease;
+      }
+
+      button,
+      a {
+        font: inherit;
+      }
+
+      button {
+        -webkit-tap-highlight-color: transparent;
+      }
+
+      svg {
+        display: block;
+      }
+
+      .site-header {
+        border-bottom: 1px solid var(--color-border);
+        background: color-mix(in srgb, var(--color-background) 92%, transparent);
+      }
+
+      .site-header-inner {
+        width: min(100% - 32px, 1080px);
+        margin: 0 auto;
+        padding: 30px 0 28px;
+      }
+
+      .header-row {
+        display: flex;
+        align-items: flex-start;
+        justify-content: space-between;
+        gap: 24px;
+      }
+
+      .brand-line {
+        display: flex;
+        align-items: center;
+        gap: 9px;
+        color: var(--color-muted-foreground);
+        font-family: var(--font-mono);
+        font-size: 10px;
+        text-transform: uppercase;
+        letter-spacing: 1px;
+      }
+
+      .brand-mark {
+        display: inline-flex;
+        width: 24px;
+        height: 24px;
+        align-items: center;
+        justify-content: center;
+        border: 1px solid rgba(166, 114, 251, 0.3);
+        border-radius: var(--radius-md);
+        background: rgba(166, 114, 251, 0.1);
+        color: var(--color-nyx-secondary-400);
+      }
+
+      h1 {
+        max-width: 720px;
+        margin: 18px 0 0;
+        font-size: 30px;
+        font-weight: 600;
+        line-height: 1.12;
+        letter-spacing: 0;
+      }
+
+      .lede {
+        max-width: 680px;
+        margin: 10px 0 0;
+        color: var(--color-muted-foreground);
+        font-size: 13px;
+        line-height: 1.6;
+      }
+
+      .theme-toggle {
+        display: inline-flex;
+        width: 34px;
+        height: 34px;
+        flex: 0 0 auto;
+        align-items: center;
+        justify-content: center;
+        border: 1px solid var(--color-hairline);
+        border-radius: var(--radius-lg);
+        background: var(--color-overlay);
+        color: var(--color-muted-foreground);
+        cursor: pointer;
+        transition:
+          border-color 180ms ease,
+          color 180ms ease,
+          background-color 180ms ease;
+      }
+
+      .theme-toggle:hover,
+      .theme-toggle:focus-visible {
+        border-color: var(--color-hairline-strong);
+        background: var(--color-overlay-strong);
+        color: var(--color-foreground);
+        outline: none;
+      }
+
+      .counts {
+        display: grid;
+        grid-template-columns: repeat(5, minmax(0, 1fr));
+        gap: 8px;
+        margin-top: 24px;
+      }
+
+      .count {
+        min-width: 0;
+        border: 1px solid var(--color-border);
+        border-radius: var(--radius-lg);
+        background: var(--color-card);
+        padding: 11px 12px;
+      }
+
+      .count-value {
+        display: block;
+        color: var(--color-foreground);
+        font-family: var(--font-mono);
+        font-size: 16px;
+        font-weight: 500;
+        font-variant-numeric: tabular-nums;
+      }
+
+      .count-label {
+        display: block;
+        margin-top: 2px;
+        overflow: hidden;
+        color: var(--color-text-tertiary);
+        font-size: 9px;
+        text-overflow: ellipsis;
+        text-transform: uppercase;
+        letter-spacing: 1px;
+        white-space: nowrap;
+      }
+
+      main {
+        width: min(100% - 32px, 680px);
+        margin: 0 auto;
+        padding: 18px 0 80px;
+      }
+
+      .catalogue-section {
+        padding-top: 54px;
+        scroll-margin-top: 24px;
+      }
+
+      .catalogue-section:first-child {
+        padding-top: 26px;
+      }
+
+      .section-kicker {
+        margin: 0;
+        color: var(--color-nyx-secondary-400);
+        font-family: var(--font-mono);
+        font-size: 10px;
+        font-weight: 500;
+        text-transform: uppercase;
+        letter-spacing: 1px;
+      }
+
+      .section-heading-row {
+        display: flex;
+        align-items: baseline;
+        justify-content: space-between;
+        gap: 16px;
+        margin-top: 7px;
+      }
+
+      h2 {
+        margin: 0;
+        font-size: 19px;
+        font-weight: 600;
+        line-height: 1.25;
+        letter-spacing: 0;
+      }
+
+      .section-count {
+        flex: 0 0 auto;
+        color: var(--color-text-tertiary);
+        font-family: var(--font-mono);
+        font-size: 10px;
+      }
+
+      .section-why {
+        margin: 6px 0 0;
+        color: var(--color-muted-foreground);
+        font-size: 12px;
+        line-height: 1.55;
+      }
+
+      .specimens {
+        display: grid;
+        gap: 18px;
+        margin-top: 18px;
+      }
+
+      .specimen {
+        min-width: 0;
+      }
+
+      .specimen-meta {
+        display: flex;
+        min-width: 0;
+        align-items: center;
+        justify-content: space-between;
+        gap: 10px;
+        padding: 0 3px 7px;
+      }
+
+      .meta-left,
+      .meta-right {
+        display: flex;
+        min-width: 0;
+        flex-wrap: wrap;
+        align-items: center;
+        gap: 5px;
+      }
+
+      .verb {
+        min-width: 0;
+        overflow: hidden;
+        color: var(--color-muted-foreground);
+        font-family: var(--font-mono);
+        font-size: 10px;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+      }
+
+      .badge {
+        display: inline-flex;
+        max-width: 100%;
+        min-width: 0;
+        align-items: center;
+        border: 1px solid;
+        border-radius: var(--radius-md);
+        padding: 2px 8px;
+        font-size: 10px;
+        font-weight: 500;
+        line-height: 1.4;
+        transition:
+          color 180ms ease,
+          background-color 180ms ease,
+          border-color 180ms ease;
+      }
+
+      .badge span {
+        min-width: 0;
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+      }
+
+      .badge-default {
+        border-color: rgba(90, 42, 241, 0.3);
+        background: rgba(90, 42, 241, 0.15);
+        color: var(--color-nyx-200);
+      }
+
+      .badge-secondary {
+        border-color: transparent;
+        background: var(--color-muted);
+        color: var(--color-muted-foreground);
+      }
+
+      .badge-destructive {
+        border-color: color-mix(in srgb, var(--color-destructive) 30%, transparent);
+        background: color-mix(in srgb, var(--color-destructive) 15%, transparent);
+        color: var(--color-destructive);
+      }
+
+      .badge-success {
+        border-color: color-mix(in srgb, var(--color-success) 30%, transparent);
+        background: color-mix(in srgb, var(--color-success) 10%, transparent);
+        color: var(--color-success);
+      }
+
+      .badge-accent {
+        border-color: rgba(90, 42, 241, 0.3);
+        background: rgba(90, 42, 241, 0.1);
+        color: var(--color-nyx-secondary-400);
+      }
+
+      html.theme-light .badge-default {
+        border-color: transparent;
+        background: var(--color-nyx-500);
+        color: #ffffff;
+      }
+
+      html.theme-light .badge-secondary {
+        border-color: var(--color-muted-foreground);
+        background: transparent;
+        color: var(--color-muted-foreground);
+      }
+
+      html.theme-light .badge-destructive {
+        border-color: transparent;
+        background: var(--color-destructive);
+        color: #ffffff;
+      }
+
+      html.theme-light .badge-success {
+        border-color: transparent;
+        background: var(--color-success);
+        color: #ffffff;
+      }
+
+      html.theme-light .badge-accent {
+        border-color: transparent;
+        background: var(--color-nyx-secondary-500);
+        color: #ffffff;
+      }
+
+      .tag {
+        padding-inline: 6px;
+        font-family: var(--font-mono);
+        font-size: 9px;
+      }
+
+      .card {
+        min-width: 0;
+        overflow: hidden;
+        border: 1px solid var(--color-border);
+        border-radius: var(--radius-xl);
+        background: var(--color-card);
+        color: var(--color-card-foreground);
+        box-shadow: 0 1px 2px rgba(0, 0, 0, 0.08);
+      }
+
+      .card-header {
+        display: flex;
+        min-width: 0;
+        align-items: flex-start;
+        gap: 12px;
+        padding: 14px 16px;
+      }
+
+      .icon-tile {
+        display: flex;
+        width: 36px;
+        height: 36px;
+        flex: 0 0 36px;
+        align-items: center;
+        justify-content: center;
+        border: 1px solid rgba(166, 114, 251, 0.3);
+        border-radius: var(--radius-lg);
+        background: rgba(166, 114, 251, 0.1);
+        color: var(--color-nyx-secondary-400);
+      }
+
+      .card-destructive .icon-tile,
+      .card-unsupported .icon-tile {
+        border-color: color-mix(in srgb, var(--color-destructive) 30%, transparent);
+        background: color-mix(in srgb, var(--color-destructive) 10%, transparent);
+        color: var(--color-destructive);
+      }
+
+      .icon-tile svg {
+        width: 17px;
+        height: 17px;
+      }
+
+      .card-heading {
+        min-width: 0;
+        flex: 1 1 auto;
+      }
+
+      .title-line {
+        display: flex;
+        min-width: 0;
+        flex-wrap: wrap;
+        align-items: center;
+        gap: 8px;
+      }
+
+      h3 {
+        min-width: 0;
+        margin: 0;
+        color: var(--color-foreground);
+        font-size: 13px;
+        font-weight: 600;
+        line-height: 1.35;
+      }
+
+      .card-body {
+        margin: 6px 0 0;
+        color: var(--color-muted-foreground);
+        font-size: 12px;
+        line-height: 1.55;
+      }
+
+      .data-section {
+        display: grid;
+        gap: 10px;
+        border-top: 1px solid var(--color-border);
+        border-bottom: 1px solid var(--color-border);
+        background: var(--color-muted);
+        padding: 12px 16px;
+      }
+
+      .chip-row {
+        display: flex;
+        min-width: 0;
+        flex-wrap: wrap;
+        align-items: center;
+        gap: 6px;
+      }
+
+      .chip-label {
+        flex: 0 0 auto;
+        color: var(--color-muted-foreground);
+        font-size: 10px;
+        font-weight: 600;
+        text-transform: uppercase;
+        letter-spacing: 1px;
+      }
+
+      .chip {
+        max-width: 100%;
+      }
+
+      .chip svg {
+        width: 12px;
+        height: 12px;
+        flex: 0 0 auto;
+        margin-right: 4px;
+      }
+
+      .mono {
+        font-family: var(--font-mono);
+      }
+
+      .trust-line,
+      .danger-line {
+        display: flex;
+        align-items: flex-start;
+        gap: 8px;
+        padding: 11px 16px;
+        color: var(--color-muted-foreground);
+        font-size: 11px;
+        line-height: 1.55;
+      }
+
+      .trust-line svg,
+      .danger-line svg {
+        width: 14px;
+        height: 14px;
+        flex: 0 0 14px;
+        margin-top: 1px;
+      }
+
+      .trust-line svg {
+        color: var(--color-nyx-secondary-400);
+      }
+
+      .danger-line {
+        color: var(--color-destructive);
+      }
+
+      .card-footer {
+        display: flex;
+        min-width: 0;
+        flex-wrap: wrap;
+        align-items: center;
+        gap: 8px;
+        border-top: 1px solid var(--color-border);
+        background: var(--color-muted);
+        padding: 12px 16px;
+      }
+
+      .button {
+        display: inline-flex;
+        height: 28px;
+        flex: 0 0 auto;
+        align-items: center;
+        justify-content: center;
+        gap: 6px;
+        border: 1px solid;
+        border-radius: var(--radius-lg);
+        padding: 0 10px;
+        font-size: 12px;
+        font-weight: 500;
+        line-height: 1;
+        white-space: nowrap;
+        cursor: default;
+        transition:
+          filter 180ms ease,
+          opacity 180ms ease,
+          border-color 180ms ease;
+      }
+
+      .button svg {
+        width: 12px;
+        height: 12px;
+        flex: 0 0 12px;
+      }
+
+      .button-primary {
+        border-color: transparent;
+        background: linear-gradient(to right, #a672fb 0%, #5e00f5 100%);
+        color: #ffffff;
+        box-shadow: 0 0 12px rgba(90, 42, 241, 0.25);
+      }
+
+      .button-destructive {
+        border-color: color-mix(in srgb, var(--color-destructive) 30%, transparent);
+        background: color-mix(in srgb, var(--color-destructive) 10%, transparent);
+        color: var(--color-destructive);
+      }
+
+      .button-outline {
+        border-color: var(--color-hairline);
+        background: transparent;
+        color: var(--color-muted-foreground);
+      }
+
+      .button[disabled] {
+        cursor: not-allowed;
+        opacity: 0.35;
+      }
+
+      .footer-copy {
+        min-width: 0;
+        margin-left: auto;
+        color: var(--color-muted-foreground);
+        font-size: 10px;
+        text-align: right;
+      }
+
+      .receipt {
+        border: 1px solid var(--color-border);
+        border-radius: var(--radius-xl);
+        background: var(--color-overlay);
+        padding: 16px;
+      }
+
+      .receipt-success {
+        border-color: color-mix(in srgb, var(--color-success) 30%, transparent);
+        background: color-mix(in srgb, var(--color-success) 6%, transparent);
+      }
+
+      .receipt-failed {
+        border-color: color-mix(in srgb, var(--color-destructive) 30%, transparent);
+        background: color-mix(in srgb, var(--color-destructive) 6%, transparent);
+      }
+
+      .receipt-heading {
+        display: flex;
+        align-items: center;
+        gap: 8px;
+        color: var(--color-foreground);
+        font-size: 12px;
+        font-weight: 600;
+      }
+
+      .receipt-heading svg {
+        width: 16px;
+        height: 16px;
+        flex: 0 0 16px;
+      }
+
+      .receipt-success .receipt-heading svg,
+      .receipt-low .receipt-heading svg {
+        color: var(--color-success);
+      }
+
+      .receipt-failed .receipt-heading svg {
+        color: var(--color-destructive);
+      }
+
+      .receipt-neutral .receipt-heading svg {
+        color: var(--color-muted-foreground);
+      }
+
+      .receipt-note {
+        margin: 8px 0 0;
+        color: var(--color-muted-foreground);
+        font-size: 12px;
+        line-height: 1.55;
+      }
+
+      .receipt .data-section {
+        margin: 12px -16px -4px;
+        border-bottom: 0;
+      }
+
+      .microtag {
+        display: inline-flex;
+        align-items: center;
+        gap: 5px;
+        margin-top: 11px;
+        color: var(--color-text-tertiary);
+        font-family: var(--font-mono);
+        font-size: 9px;
+      }
+
+      .microtag svg {
+        width: 11px;
+        height: 11px;
+      }
+
+      .dashboard-link {
+        display: inline-flex;
+        align-items: center;
+        gap: 5px;
+        margin-top: 11px;
+        color: var(--color-nyx-secondary-400);
+        font-size: 11px;
+        font-weight: 500;
+        text-decoration: none;
+      }
+
+      .dashboard-link svg {
+        width: 12px;
+        height: 12px;
+      }
+
+      .flow-storyboard {
+        display: grid;
+        gap: 22px;
+        margin-top: 20px;
+      }
+
+      .flow-frame {
+        position: relative;
+        display: grid;
+        min-width: 0;
+        grid-template-columns: 36px minmax(0, 1fr);
+        gap: 12px;
+      }
+
+      .flow-frame:not(:last-child)::after {
+        position: absolute;
+        top: 38px;
+        bottom: -22px;
+        left: 17px;
+        width: 1px;
+        background: var(--color-hairline-strong);
+        content: "";
+      }
+
+      .flow-index {
+        position: relative;
+        z-index: 1;
+        display: flex;
+        width: 34px;
+        height: 34px;
+        align-items: center;
+        justify-content: center;
+        border: 1px solid rgba(166, 114, 251, 0.35);
+        border-radius: 999px;
+        background: color-mix(in srgb, var(--color-nyx-secondary-400) 12%, var(--color-background));
+        color: var(--color-nyx-secondary-400);
+        font-family: var(--font-mono);
+        font-size: 10px;
+        font-weight: 500;
+      }
+
+      .flow-frame-branch .flow-index {
+        border-color: var(--color-hairline-strong);
+        background: var(--color-background);
+        color: var(--color-muted-foreground);
+      }
+
+      .flow-frame-error .flow-index {
+        border-color: color-mix(in srgb, var(--color-destructive) 35%, transparent);
+        background: color-mix(in srgb, var(--color-destructive) 9%, var(--color-background));
+        color: var(--color-destructive);
+      }
+
+      .flow-content {
+        min-width: 0;
+      }
+
+      .flow-caption {
+        min-width: 0;
+        padding: 1px 2px 9px;
+      }
+
+      .flow-caption strong {
+        display: block;
+        color: var(--color-foreground);
+        font-size: 12px;
+        font-weight: 600;
+      }
+
+      .flow-caption span {
+        display: block;
+        margin-top: 2px;
+        color: var(--color-muted-foreground);
+        font-size: 10px;
+        line-height: 1.5;
+      }
+
+      .flow-surface-stack,
+      .branch-stack {
+        display: grid;
+        min-width: 0;
+        gap: 10px;
+      }
+
+      .dialog-mock {
+        position: relative;
+        min-width: 0;
+        border: 1px solid var(--color-border);
+        border-radius: var(--radius-lg);
+        background: var(--color-card);
+        color: var(--color-card-foreground);
+        box-shadow:
+          0 16px 40px rgba(0, 0, 0, 0.16),
+          0 0 20px rgba(90, 42, 241, 0.04);
+      }
+
+      .dialog-chrome {
+        display: grid;
+        min-width: 0;
+        gap: 15px;
+        padding: 18px;
+      }
+
+      .dialog-close {
+        position: absolute;
+        top: 14px;
+        right: 14px;
+        display: flex;
+        width: 28px;
+        height: 28px;
+        align-items: center;
+        justify-content: center;
+        border: 0;
+        border-radius: var(--radius-sm);
+        background: transparent;
+        color: var(--color-muted-foreground);
+        cursor: default;
+      }
+
+      .dialog-close svg {
+        width: 14px;
+        height: 14px;
+      }
+
+      .mock-back {
+        display: inline-flex;
+        width: max-content;
+        max-width: 100%;
+        align-items: center;
+        gap: 5px;
+        border: 0;
+        background: transparent;
+        color: var(--color-muted-foreground);
+        padding: 0;
+        font-size: 10px;
+        cursor: default;
+      }
+
+      .mock-back svg {
+        width: 11px;
+        height: 11px;
+      }
+
+      .step-header {
+        display: flex;
+        min-width: 0;
+        align-items: flex-start;
+        gap: 12px;
+        padding-right: 30px;
+      }
+
+      .service-glyph {
+        display: flex;
+        width: 32px;
+        height: 32px;
+        flex: 0 0 32px;
+        align-items: center;
+        justify-content: center;
+        border: 1px solid var(--color-border);
+        border-radius: var(--radius-lg);
+        background: var(--color-muted);
+        color: var(--color-foreground);
+      }
+
+      .service-glyph svg {
+        width: 17px;
+        height: 17px;
+      }
+
+      .step-heading-copy {
+        min-width: 0;
+      }
+
+      .dialog-title {
+        margin: 0;
+        color: var(--color-foreground);
+        font-size: 15px;
+        font-weight: 600;
+        line-height: 1.25;
+      }
+
+      .dialog-description {
+        margin: 4px 0 0;
+        color: var(--color-muted-foreground);
+        font-size: 12px;
+        line-height: 1.5;
+      }
+
+      .mock-label {
+        margin: 0 0 7px;
+        color: var(--color-foreground);
+        font-size: 11px;
+        font-weight: 500;
+      }
+
+      .service-prefill {
+        display: flex;
+        min-width: 0;
+        align-items: center;
+        gap: 10px;
+        border: 2px solid color-mix(in srgb, var(--color-nyx-secondary-400) 70%, transparent);
+        border-radius: var(--radius-lg);
+        background: color-mix(in srgb, var(--color-nyx-secondary-400) 6%, transparent);
+        padding: 12px;
+      }
+
+      .service-prefill-copy {
+        min-width: 0;
+        flex: 1 1 auto;
+      }
+
+      .service-prefill-copy strong,
+      .service-prefill-copy span {
+        display: block;
+      }
+
+      .service-prefill-copy strong {
+        color: var(--color-foreground);
+        font-size: 12px;
+      }
+
+      .service-prefill-copy span {
+        margin-top: 2px;
+        overflow: hidden;
+        color: var(--color-muted-foreground);
+        font-family: var(--font-mono);
+        font-size: 9px;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+      }
+
+      .prefill-note,
+      .handoff-note,
+      .verify-summary {
+        display: flex;
+        min-width: 0;
+        align-items: flex-start;
+        gap: 8px;
+        border: 1px solid var(--color-border);
+        border-radius: var(--radius-lg);
+        background: var(--color-overlay);
+        padding: 11px 12px;
+        color: var(--color-muted-foreground);
+        font-size: 11px;
+        line-height: 1.55;
+      }
+
+      .prefill-note svg,
+      .handoff-note svg,
+      .verify-summary svg {
+        width: 14px;
+        height: 14px;
+        flex: 0 0 14px;
+        margin-top: 1px;
+        color: var(--color-nyx-secondary-400);
+      }
+
+      .choice-grid {
+        display: grid;
+        grid-template-columns: repeat(2, minmax(0, 1fr));
+        gap: 9px;
+      }
+
+      .choice-tile {
+        display: flex;
+        min-width: 0;
+        min-height: 92px;
+        flex-direction: column;
+        align-items: center;
+        justify-content: center;
+        gap: 6px;
+        border: 2px solid var(--color-border);
+        border-radius: var(--radius-lg);
+        background: transparent;
+        padding: 10px;
+        color: var(--color-foreground);
+        text-align: center;
+      }
+
+      .choice-tile.selected {
+        border-color: color-mix(in srgb, var(--color-nyx-secondary-400) 70%, transparent);
+        background: color-mix(in srgb, var(--color-nyx-secondary-400) 6%, transparent);
+      }
+
+      .choice-tile svg {
+        width: 18px;
+        height: 18px;
+      }
+
+      .choice-tile strong {
+        font-size: 10px;
+        font-weight: 500;
+      }
+
+      .choice-tile span {
+        color: var(--color-muted-foreground);
+        font-size: 9px;
+        line-height: 1.4;
+      }
+
+      .scope-list {
+        display: grid;
+        gap: 7px;
+      }
+
+      .scope-row {
+        display: flex;
+        min-width: 0;
+        align-items: center;
+        gap: 8px;
+        border: 1px solid var(--color-border);
+        border-radius: var(--radius-lg);
+        background: var(--color-overlay);
+        padding: 10px 11px;
+      }
+
+      .scope-check {
+        display: flex;
+        width: 16px;
+        height: 16px;
+        flex: 0 0 16px;
+        align-items: center;
+        justify-content: center;
+        border-radius: 4px;
+        background: var(--color-nyx-secondary-500);
+        color: #ffffff;
+      }
+
+      .scope-check svg {
+        width: 11px;
+        height: 11px;
+      }
+
+      .scope-copy {
+        min-width: 0;
+      }
+
+      .scope-copy strong,
+      .scope-copy span {
+        display: block;
+      }
+
+      .scope-copy strong {
+        font-family: var(--font-mono);
+        font-size: 10px;
+        font-weight: 500;
+      }
+
+      .scope-copy span {
+        margin-top: 2px;
+        color: var(--color-muted-foreground);
+        font-size: 9px;
+      }
+
+      .conditional-note {
+        display: flex;
+        min-width: 0;
+        align-items: flex-start;
+        gap: 7px;
+        color: var(--color-muted-foreground);
+        font-size: 10px;
+        line-height: 1.5;
+      }
+
+      .conditional-note svg {
+        width: 13px;
+        height: 13px;
+        flex: 0 0 13px;
+        margin-top: 1px;
+        color: var(--color-muted-foreground);
+      }
+
+      .scope-picker-mock {
+        display: grid;
+        gap: 8px;
+      }
+
+      .scope-pills {
+        display: flex;
+        min-width: 0;
+        flex-wrap: wrap;
+        gap: 6px;
+      }
+
+      .scope-pill {
+        display: inline-flex;
+        max-width: 100%;
+        align-items: center;
+        gap: 6px;
+        border: 1px solid var(--color-border);
+        border-radius: 999px;
+        background: transparent;
+        padding: 6px 10px;
+        color: var(--color-muted-foreground);
+        font-size: 10px;
+        line-height: 1;
+      }
+
+      .scope-pill.selected {
+        border-color: color-mix(in srgb, var(--color-nyx-secondary-400) 65%, transparent);
+        background: color-mix(in srgb, var(--color-nyx-secondary-400) 12%, transparent);
+        color: var(--color-foreground);
+      }
+
+      .scope-pill.gated {
+        border-style: dashed;
+        opacity: 0.55;
+      }
+
+      .scope-pill-default,
+      .scope-pill-own-app {
+        color: var(--color-muted-foreground);
+        font-size: 9px;
+      }
+
+      .scope-pill svg {
+        width: 11px;
+        height: 11px;
+        flex: 0 0 11px;
+      }
+
+      .scope-sensitive-dot {
+        width: 6px;
+        height: 6px;
+        flex: 0 0 6px;
+        border-radius: 999px;
+        background: var(--color-warning);
+      }
+
+      .scope-add-row {
+        display: grid;
+        min-width: 0;
+        grid-template-columns: minmax(0, 1fr) auto;
+        gap: 6px;
+      }
+
+      .mock-field-stack {
+        display: grid;
+        min-width: 0;
+        gap: 10px;
+      }
+
+      .mock-field-grid {
+        display: grid;
+        min-width: 0;
+        grid-template-columns: repeat(2, minmax(0, 1fr));
+        gap: 9px;
+      }
+
+      .mock-field {
+        display: grid;
+        min-width: 0;
+        gap: 5px;
+      }
+
+      .mock-field-label {
+        color: var(--color-foreground);
+        font-size: 10px;
+        font-weight: 500;
+      }
+
+      .mock-required {
+        color: var(--color-destructive);
+      }
+
+      .mock-input,
+      .mock-select,
+      .mock-copy-field,
+      .mock-search {
+        display: flex;
+        min-width: 0;
+        min-height: 36px;
+        align-items: center;
+        border: 1px solid var(--color-border);
+        border-radius: var(--radius-lg);
+        background: var(--color-background);
+        padding: 8px 10px;
+        color: var(--color-muted-foreground);
+        font-size: 10px;
+        line-height: 1.4;
+        overflow-wrap: anywhere;
+      }
+
+      .mock-input.readonly {
+        background: var(--color-muted);
+      }
+
+      .mock-select {
+        justify-content: space-between;
+      }
+
+      .mock-copy-field {
+        justify-content: space-between;
+        gap: 8px;
+        font-family: var(--font-mono);
+      }
+
+      .mock-copy-field svg,
+      .mock-search svg {
+        width: 13px;
+        height: 13px;
+        flex: 0 0 13px;
+      }
+
+      .mock-search {
+        gap: 7px;
+      }
+
+      .mock-helper,
+      .mock-link {
+        color: var(--color-muted-foreground);
+        font-size: 9px;
+        line-height: 1.5;
+      }
+
+      .mock-link {
+        display: inline-flex;
+        width: max-content;
+        max-width: 100%;
+        align-items: center;
+        gap: 5px;
+        color: var(--color-nyx-secondary-400);
+        font-size: 10px;
+      }
+
+      .mock-link svg {
+        width: 12px;
+        height: 12px;
+        flex: 0 0 12px;
+      }
+
+      .node-instructions,
+      .callback-guidance,
+      .agent-key-panel {
+        display: grid;
+        min-width: 0;
+        gap: 9px;
+        border: 1px solid var(--color-border);
+        border-radius: var(--radius-lg);
+        background: var(--color-overlay);
+        padding: 12px;
+      }
+
+      .panel-title {
+        display: flex;
+        align-items: center;
+        gap: 7px;
+        color: var(--color-foreground);
+        font-size: 11px;
+        font-weight: 600;
+      }
+
+      .panel-title svg {
+        width: 14px;
+        height: 14px;
+        color: var(--color-nyx-secondary-400);
+      }
+
+      .mock-code {
+        min-width: 0;
+        overflow-wrap: anywhere;
+        border-radius: var(--radius-md);
+        background: var(--color-muted);
+        padding: 9px 10px;
+        color: var(--color-foreground);
+        font-family: var(--font-mono);
+        font-size: 9px;
+        line-height: 1.55;
+      }
+
+      .verify-machine {
+        display: grid;
+        min-width: 0;
+        gap: 10px;
+      }
+
+      .verify-phase {
+        display: grid;
+        min-width: 0;
+        gap: 9px;
+      }
+
+      .phase-name {
+        color: var(--color-text-tertiary);
+        font-family: var(--font-mono);
+        font-size: 9px;
+      }
+
+      .phase-transition {
+        display: flex;
+        min-width: 0;
+        flex-wrap: wrap;
+        align-items: center;
+        justify-content: center;
+        gap: 5px;
+        color: var(--color-text-tertiary);
+        font-family: var(--font-mono);
+        font-size: 8px;
+      }
+
+      .phase-transition span {
+        border: 1px solid var(--color-border);
+        border-radius: var(--radius-md);
+        background: var(--color-overlay);
+        padding: 3px 6px;
+      }
+
+      .phase-transition svg {
+        width: 10px;
+        height: 10px;
+      }
+
+      .connected-prompt {
+        display: flex;
+        align-items: flex-start;
+        gap: 9px;
+        border: 1px solid var(--color-border);
+        border-radius: var(--radius-lg);
+        background: var(--color-card);
+        padding: 11px;
+        color: var(--color-muted-foreground);
+        font-size: 10px;
+        line-height: 1.55;
+      }
+
+      .connected-prompt svg {
+        width: 14px;
+        height: 14px;
+        flex: 0 0 14px;
+        margin-top: 1px;
+      }
+
+      .agent-key-panel p {
+        margin: 0;
+        color: var(--color-muted-foreground);
+        font-size: 9px;
+        line-height: 1.5;
+      }
+
+      .conditional-snippet {
+        display: grid;
+        gap: 6px;
+        border: 1px dashed var(--color-border);
+        border-radius: var(--radius-lg);
+        padding: 10px;
+        color: var(--color-muted-foreground);
+        font-size: 9px;
+        line-height: 1.45;
+      }
+
+      .probe-diagnostic {
+        display: flex;
+        min-width: 0;
+        align-items: flex-start;
+        gap: 7px;
+        color: var(--color-foreground);
+        font-size: 10px;
+        line-height: 1.55;
+      }
+
+      .probe-diagnostic svg {
+        width: 14px;
+        height: 14px;
+        flex: 0 0 14px;
+        margin-top: 1px;
+        color: var(--color-success);
+      }
+
+      .spinner-mock {
+        display: flex;
+        min-height: 76px;
+        align-items: center;
+        justify-content: center;
+        color: var(--color-muted-foreground);
+      }
+
+      .spinner-mock svg {
+        width: 30px;
+        height: 30px;
+        animation: flow-spin 1s linear infinite;
+      }
+
+      @keyframes flow-spin {
+        to {
+          transform: rotate(360deg);
+        }
+      }
+
+      .success-mock {
+        display: flex;
+        min-height: 66px;
+        align-items: center;
+        justify-content: center;
+        color: var(--color-success);
+      }
+
+      .success-mock svg {
+        width: 30px;
+        height: 30px;
+      }
+
+      .secondary-modalities {
+        margin-top: 34px;
+        border-top: 1px solid var(--color-border);
+        padding-top: 22px;
+      }
+
+      .secondary-heading-row {
+        display: flex;
+        align-items: baseline;
+        justify-content: space-between;
+        gap: 12px;
+      }
+
+      .secondary-heading-row h3 {
+        font-size: 14px;
+      }
+
+      .secondary-modalities > p {
+        margin: 5px 0 0;
+        color: var(--color-muted-foreground);
+        font-size: 10px;
+        line-height: 1.5;
+      }
+
+      .modality-grid {
+        display: grid;
+        grid-template-columns: repeat(2, minmax(0, 1fr));
+        gap: 16px;
+        margin-top: 15px;
+      }
+
+      .modality-frame {
+        min-width: 0;
+      }
+
+      .modality-meta {
+        display: flex;
+        min-width: 0;
+        align-items: center;
+        justify-content: space-between;
+        gap: 8px;
+        padding: 0 2px 7px;
+        color: var(--color-muted-foreground);
+        font-family: var(--font-mono);
+        font-size: 9px;
+      }
+
+      .modality-meta code {
+        min-width: 0;
+        overflow: hidden;
+        color: var(--color-nyx-secondary-400);
+        text-overflow: ellipsis;
+        white-space: nowrap;
+      }
+
+      .catalog-grid-mock {
+        display: grid;
+        grid-template-columns: repeat(2, minmax(0, 1fr));
+        gap: 7px;
+      }
+
+      .catalog-tile {
+        display: grid;
+        min-width: 0;
+        min-height: 80px;
+        align-content: center;
+        gap: 5px;
+        border: 1px solid var(--color-border);
+        border-radius: var(--radius-lg);
+        padding: 9px;
+        color: var(--color-foreground);
+        font-size: 9px;
+      }
+
+      .catalog-tile.dashed {
+        border-style: dashed;
+        color: var(--color-muted-foreground);
+      }
+
+      .catalog-tile svg {
+        width: 16px;
+        height: 16px;
+      }
+
+      .catalog-tile span {
+        color: var(--color-muted-foreground);
+        font-size: 8px;
+        line-height: 1.4;
+      }
+
+      .dialog-actions {
+        display: flex;
+        min-width: 0;
+        align-items: center;
+        justify-content: flex-end;
+        gap: 8px;
+        padding-top: 1px;
+      }
+
+      .dialog-actions-single .button,
+      .button-wide {
+        width: 100%;
+      }
+
+      .dialog-actions .button {
+        height: 36px;
+        padding-inline: 14px;
+      }
+
+      .error-panel {
+        display: flex;
+        align-items: flex-start;
+        gap: 8px;
+        border: 1px solid color-mix(in srgb, var(--color-destructive) 28%, transparent);
+        border-radius: var(--radius-lg);
+        background: color-mix(in srgb, var(--color-destructive) 10%, transparent);
+        padding: 11px 12px;
+        color: var(--color-destructive);
+        font-size: 11px;
+        line-height: 1.5;
+      }
+
+      .error-panel svg {
+        width: 14px;
+        height: 14px;
+        flex: 0 0 14px;
+        margin-top: 1px;
+      }
+
+      .verify-summary {
+        color: var(--color-foreground);
+      }
+
+      .verify-summary > div {
+        min-width: 0;
+        flex: 1 1 auto;
+      }
+
+      .verify-summary svg {
+        color: var(--color-success);
+      }
+
+      .reference-row {
+        display: flex;
+        min-width: 0;
+        align-items: center;
+        justify-content: space-between;
+        gap: 12px;
+        border-top: 1px solid var(--color-border);
+        margin-top: 9px;
+        padding-top: 9px;
+        color: var(--color-muted-foreground);
+        font-size: 10px;
+      }
+
+      .reference-row code {
+        color: var(--color-foreground);
+        font-family: var(--font-mono);
+        font-size: 10px;
+      }
+
+      .continue-event {
+        display: flex;
+        min-width: 0;
+        flex-wrap: wrap;
+        align-items: center;
+        justify-content: space-between;
+        gap: 7px 12px;
+        border: 1px solid var(--color-border);
+        border-radius: var(--radius-md);
+        background: var(--color-overlay);
+        padding: 9px 11px;
+        color: var(--color-muted-foreground);
+        font-family: var(--font-mono);
+        font-size: 9px;
+        line-height: 1.5;
+      }
+
+      .continue-event-main {
+        min-width: 0;
+        overflow-wrap: anywhere;
+      }
+
+      .continue-event-note {
+        flex: 0 0 auto;
+        color: var(--color-text-tertiary);
+        font-family: var(--font-sans);
+        font-size: 9px;
+      }
+
+      .assistant-bubble {
+        width: min(88%, 510px);
+        border: 1px solid var(--color-border);
+        border-radius: 4px var(--radius-lg) var(--radius-lg) var(--radius-lg);
+        background: var(--color-muted);
+        padding: 11px 13px;
+        color: var(--color-foreground);
+        font-size: 11px;
+        line-height: 1.55;
+      }
+
+      .assistant-bubble-label {
+        display: block;
+        margin-bottom: 4px;
+        color: var(--color-text-tertiary);
+        font-family: var(--font-mono);
+        font-size: 9px;
+        text-transform: uppercase;
+        letter-spacing: 1px;
+      }
+
+      .page-footer {
+        width: min(100% - 32px, 680px);
+        margin: 0 auto;
+        border-top: 1px solid var(--color-border);
+        padding: 22px 0 36px;
+        color: var(--color-text-tertiary);
+        font-family: var(--font-mono);
+        font-size: 9px;
+        line-height: 1.6;
+        text-align: center;
+      }
+
+      @media (max-width: 560px) {
+        .site-header-inner,
+        main,
+        .page-footer {
+          width: min(100% - 24px, 680px);
+        }
+
+        .site-header-inner {
+          padding-top: 20px;
+        }
+
+        h1 {
+          font-size: 24px;
+        }
+
+        .counts {
+          grid-template-columns: repeat(2, minmax(0, 1fr));
+        }
+
+        .count:first-child {
+          grid-column: span 2;
+        }
+
+        .catalogue-section {
+          padding-top: 44px;
+        }
+
+        .card-header {
+          padding: 13px 14px;
+        }
+
+        .data-section,
+        .card-footer {
+          padding-right: 14px;
+          padding-left: 14px;
+        }
+
+        .trust-line,
+        .danger-line {
+          padding-right: 14px;
+          padding-left: 14px;
+        }
+
+        .footer-copy {
+          width: 100%;
+          margin-left: 0;
+          text-align: left;
+        }
+
+        .specimen-meta {
+          align-items: flex-start;
+        }
+
+        .meta-right {
+          justify-content: flex-end;
+        }
+
+        .flow-frame {
+          grid-template-columns: 30px minmax(0, 1fr);
+          gap: 8px;
+        }
+
+        .flow-index {
+          width: 28px;
+          height: 28px;
+          font-size: 9px;
+        }
+
+        .flow-frame:not(:last-child)::after {
+          top: 32px;
+          left: 13px;
+        }
+
+        .dialog-chrome {
+          gap: 13px;
+          padding: 15px;
+        }
+
+        .dialog-close {
+          top: 11px;
+          right: 11px;
+        }
+
+        .step-header {
+          gap: 9px;
+        }
+
+        .choice-grid {
+          gap: 7px;
+        }
+
+        .choice-tile {
+          min-height: 98px;
+          padding: 8px 6px;
+        }
+
+        .dialog-actions {
+          flex-wrap: wrap;
+        }
+
+        .dialog-actions .button {
+          flex: 1 1 auto;
+        }
+
+        .assistant-bubble {
+          width: 100%;
+        }
+
+        .mock-field-grid,
+        .modality-grid {
+          grid-template-columns: minmax(0, 1fr);
+        }
+
+        .secondary-modalities {
+          margin-top: 28px;
+        }
+      }
+
+      @media (prefers-reduced-motion: reduce) {
+        html {
+          scroll-behavior: auto;
+        }
+
+        *,
+        *::before,
+        *::after {
+          animation-duration: 0.01ms !important;
+          animation-iteration-count: 1 !important;
+          transition-duration: 0.01ms !important;
+        }
+      }
+    </style>
+  </head>
+  <body>
+    <header class="site-header">
+      <div class="site-header-inner">
+        <div class="header-row">
+          <div>
+            <div class="brand-line">
+              <span class="brand-mark" id="brandMark" aria-hidden="true"></span>
+              <span>NyxID assistant / design catalogue</span>
+            </div>
+            <h1>Action cards for every contract verb</h1>
+            <p class="lede">
+              One visual system for immediate receipts, confirmed grants, and
+              irreversible actions. All examples use transcript-safe reference data.
+            </p>
+          </div>
+          <button
+            class="theme-toggle"
+            id="themeToggle"
+            type="button"
+            aria-label="Switch to light theme"
+            title="Switch to light theme"
+          ></button>
+        </div>
+        <div class="counts" id="counts" aria-label="Catalogue counts"></div>
+      </div>
+    </header>
+
+    <main id="catalogue"></main>
+
+    <footer class="page-footer">
+      Static design artifact. No credential values are rendered or retained in this
+      document.
+    </footer>
+
+    <script>
+      "use strict";
+
+      const cards = [
+        {
+          section: "states", inventory: false, verb: "service.connect", variant: "pending",
+          risk: "grant", marker: "shipped", form: "action", state: "pending", icon: "plug",
+          tags: ["state: pending"], title: "Connect GitHub", badge: "Action required",
+          body: "NyxID will broker access to GitHub for this assistant request. Your credential stays in NyxID and is never shared with the model.",
+          rows: [
+            { label: "Service", chips: [{ text: "api-github" }] },
+            { label: "Scopes", chips: [{ text: "repo", mono: true }] }
+          ],
+          journey: "You choose the account, routing, and credential. The assistant receives only brokered access after you finish.",
+          cta: "Connect GitHub", footer: "Nothing is shared until you finish."
+        },
+        {
+          section: "states", inventory: false, verb: "service.connect", variant: "in_progress",
+          risk: "grant", marker: "shipped", form: "action", state: "in_progress", icon: "plug",
+          tags: ["state: in_progress"], title: "Connect GitHub", badge: "In progress",
+          body: "NyxID will broker access to GitHub for this assistant request. Your credential stays in NyxID and is never shared with the model.",
+          rows: [
+            { label: "Service", chips: [{ text: "api-github" }] },
+            { label: "Scopes", chips: [{ text: "repo", mono: true }] }
+          ],
+          journey: "You choose the account, routing, and credential. The assistant receives only brokered access after you finish.",
+          cta: "Connecting", footer: "Nothing is shared until you finish."
+        },
+        {
+          section: "states", inventory: false, verb: "service.connect", variant: "completed",
+          risk: "grant", marker: "shipped", form: "receipt", state: "completed",
+          tags: ["state: completed"], title: "Service connected", tone: "success", icon: "check",
+          body: "Connected in NyxID. The assistant received only the new service reference.",
+          note: "GitHub"
+        },
+        {
+          section: "states", inventory: false, verb: "service.connect", variant: "declined",
+          risk: "grant", marker: "shipped", form: "receipt", state: "declined",
+          tags: ["state: declined"], title: "Action declined", tone: "neutral", icon: "x",
+          body: "You declined this request. No service was connected and no credential was shared.",
+          note: "GitHub"
+        },
+        {
+          section: "states", inventory: false, verb: "service.connect", variant: "failed",
+          risk: "grant", marker: "shipped", form: "receipt", state: "failed",
+          tags: ["state: failed"], title: "Connection failed", tone: "failed", icon: "alert",
+          body: "The connection could not be completed. Ask the assistant to request it again.",
+          note: "GitHub"
+        },
+        {
+          section: "states", inventory: false, verb: "service.connect", variant: "unsupported",
+          risk: "unsupported", marker: "shipped", form: "action", state: "unsupported", icon: "alert",
+          tags: ["state: unsupported"], title: "Unsupported action request", badge: "Unsupported",
+          body: "This assistant requested an action this version of NyxID cannot perform. Decline it to let the assistant continue safely.",
+          rows: [], cta: "", footer: "Nothing is shared until you finish."
+        },
+
+        {
+          section: "v1", inventory: true, verb: "service.connect", variant: "catalog",
+          risk: "grant", marker: "shipped", form: "action", icon: "plug", tags: ["catalog"],
+          title: "Connect GitHub", body: "Broker GitHub access for this assistant request without exposing the credential to the model.",
+          rows: [
+            { label: "Service", chips: [{ text: "api-github" }] },
+            { label: "Scopes", chips: [{ text: "repo", mono: true }] },
+            { label: "Route", chips: [{ text: "n_77", mono: true, kind: "node" }, { text: "Current organisation" }] }
+          ],
+          journey: "Opens the Add Service journey with the catalogue service and route prefilled.",
+          cta: "Connect GitHub", footer: "Nothing is shared until you finish."
+        },
+        {
+          section: "v1", inventory: true, verb: "service.connect", variant: "custom",
+          risk: "grant", marker: "shipped", form: "action", icon: "globe", tags: ["custom"],
+          title: "Connect Build API", body: "Add a custom endpoint while keeping credential entry inside NyxID.",
+          rows: [
+            { label: "Service", chips: [{ text: "Build API" }, { text: "api.example.test" }] },
+            { label: "Auth", chips: [{ text: "bearer" }, { text: "Authorization", mono: true }] },
+            { label: "Route", chips: [{ text: "n_77", mono: true, kind: "node" }, { text: "Current organisation" }] }
+          ],
+          journey: "Opens the custom Add Service path with safe endpoint and routing fields prefilled.",
+          cta: "Connect Build API", footer: "Nothing is shared until you finish."
+        },
+        {
+          section: "v1", inventory: true, verb: "service.reauthorize", risk: "grant",
+          marker: "target", form: "action", icon: "refresh", tags: [], title: "Re-authorize service",
+          body: "Refresh the service authorization and review the requested access before reconnecting.",
+          rows: [
+            { label: "Key", chips: [{ text: "k_1a2b", mono: true }] },
+            { label: "Scopes", chips: [{ text: "repo", mono: true }] }
+          ],
+          journey: "Opens the Add Service reconnect journey.", cta: "Re-authorize",
+          footer: "Nothing is shared until you finish."
+        },
+        {
+          section: "v1", inventory: true, verb: "provider.set_app_credentials", risk: "grant",
+          marker: "target", form: "action", icon: "key", tags: [], title: "Set provider app credentials",
+          body: "Configure the provider application used for delegated authorization.",
+          rows: [{ label: "Provider", chips: [{ text: "api-github" }] }],
+          journey: "Opens a credentials form; values are entered and retained only in the modal.",
+          cta: "Set app credentials", footer: "Nothing is shared until you finish."
+        },
+        {
+          section: "v1", inventory: true, verb: "key.create", risk: "grant", marker: "target",
+          form: "action", icon: "key", tags: [], title: "Create API key",
+          body: "Create a scoped agent identity for a known platform and service boundary.",
+          rows: [
+            { label: "Name", chips: [{ text: "Deploy agent" }] },
+            { label: "Platform", chips: [{ text: "codex" }] },
+            { label: "Services", chips: [{ text: "us_44", mono: true }] }
+          ],
+          journey: "Opens key creation; the new value is shown once inside the modal only.",
+          cta: "Create key", footer: "Nothing is shared until you finish."
+        },
+        {
+          section: "v1", inventory: true, verb: "key.rotate", risk: "grant", marker: "target",
+          form: "action", icon: "refresh", tags: [], title: "Rotate API key",
+          body: "Replace this key and invalidate the previous value after review.",
+          rows: [{ label: "Key", chips: [{ text: "k_1a2b", mono: true }] }],
+          journey: "Opens the rotate journey; the replacement is shown once in the modal.",
+          cta: "Rotate key", footer: "Nothing is shared until you finish."
+        },
+        {
+          section: "v1", inventory: true, verb: "node.register_token", risk: "grant",
+          marker: "target", form: "action", icon: "server", tags: [], title: "Register build node",
+          body: "Mint one-time node registration material and display the setup instructions.",
+          rows: [{ label: "Node", chips: [{ text: "build-node", mono: true }] }],
+          journey: "Opens registration setup; the one-time value is shown only in the modal.",
+          cta: "Create registration token", footer: "Nothing is shared until you finish."
+        },
+        {
+          section: "v1", inventory: true, verb: "node.rotate_token", risk: "grant",
+          marker: "target", form: "action", icon: "server", tags: [], title: "Rotate node access",
+          body: "Replace the node authentication material and invalidate the previous value.",
+          rows: [{ label: "Node", chips: [{ text: "n_77", mono: true, kind: "node" }] }],
+          journey: "Opens node rotation; the replacement is shown once in the modal.",
+          cta: "Rotate token", footer: "Nothing is shared until you finish."
+        },
+        {
+          section: "v1", inventory: true, verb: "node.inject_credential", risk: "grant",
+          marker: "target", form: "action", icon: "server", tags: [], title: "Inject node credential",
+          body: "Place a service credential into the selected node without echoing it into chat.",
+          rows: [
+            { label: "Node", chips: [{ text: "n_77", mono: true, kind: "node" }] },
+            { label: "Service", chips: [{ text: "api-github" }] }
+          ],
+          journey: "Opens the credential push wizard; the value is entered in the modal.",
+          cta: "Inject credential", footer: "Nothing is shared until you finish."
+        },
+        {
+          section: "v1", inventory: true, verb: "service_account.create", risk: "grant",
+          marker: "target", form: "action", icon: "user", tags: [], title: "Create service account",
+          body: "Create a non-human identity with an explicit allowed scope set.",
+          rows: [
+            { label: "Name", chips: [{ text: "Deploy worker" }] },
+            { label: "Scopes", chips: [{ text: "repo", mono: true }] }
+          ],
+          journey: "Opens service-account creation; the new value is shown once in the modal.",
+          cta: "Create service account", footer: "Nothing is shared until you finish."
+        },
+        {
+          section: "v1", inventory: true, verb: "service_account.rotate_secret", risk: "grant",
+          marker: "target", form: "action", icon: "refresh", tags: [], title: "Rotate service-account secret",
+          body: "Replace the service-account authentication material after confirmation.",
+          rows: [{ label: "Account", chips: [{ text: "sa_9", mono: true }] }],
+          journey: "Opens rotation; the replacement is shown once in the modal.",
+          cta: "Rotate secret", footer: "Nothing is shared until you finish."
+        },
+        {
+          section: "v1", inventory: true, verb: "developer_app.create", risk: "grant",
+          marker: "target", form: "action", icon: "app", tags: [], title: "Create developer app",
+          body: "Register an OAuth client and constrain where authorization responses may return.",
+          rows: [
+            { label: "Name", chips: [{ text: "CLI Companion" }] },
+            { label: "Redirect hosts", chips: [{ text: "app.example.test" }] }
+          ],
+          journey: "Opens app creation; the client credential is shown once in the modal.",
+          cta: "Create app", footer: "Nothing is shared until you finish."
+        },
+        {
+          section: "v1", inventory: true, verb: "developer_app.rotate_secret", risk: "grant",
+          marker: "target", form: "action", icon: "refresh", tags: [], title: "Rotate app secret",
+          body: "Replace the developer app credential and invalidate its previous value.",
+          rows: [{ label: "Client", chips: [{ text: "cl_5", mono: true }] }],
+          journey: "Opens rotation; the replacement is shown once in the modal.",
+          cta: "Rotate secret", footer: "Nothing is shared until you finish."
+        },
+        {
+          section: "v1", inventory: true, verb: "account.mfa_setup", risk: "grant",
+          marker: "target", form: "action", icon: "shield", tags: [], title: "Set up MFA",
+          body: "Add a second sign-in factor to the current NyxID account.", rows: [],
+          journey: "Opens the MFA flow from QR setup through code confirmation.",
+          cta: "Set up MFA", footer: "Nothing is shared until you finish."
+        },
+        {
+          section: "v1", inventory: true, verb: "device.approve", risk: "grant",
+          marker: "target", form: "action", icon: "device", tags: [], title: "Review device sign-in",
+          body: "Verify the requesting device context before approving delivery.",
+          rows: [{ label: "User code", chips: [{ text: "XXXX-XXXX-XXXX", mono: true }] }],
+          journey: "Opens device preview and preserves the required two explicit confirmation clicks.",
+          cta: "Review device", footer: "Nothing is shared until you finish."
+        },
+        {
+          section: "v1", inventory: true, verb: "device.onboard", risk: "grant",
+          marker: "target", form: "action", icon: "device", tags: [], title: "Onboard workshop terminal",
+          body: "Prepare a device onboarding package without placing network material in the transcript.",
+          rows: [{ label: "Device", chips: [{ text: "Workshop terminal" }] }],
+          journey: "Opens onboarding; WiFi and QR material remain inside the modal.",
+          cta: "Onboard device", footer: "Nothing is shared until you finish."
+        },
+
+        {
+          section: "services", inventory: true, verb: "service.update", risk: "low",
+          marker: "target", form: "receipt", icon: "check", title: "Service updated",
+          body: "The safe service settings were applied.", tags: [],
+          rows: [
+            { label: "Service", chips: [{ text: "us_44", mono: true }] },
+            { label: "Changed fields", chips: [{ text: "name -> GitHub API" }, { text: "rate_limit -> 20/s" }] }
+          ]
+        },
+        {
+          section: "services", inventory: true, verb: "service.delete", risk: "destructive",
+          marker: "target", form: "action", icon: "trash", title: "Delete GitHub service",
+          body: "Remove this service and its routing configuration permanently.", tags: [],
+          rows: [{ label: "Service", chips: [{ text: "us_44", mono: true }, { text: "GitHub API" }] }],
+          journey: "Opens a destructive confirmation dialog.", cta: "Delete service"
+        },
+        {
+          section: "services", inventory: true, verb: "service.route", risk: "low",
+          marker: "target", form: "receipt", icon: "check", title: "Service route updated",
+          body: "Requests now use the selected node route.", tags: [],
+          rows: [
+            { label: "Service", chips: [{ text: "us_44", mono: true }] },
+            { label: "Node", chips: [{ text: "n_77", mono: true, kind: "node" }] }
+          ]
+        },
+        {
+          section: "services", inventory: true, verb: "service.add_ssh", risk: "grant",
+          marker: "target", form: "action", icon: "server", title: "Add SSH service",
+          body: "Connect an SSH target after reviewing its principal and authentication mode.",
+          tags: ["body-unconfirmed"],
+          rows: [
+            { label: "Host", chips: [{ text: "ssh.example.test", mono: true }] },
+            { label: "Principal", chips: [{ text: "deploy", mono: true }] },
+            { label: "Auth mode", chips: [{ text: "node_key", mono: true }] }
+          ],
+          journey: "Opens the SSH service wizard.", cta: "Add SSH service"
+        },
+        {
+          section: "services", inventory: true, verb: "service.convert_ssh", risk: "grant",
+          marker: "target", form: "action", icon: "server", title: "Convert service to SSH",
+          body: "Change this service to SSH routing after confirming the new access path.", tags: [],
+          rows: [{ label: "Service", chips: [{ text: "us_44", mono: true }] }],
+          journey: "Opens a confirmation dialog.", cta: "Convert to SSH"
+        },
+        {
+          section: "services", inventory: true, verb: "service.rotate_credential", risk: "grant",
+          marker: "target", form: "action", icon: "refresh", title: "Rotate service credential",
+          body: "Replace the credential attached to this service without exposing it in chat.", tags: [],
+          rows: [{ label: "Service", chips: [{ text: "us_44", mono: true }] }],
+          journey: "Opens the credential rotation journey.", cta: "Rotate credential"
+        },
+
+        {
+          section: "keys", inventory: true, verb: "key.update", risk: "low", marker: "target",
+          form: "receipt", icon: "check", title: "Key settings updated",
+          body: "The non-sensitive key settings were applied.", tags: [],
+          rows: [
+            { label: "Key", chips: [{ text: "k_1a2b", mono: true }] },
+            { label: "Changed fields", chips: [{ text: "name -> Build agent" }, { text: "rate_limit -> 10/s" }] }
+          ]
+        },
+        {
+          section: "keys", inventory: true, verb: "key.delete", risk: "destructive",
+          marker: "target", form: "action", icon: "trash", title: "Delete Build agent key",
+          body: "Permanently remove this API key and stop clients that use it.", tags: [],
+          rows: [{ label: "Key", chips: [{ text: "k_1a2b", mono: true }, { text: "Build agent" }] }],
+          journey: "Opens a destructive confirmation dialog.", cta: "Delete key"
+        },
+        {
+          section: "keys", inventory: true, verb: "key.extend_scope", risk: "grant",
+          marker: "target", form: "action", icon: "shield", title: "Extend key scope",
+          body: "Allow this key to reach an additional service boundary.", tags: ["never-remember"],
+          rows: [
+            { label: "Key", chips: [{ text: "k_1a2b", mono: true }] },
+            { label: "Added services", chips: [{ text: "us_44", mono: true }] }
+          ],
+          journey: "Opens a confirmation dialog. This grant can never be remembered.", cta: "Extend scope"
+        },
+        {
+          section: "keys", inventory: true, verb: "key.bind_credential", risk: "grant",
+          marker: "target", form: "action", icon: "link", title: "Bind service credential",
+          body: "Select which stored credential this key may use for the service.", tags: ["never-remember"],
+          rows: [
+            { label: "Key", chips: [{ text: "k_1a2b", mono: true }] },
+            { label: "Service", chips: [{ text: "us_44", mono: true }] },
+            { label: "Credential", chips: [{ text: "Production GitHub" }] }
+          ],
+          journey: "Opens a confirmation dialog. This grant can never be remembered.", cta: "Bind credential"
+        },
+        {
+          section: "keys", inventory: true, verb: "external_key.rotate", risk: "grant",
+          marker: "target", form: "action", icon: "refresh", title: "Rotate external key",
+          body: "Replace the stored external service credential through a protected journey.", tags: [],
+          rows: [{ label: "Key", chips: [{ text: "k_1a2b", mono: true }] }],
+          journey: "Opens the external-key rotation journey.", cta: "Rotate"
+        },
+        {
+          section: "keys", inventory: true, verb: "external_key.delete", risk: "destructive",
+          marker: "target", form: "action", icon: "trash", title: "Delete external key",
+          body: "Permanently remove this stored external credential.", tags: [],
+          rows: [{ label: "Key", chips: [{ text: "k_1a2b", mono: true }] }],
+          journey: "Opens a destructive confirmation dialog.", cta: "Delete"
+        },
+        {
+          section: "keys", inventory: true, verb: "external_key.add_gcp_service_account", risk: "grant",
+          marker: "target", form: "action", icon: "key", title: "Add GCP service account",
+          body: "Store a Google Cloud service identity without putting its document in chat.", tags: [],
+          rows: [{ label: "Provider", chips: [{ text: "gcp" }] }],
+          journey: "Opens a protected JSON paste journey inside the modal.", cta: "Add GCP service account"
+        },
+        {
+          section: "keys", inventory: true, verb: "connection.revoke", risk: "grant",
+          marker: "target", form: "action", icon: "unlink", title: "Revoke service connection",
+          body: "Stop this service from using its current connection.", tags: [],
+          rows: [{ label: "Service", chips: [{ text: "us_44", mono: true }] }],
+          journey: "Opens a confirmation dialog.", cta: "Revoke connection"
+        },
+        {
+          section: "keys", inventory: true, verb: "provider.disconnect", risk: "grant",
+          marker: "target", form: "action", icon: "unlink", title: "Disconnect provider",
+          body: "Disconnect this provider from the current NyxID account.", tags: [],
+          rows: [{ label: "Provider", chips: [{ text: "api-github" }] }],
+          journey: "Opens a confirmation dialog.", cta: "Disconnect"
+        },
+
+        {
+          section: "approvals", inventory: true, verb: "approval.decide", risk: "grant",
+          marker: "target", form: "action", icon: "shield", title: "Review approval request",
+          body: "Open the full request details before deciding whether the action may run.", tags: [],
+          rows: [{ label: "Request", chips: [{ text: "Current request" }] }],
+          journey: "Opens the approval decision surface.", cta: "Review request"
+        },
+        {
+          section: "approvals", inventory: true, verb: "approval.configure", risk: "low",
+          marker: "target", form: "receipt", icon: "check", title: "Approval mode configured",
+          body: "The service approval policy now uses the selected mode.", tags: [],
+          rows: [
+            { label: "Service", chips: [{ text: "us_44", mono: true }] },
+            { label: "Mode", chips: [{ text: "per_request", mono: true }] }
+          ]
+        },
+        {
+          section: "approvals", inventory: true, verb: "approval.enable", risk: "low",
+          marker: "target", form: "receipt", icon: "check", title: "Approvals enabled",
+          body: "Requests now pause for policy approval where required.", tags: [], rows: []
+        },
+        {
+          section: "approvals", inventory: true, verb: "approval.disable", risk: "grant",
+          marker: "target", form: "action", icon: "shield", title: "Disable approvals",
+          body: "Widen agent autonomy by removing the approval pause for this policy.", tags: [], rows: [],
+          journey: "Opens a confirmation dialog.", cta: "Disable approvals"
+        },
+        {
+          section: "approvals", inventory: true, verb: "approval.revoke_grant", risk: "grant",
+          marker: "target", form: "action", icon: "unlink", title: "Revoke approval grant",
+          body: "End the selected standing approval before its normal expiry.", tags: [],
+          rows: [{ label: "Grant", chips: [{ text: "Current grant" }] }],
+          journey: "Opens a confirmation dialog.", cta: "Revoke grant"
+        },
+
+        {
+          section: "nodes", inventory: true, verb: "node.delete", risk: "destructive",
+          marker: "target", form: "action", icon: "trash", title: "Delete build node",
+          body: "Permanently remove this node and its NyxID routing entry.", tags: [],
+          rows: [{ label: "Node", chips: [{ text: "n_77", mono: true, kind: "node" }, { text: "build-node" }] }],
+          journey: "Opens a destructive confirmation dialog.", cta: "Delete node"
+        },
+        {
+          section: "nodes", inventory: true, verb: "node.transfer", risk: "destructive",
+          marker: "target", form: "action", icon: "server", title: "Transfer build node",
+          body: "Move this node to a different owner and change who controls it.", tags: [],
+          rows: [
+            { label: "Node", chips: [{ text: "n_77", mono: true, kind: "node" }] },
+            { label: "Target owner", chips: [{ text: "Current organisation" }] }
+          ],
+          journey: "Opens a destructive confirmation dialog.", cta: "Transfer node"
+        },
+        {
+          section: "nodes", inventory: true, verb: "pending_credential.push", risk: "grant",
+          marker: "target", form: "action", icon: "server", title: "Push pending credential",
+          body: "Deliver a pending credential to the selected node through the protected channel.", tags: [],
+          rows: [{ label: "Node", chips: [{ text: "n_77", mono: true, kind: "node" }] }],
+          journey: "Opens the pending-credential push wizard.", cta: "Push credential"
+        },
+        {
+          section: "nodes", inventory: true, verb: "pending_credential.inject", risk: "grant",
+          marker: "target", form: "action", icon: "server", title: "Inject pending credential",
+          body: "Complete credential injection on the selected node.", tags: ["body-unconfirmed"],
+          rows: [{ label: "Node", chips: [{ text: "n_77", mono: true, kind: "node" }] }],
+          journey: "Opens the pending-credential inject wizard.", cta: "Inject"
+        },
+        {
+          section: "nodes", inventory: true, verb: "pending_credential.cancel", risk: "low",
+          marker: "target", form: "receipt", icon: "check", title: "Pending delivery cancelled",
+          body: "The queued credential delivery will not continue.", tags: ["body-unconfirmed"],
+          rows: [
+            { label: "Node", chips: [{ text: "n_77", mono: true, kind: "node" }] },
+            { label: "Pending", chips: [{ text: "Current pending item" }] }
+          ]
+        },
+
+        {
+          section: "orgs", inventory: true, verb: "org.create", risk: "low", marker: "target",
+          form: "receipt", icon: "check", title: "Organisation created",
+          body: "The new organisation workspace is ready.", tags: [],
+          rows: [{ label: "Name", chips: [{ text: "Platform" }] }]
+        },
+        {
+          section: "orgs", inventory: true, verb: "org.update", risk: "low", marker: "target",
+          form: "receipt", icon: "check", title: "Organisation updated",
+          body: "The safe organisation fields were updated.", tags: [],
+          rows: [
+            { label: "Organisation", chips: [{ text: "Current organisation" }] },
+            { label: "Changed fields", chips: [{ text: "name -> Platform" }] }
+          ]
+        },
+        {
+          section: "orgs", inventory: true, verb: "org.delete", risk: "destructive",
+          marker: "target", form: "action", icon: "trash", title: "Delete Platform organisation",
+          body: "Permanently remove this organisation and its owned configuration.", tags: [],
+          rows: [{ label: "Organisation", chips: [{ text: "Current organisation" }, { text: "Platform" }] }],
+          journey: "Opens a destructive confirmation dialog.", cta: "Delete organisation"
+        },
+        {
+          section: "orgs", inventory: true, verb: "org.join", risk: "grant", marker: "target",
+          form: "action", icon: "building", title: "Join organisation",
+          body: "Accept this invitation and join the organisation under its assigned access.", tags: [],
+          rows: [{ label: "Invite", chips: [{ text: "Current invite", mono: true }] }],
+          journey: "Opens a confirmation dialog.", cta: "Join organisation"
+        },
+        {
+          section: "orgs", inventory: true, verb: "org.set_primary", risk: "low", marker: "target",
+          form: "receipt", icon: "check", title: "Primary organisation changed",
+          body: "This organisation is now the default workspace.", tags: [],
+          rows: [{ label: "Organisation", chips: [{ text: "Current organisation" }] }]
+        },
+        {
+          section: "orgs", inventory: true, verb: "org.member_add", risk: "grant", marker: "target",
+          form: "action", icon: "user", title: "Add organisation member",
+          body: "Give the selected user a role in this organisation.", tags: [],
+          rows: [
+            { label: "Organisation", chips: [{ text: "Current organisation" }] },
+            { label: "User", chips: [{ text: "Current user" }] },
+            { label: "Role", chips: [{ text: "developer" }] }
+          ],
+          journey: "Opens a confirmation dialog.", cta: "Add member"
+        },
+        {
+          section: "orgs", inventory: true, verb: "org.member_update", risk: "grant", marker: "target",
+          form: "action", icon: "user", title: "Change member role",
+          body: "Replace the selected member's organisation role.", tags: [],
+          rows: [
+            { label: "Organisation", chips: [{ text: "Current organisation" }] },
+            { label: "Member", chips: [{ text: "Current member" }] },
+            { label: "Role", chips: [{ text: "admin" }] }
+          ],
+          journey: "Opens a confirmation dialog.", cta: "Change role"
+        },
+        {
+          section: "orgs", inventory: true, verb: "org.member_remove", risk: "grant", marker: "target",
+          form: "action", icon: "user", title: "Remove organisation member",
+          body: "Remove this member's access to the organisation.", tags: [],
+          rows: [
+            { label: "Organisation", chips: [{ text: "Current organisation" }] },
+            { label: "Member", chips: [{ text: "Current member" }] }
+          ],
+          journey: "Opens a confirmation dialog.", cta: "Remove member"
+        },
+        {
+          section: "orgs", inventory: true, verb: "org.invite_create", risk: "grant", marker: "target",
+          form: "action", icon: "link", title: "Create organisation invite",
+          body: "Create an invitation with a bounded role, scope source, and lifetime.", tags: [],
+          rows: [
+            { label: "Organisation", chips: [{ text: "Current organisation" }] },
+            { label: "Role", chips: [{ text: "developer" }] },
+            { label: "Scope source", chips: [{ text: "role" }] },
+            { label: "TTL", chips: [{ text: "24 h", mono: true }] }
+          ],
+          journey: "Opens the invite creation journey.", cta: "Create invite"
+        },
+        {
+          section: "orgs", inventory: true, verb: "org.invite_cancel", risk: "low", marker: "target",
+          form: "receipt", icon: "check", title: "Organisation invite cancelled",
+          body: "The outstanding invitation can no longer be accepted.", tags: [],
+          rows: [
+            { label: "Organisation", chips: [{ text: "Current organisation" }] },
+            { label: "Invite", chips: [{ text: "Current invite" }] }
+          ]
+        },
+        {
+          section: "orgs", inventory: true, verb: "org.role_scope_set", risk: "grant", marker: "target",
+          form: "action", icon: "shield", title: "Set role scopes",
+          body: "Define the service scopes available to this organisation role.", tags: [],
+          rows: [
+            { label: "Organisation", chips: [{ text: "Current organisation" }] },
+            { label: "Role", chips: [{ text: "developer", mono: true }] },
+            { label: "Scopes", chips: [{ text: "repo", mono: true }] }
+          ],
+          journey: "Opens a confirmation dialog.", cta: "Set role scopes"
+        },
+        {
+          section: "orgs", inventory: true, verb: "org.role_scope_clear", risk: "grant", marker: "target",
+          form: "action", icon: "shield", title: "Clear role scopes",
+          body: "Remove the explicit service scopes assigned to this role.", tags: [],
+          rows: [
+            { label: "Organisation", chips: [{ text: "Current organisation" }] },
+            { label: "Role", chips: [{ text: "developer", mono: true }] }
+          ],
+          journey: "Opens a confirmation dialog.", cta: "Clear role scopes"
+        },
+
+        {
+          section: "account", inventory: true, verb: "account.profile_update", risk: "low",
+          marker: "target", form: "receipt", icon: "check", title: "Profile updated",
+          body: "The safe account profile fields were updated.", tags: [],
+          rows: [{ label: "Changed fields", chips: [{ text: "display_name -> Morgan" }] }]
+        },
+        {
+          section: "account", inventory: true, verb: "account.revoke_consent", risk: "grant",
+          marker: "target", form: "action", icon: "unlink", title: "Revoke application consent",
+          body: "End this application's authorized access to the current account.", tags: [],
+          rows: [{ label: "Client", chips: [{ text: "cl_5", mono: true }] }],
+          journey: "Opens a confirmation dialog.", cta: "Revoke consent"
+        },
+        {
+          section: "account", inventory: true, verb: "account.delete", risk: "destructive",
+          marker: "target", form: "action", icon: "trash", title: "Delete NyxID account",
+          body: "Permanently delete the current account and its personal data.", tags: [], rows: [],
+          journey: "Opens a typed destructive confirmation journey.", cta: "Delete account"
+        },
+
+        {
+          section: "platform", inventory: true, verb: "endpoint.update", risk: "low",
+          marker: "target", form: "receipt", icon: "check", title: "Endpoint updated",
+          body: "The safe endpoint fields were updated.", tags: [],
+          rows: [
+            { label: "Endpoint", chips: [{ text: "Current endpoint" }] },
+            { label: "Changed fields", chips: [{ text: "name -> GitHub API" }] }
+          ]
+        },
+        {
+          section: "platform", inventory: true, verb: "endpoint.delete", risk: "destructive",
+          marker: "target", form: "action", icon: "trash", title: "Delete endpoint",
+          body: "Permanently remove this endpoint from NyxID routing.", tags: [],
+          rows: [{ label: "Endpoint", chips: [{ text: "Current endpoint" }] }],
+          journey: "Opens a destructive confirmation dialog.", cta: "Delete endpoint"
+        },
+        {
+          section: "platform", inventory: true, verb: "service_account.update", risk: "low",
+          marker: "target", form: "receipt", icon: "check", title: "Service account updated",
+          body: "The safe service-account fields were updated.", tags: [],
+          rows: [
+            { label: "Account", chips: [{ text: "sa_9", mono: true }] },
+            { label: "Changed fields", chips: [{ text: "name -> Deploy worker" }] }
+          ]
+        },
+        {
+          section: "platform", inventory: true, verb: "service_account.delete", risk: "destructive",
+          marker: "target", form: "action", icon: "trash", title: "Delete Deploy worker",
+          body: "Permanently remove this service account and stop its access.", tags: [],
+          rows: [{ label: "Account", chips: [{ text: "sa_9", mono: true }, { text: "Deploy worker" }] }],
+          journey: "Opens a destructive confirmation dialog.", cta: "Delete service account"
+        },
+        {
+          section: "platform", inventory: true, verb: "service_account.revoke_tokens", risk: "grant",
+          marker: "target", form: "action", icon: "unlink", title: "Revoke service-account sessions",
+          body: "Invalidate active authentication sessions for this service account.", tags: [],
+          rows: [{ label: "Account", chips: [{ text: "sa_9", mono: true }] }],
+          journey: "Opens a confirmation dialog.", cta: "Revoke tokens"
+        },
+        {
+          section: "platform", inventory: true, verb: "developer_app.update", risk: "low",
+          marker: "target", form: "receipt", icon: "check", title: "Developer app updated",
+          body: "The safe application fields were updated.", tags: [],
+          rows: [
+            { label: "Client", chips: [{ text: "cl_5", mono: true }] },
+            { label: "Changed fields", chips: [{ text: "name -> CLI Companion" }] }
+          ]
+        },
+        {
+          section: "platform", inventory: true, verb: "developer_app.delete", risk: "destructive",
+          marker: "target", form: "action", icon: "trash", title: "Delete CLI Companion",
+          body: "Permanently remove this developer app and stop new authorizations.", tags: [],
+          rows: [{ label: "Client", chips: [{ text: "cl_5", mono: true }, { text: "CLI Companion" }] }],
+          journey: "Opens a destructive confirmation dialog.", cta: "Delete app"
+        },
+
+        {
+          section: "notifications", inventory: true, verb: "notifications.update", risk: "low",
+          marker: "target", form: "receipt", icon: "check", title: "Notification settings updated",
+          body: "The selected notification preferences were applied.", tags: [],
+          rows: [{ label: "Changed fields", chips: [{ text: "approval_channel -> mobile" }] }]
+        },
+        {
+          section: "notifications", inventory: true, verb: "notifications.telegram_link", risk: "grant",
+          marker: "target", form: "action", icon: "bell", title: "Link Telegram",
+          body: "Connect Telegram as an approval and notification channel.", tags: [], rows: [],
+          journey: "Opens the Telegram link journey.", cta: "Link Telegram"
+        },
+        {
+          section: "notifications", inventory: true, verb: "notifications.telegram_disconnect", risk: "low",
+          marker: "target", form: "receipt", icon: "check", title: "Telegram disconnected",
+          body: "Telegram is no longer linked for notifications or approvals.", tags: [], rows: []
+        },
+        {
+          section: "notifications", inventory: true, verb: "openclaw.connect", risk: "grant",
+          marker: "target", form: "action", icon: "globe", title: "Connect OpenClaw",
+          body: "Connect the current account to an OpenClaw gateway.", tags: [],
+          rows: [{ label: "Gateway", chips: [{ text: "gateway.example.test" }] }],
+          journey: "Opens gateway connection; credential entry stays in the modal.", cta: "Connect OpenClaw"
+        },
+
+        {
+          section: "pools", inventory: true, verb: "pool.create", risk: "low", marker: "target",
+          form: "receipt", icon: "check", title: "Service pool created",
+          body: "The new service pool is ready for members.", tags: ["prerequisite: pools UI"],
+          rows: [
+            { label: "Slug", chips: [{ text: "core-services", mono: true }] },
+            { label: "Name", chips: [{ text: "Core services" }] }
+          ]
+        },
+        {
+          section: "pools", inventory: true, verb: "pool.delete", risk: "destructive",
+          marker: "target", form: "action", icon: "trash", title: "Delete service pool",
+          body: "Permanently remove this pool and its member routing.", tags: ["prerequisite: pools UI"],
+          rows: [{ label: "Pool", chips: [{ text: "core-services", mono: true }] }],
+          journey: "Opens a destructive confirmation dialog.", cta: "Delete pool"
+        },
+        {
+          section: "pools", inventory: true, verb: "pool.add_member", risk: "low",
+          marker: "target", form: "receipt", icon: "check", title: "Pool member added",
+          body: "The service now participates in this pool.", tags: ["prerequisite: pools UI"],
+          rows: [
+            { label: "Pool", chips: [{ text: "core-services", mono: true }] },
+            { label: "Service", chips: [{ text: "us_44", mono: true }] }
+          ]
+        },
+        {
+          section: "pools", inventory: true, verb: "pool.remove_member", risk: "low",
+          marker: "target", form: "receipt", icon: "check", title: "Pool member removed",
+          body: "The service no longer participates in this pool.", tags: ["prerequisite: pools UI"],
+          rows: [
+            { label: "Pool", chips: [{ text: "core-services", mono: true }] },
+            { label: "Service", chips: [{ text: "us_44", mono: true }] }
+          ]
+        },
+        {
+          section: "pools", inventory: true, verb: "pool.set_strategy", risk: "low",
+          marker: "target", form: "receipt", icon: "check", title: "Pool strategy updated",
+          body: "The pool now uses the selected routing strategy.", tags: ["prerequisite: pools UI"],
+          rows: [
+            { label: "Pool", chips: [{ text: "core-services", mono: true }] },
+            { label: "Strategy", chips: [{ text: "round_robin", mono: true }] }
+          ]
+        },
+
+        {
+          section: "deep-link", inventory: true, verb: "admin.open", risk: "low",
+          marker: "target", form: "receipt", icon: "check", title: "Dashboard destination prepared",
+          body: "The requested NyxID dashboard route is available from the allowlisted destination.",
+          tags: ["prerequisite: route allowlist"],
+          rows: [
+            { label: "Route", chips: [{ text: "Service details" }] },
+            { label: "Params", chips: [{ text: "us_44", mono: true }] }
+          ],
+          link: "Open in dashboard"
+        }
+      ];
+
+      const sectionMeta = {
+        states: {
+          kicker: "Part I / shipped lifecycle",
+          title: "States",
+          why: "The current service.connect card from first prompt through a compact terminal receipt."
+        },
+        v1: {
+          kicker: "17.1 / V1",
+          title: "Secret-bearing browser flows",
+          why: "The journey owns sensitive entry and one-time display; the transcript keeps only safe references."
+        },
+        services: {
+          kicker: "17.2 / V2",
+          title: "Services",
+          why: "Service cards separate routine configuration receipts from access changes and irreversible removal."
+        },
+        keys: {
+          kicker: "17.3 / V2",
+          title: "Keys and credentials",
+          why: "Credential boundaries stay explicit, and self-escalating grants can never be remembered."
+        },
+        approvals: {
+          kicker: "17.4 / V2",
+          title: "Approvals",
+          why: "Policy tightening can execute quietly; widening autonomy always asks the user."
+        },
+        nodes: {
+          kicker: "17.5 / V2",
+          title: "Nodes",
+          why: "Node ownership and credential delivery remain visible at the point of consequence."
+        },
+        orgs: {
+          kicker: "17.6 / V2",
+          title: "Organisations",
+          why: "Membership and role changes confirm their access boundary while routine metadata becomes a receipt."
+        },
+        account: {
+          kicker: "17.7 / V2",
+          title: "Account",
+          why: "Personal settings stay lightweight; consent revocation and account deletion match their consequence."
+        },
+        platform: {
+          kicker: "17.8 / V2",
+          title: "Endpoints, service accounts, and developer apps",
+          why: "Long-lived platform identities expose references, never reusable credential material."
+        },
+        notifications: {
+          kicker: "17.9 / V2",
+          title: "Notifications and integrations",
+          why: "Channel settings distinguish harmless preference changes from new external reach."
+        },
+        pools: {
+          kicker: "17.10 / V2",
+          title: "Service pools",
+          why: "Target designs are reviewable now while implementation waits for a pools dashboard surface."
+        },
+        "deep-link": {
+          kicker: "17.11 / deep link",
+          title: "Dashboard deep link",
+          why: "Only a future NyxID-owned route allowlist may turn a model request into dashboard navigation."
+        }
+      };
+
+      function iconSvg(name) {
+        const paths = {
+          logo: '<path d="M5 3v18l6-7V3z"/><path d="M13 3v18l6-7V3z"/>',
+          sun: '<circle cx="12" cy="12" r="4"/><path d="M12 2v2M12 20v2M4.93 4.93l1.42 1.42M17.66 17.66l1.41 1.41M2 12h2M20 12h2M4.93 19.07l1.42-1.42M17.66 6.34l1.41-1.41"/>',
+          moon: '<path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z"/>',
+          github: '<path d="M15 22v-4a4.8 4.8 0 0 0-1-3.5c3.3-.4 6.8-1.6 6.8-7A5.4 5.4 0 0 0 19.4 4 5 5 0 0 0 19.3.5S18.2.1 15 1.8a13.4 13.4 0 0 0-7 0C4.8.1 3.7.5 3.7.5A5 5 0 0 0 3.6 4a5.4 5.4 0 0 0-1.4 3.7c0 5.4 3.5 6.6 6.8 7A4.8 4.8 0 0 0 8 18v4"/><path d="M8 19c-3 .9-3-1.5-4-2"/>',
+          arrowLeft: '<path d="m15 18-6-6 6-6"/>',
+          arrowRight: '<path d="m9 18 6-6-6-6"/>',
+          search: '<circle cx="11" cy="11" r="8"/><path d="m21 21-4.3-4.3"/>',
+          copy: '<rect width="14" height="14" x="8" y="8" rx="2" ry="2"/><path d="M4 16c-1.1 0-2-.9-2-2V4c0-1.1.9-2 2-2h10c1.1 0 2 .9 2 2"/>',
+          terminal: '<path d="m4 17 6-6-6-6"/><path d="M12 19h8"/>',
+          plus: '<path d="M12 5v14M5 12h14"/>',
+          plug: '<path d="M12 22v-5"/><path d="M9 8V2"/><path d="M15 8V2"/><path d="M18 8v5a6 6 0 0 1-12 0V8z"/>',
+          globe: '<circle cx="12" cy="12" r="10"/><path d="M2 12h20M12 2a15.3 15.3 0 0 1 0 20M12 2a15.3 15.3 0 0 0 0 20"/>',
+          key: '<circle cx="7.5" cy="15.5" r="5.5"/><path d="m21 2-9.6 9.6M15 6l3 3M18 3l3 3"/>',
+          refresh: '<path d="M20 11a8.1 8.1 0 0 0-15.5-2M4 4v5h5"/><path d="M4 13a8.1 8.1 0 0 0 15.5 2M20 20v-5h-5"/>',
+          server: '<rect width="20" height="8" x="2" y="2" rx="2"/><rect width="20" height="8" x="2" y="14" rx="2"/><path d="M6 6h.01M6 18h.01"/>',
+          user: '<path d="M19 21v-2a4 4 0 0 0-4-4H9a4 4 0 0 0-4 4v2"/><circle cx="12" cy="7" r="4"/>',
+          app: '<rect width="18" height="18" x="3" y="3" rx="2"/><path d="M9 3v18M3 9h18"/>',
+          shield: '<path d="M20 13c0 5-3.5 7.5-8 9-4.5-1.5-8-4-8-9V5l8-3 8 3z"/><path d="m9 12 2 2 4-4"/>',
+          device: '<rect width="14" height="20" x="5" y="2" rx="2"/><path d="M12 18h.01"/>',
+          trash: '<path d="M3 6h18M8 6V4h8v2M19 6l-1 14H6L5 6M10 11v5M14 11v5"/>',
+          link: '<path d="M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71"/><path d="M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71"/>',
+          unlink: '<path d="m18.84 12.25 1.69-1.69a5 5 0 0 0-7.07-7.07l-1.72 1.72M5.17 11.75l-1.7 1.7a5 5 0 0 0 7.07 7.07l1.7-1.7M8 2v3M2 8h3M16 19v3M19 16h3"/>',
+          building: '<rect width="16" height="20" x="4" y="2" rx="2"/><path d="M9 22v-4h6v4M8 6h.01M16 6h.01M8 10h.01M16 10h.01M8 14h.01M16 14h.01"/>',
+          bell: '<path d="M18 8a6 6 0 0 0-12 0c0 7-3 7-3 9h18c0-2-3-2-3-9M13.73 21a2 2 0 0 1-3.46 0"/>',
+          check: '<path d="m20 6-11 11-5-5"/>',
+          x: '<path d="M18 6 6 18M6 6l12 12"/>',
+          alert: '<path d="m21.73 18-8-14a2 2 0 0 0-3.46 0l-8 14A2 2 0 0 0 4 21h16a2 2 0 0 0 1.73-3"/><path d="M12 9v4M12 17h.01"/>',
+          external: '<path d="M15 3h6v6M10 14 21 3M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6"/>',
+          bolt: '<path d="m13 2-9 12h8l-1 8 9-12h-8z"/>'
+        };
+        const path = paths[name] || paths.shield;
+        return '<svg aria-hidden="true" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">' + path + '</svg>';
+      }
+
+      function escapeHtml(value) {
+        return String(value)
+          .replaceAll("&", "&amp;")
+          .replaceAll("<", "&lt;")
+          .replaceAll(">", "&gt;")
+          .replaceAll('"', "&quot;")
+          .replaceAll("'", "&#039;");
+      }
+
+      function badge(text, variant, extraClass) {
+        return '<span class="badge badge-' + variant + (extraClass ? " " + extraClass : "") + '"><span>' + escapeHtml(text) + '</span></span>';
+      }
+
+      function riskBadge(risk) {
+        if (risk === "destructive" || risk === "unsupported") return badge(risk, "destructive", "tag");
+        if (risk === "grant") return badge(risk, "accent", "tag");
+        return badge(risk, "secondary", "tag");
+      }
+
+      function renderRows(rows) {
+        if (!rows || rows.length === 0) return "";
+        return '<div class="data-section">' + rows.map(function (row) {
+          const chips = row.chips.map(function (chip) {
+            const icon = chip.kind === "node" ? iconSvg("server") : "";
+            return '<span class="badge badge-secondary chip' + (chip.mono ? " mono" : "") + '">' + icon + '<span>' + escapeHtml(chip.text) + '</span></span>';
+          }).join("");
+          return '<div class="chip-row"><span class="chip-label">' + escapeHtml(row.label) + '</span>' + chips + '</div>';
+        }).join("") + '</div>';
+      }
+
+      function stateBadge(card) {
+        if (card.state === "unsupported") return badge(card.badge, "destructive", "");
+        if (card.state === "in_progress") return badge(card.badge, "accent", "");
+        return badge(card.badge || (card.risk === "destructive" ? "Destructive action" : "Confirmation required"), card.risk === "destructive" ? "destructive" : "accent", "");
+      }
+
+      function renderActionCard(card) {
+        const unsupported = card.state === "unsupported";
+        const destructive = card.risk === "destructive";
+        const busy = card.state === "in_progress";
+        const cardClass = unsupported ? "card-unsupported" : destructive ? "card-destructive" : "card-grant";
+        const journey = card.journey
+          ? '<div class="trust-line">' + iconSvg("shield") + '<span>' + escapeHtml(card.journey) + '</span></div>'
+          : "";
+        const danger = destructive
+          ? '<div class="danger-line">' + iconSvg("alert") + '<span>This cannot be undone. You will be asked every time.</span></div>'
+          : "";
+        const primary = unsupported || !card.cta
+          ? ""
+          : '<button class="button ' + (destructive ? "button-destructive" : "button-primary") + '" type="button"' + (busy ? " disabled" : "") + '>' + iconSvg(busy ? "refresh" : destructive ? "trash" : "shield") + '<span>' + escapeHtml(card.cta) + '</span></button>';
+        const decline = '<button class="button button-outline" type="button"' + (busy ? " disabled" : "") + '>' + iconSvg("x") + '<span>Decline</span></button>';
+        const footer = card.footer || (destructive ? "Asked every time. Never remembered." : "One confirmation.");
+        return '<div class="card ' + cardClass + '">' +
+          '<div class="card-header">' +
+            '<div class="icon-tile">' + iconSvg(card.icon) + '</div>' +
+            '<div class="card-heading"><div class="title-line"><h3>' + escapeHtml(card.title) + '</h3>' + stateBadge(card) + '</div>' +
+            '<p class="card-body">' + escapeHtml(card.body) + '</p></div>' +
+          '</div>' +
+          renderRows(card.rows) + journey + danger +
+          '<div class="card-footer">' + primary + decline + '<span class="footer-copy">' + escapeHtml(footer) + '</span></div>' +
+        '</div>';
+      }
+
+      function renderReceipt(card) {
+        const tone = card.tone || "low";
+        const note = card.note ? '<div class="microtag">' + escapeHtml(card.note) + '</div>' : "";
+        const microtag = card.inventory
+          ? '<div class="microtag">' + iconSvg("bolt") + '<span>Executed immediately - no confirmation</span></div>'
+          : note;
+        const link = card.link
+          ? '<a class="dashboard-link" href="#" onclick="return false">' + escapeHtml(card.link) + iconSvg("external") + '</a>'
+          : "";
+        return '<div class="receipt receipt-' + tone + '">' +
+          '<div class="receipt-heading">' + iconSvg(card.icon || "check") + '<span>' + escapeHtml(card.title) + '</span></div>' +
+          '<p class="receipt-note">' + escapeHtml(card.body) + '</p>' +
+          renderRows(card.rows) + microtag + link +
+        '</div>';
+      }
+
+      function renderSpecimen(card, index) {
+        const tags = (card.tags || []).map(function (tag) {
+          return badge(tag, "secondary", "tag");
+        }).join("");
+        const marker = badge(card.marker, card.marker === "shipped" ? "success" : "secondary", "tag");
+        const variant = card.variant ? badge(card.variant, "secondary", "tag") : "";
+        return '<article class="specimen" data-card-index="' + index + '" data-verb="' + escapeHtml(card.verb) + '" data-risk="' + escapeHtml(card.risk) + '" data-form="' + escapeHtml(card.form) + '" data-inventory="' + String(card.inventory) + '">' +
+          '<div class="specimen-meta">' +
+            '<div class="meta-left"><code class="verb">' + escapeHtml(card.verb) + '</code>' + riskBadge(card.risk) + variant + tags + '</div>' +
+            '<div class="meta-right">' + marker + '</div>' +
+          '</div>' +
+          (card.form === "receipt" ? renderReceipt(card) : renderActionCard(card)) +
+        '</article>';
+      }
+
+      function renderSection(sectionKey, sectionCards) {
+        const meta = sectionMeta[sectionKey];
+        return '<section class="catalogue-section" id="section-' + escapeHtml(sectionKey) + '">' +
+          '<p class="section-kicker">' + escapeHtml(meta.kicker) + '</p>' +
+          '<div class="section-heading-row"><h2>' + escapeHtml(meta.title) + '</h2><span class="section-count">' + sectionCards.length + ' cards</span></div>' +
+          '<p class="section-why">' + escapeHtml(meta.why) + '</p>' +
+          '<div class="specimens">' + sectionCards.map(function (card) { return renderSpecimen(card, cards.indexOf(card)); }).join("") + '</div>' +
+        '</section>';
+      }
+
+      function renderDialogActions(actions, wide) {
+        if (!actions || actions.length === 0) return "";
+        return '<div class="dialog-actions' + (wide ? " dialog-actions-single" : "") + '">' + actions.map(function (action) {
+          const icon = action.icon ? iconSvg(action.icon) : "";
+          return '<button class="button ' + (action.variant === "primary" ? "button-primary" : "button-outline") + '" type="button">' + icon + '<span>' + escapeHtml(action.label) + '</span></button>';
+        }).join("") + '</div>';
+      }
+
+      function renderDialogMock(config) {
+        const back = config.back
+          ? '<button class="mock-back" type="button">' + iconSvg("arrowLeft") + '<span>' + escapeHtml(config.back) + '</span></button>'
+          : "";
+        const glyph = config.icon
+          ? '<span class="service-glyph">' + iconSvg(config.icon) + '</span>'
+          : "";
+
+        return '<div class="dialog-mock" data-machine-state="' + escapeHtml(config.step) + '"' + (config.substate ? ' data-machine-substate="' + escapeHtml(config.substate) + '"' : "") + '>' +
+          '<div class="dialog-chrome">' +
+            '<button class="dialog-close" type="button" aria-label="Close dialog">' + iconSvg("x") + '</button>' +
+            back +
+            '<div class="step-header">' + glyph +
+              '<div class="step-heading-copy"><h3 class="dialog-title">' + escapeHtml(config.title) + '</h3>' +
+              '<p class="dialog-description">' + escapeHtml(config.description) + '</p></div>' +
+            '</div>' +
+            config.body + renderDialogActions(config.actions, config.wideAction) +
+          '</div>' +
+        '</div>';
+      }
+
+      function renderContinueEvent(disposition, resourceId) {
+        const eventText = disposition === "completed"
+          ? '→ action.continue posted · req_7 completed · resource ' + resourceId
+          : '→ action.continue posted · req_7 · disposition: ' + disposition;
+        return '<div class="continue-event" data-disposition="' + escapeHtml(disposition) + '">' +
+          '<span class="continue-event-main">' + escapeHtml(eventText) + '</span>' +
+          '<span class="continue-event-note">automatic — no user action</span>' +
+        '</div>';
+      }
+
+      function renderFlowFrame(index, title, description, content, extraClass) {
+        return '<article class="flow-frame' + (extraClass ? " " + extraClass : "") + '" data-flow-stage="' + escapeHtml(index) + '">' +
+          '<div class="flow-index" aria-hidden="true">' + escapeHtml(index) + '</div>' +
+          '<div class="flow-content">' +
+            '<div class="flow-caption"><strong>' + escapeHtml(title) + '</strong><span>' + escapeHtml(description) + '</span></div>' +
+            '<div class="flow-surface-stack">' + content + '</div>' +
+          '</div>' +
+        '</article>';
+      }
+
+      function renderModalityFrame(state, label, dialog) {
+        return '<article class="modality-frame" data-modality-state="' + escapeHtml(state) + '">' +
+          '<div class="modality-meta"><code>' + escapeHtml(state) + '</code><span>' + escapeHtml(label) + '</span></div>' +
+          dialog +
+        '</article>';
+      }
+
+      function renderScopePicker() {
+        return '<div class="scope-picker-mock">' +
+          '<p class="mock-label">Scopes</p>' +
+          '<div class="scope-pills" role="group" aria-label="Scopes">' +
+            '<span class="scope-pill selected"><span>Read profile</span><span class="scope-pill-default">default</span>' + iconSvg("x") + '</span>' +
+            '<span class="scope-pill selected"><span>Email addresses</span><span class="scope-pill-default">default</span>' + iconSvg("x") + '</span>' +
+            '<span class="scope-pill"><span class="scope-sensitive-dot" aria-hidden="true"></span><span>Repositories (full)</span></span>' +
+            '<span class="scope-pill gated"><span class="scope-sensitive-dot" aria-hidden="true"></span><span>Manage org</span><span class="scope-pill-own-app">own app</span></span>' +
+          '</div>' +
+          '<div class="scope-add-row"><div class="mock-input">e.g. custom.scope</div><button class="button button-outline" type="button">' + iconSvg("plus") + '<span>Add</span></button></div>' +
+          '<p class="mock-helper">Selected scopes are requested at sign-in. Defaults are pre-selected — deselect to drop one. Add anything missing above; the upstream provider decides whether to grant them.</p>' +
+        '</div>';
+      }
+
+      function renderFlow() {
+        const pending = cards.find(function (card) { return card.section === "states" && card.variant === "pending"; });
+        const completed = cards.find(function (card) { return card.section === "states" && card.variant === "completed"; });
+        const failed = cards.find(function (card) { return card.section === "states" && card.variant === "failed"; });
+        const declined = cards.find(function (card) { return card.section === "states" && card.variant === "declined"; });
+
+        const routingModal = renderDialogMock({
+          step: "routing",
+          back: "Back to catalog",
+          icon: "github",
+          title: "Configure routing for GitHub",
+          description: "GitHub account access via OAuth 2.0",
+          body:
+            '<div><p class="mock-label">How should requests reach this service?</p>' +
+              '<div class="choice-grid">' +
+                '<div class="choice-tile selected">' + iconSvg("globe") + '<strong>Direct</strong><span>NyxID proxies to endpoint</span></div>' +
+                '<div class="choice-tile">' + iconSvg("server") + '<strong>Via Node</strong><span>Route through credential node</span></div>' +
+              '</div>' +
+              '<div class="conditional-note">' + iconSvg("server") + '<span>Selecting Via Node reveals Select Node with online options such as <code class="mono">n_77</code>.</span></div></div>' +
+            '<div><p class="mock-label">Which OAuth app authorizes this?</p>' +
+              '<div class="choice-grid">' +
+                '<div class="choice-tile selected">' + iconSvg("logo") + '<strong>NyxID managed</strong><span>One click. NyxID’s OAuth app handles authorization. Curated scopes.</span></div>' +
+                '<div class="choice-tile">' + iconSvg("key") + '<strong>Your own OAuth app</strong><span>Use your own client credentials. Full scope control.</span></div>' +
+              '</div></div>',
+          actions: [{ label: "Next: Connect", variant: "primary" }],
+          wideAction: true
+        });
+
+        const oauthBody = renderScopePicker() +
+          '<div class="handoff-note">' + iconSvg("external") + '<span>Connect with GitHub opens the provider authorization surface. The resulting token lands in NyxID and never enters this chat.</span></div>';
+
+        const oauthModal = renderDialogMock({
+          step: "oauth",
+          back: "Back",
+          icon: "github",
+          title: "Connect to GitHub",
+          description: "This service uses OAuth to authenticate. Click the button below to connect your account.",
+          body: oauthBody,
+          actions: [{ label: "Connect with GitHub", variant: "primary", icon: "external" }],
+          wideAction: true
+        });
+
+        const verifyConnectedModal = renderDialogMock({
+          step: "verify",
+          substate: "connected",
+          icon: "github",
+          title: "Service “GitHub” connected",
+          description: "Connect your AI tools to this service through NyxID.",
+          body:
+            '<div class="connected-prompt">' + iconSvg("key") + '<span>Your AI tools need an <strong>Agent Key</strong> to call GitHub through NyxID. NyxID injects your stored credentials server-side — your tool never sees the original secret.</span></div>',
+          actions: [
+            { label: "Maybe later", variant: "outline" },
+            { label: "Create Agent Key", variant: "primary" }
+          ]
+        });
+
+        const verifyProbeModal = renderDialogMock({
+          step: "verify",
+          substate: "probe_success",
+          icon: "github",
+          title: "Service “GitHub” connected",
+          description: "Connect your AI tools to this service through NyxID.",
+          body:
+            '<div class="agent-key-panel"><div class="panel-title">' + iconSvg("key") + '<span>Your new Agent Key</span></div>' +
+              '<p>Save this now. The full secret is only shown here once. Scoped to GitHub only, with the <code>proxy</code> scope.</p>' +
+              '<div class="mock-field"><span class="mock-field-label">Agent Key</span><div class="mock-copy-field"><span>XXXX-XXXX-XXXX</span>' + iconSvg("copy") + '</div></div>' +
+              '<div class="mock-field"><span class="mock-field-label">Base URL</span><div class="mock-copy-field"><span>https://nyxid.example/api/v1/proxy/s/api-github</span>' + iconSvg("copy") + '</div></div>' +
+            '</div>' +
+            '<div class="probe-diagnostic">' + iconSvg("check") + '<span>End-to-end verified (HTTP 200). NyxID accepted your Agent Key and the downstream returned success. Copy the Agent Key + Base URL above into your AI tool.</span></div>',
+          actions: [{ label: "Done", variant: "primary" }]
+        });
+
+        const verifySequence = verifyConnectedModal +
+          '<div class="phase-transition" aria-label="Verify phase transition"><span>minting</span>' + iconSvg("arrowRight") + '<span>key_ready</span>' + iconSvg("arrowRight") + '<span>probing</span>' + iconSvg("arrowRight") + '<span>probe_success</span></div>' +
+          verifyProbeModal +
+          '<div class="conditional-snippet"><strong>Conditional branch · OpenAI-shaped services only</strong><span><code>AgentKeyPanel</code> renders the following shell env snippet only when <code>OPENAI_SHAPED_HINTS</code> matches. It is correctly absent from the GitHub modal above.</span><div class="mock-code">export OPENAI_API_KEY="XXXX-XXXX-XXXX"<br>export OPENAI_BASE_URL="https://nyxid.example/api/v1/proxy/s/api-openai/v1"</div></div>';
+
+        const oauthErrorModal = renderDialogMock({
+          step: "oauth",
+          substate: "error",
+          back: "Back",
+          icon: "github",
+          title: "Connect to GitHub",
+          description: "This service uses OAuth to authenticate. Click the button below to connect your account.",
+          body: renderScopePicker() + '<div class="error-panel">' + iconSvg("alert") + '<span>Failed to start OAuth flow</span></div>',
+          actions: [{ label: "Connect with GitHub", variant: "primary", icon: "external" }],
+          wideAction: true
+        });
+
+        const primaryFrames = [
+          renderFlowFrame("1", "Card pending", "Connect GitHub opens AddKeyDialog with prefillSlug=api-github; handleSelectCatalog skips catalog and advances directly to routing.",
+            renderActionCard(pending) + '<div class="prefill-note">' + iconSvg("check") + '<span><code class="mono">prefillSlug="api-github"</code> matched GitHub · catalog skipped automatically</span></div>', ""),
+          renderFlowFrame("2", "Modal · routing", "Direct and NyxID managed are selected. Via Node reveals the online-node select; Your own OAuth app routes to oauth_credentials.", routingModal, ""),
+          renderFlowFrame("3", "Modal · oauth", "The picker is authoritative. Current code seeds GitHub provider defaults; the card’s requested repo scope is visible in chat but is not passed as a dialog prefill.", oauthModal, ""),
+          renderFlowFrame("4", "Modal · verify", "Two snapshots show one ConnectVerifyStep body before and after the real user-driven mint and probe phases. Maybe later and Done both finish because the UserService already exists.", verifySequence, ""),
+          renderFlowFrame("5", "Card completed", "The receipt collapses the journey, the continuation posts automatically, and the assistant resumes.",
+            renderReceipt(completed) + renderContinueEvent("completed", "us_44") +
+            '<div class="assistant-bubble"><span class="assistant-bubble-label">Assistant</span>GitHub is connected. I can continue with the repository task now.</div>', "")
+        ];
+
+        const branchFrames = [
+          renderFlowFrame("B1", "Branch · OAuth error", "initiateOAuth keeps its fallback error inline and the same Connect with GitHub button can retry. No continuation is posted while the modal remains recoverable.",
+            oauthErrorModal, "flow-frame-branch flow-frame-error"),
+          renderFlowFrame("B2", "Branch · failed", "A terminal journey failure collapses to the shipped failed receipt and posts the failed disposition automatically.",
+            renderReceipt(failed) + renderContinueEvent("failed"), "flow-frame-branch flow-frame-error"),
+          renderFlowFrame("B3", "Branch · declined", "Decline resolves directly from the pending card. AddKeyDialog never opens.",
+            '<div class="handoff-note">' + iconSvg("x") + '<span>Decline pressed on the chat card · no modal opened</span></div>' +
+            renderReceipt(declined) + renderContinueEvent("declined"), "flow-frame-branch")
+        ];
+
+        const deviceConfigure = renderDialogMock({
+          step: "device_code",
+          substate: "configure",
+          back: "Back",
+          icon: "device",
+          title: "Connect to OpenAI Codex",
+          description: "This service uses a device code to authenticate. Click continue to request a code.",
+          body: '<p class="mock-helper">This provider does not accept additional scopes -- they are fixed by the upstream client registration.</p>',
+          actions: [{ label: "Continue", variant: "primary" }],
+          wideAction: true
+        });
+
+        const deviceRequesting = renderDialogMock({
+          step: "device_code",
+          substate: "requesting",
+          back: "Back",
+          icon: "device",
+          title: "Connect to OpenAI Codex",
+          description: "Requesting code from OpenAI Codex...",
+          body: '<div class="spinner-mock">' + iconSvg("refresh") + '</div>',
+          actions: []
+        });
+
+        const deviceSuccess = renderDialogMock({
+          step: "device_code",
+          substate: "success",
+          icon: "device",
+          title: "OpenAI Codex connected",
+          description: "Your OpenAI Codex account has been connected successfully.",
+          body: '<div class="success-mock">' + iconSvg("check") + '</div>',
+          actions: [{ label: "Done", variant: "primary" }],
+          wideAction: true
+        });
+
+        const formModal = renderDialogMock({
+          step: "form",
+          back: "Back",
+          icon: "github",
+          title: "Configure GitHub API (Personal Access Token)",
+          description: "GitHub REST API access using a Personal Access Token (classic or fine-grained). Use this when you want a long-lived static credential instead of OAuth.",
+          body:
+            '<span class="mock-link">Get API key' + iconSvg("external") + '</span>' +
+            '<div class="mock-field-stack">' +
+              '<div class="mock-field"><span class="mock-field-label">Label <span class="mock-required">*</span></span><div class="mock-input">GitHub PAT</div><span class="mock-helper">Give it a name you’ll recognize. The proxy slug is auto-generated from this.</span></div>' +
+              '<div class="mock-field"><span class="mock-field-label">API Key / Credential <span class="mock-required">*</span></span><div class="mock-input">sk-...</div></div>' +
+              '<div class="mock-field"><span class="mock-field-label">Endpoint URL</span><div class="mock-input readonly">https://api.github.com</div></div>' +
+            '</div>',
+          actions: [{ label: "Connect Service", variant: "primary" }],
+          wideAction: true
+        });
+
+        const nodeSetupModal = renderDialogMock({
+          step: "node_setup",
+          back: "Back",
+          icon: "github",
+          title: "GitHub — Node setup",
+          description: "Configure credentials on your node agent.",
+          body:
+            '<div class="mock-field"><span class="mock-field-label">Label <span class="mock-required">*</span></span><div class="mock-input">GitHub</div></div>' +
+            '<div class="node-instructions"><div class="panel-title">' + iconSvg("terminal") + '<span>Node Setup Instructions</span></div>' +
+              '<p class="mock-helper">Run this on your node to auto-setup credentials. It detects the service type and guides you through the right flow:</p>' +
+              '<div class="mock-code">nyxid node credentials setup --service api-github</div>' +
+            '</div>',
+          actions: [{ label: "Connect Service", variant: "primary" }],
+          wideAction: true
+        });
+
+        const oauthCredentialsModal = renderDialogMock({
+          step: "oauth_credentials",
+          back: "Back",
+          icon: "github",
+          title: "Setup GitHub credentials",
+          description: "This service requires your own OAuth app credentials.",
+          body:
+            '<span class="mock-link">How to create an OAuth app' + iconSvg("external") + '</span>' +
+            '<div class="callback-guidance"><div class="panel-title">' + iconSvg("link") + '<span>NyxID callback URL</span></div><p class="mock-helper">Add this URL as an authorized redirect URI in your OAuth app’s settings on the provider’s developer console, or authorization will fail.</p><div class="mock-copy-field"><span>https://nyxid.example/api/v1/providers/callback</span>' + iconSvg("copy") + '</div></div>' +
+            '<div class="mock-field-stack">' +
+              '<div class="mock-field"><span class="mock-field-label">Client ID <span class="mock-required">*</span></span><div class="mock-input">Your OAuth app Client ID</div></div>' +
+              '<div class="mock-field"><span class="mock-field-label">Client Secret <span class="mock-required">*</span></span><div class="mock-input">Your OAuth app Client Secret</div></div>' +
+            '</div>',
+          actions: [{ label: "Continue to Authentication", variant: "primary" }],
+          wideAction: true
+        });
+
+        const catalogModal = renderDialogMock({
+          step: "catalog",
+          title: "Add AI Service",
+          description: "Pick from the catalog or create a custom endpoint.",
+          body:
+            '<div class="mock-search">' + iconSvg("search") + '<span>Search services...</span></div>' +
+            '<div class="catalog-grid-mock">' +
+              '<div class="catalog-tile dashed">' + iconSvg("globe") + '<strong>Custom Endpoint</strong></div>' +
+              '<div class="catalog-tile dashed">' + iconSvg("terminal") + '<strong>Custom SSH</strong></div>' +
+              '<div class="catalog-tile">' + iconSvg("github") + '<strong>GitHub</strong><span>OAuth</span></div>' +
+              '<div class="catalog-tile">' + iconSvg("key") + '<strong>GitHub API (Personal Access Token)</strong><span>Static credential</span></div>' +
+            '</div>',
+          actions: []
+        });
+
+        const modalityFrames = [
+          renderModalityFrame("device_code.configure", "configure", deviceConfigure),
+          renderModalityFrame("device_code.requesting", "requesting", deviceRequesting),
+          renderModalityFrame("device_code.success", "success", deviceSuccess),
+          renderModalityFrame("form", "API-key paste", formModal),
+          renderModalityFrame("node_setup", "via credential node", nodeSetupModal),
+          renderModalityFrame("oauth_credentials", "Custom App / BYO", oauthCredentialsModal),
+          renderModalityFrame("catalog", "unknown prefill fallback", catalogModal)
+        ];
+
+        return '<section class="catalogue-section flow-section" id="section-flow">' +
+          '<p class="section-kicker">Part II / continuous journey</p>' +
+          '<div class="section-heading-row"><h2>Flow</h2><span class="section-count">' + primaryFrames.length + ' path · ' + branchFrames.length + ' branches</span></div>' +
+          '<p class="section-why">The real AddKeyDialog state machine, expanded for static review: no invented service step, no numeric progress indicator, and every completion boundary visible.</p>' +
+          '<div class="flow-storyboard">' + primaryFrames.concat(branchFrames).join("") + '</div>' +
+          '<div class="secondary-modalities"><div class="secondary-heading-row"><h3>Other real modalities</h3><span class="section-count">' + modalityFrames.length + ' frames</span></div>' +
+            '<p>Alternate branches reached from routing or from catalog fallback. Each frame uses a real WizardStep state and its live StepHeader copy.</p>' +
+            '<div class="modality-grid">' + modalityFrames.join("") + '</div>' +
+          '</div>' +
+        '</section>';
+      }
+
+      function renderCounts() {
+        const inventory = cards.filter(function (card) { return card.inventory; });
+        const totals = {
+          catalogue: inventory.length,
+          rendered: cards.length,
+          low: inventory.filter(function (card) { return card.risk === "low"; }).length,
+          grant: inventory.filter(function (card) { return card.risk === "grant"; }).length,
+          destructive: inventory.filter(function (card) { return card.risk === "destructive"; }).length
+        };
+        document.body.dataset.catalogueCount = String(totals.catalogue);
+        document.body.dataset.renderedCount = String(totals.rendered);
+        document.body.dataset.lowCount = String(totals.low);
+        document.body.dataset.grantCount = String(totals.grant);
+        document.body.dataset.destructiveCount = String(totals.destructive);
+        const items = [
+          [totals.catalogue, "Catalogue"],
+          [totals.rendered, "Rendered incl. states"],
+          [totals.low, "Low"],
+          [totals.grant, "Grant"],
+          [totals.destructive, "Destructive"]
+        ];
+        document.getElementById("counts").innerHTML = items.map(function (item) {
+          return '<div class="count"><span class="count-value">' + item[0] + '</span><span class="count-label">' + item[1] + '</span></div>';
+        }).join("");
+      }
+
+      function renderCatalogue() {
+        const sectionKeys = [];
+        cards.forEach(function (card) {
+          if (!sectionKeys.includes(card.section)) sectionKeys.push(card.section);
+        });
+        document.getElementById("catalogue").innerHTML = sectionKeys.map(function (sectionKey) {
+          const section = renderSection(sectionKey, cards.filter(function (card) { return card.section === sectionKey; }));
+          return sectionKey === "states" ? section + renderFlow() : section;
+        }).join("");
+      }
+
+      function syncThemeButton() {
+        const light = document.documentElement.classList.contains("theme-light");
+        const button = document.getElementById("themeToggle");
+        const label = light ? "Switch to dark theme" : "Switch to light theme";
+        button.innerHTML = iconSvg(light ? "moon" : "sun");
+        button.setAttribute("aria-label", label);
+        button.setAttribute("title", label);
+      }
+
+      document.getElementById("brandMark").innerHTML = iconSvg("logo");
+      document.getElementById("themeToggle").addEventListener("click", function () {
+        const root = document.documentElement;
+        const light = root.classList.toggle("theme-light");
+        root.classList.toggle("theme-dark", !light);
+        syncThemeButton();
+      });
+
+      renderCounts();
+      renderCatalogue();
+      syncThemeButton();
+    </script>
+  </body>
+</html>

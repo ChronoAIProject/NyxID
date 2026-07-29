@@ -1,3 +1,8 @@
+import type {
+  ActionCardParams,
+  ActionReport,
+} from "@/schemas/assistant-actions";
+
 export type ConnectCardState =
   | "needs_connection"
   | "waiting_for_provider"
@@ -99,12 +104,34 @@ export interface ArtifactContentBlock {
   readonly download_url: string;
 }
 
+export type ActionCardStatus =
+  | "pending"
+  | "in_progress"
+  | "completed"
+  | "declined"
+  | "failed"
+  | "unsupported";
+
+export interface ActionCardContentBlock {
+  readonly type: "action_card";
+  readonly block_id: string;
+  readonly action: string;
+  readonly action_request_id: string;
+  readonly origin_turn_id: string;
+  /** Actor that emitted the request; used only to address action.continue. */
+  readonly actor_id?: string;
+  readonly params: ActionCardParams;
+  readonly status: ActionCardStatus;
+  readonly outcome_note: string;
+}
+
 export type ContentBlock =
   | TextContentBlock
   | ConnectCardContentBlock
   | RunContentBlock
   | ApprovalCardContentBlock
-  | ArtifactContentBlock;
+  | ArtifactContentBlock
+  | ActionCardContentBlock;
 
 export interface AssistantMessage {
   readonly id: string;
@@ -248,6 +275,18 @@ export interface AssistantTransport {
     approved: boolean,
     onEvent?: (event: TurnEvent) => void,
   ): Promise<TurnHandle | null>;
+  setActionCardInProgress(
+    conversationId: string,
+    blockId: string,
+    inProgress: boolean,
+    onEvent?: (event: TurnEvent) => void,
+  ): void;
+  continueActions(
+    conversationId: string,
+    originTurnId: string,
+    reports: readonly ActionReport[],
+    onEvent?: (event: TurnEvent) => void,
+  ): TurnHandle | null;
 }
 
 export function isTurnActive(status: TurnStatus | undefined): boolean {

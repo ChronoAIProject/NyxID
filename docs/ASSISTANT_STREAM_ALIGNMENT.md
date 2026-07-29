@@ -9,7 +9,7 @@ streaming behaviour, and the recovery flows around them. The PRD
 (`nyx-chat-prd.md`, Draft v8) remains the contract SSOT; this file records
 where our implementation stands against the reference *implementation*.
 
-Last verified: 2026-07-20.
+Last verified: 2026-07-29 against Aevatar `origin/dev` at `020a9acd2`.
 
 ---
 
@@ -39,6 +39,7 @@ Every frame family is accepted in both `type`-tagged and body-keyed shapes.
 | `CUSTOM aevatar.human_input.request` | ✅ | ✅ | `approval_card` |
 | `CUSTOM aevatar.authorization.required` | ✅ | ✅ | `connect_card` |
 | `CUSTOM nyxid.authorization.required` | ✅ | ✅ | `connect_card` |
+| `CUSTOM nyxid.action.request` (schema v4) | ✅ | ✅ | persistent `action_card` + connect journey |
 | `CUSTOM aevatar.workflow.waiting_signal` | ✅ | ✅ | turn status `waiting` |
 | `CUSTOM aevatar.llm.reasoning` | ✅ (never displayed) | ✅ (never displayed) | — (PRD §3.8) |
 | `CUSTOM aevatar.nyxid_chat.keepalive` | ✅ | ✅ | liveness only, not progress |
@@ -78,7 +79,65 @@ dropping the turn (PRD §3.0 forward-compat posture).
 | Reverse-proxy buffering | avoided | avoided (verified locally end-to-end) |
 | Session id | one per conversation | one per conversation, survives history/list reprojection |
 | Approval decision | POST → SSE continuation | POST → SSE continuation, cursors continue past prior turn |
+| Text request body | `{type:"text", prompt, clientRequestId}` | same, with an exact allowlisted object |
+| Browser action continuation | `{type:"action.continue", clientRequestId, originTurnId, actions}` | same, grouped by origin turn and streamed through the normal turn path |
 | Idle stop at approval gate | pause, card stays actionable | same |
+
+### Browser action cards
+
+Aevatar may end a turn as blocked after emitting a `CUSTOM` frame named
+`nyxid.action.request`. NyxID accepts schema version `4` and currently maps
+`service.connect` to either the catalog-service or custom-service path in the
+existing Add Service dialog. The card uses NyxID-owned consent copy, shows safe
+request parameters, and remains interactive after the origin stream terminates.
+
+Completing or explicitly declining a card creates a strict continuation turn:
+
+```json
+{
+  "type": "action.continue",
+  "clientRequestId": "<stable retry id>",
+  "originTurnId": "turn-...",
+  "actions": [
+    {
+      "actionRequestId": "act-...",
+      "originTurnId": "turn-...",
+      "disposition": "completed",
+      "resource": { "userService": { "userServiceId": "<id>" } }
+    }
+  ]
+}
+```
+
+Reports resolving during another local turn stay queued. Reports from one
+origin turn are batched together and never mixed with another origin.
+
+A continuation Aevatar refuses to admit (`NYXID_ACTION_CONTINUATION_ACTIVE_TURN`
+/ `_CONFLICT` / `_INVALID`) is **not** signalled as a run-error code on the
+continuation stream: the rejected admission is published as a
+`nyxid.continuation.changed` frame on the *origin* turn's session, so the
+continuation stream the client is reading just carries `RUN_STARTED` plus
+keepalives until it times out. The client therefore treats **any** non-success
+terminal on a continuation — run error, stall caught by the progress watchdog,
+network failure, cancel — as "these reports were never admitted": they keep
+their original `clientRequestId` and are retried once the conversation is idle
+again. Only `RUN_FINISHED`, `RUN_STOPPED`, or reaching an approval gate proves
+the continuation turn actually ran and settles the batch.
+
+Unknown custom frames remain ignored. Unknown action verbs and non-v4 requests
+render a decline-only unsupported card, including when a request is re-emitted
+under a schema version this build cannot service.
+
+Action cards are not rehydrated after a page reload because conversation history
+is currently text-only. A subsequent text turn lets Aevatar re-emit the pending
+action idempotently.
+
+### Deployment gate
+
+The discriminated body (`type:"text"`) is **required** by Aevatar ≥
+`feature/integrate` (PR aevatarAI/aevatar#2911) and **rejected** (unknown member)
+by the currently deployed prod Aevatar. This branch must deploy **after** the
+Aevatar dev contract reaches prod. Same for the whole action-card feature.
 
 ---
 

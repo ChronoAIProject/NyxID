@@ -808,17 +808,22 @@ const MOCK_CATALOG = [
   },
   {
     slug: "github", name: "GitHub", description: "GitHub REST & GraphQL API",
-    base_url: "https://api.github.com", auth_method: "bearer", auth_key_name: "Authorization",
-    provider_config_id: null, provider_type: null, requires_gateway_url: false,
-    credential_mode: "api_key",
-    api_key_instructions: "Create a personal access token at github.com/settings/tokens",
-    api_key_url: "https://github.com/settings/tokens",
+    base_url: "https://api.github.com", auth_method: "oauth2", auth_key_name: "Authorization",
+    provider_config_id: "provider-github", provider_type: "oauth2", requires_gateway_url: false,
+    credential_mode: "both",
+    api_key_instructions: null,
+    api_key_url: null,
     icon_url: null, documentation_url: "https://docs.github.com/en/rest",
     service_type: "http",
     ssh_host: null, ssh_port: null, ssh_ca_public_key: null, ssh_allowed_principals: null, ssh_certificate_ttl_minutes: null,
-    authorization_url: null, token_url: null, device_code_url: null,
-    default_scopes: null, supports_pkce: null, device_code_format: null,
+    authorization_url: "https://github.com/login/oauth/authorize", token_url: "https://github.com/login/oauth/access_token", device_code_url: null,
+    default_scopes: ["repo"],
+    scope_catalog: [{ scope: "repo", label: "Repositories", description: "Read and write repository data." }],
+    scope_removal: "unsupported",
+    supports_pkce: false, device_code_format: null,
     oauth_client_id: null, client_id_param_name: null,
+    has_platform_oauth_credentials: true,
+    platform_scope_allowlist: ["repo"],
     requires_credential: true, token_exchange_credential_fields: null, default_request_headers: null,
     homepage_url: "https://github.com", repository_url: null, issues_url: null,
     capabilities: { supports_proxy_read: true, supports_proxy_write: true, supports_proxy_binary_upload: false, supports_direct_downstream_auth: false, supports_authoring_via_nyx: false, supports_websocket: false, supports_streaming: false },
@@ -1394,6 +1399,13 @@ function findBySlug<T extends { slug: string }>(items: readonly T[], slug: strin
   return items.find((item) => item.slug === slug);
 }
 
+const MOCK_FULL_CATALOG = (() => {
+  const github = findBySlug(MOCK_CATALOG, "github");
+  return github
+    ? [...MOCK_CATALOG, { ...github, slug: "api-github" }]
+    : MOCK_CATALOG;
+})();
+
 // ── Dynamic endpoint resolver ──
 type MockHandler = (path: string) => unknown | undefined;
 
@@ -1646,8 +1658,48 @@ export function isMockMode(): boolean {
   return _mockLatched;
 }
 
-export function getMockResponse(endpoint: string): unknown | undefined {
-  const path = endpoint.split("?")[0] ?? endpoint;
+export function getMockResponse(
+  endpoint: string,
+  method = "GET",
+  body?: unknown,
+): unknown | undefined {
+  const [path = endpoint, query = ""] = endpoint.split("?", 2);
+  if (
+    method === "GET" &&
+    path === "/catalog" &&
+    new URLSearchParams(query).get("include_all") === "true"
+  ) {
+    return { entries: MOCK_FULL_CATALOG };
+  }
+  if (method === "POST" && path === "/keys") {
+    const request =
+      typeof body === "object" && body !== null
+        ? (body as Record<string, unknown>)
+        : {};
+    const requestedSlug =
+      typeof request["service_slug"] === "string"
+        ? request["service_slug"]
+        : "github";
+    const catalogSlug = requestedSlug.replace(/^api-/, "");
+    const template =
+      MOCK_KEYS.find((key) => key.catalog_service_slug === catalogSlug) ??
+      MOCK_KEYS[0];
+    if (!template) return undefined;
+    const label =
+      typeof request["label"] === "string" && request["label"].trim()
+        ? request["label"].trim()
+        : "Mock service";
+    return {
+      ...template,
+      id: "00000000-0000-4000-8000-000000000123",
+      label,
+      name: label,
+      slug: `${catalogSlug}-action-demo`,
+      catalog_service_slug: catalogSlug,
+      status: "active",
+      is_active: true,
+    };
+  }
   for (const handler of MOCK_HANDLERS) {
     const result = handler(path);
     if (result !== undefined) return result;

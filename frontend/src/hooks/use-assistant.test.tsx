@@ -86,7 +86,9 @@ describe("assistant hooks", () => {
     }
 
     await act(async () => {
-      await vi.advanceTimersByTimeAsync(700);
+      // The scripted turn now includes an action-card frame before its
+      // terminal event, so allow that additional cadence tick to settle.
+      await vi.advanceTimersByTimeAsync(800);
     });
     const completed = result.current.history.data?.messages.at(-1)?.blocks[0];
     expect(result.current.turn.data?.status).toBe("completed");
