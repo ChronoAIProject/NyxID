@@ -109,6 +109,7 @@ mod tests {
     fn context_for(credential_class: CredentialClass) -> BillingRouteContext {
         let billing = ServiceBilling {
             platform_billable: false,
+            platform_metric: None,
             resale_billable: true,
             resale_metric: BillingMetric::Tokens,
             lago_resale_metric_code: Some("resale_tokens".to_string()),
@@ -152,6 +153,7 @@ mod tests {
     fn resale_requires_operator_flag() {
         let billing = ServiceBilling {
             platform_billable: false,
+            platform_metric: None,
             resale_billable: true,
             resale_metric: BillingMetric::Tokens,
             lago_resale_metric_code: Some("resale_tokens".to_string()),

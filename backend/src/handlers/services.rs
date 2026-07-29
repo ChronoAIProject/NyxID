@@ -1577,6 +1577,7 @@ pub async fn update_service(
         validate_service_billing(body.billing.as_ref())?;
         let next_billing = body.billing.clone().filter(|billing| {
             billing.platform_billable
+                || billing.platform_metric.is_some()
                 || billing.resale_billable
                 || billing.lago_resale_metric_code.is_some()
         });

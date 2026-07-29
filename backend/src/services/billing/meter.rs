@@ -517,6 +517,7 @@ mod tests {
 
         let billing = ServiceBilling {
             platform_billable: true,
+            platform_metric: None,
             resale_billable: true,
             resale_metric: BillingMetric::Tokens,
             lago_resale_metric_code: Some("resale_tokens".to_string()),
@@ -777,6 +778,7 @@ mod tests {
         create_usage_transaction_index(&db).await;
         let billing = ServiceBilling {
             platform_billable: true,
+            platform_metric: None,
             resale_billable: true,
             resale_metric: BillingMetric::Tokens,
             lago_resale_metric_code: Some("resale_tokens".to_string()),

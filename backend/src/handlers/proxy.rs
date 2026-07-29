@@ -3115,6 +3115,17 @@ fn platform_metric_for_target(
     target: &proxy_service::ProxyTarget,
     is_connection: bool,
 ) -> BillingMetric {
+    // An admin-selected metric on the service's billing config wins;
+    // the slug/transport heuristic is only the fallback, so billing
+    // classification does not depend on service naming conventions.
+    if let Some(metric) = target
+        .service
+        .billing
+        .as_ref()
+        .and_then(|billing| billing.platform_metric)
+    {
+        return metric;
+    }
     if is_connection || target.service.service_type == "ssh" {
         BillingMetric::Bytes
     } else if target.service.slug.starts_with("llm-") {
@@ -4961,6 +4972,7 @@ mod tests {
     fn token_resale_metered_context(credential_class: CredentialClass) -> MeteredProxyContext {
         let billing = ServiceBilling {
             platform_billable: false,
+            platform_metric: None,
             resale_billable: true,
             resale_metric: BillingMetric::Tokens,
             lago_resale_metric_code: Some("resale_tokens".to_string()),
@@ -5576,6 +5588,32 @@ mod tests {
             ws_frame_injections: Vec::new(),
             connection_id: None,
         }
+    }
+
+    #[test]
+    fn admin_platform_metric_override_beats_the_slug_heuristic() {
+        // No override: a non-llm slug meters requests.
+        let target = make_target("http://localhost:8080");
+        assert_eq!(
+            super::platform_metric_for_target(&target, false),
+            BillingMetric::Requests
+        );
+
+        // Admin override: an arbitrarily named service meters tokens,
+        // including on the WS/connection path.
+        let mut target = make_target("http://localhost:8080");
+        target.service.billing = Some(ServiceBilling {
+            platform_metric: Some(BillingMetric::Tokens),
+            ..Default::default()
+        });
+        assert_eq!(
+            super::platform_metric_for_target(&target, false),
+            BillingMetric::Tokens
+        );
+        assert_eq!(
+            super::platform_metric_for_target(&target, true),
+            BillingMetric::Tokens
+        );
     }
 
     #[test]
