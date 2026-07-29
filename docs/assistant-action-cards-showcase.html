@@ -31,7 +31,6 @@
         --color-border: #262626;
         --color-success: #10b981;
         --color-warning: #f59e0b;
-        --color-info: #3b82f6;
         --color-text-tertiary: #525252;
         --color-hairline: rgba(255, 255, 255, 0.08);
         --color-hairline-strong: rgba(255, 255, 255, 0.15);
@@ -57,7 +56,6 @@
         --color-border: #e4e4e7;
         --color-success: #059669;
         --color-warning: #b45309;
-        --color-info: #2563eb;
         --color-text-tertiary: #71717a;
         --color-hairline: rgba(0, 0, 0, 0.1);
         --color-hairline-strong: rgba(0, 0, 0, 0.18);
@@ -367,12 +365,6 @@
         color: var(--color-success);
       }
 
-      .badge-info {
-        border-color: color-mix(in srgb, var(--color-info) 30%, transparent);
-        background: color-mix(in srgb, var(--color-info) 10%, transparent);
-        color: var(--color-info);
-      }
-
       .badge-accent {
         border-color: rgba(90, 42, 241, 0.3);
         background: rgba(90, 42, 241, 0.1);
@@ -400,12 +392,6 @@
       html.theme-light .badge-success {
         border-color: transparent;
         background: var(--color-success);
-        color: #ffffff;
-      }
-
-      html.theme-light .badge-info {
-        border-color: transparent;
-        background: var(--color-info);
         color: #ffffff;
       }
 
@@ -554,7 +540,7 @@
       }
 
       .trust-line svg {
-        color: var(--color-info);
+        color: var(--color-nyx-secondary-400);
       }
 
       .danger-line {
@@ -1088,7 +1074,7 @@
         height: 13px;
         flex: 0 0 13px;
         margin-top: 1px;
-        color: var(--color-info);
+        color: var(--color-muted-foreground);
       }
 
       .scope-picker-mock {
@@ -2610,9 +2596,8 @@
         if (!rows || rows.length === 0) return "";
         return '<div class="data-section">' + rows.map(function (row) {
           const chips = row.chips.map(function (chip) {
-            const kind = chip.kind === "node" ? "info" : "secondary";
             const icon = chip.kind === "node" ? iconSvg("server") : "";
-            return '<span class="badge badge-' + kind + ' chip' + (chip.mono ? " mono" : "") + '">' + icon + '<span>' + escapeHtml(chip.text) + '</span></span>';
+            return '<span class="badge badge-secondary chip' + (chip.mono ? " mono" : "") + '">' + icon + '<span>' + escapeHtml(chip.text) + '</span></span>';
           }).join("");
           return '<div class="chip-row"><span class="chip-label">' + escapeHtml(row.label) + '</span>' + chips + '</div>';
         }).join("") + '</div>';
@@ -2620,7 +2605,7 @@
 
       function stateBadge(card) {
         if (card.state === "unsupported") return badge(card.badge, "destructive", "");
-        if (card.state === "in_progress") return badge(card.badge, "info", "");
+        if (card.state === "in_progress") return badge(card.badge, "accent", "");
         return badge(card.badge || (card.risk === "destructive" ? "Destructive action" : "Confirmation required"), card.risk === "destructive" ? "destructive" : "accent", "");
       }
 
