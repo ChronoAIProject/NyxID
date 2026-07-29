@@ -1081,19 +1081,23 @@ MCP clients that support OAuth (e.g., Claude Desktop) will automatically discove
 To optimize performance, NyxID implements dynamic tool loading:
 
 **Session Initialization:**
-- MCP sessions start with only 3 meta-tools:
-  - `nyx__search_tools` -- Search and activate service tools by keyword
-  - `nyx__discover_services` -- Browse available services (does not activate)
+- MCP sessions start with built-in meta-tools and no activated per-service tools. Core meta-tools include:
+  - `nyx__search_tools` -- Search connected service tools by keyword
+  - `nyx__discover_services` -- Browse unconnected services (does not activate)
+  - `nyx__list_connected_services` -- Enumerate connected services and availability (does not activate)
   - `nyx__connect_service` -- Connect to a specific service and activate its tools
+  - `nyx__call_tool` -- Invoke a connected tool and activate its service
 
 **On-Demand Activation:**
-- When the LLM calls `nyx__search_tools`, the server activates matching service tools and sends a `notifications/tools/list_changed` notification
 - When the LLM calls `nyx__connect_service`, that service's tools are activated
+- When the LLM calls `nyx__call_tool`, the invoked tool's service is activated
+- `nyx__search_tools`, `nyx__discover_services`, and `nyx__list_connected_services` do not activate service tools
 - Clients (Cursor, Claude Code) automatically refresh their tool list when they receive the notification
 
 **Constraints:**
 - Maximum 20 activated services per session (bounded memory usage)
 - `nyx__discover_services` is browse-only and does NOT activate tools
+- `nyx__list_connected_services` is browse-only and does NOT activate tools
 
 ### How Tools Are Generated
 
@@ -1110,7 +1114,7 @@ Only services with valid connections and satisfied credentials are included:
 
 ### Backward Compatibility
 
-The REST endpoint `/api/v1/mcp/config` still returns the full list of all tools for clients that don't support the MCP protocol.
+The REST endpoint `/api/v1/mcp/config` returns the same caller-scoped executable operation set used by stateless MCP `tools/list`, plus stable opaque identities, a canonical content digest, response media/binary metadata, and non-sensitive diagnostics. Scoped callers never receive excluded service/node identities or exclusion counts.
 
 When a tool is called, the proxy:
 1. Resolves the service and endpoint from the tool name.

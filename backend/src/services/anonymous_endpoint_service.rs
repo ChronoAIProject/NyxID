@@ -590,6 +590,8 @@ mod tests {
     fn enabled_rules_reject_resale_billing() {
         let mut service = compatible_service();
         service.billing = Some(crate::models::service_billing::ServiceBilling {
+            platform_billable: false,
+            platform_metric: None,
             resale_billable: true,
             resale_metric: crate::models::service_billing::BillingMetric::Requests,
             lago_resale_metric_code: Some("resale_requests".to_string()),

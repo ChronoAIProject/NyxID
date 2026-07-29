@@ -161,6 +161,7 @@ pub struct CatalogEndpointResponse {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub request_content_type: Option<String>,
     pub request_body_required: bool,
+    pub response: crate::models::service_endpoint::OperationResponseContract,
 }
 
 #[derive(Debug, Serialize, ToSchema)]
@@ -352,6 +353,7 @@ fn parsed_endpoint_to_response(p: openapi_parser::ParsedEndpoint) -> CatalogEndp
         request_body_schema: p.request_body_schema,
         request_content_type: p.request_content_type,
         request_body_required: p.request_body_required,
+        response: p.response,
     }
 }
 
@@ -1058,6 +1060,7 @@ mod tests {
         use crate::services::openapi_parser::ParsedEndpoint;
 
         let parsed = ParsedEndpoint {
+            source_operation_id: Some("listWidgets".to_string()),
             name: "listWidgets".to_string(),
             description: Some("List all widgets".to_string()),
             method: "GET".to_string(),
@@ -1066,6 +1069,7 @@ mod tests {
             request_body_schema: None,
             request_content_type: None,
             request_body_required: false,
+            response: Default::default(),
         };
         let resp = super::parsed_endpoint_to_response(parsed);
         assert_eq!(resp.name, "listWidgets");
@@ -1083,6 +1087,7 @@ mod tests {
         use crate::services::openapi_parser::ParsedEndpoint;
 
         let parsed = ParsedEndpoint {
+            source_operation_id: Some("createWidget".to_string()),
             name: "createWidget".to_string(),
             description: None,
             method: "POST".to_string(),
@@ -1091,6 +1096,7 @@ mod tests {
             request_body_schema: Some(serde_json::json!({"type": "object"})),
             request_content_type: Some("application/json".to_string()),
             request_body_required: true,
+            response: Default::default(),
         };
         let resp = super::parsed_endpoint_to_response(parsed);
         assert_eq!(resp.name, "createWidget");
@@ -1167,6 +1173,7 @@ mod tests {
             request_body_schema: None,
             request_content_type: None,
             request_body_required: false,
+            response: Default::default(),
         };
         let json = serde_json::to_value(&resp).unwrap();
         assert!(json.get("description").is_none());
@@ -1195,6 +1202,7 @@ mod tests {
                 request_body_schema: None,
                 request_content_type: None,
                 request_body_required: false,
+                response: Default::default(),
             }],
         };
         let json = serde_json::to_value(&resp).unwrap();

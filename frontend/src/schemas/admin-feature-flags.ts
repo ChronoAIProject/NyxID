@@ -34,7 +34,6 @@ export const adminFeatureFlagSchema = z.object({
   key: z.string(),
   description: z.string(),
   default_enabled: z.boolean(),
-  org_manageable: z.boolean(),
   global_override: z.boolean().nullable(),
   org_overrides: z.array(adminOrgFeatureFlagOverrideSchema),
   user_overrides: z.array(adminUserFeatureFlagOverrideSchema),

@@ -12,6 +12,9 @@ use tokio_stream::wrappers::ReceiverStream;
 use utoipa::ToSchema;
 
 use crate::AppState;
+use crate::downstream_disconnect::{
+    CancelOnDropStream, request_cancellation, until_client_disconnect,
+};
 use crate::errors::{AppError, AppResult};
 use crate::models::service_account::{COLLECTION_NAME as SERVICE_ACCOUNTS, ServiceAccount};
 use crate::models::service_billing::{BillingMetric, PlatformUsage, ResaleUsage};
@@ -50,6 +53,7 @@ fn proxy_error_telemetry_fields(err: &AppError) -> (u16, u32) {
         AppError::NodeProxyTimeout => (504, 8002),
         AppError::NodeCredentialMissing(_) => (502, 8004),
         AppError::WsProxyDownstream(_) => (502, 8005),
+        AppError::ClientDisconnected => (499, 8012),
         AppError::ApiKeyScopeForbidden(_) => (403, 9000),
         AppError::ApiKeyScopeInactive => (403, 9001),
         AppError::ApiKeyScopeNotFound(_) => (404, 9002),
@@ -85,6 +89,17 @@ fn emit_proxy_error_telemetry(
             status,
         },
     );
+}
+
+fn proxy_client_disconnected(service_id: &str) -> AppError {
+    tracing::debug!(
+        service_id,
+        "Cancelled upstream proxy work after downstream client disconnected"
+    );
+    // Deliberately not `Internal`: the client hanging up is not a server fault,
+    // and this response is never written anywhere. Reporting it as a 500 turns
+    // ordinary client cancellation into false error-rate signal.
+    AppError::ClientDisconnected
 }
 
 /// Stable string label for the auth method that issued this proxy request.
@@ -218,6 +233,7 @@ struct PreResolved {
     /// The UserService ID for API key scope checks.
     user_service_id: Option<String>,
     has_server_credential: bool,
+    master_credential: bool,
     /// The user_id that owns the resolved UserService. For personal
     /// resolutions this is the actor; for org-routed resolutions this is
     /// the org's user_id. Used to scope NodeServiceBinding fallback
@@ -588,12 +604,14 @@ async fn proxy_request_inner(
                     node_id: resolved.node_id,
                     user_service_id: Some(resolved.user_service_id),
                     has_server_credential: resolved.has_server_credential,
+                    master_credential: resolved.master_credential,
                     effective_owner_id: resolved
                         .org_routing
                         .as_ref()
                         .map(|r| r.org_user_id.clone())
                         .unwrap_or_else(|| user_id_str.clone()),
                 }),
+                TargetMode::CallerAddressed,
                 resolved_slug,
             )
             .await;
@@ -645,12 +663,14 @@ async fn proxy_request_inner(
                 node_id: resolved.node_id,
                 user_service_id: Some(resolved.user_service_id),
                 has_server_credential: resolved.has_server_credential,
+                master_credential: resolved.master_credential,
                 effective_owner_id: resolved
                     .org_routing
                     .as_ref()
                     .map(|r| r.org_user_id.clone())
                     .unwrap_or_else(|| user_id_str.clone()),
             }),
+            TargetMode::CallerAddressed,
             resolved_slug,
         )
         .await;
@@ -801,12 +821,14 @@ async fn proxy_request_by_slug_inner(
                     node_id: resolved.node_id,
                     user_service_id: Some(resolved.user_service_id),
                     has_server_credential: resolved.has_server_credential,
+                    master_credential: resolved.master_credential,
                     effective_owner_id: resolved
                         .org_routing
                         .as_ref()
                         .map(|r| r.org_user_id.clone())
                         .unwrap_or_else(|| user_id_str.clone()),
                 }),
+                TargetMode::CallerAddressed,
                 resolved_slug,
             )
             .await;
@@ -858,12 +880,14 @@ async fn proxy_request_by_slug_inner(
                 node_id: resolved.node_id,
                 user_service_id: Some(resolved.user_service_id),
                 has_server_credential: resolved.has_server_credential,
+                master_credential: resolved.master_credential,
                 effective_owner_id: resolved
                     .org_routing
                     .as_ref()
                     .map(|r| r.org_user_id.clone())
                     .unwrap_or_else(|| user_id_str.clone()),
             }),
+            TargetMode::CallerAddressed,
             resolved_slug,
         )
         .await;
@@ -935,6 +959,60 @@ pub(crate) async fn execute_proxy(
         path,
         request,
         None,
+        TargetMode::CallerAddressed,
+        resolved_slug,
+    )
+    .await
+}
+
+/// How the proxy target was chosen, which decides whether caller-owned
+/// routing state applies to it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum TargetMode {
+    /// The caller named the service (`/proxy/{id}`, `/proxy/s/{slug}`, LLM
+    /// gateway, MCP). Caller state governs: scoped-token service allowlist,
+    /// personal node pins, personal connection state.
+    CallerAddressed,
+    /// The server chose the service for a platform surface and the caller
+    /// could not have named anything else (assistant chat pass-through).
+    AdminManaged,
+}
+
+/// Execute a proxy request against a **server-chosen** platform service.
+///
+/// Same data plane as [`execute_proxy`] -- identity propagation, delegation
+/// token, approvals, audit, billing, streaming -- with the caller-state
+/// resolution deliberately switched off, because none of it can apply to a
+/// target the caller never named:
+///
+/// - the scoped-token service allowlist is not consulted. Those lists hold
+///   `UserService` ids, so an admin catalog row can never appear in one:
+///   leaving the gate on made every restricted token (every OAuth access
+///   token minted with `resource`/`allowed_service_ids`, e.g. the Aevatar
+///   console's) fail the assistant surface with `api_key_scope_forbidden`,
+///   with no grant a user could add to fix it. This does **not** widen what
+///   the run can reach: the delegation token this path mints still inherits
+///   the caller's restrictions verbatim
+///   (`TokenRestrictionClaims::from_auth_user`), so a restricted caller's
+///   assistant run stays restricted on every callback into NyxID.
+/// - personal node pins and personal connection state are not consulted
+///   (see `proxy_service::resolve_admin_proxy_target`).
+pub(crate) async fn execute_admin_proxy(
+    state: &AppState,
+    auth_user: &AuthUser,
+    service_id: &str,
+    path: &str,
+    request: Request<Body>,
+    resolved_slug: &mut String,
+) -> AppResult<Response> {
+    execute_proxy_inner(
+        state,
+        auth_user,
+        service_id,
+        path,
+        request,
+        None,
+        TargetMode::AdminManaged,
         resolved_slug,
     )
     .await
@@ -1224,8 +1302,14 @@ async fn preflight_proxy_deny_before_resolution(
 /// Inner proxy execution with optional pre-resolved target from UserService path.
 ///
 /// When `pre_resolved` is `Some`, the target and node routing are already known
-/// (from `resolve_proxy_target_from_user_service`). When `None`, falls back to
-/// the original DownstreamService resolution.
+/// (from `resolve_proxy_target_from_user_service`). When `None`, resolution
+/// follows `target_mode`: caller-addressed requests fall back to the original
+/// DownstreamService path, server-chosen platform targets resolve the admin
+/// row alone (see [`execute_admin_proxy`]).
+// One argument over the lint's threshold: every parameter is a distinct
+// security-relevant input to resolution, and bundling them into a struct
+// would only move the same fields behind one more indirection.
+#[allow(clippy::too_many_arguments)]
 async fn execute_proxy_inner(
     state: &AppState,
     auth_user: &AuthUser,
@@ -1233,8 +1317,10 @@ async fn execute_proxy_inner(
     path: &str,
     request: Request<Body>,
     pre_resolved: Option<PreResolved>,
+    target_mode: TargetMode,
     resolved_slug: &mut String,
 ) -> AppResult<Response> {
+    let downstream_cancellation = request_cancellation(&request);
     let billing_egress_permit = enforce_proxy_billing_classification(&request)?;
 
     let user_id_str = auth_user.user_id.to_string();
@@ -1281,6 +1367,7 @@ async fn execute_proxy_inner(
         node_route,
         target,
         has_server_credential,
+        master_credential,
         resolved_user_service_id,
         node_routing_required,
         catalog_service_slug,
@@ -1419,8 +1506,29 @@ async fn execute_proxy_inner(
             node_route,
             pre.target,
             pre.has_server_credential,
+            pre.master_credential,
             pre.user_service_id,
             required,
+            catalog_service_slug,
+        )
+    } else if target_mode == TargetMode::AdminManaged {
+        // Server-chosen platform target: resolve the admin row alone, with
+        // no caller-owned routing state. See `execute_admin_proxy`.
+        let target = proxy_service::resolve_admin_proxy_target(
+            &state.db,
+            &state.encryption_keys,
+            service_id,
+        )
+        .await?;
+        let catalog_service_slug = Some(target.service.slug.clone());
+        let has_server_credential = true;
+        (
+            None,
+            target,
+            has_server_credential,
+            true,
+            None,
+            false,
             catalog_service_slug,
         )
     } else {
@@ -1468,6 +1576,7 @@ async fn execute_proxy_inner(
             node_route,
             target,
             has_server_credential,
+            false,
             resolved_user_service_id,
             node_routing_required,
             catalog_service_slug,
@@ -1500,6 +1609,7 @@ async fn execute_proxy_inner(
         node_route.is_some(),
         agent_override_applied,
         has_server_credential,
+        master_credential,
         &target,
     );
     let is_ws_candidate = is_ws_upgrade_request(&request);
@@ -2413,26 +2523,30 @@ async fn execute_proxy_inner(
         );
 
         state.billing.mark_forwarded(&metered).await?;
-        let mut response = chatgpt_translator::send_to_chatgpt(
-            &translated.body,
-            &bearer_token,
-            is_streaming,
-            is_chat_completions_path,
-            query.as_deref(),
-            Some(llm_usage_service::UsageAuditContext {
-                db: state.db.clone(),
-                user_id: user_id_str.clone(),
-                provider_slug: None,
-                service_id: Some(service_id.to_string()),
-                model,
-                path: path.to_string(),
-                api_key_id: auth_user.api_key_id.clone(),
-                api_key_name: auth_user.api_key_name.clone(),
-            }),
-            Some(usage_complete),
-            billing_egress_permit,
+        let mut response = until_client_disconnect(
+            &downstream_cancellation,
+            chatgpt_translator::send_to_chatgpt(
+                &translated.body,
+                &bearer_token,
+                is_streaming,
+                is_chat_completions_path,
+                query.as_deref(),
+                Some(llm_usage_service::UsageAuditContext {
+                    db: state.db.clone(),
+                    user_id: user_id_str.clone(),
+                    provider_slug: None,
+                    service_id: Some(service_id.to_string()),
+                    model,
+                    path: path.to_string(),
+                    api_key_id: auth_user.api_key_id.clone(),
+                    api_key_name: auth_user.api_key_name.clone(),
+                }),
+                Some(usage_complete),
+                billing_egress_permit,
+            ),
         )
-        .await?;
+        .await
+        .map_err(|_| proxy_client_disconnected(service_id))??;
 
         let status = response.status();
 
@@ -2462,22 +2576,26 @@ async fn execute_proxy_inner(
 
     // Reuse the shared reqwest::Client from AppState for connection pooling.
     state.billing.mark_forwarded(&metered).await?;
-    let downstream_response = proxy_service::forward_request(
-        &state.http_client,
-        &target,
-        reqwest_method,
-        path,
-        query.as_deref(),
-        reqwest_headers,
-        proxy_service::ProxyBody::Buffered(body),
-        identity_headers,
-        delegated,
-        caller_token.as_deref(),
-        &state.token_exchange_cache,
-        &state.cloud_response_cache,
-        billing_egress_permit,
+    let downstream_response = until_client_disconnect(
+        &downstream_cancellation,
+        proxy_service::forward_request(
+            &state.http_client,
+            &target,
+            reqwest_method,
+            path,
+            query.as_deref(),
+            reqwest_headers,
+            proxy_service::ProxyBody::Buffered(body),
+            identity_headers,
+            delegated,
+            caller_token.as_deref(),
+            &state.token_exchange_cache,
+            &state.cloud_response_cache,
+            billing_egress_permit,
+        ),
     )
-    .await?;
+    .await
+    .map_err(|_| proxy_client_disconnected(service_id))??;
 
     // Convert reqwest Response back to axum Response
     let status = StatusCode::from_u16(downstream_response.status().as_u16())
@@ -2538,6 +2656,7 @@ async fn execute_proxy_inner(
             let stream_metered = metered.clone();
             let request_len = request_body_len;
             let resale_metric = billing_ctx.resale.as_ref().map(|spec| spec.metric);
+            let task_cancellation = downstream_cancellation.clone();
 
             tokio::spawn(async move {
                 let mut sse_buffer = String::new();
@@ -2546,8 +2665,39 @@ async fn execute_proxy_inner(
                 let mut response_len: i64 = 0;
 
                 loop {
-                    match tokio::time::timeout(idle_timeout, upstream_stream.next()).await {
-                        Ok(Some(Ok(bytes))) => {
+                    let next = until_client_disconnect(
+                        &task_cancellation,
+                        tokio::time::timeout(idle_timeout, upstream_stream.next()),
+                    )
+                    .await;
+                    match next {
+                        Err(_) => {
+                            drop(upstream_stream);
+                            let usage = usage_accumulator.finalize();
+                            if let Some(usage) = usage.clone() {
+                                llm_usage_service::log_reported_usage_async(
+                                    stream_usage_context.clone(),
+                                    usage,
+                                );
+                            }
+                            let resale = resale_metric.and_then(|metric| {
+                                resale_usage_from_optional_reported(
+                                    metric,
+                                    usage.as_ref(),
+                                    request_len + response_len,
+                                )
+                            });
+                            settle_meter_async(
+                                stream_billing,
+                                stream_metered,
+                                llm_platform_usage(usage.as_ref(), request_len + response_len),
+                                resale,
+                                stream_usage_context.model.clone(),
+                            )
+                            .await;
+                            return;
+                        }
+                        Ok(Ok(Some(Ok(bytes)))) => {
                             response_len += bytes.len() as i64;
                             sse_buffer.push_str(&String::from_utf8_lossy(&bytes));
                             while let Some(event) = parse_sse_event(&mut sse_buffer) {
@@ -2562,6 +2712,7 @@ async fn execute_proxy_inner(
                             }
 
                             if tx.send(Ok(bytes)).await.is_err() {
+                                drop(upstream_stream);
                                 let usage = usage_accumulator.finalize();
                                 if let Some(usage) = usage.clone() {
                                     llm_usage_service::log_reported_usage_async(
@@ -2587,7 +2738,7 @@ async fn execute_proxy_inner(
                                 return;
                             }
                         }
-                        Ok(Some(Err(e))) => {
+                        Ok(Ok(Some(Err(e)))) => {
                             tracing::error!(
                                 service_id = %service_id_owned,
                                 error = %e,
@@ -2623,7 +2774,7 @@ async fn execute_proxy_inner(
                                 .await;
                             return;
                         }
-                        Ok(None) => {
+                        Ok(Ok(None)) => {
                             let usage = usage_accumulator.finalize();
                             if let Some(usage) = usage.clone() {
                                 llm_usage_service::log_reported_usage_async(
@@ -2648,7 +2799,7 @@ async fn execute_proxy_inner(
                             .await;
                             return;
                         }
-                        Err(_) => {
+                        Ok(Err(_)) => {
                             tracing::warn!(
                                 service_id = %service_id_owned,
                                 idle_timeout_secs,
@@ -2682,7 +2833,10 @@ async fn execute_proxy_inner(
                 }
             });
 
-            let body = Body::from_stream(ReceiverStream::new(rx));
+            let body = Body::from_stream(CancelOnDropStream::new(
+                ReceiverStream::new(rx),
+                downstream_cancellation.clone(),
+            ));
             response_builder
                 .body(body)
                 .map_err(|e| AppError::Internal(format!("Failed to build response: {e}")))?
@@ -2691,16 +2845,39 @@ async fn execute_proxy_inner(
             let idle_timeout =
                 std::time::Duration::from_secs(state.config.proxy_stream_idle_timeout_secs);
             let idle_timeout_secs = state.config.proxy_stream_idle_timeout_secs;
+            let is_json_body = downstream_response
+                .headers()
+                .get("content-type")
+                .and_then(|v| v.to_str().ok())
+                .is_some_and(|ct| ct.to_ascii_lowercase().starts_with("application/json"));
             let mut upstream_stream = downstream_response.bytes_stream();
             let stream_billing = state.billing.clone();
             let stream_metered = metered.clone();
             let request_len = request_body_len;
+            // Chunked JSON bodies (no Content-Length) stream through this
+            // branch; capture a bounded copy so LLM services settle with the
+            // provider-reported token count instead of the byte estimate.
+            let stream_usage_context = if is_json_body {
+                usage_context.clone()
+            } else {
+                None
+            };
+            let stream_resale_metric = billing_ctx.resale.as_ref().map(|spec| spec.metric);
             let stream = async_stream::stream! {
                 let mut response_len: i64 = 0;
+                let mut captured: Option<Vec<u8>> =
+                    stream_usage_context.as_ref().map(|_| Vec::new());
                 loop {
                     match tokio::time::timeout(idle_timeout, upstream_stream.next()).await {
                         Ok(Some(Ok(bytes))) => {
                             response_len += bytes.len() as i64;
+                            if let Some(buf) = captured.as_mut() {
+                                if buf.len() + bytes.len() <= USAGE_CAPTURE_MAX_BYTES {
+                                    buf.extend_from_slice(&bytes);
+                                } else {
+                                    captured = None;
+                                }
+                            }
                             yield Ok::<_, std::io::Error>(bytes);
                         }
                         Ok(Some(Err(e))) => {
@@ -2726,26 +2903,50 @@ async fn execute_proxy_inner(
                         }
                     }
                 }
+                let mut reported_usage = None;
+                let mut model = None;
+                if let Some(ctx) = stream_usage_context
+                    && let Some(buf) = captured
+                    && let Ok(json) = serde_json::from_slice::<serde_json::Value>(&buf)
+                    && let Some(usage) = llm_usage_service::extract_reported_usage(&json)
+                {
+                    model = ctx.model.clone();
+                    llm_usage_service::log_reported_usage_async(ctx, usage.clone());
+                    reported_usage = Some(usage);
+                }
+                let resale = stream_resale_metric.and_then(|metric| {
+                    resale_usage_from_optional_reported(
+                        metric,
+                        reported_usage.as_ref(),
+                        request_len + response_len,
+                    )
+                });
                 settle_meter_async(
                     stream_billing,
                     stream_metered,
-                    llm_platform_usage(None, request_len + response_len),
-                    None,
-                    None,
+                    llm_platform_usage(reported_usage.as_ref(), request_len + response_len),
+                    resale,
+                    model,
                 )
                 .await;
             };
-            let body = Body::from_stream(stream);
+            let body = Body::from_stream(CancelOnDropStream::new(
+                stream,
+                downstream_cancellation.clone(),
+            ));
             response_builder
                 .body(body)
                 .map_err(|e| AppError::Internal(format!("Failed to build response: {e}")))?
         }
     } else {
         // Buffer small / error responses so we can log diagnostics.
-        let response_body = downstream_response
-            .bytes()
-            .await
-            .map_err(|e| AppError::Internal(format!("Failed to read downstream response: {e}")))?;
+        let response_body =
+            until_client_disconnect(&downstream_cancellation, downstream_response.bytes())
+                .await
+                .map_err(|_| proxy_client_disconnected(service_id))?
+                .map_err(|e| {
+                    AppError::Internal(format!("Failed to read downstream response: {e}"))
+                })?;
 
         if !status.is_success() {
             let body_preview =
@@ -2882,6 +3083,7 @@ fn final_credential_class(
     node_route_active: bool,
     agent_override_applied: bool,
     has_server_credential: bool,
+    master_credential: bool,
     target: &proxy_service::ProxyTarget,
 ) -> CredentialClass {
     if node_route_active && !has_server_credential {
@@ -2894,7 +3096,14 @@ fn final_credential_class(
         return CredentialClass::AgentOverrideUserOwned;
     }
     if resolved_user_service_id.is_some() {
-        return CredentialClass::UserOwned;
+        // Auto-provisioned UserServices with no user key inject the
+        // catalog master credential; classify by whose key was used,
+        // not by which resolution path matched.
+        return if master_credential {
+            CredentialClass::NyxidManagedMaster
+        } else {
+            CredentialClass::UserOwned
+        };
     }
     if !target.service.requires_user_credential && !target.credential.is_empty() {
         return CredentialClass::NyxidManagedMaster;
@@ -2906,6 +3115,17 @@ fn platform_metric_for_target(
     target: &proxy_service::ProxyTarget,
     is_connection: bool,
 ) -> BillingMetric {
+    // An admin-selected metric on the service's billing config wins;
+    // the slug/transport heuristic is only the fallback, so billing
+    // classification does not depend on service naming conventions.
+    if let Some(metric) = target
+        .service
+        .billing
+        .as_ref()
+        .and_then(|billing| billing.platform_metric)
+    {
+        return metric;
+    }
     if is_connection || target.service.service_type == "ssh" {
         BillingMetric::Bytes
     } else if target.service.slug.starts_with("llm-") {
@@ -3102,6 +3322,19 @@ async fn settle_meter_async(
 /// Threshold below which non-error responses are buffered (so small API
 /// responses keep the existing diagnostic-logging path).
 const STREAM_SIZE_THRESHOLD: u64 = 256 * 1024;
+
+/// Cap on the bounded response copy kept for LLM usage extraction when a
+/// chunked JSON body streams through the passthrough branch. Bodies larger
+/// than this fall back to the byte-based token estimate.
+///
+/// This buffer is a second copy of the body, retained for the lifetime of the
+/// response and multiplied by in-flight LLM request concurrency, so the cap is
+/// what bounds the handler's worst-case footprint. 512 KiB of JSON is on the
+/// order of 100k output tokens in a single non-streaming completion — past what
+/// providers will return in one response — so real bodies stay under it. Going
+/// over is not a billing regression: the fallback byte estimate is what every
+/// one of these responses used before usage capture existed.
+const USAGE_CAPTURE_MAX_BYTES: usize = 512 * 1024;
 
 /// Content types that should always be streamed regardless of size.
 const STREAMING_CONTENT_TYPES: &[&str] = &[
@@ -4485,9 +4718,10 @@ mod tests {
         ALLOWED_FORWARD_HEADER_PREFIXES, ALLOWED_FORWARD_HEADERS, ALLOWED_WS_FORWARD_HEADERS,
         ConnectionUsageStats, WsPassthroughGuard, add_websocket_usage_provenance,
         apply_agent_attribution_headers, auth_kind_label, collect_forward_headers_with_prefixes,
-        compose_pre_resolved_node_ids, enforce_node_route_scope, is_chat_completions_proxy_path,
-        is_codex_transport_path, is_ws_upgrade_request, should_enforce_runtime_approval,
-        validate_range_header, websocket_realtime_usage_enabled, websocket_resale_usage,
+        compose_pre_resolved_node_ids, enforce_node_route_scope, final_credential_class,
+        is_chat_completions_proxy_path, is_codex_transport_path, is_ws_upgrade_request,
+        should_enforce_runtime_approval, validate_range_header, websocket_realtime_usage_enabled,
+        websocket_resale_usage,
     };
     use crate::models::service_billing::{BillingMetric, ServiceBilling};
     use crate::models::usage_meter::CredentialClass;
@@ -4737,6 +4971,8 @@ mod tests {
 
     fn token_resale_metered_context(credential_class: CredentialClass) -> MeteredProxyContext {
         let billing = ServiceBilling {
+            platform_billable: false,
+            platform_metric: None,
             resale_billable: true,
             resale_metric: BillingMetric::Tokens,
             lago_resale_metric_code: Some("resale_tokens".to_string()),
@@ -5355,6 +5591,51 @@ mod tests {
     }
 
     #[test]
+    fn admin_platform_metric_override_beats_the_slug_heuristic() {
+        // No override: a non-llm slug meters requests.
+        let target = make_target("http://localhost:8080");
+        assert_eq!(
+            super::platform_metric_for_target(&target, false),
+            BillingMetric::Requests
+        );
+
+        // Admin override: an arbitrarily named service meters tokens,
+        // including on the WS/connection path.
+        let mut target = make_target("http://localhost:8080");
+        target.service.billing = Some(ServiceBilling {
+            platform_metric: Some(BillingMetric::Tokens),
+            ..Default::default()
+        });
+        assert_eq!(
+            super::platform_metric_for_target(&target, false),
+            BillingMetric::Tokens
+        );
+        assert_eq!(
+            super::platform_metric_for_target(&target, true),
+            BillingMetric::Tokens
+        );
+    }
+
+    #[test]
+    fn user_service_with_master_credential_classifies_as_master() {
+        let mut target = make_target("http://localhost:8080");
+        target.auth_method = "bearer".to_string();
+        target.credential = "master-key".to_string();
+
+        // Auto-provisioned UserService (no user key) injecting the catalog
+        // master credential: the platform's key, not the user's.
+        assert_eq!(
+            final_credential_class(Some("us-1"), false, false, true, true, &target),
+            CredentialClass::NyxidManagedMaster
+        );
+        // A UserService backed by the user's own key stays user-owned.
+        assert_eq!(
+            final_credential_class(Some("us-1"), false, false, true, false, &target),
+            CredentialClass::UserOwned
+        );
+    }
+
+    #[test]
     fn ws_url_converts_http_to_ws() {
         let target = make_target("http://localhost:8080");
         let url = build_downstream_ws_url(&target, "socket", None, &[]).unwrap();
@@ -5717,6 +5998,23 @@ mod tests {
         assert_eq!(
             proxy_error_telemetry_fields(&AppError::WsProxyDownstream("x".into())),
             (502, 8005)
+        );
+    }
+
+    /// Cancelled work must not land in the proxy error rate as a 500 — that is
+    /// what `proxy_client_disconnected` used to do via `AppError::Internal`.
+    #[test]
+    fn proxy_error_telemetry_fields_client_disconnected() {
+        use super::{proxy_client_disconnected, proxy_error_telemetry_fields};
+        use crate::errors::AppError;
+
+        assert!(matches!(
+            proxy_client_disconnected("svc-1"),
+            AppError::ClientDisconnected
+        ));
+        assert_eq!(
+            proxy_error_telemetry_fields(&AppError::ClientDisconnected),
+            (499, 8012)
         );
     }
 
@@ -7432,6 +7730,325 @@ mod proxy_resolution_integration_tests {
         assert!(
             matches!(err, AppError::ApiKeyScopeForbidden(_)),
             "expected scope denial after resolution, got: {err}"
+        );
+        server.abort();
+    }
+
+    /// Seed an admin-managed platform service (the shape the assistant chat
+    /// pass-through targets: internal, no user credential, master/no auth).
+    async fn insert_platform_service(
+        db: &mongodb::Database,
+        slug: &str,
+        base_url: &str,
+    ) -> crate::models::downstream_service::DownstreamService {
+        let mut service = crate::models::downstream_service::test_helpers::dummy_service();
+        service.id = Uuid::new_v4().to_string();
+        service.slug = slug.to_string();
+        service.name = slug.to_string();
+        service.base_url = base_url.to_string();
+        service.service_category = "internal".to_string();
+        service.requires_user_credential = false;
+        db.collection::<crate::models::downstream_service::DownstreamService>(
+            crate::models::downstream_service::COLLECTION_NAME,
+        )
+        .insert_one(service.clone())
+        .await
+        .unwrap();
+        service
+    }
+
+    /// A restricted token's `allowed_service_ids` holds `UserService` ids, so
+    /// an admin catalog row can never be listed in one. Gating the platform
+    /// surface on that list therefore denied every restricted caller with no
+    /// grant that could fix it (observed on prod: OAuth access tokens minted
+    /// with `resource`/`allowed_service_ids` got `api_key_scope_forbidden` on
+    /// every `/api/v1/assistant/*` call). The admin-managed mode drops that
+    /// gate; the caller-addressed mode keeps it.
+    #[tokio::test]
+    async fn admin_managed_target_admits_a_scoped_token_the_caller_path_rejects() {
+        let Some(db) = connect_test_database("proxy_admin_target_scope").await else {
+            eprintln!("skipping proxy integration test: no local MongoDB available");
+            return;
+        };
+
+        let (base_url, server) = start_downstream().await;
+        let user_id = Uuid::new_v4().to_string();
+        db.collection::<crate::models::user::User>(USERS)
+            .insert_one(test_user(&user_id, UserType::Person))
+            .await
+            .unwrap();
+        let service = insert_platform_service(&db, "platform-assistant", &base_url).await;
+
+        let state = test_app_state(db.clone());
+        let mut auth = access_token_auth(&user_id);
+        auth.allow_all_services = false;
+        // A UserService id the caller really was granted — still never the
+        // catalog row the platform resolves.
+        auth.allowed_service_ids = vec![Uuid::new_v4().to_string()];
+
+        let mut caller_slug = String::new();
+        let err = super::execute_proxy(
+            &state,
+            &auth,
+            &service.id,
+            "status",
+            proxy_request("/assistant/conversations"),
+            &mut caller_slug,
+        )
+        .await
+        .expect_err("caller-addressed mode must keep enforcing the allowlist");
+        assert!(
+            matches!(err, AppError::ApiKeyScopeForbidden(_)),
+            "expected scope denial on the caller-addressed path, got: {err}"
+        );
+
+        let mut admin_slug = String::new();
+        let response = super::execute_admin_proxy(
+            &state,
+            &auth,
+            &service.id,
+            "status",
+            proxy_request("/assistant/conversations"),
+            &mut admin_slug,
+        )
+        .await
+        .expect("admin-managed mode must admit a restricted caller");
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(admin_slug, service.slug);
+        server.abort();
+    }
+
+    /// "Works for everyone but me": a user who once connected the same
+    /// catalog service personally and then disconnected it was refused by the
+    /// platform surface they never connected. The admin-managed mode does not
+    /// read the caller's connection row at all.
+    #[tokio::test]
+    async fn admin_managed_target_ignores_a_disconnected_personal_connection() {
+        let Some(db) = connect_test_database("proxy_admin_target_disconnected").await else {
+            eprintln!("skipping proxy integration test: no local MongoDB available");
+            return;
+        };
+
+        let (base_url, server) = start_downstream().await;
+        let user_id = Uuid::new_v4().to_string();
+        db.collection::<crate::models::user::User>(USERS)
+            .insert_one(test_user(&user_id, UserType::Person))
+            .await
+            .unwrap();
+        let service = insert_platform_service(&db, "platform-assistant-2", &base_url).await;
+        let now = chrono::Utc::now();
+        db.collection::<crate::models::user_service_connection::UserServiceConnection>(
+            crate::models::user_service_connection::COLLECTION_NAME,
+        )
+        .insert_one(
+            crate::models::user_service_connection::UserServiceConnection {
+                id: Uuid::new_v4().to_string(),
+                user_id: user_id.clone(),
+                service_id: service.id.clone(),
+                credential_encrypted: None,
+                credential_type: None,
+                credential_label: None,
+                metadata: None,
+                is_active: false,
+                created_at: now,
+                updated_at: now,
+            },
+        )
+        .await
+        .unwrap();
+
+        let state = test_app_state(db.clone());
+        let auth = access_token_auth(&user_id);
+
+        let mut caller_slug = String::new();
+        let err = super::execute_proxy(
+            &state,
+            &auth,
+            &service.id,
+            "status",
+            proxy_request("/assistant/conversations"),
+            &mut caller_slug,
+        )
+        .await
+        .expect_err("caller-addressed mode must keep honoring the disconnect");
+        assert!(
+            matches!(err, AppError::Forbidden(_)),
+            "expected a disconnect denial on the caller-addressed path, got: {err}"
+        );
+
+        let mut admin_slug = String::new();
+        let response = super::execute_admin_proxy(
+            &state,
+            &auth,
+            &service.id,
+            "status",
+            proxy_request("/assistant/conversations"),
+            &mut admin_slug,
+        )
+        .await
+        .expect("admin-managed mode must ignore the personal disconnect");
+        assert_eq!(response.status(), StatusCode::OK);
+        server.abort();
+    }
+
+    /// A `requires_user_credential` row cannot back a platform surface: it is
+    /// a provisioning fault, and must not degrade into a caller-facing error.
+    #[tokio::test]
+    async fn admin_managed_target_rejects_a_user_credential_service_as_internal() {
+        let Some(db) = connect_test_database("proxy_admin_target_user_cred").await else {
+            eprintln!("skipping proxy integration test: no local MongoDB available");
+            return;
+        };
+
+        let (base_url, server) = start_downstream().await;
+        let user_id = Uuid::new_v4().to_string();
+        db.collection::<crate::models::user::User>(USERS)
+            .insert_one(test_user(&user_id, UserType::Person))
+            .await
+            .unwrap();
+        let mut service = insert_platform_service(&db, "platform-needs-cred", &base_url).await;
+        service.requires_user_credential = true;
+        db.collection::<crate::models::downstream_service::DownstreamService>(
+            crate::models::downstream_service::COLLECTION_NAME,
+        )
+        .replace_one(doc! { "_id": &service.id }, &service)
+        .await
+        .unwrap();
+
+        let state = test_app_state(db.clone());
+        let mut admin_slug = String::new();
+        let err = super::execute_admin_proxy(
+            &state,
+            &access_token_auth(&user_id),
+            &service.id,
+            "status",
+            proxy_request("/assistant/conversations"),
+            &mut admin_slug,
+        )
+        .await
+        .expect_err("a user-credential row must not back a platform surface");
+        assert!(
+            matches!(err, AppError::Internal(_)),
+            "expected a provisioning fault, got: {err}"
+        );
+        server.abort();
+    }
+
+    /// End-to-end through the real assistant handler: the caller's typed
+    /// workflow-chat body is rebuilt into the pinned `studio` body, and the
+    /// upstream request carries the injected identity material with NO
+    /// caller `Authorization` — the exact wire shape Aevatar's `/api/chat`
+    /// authenticates (`NyxIdIdentityAssertionAuthentication` forwards the
+    /// Bearer scheme to the identity-assertion handler only when
+    /// `Authorization` is absent, and a malformed one 400s the whole turn).
+    #[tokio::test]
+    async fn workflow_chat_handler_rebuilds_the_body_for_the_admin_service() {
+        use std::sync::Mutex as StdMutex;
+
+        let Some(db) = connect_test_database("assistant_workflow_chat").await else {
+            eprintln!("skipping proxy integration test: no local MongoDB available");
+            return;
+        };
+
+        type Captured = (String, Vec<u8>, axum::http::HeaderMap);
+        let captured: std::sync::Arc<StdMutex<Option<Captured>>> =
+            std::sync::Arc::new(StdMutex::new(None));
+        let sink = captured.clone();
+        let app = Router::new().route(
+            "/{*path}",
+            axum::routing::post(move |request: Request<Body>| {
+                let sink = sink.clone();
+                async move {
+                    let (parts, body) = request.into_parts();
+                    let bytes = axum::body::to_bytes(body, 1024 * 1024).await.unwrap();
+                    *sink.lock().unwrap() =
+                        Some((parts.uri.path().to_string(), bytes.to_vec(), parts.headers));
+                    axum::Json(serde_json::json!({ "ok": true }))
+                }
+            }),
+        );
+        let listener = TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind workflow-chat downstream listener");
+        let addr = listener.local_addr().expect("downstream listener addr");
+        let server = tokio::spawn(async move {
+            axum::serve(listener, app)
+                .await
+                .expect("serve workflow-chat downstream");
+        });
+
+        let user_id = Uuid::new_v4().to_string();
+        db.collection::<crate::models::user::User>(USERS)
+            .insert_one(test_user(&user_id, UserType::Person))
+            .await
+            .unwrap();
+        // The assistant resolves by slug: this must be the `aevatar` row,
+        // configured like the deployed contract (identity JWT + injected
+        // delegation token, no Bearer forwarding).
+        let mut service = crate::models::downstream_service::test_helpers::dummy_service();
+        service.id = Uuid::new_v4().to_string();
+        service.slug = crate::services::assistant_service::AEVATAR_SLUG.to_string();
+        service.name = "Aevatar".to_string();
+        service.base_url = format!("http://{addr}");
+        service.service_category = "internal".to_string();
+        service.requires_user_credential = false;
+        service.identity_propagation_mode = "jwt".to_string();
+        service.identity_jwt_audience = Some("urn:aevatar:api".to_string());
+        service.inject_delegation_token = true;
+        service.delegation_token_scope = "proxy:*".to_string();
+        db.collection::<crate::models::downstream_service::DownstreamService>(
+            crate::models::downstream_service::COLLECTION_NAME,
+        )
+        .insert_one(service.clone())
+        .await
+        .unwrap();
+
+        let state = test_app_state(db.clone());
+        let auth = access_token_auth(&user_id);
+
+        let mut request = Request::builder()
+            .method(Method::POST)
+            .uri("/api/v1/assistant/workflow-chat")
+            .header(axum::http::header::CONTENT_TYPE, "application/json")
+            .body(Body::from(r#"{"prompt":"hi there"}"#))
+            .expect("build workflow chat request");
+        request.extensions_mut().insert(
+            crate::services::billing::route_inventory::BillingRoutePolicy::Metered(
+                crate::services::billing::BillingIngress::Proxy,
+            ),
+        );
+
+        let response =
+            crate::handlers::assistant::workflow_chat(axum::extract::State(state), auth, request)
+                .await
+                .expect("workflow chat handler must forward");
+        assert_eq!(response.status(), StatusCode::OK);
+
+        let (path, body, headers) = captured
+            .lock()
+            .unwrap()
+            .take()
+            .expect("downstream must have received the turn");
+        assert_eq!(path, "/api/chat");
+        let body: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(body["workflow"], "studio");
+        assert_eq!(body["prompt"], "hi there");
+        assert!(body["conversation"]["conversationId"].is_null());
+        assert!(
+            body["commandId"].as_str().is_some_and(|id| !id.is_empty()),
+            "a server-minted commandId must be present"
+        );
+        assert!(
+            headers.get(axum::http::header::AUTHORIZATION).is_none(),
+            "no caller Authorization may reach /api/chat (a malformed one 400s upstream)"
+        );
+        assert!(
+            headers.get("x-nyxid-identity-token").is_some(),
+            "the identity assertion authenticates the request upstream"
+        );
+        assert!(
+            headers.get("x-nyxid-delegation-token").is_some(),
+            "the delegation token is the workflow tool credential"
         );
         server.abort();
     }

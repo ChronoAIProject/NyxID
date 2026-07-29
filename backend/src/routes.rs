@@ -1077,15 +1077,6 @@ pub fn build_router(
                 .delete(handlers::org_role_scopes::clear_role_scope),
         )
         .route(
-            "/{org_id}/feature-flags",
-            get(handlers::org_feature_flags::list_feature_flags),
-        )
-        .route(
-            "/{org_id}/feature-flags/{flag_key}",
-            put(handlers::org_feature_flags::set_feature_flag)
-                .delete(handlers::org_feature_flags::clear_feature_flag),
-        )
-        .route(
             "/{org_id}/invites",
             get(handlers::orgs::list_invites).post(handlers::orgs::create_invite),
         )
@@ -1219,6 +1210,10 @@ pub fn build_router(
 
     let api_v1_public = Router::new()
         .route(
+            "/assistant/actions",
+            get(handlers::assistant_actions::get_assistant_actions),
+        )
+        .route(
             "/runtime-config",
             get(handlers::runtime_config::get_runtime_config),
         )
@@ -1311,6 +1306,26 @@ pub fn build_router(
         .route(
             "/conversations/{conversation_id}/approve",
             post(handlers::assistant::decide_approval),
+        )
+        .route(
+            "/conversations/{conversation_id}/stop",
+            post(handlers::assistant::stop_turn),
+        )
+        .route(
+            "/conversations/{conversation_id}/steer",
+            post(handlers::assistant::steer_turn),
+        )
+        .route(
+            "/conversations/{conversation_id}/state",
+            get(handlers::assistant::get_state),
+        )
+        .route(
+            "/conversations/{conversation_id}/turns/{turn_id}/steps/{step_id}/retry",
+            post(handlers::assistant::retry_step),
+        )
+        .route(
+            "/conversations/{conversation_id}/turns/{turn_id}/steps/{step_id}/skip",
+            post(handlers::assistant::skip_step),
         )
         .route("/completions", post(handlers::assistant::completions))
         .route("/workflow-chat", post(handlers::assistant::workflow_chat))

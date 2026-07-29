@@ -47,11 +47,18 @@ These skills drive the [Aevatar](https://aevatar.ai) control plane over REST, au
 | Skill | Purpose | Source |
 |---|---|---|
 | `aevatar-platform-map` | Entry point: object model, auth, and router to the right companion skill for each step. | [`aevatar-platform-map/`](aevatar-platform-map/) |
+| `aevatar-agent-profile-management` | Create, validate, and publish Agent Profiles with exact skill pins and bounded tool authority. | [`aevatar-agent-profile-management/`](aevatar-agent-profile-management/) |
 | `aevatar-feasibility-advisor` | Decide whether a goal is buildable on Aevatar, and its prerequisites, before building. | [`aevatar-feasibility-advisor/`](aevatar-feasibility-advisor/) |
 | `aevatar-workflow-authoring` | Author, validate, and persist an executable Aevatar workflow from a natural-language request. | [`aevatar-workflow-authoring/`](aevatar-workflow-authoring/) |
 | `aevatar-team-builder` | Create a team and its members, bind implementations, and set the team entry member. | [`aevatar-team-builder/`](aevatar-team-builder/) |
 | `aevatar-service-publisher` | Publish a member/team/workflow as an invocable service, register it with NyxID, and invoke it. | [`aevatar-service-publisher/`](aevatar-service-publisher/) |
-| `aevatar-scheduler` | Create cron schedules that fire an Aevatar service as the scope owner. | [`aevatar-scheduler/`](aevatar-scheduler/) |
+| `aevatar-scheduler` | Route and manage Team-member automation or generic service schedules with honest credential semantics. | [`aevatar-scheduler/`](aevatar-scheduler/) |
+| `aevatar-automation` | Create independent scheduled Ornn skill agents and reminders with durable credential semantics. | [`aevatar-automation/`](aevatar-automation/) |
+| `aevatar-channels-delivery` | Configure channel capabilities, delivery targets, and typed credential failure triage. | [`aevatar-channels-delivery/`](aevatar-channels-delivery/) |
+| `aevatar-codex-exec-node-setup` | Configure and prove the managed-sandbox or private-SSH `codex_exec` target. | [`aevatar-codex-exec-node-setup/`](aevatar-codex-exec-node-setup/) |
+| `aevatar-codex-exec-workflow-sample` | Run harmless workflows that verify either `codex_exec` target end to end. | [`aevatar-codex-exec-workflow-sample/`](aevatar-codex-exec-workflow-sample/) |
+| `firecrawl-via-nyxid` | Run Firecrawl research jobs through a caller-owned NyxID connection. | [`firecrawl-via-nyxid/`](firecrawl-via-nyxid/) |
+| `github-via-nyxid` | Use the GitHub REST API through a caller-owned NyxID connection. | [`github-via-nyxid/`](github-via-nyxid/) |
 | `aevatar-triage` | Triage a failure across Aevatar / NyxID / Ornn and file a code-grounded issue or give usage guidance. | [`aevatar-triage/`](aevatar-triage/) |
 | `fallback-to-calling-agent` | Safety net: hand the original task back to the calling agent when Aevatar can't finish it server-side. | [`fallback-to-calling-agent/`](fallback-to-calling-agent/) |
 

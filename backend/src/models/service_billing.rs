@@ -12,6 +12,16 @@ pub enum BillingMetric {
 
 #[derive(Clone, Debug, Serialize, Deserialize, ToSchema, PartialEq, Eq)]
 pub struct ServiceBilling {
+    /// Opt-in platform-layer charging. Services default to free (metered
+    /// for observability, never charged); admins enable this on the
+    /// platform-operated services that should bill wallet credits.
+    #[serde(default)]
+    pub platform_billable: bool,
+    /// Admin-selected platform metering unit. Unset falls back to the
+    /// heuristic (WS/SSH meter bytes, `llm-` slugs meter tokens,
+    /// everything else meters requests).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub platform_metric: Option<BillingMetric>,
     #[serde(default)]
     pub resale_billable: bool,
     #[serde(default)]
@@ -23,6 +33,8 @@ pub struct ServiceBilling {
 impl Default for ServiceBilling {
     fn default() -> Self {
         Self {
+            platform_billable: false,
+            platform_metric: None,
             resale_billable: false,
             resale_metric: BillingMetric::Tokens,
             lago_resale_metric_code: None,
@@ -101,6 +113,8 @@ mod tests {
     #[test]
     fn active_resale_spec_requires_metric_code() {
         let mut billing = ServiceBilling {
+            platform_billable: false,
+            platform_metric: None,
             resale_billable: true,
             resale_metric: BillingMetric::Requests,
             lago_resale_metric_code: None,

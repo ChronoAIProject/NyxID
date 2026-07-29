@@ -432,6 +432,99 @@ input[type="number"] {
   opacity: 0;
 }
 
+@keyframes halo-spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+@keyframes halo-spin-reverse {
+  to {
+    transform: rotate(-360deg);
+  }
+}
+
+.animate-halo-spin {
+  animation: halo-spin 3s linear infinite;
+}
+
+.animate-halo-spin-reverse {
+  animation: halo-spin-reverse 5s linear infinite;
+}
+
+.assistant-halo {
+  position: absolute;
+  top: 50%;
+  left: 50%;
+  z-index: 0;
+  width: 32px;
+  height: 32px;
+  pointer-events: none;
+  opacity: 0;
+  transform: translate(-50%, -50%);
+  transition: opacity 500ms ease-out;
+}
+
+.assistant-halo--visible {
+  opacity: 0.82;
+  transition-duration: 250ms;
+}
+
+html.theme-light .assistant-halo--visible {
+  opacity: 0.95;
+}
+
+html.theme-dark .assistant-halo--visible {
+  opacity: 0.82;
+}
+
+.assistant-halo-ring {
+  position: absolute;
+  inset: 0;
+  border-radius: 9999px;
+  background: conic-gradient(
+    from 12deg,
+    transparent 0deg 20deg,
+    #60a5fa 52deg,
+    var(--color-nyx-secondary-400) 105deg,
+    transparent 145deg 182deg,
+    #f472b6 218deg,
+    #fb923c 265deg,
+    transparent 310deg 360deg
+  );
+  filter: blur(3px) saturate(1.4);
+  mask-image: radial-gradient(closest-side, transparent 58%, black 78%);
+  -webkit-mask-image: radial-gradient(closest-side, transparent 58%, black 78%);
+}
+
+.assistant-halo-ring-reverse {
+  opacity: 0.7;
+  background: conic-gradient(
+    from 168deg,
+    transparent 0deg 34deg,
+    #fb923c 68deg,
+    #f472b6 112deg,
+    transparent 148deg 212deg,
+    var(--color-nyx-secondary-400) 250deg,
+    #60a5fa 300deg,
+    transparent 338deg 360deg
+  );
+  filter: blur(4px) saturate(1.4);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .animate-halo-spin,
+  .animate-halo-spin-reverse {
+    animation: none;
+  }
+
+  .assistant-halo--visible,
+  html.theme-light .assistant-halo--visible,
+  html.theme-dark .assistant-halo--visible {
+    opacity: 0.5;
+  }
+}
+
 /* ── Card hover glow ── */
 .hover-glow {
   transition:

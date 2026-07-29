@@ -1796,16 +1796,18 @@ Instead of loading all 80+ tools at session startup, NyxID uses a three-phase ap
 Initialize Session
     |
     v
-Load 3 Meta-Tools
+Load Built-In Meta-Tools (core shown)
     |-- nyx__search_tools
     |-- nyx__discover_services
+    |-- nyx__list_connected_services
     |-- nyx__connect_service
+    |-- nyx__call_tool
     |
     v
-LLM Calls Search/Connect
+LLM Calls Connect/Call
     |
     v
-Activate Matching Service Tools
+Activate Invoked Service Tools
     |
     v
 Send notifications/tools/list_changed
@@ -1818,32 +1820,37 @@ Client Auto-Refreshes Tool List
 
 The MCP proxy maintains session-based activation state in `McpSessionStore`:
 
-- **Initial state**: Only 3 meta-tools loaded
-- **On `nyx__search_tools` call**: Matching service tools are activated and added to the session
+- **Initial state**: Built-in meta-tools only; no per-service tools are activated
+- **On `nyx__search_tools` call**: Search all connected tools without activating services
+- **On `nyx__list_connected_services` call**: Enumerate connected services without activating tools
 - **On `nyx__connect_service` call**: That service's tools are activated
-- **On `nyx__discover_services` call**: Browse services only (does NOT activate tools)
+- **On `nyx__call_tool` call**: The invoked tool's service is activated
+- **On `nyx__discover_services` call**: Browse unconnected services only (does NOT activate tools)
 - **Maximum activated services**: 20 per session (bounded to prevent memory issues)
 
 ### Dynamic Tool Loading Flow
 
-1. **Session initialization** -- MCP server creates a new session and loads only the 3 meta-tools
+1. **Session initialization** -- MCP server creates a new session and loads built-in meta-tools only
 2. **Search phase** -- LLM calls `nyx__search_tools` with a query (e.g., "payment processing")
-3. **Activation** -- Server finds matching services, activates their tools, adds to session state
-4. **Notification** -- Server sends `notifications/tools/list_changed` to the client
-5. **Client refresh** -- Client (Cursor, Claude Code) re-fetches the full tool list via `tools/list`
-6. **Tool invocation** -- LLM can now call the newly activated service tools
+3. **Invocation** -- LLM calls `nyx__call_tool` with a search result
+4. **Activation** -- Server activates the invoked tool's service and adds it to session state
+5. **Notification** -- Server sends `notifications/tools/list_changed` to the client
+6. **Client refresh** -- Client (Cursor, Claude Code) re-fetches the full tool list via `tools/list`
+7. **Direct invocation** -- LLM can now call the activated per-service tools directly
 
 ### Meta-Tools
 
 | Tool Name | Purpose | Tool Activation |
 |-----------|---------|-----------------|
-| `nyx__search_tools` | Search and activate service tools by keyword | YES - activates matching services |
-| `nyx__discover_services` | Browse all available services | NO - browse-only |
+| `nyx__search_tools` | Search connected service tools by keyword | NO - search-only |
+| `nyx__discover_services` | Browse services that are not connected | NO - browse-only |
+| `nyx__list_connected_services` | Enumerate connected services and availability | NO - browse-only |
 | `nyx__connect_service` | Connect to a specific service and activate its tools | YES - activates the service |
+| `nyx__call_tool` | Invoke a connected tool by name | YES - activates the invoked service |
 
 ### REST API Compatibility
 
-The REST endpoint `/api/v1/mcp/config` still returns the full list of all tools for backward compatibility with non-MCP clients.
+The REST endpoint `/api/v1/mcp/config` is the stable caller-specific operation catalog for non-MCP consumers. It and MCP `tools/list` share the same canonical loader, including service and node scope filtering. For user-managed rows, the published `service_id` is the exact `UserService.id`; endpoint identities are stable opaque values and are never reconstructed by consumers. The catalog publishes a canonical SHA-256 content digest and typed, non-sensitive diagnostics. Authorization exclusions are non-enumerable.
 
 ---
 

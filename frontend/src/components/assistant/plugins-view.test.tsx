@@ -11,6 +11,7 @@ const mocks = vi.hoisted(() => ({
   useKey: vi.fn(),
   useUpdateKey: vi.fn(),
   useDeleteKey: vi.fn(),
+  useUpdateExternalApiKey: vi.fn(),
 }));
 
 // The full add-service dialog has its own test suite and many hooks; stub it
@@ -36,6 +37,7 @@ vi.mock("@/hooks/use-keys", () => ({
   useKey: mocks.useKey,
   useUpdateKey: mocks.useUpdateKey,
   useDeleteKey: mocks.useDeleteKey,
+  useUpdateExternalApiKey: mocks.useUpdateExternalApiKey,
 }));
 
 vi.mock("@tanstack/react-router", () => ({
@@ -153,6 +155,7 @@ describe("PluginsView", () => {
     mocks.useKey.mockReturnValue({
       data: {
         ...keys[0],
+        api_key_id: "api-key-1",
         status: "active",
         is_active: true,
         proxy_url: "http://localhost:3011/api/v1/proxy/s/openai",
@@ -163,6 +166,10 @@ describe("PluginsView", () => {
     });
     mocks.useUpdateKey.mockReturnValue({ mutate: vi.fn(), isPending: false });
     mocks.useDeleteKey.mockReturnValue({ mutate: vi.fn(), isPending: false });
+    mocks.useUpdateExternalApiKey.mockReturnValue({
+      mutate: vi.fn(),
+      isPending: false,
+    });
   });
 
   it("splits connectors into real connections and unconnected catalog entries", () => {
@@ -180,33 +187,37 @@ describe("PluginsView", () => {
     expect(screen.getByText("oauth")).toBeInTheDocument();
   });
 
-  it("opens the add-service dialog prefilled with the catalog slug on Connect", async () => {
+  it("connects straight from the card, with no intermediate detail step", async () => {
     const user = userEvent.setup();
     render(<PluginsView />);
     expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
-    await user.click(
-      screen.getAllByRole("button", { name: "Connect" })[0] as HTMLElement,
-    );
+    // The card itself is the only CTA — there is no nested Connect button.
+    await user.click(screen.getByRole("button", { name: "Connect GitHub" }));
     const dialog = await screen.findByRole("dialog", { name: "Add service" });
     expect(dialog).toHaveAttribute("data-prefill", "github");
   });
 
-  it("opens the compact manage modal for a single-connection service", async () => {
+  it("connects from the keyboard", async () => {
     const user = userEvent.setup();
     render(<PluginsView />);
-    // Conditional mount: no key detail is fetched before Manage is clicked.
+    screen.getByRole("button", { name: "Connect Stripe" }).focus();
+    await user.keyboard("{Enter}");
+    expect(
+      await screen.findByRole("dialog", { name: "Add service" }),
+    ).toHaveAttribute("data-prefill", "stripe");
+  });
+
+  it("opens the manage modal straight from a connected card", async () => {
+    const user = userEvent.setup();
+    render(<PluginsView />);
+    // Conditional mount: no key detail is fetched before the card is clicked.
     expect(mocks.useKey).not.toHaveBeenCalled();
-    // The OpenAI card (single connection) manages via a button, not a link.
-    const manageButtons = screen.getAllByRole("button", { name: "Manage" });
-    await user.click(manageButtons[0] as HTMLElement);
-    // Modal renders the key's details + the full-settings escape hatch.
+    await user.click(screen.getByRole("button", { name: "Manage OpenAI" }));
     expect(mocks.useKey).toHaveBeenCalledWith("key-1");
     expect(await screen.findByRole("dialog")).toBeInTheDocument();
-    const fullSettings = screen.getByRole("link", {
-      name: /open full settings/i,
-    });
-    expect(fullSettings).toHaveAttribute("data-to", "/keys/$keyId");
-    expect(fullSettings).toHaveAttribute("data-params", '{"keyId":"key-1"}');
+    const advanced = screen.getByRole("link", { name: /advanced settings/i });
+    expect(advanced).toHaveAttribute("data-to", "/keys/$keyId");
+    expect(advanced).toHaveAttribute("data-params", '{"keyId":"key-1"}');
   });
 
   it("toggles the connection active state through the modal", async () => {
@@ -214,7 +225,7 @@ describe("PluginsView", () => {
     mocks.useUpdateKey.mockReturnValue({ mutate, isPending: false });
     const user = userEvent.setup();
     render(<PluginsView />);
-    await user.click(screen.getAllByRole("button", { name: "Manage" })[0] as HTMLElement);
+    await user.click(screen.getByRole("button", { name: "Manage OpenAI" }));
     await user.click(
       await screen.findByRole("switch", { name: /toggle connection enabled/i }),
     );
@@ -224,12 +235,30 @@ describe("PluginsView", () => {
     );
   });
 
+  it("replaces the stored credential from inside the modal", async () => {
+    const mutate = vi.fn();
+    mocks.useUpdateExternalApiKey.mockReturnValue({
+      mutate,
+      isPending: false,
+    });
+    const user = userEvent.setup();
+    render(<PluginsView />);
+    await user.click(screen.getByRole("button", { name: "Manage OpenAI" }));
+    await user.click(await screen.findByRole("button", { name: "Replace" }));
+    await user.type(screen.getByLabelText("New credential"), "sk-new-secret");
+    await user.click(screen.getByRole("button", { name: "Save" }));
+    expect(mutate).toHaveBeenCalledWith(
+      { keyId: "api-key-1", credential: "sk-new-secret" },
+      expect.anything(),
+    );
+  });
+
   it("requires an explicit confirmation before revoking", async () => {
     const mutate = vi.fn();
     mocks.useDeleteKey.mockReturnValue({ mutate, isPending: false });
     const user = userEvent.setup();
     render(<PluginsView />);
-    await user.click(screen.getAllByRole("button", { name: "Manage" })[0] as HTMLElement);
+    await user.click(screen.getByRole("button", { name: "Manage OpenAI" }));
     // First Revoke click only arms the inline confirmation — no delete yet.
     await user.click(await screen.findByRole("button", { name: "Revoke" }));
     expect(mutate).not.toHaveBeenCalled();
@@ -256,16 +285,62 @@ describe("PluginsView", () => {
     });
     const user = userEvent.setup();
     render(<PluginsView />);
-    await user.click(screen.getAllByRole("button", { name: "Manage" })[0] as HTMLElement);
+    await user.click(screen.getByRole("button", { name: "Manage OpenAI" }));
     expect(await screen.findByRole("dialog")).toBeInTheDocument();
     expect(screen.queryByRole("switch")).not.toBeInTheDocument();
     expect(
       screen.queryByRole("button", { name: "Revoke" }),
     ).not.toBeInTheDocument();
-    // The full-settings escape hatch remains.
     expect(
-      screen.getByRole("link", { name: /open full settings/i }),
+      screen.queryByRole("button", { name: "Replace" }),
+    ).not.toBeInTheDocument();
+    // The advanced-settings escape hatch remains.
+    expect(
+      screen.getByRole("link", { name: /advanced settings/i }),
     ).toBeInTheDocument();
+  });
+
+  it("stacks every credential of a multi-connection service in one modal", async () => {
+    mockLoaded({
+      keyRows: [
+        ...keys,
+        {
+          id: "key-3",
+          label: "OpenAI (org)",
+          slug: "openai-2",
+          endpoint_url: "https://api.openai.com/v1",
+          credential_type: "api_key",
+          catalog_service_slug: "openai",
+          service_type: "http",
+        },
+      ] as unknown as readonly KeyInfo[],
+    });
+    // Each panel fetches its own connection.
+    mocks.useKey.mockImplementation((keyId: string) => ({
+      data: {
+        id: keyId,
+        label: keyId === "key-1" ? "OpenAI" : "OpenAI (org)",
+        credential_type: "api_key",
+        status: "active",
+        is_active: true,
+        last_used_at: null,
+        granted_scopes: null,
+      },
+      isLoading: false,
+    }));
+    const user = userEvent.setup();
+    render(<PluginsView />);
+    await user.click(screen.getByRole("button", { name: "Manage OpenAI" }));
+
+    const dialog = await screen.findByRole("dialog");
+    // Both connections are managed in place — no keys-list hand-off.
+    expect(mocks.useKey).toHaveBeenCalledWith("key-1");
+    expect(mocks.useKey).toHaveBeenCalledWith("key-3");
+    expect(within(dialog).getByText("2 connections")).toBeInTheDocument();
+    expect(within(dialog).getAllByRole("switch")).toHaveLength(2);
+    expect(
+      within(dialog).getAllByRole("link", { name: /advanced settings/i }),
+    ).toHaveLength(2);
   });
 
   it("shows loading skeletons while either query is in flight", () => {
@@ -315,7 +390,7 @@ describe("PluginsView", () => {
       screen.getByText(/No connected services yet/),
     ).toBeInTheDocument();
     // All catalog entries are available when nothing is connected.
-    expect(screen.getAllByRole("button", { name: "Connect" })).toHaveLength(3);
+    expect(screen.getAllByRole("button", { name: /^Connect / })).toHaveLength(3);
   });
 
   it("filters the catalog by search", async () => {
@@ -354,75 +429,22 @@ describe("PluginsView", () => {
     expect(screen.getByText("Ornn · v1.2")).toBeInTheDocument();
 
     await user.click(
-      screen.getAllByRole("button", { name: "Install" })[0] as HTMLElement,
+      screen.getAllByRole("button", { name: /^Install / })[0] as HTMLElement,
     );
     expect(screen.getAllByText("Installed")).toHaveLength(2);
   });
 
-  it("expands a card into a detail view with the full description and its action", async () => {
+  it("leaves an installed skill's card inert (no management flow yet)", async () => {
     const user = userEvent.setup();
     render(<PluginsView />);
-    // The grid alone shows no dialog — the detail view is click-driven.
-    expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
-
-    await user.click(screen.getByRole("button", { name: "GitHub details" }));
-    const detail = await screen.findByRole("dialog", { name: /GitHub/ });
-    // Untruncated description + the meta line, inside the dialog itself.
-    expect(within(detail).getByText("Repos, issues, and PRs.")).toBeInTheDocument();
-    expect(within(detail).getByText("oauth")).toBeInTheDocument();
-
-    // The dialog's Connect is the card's own action: same add-service flow.
-    await user.click(within(detail).getByRole("button", { name: "Connect" }));
-    const addDialog = await screen.findByRole("dialog", { name: "Add service" });
-    expect(addDialog).toHaveAttribute("data-prefill", "github");
-    // Acting closes the detail view rather than stacking dialogs on it.
-    expect(screen.queryByRole("dialog", { name: /GitHub/ })).not.toBeInTheDocument();
-  });
-
-  it("shows the Connected badge and manage action in an added card's detail view", async () => {
-    const user = userEvent.setup();
-    render(<PluginsView />);
-    await user.click(screen.getByRole("button", { name: "OpenAI details" }));
-    const detail = await screen.findByRole("dialog", { name: /OpenAI/ });
-    expect(within(detail).getByText("Connected")).toBeInTheDocument();
-
-    // Single-connection service: Manage opens the compact modal, as on the card.
-    await user.click(within(detail).getByRole("button", { name: "Manage" }));
-    expect(mocks.useKey).toHaveBeenCalledWith("key-1");
+    await user.click(screen.getByRole("tab", { name: "Skills" }));
+    // Available skills are clickable; the installed one exposes no action.
     expect(
-      await screen.findByRole("link", { name: /open full settings/i }),
-    ).toBeInTheDocument();
-  });
-
-  it("does not expand the card when its inline action button is clicked", async () => {
-    const user = userEvent.setup();
-    render(<PluginsView />);
-    // The Connect button lives inside the clickable card surface; its click
-    // must not bubble into the expand handler.
-    await user.click(
-      screen.getAllByRole("button", { name: "Connect" })[0] as HTMLElement,
-    );
-    expect(
-      await screen.findByRole("dialog", { name: "Add service" }),
+      screen.getByRole("button", { name: /^Install / }),
     ).toBeInTheDocument();
     expect(
-      screen.queryByRole("dialog", { name: /GitHub/ }),
+      screen.queryByRole("button", { name: /^Manage / }),
     ).not.toBeInTheDocument();
-  });
-
-  it("expands a card from the keyboard", async () => {
-    const user = userEvent.setup();
-    render(<PluginsView />);
-    const card = screen.getByRole("button", { name: "Stripe details" });
-    card.focus();
-    await user.keyboard("{Enter}");
-    expect(await screen.findByRole("dialog", { name: /Stripe/ })).toBeInTheDocument();
-
-    // Space is the other role="button" activation key.
-    await user.keyboard("{Escape}");
-    card.focus();
-    await user.keyboard("[Space]");
-    expect(await screen.findByRole("dialog", { name: /Stripe/ })).toBeInTheDocument();
   });
 
   it("keeps installed skills across unmount and remount", async () => {
@@ -430,7 +452,7 @@ describe("PluginsView", () => {
     const first = render(<PluginsView />);
     await user.click(screen.getByRole("tab", { name: "Skills" }));
     await user.click(
-      screen.getAllByRole("button", { name: "Install" })[0] as HTMLElement,
+      screen.getAllByRole("button", { name: /^Install / })[0] as HTMLElement,
     );
     expect(screen.getAllByText("Installed")).toHaveLength(2);
     first.unmount();

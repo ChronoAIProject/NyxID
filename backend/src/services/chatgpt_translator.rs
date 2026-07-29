@@ -1043,6 +1043,7 @@ async fn send_to_chatgpt_with_api_url(
 
         tokio::spawn(async move {
             let mut received_any_event = false;
+            let mut downstream_closed = false;
             let mut usage_accumulator = ReportedLlmUsageAccumulator::default();
             let mut response_len: i64 = 0;
 
@@ -1053,7 +1054,18 @@ async fn send_to_chatgpt_with_api_url(
                 let mut sse_buf = String::new();
                 let mut byte_stream = response.bytes_stream();
 
-                while let Some(chunk_result) = byte_stream.next().await {
+                loop {
+                    let next = tokio::select! {
+                        biased;
+                        () = tx.closed() => {
+                            downstream_closed = true;
+                            break;
+                        },
+                        next = byte_stream.next() => next,
+                    };
+                    let Some(chunk_result) = next else {
+                        break;
+                    };
                     let chunk_bytes = match chunk_result {
                         Ok(b) => b,
                         Err(e) => {
@@ -1095,6 +1107,7 @@ async fn send_to_chatgpt_with_api_url(
                                 .is_err()
                             {
                                 tracing::debug!("ChatGPT SSE client disconnected");
+                                drop(byte_stream);
                                 finalize_usage_capture(
                                     usage_context.clone(),
                                     usage_complete.clone(),
@@ -1124,7 +1137,18 @@ async fn send_to_chatgpt_with_api_url(
                 let mut sse_buf = String::new();
                 let mut byte_stream = response.bytes_stream();
 
-                while let Some(chunk_result) = byte_stream.next().await {
+                loop {
+                    let next = tokio::select! {
+                        biased;
+                        () = tx.closed() => {
+                            downstream_closed = true;
+                            break;
+                        },
+                        next = byte_stream.next() => next,
+                    };
+                    let Some(chunk_result) = next else {
+                        break;
+                    };
                     let chunk_bytes = match chunk_result {
                         Ok(b) => b,
                         Err(e) => {
@@ -1156,6 +1180,7 @@ async fn send_to_chatgpt_with_api_url(
                         response_len += sse.len() as i64;
                         if tx.send(Ok(bytes::Bytes::from(sse))).await.is_err() {
                             tracing::debug!("ChatGPT SSE client disconnected (passthrough)");
+                            drop(byte_stream);
                             finalize_usage_capture(
                                 usage_context.clone(),
                                 usage_complete.clone(),
@@ -1181,7 +1206,9 @@ async fn send_to_chatgpt_with_api_url(
                 }
             }
 
-            if !received_any_event {
+            if downstream_closed {
+                tracing::debug!("ChatGPT SSE client disconnected");
+            } else if !received_any_event {
                 let error_msg = "ChatGPT backend returned empty SSE stream";
                 tracing::error!("{error_msg}");
 
@@ -1334,6 +1361,9 @@ fn truncate_for_log(s: &str, max: usize) -> &str {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use futures::StreamExt;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    use tokio::time::{Duration, timeout};
 
     // --- Trait method tests ---
 
@@ -2042,6 +2072,128 @@ mod tests {
             with_query,
             "https://chatgpt.com/backend-api/codex/responses?trace=1"
         );
+    }
+
+    #[tokio::test]
+    async fn dropping_active_stream_cancels_upstream_before_usage_finalization() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind ChatGPT test upstream");
+        let upstream_addr = listener
+            .local_addr()
+            .expect("ChatGPT test upstream address");
+        let (send_burst_tx, send_burst_rx) = tokio::sync::oneshot::channel();
+        let (burst_sent_tx, burst_sent_rx) = tokio::sync::oneshot::channel();
+        let (cancelled_tx, cancelled_rx) = tokio::sync::oneshot::channel();
+        let upstream = tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.expect("accept ChatGPT request");
+            let mut request = Vec::new();
+            let mut chunk = [0_u8; 1024];
+            while !request.windows(4).any(|window| window == b"\r\n\r\n") {
+                let read = stream.read(&mut chunk).await.expect("read ChatGPT request");
+                assert!(read > 0, "ChatGPT request closed before headers");
+                request.extend_from_slice(&chunk[..read]);
+            }
+
+            let event = "event: response.output_text.delta\ndata: {\"delta\":\"partial\"}\n\n";
+            let response = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nTransfer-Encoding: chunked\r\n\r\n{:x}\r\n{}\r\n",
+                event.len(),
+                event,
+            );
+            stream
+                .write_all(response.as_bytes())
+                .await
+                .expect("write partial ChatGPT response");
+            stream
+                .flush()
+                .await
+                .expect("flush partial ChatGPT response");
+
+            send_burst_rx.await.expect("request active event burst");
+            let burst_event = "event: response.output_text.delta\ndata: {\"delta\":\"active\"}\n\n";
+            let burst = burst_event.repeat(64);
+            stream
+                .write_all(format!("{:x}\r\n{}\r\n", burst.len(), burst).as_bytes())
+                .await
+                .expect("write active ChatGPT response burst");
+            stream
+                .flush()
+                .await
+                .expect("flush active ChatGPT response burst");
+            burst_sent_tx.send(()).expect("signal active event burst");
+
+            loop {
+                match stream.read(&mut chunk).await {
+                    Ok(0) | Err(_) => break,
+                    Ok(_) => {}
+                }
+            }
+            let _ = cancelled_tx.send(());
+        });
+
+        let finalization_started = std::sync::Arc::new(tokio::sync::Notify::new());
+        let release_finalization = std::sync::Arc::new(tokio::sync::Notify::new());
+        let finalization_finished = std::sync::Arc::new(tokio::sync::Notify::new());
+        let usage_complete: UsageCompleteCallback = {
+            let finalization_started = finalization_started.clone();
+            let release_finalization = release_finalization.clone();
+            let finalization_finished = finalization_finished.clone();
+            std::sync::Arc::new(move |_, _| {
+                let finalization_started = finalization_started.clone();
+                let release_finalization = release_finalization.clone();
+                let finalization_finished = finalization_finished.clone();
+                Box::pin(async move {
+                    finalization_started.notify_one();
+                    release_finalization.notified().await;
+                    finalization_finished.notify_one();
+                })
+            })
+        };
+        let response = send_to_chatgpt_with_api_url(
+            &serde_json::json!({"model": "gpt-5", "input": "test", "stream": true}),
+            "test-bearer",
+            true,
+            false,
+            None,
+            &format!("http://{upstream_addr}/responses"),
+            None,
+            Some(usage_complete),
+        )
+        .await
+        .expect("send ChatGPT request");
+        let mut body = response.into_body().into_data_stream();
+        let first = timeout(Duration::from_secs(1), body.next())
+            .await
+            .expect("ChatGPT response did not produce its first event")
+            .expect("ChatGPT response ended before its first event")
+            .expect("read ChatGPT response event");
+        assert!(
+            first
+                .windows(b"partial".len())
+                .any(|window| window == b"partial"),
+            "ChatGPT response did not forward the upstream event"
+        );
+
+        send_burst_tx.send(()).expect("request active event burst");
+        timeout(Duration::from_secs(1), burst_sent_rx)
+            .await
+            .expect("active ChatGPT response burst was not sent")
+            .expect("active response burst sender dropped");
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        drop(body);
+        timeout(Duration::from_secs(1), finalization_started.notified())
+            .await
+            .expect("usage finalization did not start after downstream cancellation");
+        timeout(Duration::from_secs(1), cancelled_rx)
+            .await
+            .expect("active ChatGPT upstream body remained open during usage finalization")
+            .expect("ChatGPT upstream cancellation sender dropped");
+        release_finalization.notify_one();
+        timeout(Duration::from_secs(1), finalization_finished.notified())
+            .await
+            .expect("usage finalization did not finish after release");
+        upstream.await.expect("ChatGPT test upstream task");
     }
 
     // --- Response translation tests ---

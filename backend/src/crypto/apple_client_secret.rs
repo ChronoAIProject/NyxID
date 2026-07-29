@@ -227,6 +227,7 @@ ci0O2dgc19c2/sLtanU7P2KAzhEo8O0tIc0Dwe/nMqKfue82eGVL3DqM\n\
             lago_api_url: None,
             lago_api_key: None,
             lago_plan_code: "starter".to_string(),
+            lago_payment_provider_code: None,
             lago_webhook_secret: None,
             billing_reconcile_interval_secs: 300,
             billing_rate_cache_ttl_secs: 900,

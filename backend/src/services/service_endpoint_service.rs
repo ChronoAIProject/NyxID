@@ -4,7 +4,10 @@ use mongodb::bson::{self, doc};
 use uuid::Uuid;
 
 use crate::errors::{AppError, AppResult};
-use crate::models::service_endpoint::{COLLECTION_NAME, ServiceEndpoint};
+use crate::models::service_endpoint::{
+    COLLECTION_NAME, OperationResponseContract, ServiceEndpoint,
+};
+use crate::services::content_type::normalize_content_type;
 
 /// Input for creating or upserting a single endpoint.
 pub struct EndpointInput {
@@ -17,6 +20,7 @@ pub struct EndpointInput {
     pub request_content_type: Option<String>,
     pub request_body_required: bool,
     pub response_description: Option<String>,
+    pub response: OperationResponseContract,
 }
 
 /// Fields that can be updated on an existing endpoint.
@@ -30,7 +34,19 @@ pub struct EndpointUpdate {
     pub request_content_type: Option<Option<String>>,
     pub request_body_required: Option<bool>,
     pub response_description: Option<Option<String>>,
+    pub response: Option<OperationResponseContract>,
     pub is_active: Option<bool>,
+}
+
+fn normalize_response(mut response: OperationResponseContract) -> OperationResponseContract {
+    response.content_types = response
+        .content_types
+        .into_iter()
+        .map(|content_type| normalize_content_type(&content_type))
+        .collect();
+    response.content_types.sort_unstable();
+    response.content_types.dedup();
+    response
 }
 
 /// List all active endpoints for a given service.
@@ -67,6 +83,7 @@ pub async fn create_endpoint(
         request_content_type: input.request_content_type,
         request_body_required: input.request_body_required,
         response_description: input.response_description,
+        response: normalize_response(input.response),
         is_active: true,
         created_at: now,
         updated_at: now,
@@ -146,6 +163,12 @@ pub async fn update_endpoint(
             Some(d) => set_doc.insert("response_description", d),
             None => set_doc.insert("response_description", bson::Bson::Null),
         };
+    }
+    if let Some(response) = updates.response {
+        let response = normalize_response(response);
+        let bson_val = bson::to_bson(&response)
+            .map_err(|e| AppError::Internal(format!("BSON serialization error: {e}")))?;
+        set_doc.insert("response", bson_val);
     }
     if let Some(is_active) = updates.is_active {
         set_doc.insert("is_active", is_active);
@@ -240,6 +263,10 @@ pub async fn bulk_upsert_endpoints(
             } else {
                 set_doc.insert("response_description", bson::Bson::Null);
             }
+            let response = normalize_response(input.response);
+            let response_bson = bson::to_bson(&response)
+                .map_err(|e| AppError::Internal(format!("BSON serialization error: {e}")))?;
+            set_doc.insert("response", response_bson);
 
             coll.update_one(doc! { "_id": &existing.id }, doc! { "$set": set_doc })
                 .await?;
@@ -257,6 +284,7 @@ pub async fn bulk_upsert_endpoints(
                 request_content_type: input.request_content_type,
                 request_body_required: input.request_body_required,
                 response_description: input.response_description,
+                response,
                 is_active: true,
                 created_at: existing.created_at,
                 updated_at: now,
@@ -276,6 +304,7 @@ pub async fn bulk_upsert_endpoints(
                 request_content_type: input.request_content_type,
                 request_body_required: input.request_body_required,
                 response_description: input.response_description,
+                response: normalize_response(input.response),
                 is_active: true,
                 created_at: now,
                 updated_at: now,
@@ -320,6 +349,7 @@ mod tests {
             request_content_type: None,
             request_body_required: false,
             response_description: None,
+            response: OperationResponseContract::default(),
         }
     }
 
@@ -392,6 +422,7 @@ mod tests {
                 request_content_type: None,
                 request_body_required: None,
                 response_description: None,
+                response: None,
                 is_active: None,
             },
         )
@@ -429,6 +460,7 @@ mod tests {
                 request_content_type: None,
                 request_body_required: None,
                 response_description: None,
+                response: None,
                 is_active: None,
             },
         )

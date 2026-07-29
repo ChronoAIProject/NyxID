@@ -9,14 +9,16 @@ import {
   assistantTransport,
   resetAssistantTransport,
 } from "@/lib/assistant/transport";
-import type { ConversationHistory } from "@/types/assistant";
+import type { Conversation, ConversationHistory } from "@/types/assistant";
 import {
   assistantKeys,
+  describeHistoryError,
   describeSendFailure,
   describeTransportError,
   useAssistantTurn,
   useCancelTurn,
   useConversation,
+  useCreateConversation,
   useDecideApproval,
   useSendMessage,
   type SentMessage,
@@ -176,6 +178,43 @@ describe("assistant hooks", () => {
     expect(fulfilled).toHaveLength(1);
     expect(rejected).toHaveLength(1);
     expect(String(rejected[0]?.reason)).toMatch(/already active/i);
+
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(2_000);
+    });
+    createSpy.mockRestore();
+    unmount();
+    queryClient.clear();
+  });
+
+  it("shares one conversation between the New chat button and a racing send", async () => {
+    // "New chat" navigates optimistically, so the draft thread accepts a
+    // send while its actor is still being provisioned. The button's create
+    // and the empty-state auto-create must resolve to the SAME actor —
+    // otherwise the message streams into an orphan the sidebar never shows.
+    const { queryClient, Wrapper } = createHarness();
+    const createSpy = vi.spyOn(assistantTransport, "createConversation");
+    const { result, unmount } = renderHook(
+      () => ({
+        create: useCreateConversation(),
+        send: useSendMessage(undefined),
+      }),
+      { wrapper: Wrapper },
+    );
+
+    let created: Conversation | null = null;
+    let sent: SentMessage | null = null;
+    await act(async () => {
+      const createPromise = result.current.create.mutateAsync();
+      const sendPromise = result.current.send.mutateAsync("Sent mid-provision.");
+      await vi.advanceTimersByTimeAsync(0);
+      [created, sent] = await Promise.all([createPromise, sendPromise]);
+    });
+
+    expect(createSpy).toHaveBeenCalledTimes(1);
+    expect((sent as SentMessage | null)?.conversationId).toBe(
+      (created as Conversation | null)?.id,
+    );
 
     await act(async () => {
       await vi.advanceTimersByTimeAsync(2_000);
@@ -408,5 +447,109 @@ describe("describeSendFailure", () => {
       new Error("Aevatar did not return a conversation id."),
     );
     expect(description).toBe("Aevatar did not return a conversation id.");
+  });
+});
+
+describe("a failed transcript read never blocks the send", () => {
+  // The send path warms the cache before and after the stream starts. Those
+  // two reads used to share one `Promise.all`, so a rejected transcript read
+  // took the projection — and the send — down with it, and the stream POST
+  // was never issued. Reading history and sending a message target different
+  // upstream surfaces; one must not gate the other.
+  it("still streams the turn when getHistory rejects", async () => {
+    const { Wrapper } = createHarness();
+    vi.spyOn(assistantTransport, "getHistory").mockRejectedValue(
+      new ApiError(404, {
+        error: "not_found",
+        error_code: -1,
+        message: "Not Found",
+      }),
+    );
+    const sendSpy = vi.spyOn(assistantTransport, "sendMessage");
+    // The file has no global mock reset; spies accumulate across tests.
+    sendSpy.mockClear();
+
+    const { result, unmount } = renderHook(
+      () => useSendMessage("conversation-stripe"),
+      { wrapper: Wrapper },
+    );
+
+    let sent: SentMessage | null = null;
+    await act(async () => {
+      const pending = result.current.mutateAsync("Send me anyway.");
+      await vi.advanceTimersByTimeAsync(0);
+      sent = await pending;
+    });
+
+    expect(sendSpy).toHaveBeenCalledTimes(1);
+    expect((sent as SentMessage | null)?.conversationId).toBe(
+      "conversation-stripe",
+    );
+    unmount();
+  });
+
+  it("still streams from the draft empty state, where the read runs FIRST", async () => {
+    // The exact prod failure: "New chat" -> first send -> the conversation is
+    // allocated, then the cache is warmed, then the stream POST fires. With
+    // the read gating the projection, the flow died between allocate and
+    // stream and no `:stream` request was ever issued.
+    const { Wrapper } = createHarness();
+    vi.spyOn(assistantTransport, "getHistory").mockRejectedValue(
+      new ApiError(404, {
+        error: "not_found",
+        error_code: -1,
+        message: "Not Found",
+      }),
+    );
+    const sendSpy = vi.spyOn(assistantTransport, "sendMessage");
+    // The file has no global mock reset; spies accumulate across tests.
+    sendSpy.mockClear();
+
+    const { result, unmount } = renderHook(() => useSendMessage(undefined), {
+      wrapper: Wrapper,
+    });
+
+    let sent: SentMessage | null = null;
+    await act(async () => {
+      const pending = result.current.mutateAsync("First message.");
+      await vi.advanceTimersByTimeAsync(0);
+      sent = await pending;
+    });
+
+    expect(sendSpy).toHaveBeenCalledTimes(1);
+    expect((sent as SentMessage | null)?.conversationId).toBeTruthy();
+    unmount();
+  });
+});
+
+describe("describeHistoryError", () => {
+  it("does not call a not-yet-materialized transcript a failure", () => {
+    expect(
+      describeHistoryError(
+        new ApiError(404, {
+          error: "not_found",
+          error_code: -1,
+          message: "Not Found",
+        }),
+      ),
+    ).toContain("no saved transcript yet");
+  });
+
+  it("names an auth rejection as the backend's, not the session's", () => {
+    expect(
+      describeHistoryError(
+        new ApiError(403, {
+          error: "forbidden",
+          error_code: -1,
+          message: "Forbidden",
+        }),
+      ),
+    ).toContain("chat backend rejected");
+  });
+
+  it("falls back to a plain message for anything else", () => {
+    expect(describeHistoryError(new Error("boom"))).toContain(
+      "Could not load earlier messages",
+    );
   });
 });

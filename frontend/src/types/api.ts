@@ -239,6 +239,7 @@ export interface DownstreamService {
   readonly repository_url?: string | null;
   readonly issues_url?: string | null;
   readonly capabilities?: ServiceCapabilities | null;
+  readonly billing?: ServiceBilling | null;
   readonly auth_notes?: string | null;
   readonly known_limitations?: string | null;
   readonly required_permissions?: readonly string[] | null;
@@ -330,6 +331,16 @@ export interface ServiceCapabilities {
   readonly supports_streaming: boolean;
 }
 
+export interface ServiceBilling {
+  /** Admin opt-in: only platform_billable services charge wallet credits. */
+  readonly platform_billable?: boolean;
+  /** Admin-selected metering unit; unset falls back to the slug heuristic. */
+  readonly platform_metric?: string;
+  readonly resale_billable?: boolean;
+  readonly resale_metric?: string;
+  readonly lago_resale_metric_code?: string | null;
+}
+
 export interface SshServiceConfig {
   readonly host: string;
   readonly port: number;
@@ -393,6 +404,7 @@ export type UpdateServicePayload =
       readonly repository_url?: string;
       readonly issues_url?: string;
       readonly capabilities?: ServiceCapabilities;
+      readonly billing?: ServiceBilling;
       readonly auth_notes?: string;
       readonly known_limitations?: string;
       readonly required_permissions?: readonly string[];

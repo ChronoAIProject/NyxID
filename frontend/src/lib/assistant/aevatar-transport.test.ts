@@ -10,7 +10,7 @@ import capturedHistory from "@/lib/assistant/__fixtures__/aevatar-chat-history.j
 import capturedStream from "@/lib/assistant/__fixtures__/aevatar-nyxid-chat-stream.sse?raw";
 import { useAuthStore } from "@/stores/auth-store";
 import type { User } from "@/types/api";
-import type { ContentBlock, TurnEvent } from "@/types/assistant";
+import type { ContentBlock, Conversation, TurnEvent } from "@/types/assistant";
 
 const USER_ID = "add69059-bece-4f0e-9559-99cfd10b47eb";
 const CONVERSATION_ID = "nyxid-chat-f8369965a444433f92ec50e67ad8ee52";
@@ -128,10 +128,51 @@ function stubFetch(...routes: FetchRoute[]): ReturnType<typeof vi.fn> {
   return mock;
 }
 
-const routeCreate: FetchRoute = (url, init) =>
-  url === `${ASSISTANT_BASE}/conversations` && init?.method === "POST"
-    ? jsonResponse({ status: "accepted", actorId: CONVERSATION_ID })
-    : undefined;
+// `createConversation` is client-local now (new chats are workflow
+// conversations created server-side by their first turn), so the legacy
+// `nyxid-chat-…` actor conversations these AG-UI tests exercise are seeded
+// the only way they still arrive: through the Chat History index. The
+// helper stubs one list fetch, seeds `CONVERSATION_ID`, then restores the
+// test's own fetch stub and the list-fetch throttle.
+async function seedActorConversation(
+  transport: AevatarAssistantTransport,
+): Promise<Conversation> {
+  const active = globalThis.fetch;
+  vi.stubGlobal("fetch", (input: RequestInfo | URL, init?: RequestInit) => {
+    const url = String(input);
+    if (
+      url === `${ASSISTANT_BASE}/conversations` &&
+      (init?.method ?? "GET") === "GET"
+    ) {
+      return Promise.resolve(
+        jsonResponse({
+          conversations: [
+            {
+              id: CONVERSATION_ID,
+              title: "Seeded conversation",
+              updatedAt: "2026-07-29T00:00:00.000Z",
+            },
+          ],
+        }),
+      );
+    }
+    return active(input, init);
+  });
+  try {
+    // The seed must reach the wire even when the test already listed
+    // within the throttle window.
+    (transport as unknown as { listFetchedAt: number }).listFetchedAt = 0;
+    const conversations = await transport.listConversations();
+    const seeded = conversations.find((c) => c.id === CONVERSATION_ID);
+    if (!seeded) throw new Error("seed conversation did not merge");
+    return seeded;
+  } finally {
+    vi.stubGlobal("fetch", active);
+    // Reset the list throttle so tests that assert list behavior still
+    // reach their own stubs.
+    (transport as unknown as { listFetchedAt: number }).listFetchedAt = 0;
+  }
+}
 
 function routeStream(frames: unknown[]): FetchRoute {
   return (url, init) =>
@@ -140,11 +181,14 @@ function routeStream(frames: unknown[]): FetchRoute {
       : undefined;
 }
 
-function routeHistory(entries: unknown[]): FetchRoute {
+// `body` is the whole transcript response, not just its entries: the reader
+// accepts the legacy flat array and the PR #2923 `{messages, stateVersion}`
+// wrapper, and must reject anything else.
+function routeHistory(body: unknown): FetchRoute {
   return (url, init) =>
     url.startsWith(`${ASSISTANT_BASE}/conversations/`) &&
     (init?.method ?? "GET") === "GET"
-      ? jsonResponse(entries)
+      ? jsonResponse(body)
       : undefined;
 }
 
@@ -176,9 +220,9 @@ afterEach(() => {
 
 describe("AevatarAssistantTransport", () => {
   it("adapts the observed AG-UI stream into the PRD turn-event sequence", async () => {
-    stubFetch(routeCreate, routeStream(OBSERVED_FRAMES));
+    stubFetch(routeStream(OBSERVED_FRAMES));
     const transport = new AevatarAssistantTransport();
-    await transport.createConversation();
+    await seedActorConversation(transport);
 
     const events = await collectTurn(transport, "Say hello in five words.");
 
@@ -212,9 +256,9 @@ describe("AevatarAssistantTransport", () => {
   });
 
   it("serves the streamed transcript from the local mirror during and after the turn", async () => {
-    stubFetch(routeCreate, routeStream(OBSERVED_FRAMES), routeHistory([]));
+    stubFetch(routeStream(OBSERVED_FRAMES), routeHistory([]));
     const transport = new AevatarAssistantTransport();
-    await transport.createConversation();
+    await seedActorConversation(transport);
     await collectTurn(transport, "Say hello in five words.");
 
     // Server history is empty (materialization lag) — the keep-max guard
@@ -318,9 +362,9 @@ describe("AevatarAssistantTransport", () => {
   });
 
   it("uses RUN_STARTED.turnId as the authoritative handle and event identity", async () => {
-    stubFetch(routeCreate, routeStream(OBSERVED_FRAMES));
+    stubFetch(routeStream(OBSERVED_FRAMES));
     const transport = new AevatarAssistantTransport();
-    await transport.createConversation();
+    await seedActorConversation(transport);
 
     const events: TurnEvent[] = [];
     let resolveDone: () => void = () => {};
@@ -394,9 +438,9 @@ describe("AevatarAssistantTransport", () => {
   });
 
   it("keeps a streaming conversation's live title over stale index metadata", async () => {
-    stubFetch(routeCreate, routeStream(OBSERVED_FRAMES));
+    stubFetch(routeStream(OBSERVED_FRAMES));
     const transport = new AevatarAssistantTransport();
-    await transport.createConversation();
+    await seedActorConversation(transport);
     // Start a turn but don't await it, so the conversation is mid-flight.
     const inflight = collectTurn(transport, "Draft the launch note");
 
@@ -410,9 +454,9 @@ describe("AevatarAssistantTransport", () => {
   });
 
   it("rejects a concurrent send while a turn is active", async () => {
-    stubFetch(routeCreate, routeStream(OBSERVED_FRAMES));
+    stubFetch(routeStream(OBSERVED_FRAMES));
     const transport = new AevatarAssistantTransport();
-    await transport.createConversation();
+    await seedActorConversation(transport);
 
     const first = collectTurn(transport, "First message");
     expect(() => {
@@ -423,7 +467,6 @@ describe("AevatarAssistantTransport", () => {
 
   it("maps RUN_ERROR to a failed turn", async () => {
     stubFetch(
-      routeCreate,
       routeStream([
         { type: "RUN_STARTED", turnId: TURN_ID },
         {
@@ -433,7 +476,7 @@ describe("AevatarAssistantTransport", () => {
       ]),
     );
     const transport = new AevatarAssistantTransport();
-    await transport.createConversation();
+    await seedActorConversation(transport);
 
     const events = await collectTurn(transport, "Hello");
 
@@ -450,13 +493,13 @@ describe("AevatarAssistantTransport", () => {
   });
 
   it("fails the turn when the stream endpoint rejects the request", async () => {
-    stubFetch(routeCreate, (url, init) =>
+    stubFetch((url, init) =>
       url.endsWith("/stream") && init?.method === "POST"
         ? jsonResponse({ error: "turn_active" }, 409)
         : undefined,
     );
     const transport = new AevatarAssistantTransport();
-    await transport.createConversation();
+    await seedActorConversation(transport);
 
     const events = await collectTurn(transport, "Hello");
 
@@ -472,7 +515,7 @@ describe("AevatarAssistantTransport", () => {
   it("surfaces the pre-stream error envelope instead of a bare status", async () => {
     // Errors before the SSE stream starts are a JSON `{code, message}`
     // envelope (Chat History contract) — the turn error must carry it.
-    stubFetch(routeCreate, (url, init) =>
+    stubFetch((url, init) =>
       url.endsWith("/stream") && init?.method === "POST"
         ? jsonResponse(
             { code: "UPSTREAM_TIMEOUT", message: "Aevatar timed out." },
@@ -481,7 +524,7 @@ describe("AevatarAssistantTransport", () => {
         : undefined,
     );
     const transport = new AevatarAssistantTransport();
-    await transport.createConversation();
+    await seedActorConversation(transport);
 
     const events = await collectTurn(transport, "Hello");
 
@@ -493,13 +536,13 @@ describe("AevatarAssistantTransport", () => {
   });
 
   it("gives a stream 401 an auth-specific message, not a bare status", async () => {
-    stubFetch(routeCreate, (url, init) =>
+    stubFetch((url, init) =>
       url.endsWith("/stream") && init?.method === "POST"
         ? jsonResponse({ error: "unauthorized" }, 401)
         : undefined,
     );
     const transport = new AevatarAssistantTransport();
-    await transport.createConversation();
+    await seedActorConversation(transport);
 
     const events = await collectTurn(transport, "Hello");
 
@@ -515,11 +558,10 @@ describe("AevatarAssistantTransport", () => {
     // RUN_ERROR. That is not a success (the reference client marks it
     // "closed"); the partial text must still settle into the transcript.
     stubFetch(
-      routeCreate,
       routeStream([OBSERVED_FRAMES[0], OBSERVED_FRAMES[1], OBSERVED_FRAMES[2]]),
     );
     const transport = new AevatarAssistantTransport();
-    await transport.createConversation();
+    await seedActorConversation(transport);
 
     const events = await collectTurn(transport, "Hello");
 
@@ -537,7 +579,7 @@ describe("AevatarAssistantTransport", () => {
   });
 
   it("fails duplicate terminal frames delivered in separate chunks", async () => {
-    stubFetch(routeCreate, (url, init) =>
+    stubFetch((url, init) =>
       url.endsWith("/stream") && init?.method === "POST"
         ? chunkedSseResponse([
             [
@@ -554,7 +596,7 @@ describe("AevatarAssistantTransport", () => {
         : undefined,
     );
     const transport = new AevatarAssistantTransport();
-    await transport.createConversation();
+    await seedActorConversation(transport);
 
     const events = await collectTurn(transport, "Hello");
 
@@ -571,7 +613,7 @@ describe("AevatarAssistantTransport", () => {
       .join("");
     // The capture ends right after the last data line — no blank line.
     const body = `${terminatedFrames}data: ${JSON.stringify({ type: "RUN_FINISHED" })}`;
-    stubFetch(routeCreate, (url, init) =>
+    stubFetch((url, init) =>
       url.endsWith("/stream") && init?.method === "POST"
         ? new Response(body, {
             status: 200,
@@ -580,7 +622,7 @@ describe("AevatarAssistantTransport", () => {
         : undefined,
     );
     const transport = new AevatarAssistantTransport();
-    await transport.createConversation();
+    await seedActorConversation(transport);
 
     const events = await collectTurn(transport, "Hello");
 
@@ -606,7 +648,7 @@ describe("AevatarAssistantTransport", () => {
         );
       },
     });
-    stubFetch(routeCreate, (url, init) =>
+    stubFetch((url, init) =>
       url.endsWith("/stream") && init?.method === "POST"
         ? new Response(openStream, {
             status: 200,
@@ -615,7 +657,7 @@ describe("AevatarAssistantTransport", () => {
         : undefined,
     );
     const transport = new AevatarAssistantTransport();
-    await transport.createConversation();
+    await seedActorConversation(transport);
 
     const events: TurnEvent[] = [];
     const done = new Promise<void>((resolve) => {
@@ -652,6 +694,1032 @@ describe("AevatarAssistantTransport", () => {
     ]);
   });
 
+  it("fires a best-effort server-side stop carrying the turn identity on cancel", async () => {
+    const openStream = new ReadableStream<Uint8Array>({
+      start(controller) {
+        const encoder = new TextEncoder();
+        controller.enqueue(
+          encoder.encode(
+            [
+              `data: ${JSON.stringify(OBSERVED_FRAMES[0])}\n\n`,
+              `data: ${JSON.stringify(OBSERVED_FRAMES[1])}\n\n`,
+              `data: ${JSON.stringify(OBSERVED_FRAMES[2])}\n\n`,
+            ].join(""),
+          ),
+        );
+      },
+    });
+    const stopBodies: Array<Record<string, unknown>> = [];
+    let streamClientRequestId: string | undefined;
+    stubFetch(
+      (url, init) => {
+        if (
+          url === `${ASSISTANT_BASE}/conversations/${CONVERSATION_ID}/stop` &&
+          init?.method === "POST"
+        ) {
+          stopBodies.push(
+            JSON.parse(String(init.body)) as Record<string, unknown>,
+          );
+          return jsonResponse({ status: "accepted" }, 202);
+        }
+        return undefined;
+      },
+      (url, init) => {
+        if (url.endsWith("/stream") && init?.method === "POST") {
+          streamClientRequestId = (
+            JSON.parse(String(init.body)) as { clientRequestId: string }
+          ).clientRequestId;
+          return new Response(openStream, {
+            status: 200,
+            headers: { "Content-Type": "text/event-stream" },
+          });
+        }
+        return undefined;
+      },
+    );
+    const transport = new AevatarAssistantTransport();
+    await seedActorConversation(transport);
+
+    await new Promise<void>((resolve) => {
+      const handle = transport.sendMessage(
+        CONVERSATION_ID,
+        "Hello",
+        (event) => {
+          if (event.event === "turn.completed") resolve();
+          if (event.event === "block.delta") handle.cancel();
+        },
+      );
+    });
+    // The stop POST is fire-and-forget; give its microtask a beat to land.
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    expect(stopBodies).toHaveLength(1);
+    const stop = stopBodies[0];
+    expect(stop?.turnId).toBe(TURN_ID);
+    expect(stop?.expectedStateVersion).toBe(0);
+    // Fresh control identities: neither reuses the turn's clientRequestId.
+    expect(stop?.stopRequestId).toMatch(/^[0-9a-f-]{36}$/);
+    expect(stop?.clientRequestId).toMatch(/^[0-9a-f-]{36}$/);
+    expect(stop?.stopRequestId).not.toBe(stop?.clientRequestId);
+    expect(stop?.clientRequestId).not.toBe(streamClientRequestId);
+  });
+
+  it("sends no server-side stop when the turn is never announced", async () => {
+    // A stream that never sends RUN_STARTED: there is never a turn identity
+    // to address, so no stop can go out. (The reader lingers briefly after
+    // the local settle — PRE_START_STOP_WINDOW_MS — in case the announcing
+    // frame is still in flight; see the next test for that path.)
+    const silentStream = new ReadableStream<Uint8Array>({ start() {} });
+    const fetchMock = stubFetch((url, init) =>
+      url.endsWith("/stream") && init?.method === "POST"
+        ? new Response(silentStream, {
+            status: 200,
+            headers: { "Content-Type": "text/event-stream" },
+          })
+        : undefined,
+    );
+    const transport = new AevatarAssistantTransport();
+    await seedActorConversation(transport);
+
+    await new Promise<void>((resolve) => {
+      const handle = transport.sendMessage(
+        CONVERSATION_ID,
+        "Hello",
+        (event) => {
+          if (event.event === "turn.completed") resolve();
+        },
+      );
+      setTimeout(() => handle.cancel(), 0);
+    });
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    const stopCalls = fetchMock.mock.calls.filter(([input]) =>
+      String(input).endsWith("/stop"),
+    );
+    expect(stopCalls).toHaveLength(0);
+  });
+
+  it("delivers the deferred stop once RUN_STARTED names the turn after a pre-start cancel", async () => {
+    // Aevatar may have accepted the stream even though RUN_STARTED has not
+    // reached the browser yet. Cancel must not discard the only chance to
+    // learn the turnId: the reader stays alive, and the late RUN_STARTED
+    // triggers the stop before the connection drops.
+    let streamController:
+      | ReadableStreamDefaultController<Uint8Array>
+      | undefined;
+    const lateStream = new ReadableStream<Uint8Array>({
+      start(controller) {
+        streamController = controller;
+      },
+    });
+    const stopBodies: Array<Record<string, unknown>> = [];
+    stubFetch(
+      (url, init) => {
+        if (url.endsWith("/stop") && init?.method === "POST") {
+          stopBodies.push(
+            JSON.parse(String(init.body)) as Record<string, unknown>,
+          );
+          return jsonResponse({ status: "accepted" }, 202);
+        }
+        return undefined;
+      },
+      (url, init) =>
+        url.endsWith("/stream") && init?.method === "POST"
+          ? new Response(lateStream, {
+              status: 200,
+              headers: { "Content-Type": "text/event-stream" },
+            })
+          : undefined,
+    );
+    const transport = new AevatarAssistantTransport();
+    await seedActorConversation(transport);
+
+    const events: TurnEvent[] = [];
+    const handle = transport.sendMessage(CONVERSATION_ID, "Hello", (event) =>
+      events.push(event),
+    );
+    await new Promise((resolve) => setTimeout(resolve, 10));
+    handle.cancel();
+
+    // The local turn settles immediately; no stop yet (no turnId).
+    expect(events[events.length - 1]?.event).toBe("turn.completed");
+    expect(stopBodies).toHaveLength(0);
+
+    if (!streamController) throw new Error("stream never started");
+    streamController.enqueue(
+      new TextEncoder().encode(
+        `data: ${JSON.stringify(OBSERVED_FRAMES[0])}\n\n`,
+      ),
+    );
+    await new Promise((resolve) => setTimeout(resolve, 30));
+
+    expect(stopBodies).toHaveLength(1);
+    expect(stopBodies[0]?.turnId).toBe(TURN_ID);
+    expect(stopBodies[0]?.expectedStateVersion).toBe(0);
+  });
+
+  it("fences a follow-up send behind a pre-start cancel until the deferred stop settles", async () => {
+    // The stop request cannot exist until RUN_STARTED names the turn, but a
+    // follow-up send right after a pre-start cancel must already serialize
+    // behind the eventual stop — otherwise it can overtake the fence.
+    let streamController:
+      | ReadableStreamDefaultController<Uint8Array>
+      | undefined;
+    const lateStream = new ReadableStream<Uint8Array>({
+      start(controller) {
+        streamController = controller;
+      },
+    });
+    let stopCalls = 0;
+    let streamCalls = 0;
+    const mock = vi.fn(
+      (input: RequestInfo | URL, init?: RequestInit): Promise<Response> => {
+        const url = String(input);
+        if (
+          url === `${ASSISTANT_BASE}/conversations` &&
+          init?.method === "POST"
+        ) {
+          return Promise.resolve(
+            jsonResponse({ status: "accepted", actorId: CONVERSATION_ID }),
+          );
+        }
+        if (url.endsWith("/stop") && init?.method === "POST") {
+          stopCalls += 1;
+          return Promise.resolve(jsonResponse({ status: "accepted" }, 202));
+        }
+        if (url.endsWith("/stream") && init?.method === "POST") {
+          streamCalls += 1;
+          return Promise.resolve(
+            streamCalls === 1
+              ? new Response(lateStream, {
+                  status: 200,
+                  headers: { "Content-Type": "text/event-stream" },
+                })
+              : sseResponse(OBSERVED_FRAMES),
+          );
+        }
+        return Promise.resolve(
+          jsonResponse(
+            { error: "not_found", error_code: -1, message: "404" },
+            404,
+          ),
+        );
+      },
+    );
+    vi.stubGlobal("fetch", mock);
+    const transport = new AevatarAssistantTransport();
+    await seedActorConversation(transport);
+
+    const handle = transport.sendMessage(CONVERSATION_ID, "First", () => {});
+    await new Promise((resolve) => setTimeout(resolve, 10));
+    handle.cancel(); // pre-start: no RUN_STARTED yet
+
+    const followUp = new Promise<void>((resolve) => {
+      transport.sendMessage(CONVERSATION_ID, "Second", (event) => {
+        if (event.event === "turn.completed") resolve();
+      });
+    });
+    // The fence holds while the first stream has not announced its turn.
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    expect(streamCalls).toBe(1);
+    expect(stopCalls).toBe(0);
+
+    // RUN_STARTED arrives: the deferred stop fires, the fence lifts, and
+    // only then does the follow-up stream go out.
+    if (!streamController) throw new Error("stream never started");
+    streamController.enqueue(
+      new TextEncoder().encode(
+        `data: ${JSON.stringify(OBSERVED_FRAMES[0])}\n\n`,
+      ),
+    );
+    await followUp;
+    expect(stopCalls).toBe(1);
+    expect(streamCalls).toBe(2);
+  });
+
+  it("holds the pre-start fence beyond two seconds (full pre-start window)", async () => {
+    // Regression (codex round 3): an outer 2s race on awaitPendingStop
+    // abandoned the fence before the 5s pre-start window elapsed, letting
+    // a follow-up overtake a RUN_STARTED that arrived between seconds 2
+    // and 5. The fence must hold for the placeholder's full lifetime.
+    let streamController:
+      | ReadableStreamDefaultController<Uint8Array>
+      | undefined;
+    const lateStream = new ReadableStream<Uint8Array>({
+      start(controller) {
+        streamController = controller;
+      },
+    });
+    let stopCalls = 0;
+    let streamCalls = 0;
+    const mock = vi.fn(
+      (input: RequestInfo | URL, init?: RequestInit): Promise<Response> => {
+        const url = String(input);
+        if (
+          url === `${ASSISTANT_BASE}/conversations` &&
+          init?.method === "POST"
+        ) {
+          return Promise.resolve(
+            jsonResponse({ status: "accepted", actorId: CONVERSATION_ID }),
+          );
+        }
+        if (url.endsWith("/stop") && init?.method === "POST") {
+          stopCalls += 1;
+          return Promise.resolve(jsonResponse({ status: "accepted" }, 202));
+        }
+        if (url.endsWith("/stream") && init?.method === "POST") {
+          streamCalls += 1;
+          return Promise.resolve(
+            streamCalls === 1
+              ? new Response(lateStream, {
+                  status: 200,
+                  headers: { "Content-Type": "text/event-stream" },
+                })
+              : sseResponse(OBSERVED_FRAMES),
+          );
+        }
+        return Promise.resolve(
+          jsonResponse(
+            { error: "not_found", error_code: -1, message: "404" },
+            404,
+          ),
+        );
+      },
+    );
+    vi.stubGlobal("fetch", mock);
+    const transport = new AevatarAssistantTransport();
+    await seedActorConversation(transport);
+
+    const handle = transport.sendMessage(CONVERSATION_ID, "First", () => {});
+    await new Promise((resolve) => setTimeout(resolve, 10));
+    handle.cancel(); // pre-start cancel installs the fence
+
+    const followUp = new Promise<void>((resolve) => {
+      transport.sendMessage(CONVERSATION_ID, "Second", (event) => {
+        if (event.event === "turn.completed") resolve();
+      });
+    });
+    // Past the old 2s cliff: the fence must still be holding.
+    await new Promise((resolve) => setTimeout(resolve, 2_300));
+    expect(streamCalls).toBe(1);
+
+    // RUN_STARTED at ~2.4s (inside the 5s window): stop fires, fence
+    // lifts, follow-up proceeds.
+    if (!streamController) throw new Error("stream never started");
+    streamController.enqueue(
+      new TextEncoder().encode(
+        `data: ${JSON.stringify(OBSERVED_FRAMES[0])}\n\n`,
+      ),
+    );
+    await followUp;
+    expect(stopCalls).toBe(1);
+    expect(streamCalls).toBe(2);
+  }, 15_000);
+
+  it("keeps the earlier stop fence when a queued follow-up is cancelled", async () => {
+    // Regression (codex round 4): cancelling a follow-up that is still
+    // QUEUED behind an earlier turn's stop must not install a pre-start
+    // placeholder — that would overwrite the earlier fence and let a third
+    // send overtake the still-pending stop. A never-dispatched run cancels
+    // purely locally.
+    const encoder = new TextEncoder();
+    const firstStream = new ReadableStream<Uint8Array>({
+      start(controller) {
+        controller.enqueue(
+          encoder.encode(
+            [
+              `data: ${JSON.stringify(OBSERVED_FRAMES[0])}\n\n`,
+              `data: ${JSON.stringify(OBSERVED_FRAMES[1])}\n\n`,
+              `data: ${JSON.stringify(OBSERVED_FRAMES[2])}\n\n`,
+            ].join(""),
+          ),
+        );
+      },
+    });
+    let releaseStop: (() => void) | undefined;
+    let stopCalls = 0;
+    let streamCalls = 0;
+    const streamBodies: string[] = [];
+    const mock = vi.fn(
+      (input: RequestInfo | URL, init?: RequestInit): Promise<Response> => {
+        const url = String(input);
+        if (
+          url === `${ASSISTANT_BASE}/conversations` &&
+          init?.method === "POST"
+        ) {
+          return Promise.resolve(
+            jsonResponse({ status: "accepted", actorId: CONVERSATION_ID }),
+          );
+        }
+        if (url.endsWith("/stop") && init?.method === "POST") {
+          stopCalls += 1;
+          return new Promise<Response>((resolve) => {
+            releaseStop = () =>
+              resolve(jsonResponse({ status: "accepted" }, 202));
+          });
+        }
+        if (url.endsWith("/stream") && init?.method === "POST") {
+          streamCalls += 1;
+          streamBodies.push(String(init?.body));
+          return Promise.resolve(
+            streamCalls === 1
+              ? new Response(firstStream, {
+                  status: 200,
+                  headers: { "Content-Type": "text/event-stream" },
+                })
+              : sseResponse(OBSERVED_FRAMES),
+          );
+        }
+        return Promise.resolve(
+          jsonResponse(
+            { error: "not_found", error_code: -1, message: "404" },
+            404,
+          ),
+        );
+      },
+    );
+    vi.stubGlobal("fetch", mock);
+    const transport = new AevatarAssistantTransport();
+    await seedActorConversation(transport);
+
+    // Turn A: streams, gets its turnId, cancelled → stop A held pending.
+    await new Promise<void>((resolve) => {
+      const handle = transport.sendMessage(CONVERSATION_ID, "Turn A", (e) => {
+        if (e.event === "turn.completed") resolve();
+        if (e.event === "block.delta") handle.cancel();
+      });
+    });
+    await new Promise((resolve) => setTimeout(resolve, 10));
+    expect(stopCalls).toBe(1);
+    expect(releaseStop).toBeDefined();
+
+    // Turn B: queued behind stop A (its fetch never dispatches), then
+    // cancelled. Must not touch the fence.
+    const handleB = transport.sendMessage(CONVERSATION_ID, "Turn B", () => {});
+    await new Promise((resolve) => setTimeout(resolve, 10));
+    expect(streamCalls).toBe(1);
+    handleB.cancel();
+    await new Promise((resolve) => setTimeout(resolve, 10));
+
+    // Turn C: must still be fenced by stop A.
+    const completedC = new Promise<void>((resolve) => {
+      transport.sendMessage(CONVERSATION_ID, "Turn C", (e) => {
+        if (e.event === "turn.completed") resolve();
+      });
+    });
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    expect(streamCalls).toBe(1);
+
+    releaseStop?.();
+    await completedC;
+    // B never dispatched; C is the second and only other stream, sent
+    // after the fence lifted.
+    expect(streamCalls).toBe(2);
+    expect(streamBodies[1]).toContain("Turn C");
+    expect(stopCalls).toBe(1);
+  });
+
+  it("rejects sends while a delete is waiting on the stop fence", async () => {
+    // Regression (codex round 5): deleteConversation removed the run
+    // synchronously, so a successor send admitted during its fence wait
+    // could dispatch a stream before the DELETE and recreate the actor.
+    const encoder = new TextEncoder();
+    const firstStream = new ReadableStream<Uint8Array>({
+      start(controller) {
+        controller.enqueue(
+          encoder.encode(
+            [
+              `data: ${JSON.stringify(OBSERVED_FRAMES[0])}\n\n`,
+              `data: ${JSON.stringify(OBSERVED_FRAMES[1])}\n\n`,
+              `data: ${JSON.stringify(OBSERVED_FRAMES[2])}\n\n`,
+            ].join(""),
+          ),
+        );
+      },
+    });
+    let releaseStop: (() => void) | undefined;
+    let deleteCalls = 0;
+    const mock = vi.fn(
+      (input: RequestInfo | URL, init?: RequestInit): Promise<Response> => {
+        const url = String(input);
+        if (
+          url === `${ASSISTANT_BASE}/conversations` &&
+          init?.method === "POST"
+        ) {
+          return Promise.resolve(
+            jsonResponse({ status: "accepted", actorId: CONVERSATION_ID }),
+          );
+        }
+        if (url.endsWith("/stop") && init?.method === "POST") {
+          return new Promise<Response>((resolve) => {
+            releaseStop = () =>
+              resolve(jsonResponse({ status: "accepted" }, 202));
+          });
+        }
+        if (url.endsWith("/stream") && init?.method === "POST") {
+          return Promise.resolve(
+            new Response(firstStream, {
+              status: 200,
+              headers: { "Content-Type": "text/event-stream" },
+            }),
+          );
+        }
+        if (init?.method === "DELETE") {
+          deleteCalls += 1;
+          return Promise.resolve(jsonResponse({}));
+        }
+        return Promise.resolve(
+          jsonResponse(
+            { error: "not_found", error_code: -1, message: "404" },
+            404,
+          ),
+        );
+      },
+    );
+    vi.stubGlobal("fetch", mock);
+    const transport = new AevatarAssistantTransport();
+    await seedActorConversation(transport);
+
+    await new Promise<void>((resolve) => {
+      const handle = transport.sendMessage(CONVERSATION_ID, "Turn A", (e) => {
+        if (e.event === "turn.completed") resolve();
+        if (e.event === "block.delta") handle.cancel();
+      });
+    });
+    await new Promise((resolve) => setTimeout(resolve, 10));
+    expect(releaseStop).toBeDefined();
+
+    const deleting = transport.deleteConversation(CONVERSATION_ID);
+    await new Promise((resolve) => setTimeout(resolve, 10));
+    expect(deleteCalls).toBe(0); // still fenced behind the held stop
+    expect(() =>
+      transport.sendMessage(CONVERSATION_ID, "Sneaky send", () => {}),
+    ).toThrow("This conversation is being deleted.");
+
+    releaseStop?.();
+    await deleting;
+    expect(deleteCalls).toBe(1);
+    // After success the tombstone takes over.
+    expect(() =>
+      transport.sendMessage(CONVERSATION_ID, "After delete", () => {}),
+    ).toThrow("Conversation was not found.");
+  });
+
+  it("guards against re-entrant sends and deletes from the cancellation callback", async () => {
+    // Regression (codex round 7): the delete body ran synchronously before
+    // the reservation was installed, so the cancel's synchronous
+    // `turn.completed` callback could re-enter the transport and slip a
+    // send (or a second DELETE) past both guards.
+    const encoder = new TextEncoder();
+    const openStream = new ReadableStream<Uint8Array>({
+      start(controller) {
+        controller.enqueue(
+          encoder.encode(
+            [
+              `data: ${JSON.stringify(OBSERVED_FRAMES[0])}\n\n`,
+              `data: ${JSON.stringify(OBSERVED_FRAMES[1])}\n\n`,
+              `data: ${JSON.stringify(OBSERVED_FRAMES[2])}\n\n`,
+            ].join(""),
+          ),
+        );
+      },
+    });
+    let deleteCalls = 0;
+    const mock = vi.fn(
+      (input: RequestInfo | URL, init?: RequestInit): Promise<Response> => {
+        const url = String(input);
+        if (
+          url === `${ASSISTANT_BASE}/conversations` &&
+          init?.method === "POST"
+        ) {
+          return Promise.resolve(
+            jsonResponse({ status: "accepted", actorId: CONVERSATION_ID }),
+          );
+        }
+        if (url.endsWith("/stop") && init?.method === "POST") {
+          return Promise.resolve(jsonResponse({ status: "accepted" }, 202));
+        }
+        if (url.endsWith("/stream") && init?.method === "POST") {
+          return Promise.resolve(
+            new Response(openStream, {
+              status: 200,
+              headers: { "Content-Type": "text/event-stream" },
+            }),
+          );
+        }
+        if (init?.method === "DELETE") {
+          deleteCalls += 1;
+          return Promise.resolve(jsonResponse({}));
+        }
+        return Promise.resolve(
+          jsonResponse(
+            { error: "not_found", error_code: -1, message: "404" },
+            404,
+          ),
+        );
+      },
+    );
+    vi.stubGlobal("fetch", mock);
+    const transport = new AevatarAssistantTransport();
+    await seedActorConversation(transport);
+
+    let deleteStarted = false;
+    let reentrantSendError: string | null = null;
+    let reentrantDeleteRan = false;
+    const streaming = new Promise<void>((resolve) => {
+      transport.sendMessage(CONVERSATION_ID, "Turn A", (event) => {
+        if (event.event === "block.delta") resolve();
+        if (event.event === "turn.completed" && deleteStarted) {
+          // Synchronous re-entry from the cancellation callback.
+          try {
+            transport.sendMessage(CONVERSATION_ID, "reentrant", () => {});
+          } catch (error) {
+            reentrantSendError =
+              error instanceof Error ? error.message : String(error);
+          }
+          void transport.deleteConversation(CONVERSATION_ID);
+          reentrantDeleteRan = true;
+        }
+      });
+    });
+    await streaming;
+
+    deleteStarted = true;
+    await transport.deleteConversation(CONVERSATION_ID);
+
+    expect(reentrantDeleteRan).toBe(true);
+    expect(reentrantSendError).toBe("This conversation is being deleted.");
+    // The re-entrant delete coalesced: exactly one DELETE on the wire.
+    expect(deleteCalls).toBe(1);
+  });
+
+  it("aborts a hung DELETE at its own deadline and stays retryable", async () => {
+    // Regression (codex rounds 7-8): the delete carried no deadline, so an
+    // accepted-but-unanswered DELETE pinned the reservation forever and
+    // locked the conversation. Signal-driven: the mock only rejects when
+    // the request's OWN AbortSignal fires, so this fails if the deadline
+    // controller, timer, or signal pass-through is ever removed.
+    vi.useFakeTimers();
+    try {
+      let deleteCalls = 0;
+      const mock = vi.fn(
+        (input: RequestInfo | URL, init?: RequestInit): Promise<Response> => {
+          const url = String(input);
+          if (
+            url === `${ASSISTANT_BASE}/conversations` &&
+            init?.method === "POST"
+          ) {
+            return Promise.resolve(
+              jsonResponse({ status: "accepted", actorId: CONVERSATION_ID }),
+            );
+          }
+          if (init?.method === "DELETE") {
+            deleteCalls += 1;
+            if (deleteCalls === 1) {
+              return new Promise<Response>((_, reject) => {
+                init.signal?.addEventListener("abort", () =>
+                  reject(new DOMException("aborted", "AbortError")),
+                );
+              });
+            }
+            return Promise.resolve(jsonResponse({}));
+          }
+          return Promise.resolve(
+            jsonResponse(
+              { error: "not_found", error_code: -1, message: "404" },
+              404,
+            ),
+          );
+        },
+      );
+      vi.stubGlobal("fetch", mock);
+      const transport = new AevatarAssistantTransport();
+      await seedActorConversation(transport);
+
+      const firstOutcome = transport.deleteConversation(CONVERSATION_ID).then(
+        () => "resolved",
+        () => "rejected",
+      );
+      const secondOutcome = transport.deleteConversation(CONVERSATION_ID).then(
+        () => "resolved",
+        () => "rejected",
+      );
+
+      // Just before the deadline: still one DELETE, still reserved.
+      await vi.advanceTimersByTimeAsync(14_000);
+      expect(deleteCalls).toBe(1);
+      expect(() =>
+        transport.sendMessage(CONVERSATION_ID, "too early", () => {}),
+      ).toThrow("This conversation is being deleted.");
+
+      // Crossing the deadline aborts the request; both coalesced callers
+      // reject and the reservation lifts.
+      await vi.advanceTimersByTimeAsync(1_100);
+      expect(await firstOutcome).toBe("rejected");
+      expect(await secondOutcome).toBe("rejected");
+
+      // Not tombstoned: the retry delete goes through.
+      await transport.deleteConversation(CONVERSATION_ID);
+      expect(deleteCalls).toBe(2);
+      expect(() =>
+        transport.sendMessage(CONVERSATION_ID, "after delete", () => {}),
+      ).toThrow("Conversation was not found.");
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("normalizes numeric index timestamps so multi-row lists sort and sends work", async () => {
+    // Live-stack repro: the chat-history index carries epoch-ms NUMBERS;
+    // with 2+ conversations the sidebar sort called localeCompare on a
+    // number and every send died with "Message not sent". (A one-row list
+    // never invokes the comparator, which is why single-conversation
+    // smoke tests missed it.)
+    stubFetch(
+      (url, init) =>
+        url === `${ASSISTANT_BASE}/conversations` &&
+        (init?.method ?? "GET") === "GET"
+          ? jsonResponse({
+              conversations: [
+                {
+                  id: "conv-old",
+                  title: "Older chat",
+                  createdAt: 1784192889074,
+                  updatedAt: 1784192899074,
+                  messageCount: 2,
+                },
+                {
+                  id: "conv-new",
+                  title: "Newer chat",
+                  createdAt: 1784192989074,
+                  updatedAt: 1784192999074,
+                  messageCount: 4,
+                },
+              ],
+            })
+          : undefined,
+      routeStream(OBSERVED_FRAMES),
+    );
+    const transport = new AevatarAssistantTransport();
+
+    const list = await transport.listConversations();
+    expect(list.map((c) => c.id)).toEqual(["conv-new", "conv-old"]);
+    for (const conversation of list) {
+      expect(typeof conversation.last_message_at).toBe("string");
+      expect(typeof conversation.created_at).toBe("string");
+    }
+
+    // A send with multiple rows in the mirror must still complete.
+    await seedActorConversation(transport);
+    const events = await collectTurn(transport, "Does sending still work?");
+    expect(events[events.length - 1]?.event).toBe("turn.completed");
+  });
+
+  it("coalesces concurrent deletes onto one in-flight operation", async () => {
+    // Regression (codex round 6): a Set-style reservation let an
+    // overlapping delete clear the flag while the other DELETE was still
+    // in flight, re-admitting sends. Concurrent deletes must share one
+    // operation — one DELETE on the wire, both callers settle together.
+    let releaseDelete: (() => void) | undefined;
+    let deleteCalls = 0;
+    const mock = vi.fn(
+      (input: RequestInfo | URL, init?: RequestInit): Promise<Response> => {
+        const url = String(input);
+        if (
+          url === `${ASSISTANT_BASE}/conversations` &&
+          init?.method === "POST"
+        ) {
+          return Promise.resolve(
+            jsonResponse({ status: "accepted", actorId: CONVERSATION_ID }),
+          );
+        }
+        if (init?.method === "DELETE") {
+          deleteCalls += 1;
+          return new Promise<Response>((resolve) => {
+            releaseDelete = () => resolve(jsonResponse({}));
+          });
+        }
+        return Promise.resolve(
+          jsonResponse(
+            { error: "not_found", error_code: -1, message: "404" },
+            404,
+          ),
+        );
+      },
+    );
+    vi.stubGlobal("fetch", mock);
+    const transport = new AevatarAssistantTransport();
+    await seedActorConversation(transport);
+
+    const first = transport.deleteConversation(CONVERSATION_ID);
+    const second = transport.deleteConversation(CONVERSATION_ID);
+    await new Promise((resolve) => setTimeout(resolve, 10));
+    expect(deleteCalls).toBe(1);
+    // While the shared delete is in flight, sends stay rejected.
+    expect(() =>
+      transport.sendMessage(CONVERSATION_ID, "Sneaky send", () => {}),
+    ).toThrow("This conversation is being deleted.");
+
+    releaseDelete?.();
+    await Promise.all([first, second]);
+    expect(deleteCalls).toBe(1);
+    expect(() =>
+      transport.sendMessage(CONVERSATION_ID, "After delete", () => {}),
+    ).toThrow("Conversation was not found.");
+  });
+
+  it("holds an approval decision behind the in-flight stop fence", async () => {
+    // Regression (codex round 5): decideApproval dispatched /approve
+    // without awaiting the conversation's pending stop, so the approval
+    // continuation could overtake a cancelled turn's fence upstream.
+    const encoder = new TextEncoder();
+    const secondStream = new ReadableStream<Uint8Array>({
+      start(controller) {
+        controller.enqueue(
+          encoder.encode(
+            [
+              `data: ${JSON.stringify({ type: "RUN_STARTED", turnId: "turn-2", actorId: CONVERSATION_ID })}\n\n`,
+              `data: ${JSON.stringify(OBSERVED_FRAMES[1])}\n\n`,
+              `data: ${JSON.stringify(OBSERVED_FRAMES[2])}\n\n`,
+            ].join(""),
+          ),
+        );
+      },
+    });
+    let releaseStop: (() => void) | undefined;
+    let approveCalls = 0;
+    let streamCalls = 0;
+    const mock = vi.fn(
+      (input: RequestInfo | URL, init?: RequestInit): Promise<Response> => {
+        const url = String(input);
+        if (
+          url === `${ASSISTANT_BASE}/conversations` &&
+          init?.method === "POST"
+        ) {
+          return Promise.resolve(
+            jsonResponse({ status: "accepted", actorId: CONVERSATION_ID }),
+          );
+        }
+        if (url.endsWith("/stop") && init?.method === "POST") {
+          return new Promise<Response>((resolve) => {
+            releaseStop = () =>
+              resolve(jsonResponse({ status: "accepted" }, 202));
+          });
+        }
+        if (url.endsWith("/approve") && init?.method === "POST") {
+          approveCalls += 1;
+          return Promise.resolve(sseResponse(OBSERVED_FRAMES));
+        }
+        if (url.endsWith("/stream") && init?.method === "POST") {
+          streamCalls += 1;
+          return Promise.resolve(
+            streamCalls === 1
+              ? sseResponse([
+                  { type: "RUN_STARTED", turnId: TURN_ID },
+                  {
+                    type: "TOOL_APPROVAL_REQUEST",
+                    toolApprovalRequest: {
+                      requestId: "req-fence",
+                      toolName: "lark_post",
+                      message: "Post the digest.",
+                    },
+                  },
+                ])
+              : new Response(secondStream, {
+                  status: 200,
+                  headers: { "Content-Type": "text/event-stream" },
+                }),
+          );
+        }
+        return Promise.resolve(
+          jsonResponse(
+            { error: "not_found", error_code: -1, message: "404" },
+            404,
+          ),
+        );
+      },
+    );
+    vi.stubGlobal("fetch", mock);
+    const transport = new AevatarAssistantTransport();
+    await seedActorConversation(transport);
+
+    // Turn 1 parks an actionable approval card at EOF.
+    const turn1 = await collectTurn(transport, "Post the digest");
+    const card = turn1.find(
+      (event) =>
+        event.event === "block.started" && event.block.type === "approval_card",
+    );
+    if (!card || card.event !== "block.started") {
+      throw new Error("approval card never appeared");
+    }
+
+    // Turn 2 streams, gets cancelled mid-delta -> stop held pending.
+    await new Promise<void>((resolve) => {
+      const handle = transport.sendMessage(CONVERSATION_ID, "Turn 2", (e) => {
+        if (e.event === "turn.completed") resolve();
+        if (e.event === "block.delta") handle.cancel();
+      });
+    });
+    await new Promise((resolve) => setTimeout(resolve, 10));
+    expect(releaseStop).toBeDefined();
+
+    // Deciding the old card must wait for turn 2's stop fence.
+    const deciding = transport.decideApproval(
+      CONVERSATION_ID,
+      card.block.block_id,
+      true,
+    );
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    expect(approveCalls).toBe(0);
+
+    releaseStop?.();
+    await deciding;
+    expect(approveCalls).toBe(1);
+  });
+
+  it("serializes a follow-up send behind the in-flight stop", async () => {
+    // The stop fence must commit upstream before the next :stream goes out;
+    // otherwise the follow-up can arrive first and fail with
+    // ACTIVE_TURN_REQUIRES_STEERING. Hold the stop 202 pending and assert
+    // the second send waits for it.
+    const encoder = new TextEncoder();
+    const firstStream = new ReadableStream<Uint8Array>({
+      start(controller) {
+        controller.enqueue(
+          encoder.encode(
+            [
+              `data: ${JSON.stringify(OBSERVED_FRAMES[0])}\n\n`,
+              `data: ${JSON.stringify(OBSERVED_FRAMES[1])}\n\n`,
+              `data: ${JSON.stringify(OBSERVED_FRAMES[2])}\n\n`,
+            ].join(""),
+          ),
+        );
+      },
+    });
+    let releaseStop: (() => void) | undefined;
+    let streamCalls = 0;
+    const mock = vi.fn(
+      (input: RequestInfo | URL, init?: RequestInit): Promise<Response> => {
+        const url = String(input);
+        if (
+          url === `${ASSISTANT_BASE}/conversations` &&
+          init?.method === "POST"
+        ) {
+          return Promise.resolve(
+            jsonResponse({ status: "accepted", actorId: CONVERSATION_ID }),
+          );
+        }
+        if (url.endsWith("/stop") && init?.method === "POST") {
+          return new Promise<Response>((resolve) => {
+            releaseStop = () =>
+              resolve(jsonResponse({ status: "accepted" }, 202));
+          });
+        }
+        if (url.endsWith("/stream") && init?.method === "POST") {
+          streamCalls += 1;
+          return Promise.resolve(
+            streamCalls === 1
+              ? new Response(firstStream, {
+                  status: 200,
+                  headers: { "Content-Type": "text/event-stream" },
+                })
+              : sseResponse(OBSERVED_FRAMES),
+          );
+        }
+        return Promise.resolve(
+          jsonResponse(
+            { error: "not_found", error_code: -1, message: "404" },
+            404,
+          ),
+        );
+      },
+    );
+    vi.stubGlobal("fetch", mock);
+    const transport = new AevatarAssistantTransport();
+    await seedActorConversation(transport);
+
+    await new Promise<void>((resolve) => {
+      const handle = transport.sendMessage(
+        CONVERSATION_ID,
+        "First turn",
+        (event) => {
+          if (event.event === "turn.completed") resolve();
+          if (event.event === "block.delta") handle.cancel();
+        },
+      );
+    });
+    await new Promise((resolve) => setTimeout(resolve, 10));
+    expect(releaseStop).toBeDefined();
+    expect(streamCalls).toBe(1);
+
+    // Follow-up send: must NOT reach /stream while the stop is pending.
+    const followUp = new Promise<void>((resolve) => {
+      transport.sendMessage(CONVERSATION_ID, "Second turn", (event) => {
+        if (event.event === "turn.completed") resolve();
+      });
+    });
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    expect(streamCalls).toBe(1);
+
+    releaseStop?.();
+    await followUp;
+    expect(streamCalls).toBe(2);
+  });
+
+  it("keeps the local cancel settled when the server-side stop fails", async () => {
+    const openStream = new ReadableStream<Uint8Array>({
+      start(controller) {
+        const encoder = new TextEncoder();
+        controller.enqueue(
+          encoder.encode(
+            [
+              `data: ${JSON.stringify(OBSERVED_FRAMES[0])}\n\n`,
+              `data: ${JSON.stringify(OBSERVED_FRAMES[1])}\n\n`,
+              `data: ${JSON.stringify(OBSERVED_FRAMES[2])}\n\n`,
+            ].join(""),
+          ),
+        );
+      },
+    });
+    stubFetch(
+      (url, init) =>
+        url.endsWith("/stop") && init?.method === "POST"
+          ? jsonResponse(
+              { error: "internal", error_code: 1006, message: "boom" },
+              500,
+            )
+          : undefined,
+      (url, init) =>
+        url.endsWith("/stream") && init?.method === "POST"
+          ? new Response(openStream, {
+              status: 200,
+              headers: { "Content-Type": "text/event-stream" },
+            })
+          : undefined,
+    );
+    const transport = new AevatarAssistantTransport();
+    await seedActorConversation(transport);
+
+    const events: TurnEvent[] = [];
+    await new Promise<void>((resolve) => {
+      const handle = transport.sendMessage(
+        CONVERSATION_ID,
+        "Hello",
+        (event) => {
+          events.push(event);
+          if (event.event === "turn.completed") resolve();
+          if (event.event === "block.delta") handle.cancel();
+        },
+      );
+    });
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    const terminal = events[events.length - 1];
+    expect(terminal?.event === "turn.completed" && terminal.status).toBe(
+      "cancelled",
+    );
+  });
+
   it("throws when deciding an approval for an unknown block", async () => {
     stubFetch(routeHistory([]));
     const transport = new AevatarAssistantTransport();
@@ -675,9 +1743,9 @@ describe("AevatarAssistantTransport", () => {
     // transport must not depend on the client-side user at all (PRD
     // decision 4). Regression guard against reintroducing a scope segment.
     useAuthStore.getState().setUser(null);
-    const fetchMock = stubFetch(routeCreate, routeStream(OBSERVED_FRAMES));
+    const fetchMock = stubFetch(routeStream(OBSERVED_FRAMES));
     const transport = new AevatarAssistantTransport();
-    await transport.createConversation();
+    await seedActorConversation(transport);
 
     const events = await collectTurn(transport, "Hello there");
 
@@ -703,9 +1771,9 @@ describe("AevatarAssistantTransport", () => {
       init?.method === "DELETE"
         ? jsonResponse({})
         : undefined;
-    const fetchMock = stubFetch(routeCreate, routeIndex, routeDelete);
+    const fetchMock = stubFetch(routeIndex, routeDelete);
     const transport = new AevatarAssistantTransport();
-    await transport.createConversation();
+    await seedActorConversation(transport);
     expect(await transport.listConversations()).toHaveLength(1);
 
     await transport.deleteConversation(CONVERSATION_ID);
@@ -733,9 +1801,9 @@ describe("AevatarAssistantTransport", () => {
             502,
           )
         : undefined;
-    stubFetch(routeCreate, routeIndex, routeDeleteFailure);
+    stubFetch(routeIndex, routeDeleteFailure);
     const transport = new AevatarAssistantTransport();
-    await transport.createConversation();
+    await seedActorConversation(transport);
 
     await expect(
       transport.deleteConversation(CONVERSATION_ID),
@@ -769,7 +1837,7 @@ describe("AevatarAssistantTransport", () => {
       init?.method === "DELETE"
         ? jsonResponse({})
         : undefined;
-    stubFetch(routeCreate, routeDelete, (url, init) =>
+    stubFetch(routeDelete, (url, init) =>
       url.endsWith("/stream") && init?.method === "POST"
         ? new Response(openStream, {
             status: 200,
@@ -778,7 +1846,7 @@ describe("AevatarAssistantTransport", () => {
         : undefined,
     );
     const transport = new AevatarAssistantTransport();
-    await transport.createConversation();
+    await seedActorConversation(transport);
 
     const events: TurnEvent[] = [];
     let deletion: Promise<void> | null = null;
@@ -832,7 +1900,7 @@ describe("captured production wire shapes", () => {
         controller.close();
       },
     });
-    stubFetch(routeCreate, (url, init) =>
+    stubFetch((url, init) =>
       url.endsWith("/stream") && init?.method === "POST"
         ? new Response(trickle, {
             status: 200,
@@ -841,7 +1909,7 @@ describe("captured production wire shapes", () => {
         : undefined,
     );
     const transport = new AevatarAssistantTransport();
-    await transport.createConversation();
+    await seedActorConversation(transport);
 
     const events = await collectTurn(
       transport,
@@ -891,10 +1959,80 @@ describe("captured production wire shapes", () => {
     );
   });
 
-  it("sends the exact request shape the aevatar stream endpoint requires", async () => {
-    const fetchMock = stubFetch(routeCreate, routeStream(OBSERVED_FRAMES));
+  // Aevatar PR #2923 wrapped the transcript in `{messages, stateVersion}`.
+  // Both shapes must map to the identical transcript, and the wrapper must
+  // not be confused with a body that merely happens to be an object.
+  it("maps the PR #2923 wrapped transcript identically to the legacy array", async () => {
+    stubFetch(routeHistory({ messages: capturedHistory, stateVersion: 7 }));
     const transport = new AevatarAssistantTransport();
-    await transport.createConversation();
+
+    const wrapped = await transport.getHistory(CONVERSATION_ID);
+
+    stubFetch(routeHistory(capturedHistory));
+    const legacy = await new AevatarAssistantTransport().getHistory(
+      CONVERSATION_ID,
+    );
+    expect(wrapped.messages).toEqual(legacy.messages);
+    expect(wrapped.conversation.title).toBe(legacy.conversation.title);
+  });
+
+  it.each([
+    ["with a stateVersion", { messages: [], stateVersion: 0 }],
+    // Acceptance is keyed ONLY on array-valued `messages`. `stateVersion` has
+    // zero consumers on the `:stream` transport, so requiring it would turn a
+    // field we never read into an outage.
+    ["without a stateVersion", { messages: [] }],
+  ])(
+    "treats an empty wrapped transcript %s as a valid empty conversation",
+    async (_label, body) => {
+      // The contract's "empty is a real answer" rule (deleted / not yet
+      // materialized / zero turns) survives the wrapper — it must not be
+      // mistaken for a shape violation.
+      stubFetch(routeHistory(body));
+      const transport = new AevatarAssistantTransport();
+
+      const history = await transport.getHistory(CONVERSATION_ID);
+
+      expect(history.messages).toEqual([]);
+    },
+  );
+
+  it.each([
+    ["no messages field", {}],
+    ["a null messages field", { messages: null }],
+    ["a non-array messages field", { messages: { "0": {} } }],
+    ["a bare string", "nyxid-chat-f836"],
+  ])(
+    "surfaces a transcript response with %s instead of rendering it empty",
+    async (_label, body) => {
+      // The regression this whole change exists for: an unrecognized body
+      // must NOT be laundered into "this chat has no messages". The index
+      // has already merged the conversation in (mirror present but empty),
+      // which is exactly the state the old catch-all fallback dressed up as
+      // a successful empty read.
+      stubFetch(
+        (url, init) =>
+          url === `${ASSISTANT_BASE}/conversations` &&
+          (init?.method ?? "GET") === "GET"
+            ? jsonResponse({
+                conversations: [{ id: CONVERSATION_ID, title: "Server title" }],
+              })
+            : undefined,
+        routeHistory(body),
+      );
+      const transport = new AevatarAssistantTransport();
+      await transport.listConversations();
+
+      await expect(transport.getHistory(CONVERSATION_ID)).rejects.toThrow(
+        /did not match the expected shape/,
+      );
+    },
+  );
+
+  it("sends the exact request shape the aevatar stream endpoint requires", async () => {
+    const fetchMock = stubFetch(routeStream(OBSERVED_FRAMES));
+    const transport = new AevatarAssistantTransport();
+    await seedActorConversation(transport);
 
     await collectTurn(transport, "Hello there");
 
@@ -929,12 +2067,16 @@ describe("captured production wire shapes", () => {
     expect(body.clientRequestId).toMatch(
       /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/,
     );
+    expect(Object.keys(body).sort()).toEqual([
+      "clientRequestId",
+      "prompt",
+      "type",
+    ]);
     expect(body.sessionId).toBeUndefined();
   });
 
   it("uses a new clientRequestId for each logical turn across reprojection", async () => {
     const fetchMock = stubFetch(
-      routeCreate,
       routeStream(OBSERVED_FRAMES),
       (url, init) =>
         url === `${ASSISTANT_BASE}/conversations` &&
@@ -966,7 +2108,7 @@ describe("captured production wire shapes", () => {
       ]),
     );
     const transport = new AevatarAssistantTransport();
-    await transport.createConversation();
+    await seedActorConversation(transport);
 
     await collectTurn(transport, "First turn");
     // Post-turn reprojection: server history (equal length) replaces the
@@ -1011,7 +2153,7 @@ describe("captured production wire shapes", () => {
     );
     vi.stubGlobal("fetch", fetchMock);
     const transport = new AevatarAssistantTransport();
-    await transport.createConversation();
+    await seedActorConversation(transport);
 
     const events = await collectTurn(transport, "Retry this delivery");
 
@@ -1025,18 +2167,26 @@ describe("captured production wire shapes", () => {
       .map(
         ([, init]) =>
           JSON.parse(String(init?.body)) as {
+            prompt: string;
             clientRequestId: string;
+            type: string;
             sessionId?: string;
           },
       );
     expect(bodies).toHaveLength(2);
     expect(bodies[0]?.clientRequestId).toBe(bodies[1]?.clientRequestId);
+    expect(bodies[0]).toEqual({
+      prompt: "Retry this delivery",
+      clientRequestId: bodies[0]?.clientRequestId,
+      type: "text",
+    });
+    expect(bodies[1]).toEqual(bodies[0]);
     expect(bodies[0]?.sessionId).toBeUndefined();
   });
 
   it("retries a successful stream response that has no body", async () => {
     let streamAttempts = 0;
-    const fetchMock = stubFetch(routeCreate, (url, init) => {
+    const fetchMock = stubFetch((url, init) => {
       if (!url.endsWith("/stream") || init?.method !== "POST") return undefined;
       streamAttempts += 1;
       return streamAttempts === 1
@@ -1047,7 +2197,7 @@ describe("captured production wire shapes", () => {
         : sseResponse(OBSERVED_FRAMES);
     });
     const transport = new AevatarAssistantTransport();
-    await transport.createConversation();
+    await seedActorConversation(transport);
 
     const events = await collectTurn(transport, "Retry the empty delivery");
 
@@ -1100,7 +2250,6 @@ describe("live AG-UI frame taxonomy", () => {
 
   it("maps TOOL_CALL_START/END onto a run step ledger", async () => {
     stubFetch(
-      routeCreate,
       routeStream([
         { type: "RUN_STARTED", turnId: TURN_ID, actorId: CONVERSATION_ID },
         {
@@ -1119,7 +2268,7 @@ describe("live AG-UI frame taxonomy", () => {
       ]),
     );
     const transport = new AevatarAssistantTransport();
-    await transport.createConversation();
+    await seedActorConversation(transport);
 
     const events = await collectTurn(transport, "Search skills");
 
@@ -1165,7 +2314,6 @@ describe("live AG-UI frame taxonomy", () => {
 
   it("keeps policy-denied tool failures ordinary without a connect card", async () => {
     stubFetch(
-      routeCreate,
       routeStream([
         { type: "RUN_STARTED", turnId: TURN_ID },
         {
@@ -1189,7 +2337,7 @@ describe("live AG-UI frame taxonomy", () => {
       ]),
     );
     const transport = new AevatarAssistantTransport();
-    await transport.createConversation();
+    await seedActorConversation(transport);
 
     const events = await collectTurn(transport, "Open a PR");
 
@@ -1209,7 +2357,6 @@ describe("live AG-UI frame taxonomy", () => {
 
   it("ignores generic and unclassified authorization signals", async () => {
     stubFetch(
-      routeCreate,
       routeStream([
         { type: "RUN_STARTED", turnId: TURN_ID },
         {
@@ -1238,7 +2385,7 @@ describe("live AG-UI frame taxonomy", () => {
       ]),
     );
     const transport = new AevatarAssistantTransport();
-    await transport.createConversation();
+    await seedActorConversation(transport);
 
     const events = await collectTurn(transport, "Summarize PRs");
 
@@ -1264,7 +2411,6 @@ describe("live AG-UI frame taxonomy", () => {
       },
     };
     stubFetch(
-      routeCreate,
       routeStream([
         { type: "RUN_STARTED", turnId: TURN_ID },
         authorizationFrame,
@@ -1277,7 +2423,7 @@ describe("live AG-UI frame taxonomy", () => {
       ]),
     );
     const transport = new AevatarAssistantTransport();
-    await transport.createConversation();
+    await seedActorConversation(transport);
 
     const events = await collectTurn(transport, "Summarize my PRs");
 
@@ -1305,7 +2451,6 @@ describe("live AG-UI frame taxonomy", () => {
 
   it("maps a genuinely disconnected service by its canonical slug", async () => {
     stubFetch(
-      routeCreate,
       routeStream([
         { type: "RUN_STARTED", turnId: TURN_ID },
         {
@@ -1327,7 +2472,7 @@ describe("live AG-UI frame taxonomy", () => {
       ]),
     );
     const transport = new AevatarAssistantTransport();
-    await transport.createConversation();
+    await seedActorConversation(transport);
 
     const events = await collectTurn(transport, "Post to Lark");
 
@@ -1347,7 +2492,7 @@ describe("live AG-UI frame taxonomy", () => {
 
   it("starts a new logical turn after a blocked delivery", async () => {
     let delivery = 0;
-    const fetchMock = stubFetch(routeCreate, (url, init) => {
+    const fetchMock = stubFetch((url, init) => {
       if (!url.endsWith("/stream") || init?.method !== "POST") return undefined;
       delivery += 1;
       return delivery === 1
@@ -1376,7 +2521,7 @@ describe("live AG-UI frame taxonomy", () => {
           ]);
     });
     const transport = new AevatarAssistantTransport();
-    await transport.createConversation();
+    await seedActorConversation(transport);
 
     const blocked = await collectTurn(transport, "Read a private repository");
     const completed = await collectTurn(transport, "Continue after reconnect");
@@ -1401,7 +2546,6 @@ describe("live AG-UI frame taxonomy", () => {
     // The upstream may close the idle stream while the human gate is open
     // (PRD §3.4); that is a pause, not a truncated run.
     stubFetch(
-      routeCreate,
       routeStream([
         { type: "RUN_STARTED", turnId: TURN_ID },
         {
@@ -1415,7 +2559,7 @@ describe("live AG-UI frame taxonomy", () => {
       ]),
     );
     const transport = new AevatarAssistantTransport();
-    await transport.createConversation();
+    await seedActorConversation(transport);
 
     const events = await collectTurn(transport, "Post the digest");
 
@@ -1450,7 +2594,6 @@ describe("live AG-UI frame taxonomy", () => {
 
   it("streams the approve endpoint's SSE continuation as a follow-on turn", async () => {
     const fetchMock = stubFetch(
-      routeCreate,
       routeStream([
         { type: "RUN_STARTED", turnId: TURN_ID },
         {
@@ -1476,7 +2619,7 @@ describe("live AG-UI frame taxonomy", () => {
       routeHistory([]),
     );
     const transport = new AevatarAssistantTransport();
-    await transport.createConversation();
+    await seedActorConversation(transport);
     const firstTurn = await collectTurn(transport, "Post the digest");
     const lastFirstCursor = firstTurn[firstTurn.length - 1]?.cursor ?? 0;
     const history = await transport.getHistory(CONVERSATION_ID);
@@ -1538,7 +2681,6 @@ describe("live AG-UI frame taxonomy", () => {
 
   it("fails closed when an approval continuation ends without a terminal frame", async () => {
     stubFetch(
-      routeCreate,
       routeStream([
         { type: "RUN_STARTED", turnId: TURN_ID },
         {
@@ -1562,7 +2704,7 @@ describe("live AG-UI frame taxonomy", () => {
       routeHistory([]),
     );
     const transport = new AevatarAssistantTransport();
-    await transport.createConversation();
+    await seedActorConversation(transport);
     await collectTurn(transport, "Run an approved action");
     const history = await transport.getHistory(CONVERSATION_ID);
     const card = history.messages
@@ -1596,7 +2738,6 @@ describe("live AG-UI frame taxonomy", () => {
     // active-turn guard and interleave two streams into one reducer.
     let releaseApprove: () => void = () => {};
     stubFetch(
-      routeCreate,
       routeStream([
         { type: "RUN_STARTED", turnId: TURN_ID },
         {
@@ -1607,7 +2748,7 @@ describe("live AG-UI frame taxonomy", () => {
       routeHistory([]),
     );
     const transport = new AevatarAssistantTransport();
-    await transport.createConversation();
+    await seedActorConversation(transport);
     await collectTurn(transport, "Do the thing");
     const history = await transport.getHistory(CONVERSATION_ID);
     const card = history.messages
@@ -1652,7 +2793,6 @@ describe("live AG-UI frame taxonomy", () => {
     // Codex P2: TOOL_CALL_START directly followed by TOOL_APPROVAL_REQUEST
     // (no toolCallId on the frame) must park the step, not spin forever.
     stubFetch(
-      routeCreate,
       routeStream([
         { type: "RUN_STARTED", turnId: TURN_ID },
         {
@@ -1666,7 +2806,7 @@ describe("live AG-UI frame taxonomy", () => {
       ]),
     );
     const transport = new AevatarAssistantTransport();
-    await transport.createConversation();
+    await seedActorConversation(transport);
 
     const events = await collectTurn(transport, "Post it");
 
@@ -1687,7 +2827,6 @@ describe("live AG-UI frame taxonomy", () => {
     // list response must not resurrect a server-accepted delete.
     let listCalls = 0;
     stubFetch(
-      routeCreate,
       (url, init) =>
         url === `${ASSISTANT_BASE}/conversations` &&
         (init?.method ?? "GET") === "GET"
@@ -1706,7 +2845,7 @@ describe("live AG-UI frame taxonomy", () => {
           : undefined,
     );
     const transport = new AevatarAssistantTransport();
-    await transport.createConversation();
+    await seedActorConversation(transport);
 
     await transport.deleteConversation(CONVERSATION_ID);
 
@@ -1717,7 +2856,6 @@ describe("live AG-UI frame taxonomy", () => {
 
   it("settles immediately when the approve endpoint acks with JSON", async () => {
     stubFetch(
-      routeCreate,
       routeStream([
         { type: "RUN_STARTED", turnId: TURN_ID },
         {
@@ -1729,7 +2867,7 @@ describe("live AG-UI frame taxonomy", () => {
       routeHistory([]),
     );
     const transport = new AevatarAssistantTransport();
-    await transport.createConversation();
+    await seedActorConversation(transport);
     await collectTurn(transport, "Do the thing");
     const history = await transport.getHistory(CONVERSATION_ID);
     const card = history.messages
@@ -1763,7 +2901,6 @@ describe("live AG-UI frame taxonomy", () => {
     // step; deciding must flip it (approved → done/completed) so the
     // transient activity line doesn't show a stale approval clock forever.
     stubFetch(
-      routeCreate,
       routeStream([
         { type: "RUN_STARTED", turnId: TURN_ID },
         {
@@ -1782,7 +2919,7 @@ describe("live AG-UI frame taxonomy", () => {
       routeHistory([]),
     );
     const transport = new AevatarAssistantTransport();
-    await transport.createConversation();
+    await seedActorConversation(transport);
     await collectTurn(transport, "Post it");
     const history = await transport.getHistory(CONVERSATION_ID);
     const card = history.messages
@@ -1816,7 +2953,6 @@ describe("live AG-UI frame taxonomy", () => {
     // approval_request_id — deciding one card must not settle a step gated
     // on a different pending approval, and the ledger stays parked.
     stubFetch(
-      routeCreate,
       routeStream([
         { type: "RUN_STARTED", turnId: TURN_ID },
         {
@@ -1843,7 +2979,7 @@ describe("live AG-UI frame taxonomy", () => {
       routeHistory([]),
     );
     const transport = new AevatarAssistantTransport();
-    await transport.createConversation();
+    await seedActorConversation(transport);
     await collectTurn(transport, "Two gated actions");
     const history = await transport.getHistory(CONVERSATION_ID);
     const cardB = history.messages
@@ -1886,7 +3022,6 @@ describe("live AG-UI frame taxonomy", () => {
     // Second-pass codex P2: a terminal run must not carry a non-terminal
     // step — RUN_ERROR after an approval request skips the waiting step.
     stubFetch(
-      routeCreate,
       routeStream([
         { type: "RUN_STARTED", turnId: TURN_ID },
         {
@@ -1904,7 +3039,7 @@ describe("live AG-UI frame taxonomy", () => {
       ]),
     );
     const transport = new AevatarAssistantTransport();
-    await transport.createConversation();
+    await seedActorConversation(transport);
 
     const events = await collectTurn(transport, "Post it");
 
@@ -1921,7 +3056,6 @@ describe("live AG-UI frame taxonomy", () => {
     // Second-pass codex P2: history hydration must honor tombstones — a
     // projection racing the delete must not write the row back.
     stubFetch(
-      routeCreate,
       routeHistory([
         { id: "h-user", role: "user", content: "hi", timestamp: 1 },
       ]),
@@ -1937,7 +3071,7 @@ describe("live AG-UI frame taxonomy", () => {
           : undefined,
     );
     const transport = new AevatarAssistantTransport();
-    await transport.createConversation();
+    await seedActorConversation(transport);
 
     await transport.deleteConversation(CONVERSATION_ID);
 
@@ -1954,7 +3088,6 @@ describe("live AG-UI frame taxonomy", () => {
     // fallback.
     let releaseHistory: () => void = () => {};
     stubFetch(
-      routeCreate,
       routeStream(OBSERVED_FRAMES),
       (url, init) =>
         url === `${ASSISTANT_BASE}/conversations/${CONVERSATION_ID}` &&
@@ -1975,7 +3108,7 @@ describe("live AG-UI frame taxonomy", () => {
       },
     );
     const transport = new AevatarAssistantTransport();
-    await transport.createConversation();
+    await seedActorConversation(transport);
     await collectTurn(transport, "Say hello in five words.");
 
     const baseFetch = fetch;
@@ -2005,11 +3138,58 @@ describe("live AG-UI frame taxonomy", () => {
     await expect(pendingRead).rejects.toThrow("Conversation was not found.");
   });
 
+  it("answers not-found, not the read failure, when a delete lands mid-read and the read then fails", async () => {
+    // Fourth-pass codex P2: narrowing the getHistory catch added two early
+    // throws that could bypass the post-await tombstone check. Delete must
+    // still win — with an index-only mirror (EMPTY_TURN_STATE), a read that
+    // rejects after the delete must report "not found", not the transport
+    // failure.
+    let rejectHistory: (error: Error) => void = () => {};
+    vi.stubGlobal(
+      "fetch",
+      vi.fn((input: RequestInfo | URL, init?: RequestInit) => {
+        const url = String(input);
+        const method = init?.method ?? "GET";
+        if (url === `${ASSISTANT_BASE}/conversations` && method === "GET") {
+          return Promise.resolve(
+            jsonResponse({
+              conversations: [{ id: CONVERSATION_ID, title: "Server title" }],
+            }),
+          );
+        }
+        if (
+          url === `${ASSISTANT_BASE}/conversations/${CONVERSATION_ID}` &&
+          method === "DELETE"
+        ) {
+          return Promise.resolve(jsonResponse({}));
+        }
+        if (
+          url === `${ASSISTANT_BASE}/conversations/${CONVERSATION_ID}` &&
+          method === "GET"
+        ) {
+          return new Promise<Response>((_resolve, reject) => {
+            rejectHistory = reject;
+          });
+        }
+        return Promise.resolve(jsonResponse({}, 404));
+      }),
+    );
+    const transport = new AevatarAssistantTransport();
+    // Index-only mirror: no turn ever ran, so `turnState` is EMPTY_TURN_STATE.
+    await transport.listConversations();
+
+    const pendingRead = transport.getHistory(CONVERSATION_ID);
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    await transport.deleteConversation(CONVERSATION_ID);
+    rejectHistory(new Error("network down"));
+
+    await expect(pendingRead).rejects.toThrow("Conversation was not found.");
+  });
+
   it("stops an approve request hung before response headers", async () => {
     // Second-pass codex P2: Stop works during the pre-header window via the
     // transport-level cancel (the caller holds no handle yet).
     stubFetch(
-      routeCreate,
       routeStream([
         { type: "RUN_STARTED", turnId: TURN_ID },
         {
@@ -2020,7 +3200,7 @@ describe("live AG-UI frame taxonomy", () => {
       routeHistory([]),
     );
     const transport = new AevatarAssistantTransport();
-    await transport.createConversation();
+    await seedActorConversation(transport);
     await collectTurn(transport, "Do it");
     const history = await transport.getHistory(CONVERSATION_ID);
     const card = history.messages
@@ -2065,7 +3245,6 @@ describe("live AG-UI frame taxonomy", () => {
     // (its toast) and settle the turn with a NULL error so the generic
     // reply-failed toast cannot double-fire.
     stubFetch(
-      routeCreate,
       routeStream([
         { type: "RUN_STARTED", turnId: TURN_ID },
         {
@@ -2080,7 +3259,7 @@ describe("live AG-UI frame taxonomy", () => {
       routeHistory([]),
     );
     const transport = new AevatarAssistantTransport();
-    await transport.createConversation();
+    await seedActorConversation(transport);
     await collectTurn(transport, "Do it");
     const history = await transport.getHistory(CONVERSATION_ID);
     const card = history.messages
@@ -2116,7 +3295,6 @@ describe("live AG-UI frame taxonomy", () => {
 
   it("mines a raw.observed completion for steps and fallback text, never reasoning", async () => {
     stubFetch(
-      routeCreate,
       routeStream([
         { type: "RUN_STARTED", turnId: TURN_ID },
         {
@@ -2161,7 +3339,7 @@ describe("live AG-UI frame taxonomy", () => {
       routeHistory([]),
     );
     const transport = new AevatarAssistantTransport();
-    await transport.createConversation();
+    await seedActorConversation(transport);
 
     const events = await collectTurn(transport, "Search and finish");
 
@@ -2184,7 +3362,6 @@ describe("live AG-UI frame taxonomy", () => {
 
   it("treats RUN_STOPPED as a terminal stop, not a truncated stream", async () => {
     stubFetch(
-      routeCreate,
       routeStream([
         { type: "RUN_STARTED", turnId: TURN_ID },
         {
@@ -2199,7 +3376,7 @@ describe("live AG-UI frame taxonomy", () => {
       ]),
     );
     const transport = new AevatarAssistantTransport();
-    await transport.createConversation();
+    await seedActorConversation(transport);
 
     const events = await collectTurn(transport, "Do something long");
 
@@ -2217,7 +3394,6 @@ describe("live AG-UI frame taxonomy", () => {
     // body-keyed terminal frame falling through to UNKNOWN would leave the
     // turn looking truncated when it actually completed.
     stubFetch(
-      routeCreate,
       routeStream([
         { runStarted: { turnId: TURN_ID, actorId: CONVERSATION_ID } },
         { textMessageStart: { messageId: "m-1", role: "assistant" } },
@@ -2229,7 +3405,7 @@ describe("live AG-UI frame taxonomy", () => {
       ]),
     );
     const transport = new AevatarAssistantTransport();
-    await transport.createConversation();
+    await seedActorConversation(transport);
 
     const events = await collectTurn(transport, "Hello");
 
@@ -2255,7 +3431,6 @@ describe("live AG-UI frame taxonomy", () => {
 
   it("maps top-level STEP_STARTED/STEP_FINISHED onto the run ledger", async () => {
     stubFetch(
-      routeCreate,
       routeStream([
         { type: "RUN_STARTED", turnId: TURN_ID },
         { type: "STEP_STARTED", stepStarted: { stepName: "collect" } },
@@ -2267,7 +3442,7 @@ describe("live AG-UI frame taxonomy", () => {
       ]),
     );
     const transport = new AevatarAssistantTransport();
-    await transport.createConversation();
+    await seedActorConversation(transport);
 
     const events = await collectTurn(transport, "Run the workflow");
 
@@ -2283,7 +3458,6 @@ describe("live AG-UI frame taxonomy", () => {
 
   it("maps workflow step customs onto the run ledger", async () => {
     stubFetch(
-      routeCreate,
       routeStream([
         { type: "RUN_STARTED", turnId: TURN_ID },
         {
@@ -2304,7 +3478,7 @@ describe("live AG-UI frame taxonomy", () => {
       ]),
     );
     const transport = new AevatarAssistantTransport();
-    await transport.createConversation();
+    await seedActorConversation(transport);
 
     const events = await collectTurn(transport, "Plan it");
 
@@ -2320,7 +3494,6 @@ describe("live AG-UI frame taxonomy", () => {
 
   it("embeds MEDIA_CONTENT as a data-URL artifact block", async () => {
     stubFetch(
-      routeCreate,
       routeStream([
         { type: "RUN_STARTED", turnId: TURN_ID },
         {
@@ -2335,7 +3508,7 @@ describe("live AG-UI frame taxonomy", () => {
       ]),
     );
     const transport = new AevatarAssistantTransport();
-    await transport.createConversation();
+    await seedActorConversation(transport);
 
     const events = await collectTurn(transport, "Chart it");
 
@@ -2365,7 +3538,7 @@ describe("live AG-UI frame taxonomy", () => {
           push({ type: "RUN_STARTED", turnId: TURN_ID });
         },
       });
-      stubFetch(routeCreate, (url, init) =>
+      stubFetch((url, init) =>
         url.endsWith("/stream") && init?.method === "POST"
           ? new Response(openStream, {
               status: 200,
@@ -2374,7 +3547,7 @@ describe("live AG-UI frame taxonomy", () => {
           : undefined,
       );
       const transport = new AevatarAssistantTransport();
-      await transport.createConversation();
+      await seedActorConversation(transport);
 
       const events: TurnEvent[] = [];
       const done = new Promise<void>((resolve) => {
@@ -2419,7 +3592,7 @@ describe("live AG-UI frame taxonomy", () => {
           push({ type: "RUN_STARTED", turnId: TURN_ID });
         },
       });
-      stubFetch(routeCreate, (url, init) =>
+      stubFetch((url, init) =>
         url.endsWith("/stream") && init?.method === "POST"
           ? new Response(openStream, {
               status: 200,
@@ -2428,7 +3601,7 @@ describe("live AG-UI frame taxonomy", () => {
           : undefined,
       );
       const transport = new AevatarAssistantTransport();
-      await transport.createConversation();
+      await seedActorConversation(transport);
 
       const events: TurnEvent[] = [];
       const done = new Promise<void>((resolve) => {
@@ -2463,7 +3636,6 @@ describe("live AG-UI frame taxonomy", () => {
 describe("chat action cards", () => {
   it("creates one card and upgrades an idempotently re-emitted request", async () => {
     stubFetch(
-      routeCreate,
       routeStream([
         { type: "RUN_STARTED", turnId: TURN_ID },
         actionRequestFrame({ schemaVersion: 3 }),
@@ -2479,7 +3651,7 @@ describe("chat action cards", () => {
       ]),
     );
     const transport = new AevatarAssistantTransport();
-    await transport.createConversation();
+    await seedActorConversation(transport);
 
     const events = await collectTurn(transport, "Read my repositories");
     const starts = events.filter(
@@ -2514,7 +3686,7 @@ describe("chat action cards", () => {
   });
 
   it("posts the exact action.continue body and streams the follow-up", async () => {
-    const fetchMock = stubFetch(routeCreate, (url, init) => {
+    const fetchMock = stubFetch((url, init) => {
       if (!url.endsWith("/stream") || init?.method !== "POST") return undefined;
       const body = JSON.parse(String(init.body)) as { readonly type: string };
       if (body.type === "text") {
@@ -2539,7 +3711,7 @@ describe("chat action cards", () => {
       ]);
     });
     const transport = new AevatarAssistantTransport();
-    await transport.createConversation();
+    await seedActorConversation(transport);
     await collectTurn(transport, "Read my repositories");
 
     const events: TurnEvent[] = [];
@@ -2613,7 +3785,7 @@ describe("chat action cards", () => {
   it("batches reports that resolve during the active origin turn", async () => {
     let originFinished = false;
     const actionBodies: Array<{ readonly actions: readonly unknown[] }> = [];
-    stubFetch(routeCreate, (url, init) => {
+    stubFetch((url, init) => {
       if (!url.endsWith("/stream") || init?.method !== "POST") return undefined;
       const body = JSON.parse(String(init.body)) as {
         readonly type: string;
@@ -2635,7 +3807,7 @@ describe("chat action cards", () => {
       ]);
     });
     const transport = new AevatarAssistantTransport();
-    await transport.createConversation();
+    await seedActorConversation(transport);
 
     const resolvedIds = new Set<string>();
     await new Promise<void>((resolve) => {
@@ -2677,7 +3849,7 @@ describe("chat action cards", () => {
   // so a fast double-click can reach the transport twice before React repaints.
   it("sends one report per action request when a decline is double-fired", async () => {
     const actionBodies: Array<{ readonly actions: readonly unknown[] }> = [];
-    stubFetch(routeCreate, (url, init) => {
+    stubFetch((url, init) => {
       if (!url.endsWith("/stream") || init?.method !== "POST") return undefined;
       const body = JSON.parse(String(init.body)) as {
         readonly type: string;
@@ -2697,7 +3869,7 @@ describe("chat action cards", () => {
       ]);
     });
     const transport = new AevatarAssistantTransport();
-    await transport.createConversation();
+    await seedActorConversation(transport);
     await collectTurn(transport, "Connect GitHub");
 
     const report = {
@@ -2722,7 +3894,7 @@ describe("chat action cards", () => {
   it("reuses the continuation clientRequestId for automatic delivery retry", async () => {
     let actionAttempts = 0;
     const actionRequestIds: string[] = [];
-    stubFetch(routeCreate, (url, init) => {
+    stubFetch((url, init) => {
       if (!url.endsWith("/stream") || init?.method !== "POST") return undefined;
       const body = JSON.parse(String(init.body)) as {
         readonly type: string;
@@ -2745,7 +3917,7 @@ describe("chat action cards", () => {
           ]);
     });
     const transport = new AevatarAssistantTransport();
-    await transport.createConversation();
+    await seedActorConversation(transport);
     await collectTurn(transport, "Connect GitHub");
 
     await new Promise<void>((resolve) => {
@@ -2773,7 +3945,7 @@ describe("chat action cards", () => {
     let textTurns = 0;
     let actionAttempts = 0;
     const actionRequestIds: string[] = [];
-    stubFetch(routeCreate, (url, init) => {
+    stubFetch((url, init) => {
       if (!url.endsWith("/stream") || init?.method !== "POST") return undefined;
       const body = JSON.parse(String(init.body)) as {
         readonly type: string;
@@ -2802,7 +3974,7 @@ describe("chat action cards", () => {
           ]);
     });
     const transport = new AevatarAssistantTransport();
-    await transport.createConversation();
+    await seedActorConversation(transport);
     await collectTurn(transport, "Connect GitHub");
 
     let resolveFailed: () => void = () => undefined;
@@ -2867,7 +4039,7 @@ describe("chat action cards", () => {
     let textTurns = 0;
     let actionAttempts = 0;
     const actionRequestIds: string[] = [];
-    stubFetch(routeCreate, (url, init) => {
+    stubFetch((url, init) => {
       if (!url.endsWith("/stream") || init?.method !== "POST") return undefined;
       const body = JSON.parse(String(init.body)) as {
         readonly type: string;
@@ -2905,7 +4077,7 @@ describe("chat action cards", () => {
           ]);
     });
     const transport = new AevatarAssistantTransport();
-    await transport.createConversation();
+    await seedActorConversation(transport);
     await collectTurn(transport, "Connect GitHub");
 
     let resolveRejected: () => void = () => undefined;
@@ -2955,7 +4127,7 @@ describe("chat action cards", () => {
     let textTurns = 0;
     let actionAttempts = 0;
     const actionRequestIds: string[] = [];
-    stubFetch(routeCreate, (url, init) => {
+    stubFetch((url, init) => {
       if (!url.endsWith("/stream") || init?.method !== "POST") return undefined;
       const body = JSON.parse(String(init.body)) as {
         readonly type: string;
@@ -2993,7 +4165,7 @@ describe("chat action cards", () => {
           ]);
     });
     const transport = new AevatarAssistantTransport();
-    await transport.createConversation();
+    await seedActorConversation(transport);
     await collectTurn(transport, "Connect GitHub");
 
     let resolveFailed: () => void = () => undefined;
@@ -3051,7 +4223,7 @@ describe("chat action cards", () => {
           );
         },
       });
-      stubFetch(routeCreate, (url, init) => {
+      stubFetch((url, init) => {
         if (!url.endsWith("/stream") || init?.method !== "POST")
           return undefined;
         const body = JSON.parse(String(init.body)) as {
@@ -3084,7 +4256,7 @@ describe("chat action cards", () => {
             ]);
       });
       const transport = new AevatarAssistantTransport();
-      await transport.createConversation();
+      await seedActorConversation(transport);
       await collectTurn(transport, "Connect GitHub");
 
       let resolveRetried: () => void = () => undefined;
@@ -3102,7 +4274,10 @@ describe("chat action cards", () => {
           },
         ],
         (event) => {
-          if (event.event === "turn.completed" && event.status === "completed") {
+          if (
+            event.event === "turn.completed" &&
+            event.status === "completed"
+          ) {
             resolveRetried();
           }
         },
@@ -3128,7 +4303,6 @@ describe("chat action cards", () => {
 
   it("downgrades a re-emitted card the client can no longer service", async () => {
     stubFetch(
-      routeCreate,
       routeStream([
         { type: "RUN_STARTED", turnId: TURN_ID },
         actionRequestFrame(),
@@ -3138,7 +4312,7 @@ describe("chat action cards", () => {
       ]),
     );
     const transport = new AevatarAssistantTransport();
-    await transport.createConversation();
+    await seedActorConversation(transport);
     await collectTurn(transport, "Read my repositories");
 
     const history = await transport.getHistory(CONVERSATION_ID);
@@ -3151,7 +4325,6 @@ describe("chat action cards", () => {
 
   it("renders malformed recognizable action requests as decline-only cards", async () => {
     stubFetch(
-      routeCreate,
       routeStream([
         { type: "RUN_STARTED", turnId: TURN_ID },
         actionRequestFrame({
@@ -3176,7 +4349,7 @@ describe("chat action cards", () => {
       ]),
     );
     const transport = new AevatarAssistantTransport();
-    await transport.createConversation();
+    await seedActorConversation(transport);
     await collectTurn(transport, "Connect the requested services");
 
     const history = await transport.getHistory(CONVERSATION_ID);
@@ -3244,7 +4417,6 @@ describe("redaction and tool summaries", () => {
 
   it("redacts credentials from RUN_ERROR messages before they render", async () => {
     stubFetch(
-      routeCreate,
       routeStream([
         { type: "RUN_STARTED", turnId: TURN_ID },
         {
@@ -3258,7 +4430,7 @@ describe("redaction and tool summaries", () => {
       ]),
     );
     const transport = new AevatarAssistantTransport();
-    await transport.createConversation();
+    await seedActorConversation(transport);
 
     const events = await collectTurn(transport, "Hello");
 
@@ -3320,5 +4492,857 @@ describe("transport selection", () => {
         search: "",
       }),
     ).toBe("aevatar");
+  });
+});
+
+describe("connect markers in assistant messages", () => {
+  const MARKER = [
+    "```nyxid:connect",
+    JSON.stringify({ catalog_slug: "api-github", reason: "read merged PRs" }),
+    "```",
+  ].join("\n");
+
+  function connectCards(blocks: readonly ContentBlock[]): ContentBlock[] {
+    return blocks.filter((block) => block.type === "connect_card");
+  }
+
+  it("renders cards from stored history — the reload path", async () => {
+    // The whole point of the in-text encoding: the FE may call only chat and
+    // history, so a card that lived in a live SSE frame is gone after a
+    // reload. Re-splitting the stored string brings it back.
+    stubFetch(
+      routeHistory([
+        {
+          id: "m1",
+          role: "user",
+          content: "Summarise my merged PRs",
+          timestamp: 1784192889074,
+        },
+        {
+          id: "m2",
+          role: "assistant",
+          content: `I need GitHub first.\n${MARKER}\nThen I'll summarise.`,
+          timestamp: 1784192899074,
+        },
+      ]),
+    );
+    const transport = new AevatarAssistantTransport();
+
+    const history = await transport.getHistory(CONVERSATION_ID);
+
+    const assistant = history.messages.find((m) => m.id === "m2");
+    expect(assistant?.blocks.map((b) => b.type)).toEqual([
+      "text",
+      "connect_card",
+      "text",
+    ]);
+    const card = connectCards(assistant?.blocks ?? [])[0];
+    expect(card).toMatchObject({
+      type: "connect_card",
+      catalog_slug: "api-github",
+      state: "needs_connection",
+    });
+    // The raw encoding must never survive into rendered prose.
+    for (const block of assistant?.blocks ?? []) {
+      if (block.type === "text") {
+        expect(block.text).not.toContain("nyxid:connect");
+      }
+    }
+  });
+
+  it("never mints a card from a user message", async () => {
+    // Markers are Aevatar-authored. A user pasting the encoding into chat
+    // must not be able to conjure a connect card.
+    stubFetch(
+      routeHistory([
+        { id: "m1", role: "user", content: MARKER, timestamp: 1784192889074 },
+      ]),
+    );
+    const transport = new AevatarAssistantTransport();
+
+    const history = await transport.getHistory(CONVERSATION_ID);
+
+    expect(connectCards(history.messages[0]?.blocks ?? [])).toHaveLength(0);
+  });
+
+  it("leaves marker-free history byte-identical", async () => {
+    stubFetch(
+      routeHistory([
+        {
+          id: "m1",
+          role: "assistant",
+          content: "Nothing to connect here.",
+          timestamp: 1784192889074,
+        },
+      ]),
+    );
+    const transport = new AevatarAssistantTransport();
+
+    const history = await transport.getHistory(CONVERSATION_ID);
+
+    expect(history.messages[0]?.blocks).toEqual([
+      { type: "text", block_id: "m1-text", text: "Nothing to connect here." },
+    ]);
+  });
+
+  it("emits a card from the live stream and keeps the encoding out of prose", async () => {
+    stubFetch(
+      routeStream([
+        { type: "RUN_STARTED", turnId: TURN_ID, actorId: CONVERSATION_ID },
+        { type: "TEXT_MESSAGE_START", textMessageStart: { messageId: "m9" } },
+        {
+          type: "TEXT_MESSAGE_CONTENT",
+          textMessageContent: { delta: "I need GitHub first.\n" },
+        },
+        { type: "TEXT_MESSAGE_CONTENT", textMessageContent: { delta: MARKER } },
+        { type: "TEXT_MESSAGE_END" },
+        { type: "RUN_FINISHED" },
+      ]),
+      routeHistory([]),
+    );
+    const transport = new AevatarAssistantTransport();
+    await seedActorConversation(transport);
+
+    const events = await collectTurn(transport, "Summarise my merged PRs");
+
+    const started = events
+      .filter(
+        (e): e is Extract<TurnEvent, { event: "block.started" }> =>
+          e.event === "block.started",
+      )
+      .map((e) => e.block);
+    expect(connectCards(started)).toHaveLength(1);
+    expect(connectCards(started)[0]).toMatchObject({
+      catalog_slug: "api-github",
+    });
+
+    // No streamed delta may carry the raw encoding.
+    for (const event of events) {
+      if (event.event === "block.delta") {
+        expect(event.text).not.toContain("nyxid:connect");
+      }
+    }
+  });
+
+  it("withholds a half-written marker while it streams", async () => {
+    stubFetch(
+      routeStream([
+        { type: "RUN_STARTED", turnId: TURN_ID, actorId: CONVERSATION_ID },
+        { type: "TEXT_MESSAGE_START", textMessageStart: { messageId: "m9" } },
+        {
+          type: "TEXT_MESSAGE_CONTENT",
+          textMessageContent: { delta: "Hold on.\n``" },
+        },
+        {
+          type: "TEXT_MESSAGE_CONTENT",
+          textMessageContent: { delta: "`nyxid:conn" },
+        },
+        {
+          type: "TEXT_MESSAGE_CONTENT",
+          textMessageContent: { delta: `ect\n{"catalog_slug":"api-github"}\n` },
+        },
+        { type: "TEXT_MESSAGE_CONTENT", textMessageContent: { delta: "```" } },
+        { type: "TEXT_MESSAGE_END" },
+        { type: "RUN_FINISHED" },
+      ]),
+      routeHistory([]),
+    );
+    const transport = new AevatarAssistantTransport();
+    await seedActorConversation(transport);
+
+    const events = await collectTurn(transport, "go");
+
+    // Deltas are append-only prose; the partial fence never leaks, so the
+    // transcript never shows text it must later retract.
+    const streamed = events
+      .filter(
+        (e): e is Extract<TurnEvent, { event: "block.delta" }> =>
+          e.event === "block.delta",
+      )
+      .map((e) => e.text)
+      .join("");
+    expect(streamed.trim()).toBe("Hold on.");
+    expect(streamed).not.toContain("nyxid");
+    expect(streamed).not.toContain("`");
+
+    const started = events
+      .filter(
+        (e): e is Extract<TurnEvent, { event: "block.started" }> =>
+          e.event === "block.started",
+      )
+      .map((e) => e.block);
+    expect(connectCards(started)).toHaveLength(1);
+  });
+});
+
+describe("live/history convergence for connect markers", () => {
+  // The design rests on one property: what a live turn renders and what a
+  // reload replays must be the same blocks. Codex's review found they were
+  // not — the live path derived its own ordering and ids. These cases pin it.
+  const CASES: ReadonlyArray<readonly [string, string]> = [
+    [
+      "marker first",
+      '```nyxid:connect\n{"catalog_slug":"api-github"}\n```\nAfter',
+    ],
+    [
+      "marker last",
+      'Before\n```nyxid:connect\n{"catalog_slug":"api-github"}\n```',
+    ],
+    ["marker only", '```nyxid:connect\n{"catalog_slug":"api-github"}\n```'],
+    [
+      "text card text",
+      'Before\n```nyxid:connect\n{"catalog_slug":"api-github"}\n```\nAfter',
+    ],
+    [
+      "adjacent markers",
+      '```nyxid:connect\n{"catalog_slug":"api-github"}\n```\n```nyxid:connect\n{"catalog_slug":"api-lark-bot"}\n```',
+    ],
+    ["no marker", "Plain prose only."],
+  ];
+
+  /** Split into `size`-char deltas — real streams do not arrive whole. */
+  function chunks(content: string, size: number): string[] {
+    if (size <= 0) return [content];
+    const out: string[] = [];
+    for (let at = 0; at < content.length; at += size) {
+      out.push(content.slice(at, at + size));
+    }
+    return out.length > 0 ? out : [""];
+  }
+
+  // Chunk size 0 = one whole delta. 1 exercises the worst case: every marker
+  // character arrives separately, so the partial-marker guard and the suffix
+  // diff are hit at every boundary.
+  const CHUNKINGS = [0, 1, 3, 7];
+
+  it.each(
+    CASES.flatMap(([label, content]) =>
+      CHUNKINGS.map(
+        (size) => [`${label} (chunk ${String(size)})`, content, size] as const,
+      ),
+    ),
+  )("%s", async (_label, content, chunkSize) => {
+    stubFetch(
+      routeStream([
+        { type: "RUN_STARTED", turnId: TURN_ID, actorId: CONVERSATION_ID },
+        { type: "TEXT_MESSAGE_START", textMessageStart: { messageId: "mX" } },
+        ...chunks(content, chunkSize).map((delta) => ({
+          type: "TEXT_MESSAGE_CONTENT",
+          textMessageContent: { delta },
+        })),
+        { type: "TEXT_MESSAGE_END" },
+        { type: "RUN_FINISHED" },
+      ]),
+      routeHistory([]),
+    );
+    const liveTransport = new AevatarAssistantTransport();
+    await seedActorConversation(liveTransport);
+    const events = await collectTurn(liveTransport, "go");
+
+    // Final state of every block this message produced, in emission order.
+    const order: string[] = [];
+    const finals = new Map<string, ContentBlock>();
+    for (const event of events) {
+      if (event.event === "block.completed") {
+        if (!finals.has(event.block_id)) order.push(event.block_id);
+        finals.set(event.block_id, event.block);
+      }
+    }
+    const liveBlocks = order
+      .filter((id) => id.startsWith("mX"))
+      .map((id) => finals.get(id));
+
+    // History: the same text, replayed through the reload path.
+    stubFetch(
+      routeHistory([
+        {
+          id: "mX",
+          role: "assistant",
+          content,
+          timestamp: 1784192899074,
+        },
+      ]),
+    );
+    const historyTransport = new AevatarAssistantTransport();
+    const history = await historyTransport.getHistory(CONVERSATION_ID);
+    const historyBlocks = history.messages.find((m) => m.id === "mX")?.blocks;
+
+    expect(liveBlocks).toEqual(historyBlocks);
+
+    // Whatever the chunking, raw marker syntax must never reach the stream.
+    for (const event of events) {
+      if (event.event === "block.delta") {
+        expect(event.text).not.toContain("nyxid:connect");
+      }
+    }
+  });
+});
+
+describe("cancel runs the same projection as a normal close", () => {
+  const MARKER = [
+    "```nyxid:connect",
+    JSON.stringify({ catalog_slug: "api-github", reason: "read PRs" }),
+    "```",
+  ].join("\n");
+
+  /** A stream that emits some deltas then stays open until cancelled. */
+  function hangingStream(deltas: readonly string[]): FetchRoute {
+    return (url, init) => {
+      if (!url.endsWith("/stream") || init?.method !== "POST") return undefined;
+      const body = new ReadableStream<Uint8Array>({
+        start(controller) {
+          const encoder = new TextEncoder();
+          const frames = [
+            { type: "RUN_STARTED", turnId: TURN_ID, actorId: CONVERSATION_ID },
+            {
+              type: "TEXT_MESSAGE_START",
+              textMessageStart: { messageId: "mC" },
+            },
+            ...deltas.map((delta) => ({
+              type: "TEXT_MESSAGE_CONTENT",
+              textMessageContent: { delta },
+            })),
+          ];
+          controller.enqueue(
+            encoder.encode(
+              frames.map((f) => `data: ${JSON.stringify(f)}\n\n`).join(""),
+            ),
+          );
+        },
+      });
+      return new Response(body, {
+        status: 200,
+        headers: { "Content-Type": "text/event-stream" },
+      });
+    };
+  }
+
+  async function cancelAfterDeltas(
+    deltas: readonly string[],
+  ): Promise<TurnEvent[]> {
+    stubFetch(hangingStream(deltas), routeHistory([]));
+    const transport = new AevatarAssistantTransport();
+    await seedActorConversation(transport);
+    const events: TurnEvent[] = [];
+    let seen = 0;
+    await new Promise<void>((resolve) => {
+      const handle = transport.sendMessage(CONVERSATION_ID, "go", (event) => {
+        events.push(event);
+        if (event.event === "turn.completed") resolve();
+        if (event.event === "block.delta") {
+          seen += 1;
+          // Cancel once every delta the transport chose to emit has landed.
+          if (seen >= 1) setTimeout(() => handle.cancel(), 0);
+        }
+      });
+      // A message that is only a marker emits no delta at all — cancel anyway.
+      setTimeout(() => handle.cancel(), 20);
+    });
+    return events;
+  }
+
+  it("emits the card when a turn is cancelled after a complete marker", async () => {
+    // Previously cancel bypassed the splitter entirely: no card was emitted
+    // live, but a reload produced one — the two disagreed.
+    const events = await cancelAfterDeltas([`Need GitHub.\n${MARKER}`]);
+
+    const blocks = events
+      .filter(
+        (e): e is Extract<TurnEvent, { event: "block.completed" }> =>
+          e.event === "block.completed",
+      )
+      .map((e) => e.block);
+    expect(blocks.some((block) => block.type === "connect_card")).toBe(true);
+  });
+
+  it("never leaks raw marker syntax when cancelled mid-message", async () => {
+    const events = await cancelAfterDeltas([`Need GitHub.\n${MARKER}`]);
+
+    for (const event of events) {
+      if (event.event === "block.delta") {
+        expect(event.text).not.toContain("nyxid:connect");
+      }
+      if (event.event === "block.completed" && event.block.type === "text") {
+        expect(event.block.text).not.toContain("nyxid:connect");
+      }
+    }
+  });
+});
+
+describe("connect markers survive the PR #2923 wrapped transcript", () => {
+  // Merge-point coverage: main taught `loadHistory` to accept
+  // `{messages, stateVersion}`; this branch taught `historyEntryToMessage` to
+  // project markers into blocks. Neither side tested the two together, and the
+  // reload path — the whole reason the marker is carried in the text — runs
+  // through both.
+  const MARKER = [
+    "```nyxid:connect",
+    JSON.stringify({ catalog_slug: "api-github", reason: "read PRs" }),
+    "```",
+  ].join("\n");
+
+  const ENTRIES = [
+    {
+      id: "w1",
+      role: "assistant",
+      content: `Need GitHub.\n${MARKER}\nThen I'll continue.`,
+      timestamp: 1784192899074,
+    },
+  ];
+
+  it("renders the card from the wrapped shape", async () => {
+    stubFetch((url, init) =>
+      url.startsWith(`${ASSISTANT_BASE}/conversations/`) &&
+      (init?.method ?? "GET") === "GET"
+        ? jsonResponse({ messages: ENTRIES, stateVersion: 42 })
+        : undefined,
+    );
+    const transport = new AevatarAssistantTransport();
+
+    const history = await transport.getHistory(CONVERSATION_ID);
+
+    const blocks = history.messages.find((m) => m.id === "w1")?.blocks ?? [];
+    expect(blocks.map((b) => b.type)).toEqual(["text", "connect_card", "text"]);
+  });
+
+  it("renders identically from the legacy flat array", async () => {
+    stubFetch(routeHistory(ENTRIES));
+    const transport = new AevatarAssistantTransport();
+
+    const history = await transport.getHistory(CONVERSATION_ID);
+
+    const blocks = history.messages.find((m) => m.id === "w1")?.blocks ?? [];
+    expect(blocks.map((b) => b.type)).toEqual(["text", "connect_card", "text"]);
+  });
+});
+
+describe("a conversation with no committed turn has no server transcript", () => {
+  // The two upstream halves materialize at different times: `nyxid-chat`
+  // mints the actor at create, while the `chat-history` row is only written
+  // when a turn reaches a terminal. Aevatar's `HandleGetConversation` maps a
+  // missing read-model document to 404 — NOT to an empty array — so a
+  // freshly created conversation 404s here by design. Treating that as a
+  // failure is what made every new chat dead-end on "Failed to load this
+  // conversation" (observed in prod, 2026-07-28).
+  it("serves an empty transcript when the history row does not exist yet", async () => {
+    // Only the create is routed; stubFetch answers everything else 404.
+    stubFetch();
+    const transport = new AevatarAssistantTransport();
+    const conversation = await seedActorConversation(transport);
+
+    const history = await transport.getHistory(conversation.id);
+
+    expect(history.messages).toEqual([]);
+    expect(history.conversation.id).toBe(CONVERSATION_ID);
+  });
+
+  it("still rejects a 404 for a conversation it has never seen", async () => {
+    stubFetch();
+    const transport = new AevatarAssistantTransport();
+
+    await expect(
+      transport.getHistory("nyxid-chat-never-created"),
+    ).rejects.toThrow();
+  });
+
+  it("still rejects a transient failure on a conversation with no local transcript", async () => {
+    // 5xx is a real read failure, not the not-yet-materialized state — it
+    // must not be dressed up as a legitimately empty chat.
+    stubFetch((url, init) =>
+      url.startsWith(`${ASSISTANT_BASE}/conversations/`) &&
+      (init?.method ?? "GET") === "GET"
+        ? jsonResponse(
+            { error: "internal", error_code: -1, message: "boom" },
+            500,
+          )
+        : undefined,
+    );
+    const transport = new AevatarAssistantTransport();
+    const conversation = await seedActorConversation(transport);
+
+    await expect(transport.getHistory(conversation.id)).rejects.toThrow();
+  });
+});
+
+describe("workflow chat turns (studio engine)", () => {
+  // New conversations run on Aevatar's workflow chat through the typed
+  // `POST /api/v1/assistant/workflow-chat` pass-through. The frame shapes
+  // below mirror the live `/api/chat` capture (2026-07-29): body-keyed
+  // protobuf-JSON envelopes, `aevatar.chat.context` first, trailing
+  // `stateSnapshot` after the terminal.
+  const WORKFLOW_URL = "/api/v1/assistant/workflow-chat";
+  const WORKFLOW_CONVERSATION = "chatc-8bd999c402fb37d60cdcd81e3b78cfd";
+  const WORKFLOW_TURN = "turn-d619940adcd817c4aeb5d1c3e57f1ca5";
+  const RUN_ACTOR = "workflow-definition:studio:run:43bfe86961b44fc2a6422d0b";
+
+  function workflowContextFrame(stateVersion: string): unknown {
+    return {
+      timestamp: "1785297207163",
+      custom: {
+        name: "aevatar.chat.context",
+        payload: {
+          "@type":
+            "type.googleapis.com/aevatar.workflow.runs.WorkflowChatContextPayload",
+          scopeId: USER_ID,
+          conversationId: WORKFLOW_CONVERSATION,
+          turnId: WORKFLOW_TURN,
+          stateVersion,
+        },
+      },
+    };
+  }
+
+  const WORKFLOW_PREAMBLE = [
+    workflowContextFrame("3"),
+    {
+      custom: {
+        name: "aevatar.run.context",
+        payload: {
+          "@type":
+            "type.googleapis.com/aevatar.workflow.runs.WorkflowRunContextPayload",
+          actorId: RUN_ACTOR,
+          workflowName: "studio",
+          commandId: "00e6f0aa-8670-4405-9911-7903a6616cbd",
+        },
+      },
+    },
+    { runStarted: { threadId: RUN_ACTOR, runId: RUN_ACTOR } },
+    { stepStarted: { stepName: "reply" } },
+  ];
+
+  const WORKFLOW_TAIL = [
+    { stepFinished: { stepName: "reply" } },
+    { usage: {} },
+    {
+      runFinished: {
+        threadId: RUN_ACTOR,
+        result: {
+          "@type":
+            "type.googleapis.com/aevatar.workflow.runs.WorkflowRunResultPayload",
+          output: "Here's what's available on your NyxID account.",
+        },
+      },
+    },
+    { stateSnapshot: { snapshot: { actorId: RUN_ACTOR } } },
+  ];
+
+  function routeWorkflow(frames: unknown[]): FetchRoute {
+    return (url, init) =>
+      url === WORKFLOW_URL && init?.method === "POST"
+        ? sseResponse(frames)
+        : undefined;
+  }
+
+  function collectWorkflowTurn(
+    transport: AevatarAssistantTransport,
+    conversationId: string,
+    content: string,
+  ): Promise<TurnEvent[]> {
+    return new Promise((resolve, reject) => {
+      const events: TurnEvent[] = [];
+      try {
+        transport.sendMessage(conversationId, content, (event) => {
+          events.push(event);
+          if (event.event === "turn.completed") resolve(events);
+        });
+      } catch (error) {
+        reject(error instanceof Error ? error : new Error(String(error)));
+      }
+    });
+  }
+
+  it("creates conversations locally and runs the first turn through the workflow route", async () => {
+    const mock = stubFetch(
+      routeWorkflow([
+        ...WORKFLOW_PREAMBLE,
+        { textMessageStart: { messageId: "wm-1" } },
+        {
+          textMessageContent: {
+            delta: "Here's what's available on your NyxID account.",
+          },
+        },
+        { textMessageEnd: {} },
+        ...WORKFLOW_TAIL,
+      ]),
+    );
+    const transport = new AevatarAssistantTransport();
+    const conversation = await transport.createConversation();
+    expect(conversation.id.startsWith("workflow-pending-")).toBe(true);
+    // Create is client-local: nothing goes to the wire until the send.
+    expect(mock).not.toHaveBeenCalled();
+
+    const events = await collectWorkflowTurn(transport, conversation.id, "hi");
+
+    const turnCall = mock.mock.calls.find(
+      ([input]) => String(input) === WORKFLOW_URL,
+    );
+    expect(turnCall).toBeDefined();
+    const body = JSON.parse(String(turnCall?.[1]?.body)) as Record<
+      string,
+      unknown
+    >;
+    // First turn = create intent: no conversation id, but an idempotency
+    // command id the retry loop can replay.
+    expect(body["conversationId"]).toBeUndefined();
+    expect(typeof body["commandId"]).toBe("string");
+    expect(body["prompt"]).toBe("hi");
+
+    const terminal = events[events.length - 1];
+    expect(terminal?.event === "turn.completed" && terminal.status).toBe(
+      "completed",
+    );
+    const completed = events.find((event) => event.event === "block.completed");
+    expect(completed?.event === "block.completed" && completed.block).toEqual({
+      type: "text",
+      block_id: "wm-1-text",
+      text: "Here's what's available on your NyxID account.",
+    });
+
+    // `aevatar.chat.context` aliased the placeholder to the server id: the
+    // conversation now reports the `chatc-…` id through either address.
+    const history = await transport.getHistory(conversation.id);
+    expect(history.conversation.id).toBe(WORKFLOW_CONVERSATION);
+    expect(history.messages.length).toBeGreaterThanOrEqual(2);
+  });
+
+  it("renders the run result when nothing streamed as text", async () => {
+    stubFetch(routeWorkflow([...WORKFLOW_PREAMBLE, ...WORKFLOW_TAIL]));
+    const transport = new AevatarAssistantTransport();
+    const conversation = await transport.createConversation();
+
+    const events = await collectWorkflowTurn(transport, conversation.id, "hi");
+
+    const textBlocks = events.filter(
+      (event) =>
+        event.event === "block.completed" && event.block.type === "text",
+    );
+    expect(
+      textBlocks.some(
+        (event) =>
+          event.event === "block.completed" &&
+          event.block.type === "text" &&
+          event.block.text === "Here's what's available on your NyxID account.",
+      ),
+    ).toBe(true);
+    expect(events[events.length - 1]?.event).toBe("turn.completed");
+  });
+
+  it("continues the conversation with the observed stateVersion and a fresh commandId", async () => {
+    const mock = stubFetch(
+      routeWorkflow([
+        ...WORKFLOW_PREAMBLE,
+        { textMessageStart: { messageId: "wm-1" } },
+        { textMessageContent: { delta: "First." } },
+        { textMessageEnd: {} },
+        ...WORKFLOW_TAIL,
+      ]),
+    );
+    const transport = new AevatarAssistantTransport();
+    const conversation = await transport.createConversation();
+    await collectWorkflowTurn(transport, conversation.id, "first");
+    await collectWorkflowTurn(transport, conversation.id, "second");
+
+    const turnBodies = mock.mock.calls
+      .filter(([input]) => String(input) === WORKFLOW_URL)
+      .map(
+        ([, init]) => JSON.parse(String(init?.body)) as Record<string, unknown>,
+      );
+    expect(turnBodies).toHaveLength(2);
+    expect(turnBodies[0]?.["conversationId"]).toBeUndefined();
+    // The follow-up addresses the server conversation with the read fence
+    // from the first turn's chat.context (stateVersion "3").
+    expect(turnBodies[1]?.["conversationId"]).toBe(WORKFLOW_CONVERSATION);
+    expect(turnBodies[1]?.["minimumStateVersion"]).toBe(3);
+    expect(turnBodies[1]?.["commandId"]).not.toBe(turnBodies[0]?.["commandId"]);
+  });
+
+  it("maps runError to a failed turn with its upstream code", async () => {
+    stubFetch(
+      routeWorkflow([
+        ...WORKFLOW_PREAMBLE,
+        { runError: { code: "WORKFLOW_FAILED", message: "engine died" } },
+      ]),
+    );
+    const transport = new AevatarAssistantTransport();
+    const conversation = await transport.createConversation();
+
+    const events = await collectWorkflowTurn(transport, conversation.id, "hi");
+
+    const terminal = events[events.length - 1];
+    expect(
+      terminal?.event === "turn.completed" && {
+        status: terminal.status,
+        code: terminal.error?.code,
+      },
+    ).toEqual({ status: "failed", code: "WORKFLOW_FAILED" });
+  });
+
+  it("cancels client-side without posting the actor surface's :stop", async () => {
+    const encoder = new TextEncoder();
+    let preambleSent = false;
+    const mock = stubFetch((url, init) => {
+      if (url === WORKFLOW_URL && init?.method === "POST") {
+        return new Response(
+          new ReadableStream<Uint8Array>({
+            pull(controller) {
+              if (!preambleSent) {
+                preambleSent = true;
+                controller.enqueue(
+                  encoder.encode(
+                    WORKFLOW_PREAMBLE.map(
+                      (frame) => `data: ${JSON.stringify(frame)}\n\n`,
+                    ).join(""),
+                  ),
+                );
+                return;
+              }
+              // Hang: the run is still executing server-side.
+              return new Promise<never>(() => {});
+            },
+          }),
+          { status: 200, headers: { "Content-Type": "text/event-stream" } },
+        );
+      }
+      return undefined;
+    });
+    const transport = new AevatarAssistantTransport();
+    const conversation = await transport.createConversation();
+
+    const events: TurnEvent[] = [];
+    const terminal = new Promise<void>((resolve) => {
+      const handle = transport.sendMessage(conversation.id, "hi", (event) => {
+        events.push(event);
+        if (event.event === "turn.completed") resolve();
+        if (event.event === "turn.status" && event.status === "running") {
+          handle.cancel();
+        }
+      });
+    });
+    await terminal;
+
+    expect(
+      events.some(
+        (event) =>
+          event.event === "turn.completed" && event.status === "cancelled",
+      ),
+    ).toBe(true);
+    expect(
+      mock.mock.calls.some(([input]) => String(input).endsWith("/stop")),
+    ).toBe(false);
+  });
+
+  it("deletes an aliased conversation through its server id", async () => {
+    const mock = stubFetch(
+      routeWorkflow([
+        ...WORKFLOW_PREAMBLE,
+        { textMessageStart: { messageId: "wm-1" } },
+        { textMessageContent: { delta: "First." } },
+        { textMessageEnd: {} },
+        ...WORKFLOW_TAIL,
+      ]),
+      (_url, init) =>
+        init?.method === "DELETE" ? jsonResponse({}) : undefined,
+    );
+    const transport = new AevatarAssistantTransport();
+    const conversation = await transport.createConversation();
+    await collectWorkflowTurn(transport, conversation.id, "first");
+
+    await transport.deleteConversation(conversation.id);
+
+    expect(
+      mock.mock.calls.some(
+        ([input, init]) =>
+          String(input) ===
+            `${ASSISTANT_BASE}/conversations/${WORKFLOW_CONVERSATION}` &&
+          init?.method === "DELETE",
+      ),
+    ).toBe(true);
+    await expect(transport.getHistory(conversation.id)).rejects.toThrow(
+      "Conversation was not found.",
+    );
+    await expect(transport.getHistory(WORKFLOW_CONVERSATION)).rejects.toThrow(
+      "Conversation was not found.",
+    );
+  });
+
+  it("does not post an action continuation to a workflow-only conversation", async () => {
+    const mock = stubFetch(
+      routeWorkflow([
+        ...WORKFLOW_PREAMBLE,
+        actionRequestFrame({
+          actorId: WORKFLOW_CONVERSATION,
+          originTurnId: WORKFLOW_TURN,
+        }),
+        { runFinished: { threadId: RUN_ACTOR, status: "blocked" } },
+        { stateSnapshot: { snapshot: { actorId: RUN_ACTOR } } },
+      ]),
+    );
+    const transport = new AevatarAssistantTransport();
+    const conversation = await transport.createConversation();
+    await collectWorkflowTurn(transport, conversation.id, "Connect GitHub");
+
+    const events: TurnEvent[] = [];
+    expect(
+      transport.continueActions(
+        conversation.id,
+        WORKFLOW_TURN,
+        [
+          {
+            actionRequestId: "act-action-1",
+            originTurnId: WORKFLOW_TURN,
+            disposition: "completed",
+            resource: {
+              userService: {
+                userServiceId: "00000000-0000-4000-8000-000000000123",
+              },
+            },
+          },
+        ],
+        (event) => events.push(event),
+      ),
+    ).toBeNull();
+
+    expect(
+      mock.mock.calls.some(
+        ([input]) =>
+          String(input).includes(
+            `/conversations/${WORKFLOW_CONVERSATION}/stream`,
+          ) ||
+          String(input).includes(`/conversations/${conversation.id}/stream`),
+      ),
+    ).toBe(false);
+    expect(
+      mock.mock.calls
+        .filter(([input]) => String(input) === WORKFLOW_URL)
+        .map(([, init]) => JSON.parse(String(init?.body)) as { type?: string })
+        .some((body) => body.type === "action.continue"),
+    ).toBe(false);
+    expect(
+      events.some(
+        (event) =>
+          event.event === "block.updated" &&
+          "outcome_note" in event.patch &&
+          event.patch.outcome_note?.includes("has not reached the assistant"),
+      ),
+    ).toBe(true);
+  });
+});
+
+describe("workflow conversations fail approvals honestly", () => {
+  // `:approve` addresses a nyxid-chat ACTOR; a workflow run resumes through
+  // `runs/{runId}:resume`, which the mount does not proxy. The card can
+  // still render (the workflow mapper emits `aevatar.tool_approval.pending`),
+  // so the decision must fail with a legible message instead of a 404.
+  it("refuses to post the actor approve route for a chatc conversation", async () => {
+    const mock = stubFetch();
+    const transport = new AevatarAssistantTransport();
+    const conversation = await transport.createConversation();
+
+    await expect(
+      transport.decideApproval(conversation.id, "block-1", true),
+    ).rejects.toThrow(/Approvals cannot be decided from this chat yet/);
+    expect(
+      mock.mock.calls.some(([input]) => String(input).endsWith("/approve")),
+    ).toBe(false);
   });
 });

@@ -104,25 +104,55 @@ describe("admin list / detail queries", () => {
     expect(mockGet).toHaveBeenCalledWith("/admin/users/u1/sessions");
   });
 
-  it("useAdminAuditLog adds user_id / api_key_id filters when present", async () => {
+  it("useAdminAuditLog forwards every applied table control", async () => {
     mockGet.mockResolvedValue({ entries: [], total: 0 });
     const { result } = renderHook(
-      () => useAdminAuditLog(1, 50, { userId: "u1", apiKeyId: "key-2" }),
+      () =>
+        useAdminAuditLog({
+          page: 2,
+          per_page: 50,
+          sort: "event_type",
+          search: "mfa",
+          search_filters: '[{"field":"user_id","values":["u1"]}]',
+          custom_filters: '{"event_type":["login"]}',
+          event_type: "admin.user.created",
+          status: "4xx,5xx",
+          actor: "agent",
+          created_from: "2026-07-01",
+          created_to: "2026-07-13",
+        }),
       { wrapper: wrapperFactory() },
     );
     await waitFor(() => expect(result.current.isSuccess).toBe(true));
-    expect(mockGet).toHaveBeenCalledWith(
-      "/admin/audit-log?page=1&per_page=50&user_id=u1&api_key_id=key-2",
+
+    const url = new URL(
+      `https://example.test${(mockGet.mock.calls[0] as [string])[0]}`,
     );
+    expect(Object.fromEntries(url.searchParams)).toEqual({
+      page: "2",
+      per_page: "50",
+      sort: "event_type",
+      search: "mfa",
+      search_filters: '[{"field":"user_id","values":["u1"]}]',
+      custom_filters: '{"event_type":["login"]}',
+      event_type: "admin.user.created",
+      status: "4xx,5xx",
+      actor: "agent",
+      created_from: "2026-07-01",
+      created_to: "2026-07-13",
+    });
   });
 
   it("useAdminAuditLog omits filters when none are supplied", async () => {
     mockGet.mockResolvedValue({ entries: [], total: 0 });
-    const { result } = renderHook(() => useAdminAuditLog(1, 50), {
-      wrapper: wrapperFactory(),
-    });
+    const { result } = renderHook(
+      () => useAdminAuditLog({ page: 1, per_page: 25, sort: "-created_at" }),
+      { wrapper: wrapperFactory() },
+    );
     await waitFor(() => expect(result.current.isSuccess).toBe(true));
-    expect(mockGet).toHaveBeenCalledWith("/admin/audit-log?page=1&per_page=50");
+    expect(mockGet).toHaveBeenCalledWith(
+      "/admin/audit-log?page=1&per_page=25&sort=-created_at",
+    );
   });
 });
 

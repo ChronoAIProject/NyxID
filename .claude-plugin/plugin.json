@@ -1,7 +1,7 @@
 {
   "name": "nyxid",
-  "description": "Brokers credentials for downstream services (OpenAI, Anthropic, GitHub, Lark, custom APIs, SSH, MCP) so the agent never sees raw API keys or OAuth tokens. Thin wrapper over the nyxid CLI.",
-  "version": "0.6.1",
+  "description": "Brokers credentials for downstream services so agents never see raw keys or tokens, and bundles the synchronized Aevatar platform skill family. Operates through the nyxid CLI.",
+  "version": "0.7.0",
   "author": {
     "name": "ChronoAIProject"
   },

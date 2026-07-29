@@ -1,4 +1,5 @@
 pub mod action_description;
+pub mod admin_audit_service;
 pub mod admin_user_service;
 pub mod agent_binding_service;
 pub mod anonymous_endpoint_service;

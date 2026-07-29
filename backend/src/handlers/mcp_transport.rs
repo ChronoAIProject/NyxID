@@ -576,13 +576,21 @@ fn is_scoped_api_key(auth: &McpAuthContext) -> bool {
     auth.is_api_key && (!auth.allow_all_services || !auth.allow_all_nodes)
 }
 
+fn mcp_service_scope(auth: &McpAuthContext) -> mcp_service::ServiceScope<'_> {
+    if auth.allow_all_services {
+        mcp_service::ServiceScope::Unrestricted
+    } else {
+        mcp_service::ServiceScope::Allowed(auth.allowed_service_ids.as_slice())
+    }
+}
+
 /// Names of tools that SSH-gate on agent scope.
 const SSH_META_TOOL_NAMES: &[&str] = &["nyx__ssh_exec", "nyx__ssh_list_services"];
 
-/// Drop user-managed services the API key is not scoped to, and reject all
-/// platform services (scoped API keys are UserService-only, matching the REST
-/// proxy check in `execute_proxy_inner`). OAuth/session callers keep every
-/// service since `allow_all_services` is `true` in `McpAuthContext::user`.
+/// Drop user-managed services the caller is not scoped to, and reject all
+/// platform services. Scoped API keys and relay tokens are UserService-only,
+/// matching the REST proxy check in `execute_proxy_inner`; unrestricted
+/// OAuth/session callers keep every service.
 fn filter_services_by_scope(
     services: Vec<mcp_service::McpToolService>,
     auth: &McpAuthContext,
@@ -1075,24 +1083,23 @@ async fn handle_tools_list(
     // Thread API-key node scope into the discovery chain so scoped
     // keys don't see tools whose only dispatchable routes are all out of
     // scope (seventeenth-round Codex review P2).
-    let services = match mcp_service::load_user_tools_scoped(
+    let catalog = match mcp_service::load_operation_catalog(
         &state.db,
         state.node_ws_manager.as_ref(),
         &auth.user_id,
         mcp_node_scope(auth),
+        mcp_service_scope(auth),
     )
     .await
     {
-        Ok(s) => s,
+        Ok(catalog) => catalog,
         Err(e) => {
             tracing::error!("Failed to load user tools: {e}");
             return rpc_error(request.id.clone(), -32603, "Failed to load tools");
         }
     };
 
-    // Enforce API-key service scope: scoped keys only see the UserServices in
-    // their allow-list, mirroring the REST proxy's ApiKeyScopeForbidden check.
-    let services = filter_services_by_scope(services, auth);
+    let services = catalog.services;
 
     // Session-backed clients get meta-tools + activated service tools only.
     // Stateless (API-key) clients with no session get the full tool list up front.
@@ -1167,6 +1174,9 @@ async fn handle_tools_call(
             return handle_meta_discover(state, &auth.user_id, &arguments, request.id.clone())
                 .await;
         }
+        "nyx__list_connected_services" => {
+            return handle_meta_list_connected(state, auth, &arguments, request.id.clone()).await;
+        }
         "nyx__connect_service" => {
             return handle_meta_connect(
                 state,
@@ -1238,21 +1248,23 @@ async fn handle_tools_call(
     // Scoped discovery so resolve_tool_call can't match tools whose
     // only dispatchable routes fall outside the caller's API-key node scope
     // (twentieth-round Codex P2).
-    let services = match mcp_service::load_user_tools_scoped(
+    let catalog = match mcp_service::load_operation_catalog(
         &state.db,
         state.node_ws_manager.as_ref(),
         &auth.user_id,
         mcp_node_scope(auth),
+        mcp_service_scope(auth),
     )
     .await
     {
-        Ok(s) => s,
+        Ok(catalog) => catalog,
         Err(e) => {
             tracing::error!("Failed to load tools for execution: {e}");
             return tool_result(request.id.clone(), "Failed to load tools", true);
         }
     };
 
+    let services = catalog.services;
     let (service, endpoint) = match mcp_service::resolve_tool_call(tool_name, &services) {
         Some(pair) => pair,
         None => {
@@ -1299,14 +1311,8 @@ async fn handle_tools_call(
             );
         }
     };
-    if let Err(resp) = authorize_mcp_operation(
-        state,
-        auth,
-        approval_target_for_tool(auth, service),
-        &operation,
-        request.id.clone(),
-    )
-    .await
+    if let Err(resp) =
+        authorize_mcp_tool_operation(state, auth, service, &operation, request.id.clone()).await
     {
         return resp;
     }
@@ -1403,23 +1409,69 @@ struct McpApprovalTarget {
     service_owner_user_id: String,
 }
 
-fn approval_target_for_tool(
+/// Resolve the approval key and owner through the same metadata-only path as
+/// the REST proxy. MCP activation uses `UserService.id`, while catalog-backed
+/// approval policies use `catalog_service_id`; those identities must not be
+/// conflated.
+async fn approval_target_for_tool(
+    db: &mongodb::Database,
     auth: &McpAuthContext,
     service: &mcp_service::McpToolService,
-) -> McpApprovalTarget {
-    let service_owner_user_id = match &service.source {
+) -> crate::errors::AppResult<McpApprovalTarget> {
+    let approval_owner_user_id = auth.effective_approval_owner_user_id();
+    let hint = match &service.source {
         mcp_service::McpToolSource::UserManaged {
-            effective_owner_id, ..
-        } => effective_owner_id.clone(),
-        mcp_service::McpToolSource::Platform { .. } => auth.effective_approval_owner_user_id(),
+            user_service_id, ..
+        } => proxy_service::find_approval_resolution_hint_by_user_service_id(
+            db,
+            &approval_owner_user_id,
+            user_service_id,
+            Some(&service.service_slug),
+            None,
+        )
+        .await?
+        .ok_or_else(|| crate::errors::AppError::NotFound("Service not found".to_string()))?,
+        mcp_service::McpToolSource::Platform {
+            downstream_service_id,
+        } => proxy_service::find_approval_resolution_hint(
+            db,
+            &approval_owner_user_id,
+            None,
+            Some(downstream_service_id),
+        )
+        .await?
+        .unwrap_or_else(|| proxy_service::ApprovalResolutionHint {
+            service_id: downstream_service_id.clone(),
+            service_owner_id: approval_owner_user_id,
+        }),
     };
 
-    McpApprovalTarget {
-        service_id: service.service_id.clone(),
+    Ok(McpApprovalTarget {
+        service_id: hint.service_id,
         service_name: service.service_name.clone(),
         service_slug: service.service_slug.clone(),
-        service_owner_user_id,
-    }
+        service_owner_user_id: hint.service_owner_id,
+    })
+}
+
+#[allow(clippy::result_large_err)]
+async fn authorize_mcp_tool_operation(
+    state: &AppState,
+    auth: &McpAuthContext,
+    service: &mcp_service::McpToolService,
+    operation: &operation_descriptor::OperationDescriptor,
+    request_id: Option<serde_json::Value>,
+) -> Result<(), Response> {
+    let target = approval_target_for_tool(&state.db, auth, service)
+        .await
+        .map_err(|e| {
+            tool_result(
+                request_id.clone(),
+                &format!("Approval check failed: {e}"),
+                true,
+            )
+        })?;
+    authorize_mcp_operation(state, auth, target, operation, request_id).await
 }
 
 #[allow(clippy::result_large_err)]
@@ -1603,21 +1655,22 @@ async fn handle_meta_call_tool(
     // `nyx__call_tool` can't auto-invoke a tool whose only dispatchable
     // routes are outside the caller's allow-list (twentieth-round
     // Codex P2). Service scope is still applied downstream below.
-    let services = match mcp_service::load_user_tools_scoped(
+    let catalog = match mcp_service::load_operation_catalog(
         &state.db,
         state.node_ws_manager.as_ref(),
         &auth.user_id,
         mcp_node_scope(auth),
+        mcp_service_scope(auth),
     )
     .await
     {
-        Ok(s) => s,
+        Ok(catalog) => catalog,
         Err(e) => {
             tracing::error!("Failed to load tools for call_tool: {e}");
             return tool_result(request_id, "Failed to load tools", true);
         }
     };
-    let services = filter_services_by_scope(services, auth);
+    let services = catalog.services;
 
     // Resolve tool (no activation gate -- that's the whole point)
     let (service, endpoint) = match mcp_service::resolve_tool_call(tool_name, &services) {
@@ -1640,14 +1693,8 @@ async fn handle_meta_call_tool(
                 return tool_result(request_id, &format!("Invalid tool arguments: {e}"), true);
             }
         };
-    if let Err(resp) = authorize_mcp_operation(
-        state,
-        auth,
-        approval_target_for_tool(auth, service),
-        &operation,
-        request_id.clone(),
-    )
-    .await
+    if let Err(resp) =
+        authorize_mcp_tool_operation(state, auth, service, &operation, request_id.clone()).await
     {
         return resp;
     }
@@ -1759,27 +1806,13 @@ async fn handle_meta_search(
         return tool_result(request_id, "Search query too long (max 200 chars)", true);
     }
 
-    // Load ALL user tools including non-executable (for discovery).
-    // Scope-aware so scoped keys don't see tools whose only dispatchable
-    // routes are outside their node allow-list (twentieth-round Codex
-    // P2).
-    let services = match mcp_service::load_user_tools_all_scoped(
-        &state.db,
-        state.node_ws_manager.as_ref(),
-        &auth.user_id,
-        mcp_node_scope(auth),
-    )
-    .await
-    {
+    let services = match load_all_services_for_meta_tools(state, auth).await {
         Ok(s) => s,
         Err(e) => {
             tracing::error!("Failed to load tools for search: {e}");
             return tool_result(request_id, "Failed to load tools", true);
         }
     };
-
-    // Scoped API keys only see services in their allow-list.
-    let services = filter_services_by_scope(services, auth);
 
     // Search across ALL tools (does NOT activate services -- use nyx__call_tool
     // to invoke discovered tools, which auto-activates on first call)
@@ -1805,6 +1838,46 @@ async fn handle_meta_search(
     });
 
     let text = serde_json::to_string_pretty(&response_json).unwrap_or_default();
+    tool_result(request_id, &text, false)
+}
+
+/// Load connected services through the same node- and service-scoped chain
+/// used by MCP metadata tools.
+async fn load_all_services_for_meta_tools(
+    state: &AppState,
+    auth: &McpAuthContext,
+) -> crate::errors::AppResult<Vec<mcp_service::McpToolService>> {
+    let services = mcp_service::load_user_tools_all_scoped(
+        &state.db,
+        state.node_ws_manager.as_ref(),
+        &auth.user_id,
+        mcp_node_scope(auth),
+    )
+    .await?;
+    Ok(filter_services_by_scope(services, auth))
+}
+
+async fn handle_meta_list_connected(
+    state: &AppState,
+    auth: &McpAuthContext,
+    arguments: &serde_json::Value,
+    request_id: Option<serde_json::Value>,
+) -> Response {
+    let query = arguments.get("query").and_then(|query| query.as_str());
+    if query.is_some_and(|query| query.len() > 200) {
+        return tool_result(request_id, "Search query too long (max 200 chars)", true);
+    }
+
+    let services = match load_all_services_for_meta_tools(state, auth).await {
+        Ok(services) => services,
+        Err(error) => {
+            tracing::error!("Failed to load connected services: {error}");
+            return tool_result(request_id, "Failed to load connected services", true);
+        }
+    };
+
+    let result = mcp_service::list_connected_services(&services, query);
+    let text = serde_json::to_string_pretty(&result).unwrap_or_default();
     tool_result(request_id, &text, false)
 }
 
@@ -2797,9 +2870,34 @@ async fn execute_ssh_command_internal(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::models::approval_grant::{ApprovalGrant, COLLECTION_NAME as APPROVAL_GRANTS};
+    use crate::models::approval_request::{ApprovalRequest, COLLECTION_NAME as APPROVAL_REQUESTS};
+    use crate::models::notification_channel::{
+        COLLECTION_NAME as NOTIFICATION_CHANNELS, NotificationChannel,
+    };
+    use crate::models::org_membership::{
+        COLLECTION_NAME as ORG_MEMBERSHIPS, OrgMembership, OrgRole,
+    };
+    use crate::models::service_approval_config::{
+        ApprovalMode, COLLECTION_NAME as SERVICE_APPROVAL_CONFIGS, ServiceApprovalConfig,
+    };
+    use crate::models::user::{COLLECTION_NAME as USERS, User, UserType};
+    use crate::models::user_endpoint::{COLLECTION_NAME as USER_ENDPOINTS, UserEndpoint};
     use crate::models::user_service::{COLLECTION_NAME as USER_SERVICES, UserService};
+    use crate::mw::auth::AuthUser;
     use crate::services::mcp_service::{McpToolService, McpToolSource};
-    use crate::test_utils::{connect_test_database, test_user_service};
+    use crate::test_utils::{
+        connect_test_database, test_app_state, test_membership, test_user, test_user_endpoint,
+        test_user_service,
+    };
+    use axum::{
+        Router,
+        body::Body,
+        extract::{Path, State},
+        http::{Method, Request, StatusCode},
+        routing::any,
+    };
+    use tokio::net::TcpListener;
 
     fn api_key_auth(allowed_service_ids: Vec<String>) -> McpAuthContext {
         McpAuthContext {
@@ -2835,7 +2933,9 @@ mod tests {
                 node_id: None,
                 has_server_credential: true,
             },
+            executable: true,
             is_generic_proxy: false,
+            invalid_openapi_contract: false,
         }
     }
 
@@ -2850,7 +2950,9 @@ mod tests {
             source: McpToolSource::Platform {
                 downstream_service_id: id.into(),
             },
+            executable: true,
             is_generic_proxy: false,
+            invalid_openapi_contract: false,
         }
     }
 
@@ -2861,6 +2963,38 @@ mod tests {
         let filtered = filter_services_by_scope(services, &auth);
         assert_eq!(filtered.len(), 1);
         assert_eq!(filtered[0].service_id, "svc-a");
+    }
+
+    #[test]
+    fn connected_services_listing_respects_api_key_allow_list() {
+        let auth = api_key_auth(vec!["svc-a".into()]);
+        let services = vec![
+            user_managed("svc-a"),
+            user_managed("svc-b"),
+            platform("svc-c"),
+        ];
+
+        let visible = filter_services_by_scope(services, &auth);
+        let result = mcp_service::list_connected_services(&visible, None);
+        let services = result["services"].as_array().expect("services array");
+
+        assert_eq!(result["count"], 1);
+        assert_eq!(services[0]["service_id"], "svc-a");
+    }
+
+    #[test]
+    fn connected_services_listing_respects_relay_allow_list() {
+        let mut auth = McpAuthContext::user("user-1".into(), AuthMethod::Relay);
+        auth.allow_all_services = false;
+        auth.allowed_service_ids = vec!["svc-b".into()];
+        let services = vec![user_managed("svc-a"), user_managed("svc-b")];
+
+        let visible = filter_services_by_scope(services, &auth);
+        let result = mcp_service::list_connected_services(&visible, None);
+        let services = result["services"].as_array().expect("services array");
+
+        assert_eq!(result["count"], 1);
+        assert_eq!(services[0]["service_id"], "svc-b");
     }
 
     #[test]
@@ -2899,30 +3033,249 @@ mod tests {
         assert!(ensure_service_in_scope(&auth, &svc, None).is_ok());
     }
 
-    #[test]
-    fn approval_target_for_user_managed_service_uses_effective_owner() {
-        let auth = McpAuthContext::user("actor-1".into(), AuthMethod::AccessToken);
-        let mut svc = user_managed("svc-a");
-        svc.source = McpToolSource::UserManaged {
-            user_service_id: "svc-a".into(),
-            effective_owner_id: "org-1".into(),
+    #[tokio::test]
+    async fn catalog_backed_proxy_and_mcp_paths_enforce_the_same_approval_policy() {
+        let Some(db) = connect_test_database("mcp_approval_target_parity").await else {
+            eprintln!("skipping MCP approval parity test: no local MongoDB available");
+            return;
+        };
+        let downstream = Router::new().route("/{*path}", any(|| async { StatusCode::OK }));
+        let listener = TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind approval parity downstream");
+        let downstream_url = format!(
+            "http://{}",
+            listener.local_addr().expect("approval parity address")
+        );
+        let server = tokio::spawn(async move {
+            axum::serve(listener, downstream)
+                .await
+                .expect("serve approval parity downstream");
+        });
+
+        let actor_id = uuid::Uuid::new_v4().to_string();
+        let org_id = uuid::Uuid::new_v4().to_string();
+        let user_service_id = uuid::Uuid::new_v4().to_string();
+        let endpoint_id = uuid::Uuid::new_v4().to_string();
+        let catalog_service_id = uuid::Uuid::new_v4().to_string();
+        let slug = "approval-parity";
+        db.collection::<User>(USERS)
+            .insert_many([
+                test_user(&actor_id, UserType::Person),
+                test_user(&org_id, UserType::Org),
+            ])
+            .await
+            .unwrap();
+        db.collection::<OrgMembership>(ORG_MEMBERSHIPS)
+            .insert_one(test_membership(&org_id, &actor_id, OrgRole::Admin, None))
+            .await
+            .unwrap();
+        db.collection::<UserEndpoint>(USER_ENDPOINTS)
+            .insert_one(test_user_endpoint(
+                &endpoint_id,
+                &org_id,
+                "Approval Parity",
+                &downstream_url,
+                None,
+                Some(&catalog_service_id),
+            ))
+            .await
+            .unwrap();
+        let user_service = test_user_service(
+            &user_service_id,
+            &org_id,
+            slug,
+            &endpoint_id,
+            Some(&catalog_service_id),
+            None,
+        );
+        db.collection::<UserService>(USER_SERVICES)
+            .insert_one(user_service)
+            .await
+            .unwrap();
+
+        let mut service = user_managed(&user_service_id);
+        service.service_slug = slug.to_string();
+        service.source = McpToolSource::UserManaged {
+            user_service_id: user_service_id.clone(),
+            effective_owner_id: org_id.clone(),
             node_id: None,
             has_server_credential: true,
         };
+        let mcp_auth = McpAuthContext::user(actor_id.clone(), AuthMethod::AccessToken);
+        let proxy_auth = AuthUser {
+            user_id: uuid::Uuid::parse_str(&actor_id).unwrap(),
+            session_id: None,
+            scope: "proxy".to_string(),
+            acting_client_id: None,
+            approval_owner_user_id: None,
+            auth_method: AuthMethod::ApiKey,
+            allow_all_services: true,
+            allow_all_nodes: true,
+            allowed_service_ids: vec![],
+            resource_uris: None,
+            allowed_node_ids: vec![],
+            api_key_id: Some(uuid::Uuid::new_v4().to_string()),
+            api_key_name: Some("approval-parity-agent".to_string()),
+            rate_limit_per_second: None,
+            rate_limit_burst: None,
+            ip_address: None,
+            user_agent: None,
+        };
+        let state = test_app_state(db.clone());
+        let operation = operation_descriptor::build_mcp_descriptor("POST", "/items", None);
+        let proxy_request = || {
+            let mut request = Request::builder()
+                .method(Method::POST)
+                .uri(format!("/api/v1/proxy/s/{slug}/items"))
+                .body(Body::empty())
+                .expect("build approval parity proxy request");
+            request.extensions_mut().insert(
+                crate::services::billing::route_inventory::BillingRoutePolicy::Metered(
+                    crate::services::billing::BillingIngress::Proxy,
+                ),
+            );
+            request
+        };
+        let proxy_call = |request| {
+            crate::handlers::proxy::proxy_request_by_slug(
+                State(state.clone()),
+                proxy_auth.clone(),
+                TelemetryContext::default(),
+                Path((slug.to_string(), "items".to_string())),
+                request,
+            )
+        };
 
-        let target = approval_target_for_tool(&auth, &svc);
+        let now = chrono::Utc::now();
+        let config = ServiceApprovalConfig {
+            id: uuid::Uuid::new_v4().to_string(),
+            user_id: org_id.clone(),
+            service_id: catalog_service_id.clone(),
+            service_name: "Approval Parity".to_string(),
+            approval_required: false,
+            approval_mode: ApprovalMode::Grant,
+            rules: vec![],
+            default_effect: None,
+            created_at: now,
+            updated_at: now,
+        };
+        db.collection::<ServiceApprovalConfig>(SERVICE_APPROVAL_CONFIGS)
+            .insert_one(config)
+            .await
+            .unwrap();
 
-        assert_eq!(target.service_id, "svc-a");
-        assert_eq!(target.service_owner_user_id, "org-1");
+        let proxy_auto_allowed = proxy_call(proxy_request()).await.unwrap();
+        assert_eq!(proxy_auto_allowed.status(), StatusCode::OK);
+        assert!(
+            authorize_mcp_tool_operation(&state, &mcp_auth, &service, &operation, None)
+                .await
+                .is_ok()
+        );
+
+        db.collection::<ServiceApprovalConfig>(SERVICE_APPROVAL_CONFIGS)
+            .update_one(
+                doc! { "user_id": &org_id, "service_id": &catalog_service_id },
+                doc! { "$set": { "approval_required": true, "approval_mode": "grant" } },
+            )
+            .await
+            .unwrap();
+
+        db.collection::<ApprovalGrant>(APPROVAL_GRANTS)
+            .insert_one(ApprovalGrant {
+                id: uuid::Uuid::new_v4().to_string(),
+                user_id: org_id.clone(),
+                service_id: catalog_service_id.clone(),
+                service_name: "Approval Parity".to_string(),
+                requester_type: "access_token".to_string(),
+                requester_id: actor_id.clone(),
+                requester_label: None,
+                approval_request_id: uuid::Uuid::new_v4().to_string(),
+                scope: None,
+                granted_at: now,
+                expires_at: now + chrono::Duration::days(30),
+                revoked: false,
+                org_scoped: true,
+            })
+            .await
+            .unwrap();
+
+        let proxy_grant_covered = proxy_call(proxy_request()).await.unwrap();
+        assert_eq!(proxy_grant_covered.status(), StatusCode::OK);
+        assert!(
+            authorize_mcp_tool_operation(&state, &mcp_auth, &service, &operation, None)
+                .await
+                .is_ok()
+        );
+
+        db.collection::<ServiceApprovalConfig>(SERVICE_APPROVAL_CONFIGS)
+            .update_one(
+                doc! { "user_id": &org_id, "service_id": &catalog_service_id },
+                doc! { "$set": { "approval_mode": "per_request" } },
+            )
+            .await
+            .unwrap();
+        db.collection::<NotificationChannel>(NOTIFICATION_CHANNELS)
+            .insert_one(NotificationChannel {
+                id: uuid::Uuid::new_v4().to_string(),
+                user_id: actor_id.clone(),
+                telegram_chat_id: None,
+                telegram_username: None,
+                telegram_enabled: false,
+                telegram_link_code: None,
+                telegram_link_code_expires_at: None,
+                approval_timeout_secs: 0,
+                grant_expiry_days: 30,
+                approval_required: false,
+                push_enabled: false,
+                push_devices: vec![],
+                created_at: now,
+                updated_at: now,
+            })
+            .await
+            .unwrap();
+
+        let proxy_per_request = proxy_call(proxy_request()).await.unwrap_err();
+        assert!(matches!(
+            proxy_per_request,
+            crate::errors::AppError::ApprovalFailed { .. }
+        ));
+        assert!(
+            authorize_mcp_tool_operation(&state, &mcp_auth, &service, &operation, None)
+                .await
+                .is_err()
+        );
+
+        for requester_type in ["api_key", "access_token"] {
+            let approval = db
+                .collection::<ApprovalRequest>(APPROVAL_REQUESTS)
+                .find_one(doc! {
+                    "user_id": &org_id,
+                    "service_id": &catalog_service_id,
+                    "requester_type": requester_type,
+                    "requester_id": &actor_id,
+                })
+                .await
+                .unwrap()
+                .unwrap_or_else(|| panic!("{requester_type} path must create an approval request"));
+            assert_eq!(approval.approval_mode, ApprovalMode::PerRequest);
+            assert!(approval.from_org_policy);
+        }
+
+        server.abort();
     }
 
-    #[test]
-    fn approval_target_for_platform_service_uses_approval_owner() {
+    #[tokio::test]
+    async fn platform_mcp_target_falls_back_to_effective_approval_owner() {
+        let Some(db) = connect_test_database("mcp_platform_approval_target").await else {
+            eprintln!("skipping MCP approval target test: no local MongoDB available");
+            return;
+        };
         let mut auth = McpAuthContext::user("sa-1".into(), AuthMethod::ServiceAccount);
         auth.approval_owner_user_id = Some("owner-1".into());
         let svc = platform("svc-a");
 
-        let target = approval_target_for_tool(&auth, &svc);
+        let target = approval_target_for_tool(&db, &auth, &svc).await.unwrap();
 
         assert_eq!(target.service_id, "svc-a");
         assert_eq!(target.service_owner_user_id, "owner-1");
@@ -3533,6 +3886,7 @@ mod tests {
         assert!(SSH_META_TOOL_NAMES.contains(&"nyx__ssh_exec"));
         assert!(SSH_META_TOOL_NAMES.contains(&"nyx__ssh_list_services"));
         assert!(!SSH_META_TOOL_NAMES.contains(&"nyx__call_tool"));
+        assert!(!SSH_META_TOOL_NAMES.contains(&"nyx__list_connected_services"));
     }
 
     // -----------------------------------------------------------------------

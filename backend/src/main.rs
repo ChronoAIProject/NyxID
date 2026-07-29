@@ -1,6 +1,5 @@
 use axum::{extract::DefaultBodyLimit, extract::Extension, middleware as axum_mw};
 use clap::{Parser, Subcommand};
-use std::net::SocketAddr;
 use tokio::net::TcpListener;
 use tower_http::cors::{AllowHeaders, AllowMethods, AllowOrigin, CorsLayer};
 use tower_http::trace::TraceLayer;
@@ -11,6 +10,7 @@ mod cleanup_cli;
 mod config;
 mod crypto;
 mod db;
+mod downstream_disconnect;
 mod errors;
 mod handlers;
 mod login_cli;
@@ -1079,8 +1079,8 @@ async fn main() {
     tracing::info!("Listening on {addr}");
 
     axum::serve(
-        listener,
-        app.into_make_service_with_connect_info::<SocketAddr>(),
+        downstream_disconnect::DisconnectAwareListener::new(listener),
+        downstream_disconnect::DisconnectAwareMakeService::new(app),
     )
     .await
     .expect("Server error");

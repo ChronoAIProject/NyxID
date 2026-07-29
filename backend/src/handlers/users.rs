@@ -127,7 +127,11 @@ pub async fn get_me(
             },
         },
         capabilities: UserCapabilitiesResponse {
-            billing_available: state.billing.billing_enabled() && state.billing.lago_configured(),
+            billing_available: state.billing.billing_enabled()
+                && state.billing.lago_configured()
+                && enabled_features
+                    .iter()
+                    .any(|key| key == crate::services::feature_flag_service::BILLING_FLAG_KEY),
             enabled_features,
         },
     }))

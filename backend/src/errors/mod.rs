@@ -3,6 +3,13 @@ use axum::response::{IntoResponse, Response};
 use serde::Serialize;
 use utoipa::ToSchema;
 
+/// nginx's non-standard 499 "Client Closed Request". Used for
+/// [`AppError::ClientDisconnected`], where the status is only ever recorded in
+/// telemetry and audit — the socket it would be written to is already gone.
+fn client_closed_request() -> StatusCode {
+    StatusCode::from_u16(499).expect("499 is within the valid status-code range")
+}
+
 pub const PENDING_CREDENTIAL_DECRYPT_FAILED_CODE: u32 = 8006;
 pub const PENDING_CREDENTIAL_VERSION_UNSUPPORTED_CODE: u32 = 8007;
 pub const PENDING_CREDENTIAL_CIPHERTEXT_TOO_LARGE_CODE: u32 = 8008;
@@ -196,6 +203,13 @@ pub enum AppError {
 
     #[error("WebSocket proxy downstream error: {0}")]
     WsProxyDownstream(String),
+
+    /// The client that issued the request went away before we could answer, so
+    /// upstream work was cancelled. Nobody receives this response — the socket
+    /// is already gone. It exists as its own variant so cancelled work is not
+    /// counted as a server fault in telemetry and audit.
+    #[error("Client disconnected before the response could be delivered")]
+    ClientDisconnected,
 
     #[error("Pending credential decrypt failed: {0}")]
     PendingCredentialDecryptFailed(String),
@@ -467,6 +481,7 @@ impl AppError {
             Self::NodeRegistrationFailed(_) => StatusCode::BAD_REQUEST,
             Self::NodeCredentialMissing(_) => StatusCode::BAD_GATEWAY,
             Self::WsProxyDownstream(_) => StatusCode::BAD_GATEWAY,
+            Self::ClientDisconnected => client_closed_request(),
             Self::PendingCredentialDecryptFailed(_) => StatusCode::BAD_REQUEST,
             Self::PendingCredentialVersionUnsupported(_) => StatusCode::BAD_REQUEST,
             Self::PendingCredentialCiphertextTooLarge(_) => StatusCode::PAYLOAD_TOO_LARGE,
@@ -598,6 +613,7 @@ impl AppError {
             Self::NodeRegistrationFailed(_) => 8003,
             Self::NodeCredentialMissing(_) => 8004,
             Self::WsProxyDownstream(_) => 8005,
+            Self::ClientDisconnected => 8012,
             Self::PendingCredentialDecryptFailed(_) => PENDING_CREDENTIAL_DECRYPT_FAILED_CODE,
             Self::PendingCredentialVersionUnsupported(_) => {
                 PENDING_CREDENTIAL_VERSION_UNSUPPORTED_CODE
@@ -766,6 +782,7 @@ impl AppError {
             Self::NodeRegistrationFailed(_) => "node_registration_failed",
             Self::NodeCredentialMissing(_) => "node_credential_missing",
             Self::WsProxyDownstream(_) => "ws_proxy_downstream",
+            Self::ClientDisconnected => "client_disconnected",
             Self::PendingCredentialDecryptFailed(_) => "pending_credential_decrypt_failed",
             Self::PendingCredentialVersionUnsupported(_) => {
                 "pending_credential_version_unsupported"
@@ -1181,6 +1198,16 @@ mod tests {
         );
     }
 
+    /// A client hanging up mid-request is not a server fault. If this ever
+    /// reports 5xx again, every cancelled proxy request inflates the error rate.
+    #[test]
+    fn client_disconnect_is_not_a_server_error() {
+        let status = AppError::ClientDisconnected.status_code();
+        assert_eq!(status.as_u16(), 499);
+        assert!(!status.is_server_error());
+        assert_eq!(AppError::ClientDisconnected.error_code(), 8012);
+    }
+
     #[test]
     fn error_codes_unique() {
         let codes = vec![
@@ -1236,6 +1263,7 @@ mod tests {
             AppError::NodeRegistrationFailed("".into()).error_code(),
             AppError::NodeCredentialMissing("".into()).error_code(),
             AppError::WsProxyDownstream("".into()).error_code(),
+            AppError::ClientDisconnected.error_code(),
             AppError::PendingCredentialDecryptFailed("".into()).error_code(),
             AppError::PendingCredentialVersionUnsupported("".into()).error_code(),
             AppError::PendingCredentialCiphertextTooLarge(0).error_code(),
@@ -1308,6 +1336,10 @@ mod tests {
         assert_eq!(AppError::Conflict("".into()).error_key(), "conflict");
         assert_eq!(AppError::RateLimited.error_key(), "rate_limited");
         assert_eq!(AppError::Internal("".into()).error_key(), "internal_error");
+        assert_eq!(
+            AppError::ClientDisconnected.error_key(),
+            "client_disconnected"
+        );
         assert_eq!(
             AppError::ValidationError("".into()).error_key(),
             "validation_error"

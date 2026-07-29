@@ -2,6 +2,7 @@ use std::collections::{HashMap, HashSet};
 
 use futures::TryStreamExt;
 use mongodb::bson::doc;
+use sha2::{Digest, Sha256};
 
 use crate::crypto::aes::EncryptionKeys;
 use crate::errors::{AppError, AppResult};
@@ -9,7 +10,9 @@ use crate::models::downstream_service::{
     COLLECTION_NAME as DOWNSTREAM_SERVICES, DownstreamService, legacy_http_service_type_filter,
 };
 use crate::models::service_billing::{BillingMetric, PlatformUsage};
-use crate::models::service_endpoint::{COLLECTION_NAME as SERVICE_ENDPOINTS, ServiceEndpoint};
+use crate::models::service_endpoint::{
+    COLLECTION_NAME as SERVICE_ENDPOINTS, OperationResponseContract, ServiceEndpoint,
+};
 use crate::models::usage_meter::CredentialClass;
 use crate::models::user_api_key::{COLLECTION_NAME as USER_API_KEYS, UserApiKey};
 use crate::models::user_endpoint::{COLLECTION_NAME as USER_ENDPOINTS, UserEndpoint};
@@ -157,8 +160,14 @@ pub struct McpToolService {
     pub service_category: String,
     pub endpoints: Vec<McpToolEndpoint>,
     pub source: McpToolSource,
+    /// Whether the service can currently execute requests with its configured
+    /// credential and routing state.
+    pub executable: bool,
     /// true if this service has only a generic proxy tool (custom endpoint, no predefined endpoints)
     pub is_generic_proxy: bool,
+    /// The custom OpenAPI document was present but could not produce a valid
+    /// declared operation set, so only the explicitly-marked generic proxy is published.
+    pub invalid_openapi_contract: bool,
 }
 
 fn mcp_credential_class(
@@ -193,6 +202,7 @@ pub struct McpToolEndpoint {
     pub request_content_type: Option<String>,
     pub request_body_required: bool,
     pub response_description: Option<String>,
+    pub response: OperationResponseContract,
 }
 
 /// An MCP tool definition (name + description + JSON Schema input).
@@ -200,6 +210,25 @@ pub struct McpToolDefinition {
     pub name: String,
     pub description: String,
     pub input_schema: serde_json::Value,
+}
+
+/// Caller-visible, non-sensitive catalog diagnostics. Authorization exclusions
+/// are represented only by `*_scope_restricted`; excluded counts and resource
+/// identities are deliberately not exposed.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct McpCatalogDiagnostics {
+    pub no_visible_connections: bool,
+    pub unavailable_services: usize,
+    pub generic_only_services: usize,
+    pub invalid_contract_services: usize,
+    pub service_scope_restricted: bool,
+    pub node_scope_restricted: bool,
+    pub node_scope_exclusions_present: bool,
+}
+
+pub struct McpOperationCatalog {
+    pub services: Vec<McpToolService>,
+    pub diagnostics: McpCatalogDiagnostics,
 }
 
 // ---------------------------------------------------------------------------
@@ -235,6 +264,7 @@ pub async fn load_user_tools(
 /// MCP doesn't advertise tools the caller can't actually invoke. Matches
 /// the scope enforcement in `execute_tool` (seventeenth-round Codex
 /// review P2).
+#[allow(dead_code)]
 pub async fn load_user_tools_scoped(
     db: &mongodb::Database,
     node_ws_manager: &NodeWsManager,
@@ -281,6 +311,217 @@ pub async fn load_user_tools_all_scoped(
 pub enum NodeScope<'a> {
     Unrestricted,
     Allowed(&'a [String]),
+}
+
+/// Service authorization applied before catalog diagnostics and publication.
+#[derive(Clone, Copy)]
+pub enum ServiceScope<'a> {
+    Unrestricted,
+    Allowed(&'a [String]),
+}
+
+impl ServiceScope<'_> {
+    fn permits(&self, service: &McpToolService) -> bool {
+        match self {
+            ServiceScope::Unrestricted => true,
+            ServiceScope::Allowed(ids) => {
+                service.source.is_user_service() && ids.iter().any(|id| id == &service.service_id)
+            }
+        }
+    }
+
+    fn is_restricted(&self) -> bool {
+        matches!(self, ServiceScope::Allowed(_))
+    }
+}
+
+/// Build the canonical caller-specific operation catalog used by both REST
+/// `/api/v1/mcp/config` and MCP `tools/list`.
+pub async fn load_operation_catalog(
+    db: &mongodb::Database,
+    node_ws_manager: &NodeWsManager,
+    user_id: &str,
+    node_scope: NodeScope<'_>,
+    service_scope: ServiceScope<'_>,
+) -> AppResult<McpOperationCatalog> {
+    let node_scope_restricted = matches!(node_scope, NodeScope::Allowed(_));
+    let mut visible = load_user_tools_inner(db, node_ws_manager, user_id, true, node_scope).await?;
+    visible.retain(|service| service_scope.permits(service));
+
+    // A boolean reason is safe for services already visible through service
+    // authorization, while counts or IDs would disclose node topology. The
+    // unrestricted comparison is internal and uses the same canonical loader.
+    let node_scope_excluded_service_ids: HashSet<String> = if node_scope_restricted {
+        let scoped_execution: HashMap<String, bool> = visible
+            .iter()
+            .map(|service| (service.service_id.clone(), service.executable))
+            .collect();
+        let mut before_node_scope =
+            load_user_tools_inner(db, node_ws_manager, user_id, true, NodeScope::Unrestricted)
+                .await?;
+        before_node_scope.retain(|service| service_scope.permits(service));
+        before_node_scope
+            .iter()
+            .filter(|service| {
+                service.executable
+                    && scoped_execution.get(&service.service_id).copied() != Some(true)
+            })
+            .map(|service| service.service_id.clone())
+            .collect()
+    } else {
+        HashSet::new()
+    };
+    let node_scope_exclusions_present = !node_scope_excluded_service_ids.is_empty();
+
+    let no_visible_connections = visible.is_empty() && !node_scope_exclusions_present;
+    let unavailable_services = visible
+        .iter()
+        .filter(|service| {
+            !service.executable
+                && !node_scope_excluded_service_ids.contains(service.service_id.as_str())
+        })
+        .count();
+    visible.retain(|service| service.executable);
+
+    visible.sort_by(|left, right| left.service_id.cmp(&right.service_id));
+    for service in &mut visible {
+        service
+            .endpoints
+            .sort_by(|left, right| left.endpoint_id.cmp(&right.endpoint_id));
+    }
+    validate_catalog_identities(&visible)?;
+
+    let mut invalid_contract_services = visible
+        .iter()
+        .filter(|service| service.invalid_openapi_contract)
+        .count();
+    visible.retain(|service| {
+        let valid = operation_set_is_publishable(service);
+        if !valid {
+            invalid_contract_services += 1;
+            tracing::warn!(
+                service_id = %service.service_id,
+                "Omitting service with invalid MCP operation descriptor"
+            );
+        }
+        valid
+    });
+
+    let generic_only_services = visible
+        .iter()
+        .filter(|service| service.is_generic_proxy)
+        .count();
+    Ok(McpOperationCatalog {
+        services: visible,
+        diagnostics: McpCatalogDiagnostics {
+            no_visible_connections,
+            unavailable_services,
+            generic_only_services,
+            invalid_contract_services,
+            service_scope_restricted: service_scope.is_restricted(),
+            node_scope_restricted,
+            node_scope_exclusions_present,
+        },
+    })
+}
+
+fn operation_set_is_publishable(service: &McpToolService) -> bool {
+    if service.endpoints.is_empty() {
+        return false;
+    }
+    if service.is_generic_proxy {
+        return service.endpoints.len() == 1
+            && service.endpoints[0].endpoint_id == GENERIC_PROXY_ENDPOINT_ID
+            && service.endpoints[0].name == "request";
+    }
+    let mut names = HashSet::new();
+    service.endpoints.iter().all(|endpoint| {
+        operation_descriptor_is_publishable(endpoint) && names.insert(endpoint.name.as_str())
+    })
+}
+
+fn operation_descriptor_is_publishable(endpoint: &McpToolEndpoint) -> bool {
+    if endpoint.endpoint_id.trim().is_empty()
+        || endpoint.name.trim().is_empty()
+        || !endpoint.path.starts_with('/')
+        || !matches!(
+            endpoint.method.as_str(),
+            "GET" | "POST" | "PUT" | "PATCH" | "DELETE"
+        )
+        || endpoint.parameters.as_ref().is_some_and(|parameters| {
+            !parameters.as_array().is_some_and(|parameters| {
+                parameters.iter().all(parameter_descriptor_is_publishable)
+            })
+        })
+        || endpoint
+            .request_content_type
+            .as_ref()
+            .is_some_and(|content_type| {
+                content_type.trim().is_empty()
+                    || reqwest::header::HeaderValue::from_str(content_type).is_err()
+            })
+        || endpoint
+            .request_body_schema
+            .as_ref()
+            .is_some_and(|schema| !schema.is_object() && !schema.is_boolean())
+    {
+        return false;
+    }
+
+    endpoint.response.content_types.iter().all(|content_type| {
+        !content_type.trim().is_empty()
+            && reqwest::header::HeaderValue::from_str(content_type).is_ok()
+    })
+}
+
+fn parameter_descriptor_is_publishable(parameter: &serde_json::Value) -> bool {
+    parameter
+        .get("name")
+        .and_then(|value| value.as_str())
+        .is_some_and(|name| !name.is_empty())
+        && matches!(
+            parameter.get("in").and_then(|value| value.as_str()),
+            Some("path" | "query" | "header" | "cookie")
+        )
+        && parameter
+            .get("required")
+            .is_none_or(serde_json::Value::is_boolean)
+        && parameter
+            .get("schema")
+            .is_none_or(|schema| schema.is_object() || schema.is_boolean())
+}
+
+fn validate_catalog_identities(services: &[McpToolService]) -> AppResult<()> {
+    let mut service_ids = HashSet::new();
+    for service in services {
+        if service.service_id.trim().is_empty() || !service_ids.insert(service.service_id.as_str())
+        {
+            tracing::error!(
+                service_id = %service.service_id,
+                "MCP operation catalog contains a missing or duplicate service identity"
+            );
+            return Err(AppError::Internal(
+                "MCP operation catalog contains ambiguous identities".to_string(),
+            ));
+        }
+
+        let mut endpoint_ids = HashSet::new();
+        for endpoint in &service.endpoints {
+            if endpoint.endpoint_id.trim().is_empty()
+                || !endpoint_ids.insert(endpoint.endpoint_id.as_str())
+            {
+                tracing::error!(
+                    service_id = %service.service_id,
+                    endpoint_id = %endpoint.endpoint_id,
+                    "MCP operation catalog contains a missing or duplicate endpoint identity"
+                );
+                return Err(AppError::Internal(
+                    "MCP operation catalog contains ambiguous identities".to_string(),
+                ));
+            }
+        }
+    }
+    Ok(())
 }
 
 impl<'a> NodeScope<'a> {
@@ -370,24 +611,28 @@ async fn load_user_tools_inner(
     };
 
     let mut seen_ids: HashSet<String> = HashSet::new();
-    let mut valid_platform_services: Vec<&DownstreamService> = Vec::new();
+    let mut valid_platform_services: Vec<(&DownstreamService, bool)> = Vec::new();
 
     for svc in &connected_services {
         if svc.service_type != "http" || svc.service_category == "provider" {
             continue;
         }
+        let mut executable = true;
         if svc.requires_user_credential {
             if let Some(conn) = conn_map.get(svc.id.as_str()) {
                 if conn.credential_encrypted.is_none() && !node_route_set.contains(svc.id.as_str())
                 {
-                    continue;
+                    executable = false;
                 }
             } else {
                 continue;
             }
         }
+        if !include_non_executable && !executable {
+            continue;
+        }
         if seen_ids.insert(svc.id.clone()) {
-            valid_platform_services.push(svc);
+            valid_platform_services.push((svc, executable));
         }
     }
 
@@ -401,7 +646,7 @@ async fn load_user_tools_inner(
             continue;
         }
         if seen_ids.insert(svc.id.clone()) {
-            valid_platform_services.push(svc);
+            valid_platform_services.push((svc, true));
         }
     }
 
@@ -416,10 +661,12 @@ async fn load_user_tools_inner(
     // Collect catalog IDs and slugs from *executable* user services for dedup
     let executable_catalog_ids: HashSet<&str> = all_user_services
         .iter()
+        .filter(|r| r.executable)
         .filter_map(|r| r.service.catalog_service_id.as_deref())
         .collect();
     let executable_slugs: HashSet<&str> = all_user_services
         .iter()
+        .filter(|r| r.executable)
         .map(|r| r.service.slug.as_str())
         .collect();
 
@@ -519,7 +766,7 @@ async fn load_user_tools_inner(
     // Collect all catalog/downstream IDs that need endpoints
     let mut endpoint_service_ids: Vec<&str> = valid_platform_services
         .iter()
-        .map(|s| s.id.as_str())
+        .map(|(service, _)| service.id.as_str())
         .collect();
     for r in &all_user_services {
         if let Some(catalog_id) = r.service.catalog_service_id.as_deref() {
@@ -583,14 +830,16 @@ async fn load_user_tools_inner(
             .map(|ep| ep.label.as_str())
             .unwrap_or(&us.slug);
 
-        let (endpoints, is_generic) = if let Some(catalog_id) = us.catalog_service_id.as_deref() {
+        let (endpoints, is_generic, invalid_openapi_contract) = if let Some(catalog_id) =
+            us.catalog_service_id.as_deref()
+        {
             // Catalog-backed: use the ServiceEndpoint rows pre-parsed at catalog
             // registration time. Unchanged path.
             let eps = eps_by_svc
                 .get(catalog_id)
                 .map(|eps| service_endpoints_to_mcp(eps))
                 .unwrap_or_default();
-            (eps, false)
+            (eps, false, false)
         } else if let Some(spec_url) = user_endpoint.and_then(|ep| ep.openapi_spec_url.as_deref()) {
             // Custom endpoint with a user-supplied OpenAPI spec: fetch + parse
             // through the hardened cache (scoped by owner) and surface each
@@ -598,14 +847,18 @@ async fn load_user_tools_inner(
             // generic proxy tool so a broken spec URL never takes the service
             // offline for the agent.
             match fetch_and_parse_user_spec(spec_url, &r.effective_owner_id).await {
-                Ok(mcp_endpoints) if !mcp_endpoints.is_empty() => (mcp_endpoints, false),
+                Ok(mcp_endpoints) if !mcp_endpoints.is_empty() => (mcp_endpoints, false, false),
                 Ok(_) => {
                     tracing::debug!(
                         user_service_id = %us.id,
                         spec_url = %api_docs_service::redact_url_for_logs(spec_url),
                         "Parsed user OpenAPI spec contained no operations; falling back to generic proxy tool"
                     );
-                    (vec![build_generic_proxy_endpoint(endpoint_label)], true)
+                    (
+                        vec![build_generic_proxy_endpoint(endpoint_label)],
+                        true,
+                        true,
+                    )
                 }
                 Err(error) => {
                     tracing::warn!(
@@ -614,12 +867,16 @@ async fn load_user_tools_inner(
                         %error,
                         "Failed to parse user OpenAPI spec; falling back to generic proxy tool"
                     );
-                    (vec![build_generic_proxy_endpoint(endpoint_label)], true)
+                    (
+                        vec![build_generic_proxy_endpoint(endpoint_label)],
+                        true,
+                        true,
+                    )
                 }
             }
         } else {
             let generic_ep = build_generic_proxy_endpoint(endpoint_label);
-            (vec![generic_ep], true)
+            (vec![generic_ep], true, false)
         };
 
         result.push(McpToolService {
@@ -635,13 +892,15 @@ async fn load_user_tools_inner(
                 node_id: us.node_id.clone(),
                 has_server_credential: r.has_server_credential,
             },
+            executable: r.executable,
             is_generic_proxy: is_generic,
+            invalid_openapi_contract,
         });
     }
 
     // 4b. Platform services (skip those covered by an executable user
     // service OR by a node-pinned UserService — see blocked_* sets).
-    for svc in valid_platform_services {
+    for (svc, executable) in valid_platform_services {
         if blocked_catalog_ids.contains(svc.id.as_str()) {
             continue;
         }
@@ -664,7 +923,9 @@ async fn load_user_tools_inner(
             source: McpToolSource::Platform {
                 downstream_service_id: svc.id.clone(),
             },
+            executable,
             is_generic_proxy: false,
+            invalid_openapi_contract: false,
         });
     }
 
@@ -685,6 +946,7 @@ fn service_endpoints_to_mcp(eps: &[&ServiceEndpoint]) -> Vec<McpToolEndpoint> {
             request_content_type: ep.request_content_type.clone(),
             request_body_required: ep.effective_request_body_required(),
             response_description: ep.response_description.clone(),
+            response: ep.response.clone(),
         })
         .collect()
 }
@@ -700,10 +962,10 @@ async fn fetch_and_parse_user_spec(
     Ok(parsed
         .into_iter()
         .map(|p| McpToolEndpoint {
-            // User-endpoint operations have no persistent ID; synthesise a
-            // stable one from method+path so downstream logging / metrics can
-            // distinguish tools.
-            endpoint_id: format!("{}:{}", p.method, p.path),
+            // Dynamic operations have no persisted row. Hash the producer's
+            // OpenAPI operationId, falling back to canonical method/path, so
+            // callers receive a stable opaque ID and never derive identity.
+            endpoint_id: opaque_operation_id(p.source_operation_id.as_deref(), &p.method, &p.path),
             name: p.name,
             description: p.description,
             method: p.method,
@@ -713,6 +975,7 @@ async fn fetch_and_parse_user_spec(
             request_content_type: p.request_content_type,
             request_body_required: p.request_body_required,
             response_description: None,
+            response: p.response,
         })
         .collect())
 }
@@ -722,6 +985,7 @@ struct ResolvedUserService {
     service: UserService,
     effective_owner_id: String,
     has_server_credential: bool,
+    executable: bool,
 }
 
 /// Load all callable UserServices for the user: personal + org-shared (where
@@ -909,6 +1173,7 @@ async fn load_callable_user_services(
             service: us,
             effective_owner_id: user_id.to_string(),
             has_server_credential: cred_info.has_server_credential,
+            executable: cred_info.is_executable,
         });
     }
 
@@ -948,6 +1213,7 @@ async fn load_callable_user_services(
             service: us,
             effective_owner_id: org_user_id,
             has_server_credential: cred_info.has_server_credential,
+            executable: cred_info.is_executable,
         });
     }
 
@@ -1059,10 +1325,10 @@ fn classify_credential(
 /// predefined API endpoints. Lets the AI make arbitrary HTTP requests.
 fn build_generic_proxy_endpoint(service_label: &str) -> McpToolEndpoint {
     McpToolEndpoint {
-        endpoint_id: String::new(),
+        endpoint_id: GENERIC_PROXY_ENDPOINT_ID.to_string(),
         name: "request".to_string(),
         description: Some(format!(
-            "Make an HTTP request to {service_label}. Specify the method, path, and optional JSON body."
+            "Make an HTTP request to {service_label}. Specify the method, path, optional raw query string, and optional JSON body."
         )),
         method: "POST".to_string(),
         path: String::new(),
@@ -1071,7 +1337,22 @@ fn build_generic_proxy_endpoint(service_label: &str) -> McpToolEndpoint {
         request_content_type: Some("application/json".to_string()),
         request_body_required: false,
         response_description: None,
+        response: OperationResponseContract::default(),
     }
+}
+
+const GENERIC_PROXY_ENDPOINT_ID: &str = "nyx_generic_proxy_v1";
+
+fn opaque_operation_id(source_operation_id: Option<&str>, method: &str, path: &str) -> String {
+    let canonical = match source_operation_id {
+        Some(operation_id) => format!("operationId\n{}", operation_id.trim()),
+        None => format!(
+            "methodPath\n{}\n{}",
+            method.trim().to_ascii_uppercase(),
+            path.trim()
+        ),
+    };
+    format!("op_{}", hex::encode(Sha256::digest(canonical.as_bytes())))
 }
 
 /// Build the JSON Schema input for a generic proxy tool. This is separate from
@@ -1088,7 +1369,11 @@ fn build_generic_proxy_input_schema() -> serde_json::Value {
             },
             "path": {
                 "type": "string",
-                "description": "Request path (e.g., /v1/chat/completions)"
+                "description": "Request path, optionally including a raw query string (e.g., /stats?period=today)"
+            },
+            "query": {
+                "type": "string",
+                "description": "Optional raw query string without the leading ?. Preserves repeated keys and percent-encoding; omit when path includes a query string."
             },
             "body": {
                 "description": "Request body (JSON object). Omit for GET/DELETE requests."
@@ -1103,7 +1388,7 @@ fn build_generic_proxy_input_schema() -> serde_json::Value {
 // ---------------------------------------------------------------------------
 
 /// Generate MCP tool definitions from loaded services.
-/// Always includes the three `nyx__` meta-tools.
+/// Always includes the built-in `nyx__` meta-tools.
 ///
 /// `activated_service_ids` controls which services' tools are included:
 /// - `None` = include all services (backward compat for REST /mcp/config)
@@ -1135,7 +1420,9 @@ pub fn generate_tool_definitions(
     tools.push(McpToolDefinition {
         name: "nyx__discover_services".to_string(),
         description: "Browse available services you can connect to on this NyxID instance. \
-            Returns services you are NOT yet connected to."
+            Returns services you are NOT yet connected to. For services you are already \
+            connected to, use nyx__list_connected_services. Services that require no \
+            credential are auto-connected and appear there."
             .to_string(),
         input_schema: serde_json::json!({
             "type": "object",
@@ -1150,6 +1437,24 @@ pub fn generate_tool_definitions(
                     "description": "Optional: filter by service category"
                 }
             }
+        }),
+    });
+
+    tools.push(McpToolDefinition {
+        name: "nyx__list_connected_services".to_string(),
+        description: "List services you are already connected to, including services that \
+            are currently unavailable. Services that require no credential are auto-connected \
+            and appear here. This is the complement of nyx__discover_services."
+            .to_string(),
+        input_schema: serde_json::json!({
+            "type": "object",
+            "properties": {
+                "query": {
+                    "type": "string",
+                    "description": "Optional substring filter over service name, slug, or description"
+                }
+            },
+            "required": []
         }),
     });
 
@@ -1455,6 +1760,7 @@ pub async fn load_public_tools(db: &mongodb::Database) -> AppResult<Vec<McpToolS
                 request_content_type: Some("application/json".to_string()),
                 request_body_required: false,
                 response_description: None,
+                response: OperationResponseContract::default(),
             })
             .collect();
 
@@ -1472,7 +1778,9 @@ pub async fn load_public_tools(db: &mongodb::Database) -> AppResult<Vec<McpToolS
             source: McpToolSource::Platform {
                 downstream_service_id: svc.id,
             },
+            executable: true,
             is_generic_proxy: false,
+            invalid_openapi_contract: false,
         });
     }
 
@@ -1783,7 +2091,7 @@ fn push_required(required: &mut Vec<serde_json::Value>, name: &str) {
 
 const REQUEST_BODY_FIELD_CANDIDATES: &[&str] = &["body", "request_body", "requestBody", "payload"];
 
-const BLOCKED_MCP_HEADER_PARAMETER_NAMES: &[&str] = &[
+pub(crate) const BLOCKED_MCP_HEADER_PARAMETER_NAMES: &[&str] = &[
     "host",
     "authorization",
     "cookie",
@@ -2985,16 +3293,43 @@ pub async fn execute_tool(
 }
 
 /// Build proxy arguments from a generic proxy tool call.
-/// Extracts method, path, and body from the tool arguments directly.
+/// Extracts method, path, query, and body from the tool arguments directly.
 fn build_generic_proxy_args(args: &serde_json::Value) -> AppResult<ProxyArgs> {
-    let path = match args.get("path").and_then(|v| v.as_str()) {
-        Some(p) => p.trim_start_matches('/').to_string(),
+    let requested_path = match args.get("path").and_then(|v| v.as_str()) {
+        Some(path) => path,
         None => {
             return Err(AppError::BadRequest(
                 "Missing required parameter: path".to_string(),
             ));
         }
     };
+
+    let (path, embedded_query) = match requested_path.split_once('?') {
+        Some((path, query)) => (path, Some(query)),
+        None => (requested_path, None),
+    };
+    let explicit_query = match args.get("query") {
+        Some(serde_json::Value::String(query)) => Some(query.as_str()),
+        Some(_) => {
+            return Err(AppError::BadRequest(
+                "Invalid parameter: query must be a string".to_string(),
+            ));
+        }
+        None => None,
+    };
+
+    if embedded_query.is_some() && explicit_query.is_some() {
+        return Err(AppError::BadRequest(
+            "Specify query parameters either in path or query, not both".to_string(),
+        ));
+    }
+
+    let query = embedded_query.or(explicit_query);
+    if query.is_some_and(|query| query.contains('#')) {
+        return Err(AppError::BadRequest("Invalid proxy path".to_string()));
+    }
+    proxy_service::validate_requested_proxy_path(path)?;
+    let path = path.trim_start_matches('/').to_string();
 
     let method = parse_proxy_method(args.get("method").and_then(|v| v.as_str()).unwrap_or("GET"))?;
 
@@ -3010,7 +3345,7 @@ fn build_generic_proxy_args(args: &serde_json::Value) -> AppResult<ProxyArgs> {
         Some(bytes::Bytes::from(bytes))
     });
 
-    Ok((method, path, None, Vec::new(), body))
+    Ok((method, path, query.map(str::to_string), Vec::new(), body))
 }
 
 fn parse_proxy_method(method: &str) -> AppResult<reqwest::Method> {
@@ -3089,6 +3424,55 @@ pub fn search_all_tools(services: &[McpToolService], query: &str) -> SearchResul
 }
 
 // ---------------------------------------------------------------------------
+// Meta-tool: nyx__list_connected_services
+// ---------------------------------------------------------------------------
+
+/// Summarize the connected services already loaded for an MCP caller.
+pub fn list_connected_services(
+    services: &[McpToolService],
+    query: Option<&str>,
+) -> serde_json::Value {
+    let query = query
+        .map(str::trim)
+        .filter(|query| !query.is_empty())
+        .map(str::to_lowercase);
+
+    let results: Vec<serde_json::Value> = services
+        .iter()
+        .filter(|service| {
+            query.as_ref().is_none_or(|query| {
+                service.service_name.to_lowercase().contains(query)
+                    || service.service_slug.to_lowercase().contains(query)
+                    || service
+                        .description
+                        .as_deref()
+                        .is_some_and(|description| description.to_lowercase().contains(query))
+            })
+        })
+        .map(|service| {
+            let source = match &service.source {
+                McpToolSource::Platform { .. } => "platform",
+                McpToolSource::UserManaged { .. } => "user_service",
+            };
+            serde_json::json!({
+                "service_id": service.service_id,
+                "name": service.service_name,
+                "slug": service.service_slug,
+                "description": service.description,
+                "category": service.service_category,
+                "source": source,
+                "executable": service.executable,
+                "tool_count": service.endpoints.len(),
+                "is_generic_proxy": service.is_generic_proxy,
+            })
+        })
+        .collect();
+
+    let count = results.len();
+    serde_json::json!({ "services": results, "count": count })
+}
+
+// ---------------------------------------------------------------------------
 // Meta-tool: nyx__discover_services
 // ---------------------------------------------------------------------------
 
@@ -3099,15 +3483,24 @@ pub async fn discover_services(
     query: Option<&str>,
     category: Option<&str>,
 ) -> AppResult<serde_json::Value> {
-    // Load old-model connections
+    // Load all old-model connections so an inactive row can distinguish an
+    // explicit disconnect from an auto-connected service with no row.
     let connections: Vec<UserServiceConnection> = db
         .collection::<UserServiceConnection>(CONNECTIONS)
-        .find(doc! { "user_id": user_id, "is_active": true })
+        .find(doc! { "user_id": user_id })
         .await?
         .try_collect()
         .await?;
 
-    let connected_ids: HashSet<&str> = connections.iter().map(|c| c.service_id.as_str()).collect();
+    let connected_ids: HashSet<&str> = connections
+        .iter()
+        .filter(|connection| connection.is_active)
+        .map(|connection| connection.service_id.as_str())
+        .collect();
+    let connection_ids: HashSet<&str> = connections
+        .iter()
+        .map(|connection| connection.service_id.as_str())
+        .collect();
 
     // Load new-model AI Services -- exclude catalog services already provisioned
     let user_services: Vec<UserService> = db
@@ -3148,6 +3541,11 @@ pub async fn discover_services(
         .filter(|svc| {
             // Already connected via old model
             if connected_ids.contains(svc.id.as_str()) {
+                return false;
+            }
+            // Credential-free services are auto-connected unless an inactive
+            // connection row records an explicit disconnect.
+            if !svc.requires_user_credential && !connection_ids.contains(svc.id.as_str()) {
                 return false;
             }
             // Already provisioned as a UserService (by catalog ID or slug match)
@@ -3225,10 +3623,12 @@ pub async fn connect_service(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::models::downstream_service::test_helpers::dummy_service;
+    use crate::test_utils::{connect_test_database, test_user_endpoint, test_user_service};
 
     fn make_endpoint(name: &str, description: &str) -> McpToolEndpoint {
         McpToolEndpoint {
-            endpoint_id: String::new(),
+            endpoint_id: format!("endpoint-{name}"),
             name: name.to_string(),
             description: Some(description.to_string()),
             method: "GET".to_string(),
@@ -3238,6 +3638,7 @@ mod tests {
             request_content_type: None,
             request_body_required: false,
             response_description: None,
+            response: OperationResponseContract::default(),
         }
     }
 
@@ -3257,7 +3658,9 @@ mod tests {
             source: McpToolSource::Platform {
                 downstream_service_id: id.to_string(),
             },
+            executable: true,
             is_generic_proxy: false,
+            invalid_openapi_contract: false,
         }
     }
 
@@ -3282,6 +3685,91 @@ mod tests {
             descriptor.resource.as_deref(),
             Some("/repos/acme/project/contents/README.md")
         );
+    }
+
+    #[test]
+    fn dynamic_operation_identity_is_stable_and_opaque() {
+        let first = opaque_operation_id(None, "get", "/v1/files/{id}");
+        let second = opaque_operation_id(None, "GET", "/v1/files/{id}");
+
+        assert_eq!(first, second);
+        assert!(first.starts_with("op_"));
+        assert!(!first.contains("GET"));
+        assert!(!first.contains("/v1/files"));
+
+        assert_eq!(
+            opaque_operation_id(Some("downloadFile"), "GET", "/v1/files/{id}"),
+            opaque_operation_id(Some("downloadFile"), "POST", "/v2/assets/{id}"),
+        );
+    }
+
+    #[test]
+    fn catalog_identity_validation_fails_closed_on_missing_or_duplicate_ids() {
+        let mut missing_service = make_service(
+            "",
+            "Missing",
+            "missing",
+            vec![make_endpoint("read", "Read")],
+        );
+        assert!(validate_catalog_identities(&[missing_service]).is_err());
+
+        let duplicate_endpoint = make_endpoint("read", "Read");
+        let service = make_service(
+            "service-1",
+            "Duplicate",
+            "duplicate",
+            vec![duplicate_endpoint, make_endpoint("read", "Read again")],
+        );
+        assert!(validate_catalog_identities(&[service]).is_err());
+
+        missing_service = make_service(
+            "service-1",
+            "First",
+            "first",
+            vec![make_endpoint("one", "One")],
+        );
+        let duplicate_service = make_service(
+            "service-1",
+            "Second",
+            "second",
+            vec![make_endpoint("two", "Two")],
+        );
+        assert!(validate_catalog_identities(&[missing_service, duplicate_service]).is_err());
+    }
+
+    #[test]
+    fn service_scope_keeps_only_exact_user_service_identities() {
+        let user_service = McpToolService {
+            source: McpToolSource::UserManaged {
+                user_service_id: "service-allowed".to_string(),
+                effective_owner_id: "owner-1".to_string(),
+                node_id: None,
+                has_server_credential: true,
+            },
+            ..make_service(
+                "service-allowed",
+                "Allowed",
+                "allowed",
+                vec![make_endpoint("read", "Read")],
+            )
+        };
+        let platform = make_service(
+            "service-allowed",
+            "Platform",
+            "platform",
+            vec![make_endpoint("read", "Read")],
+        );
+        let allowed_ids = ["service-allowed".to_string()];
+        let scope = ServiceScope::Allowed(&allowed_ids);
+
+        assert!(scope.permits(&user_service));
+        assert!(!scope.permits(&platform));
+        match &user_service.source {
+            McpToolSource::UserManaged {
+                user_service_id, ..
+            } => assert_eq!(user_service.service_id, *user_service_id),
+            McpToolSource::Platform { .. } => panic!("expected user-managed source"),
+        }
     }
 
     #[test]
@@ -3410,6 +3898,324 @@ mod tests {
         assert!(result.matched_service_ids.is_empty());
     }
 
+    // -- list_connected_services tests --
+
+    #[test]
+    fn list_connected_services_filters_by_name_slug_and_description() {
+        let mut weather = make_service(
+            "svc-1",
+            "Forecast Service",
+            "weather",
+            vec![make_endpoint("get_forecast", "Get weather forecast")],
+        );
+        weather.description = Some("Hourly climate data".to_string());
+        let news = make_service(
+            "svc-2",
+            "News",
+            "news",
+            vec![make_endpoint("headlines", "Get headlines")],
+        );
+
+        let services = [weather, news];
+        for query in ["FORECAST", "weather", "CLIMATE"] {
+            let result = list_connected_services(&services, Some(query));
+            let matches = result["services"].as_array().expect("services array");
+
+            assert_eq!(result["count"], 1);
+            assert_eq!(matches[0]["service_id"], "svc-1");
+            assert_eq!(matches[0]["tool_count"], 1);
+            assert_eq!(matches[0]["source"], "platform");
+        }
+    }
+
+    #[tokio::test]
+    async fn connected_service_loader_excludes_unconnected_and_marks_unavailable() {
+        let Some(db) = connect_test_database("mcp_connected_services").await else {
+            eprintln!("skipping MCP connected-services test: no local MongoDB available");
+            return;
+        };
+
+        let user_id = uuid::Uuid::new_v4().to_string();
+        let connected_id = uuid::Uuid::new_v4().to_string();
+        let unconnected_id = uuid::Uuid::new_v4().to_string();
+        let unavailable_id = uuid::Uuid::new_v4().to_string();
+
+        let mut connected = dummy_service();
+        connected.id = connected_id.clone();
+        connected.name = "Connected Platform".to_string();
+        connected.slug = "connected-platform".to_string();
+        connected.description = Some("Connected service".to_string());
+        connected.requires_user_credential = true;
+
+        let mut unconnected = dummy_service();
+        unconnected.id = unconnected_id.clone();
+        unconnected.name = "Unconnected Platform".to_string();
+        unconnected.slug = "unconnected-platform".to_string();
+        unconnected.requires_user_credential = true;
+
+        db.collection::<DownstreamService>(DOWNSTREAM_SERVICES)
+            .insert_many(vec![connected, unconnected])
+            .await
+            .expect("insert platform services");
+
+        db.collection::<UserServiceConnection>(CONNECTIONS)
+            .insert_one(UserServiceConnection {
+                id: uuid::Uuid::new_v4().to_string(),
+                user_id: user_id.clone(),
+                service_id: connected_id.clone(),
+                credential_encrypted: Some(vec![1]),
+                credential_type: Some("api_key".to_string()),
+                credential_label: None,
+                metadata: None,
+                is_active: true,
+                created_at: chrono::Utc::now(),
+                updated_at: chrono::Utc::now(),
+            })
+            .await
+            .expect("insert connection");
+
+        db.collection::<ServiceEndpoint>(SERVICE_ENDPOINTS)
+            .insert_one(ServiceEndpoint {
+                id: uuid::Uuid::new_v4().to_string(),
+                service_id: connected_id.clone(),
+                name: "status".to_string(),
+                description: Some("Get status".to_string()),
+                method: "GET".to_string(),
+                path: "/status".to_string(),
+                parameters: None,
+                request_body_schema: None,
+                request_content_type: None,
+                request_body_required: false,
+                response_description: None,
+                response: OperationResponseContract::default(),
+                is_active: true,
+                created_at: chrono::Utc::now(),
+                updated_at: chrono::Utc::now(),
+            })
+            .await
+            .expect("insert endpoint");
+
+        let endpoint_id = uuid::Uuid::new_v4().to_string();
+        db.collection::<UserEndpoint>(USER_ENDPOINTS)
+            .insert_one(test_user_endpoint(
+                &endpoint_id,
+                &user_id,
+                "Unavailable User Service",
+                "https://unavailable.example.com",
+                None,
+                None,
+            ))
+            .await
+            .expect("insert user endpoint");
+        let mut unavailable = test_user_service(
+            &unavailable_id,
+            &user_id,
+            "unavailable-user-service",
+            &endpoint_id,
+            None,
+            None,
+        );
+        unavailable.auth_method = "bearer".to_string();
+        db.collection::<UserService>(USER_SERVICES)
+            .insert_one(unavailable)
+            .await
+            .expect("insert unavailable user service");
+
+        let node_ws_manager = NodeWsManager::new(30, 100);
+        let loaded =
+            load_user_tools_all_scoped(&db, &node_ws_manager, &user_id, NodeScope::Unrestricted)
+                .await
+                .expect("load connected services");
+        let result = list_connected_services(&loaded, None);
+        let services = result["services"].as_array().expect("services array");
+
+        assert_eq!(result["count"], 2);
+        assert!(
+            services
+                .iter()
+                .any(|service| service["service_id"] == connected_id)
+        );
+        assert!(
+            services
+                .iter()
+                .all(|service| service["service_id"] != unconnected_id)
+        );
+        let unavailable = services
+            .iter()
+            .find(|service| service["service_id"] == unavailable_id)
+            .expect("unavailable connected service should be listed");
+        assert_eq!(unavailable["executable"], false);
+        assert_eq!(unavailable["source"], "user_service");
+        assert_eq!(unavailable["is_generic_proxy"], true);
+    }
+
+    #[tokio::test]
+    async fn unavailable_unpinned_user_service_does_not_shadow_executable_platform_route() {
+        let Some(db) = connect_test_database("mcp_non_executable_dedup").await else {
+            eprintln!("skipping MCP dedup test: no local MongoDB available");
+            return;
+        };
+
+        let user_id = uuid::Uuid::new_v4().to_string();
+        let platform_id = uuid::Uuid::new_v4().to_string();
+        let user_service_id = uuid::Uuid::new_v4().to_string();
+        let user_endpoint_id = uuid::Uuid::new_v4().to_string();
+        let slug = "competing-route";
+
+        let mut platform = dummy_service();
+        platform.id = platform_id.clone();
+        platform.name = "Executable Platform Route".to_string();
+        platform.slug = slug.to_string();
+        db.collection::<DownstreamService>(DOWNSTREAM_SERVICES)
+            .insert_one(platform)
+            .await
+            .expect("insert platform service");
+
+        db.collection::<ServiceEndpoint>(SERVICE_ENDPOINTS)
+            .insert_one(ServiceEndpoint {
+                id: uuid::Uuid::new_v4().to_string(),
+                service_id: platform_id.clone(),
+                name: "status".to_string(),
+                description: Some("Get status".to_string()),
+                method: "GET".to_string(),
+                path: "/status".to_string(),
+                parameters: None,
+                request_body_schema: None,
+                request_content_type: None,
+                request_body_required: false,
+                response_description: None,
+                response: OperationResponseContract::default(),
+                is_active: true,
+                created_at: chrono::Utc::now(),
+                updated_at: chrono::Utc::now(),
+            })
+            .await
+            .expect("insert platform endpoint");
+
+        db.collection::<UserEndpoint>(USER_ENDPOINTS)
+            .insert_one(test_user_endpoint(
+                &user_endpoint_id,
+                &user_id,
+                "Unavailable User Route",
+                "https://unavailable.example.com",
+                None,
+                Some(&platform_id),
+            ))
+            .await
+            .expect("insert user endpoint");
+        let mut user_service = test_user_service(
+            &user_service_id,
+            &user_id,
+            slug,
+            &user_endpoint_id,
+            Some(&platform_id),
+            None,
+        );
+        user_service.auth_method = "bearer".to_string();
+        db.collection::<UserService>(USER_SERVICES)
+            .insert_one(user_service)
+            .await
+            .expect("insert unavailable user service");
+
+        let catalog = load_operation_catalog(
+            &db,
+            &NodeWsManager::new(30, 100),
+            &user_id,
+            NodeScope::Unrestricted,
+            ServiceScope::Unrestricted,
+        )
+        .await
+        .expect("load operation catalog");
+
+        assert_eq!(catalog.services.len(), 1);
+        assert_eq!(catalog.services[0].service_id, platform_id);
+        assert!(matches!(
+            catalog.services[0].source,
+            McpToolSource::Platform { .. }
+        ));
+        assert_eq!(catalog.diagnostics.unavailable_services, 1);
+    }
+
+    #[tokio::test]
+    async fn discover_and_connected_services_are_disjoint_for_auto_connect_states() {
+        let Some(db) = connect_test_database("mcp_auto_connect_complement").await else {
+            eprintln!("skipping MCP auto-connect test: no local MongoDB available");
+            return;
+        };
+
+        let user_id = uuid::Uuid::new_v4().to_string();
+        let auto_connected_id = uuid::Uuid::new_v4().to_string();
+        let auto_disconnected_id = uuid::Uuid::new_v4().to_string();
+        let credential_required_id = uuid::Uuid::new_v4().to_string();
+
+        let mut auto_connected = dummy_service();
+        auto_connected.id = auto_connected_id.clone();
+        auto_connected.name = "Auto Connected".to_string();
+        auto_connected.slug = "auto-connected".to_string();
+        auto_connected.requires_user_credential = false;
+
+        let mut auto_disconnected = dummy_service();
+        auto_disconnected.id = auto_disconnected_id.clone();
+        auto_disconnected.name = "Auto Disconnected".to_string();
+        auto_disconnected.slug = "auto-disconnected".to_string();
+        auto_disconnected.requires_user_credential = false;
+
+        let mut credential_required = dummy_service();
+        credential_required.id = credential_required_id.clone();
+        credential_required.name = "Credential Required".to_string();
+        credential_required.slug = "credential-required".to_string();
+        credential_required.requires_user_credential = true;
+
+        db.collection::<DownstreamService>(DOWNSTREAM_SERVICES)
+            .insert_many(vec![auto_connected, auto_disconnected, credential_required])
+            .await
+            .expect("insert discovery services");
+
+        db.collection::<UserServiceConnection>(CONNECTIONS)
+            .insert_one(UserServiceConnection {
+                id: uuid::Uuid::new_v4().to_string(),
+                user_id: user_id.clone(),
+                service_id: auto_disconnected_id.clone(),
+                credential_encrypted: None,
+                credential_type: None,
+                credential_label: None,
+                metadata: None,
+                is_active: false,
+                created_at: chrono::Utc::now(),
+                updated_at: chrono::Utc::now(),
+            })
+            .await
+            .expect("insert explicit disconnect");
+
+        let node_ws_manager = NodeWsManager::new(30, 100);
+        let loaded =
+            load_user_tools_all_scoped(&db, &node_ws_manager, &user_id, NodeScope::Unrestricted)
+                .await
+                .expect("load connected services");
+        let connected = list_connected_services(&loaded, None);
+        let discover = discover_services(&db, &user_id, None, Some("connection"))
+            .await
+            .expect("discover services");
+
+        let service_ids = |result: &serde_json::Value| -> HashSet<String> {
+            result["services"]
+                .as_array()
+                .expect("services array")
+                .iter()
+                .filter_map(|service| service["service_id"].as_str().map(str::to_string))
+                .collect()
+        };
+        let connected_ids = service_ids(&connected);
+        let discover_ids = service_ids(&discover);
+
+        assert_eq!(connected_ids, HashSet::from([auto_connected_id]));
+        assert_eq!(
+            discover_ids,
+            HashSet::from([auto_disconnected_id, credential_required_id])
+        );
+        assert!(connected_ids.is_disjoint(&discover_ids));
+    }
+
     // -- generate_tool_definitions tests --
 
     #[test]
@@ -3424,8 +4230,8 @@ mod tests {
         let empty_set = HashSet::new();
         let tools = generate_tool_definitions(&services, Some(&empty_set));
 
-        // Should only have the 12 meta-tools (4 core + 2 SSH + 6 oracle)
-        assert_eq!(tools.len(), 12);
+        // Should only have the 13 meta-tools (5 core + 2 SSH + 6 oracle)
+        assert_eq!(tools.len(), 13);
         assert!(tools.iter().all(|t| t.name.starts_with("nyx__")));
     }
 
@@ -3450,8 +4256,8 @@ mod tests {
         activated.insert("svc-1".to_string());
         let tools = generate_tool_definitions(&services, Some(&activated));
 
-        // 12 meta-tools + 1 weather tool (news excluded)
-        assert_eq!(tools.len(), 13);
+        // 13 meta-tools + 1 weather tool (news excluded)
+        assert_eq!(tools.len(), 14);
         assert!(tools.iter().any(|t| t.name == "weather__get_forecast"));
         assert!(!tools.iter().any(|t| t.name == "news__headlines"));
     }
@@ -3475,8 +4281,8 @@ mod tests {
 
         let tools = generate_tool_definitions(&services, None);
 
-        // 12 meta-tools + 2 service tools
-        assert_eq!(tools.len(), 14);
+        // 13 meta-tools + 2 service tools
+        assert_eq!(tools.len(), 15);
         assert!(tools.iter().any(|t| t.name == "weather__get_forecast"));
         assert!(tools.iter().any(|t| t.name == "news__headlines"));
     }
@@ -3512,6 +4318,18 @@ mod tests {
     }
 
     #[test]
+    fn generate_tool_definitions_includes_connected_services_meta_tool() {
+        let tools = generate_tool_definitions(&[], None);
+        let tool = tools
+            .iter()
+            .find(|tool| tool.name == "nyx__list_connected_services")
+            .expect("connected-services meta-tool");
+
+        assert_eq!(tool.input_schema["required"], serde_json::json!([]));
+        assert!(tool.input_schema["properties"]["query"].is_object());
+    }
+
+    #[test]
     fn build_input_schema_uses_base64_string_for_binary_bodies() {
         let endpoint = McpToolEndpoint {
             endpoint_id: String::new(),
@@ -3527,6 +4345,7 @@ mod tests {
             request_content_type: Some("application/zip".to_string()),
             request_body_required: true,
             response_description: None,
+            response: OperationResponseContract::default(),
         };
 
         let schema = build_input_schema(&endpoint);
@@ -3564,6 +4383,7 @@ mod tests {
             request_content_type: Some("application/xml".to_string()),
             request_body_required: true,
             response_description: None,
+            response: OperationResponseContract::default(),
         };
 
         let schema = build_input_schema(&endpoint);
@@ -3589,6 +4409,7 @@ mod tests {
             request_content_type: Some("application/zip".to_string()),
             request_body_required: true,
             response_description: None,
+            response: OperationResponseContract::default(),
         };
 
         let schema = build_input_schema(&endpoint);
@@ -3614,6 +4435,7 @@ mod tests {
             request_content_type: Some("application/x-tar".to_string()),
             request_body_required: true,
             response_description: None,
+            response: OperationResponseContract::default(),
         };
 
         let schema = build_input_schema(&endpoint);
@@ -3658,6 +4480,7 @@ mod tests {
             request_content_type: None,
             request_body_required: false,
             response_description: None,
+            response: OperationResponseContract::default(),
         };
 
         let schema = build_input_schema(&endpoint);
@@ -3690,6 +4513,7 @@ mod tests {
             request_content_type: Some("application/zip".to_string()),
             request_body_required: true,
             response_description: None,
+            response: OperationResponseContract::default(),
         };
 
         let schema = build_input_schema(&endpoint);
@@ -3744,6 +4568,7 @@ mod tests {
             request_content_type: Some("application/json".to_string()),
             request_body_required: true,
             response_description: None,
+            response: OperationResponseContract::default(),
         };
 
         let schema = build_input_schema(&endpoint);
@@ -3786,6 +4611,7 @@ mod tests {
             request_content_type: Some("application/json".to_string()),
             request_body_required: true,
             response_description: None,
+            response: OperationResponseContract::default(),
         };
 
         let schema = build_input_schema(&endpoint);
@@ -3822,6 +4648,7 @@ mod tests {
             request_content_type: Some("application/json".to_string()),
             request_body_required: true,
             response_description: None,
+            response: OperationResponseContract::default(),
         };
 
         let schema = build_input_schema(&endpoint);
@@ -3856,6 +4683,7 @@ mod tests {
             request_content_type: Some("application/json".to_string()),
             request_body_required: false,
             response_description: None,
+            response: OperationResponseContract::default(),
         };
 
         let schema = build_input_schema(&endpoint);
@@ -3884,6 +4712,7 @@ mod tests {
             request_content_type: None,
             request_body_required: true,
             response_description: None,
+            response: OperationResponseContract::default(),
         };
 
         let schema = build_input_schema(&endpoint);
@@ -3910,6 +4739,7 @@ mod tests {
             request_content_type: Some("*/*".to_string()),
             request_body_required: true,
             response_description: None,
+            response: OperationResponseContract::default(),
         };
 
         let schema = build_input_schema(&endpoint);
@@ -3941,6 +4771,7 @@ mod tests {
             request_content_type: Some("text/plain".to_string()),
             request_body_required: true,
             response_description: None,
+            response: OperationResponseContract::default(),
         };
 
         let schema = build_input_schema(&endpoint);
@@ -3971,6 +4802,7 @@ mod tests {
             request_content_type: Some("application/zip".to_string()),
             request_body_required: true,
             response_description: None,
+            response: OperationResponseContract::default(),
         };
 
         let (_, _, _, _, body) = build_proxy_args(
@@ -4002,6 +4834,7 @@ mod tests {
             request_content_type: None,
             request_body_required: true,
             response_description: None,
+            response: OperationResponseContract::default(),
         };
 
         let (_, _, _, _, body) = build_proxy_args(
@@ -4030,6 +4863,7 @@ mod tests {
             request_content_type: Some("application/x-tar".to_string()),
             request_body_required: true,
             response_description: None,
+            response: OperationResponseContract::default(),
         };
 
         let (_, _, _, _, body) = build_proxy_args(
@@ -4062,6 +4896,7 @@ mod tests {
             request_content_type: Some("application/json".to_string()),
             request_body_required: true,
             response_description: None,
+            response: OperationResponseContract::default(),
         };
 
         let (_, _, _, _, body) = build_proxy_args(
@@ -4096,6 +4931,7 @@ mod tests {
             request_content_type: Some("application/json".to_string()),
             request_body_required: true,
             response_description: None,
+            response: OperationResponseContract::default(),
         };
 
         let error = build_proxy_args(&endpoint, &serde_json::json!({}))
@@ -4144,6 +4980,7 @@ mod tests {
             request_content_type: Some("application/json".to_string()),
             request_body_required: true,
             response_description: None,
+            response: OperationResponseContract::default(),
         };
 
         let (_, path, _, headers, body) = build_proxy_args(
@@ -4199,6 +5036,7 @@ mod tests {
             request_content_type: Some("application/json".to_string()),
             request_body_required: true,
             response_description: None,
+            response: OperationResponseContract::default(),
         };
 
         let (_, _, _, headers, body) = build_proxy_args(
@@ -4242,6 +5080,7 @@ mod tests {
             request_content_type: Some("application/json".to_string()),
             request_body_required: false,
             response_description: None,
+            response: OperationResponseContract::default(),
         };
 
         let (_, _, _, _, body) = build_proxy_args(&endpoint, &serde_json::json!({}))
@@ -4272,6 +5111,7 @@ mod tests {
             request_content_type: Some("application/zip".to_string()),
             request_body_required: true,
             response_description: None,
+            response: OperationResponseContract::default(),
         };
 
         let (_, _, query, _, body) = build_proxy_args(
@@ -4326,6 +5166,7 @@ mod tests {
             request_content_type: Some("application/json".to_string()),
             request_body_required: true,
             response_description: None,
+            response: OperationResponseContract::default(),
         };
 
         let (_, path, _, headers, body) = build_proxy_args(
@@ -4387,6 +5228,7 @@ mod tests {
             request_content_type: Some("application/json".to_string()),
             request_body_required: true,
             response_description: None,
+            response: OperationResponseContract::default(),
         };
 
         let (_, _, _, headers, body) = build_proxy_args(
@@ -4438,6 +5280,7 @@ mod tests {
             request_content_type: Some("application/json".to_string()),
             request_body_required: true,
             response_description: None,
+            response: OperationResponseContract::default(),
         };
 
         let (_, _, _, headers, body) = build_proxy_args(
@@ -4479,6 +5322,7 @@ mod tests {
             request_content_type: Some("application/zip".to_string()),
             request_body_required: true,
             response_description: None,
+            response: OperationResponseContract::default(),
         };
 
         let error = build_proxy_args(&endpoint, &serde_json::json!({}))
@@ -4509,6 +5353,7 @@ mod tests {
             request_content_type: Some("text/plain".to_string()),
             request_body_required: true,
             response_description: None,
+            response: OperationResponseContract::default(),
         };
 
         let error = build_proxy_args(
@@ -4545,6 +5390,7 @@ mod tests {
             request_content_type: Some("text/plain".to_string()),
             request_body_required: true,
             response_description: None,
+            response: OperationResponseContract::default(),
         };
 
         let error = build_proxy_args(
@@ -4582,6 +5428,7 @@ mod tests {
             request_content_type: Some("text/plain".to_string()),
             request_body_required: true,
             response_description: None,
+            response: OperationResponseContract::default(),
         };
 
         let (_, _, _, headers, body) = build_proxy_args(
@@ -4619,6 +5466,7 @@ mod tests {
             request_content_type: Some("application/json".to_string()),
             request_body_required: true,
             response_description: None,
+            response: OperationResponseContract::default(),
         };
 
         let error = build_proxy_args(
@@ -4648,6 +5496,7 @@ mod tests {
             request_content_type: Some("application/x-www-form-urlencoded".to_string()),
             request_body_required: true,
             response_description: None,
+            response: OperationResponseContract::default(),
         };
 
         let (_, _, _, _, body) = build_proxy_args(
@@ -4684,6 +5533,7 @@ mod tests {
             request_content_type: None,
             request_body_required: false,
             response_description: None,
+            response: OperationResponseContract::default(),
         };
 
         let error = build_proxy_args(
@@ -4716,6 +5566,7 @@ mod tests {
             request_content_type: None,
             request_body_required: false,
             response_description: None,
+            response: OperationResponseContract::default(),
         };
 
         let error = build_proxy_args(
@@ -4754,6 +5605,7 @@ mod tests {
             request_content_type: None,
             request_body_required: false,
             response_description: None,
+            response: OperationResponseContract::default(),
         };
 
         let error = build_proxy_args(&endpoint, &serde_json::json!({}))
@@ -4787,6 +5639,7 @@ mod tests {
             request_content_type: None,
             request_body_required: false,
             response_description: None,
+            response: OperationResponseContract::default(),
         };
 
         let error = build_proxy_args(&endpoint, &serde_json::json!({}))
@@ -4832,6 +5685,7 @@ mod tests {
             request_content_type: None,
             request_body_required: false,
             response_description: None,
+            response: OperationResponseContract::default(),
         };
 
         let query_error = build_proxy_args(&endpoint, &serde_json::json!({}))
@@ -4891,6 +5745,7 @@ mod tests {
             request_content_type: Some("multipart/form-data".to_string()),
             request_body_required: true,
             response_description: None,
+            response: OperationResponseContract::default(),
         };
 
         let error = build_proxy_args(&endpoint, &serde_json::json!({ "body": "ignored" }))
@@ -4924,6 +5779,7 @@ mod tests {
             request_content_type: Some("text/plain".to_string()),
             request_body_required: true,
             response_description: None,
+            response: OperationResponseContract::default(),
         };
 
         let error = build_proxy_args(
@@ -4956,6 +5812,7 @@ mod tests {
             request_content_type: None,
             request_body_required: true,
             response_description: None,
+            response: OperationResponseContract::default(),
         };
 
         assert_eq!(
@@ -4980,6 +5837,7 @@ mod tests {
             request_content_type: Some("*/*".to_string()),
             request_body_required: true,
             response_description: None,
+            response: OperationResponseContract::default(),
         };
 
         assert_eq!(
@@ -5004,6 +5862,7 @@ mod tests {
             request_content_type: Some("application/zip".to_string()),
             request_body_required: true,
             response_description: None,
+            response: OperationResponseContract::default(),
         };
 
         assert_eq!(
@@ -5025,6 +5884,7 @@ mod tests {
             request_content_type: Some("application/zip".to_string()),
             request_body_required: false,
             response_description: None,
+            response: OperationResponseContract::default(),
         };
 
         assert_eq!(request_content_type_header_value(&endpoint, false), None);
@@ -5050,6 +5910,7 @@ mod tests {
             request_content_type: None,
             request_body_required: false,
             response_description: None,
+            response: OperationResponseContract::default(),
         };
 
         assert_eq!(request_content_type_header_value(&endpoint, false), None);
@@ -5071,6 +5932,7 @@ mod tests {
             request_content_type: Some("application/zip".to_string()),
             request_body_required: true,
             response_description: None,
+            response: OperationResponseContract::default(),
         };
 
         let headers =
@@ -5201,6 +6063,7 @@ mod tests {
             request_content_type: None,
             request_body_required: false,
             response_description: None,
+            response: OperationResponseContract::default(),
         };
         assert_eq!(request_body_field_name(&endpoint), "request_body");
     }
@@ -5253,6 +6116,77 @@ mod tests {
         let schema = build_generic_proxy_input_schema();
         let required = schema["required"].as_array().unwrap();
         assert!(required.contains(&serde_json::Value::String("path".into())));
+        assert_eq!(schema["properties"]["query"]["type"], "string");
+        assert!(!required.contains(&serde_json::Value::String("query".into())));
+    }
+
+    #[test]
+    fn build_generic_proxy_args_separates_embedded_query_verbatim() {
+        let (method, path, query, headers, body) = build_generic_proxy_args(&serde_json::json!({
+            "path": "/stats?tag=a&tag=b&name=Nyx%20ID&empty="
+        }))
+        .expect("embedded query should be accepted");
+
+        assert_eq!(method, reqwest::Method::GET);
+        assert_eq!(path, "stats");
+        assert_eq!(query.as_deref(), Some("tag=a&tag=b&name=Nyx%20ID&empty="));
+        assert!(headers.is_empty());
+        assert!(body.is_none());
+    }
+
+    #[test]
+    fn build_generic_proxy_args_accepts_explicit_raw_query() {
+        let (_, path, query, _, _) = build_generic_proxy_args(&serde_json::json!({
+            "path": "stats",
+            "query": "redirect=/search?q=nyx&empty="
+        }))
+        .expect("explicit raw query should be accepted");
+
+        assert_eq!(path, "stats");
+        assert_eq!(query.as_deref(), Some("redirect=/search?q=nyx&empty="));
+    }
+
+    #[test]
+    fn build_generic_proxy_args_rejects_ambiguous_or_fragmented_query() {
+        let ambiguous = build_generic_proxy_args(&serde_json::json!({
+            "path": "stats?period=today",
+            "query": "limit=10"
+        }))
+        .expect_err("dual query sources should be rejected");
+        assert!(matches!(
+            ambiguous,
+            AppError::BadRequest(message) if message.contains("either in path or query")
+        ));
+
+        for args in [
+            serde_json::json!({"path": "stats?period=today#summary"}),
+            serde_json::json!({"path": "stats", "query": "period=today#summary"}),
+        ] {
+            let error =
+                build_generic_proxy_args(&args).expect_err("URI fragments should not be forwarded");
+            assert!(matches!(
+                error,
+                AppError::BadRequest(message) if message == "Invalid proxy path"
+            ));
+        }
+    }
+
+    #[test]
+    fn build_generic_proxy_args_preserves_path_security_checks() {
+        for path in [
+            "https://example.test/stats?period=today",
+            "//example.test/stats?period=today",
+            "a/../stats?period=today",
+            "stats%3Fperiod%3Dtoday",
+            "stats#summary",
+        ] {
+            let error = build_generic_proxy_args(&serde_json::json!({"path": path}))
+                .expect_err("unsafe request target should be rejected");
+            assert!(
+                matches!(error, AppError::BadRequest(message) if message == "Invalid proxy path"),
+                "unexpected error for {path}"
+            );
+        }
     }
 
     #[test]
@@ -5304,6 +6238,7 @@ mod tests {
             node_id: None,
             user_service_id: "user-service".to_string(),
             has_server_credential: false,
+            master_credential: false,
             org_routing: org_user_id.map(|org_user_id| proxy_service::OrgRouting {
                 org_user_id: org_user_id.to_string(),
                 member_user_id: actor_user_id.to_string(),

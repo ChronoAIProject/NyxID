@@ -36,6 +36,7 @@ Strict separation: `handlers/` -> `services/` -> `models/`
 - 1011-1019 SSH node-key/auth-mode: 1011 `SshNodeKeyMissing`, 1012 `SshHostKeyMismatch`, 1013 `SshNodeExecChannelClosed`, 1014 `SshPrincipalAmbiguous`, 1015 `SshAuthModeUnsupportedForOperation`
 - 8000-8005 node/proxy: 8000 `NodeNotFound`, 8001 `NodeOffline`, 8002 `NodeProxyTimeout`, 8003 `NodeRegistrationFailed`, 8004 `NodeCredentialMissing`, 8005 `WsProxyDownstream`
 - 8006-8011 pending-credential protocol: 8006 `PendingCredentialDecryptFailed`, 8007 `PendingCredentialVersionUnsupported`, 8008 `PendingCredentialCiphertextTooLarge`, 8009 `PendingCredentialPubkeyAwaiting`, 8010 `PendingCredentialNodeOffline`, 8011 `PendingCredentialQueueFull`
+- 8012 `ClientDisconnected` (HTTP 499, nginx's "Client Closed Request"): the caller hung up before the response could be written and upstream work was cancelled. Never delivered to anyone — it exists so cancelled work is not counted as a server fault in telemetry and audit. Do not map it to 5xx.
 - 9500-9599 device-code binding: 9500 `DeviceCodeNotFound`, 9501 `DeviceCodeExpired`, 9502 `DevicePollSignatureInvalid`, 9503 `DeviceUserCodeInvalid`, 9504 `DeviceCodePending`, 9505 `DeviceCodeAlreadyDelivered`, 9506 `DeviceCodeRateLimited`, 9507 `DeviceCodeLocked`, 9508 `DeviceCodeSlowDown`
 - 11000-11099 oracle relay: 11000 `OraclePoolNotFound`, 11001 `OraclePoolSlugTaken`, 11002 `OraclePoolInactive`, 11003 `OracleWorkerTokenInvalid`, 11004 `OracleQueueFull`, 11005 `OracleQuotaExceeded`, 11006 `OracleTaskNotFound`, 11007 `OracleSessionNotFound`, 11008 `OracleSessionClosed`, 11009 `OraclePayloadTooLarge`, 11010 `OracleExtractDisabled`
 - 11100 `AnonymousIncompatibleService` (HTTP 400)
@@ -214,6 +215,7 @@ All API routes under `/api/v1`:
 - `/connections` -- connect/disconnect services
 - `/providers` -- CRUD + OAuth/device-code/API-key flows + token management + per-user credentials
 - `/admin` -- user management, audit log, OAuth clients, service accounts
+- `/assistant/actions` -- public static assistant action manifest for Aevatar startup discovery
 - `/proxy/{service_id}/{path}` and `/proxy/s/{slug}/{path}` -- authenticated proxy (UUID- and slug-based); HTTP + WebSocket passthrough
 - `/proxy/services` -- service discovery (paginated list of proxyable services)
 - `/llm` -- LLM gateway (provider proxy, OpenAI-compatible gateway, status)
