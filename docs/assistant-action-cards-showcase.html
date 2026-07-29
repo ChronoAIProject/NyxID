@@ -429,16 +429,6 @@
         box-shadow: 0 1px 2px rgba(0, 0, 0, 0.08);
       }
 
-      .rail {
-        height: 3px;
-        background: var(--color-nyx-secondary-400);
-      }
-
-      .card-destructive .rail,
-      .card-unsupported .rail {
-        background: var(--color-destructive);
-      }
-
       .card-header {
         display: flex;
         min-width: 0;
@@ -727,6 +717,491 @@
         height: 12px;
       }
 
+      .flow-storyboard {
+        display: grid;
+        gap: 22px;
+        margin-top: 20px;
+      }
+
+      .flow-frame {
+        position: relative;
+        display: grid;
+        min-width: 0;
+        grid-template-columns: 36px minmax(0, 1fr);
+        gap: 12px;
+      }
+
+      .flow-frame:not(:last-child)::after {
+        position: absolute;
+        top: 38px;
+        bottom: -22px;
+        left: 17px;
+        width: 1px;
+        background: var(--color-hairline-strong);
+        content: "";
+      }
+
+      .flow-index {
+        position: relative;
+        z-index: 1;
+        display: flex;
+        width: 34px;
+        height: 34px;
+        align-items: center;
+        justify-content: center;
+        border: 1px solid rgba(166, 114, 251, 0.35);
+        border-radius: 999px;
+        background: color-mix(in srgb, var(--color-nyx-secondary-400) 12%, var(--color-background));
+        color: var(--color-nyx-secondary-400);
+        font-family: var(--font-mono);
+        font-size: 10px;
+        font-weight: 500;
+      }
+
+      .flow-frame-branch .flow-index {
+        border-color: var(--color-hairline-strong);
+        background: var(--color-background);
+        color: var(--color-muted-foreground);
+      }
+
+      .flow-frame-error .flow-index {
+        border-color: color-mix(in srgb, var(--color-destructive) 35%, transparent);
+        background: color-mix(in srgb, var(--color-destructive) 9%, var(--color-background));
+        color: var(--color-destructive);
+      }
+
+      .flow-content {
+        min-width: 0;
+      }
+
+      .flow-caption {
+        min-width: 0;
+        padding: 1px 2px 9px;
+      }
+
+      .flow-caption strong {
+        display: block;
+        color: var(--color-foreground);
+        font-size: 12px;
+        font-weight: 600;
+      }
+
+      .flow-caption span {
+        display: block;
+        margin-top: 2px;
+        color: var(--color-muted-foreground);
+        font-size: 10px;
+        line-height: 1.5;
+      }
+
+      .flow-surface-stack,
+      .branch-stack {
+        display: grid;
+        min-width: 0;
+        gap: 10px;
+      }
+
+      .dialog-mock {
+        position: relative;
+        min-width: 0;
+        border: 1px solid var(--color-border);
+        border-radius: var(--radius-lg);
+        background: var(--color-card);
+        color: var(--color-card-foreground);
+        box-shadow:
+          0 16px 40px rgba(0, 0, 0, 0.16),
+          0 0 20px rgba(90, 42, 241, 0.04);
+      }
+
+      .dialog-chrome {
+        display: grid;
+        min-width: 0;
+        gap: 15px;
+        padding: 18px;
+      }
+
+      .dialog-close {
+        position: absolute;
+        top: 14px;
+        right: 14px;
+        display: flex;
+        width: 28px;
+        height: 28px;
+        align-items: center;
+        justify-content: center;
+        border: 0;
+        border-radius: var(--radius-sm);
+        background: transparent;
+        color: var(--color-muted-foreground);
+        cursor: default;
+      }
+
+      .dialog-close svg {
+        width: 14px;
+        height: 14px;
+      }
+
+      .modal-step {
+        padding-right: 36px;
+        color: var(--color-nyx-secondary-400);
+        font-family: var(--font-mono);
+        font-size: 9px;
+        font-weight: 500;
+        text-transform: uppercase;
+        letter-spacing: 1px;
+      }
+
+      .mock-back {
+        display: inline-flex;
+        width: max-content;
+        max-width: 100%;
+        align-items: center;
+        gap: 5px;
+        border: 0;
+        background: transparent;
+        color: var(--color-muted-foreground);
+        padding: 0;
+        font-size: 10px;
+        cursor: default;
+      }
+
+      .mock-back svg {
+        width: 11px;
+        height: 11px;
+      }
+
+      .step-header {
+        display: flex;
+        min-width: 0;
+        align-items: flex-start;
+        gap: 12px;
+        padding-right: 30px;
+      }
+
+      .service-glyph {
+        display: flex;
+        width: 32px;
+        height: 32px;
+        flex: 0 0 32px;
+        align-items: center;
+        justify-content: center;
+        border: 1px solid var(--color-border);
+        border-radius: var(--radius-lg);
+        background: var(--color-muted);
+        color: var(--color-foreground);
+      }
+
+      .service-glyph svg {
+        width: 17px;
+        height: 17px;
+      }
+
+      .step-heading-copy {
+        min-width: 0;
+      }
+
+      .dialog-title {
+        margin: 0;
+        color: var(--color-foreground);
+        font-size: 15px;
+        font-weight: 600;
+        line-height: 1.25;
+      }
+
+      .dialog-description {
+        margin: 4px 0 0;
+        color: var(--color-muted-foreground);
+        font-size: 12px;
+        line-height: 1.5;
+      }
+
+      .mock-label {
+        margin: 0 0 7px;
+        color: var(--color-foreground);
+        font-size: 11px;
+        font-weight: 500;
+      }
+
+      .service-prefill {
+        display: flex;
+        min-width: 0;
+        align-items: center;
+        gap: 10px;
+        border: 2px solid color-mix(in srgb, var(--color-nyx-secondary-400) 70%, transparent);
+        border-radius: var(--radius-lg);
+        background: color-mix(in srgb, var(--color-nyx-secondary-400) 6%, transparent);
+        padding: 12px;
+      }
+
+      .service-prefill-copy {
+        min-width: 0;
+        flex: 1 1 auto;
+      }
+
+      .service-prefill-copy strong,
+      .service-prefill-copy span {
+        display: block;
+      }
+
+      .service-prefill-copy strong {
+        color: var(--color-foreground);
+        font-size: 12px;
+      }
+
+      .service-prefill-copy span {
+        margin-top: 2px;
+        overflow: hidden;
+        color: var(--color-muted-foreground);
+        font-family: var(--font-mono);
+        font-size: 9px;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+      }
+
+      .prefill-note,
+      .handoff-note,
+      .verify-summary {
+        display: flex;
+        min-width: 0;
+        align-items: flex-start;
+        gap: 8px;
+        border: 1px solid var(--color-border);
+        border-radius: var(--radius-lg);
+        background: var(--color-overlay);
+        padding: 11px 12px;
+        color: var(--color-muted-foreground);
+        font-size: 11px;
+        line-height: 1.55;
+      }
+
+      .prefill-note svg,
+      .handoff-note svg,
+      .verify-summary svg {
+        width: 14px;
+        height: 14px;
+        flex: 0 0 14px;
+        margin-top: 1px;
+        color: var(--color-nyx-secondary-400);
+      }
+
+      .choice-grid {
+        display: grid;
+        grid-template-columns: repeat(2, minmax(0, 1fr));
+        gap: 9px;
+      }
+
+      .choice-tile {
+        display: flex;
+        min-width: 0;
+        min-height: 92px;
+        flex-direction: column;
+        align-items: center;
+        justify-content: center;
+        gap: 6px;
+        border: 2px solid var(--color-border);
+        border-radius: var(--radius-lg);
+        background: transparent;
+        padding: 10px;
+        color: var(--color-foreground);
+        text-align: center;
+      }
+
+      .choice-tile.selected {
+        border-color: color-mix(in srgb, var(--color-nyx-secondary-400) 70%, transparent);
+        background: color-mix(in srgb, var(--color-nyx-secondary-400) 6%, transparent);
+      }
+
+      .choice-tile svg {
+        width: 18px;
+        height: 18px;
+      }
+
+      .choice-tile strong {
+        font-size: 10px;
+        font-weight: 500;
+      }
+
+      .choice-tile span {
+        color: var(--color-muted-foreground);
+        font-size: 9px;
+        line-height: 1.4;
+      }
+
+      .scope-list {
+        display: grid;
+        gap: 7px;
+      }
+
+      .scope-row {
+        display: flex;
+        min-width: 0;
+        align-items: center;
+        gap: 8px;
+        border: 1px solid var(--color-border);
+        border-radius: var(--radius-lg);
+        background: var(--color-overlay);
+        padding: 10px 11px;
+      }
+
+      .scope-check {
+        display: flex;
+        width: 16px;
+        height: 16px;
+        flex: 0 0 16px;
+        align-items: center;
+        justify-content: center;
+        border-radius: 4px;
+        background: var(--color-nyx-secondary-500);
+        color: #ffffff;
+      }
+
+      .scope-check svg {
+        width: 11px;
+        height: 11px;
+      }
+
+      .scope-copy {
+        min-width: 0;
+      }
+
+      .scope-copy strong,
+      .scope-copy span {
+        display: block;
+      }
+
+      .scope-copy strong {
+        font-family: var(--font-mono);
+        font-size: 10px;
+        font-weight: 500;
+      }
+
+      .scope-copy span {
+        margin-top: 2px;
+        color: var(--color-muted-foreground);
+        font-size: 9px;
+      }
+
+      .dialog-actions {
+        display: flex;
+        min-width: 0;
+        align-items: center;
+        justify-content: flex-end;
+        gap: 8px;
+        padding-top: 1px;
+      }
+
+      .dialog-actions-single .button,
+      .button-wide {
+        width: 100%;
+      }
+
+      .dialog-actions .button {
+        height: 36px;
+        padding-inline: 14px;
+      }
+
+      .error-panel {
+        display: flex;
+        align-items: flex-start;
+        gap: 8px;
+        border: 1px solid color-mix(in srgb, var(--color-destructive) 28%, transparent);
+        border-radius: var(--radius-lg);
+        background: color-mix(in srgb, var(--color-destructive) 10%, transparent);
+        padding: 11px 12px;
+        color: var(--color-destructive);
+        font-size: 11px;
+        line-height: 1.5;
+      }
+
+      .error-panel svg {
+        width: 14px;
+        height: 14px;
+        flex: 0 0 14px;
+        margin-top: 1px;
+      }
+
+      .verify-summary {
+        color: var(--color-foreground);
+      }
+
+      .verify-summary > div {
+        min-width: 0;
+        flex: 1 1 auto;
+      }
+
+      .verify-summary svg {
+        color: var(--color-success);
+      }
+
+      .reference-row {
+        display: flex;
+        min-width: 0;
+        align-items: center;
+        justify-content: space-between;
+        gap: 12px;
+        border-top: 1px solid var(--color-border);
+        margin-top: 9px;
+        padding-top: 9px;
+        color: var(--color-muted-foreground);
+        font-size: 10px;
+      }
+
+      .reference-row code {
+        color: var(--color-foreground);
+        font-family: var(--font-mono);
+        font-size: 10px;
+      }
+
+      .continue-event {
+        display: flex;
+        min-width: 0;
+        flex-wrap: wrap;
+        align-items: center;
+        justify-content: space-between;
+        gap: 7px 12px;
+        border: 1px solid var(--color-border);
+        border-radius: var(--radius-md);
+        background: var(--color-overlay);
+        padding: 9px 11px;
+        color: var(--color-muted-foreground);
+        font-family: var(--font-mono);
+        font-size: 9px;
+        line-height: 1.5;
+      }
+
+      .continue-event-main {
+        min-width: 0;
+        overflow-wrap: anywhere;
+      }
+
+      .continue-event-note {
+        flex: 0 0 auto;
+        color: var(--color-text-tertiary);
+        font-family: var(--font-sans);
+        font-size: 9px;
+      }
+
+      .assistant-bubble {
+        width: min(88%, 510px);
+        border: 1px solid var(--color-border);
+        border-radius: 4px var(--radius-lg) var(--radius-lg) var(--radius-lg);
+        background: var(--color-muted);
+        padding: 11px 13px;
+        color: var(--color-foreground);
+        font-size: 11px;
+        line-height: 1.55;
+      }
+
+      .assistant-bubble-label {
+        display: block;
+        margin-bottom: 4px;
+        color: var(--color-text-tertiary);
+        font-family: var(--font-mono);
+        font-size: 9px;
+        text-transform: uppercase;
+        letter-spacing: 1px;
+      }
+
       .page-footer {
         width: min(100% - 32px, 680px);
         margin: 0 auto;
@@ -794,6 +1269,57 @@
 
         .meta-right {
           justify-content: flex-end;
+        }
+
+        .flow-frame {
+          grid-template-columns: 30px minmax(0, 1fr);
+          gap: 8px;
+        }
+
+        .flow-index {
+          width: 28px;
+          height: 28px;
+          font-size: 9px;
+        }
+
+        .flow-frame:not(:last-child)::after {
+          top: 32px;
+          left: 13px;
+        }
+
+        .dialog-chrome {
+          gap: 13px;
+          padding: 15px;
+        }
+
+        .dialog-close {
+          top: 11px;
+          right: 11px;
+        }
+
+        .step-header {
+          gap: 9px;
+        }
+
+        .choice-grid {
+          gap: 7px;
+        }
+
+        .choice-tile {
+          min-height: 98px;
+          padding: 8px 6px;
+        }
+
+        .dialog-actions {
+          flex-wrap: wrap;
+        }
+
+        .dialog-actions .button {
+          flex: 1 1 auto;
+        }
+
+        .assistant-bubble {
+          width: 100%;
         }
       }
 
@@ -1590,6 +2116,8 @@
           logo: '<path d="M5 3v18l6-7V3z"/><path d="M13 3v18l6-7V3z"/>',
           sun: '<circle cx="12" cy="12" r="4"/><path d="M12 2v2M12 20v2M4.93 4.93l1.42 1.42M17.66 17.66l1.41 1.41M2 12h2M20 12h2M4.93 19.07l1.42-1.42M17.66 6.34l1.41-1.41"/>',
           moon: '<path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z"/>',
+          github: '<path d="M15 22v-4a4.8 4.8 0 0 0-1-3.5c3.3-.4 6.8-1.6 6.8-7A5.4 5.4 0 0 0 19.4 4 5 5 0 0 0 19.3.5S18.2.1 15 1.8a13.4 13.4 0 0 0-7 0C4.8.1 3.7.5 3.7.5A5 5 0 0 0 3.6 4a5.4 5.4 0 0 0-1.4 3.7c0 5.4 3.5 6.6 6.8 7A4.8 4.8 0 0 0 8 18v4"/><path d="M8 19c-3 .9-3-1.5-4-2"/>',
+          arrowLeft: '<path d="m15 18-6-6 6-6"/>',
           plug: '<path d="M12 22v-5"/><path d="M9 8V2"/><path d="M15 8V2"/><path d="M18 8v5a6 6 0 0 1-12 0V8z"/>',
           globe: '<circle cx="12" cy="12" r="10"/><path d="M2 12h20M12 2a15.3 15.3 0 0 1 0 20M12 2a15.3 15.3 0 0 0 0 20"/>',
           key: '<circle cx="7.5" cy="15.5" r="5.5"/><path d="m21 2-9.6 9.6M15 6l3 3M18 3l3 3"/>',
@@ -1668,7 +2196,6 @@
         const decline = '<button class="button button-outline" type="button"' + (busy ? " disabled" : "") + '>' + iconSvg("x") + '<span>Decline</span></button>';
         const footer = card.footer || (destructive ? "Asked every time. Never remembered." : "One confirmation.");
         return '<div class="card ' + cardClass + '">' +
-          '<div class="rail" aria-hidden="true"></div>' +
           '<div class="card-header">' +
             '<div class="icon-tile">' + iconSvg(card.icon) + '</div>' +
             '<div class="card-heading"><div class="title-line"><h3>' + escapeHtml(card.title) + '</h3>' + stateBadge(card) + '</div>' +
@@ -1720,6 +2247,164 @@
         '</section>';
       }
 
+      function renderDialogMock(config) {
+        const back = config.back
+          ? '<button class="mock-back" type="button">' + iconSvg("arrowLeft") + '<span>' + escapeHtml(config.back) + '</span></button>'
+          : "";
+        const glyph = config.icon
+          ? '<span class="service-glyph">' + iconSvg(config.icon) + '</span>'
+          : "";
+        const actions = config.actions && config.actions.length
+          ? '<div class="dialog-actions' + (config.wideAction ? " dialog-actions-single" : "") + '">' + config.actions.map(function (action) {
+              const icon = action.icon ? iconSvg(action.icon) : "";
+              return '<button class="button ' + (action.variant === "primary" ? "button-primary" : "button-outline") + '" type="button">' + icon + '<span>' + escapeHtml(action.label) + '</span></button>';
+            }).join("") + '</div>'
+          : "";
+
+        return '<div class="dialog-mock" data-modal-step="' + escapeHtml(config.step) + '">' +
+          '<div class="dialog-chrome">' +
+            '<button class="dialog-close" type="button" aria-label="Close dialog">' + iconSvg("x") + '</button>' +
+            '<div class="modal-step">' + escapeHtml(config.indicator) + '</div>' +
+            back +
+            '<div class="step-header">' + glyph +
+              '<div class="step-heading-copy"><h3 class="dialog-title">' + escapeHtml(config.title) + '</h3>' +
+              '<p class="dialog-description">' + escapeHtml(config.description) + '</p></div>' +
+            '</div>' +
+            config.body + actions +
+          '</div>' +
+        '</div>';
+      }
+
+      function renderContinueEvent(disposition, resourceId) {
+        const eventText = disposition === "completed"
+          ? '→ action.continue posted · req_7 completed · resource ' + resourceId
+          : '→ action.continue posted · req_7 · disposition: ' + disposition;
+        return '<div class="continue-event" data-disposition="' + escapeHtml(disposition) + '">' +
+          '<span class="continue-event-main">' + escapeHtml(eventText) + '</span>' +
+          '<span class="continue-event-note">automatic — no user action</span>' +
+        '</div>';
+      }
+
+      function renderFlowFrame(index, title, description, content, extraClass) {
+        return '<article class="flow-frame' + (extraClass ? " " + extraClass : "") + '" data-flow-stage="' + escapeHtml(index) + '">' +
+          '<div class="flow-index" aria-hidden="true">' + escapeHtml(index) + '</div>' +
+          '<div class="flow-content">' +
+            '<div class="flow-caption"><strong>' + escapeHtml(title) + '</strong><span>' + escapeHtml(description) + '</span></div>' +
+            '<div class="flow-surface-stack">' + content + '</div>' +
+          '</div>' +
+        '</article>';
+      }
+
+      function renderFlow() {
+        const pending = cards.find(function (card) { return card.section === "states" && card.variant === "pending"; });
+        const completed = cards.find(function (card) { return card.section === "states" && card.variant === "completed"; });
+        const failed = cards.find(function (card) { return card.section === "states" && card.variant === "failed"; });
+        const declined = cards.find(function (card) { return card.section === "states" && card.variant === "declined"; });
+
+        const serviceModal = renderDialogMock({
+          step: "service",
+          indicator: "Service · automatic prefill",
+          title: "Add AI Service",
+          description: "Pick from the catalog or create a custom endpoint.",
+          body:
+            '<div><p class="mock-label">Selected service</p>' +
+              '<div class="service-prefill"><span class="service-glyph">' + iconSvg("github") + '</span>' +
+                '<span class="service-prefill-copy"><strong>GitHub</strong><span>api-github</span></span>' +
+                badge("OAuth", "secondary", "tag") +
+              '</div></div>' +
+            '<div class="prefill-note">' + iconSvg("check") + '<span><code class="mono">prefillSlug</code> matched GitHub. The real dialog advances to Routing automatically; there is no second service-selection click.</span></div>',
+          actions: []
+        });
+
+        const routingModal = renderDialogMock({
+          step: "routing",
+          indicator: "Routing · 1 of 3",
+          back: "Back to catalog",
+          icon: "github",
+          title: "Configure routing for GitHub",
+          description: "Developer platform for repositories, issues, and automation.",
+          body:
+            '<div><p class="mock-label">How should requests reach this service?</p>' +
+              '<div class="choice-grid">' +
+                '<div class="choice-tile selected">' + iconSvg("globe") + '<strong>Direct</strong><span>NyxID proxies to endpoint</span></div>' +
+                '<div class="choice-tile">' + iconSvg("server") + '<strong>Via Node</strong><span>Route through credential node</span></div>' +
+              '</div></div>' +
+            '<div><p class="mock-label">Which OAuth app authorizes this?</p>' +
+              '<div class="choice-grid">' +
+                '<div class="choice-tile selected">' + iconSvg("logo") + '<strong>NyxID managed</strong><span>One click. Curated scopes.</span></div>' +
+                '<div class="choice-tile">' + iconSvg("key") + '<strong>Your own OAuth app</strong><span>Use your own client credentials.</span></div>' +
+              '</div></div>',
+          actions: [{ label: "Next: Connect", variant: "primary" }],
+          wideAction: true
+        });
+
+        const authorizeBody =
+          '<div><p class="mock-label">Requested access</p>' +
+            '<div class="scope-list"><div class="scope-row"><span class="scope-check">' + iconSvg("check") + '</span>' +
+              '<span class="scope-copy"><strong>repo</strong><span>Repository access selected in NyxID</span></span>' +
+            '</div></div></div>' +
+          '<div class="handoff-note">' + iconSvg("external") + '<span>The GitHub popup opens on NyxID’s surface. The token never enters this chat; the assistant receives only brokered access after you finish.</span></div>';
+
+        const authorizeModal = renderDialogMock({
+          step: "authorize",
+          indicator: "Authorize · 2 of 3",
+          back: "Back",
+          icon: "github",
+          title: "Connect to GitHub",
+          description: "This service uses OAuth to authenticate. Review access, then continue to GitHub.",
+          body: authorizeBody,
+          actions: [{ label: "Continue to GitHub", variant: "primary", icon: "external" }],
+          wideAction: true
+        });
+
+        const verifyModal = renderDialogMock({
+          step: "verify",
+          indicator: "Verify · 3 of 3",
+          icon: "github",
+          title: "Service “GitHub” connected",
+          description: "Connect your AI tools to this service through NyxID.",
+          body:
+            '<div class="verify-summary">' + iconSvg("check") + '<div><strong>Connection verified</strong><div class="reference-row"><span>User service</span><code>us_44</code></div></div></div>',
+          actions: [{ label: "Done", variant: "primary" }]
+        });
+
+        const authorizeErrorModal = renderDialogMock({
+          step: "authorize-error",
+          indicator: "Authorize · retry",
+          back: "Back",
+          icon: "github",
+          title: "Connect to GitHub",
+          description: "This service uses OAuth to authenticate. Review access, then continue to GitHub.",
+          body: authorizeBody + '<div class="error-panel">' + iconSvg("alert") + '<span>GitHub authorization did not start. Check the popup setting and try again; nothing has been reported to the assistant yet.</span></div>',
+          actions: [{ label: "Try again", variant: "primary", icon: "refresh" }],
+          wideAction: true
+        });
+
+        const frames = [
+          renderFlowFrame("1", "Card pending", "The assistant request waits in chat until the user chooses Connect GitHub or Decline.", renderActionCard(pending), ""),
+          renderFlowFrame("2", "Service prefill", "GitHub resolves from api-github automatically before the first user-visible choice.", serviceModal, ""),
+          renderFlowFrame("3", "Modal · Routing", "Direct is preselected; the user can still choose a credential node or their own OAuth app.", routingModal, ""),
+          renderFlowFrame("4", "Modal · Authorize", "OAuth leaves the chat surface without moving reusable credential material through the transcript.", authorizeModal, ""),
+          renderFlowFrame("5", "Modal · Verify", "The post-connect success step owns the created user-service reference and reports only after Done.", verifyModal, ""),
+          renderFlowFrame("6", "Card completed", "The receipt collapses the journey, the continuation posts automatically, and the assistant resumes.",
+            renderReceipt(completed) + renderContinueEvent("completed", "us_44") +
+            '<div class="assistant-bubble"><span class="assistant-bubble-label">Assistant</span>GitHub is connected. I can continue with the repository task now.</div>', ""),
+          renderFlowFrame("7A", "Branch · Authorize error", "The modal keeps a recoverable OAuth error local; a terminal failure reports only after the journey cannot continue.",
+            authorizeErrorModal + '<p class="mock-label">If the journey ends after retry</p>' + renderReceipt(failed) + renderContinueEvent("failed"),
+            "flow-frame-branch flow-frame-error"),
+          renderFlowFrame("7B", "Branch · Declined", "Decline resolves directly from the pending card. AddKeyDialog never opens.",
+            '<div class="handoff-note">' + iconSvg("x") + '<span>Decline pressed on the chat card · no modal opened</span></div>' +
+            renderReceipt(declined) + renderContinueEvent("declined"), "flow-frame-branch")
+        ];
+
+        return '<section class="catalogue-section flow-section" id="section-flow">' +
+          '<p class="section-kicker">Part II / continuous journey</p>' +
+          '<div class="section-heading-row"><h2>Flow</h2><span class="section-count">' + frames.length + ' frames · 5 modal views</span></div>' +
+          '<p class="section-why">From assistant request to NyxID-owned authorization, automatic continuation, and the resumed conversation. Every stage stays visible for review.</p>' +
+          '<div class="flow-storyboard">' + frames.join("") + '</div>' +
+        '</section>';
+      }
+
       function renderCounts() {
         const inventory = cards.filter(function (card) { return card.inventory; });
         const totals = {
@@ -1752,7 +2437,8 @@
           if (!sectionKeys.includes(card.section)) sectionKeys.push(card.section);
         });
         document.getElementById("catalogue").innerHTML = sectionKeys.map(function (sectionKey) {
-          return renderSection(sectionKey, cards.filter(function (card) { return card.section === sectionKey; }));
+          const section = renderSection(sectionKey, cards.filter(function (card) { return card.section === sectionKey; }));
+          return sectionKey === "states" ? section + renderFlow() : section;
         }).join("");
       }
 
