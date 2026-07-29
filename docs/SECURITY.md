@@ -464,14 +464,28 @@ Both the introspection (`POST /oauth/introspect`) and revocation (`POST /oauth/r
 | **Service authentication** | Client credentials (`client_id` + hashed `client_secret`) required for token exchange |
 | **User authentication** | Subject token must be a valid, non-expired NyxID access token |
 | **Consent verification** | Consent record must exist for `(user_id, client_id)` before token exchange is allowed |
-| **Scope limitation** | Delegated token scope is constrained to the client's configured `delegation_scopes` |
+| **Scope limitation** | OAuth-client token exchange is constrained to the client's configured `delegation_scopes`; service-issued tokens are constrained to the admin-configured service scope |
 | **Time limitation** | Token exchange: 5-minute TTL; MCP injection: 5-minute TTL |
 | **Renewable tokens** | Delegation tokens can be refreshed via `POST /api/v1/delegation/refresh`; each refresh issues a new token with fresh 5-minute TTL, same scope and acting client |
 | **Consent-on-refresh** | Every refresh validates that the user still has active consent for the acting client; revoking consent immediately blocks future refreshes |
-| **Endpoint restriction** | Delegated tokens are blocked from non-proxy/non-LLM endpoints via `reject_delegated_tokens` middleware |
+| **Endpoint restriction** | Native delegated routes remain available; management access requires the exact `account:read` scope and the read-parity controls below |
 | **No credential exposure** | Services never see user's provider credentials -- only NyxID resolves and injects them |
 | **Chained exchange prevention** | Delegated tokens cannot be exchanged for new delegated tokens, preventing indefinite TTL extension |
 | **Audit trail** | Token exchange and subsequent proxy requests are audit-logged with both `user_id` and `acting_client_id` |
+
+### Account Read Parity
+
+A service-issued delegated token with the exact, case-sensitive `account:read` scope can read the user's existing management resources through their normal endpoints. The request must use `GET`, must not be a WebSocket upgrade, and remains subject to each handler's existing personal and organization ACLs. Writes are never enabled by this scope.
+
+The read path denies `admin/**`, `ssh/**`, `assistant/**`, `auth/**`, `devices/**`, `cli-pairings/**`, `services/**`, `mcp/**`, `webhooks/**`, `integrations/**`, `billing/**`, `oracle/**`, `channel-bots/**`, and `channel-conversations/**`. It also denies `nodes/ws`, node pending-credential protocol routes, provider OAuth initiation/callback routes, and `orgs/{org_id}/invites` because org invite responses carry redeemable bearer nonces. Ordinary organization list, detail, member, role-scope, and feature-flag reads remain available. Native delegated routes under `llm`, `delegation`, `proxy`, `demo`, `channel-relay`, and `channel-events`, plus exact approval-status polling, retain their existing behavior. Proxy handlers validate the original encoded URI before Axum wildcard decoding, so percent-encoded path separators still return `400 Invalid proxy path` on native proxy routes.
+
+The `AuthUser` extractor applies the authoritative decision only after verifying the JWT signature and requiring `delegated: true` and `act` to be present together. `reject_delegated_tokens` performs the same decision using an unverified claim peek only as a fail-fast optimization. Accepted management reads emit metadata-only `delegated_account_read` tracing events; they do not create tamper-evident audit-chain rows.
+
+Delegated JWTs also fail closed on routes outside `/api/v1` whenever those routes use `AuthUser` or `OptionalAuthUser`; `account:read` does not make top-level OAuth routes such as `/oauth/userinfo` delegated-native. Required-auth extractors return the delegated-policy `403`, while `OptionalAuthUser` treats the client rejection as absent optional credentials and logs it at debug level; genuine internal extractor failures remain error-level events. The top-level pending-credential accept pages take no authentication extractor and remain public HTML delivery, but their credential API calls stay inside the explicitly denied pending-credential route class.
+
+OAuth clients cannot configure or exchange for `account:read`, and delegation refresh cannot re-add it. The scope is confined to admin-configured downstream and user-service rows; a service must receive a newly minted token from an eligible invocation. Its bearer-token replay window is the existing five-minute delegated-token TTL and must not be increased.
+
+New management `GET` routes default to readable for `account:read`. Route authors must add any new secret-delivery, execution, streaming, WebSocket-upgrade, or authentication/provisioning protocol route to `delegated_read_denied_path` in `mw/auth.rs` before mounting it.
 
 ### MCP Injection Security
 
@@ -492,11 +506,11 @@ When NyxID proxies MCP tool calls, delegation tokens are only injected for servi
 | **Stolen service credentials** | Client secret is hashed (SHA-256) in storage. Constant-time comparison prevents timing attacks. |
 | **Stolen subject token** | Subject tokens are short-lived (15 min). Attacker also needs client_secret for token exchange. |
 | **Service acting without consent** | Consent check is mandatory at token exchange and on every refresh. Can be revoked by user at any time via consent management; revocation immediately blocks future refreshes. |
-| **Scope escalation** | Delegated scope strictly limited by `delegation_scopes` on the client configuration. |
+| **Scope escalation** | OAuth-client scopes are strictly limited by `delegation_scopes`; `account:read` is rejected during client validation, token exchange, and refresh. Service-issued scopes are admin-configured. |
 | **Chained token exchange** | Explicitly rejected: delegated tokens have `delegated: true` and are blocked from exchange. |
 | **Token replay** | Delegated tokens have unique JTI and short TTL (5 min). Each refresh issues a new JTI. |
 | **Downstream service replays MCP token** | 5-minute TTL. Refreshable via `/api/v1/delegation/refresh` for legitimate long-running workflows; user must remain active and consent must not be revoked for refresh to succeed. |
-| **Delegated token used on restricted endpoints** | `reject_delegated_tokens` middleware blocks access to all non-proxy/non-LLM routes. |
+| **Delegated token used on restricted endpoints** | The verified `AuthUser` extractor enforces exact scope, GET-only access, the deny classes, and the no-WebSocket-upgrade rule; middleware rejection is fail-fast only. |
 | **User deactivation** | `AuthUser` extractor checks `is_active` for every request, including delegated tokens. |
 
 ---
@@ -718,7 +732,7 @@ Rate limit state is per-instance (in-memory). For distributed deployments, consi
 | Unauthorized RBAC modification  | All RBAC endpoints require `is_admin = true` (database check, not JWT claim) |
 | Token introspection info leak   | Returns `{"active": false}` for unauthenticated callers |
 | Consent IDOR                    | User ID taken from auth context, not request parameters |
-| Delegated token scope escalation | Scope constrained to client's `delegation_scopes`; `reject_delegated_tokens` middleware blocks non-proxy endpoints |
+| Delegated token scope escalation | OAuth-client scopes exclude `account:read`; verified claims gate GET-only management parity and denied route classes |
 | Chained token exchange          | Delegated tokens explicitly rejected as subject tokens for exchange |
 | MCP token replay                | 5-minute TTL on MCP-injected tokens; per-call generation with unique JTI |
 | Approval webhook spoofing       | Constant-time secret verification with pre-hashed SHA-256 comparison |
@@ -778,7 +792,7 @@ Summary of security controls by identifier (from the architecture plan):
 | SEC-M5 | Error body truncation                      | 200-char limit on provider error messages   |
 | CR-4/5/6 | N+1 query prevention                    | Batch `$in` queries for provider lookups    |
 | CR-15  | Required provider enforcement              | 400 error for missing required provider tokens |
-| DA-1   | Delegated token endpoint restriction       | `reject_delegated_tokens` middleware on non-proxy routes |
+| DA-1   | Delegated token endpoint restriction       | Verified `AuthUser` policy plus fail-fast `reject_delegated_tokens` middleware |
 | DA-2   | Chained exchange prevention                | `delegated == Some(true)` check in `exchange_token()` |
 | DA-3   | Consent-gated delegation                   | `consent_service::check_consent()` before token issuance |
 | DA-4   | MCP injection opt-in                       | `inject_delegation_token` defaults to `false` per service |

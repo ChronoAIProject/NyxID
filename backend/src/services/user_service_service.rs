@@ -11,6 +11,7 @@ use crate::models::user_api_key::COLLECTION_NAME as USER_API_KEYS;
 use crate::models::user_endpoint::COLLECTION_NAME as USER_ENDPOINTS;
 use crate::models::user_service::{COLLECTION_NAME, UserService};
 use crate::models::ws_frame_injection::WsFrameInjection;
+use crate::mw::auth::SERVICE_DELEGATION_SCOPES;
 use crate::services::{
     agent_binding_service, audit_service, node_service, org_service, ws_frame_injector,
 };
@@ -52,8 +53,6 @@ const VALID_AUTH_METHODS: &[&str] = &[
 
 /// Valid identity propagation modes.
 const VALID_IDENTITY_MODES: &[&str] = &["none", "headers", "jwt", "both"];
-const VALID_DELEGATION_SCOPES: &[&str] = &["llm:proxy", "proxy:*", "llm:status"];
-
 /// Identity propagation and delegation token configuration.
 #[derive(Clone, Debug)]
 pub struct IdentityConfig {
@@ -100,11 +99,11 @@ fn validate_identity_config(config: &IdentityConfig) -> AppResult<()> {
     }
 
     for scope in config.delegation_token_scope.split_whitespace() {
-        if !VALID_DELEGATION_SCOPES.contains(&scope) {
+        if !SERVICE_DELEGATION_SCOPES.contains(&scope) {
             return Err(AppError::ValidationError(format!(
                 "Invalid delegation_token_scope '{}'. Must be one of: {}",
                 scope,
-                VALID_DELEGATION_SCOPES.join(", ")
+                SERVICE_DELEGATION_SCOPES.join(", ")
             )));
         }
     }
@@ -2565,7 +2564,7 @@ mod tests {
 
     #[test]
     fn validate_identity_config_accepts_all_valid_scopes() {
-        for scope in ["llm:proxy", "proxy:*", "llm:status"] {
+        for scope in ["llm:proxy", "proxy:*", "llm:status", "account:read"] {
             let config = IdentityConfig {
                 delegation_token_scope: scope.to_string(),
                 ..IdentityConfig::none()
@@ -2578,7 +2577,7 @@ mod tests {
     #[test]
     fn validate_identity_config_accepts_multiple_valid_scopes() {
         let config = IdentityConfig {
-            delegation_token_scope: "llm:proxy proxy:*".to_string(),
+            delegation_token_scope: "llm:proxy proxy:* account:read".to_string(),
             ..IdentityConfig::none()
         };
         validate_identity_config(&config).expect("combined scopes should be valid");

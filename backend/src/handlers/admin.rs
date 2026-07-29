@@ -1725,19 +1725,9 @@ pub async fn create_oauth_client(
     let user_id = auth_user.user_id.to_string();
     let delegation_scopes = body.delegation_scopes.as_deref().unwrap_or("");
 
-    // M3: Validate delegation_scopes against known scopes
-    if !delegation_scopes.is_empty() {
-        let valid_scopes = ["llm:proxy", "proxy:*", "llm:status"];
-        for s in delegation_scopes.split_whitespace() {
-            if !valid_scopes.contains(&s) {
-                return Err(AppError::ValidationError(format!(
-                    "Invalid delegation scope '{}'. Must be one of: {}",
-                    s,
-                    valid_scopes.join(", ")
-                )));
-            }
-        }
-    }
+    // OAuth-client delegation deliberately excludes the service-only
+    // `account:read` capability.
+    oauth_client_service::validate_oauth_client_delegation_scopes(delegation_scopes)?;
 
     let allowed_scopes = body
         .allowed_scopes

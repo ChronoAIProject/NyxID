@@ -20,7 +20,7 @@ use crate::models::oauth_client::{COLLECTION_NAME as OAUTH_CLIENTS, OauthClient}
 use crate::models::service_billing::ServiceBilling;
 use crate::models::ssh_auth_mode::SshAuthMode;
 use crate::models::ws_frame_injection::WsFrameInjection;
-use crate::mw::auth::AuthUser;
+use crate::mw::auth::{AuthUser, SERVICE_DELEGATION_SCOPES};
 use crate::services::url_validation::{validate_base_url, validate_optional_spec_url};
 use crate::services::{
     anonymous_endpoint_service, api_docs_service, audit_service, oauth_client_service, ssh_service,
@@ -1415,13 +1415,12 @@ pub async fn update_service(
                     scope.as_str()
                 };
 
-                let valid_scopes = ["llm:proxy", "proxy:*", "llm:status"];
                 for s in scope.split_whitespace() {
-                    if !valid_scopes.contains(&s) {
+                    if !SERVICE_DELEGATION_SCOPES.contains(&s) {
                         return Err(AppError::ValidationError(format!(
                             "Invalid delegation_token_scope '{}'. Must be one of: {}",
                             s,
-                            valid_scopes.join(", ")
+                            SERVICE_DELEGATION_SCOPES.join(", ")
                         )));
                     }
                 }

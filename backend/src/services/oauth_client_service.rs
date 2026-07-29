@@ -38,6 +38,24 @@ pub const KNOWN_OIDC_SCOPES: &[&str] = &[
 /// Default allowed scopes for new OAuth clients.
 pub const DEFAULT_ALLOWED_SCOPES: &str = "openid profile email";
 
+/// Delegation scopes OAuth clients may request through RFC 8693 token
+/// exchange. `account:read` is intentionally absent: that capability is
+/// confined to admin-configured downstream/user service rows.
+pub const OAUTH_CLIENT_DELEGATION_SCOPES: &[&str] = &["llm:proxy", "proxy:*", "llm:status"];
+
+pub fn validate_oauth_client_delegation_scopes(scopes: &str) -> AppResult<()> {
+    for scope in scopes.split_whitespace() {
+        if !OAUTH_CLIENT_DELEGATION_SCOPES.contains(&scope) {
+            return Err(AppError::ValidationError(format!(
+                "Invalid delegation scope '{}'. Must be one of: {}",
+                scope,
+                OAUTH_CLIENT_DELEGATION_SCOPES.join(", ")
+            )));
+        }
+    }
+    Ok(())
+}
+
 /// Default scopes for the built-in MCP OAuth client and dynamic registrations.
 ///
 /// Includes `roles` and `groups` so MCP clients (Cursor, Claude Code, Codex,
@@ -1424,6 +1442,22 @@ mod tests {
             created_to: None,
             sort: "-created_at",
             broker_require_admin_capability: false,
+        }
+    }
+
+    #[test]
+    fn oauth_client_delegation_scopes_exclude_account_read() {
+        for scope in OAUTH_CLIENT_DELEGATION_SCOPES {
+            validate_oauth_client_delegation_scopes(scope).unwrap_or_else(|error| {
+                panic!("OAuth-client scope {scope} should be valid: {error}")
+            });
+        }
+
+        for scopes in ["account:read", "proxy:* account:read"] {
+            assert!(matches!(
+                validate_oauth_client_delegation_scopes(scopes),
+                Err(AppError::ValidationError(_))
+            ));
         }
     }
 

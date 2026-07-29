@@ -274,6 +274,7 @@ pub async fn create_my_oauth_client(
     }
 
     let delegation_scopes = body.delegation_scopes.as_deref().unwrap_or("");
+    oauth_client_service::validate_oauth_client_delegation_scopes(delegation_scopes)?;
     require_platform_admin_for_broker_capability(
         &state,
         &auth_user,
@@ -385,6 +386,10 @@ pub async fn update_my_oauth_client(
     Path(client_id): Path<String>,
     Json(body): Json<UpdateDeveloperOAuthClientRequest>,
 ) -> AppResult<Json<DeveloperOAuthClientResponse>> {
+    if let Some(scopes) = body.delegation_scopes.as_deref() {
+        oauth_client_service::validate_oauth_client_delegation_scopes(scopes)?;
+    }
+
     if let Some(name) = body.name.as_ref()
         && name.trim().is_empty()
     {
@@ -494,8 +499,8 @@ mod tests {
     use crate::services::oauth_broker_service::BROKER_BINDING_SCOPE;
     use crate::services::role_service;
     use crate::test_utils::{
-        connect_test_database, test_app_state, test_app_state_with_config, test_auth_user,
-        test_user,
+        connect_test_database, test_app_state, test_app_state_no_db, test_app_state_with_config,
+        test_auth_user, test_user,
     };
     use axum::extract::State;
 
@@ -667,6 +672,56 @@ mod tests {
 
         assert_eq!(updated.client_name, "After Update");
         assert!(updated.broker_capability_enabled);
+    }
+
+    #[tokio::test]
+    async fn create_oauth_client_rejects_account_read_delegation_scope() {
+        let user_id = uuid::Uuid::new_v4().to_string();
+        let error = create_my_oauth_client(
+            State(test_app_state_no_db().await),
+            test_auth_user(&user_id),
+            tele(),
+            Json(CreateDeveloperOAuthClientRequest {
+                name: "Disallowed Delegation App".to_string(),
+                redirect_uris: vec!["https://example.com/callback".to_string()],
+                client_type: Some("confidential".to_string()),
+                delegation_scopes: Some("proxy:* account:read".to_string()),
+                broker_capability_enabled: None,
+                revocation_webhook_url: None,
+                revocation_webhook_secret: None,
+                allowed_scopes: None,
+                target_org_id: None,
+                default_service_catalog_slugs: None,
+            }),
+        )
+        .await
+        .expect_err("OAuth-client create must reject account:read");
+
+        assert!(matches!(error, AppError::ValidationError(_)));
+    }
+
+    #[tokio::test]
+    async fn update_oauth_client_rejects_account_read_delegation_scope() {
+        let user_id = uuid::Uuid::new_v4().to_string();
+        let error = update_my_oauth_client(
+            State(test_app_state_no_db().await),
+            test_auth_user(&user_id),
+            Path("client-id".to_string()),
+            Json(UpdateDeveloperOAuthClientRequest {
+                name: None,
+                redirect_uris: None,
+                delegation_scopes: Some("account:read".to_string()),
+                broker_capability_enabled: None,
+                revocation_webhook_url: None,
+                revocation_webhook_secret: None,
+                allowed_scopes: None,
+                default_service_catalog_slugs: None,
+            }),
+        )
+        .await
+        .expect_err("OAuth-client update must reject account:read");
+
+        assert!(matches!(error, AppError::ValidationError(_)));
     }
 
     #[tokio::test]

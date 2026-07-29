@@ -1,8 +1,8 @@
 use std::net::SocketAddr;
 
 use axum::{
-    extract::{ConnectInfo, FromRequestParts},
-    http::{Method, header, request::Parts},
+    extract::{ConnectInfo, FromRequestParts, OriginalUri},
+    http::{HeaderMap, Method, header, request::Parts},
     middleware::Next,
     response::IntoResponse,
 };
@@ -253,6 +253,20 @@ pub const WIDE_PROXY_SCOPE: &str = "proxy:*";
 /// Scope that grants access to the LLM gateway.
 pub const LLM_PROXY_SCOPE: &str = "llm:proxy";
 
+/// Scope that grants read-only access to user account management resources.
+pub const ACCOUNT_READ_SCOPE: &str = "account:read";
+
+/// Delegation scopes that may be configured on downstream and user services.
+/// OAuth-client delegation validation intentionally uses a narrower list.
+pub const SERVICE_DELEGATION_SCOPES: &[&str] = &[
+    LLM_PROXY_SCOPE,
+    WIDE_PROXY_SCOPE,
+    "llm:status",
+    ACCOUNT_READ_SCOPE,
+];
+
+const DELEGATED_ENDPOINT_FORBIDDEN: &str = "Delegated tokens cannot access this endpoint";
+
 fn scope_contains(scopes: &str, expected: &str) -> bool {
     scopes.split_whitespace().any(|scope| scope == expected)
 }
@@ -291,6 +305,162 @@ fn path_matches_prefix(path: &str, prefix: &str) -> bool {
         || path
             .strip_prefix(prefix)
             .is_some_and(|suffix| suffix.starts_with('/'))
+}
+
+fn contains_percent_encoded_slash(path: &str) -> bool {
+    path.as_bytes().windows(3).any(|window| {
+        window[0] == b'%' && window[1] == b'2' && window[2].eq_ignore_ascii_case(&b'f')
+    })
+}
+
+/// Return normalized path segments below `/api/v1` without applying the
+/// management-route percent-encoding guard.
+fn api_v1_path_segments_unchecked(path: &str) -> Option<Vec<&str>> {
+    let path = path.split_once('?').map_or(path, |(path, _)| path);
+    let segments: Vec<&str> = path
+        .split('/')
+        .filter(|segment| !segment.is_empty())
+        .collect();
+    segments
+        .starts_with(&["api", "v1"])
+        .then(|| segments.into_iter().skip(2).collect())
+}
+
+/// Return normalized path segments below `/api/v1`.
+///
+/// Duplicate and trailing slashes are collapsed by dropping empty segments.
+/// Query strings are ignored. Percent-encoded slashes are rejected instead of
+/// decoded so a path cannot change management route class after authorization.
+fn api_v1_path_segments(path: &str) -> Option<Vec<&str>> {
+    let path_without_query = path.split_once('?').map_or(path, |(path, _)| path);
+    if contains_percent_encoded_slash(path_without_query) {
+        return None;
+    }
+
+    api_v1_path_segments_unchecked(path)
+}
+
+/// Native delegated routes retain their existing behavior for every method and
+/// scope. These routes are checked before the account-read management rule.
+fn is_delegated_native_path(path: &str) -> bool {
+    let Some(segments) = api_v1_path_segments_unchecked(path) else {
+        return false;
+    };
+
+    if matches!(
+        segments.first().copied(),
+        Some("llm" | "delegation" | "proxy" | "demo" | "channel-relay" | "channel-events")
+    ) {
+        return true;
+    }
+
+    matches!(segments.as_slice(), ["approvals", "requests", _, "status"])
+}
+
+/// Return true for management GET classes that delegated account reads must
+/// never reach. Matching is segment-based so adjacent names such as
+/// `/nodesXYZ` and `/administer` remain ordinary default-allowed GET paths.
+fn delegated_read_denied_path(path: &str) -> bool {
+    let Some(segments) = api_v1_path_segments(path) else {
+        return true;
+    };
+
+    if matches!(
+        segments.first().copied(),
+        Some(
+            "admin"
+                | "ssh"
+                | "assistant"
+                | "auth"
+                | "devices"
+                | "cli-pairings"
+                | "services"
+                | "mcp"
+                | "webhooks"
+                | "integrations"
+                | "billing"
+                | "oracle"
+                | "channel-bots"
+                | "channel-conversations"
+        )
+    ) {
+        return true;
+    }
+
+    // Node WebSocket transport and both pending-credential URL shapes are
+    // protocols that deliver or advance one-time credential material.
+    if matches!(segments.as_slice(), ["nodes", "ws"])
+        || (segments.first() == Some(&"nodes")
+            && (segments.get(1) == Some(&"credentials") || segments.get(2) == Some(&"credentials")))
+    {
+        return true;
+    }
+
+    // Org invites expose a redeemable bearer nonce. Keep ordinary org
+    // inventory readable while denying both the mounted collection route and
+    // the reserved item shape should a GET handler be added later.
+    if matches!(
+        segments.as_slice(),
+        ["orgs", _, "invites"] | ["orgs", _, "invites", _]
+    ) {
+        return true;
+    }
+
+    // Provider inventory and credential-presence reads stay available. OAuth
+    // initiation/callback GETs mutate protocol state or deliver authorization
+    // material and therefore require explicit exclusions within the family.
+    matches!(
+        segments.as_slice(),
+        ["providers", "callback"]
+            | ["providers", _, "callback"]
+            | ["providers", _, "connect", "oauth"]
+    )
+}
+
+fn header_contains_token(headers: &HeaderMap, name: &header::HeaderName, expected: &str) -> bool {
+    headers.get_all(name).iter().any(|value| {
+        value.to_str().ok().is_some_and(|value| {
+            value
+                .split(',')
+                .any(|token| token.trim().eq_ignore_ascii_case(expected))
+        })
+    })
+}
+
+fn is_websocket_upgrade(headers: &HeaderMap) -> bool {
+    header_contains_token(headers, &header::CONNECTION, "upgrade")
+        && header_contains_token(headers, &header::UPGRADE, "websocket")
+}
+
+fn delegated_request_allowed(
+    method: &Method,
+    path: &str,
+    headers: &HeaderMap,
+    scopes: &str,
+) -> bool {
+    if is_delegated_native_path(path) {
+        return true;
+    }
+
+    method == Method::GET
+        && scope_contains(scopes, ACCOUNT_READ_SCOPE)
+        && !delegated_read_denied_path(path)
+        && !is_websocket_upgrade(headers)
+}
+
+fn delegated_path_class(path: &str) -> String {
+    api_v1_path_segments(path)
+        .and_then(|segments| segments.first().map(|segment| (*segment).to_string()))
+        .unwrap_or_else(|| "unknown".to_string())
+}
+
+fn ensure_delegated_claim_consistency(claims: &jwt::Claims) -> Result<(), AppError> {
+    if (claims.delegated == Some(true)) != claims.act.is_some() {
+        return Err(AppError::Unauthorized(
+            "Invalid delegated token claims".to_string(),
+        ));
+    }
+    Ok(())
 }
 
 fn validate_dpop_bound_access(
@@ -447,6 +617,13 @@ impl FromRequestParts<AppState> for AuthUser {
                         }
                     };
 
+                    // Every NyxID delegated-token mint sets both RFC 8693
+                    // `act` and `delegated: true`. Reject either half by itself
+                    // after signature verification so the middleware's
+                    // unverified delegated peek cannot disagree with the
+                    // authoritative classifier below.
+                    ensure_delegated_claim_consistency(&claims)?;
+
                     if claims.token_type != "access" {
                         return Err(AppError::Unauthorized("Expected access token".to_string()));
                     }
@@ -549,6 +726,41 @@ impl FromRequestParts<AppState> for AuthUser {
                     } else {
                         AuthMethod::AccessToken
                     };
+
+                    if auth_method == AuthMethod::Delegated {
+                        let request_path = parts
+                            .extensions
+                            .get::<OriginalUri>()
+                            .map_or_else(|| parts.uri.path(), |uri| uri.path());
+                        if !delegated_request_allowed(
+                            &parts.method,
+                            request_path,
+                            &parts.headers,
+                            &claims.scope,
+                        ) {
+                            return Err(AppError::Forbidden(
+                                DELEGATED_ENDPOINT_FORBIDDEN.to_string(),
+                            ));
+                        }
+
+                        if !is_delegated_native_path(request_path) {
+                            let acting = claims
+                                .act
+                                .as_ref()
+                                .expect("consistent delegated claims include act")
+                                .sub
+                                .as_str();
+                            let path_class = delegated_path_class(request_path);
+                            tracing::info!(
+                                user_id = %user_id,
+                                acting = %acting,
+                                method = %parts.method,
+                                path_class = %path_class,
+                                outcome = "accepted",
+                                "delegated_account_read"
+                            );
+                        }
+                    }
 
                     // For relay tokens, verify the originating agent key is still
                     // active. Relay tokens are stateless JWTs that leave NyxID's
@@ -887,35 +1099,38 @@ fn is_jwt_relay(token: &str) -> bool {
     false
 }
 
-/// Middleware that rejects delegated tokens from accessing protected endpoints.
+/// Fail-fast middleware for delegated tokens on management routers.
 ///
-/// Delegated tokens (with `delegated: true` in JWT claims) are constrained to
-/// proxy and LLM gateway routes only. This middleware should be applied to all
-/// other route groups under `/api/v1`.
+/// This only peeks at unverified claims. The `AuthUser` extractor repeats the
+/// decision using verified claims and is the authoritative security boundary.
 pub async fn reject_delegated_tokens(
     request: axum::http::Request<axum::body::Body>,
     next: Next,
 ) -> Result<impl IntoResponse, AppError> {
-    if is_delegated_request(&request) {
-        return Err(AppError::Forbidden(
-            "Delegated tokens cannot access this endpoint".to_string(),
-        ));
+    if let Some(token) = delegated_bearer_token(&request)
+        && is_jwt_delegated(token)
+    {
+        let scope = peek_jwt_scope(token).unwrap_or_default();
+        let request_path = request
+            .extensions()
+            .get::<OriginalUri>()
+            .map_or_else(|| request.uri().path(), |uri| uri.path());
+        if !delegated_request_allowed(request.method(), request_path, request.headers(), &scope) {
+            return Err(AppError::Forbidden(
+                DELEGATED_ENDPOINT_FORBIDDEN.to_string(),
+            ));
+        }
     }
     Ok(next.run(request).await)
 }
 
-/// Check if the request bears a delegated token.
-fn is_delegated_request(request: &axum::http::Request<axum::body::Body>) -> bool {
-    // Check Authorization header
-    if let Some(auth_header) = request.headers().get("authorization")
-        && let Ok(auth_str) = auth_header.to_str()
-        && let Some(token) = auth_str.strip_prefix("Bearer ")
-        && is_jwt_delegated(token)
-    {
-        return true;
-    }
-
-    false
+fn delegated_bearer_token(request: &axum::http::Request<axum::body::Body>) -> Option<&str> {
+    request
+        .headers()
+        .get("authorization")?
+        .to_str()
+        .ok()?
+        .strip_prefix("Bearer ")
 }
 
 /// Peek at the JWT payload (without verifying signature) to check the `delegated` field.
@@ -925,9 +1140,21 @@ fn is_delegated_request(request: &axum::http::Request<axum::body::Body>) -> bool
 /// decide whether to reject early. If the token is forged, the extractor will
 /// reject it during signature verification.
 fn is_jwt_delegated(token: &str) -> bool {
+    peek_jwt_claims(token)
+        .is_some_and(|claims| claims.get("delegated") == Some(&serde_json::Value::Bool(true)))
+}
+
+fn peek_jwt_scope(token: &str) -> Option<String> {
+    peek_jwt_claims(token)?
+        .get("scope")?
+        .as_str()
+        .map(String::from)
+}
+
+fn peek_jwt_claims(token: &str) -> Option<serde_json::Value> {
     let parts: Vec<&str> = token.splitn(3, '.').collect();
     if parts.len() < 2 {
-        return false;
+        return None;
     }
 
     // Decode the payload (2nd part) from base64url (without padding)
@@ -937,17 +1164,12 @@ fn is_jwt_delegated(token: &str) -> bool {
             // Retry with standard padding
             match base64::engine::general_purpose::URL_SAFE.decode(parts[1]) {
                 Ok(bytes) => bytes,
-                Err(_) => return false,
+                Err(_) => return None,
             }
         }
     };
 
-    // Parse as JSON and check for delegated field
-    if let Ok(claims) = serde_json::from_slice::<serde_json::Value>(&payload) {
-        return claims.get("delegated") == Some(&serde_json::Value::Bool(true));
-    }
-
-    false
+    serde_json::from_slice(&payload).ok()
 }
 
 /// Middleware that rejects service account tokens from human-only endpoints.
@@ -1053,6 +1275,10 @@ impl FromRequestParts<AppState> for OptionalAuthUser {
                 Err(AppError::Unauthorized(_)) | Err(AppError::TokenExpired) => {
                     Ok(OptionalAuthUser(None))
                 }
+                Err(AppError::Forbidden(error)) => {
+                    tracing::debug!(%error, "OptionalAuthUser rejected credentials");
+                    Ok(OptionalAuthUser(None))
+                }
                 Err(other) => {
                     tracing::error!("OptionalAuthUser internal error: {other}");
                     Ok(OptionalAuthUser(None))
@@ -1078,9 +1304,42 @@ fn parse_cookie<'a>(cookie_header: &'a str, name: &str) -> Option<&'a str> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use axum::body::Body;
-    use axum::http::{Request, header};
+    use axum::body::{Body, to_bytes};
+    use axum::http::{Request, StatusCode, header};
+    use axum::{Router, middleware, routing::get};
+    use tower::ServiceExt;
     use uuid::Uuid;
+
+    const DELEGATED_ALLOWED_MANAGEMENT_PATHS: &[&str] = &[
+        "/api/v1/users/me",
+        "/api/v1/users/me/consents",
+        "/api/v1/keys",
+        "/api/v1/api-keys",
+        "/api/v1/api-keys/key-id/usage",
+        "/api/v1/api-keys/key-id/bindings",
+        "/api/v1/nodes",
+        "/api/v1/nodes/node-id",
+        "/api/v1/nodes/node-id/bindings",
+        "/api/v1/catalog",
+        "/api/v1/catalog/openai",
+        "/api/v1/user-services",
+        "/api/v1/endpoints",
+        "/api/v1/orgs",
+        "/api/v1/orgs/org-id",
+        "/api/v1/orgs/org-id/members",
+        "/api/v1/approvals/requests",
+        "/api/v1/approvals/grants",
+        "/api/v1/sessions",
+        "/api/v1/notifications/settings",
+        "/api/v1/developer/oauth-clients",
+        "/api/v1/service-pools",
+        "/api/v1/connections",
+        "/api/v1/providers",
+        "/api/v1/providers/my-tokens",
+        "/api/v1/providers/provider-id",
+        "/api/v1/providers/provider-id/credentials",
+        "/api/v1/providers/provider-id/connect/telegram",
+    ];
 
     fn test_auth_user(auth_method: AuthMethod, scope: &str) -> AuthUser {
         AuthUser {
@@ -1111,6 +1370,1184 @@ mod tests {
         }
         let request = builder.body(Body::empty()).unwrap();
         request.into_parts().0
+    }
+
+    fn fake_jwt_from_value(payload: serde_json::Value) -> String {
+        let payload_b64 = base64::engine::general_purpose::URL_SAFE_NO_PAD
+            .encode(serde_json::to_vec(&payload).unwrap());
+        format!("eyJhbGciOiJSUzI1NiJ9.{payload_b64}.fake_sig")
+    }
+
+    fn fake_delegated_jwt(scope: &str) -> String {
+        fake_jwt_from_value(serde_json::json!({
+            "sub": "user-123",
+            "delegated": true,
+            "act": { "sub": "aevatar" },
+            "scope": scope,
+        }))
+    }
+
+    async fn run_delegated_rejection_middleware(
+        request: Request<Body>,
+    ) -> axum::response::Response {
+        Router::new()
+            .fallback(|| async {
+                (
+                    StatusCode::IM_A_TEAPOT,
+                    [("x-handler-result", "preserved")],
+                    b"unchanged-handler-bytes".as_slice(),
+                )
+            })
+            .layer(middleware::from_fn(reject_delegated_tokens))
+            .oneshot(request)
+            .await
+            .expect("middleware response")
+    }
+
+    #[test]
+    fn delegated_account_read_allows_expected_management_families() {
+        let headers = HeaderMap::new();
+        for path in DELEGATED_ALLOWED_MANAGEMENT_PATHS {
+            assert!(
+                delegated_request_allowed(&Method::GET, path, &headers, ACCOUNT_READ_SCOPE),
+                "delegated account read should allow GET {path}"
+            );
+        }
+    }
+
+    #[test]
+    fn delegated_account_read_rejects_every_management_write_method() {
+        let headers = HeaderMap::new();
+        for path in DELEGATED_ALLOWED_MANAGEMENT_PATHS {
+            for method in [Method::POST, Method::PUT, Method::PATCH, Method::DELETE] {
+                assert!(
+                    !delegated_request_allowed(&method, path, &headers, ACCOUNT_READ_SCOPE),
+                    "delegated account read should reject {method} {path}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn delegated_proxy_scope_alone_cannot_read_any_management_family() {
+        let headers = HeaderMap::new();
+        for path in DELEGATED_ALLOWED_MANAGEMENT_PATHS {
+            assert!(
+                !delegated_request_allowed(&Method::GET, path, &headers, WIDE_PROXY_SCOPE),
+                "plain proxy scope must not grant GET {path}"
+            );
+        }
+    }
+
+    #[test]
+    fn delegated_account_read_rejects_every_denied_class_and_protocol_get() {
+        let headers = HeaderMap::new();
+        let denied_paths = [
+            "/api/v1/admin/users",
+            "/api/v1/ssh/service-id",
+            "/api/v1/ssh/service-id/terminal",
+            "/api/v1/assistant/workflow-chat/ws",
+            "/api/v1/auth/social/github",
+            "/api/v1/devices/code/poll",
+            "/api/v1/cli-pairings/pairing-id/poll",
+            "/api/v1/services",
+            "/api/v1/mcp/config",
+            "/api/v1/webhooks/telegram",
+            "/api/v1/integrations/openclaw/mappings",
+            "/api/v1/billing/wallet",
+            "/api/v1/oracle/pools",
+            "/api/v1/channel-bots",
+            "/api/v1/channel-conversations/conversation-id",
+            "/api/v1/nodes/ws",
+            "/api/v1/nodes/node-id/credentials",
+            "/api/v1/nodes/node-id/credentials/pending",
+            "/api/v1/nodes/node-id/credentials/pending/pending-id",
+            "/api/v1/nodes/credentials/pending/fanout-id/fan-out",
+            "/api/v1/providers/callback",
+            "/api/v1/providers/provider-id/callback",
+            "/api/v1/providers/provider-id/connect/oauth",
+            "/api/v1/orgs/org-id/invites",
+            "/api/v1/orgs/org-id/invites/invite-id",
+        ];
+
+        for path in denied_paths {
+            assert!(
+                delegated_read_denied_path(path),
+                "missing deny classification for {path}"
+            );
+            assert!(
+                !delegated_request_allowed(&Method::GET, path, &headers, ACCOUNT_READ_SCOPE),
+                "delegated account read should reject GET {path}"
+            );
+        }
+    }
+
+    #[test]
+    fn delegated_account_read_denies_org_invite_bearer_material() {
+        let headers = HeaderMap::new();
+
+        for path in [
+            "/api/v1/orgs/org-id/invites",
+            "/api/v1/orgs/org-id/invites/invite-id",
+        ] {
+            assert!(
+                delegated_read_denied_path(path),
+                "GET {path} must be denied"
+            );
+            assert!(!delegated_request_allowed(
+                &Method::GET,
+                path,
+                &headers,
+                ACCOUNT_READ_SCOPE,
+            ));
+        }
+
+        for path in ["/api/v1/orgs", "/api/v1/orgs/org-id"] {
+            assert!(
+                !delegated_read_denied_path(path),
+                "GET {path} stays readable"
+            );
+            assert!(delegated_request_allowed(
+                &Method::GET,
+                path,
+                &headers,
+                ACCOUNT_READ_SCOPE,
+            ));
+        }
+    }
+
+    #[test]
+    fn delegated_account_read_rejects_websocket_upgrade_case_insensitively() {
+        let mut headers = HeaderMap::new();
+        headers.insert(header::CONNECTION, "keep-alive, UpGrAdE".parse().unwrap());
+        headers.insert(header::UPGRADE, "WebSocket".parse().unwrap());
+
+        assert!(is_websocket_upgrade(&headers));
+        assert!(!delegated_request_allowed(
+            &Method::GET,
+            "/api/v1/keys",
+            &headers,
+            ACCOUNT_READ_SCOPE,
+        ));
+    }
+
+    #[test]
+    fn delegated_account_read_requires_exact_case_sensitive_scope_token() {
+        let headers = HeaderMap::new();
+        for scope in [
+            "proxy:*",
+            "account:reader",
+            "fooaccount:read",
+            "ACCOUNT:READ",
+            "account:reader account:reader",
+        ] {
+            assert!(
+                !delegated_request_allowed(&Method::GET, "/api/v1/keys", &headers, scope),
+                "scope {scope:?} must not grant account read"
+            );
+        }
+
+        for scope in [
+            "account:read",
+            "proxy:* account:read",
+            "account:read account:read",
+            "\taccount:read\nproxy:* ",
+        ] {
+            assert!(
+                delegated_request_allowed(&Method::GET, "/api/v1/keys", &headers, scope),
+                "scope {scope:?} contains the exact account-read token"
+            );
+        }
+    }
+
+    #[test]
+    fn delegated_account_read_normalizes_paths_without_prefix_confusion() {
+        let headers = HeaderMap::new();
+        for path in [
+            "//api/v1//keys",
+            "/api/v1/keys/",
+            "/api/v1/keys?include=all",
+            "/api/v1/nodesXYZ",
+            "/api/v1/administer",
+        ] {
+            assert!(
+                delegated_request_allowed(&Method::GET, path, &headers, ACCOUNT_READ_SCOPE),
+                "normalized path should remain allowed: {path}"
+            );
+        }
+
+        for path in [
+            "/api/v1/keys%2Fsecret",
+            "/api/v1/keys%2fsecret",
+            "/api/v1%2Fkeys",
+        ] {
+            assert!(
+                !delegated_request_allowed(&Method::GET, path, &headers, ACCOUNT_READ_SCOPE),
+                "percent-encoded slash must fail closed: {path}"
+            );
+        }
+    }
+
+    #[test]
+    fn delegated_native_paths_keep_plain_proxy_scope_behavior() {
+        let mut websocket_headers = HeaderMap::new();
+        websocket_headers.insert(header::CONNECTION, "upgrade".parse().unwrap());
+        websocket_headers.insert(header::UPGRADE, "websocket".parse().unwrap());
+        let native_paths = [
+            "/api/v1/proxy/s/openai/v1/models",
+            "/api/v1/proxy/s/openai/a%2Fb",
+            "/api/v1/llm/status",
+            "/api/v1/delegation/refresh",
+            "/api/v1/demo",
+            "/api/v1/channel-relay/reply",
+            "/api/v1/channel-events/conversation-id",
+            "/api/v1/approvals/requests/request-id/status",
+        ];
+
+        for path in native_paths {
+            assert!(
+                is_delegated_native_path(path),
+                "native path not recognized: {path}"
+            );
+            assert!(delegated_request_allowed(
+                &Method::POST,
+                path,
+                &websocket_headers,
+                WIDE_PROXY_SCOPE,
+            ));
+        }
+
+        assert!(!is_delegated_native_path(
+            "/api/v1/approvals/requests/request-id"
+        ));
+    }
+
+    #[test]
+    fn verified_delegated_claims_must_set_actor_and_flag_together() {
+        let mut claims = jwt::Claims {
+            sub: Uuid::new_v4().to_string(),
+            iss: "nyxid".to_string(),
+            aud: "http://localhost:3001".to_string(),
+            exp: chrono::Utc::now().timestamp() + 60,
+            iat: chrono::Utc::now().timestamp(),
+            jti: Uuid::new_v4().to_string(),
+            scope: ACCOUNT_READ_SCOPE.to_string(),
+            token_type: "access".to_string(),
+            roles: None,
+            groups: None,
+            permissions: None,
+            sid: None,
+            act: Some(jwt::ActorClaim {
+                sub: "aevatar".to_string(),
+            }),
+            delegated: Some(true),
+            sa: None,
+            cnf: None,
+            relay: None,
+            relay_api_key_id: None,
+            relay_api_key_name: None,
+            relay_allowed_service_ids: None,
+            relay_allowed_node_ids: None,
+            relay_allow_all_services: None,
+            relay_allow_all_nodes: None,
+            resources: None,
+            allowed_service_ids: None,
+            allow_all_services: None,
+            assistant_forward: None,
+        };
+        assert!(ensure_delegated_claim_consistency(&claims).is_ok());
+
+        claims.act = None;
+        assert!(matches!(
+            ensure_delegated_claim_consistency(&claims),
+            Err(AppError::Unauthorized(_))
+        ));
+
+        claims.act = Some(jwt::ActorClaim {
+            sub: "aevatar".to_string(),
+        });
+        claims.delegated = None;
+        assert!(matches!(
+            ensure_delegated_claim_consistency(&claims),
+            Err(AppError::Unauthorized(_))
+        ));
+
+        claims.act = None;
+        claims.sa = Some(true);
+        assert!(ensure_delegated_claim_consistency(&claims).is_ok());
+
+        claims.sa = None;
+        claims.relay = Some(true);
+        assert!(ensure_delegated_claim_consistency(&claims).is_ok());
+
+        claims.relay = None;
+        assert!(ensure_delegated_claim_consistency(&claims).is_ok());
+    }
+
+    #[tokio::test]
+    async fn delegated_middleware_preserves_allowed_handler_response_bytes() {
+        let token = fake_delegated_jwt("proxy:* account:read");
+        let request = Request::builder()
+            .method(Method::GET)
+            .uri("/api/v1/keys")
+            .header(header::AUTHORIZATION, format!("Bearer {token}"))
+            .body(Body::empty())
+            .unwrap();
+
+        let response = run_delegated_rejection_middleware(request).await;
+        assert_eq!(response.status(), StatusCode::IM_A_TEAPOT);
+        assert_eq!(response.headers()["x-handler-result"], "preserved");
+        assert_eq!(
+            to_bytes(response.into_body(), usize::MAX).await.unwrap(),
+            "unchanged-handler-bytes"
+        );
+    }
+
+    #[tokio::test]
+    async fn delegated_middleware_keeps_existing_forbidden_error_for_denials() {
+        for (method, path, scope) in [
+            (Method::GET, "/api/v1/keys", WIDE_PROXY_SCOPE),
+            (Method::POST, "/api/v1/keys", ACCOUNT_READ_SCOPE),
+            (Method::GET, "/api/v1/admin/users", ACCOUNT_READ_SCOPE),
+        ] {
+            let token = fake_delegated_jwt(scope);
+            let request = Request::builder()
+                .method(method.clone())
+                .uri(path)
+                .header(header::AUTHORIZATION, format!("Bearer {token}"))
+                .body(Body::empty())
+                .unwrap();
+            let response = run_delegated_rejection_middleware(request).await;
+            assert_eq!(response.status(), StatusCode::FORBIDDEN, "{method} {path}");
+            let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+            assert!(
+                String::from_utf8_lossy(&body).contains(DELEGATED_ENDPOINT_FORBIDDEN),
+                "forbidden response changed for {method} {path}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn delegated_middleware_leaves_other_token_classes_byte_for_byte_unchanged() {
+        let relay = fake_jwt_from_value(serde_json::json!({ "relay": true, "scope": "proxy:*" }));
+        let service_account =
+            fake_jwt_from_value(serde_json::json!({ "sa": true, "scope": "proxy:*" }));
+        let access = fake_jwt_from_value(serde_json::json!({ "scope": "openid profile" }));
+        let credentials = [
+            (
+                header::COOKIE.as_str(),
+                "nyx_session=session-token".to_string(),
+            ),
+            ("x-api-key", "nyxid_ag_test-key".to_string()),
+            (header::AUTHORIZATION.as_str(), format!("Bearer {relay}")),
+            (
+                header::AUTHORIZATION.as_str(),
+                format!("Bearer {service_account}"),
+            ),
+            (header::AUTHORIZATION.as_str(), format!("Bearer {access}")),
+        ];
+
+        for (name, value) in credentials {
+            let request = Request::builder()
+                .method(Method::GET)
+                .uri("/api/v1/keys")
+                .header(name, value)
+                .body(Body::empty())
+                .unwrap();
+            let response = run_delegated_rejection_middleware(request).await;
+            assert_eq!(response.status(), StatusCode::IM_A_TEAPOT);
+            assert_eq!(
+                to_bytes(response.into_body(), usize::MAX).await.unwrap(),
+                "unchanged-handler-bytes"
+            );
+        }
+    }
+
+    fn sign_test_claims(state: &AppState, claims: &jwt::Claims) -> String {
+        let mut jwt_header = jsonwebtoken::Header::new(jsonwebtoken::Algorithm::RS256);
+        jwt_header.kid = Some(state.jwt_keys.kid.clone());
+        jsonwebtoken::encode(&jwt_header, claims, &state.jwt_keys.encoding)
+            .expect("sign test claims")
+    }
+
+    #[tokio::test]
+    async fn authoritative_extractor_rejects_signed_delegated_claim_inconsistency() {
+        let state = crate::test_utils::test_app_state_no_db().await;
+        let user_id = Uuid::new_v4();
+        let token = jwt::generate_delegated_access_token(
+            &state.jwt_keys,
+            &state.config,
+            &user_id,
+            ACCOUNT_READ_SCOPE,
+            "aevatar",
+            60,
+            None,
+        )
+        .unwrap();
+        let valid_claims = jwt::verify_token(&state.jwt_keys, &state.config, &token).unwrap();
+
+        let mut delegated_without_actor = valid_claims.clone();
+        delegated_without_actor.act = None;
+        let mut actor_without_delegated = valid_claims;
+        actor_without_delegated.delegated = None;
+
+        for claims in [delegated_without_actor, actor_without_delegated] {
+            let token = sign_test_claims(&state, &claims);
+            let app = Router::new()
+                .route(
+                    "/api/v1/keys",
+                    get(|_auth: AuthUser| async { StatusCode::NO_CONTENT }),
+                )
+                .with_state(state.clone());
+            let response = app
+                .oneshot(
+                    Request::builder()
+                        .uri("/api/v1/keys")
+                        .header(header::AUTHORIZATION, format!("Bearer {token}"))
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+        }
+    }
+
+    #[tokio::test]
+    async fn authoritative_extractor_rejects_management_read_without_account_scope_without_middleware()
+     {
+        use crate::models::user::{COLLECTION_NAME as USERS, UserType};
+
+        let Some(db) = crate::test_utils::connect_test_database(
+            "auth_delegated_extractor_without_reject_middleware",
+        )
+        .await
+        else {
+            return;
+        };
+        let state = crate::test_utils::test_app_state(db.clone());
+        let user_id = Uuid::new_v4();
+        db.collection::<User>(USERS)
+            .insert_one(crate::test_utils::test_user(
+                &user_id.to_string(),
+                UserType::Person,
+            ))
+            .await
+            .unwrap();
+        let token = jwt::generate_delegated_access_token(
+            &state.jwt_keys,
+            &state.config,
+            &user_id,
+            WIDE_PROXY_SCOPE,
+            "aevatar",
+            60,
+            None,
+        )
+        .unwrap();
+
+        let response = Router::new()
+            .route("/api/v1/keys", get(|_: AuthUser| async {}))
+            .with_state(state)
+            .oneshot(
+                Request::builder()
+                    .uri("/api/v1/keys")
+                    .header(header::AUTHORIZATION, format!("Bearer {token}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::FORBIDDEN);
+        let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(
+            json["message"],
+            format!("Forbidden: {DELEGATED_ENDPOINT_FORBIDDEN}")
+        );
+    }
+
+    #[tokio::test]
+    async fn forged_delegated_account_read_passes_peek_but_fails_real_router_verification() {
+        let Some(db) = crate::test_utils::connect_test_database("auth_delegated_forged").await
+        else {
+            return;
+        };
+        let state = crate::test_utils::test_app_state(db);
+        let token = fake_delegated_jwt("proxy:* account:read");
+        assert!(is_jwt_delegated(&token));
+        assert_eq!(
+            peek_jwt_scope(&token).as_deref(),
+            Some("proxy:* account:read")
+        );
+
+        let (_, private) = crate::routes::build_router(
+            state.config.proxy_max_body_size,
+            state.config.public_proxy_max_body_size,
+        );
+        let response = private
+            .with_state(state)
+            .oneshot(
+                Request::builder()
+                    .uri("/api/v1/keys")
+                    .header(header::AUTHORIZATION, format!("Bearer {token}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    fn delegated_fixture_api_key(
+        id: &str,
+        user_id: &str,
+        key_hash: &str,
+    ) -> crate::models::api_key::ApiKey {
+        crate::models::api_key::ApiKey {
+            id: id.to_string(),
+            user_id: user_id.to_string(),
+            name: "Delegated read fixture".to_string(),
+            key_prefix: "nyxid_ag_fixture".to_string(),
+            key_hash: key_hash.to_string(),
+            scopes: "read proxy".to_string(),
+            last_used_at: None,
+            expires_at: None,
+            is_active: true,
+            created_at: chrono::Utc::now(),
+            description: None,
+            allowed_service_ids: Vec::new(),
+            allowed_node_ids: Vec::new(),
+            allow_all_services: true,
+            allow_all_nodes: true,
+            rate_limit_per_second: None,
+            rate_limit_burst: None,
+            platform: Some("aevatar".to_string()),
+            callback_url: None,
+        }
+    }
+
+    fn delegated_fixture_node(
+        id: &str,
+        user_id: &str,
+        auth_hash: &str,
+        signing_hash: &str,
+    ) -> crate::models::node::Node {
+        crate::models::node::Node {
+            id: id.to_string(),
+            user_id: user_id.to_string(),
+            name: "Delegated read fixture node".to_string(),
+            status: crate::models::node::NodeStatus::Offline,
+            auth_token_hash: auth_hash.to_string(),
+            signing_secret_encrypted: Some(vec![9, 8, 7, 6]),
+            signing_secret_hash: signing_hash.to_string(),
+            last_heartbeat_at: None,
+            connected_at: None,
+            metadata: None,
+            metrics: Default::default(),
+            is_active: true,
+            created_at: chrono::Utc::now(),
+            updated_at: chrono::Utc::now(),
+        }
+    }
+
+    async fn delegated_router_response(
+        app: &Router,
+        method: Method,
+        path: &str,
+        token: &str,
+    ) -> axum::response::Response {
+        app.clone()
+            .oneshot(
+                Request::builder()
+                    .method(method)
+                    .uri(path)
+                    .header(header::AUTHORIZATION, format!("Bearer {token}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .expect("real router response")
+    }
+
+    fn assert_delegated_response_has_no_secret_fields(value: &serde_json::Value) {
+        const SENSITIVE_FIELDS: &[&str] = &[
+            "key",
+            "key_hash",
+            "credential",
+            "credential_encrypted",
+            "access_token",
+            "access_token_encrypted",
+            "refresh_token",
+            "refresh_token_encrypted",
+            "token",
+            "token_hash",
+            "auth_token",
+            "auth_token_hash",
+            "signing_secret",
+            "signing_secret_hash",
+            "signing_secret_encrypted",
+            "client_secret",
+            "password_hash",
+            "password_reset_token",
+            "email_verification_token",
+            "worker_token",
+            "worker_token_hash",
+            "nonce",
+            "secret",
+            "verification_token",
+            "encrypt_key",
+            "user_code",
+            "device_code",
+        ];
+
+        match value {
+            serde_json::Value::Object(map) => {
+                for (key, value) in map {
+                    assert!(
+                        !SENSITIVE_FIELDS.contains(&key.as_str()),
+                        "delegated response exposed sensitive field {key}"
+                    );
+                    assert_delegated_response_has_no_secret_fields(value);
+                }
+            }
+            serde_json::Value::Array(values) => {
+                for value in values {
+                    assert_delegated_response_has_no_secret_fields(value);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    #[tokio::test]
+    async fn aevatar_account_read_real_router_enforces_read_acl_and_redacts_secrets() {
+        use crate::models::agent_service_binding::{
+            AgentServiceBinding, COLLECTION_NAME as AGENT_SERVICE_BINDINGS,
+        };
+        use crate::models::api_key::COLLECTION_NAME as API_KEYS;
+        use crate::models::node::COLLECTION_NAME as NODES;
+        use crate::models::oauth_client::{COLLECTION_NAME as OAUTH_CLIENTS, OauthClient};
+        use crate::models::org_invite::{COLLECTION_NAME as ORG_INVITES, OrgInvite};
+        use crate::models::org_membership::{
+            COLLECTION_NAME as ORG_MEMBERSHIPS, MemberScopeSource, OrgRole,
+        };
+        use crate::models::provider_config::{COLLECTION_NAME as PROVIDER_CONFIGS, ProviderConfig};
+        use crate::models::service_pool::{
+            COLLECTION_NAME as SERVICE_POOLS, PoolStrategy, ServicePool, ServicePoolMember,
+        };
+        use crate::models::user::{COLLECTION_NAME as USERS, UserType};
+        use crate::models::user_api_key::{COLLECTION_NAME as USER_API_KEYS, UserApiKey};
+        use crate::models::user_endpoint::COLLECTION_NAME as USER_ENDPOINTS;
+        use crate::models::user_provider_credentials::{
+            COLLECTION_NAME as USER_PROVIDER_CREDENTIALS, UserProviderCredentials,
+        };
+        use crate::models::user_provider_token::{
+            COLLECTION_NAME as USER_PROVIDER_TOKENS, UserProviderToken,
+        };
+        use crate::models::user_service::COLLECTION_NAME as USER_SERVICES;
+        use crate::models::user_service_connection::{
+            COLLECTION_NAME as USER_SERVICE_CONNECTIONS, UserServiceConnection,
+        };
+
+        let Some(db) =
+            crate::test_utils::connect_test_database("auth_delegated_account_read_router").await
+        else {
+            return;
+        };
+        crate::services::role_service::seed_system_roles(&db)
+            .await
+            .expect("seed platform roles");
+        let state = crate::test_utils::test_app_state(db.clone());
+        let actor_id = Uuid::new_v4();
+        let other_user_id = Uuid::new_v4();
+        let visible_org_id = Uuid::new_v4();
+        let hidden_org_id = Uuid::new_v4();
+
+        db.collection::<User>(USERS)
+            .insert_many([
+                crate::test_utils::test_user(&actor_id.to_string(), UserType::Person),
+                crate::test_utils::test_user(&other_user_id.to_string(), UserType::Person),
+                crate::test_utils::test_user(&visible_org_id.to_string(), UserType::Org),
+                crate::test_utils::test_user(&hidden_org_id.to_string(), UserType::Org),
+            ])
+            .await
+            .unwrap();
+        db.collection::<crate::models::org_membership::OrgMembership>(ORG_MEMBERSHIPS)
+            .insert_one(crate::test_utils::test_membership(
+                &visible_org_id.to_string(),
+                &actor_id.to_string(),
+                OrgRole::Admin,
+                None,
+            ))
+            .await
+            .unwrap();
+
+        let invite_nonce = "redeemable-org-invite-nonce-fixture";
+        db.collection::<OrgInvite>(ORG_INVITES)
+            .insert_one(OrgInvite {
+                id: Uuid::new_v4().to_string(),
+                org_user_id: visible_org_id.to_string(),
+                nonce: invite_nonce.to_string(),
+                role: OrgRole::Admin,
+                scope_source: MemberScopeSource::Override,
+                allowed_service_ids: None,
+                created_by: actor_id.to_string(),
+                expires_at: chrono::Utc::now() + chrono::Duration::hours(1),
+                redeemed_by: None,
+                redeemed_at: None,
+                created_at: chrono::Utc::now(),
+            })
+            .await
+            .unwrap();
+
+        let actor_api_key_id = Uuid::new_v4().to_string();
+        let other_api_key_id = Uuid::new_v4().to_string();
+        let actor_api_hash = "actor-api-key-hash-fixture";
+        db.collection::<crate::models::api_key::ApiKey>(API_KEYS)
+            .insert_many([
+                delegated_fixture_api_key(&actor_api_key_id, &actor_id.to_string(), actor_api_hash),
+                delegated_fixture_api_key(
+                    &other_api_key_id,
+                    &other_user_id.to_string(),
+                    "other-api-key-hash-fixture",
+                ),
+            ])
+            .await
+            .unwrap();
+
+        let actor_node_id = Uuid::new_v4().to_string();
+        let other_node_id = Uuid::new_v4().to_string();
+        let actor_node_auth_hash = "actor-node-auth-hash-fixture";
+        let actor_node_signing_hash = "actor-node-signing-hash-fixture";
+        db.collection::<crate::models::node::Node>(NODES)
+            .insert_many([
+                delegated_fixture_node(
+                    &actor_node_id,
+                    &actor_id.to_string(),
+                    actor_node_auth_hash,
+                    actor_node_signing_hash,
+                ),
+                delegated_fixture_node(
+                    &other_node_id,
+                    &other_user_id.to_string(),
+                    "other-node-auth-hash-fixture",
+                    "other-node-signing-hash-fixture",
+                ),
+            ])
+            .await
+            .unwrap();
+
+        let raw_credential = "delegated-account-read-plaintext-secret-fixture";
+        let actor_external_key_id = Uuid::new_v4().to_string();
+        let encrypted_credential = state
+            .encryption_keys
+            .encrypt(raw_credential.as_bytes())
+            .await
+            .unwrap();
+        db.collection::<UserApiKey>(USER_API_KEYS)
+            .insert_one(UserApiKey {
+                id: actor_external_key_id.clone(),
+                user_id: actor_id.to_string(),
+                label: "Secret-bearing fixture".to_string(),
+                credential_type: "api_key".to_string(),
+                credential_encrypted: Some(encrypted_credential),
+                access_token_encrypted: None,
+                refresh_token_encrypted: None,
+                token_scopes: None,
+                expires_at: None,
+                provider_config_id: None,
+                connection_id: None,
+                user_oauth_client_id_encrypted: None,
+                user_oauth_client_secret_encrypted: None,
+                credential_source: None,
+                status: "active".to_string(),
+                last_used_at: None,
+                last_authorized_at: None,
+                error_message: None,
+                source: Some("user_created".to_string()),
+                source_id: None,
+                created_at: chrono::Utc::now(),
+                updated_at: chrono::Utc::now(),
+            })
+            .await
+            .unwrap();
+
+        let actor_endpoint_id = Uuid::new_v4().to_string();
+        let visible_org_endpoint_id = Uuid::new_v4().to_string();
+        let hidden_org_endpoint_id = Uuid::new_v4().to_string();
+        db.collection::<crate::models::user_endpoint::UserEndpoint>(USER_ENDPOINTS)
+            .insert_many([
+                crate::test_utils::test_user_endpoint(
+                    &actor_endpoint_id,
+                    &actor_id.to_string(),
+                    "Actor endpoint",
+                    "https://actor-api.example.test",
+                    None,
+                    None,
+                ),
+                crate::test_utils::test_user_endpoint(
+                    &visible_org_endpoint_id,
+                    &visible_org_id.to_string(),
+                    "Visible org endpoint",
+                    "https://visible-org.example.test",
+                    None,
+                    None,
+                ),
+                crate::test_utils::test_user_endpoint(
+                    &hidden_org_endpoint_id,
+                    &hidden_org_id.to_string(),
+                    "Hidden org endpoint",
+                    "https://hidden-org.example.test",
+                    None,
+                    None,
+                ),
+            ])
+            .await
+            .unwrap();
+
+        let actor_service_id = Uuid::new_v4().to_string();
+        let visible_org_service_id = Uuid::new_v4().to_string();
+        let hidden_org_service_id = Uuid::new_v4().to_string();
+        let mut actor_service = crate::test_utils::test_user_service(
+            &actor_service_id,
+            &actor_id.to_string(),
+            "actor-service",
+            &actor_endpoint_id,
+            None,
+            None,
+        );
+        actor_service.api_key_id = Some(actor_external_key_id.clone());
+        actor_service.auth_method = "bearer".to_string();
+        actor_service.auth_key_name = "Authorization".to_string();
+        db.collection::<crate::models::user_service::UserService>(USER_SERVICES)
+            .insert_many([
+                actor_service,
+                crate::test_utils::test_user_service(
+                    &visible_org_service_id,
+                    &visible_org_id.to_string(),
+                    "visible-org-service",
+                    &visible_org_endpoint_id,
+                    None,
+                    None,
+                ),
+                crate::test_utils::test_user_service(
+                    &hidden_org_service_id,
+                    &hidden_org_id.to_string(),
+                    "hidden-org-service",
+                    &hidden_org_endpoint_id,
+                    None,
+                    None,
+                ),
+            ])
+            .await
+            .unwrap();
+
+        db.collection::<AgentServiceBinding>(AGENT_SERVICE_BINDINGS)
+            .insert_one(AgentServiceBinding {
+                id: Uuid::new_v4().to_string(),
+                api_key_id: actor_api_key_id.clone(),
+                user_service_id: actor_service_id.clone(),
+                user_api_key_id: actor_external_key_id.clone(),
+                user_id: actor_id.to_string(),
+                created_at: chrono::Utc::now(),
+                updated_at: chrono::Utc::now(),
+            })
+            .await
+            .unwrap();
+
+        let provider_id = Uuid::new_v4().to_string();
+        db.collection::<ProviderConfig>(PROVIDER_CONFIGS)
+            .insert_one(ProviderConfig {
+                id: provider_id.clone(),
+                slug: "delegated-provider".to_string(),
+                name: "Delegated provider fixture".to_string(),
+                description: None,
+                provider_type: "oauth2".to_string(),
+                authorization_url: Some("https://auth.example.test/authorize".to_string()),
+                token_url: Some("https://auth.example.test/token".to_string()),
+                revocation_url: None,
+                default_scopes: Some(vec!["read:user".to_string()]),
+                client_id_encrypted: Some(vec![1, 2, 3]),
+                client_secret_encrypted: Some(vec![4, 5, 6]),
+                supports_pkce: true,
+                device_code_url: None,
+                device_token_url: None,
+                device_verification_url: None,
+                hosted_callback_url: None,
+                api_key_instructions: None,
+                api_key_url: None,
+                icon_url: None,
+                documentation_url: None,
+                is_active: true,
+                credential_mode: "both".to_string(),
+                token_endpoint_auth_method: "client_secret_post".to_string(),
+                extra_auth_params: None,
+                device_code_format: "rfc8628".to_string(),
+                client_id_param_name: None,
+                requires_gateway_url: false,
+                created_by: actor_id.to_string(),
+                created_at: chrono::Utc::now(),
+                updated_at: chrono::Utc::now(),
+            })
+            .await
+            .unwrap();
+        db.collection::<UserProviderToken>(USER_PROVIDER_TOKENS)
+            .insert_one(UserProviderToken {
+                id: Uuid::new_v4().to_string(),
+                user_id: actor_id.to_string(),
+                provider_config_id: provider_id.clone(),
+                connection_id: Some(Uuid::new_v4().to_string()),
+                credential_user_id: None,
+                token_type: "oauth2".to_string(),
+                access_token_encrypted: Some(vec![7, 8, 9]),
+                refresh_token_encrypted: Some(vec![10, 11, 12]),
+                token_scopes: Some("read:user".to_string()),
+                expires_at: None,
+                api_key_encrypted: None,
+                status: "active".to_string(),
+                last_refreshed_at: None,
+                last_used_at: None,
+                error_message: None,
+                label: Some("Connected account".to_string()),
+                metadata: None,
+                gateway_url: None,
+                created_at: chrono::Utc::now(),
+                updated_at: chrono::Utc::now(),
+            })
+            .await
+            .unwrap();
+        db.collection::<UserProviderCredentials>(USER_PROVIDER_CREDENTIALS)
+            .insert_one(UserProviderCredentials {
+                id: Uuid::new_v4().to_string(),
+                user_id: actor_id.to_string(),
+                provider_config_id: provider_id.clone(),
+                client_id_encrypted: Some(vec![13, 14, 15]),
+                client_secret_encrypted: Some(vec![16, 17, 18]),
+                label: Some("BYO OAuth app".to_string()),
+                created_at: chrono::Utc::now(),
+                updated_at: chrono::Utc::now(),
+            })
+            .await
+            .unwrap();
+
+        let oauth_client_id = Uuid::new_v4().to_string();
+        let oauth_client_hash = "delegated-oauth-client-secret-hash-fixture";
+        db.collection::<OauthClient>(OAUTH_CLIENTS)
+            .insert_one(OauthClient {
+                id: oauth_client_id.clone(),
+                client_name: "Delegated OAuth client fixture".to_string(),
+                client_secret_hash: oauth_client_hash.to_string(),
+                redirect_uris: vec!["https://client.example.test/callback".to_string()],
+                allowed_scopes: "openid profile".to_string(),
+                scope_provenance: Default::default(),
+                grant_types: "authorization_code".to_string(),
+                client_type: "confidential".to_string(),
+                is_active: true,
+                delegation_scopes: "proxy:*".to_string(),
+                default_service_catalog_slugs: Vec::new(),
+                broker_capability_enabled: false,
+                revocation_webhook_url: None,
+                revocation_webhook_secret_encrypted: Some(vec![19, 20, 21]),
+                created_by: Some(actor_id.to_string()),
+                created_at: chrono::Utc::now(),
+                updated_at: chrono::Utc::now(),
+            })
+            .await
+            .unwrap();
+
+        let service_pool_id = Uuid::new_v4().to_string();
+        db.collection::<ServicePool>(SERVICE_POOLS)
+            .insert_one(ServicePool {
+                id: service_pool_id.clone(),
+                user_id: actor_id.to_string(),
+                slug: "delegated-pool".to_string(),
+                name: "Delegated pool fixture".to_string(),
+                description: None,
+                strategy: PoolStrategy::RoundRobin,
+                members: vec![ServicePoolMember {
+                    user_service_id: actor_service_id.clone(),
+                    weight: 1,
+                    enabled: true,
+                }],
+                rr_counter: 0,
+                is_active: true,
+                created_at: chrono::Utc::now(),
+                updated_at: chrono::Utc::now(),
+            })
+            .await
+            .unwrap();
+
+        db.collection::<UserServiceConnection>(USER_SERVICE_CONNECTIONS)
+            .insert_one(UserServiceConnection {
+                id: Uuid::new_v4().to_string(),
+                user_id: actor_id.to_string(),
+                service_id: actor_service_id.clone(),
+                credential_encrypted: Some(vec![22, 23, 24]),
+                credential_type: Some("api_key".to_string()),
+                credential_label: Some("Connection secret fixture".to_string()),
+                metadata: None,
+                is_active: true,
+                created_at: chrono::Utc::now(),
+                updated_at: chrono::Utc::now(),
+            })
+            .await
+            .unwrap();
+
+        let token = jwt::generate_delegated_access_token(
+            &state.jwt_keys,
+            &state.config,
+            &actor_id,
+            "proxy:* account:read",
+            "aevatar",
+            jwt::DELEGATED_TOKEN_TTL_SECS,
+            None,
+        )
+        .unwrap();
+        let rollback_token = jwt::generate_delegated_access_token(
+            &state.jwt_keys,
+            &state.config,
+            &actor_id,
+            WIDE_PROXY_SCOPE,
+            "aevatar",
+            jwt::DELEGATED_TOKEN_TTL_SECS,
+            None,
+        )
+        .unwrap();
+        let (_, private) = crate::routes::build_router(
+            state.config.proxy_max_body_size,
+            state.config.public_proxy_max_body_size,
+        );
+        let app = private.with_state(state);
+
+        let response_paths = vec![
+            "/api/v1/users/me".to_string(),
+            "/api/v1/keys".to_string(),
+            format!("/api/v1/keys/{actor_service_id}"),
+            "/api/v1/api-keys".to_string(),
+            format!("/api/v1/api-keys/{actor_api_key_id}/bindings"),
+            "/api/v1/nodes".to_string(),
+            "/api/v1/catalog".to_string(),
+            "/api/v1/user-services".to_string(),
+            "/api/v1/endpoints".to_string(),
+            "/api/v1/orgs".to_string(),
+            format!("/api/v1/orgs/{visible_org_id}"),
+            "/api/v1/sessions".to_string(),
+            "/api/v1/providers".to_string(),
+            "/api/v1/providers/my-tokens".to_string(),
+            format!("/api/v1/providers/{provider_id}"),
+            format!("/api/v1/providers/{provider_id}/credentials"),
+            "/api/v1/notifications/devices".to_string(),
+            format!("/api/v1/developer/oauth-clients/{oauth_client_id}"),
+            "/api/v1/service-pools".to_string(),
+            format!("/api/v1/service-pools/{service_pool_id}"),
+            "/api/v1/connections".to_string(),
+            "/api/v1/approvals/requests".to_string(),
+            "/api/v1/approvals/grants".to_string(),
+            "/api/v1/approvals/service-configs".to_string(),
+        ];
+        let mut response_json = Vec::new();
+        for path in &response_paths {
+            let response = delegated_router_response(&app, Method::GET, path, &token).await;
+            assert_eq!(response.status(), StatusCode::OK, "GET {path}");
+            let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+            let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+            assert_delegated_response_has_no_secret_fields(&json);
+            let serialized = serde_json::to_string(&json).unwrap();
+            for fixture in [
+                raw_credential,
+                actor_api_hash,
+                actor_node_auth_hash,
+                actor_node_signing_hash,
+                oauth_client_hash,
+            ] {
+                assert!(
+                    !serialized.contains(fixture),
+                    "GET {path} exposed fixture {fixture}"
+                );
+            }
+            response_json.push((path.as_str(), serialized));
+        }
+
+        let orgs = response_json
+            .iter()
+            .find(|(path, _)| *path == "/api/v1/orgs")
+            .unwrap()
+            .1
+            .as_str();
+        assert!(orgs.contains(&visible_org_id.to_string()));
+        assert!(!orgs.contains(&hidden_org_id.to_string()));
+
+        let services = response_json
+            .iter()
+            .find(|(path, _)| *path == "/api/v1/user-services")
+            .unwrap()
+            .1
+            .as_str();
+        assert!(services.contains(&actor_service_id));
+        assert!(services.contains(&visible_org_service_id));
+        assert!(!services.contains(&hidden_org_service_id));
+
+        let invite_path = format!("/api/v1/orgs/{visible_org_id}/invites");
+        let invite_response =
+            delegated_router_response(&app, Method::GET, &invite_path, &token).await;
+        assert_eq!(invite_response.status(), StatusCode::FORBIDDEN);
+        let invite_body = to_bytes(invite_response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        assert!(!String::from_utf8_lossy(&invite_body).contains(invite_nonce));
+
+        for path in [
+            format!("/api/v1/api-keys/{other_api_key_id}"),
+            format!("/api/v1/nodes/{other_node_id}"),
+        ] {
+            let response = delegated_router_response(&app, Method::GET, &path, &token).await;
+            assert!(
+                matches!(
+                    response.status(),
+                    StatusCode::NOT_FOUND | StatusCode::FORBIDDEN
+                ),
+                "cross-user GET {path} returned {}",
+                response.status()
+            );
+        }
+
+        for (method, path) in [
+            (Method::POST, "/api/v1/keys".to_string()),
+            (Method::PUT, "/api/v1/users/me".to_string()),
+            (
+                Method::POST,
+                format!("/api/v1/api-keys/{actor_api_key_id}/rotate"),
+            ),
+            (
+                Method::DELETE,
+                format!("/api/v1/api-keys/{actor_api_key_id}"),
+            ),
+        ] {
+            let response = delegated_router_response(&app, method.clone(), &path, &token).await;
+            assert_eq!(response.status(), StatusCode::FORBIDDEN, "{method} {path}");
+        }
+
+        let response =
+            delegated_router_response(&app, Method::GET, "/api/v1/keys", &rollback_token).await;
+        assert_eq!(response.status(), StatusCode::FORBIDDEN);
+
+        let encoded_proxy_path = "/api/v1/proxy/s/actor-service/a%2Fb";
+        let response =
+            delegated_router_response(&app, Method::GET, encoded_proxy_path, &rollback_token).await;
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        assert!(!String::from_utf8_lossy(&body).contains(DELEGATED_ENDPOINT_FORBIDDEN));
+
+        let actor_node = delegated_router_response(
+            &app,
+            Method::GET,
+            &format!("/api/v1/nodes/{actor_node_id}"),
+            &token,
+        )
+        .await;
+        assert_eq!(actor_node.status(), StatusCode::OK);
     }
 
     #[test]
@@ -1416,45 +2853,6 @@ mod tests {
             .encode(serde_json::to_vec(&payload).unwrap());
         let fake_jwt = format!("eyJhbGciOiJSUzI1NiJ9.{payload_b64}.fake_sig");
         assert!(!is_jwt_delegated(&fake_jwt));
-    }
-
-    #[test]
-    fn delegated_request_detection_uses_bearer_header() {
-        let payload = serde_json::json!({
-            "sub": "user-123",
-            "delegated": true,
-            "act": { "sub": "client-1" }
-        });
-        let payload_b64 = base64::engine::general_purpose::URL_SAFE_NO_PAD
-            .encode(serde_json::to_vec(&payload).unwrap());
-        let fake_jwt = format!("eyJhbGciOiJSUzI1NiJ9.{payload_b64}.fake_sig");
-        let request = Request::builder()
-            .header(header::AUTHORIZATION, format!("Bearer {fake_jwt}"))
-            .body(Body::empty())
-            .unwrap();
-
-        assert!(is_delegated_request(&request));
-    }
-
-    #[test]
-    fn delegated_request_detection_ignores_legacy_access_cookie() {
-        let payload = serde_json::json!({
-            "sub": "user-123",
-            "delegated": true,
-            "act": { "sub": "client-1" }
-        });
-        let payload_b64 = base64::engine::general_purpose::URL_SAFE_NO_PAD
-            .encode(serde_json::to_vec(&payload).unwrap());
-        let fake_jwt = format!("eyJhbGciOiJSUzI1NiJ9.{payload_b64}.fake_sig");
-        let request = Request::builder()
-            .header(
-                header::COOKIE,
-                format!("{ACCESS_TOKEN_COOKIE_NAME}={fake_jwt}"),
-            )
-            .body(Body::empty())
-            .unwrap();
-
-        assert!(!is_delegated_request(&request));
     }
 
     #[test]
