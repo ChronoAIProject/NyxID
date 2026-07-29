@@ -110,10 +110,23 @@ Completing or explicitly declining a card creates a strict continuation turn:
 ```
 
 Reports resolving during another local turn stay queued. Reports from one
-origin turn are batched together, never mixed with another origin, and rejected
-continuations retain their original `clientRequestId` for a later idle retry.
+origin turn are batched together and never mixed with another origin.
+
+A continuation Aevatar refuses to admit (`NYXID_ACTION_CONTINUATION_ACTIVE_TURN`
+/ `_CONFLICT` / `_INVALID`) is **not** signalled as a run-error code on the
+continuation stream: the rejected admission is published as a
+`nyxid.continuation.changed` frame on the *origin* turn's session, so the
+continuation stream the client is reading just carries `RUN_STARTED` plus
+keepalives until it times out. The client therefore treats **any** non-success
+terminal on a continuation — run error, stall caught by the progress watchdog,
+network failure, cancel — as "these reports were never admitted": they keep
+their original `clientRequestId` and are retried once the conversation is idle
+again. Only `RUN_FINISHED`, `RUN_STOPPED`, or reaching an approval gate proves
+the continuation turn actually ran and settles the batch.
+
 Unknown custom frames remain ignored. Unknown action verbs and non-v4 requests
-render a decline-only unsupported card.
+render a decline-only unsupported card, including when a request is re-emitted
+under a schema version this build cannot service.
 
 Action cards are not rehydrated after a page reload because conversation history
 is currently text-only. A subsequent text turn lets Aevatar re-emit the pending

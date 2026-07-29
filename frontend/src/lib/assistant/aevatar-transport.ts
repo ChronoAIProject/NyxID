@@ -96,11 +96,6 @@ const MAX_TOOL_SUMMARY_CHARS = 160;
 // a dropped delivery without hiding a persistently unhealthy transport.
 const STREAM_DELIVERY_ATTEMPTS = 2;
 const RETRYABLE_STREAM_STATUSES = new Set([408, 425, 429, 500, 502, 503, 504]);
-const ACTION_CONTINUATION_REJECTION_CODES = new Set([
-  "NYXID_ACTION_CONTINUATION_INVALID",
-  "NYXID_ACTION_CONTINUATION_CONFLICT",
-  "NYXID_ACTION_CONTINUATION_ACTIVE_TURN",
-]);
 
 /** AG-UI frame vocabulary observed on `nyxid-chat/conversations/{id}:stream`. */
 interface ToolCallPayload {
@@ -284,6 +279,8 @@ interface PendingActionBatch {
 interface ActionContinuationState {
   readonly batchId: string;
   retryQueued: boolean;
+  /** True once the batch was explicitly accepted or explicitly requeued. */
+  settled: boolean;
 }
 
 interface RunningTurn {
@@ -1192,7 +1189,11 @@ export class AevatarAssistantTransport implements AssistantTransport {
     );
     const run = this.newRun(batch.onEvent);
     run.cursor = stored.turnState.lastCursor;
-    run.actionContinuation = { batchId: batch.id, retryQueued: false };
+    run.actionContinuation = {
+      batchId: batch.id,
+      retryQueued: false,
+      settled: false,
+    };
     batch.inFlight = true;
     this.running.set(conversationId, run);
     void this.streamActionContinuation(conversationId, run, body);
@@ -1213,12 +1214,14 @@ export class AevatarAssistantTransport implements AssistantTransport {
       ?.find((batch) => batch.id === batchId);
   }
 
+  /** Drop the batch: the server admitted the reports and started the turn. */
   private acceptActionBatch(conversationId: string, run: RunningTurn): void {
-    const batchId = run.actionContinuation?.batchId;
-    if (!batchId) return;
+    const state = run.actionContinuation;
+    if (!state || state.settled) return;
+    state.settled = true;
     const batches = this.pendingActionBatches.get(conversationId);
     if (!batches) return;
-    const index = batches.findIndex((batch) => batch.id === batchId);
+    const index = batches.findIndex((batch) => batch.id === state.batchId);
     if (index >= 0) batches.splice(index, 1);
     if (batches.length === 0) this.pendingActionBatches.delete(conversationId);
   }
@@ -1228,7 +1231,8 @@ export class AevatarAssistantTransport implements AssistantTransport {
     run: RunningTurn,
   ): void {
     const state = run.actionContinuation;
-    if (!state) return;
+    if (!state || state.settled) return;
+    state.settled = true;
     const batch = this.findActionBatch(conversationId, state.batchId);
     if (batch) {
       batch.inFlight = false;
@@ -1390,6 +1394,12 @@ export class AevatarAssistantTransport implements AssistantTransport {
       run.finished = true;
       this.clearWatchdog(run);
       this.running.delete(conversationId);
+      // Safety net for terminals that bypass settleDeliveryTerminal (watchdog
+      // stall, abort): an unsettled continuation was never acknowledged, so
+      // its reports stay queued rather than leaking as an in-flight batch.
+      if (run.actionContinuation && !run.actionContinuation.settled) {
+        this.keepActionBatchQueued(conversationId, run);
+      }
       if (!run.actionContinuation) {
         this.unblockActionBatches(conversationId);
         drainActions = true;
@@ -1635,6 +1645,9 @@ export class AevatarAssistantTransport implements AssistantTransport {
         // EOF at a human gate is a pause, not a truncation: Aevatar may
         // close an idle stream while an approval waits (PRD §3.4). The card
         // stays actionable; the decision starts the continuation stream.
+        // Reaching an approval gate proves the continuation turn ran, so its
+        // reports are delivered and must not be resent.
+        this.acceptActionBatch(conversationId, run);
         this.closeOpenMessage(conversationId, run);
         this.finalizeActivity(conversationId, run, "waiting");
         this.finishTurn(conversationId, run, "completed", null);
@@ -2331,14 +2344,17 @@ export class AevatarAssistantTransport implements AssistantTransport {
         existing?.status === "completed" ||
         existing?.status === "declined" ||
         existing?.status === "failed";
-      const status =
-        terminal || existing?.status === "in_progress"
-          ? existing.status
-          : existing?.status === "pending" && !resolved.supported
-            ? "pending"
-            : resolved.supported
-              ? "pending"
-              : "unsupported";
+      // A re-emission the client can no longer service (server upgraded past
+      // this schema version, or the verb left the registry) must downgrade the
+      // card to `unsupported` — leaving it `pending` would render a CTA with
+      // no journey behind it. Already-resolved cards keep their receipt.
+      const status: ActionCardStatus = terminal
+        ? existing.status
+        : !resolved.supported
+          ? "unsupported"
+          : existing?.status === "in_progress"
+            ? "in_progress"
+            : "pending";
       this.emit(conversationId, run, {
         cursor: this.nextCursor(run),
         event: "block.updated",
@@ -2614,11 +2630,18 @@ export class AevatarAssistantTransport implements AssistantTransport {
   ): void {
     this.closeOpenMessage(conversationId, run);
     if (run.actionContinuation) {
-      const rejected =
-        terminal.kind === "error" &&
-        ACTION_CONTINUATION_REJECTION_CODES.has(terminal.error.code);
-      if (rejected) this.keepActionBatchQueued(conversationId, run);
-      else this.acceptActionBatch(conversationId, run);
+      // A rejected continuation is published as a `nyxid.continuation.changed`
+      // CUSTOM frame on the *origin* turn's session, never as a reason code on
+      // this stream — the client only ever sees a generic terminal error (or a
+      // stall that trips the watchdog). So any error terminal means "the
+      // server may never have admitted these reports": requeue instead of
+      // dropping them. Only a real terminal (RUN_FINISHED / RUN_STOPPED)
+      // proves the continuation turn ran.
+      if (terminal.kind === "error") {
+        this.keepActionBatchQueued(conversationId, run);
+      } else {
+        this.acceptActionBatch(conversationId, run);
+      }
     }
     switch (terminal.kind) {
       case "error":
@@ -2789,6 +2812,7 @@ export class AevatarAssistantTransport implements AssistantTransport {
    */
   private pauseForApproval(conversationId: string, run: RunningTurn): void {
     if (run.finished) return;
+    this.acceptActionBatch(conversationId, run);
     this.closeOpenMessage(conversationId, run);
     this.finalizeActivity(conversationId, run, "waiting");
     this.finishTurn(conversationId, run, "completed", null);

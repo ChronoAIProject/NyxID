@@ -2806,6 +2806,208 @@ describe("chat action cards", () => {
       .find((block) => block.type === "action_card");
     expect(card).toMatchObject({ status: "declined" });
   });
+
+  // Aevatar publishes a rejected continuation admission to the *origin* turn's
+  // session (`nyxid.continuation.changed`), never as a reason code on the
+  // continuation stream. The client therefore only ever observes a generic
+  // terminal error — the report must still survive it.
+  it("requeues a report after a generic continuation stream error", async () => {
+    let textTurns = 0;
+    let actionAttempts = 0;
+    const actionRequestIds: string[] = [];
+    stubFetch(routeCreate, (url, init) => {
+      if (!url.endsWith("/stream") || init?.method !== "POST") return undefined;
+      const body = JSON.parse(String(init.body)) as {
+        readonly type: string;
+        readonly clientRequestId: string;
+      };
+      if (body.type === "text") {
+        textTurns += 1;
+        return textTurns === 1
+          ? sseResponse([
+              { type: "RUN_STARTED", turnId: TURN_ID },
+              actionRequestFrame(),
+              { type: "RUN_FINISHED", runFinished: { status: "blocked" } },
+            ])
+          : sseResponse([
+              { type: "RUN_STARTED", turnId: "turn-user-after-error" },
+              { type: "RUN_FINISHED" },
+            ]);
+      }
+      actionAttempts += 1;
+      actionRequestIds.push(body.clientRequestId);
+      return actionAttempts === 1
+        ? sseResponse([
+            { type: "RUN_STARTED", turnId: "turn-stalled-action" },
+            {
+              type: "RUN_ERROR",
+              runError: {
+                code: "STREAM_TIMEOUT",
+                message: "The chat request timed out. Please try again.",
+              },
+            },
+          ])
+        : sseResponse([
+            { type: "RUN_STARTED", turnId: "turn-retried-action" },
+            { type: "RUN_FINISHED" },
+          ]);
+    });
+    const transport = new AevatarAssistantTransport();
+    await transport.createConversation();
+    await collectTurn(transport, "Connect GitHub");
+
+    let resolveFailed: () => void = () => undefined;
+    let resolveRetried: () => void = () => undefined;
+    const failed = new Promise<void>((resolve) => {
+      resolveFailed = resolve;
+    });
+    const retried = new Promise<void>((resolve) => {
+      resolveRetried = resolve;
+    });
+    transport.continueActions(
+      CONVERSATION_ID,
+      TURN_ID,
+      [
+        {
+          actionRequestId: "act-action-1",
+          originTurnId: TURN_ID,
+          disposition: "completed",
+        },
+      ],
+      (event) => {
+        if (event.event !== "turn.completed") return;
+        if (event.status === "failed") resolveFailed();
+        if (event.status === "completed") resolveRetried();
+      },
+    );
+    await failed;
+    expect(actionAttempts).toBe(1);
+
+    await collectTurn(transport, "Anything else?");
+    await retried;
+
+    expect(actionAttempts).toBe(2);
+    expect(actionRequestIds[0]).toBe(actionRequestIds[1]);
+  });
+
+  it("requeues a report when the continuation stalls into the watchdog", async () => {
+    vi.useFakeTimers();
+    try {
+      const encoder = new TextEncoder();
+      let textTurns = 0;
+      let actionAttempts = 0;
+      const actionRequestIds: string[] = [];
+      // RUN_STARTED then silence: exactly what a rejected continuation looks
+      // like on the wire once the server's keepalives are filtered out.
+      const stalledStream = new ReadableStream<Uint8Array>({
+        start(controller) {
+          controller.enqueue(
+            encoder.encode(
+              `data: ${JSON.stringify({
+                type: "RUN_STARTED",
+                turnId: "turn-stalled-action",
+              })}\n\n`,
+            ),
+          );
+        },
+      });
+      stubFetch(routeCreate, (url, init) => {
+        if (!url.endsWith("/stream") || init?.method !== "POST")
+          return undefined;
+        const body = JSON.parse(String(init.body)) as {
+          readonly type: string;
+          readonly clientRequestId: string;
+        };
+        if (body.type === "text") {
+          textTurns += 1;
+          return textTurns === 1
+            ? sseResponse([
+                { type: "RUN_STARTED", turnId: TURN_ID },
+                actionRequestFrame(),
+                { type: "RUN_FINISHED", runFinished: { status: "blocked" } },
+              ])
+            : sseResponse([
+                { type: "RUN_STARTED", turnId: "turn-user-after-stall" },
+                { type: "RUN_FINISHED" },
+              ]);
+        }
+        actionAttempts += 1;
+        actionRequestIds.push(body.clientRequestId);
+        return actionAttempts === 1
+          ? new Response(stalledStream, {
+              status: 200,
+              headers: { "Content-Type": "text/event-stream" },
+            })
+          : sseResponse([
+              { type: "RUN_STARTED", turnId: "turn-retried-action" },
+              { type: "RUN_FINISHED" },
+            ]);
+      });
+      const transport = new AevatarAssistantTransport();
+      await transport.createConversation();
+      await collectTurn(transport, "Connect GitHub");
+
+      let resolveRetried: () => void = () => undefined;
+      const retried = new Promise<void>((resolve) => {
+        resolveRetried = resolve;
+      });
+      transport.continueActions(
+        CONVERSATION_ID,
+        TURN_ID,
+        [
+          {
+            actionRequestId: "act-action-1",
+            originTurnId: TURN_ID,
+            disposition: "completed",
+          },
+        ],
+        (event) => {
+          if (event.event === "turn.completed" && event.status === "completed") {
+            resolveRetried();
+          }
+        },
+      );
+      await vi.advanceTimersByTimeAsync(120_001);
+      expect(actionAttempts).toBe(1);
+
+      const idle = new Promise<void>((resolve) => {
+        transport.sendMessage(CONVERSATION_ID, "Anything else?", (event) => {
+          if (event.event === "turn.completed") resolve();
+        });
+      });
+      await vi.advanceTimersByTimeAsync(1);
+      await idle;
+      await retried;
+
+      expect(actionAttempts).toBe(2);
+      expect(actionRequestIds[0]).toBe(actionRequestIds[1]);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("downgrades a re-emitted card the client can no longer service", async () => {
+    stubFetch(
+      routeCreate,
+      routeStream([
+        { type: "RUN_STARTED", turnId: TURN_ID },
+        actionRequestFrame(),
+        // Aevatar rolled forward to a schema this build cannot service.
+        actionRequestFrame({ schemaVersion: 5 }),
+        { type: "RUN_FINISHED", runFinished: { status: "blocked" } },
+      ]),
+    );
+    const transport = new AevatarAssistantTransport();
+    await transport.createConversation();
+    await collectTurn(transport, "Read my repositories");
+
+    const history = await transport.getHistory(CONVERSATION_ID);
+    const cards = history.messages
+      .flatMap((message) => message.blocks)
+      .filter((block) => block.type === "action_card");
+    expect(cards).toHaveLength(1);
+    expect(cards[0]).toMatchObject({ status: "unsupported" });
+  });
 });
 
 describe("redaction and tool summaries", () => {
