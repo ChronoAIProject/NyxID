@@ -290,7 +290,12 @@ All paths relative to `frontend/src`.
 
 ## 7. Explicit non-goals (v1)
 
-- No backend action registry (`GET /api/v1/assistant/actions`) — separate task.
+- The backend now exposes the public `GET /api/v1/assistant/actions` registry. It returns
+  the static schema-v4 manifest (`nyxid-assistant-actions.v4`) and currently describes
+  only `service.connect` (`risk: "grant"`, `tier: "v1"`,
+  `remember_eligible: true`) with strict parameter schemas. Dynamically deriving this
+  v1 frontend implementation from that registry remains out of scope; the shipped card
+  still uses the local validated descriptor and NyxID-owned copy.
 - No NyxID backend `/stream` validation changes (passthrough already forwards the body).
 - No card persistence/rehydration across reload: history is text-only today. Live v4
   emits frames only for newly committed `ActionRequested` events, and a same-ID

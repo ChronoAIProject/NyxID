@@ -421,7 +421,12 @@ The frontend is acceptable when all of the following hold:
 
 ## 13. Explicit non-goals
 
-- A backend action registry or new NyxID backend endpoint.
+- Runtime discovery or dynamic card generation from the existing public
+  `GET /api/v1/assistant/actions` registry. The endpoint returns the static schema-v4
+  manifest (`nyxid-assistant-actions.v4`) and currently describes only
+  `service.connect` (`risk: "grant"`, `tier: "v1"`,
+  `remember_eligible: true`) with strict parameter schemas; the shipped frontend keeps
+  its local validated descriptor and NyxID-owned consent copy.
 - New action verbs beyond `service.connect`.
 - Action-card persistence in Aevatar chat history.
 - Standing grants, remember-me behavior, or scope-widening UI.
@@ -455,7 +460,8 @@ Action Contract" (Schema v3, 2026-07-24)** — the cards the chat *will* show as
 surface grows — and the static showcase page that renders all of them for design review.
 Nothing in Part II overrides Part I's non-goals: only `service.connect` is implemented
 today; every other row below is a design target, and its risk tier is a PM-proposed
-default until the backend action registry exists and becomes authoritative.
+default until that verb is added to the existing backend action registry and the
+frontend begins consuming it authoritatively.
 
 ## 15. Risk decides the card form (the "why")
 
@@ -638,8 +644,8 @@ Part I §8 states, in the shipped visual language, so the whole catalogue is rev
 side by side without running the app.
 
 **Why:** §17 is only reviewable as words; design review needs to see all ~74 cards in
-both themes before the registry and journeys are built. The page is a design artifact —
-not production code, never imported by the app.
+both themes before the remaining registry entries and journeys are built. The page is a
+design artifact — not production code, never imported by the app.
 
 **Requirements:**
 
