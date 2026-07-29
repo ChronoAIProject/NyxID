@@ -426,3 +426,235 @@ The frontend is acceptable when all of the following hold:
 | UI state hooks | `frontend/src/hooks/use-assistant.ts` |
 | Existing connect journey | `frontend/src/components/dashboard/add-key-dialog.tsx` |
 
+---
+
+# Part II — Action-card catalogue and showcase (target designs)
+
+Author: Fable (PM), 2026-07-29. Part I is the implementation contract for what is shipped.
+Part II specifies the **target design for every verb in the initial "NyxID ↔ Aevatar —
+Action Contract" (Schema v3, 2026-07-24)** — the cards the chat *will* show as the verb
+surface grows — and the static showcase page that renders all of them for design review.
+Nothing in Part II overrides Part I's non-goals: only `service.connect` is implemented
+today; every other row below is a design target, and its risk tier is a PM-proposed
+default until the backend action registry exists and becomes authoritative.
+
+## 15. Risk decides the card form (the "why")
+
+| Risk | Interaction | Card form | Rationale |
+|---|---|---|---|
+| `low` | Execute immediately, show a receipt. No prompt. | **Receipt card**: outcome title + safe note + reference chips + microtag "Executed immediately — no confirmation" | Config-level changes; prompting here trains reflexive clicking and spends the attention needed for prompts that matter |
+| `grant` | One confirmation — the CTA and its journey. | **Action card** (Part I §8 anatomy), purple rail | Changes what someone or something can reach, or collects/reveals a credential |
+| `destructive` | Confirmation every time, never remembered. | **Action card**, red (`destructive`) rail, destructive badge, warning line "This cannot be undone. You will be asked every time." | Irreversible; the repeat confirmation is the point |
+
+Footer microcopy by class: secret-bearing grant → "Nothing is shared until you finish.";
+other grant → "One confirmation."; destructive → "Asked every time. Never remembered."
+
+Remember-me is a server-side approval grant, never a client checkbox. `key.extend_scope`
+and `key.bind_credential` are **never** remember-eligible (self-escalating — exactly what
+a prompt-injected agent would want pre-approved), plus everything destructive.
+
+## 16. Data presentation rules (the "data")
+
+Extends Part I §6/§8.2; these rules bind every card in §17:
+
+- Chip rows: 10px uppercase label + badges. Slugs, scopes, ids, hosts, user codes →
+  `secondary` badges; ids/scopes/codes mono; node refs → `info` badge with server glyph;
+  every chip `max-w-full truncate`.
+- Scopes render one chip per scope, mono.
+- Custom endpoints render **host only**; invalid or credential-embedding URLs render
+  nothing.
+- Patches (`*.update` verbs) render changed-field chips: field name always; the new value
+  only when it is a non-credential scalar (name, rate limit, mode); otherwise the field
+  name alone.
+- `device.approve` renders the user code grouped mono (`XXXX-XXXX-XXXX`) — safe because
+  the user already holds it; the journey re-verifies through the device preview flow.
+- One-time reveals (new keys, registration tokens, SA secrets, client secrets) happen
+  **inside the journey modal only**. The chat transcript is long-lived and re-readable;
+  no reveal, secret, password, WiFi credential, full redirect URI, or raw patch ever
+  renders in a card or receipt.
+
+## 17. Card inventory — every verb in the initial contract
+
+Columns: **Risk** (→ card form per §15) · **Journey** (what the CTA opens; `—` = low-risk
+receipt, no CTA) · **Card shows** (data per §16) · **CTA**. Example values in the showcase
+are the contract doc's own (`api-github`, `repo`, `k_1a2b`, `n_77`, `sa_9`, `cl_5`,
+`us_44`, `XXXX-XXXX-XXXX`).
+
+### 17.1 V1 — secret-bearing browser flows (all `grant`; the journey owns the secret)
+
+| Verb | Journey | Card shows | CTA |
+|---|---|---|---|
+| `service.connect` (catalog) — **shipped** | AddKeyDialog multistep | Service (icon + label from slug), scopes, node ref?, org ref? | Connect {Service} |
+| `service.connect` (custom) — **shipped** | AddKeyDialog custom path | Name (clamped), endpoint host, auth method + key name, node?, org? | Connect {Name} |
+| `service.reauthorize` | AddKeyDialog reconnect | Key ref, requested scopes | Re-authorize |
+| `provider.set_app_credentials` | Credentials form modal (client_id + secret entered in-modal) | Provider slug | Set app credentials |
+| `key.create` | Key-create modal; key revealed once in-modal | Name, platform, allowed services | Create key |
+| `key.rotate` | Rotate + one-time reveal modal | Key ref | Rotate key |
+| `node.register_token` | Token mint + one-time reveal + setup instructions | Node name (`[a-z0-9-]{1,64}`) | Create registration token |
+| `node.rotate_token` | Rotate + one-time reveal | Node ref | Rotate token |
+| `node.inject_credential` | Credential push wizard (value typed in-modal) | Node ref, service slug | Inject credential |
+| `service_account.create` | SA create; secret shown once in-modal | Name, allowed scopes | Create service account |
+| `service_account.rotate_secret` | Rotate + one-time reveal | SA ref | Rotate secret |
+| `developer_app.create` | App create; client_secret shown once in-modal | App name, redirect hosts | Create app |
+| `developer_app.rotate_secret` | Rotate + one-time reveal | Client ref | Rotate secret |
+| `account.mfa_setup` | MFA multistep (QR → confirm code) | — (account-level; body copy says so) | Set up MFA |
+| `device.approve` | Device preview → approve (two explicit clicks, anti-phishing block per Critical Rule 12) | User code, grouped mono | Review device |
+| `device.onboard` | Onboarding wizard (WiFi + QR in-modal, never echoed) | Device label | Onboard device |
+
+### 17.2 V2 — services
+
+| Verb | Risk | Journey | Card shows | CTA |
+|---|---|---|---|---|
+| `service.update` | low | — | Service ref + changed fields | — |
+| `service.delete` | destructive | Confirm dialog | Service ref + name | Delete service |
+| `service.route` | low | — | Service ref, node ref | — |
+| `service.add_ssh` | grant ⚠︎body-unconfirmed | SSH add wizard | Host, principal, auth mode | Add SSH service |
+| `service.convert_ssh` | grant | Confirm dialog | Service ref | Convert to SSH |
+| `service.rotate_credential` | grant | Rotate journey | Service ref | Rotate credential |
+
+### 17.3 V2 — keys and credentials
+
+| Verb | Risk | Journey | Card shows | CTA |
+|---|---|---|---|---|
+| `key.update` | low | — | Key ref + changed fields | — |
+| `key.delete` | destructive | Confirm dialog | Key ref + name | Delete key |
+| `key.extend_scope` | grant 🔒never-remember | Confirm dialog | Key ref, **added** services | Extend scope |
+| `key.bind_credential` | grant 🔒never-remember | Confirm dialog | Key ref, service, credential **label** | Bind credential |
+| `external_key.rotate` | grant | Rotate journey | Key ref | Rotate |
+| `external_key.delete` | destructive | Confirm dialog | Key ref | Delete |
+| `external_key.add_gcp_service_account` | grant | SA-JSON paste journey (in-modal) | Provider slug | Add GCP service account |
+| `connection.revoke` | grant | Confirm dialog | Service ref | Revoke connection |
+| `provider.disconnect` | grant | Confirm dialog | Provider slug | Disconnect |
+
+### 17.4 V2 — approvals
+
+| Verb | Risk | Journey | Card shows | CTA |
+|---|---|---|---|---|
+| `approval.decide` | grant | Opens the approval decision UI | Request ref (details from the approvals read surface) | Review request |
+| `approval.configure` | low | — | Service ref, mode | — |
+| `approval.enable` | low | — | — | — |
+| `approval.disable` | grant | Confirm dialog (widens agent autonomy) | — | Disable approvals |
+| `approval.revoke_grant` | grant | Confirm dialog | Grant ref | Revoke grant |
+
+### 17.5 V2 — nodes
+
+| Verb | Risk | Journey | Card shows | CTA |
+|---|---|---|---|---|
+| `node.delete` | destructive | Confirm dialog | Node ref + name | Delete node |
+| `node.transfer` | destructive | Confirm dialog | Node ref, target owner ref | Transfer node |
+| `pending_credential.push` | grant | Push wizard | Node ref | Push credential |
+| `pending_credential.inject` | grant ⚠︎body-unconfirmed | Inject wizard | Node ref | Inject |
+| `pending_credential.cancel` | low ⚠︎body-unconfirmed | — | Node ref, pending ref | — |
+
+### 17.6 V2 — organisations
+
+| Verb | Risk | Journey | Card shows | CTA |
+|---|---|---|---|---|
+| `org.create` | low | — | Org name | — |
+| `org.update` | low | — | Org ref + changed fields | — |
+| `org.delete` | destructive | Confirm dialog | Org ref + name | Delete organisation |
+| `org.join` | grant | Confirm dialog | Invite ref (mono) | Join organisation |
+| `org.set_primary` | low | — | Org ref | — |
+| `org.member_add` | grant | Confirm dialog | Org ref, user ref, role | Add member |
+| `org.member_update` | grant | Confirm dialog | Org ref, member ref, role | Change role |
+| `org.member_remove` | grant | Confirm dialog | Org ref, member ref | Remove member |
+| `org.invite_create` | grant | Invite journey | Org ref, role, scope source?, TTL? | Create invite |
+| `org.invite_cancel` | low | — | Org ref, invite ref | — |
+| `org.role_scope_set` | grant | Confirm dialog | Org ref, role (path key), scopes | Set role scopes |
+| `org.role_scope_clear` | grant | Confirm dialog | Org ref, role | Clear role scopes |
+
+### 17.7 V2 — account
+
+| Verb | Risk | Journey | Card shows | CTA |
+|---|---|---|---|---|
+| `account.profile_update` | low | — | Changed fields | — |
+| `account.revoke_consent` | grant | Confirm dialog | Client ref | Revoke consent |
+| `account.delete` | destructive | Typed-confirmation journey | — (account-level) | Delete account |
+
+### 17.8 V2 — endpoints, service accounts, developer apps
+
+| Verb | Risk | Journey | Card shows | CTA |
+|---|---|---|---|---|
+| `endpoint.update` | low | — | Endpoint ref + changed fields | — |
+| `endpoint.delete` | destructive | Confirm dialog | Endpoint ref | Delete endpoint |
+| `service_account.update` | low | — | SA ref + changed fields | — |
+| `service_account.delete` | destructive | Confirm dialog | SA ref + name | Delete service account |
+| `service_account.revoke_tokens` | grant | Confirm dialog | SA ref | Revoke tokens |
+| `developer_app.update` | low | — | Client ref + changed fields | — |
+| `developer_app.delete` | destructive | Confirm dialog | Client ref + name | Delete app |
+
+### 17.9 V2 — notifications and integrations
+
+| Verb | Risk | Journey | Card shows | CTA |
+|---|---|---|---|---|
+| `notifications.update` | low | — | Changed fields | — |
+| `notifications.telegram_link` | grant | Telegram link journey | — | Link Telegram |
+| `notifications.telegram_disconnect` | low | — | — | — |
+| `openclaw.connect` | grant | Gateway connect journey (token in-modal) | Gateway host | Connect OpenClaw |
+
+### 17.10 V2 — service pools (⚠︎ prerequisite: no pools dashboard page exists yet)
+
+| Verb | Risk | Card shows | CTA |
+|---|---|---|---|
+| `pool.create` | low | Slug, name | — |
+| `pool.delete` | destructive | Pool ref | Delete pool |
+| `pool.add_member` / `pool.remove_member` | low | Pool ref, service ref | — |
+| `pool.set_strategy` | low | Pool ref, strategy | — |
+
+### 17.11 Deep link
+
+| Verb | Risk | Card shows | Notes |
+|---|---|---|---|
+| `admin.open` | low | Route label (NyxID-owned allowlist), params summary | ⚠︎ the route_key allowlist does not exist; unimplementable until defined. Renders as a receipt-style card with an "Open in dashboard" link |
+
+**Tag legend:** ⚠︎body-unconfirmed = contract §13 (HTTP body not confirmed — read the
+handler before building the journey); 🔒never-remember = excluded from standing grants;
+prerequisite = blocked on a missing dashboard page.
+
+## 18. Showcase page — `docs/assistant-action-cards-showcase.html`
+
+**What:** one self-contained static HTML file rendering *every* card in §17 plus the six
+Part I §8 states, in the shipped visual language, so the whole catalogue is reviewable
+side by side without running the app.
+
+**Why:** §17 is only reviewable as words; design review needs to see all ~74 cards in
+both themes before the registry and journeys are built. The page is a design artifact —
+not production code, never imported by the app.
+
+**Requirements:**
+
+1. Single file, opens from `file://`, no build step. Only external fetch: the same Google
+   Fonts stylesheet the app loads (Mona Sans + JetBrains Mono); must degrade to system
+   fonts offline.
+2. **Data-driven:** one JS array of card descriptors (verb, tier, risk, tags, title, body
+   copy, CTA, chip rows with the §17 example values) + one render function per card form
+   (action card, receipt). No hand-written per-card HTML blocks.
+3. Tokens must be transcribed from `frontend/src/app.css` (the live source of truth) as
+   CSS custom properties — dark values default, light values behind a working theme
+   toggle. Purple rail `--color-nyx-secondary-400` (#A672FB); primary CTA gradient
+   `#A672FB → #5E00F5`; badge recipes per `components/ui/badge.tsx`. Chat-column layout,
+   max-width 680px, with section headers per §17 group carrying the group's one-line why.
+4. A **States** section first: `service.connect` in all six states (pending, in_progress,
+   completed, declined, failed, unsupported) exactly as shipped in `action-card.tsx`.
+5. Every card carries its verb as a mono caption, its risk as the badge, §17 tags as small
+   chips, and a shipped/target marker (`service.connect` ×2 + states = shipped; all else
+   target).
+6. Header shows counts (total, per risk tier) **computed from the data array** — the
+   completeness check, never hardcoded.
+7. Icons: small inline SVG set (lucide-style, stroke currentColor). No icon fonts, no
+   external images.
+8. Example ids only; no realistic secrets or tokens anywhere in the file.
+
+**Acceptance gates (verify before done):**
+
+- [ ] The computed card count equals the §17 inventory, and every §17 row appears exactly
+      once (cross-check the data array verb-by-verb against §17).
+- [ ] States section shows all six states matching Part I §8.
+- [ ] Renders at 1440px and 390px, dark and light, with no horizontal overflow.
+- [ ] Opened from `file://` in a real browser with zero console errors.
+- [ ] No warning/amber styling on any pending card.
+- [ ] `rg -i "secret|token|password" docs/assistant-action-cards-showcase.html` yields
+      only prose about secrets ("shown once", "never rendered"), never values.
+- [ ] Grant cards: purple rail + CTA + Decline. Destructive: red rail + "Asked every
+      time. Never remembered." Low: receipt form only, no CTA.
+
