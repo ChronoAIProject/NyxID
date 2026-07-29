@@ -6,6 +6,7 @@ import { ArtifactBlock } from "@/components/assistant/blocks/artifact-block";
 import { ConnectCard } from "@/components/assistant/blocks/connect-card";
 import { RunCard } from "@/components/assistant/blocks/run-card";
 import { TextBlock } from "@/components/assistant/blocks/text-block";
+import { useFadingPresence } from "@/hooks/use-fading-presence";
 import { formatClockTime } from "@/lib/utils";
 import type { AssistantMessage, ContentBlock } from "@/types/assistant";
 
@@ -78,11 +79,34 @@ function renderBlock(
  * has room it sits in a left gutter beside the answer; once the chat window
  * narrows past the thread's natural width it stacks on top instead.
  */
-function AssistantIdentity({ time }: { readonly time: string }) {
+function AssistantIdentity({
+  time,
+  loading = false,
+  allowHaloExit = true,
+}: {
+  readonly time: string;
+  readonly loading?: boolean;
+  readonly allowHaloExit?: boolean;
+}) {
+  const halo = useFadingPresence(loading, 500);
+  const showHalo = halo.present && (loading || allowHaloExit);
+
   return (
     <div className="flex shrink-0 items-center gap-2 @min-[680px]:flex-col @min-[680px]:items-start @min-[680px]:gap-1">
-      <span className="flex h-[18px] w-[18px] shrink-0 items-center justify-center rounded-md border border-nyx-secondary-400/20 bg-nyx-secondary-400/[0.06]">
-        <NyxidIcon className="h-[11px] w-[11px]" />
+      <span className="relative flex h-[18px] w-[18px] shrink-0 items-center justify-center overflow-visible">
+        {showHalo ? (
+          <span
+            aria-hidden="true"
+            data-assistant-halo
+            className={`assistant-halo ${halo.visible ? "assistant-halo--visible" : ""}`}
+          >
+            <span className="assistant-halo-ring animate-halo-spin" />
+            <span className="assistant-halo-ring assistant-halo-ring-reverse animate-halo-spin-reverse" />
+          </span>
+        ) : null}
+        <span className="relative z-10 flex h-[18px] w-[18px] items-center justify-center rounded-md border border-nyx-secondary-400/20 bg-nyx-secondary-400/[0.06]">
+          <NyxidIcon className="h-[11px] w-[11px]" />
+        </span>
       </span>
       {time ? (
         <span className="font-mono text-[10px] text-text-tertiary tabular-nums opacity-0 transition-opacity group-focus-within:opacity-100 group-hover:opacity-100">
@@ -111,8 +135,10 @@ type MessageGroup = {
  * repeat the icon per message.
  */
 function groupMessages(messages: readonly AssistantMessage[]): MessageGroup[] {
-  const groups: { role: AssistantMessage["role"]; messages: AssistantMessage[] }[] =
-    [];
+  const groups: {
+    role: AssistantMessage["role"];
+    messages: AssistantMessage[];
+  }[] = [];
   for (const message of messages) {
     const last = groups.at(-1);
     if (last && last.role === message.role) last.messages.push(message);
@@ -132,19 +158,16 @@ function StreamingCaret() {
   );
 }
 
-function ThinkingRow() {
+function ThinkingRow({ loading }: { readonly loading: boolean }) {
   return (
-    <article className={ASSISTANT_ROW}>
-      <AssistantIdentity time="" />
-      <div
-        className="flex min-w-0 flex-1 items-center gap-1.5 py-1"
-        role="status"
-        aria-label="Assistant is thinking"
-      >
-        <span className="h-1.5 w-1.5 animate-bounce rounded-full bg-text-tertiary [animation-delay:-0.3s]" />
-        <span className="h-1.5 w-1.5 animate-bounce rounded-full bg-text-tertiary [animation-delay:-0.15s]" />
-        <span className="h-1.5 w-1.5 animate-bounce rounded-full bg-text-tertiary" />
-      </div>
+    <article
+      className={ASSISTANT_ROW}
+      role={loading ? "status" : undefined}
+      aria-label={loading ? "Assistant is thinking" : undefined}
+      aria-hidden={loading ? undefined : true}
+    >
+      <AssistantIdentity time="" loading={loading} />
+      <div className="min-h-[18px] min-w-0 flex-1" />
     </article>
   );
 }
@@ -174,6 +197,7 @@ export function ChatThread({
   ) => Promise<void>;
 }) {
   const scrollRef = useRef<HTMLDivElement>(null);
+  const thinkingPresence = useFadingPresence(thinking, 500);
 
   useEffect(() => {
     const element = scrollRef.current;
@@ -255,7 +279,11 @@ export function ChatThread({
 
             return (
               <article key={first?.id} className={ASSISTANT_ROW}>
-                <AssistantIdentity time={time} />
+                <AssistantIdentity
+                  time={time}
+                  loading={streamingGroup}
+                  allowHaloExit={!thinking && !streaming}
+                />
                 <div className="min-w-0 flex-1 space-y-3">
                   {group.messages.map((message) => {
                     if (message.schema_version !== 1) {
@@ -273,7 +301,9 @@ export function ChatThread({
                               {renderBlock(
                                 block,
                                 onDecideApproval,
-                                streamingGroup && isLastBlock && isTextBlock(block),
+                                streamingGroup &&
+                                  isLastBlock &&
+                                  isTextBlock(block),
                               )}
                             </div>
                           );
@@ -286,7 +316,9 @@ export function ChatThread({
               </article>
             );
           })}
-          {thinking ? <ThinkingRow /> : null}
+          {thinkingPresence.present && !streaming ? (
+            <ThinkingRow loading={thinking} />
+          ) : null}
         </div>
       </div>
       {/*

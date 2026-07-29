@@ -1,4 +1,4 @@
-import { useMemo } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { useNavigate, useRouterState } from "@tanstack/react-router";
 import { toast } from "sonner";
 import { AssistantShell } from "@/components/assistant/assistant-shell";
@@ -18,6 +18,10 @@ import {
   useDeleteConversation,
   useSendMessage,
 } from "@/hooks/use-assistant";
+import { resolveAssistantConversationId } from "@/lib/assistant/conversation-resolution";
+import { useAssistantContextStore } from "@/stores/assistant-context-store";
+import { useAssistantDraftStore } from "@/stores/assistant-draft-store";
+import { useAuthStore } from "@/stores/auth-store";
 import { isTurnActive } from "@/types/assistant";
 
 export function AssistantPage({
@@ -26,6 +30,14 @@ export function AssistantPage({
   readonly view?: "chat" | "plugins" | "approvals";
 }) {
   const navigate = useNavigate();
+  const user = useAuthStore((state) => state.user);
+  const [entryScreen] = useState(() => {
+    const context = useAssistantContextStore.getState();
+    const currentUser = useAuthStore.getState().user;
+    return currentUser && context.ownerUserId === currentUser.id
+      ? context.lastScreen
+      : null;
+  });
   const selectedFromSearch = useRouterState({
     select: (state) => {
       const search = state.location.search as Record<string, unknown>;
@@ -33,16 +45,27 @@ export function AssistantPage({
     },
   });
   const conversations = useConversations();
-  const selectedId = useMemo(() => {
-    const items = conversations.data ?? [];
-    if (
-      selectedFromSearch &&
-      items.some((item) => item.id === selectedFromSearch)
-    ) {
-      return selectedFromSearch;
+  const boundConversationId = useAssistantContextStore((state) => {
+    if (!user || !entryScreen || state.ownerUserId !== user.id) {
+      return undefined;
     }
-    return items[0]?.id;
-  }, [conversations.data, selectedFromSearch]);
+    return state.bindings[entryScreen]?.conversationId;
+  });
+  const selectedId = useMemo(() => {
+    return resolveAssistantConversationId({
+      explicitConversationId: selectedFromSearch,
+      boundConversationId,
+      entryScreen,
+      conversationsResolved: conversations.isSuccess,
+      conversations: conversations.data ?? [],
+    });
+  }, [
+    boundConversationId,
+    conversations.data,
+    conversations.isSuccess,
+    entryScreen,
+    selectedFromSearch,
+  ]);
   const history = useConversation(selectedId);
   const turn = useAssistantTurn(selectedId);
   const createConversation = useCreateConversation();
@@ -50,6 +73,62 @@ export function AssistantPage({
   const cancelTurn = useCancelTurn(selectedId);
   const decideApproval = useDecideApproval(selectedId);
   const deleteConversation = useDeleteConversation();
+  const selectedConversationExists = (conversations.data ?? []).some(
+    (conversation) => conversation.id === selectedId,
+  );
+  const explicitConversationIsStale = Boolean(
+    selectedFromSearch &&
+      conversations.isSuccess &&
+      !(conversations.data ?? []).some(
+        (conversation) => conversation.id === selectedFromSearch,
+      ),
+  );
+
+  useEffect(() => {
+    if (!conversations.isSuccess) return;
+    const existingIds = (conversations.data ?? []).map(
+      (conversation) => conversation.id,
+    );
+    useAssistantContextStore.getState().pruneBindings(existingIds);
+    useAssistantDraftStore.getState().pruneConversationDrafts(existingIds);
+  }, [conversations.data, conversations.isSuccess]);
+
+  useEffect(() => {
+    if (view !== "chat" || !conversations.isSuccess) {
+      return;
+    }
+    if (selectedFromSearch && !explicitConversationIsStale) return;
+    if (!selectedId && !explicitConversationIsStale) return;
+    void navigate({
+      to: "/assistant" as never,
+      search: selectedId ? ({ c: selectedId } as never) : ({} as never),
+      replace: true,
+    });
+  }, [
+    conversations.isSuccess,
+    explicitConversationIsStale,
+    navigate,
+    selectedFromSearch,
+    selectedId,
+    view,
+  ]);
+
+  useEffect(() => {
+    if (
+      view !== "chat" ||
+      !user ||
+      !entryScreen ||
+      !selectedId ||
+      !(conversations.data ?? []).some(
+        (conversation) => conversation.id === selectedId,
+      )
+    ) {
+      return;
+    }
+    useAssistantContextStore
+      .getState()
+      .bindConversation(user.id, entryScreen, selectedId);
+  }, [conversations.data, entryScreen, selectedId, user, view]);
 
   function selectConversation(conversationId: string) {
     void navigate({
@@ -107,6 +186,12 @@ export function AssistantPage({
         ? "Approvals"
         : (history.data?.conversation.title ?? "New chat");
   const active = isTurnActive(turn.data?.status);
+  const draftKey =
+    selectedId && (!conversations.isSuccess || selectedConversationExists)
+      ? `conv:${selectedId}`
+      : !selectedFromSearch && entryScreen
+        ? `screen:${entryScreen}`
+        : null;
   const sidebar = (
     <AssistantSidebar
       conversations={conversations.data ?? []}
@@ -145,12 +230,10 @@ export function AssistantPage({
           <ChatThread
             messages={history.data?.messages ?? []}
             thinking={
-              active &&
-              history.data?.messages.at(-1)?.role !== "assistant"
+              active && history.data?.messages.at(-1)?.role !== "assistant"
             }
             streaming={
-              active &&
-              history.data?.messages.at(-1)?.role === "assistant"
+              active && history.data?.messages.at(-1)?.role === "assistant"
             }
             onDecideApproval={(blockId, approved) =>
               decideApproval.mutateAsync({ blockId, approved })
@@ -160,6 +243,8 @@ export function AssistantPage({
         <ChatComposer
           active={active}
           sending={sendMessage.isPending}
+          ownerUserId={user?.id ?? null}
+          draftKey={draftKey}
           onSend={handleSend}
           onStop={() => cancelTurn.mutateAsync()}
         />
