@@ -739,3 +739,51 @@ not production code, never imported by the app.
       tile + destructive badge + "Asked every time. Never remembered." Low: receipt
       form only, no CTA.
 
+## 19. In-app design gallery — the demoable mock page
+
+**What:** a frontend route, `/design/action-cards`, that renders the REAL shipped
+components with seeded demo data — pixel-true by construction because it *is* the app.
+This is the page to demo from; the §18 static HTML is a spec illustration of the
+target catalogue and stays until an explicit teardown decision.
+
+**Why:** the static page hand-transcribes styles and drifts; a demo must show exactly
+what ships. The gallery renders only what is real — no drawn approximations.
+
+**Requirements:**
+
+1. Route `/design/action-cards`, registered in `router.tsx`, **dev-only** (guarded by
+   `import.meta.env.DEV`; unknown route in prod builds). No auth gate in mock mode —
+   follow the `/assistant` `?mock` conventions. When the `?mock` param is absent the
+   page says so plainly and links to `/design/action-cards?mock`.
+2. **Real components only.** `ActionCard`, `ApprovalCard`, `AddKeyDialog` — imported,
+   not copied. Zero new visual CSS beyond page layout (headings, grid, spacing).
+   No forked card markup: if the gallery needs a state, it builds a fixture *block*
+   and hands it to the real component.
+3. **Sections, all fed from one seeded fixture module**
+   (`lib/assistant/gallery-fixtures.ts`, values chosen to read well in a demo —
+   realistic labels, no lorem):
+   a. **Action card states** — the real `ActionCard` × 6: pending (GitHub,
+      `repo` scope), in_progress, completed ("Service connected", `us_44`),
+      declined, failed, unsupported (unknown verb). Plus the custom-endpoint
+      pending variant (name "Internal API", host `api.internal.example.com`,
+      bearer + `X-Api-Key`) and a via-node + org variant (`n_77`, org ref).
+   b. **Approval card states** — the real `ApprovalCard`: pending (per-request),
+      pending (grant with duration), approved, denied, expired, cancelled.
+   c. **Live wizard** — the pending GitHub card wired with real callbacks so its CTA
+      opens the REAL `AddKeyDialog` against the mock API (catalog seeded with GitHub;
+      the flow walks routing → oauth → verify exactly as `/assistant?mock` does).
+      Resolution updates the card state in-page (local state; no conversation
+      needed). A caption links to `/assistant?mock` for the full conversational
+      flow with the automatic `action.continue`.
+4. Each specimen carries a small mono caption (state name / variant); the page works
+   with the app's existing light/dark theme mechanism (no bespoke toggle).
+5. Tests: route module renders in mock mode with all fixture states present (happy-dom,
+   colocated); fixtures obey the §16 data rules (no secrets — assert the fixture module
+   contains no credential-shaped strings).
+
+**Acceptance gates:** page loads at `/design/action-cards?mock` under `npm run dev`
+with zero console errors; all §19.3 specimens visible in both themes at 1440px and
+390px; the CTA opens the real dialog and a completed walk flips the card to its real
+completed receipt; `npm run build`, `npm run test`, `npm run lint` green; route absent
+from prod build output.
+
