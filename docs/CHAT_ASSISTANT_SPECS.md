@@ -321,13 +321,34 @@ none surface as a surprise "next broken leg":**
   responds with SSE. The backend endpoint authenticates; the browser cannot yet
   surface/complete a real approval. Only bites when the assistant performs a
   NyxID-gated write. Fix = the TD-7 protocol-module port.
-- **G2 [P2, TD-1] Caller-state can still divert/deny.** `execute_proxy` still
-  runs per-user node routing and rejects an inactive legacy Aevatar
-  `UserServiceConnection`, so one historical disconnected row = "works for
-  everyone but me". Fix = strict admin-target execution mode.
-- **G3 [P2] Node-routed workflow WS loses the bearer.** `/workflow-chat/ws` via
-  a user node pin: the node WS path has no `caller_token` and never injects the
-  forwarded bearer → 401. Direct WS is fine. Subsumed by G2's strict admin mode.
+- **G2 [P2, TD-1] Caller-state can still divert/deny — FIXED 2026-07-29.**
+  `forward()` now calls `proxy::execute_admin_proxy` (`TargetMode::AdminManaged`)
+  instead of `execute_proxy`, so the platform target resolves through
+  `proxy_service::resolve_admin_proxy_target` with no caller state: no
+  scoped-token service allowlist, no personal node pin, no personal
+  `UserServiceConnection`. The third of those was the live blocker, not just a
+  latent one — see G8.
+- **G8 [P1, FIXED 2026-07-29] Restricted tokens were locked out entirely.** A
+  restricted token's `allowed_service_ids` holds `UserService` ids, so the
+  admin catalog row can never be listed in one; the legacy-branch
+  `allow_all_services` gate therefore 403'd
+  (`api_key_scope_forbidden`, code 9000) **every** OAuth access token minted
+  with `resource`/`allowed_service_ids` on every `/api/v1/assistant/*` call,
+  with no grant a user could add to fix it. Reproduced on prod 2026-07-29 with
+  an Aevatar-console session token: `GET /api/v1/assistant/conversations` → 403,
+  while the same token drove a full `nyxid-chat` turn through
+  `/api/v1/proxy/s/aevatar/...` (its own `UserService` **is** in the list) and a
+  real completion through `/api/v1/proxy/s/chrono-llm-public/chat/completions`.
+  Cookie sessions were never affected (`allow_all_services: true`), which is why
+  the browser surface hid this. The admin-managed mode drops that gate for the
+  server-chosen target only; the delegation token it mints still inherits the
+  caller's restrictions verbatim (`TokenRestrictionClaims::from_auth_user`), so
+  a restricted caller's run stays restricted on every callback into NyxID.
+- **G3 [P2] Node-routed workflow WS loses the bearer — FIXED by G2.**
+  `/workflow-chat/ws` diverted to a user node pin had no `caller_token` and
+  never injected the forwarded bearer → 401. Every assistant handler forwards
+  through `forward()`, so the admin-managed mode resolves the WS twin with
+  `node_route = None`: a personal pin can no longer divert it.
 - **G4 [P2] Long-run callback refresh.** The forwarded delegated token is 300s;
   `/delegation/refresh` expects `act.sub` to be an active `OauthClient`, which
   `"aevatar"` is not, so a run that issues its first callback after 5 min can
@@ -340,6 +361,166 @@ none surface as a surprise "next broken leg":**
   service still resolves a caller `UserService` first then the active catalog
   row — its endpoint + credential provisioning remains a runtime dependency
   (confirm it's an active public/master-credential row, class-equal to aevatar).
+- **G11 [P1, FIXED 2026-07-29; SUPERSEDED same day by the workflow re-point]
+  The conversation list leaked another product's chats.** `chat-history` is a
+  **shared** read model: Aevatar's workflow chat (`POST /api/chat`, what
+  `aevatar-console.aevatar.ai/chat` posts to) writes `chatc-…` rows into the
+  same index that `GET /assistant/conversations` reads. Those ids are not
+  conversation actors — verified on prod 2026-07-29, streaming into one
+  returns `RUN_ERROR ACTOR_NOT_FOUND` — so the sidebar listed the user's
+  console chats and every send into one died. First fixed by filtering to the
+  `nyxid-chat-` actor prefix; the same-day workflow re-point (see "Chat turns
+  re-pointed" below) made `chatc-` rows first-class again, so
+  `assistant_service::filter_chat_history_index` now keeps BOTH families and
+  drops only rows from other product surfaces. Still shape-tolerant: an index
+  we do not recognise streams through byte-for-byte.
+- **G9 [P1, decision needed] Aevatar's NyxID management tools are unreachable
+  through this mount.** Upstream `ExtractNyxIdAccessToken`
+  (`NyxIdChatEndpoints.cs:331`) prefers `X-NyxID-Delegation-Token` over
+  `Authorization`, so every built-in NyxID tool calls NyxID back with the
+  delegation token we inject. `NyxIdApiClient` targets first-party management
+  routes — `/users/me`, `/catalog`, `/keys`, `/user-services`, `/api-keys`,
+  `/nodes`, `/approvals/requests`, `/ssh/{id}/exec` — and all of those live in
+  `api_v1_human_only`, behind `reject_delegated_tokens`. Only `nyxid_proxy`
+  (`/proxy/s/{slug}`) and the LLM gateway are inside `api_v1_delegated`. Net
+  effect: on the Aevatar console (raw user bearer, human-only accepted) the
+  assistant can answer "what do I have connected?"; through `/api/v1/assistant/*`
+  it cannot. This is a deliberate confused-deputy boundary, so widening it is
+  Calvin's call, not a bug fix. Options: (a) keep the boundary and scope chat to
+  proxy/LLM; (b) add a curated **read-only** delegated subset (`GET /users/me`,
+  `/catalog`, `/user-services`, `/keys`, `/nodes`, `/approvals/requests`) with
+  writes still human-only; (c) mint a restricted first-party token instead of a
+  delegation token (previously vetoed: NyxID-audienced ⇒ replayable at NyxID).
+  Note (b) does not pay off until G10 lands upstream — and dev's own answer is
+  neither (a) nor (b): see G12, where the browser executes the action with the
+  user's own session and reports back. Implementing G12 is the aligned path;
+  widening the delegated router is probably the wrong fix.
+- **G10 [P1, UPSTREAM] Effect-capable NyxID tools fail every turn on the
+  `nyxid-chat` surface.** `NyxIdChatTurnOperationExecutor.cs:366-374` fails the
+  run with `NYXID_CHAT_TOOL_RECEIPT_REQUIRED` when a `MayChangeExternalState`
+  tool returns no `AgentToolReceipt`. `NyxIdProxyTool`/`NyxIdRequireServiceTool`
+  emit one via `NyxIdProxyReceiptFactory`; `NyxIdServicesTool` and its siblings
+  return a bare JSON string and never do, and `StreamingToolExecutor`
+  synthesizes a receipt only for `IsError` results — a successful call is left
+  receiptless. Reproduced 2026-07-29 straight at
+  `aevatar-console-backend-api.aevatar.ai` with a raw bearer (no NyxID in the
+  path): `nyxid_services` → step `uncertain` / `may_have_changed` → `RUN_ERROR`.
+  Not fixable from NyxID; needs an Aevatar-side receipt for those tools.
+
+### Chat turns re-pointed to the workflow ("studio") engine (2026-07-29, Calvin's directive)
+
+The nyxid-chat surface's receipt gate (G10) kills every turn that touches a
+default-classified `nyxid_*` tool, and the fix is upstream-owned. Calvin's
+call: make the product chat call the same engine the Aevatar console uses —
+`POST /api/chat`, workflow `studio` — through the pass-through. Implemented:
+
+- **Backend.** `POST /api/v1/assistant/workflow-chat` no longer forwards the
+  caller body verbatim: it parses a typed `WorkflowChatTurnRequest`
+  (`prompt`, optional `conversationId` + `minimumStateVersion`, optional
+  `commandId`; `deny_unknown_fields`) and builds Aevatar's strict
+  `HttpChatInput` server-side — `workflow` pinned to `studio`
+  (`assistant_service::WORKFLOW_CHAT_WORKFLOW`), `conversation` object always
+  present (without it Aevatar persists nothing), no `scopeId` (trusted scope
+  wins upstream anyway). Continuations require the client's last observed
+  `stateVersion` (Aevatar's read fence; `> 0` or 400 here, 503 upstream).
+  Auth: `/api/chat` accepts the injected `X-NyxID-Identity-Token` via the
+  global JwtBearer forward selector when no `Authorization` is present
+  (verified on `feature/integrate`: `NyxIdIdentityAssertionAuthentication.cs`,
+  `ChatEndpointsInternalTests.HandleChat_ShouldUseDelegationCredentialAndAuthenticatedScope`);
+  the delegation token becomes the tool credential
+  (`WorkflowCallerCredentialExtractor`, Authorization-first, delegation
+  fallback).
+- **Frontend.** Transport routes by conversation-id family: `chatc-…` (and
+  the client-local `workflow-pending-…` placeholder) → workflow route;
+  legacy `nyxid-chat-…` → the AG-UI `:stream` route, unchanged.
+  `createConversation` is client-local; the first turn's
+  `aevatar.chat.context` frame delivers the server `chatc-…` id, which the
+  transport aliases over the placeholder (URL keeps the placeholder for the
+  session; a reload lists the server row). `stateVersion` is captured from
+  `chat.context` and the wrapped transcript read. Workflow frame semantics:
+  pre-`runStarted` CUSTOM context frames are legal, `runStarted.runId` is run
+  identity (not the turn id), `runFinished.result.output` renders when
+  nothing streamed, trailing `stateSnapshot`/`raw.observed` after the
+  terminal are tolerated. No `:stop` on this surface — cancel is client-side
+  only (run control lives on scope-service `runs/{runId}:stop`, not proxied).
+- **Known limits, deliberate:** G9 applies unchanged on this path (the tool
+  credential is still the delegation token, so `nyxid_status`-class account
+  tools 403 into NyxID and answers degrade instead of crashing — the G9
+  decision is still open); a mid-session placeholder URL dies on reload
+  (sidebar row recovers it); `workflow-chat/ws` remains dead code.
+- **G18 [P2] Approvals cannot be decided on the workflow surface.** `:approve`
+  addresses a nyxid-chat conversation ACTOR; a workflow run resumes through
+  scope-service `runs/{runId}:resume`, which this mount does not proxy. The
+  card can still RENDER (the workflow mapper emits
+  `aevatar.tool_approval.pending` / `aevatar.human_input.request`), so
+  `decideApproval` fails fast with a legible message pointing at the NyxID
+  Approvals page rather than 404-ing the actor route. Not a regression —
+  G1 already recorded that no approval could be completed from the browser on
+  the actor surface either. Fix = proxy the resume route (new mount entry +
+  `runId`/`stepId` plumbing from the run-context frame) when approvals become
+  a product requirement.
+
+**Compatibility review (2026-07-29, post-implementation).** Every changed
+symbol was traced to its consumers before merge:
+`POST /assistant/workflow-chat` had **no** callers anywhere in the repo (dead
+since the transport-toggle removal), so tightening it to a typed body breaks
+nothing; `execute_proxy`'s two production callers are unchanged and still run
+`TargetMode::CallerAddressed` with every caller-state gate intact; the
+`filter_chat_history_index` widening is additive (a user with only
+`nyxid-chat-` rows sees an identical list); and every workflow-specific branch
+in the transport is gated on `run.protocol === "workflow"` or an id-prefix
+test, so legacy `nyxid-chat-…` conversations stream, cancel, stop, approve,
+reload, and delete exactly as before. The one intended behavior change for
+legacy conversations is that new ones can no longer be *created* — existing
+ones stay fully continuable. On the `AdminManaged` branch, `master_credential`
+and `has_server_credential` are inert (both only matter when a
+`user_service_id` or node route is present, and neither is), so billing
+classification, approvals, audit, identity propagation, and delegation
+injection all behave as on the caller-addressed path.
+
+### Contract layers dev ships that the FE transport does not speak (2026-07-29)
+
+Endpoints, request bodies, and the v1 frame vocabulary all match (verified
+live). What our `aevatar-transport.ts` has not caught up with is everything
+`feature/integrate` added on top:
+
+- **G13 Task/step progress.** `CUSTOM nyxid.task.snapshot` +
+  `nyxid.task.step.changed` are the run ledger now: ordered steps with
+  `kind`, `status`, human `description`, `externalEffect`, and per-step
+  `availableActions`. `aevatar.step.request` / `aevatar.step.completed` (which
+  we do handle) are no longer emitted, so the activity card is built only from
+  `TOOL_CALL_START/END` and shows raw tool names instead of the committed plan.
+- **G14 Control plane unused.** `GET …/state` is the contract's reconnect
+  surface (every control 202 returns its `stateUrl`), and `:steer`,
+  `steps/{id}:retry`, `steps/{id}:skip` are live. NyxID proxies all four; the
+  FE calls none of them — only `:stream`, `:approve`, `:stop`, transcript,
+  list, delete. A dropped stream cannot be recovered by polling state, and
+  `availableActions` never reaches the UI.
+- **G12 Assistant actions registry (schema v4).** `CUSTOM nyxid.action.request`
+  asks the **browser** to perform a caller-owned NyxID action (v1 wire payload:
+  `service.connect`, catalog or custom) and the client answers on the same
+  `:stream` route with `type:"action.continue"`, `originTurnId`, and
+  `actions: [{actionRequestId, originTurnId, disposition, resource,
+  safeMessage}]` where disposition ∈ completed | declined | failed | cancelled
+  | expired. Registry: `NyxIdAssistantActionRegistry.cs` (service.connect,
+  service.reauthorize, key.create/rotate, node.*, service_account.*,
+  developer_app.*, account.mfa_setup …). Unimplemented end to end — the FE
+  drops the frame and NyxID's `:stream` handler never sees the continuation
+  shape. This is the upstream answer to G9: privileged NyxID work is done by
+  the browser with the user's own session, not by Aevatar with a delegation
+  token.
+- **G15 Frame sequencing ignored.** Dev stamps every frame with `sequence`;
+  the transport never reads it, so it cannot detect gaps or re-order.
+- **G16 Dead vocabulary retained.** The transport still handles
+  `aevatar.step.*`, `aevatar.tool_approval.pending`,
+  `aevatar.human_input.request`, `aevatar.workflow.waiting_signal`,
+  `aevatar.raw.observed`, `demo.conversation.context`, `STEP_STARTED/FINISHED`,
+  `RUN_STOPPED`, and typed `AUTHORIZATION_REQUIRED` — none are emitted by dev's
+  `NyxIdChatSseWriter`. Harmless, but it is not the current contract.
+- **G17 Narrow blocker allowlist.** The connect card only renders for
+  `reasonCode` ∈ {`NYXID_SERVICE_NOT_CONNECTED`, `NYXID_UNAUTHORIZED`}. Dev's
+  code path emits `NYXID_UNAUTHORIZED`, but `NyxIdRequireServiceTool` passes a
+  model-supplied code through, so an unexpected value silently drops the card.
 
 ## Enable-ready (proven, awaiting a decision — not blocked on code)
 
@@ -526,13 +707,16 @@ harness).**
 Good-to-have items consciously deferred on 2026-07-17; default owner = BE engineer
 unless noted. Each item: what, risk, trigger.
 
-- **TD-1 — Admin-path isolation leak (F1).** `execute_proxy` still runs caller-state
-  resolution even for catalog-id addressing: a personal node pin
-  (`resolve_node_route`) or an inactive `UserServiceConnection` ("You have
-  disconnected from this service", `proxy_service.rs:~460`) changes or breaks
-  assistant traffic for that one user. Fix: strict admin-target execution mode that
-  bypasses UserService / node routing / legacy connections. Trigger: before GA, or
-  the first "chat works for everyone but me" report.
+- **TD-1 — Admin-path isolation leak (F1) — CLOSED 2026-07-29.** Shipped as
+  `proxy::execute_admin_proxy` / `TargetMode::AdminManaged` +
+  `proxy_service::resolve_admin_proxy_target`, wired into
+  `handlers::assistant::forward`, so no caller state (scoped-token allowlist,
+  personal node pin, personal `UserServiceConnection`) reaches a server-chosen
+  platform target. Caller-addressed proxy routes are unchanged and still
+  enforce all three. Tests:
+  `admin_managed_target_admits_a_scoped_token_the_caller_path_rejects`,
+  `admin_managed_target_ignores_a_disconnected_personal_connection`,
+  `admin_managed_target_rejects_a_user_credential_service_as_internal`.
 - **TD-2 — Scope smuggling (F4, F5, F6).** (a) `/assistant/workflow-chat` forwards
   the body verbatim — a caller can send `scopeId` / `chatHistory.conversationId`;
   identity-JWT generation failures log and continue. (b) The WS twin bridges frames

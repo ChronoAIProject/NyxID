@@ -611,6 +611,7 @@ async fn proxy_request_inner(
                         .map(|r| r.org_user_id.clone())
                         .unwrap_or_else(|| user_id_str.clone()),
                 }),
+                TargetMode::CallerAddressed,
                 resolved_slug,
             )
             .await;
@@ -669,6 +670,7 @@ async fn proxy_request_inner(
                     .map(|r| r.org_user_id.clone())
                     .unwrap_or_else(|| user_id_str.clone()),
             }),
+            TargetMode::CallerAddressed,
             resolved_slug,
         )
         .await;
@@ -826,6 +828,7 @@ async fn proxy_request_by_slug_inner(
                         .map(|r| r.org_user_id.clone())
                         .unwrap_or_else(|| user_id_str.clone()),
                 }),
+                TargetMode::CallerAddressed,
                 resolved_slug,
             )
             .await;
@@ -884,6 +887,7 @@ async fn proxy_request_by_slug_inner(
                     .map(|r| r.org_user_id.clone())
                     .unwrap_or_else(|| user_id_str.clone()),
             }),
+            TargetMode::CallerAddressed,
             resolved_slug,
         )
         .await;
@@ -955,6 +959,60 @@ pub(crate) async fn execute_proxy(
         path,
         request,
         None,
+        TargetMode::CallerAddressed,
+        resolved_slug,
+    )
+    .await
+}
+
+/// How the proxy target was chosen, which decides whether caller-owned
+/// routing state applies to it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum TargetMode {
+    /// The caller named the service (`/proxy/{id}`, `/proxy/s/{slug}`, LLM
+    /// gateway, MCP). Caller state governs: scoped-token service allowlist,
+    /// personal node pins, personal connection state.
+    CallerAddressed,
+    /// The server chose the service for a platform surface and the caller
+    /// could not have named anything else (assistant chat pass-through).
+    AdminManaged,
+}
+
+/// Execute a proxy request against a **server-chosen** platform service.
+///
+/// Same data plane as [`execute_proxy`] -- identity propagation, delegation
+/// token, approvals, audit, billing, streaming -- with the caller-state
+/// resolution deliberately switched off, because none of it can apply to a
+/// target the caller never named:
+///
+/// - the scoped-token service allowlist is not consulted. Those lists hold
+///   `UserService` ids, so an admin catalog row can never appear in one:
+///   leaving the gate on made every restricted token (every OAuth access
+///   token minted with `resource`/`allowed_service_ids`, e.g. the Aevatar
+///   console's) fail the assistant surface with `api_key_scope_forbidden`,
+///   with no grant a user could add to fix it. This does **not** widen what
+///   the run can reach: the delegation token this path mints still inherits
+///   the caller's restrictions verbatim
+///   (`TokenRestrictionClaims::from_auth_user`), so a restricted caller's
+///   assistant run stays restricted on every callback into NyxID.
+/// - personal node pins and personal connection state are not consulted
+///   (see `proxy_service::resolve_admin_proxy_target`).
+pub(crate) async fn execute_admin_proxy(
+    state: &AppState,
+    auth_user: &AuthUser,
+    service_id: &str,
+    path: &str,
+    request: Request<Body>,
+    resolved_slug: &mut String,
+) -> AppResult<Response> {
+    execute_proxy_inner(
+        state,
+        auth_user,
+        service_id,
+        path,
+        request,
+        None,
+        TargetMode::AdminManaged,
         resolved_slug,
     )
     .await
@@ -1244,8 +1302,14 @@ async fn preflight_proxy_deny_before_resolution(
 /// Inner proxy execution with optional pre-resolved target from UserService path.
 ///
 /// When `pre_resolved` is `Some`, the target and node routing are already known
-/// (from `resolve_proxy_target_from_user_service`). When `None`, falls back to
-/// the original DownstreamService resolution.
+/// (from `resolve_proxy_target_from_user_service`). When `None`, resolution
+/// follows `target_mode`: caller-addressed requests fall back to the original
+/// DownstreamService path, server-chosen platform targets resolve the admin
+/// row alone (see [`execute_admin_proxy`]).
+// One argument over the lint's threshold: every parameter is a distinct
+// security-relevant input to resolution, and bundling them into a struct
+// would only move the same fields behind one more indirection.
+#[allow(clippy::too_many_arguments)]
 async fn execute_proxy_inner(
     state: &AppState,
     auth_user: &AuthUser,
@@ -1253,6 +1317,7 @@ async fn execute_proxy_inner(
     path: &str,
     request: Request<Body>,
     pre_resolved: Option<PreResolved>,
+    target_mode: TargetMode,
     resolved_slug: &mut String,
 ) -> AppResult<Response> {
     let downstream_cancellation = request_cancellation(&request);
@@ -1444,6 +1509,26 @@ async fn execute_proxy_inner(
             pre.master_credential,
             pre.user_service_id,
             required,
+            catalog_service_slug,
+        )
+    } else if target_mode == TargetMode::AdminManaged {
+        // Server-chosen platform target: resolve the admin row alone, with
+        // no caller-owned routing state. See `execute_admin_proxy`.
+        let target = proxy_service::resolve_admin_proxy_target(
+            &state.db,
+            &state.encryption_keys,
+            service_id,
+        )
+        .await?;
+        let catalog_service_slug = Some(target.service.slug.clone());
+        let has_server_credential = true;
+        (
+            None,
+            target,
+            has_server_credential,
+            true,
+            None,
+            false,
             catalog_service_slug,
         )
     } else {
@@ -7607,6 +7692,325 @@ mod proxy_resolution_integration_tests {
         assert!(
             matches!(err, AppError::ApiKeyScopeForbidden(_)),
             "expected scope denial after resolution, got: {err}"
+        );
+        server.abort();
+    }
+
+    /// Seed an admin-managed platform service (the shape the assistant chat
+    /// pass-through targets: internal, no user credential, master/no auth).
+    async fn insert_platform_service(
+        db: &mongodb::Database,
+        slug: &str,
+        base_url: &str,
+    ) -> crate::models::downstream_service::DownstreamService {
+        let mut service = crate::models::downstream_service::test_helpers::dummy_service();
+        service.id = Uuid::new_v4().to_string();
+        service.slug = slug.to_string();
+        service.name = slug.to_string();
+        service.base_url = base_url.to_string();
+        service.service_category = "internal".to_string();
+        service.requires_user_credential = false;
+        db.collection::<crate::models::downstream_service::DownstreamService>(
+            crate::models::downstream_service::COLLECTION_NAME,
+        )
+        .insert_one(service.clone())
+        .await
+        .unwrap();
+        service
+    }
+
+    /// A restricted token's `allowed_service_ids` holds `UserService` ids, so
+    /// an admin catalog row can never be listed in one. Gating the platform
+    /// surface on that list therefore denied every restricted caller with no
+    /// grant that could fix it (observed on prod: OAuth access tokens minted
+    /// with `resource`/`allowed_service_ids` got `api_key_scope_forbidden` on
+    /// every `/api/v1/assistant/*` call). The admin-managed mode drops that
+    /// gate; the caller-addressed mode keeps it.
+    #[tokio::test]
+    async fn admin_managed_target_admits_a_scoped_token_the_caller_path_rejects() {
+        let Some(db) = connect_test_database("proxy_admin_target_scope").await else {
+            eprintln!("skipping proxy integration test: no local MongoDB available");
+            return;
+        };
+
+        let (base_url, server) = start_downstream().await;
+        let user_id = Uuid::new_v4().to_string();
+        db.collection::<crate::models::user::User>(USERS)
+            .insert_one(test_user(&user_id, UserType::Person))
+            .await
+            .unwrap();
+        let service = insert_platform_service(&db, "platform-assistant", &base_url).await;
+
+        let state = test_app_state(db.clone());
+        let mut auth = access_token_auth(&user_id);
+        auth.allow_all_services = false;
+        // A UserService id the caller really was granted — still never the
+        // catalog row the platform resolves.
+        auth.allowed_service_ids = vec![Uuid::new_v4().to_string()];
+
+        let mut caller_slug = String::new();
+        let err = super::execute_proxy(
+            &state,
+            &auth,
+            &service.id,
+            "status",
+            proxy_request("/assistant/conversations"),
+            &mut caller_slug,
+        )
+        .await
+        .expect_err("caller-addressed mode must keep enforcing the allowlist");
+        assert!(
+            matches!(err, AppError::ApiKeyScopeForbidden(_)),
+            "expected scope denial on the caller-addressed path, got: {err}"
+        );
+
+        let mut admin_slug = String::new();
+        let response = super::execute_admin_proxy(
+            &state,
+            &auth,
+            &service.id,
+            "status",
+            proxy_request("/assistant/conversations"),
+            &mut admin_slug,
+        )
+        .await
+        .expect("admin-managed mode must admit a restricted caller");
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(admin_slug, service.slug);
+        server.abort();
+    }
+
+    /// "Works for everyone but me": a user who once connected the same
+    /// catalog service personally and then disconnected it was refused by the
+    /// platform surface they never connected. The admin-managed mode does not
+    /// read the caller's connection row at all.
+    #[tokio::test]
+    async fn admin_managed_target_ignores_a_disconnected_personal_connection() {
+        let Some(db) = connect_test_database("proxy_admin_target_disconnected").await else {
+            eprintln!("skipping proxy integration test: no local MongoDB available");
+            return;
+        };
+
+        let (base_url, server) = start_downstream().await;
+        let user_id = Uuid::new_v4().to_string();
+        db.collection::<crate::models::user::User>(USERS)
+            .insert_one(test_user(&user_id, UserType::Person))
+            .await
+            .unwrap();
+        let service = insert_platform_service(&db, "platform-assistant-2", &base_url).await;
+        let now = chrono::Utc::now();
+        db.collection::<crate::models::user_service_connection::UserServiceConnection>(
+            crate::models::user_service_connection::COLLECTION_NAME,
+        )
+        .insert_one(
+            crate::models::user_service_connection::UserServiceConnection {
+                id: Uuid::new_v4().to_string(),
+                user_id: user_id.clone(),
+                service_id: service.id.clone(),
+                credential_encrypted: None,
+                credential_type: None,
+                credential_label: None,
+                metadata: None,
+                is_active: false,
+                created_at: now,
+                updated_at: now,
+            },
+        )
+        .await
+        .unwrap();
+
+        let state = test_app_state(db.clone());
+        let auth = access_token_auth(&user_id);
+
+        let mut caller_slug = String::new();
+        let err = super::execute_proxy(
+            &state,
+            &auth,
+            &service.id,
+            "status",
+            proxy_request("/assistant/conversations"),
+            &mut caller_slug,
+        )
+        .await
+        .expect_err("caller-addressed mode must keep honoring the disconnect");
+        assert!(
+            matches!(err, AppError::Forbidden(_)),
+            "expected a disconnect denial on the caller-addressed path, got: {err}"
+        );
+
+        let mut admin_slug = String::new();
+        let response = super::execute_admin_proxy(
+            &state,
+            &auth,
+            &service.id,
+            "status",
+            proxy_request("/assistant/conversations"),
+            &mut admin_slug,
+        )
+        .await
+        .expect("admin-managed mode must ignore the personal disconnect");
+        assert_eq!(response.status(), StatusCode::OK);
+        server.abort();
+    }
+
+    /// A `requires_user_credential` row cannot back a platform surface: it is
+    /// a provisioning fault, and must not degrade into a caller-facing error.
+    #[tokio::test]
+    async fn admin_managed_target_rejects_a_user_credential_service_as_internal() {
+        let Some(db) = connect_test_database("proxy_admin_target_user_cred").await else {
+            eprintln!("skipping proxy integration test: no local MongoDB available");
+            return;
+        };
+
+        let (base_url, server) = start_downstream().await;
+        let user_id = Uuid::new_v4().to_string();
+        db.collection::<crate::models::user::User>(USERS)
+            .insert_one(test_user(&user_id, UserType::Person))
+            .await
+            .unwrap();
+        let mut service = insert_platform_service(&db, "platform-needs-cred", &base_url).await;
+        service.requires_user_credential = true;
+        db.collection::<crate::models::downstream_service::DownstreamService>(
+            crate::models::downstream_service::COLLECTION_NAME,
+        )
+        .replace_one(doc! { "_id": &service.id }, &service)
+        .await
+        .unwrap();
+
+        let state = test_app_state(db.clone());
+        let mut admin_slug = String::new();
+        let err = super::execute_admin_proxy(
+            &state,
+            &access_token_auth(&user_id),
+            &service.id,
+            "status",
+            proxy_request("/assistant/conversations"),
+            &mut admin_slug,
+        )
+        .await
+        .expect_err("a user-credential row must not back a platform surface");
+        assert!(
+            matches!(err, AppError::Internal(_)),
+            "expected a provisioning fault, got: {err}"
+        );
+        server.abort();
+    }
+
+    /// End-to-end through the real assistant handler: the caller's typed
+    /// workflow-chat body is rebuilt into the pinned `studio` body, and the
+    /// upstream request carries the injected identity material with NO
+    /// caller `Authorization` — the exact wire shape Aevatar's `/api/chat`
+    /// authenticates (`NyxIdIdentityAssertionAuthentication` forwards the
+    /// Bearer scheme to the identity-assertion handler only when
+    /// `Authorization` is absent, and a malformed one 400s the whole turn).
+    #[tokio::test]
+    async fn workflow_chat_handler_rebuilds_the_body_for_the_admin_service() {
+        use std::sync::Mutex as StdMutex;
+
+        let Some(db) = connect_test_database("assistant_workflow_chat").await else {
+            eprintln!("skipping proxy integration test: no local MongoDB available");
+            return;
+        };
+
+        type Captured = (String, Vec<u8>, axum::http::HeaderMap);
+        let captured: std::sync::Arc<StdMutex<Option<Captured>>> =
+            std::sync::Arc::new(StdMutex::new(None));
+        let sink = captured.clone();
+        let app = Router::new().route(
+            "/{*path}",
+            axum::routing::post(move |request: Request<Body>| {
+                let sink = sink.clone();
+                async move {
+                    let (parts, body) = request.into_parts();
+                    let bytes = axum::body::to_bytes(body, 1024 * 1024).await.unwrap();
+                    *sink.lock().unwrap() =
+                        Some((parts.uri.path().to_string(), bytes.to_vec(), parts.headers));
+                    axum::Json(serde_json::json!({ "ok": true }))
+                }
+            }),
+        );
+        let listener = TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind workflow-chat downstream listener");
+        let addr = listener.local_addr().expect("downstream listener addr");
+        let server = tokio::spawn(async move {
+            axum::serve(listener, app)
+                .await
+                .expect("serve workflow-chat downstream");
+        });
+
+        let user_id = Uuid::new_v4().to_string();
+        db.collection::<crate::models::user::User>(USERS)
+            .insert_one(test_user(&user_id, UserType::Person))
+            .await
+            .unwrap();
+        // The assistant resolves by slug: this must be the `aevatar` row,
+        // configured like the deployed contract (identity JWT + injected
+        // delegation token, no Bearer forwarding).
+        let mut service = crate::models::downstream_service::test_helpers::dummy_service();
+        service.id = Uuid::new_v4().to_string();
+        service.slug = crate::services::assistant_service::AEVATAR_SLUG.to_string();
+        service.name = "Aevatar".to_string();
+        service.base_url = format!("http://{addr}");
+        service.service_category = "internal".to_string();
+        service.requires_user_credential = false;
+        service.identity_propagation_mode = "jwt".to_string();
+        service.identity_jwt_audience = Some("urn:aevatar:api".to_string());
+        service.inject_delegation_token = true;
+        service.delegation_token_scope = "proxy:*".to_string();
+        db.collection::<crate::models::downstream_service::DownstreamService>(
+            crate::models::downstream_service::COLLECTION_NAME,
+        )
+        .insert_one(service.clone())
+        .await
+        .unwrap();
+
+        let state = test_app_state(db.clone());
+        let auth = access_token_auth(&user_id);
+
+        let mut request = Request::builder()
+            .method(Method::POST)
+            .uri("/api/v1/assistant/workflow-chat")
+            .header(axum::http::header::CONTENT_TYPE, "application/json")
+            .body(Body::from(r#"{"prompt":"hi there"}"#))
+            .expect("build workflow chat request");
+        request.extensions_mut().insert(
+            crate::services::billing::route_inventory::BillingRoutePolicy::Metered(
+                crate::services::billing::BillingIngress::Proxy,
+            ),
+        );
+
+        let response =
+            crate::handlers::assistant::workflow_chat(axum::extract::State(state), auth, request)
+                .await
+                .expect("workflow chat handler must forward");
+        assert_eq!(response.status(), StatusCode::OK);
+
+        let (path, body, headers) = captured
+            .lock()
+            .unwrap()
+            .take()
+            .expect("downstream must have received the turn");
+        assert_eq!(path, "/api/chat");
+        let body: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(body["workflow"], "studio");
+        assert_eq!(body["prompt"], "hi there");
+        assert!(body["conversation"]["conversationId"].is_null());
+        assert!(
+            body["commandId"].as_str().is_some_and(|id| !id.is_empty()),
+            "a server-minted commandId must be present"
+        );
+        assert!(
+            headers.get(axum::http::header::AUTHORIZATION).is_none(),
+            "no caller Authorization may reach /api/chat (a malformed one 400s upstream)"
+        );
+        assert!(
+            headers.get("x-nyxid-identity-token").is_some(),
+            "the identity assertion authenticates the request upstream"
+        );
+        assert!(
+            headers.get("x-nyxid-delegation-token").is_some(),
+            "the delegation token is the workflow tool credential"
         );
         server.abort();
     }
