@@ -5,8 +5,15 @@ import {
   identify as telemetryIdentify,
   reset as telemetryReset,
 } from "@/lib/telemetry";
+import { useAssistantContextStore } from "@/stores/assistant-context-store";
+import { useAssistantDraftStore } from "@/stores/assistant-draft-store";
 
 const MFA_REQUIRED_ERROR_CODE = 2002;
+
+function clearAssistantLocalState(): void {
+  useAssistantContextStore.getState().clear();
+  useAssistantDraftStore.getState().clear();
+}
 
 interface LoginResult {
   readonly mfaRequired: boolean;
@@ -79,6 +86,7 @@ export const useAuthStore = create<AuthStore>((set) => ({
       // Clear telemetry identity BEFORE state wipe so the next event
       // the app emits already carries a fresh anon distinct_id.
       telemetryReset();
+      clearAssistantLocalState();
       set({
         user: null,
         isAuthenticated: false,
@@ -104,6 +112,7 @@ export const useAuthStore = create<AuthStore>((set) => ({
         // so subsequent pageviews attribute to a fresh anon, not the
         // ex-user. Parity with the explicit `logout()` branch above.
         telemetryReset();
+        clearAssistantLocalState();
         set({ user: null, isAuthenticated: false, isLoading: false });
       } else {
         set({ isLoading: false });
@@ -112,6 +121,7 @@ export const useAuthStore = create<AuthStore>((set) => ({
   },
 
   setUser: (user: User | null): void => {
+    if (user === null) clearAssistantLocalState();
     set({ user, isAuthenticated: user !== null });
     if (user !== null) {
       telemetryIdentify(user.id);
