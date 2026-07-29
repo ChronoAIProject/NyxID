@@ -6,6 +6,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::AppState;
 use crate::errors::{AppError, AppResult};
+use crate::models::service_endpoint::OperationResponseContract;
 use crate::mw::auth::AuthUser;
 use crate::services::service_endpoint_service::{EndpointInput, EndpointUpdate};
 use crate::services::{openapi_parser, service_endpoint_service};
@@ -25,6 +26,7 @@ pub struct CreateEndpointRequest {
     pub request_content_type: Option<String>,
     pub request_body_required: Option<bool>,
     pub response_description: Option<String>,
+    pub response: Option<OperationResponseContract>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -38,6 +40,7 @@ pub struct UpdateEndpointRequest {
     pub request_content_type: Option<Option<String>>,
     pub request_body_required: Option<bool>,
     pub response_description: Option<Option<String>>,
+    pub response: Option<OperationResponseContract>,
     pub is_active: Option<bool>,
 }
 
@@ -54,6 +57,7 @@ pub struct EndpointResponse {
     pub request_content_type: Option<String>,
     pub request_body_required: bool,
     pub response_description: Option<String>,
+    pub response: OperationResponseContract,
     pub is_active: bool,
     pub created_at: String,
     pub updated_at: String,
@@ -142,6 +146,19 @@ fn validate_request_content_type(content_type: &str) -> AppResult<()> {
     Ok(())
 }
 
+fn validate_response_contract(response: &OperationResponseContract) -> AppResult<()> {
+    for content_type in &response.content_types {
+        if content_type.trim().is_empty()
+            || reqwest::header::HeaderValue::from_str(content_type).is_err()
+        {
+            return Err(AppError::ValidationError(
+                "response.content_types must contain valid HTTP content types".to_string(),
+            ));
+        }
+    }
+    Ok(())
+}
+
 fn endpoint_to_response(e: crate::models::service_endpoint::ServiceEndpoint) -> EndpointResponse {
     let request_body_required = e.effective_request_body_required();
 
@@ -157,6 +174,7 @@ fn endpoint_to_response(e: crate::models::service_endpoint::ServiceEndpoint) -> 
         request_content_type: e.request_content_type,
         request_body_required,
         response_description: e.response_description,
+        response: e.response,
         is_active: e.is_active,
         created_at: e.created_at.to_rfc3339(),
         updated_at: e.updated_at.to_rfc3339(),
@@ -202,6 +220,9 @@ pub async fn create_endpoint(
     if let Some(content_type) = body.request_content_type.as_deref() {
         validate_request_content_type(content_type)?;
     }
+    if let Some(response) = body.response.as_ref() {
+        validate_response_contract(response)?;
+    }
 
     let input = EndpointInput {
         request_body_required: body
@@ -215,6 +236,7 @@ pub async fn create_endpoint(
         request_body_schema: body.request_body_schema,
         request_content_type: body.request_content_type,
         response_description: body.response_description,
+        response: body.response.unwrap_or_default(),
     };
 
     let endpoint = service_endpoint_service::create_endpoint(&state.db, &service_id, input).await?;
@@ -254,6 +276,9 @@ pub async fn update_endpoint(
     if let Some(Some(content_type)) = body.request_content_type.as_ref() {
         validate_request_content_type(content_type)?;
     }
+    if let Some(response) = body.response.as_ref() {
+        validate_response_contract(response)?;
+    }
 
     let updates = EndpointUpdate {
         name: body.name,
@@ -265,6 +290,7 @@ pub async fn update_endpoint(
         request_content_type: body.request_content_type,
         request_body_required: body.request_body_required,
         response_description: body.response_description,
+        response: body.response,
         is_active: body.is_active,
     };
 
@@ -329,6 +355,7 @@ pub async fn discover_endpoints(
         if let Some(content_type) = endpoint.request_content_type.as_deref() {
             validate_request_content_type(content_type)?;
         }
+        validate_response_contract(&endpoint.response)?;
     }
 
     let inputs: Vec<EndpointInput> = parsed
@@ -343,6 +370,7 @@ pub async fn discover_endpoints(
             request_content_type: p.request_content_type,
             request_body_required: p.request_body_required,
             response_description: None,
+            response: p.response,
         })
         .collect();
 
@@ -369,7 +397,7 @@ pub async fn discover_endpoints(
 mod tests {
     use chrono::Utc;
 
-    use super::{endpoint_to_response, validate_request_content_type};
+    use super::{endpoint_to_response, validate_request_content_type, validate_response_contract};
     use crate::errors::AppError;
     use crate::models::service_endpoint::ServiceEndpoint;
 
@@ -397,6 +425,15 @@ mod tests {
     }
 
     #[test]
+    fn validate_response_contract_rejects_invalid_media_types() {
+        let response = crate::models::service_endpoint::OperationResponseContract {
+            content_types: vec!["application/json\nx-invalid: true".to_string()],
+            binary_artifact: Some(false),
+        };
+        assert!(validate_response_contract(&response).is_err());
+    }
+
+    #[test]
     fn endpoint_to_response_uses_effective_request_body_required() {
         let endpoint = ServiceEndpoint {
             id: uuid::Uuid::new_v4().to_string(),
@@ -410,6 +447,7 @@ mod tests {
             request_content_type: None,
             request_body_required: true,
             response_description: None,
+            response: Default::default(),
             is_active: true,
             created_at: Utc::now(),
             updated_at: Utc::now(),

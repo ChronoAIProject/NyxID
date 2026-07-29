@@ -140,7 +140,11 @@ The `/endpoints` response includes structured endpoint data:
       "parameters": null,
       "request_body_schema": { ... },
       "request_content_type": "application/json",
-      "request_body_required": true
+      "request_body_required": true,
+      "response": {
+        "content_types": ["application/json"],
+        "binary_artifact": false
+      }
     }
   ]
 }
@@ -176,4 +180,3 @@ nyxid catalog endpoints <slug>          # parsed OpenAPI endpoints
 3. If discovery missed the real spec location, update `openapi_spec_url` and `asyncapi_spec_url`.
 4. Enrich the service with metadata: `homepage_url`, `repository_url`, `capabilities`, `auth_notes`, `known_limitations`, `required_permissions` so AI agents can discover the service fully.
 5. Share `GET /api/v1/proxy/services/{service_id}/docs` with internal consumers so they test through NyxID instead of bypassing it.
-

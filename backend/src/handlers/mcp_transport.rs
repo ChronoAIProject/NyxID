@@ -576,6 +576,14 @@ fn is_scoped_api_key(auth: &McpAuthContext) -> bool {
     auth.is_api_key && (!auth.allow_all_services || !auth.allow_all_nodes)
 }
 
+fn mcp_service_scope(auth: &McpAuthContext) -> mcp_service::ServiceScope<'_> {
+    if auth.allow_all_services {
+        mcp_service::ServiceScope::Unrestricted
+    } else {
+        mcp_service::ServiceScope::Allowed(auth.allowed_service_ids.as_slice())
+    }
+}
+
 /// Names of tools that SSH-gate on agent scope.
 const SSH_META_TOOL_NAMES: &[&str] = &["nyx__ssh_exec", "nyx__ssh_list_services"];
 
@@ -1075,24 +1083,23 @@ async fn handle_tools_list(
     // Thread API-key node scope into the discovery chain so scoped
     // keys don't see tools whose only dispatchable routes are all out of
     // scope (seventeenth-round Codex review P2).
-    let services = match mcp_service::load_user_tools_scoped(
+    let catalog = match mcp_service::load_operation_catalog(
         &state.db,
         state.node_ws_manager.as_ref(),
         &auth.user_id,
         mcp_node_scope(auth),
+        mcp_service_scope(auth),
     )
     .await
     {
-        Ok(s) => s,
+        Ok(catalog) => catalog,
         Err(e) => {
             tracing::error!("Failed to load user tools: {e}");
             return rpc_error(request.id.clone(), -32603, "Failed to load tools");
         }
     };
 
-    // Enforce API-key service scope: scoped keys only see the UserServices in
-    // their allow-list, mirroring the REST proxy's ApiKeyScopeForbidden check.
-    let services = filter_services_by_scope(services, auth);
+    let services = catalog.services;
 
     // Session-backed clients get meta-tools + activated service tools only.
     // Stateless (API-key) clients with no session get the full tool list up front.
@@ -1241,21 +1248,23 @@ async fn handle_tools_call(
     // Scoped discovery so resolve_tool_call can't match tools whose
     // only dispatchable routes fall outside the caller's API-key node scope
     // (twentieth-round Codex P2).
-    let services = match mcp_service::load_user_tools_scoped(
+    let catalog = match mcp_service::load_operation_catalog(
         &state.db,
         state.node_ws_manager.as_ref(),
         &auth.user_id,
         mcp_node_scope(auth),
+        mcp_service_scope(auth),
     )
     .await
     {
-        Ok(s) => s,
+        Ok(catalog) => catalog,
         Err(e) => {
             tracing::error!("Failed to load tools for execution: {e}");
             return tool_result(request.id.clone(), "Failed to load tools", true);
         }
     };
 
+    let services = catalog.services;
     let (service, endpoint) = match mcp_service::resolve_tool_call(tool_name, &services) {
         Some(pair) => pair,
         None => {
@@ -1606,21 +1615,22 @@ async fn handle_meta_call_tool(
     // `nyx__call_tool` can't auto-invoke a tool whose only dispatchable
     // routes are outside the caller's allow-list (twentieth-round
     // Codex P2). Service scope is still applied downstream below.
-    let services = match mcp_service::load_user_tools_scoped(
+    let catalog = match mcp_service::load_operation_catalog(
         &state.db,
         state.node_ws_manager.as_ref(),
         &auth.user_id,
         mcp_node_scope(auth),
+        mcp_service_scope(auth),
     )
     .await
     {
-        Ok(s) => s,
+        Ok(catalog) => catalog,
         Err(e) => {
             tracing::error!("Failed to load tools for call_tool: {e}");
             return tool_result(request_id, "Failed to load tools", true);
         }
     };
-    let services = filter_services_by_scope(services, auth);
+    let services = catalog.services;
 
     // Resolve tool (no activation gate -- that's the whole point)
     let (service, endpoint) = match mcp_service::resolve_tool_call(tool_name, &services) {
@@ -2866,6 +2876,7 @@ mod tests {
             },
             executable: true,
             is_generic_proxy: false,
+            invalid_openapi_contract: false,
         }
     }
 
@@ -2882,6 +2893,7 @@ mod tests {
             },
             executable: true,
             is_generic_proxy: false,
+            invalid_openapi_contract: false,
         }
     }
 

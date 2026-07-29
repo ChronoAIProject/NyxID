@@ -1,6 +1,7 @@
 use std::collections::HashSet;
 
 use crate::errors::{AppError, AppResult};
+use crate::models::service_endpoint::OperationResponseContract;
 use crate::services::content_type::{
     is_binary_content_type, is_json_content_type, normalize_content_type,
     schema_contains_binary_field, schema_is_binary,
@@ -8,6 +9,7 @@ use crate::services::content_type::{
 
 /// A single endpoint parsed from an OpenAPI/Swagger specification.
 pub struct ParsedEndpoint {
+    pub source_operation_id: Option<String>,
     pub name: String,
     pub description: Option<String>,
     pub method: String,
@@ -16,6 +18,7 @@ pub struct ParsedEndpoint {
     pub request_body_schema: Option<serde_json::Value>,
     pub request_content_type: Option<String>,
     pub request_body_required: bool,
+    pub response: OperationResponseContract,
 }
 
 #[derive(Default)]
@@ -120,6 +123,11 @@ fn parse_endpoints_from_spec(
                 continue;
             };
 
+            let source_operation_id = operation
+                .get("operationId")
+                .and_then(|value| value.as_str())
+                .filter(|value| !value.is_empty())
+                .map(str::to_string);
             let name = extract_name(operation, method, path);
             let description = extract_description(operation);
             let parameters = extract_parameters_with_spec(operation, path_obj, spec);
@@ -128,8 +136,10 @@ fn parse_endpoints_from_spec(
             } else {
                 extract_request_body_swagger2(operation, path_obj, spec)
             };
+            let response = extract_response_contract(operation, spec, is_openapi3);
 
             endpoints.push(ParsedEndpoint {
+                source_operation_id,
                 name,
                 description,
                 method: method.to_uppercase(),
@@ -138,11 +148,125 @@ fn parse_endpoints_from_spec(
                 request_body_schema: request_body.schema,
                 request_content_type: request_body.content_type,
                 request_body_required: request_body.required,
+                response,
             });
         }
     }
 
     Ok(endpoints)
+}
+
+fn extract_response_contract(
+    operation: &serde_json::Value,
+    spec: &serde_json::Value,
+    is_openapi3: bool,
+) -> OperationResponseContract {
+    if is_openapi3 {
+        extract_openapi3_response_contract(operation, spec)
+    } else {
+        extract_swagger2_response_contract(operation, spec)
+    }
+}
+
+fn success_responses(operation: &serde_json::Value) -> Vec<&serde_json::Value> {
+    let Some(responses) = operation
+        .get("responses")
+        .and_then(|value| value.as_object())
+    else {
+        return Vec::new();
+    };
+
+    let mut success: Vec<&serde_json::Value> = responses
+        .iter()
+        .filter(|(status, _)| {
+            status.len() == 3
+                && status
+                    .as_bytes()
+                    .first()
+                    .is_some_and(|first| *first == b'2')
+        })
+        .map(|(_, response)| response)
+        .collect();
+    if success.is_empty()
+        && let Some(default) = responses.get("default")
+    {
+        success.push(default);
+    }
+    success
+}
+
+fn extract_openapi3_response_contract(
+    operation: &serde_json::Value,
+    spec: &serde_json::Value,
+) -> OperationResponseContract {
+    let mut content_types = Vec::new();
+    let mut binary_artifact = false;
+    let mut classifiable = false;
+
+    for response in success_responses(operation) {
+        let Some(response) = resolve_response_refs(spec, response) else {
+            continue;
+        };
+        let Some(content) = response.get("content").and_then(|value| value.as_object()) else {
+            continue;
+        };
+        for (content_type, media) in content {
+            content_types.push(normalize_content_type(content_type));
+            let schema = media
+                .get("schema")
+                .map(|schema| resolve_schema_refs(spec, schema));
+            let is_binary =
+                is_binary_content_type(content_type) || schema_is_binary(schema.as_ref());
+            binary_artifact |= is_binary;
+            classifiable |= is_binary || is_concrete_content_type(content_type);
+        }
+    }
+
+    content_types.sort_unstable();
+    content_types.dedup();
+    OperationResponseContract {
+        content_types,
+        binary_artifact: classifiable.then_some(binary_artifact),
+    }
+}
+
+fn extract_swagger2_response_contract(
+    operation: &serde_json::Value,
+    spec: &serde_json::Value,
+) -> OperationResponseContract {
+    let mut content_types: Vec<String> = operation
+        .get("produces")
+        .or_else(|| spec.get("produces"))
+        .and_then(|value| value.as_array())
+        .into_iter()
+        .flatten()
+        .filter_map(|value| value.as_str())
+        .map(normalize_content_type)
+        .collect();
+    content_types.sort_unstable();
+    content_types.dedup();
+
+    let binary_schema = success_responses(operation).into_iter().any(|response| {
+        let Some(response) = resolve_response_refs(spec, response) else {
+            return false;
+        };
+        let schema = response
+            .get("schema")
+            .map(|schema| resolve_schema_refs(spec, schema));
+        schema_is_binary(schema.as_ref())
+    });
+    let binary_media = content_types
+        .iter()
+        .any(|content_type| is_binary_content_type(content_type));
+    let classifiable = binary_schema
+        || content_types
+            .iter()
+            .any(|content_type| is_concrete_content_type(content_type));
+
+    OperationResponseContract {
+        content_types,
+        binary_artifact: classifiable.then_some(binary_schema || binary_media),
+    }
 }
 
 /// Extract or generate a tool-safe name from the operation.
@@ -623,6 +747,48 @@ fn resolve_request_body_refs(
     resolve_request_body_refs_inner(root, request_body, &mut visited)
 }
 
+fn resolve_response_refs(
+    root: &serde_json::Value,
+    response: &serde_json::Value,
+) -> Option<serde_json::Value> {
+    let mut visited = HashSet::new();
+    resolve_response_refs_inner(root, response, &mut visited)
+}
+
+fn resolve_response_refs_inner(
+    root: &serde_json::Value,
+    response: &serde_json::Value,
+    visited: &mut HashSet<String>,
+) -> Option<serde_json::Value> {
+    let mut resolved = if let Some(ref_str) = response.get("$ref").and_then(|value| value.as_str())
+    {
+        if !visited.insert(ref_str.to_string()) {
+            return Some(response.clone());
+        }
+        let target = resolve_local_ref(root, response)?;
+        let expanded = resolve_response_refs_inner(root, target, visited)?;
+        visited.remove(ref_str);
+        expanded
+    } else {
+        response.clone()
+    };
+
+    if let Some(content) = resolved
+        .get_mut("content")
+        .and_then(|content| content.as_object_mut())
+    {
+        for media in content.values_mut() {
+            if let Some(schema) = media.get_mut("schema") {
+                *schema = resolve_schema_refs(root, schema);
+            }
+        }
+    }
+    if let Some(schema) = resolved.get_mut("schema") {
+        *schema = resolve_schema_refs(root, schema);
+    }
+    Some(resolved)
+}
+
 fn resolve_request_body_refs_inner(
     root: &serde_json::Value,
     request_body: &serde_json::Value,
@@ -774,6 +940,79 @@ fn resolve_schema_refs_inner(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn parses_openapi_success_response_media_and_binary_capability() {
+        let spec = serde_json::json!({
+            "openapi": "3.0.3",
+            "paths": {
+                "/files/{id}": {
+                    "get": {
+                        "operationId": "downloadFile",
+                        "responses": {
+                            "200": {
+                                "description": "File",
+                                "content": {
+                                    "application/octet-stream": {
+                                        "schema": {"type": "string", "format": "binary"}
+                                    },
+                                    "application/json": {
+                                        "schema": {"type": "object"}
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        });
+
+        let parsed = parse_openapi_spec_value(&spec).expect("valid spec");
+        assert_eq!(
+            parsed[0].response.content_types,
+            vec!["application/json", "application/octet-stream"]
+        );
+        assert_eq!(parsed[0].response.binary_artifact, Some(true));
+    }
+
+    #[test]
+    fn response_binary_capability_is_unknown_without_declared_media() {
+        let spec = serde_json::json!({
+            "openapi": "3.0.3",
+            "paths": {
+                "/health": {
+                    "get": {
+                        "responses": {"204": {"description": "No content"}}
+                    }
+                }
+            }
+        });
+
+        let parsed = parse_openapi_spec_value(&spec).expect("valid spec");
+        assert!(parsed[0].response.content_types.is_empty());
+        assert_eq!(parsed[0].response.binary_artifact, None);
+    }
+
+    #[test]
+    fn parses_swagger_produces_as_non_binary_response_contract() {
+        let spec = serde_json::json!({
+            "swagger": "2.0",
+            "produces": ["application/json"],
+            "paths": {
+                "/items": {
+                    "get": {
+                        "responses": {
+                            "200": {"description": "Items", "schema": {"type": "array"}}
+                        }
+                    }
+                }
+            }
+        });
+
+        let parsed = parse_openapi_spec_value(&spec).expect("valid spec");
+        assert_eq!(parsed[0].response.content_types, vec!["application/json"]);
+        assert_eq!(parsed[0].response.binary_artifact, Some(false));
+    }
 
     #[test]
     fn sanitize_name_simple() {

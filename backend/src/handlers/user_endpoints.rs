@@ -322,6 +322,7 @@ pub struct UserEndpointOperationResponse {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub request_content_type: Option<String>,
     pub request_body_required: bool,
+    pub response: crate::models::service_endpoint::OperationResponseContract,
 }
 
 #[derive(Debug, Serialize, ToSchema)]
@@ -342,6 +343,7 @@ fn parsed_endpoint_to_response(p: openapi_parser::ParsedEndpoint) -> UserEndpoin
         request_body_schema: p.request_body_schema,
         request_content_type: p.request_content_type,
         request_body_required: p.request_body_required,
+        response: p.response,
     }
 }
 
@@ -650,6 +652,7 @@ mod tests {
     #[test]
     fn parsed_endpoint_to_response_maps_all_fields() {
         let parsed = openapi_parser::ParsedEndpoint {
+            source_operation_id: Some("list_users".into()),
             name: "list_users".into(),
             description: Some("List all users".into()),
             method: "GET".into(),
@@ -658,6 +661,7 @@ mod tests {
             request_body_schema: None,
             request_content_type: None,
             request_body_required: false,
+            response: Default::default(),
         };
         let resp = parsed_endpoint_to_response(parsed);
         assert_eq!(resp.name, "list_users");
@@ -671,6 +675,7 @@ mod tests {
     #[test]
     fn parsed_endpoint_to_response_with_body() {
         let parsed = openapi_parser::ParsedEndpoint {
+            source_operation_id: Some("create_user".into()),
             name: "create_user".into(),
             description: None,
             method: "POST".into(),
@@ -679,6 +684,7 @@ mod tests {
             request_body_schema: Some(serde_json::json!({"type": "object"})),
             request_content_type: Some("application/json".into()),
             request_body_required: true,
+            response: Default::default(),
         };
         let resp = parsed_endpoint_to_response(parsed);
         assert_eq!(resp.name, "create_user");
