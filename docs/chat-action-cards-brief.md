@@ -146,8 +146,19 @@ Validated server-side (violations → 400 or a rejected continuation):
 - Response is SSE, same as a text turn: the continuation **starts a new turn** that streams
   the assistant's follow-up. Run it through the exact same stream-consumption path as
   `sendMessage` (`streamTurn`), including retry budget, watchdog and cursor handling.
-  Reason codes you may see on rejection: `NYXID_ACTION_CONTINUATION_INVALID`,
-  `NYXID_ACTION_CONTINUATION_CONFLICT`, `NYXID_ACTION_CONTINUATION_ACTIVE_TURN`.
+- **Rejection signalling (corrected 2026-07-29 after adversarial review).** The admission
+  reason codes (`NYXID_ACTION_CONTINUATION_{INVALID,CONFLICT,ACTIVE_TURN}`) **never appear
+  on the continuation stream**: a rejected admission is published as a
+  `nyxid.continuation.changed` CUSTOM frame on the *origin* turn's session
+  (`NyxIdChatProjectionSession` gates `BuildContinuationChanged` on
+  `admission.OriginTurnId == context.SessionId`, and the continuation stream's session is
+  the continuation turn id). The client only ever observes a generic terminal
+  (`STREAM_TIMEOUT`, `PROJECTION_UNAVAILABLE`, `ACTOR_NOT_FOUND`, `COMMAND_START_FAILED`)
+  or a stall that trips the local watchdog. Client rule: a report batch is settled only by
+  a real terminal (`RUN_FINISHED` / `RUN_STOPPED`, or reaching an approval gate — proof
+  the continuation turn ran); **any** error terminal or stall requeues the batch under the
+  same `clientRequestId` for retry at next idle. An earlier revision of this section
+  implied the reason codes arrive as run-error codes — that was wrong.
 
 ### 2.3 Deployment note (put in the PR description verbatim)
 
