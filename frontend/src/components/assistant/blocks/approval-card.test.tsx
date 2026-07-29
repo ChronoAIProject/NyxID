@@ -76,6 +76,8 @@ describe("ApprovalCard", () => {
     expect(card).toHaveClass("border-border", "bg-card");
     expect(card?.className).not.toContain("warning");
     expect(card?.querySelector('[class*="warning"]')).toBeNull();
+    expect(card?.firstElementChild).toHaveClass("bg-info");
+    expect(screen.getByText("Pending")).toBeInTheDocument();
     expect(screen.getByText("Scope")).toBeInTheDocument();
     expect(screen.getByText("lark-bot")).toBeInTheDocument();
     expect(screen.getByText("nyxid_ag_...7f3d")).toBeInTheDocument();

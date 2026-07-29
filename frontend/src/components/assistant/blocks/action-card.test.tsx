@@ -88,6 +88,7 @@ describe("ActionCard", () => {
     expect(card).toHaveClass("border-border", "bg-card");
     expect(card?.className).not.toContain("warning");
     expect(card?.querySelector('[class*="warning"]')).toBeNull();
+    expect(card?.firstElementChild).toHaveClass("bg-nyx-secondary-400");
     expect(screen.getByText("repo")).toBeInTheDocument();
     expect(screen.getByText("Node node-1")).toBeInTheDocument();
     expect(screen.getByText("Org org-1")).toBeInTheDocument();

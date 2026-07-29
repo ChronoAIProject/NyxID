@@ -202,9 +202,10 @@ export function ApprovalCard({
 
   return (
     <section className="overflow-hidden rounded-xl border border-border bg-card shadow-sm">
+      <div aria-hidden="true" className="h-[3px] bg-info" />
       <div className="flex items-start gap-3 border-b border-border px-4 py-3.5">
-        <div className="flex h-8 w-8 shrink-0 items-center justify-center rounded-lg border border-border bg-muted">
-          <ShieldAlert className="h-4 w-4 text-muted-foreground" />
+        <div className="flex h-8 w-8 shrink-0 items-center justify-center rounded-lg border border-info/30 bg-info/10">
+          <ShieldAlert className="h-4 w-4 text-info" />
         </div>
         <div className="min-w-0 flex-1">
           <h3 className="text-[13px] font-semibold text-foreground">
@@ -214,16 +215,19 @@ export function ApprovalCard({
             Review the destination and access scope before this action runs.
           </p>
         </div>
-        <span
-          className={`flex shrink-0 items-center gap-1 pt-0.5 font-mono text-[10px] ${
-            expired || urgent
-              ? "font-semibold text-destructive"
-              : "text-muted-foreground"
-          }`}
-        >
-          <Clock3 className="h-3 w-3" />
-          {remainingLabel(remainingMs)}
-        </span>
+        <div className="flex shrink-0 flex-col items-end gap-1.5">
+          <Badge variant="info">Pending</Badge>
+          <span
+            className={`flex items-center gap-1 font-mono text-[10px] ${
+              expired || urgent
+                ? "font-semibold text-destructive"
+                : "text-muted-foreground"
+            }`}
+          >
+            <Clock3 className="h-3 w-3" />
+            {remainingLabel(remainingMs)}
+          </span>
+        </div>
       </div>
 
       <div className="px-4 py-3.5">
