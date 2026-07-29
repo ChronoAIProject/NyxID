@@ -334,6 +334,8 @@ export interface ServiceCapabilities {
 export interface ServiceBilling {
   /** Admin opt-in: only platform_billable services charge wallet credits. */
   readonly platform_billable?: boolean;
+  /** Admin-selected metering unit; unset falls back to the slug heuristic. */
+  readonly platform_metric?: string;
   readonly resale_billable?: boolean;
   readonly resale_metric?: string;
   readonly lago_resale_metric_code?: string | null;
