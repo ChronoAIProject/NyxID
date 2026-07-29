@@ -661,10 +661,12 @@ async fn load_user_tools_inner(
     // Collect catalog IDs and slugs from *executable* user services for dedup
     let executable_catalog_ids: HashSet<&str> = all_user_services
         .iter()
+        .filter(|r| r.executable)
         .filter_map(|r| r.service.catalog_service_id.as_deref())
         .collect();
     let executable_slugs: HashSet<&str> = all_user_services
         .iter()
+        .filter(|r| r.executable)
         .map(|r| r.service.slug.as_str())
         .collect();
 
@@ -4045,6 +4047,93 @@ mod tests {
         assert_eq!(unavailable["executable"], false);
         assert_eq!(unavailable["source"], "user_service");
         assert_eq!(unavailable["is_generic_proxy"], true);
+    }
+
+    #[tokio::test]
+    async fn unavailable_unpinned_user_service_does_not_shadow_executable_platform_route() {
+        let Some(db) = connect_test_database("mcp_non_executable_dedup").await else {
+            eprintln!("skipping MCP dedup test: no local MongoDB available");
+            return;
+        };
+
+        let user_id = uuid::Uuid::new_v4().to_string();
+        let platform_id = uuid::Uuid::new_v4().to_string();
+        let user_service_id = uuid::Uuid::new_v4().to_string();
+        let user_endpoint_id = uuid::Uuid::new_v4().to_string();
+        let slug = "competing-route";
+
+        let mut platform = dummy_service();
+        platform.id = platform_id.clone();
+        platform.name = "Executable Platform Route".to_string();
+        platform.slug = slug.to_string();
+        db.collection::<DownstreamService>(DOWNSTREAM_SERVICES)
+            .insert_one(platform)
+            .await
+            .expect("insert platform service");
+
+        db.collection::<ServiceEndpoint>(SERVICE_ENDPOINTS)
+            .insert_one(ServiceEndpoint {
+                id: uuid::Uuid::new_v4().to_string(),
+                service_id: platform_id.clone(),
+                name: "status".to_string(),
+                description: Some("Get status".to_string()),
+                method: "GET".to_string(),
+                path: "/status".to_string(),
+                parameters: None,
+                request_body_schema: None,
+                request_content_type: None,
+                request_body_required: false,
+                response_description: None,
+                response: OperationResponseContract::default(),
+                is_active: true,
+                created_at: chrono::Utc::now(),
+                updated_at: chrono::Utc::now(),
+            })
+            .await
+            .expect("insert platform endpoint");
+
+        db.collection::<UserEndpoint>(USER_ENDPOINTS)
+            .insert_one(test_user_endpoint(
+                &user_endpoint_id,
+                &user_id,
+                "Unavailable User Route",
+                "https://unavailable.example.com",
+                None,
+                Some(&platform_id),
+            ))
+            .await
+            .expect("insert user endpoint");
+        let mut user_service = test_user_service(
+            &user_service_id,
+            &user_id,
+            slug,
+            &user_endpoint_id,
+            Some(&platform_id),
+            None,
+        );
+        user_service.auth_method = "bearer".to_string();
+        db.collection::<UserService>(USER_SERVICES)
+            .insert_one(user_service)
+            .await
+            .expect("insert unavailable user service");
+
+        let catalog = load_operation_catalog(
+            &db,
+            &NodeWsManager::new(30, 100),
+            &user_id,
+            NodeScope::Unrestricted,
+            ServiceScope::Unrestricted,
+        )
+        .await
+        .expect("load operation catalog");
+
+        assert_eq!(catalog.services.len(), 1);
+        assert_eq!(catalog.services[0].service_id, platform_id);
+        assert!(matches!(
+            catalog.services[0].source,
+            McpToolSource::Platform { .. }
+        ));
+        assert_eq!(catalog.diagnostics.unavailable_services, 1);
     }
 
     #[tokio::test]
