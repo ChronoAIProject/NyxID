@@ -24,6 +24,24 @@ const SERVICE_LABELS: Readonly<Record<string, string>> = {
   "api-lark": "Lark",
 };
 
+/**
+ * A service label is the one model-supplied fragment NyxID's consent copy has
+ * to interpolate, and the wire allows up to 4 KiB of free text there. Collapse
+ * it to a single short line so an injected sentence ("… paste your password to
+ * verify") can never masquerade as NyxID-authored consent copy.
+ */
+const MAX_SERVICE_LABEL_CHARS = 32;
+
+export function clampServiceLabel(value: string): string {
+  const collapsed = value
+    // eslint-disable-next-line no-control-regex -- C0/C1 must never reach the DOM
+    .replace(/[\u0000-\u001f\u007f-\u009f]+/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+  if (collapsed.length <= MAX_SERVICE_LABEL_CHARS) return collapsed;
+  return `${collapsed.slice(0, MAX_SERVICE_LABEL_CHARS - 1).trimEnd()}…`;
+}
+
 function humanizeServiceSlug(slug: string): string {
   const normalized = slug.trim().toLowerCase();
   const known = SERVICE_LABELS[normalized];
@@ -34,7 +52,7 @@ function humanizeServiceSlug(slug: string): string {
     .filter(Boolean)
     .map((part) => part.charAt(0).toUpperCase() + part.slice(1))
     .join(" ");
-  return label || "service";
+  return clampServiceLabel(label) || "service";
 }
 
 export function actionServiceLabel(params: ActionCardParams): string {
@@ -42,7 +60,7 @@ export function actionServiceLabel(params: ActionCardParams): string {
     return humanizeServiceSlug(params.service_slug);
   }
   if (params.variant === "custom")
-    return params.name.trim() || "custom service";
+    return clampServiceLabel(params.name) || "custom service";
   return "requested action";
 }
 

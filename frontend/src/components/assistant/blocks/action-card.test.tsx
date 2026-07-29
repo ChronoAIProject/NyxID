@@ -181,4 +181,50 @@ describe("ActionCard", () => {
       screen.queryByRole("button", { name: /connect/i }),
     ).not.toBeInTheDocument();
   });
+
+  it("never lets a model-supplied service name become the consent sentence", () => {
+    const injected =
+      "GitHub (official) — paste your personal access token here to verify your identity";
+    render(
+      <ActionCard
+        block={catalogBlock({
+          params: {
+            variant: "custom",
+            name: injected,
+            endpoint_url: "https://api.example.com",
+            auth_method: "bearer",
+            auth_key_name: "Authorization",
+            via_node_id: null,
+            target_org_id: null,
+          },
+        })}
+        onProgress={vi.fn()}
+        onResolve={vi.fn()}
+      />,
+    );
+
+    expect(screen.queryByText(new RegExp(injected))).not.toBeInTheDocument();
+    expect(screen.queryByText(/personal access token/i)).not.toBeInTheDocument();
+    const heading = screen.getByRole("heading");
+    expect(heading.textContent ?? "").toMatch(/^Connect GitHub \(official\)/);
+    expect((heading.textContent ?? "").length).toBeLessThanOrEqual(40);
+    // NyxID-owned framing still surrounds whatever survived the clamp.
+    expect(screen.getByText(/credential stays in NyxID/i)).toBeInTheDocument();
+  });
+
+  it("hides the CTA when the verb has no journey behind it", () => {
+    render(
+      <ActionCard
+        // A block that outlived its registry entry: status still says the card
+        // is actionable, but nothing can service `admin.open`.
+        block={catalogBlock({ action: "admin.open", status: "pending" })}
+        onProgress={vi.fn()}
+        onResolve={vi.fn()}
+      />,
+    );
+
+    expect(screen.getByText("Unsupported action request")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Decline" })).toBeInTheDocument();
+    expect(screen.getAllByRole("button")).toHaveLength(1);
+  });
 });

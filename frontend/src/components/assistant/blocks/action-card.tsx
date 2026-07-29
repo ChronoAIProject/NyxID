@@ -14,6 +14,7 @@ import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import {
   actionServiceLabel,
+  clampServiceLabel,
   descriptorForAction,
 } from "@/lib/assistant/action-registry";
 import type { ActionReport } from "@/schemas/assistant-actions";
@@ -50,9 +51,9 @@ function ParameterSummary({
           Service
         </span>
         <Badge variant="secondary">
-          {params.variant === "catalog"
-            ? params.service_slug
-            : params.name || "Custom"}
+          {clampServiceLabel(
+            params.variant === "catalog" ? params.service_slug : params.name,
+          ) || "Custom"}
         </Badge>
         {endpointHost ? (
           <Badge variant="secondary">
@@ -75,14 +76,16 @@ function ParameterSummary({
       ) : null}
       {params.via_node_id || params.target_org_id ? (
         <div className="flex flex-wrap items-center gap-1.5">
+          {/* Ids are wire-supplied and only length-capped at 256 chars, so they
+              stay inside the card instead of widening the chat column. */}
           {params.via_node_id ? (
-            <Badge variant="info" className="font-mono">
+            <Badge variant="info" className="max-w-full truncate font-mono">
               <Server className="mr-1 h-3 w-3" />
               Node {params.via_node_id}
             </Badge>
           ) : null}
           {params.target_org_id ? (
-            <Badge variant="secondary" className="font-mono">
+            <Badge variant="secondary" className="max-w-full truncate font-mono">
               Org {params.target_org_id}
             </Badge>
           ) : null}
@@ -156,7 +159,10 @@ export function ActionCard({ block, onProgress, onResolve }: ActionCardProps) {
     return <Receipt block={block} />;
   }
 
-  const unsupported = block.status === "unsupported";
+  // Trust the descriptor too: a card whose verb has no journey behind it must
+  // never render a CTA, whatever status the block carries.
+  const unsupported =
+    block.status === "unsupported" || descriptor.risk === "unsupported";
   const busy = block.status === "in_progress";
   const params = block.params;
 
