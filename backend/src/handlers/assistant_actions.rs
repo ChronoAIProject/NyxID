@@ -398,7 +398,6 @@ mod tests {
                 .and_then(|value| value.to_str().ok()),
             Some("application/json")
         );
-        assert!(response.headers().get(header::CACHE_CONTROL).is_none());
         let body = to_bytes(response.into_body(), MAXIMUM_REGISTRY_BYTES)
             .await
             .unwrap();

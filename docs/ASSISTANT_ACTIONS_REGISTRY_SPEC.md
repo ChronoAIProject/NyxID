@@ -161,9 +161,12 @@ host's set is a startup-crash for that host (see §6).
   `serde_json::json!` into a `LazyLock<String>` (or `OnceLock`) and expose
   `pub fn manifest_body() -> &'static str` so tests can call it directly — this makes the
   build-once claim observable instead of inferred. Serve with
-  `Content-Type: application/json`. No cache headers: the consumer fetches once at startup and
-  the security-headers middleware adds `Pragma: no-cache` unconditionally, so a `Cache-Control`
-  here would just be internally inconsistent noise.
+  `Content-Type: application/json`. The handler sets no cache headers; in production the global
+  security-headers middleware (`main.rs` response wrapper) adds
+  `Cache-Control: no-store, no-cache, must-revalidate` and `Pragma: no-cache` to any response
+  that omits them, and that default is acceptable here — the consumer fetches exactly once at
+  startup and never caches, so a path-specific carve-out would be complexity for zero functional
+  gain. Do not assert cache-header absence in tests that bypass that wrapper.
 - Always `200 OK`. There is no error path.
 
 ### 3.3 Content constants
