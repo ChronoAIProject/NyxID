@@ -25,6 +25,7 @@ sessionStorage.removeItem("nyxid_chunk_reload");
 // device-code login and preserves `?user_code=...`.
 function isPublicPath(path: string): boolean {
   return (
+    (import.meta.env.DEV && path === "/design/action-cards") ||
     path === "/" ||
     path === "/login" ||
     path === "/register" ||

@@ -175,6 +175,7 @@ function makeReconnectKey(overrides: Partial<KeyInfo> = {}): KeyInfo {
 
 beforeEach(() => {
   vi.clearAllMocks();
+  window.history.replaceState({}, "", "/");
   catalog.entries = [OPENAI_ENTRY];
   createKeyMutateAsync.mockResolvedValue({ id: "created-service-1" });
   initiateOAuthMutateAsync.mockResolvedValue({
@@ -458,6 +459,45 @@ describe("AddKeyDialog — platform one-click path (credential_mode=both)", () =
     expect(
       screen.queryByText(/Setup GitHub credentials/i),
     ).not.toBeInTheDocument();
+  });
+
+  it("advances the managed OAuth path to verify inside dev mock mode", async () => {
+    window.history.replaceState({}, "", "/design/action-cards?mock");
+    catalog.entries = [PLATFORM_OAUTH_ENTRY];
+    createKeyMutateAsync.mockResolvedValue({
+      id: "mock-user-service",
+      slug: "github-action-demo",
+    });
+    const onSuccess = vi.fn();
+    const user = userEvent.setup();
+    render(
+      <AddKeyDialog
+        open
+        onOpenChange={vi.fn()}
+        prefillSlug="api-github"
+        onSuccess={onSuccess}
+      />,
+    );
+
+    await user.click(
+      await screen.findByRole("button", { name: "Next: Connect" }),
+    );
+    await user.click(
+      screen.getByRole("button", { name: "Connect with GitHub" }),
+    );
+
+    expect(
+      await screen.findByRole("heading", {
+        name: /Service.*GitHub.*connected/i,
+      }),
+    ).toBeInTheDocument();
+    expect(initiateOAuthMutateAsync).not.toHaveBeenCalled();
+    expect(mockHardRedirect).not.toHaveBeenCalled();
+
+    await user.click(screen.getByRole("button", { name: "Maybe later" }));
+    expect(onSuccess).toHaveBeenCalledWith({
+      userServiceId: "mock-user-service",
+    });
   });
 
   it("hides the OAuth-client choice and goes to the BYO form when platform credentials are absent", async () => {

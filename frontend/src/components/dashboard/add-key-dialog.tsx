@@ -1393,11 +1393,19 @@ function entryOffersClientSourceChoice(entry: CatalogEntry): boolean {
   );
 }
 
+function isDevMockMode(): boolean {
+  return (
+    import.meta.env.DEV &&
+    new URLSearchParams(window.location.search).has("mock")
+  );
+}
+
 function OAuthStep({
   catalogEntry,
   ensureKey,
   onKeyCleared,
   onBack,
+  onComplete,
   platformScopeAllowlist,
   targetOrgId,
   reconnectMode,
@@ -1408,6 +1416,7 @@ function OAuthStep({
   readonly ensureKey: () => Promise<KeyInfo>;
   readonly onKeyCleared: () => void;
   readonly onBack: () => void;
+  readonly onComplete: (keyId: string) => void;
   /**
    * When this connection rides the shared platform app, the scopes it may
    * request (`platform_scope_allowlist`). Passed only on the platform path so
@@ -1452,6 +1461,13 @@ function OAuthStep({
     let key: KeyInfo | null = null;
     try {
       key = await ensureKey();
+      // The development mock has no external provider callback to return
+      // through. Preserve the real state machine by advancing this same
+      // OAuth step to the shipped verify step after the mock key is created.
+      if (isDevMockMode()) {
+        onComplete(key.id);
+        return;
+      }
       const response = await initiateOAuth.mutateAsync({
         providerId: catalogEntry.provider_config_id,
         redirectPath: `/keys/${key.id}`,
@@ -2910,6 +2926,7 @@ export function AddKeyDialog({
             catalogEntry={selectedEntry}
             ensureKey={ensureAuthKey}
             onKeyCleared={() => setAuthKey(null)}
+            onComplete={handleAuthComplete}
             targetOrgId={targetOrgId}
             reconnectMode={isReconnect}
             grantedScopes={isReconnect ? (reconnectKey?.granted_scopes ?? []) : []}
