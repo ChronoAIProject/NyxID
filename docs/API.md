@@ -2995,7 +2995,7 @@ Forward any HTTP request to a registered downstream service. NyxID resolves the 
 
 **Credential Delegation:** If the service has provider requirements configured, NyxID resolves the user's provider tokens and injects them into the outbound request. Required provider tokens cause the request to fail if missing; optional tokens are silently skipped.
 
-**Delegation Token Injection:** If the service has `inject_delegation_token: true`, NyxID generates a short-lived delegated access token (5-minute TTL) and injects it as the `X-NyxID-Delegation-Token` header. This allows the downstream service to call NyxID APIs (LLM gateway, proxy) on behalf of the user. The token can be refreshed via `POST /api/v1/delegation/refresh` for long-running workflows. See [Token Exchange (Delegated Access)](#token-exchange-delegated-access) for details.
+**Delegation Token Injection:** If the service has `inject_delegation_token: true`, NyxID generates a short-lived delegated access token (5-minute TTL) and injects it as the `X-NyxID-Delegation-Token` header. This allows the downstream service to call NyxID APIs on behalf of the user according to the admin-configured service scope. Proxy and LLM scopes retain their existing behavior; the service-only `account:read` scope adds GET-only management parity with explicit route-class and WebSocket exclusions. Other eligible scopes can be refreshed via `POST /api/v1/delegation/refresh` for long-running workflows, but refresh cannot re-add `account:read`; the service must receive a newly minted token from an eligible invocation. See [Token Exchange (Delegated Access)](#token-exchange-delegated-access) for details.
 
 **Assistant Forward Token (transitional, assistant mount only):** Not a new identity mode. On the `/api/v1/assistant/*` pass-through, a browser session authenticates with a cookie and therefore carries no bearer for `forward_access_token` to forward. While the `aevatar` service row has `forward_access_token: true`, NyxID mints a **delegated access token** for the session user (the same `delegated: true` capability token described under Delegation Token Injection, scoped `proxy`, 5-minute TTL, `act.sub = "aevatar"`) and sends it as `Authorization: Bearer` alongside the standard identity headers above (which flow unchanged). Aevatar reuses that bearer to call NyxID's LLM/proxy routes on the user's behalf; because it is a delegated token, `reject_delegated_tokens` keeps a leaked copy off every account-management, admin, and key surface while the proxy/LLM routes accept it. It is delivered in `Authorization` rather than `X-NyxID-Delegation-Token` only because Aevatar's currently deployed validator reads `Authorization`. Unlike identity/delegation *injection* (which log and continue on generation failure), a mint failure fails the assistant request: the token is required authentication for the downstream today. Flipping the row to `forward_access_token: false` (the identity-token rollout, with `inject_delegation_token: true`) retires this Authorization mint and hands over to the standard `X-NyxID-Delegation-Token` header with no code change.
 
@@ -3673,7 +3673,7 @@ NyxID supports [RFC 8693 OAuth 2.0 Token Exchange](https://tools.ietf.org/html/r
 
 #### POST /oauth/token (token-exchange grant)
 
-Exchange a user's access token for a short-lived delegated access token. The delegated token can be used as a Bearer token at NyxID's proxy and LLM gateway endpoints.
+Exchange a user's access token for a short-lived delegated access token. The delegated token can be used as a Bearer token at NyxID's proxy and LLM gateway endpoints. Separately, service-issued delegated tokens may carry `account:read` for read-only management parity as described below.
 
 **Auth:** None (client authenticates via `client_id` and `client_secret` in the request body)
 
@@ -3701,6 +3701,9 @@ Exchange a user's access token for a short-lived delegated access token. The del
 | `proxy:*`          | All proxy endpoints (`/api/v1/proxy/{service_id}/{*path}`)      |
 | `proxy:{service_id}` | A specific service's proxy endpoint                           |
 | `llm:status`       | Read-only access to LLM status endpoint                        |
+| `account:read`     | GET-only access to the user's existing management resources, subject to route-class and WebSocket exclusions |
+
+`account:read` is service-issued only. It may be configured on an admin-managed downstream or user-service row, but OAuth clients cannot include it in `delegation_scopes`, request it through RFC 8693 token exchange, or regain it during delegation refresh. The scope preserves each endpoint's existing personal and organization ACLs, never authorizes management writes, and does not permit admin, auth/provisioning, credential-delivery, execution, streaming, or WebSocket route classes.
 
 **Response (200):**
 

@@ -56,6 +56,7 @@ Strict separation: `handlers/` -> `services/` -> `models/`
 - Middleware: rate limiting (`mw/rate_limit.rs`), security headers (`mw/security_headers.rs`), JWT auth (`mw/auth.rs`)
 - Audit logs are tamper-evident for new rows via HMAC-SHA256 hash chaining (`services/audit_chain_service.rs`): new `AuditLog` rows must set `seq`, `prev_hash`, `entry_hash` through the audit service append path; legacy rows without `seq` count as pre-chain, not backfilled. `AUDIT_CHAIN_HMAC_KEY` is an optional 64-hex override; otherwise the key is domain-derived from `ENCRYPTION_KEY` or the JWT private key. v1 does not detect tail truncation without external head anchoring.
 - Anonymous catalog endpoints may be enabled only when the service has `identity_propagation_mode = "none"`, `forward_access_token = false`, and `inject_delegation_token = false` (disabled draft rules may be stored on any service); violating admin writes return `AppError::AnonymousIncompatibleService` (400, code 11100). Public execution still force-strips identity propagation, access-token forwarding, delegation-token injection, and downstream auth defaults as defense in depth.
+- Delegated management parity requires the exact `account:read` scope, `GET`, a non-WebSocket request, and a route outside the deny classes in `mw/auth.rs`; the verified `AuthUser` extractor is authoritative. New secret-delivering, execution-shaped, streaming, upgrade, or authentication/provisioning protocol GET routes MUST be added to `delegated_read_denied_path` before mounting.
 
 ### 5a. Vendor URN Namespace
 
