@@ -6,6 +6,7 @@ use crate::crypto::jwt::{self, DELEGATED_TOKEN_TTL_SECS, JwtKeys};
 use crate::errors::{AppError, AppResult};
 use crate::models::oauth_client::{COLLECTION_NAME as OAUTH_CLIENTS, OauthClient};
 use crate::models::user::{COLLECTION_NAME as USERS, User};
+use crate::mw::auth::ACCOUNT_READ_SCOPE;
 use crate::services::{audit_service, consent_service, oauth_service};
 
 /// Result of a successful token exchange.
@@ -275,6 +276,12 @@ fn validate_delegation_scope(
     let requested_scopes: Vec<&str> = requested.split_whitespace().collect();
 
     for scope in &requested_scopes {
+        if *scope == ACCOUNT_READ_SCOPE {
+            return Err(AppError::InvalidScope(format!(
+                "Delegation scope '{}' is reserved for service-issued tokens",
+                scope
+            )));
+        }
         if !allowed.contains(scope) {
             return Err(AppError::InvalidScope(format!(
                 "Delegation scope '{}' is not allowed for this client",
@@ -376,6 +383,94 @@ mod tests {
         let result = validate_delegation_scope("   ", "llm:proxy");
         assert!(result.is_ok());
         assert_eq!(result.unwrap(), "");
+    }
+
+    #[tokio::test]
+    async fn oauth_client_cannot_exchange_or_refresh_account_read() {
+        let Some(db) =
+            crate::test_utils::connect_test_database("token_exchange_reject_account_read").await
+        else {
+            return;
+        };
+        let state = crate::test_utils::test_app_state(db.clone());
+        let user_id = Uuid::new_v4();
+        let client_id = "legacy-account-read-client";
+        let client_secret = "legacy-account-read-secret";
+        let now = Utc::now();
+
+        db.collection::<User>(USERS)
+            .insert_one(crate::test_utils::test_user(
+                &user_id.to_string(),
+                crate::models::user::UserType::Person,
+            ))
+            .await
+            .expect("insert user");
+        db.collection::<OauthClient>(OAUTH_CLIENTS)
+            .insert_one(OauthClient {
+                id: client_id.to_string(),
+                client_name: "Legacy account-read client".to_string(),
+                client_secret_hash: crate::crypto::token::hash_token(client_secret),
+                redirect_uris: vec!["https://example.com/callback".to_string()],
+                allowed_scopes: "openid".to_string(),
+                scope_provenance: Default::default(),
+                grant_types: "authorization_code refresh_token".to_string(),
+                client_type: "confidential".to_string(),
+                is_active: true,
+                delegation_scopes: ACCOUNT_READ_SCOPE.to_string(),
+                default_service_catalog_slugs: Vec::new(),
+                broker_capability_enabled: false,
+                revocation_webhook_url: None,
+                revocation_webhook_secret_encrypted: None,
+                created_by: None,
+                created_at: now,
+                updated_at: now,
+            })
+            .await
+            .expect("insert deliberately altered OAuth client");
+        consent_service::grant_consent(&db, &user_id.to_string(), client_id, "openid")
+            .await
+            .expect("grant consent");
+
+        let subject_token = jwt::generate_access_token(
+            &state.jwt_keys,
+            &state.config,
+            &user_id,
+            "openid",
+            None,
+            None,
+            None,
+            None,
+            None,
+        )
+        .expect("generate direct subject token");
+        let exchange_error = exchange_token(
+            &db,
+            &state.config,
+            &state.jwt_keys,
+            client_id,
+            client_secret,
+            &subject_token,
+            "urn:ietf:params:oauth:token-type:access_token",
+            Some(ACCOUNT_READ_SCOPE),
+        )
+        .await
+        .err()
+        .expect("token exchange must not mint account:read");
+        assert!(matches!(exchange_error, AppError::InvalidScope(_)));
+
+        let refresh_error = refresh_delegation_token(
+            &db,
+            &state.config,
+            &state.jwt_keys,
+            &user_id.to_string(),
+            client_id,
+            ACCOUNT_READ_SCOPE,
+            &jwt::TokenRestrictionClaims::default(),
+        )
+        .await
+        .err()
+        .expect("delegation refresh must not re-add account:read");
+        assert!(matches!(refresh_error, AppError::InvalidScope(_)));
     }
 
     #[test]
@@ -538,7 +633,7 @@ mod tests {
 
         let app = Router::new()
             .route(
-                "/proxy/s/{slug}/{*path}",
+                "/api/v1/proxy/s/{slug}/{*path}",
                 any(crate::handlers::proxy::proxy_request_by_slug),
             )
             .route_layer(axum::Extension(
@@ -551,7 +646,7 @@ mod tests {
             .oneshot(
                 Request::builder()
                     .method(Method::GET)
-                    .uri("/proxy/s/denied-service/status")
+                    .uri("/api/v1/proxy/s/denied-service/status")
                     .header(
                         header::AUTHORIZATION,
                         format!("Bearer {}", exchanged.access_token),
