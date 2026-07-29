@@ -498,7 +498,7 @@ describe("AddKeyDialog — platform one-click path (credential_mode=both)", () =
   });
 
   it("advances the managed OAuth path to verify inside dev mock mode", async () => {
-    window.history.replaceState({}, "", "/design/action-cards?mock");
+    window.history.replaceState({}, "", "/assistant?mock");
     catalog.entries = [PLATFORM_OAUTH_ENTRY];
     catalog.allEntries = [{ ...PLATFORM_OAUTH_ENTRY, slug: "api-github" }];
     createKeyMutateAsync.mockResolvedValue({

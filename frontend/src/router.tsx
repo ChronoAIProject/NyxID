@@ -1,4 +1,4 @@
-import { lazy, Suspense } from "react";
+import { Suspense } from "react";
 import {
   createRouter,
   createRoute,
@@ -313,18 +313,6 @@ const assistantApprovalsRoute = createRoute({
   beforeLoad: assistantBeforeLoad,
   component: () => <AssistantPage view="approvals" />,
 });
-
-const actionCardsDesignRoute = import.meta.env.DEV
-  ? createRoute({
-      path: "/design/action-cards",
-      getParentRoute: () => rootRoute,
-      component: lazy(() =>
-        import("@/pages/assistant-action-cards-gallery").then((module) => ({
-          default: module.AssistantActionCardsGalleryPage,
-        })),
-      ),
-    })
-  : null;
 
 const dashboardLayout = createRoute({
   id: "dashboard",
@@ -853,7 +841,6 @@ const routeTree = rootRoute.addChildren([
   assistantRoute,
   assistantPluginsRoute,
   assistantApprovalsRoute,
-  ...(actionCardsDesignRoute ? [actionCardsDesignRoute] : []),
   designSystemRoute,
   dashboardLayout.addChildren([
     dashboardIndexRoute,
