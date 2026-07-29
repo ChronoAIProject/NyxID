@@ -19,7 +19,11 @@ const {
   mockNavigate,
   toastFns,
 } = vi.hoisted(() => ({
-  catalog: { entries: [] as unknown[] },
+  catalog: {
+    entries: [] as unknown[],
+    allEntries: null as unknown[] | null,
+    requests: [] as boolean[],
+  },
   createKeyMutate: vi.fn(),
   createKeyMutateAsync: vi.fn(),
   // Wave-aha-1 A4+ — the verify step auto-mints an Agent Key. The mock
@@ -37,7 +41,16 @@ const {
 }));
 
 vi.mock("@/hooks/use-keys", () => ({
-  useCatalog: () => ({ data: catalog.entries, isLoading: false }),
+  useCatalog: (options: { readonly includeAll?: boolean } = {}) => {
+    const includeAll = options.includeAll ?? false;
+    catalog.requests.push(includeAll);
+    return {
+      data: includeAll
+        ? (catalog.allEntries ?? catalog.entries)
+        : catalog.entries,
+      isLoading: false,
+    };
+  },
   useCreateKey: () => ({
     mutate: createKeyMutate,
     mutateAsync: createKeyMutateAsync,
@@ -177,6 +190,8 @@ beforeEach(() => {
   vi.clearAllMocks();
   window.history.replaceState({}, "", "/");
   catalog.entries = [OPENAI_ENTRY];
+  catalog.allEntries = null;
+  catalog.requests = [];
   createKeyMutateAsync.mockResolvedValue({ id: "created-service-1" });
   initiateOAuthMutateAsync.mockResolvedValue({
     authorization_url: "https://provider.example/oauth",
@@ -359,13 +374,15 @@ describe("AddKeyDialog — custom endpoint path", () => {
 });
 
 describe("AddKeyDialog — catalog template path", () => {
-  it("falls back from an Aevatar-prefixed catalog slug to the live catalog slug", async () => {
+  it("resolves an action prefill by exact slug from the full catalog", async () => {
     catalog.entries = [OAUTH_ENTRY];
+    catalog.allEntries = [{ ...OAUTH_ENTRY, slug: "api-github" }];
     render(
       <AddKeyDialog
         open
         onOpenChange={vi.fn()}
         prefillSlug="api-github"
+        prefillIncludeAllCatalog
       />,
     );
 
@@ -374,6 +391,27 @@ describe("AddKeyDialog — catalog template path", () => {
         name: "Configure routing for GitHub",
       }),
     ).toBeInTheDocument();
+    expect(catalog.requests).toContain(true);
+  });
+
+  it("stays on the catalog step instead of substituting a slug alias", () => {
+    catalog.entries = [OAUTH_ENTRY];
+    catalog.allEntries = [OAUTH_ENTRY];
+    render(
+      <AddKeyDialog
+        open
+        onOpenChange={vi.fn()}
+        prefillSlug="api-github"
+        prefillIncludeAllCatalog
+      />,
+    );
+
+    expect(
+      screen.getByRole("heading", { name: "Add AI Service" }),
+    ).toBeInTheDocument();
+    expect(
+      screen.queryByRole("heading", { name: "Configure routing for GitHub" }),
+    ).not.toBeInTheDocument();
   });
 
   it("creates a key from a catalog entry, omitting params that match catalog defaults", async () => {
@@ -464,6 +502,7 @@ describe("AddKeyDialog — platform one-click path (credential_mode=both)", () =
   it("advances the managed OAuth path to verify inside dev mock mode", async () => {
     window.history.replaceState({}, "", "/design/action-cards?mock");
     catalog.entries = [PLATFORM_OAUTH_ENTRY];
+    catalog.allEntries = [{ ...PLATFORM_OAUTH_ENTRY, slug: "api-github" }];
     createKeyMutateAsync.mockResolvedValue({
       id: "mock-user-service",
       slug: "github-action-demo",
@@ -475,6 +514,7 @@ describe("AddKeyDialog — platform one-click path (credential_mode=both)", () =
         open
         onOpenChange={vi.fn()}
         prefillSlug="api-github"
+        prefillIncludeAllCatalog
         onSuccess={onSuccess}
       />,
     );
@@ -821,46 +861,56 @@ function minCatalogEntry(
 }
 
 describe("AddKeyDialog → ConnectVerifyStep integration (end-to-end wiring)", () => {
-  it("reports the created UserService id only when the success step is finished", async () => {
-    createKeyMutate.mockImplementation((_params, opts) => {
-      opts?.onSuccess?.({
-        id: "user-service-from-action",
-        slug: "custom-action-service",
+  it(
+    "reports the created UserService id only when the success step is finished",
+    async () => {
+      createKeyMutate.mockImplementation((_params, opts) => {
+        opts?.onSuccess?.({
+          id: "user-service-from-action",
+          slug: "custom-action-service",
+        });
       });
-    });
-    const onOpenChange = vi.fn();
-    const onSuccess = vi.fn();
-    const user = userEvent.setup();
-    render(
-      <AddKeyDialog
-        open
-        onOpenChange={onOpenChange}
-        onSuccess={onSuccess}
-      />,
-    );
+      const onOpenChange = vi.fn();
+      const onSuccess = vi.fn();
+      const user = userEvent.setup();
+      render(
+        <AddKeyDialog
+          open
+          onOpenChange={onOpenChange}
+          onSuccess={onSuccess}
+        />,
+      );
 
-    await user.click(screen.getByRole("button", { name: /Custom Endpoint/i }));
-    await user.click(
-      screen.getByRole("button", { name: /Next: Enter Credentials/i }),
-    );
-    await typeInto(user, "add-key-label", "Action Service");
-    await typeInto(user, "add-key-credential", "obviously-fake-credential");
-    await typeInto(
-      user,
-      "add-key-endpoint",
-      "https://action.example.test/v1",
-    );
-    await user.click(screen.getByRole("button", { name: "Connect Service" }));
+      await user.click(
+        screen.getByRole("button", { name: /Custom Endpoint/i }),
+      );
+      await user.click(
+        screen.getByRole("button", { name: /Next: Enter Credentials/i }),
+      );
+      await typeInto(user, "add-key-label", "Action Service");
+      await typeInto(user, "add-key-credential", "obviously-fake-credential");
+      await typeInto(
+        user,
+        "add-key-endpoint",
+        "https://action.example.test/v1",
+      );
+      await user.click(
+        screen.getByRole("button", { name: "Connect Service" }),
+      );
 
-    expect(onSuccess).not.toHaveBeenCalled();
-    await user.click(await screen.findByRole("button", { name: "Maybe later" }));
+      expect(onSuccess).not.toHaveBeenCalled();
+      await user.click(
+        await screen.findByRole("button", { name: "Maybe later" }),
+      );
 
-    expect(onSuccess).toHaveBeenCalledOnce();
-    expect(onSuccess).toHaveBeenCalledWith({
-      userServiceId: "user-service-from-action",
-    });
-    expect(onOpenChange).toHaveBeenCalledWith(false);
-  });
+      expect(onSuccess).toHaveBeenCalledOnce();
+      expect(onSuccess).toHaveBeenCalledWith({
+        userServiceId: "user-service-from-action",
+      });
+      expect(onOpenChange).toHaveBeenCalledWith(false);
+    },
+    10_000,
+  );
 
   // GLM #8 + Kimi — the intentionally-swallowed createApiKeyMutate
   // in the other tests hides the real dialog → verify-step wiring.

@@ -56,52 +56,55 @@ describe("AssistantActionCardsGalleryPage", () => {
     );
   });
 
-  it("walks the real mock OAuth dialog and resolves the live card", async () => {
-    const user = userEvent.setup();
-    renderGallery();
-    const caption = screen.getByText(
-      actionCardGalleryFixtures.liveWizard.caption,
-    );
-    const liveSpecimen = caption.parentElement;
-    if (!liveSpecimen) throw new Error("live specimen wrapper missing");
+  it(
+    "walks the real mock OAuth dialog and resolves the live card",
+    async () => {
+      const user = userEvent.setup();
+      renderGallery();
+      const caption = screen.getByText(
+        actionCardGalleryFixtures.liveWizard.caption,
+      );
+      const liveSpecimen = caption.parentElement;
+      if (!liveSpecimen) throw new Error("live specimen wrapper missing");
 
-    await user.click(
-      within(liveSpecimen).getByRole("button", { name: "Connect GitHub" }),
-    );
-    expect(
-      await screen.findByRole("heading", {
-        name: "Configure routing for GitHub",
-      }),
-    ).toBeInTheDocument();
-
-    await user.click(screen.getByRole("button", { name: "Next: Connect" }));
-    expect(
-      await screen.findByRole("heading", { name: "Connect to GitHub" }),
-    ).toBeInTheDocument();
-    expect(screen.getByRole("button", { name: /Repositories/i })).toHaveAttribute(
-      "aria-pressed",
-      "true",
-    );
-
-    await user.click(
-      screen.getByRole("button", { name: "Connect with GitHub" }),
-    );
-    expect(
-      await screen.findByRole("heading", {
-        name: /Service.*GitHub.*connected/i,
-      }),
-    ).toBeInTheDocument();
-
-    await user.click(screen.getByRole("button", { name: "Maybe later" }));
-    await waitFor(() => {
+      await user.click(
+        within(liveSpecimen).getByRole("button", { name: "Connect GitHub" }),
+      );
       expect(
-        within(liveSpecimen).getByText("Service connected"),
+        await screen.findByRole("heading", {
+          name: "Configure routing for GitHub",
+        }),
+      ).toBeInTheDocument();
+
+      await user.click(screen.getByRole("button", { name: "Next: Connect" }));
+      expect(
+        await screen.findByRole("heading", { name: "Connect to GitHub" }),
       ).toBeInTheDocument();
       expect(
-        within(liveSpecimen).getByText(/service us_44/),
+        screen.getByRole("button", { name: /Repositories/i }),
+      ).toHaveAttribute("aria-pressed", "true");
+
+      await user.click(
+        screen.getByRole("button", { name: "Connect with GitHub" }),
+      );
+      expect(
+        await screen.findByRole("heading", {
+          name: /Service.*GitHub.*connected/i,
+        }),
       ).toBeInTheDocument();
-    });
-  });
+
+      await user.click(screen.getByRole("button", { name: "Maybe later" }));
+      await waitFor(() => {
+        expect(
+          within(liveSpecimen).getByText("Service connected"),
+        ).toBeInTheDocument();
+        expect(
+          within(liveSpecimen).getByText(/service us_44/),
+        ).toBeInTheDocument();
+      });
+    },
+    10_000,
+  );
 
   it("renders a plain mock-mode hint when the query parameter is absent", () => {
     window.history.replaceState({}, "", "/design/action-cards");

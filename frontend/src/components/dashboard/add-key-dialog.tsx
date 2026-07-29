@@ -2302,6 +2302,7 @@ export function AddKeyDialog({
   open,
   onOpenChange,
   prefillSlug,
+  prefillIncludeAllCatalog = false,
   prefillNodeId,
   prefillTargetOrgId,
   prefillCustom,
@@ -2318,6 +2319,8 @@ export function AddKeyDialog({
    * generic catalog grid and have to hunt for the right entry.
    */
   readonly prefillSlug?: string;
+  /** Action cards use the unfiltered catalog for exact slug resolution. */
+  readonly prefillIncludeAllCatalog?: boolean;
   /** Optional routing defaults supplied by an assistant browser action. */
   readonly prefillNodeId?: string;
   readonly prefillTargetOrgId?: string;
@@ -2328,7 +2331,9 @@ export function AddKeyDialog({
   readonly onSuccess?: (result: AddKeyDialogCompletion) => void;
 }) {
   const createKey = useCreateKey();
-  const { data: catalogEntries } = useCatalog();
+  const { data: catalogEntries } = useCatalog({
+    includeAll: prefillIncludeAllCatalog,
+  });
   const [step, setStep] = useState<WizardStep>("catalog");
   const [selectedEntry, setSelectedEntry] = useState<CatalogEntry | null>(null);
   const [form, setForm] = useState<FormState>(INITIAL_FORM);
@@ -2445,10 +2450,7 @@ export function AddKeyDialog({
     if (!open || !prefillSlug || !catalogEntries) return;
     if (isReconnect) return;
     if (appliedPrefillRef.current === prefillSlug) return;
-    const fallbackSlug = prefillSlug.replace(/^(api|llm)-/, "");
-    const match =
-      catalogEntries.find((e) => e.slug === prefillSlug) ??
-      catalogEntries.find((e) => e.slug === fallbackSlug);
+    const match = catalogEntries.find((entry) => entry.slug === prefillSlug);
     if (!match) return;
     appliedPrefillRef.current = prefillSlug;
     // eslint-disable-next-line react-hooks/set-state-in-effect -- prefill selection is guarded to run once per slug

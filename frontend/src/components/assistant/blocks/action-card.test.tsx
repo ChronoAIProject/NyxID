@@ -13,12 +13,14 @@ vi.mock("@/components/dashboard/add-key-dialog", () => ({
     open,
     onOpenChange,
     prefillSlug,
+    prefillIncludeAllCatalog,
     prefillCustom,
     onSuccess,
   }: {
     readonly open: boolean;
     readonly onOpenChange: (open: boolean) => void;
     readonly prefillSlug?: string;
+    readonly prefillIncludeAllCatalog?: boolean;
     readonly prefillCustom?: { readonly name?: string };
     readonly onSuccess?: (result: { readonly userServiceId: string }) => void;
   }) =>
@@ -26,6 +28,7 @@ vi.mock("@/components/dashboard/add-key-dialog", () => ({
       <div
         role="dialog"
         data-prefill={prefillSlug ?? prefillCustom?.name ?? ""}
+        data-prefill-include-all={String(prefillIncludeAllCatalog ?? false)}
       >
         <button
           type="button"
@@ -108,6 +111,10 @@ describe("ActionCard", () => {
     expect(screen.getByRole("dialog")).toHaveAttribute(
       "data-prefill",
       "api-github",
+    );
+    expect(screen.getByRole("dialog")).toHaveAttribute(
+      "data-prefill-include-all",
+      "true",
     );
 
     await user.click(

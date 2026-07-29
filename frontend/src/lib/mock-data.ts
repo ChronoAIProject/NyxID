@@ -1311,6 +1311,13 @@ function findBySlug<T extends { slug: string }>(items: readonly T[], slug: strin
   return items.find((item) => item.slug === slug);
 }
 
+const MOCK_FULL_CATALOG = (() => {
+  const github = findBySlug(MOCK_CATALOG, "github");
+  return github
+    ? [...MOCK_CATALOG, { ...github, slug: "api-github" }]
+    : MOCK_CATALOG;
+})();
+
 // ── Dynamic endpoint resolver ──
 type MockHandler = (path: string) => unknown | undefined;
 
@@ -1568,7 +1575,14 @@ export function getMockResponse(
   method = "GET",
   body?: unknown,
 ): unknown | undefined {
-  const path = endpoint.split("?")[0] ?? endpoint;
+  const [path = endpoint, query = ""] = endpoint.split("?", 2);
+  if (
+    method === "GET" &&
+    path === "/catalog" &&
+    new URLSearchParams(query).get("include_all") === "true"
+  ) {
+    return { entries: MOCK_FULL_CATALOG };
+  }
   if (method === "POST" && path === "/keys") {
     const request =
       typeof body === "object" && body !== null

@@ -298,6 +298,7 @@ export function ActionCard({ block, onProgress, onResolve }: ActionCardProps) {
           prefillSlug={
             params.variant === "catalog" ? params.service_slug : undefined
           }
+          prefillIncludeAllCatalog={params.variant === "catalog"}
           prefillNodeId={
             params.variant === "unknown"
               ? undefined
