@@ -1,7 +1,7 @@
 use axum::{
     Json,
     body::Body,
-    extract::{FromRequestParts, Path, Query, State, ws::WebSocketUpgrade},
+    extract::{FromRequestParts, OriginalUri, Path, Query, State, ws::WebSocketUpgrade},
     http::{Method, Request, StatusCode},
     response::{IntoResponse, Response},
 };
@@ -528,6 +528,7 @@ async fn proxy_request_inner(
     request: Request<Body>,
     resolved_slug: &mut String,
 ) -> AppResult<Response> {
+    validate_original_proxy_request_path(&request)?;
     auth_user.ensure_rest_proxy_access()?;
 
     let user_id_str = auth_user.proxy_resolution_user_id();
@@ -741,6 +742,7 @@ async fn proxy_request_by_slug_inner(
     request: Request<Body>,
     resolved_slug: &mut String,
 ) -> AppResult<Response> {
+    validate_original_proxy_request_path(&request)?;
     auth_user.ensure_rest_proxy_access()?;
 
     let user_id_str = auth_user.proxy_resolution_user_id();
@@ -876,6 +878,17 @@ async fn proxy_request_by_slug_inner(
         .await?;
     let service = proxy_service::resolve_service_by_slug(&state.db, slug).await?;
     execute_proxy(state, auth_user, &service.id, path, request, resolved_slug).await
+}
+
+/// Axum decodes wildcard captures before handlers receive them. Validate the
+/// original encoded URI as well so an encoded separator cannot disappear
+/// before `validate_requested_proxy_path` runs on the captured suffix.
+fn validate_original_proxy_request_path(request: &Request<Body>) -> AppResult<()> {
+    let path = request
+        .extensions()
+        .get::<OriginalUri>()
+        .map_or_else(|| request.uri().path(), |uri| uri.path());
+    proxy_service::validate_requested_proxy_path(path)
 }
 
 /// ANY /api/v1/proxy/:service_id (no trailing path)
