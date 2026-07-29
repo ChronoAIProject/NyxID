@@ -282,7 +282,12 @@ against duplicate resolution calls.
 - `failed`: compact red `Connection failed` receipt.
 
 Receipts show only a safe outcome note and clamped service label. Secrets and
-full credential-bearing URLs are forbidden in cards, reports, logs, and tests.
+full credential-bearing URLs are forbidden in assistant action/control
+surfaces: action cards, `action.continue` bodies, receipts, action-related logs,
+and their fixtures. This invariant does not inspect or sanitize ordinary chat
+text. A user can paste a secret into a prompt by design; whether chat should add
+DLP is an open product decision, not a protection silently provided by this
+frontend.
 
 ## 9. Transport and lifecycle boundaries
 
@@ -349,8 +354,13 @@ The active turn is conversation-scoped. The composer and Stop action reflect
 update the same thread reducer and preserve cursor monotonicity.
 
 Action cards currently live in the in-memory conversation projection. Aevatar
-history is text-only, so action cards are not rehydrated after reload. The next
-text turn allows the server to re-emit a still-pending action idempotently.
+history is text-only, so action cards are not rehydrated after reload. Live v4
+emits action frames only from newly committed `ActionRequested` events, while a
+same-ID `CommitRequest` returns `NoCommit`; sending another text turn therefore
+does not re-emit the lost pending card. Restoring pending actions after reload
+requires a follow-up: either Aevatar must replay durable pending requests into
+new sessions, or NyxID must persist and rehydrate action cards. Neither exists
+today.
 
 ## 10. Mock and demo contract
 
@@ -795,4 +805,3 @@ with zero console errors; all §19.3 specimens visible in both themes at 1440px 
 390px; the CTA opens the real dialog and a completed walk flips the card to its real
 completed receipt; `npm run build`, `npm run test`, `npm run lint` green; route absent
 from prod build output.
-

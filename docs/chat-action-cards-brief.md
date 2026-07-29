@@ -256,8 +256,11 @@ All paths relative to `frontend/src`.
 
 ## 5. Hard rules
 
-1. **Never** put a secret, token, credential, or full URL-with-credentials in a card,
-   a continue body, a log line, or a test fixture beyond obviously-fake values.
+1. **Never** put a secret, token, credential, or full URL-with-credentials in an
+   action/control payload or presentation: cards, continue bodies, receipts,
+   action-related logs, or their test fixtures beyond obviously-fake values. This
+   invariant does not inspect ordinary chat text; users can paste secrets into chat by
+   design. Chat-text DLP is an open product decision, not a frontend guarantee.
 2. Aevatar's DTO **rejects unknown members** — construct outbound bodies from explicit
    object literals, not spreads of larger objects. Add a test asserting the exact key set.
 3. Do not break existing flows: approvals, connect-card (`nyxid.authorization.required`),
@@ -289,8 +292,11 @@ All paths relative to `frontend/src`.
 
 - No backend action registry (`GET /api/v1/assistant/actions`) — separate task.
 - No NyxID backend `/stream` validation changes (passthrough already forwards the body).
-- No card persistence/rehydration across reload: history is text-only today. A reloaded,
-  stuck conversation self-heals because the user's next text turn leads Aevatar to
-  re-emit the pending action idempotently. Document this in the PR.
+- No card persistence/rehydration across reload: history is text-only today. Live v4
+  emits frames only for newly committed `ActionRequested` events, and a same-ID
+  `CommitRequest` returns `NoCommit`, so the user's next text turn does **not** re-emit a
+  pending card lost on reload. Recovery requires a follow-up: either Aevatar replays
+  durable pending requests into new sessions, or NyxID persists and rehydrates cards.
+  Neither exists today; document this limitation in the PR.
 - No standing-grant / remember-me integration; no V2 verb surface; no `admin.open`.
 - No `cancelled`/`expired` dispositions; no scope-widening UI beyond what AddKeyDialog has.
