@@ -2871,6 +2871,10 @@ async fn execute_ssh_command_internal(
 mod tests {
     use super::*;
     use crate::models::approval_grant::{ApprovalGrant, COLLECTION_NAME as APPROVAL_GRANTS};
+    use crate::models::approval_request::{ApprovalRequest, COLLECTION_NAME as APPROVAL_REQUESTS};
+    use crate::models::notification_channel::{
+        COLLECTION_NAME as NOTIFICATION_CHANNELS, NotificationChannel,
+    };
     use crate::models::org_membership::{
         COLLECTION_NAME as ORG_MEMBERSHIPS, OrgMembership, OrgRole,
     };
@@ -2878,9 +2882,22 @@ mod tests {
         ApprovalMode, COLLECTION_NAME as SERVICE_APPROVAL_CONFIGS, ServiceApprovalConfig,
     };
     use crate::models::user::{COLLECTION_NAME as USERS, User, UserType};
+    use crate::models::user_endpoint::{COLLECTION_NAME as USER_ENDPOINTS, UserEndpoint};
     use crate::models::user_service::{COLLECTION_NAME as USER_SERVICES, UserService};
+    use crate::mw::auth::AuthUser;
     use crate::services::mcp_service::{McpToolService, McpToolSource};
-    use crate::test_utils::{connect_test_database, test_membership, test_user, test_user_service};
+    use crate::test_utils::{
+        connect_test_database, test_app_state, test_membership, test_user, test_user_endpoint,
+        test_user_service,
+    };
+    use axum::{
+        Router,
+        body::Body,
+        extract::{Path, State},
+        http::{Method, Request, StatusCode},
+        routing::any,
+    };
+    use tokio::net::TcpListener;
 
     fn api_key_auth(allowed_service_ids: Vec<String>) -> McpAuthContext {
         McpAuthContext {
@@ -3017,14 +3034,29 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn catalog_backed_mcp_target_uses_proxy_approval_identity_and_policy() {
+    async fn catalog_backed_proxy_and_mcp_paths_enforce_the_same_approval_policy() {
         let Some(db) = connect_test_database("mcp_approval_target_parity").await else {
             eprintln!("skipping MCP approval parity test: no local MongoDB available");
             return;
         };
+        let downstream = Router::new().route("/{*path}", any(|| async { StatusCode::OK }));
+        let listener = TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind approval parity downstream");
+        let downstream_url = format!(
+            "http://{}",
+            listener.local_addr().expect("approval parity address")
+        );
+        let server = tokio::spawn(async move {
+            axum::serve(listener, downstream)
+                .await
+                .expect("serve approval parity downstream");
+        });
+
         let actor_id = uuid::Uuid::new_v4().to_string();
         let org_id = uuid::Uuid::new_v4().to_string();
         let user_service_id = uuid::Uuid::new_v4().to_string();
+        let endpoint_id = uuid::Uuid::new_v4().to_string();
         let catalog_service_id = uuid::Uuid::new_v4().to_string();
         let slug = "approval-parity";
         db.collection::<User>(USERS)
@@ -3035,14 +3067,25 @@ mod tests {
             .await
             .unwrap();
         db.collection::<OrgMembership>(ORG_MEMBERSHIPS)
-            .insert_one(test_membership(&org_id, &actor_id, OrgRole::Member, None))
+            .insert_one(test_membership(&org_id, &actor_id, OrgRole::Admin, None))
+            .await
+            .unwrap();
+        db.collection::<UserEndpoint>(USER_ENDPOINTS)
+            .insert_one(test_user_endpoint(
+                &endpoint_id,
+                &org_id,
+                "Approval Parity",
+                &downstream_url,
+                None,
+                Some(&catalog_service_id),
+            ))
             .await
             .unwrap();
         let user_service = test_user_service(
             &user_service_id,
             &org_id,
             slug,
-            &uuid::Uuid::new_v4().to_string(),
+            &endpoint_id,
             Some(&catalog_service_id),
             None,
         );
@@ -3059,13 +3102,50 @@ mod tests {
             node_id: None,
             has_server_credential: true,
         };
-        let auth = McpAuthContext::user(actor_id.clone(), AuthMethod::AccessToken);
-        let target = approval_target_for_tool(&db, &auth, &service)
-            .await
-            .unwrap();
-
-        assert_eq!(target.service_id, catalog_service_id);
-        assert_eq!(target.service_owner_user_id, org_id);
+        let mcp_auth = McpAuthContext::user(actor_id.clone(), AuthMethod::AccessToken);
+        let proxy_auth = AuthUser {
+            user_id: uuid::Uuid::parse_str(&actor_id).unwrap(),
+            session_id: None,
+            scope: "proxy".to_string(),
+            acting_client_id: None,
+            approval_owner_user_id: None,
+            auth_method: AuthMethod::ApiKey,
+            allow_all_services: true,
+            allow_all_nodes: true,
+            allowed_service_ids: vec![],
+            resource_uris: None,
+            allowed_node_ids: vec![],
+            api_key_id: Some(uuid::Uuid::new_v4().to_string()),
+            api_key_name: Some("approval-parity-agent".to_string()),
+            rate_limit_per_second: None,
+            rate_limit_burst: None,
+            ip_address: None,
+            user_agent: None,
+        };
+        let state = test_app_state(db.clone());
+        let operation = operation_descriptor::build_mcp_descriptor("POST", "/items", None);
+        let proxy_request = || {
+            let mut request = Request::builder()
+                .method(Method::POST)
+                .uri(format!("/api/v1/proxy/s/{slug}/items"))
+                .body(Body::empty())
+                .expect("build approval parity proxy request");
+            request.extensions_mut().insert(
+                crate::services::billing::route_inventory::BillingRoutePolicy::Metered(
+                    crate::services::billing::BillingIngress::Proxy,
+                ),
+            );
+            request
+        };
+        let proxy_call = |request| {
+            crate::handlers::proxy::proxy_request_by_slug(
+                State(state.clone()),
+                proxy_auth.clone(),
+                TelemetryContext::default(),
+                Path((slug.to_string(), "items".to_string())),
+                request,
+            )
+        };
 
         let now = chrono::Utc::now();
         let config = ServiceApprovalConfig {
@@ -3084,24 +3164,14 @@ mod tests {
             .insert_one(config)
             .await
             .unwrap();
-        let operation = operation_descriptor::build_mcp_descriptor("POST", "/items", None);
 
-        let auto_allowed = approval_service::evaluate_and_check(
-            &db,
-            &actor_id,
-            &target.service_owner_user_id,
-            &target.service_id,
-            &operation,
-            auth.approval_requester_type(),
-            &auth.approval_requester_id(),
-            false,
-        )
-        .await
-        .unwrap();
-        assert!(matches!(
-            auto_allowed,
-            approval_service::ApprovalOutcome::Allowed { required: false }
-        ));
+        let proxy_auto_allowed = proxy_call(proxy_request()).await.unwrap();
+        assert_eq!(proxy_auto_allowed.status(), StatusCode::OK);
+        assert!(
+            authorize_mcp_tool_operation(&state, &mcp_auth, &service, &operation, None)
+                .await
+                .is_ok()
+        );
 
         db.collection::<ServiceApprovalConfig>(SERVICE_APPROVAL_CONFIGS)
             .update_one(
@@ -3110,22 +3180,6 @@ mod tests {
             )
             .await
             .unwrap();
-        let uncovered = approval_service::evaluate_and_check(
-            &db,
-            &actor_id,
-            &target.service_owner_user_id,
-            &target.service_id,
-            &operation,
-            auth.approval_requester_type(),
-            &auth.approval_requester_id(),
-            false,
-        )
-        .await
-        .unwrap();
-        assert!(matches!(
-            uncovered,
-            approval_service::ApprovalOutcome::NeedsApproval(_)
-        ));
 
         db.collection::<ApprovalGrant>(APPROVAL_GRANTS)
             .insert_one(ApprovalGrant {
@@ -3145,22 +3199,14 @@ mod tests {
             })
             .await
             .unwrap();
-        let covered = approval_service::evaluate_and_check(
-            &db,
-            &actor_id,
-            &target.service_owner_user_id,
-            &target.service_id,
-            &operation,
-            auth.approval_requester_type(),
-            &auth.approval_requester_id(),
-            false,
-        )
-        .await
-        .unwrap();
-        assert!(matches!(
-            covered,
-            approval_service::ApprovalOutcome::Allowed { required: true }
-        ));
+
+        let proxy_grant_covered = proxy_call(proxy_request()).await.unwrap();
+        assert_eq!(proxy_grant_covered.status(), StatusCode::OK);
+        assert!(
+            authorize_mcp_tool_operation(&state, &mcp_auth, &service, &operation, None)
+                .await
+                .is_ok()
+        );
 
         db.collection::<ServiceApprovalConfig>(SERVICE_APPROVAL_CONFIGS)
             .update_one(
@@ -3169,22 +3215,54 @@ mod tests {
             )
             .await
             .unwrap();
-        let per_request = approval_service::evaluate_and_check(
-            &db,
-            &actor_id,
-            &target.service_owner_user_id,
-            &target.service_id,
-            &operation,
-            auth.approval_requester_type(),
-            &auth.approval_requester_id(),
-            false,
-        )
-        .await
-        .unwrap();
+        db.collection::<NotificationChannel>(NOTIFICATION_CHANNELS)
+            .insert_one(NotificationChannel {
+                id: uuid::Uuid::new_v4().to_string(),
+                user_id: actor_id.clone(),
+                telegram_chat_id: None,
+                telegram_username: None,
+                telegram_enabled: false,
+                telegram_link_code: None,
+                telegram_link_code_expires_at: None,
+                approval_timeout_secs: 0,
+                grant_expiry_days: 30,
+                approval_required: false,
+                push_enabled: false,
+                push_devices: vec![],
+                created_at: now,
+                updated_at: now,
+            })
+            .await
+            .unwrap();
+
+        let proxy_per_request = proxy_call(proxy_request()).await.unwrap_err();
         assert!(matches!(
-            per_request,
-            approval_service::ApprovalOutcome::NeedsApproval(_)
+            proxy_per_request,
+            crate::errors::AppError::ApprovalFailed { .. }
         ));
+        assert!(
+            authorize_mcp_tool_operation(&state, &mcp_auth, &service, &operation, None)
+                .await
+                .is_err()
+        );
+
+        for requester_type in ["api_key", "access_token"] {
+            let approval = db
+                .collection::<ApprovalRequest>(APPROVAL_REQUESTS)
+                .find_one(doc! {
+                    "user_id": &org_id,
+                    "service_id": &catalog_service_id,
+                    "requester_type": requester_type,
+                    "requester_id": &actor_id,
+                })
+                .await
+                .unwrap()
+                .unwrap_or_else(|| panic!("{requester_type} path must create an approval request"));
+            assert_eq!(approval.approval_mode, ApprovalMode::PerRequest);
+            assert!(approval.from_org_policy);
+        }
+
+        server.abort();
     }
 
     #[tokio::test]
