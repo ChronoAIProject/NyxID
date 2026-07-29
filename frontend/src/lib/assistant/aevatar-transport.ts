@@ -1153,12 +1153,56 @@ export class AevatarAssistantTransport implements AssistantTransport {
 
   private actionOutcomeNote(disposition: ActionReport["disposition"]): string {
     if (disposition === "completed") {
-      return "Connected in NyxID. The assistant received only the new service reference.";
+      return "Connected in NyxID. Sending the new service reference to the assistant.";
     }
     if (disposition === "declined") {
-      return "You declined this request. No service was connected and no credential was shared.";
+      return "You declined this request. Sending the decision to the assistant; no credential was shared.";
     }
-    return "The connection could not be completed. Ask the assistant to request it again.";
+    return "The connection could not be completed. Sending the failure to the assistant.";
+  }
+
+  private settledActionOutcomeNote(
+    disposition: ActionReport["disposition"],
+    delivered: boolean,
+  ): string {
+    if (disposition === "completed") {
+      return delivered
+        ? "Connected in NyxID. The assistant received only the new service reference."
+        : "Connected in NyxID. The service reference has not reached the assistant; delivery will retry after the next turn.";
+    }
+    if (disposition === "declined") {
+      return delivered
+        ? "You declined this request. The assistant received the decision; no credential was shared."
+        : "You declined this request. The decision has not reached the assistant; delivery will retry after the next turn.";
+    }
+    return delivered
+      ? "The assistant received the connection failure. Ask it to request the service again."
+      : "The connection failure has not reached the assistant; delivery will retry after the next turn.";
+  }
+
+  private updateActionBatchOutcomeNotes(
+    conversationId: string,
+    batch: PendingActionBatch,
+    delivered: boolean,
+  ): void {
+    for (const report of batch.reports.values()) {
+      const card = this.findActionCardByRequestId(
+        conversationId,
+        report.actionRequestId,
+      );
+      if (!card) continue;
+      this.emitLocalBlockPatch(
+        conversationId,
+        card.block_id,
+        {
+          outcome_note: this.settledActionOutcomeNote(
+            report.disposition,
+            delivered,
+          ),
+        },
+        batch.onEvent,
+      );
+    }
   }
 
   private drainPendingActions(conversationId: string): TurnHandle | null {
@@ -1222,7 +1266,11 @@ export class AevatarAssistantTransport implements AssistantTransport {
     const batches = this.pendingActionBatches.get(conversationId);
     if (!batches) return;
     const index = batches.findIndex((batch) => batch.id === state.batchId);
-    if (index >= 0) batches.splice(index, 1);
+    if (index >= 0) {
+      const batch = batches[index];
+      if (batch) this.updateActionBatchOutcomeNotes(conversationId, batch, true);
+      batches.splice(index, 1);
+    }
     if (batches.length === 0) this.pendingActionBatches.delete(conversationId);
   }
 
@@ -1237,6 +1285,7 @@ export class AevatarAssistantTransport implements AssistantTransport {
     if (batch) {
       batch.inFlight = false;
       batch.blocked = true;
+      this.updateActionBatchOutcomeNotes(conversationId, batch, false);
     }
     state.retryQueued = true;
     this.actionDrainBlocked.add(conversationId);
@@ -1549,9 +1598,13 @@ export class AevatarAssistantTransport implements AssistantTransport {
 
       const contentType = response.headers.get("content-type") ?? "";
       if (!contentType.includes("text/event-stream")) {
-        this.acceptActionBatch(conversationId, run);
-        this.finishTurn(conversationId, run, "completed", null);
-        return;
+        await response.body?.cancel().catch(() => undefined);
+        finalFailure = {
+          code: "stream_protocol_error",
+          message:
+            "The action report endpoint did not return an event stream. Delivery will retry after the next turn.",
+        };
+        break;
       }
       if (!response.body) {
         finalFailure = {

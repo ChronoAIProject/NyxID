@@ -2769,6 +2769,100 @@ describe("chat action cards", () => {
     expect(actionRequestIds[0]).toBe(actionRequestIds[1]);
   });
 
+  it("requeues a continuation when a successful response is not SSE", async () => {
+    let textTurns = 0;
+    let actionAttempts = 0;
+    const actionRequestIds: string[] = [];
+    stubFetch(routeCreate, (url, init) => {
+      if (!url.endsWith("/stream") || init?.method !== "POST") return undefined;
+      const body = JSON.parse(String(init.body)) as {
+        readonly type: string;
+        readonly clientRequestId: string;
+      };
+      if (body.type === "text") {
+        textTurns += 1;
+        return textTurns === 1
+          ? sseResponse([
+              { type: "RUN_STARTED", turnId: TURN_ID },
+              actionRequestFrame(),
+              { type: "RUN_FINISHED", runFinished: { status: "blocked" } },
+            ])
+          : sseResponse([
+              { type: "RUN_STARTED", turnId: "turn-after-json-response" },
+              { type: "RUN_FINISHED" },
+            ]);
+      }
+      actionAttempts += 1;
+      actionRequestIds.push(body.clientRequestId);
+      return actionAttempts === 1
+        ? jsonResponse({ accepted: true })
+        : sseResponse([
+            { type: "RUN_STARTED", turnId: "turn-retried-after-json" },
+            { type: "RUN_FINISHED" },
+          ]);
+    });
+    const transport = new AevatarAssistantTransport();
+    await transport.createConversation();
+    await collectTurn(transport, "Connect GitHub");
+
+    let resolveFailed: () => void = () => undefined;
+    let resolveRetried: () => void = () => undefined;
+    const failed = new Promise<void>((resolve) => {
+      resolveFailed = resolve;
+    });
+    const retried = new Promise<void>((resolve) => {
+      resolveRetried = resolve;
+    });
+    transport.continueActions(
+      CONVERSATION_ID,
+      TURN_ID,
+      [
+        {
+          actionRequestId: "act-action-1",
+          originTurnId: TURN_ID,
+          disposition: "completed",
+          resource: {
+            userService: {
+              userServiceId: "00000000-0000-4000-8000-000000000123",
+            },
+          },
+        },
+      ],
+      (event) => {
+        if (event.event !== "turn.completed") return;
+        if (event.status === "failed") resolveFailed();
+        if (event.status === "completed") resolveRetried();
+      },
+    );
+    await failed;
+
+    expect(actionAttempts).toBe(1);
+    let history = await transport.getHistory(CONVERSATION_ID);
+    let card = history.messages
+      .flatMap((message) => message.blocks)
+      .find((block) => block.type === "action_card");
+    expect(card).toMatchObject({ status: "completed" });
+    expect(card?.type === "action_card" ? card.outcome_note : "").toContain(
+      "has not reached the assistant",
+    );
+    expect(card?.type === "action_card" ? card.outcome_note : "").not.toContain(
+      "assistant received",
+    );
+
+    await collectTurn(transport, "Continue when idle");
+    await retried;
+
+    expect(actionAttempts).toBe(2);
+    expect(actionRequestIds[0]).toBe(actionRequestIds[1]);
+    history = await transport.getHistory(CONVERSATION_ID);
+    card = history.messages
+      .flatMap((message) => message.blocks)
+      .find((block) => block.type === "action_card");
+    expect(card?.type === "action_card" ? card.outcome_note : "").toContain(
+      "assistant received",
+    );
+  });
+
   it("keeps a rejected report queued and retries after the next idle turn", async () => {
     let textTurns = 0;
     let actionAttempts = 0;
