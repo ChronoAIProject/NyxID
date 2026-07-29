@@ -1,0 +1,6 @@
+interface:
+  display_name: "Aevatar Codex Exec Setup"
+  short_description: "Configure and prove a Codex execution target"
+  default_prompt: "Use $aevatar-codex-exec-node-setup to configure and prove the selected Codex execution target."
+policy:
+  allow_implicit_invocation: false

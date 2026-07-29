@@ -1,7 +1,7 @@
 ---
 name: aevatar-feasibility-advisor
-description: Decide — honestly — whether a thing the user wants to build on Aevatar is possible, what its prerequisites are, or why it cannot be done, BEFORE anyone starts building. Use this first whenever a user describes a goal rather than a concrete artifact — "can aevatar do X", "I want a bot that…", "build me something that posts to Twitter / reads my GitHub / replies on Telegram", "is it possible to…", "automate … every day", "let Lark Base trigger a workflow". It teaches the one hard premise (every third-party capability is brokered by NyxID), the two distinct surfaces (outbound connector vs inbound channel), external HTTP trigger options such as Lark Base automation, how to check what is actually connectable, the prerequisite for each capability class, what is host-gated (and so not self-serve), and what is genuinely impossible without new NyxID/Aevatar platform work — so you can negotiate scope and give the user a straight answer plus next steps instead of over-promising. It scopes; it does not build (hand off to workflow-authoring / team-builder / service-publisher / scheduler).
-version: "1.1"
+description: Use before building when a user asks whether Aevatar can achieve a goal, what prerequisites it has, or why it is unavailable. Triggers include bots and third-party APIs, inbound channels, external HTTP triggers, schedules, service exposure, Agent Profiles and tool ceilings, and bounded managed or private-host codex_exec work. It distinguishes outbound connectors from inbound channels and separates not connected, host-gated, not deployed, and genuinely unsupported outcomes. It chooses managed_sandbox versus private_ssh without promising repository, model, credential, runtime, or deployment capabilities the caller does not control, then routes feasible work to the owning Aevatar skill.
+version: "1.4"
 metadata:
   category: plain
   tag:
@@ -13,6 +13,8 @@ metadata:
     - prerequisites
     - advisor
     - negotiation
+    - agent-profile
+    - codex-exec
 ---
 
 # Aevatar feasibility advisor
@@ -22,18 +24,72 @@ Before you (or the user) commit to building something on Aevatar, answer three q
 alternative?* This skill exists so you negotiate scope up front instead of discovering a
 hard blocker halfway through. It only **advises** — once a plan is feasible, hand off to
 `aevatar-workflow-authoring` → `aevatar-team-builder` → `aevatar-service-publisher` →
-`aevatar-scheduler` (see `aevatar-platform-map`).
+`aevatar-scheduler`, or to `aevatar-agent-profile-management` for the Agent Profile surface
+(see `aevatar-platform-map`). For `codex_exec`, choose the target here, then hand setup or
+repair to `aevatar-codex-exec-node-setup`, require the public
+`aevatar-codex-exec-workflow-sample` proof, and only then author the real workflow.
+
+## Three different reasons a thing can be unavailable — never blur them
+
+They have different owners and different fixes. Collapsing them into "it's host-gated" is the most
+common wrong answer here.
+
+| Reason | What it looks like | Who fixes it |
+|---|---|---|
+| **Not connected** | The connector is in `/api/v1/catalog` but missing from `/api/v1/services` | **The user**, self-serve |
+| **Host-gated** | The capability is deployed and works, but a host policy governs one aspect (NyxID external exposure; Agent Profile *rollout admission*) | **The host** — not you, not the user |
+| **Not deployed** | The capability's whole API surface is absent from the running build | **The host**, by deploying a build that exposes it |
+
+"Not deployed" is the one people get wrong most: the feature exists in the codebase and in design
+docs, so it *sounds* available. **Probe the live surface, never a branch or a memory** —
+`GET /api/openapi.json` and check whether the complete route family is advertised.
+
+**Agent Profile is currently the live example.** Owner Profile management (create, edit draft, bind
+exact Ornn skills, validate, publish) is an **owner-managed** capability — an authenticated user
+manages their *own* profile; it is not host-only configuration. But it is **deployment-gated**, and
+today production advertises **no** `agent-profiles` routes at all. So the honest answer to "can I
+give my agent a fixed persona with pinned skills and a hard tool ceiling?" is: *the product models
+exactly that, it is yours to manage rather than the host's, but this deployment does not currently
+expose the contract — here is the probe, and here is what works today instead.* Do not report it as
+host-owned config, and do not report it as impossible.
+
+## Choose the `codex_exec` target before workflow authoring
+
+`codex_exec` is an in-session workflow capability with two separate infrastructure targets. It is
+not an HTTP endpoint or a Studio lifecycle stage. Choose exactly one target from the requirement;
+never mix their fields.
+
+| Requirement | Feasibility verdict | Exact boundary and prerequisite |
+|---|---|---|
+| Bounded one-shot Codex work that can start from a clean empty Git repository | ✅ Use `managed_sandbox` | Requires the exact native NyxID user to be admitted by the internal rollout and to directly own one active usable `chrono-sandbox` UserService plus one usable `chrono-llm-public` route. The request must use `workspace.kind=empty_git`; timeout defaults to and is capped at 180 seconds. |
+| Codex work that requires an existing private repository, host files, or host Codex login/configuration | ✅ Use `private_ssh` | Requires a user-owned hardened NyxID SSH service, fixed principal and host workspace, and a working host Codex CLI/login. Send no `workspace`; the host wrapper owns the repository path. Timeout defaults to 30 seconds and is capped at 300 seconds. |
+| Persistent managed repository/session, caller-selected repository/path, image, model, provider, credential, shell, or work beyond the bounded synchronous contract | ❌ Not provided by `managed_sandbox` | Narrow or split the work so it can start from `empty_git`, or use a separately authorized private-host/long-running workflow. Do not promise managed repository persistence. |
+
+Both targets accept only a nonblank prompt of at most 6000 UTF-8 bytes plus their typed target
+fields and optional timeout. A managed caller cannot select a repository, path, image, model,
+provider, credential, Codex profile, command, approval policy, or sandbox flag. A private caller
+supplies only `target.private_ssh.service` and `principal`; that service is a UserService slug or
+UUID, not a node ID.
+
+Configuration, health, service inventory, a direct chrono call, or a direct SSH command is only a
+prerequisite. Readiness requires mounting the public `aevatar-codex-exec-workflow-sample` and
+getting exact `CODEX_EXEC_READY` through Aevatar:
+
+- Managed proof: `status=succeeded`, `target=managed_sandbox`, trimmed
+  `output=CODEX_EXEC_READY`, `exit_code=0`, and a non-empty sanitized `diagnostic_id`.
+- Private proof: the original NyxID SSH result has `exit_code=0`, `timed_out=false`, and trimmed
+  stdout exactly `CODEX_EXEC_READY`.
+
+After choosing `managed_sandbox`, explicitly call authenticated `POST /api/managed-codex/credential` to provision or reconcile, then read `GET /api/managed-codex/credential`. Proceed only when `execution_ready=true` and `execution_readiness_reason=ready`; `status=active` alone is insufficient. Normal `codex_exec` is credential-read-only and never provisions, reconciles, rotates, repairs, or retries after a credential failure. The caller never supplies or sees the key. Then use `aevatar-codex-exec-workflow-sample` for the mandatory proof and load `aevatar-workflow-authoring` only after it succeeds. Preserve the deadline chain: chrono execution 180s < Aevatar managed request 300s < NyxID/ingress at least 315s < NyxID client 330s < workflow canary at least 360s. Landlock, Bubblewrap, sandbox-side Credential Vault substitution, and a credential proxy are not repair paths for the managed runtime.
 
 ## The one premise: NyxID is the universal gateway
 
 Aevatar holds **no third-party credentials and talks to no external service directly.**
-Every external capability is brokered by **NyxID**. That single fact drives every
-feasibility answer below. It splits into **two surfaces that people constantly conflate** —
-get this right first:
+Every external capability is brokered by **NyxID**. That single fact drives every feasibility answer below. Keep inbound channels separate from three outbound invocation modes:
 
 | Surface | What it gives you | How it's used | Supported set |
 |---|---|---|---|
-| **Connector** (outbound) | Your workflow/agent **calls** a third-party API (read data, post, act) | `nyxid_proxy` tool (or a typed connector tool) with the service `slug` | Anything in the NyxID **catalog** (see below) — broad |
+| **Connector** (outbound) | Your workflow/agent **calls** a third-party API (read data, post, act) | Raw `nyxid_proxy` requires exact `service_id + slug + path`; an interactive `nyxid_service_operation__*` requires enumerated `user_service_id` plus its emitted schema; a compiled workflow calls `nyxid_proxy` with a copied `capability.nyxid_operation` selector and only admitted runtime values (`path_params/query/headers/body/response_mode`) | Anything in the NyxID **catalog** (see below) — broad |
 | **Channel** (inbound) | A third-party chat platform **delivers user messages to your agent**, which replies **in that platform** | An Aevatar **channel module** + NyxID relay webhook | **Narrow** — only platforms with a built module |
 
 > **The trap:** "I want a Twitter bot." A Twitter *connector* (`api-twitter`) exists, so your
@@ -90,13 +146,17 @@ exists or doesn't without checking it.** The examples below are illustrative, no
 | The user wants… | Possible? | Prerequisite / who must do it |
 |---|---|---|
 | Pure LLM / text / transform / branching pipeline | ✅ Always | Author a workflow (`aevatar-workflow-authoring`). No external anything. |
-| **Call** a third-party API (read/post): GitHub, Slack, Google, X/Twitter, Reddit, a custom HTTP API… | ✅ If the connector is in the catalog | User **connects the `api-*` connector in NyxID** (OAuth for `user` mode, or supplies a token for `admin` mode — per the catalog entry). Then the workflow calls it via `nyxid_proxy`. |
+| Bounded one-shot Codex work that can start from empty Git | ✅ With the managed target | Choose `managed_sandbox`; require internal eligibility, the user's own usable `chrono-sandbox` and `chrono-llm-public` UserServices, `workspace.kind=empty_git`, timeout ≤ 180 seconds, and the public `CODEX_EXEC_READY` proof. |
+| Codex work requiring an existing private repository or host Codex configuration | ✅ With the private target | Choose `private_ssh`; require the user's hardened NyxID SSH service, fixed principal/workspace and working host Codex setup, no request `workspace`, timeout ≤ 300 seconds, and the private public-sample proof. |
+| **Call** a third-party API (read/post): GitHub, Slack, Google, X/Twitter, Reddit, a custom HTTP API… | ✅ If the connector is in the catalog | User **connects the `api-*` connector in NyxID** (OAuth for `user` mode, or supplies a token for `admin` mode — per the catalog entry). Then use the invocation mode matching the surface; never paste raw route fields into a compiled admitted workflow call. |
 | A connector that is **NOT in the catalog** | ⚠️ Only if it's a plain HTTP API | If it speaks HTTP + a supported `auth_method`, NyxID can add it (platform/admin work — not self-serve). If not HTTP, ❌. |
 | **Inbound bot** that replies in-platform: **Lark / Telegram** | ✅ Yes | Connect the bot connector (`api-lark-bot` / `api-telegram-bot`) **and** register the channel (channel-admin / `channel_registrations`); NyxID provisions the webhook to Aevatar's relay. |
 | **Inbound bot** on a platform with a connector but **no channel module** (Discord, Slack, X, …) | ❌ Not self-serve | Outbound calls work, but inbound-reply needs a new Aevatar **channel module** + relay wiring = Aevatar platform work. Offer the outbound-only version as the alternative. |
 | **Publish** a workflow/team as an **invocable service** in-scope | ✅ Yes | Just bind it (`aevatar-service-publisher`). Usable within the user's scope immediately. |
 | An external automation **triggers an existing Aevatar workflow** (e.g. Lark Base row status changed → HTTP request → run member workflow) | ✅ Usually, without service externalExposure | Use the external system's HTTP action to call the NyxID proxy for the existing `aevatar` service with a NyxID API key (`proxy` scope), targeting an explicit `/api/scopes/{scopeId}/members/{memberId}/invoke/...` or `/teams/{teamId}/invoke/...` path. This is an external trigger, not a NyxID connector registration. See `aevatar-service-publisher`. |
 | Have that service **registered as a NyxID-brokered connector** (callable by others/externally) | ⚠️ Host-gated | The **host** must enable external exposure (`GAgentService:ExternalExposure: Enabled=true` + `RegisterAllPublishedServices` or an opt-in policy). You **cannot** turn this on as a client — verify `externalExposure` on the service and, if empty, tell the user to ask the host. |
+| Give an agent a **fixed persona + pinned Ornn skills + an enforced tool ceiling** (an Agent Profile) | ⚠️ Modelled, owner-managed, but **not deployed today** | Probe `GET /api/openapi.json` for the complete `agent-profiles` route family. Absent ⇒ the deployment does not expose it; say so and offer the workflow-instructions version as the interim. Present ⇒ it is **yours** to create/validate/publish via `aevatar-agent-profile-management`, no host action needed for management itself. |
+| Have a published Profile actually **drive a running agent** | ⚠️ Host-gated, and narrow | Publication is not runtime binding. Only *newly created* NyxID direct conversations admitted by a **host-owned rollout** consume a Profile; existing conversations never hot-upgrade, and workflows/teams/services/schedules/channels/AgentRuns are not consumers at all. |
 | **Schedule** a recurring run (cron) | ⚠️ Yes, with a binding | The scope owner needs a durable **NyxID broker binding** — i.e. an interactive **console** NyxID login, not just a CLI token. Without it, schedule creation 400s ("Authenticated NyxID owner binding is required"). |
 | A service backed by an **arbitrary custom agent / actor type** | ⚠️ Constrained | Member implementations are `workflow`, `script`, or **registered** `gagent` kinds (`GET /api/scopes/gagent-types`). You can't point a service at an arbitrary actor; wrap custom logic in a workflow or script, or use a registered gagent kind. |
 | A genuinely **new service *shape*** (e.g. streaming/WebSocket/gRPC endpoint, a runtime kind beyond workflow/script/gagent) | ❌ Not currently | Service endpoints are unary **HTTP** over the fixed implementation kinds. A new shape needs Aevatar platform work. |
@@ -151,6 +211,12 @@ Give the user a straight answer in this shape — never a vague "maybe":
   member workflow by sending an HTTPS request to NyxID's `aevatar` proxy with a NyxID API key,
   targeting `/api/scopes/{scopeId}/members/{memberId}/invoke/chat:stream`. ExternalExposure is
   only needed if you want this workflow registered as a reusable NyxID connector/slug."
+- ⚠️ **Yes in the product, but not in this deployment** — "Aevatar models exactly that: an Agent
+  Profile with a purpose, instructions, an always-on skill, a billing-triggered skill, and a hard
+  tool ceiling — and it would be **yours** to manage, not the host's. But this deployment
+  advertises no `agent-profiles` routes, so I can't create one today. What I *can* build now is
+  the same behavior expressed in a workflow member with on-demand skill discovery; the pinned-skill
+  and enforced-ceiling guarantees need a build that exposes the contract."
 - ❌ **Not as described** — "An auto-replying **Twitter bot** isn't possible: there's no inbound
   Twitter channel on Aevatar (only Lark and Telegram). What *is* possible: a workflow that
   **posts** to X on a schedule (via the `api-twitter` connector), or an inbound bot on **Telegram**
@@ -164,7 +230,14 @@ alternative when you say no.
 - **Check the live catalog/services** before claiming a connector exists or not. Examples in
   this doc are illustrative and can drift.
 - **Connector ≠ channel.** Outbound API access never implies an inbound bot.
-- **Never promise host-gated outcomes** (NyxID registration, anything needing host config) or
-  features that need platform work — surface them as dependencies, not done deals.
+- **Never promise host-gated outcomes** (NyxID registration, Agent Profile rollout admission,
+  anything needing host config) or features that need platform work — surface them as
+  dependencies, not done deals.
+- **Distinguish not-connected / host-gated / not-deployed.** Each has a different owner and a
+  different fix. Probe the live OpenAPI before calling a capability available or unavailable —
+  source on a feature branch proves the code exists, never that production exposes it.
+- **Don't quietly substitute a different resource.** If the user asked for an Agent Profile and the
+  contract isn't deployed, say that and offer the nearest alternative explicitly — never build a
+  workflow member and present it as the profile they asked for.
 - If you genuinely can't determine feasibility from the catalog + this matrix, say what you'd
   need to confirm rather than guessing.

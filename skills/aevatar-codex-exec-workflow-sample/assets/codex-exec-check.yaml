@@ -1,0 +1,11 @@
+name: codex-exec-check
+description: Verify that the authenticated eligible NyxID account can execute Codex through Aevatar's operator-managed chrono-sandbox/gVisor target.
+when_to_use: Use after managed codex_exec is enabled for the account and before running real tasks.
+steps:
+  - id: execute
+    type: tool_call
+    timeout_ms: 360000
+    parameters:
+      tool: codex_exec
+      arguments: >-
+        {"target":{"kind":"managed_sandbox"},"workspace":{"kind":"empty_git"},"prompt":"Reply with exactly CODEX_EXEC_READY","timeout_secs":180}

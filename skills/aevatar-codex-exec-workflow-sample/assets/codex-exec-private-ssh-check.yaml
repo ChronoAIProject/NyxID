@@ -1,0 +1,41 @@
+name: codex-exec-private-ssh-check
+description: Verify that a private NyxID node-backed SSH service can run its fixed local Codex CLI.
+when_to_use: Use after configuring a private NyxID SSH service and before running real private codex_exec tasks.
+steps:
+  - id: capture_request
+    type: assign
+    parameters:
+      target: codex_exec_request
+      value: "$"
+
+  - id: extract_service
+    type: transform
+    parameters:
+      op: json_extract
+      path: service
+
+  - id: capture_service
+    type: assign
+    parameters:
+      target: codex_exec_service_json
+      value: "$"
+
+  - id: restore_request
+    type: assign
+    parameters:
+      target: codex_exec_request
+      value: "${codex_exec_request}"
+
+  - id: extract_principal
+    type: transform
+    parameters:
+      op: json_extract
+      path: principal
+
+  - id: execute
+    type: tool_call
+    timeout_ms: 320000
+    parameters:
+      tool: codex_exec
+      arguments: >-
+        {"target":{"kind":"private_ssh","private_ssh":{"service":${codex_exec_service_json},"principal":${input}}},"prompt":"Reply with exactly CODEX_EXEC_READY","timeout_secs":300}
