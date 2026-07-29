@@ -211,10 +211,6 @@ export function ActionCard({ block, onProgress, onResolve }: ActionCardProps) {
 
   return (
     <section className="overflow-hidden rounded-xl border border-border bg-card shadow-sm">
-      <div
-        aria-hidden="true"
-        className={`h-[3px] ${unsupported ? "bg-destructive" : "bg-nyx-secondary-400"}`}
-      />
       <div className="flex items-start gap-3 px-4 py-3.5">
         <div
           className={`flex h-9 w-9 shrink-0 items-center justify-center rounded-lg border ${
