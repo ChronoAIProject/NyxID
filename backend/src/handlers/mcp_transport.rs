@@ -1311,14 +1311,8 @@ async fn handle_tools_call(
             );
         }
     };
-    if let Err(resp) = authorize_mcp_operation(
-        state,
-        auth,
-        approval_target_for_tool(auth, service),
-        &operation,
-        request.id.clone(),
-    )
-    .await
+    if let Err(resp) =
+        authorize_mcp_tool_operation(state, auth, service, &operation, request.id.clone()).await
     {
         return resp;
     }
@@ -1415,23 +1409,69 @@ struct McpApprovalTarget {
     service_owner_user_id: String,
 }
 
-fn approval_target_for_tool(
+/// Resolve the approval key and owner through the same metadata-only path as
+/// the REST proxy. MCP activation uses `UserService.id`, while catalog-backed
+/// approval policies use `catalog_service_id`; those identities must not be
+/// conflated.
+async fn approval_target_for_tool(
+    db: &mongodb::Database,
     auth: &McpAuthContext,
     service: &mcp_service::McpToolService,
-) -> McpApprovalTarget {
-    let service_owner_user_id = match &service.source {
+) -> crate::errors::AppResult<McpApprovalTarget> {
+    let approval_owner_user_id = auth.effective_approval_owner_user_id();
+    let hint = match &service.source {
         mcp_service::McpToolSource::UserManaged {
-            effective_owner_id, ..
-        } => effective_owner_id.clone(),
-        mcp_service::McpToolSource::Platform { .. } => auth.effective_approval_owner_user_id(),
+            user_service_id, ..
+        } => proxy_service::find_approval_resolution_hint_by_user_service_id(
+            db,
+            &approval_owner_user_id,
+            user_service_id,
+            Some(&service.service_slug),
+            None,
+        )
+        .await?
+        .ok_or_else(|| crate::errors::AppError::NotFound("Service not found".to_string()))?,
+        mcp_service::McpToolSource::Platform {
+            downstream_service_id,
+        } => proxy_service::find_approval_resolution_hint(
+            db,
+            &approval_owner_user_id,
+            None,
+            Some(downstream_service_id),
+        )
+        .await?
+        .unwrap_or_else(|| proxy_service::ApprovalResolutionHint {
+            service_id: downstream_service_id.clone(),
+            service_owner_id: approval_owner_user_id,
+        }),
     };
 
-    McpApprovalTarget {
-        service_id: service.service_id.clone(),
+    Ok(McpApprovalTarget {
+        service_id: hint.service_id,
         service_name: service.service_name.clone(),
         service_slug: service.service_slug.clone(),
-        service_owner_user_id,
-    }
+        service_owner_user_id: hint.service_owner_id,
+    })
+}
+
+#[allow(clippy::result_large_err)]
+async fn authorize_mcp_tool_operation(
+    state: &AppState,
+    auth: &McpAuthContext,
+    service: &mcp_service::McpToolService,
+    operation: &operation_descriptor::OperationDescriptor,
+    request_id: Option<serde_json::Value>,
+) -> Result<(), Response> {
+    let target = approval_target_for_tool(&state.db, auth, service)
+        .await
+        .map_err(|e| {
+            tool_result(
+                request_id.clone(),
+                &format!("Approval check failed: {e}"),
+                true,
+            )
+        })?;
+    authorize_mcp_operation(state, auth, target, operation, request_id).await
 }
 
 #[allow(clippy::result_large_err)]
@@ -1653,14 +1693,8 @@ async fn handle_meta_call_tool(
                 return tool_result(request_id, &format!("Invalid tool arguments: {e}"), true);
             }
         };
-    if let Err(resp) = authorize_mcp_operation(
-        state,
-        auth,
-        approval_target_for_tool(auth, service),
-        &operation,
-        request_id.clone(),
-    )
-    .await
+    if let Err(resp) =
+        authorize_mcp_tool_operation(state, auth, service, &operation, request_id.clone()).await
     {
         return resp;
     }
@@ -2836,9 +2870,17 @@ async fn execute_ssh_command_internal(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::models::approval_grant::{ApprovalGrant, COLLECTION_NAME as APPROVAL_GRANTS};
+    use crate::models::org_membership::{
+        COLLECTION_NAME as ORG_MEMBERSHIPS, OrgMembership, OrgRole,
+    };
+    use crate::models::service_approval_config::{
+        ApprovalMode, COLLECTION_NAME as SERVICE_APPROVAL_CONFIGS, ServiceApprovalConfig,
+    };
+    use crate::models::user::{COLLECTION_NAME as USERS, User, UserType};
     use crate::models::user_service::{COLLECTION_NAME as USER_SERVICES, UserService};
     use crate::services::mcp_service::{McpToolService, McpToolSource};
-    use crate::test_utils::{connect_test_database, test_user_service};
+    use crate::test_utils::{connect_test_database, test_membership, test_user, test_user_service};
 
     fn api_key_auth(allowed_service_ids: Vec<String>) -> McpAuthContext {
         McpAuthContext {
@@ -2974,30 +3016,188 @@ mod tests {
         assert!(ensure_service_in_scope(&auth, &svc, None).is_ok());
     }
 
-    #[test]
-    fn approval_target_for_user_managed_service_uses_effective_owner() {
-        let auth = McpAuthContext::user("actor-1".into(), AuthMethod::AccessToken);
-        let mut svc = user_managed("svc-a");
-        svc.source = McpToolSource::UserManaged {
-            user_service_id: "svc-a".into(),
-            effective_owner_id: "org-1".into(),
+    #[tokio::test]
+    async fn catalog_backed_mcp_target_uses_proxy_approval_identity_and_policy() {
+        let Some(db) = connect_test_database("mcp_approval_target_parity").await else {
+            eprintln!("skipping MCP approval parity test: no local MongoDB available");
+            return;
+        };
+        let actor_id = uuid::Uuid::new_v4().to_string();
+        let org_id = uuid::Uuid::new_v4().to_string();
+        let user_service_id = uuid::Uuid::new_v4().to_string();
+        let catalog_service_id = uuid::Uuid::new_v4().to_string();
+        let slug = "approval-parity";
+        db.collection::<User>(USERS)
+            .insert_many([
+                test_user(&actor_id, UserType::Person),
+                test_user(&org_id, UserType::Org),
+            ])
+            .await
+            .unwrap();
+        db.collection::<OrgMembership>(ORG_MEMBERSHIPS)
+            .insert_one(test_membership(&org_id, &actor_id, OrgRole::Member, None))
+            .await
+            .unwrap();
+        let user_service = test_user_service(
+            &user_service_id,
+            &org_id,
+            slug,
+            &uuid::Uuid::new_v4().to_string(),
+            Some(&catalog_service_id),
+            None,
+        );
+        db.collection::<UserService>(USER_SERVICES)
+            .insert_one(user_service)
+            .await
+            .unwrap();
+
+        let mut service = user_managed(&user_service_id);
+        service.service_slug = slug.to_string();
+        service.source = McpToolSource::UserManaged {
+            user_service_id: user_service_id.clone(),
+            effective_owner_id: org_id.clone(),
             node_id: None,
             has_server_credential: true,
         };
+        let auth = McpAuthContext::user(actor_id.clone(), AuthMethod::AccessToken);
+        let target = approval_target_for_tool(&db, &auth, &service)
+            .await
+            .unwrap();
 
-        let target = approval_target_for_tool(&auth, &svc);
+        assert_eq!(target.service_id, catalog_service_id);
+        assert_eq!(target.service_owner_user_id, org_id);
 
-        assert_eq!(target.service_id, "svc-a");
-        assert_eq!(target.service_owner_user_id, "org-1");
+        let now = chrono::Utc::now();
+        let config = ServiceApprovalConfig {
+            id: uuid::Uuid::new_v4().to_string(),
+            user_id: org_id.clone(),
+            service_id: catalog_service_id.clone(),
+            service_name: "Approval Parity".to_string(),
+            approval_required: false,
+            approval_mode: ApprovalMode::Grant,
+            rules: vec![],
+            default_effect: None,
+            created_at: now,
+            updated_at: now,
+        };
+        db.collection::<ServiceApprovalConfig>(SERVICE_APPROVAL_CONFIGS)
+            .insert_one(config)
+            .await
+            .unwrap();
+        let operation = operation_descriptor::build_mcp_descriptor("POST", "/items", None);
+
+        let auto_allowed = approval_service::evaluate_and_check(
+            &db,
+            &actor_id,
+            &target.service_owner_user_id,
+            &target.service_id,
+            &operation,
+            auth.approval_requester_type(),
+            &auth.approval_requester_id(),
+            false,
+        )
+        .await
+        .unwrap();
+        assert!(matches!(
+            auto_allowed,
+            approval_service::ApprovalOutcome::Allowed { required: false }
+        ));
+
+        db.collection::<ServiceApprovalConfig>(SERVICE_APPROVAL_CONFIGS)
+            .update_one(
+                doc! { "user_id": &org_id, "service_id": &catalog_service_id },
+                doc! { "$set": { "approval_required": true, "approval_mode": "grant" } },
+            )
+            .await
+            .unwrap();
+        let uncovered = approval_service::evaluate_and_check(
+            &db,
+            &actor_id,
+            &target.service_owner_user_id,
+            &target.service_id,
+            &operation,
+            auth.approval_requester_type(),
+            &auth.approval_requester_id(),
+            false,
+        )
+        .await
+        .unwrap();
+        assert!(matches!(
+            uncovered,
+            approval_service::ApprovalOutcome::NeedsApproval(_)
+        ));
+
+        db.collection::<ApprovalGrant>(APPROVAL_GRANTS)
+            .insert_one(ApprovalGrant {
+                id: uuid::Uuid::new_v4().to_string(),
+                user_id: org_id.clone(),
+                service_id: catalog_service_id.clone(),
+                service_name: "Approval Parity".to_string(),
+                requester_type: "access_token".to_string(),
+                requester_id: actor_id.clone(),
+                requester_label: None,
+                approval_request_id: uuid::Uuid::new_v4().to_string(),
+                scope: None,
+                granted_at: now,
+                expires_at: now + chrono::Duration::days(30),
+                revoked: false,
+                org_scoped: true,
+            })
+            .await
+            .unwrap();
+        let covered = approval_service::evaluate_and_check(
+            &db,
+            &actor_id,
+            &target.service_owner_user_id,
+            &target.service_id,
+            &operation,
+            auth.approval_requester_type(),
+            &auth.approval_requester_id(),
+            false,
+        )
+        .await
+        .unwrap();
+        assert!(matches!(
+            covered,
+            approval_service::ApprovalOutcome::Allowed { required: true }
+        ));
+
+        db.collection::<ServiceApprovalConfig>(SERVICE_APPROVAL_CONFIGS)
+            .update_one(
+                doc! { "user_id": &org_id, "service_id": &catalog_service_id },
+                doc! { "$set": { "approval_mode": "per_request" } },
+            )
+            .await
+            .unwrap();
+        let per_request = approval_service::evaluate_and_check(
+            &db,
+            &actor_id,
+            &target.service_owner_user_id,
+            &target.service_id,
+            &operation,
+            auth.approval_requester_type(),
+            &auth.approval_requester_id(),
+            false,
+        )
+        .await
+        .unwrap();
+        assert!(matches!(
+            per_request,
+            approval_service::ApprovalOutcome::NeedsApproval(_)
+        ));
     }
 
-    #[test]
-    fn approval_target_for_platform_service_uses_approval_owner() {
+    #[tokio::test]
+    async fn platform_mcp_target_falls_back_to_effective_approval_owner() {
+        let Some(db) = connect_test_database("mcp_platform_approval_target").await else {
+            eprintln!("skipping MCP approval target test: no local MongoDB available");
+            return;
+        };
         let mut auth = McpAuthContext::user("sa-1".into(), AuthMethod::ServiceAccount);
         auth.approval_owner_user_id = Some("owner-1".into());
         let svc = platform("svc-a");
 
-        let target = approval_target_for_tool(&auth, &svc);
+        let target = approval_target_for_tool(&db, &auth, &svc).await.unwrap();
 
         assert_eq!(target.service_id, "svc-a");
         assert_eq!(target.service_owner_user_id, "owner-1");
