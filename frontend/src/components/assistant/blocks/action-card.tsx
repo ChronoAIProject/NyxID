@@ -85,7 +85,7 @@ function ParameterSummary({
           {/* Ids are wire-supplied and only length-capped at 256 chars, so they
               stay inside the card instead of widening the chat column. */}
           {params.via_node_id ? (
-            <Badge variant="info" className="max-w-full truncate font-mono">
+            <Badge variant="secondary" className="max-w-full truncate font-mono">
               <Server className="mr-1 h-3 w-3" />
               <span className="min-w-0 truncate">
                 Node {params.via_node_id}
@@ -233,7 +233,7 @@ export function ActionCard({ block, onProgress, onResolve }: ActionCardProps) {
               {descriptor.title(params)}
             </h3>
             <Badge
-              variant={unsupported ? "destructive" : busy ? "info" : "accent"}
+              variant={unsupported ? "destructive" : "accent"}
             >
               {unsupported
                 ? "Unsupported"
@@ -252,7 +252,7 @@ export function ActionCard({ block, onProgress, onResolve }: ActionCardProps) {
 
       {!unsupported ? (
         <div className="flex items-start gap-2 px-4 py-3">
-          <ShieldCheck className="mt-0.5 h-3.5 w-3.5 shrink-0 text-info" />
+          <ShieldCheck className="mt-0.5 h-3.5 w-3.5 shrink-0 text-nyx-secondary-400" />
           <p className="text-[11px] leading-relaxed text-muted-foreground">
             You choose the account, routing, and credential. The assistant
             receives only brokered access after you finish.

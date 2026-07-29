@@ -66,6 +66,15 @@ function catalogBlock(
   };
 }
 
+function expectNoBlueAccent(card: HTMLElement | null) {
+  const classNames = [card, ...(card?.querySelectorAll("[class]") ?? [])]
+    .map((element) => element?.getAttribute("class") ?? "")
+    .join(" ");
+  expect(classNames).not.toMatch(
+    /(?:^|\s)(?:[a-z-]+:)*(?:bg|border|text|ring|fill|stroke)-(?:info|blue|sky|cyan|indigo)(?:[\w./-]*)/,
+  );
+}
+
 describe("ActionCard", () => {
   it("renders owned consent copy and opens the prefilled connect journey", async () => {
     const user = userEvent.setup();
@@ -157,6 +166,40 @@ describe("ActionCard", () => {
       />,
     );
     expectNoRail();
+  });
+
+  it("uses purple interaction accents and neutral reference chips without blue", () => {
+    const { rerender } = render(
+      <ActionCard
+        block={catalogBlock()}
+        onProgress={vi.fn()}
+        onResolve={vi.fn()}
+      />,
+    );
+
+    function expectPurpleAndNeutralPalette(status: "pending" | "in_progress") {
+      const statusLabel = status === "pending" ? "Action required" : "In progress";
+      const card = screen.getByRole("heading").closest("section");
+      expectNoBlueAccent(card);
+      expect(screen.getByText(statusLabel).closest("div")).toHaveClass(
+        "text-nyx-secondary-400",
+      );
+      expect(screen.getByText("Node node-1").closest("div")).toHaveClass(
+        "bg-muted",
+        "text-muted-foreground",
+      );
+      expect(card?.querySelector("svg.text-nyx-secondary-400")).not.toBeNull();
+    }
+
+    expectPurpleAndNeutralPalette("pending");
+    rerender(
+      <ActionCard
+        block={catalogBlock({ status: "in_progress" })}
+        onProgress={vi.fn()}
+        onResolve={vi.fn()}
+      />,
+    );
+    expectPurpleAndNeutralPalette("in_progress");
   });
 
   it("treats modal dismissal as pending and decline as an explicit report", async () => {
