@@ -1210,6 +1210,10 @@ pub fn build_router(
 
     let api_v1_public = Router::new()
         .route(
+            "/assistant/actions",
+            get(handlers::assistant_actions::get_assistant_actions),
+        )
+        .route(
             "/runtime-config",
             get(handlers::runtime_config::get_runtime_config),
         )

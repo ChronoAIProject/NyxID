@@ -215,6 +215,7 @@ All API routes under `/api/v1`:
 - `/connections` -- connect/disconnect services
 - `/providers` -- CRUD + OAuth/device-code/API-key flows + token management + per-user credentials
 - `/admin` -- user management, audit log, OAuth clients, service accounts
+- `/assistant/actions` -- public static assistant action manifest for Aevatar startup discovery
 - `/proxy/{service_id}/{path}` and `/proxy/s/{slug}/{path}` -- authenticated proxy (UUID- and slug-based); HTTP + WebSocket passthrough
 - `/proxy/services` -- service discovery (paginated list of proxyable services)
 - `/llm` -- LLM gateway (provider proxy, OpenAI-compatible gateway, status)

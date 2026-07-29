@@ -565,6 +565,14 @@ fn extract_client_ip(request: &Request<Body>) -> IpAddr {
 /// Returns 429 Too Many Requests when the limit is exceeded.
 /// Paths exempt from rate limiting (authenticated via other means).
 const RATE_LIMIT_EXEMPT_PATHS: &[&str] = &["/mcp", "/.well-known/", "/health"];
+const ASSISTANT_ACTIONS_EXEMPT_PATH: &str = "/api/v1/assistant/actions";
+
+fn is_rate_limit_exempt(path: &str) -> bool {
+    path == ASSISTANT_ACTIONS_EXEMPT_PATH
+        || RATE_LIMIT_EXEMPT_PATHS
+            .iter()
+            .any(|prefix| path.starts_with(prefix))
+}
 
 pub async fn rate_limit_middleware(
     Extension(per_ip_limiter): Extension<SharedPerIpRateLimiter>,
@@ -575,7 +583,7 @@ pub async fn rate_limit_middleware(
     let path = request.uri().path();
 
     // Skip rate limiting for exempt paths (MCP has its own auth + session management)
-    if RATE_LIMIT_EXEMPT_PATHS.iter().any(|p| path.starts_with(p)) {
+    if is_rate_limit_exempt(path) {
         return Ok(next.run(request).await);
     }
 
@@ -804,6 +812,15 @@ mod tests {
             .unwrap();
         let ip = extract_client_ip(&req);
         assert_eq!(ip, IpAddr::V4(Ipv4Addr::new(1, 2, 3, 4)));
+    }
+
+    #[test]
+    fn assistant_actions_has_exact_path_rate_limit_exemption() {
+        assert!(is_rate_limit_exempt("/health"));
+        assert!(is_rate_limit_exempt("/.well-known/openid-configuration"));
+        assert!(is_rate_limit_exempt("/mcp"));
+        assert!(is_rate_limit_exempt("/api/v1/assistant/actions"));
+        assert!(!is_rate_limit_exempt("/api/v1/assistant/actions/extra"));
     }
 
     #[test]
