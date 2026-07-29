@@ -78,6 +78,30 @@ describe("ChatThread", () => {
     );
   });
 
+  it("draws the halo from the sprite strip rather than a bare CSS ring", () => {
+    render(
+      <ChatThread
+        messages={[
+          message({
+            role: "user",
+            blocks: [{ type: "text", block_id: "text-1", text: "Hi" }],
+          }),
+        ]}
+        thinking
+        onDecideApproval={vi.fn()}
+      />,
+    );
+
+    // The strip URL has to come from the JS import: app.css is shared with the
+    // CLI wizard bundle, whose single-file build would inline any asset a
+    // stylesheet references as base64 into a binary that has no chat UI.
+    const sprite = document.querySelector<HTMLElement>(
+      "[data-assistant-halo] .assistant-halo-sprite",
+    );
+    expect(sprite).toBeInTheDocument();
+    expect(sprite?.style.backgroundImage).toMatch(/^url\(.+\)$/);
+  });
+
   it("reserves tail room and fades over the composer it scrolls behind", () => {
     const { container } = render(
       <ChatThread

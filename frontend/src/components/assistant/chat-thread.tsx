@@ -7,6 +7,7 @@ import { ConnectCard } from "@/components/assistant/blocks/connect-card";
 import { RunCard } from "@/components/assistant/blocks/run-card";
 import { TextBlock } from "@/components/assistant/blocks/text-block";
 import { useFadingPresence } from "@/hooks/use-fading-presence";
+import haloSheet from "@/assets/halo-sheet.webp";
 import { formatClockTime } from "@/lib/utils";
 import type { AssistantMessage, ContentBlock } from "@/types/assistant";
 
@@ -120,8 +121,10 @@ function AssistantIdentity({
             data-assistant-halo
             className={`assistant-halo ${halo.visible ? "assistant-halo--visible" : ""}`}
           >
-            <span className="assistant-halo-ring animate-halo-spin" />
-            <span className="assistant-halo-ring assistant-halo-ring-reverse animate-halo-spin-reverse" />
+            <span
+              className="assistant-halo-sprite"
+              style={{ backgroundImage: `url(${haloSheet})` }}
+            />
           </span>
         ) : null}
         <span className="relative z-10 flex h-[18px] w-[18px] items-center justify-center rounded-md border border-nyx-secondary-400/20 bg-nyx-secondary-400/[0.06]">
@@ -232,6 +235,14 @@ export function ChatThread({
   const thinkingPresence = useFadingPresence(thinking, 500);
   const following = useRef(true);
   const lastSentId = useRef<string | undefined>(undefined);
+
+  // Nothing references the halo strip until a thinking state mounts, so the
+  // fetch would otherwise start at the exact moment the halo needs to be
+  // decoded already — and the first wait of a session would show a blank gutter
+  // instead. Warm it when the thread opens rather than preloading it app-wide.
+  useEffect(() => {
+    new Image().src = haloSheet;
+  }, []);
 
   const handleScroll = useCallback(() => {
     const element = scrollRef.current;
