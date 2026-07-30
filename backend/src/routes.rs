@@ -1333,6 +1333,7 @@ pub fn build_router(
             post(handlers::assistant::skip_step),
         )
         .route("/completions", post(handlers::assistant::completions))
+        .route("/chat", post(handlers::assistant::typed_chat))
         .route("/workflow-chat", post(handlers::assistant::workflow_chat))
         .route(
             "/workflow-chat/ws",
