@@ -51,6 +51,43 @@ pub trait LagoApi: Send + Sync {
     async fn plan_rates(&self, _plan_code: &str) -> AppResult<Vec<PlanRate>> {
         Ok(Vec::new())
     }
+    /// Credit (top-up) invoices for a customer, used to resolve payment
+    /// outcomes for the top-up history. Defaults to empty for fakes.
+    async fn credit_invoices(&self, _external_customer_id: &str) -> AppResult<Vec<InvoiceSummary>> {
+        Ok(Vec::new())
+    }
+    /// A single invoice, or None when it does not exist.
+    async fn invoice_summary(&self, _lago_invoice_id: &str) -> AppResult<Option<InvoiceSummary>> {
+        Ok(None)
+    }
+    /// The downloadable PDF URL for an invoice; None while Lago is still
+    /// generating the document.
+    async fn invoice_download_url(&self, _lago_invoice_id: &str) -> AppResult<Option<String>> {
+        Ok(None)
+    }
+    /// (wallet_transaction_id, invoice_id) pairs for a wallet, used to
+    /// backfill invoice links on top-up sessions stored before the id was
+    /// captured at creation. Defaults to empty for fakes.
+    async fn wallet_transaction_invoices(
+        &self,
+        _wallet_id: &str,
+    ) -> AppResult<Vec<(String, String)>> {
+        Ok(Vec::new())
+    }
+}
+
+/// A trimmed Lago invoice used for top-up history and receipt downloads.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct InvoiceSummary {
+    pub lago_id: String,
+    pub number: String,
+    pub total_amount_cents: i64,
+    /// Lago lifecycle status: draft, finalized, voided, ...
+    pub status: String,
+    /// Payment outcome: pending, succeeded, failed.
+    pub payment_status: String,
+    pub external_customer_id: Option<String>,
+    pub issuing_date: Option<String>,
 }
 
 /// A per-unit price from a Lago plan charge, converted to micro-credits
@@ -422,6 +459,94 @@ impl LagoApi for LagoClient {
                     .collect()
             })
             .unwrap_or_default())
+    }
+
+    async fn wallet_transaction_invoices(
+        &self,
+        wallet_id: &str,
+    ) -> AppResult<Vec<(String, String)>> {
+        let value = self
+            .json_request(
+                reqwest::Method::GET,
+                &format!(
+                    "wallets/{}/wallet_transactions?per_page=100",
+                    urlencoding::encode(wallet_id)
+                ),
+                None,
+            )
+            .await
+            .map_err(lago_error_to_app)?;
+        Ok(value
+            .get("wallet_transactions")
+            .and_then(Value::as_array)
+            .map(|items| {
+                items
+                    .iter()
+                    .filter_map(|item| {
+                        Some((
+                            value_string(item, &["lago_id"])?,
+                            value_string(item, &["lago_invoice_id"])?,
+                        ))
+                    })
+                    .collect()
+            })
+            .unwrap_or_default())
+    }
+
+    async fn credit_invoices(&self, external_customer_id: &str) -> AppResult<Vec<InvoiceSummary>> {
+        let value = self
+            .json_request(
+                reqwest::Method::GET,
+                &format!(
+                    "invoices?external_customer_id={}&invoice_type=credit&per_page=100",
+                    urlencoding::encode(external_customer_id)
+                ),
+                None,
+            )
+            .await
+            .map_err(lago_error_to_app)?;
+        Ok(value
+            .get("invoices")
+            .and_then(Value::as_array)
+            .map(|items| {
+                items
+                    .iter()
+                    .filter_map(invoice_summary_from_value)
+                    .collect()
+            })
+            .unwrap_or_default())
+    }
+
+    async fn invoice_summary(&self, lago_invoice_id: &str) -> AppResult<Option<InvoiceSummary>> {
+        let path = format!("invoices/{}", urlencoding::encode(lago_invoice_id));
+        match self.json_request(reqwest::Method::GET, &path, None).await {
+            Ok(value) => Ok(value.get("invoice").and_then(invoice_summary_from_value)),
+            Err(error) if error.status == Some(StatusCode::NOT_FOUND) => Ok(None),
+            Err(error) => Err(lago_error_to_app(error)),
+        }
+    }
+
+    async fn invoice_download_url(&self, lago_invoice_id: &str) -> AppResult<Option<String>> {
+        // POST download triggers PDF generation when the document does not
+        // exist yet; file_url stays null until Lago's worker finishes, so
+        // retry briefly before reporting "still generating".
+        let path = format!("invoices/{}/download", urlencoding::encode(lago_invoice_id));
+        let mut attempt = 0;
+        loop {
+            attempt += 1;
+            let value = self
+                .json_request(reqwest::Method::POST, &path, None)
+                .await
+                .map_err(lago_error_to_app)?;
+            let file_url = value
+                .get("invoice")
+                .and_then(|invoice| value_string(invoice, &["file_url"]))
+                .filter(|url| !url.is_empty());
+            if file_url.is_some() || attempt >= PAYMENT_URL_MAX_ATTEMPTS {
+                return Ok(file_url);
+            }
+            tokio::time::sleep(Duration::from_millis(PAYMENT_URL_RETRY_DELAY_MS)).await;
+        }
     }
 
     async fn plan_rates(&self, plan_code: &str) -> AppResult<Vec<PlanRate>> {
@@ -887,6 +1012,24 @@ pub fn extract_wallet_balance_credits(value: &Value) -> Option<i64> {
     })
 }
 
+/// Parse one Lago invoice object into the trimmed summary shape.
+fn invoice_summary_from_value(value: &Value) -> Option<InvoiceSummary> {
+    Some(InvoiceSummary {
+        lago_id: value_string(value, &["lago_id"])?,
+        number: value_string(value, &["number"]).unwrap_or_default(),
+        total_amount_cents: value
+            .get("total_amount_cents")
+            .and_then(Value::as_i64)
+            .unwrap_or(0),
+        status: value_string(value, &["status"]).unwrap_or_default(),
+        payment_status: value_string(value, &["payment_status"]).unwrap_or_default(),
+        external_customer_id: value
+            .get("customer")
+            .and_then(|customer| value_string(customer, &["external_id"])),
+        issuing_date: value_string(value, &["issuing_date"]),
+    })
+}
+
 /// Parse a Lago decimal amount string ("0.000005", "0.01", "1") into
 /// micro-credits without floating point. Digits beyond micro precision are
 /// truncated. Returns None for negative or malformed values.
@@ -1292,6 +1435,93 @@ mod tests {
 
         assert!(error.to_string().contains("no_linked_payment_provider"));
         assert_eq!(calls.load(AtomicOrdering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn credit_invoices_parse_payment_outcomes_and_customer() {
+        async fn list_invoices(
+            axum::extract::Query(query): axum::extract::Query<
+                std::collections::HashMap<String, String>,
+            >,
+        ) -> axum::Json<serde_json::Value> {
+            assert_eq!(
+                query.get("external_customer_id").map(String::as_str),
+                Some("owner-1")
+            );
+            assert_eq!(
+                query.get("invoice_type").map(String::as_str),
+                Some("credit")
+            );
+            axum::Json(json!({
+                "invoices": [
+                    {
+                        "lago_id": "inv-paid",
+                        "number": "CHR-001-001",
+                        "total_amount_cents": 100,
+                        "status": "finalized",
+                        "payment_status": "succeeded",
+                        "issuing_date": "2026-07-29",
+                        "customer": { "external_id": "owner-1" }
+                    },
+                    {
+                        "lago_id": "inv-open",
+                        "number": "CHR-001-002",
+                        "total_amount_cents": 10000,
+                        "status": "finalized",
+                        "payment_status": "pending",
+                        "customer": { "external_id": "owner-1" }
+                    }
+                ]
+            }))
+        }
+
+        let base_url = spawn_lago_mock(
+            axum::Router::new().route("/api/v1/invoices", axum::routing::get(list_invoices)),
+        )
+        .await;
+        let client = LagoClient::new(base_url, "test-key".to_string()).expect("client");
+
+        let invoices = client.credit_invoices("owner-1").await.expect("invoices");
+
+        assert_eq!(invoices.len(), 2);
+        assert_eq!(invoices[0].lago_id, "inv-paid");
+        assert_eq!(invoices[0].payment_status, "succeeded");
+        assert_eq!(invoices[0].external_customer_id.as_deref(), Some("owner-1"));
+        assert_eq!(invoices[1].total_amount_cents, 10000);
+    }
+
+    #[tokio::test]
+    async fn invoice_download_retries_until_the_pdf_exists() {
+        use std::sync::atomic::{AtomicUsize, Ordering as AtomicOrdering};
+
+        let calls = std::sync::Arc::new(AtomicUsize::new(0));
+        let counter = calls.clone();
+        let base_url = spawn_lago_mock(axum::Router::new().route(
+            "/api/v1/invoices/inv-1/download",
+            axum::routing::post(move || {
+                let calls = counter.clone();
+                async move {
+                    let file_url = if calls.fetch_add(1, AtomicOrdering::SeqCst) < 1 {
+                        serde_json::Value::Null
+                    } else {
+                        json!("https://lago.example/receipt.pdf")
+                    };
+                    axum::Json(json!({
+                        "invoice": { "lago_id": "inv-1", "file_url": file_url }
+                    }))
+                }
+            }),
+        ))
+        .await;
+        let client = LagoClient::new(base_url, "test-key".to_string()).expect("client");
+
+        let url = client
+            .invoice_download_url("inv-1")
+            .await
+            .expect("download url");
+
+        assert_eq!(url.as_deref(), Some("https://lago.example/receipt.pdf"));
+        assert_eq!(calls.load(AtomicOrdering::SeqCst), 2);
     }
 
     #[test]

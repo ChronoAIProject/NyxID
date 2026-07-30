@@ -59,6 +59,8 @@
         crate::handlers::billing::get_wallet,
         crate::handlers::billing::provision_wallet,
         crate::handlers::billing::create_topup,
+        crate::handlers::billing::list_topups,
+        crate::handlers::billing::download_invoice,
         // Demo
         crate::handlers::demo::get_demo
     ),
@@ -131,6 +133,9 @@
             crate::handlers::billing::BillingUsageRow,
             crate::handlers::billing::BillingUsageTotals,
             crate::handlers::billing::BillingReadOnlyBlock,
+            crate::handlers::billing::TopUpHistoryResponse,
+            crate::handlers::billing::TopUpHistoryEntry,
+            crate::handlers::billing::InvoiceDownloadResponse,
             crate::handlers::billing::ProvisionWalletRequest,
             crate::handlers::billing::TopUpRequest,
             crate::handlers::billing::BillingWalletResponse,

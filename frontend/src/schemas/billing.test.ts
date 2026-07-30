@@ -58,7 +58,7 @@ describe("billing schemas", () => {
   });
 
   it("lists only backend-supported usage periods", () => {
-    expect(BILLING_USAGE_PERIODS).toEqual(["24h", "1d", "7d", "30d", "90d", "all"]);
+    expect(BILLING_USAGE_PERIODS).toEqual(["24h", "7d", "30d", "90d", "all"]);
   });
 
   it("accepts the wallet response shape returned by `/billing/wallet`", () => {

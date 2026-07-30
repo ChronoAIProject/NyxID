@@ -20,6 +20,8 @@ import {
   useBillingWallet,
   useProvisionBillingWallet,
   useTopUpBilling,
+  useTopUpHistory,
+  openInvoiceReceipt,
 } from "@/hooks/use-billing";
 import { Button, ButtonIcon } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
@@ -195,7 +197,147 @@ export function BillingPage() {
         totals={usageQuery.data?.totals}
         loading={usageQuery.isLoading}
       />
+
+      <TopUpHistory key={period} period={period} />
     </div>
+  );
+}
+
+const TOPUP_STATUS_VARIANT = {
+  paid: "success",
+  pending: "secondary",
+  expired: "warning",
+  failed: "destructive",
+  voided: "secondary",
+} as const;
+
+const TOPUPS_PER_PAGE = 10;
+
+function TopUpHistory({ period }: { readonly period: BillingUsagePeriod }) {
+  const [page, setPage] = useState(1);
+  const historyQuery = useTopUpHistory(page, TOPUPS_PER_PAGE, period);
+  const topups = historyQuery.data?.topups ?? [];
+  const total = historyQuery.data?.total || topups.length;
+  const pageCount = Math.max(1, Math.ceil(total / TOPUPS_PER_PAGE));
+
+  async function handleReceipt(lagoInvoiceId: string) {
+    try {
+      await openInvoiceReceipt(lagoInvoiceId);
+    } catch (error) {
+      toast.error(
+        error instanceof ApiError
+          ? error.message
+          : "The receipt is not ready yet; try again shortly",
+      );
+    }
+  }
+
+  if (historyQuery.isLoading) {
+    return <Skeleton className="h-[200px] w-full" />;
+  }
+
+  return (
+    <Card>
+      <CardHeader>
+        <CardTitle>Top-up history</CardTitle>
+        <p className="mt-1 text-[12px] text-muted-foreground">
+          Payments, their status, and downloadable receipts.
+        </p>
+      </CardHeader>
+      <CardContent>
+        <div className="overflow-hidden rounded-lg border border-border">
+          <Table>
+            <TableHeader>
+              <TableRow>
+                <TableHead>Date</TableHead>
+                <TableHead className="text-right">Credits</TableHead>
+                <TableHead>Invoice</TableHead>
+                <TableHead>Status</TableHead>
+                <TableHead className="text-right">Actions</TableHead>
+              </TableRow>
+            </TableHeader>
+            <TableBody>
+              {topups.length === 0 ? (
+                <TableRow>
+                  <TableCell colSpan={5} className="py-8 text-center text-muted-foreground">
+                    No top-ups yet.
+                  </TableCell>
+                </TableRow>
+              ) : (
+                topups.map((topup) => (
+                  <TableRow key={topup.id}>
+                    <TableCell>
+                      {new Date(topup.created_at).toLocaleString()}
+                    </TableCell>
+                    <TableCell className="text-right">
+                      {formatNumber(topup.amount_credits)}
+                    </TableCell>
+                    <TableCell className="text-muted-foreground">
+                      {topup.invoice_number ?? "—"}
+                    </TableCell>
+                    <TableCell>
+                      <Badge variant={TOPUP_STATUS_VARIANT[topup.status]}>
+                        {labelize(topup.status)}
+                      </Badge>
+                    </TableCell>
+                    <TableCell className="text-right">
+                      {topup.status === "pending" && topup.checkout_url ? (
+                        <Button
+                          variant="outline"
+                          size="sm"
+                          onClick={() => openExternal(topup.checkout_url ?? "")}
+                        >
+                          Resume payment
+                        </Button>
+                      ) : topup.receipt_available && topup.lago_invoice_id ? (
+                        <Button
+                          variant="outline"
+                          size="sm"
+                          onClick={() =>
+                            void handleReceipt(topup.lago_invoice_id ?? "")
+                          }
+                        >
+                          Download receipt
+                        </Button>
+                      ) : (
+                        <span className="text-muted-foreground">—</span>
+                      )}
+                    </TableCell>
+                  </TableRow>
+                ))
+              )}
+            </TableBody>
+          </Table>
+        </div>
+        {pageCount > 1 && (
+          <div className="mt-3 flex items-center justify-between text-[12px] text-muted-foreground">
+            <span>
+              Page {page} of {pageCount}
+            </span>
+            <div className="flex gap-2">
+              <Button
+                variant="outline"
+                size="sm"
+                disabled={page <= 1 || historyQuery.isFetching}
+                onClick={() => setPage((current) => Math.max(1, current - 1))}
+              >
+                Previous
+              </Button>
+              <Button
+                variant="outline"
+                size="sm"
+                disabled={page >= pageCount || historyQuery.isFetching}
+                onClick={() =>
+                  setPage((current) => Math.min(pageCount, current + 1))
+                }
+              >
+                Next
+              </Button>
+            </div>
+          </div>
+        )}
+      </CardContent>
+    </Card>
   );
 }
 
@@ -411,7 +553,6 @@ function Detail({ label, value }: { readonly label: string; readonly value: stri
 function periodLabel(period: BillingUsagePeriod): string {
   switch (period) {
     case "24h":
-    case "1d":
       return "24 hours";
     case "7d":
       return "7 days";

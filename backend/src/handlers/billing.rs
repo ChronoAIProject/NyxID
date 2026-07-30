@@ -132,6 +132,42 @@ pub struct LagoWebhookResponse {
     pub action: String,
 }
 
+#[derive(Debug, Serialize, ToSchema)]
+pub struct TopUpHistoryEntry {
+    pub id: String,
+    pub created_at: chrono::DateTime<Utc>,
+    pub amount_credits: i64,
+    /// paid | pending | expired | failed | voided
+    pub status: String,
+    pub invoice_number: Option<String>,
+    pub lago_invoice_id: Option<String>,
+    /// Present while the checkout can still be completed.
+    pub checkout_url: Option<String>,
+    /// True when a receipt PDF can be downloaded for this top-up.
+    pub receipt_available: bool,
+}
+
+#[derive(Debug, Serialize, ToSchema)]
+pub struct TopUpHistoryResponse {
+    pub owner_id: String,
+    pub topups: Vec<TopUpHistoryEntry>,
+    pub page: u32,
+    pub per_page: u32,
+    pub total: u64,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct TopUpHistoryQuery {
+    pub page: Option<u32>,
+    pub per_page: Option<u32>,
+    pub period: Option<String>,
+}
+
+#[derive(Debug, Serialize, ToSchema)]
+pub struct InvoiceDownloadResponse {
+    pub file_url: String,
+}
+
 #[utoipa::path(
     get,
     path = "/api/v1/billing/usage",
@@ -379,6 +415,193 @@ pub async fn create_topup(
         status: checkout.session.status,
         reused: checkout.reused,
     }))
+}
+
+#[utoipa::path(
+    get,
+    path = "/api/v1/billing/topups",
+    tag = "Billing",
+    responses(
+        (status = 200, description = "Top-up history", body = TopUpHistoryResponse)
+    ),
+    security(("bearer_auth" = []))
+)]
+pub async fn list_topups(
+    State(state): State<AppState>,
+    auth_user: AuthUser,
+    Query(query): Query<TopUpHistoryQuery>,
+) -> AppResult<Json<TopUpHistoryResponse>> {
+    let actor_id = auth_user.user_id.to_string();
+    let owner = state
+        .billing
+        .owner_resolver()
+        .resolve_for_wallet_management(&actor_id, None)
+        .await?;
+    ensure_billing_rollout(&state, &owner.owner_id, &actor_id).await?;
+
+    let page = query.page.unwrap_or(1).max(1);
+    let per_page = query.per_page.unwrap_or(10).clamp(1, 50);
+    let mut filter = doc! { "owner_id": &owner.owner_id };
+    if let Some(period) = query.period.as_deref().filter(|period| *period != "all") {
+        filter.insert(
+            "created_at",
+            doc! { "$gte": bson::DateTime::from_chrono(period_start(period)) },
+        );
+    }
+    let collection = state
+        .db
+        .collection::<crate::models::billing_topup_session::BillingTopUpSession>(
+            crate::models::billing_topup_session::COLLECTION_NAME,
+        );
+    let total = collection.count_documents(filter.clone()).await?;
+    let sessions: Vec<crate::models::billing_topup_session::BillingTopUpSession> = collection
+        .find(filter)
+        .sort(doc! { "created_at": -1 })
+        .skip(u64::from((page - 1) * per_page))
+        .limit(i64::from(per_page))
+        .await?
+        .try_collect()
+        .await?;
+
+    // One Lago call resolves payment outcomes for every session: the
+    // local store only tracks checkout creation, while paid/voided live
+    // on the credit invoice. Lago being unreachable degrades to local
+    // statuses rather than failing the page.
+    let invoices = match state.billing.lago_client() {
+        Some(lago) => lago
+            .credit_invoices(&owner.owner_id)
+            .await
+            .unwrap_or_default(),
+        None => Vec::new(),
+    };
+    let invoices_by_id: std::collections::HashMap<
+        &str,
+        &crate::services::billing::lago_client::InvoiceSummary,
+    > = invoices
+        .iter()
+        .map(|invoice| (invoice.lago_id.as_str(), invoice))
+        .collect();
+
+    // Sessions written before the invoice id was captured at creation
+    // (invoice attachment is asynchronous) carry no invoice link. Lago's
+    // wallet transactions do, so backfill the mapping with one call per
+    // distinct wallet on this page.
+    let mut txn_invoices: std::collections::HashMap<String, String> =
+        std::collections::HashMap::new();
+    if let Some(lago) = state.billing.lago_client() {
+        let wallets_needing_backfill: std::collections::BTreeSet<&str> = sessions
+            .iter()
+            .filter(|session| {
+                session.lago_invoice_id.is_none() && session.lago_wallet_transaction_id.is_some()
+            })
+            .map(|session| session.lago_wallet_id.as_str())
+            .collect();
+        for wallet_id in wallets_needing_backfill {
+            if let Ok(pairs) = lago.wallet_transaction_invoices(wallet_id).await {
+                txn_invoices.extend(pairs);
+            }
+        }
+    }
+
+    let checkout_expiry_cutoff = Utc::now() - Duration::hours(24);
+    let topups = sessions
+        .into_iter()
+        .map(|session| {
+            let lago_invoice_id = session.lago_invoice_id.clone().or_else(|| {
+                session
+                    .lago_wallet_transaction_id
+                    .as_deref()
+                    .and_then(|txn| txn_invoices.get(txn).cloned())
+            });
+            let invoice = lago_invoice_id
+                .as_deref()
+                .and_then(|id| invoices_by_id.get(id).copied());
+            let status = match invoice {
+                Some(invoice) if invoice.status == "voided" => "voided",
+                Some(invoice) if invoice.payment_status == "succeeded" => "paid",
+                Some(invoice) if invoice.payment_status == "failed" => "failed",
+                _ if matches!(
+                    session.status,
+                    crate::models::billing_topup_session::BillingTopUpStatus::Failed
+                ) =>
+                {
+                    "failed"
+                }
+                // Stripe checkout sessions expire after 24 hours and Lago
+                // returns the same cached session per transaction, so an
+                // old pending checkout can no longer be completed.
+                _ if session.created_at < checkout_expiry_cutoff => "expired",
+                _ => "pending",
+            };
+            TopUpHistoryEntry {
+                id: session.id,
+                created_at: session.created_at,
+                amount_credits: session.amount_credits,
+                status: status.to_string(),
+                invoice_number: invoice.map(|invoice| invoice.number.clone()),
+                lago_invoice_id,
+                checkout_url: (status == "pending")
+                    .then_some(session.payment_url)
+                    .flatten(),
+                receipt_available: status == "paid",
+            }
+        })
+        .collect();
+
+    Ok(Json(TopUpHistoryResponse {
+        owner_id: owner.owner_id,
+        topups,
+        page,
+        per_page,
+        total,
+    }))
+}
+
+#[utoipa::path(
+    get,
+    path = "/api/v1/billing/invoices/{invoice_id}/download",
+    tag = "Billing",
+    params(("invoice_id" = String, Path, description = "Lago invoice id")),
+    responses(
+        (status = 200, description = "Signed receipt download URL", body = InvoiceDownloadResponse)
+    ),
+    security(("bearer_auth" = []))
+)]
+pub async fn download_invoice(
+    State(state): State<AppState>,
+    auth_user: AuthUser,
+    axum::extract::Path(invoice_id): axum::extract::Path<String>,
+) -> AppResult<Json<InvoiceDownloadResponse>> {
+    let actor_id = auth_user.user_id.to_string();
+    let owner = state
+        .billing
+        .owner_resolver()
+        .resolve_for_wallet_management(&actor_id, None)
+        .await?;
+    ensure_billing_rollout(&state, &owner.owner_id, &actor_id).await?;
+
+    let lago = state.billing.lago_client().ok_or_else(|| {
+        AppError::BillingNotConfigured("Lago client is not configured".to_string())
+    })?;
+    // Ownership check before touching the document: the invoice's Lago
+    // customer must be the resolved billing owner. Foreign or unknown
+    // invoices 404 identically so existence is not leaked.
+    let invoice = lago
+        .invoice_summary(&invoice_id)
+        .await?
+        .filter(|invoice| invoice.external_customer_id.as_deref() == Some(owner.owner_id.as_str()))
+        .ok_or_else(|| AppError::NotFound("Invoice not found".to_string()))?;
+
+    let file_url = lago
+        .invoice_download_url(&invoice.lago_id)
+        .await?
+        .ok_or_else(|| {
+            AppError::BillingProviderUnavailable(
+                "The receipt is still being generated; try again shortly".to_string(),
+            )
+        })?;
+
+    Ok(Json(InvoiceDownloadResponse { file_url }))
 }
 
 pub async fn lago_webhook(

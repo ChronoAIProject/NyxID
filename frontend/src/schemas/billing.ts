@@ -1,6 +1,6 @@
 import { z } from "zod";
 
-export const BILLING_USAGE_PERIODS = ["24h", "1d", "7d", "30d", "90d", "all"] as const;
+export const BILLING_USAGE_PERIODS = ["24h", "7d", "30d", "90d", "all"] as const;
 
 export type BillingUsagePeriod = (typeof BILLING_USAGE_PERIODS)[number];
 
@@ -102,6 +102,34 @@ export type BillingReadOnlyBlock = z.infer<typeof billingReadOnlyBlockSchema>;
 export type BillingUsageRow = z.infer<typeof billingUsageRowSchema>;
 export type BillingUsageTotals = z.infer<typeof billingUsageTotalsSchema>;
 export type BillingUsageResponse = z.infer<typeof billingUsageResponseSchema>;
+export const topUpHistoryEntrySchema = z.object({
+  id: z.string().min(1),
+  created_at: z.string().min(1),
+  amount_credits: z.number().int(),
+  status: z.enum(["paid", "pending", "expired", "failed", "voided"]),
+  invoice_number: z.string().nullable().optional(),
+  lago_invoice_id: z.string().nullable().optional(),
+  checkout_url: z.string().nullable().optional(),
+  receipt_available: z.boolean(),
+});
+
+export const topUpHistoryResponseSchema = z.object({
+  owner_id: z.string().min(1),
+  topups: z.array(topUpHistoryEntrySchema),
+  // Optional with defaults so older backends that omit pagination render
+  // a single page instead of failing the parse and blanking the card.
+  page: z.number().int().positive().optional().default(1),
+  per_page: z.number().int().positive().optional().default(10),
+  total: z.number().int().nonnegative().optional().default(0),
+});
+
+export const invoiceDownloadResponseSchema = z.object({
+  file_url: z.string().min(1),
+});
+
+export type TopUpHistoryEntry = z.infer<typeof topUpHistoryEntrySchema>;
+export type TopUpHistoryResponse = z.infer<typeof topUpHistoryResponseSchema>;
+
 export type BillingWalletResponse = z.infer<typeof billingWalletResponseSchema>;
 export type ProvisionBillingWalletRequest = z.infer<typeof provisionBillingWalletRequestSchema>;
 export type TopUpBillingRequest = z.infer<typeof topUpBillingRequestSchema>;

@@ -1042,7 +1042,12 @@ pub fn build_router(
             "/wallet",
             get(handlers::billing::get_wallet).post(handlers::billing::provision_wallet),
         )
-        .route("/topup", post(handlers::billing::create_topup));
+        .route("/topup", post(handlers::billing::create_topup))
+        .route("/topups", get(handlers::billing::list_topups))
+        .route(
+            "/invoices/{invoice_id}/download",
+            get(handlers::billing::download_invoice),
+        );
 
     // Org management routes (creation, members, invites). All routes
     // authenticate as a regular session/user; admin-vs-member checks happen
