@@ -168,6 +168,24 @@ The discriminated body (`type:"text"`) is **required** by Aevatar ≥ `feature/i
 prod Aevatar. This branch must deploy **after** the Aevatar dev contract reaches prod.
 Same for the whole action-card feature.
 
+### 2.4 Producer contract smoke
+
+After reproducing the missing-service blocked turn, run the credentialed smoke against the
+deployed NyxID/Aevatar pair. Use the `actorId` and `originTurnId` from the producer's
+`nyxid.action.request`; the smoke posts the exact out-of-band `actions: []` envelope and passes
+only when Aevatar admits it by emitting `RUN_STARTED` for a distinct continuation turn:
+
+```bash
+NYXID_URL=https://nyx-api.example.com \
+NYXID_ACCESS_TOKEN=<approved-test-session> \
+NYXID_AEVATAR_ACTOR_ID=nyxid-chat-... \
+NYXID_AEVATAR_ORIGIN_TURN_ID=turn-... \
+npm --prefix frontend run test:producer-contract
+```
+
+This is deliberately separate from the hermetic frontend suite: it requires an explicitly
+approved production-smoke identity and performs real producer writes.
+
 ## 3. Current frontend anatomy (verified file map)
 
 All paths relative to `frontend/src`.
