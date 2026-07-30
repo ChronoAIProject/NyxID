@@ -41,7 +41,7 @@ export async function openAssistant(
   await page.goto(`/assistant?${search.toString()}`);
   await expect(
     page.getByRole("button", { name: "New chat" }),
-  ).toBeVisible();
+  ).toBeVisible({ timeout: 20_000 });
 }
 
 /** The chat surface (thread + composer), excluding sidebar and header. */

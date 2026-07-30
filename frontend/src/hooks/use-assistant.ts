@@ -46,8 +46,33 @@ export const assistantKeys = {
 // simultaneously-pending; the badge uses the server-side total anyway.
 const PENDING_APPROVALS_PAGE_SIZE = 50;
 const APPROVAL_HISTORY_PAGE_SIZE = 20;
+const STREAM_START_DEADLINE_MS = 8_000;
+const PROJECTION_DEADLINE_MS = 5_000;
 
 const activeHandles = new Map<string, TurnHandle>();
+const episodeOwners = new WeakMap<QueryClient, Map<string, symbol>>();
+
+function ownersFor(queryClient: QueryClient): Map<string, symbol> {
+  const existing = episodeOwners.get(queryClient);
+  if (existing) return existing;
+  const owners = new Map<string, symbol>();
+  episodeOwners.set(queryClient, owners);
+  return owners;
+}
+
+async function waitWithDeadline(
+  task: Promise<void>,
+  timeoutMs: number,
+): Promise<void> {
+  let timeout: ReturnType<typeof setTimeout> | undefined;
+  await Promise.race([
+    task,
+    new Promise<void>((resolve) => {
+      timeout = setTimeout(resolve, timeoutMs);
+    }),
+  ]);
+  if (timeout !== undefined) clearTimeout(timeout);
+}
 
 /**
  * Warm the query cache from the transport. BEST EFFORT, and deliberately
@@ -69,23 +94,30 @@ async function projectTransportState(
   queryClient: QueryClient,
   conversationId: string,
 ): Promise<void> {
-  const [history, conversations] = await Promise.allSettled([
-    assistantTransport.getHistory(conversationId),
-    assistantTransport.listConversations(),
-  ]);
-  if (history.status === "fulfilled") {
-    queryClient.setQueryData<ConversationHistory>(
-      assistantKeys.history(conversationId),
-      () => history.value,
-    );
-  }
-  if (conversations.status === "fulfilled") {
-    queryClient.setQueryData<Conversation[]>(
-      assistantKeys.conversations,
-      () => conversations.value,
-    );
-  }
-  await queryClient.invalidateQueries({ queryKey: assistantKeys.workspace });
+  await waitWithDeadline(
+    (async () => {
+      const [history, conversations] = await Promise.allSettled([
+        assistantTransport.getHistory(conversationId),
+        assistantTransport.listConversations(),
+      ]);
+      if (history.status === "fulfilled") {
+        queryClient.setQueryData<ConversationHistory>(
+          assistantKeys.history(conversationId),
+          () => history.value,
+        );
+      }
+      if (conversations.status === "fulfilled") {
+        queryClient.setQueryData<Conversation[]>(
+          assistantKeys.conversations,
+          () => conversations.value,
+        );
+      }
+      await queryClient.invalidateQueries({
+        queryKey: assistantKeys.workspace,
+      });
+    })(),
+    PROJECTION_DEADLINE_MS,
+  );
 }
 
 function turnFromEvent(event: TurnEvent): ActiveTurn | undefined {
@@ -133,9 +165,7 @@ export function useAssistantApprovals() {
   const pending: AssistantApprovalEntry[] = (
     pendingQuery.data?.requests ?? []
   ).map((request) => toAssistantApprovalEntry(request, grantDurationSec));
-  const history: AssistantApprovalEntry[] = (
-    historyQuery.data?.requests ?? []
-  )
+  const history: AssistantApprovalEntry[] = (historyQuery.data?.requests ?? [])
     .filter((request) => request.status !== "pending")
     .map((request) => toAssistantApprovalEntry(request, grantDurationSec));
 
@@ -244,6 +274,10 @@ export function useConversation(conversationId: string | undefined) {
     queryKey: assistantKeys.history(conversationId ?? ""),
     queryFn: () => assistantTransport.getHistory(conversationId ?? ""),
     enabled: Boolean(conversationId),
+    retry: (failureCount, error) => {
+      if (error instanceof ApiError && error.status === 404) return false;
+      return failureCount < 3;
+    },
   });
 }
 
@@ -349,6 +383,8 @@ function eventPrintsContent(event: TurnEvent): boolean {
   switch (event.event) {
     case "block.delta":
       return event.text.trim().length > 0;
+    case "block.updated":
+      return "decision" in event.patch && event.patch.decision !== null;
     case "block.started":
     case "block.completed":
       return (
@@ -361,10 +397,24 @@ function eventPrintsContent(event: TurnEvent): boolean {
   }
 }
 
+interface TurnEventPump {
+  readonly onEvent: (event: TurnEvent) => void;
+  readonly receivedEvent: () => boolean;
+  readonly expired: () => boolean;
+  readonly restorePrevious: () => void;
+  readonly disown: () => void;
+}
+
 function createTurnEventPump(
   queryClient: QueryClient,
   targetId: string,
-): (event: TurnEvent) => void {
+): TurnEventPump {
+  const owners = ownersFor(queryClient);
+  const owner = Symbol(targetId);
+  const previousOwner = owners.get(targetId);
+  const previousEpisode = queryClient.getQueryData<TurnEpisode | null>(
+    assistantKeys.episode(targetId),
+  );
   let lastSeenCursor = 0;
   // Per-episode, because the pump itself is per-episode. Opening it here rather
   // than on the first event is what lets the thread tell "a stream is starting"
@@ -372,15 +422,54 @@ function createTurnEventPump(
   let printed = false;
   let open = true;
   let projections = 0;
+  let hasReceivedEvent = false;
+  let startExpired = false;
+  let startDeadline: ReturnType<typeof setTimeout> | undefined;
+  const ownsEpisode = () => owners.get(targetId) === owner;
+  const clearStartDeadline = () => {
+    if (startDeadline !== undefined) {
+      clearTimeout(startDeadline);
+      startDeadline = undefined;
+    }
+  };
   const publish = () => {
+    if (!ownsEpisode()) return;
     queryClient.setQueryData<TurnEpisode | null>(
       assistantKeys.episode(targetId),
       () => ({ open, printed, projecting: projections > 0 }),
     );
   };
+  owners.set(targetId, owner);
   publish();
 
-  return (event) => {
+  startDeadline = setTimeout(() => {
+    if (!ownsEpisode() || hasReceivedEvent) return;
+    startExpired = true;
+    assistantTransport.cancelActiveTurn(targetId);
+    if (!ownsEpisode()) return;
+
+    const handle = activeHandles.get(targetId);
+    const error = {
+      code: "stream_start_timeout",
+      message: "The assistant did not start replying in time. Try again.",
+    };
+    open = false;
+    activeHandles.delete(targetId);
+    queryClient.setQueryData<ActiveTurn | null>(
+      assistantKeys.turn(targetId),
+      () => ({ turnId: handle?.turnId ?? null, status: "failed", error }),
+    );
+    publish();
+    toast.error("The assistant reply failed", {
+      id: `assistant-turn-start-timeout-${targetId}`,
+      description: error.message,
+    });
+  }, STREAM_START_DEADLINE_MS);
+
+  const onEvent = (event: TurnEvent) => {
+    if (!ownsEpisode()) return;
+    hasReceivedEvent = true;
+    clearStartDeadline();
     if (event.cursor <= lastSeenCursor) return;
     lastSeenCursor = event.cursor;
     if (eventPrintsContent(event)) printed = true;
@@ -424,6 +513,34 @@ function createTurnEventPump(
         publish();
       });
   };
+
+  return {
+    onEvent,
+    receivedEvent: () => hasReceivedEvent,
+    expired: () => startExpired,
+    restorePrevious: () => {
+      clearStartDeadline();
+      if (!ownsEpisode()) return;
+      if (previousOwner) {
+        owners.set(targetId, previousOwner);
+      } else {
+        owners.delete(targetId);
+      }
+      queryClient.setQueryData<TurnEpisode | null>(
+        assistantKeys.episode(targetId),
+        () => previousEpisode ?? null,
+      );
+    },
+    disown: () => {
+      clearStartDeadline();
+      if (!ownsEpisode()) return;
+      owners.delete(targetId);
+      queryClient.setQueryData<TurnEpisode | null>(
+        assistantKeys.episode(targetId),
+        () => null,
+      );
+    },
+  };
 }
 
 /**
@@ -456,18 +573,18 @@ export function useSendMessage(conversationId: string | undefined) {
       // exists — and leave the composer disabled with no turn to stop.
       const pump = createTurnEventPump(queryClient, targetId);
       try {
-        const handle = assistantTransport.sendMessage(targetId, content, pump);
+        const handle = assistantTransport.sendMessage(
+          targetId,
+          content,
+          pump.onEvent,
+        );
         activeHandles.set(targetId, handle);
         await projectTransportState(queryClient, targetId);
         return { conversationId: targetId, handle };
       } catch (error) {
-        // A send that never became a turn (active-turn guard, transport throw)
-        // must not leave its episode open, or the thread waits on a stream that
-        // was never started.
-        queryClient.setQueryData<TurnEpisode | null>(
-          assistantKeys.episode(targetId),
-          () => null,
-        );
+        // A rejected candidate never became the owner of a real turn. Restore
+        // the prior pump and its state instead of clearing a live episode.
+        pump.restorePrevious();
         throw error;
       }
     },
@@ -485,7 +602,10 @@ export function describeSendFailure(error: unknown): {
   readonly message: string;
   readonly description: string;
 } {
-  if (error instanceof ApiError && (error.status === 401 || error.status === 403)) {
+  if (
+    error instanceof ApiError &&
+    (error.status === 401 || error.status === 403)
+  ) {
     return {
       message: "Message not sent",
       description:
@@ -536,14 +656,26 @@ export function useDecideApproval(conversationId: string | undefined) {
       // On the live contract the approve endpoint streams an SSE
       // continuation of the run; the pump projects its events and the
       // handle makes the stop button work during it.
-      const handle = await assistantTransport.decideApproval(
-        conversationId,
-        blockId,
-        approved,
-        createTurnEventPump(queryClient, conversationId),
-      );
-      if (handle) activeHandles.set(conversationId, handle);
-      await projectTransportState(queryClient, conversationId);
+      const pump = createTurnEventPump(queryClient, conversationId);
+      try {
+        const handle = await assistantTransport.decideApproval(
+          conversationId,
+          blockId,
+          approved,
+          pump.onEvent,
+        );
+        if (handle) {
+          activeHandles.set(conversationId, handle);
+        } else if (!pump.receivedEvent()) {
+          pump.disown();
+        }
+        await projectTransportState(queryClient, conversationId);
+      } catch (error) {
+        if (!pump.receivedEvent() && !pump.expired()) {
+          pump.restorePrevious();
+        }
+        throw error;
+      }
     },
     // Without this toast a failed approve POST (or an active-turn
     // rejection) is invisible: the buttons just re-enable and nothing

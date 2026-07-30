@@ -143,7 +143,7 @@ describe("assistant hooks", () => {
     queryClient.clear();
   });
 
-  it("clears the episode when a send never becomes a turn", async () => {
+  it("restores the live episode when a concurrent send is rejected", async () => {
     const { queryClient, Wrapper } = createHarness();
     const { result, unmount } = renderHook(
       () => ({
@@ -162,15 +162,18 @@ describe("assistant hooks", () => {
       await vi.advanceTimersByTimeAsync(0);
     });
 
-    // Rejected by the active-turn guard: its episode must not be left open, or
-    // the thread waits forever on a stream that never started.
+    // Rejected by the active-turn guard: the losing pump must restore the
+    // current stream's episode instead of clearing or replacing it.
     await act(async () => {
       await expect(
         result.current.second.mutateAsync("Second"),
       ).rejects.toBeInstanceOf(AssistantTurnActiveError);
       await vi.advanceTimersByTimeAsync(0);
     });
-    expect(result.current.episode.data).toBeNull();
+    expect(result.current.episode.data).toMatchObject({
+      open: true,
+      printed: false,
+    });
 
     unmount();
     queryClient.clear();
@@ -281,7 +284,9 @@ describe("assistant hooks", () => {
     let sent: SentMessage | null = null;
     await act(async () => {
       const createPromise = result.current.create.mutateAsync();
-      const sendPromise = result.current.send.mutateAsync("Sent mid-provision.");
+      const sendPromise = result.current.send.mutateAsync(
+        "Sent mid-provision.",
+      );
       await vi.advanceTimersByTimeAsync(0);
       [created, sent] = await Promise.all([createPromise, sendPromise]);
     });

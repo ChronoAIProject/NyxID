@@ -1,15 +1,8 @@
 /**
- * AUDIT probes — chat-flow audit, docs/chat-flow-audit.md.
+ * Regression probes from the chat-flow audit, docs/chat-flow-audit.md.
  *
- * These are CHARACTERIZATION tests: each pins down a defect's mechanism
- * empirically and PASSES by asserting the current (defective) behavior, so
- * the suite stays green while the defects are open. Each carries the defect
- * id from the audit report; when a defect is fixed, flip the marked
- * assertion(s) to the desired behavior and move the test into the main
- * suite (or delete it in favor of a real regression test).
- *
- * They drive the REAL hooks against the REAL mock transport (plus targeted
- * spies where the defect lives in the live transport's event vocabulary).
+ * They drive the real hooks against the real mock transport, plus targeted
+ * spies for live-transport event vocabulary and failure paths.
  */
 import { act, render, renderHook, screen } from "@testing-library/react";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
@@ -50,21 +43,17 @@ beforeEach(() => {
 });
 
 afterEach(() => {
-  delete (
-    globalThis as { __assistantMockFaults?: unknown }
-  ).__assistantMockFaults;
+  delete (globalThis as { __assistantMockFaults?: unknown })
+    .__assistantMockFaults;
   vi.restoreAllMocks();
   resetAssistantTransport(() => TEST_NOW);
   vi.useRealTimers();
 });
 
-describe("AUDIT: episode-slot ownership (NYX-2 / hypothesis P1-a)", () => {
-  it("a rejected concurrent send nulls the LIVE stream's episode; with no further events it stays null", async () => {
-    // A stream that produced no events yet (the real transport before its
-    // response headers arrive). With events flowing, the null still happens
-    // but is re-overwritten within ~100 ms by the live pump's next event or
-    // projection finalizer — itself proof that the slot has no owner: any
-    // pump, superseded or not, writes it unconditionally.
+describe("episode-slot ownership (NYX-2 / hypothesis P1-a)", () => {
+  it("a rejected concurrent send preserves the live stream's episode", async () => {
+    // A stream that produced no events yet mirrors the real transport before
+    // its response headers arrive.
     (
       globalThis as {
         __assistantMockFaults?: { sendSilent?: boolean };
@@ -95,15 +84,79 @@ describe("AUDIT: episode-slot ownership (NYX-2 / hypothesis P1-a)", () => {
       await vi.advanceTimersByTimeAsync(5_000);
     });
 
-    // DEFECT (NYX-2): the LOSER's cleanup wiped the WINNER's episode. The
-    // page now believes no stream ran — the thinking indicator drops, and a
-    // stream that later closes empty can no longer be reported as an error.
-    expect(result.current.episode.data).toBeNull();
+    expect(result.current.episode.data).toEqual({
+      open: true,
+      printed: false,
+      projecting: false,
+    });
   });
 });
 
-describe("AUDIT: approval leaves the episode open forever (NYX-5 / hypothesis P2-f)", () => {
-  it("deciding an approval on the mock transport opens an episode nothing will ever close", async () => {
+describe("stream deadlines (NYX-1 / NYX-7)", () => {
+  it("fails an episode that emits no event within the start deadline", async () => {
+    (
+      globalThis as {
+        __assistantMockFaults?: { sendSilent?: boolean };
+      }
+    ).__assistantMockFaults = { sendSilent: true };
+
+    const { Wrapper } = createHarness();
+    const { result } = renderHook(
+      () => ({
+        send: useSendMessage("conversation-github"),
+        episode: useTurnEpisode("conversation-github"),
+        turn: useAssistantTurn("conversation-github"),
+      }),
+      { wrapper: Wrapper },
+    );
+
+    await act(async () => {
+      await result.current.send.mutateAsync("Wait for the deadline.");
+      await vi.advanceTimersByTimeAsync(8_001);
+    });
+
+    expect(result.current.turn.data).toMatchObject({
+      status: "failed",
+      error: { code: "stream_start_timeout" },
+    });
+    expect(result.current.episode.data).toEqual({
+      open: false,
+      printed: false,
+      projecting: false,
+    });
+  });
+
+  it("stops reporting projection work when transcript reads never settle", async () => {
+    vi.spyOn(assistantTransport, "getHistory").mockImplementation(
+      () => new Promise(() => undefined),
+    );
+
+    const { Wrapper } = createHarness();
+    const { result } = renderHook(
+      () => ({
+        send: useSendMessage("conversation-github"),
+        episode: useTurnEpisode("conversation-github"),
+      }),
+      { wrapper: Wrapper },
+    );
+
+    await act(async () => {
+      const pending = result.current.send.mutateAsync("Project this reply.");
+      await vi.advanceTimersByTimeAsync(5_000);
+      await pending;
+      await vi.advanceTimersByTimeAsync(2_000);
+    });
+
+    expect(result.current.episode.data).toEqual({
+      open: false,
+      printed: true,
+      projecting: false,
+    });
+  });
+});
+
+describe("approval episode cleanup (NYX-5 / hypothesis P2-f)", () => {
+  it("a settled approval without a continuation disowns its episode", async () => {
     const { Wrapper } = createHarness();
     const { result } = renderHook(
       () => ({
@@ -121,25 +174,43 @@ describe("AUDIT: approval leaves the episode open forever (NYX-5 / hypothesis P2
       await vi.advanceTimersByTimeAsync(0);
     });
 
-    // DEFECT (NYX-5): the pump is constructed (episode opened) before the
-    // transport answers; the mock's decideApproval settles the card and
-    // returns null WITHOUT emitting a single event, so nothing ever closes
-    // the episode.
-    expect(result.current.episode.data).toEqual({
-      open: true,
-      printed: false,
-      projecting: false,
-    });
+    expect(result.current.episode.data).toBeNull();
 
     await act(async () => {
       await vi.advanceTimersByTimeAsync(10_000);
     });
-    expect(result.current.episode.data?.open).toBe(true);
+    expect(result.current.episode.data).toBeNull();
+  });
+
+  it("a rejected approval restores the prior episode instead of leaking its pump", async () => {
+    vi.spyOn(assistantTransport, "decideApproval").mockRejectedValue(
+      new Error("Approval transport failed."),
+    );
+
+    const { Wrapper } = createHarness();
+    const { result } = renderHook(
+      () => ({
+        decide: useDecideApproval("conversation-stripe"),
+        episode: useTurnEpisode("conversation-stripe"),
+      }),
+      { wrapper: Wrapper },
+    );
+
+    await act(async () => {
+      await expect(
+        result.current.decide.mutateAsync({
+          blockId: "approval-stripe-lark",
+          approved: true,
+        }),
+      ).rejects.toThrow("Approval transport failed.");
+    });
+
+    expect(result.current.episode.data).toBeNull();
   });
 });
 
-describe("AUDIT: approval decision events do not count as printed (NYX-4 / hypothesis P1-c)", () => {
-  it("a JSON-ack approval — block.updated patches then turn.completed — closes the episode printed:false", async () => {
+describe("approval decision events count as printed (NYX-4 / hypothesis P1-c)", () => {
+  it("a JSON-ack approval closes the episode as printed", async () => {
     // Script exactly what AevatarAssistantTransport emits on the JSON-ack
     // approve path (aevatar-transport.ts:1285-1349): the decision patch,
     // the parked-ledger patch, then finishTurn's turn.completed. No
@@ -189,23 +260,15 @@ describe("AUDIT: approval decision events do not count as printed (NYX-4 / hypot
       await vi.advanceTimersByTimeAsync(0);
     });
 
-    // The approval SUCCEEDED and the card visibly flipped via block.updated,
-    // yet the episode closes as "printed nothing":
     expect(result.current.turn.data?.status).toBe("completed");
-    // DEFECT (NYX-4): eventPrintsContent ignores block.updated, so a turn
-    // whose only presentation events are approval patches reads as empty.
     expect(result.current.episode.data).toMatchObject({
       open: false,
-      printed: false,
+      printed: true,
     });
-    // pages/assistant.tsx will therefore compute turnEnded=true,
-    // turnPrinted=false — the combination ChatThread reports as the red
-    // "Sorry, there seems to be an error" row (proven in the render probe
-    // below).
   });
 });
 
-describe("AUDIT: what the thread renders for the probed states (NYX-4 consequence)", () => {
+describe("thread rendering for approval continuation states", () => {
   const approvalTail: AssistantMessage[] = [
     {
       id: "message-approval",
@@ -230,12 +293,12 @@ describe("AUDIT: what the thread renders for the probed states (NYX-4 consequenc
     },
   ];
 
-  it("turnEnded + printed:false over an approved card shows the false error after the grace period", async () => {
+  it("a printed approval decision does not show an empty-turn error", async () => {
     render(
       <ChatThread
         messages={approvalTail}
         turnEnded
-        turnPrinted={false}
+        turnPrinted
         onDecideApproval={() => Promise.resolve()}
       />,
     );
@@ -243,25 +306,21 @@ describe("AUDIT: what the thread renders for the probed states (NYX-4 consequenc
     await act(async () => {
       await vi.advanceTimersByTimeAsync(800);
     });
-    // DEFECT (NYX-4, user-visible half): the reader approved, the card
-    // flipped, the continuation acked — and the chat calls it an error.
     expect(
-      screen.getByText(
+      screen.queryByText(
         "Sorry, there seems to be an error with the request for now.",
       ),
-    ).toBeInTheDocument();
+    ).not.toBeInTheDocument();
   });
 
-  it("an approval continuation's pre-status gap shows NO loading indicator at all (NYX-3 / hypothesis P1-d)", () => {
-    // Probed page inputs for the gap between clicking Approve and the
-    // continuation's first turn.status: active=false (turn cache still
-    // holds the prior terminal), episode open (pump constructed), tail is
-    // the assistant-owned approval card. The page then passes thinking=false
-    // (tail IS assistant) and streaming=false (turn not active).
+  it("an approval continuation's pre-status gap shows its thinking state (NYX-3 / hypothesis P1-d)", () => {
+    // Page inputs for the gap between clicking Approve and the continuation's
+    // first turn.status: active=false, episode open, and an assistant-owned
+    // approval card at the tail. The open episode keeps thinking visible.
     render(
       <ChatThread
         messages={approvalTail}
-        thinking={false}
+        thinking
         streaming={false}
         turnEnded={false}
         turnPrinted={false}
@@ -269,8 +328,7 @@ describe("AUDIT: what the thread renders for the probed states (NYX-4 consequenc
       />,
     );
 
-    // DEFECT (NYX-3): nothing on screen says the assistant is working.
-    expect(document.querySelector("[data-streaming-dots]")).toBeNull();
-    expect(document.querySelector("[data-assistant-halo]")).toBeNull();
+    expect(document.querySelector("[data-streaming-dots]")).not.toBeNull();
+    expect(document.querySelector("[data-assistant-halo]")).not.toBeNull();
   });
 });

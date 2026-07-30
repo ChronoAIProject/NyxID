@@ -56,6 +56,12 @@ function optimisticUserMessage(text: string): AssistantMessage {
   };
 }
 
+interface PendingSendEcho {
+  readonly targetId: string | undefined;
+  readonly content: string;
+  readonly matchingMessagesBeforeSend: number;
+}
+
 export function AssistantPage({
   view = "chat",
 }: {
@@ -91,9 +97,7 @@ export function AssistantPage({
   // Which conversation the in-flight send was aimed at, so its optimistic echo
   // cannot follow the reader into a different thread. State rather than a ref:
   // it is read during render to build the message list.
-  const [pendingSendTarget, setPendingSendTarget] = useState<
-    string | undefined
-  >(undefined);
+  const [pendingSendEcho, setPendingSendEcho] = useState<PendingSendEcho>();
 
   useLayoutEffect(() => {
     const element = composerRef.current;
@@ -268,7 +272,15 @@ export function AssistantPage({
     // nothing about where the text was going — without this the reader can
     // switch chats mid-send and watch the previous chat's message appear in
     // this one's transcript. `undefined` is the draft thread, which matches.
-    setPendingSendTarget(selectedId);
+    const normalizedContent = content.trim();
+    const matchingMessagesBeforeSend = (history.data?.messages ?? []).filter(
+      (message) => userMessageText(message)?.trim() === normalizedContent,
+    ).length;
+    setPendingSendEcho({
+      targetId: selectedId,
+      content,
+      matchingMessagesBeforeSend,
+    });
     try {
       const sent = await sendMessage.mutateAsync(content);
       if (sent.conversationId !== selectedId) {
@@ -302,26 +314,38 @@ export function AssistantPage({
    * Also covers the shorter gap on an existing conversation, between the send
    * starting and the projection landing.
    */
-  const pendingContent =
-    sendMessage.isPending && pendingSendTarget === selectedId
-      ? sendMessage.variables
-      : undefined;
+  const pendingEcho = useMemo(
+    () =>
+      sendMessage.isPending &&
+      pendingSendEcho !== undefined &&
+      pendingSendEcho.targetId === selectedId
+        ? pendingSendEcho
+        : sendMessage.isPending &&
+            pendingSendEcho === undefined &&
+            typeof sendMessage.variables === "string"
+          ? {
+              targetId: selectedId,
+              content: sendMessage.variables,
+              matchingMessagesBeforeSend: 0,
+            }
+          : undefined,
+    [pendingSendEcho, selectedId, sendMessage.isPending, sendMessage.variables],
+  );
   const messages = useMemo(() => {
     const transcript = history.data?.messages ?? [];
-    if (pendingContent === undefined) return transcript;
-    // Scanned across the whole transcript, not just its tail: the assistant's
-    // first message can project while the send mutation is still pending, and a
-    // tail-only test would then append a SECOND copy of the reader's message
-    // below the answer — and flip the page out of `streaming` back to
-    // `thinking`. The cost is that re-sending identical text twice in one
-    // conversation skips its echo, which is the harmless direction.
-    const projected = transcript.some(
-      (message) => userMessageText(message)?.trim() === pendingContent.trim(),
-    );
+    if (pendingEcho === undefined) return transcript;
+    const normalizedContent = pendingEcho.content.trim();
+    const matchingMessages = transcript.filter(
+      (message) => userMessageText(message)?.trim() === normalizedContent,
+    ).length;
+    // The transport's projected copy is present only when the count advanced
+    // beyond the send-time snapshot. An older identical message is not the
+    // identity of this send and must not suppress its optimistic echo.
+    const projected = matchingMessages > pendingEcho.matchingMessagesBeforeSend;
     return projected
       ? transcript
-      : [...transcript, optimisticUserMessage(pendingContent)];
-  }, [history.data?.messages, pendingContent]);
+      : [...transcript, optimisticUserMessage(pendingEcho.content)];
+  }, [history.data?.messages, pendingEcho]);
   const episodeState = episode.data ?? undefined;
   const awaitingFirstTurn =
     active || sendMessage.isPending || episodeState?.open === true;
@@ -395,7 +419,8 @@ export function AssistantPage({
             messages={messages}
             bottomInset={composerHeight}
             thinking={
-              awaitingFirstTurn && messages.at(-1)?.role !== "assistant"
+              awaitingFirstTurn &&
+              (!active || messages.at(-1)?.role !== "assistant")
             }
             streaming={active && messages.at(-1)?.role === "assistant"}
             turnEnded={turnEnded}

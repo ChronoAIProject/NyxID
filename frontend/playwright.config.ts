@@ -18,6 +18,7 @@ const PORT = 4611;
 export default defineConfig({
   testDir: "./e2e",
   fullyParallel: true,
+  workers: 3,
   forbidOnly: !!process.env.CI,
   retries: 0,
   reporter: [["list"]],

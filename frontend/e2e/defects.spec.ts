@@ -12,23 +12,15 @@ import {
 } from "./helpers";
 
 /**
- * Defect specs — chat-flow audit (docs/chat-flow-audit.md).
- *
- * Convention:
- *  - `test.fail(...)`-annotated specs assert the DESIRED user-visible
- *    behavior and are expected to fail while the defect is open. Fixing the
- *    defect makes Playwright report "passed unexpectedly" — then remove the
- *    annotation and the spec becomes the regression test.
- *  - "current behavior" specs PASS and pin down exactly what a user sees
- *    today, so the defect is reproducible on demand.
+ * Regression specs from the chat-flow audit (docs/chat-flow-audit.md).
  *
  * Fault injection (silent turn, transcript latency) mirrors real transport
  * conditions the deterministic mock script cannot otherwise reach; the
  * mapping to live-transport behavior is argued in the audit report.
  */
 
-test.describe("NYX-1: a turn that never starts has no deadline, no Stop, no error", () => {
-  test("current behavior: thinking dots forever over an idle-looking composer", async ({
+test.describe("NYX-1: a turn that never starts reaches a deadline", () => {
+  test("a silent turn reports an error and frees the composer", async ({
     page,
   }) => {
     await openAssistant(page, {
@@ -41,25 +33,16 @@ test.describe("NYX-1: a turn that never starts has no deadline, no Stop, no erro
       thread(page).getByText("Rotate the key one more time."),
     ).toBeVisible({ timeout: 2_000 });
 
-    // The chat says it is thinking...
     await expect(streamingDots(page).first()).toBeVisible({
       timeout: 3_000,
     });
-    // ...but the turn was never announced, so there is no Stop to reach for
-    // and the composer sits enabled as if nothing were happening.
+    await expect(emptyTurnError(page)).toBeVisible({ timeout: 10_000 });
+    await expect(streamingDots(page)).toHaveCount(0);
     await expect(stopButton(page)).toHaveCount(0);
     await expect(composerInput(page)).toBeEnabled();
-
-    // Ten seconds on: still dots, still no error, still no way out.
-    await page.waitForTimeout(10_000);
-    await expect(streamingDots(page).first()).toBeVisible();
-    await expect(emptyTurnError(page)).toHaveCount(0);
-    await expect(stopButton(page)).toHaveCount(0);
   });
 
-  test("current behavior: retrying into the hang erases even the thinking dots", async ({
-    page,
-  }) => {
+  test("a rejected retry cannot erase the live episode", async ({ page }) => {
     await openAssistant(page, {
       conversation: "conversation-github",
       faults: { sendSilent: true },
@@ -70,16 +53,11 @@ test.describe("NYX-1: a turn that never starts has no deadline, no Stop, no erro
       timeout: 3_000,
     });
 
-    // The composer looks idle, so the reader naturally tries again. The
-    // retry is rejected (active-turn guard) — and its cleanup NULLS the
-    // live episode (NYX-2), so the thinking dots vanish too. The chat now
-    // shows a sent message, no activity, no error, and a composer holding
-    // the rejected text: it looks dead.
     await sendMessage(page, "Hello? Are you still there?");
     await expect(
       page.getByText("Message not sent", { exact: false }).first(),
     ).toBeVisible({ timeout: 5_000 });
-    await expect(streamingDots(page)).toHaveCount(0, { timeout: 5_000 });
+    await expect(streamingDots(page).first()).toBeVisible({ timeout: 5_000 });
     await expect(emptyTurnError(page)).toHaveCount(0);
     await expect(stopButton(page)).toHaveCount(0);
     // The rejected text was restored — the reader's earlier message hangs
@@ -89,27 +67,26 @@ test.describe("NYX-1: a turn that never starts has no deadline, no Stop, no erro
     );
   });
 
-  test.fail(
-    "desired: a stream that never starts surfaces a way out within 10 s",
-    async ({ page }) => {
-      await openAssistant(page, {
-        conversation: "conversation-github",
-        faults: { sendSilent: true },
-      });
+  test("desired: a stream that never starts surfaces a way out within 10 s", async ({
+    page,
+  }) => {
+    await openAssistant(page, {
+      conversation: "conversation-github",
+      faults: { sendSilent: true },
+    });
 
-      await sendMessage(page, "Rotate the key one more time.");
-      await expect(streamingDots(page).first()).toBeVisible({
-        timeout: 3_000,
-      });
+    await sendMessage(page, "Rotate the key one more time.");
+    await expect(streamingDots(page).first()).toBeVisible({
+      timeout: 3_000,
+    });
 
-      // Within 10 s the reader must get EITHER a Stop button (the turn is
-      // acknowledged as live) OR an error (the turn is acknowledged as
-      // dead). Silence with an enabled composer is neither.
-      await expect(
-        stopButton(page).or(emptyTurnError(page)).first(),
-      ).toBeVisible({ timeout: 10_000 });
-    },
-  );
+    // Within 10 s the reader must get EITHER a Stop button (the turn is
+    // acknowledged as live) OR an error (the turn is acknowledged as
+    // dead). Silence with an enabled composer is neither.
+    await expect(stopButton(page).or(emptyTurnError(page)).first()).toBeVisible(
+      { timeout: 10_000 },
+    );
+  });
 });
 
 test.describe("NYX-6: re-sending earlier text suppresses the optimistic echo", () => {
@@ -132,43 +109,38 @@ test.describe("NYX-6: re-sending earlier text suppresses the optimistic echo", (
     ).toBeVisible({ timeout: 1_000 });
   });
 
-  test.fail(
-    "desired: re-sending text that appears earlier in the chat still echoes instantly",
-    async ({ page }) => {
-      await openAssistant(page, {
-        conversation: "conversation-github",
-        faults: { historyDelayMs: 1_500 },
-      });
-      // The transcript already contains this exact user message.
-      await expect(
-        thread(page).getByText(
-          "Rotate the deploy key for the web repository and verify access.",
-        ),
-      ).toBeVisible({ timeout: 10_000 });
-
-      await sendMessage(
-        page,
-        "Rotate the deploy key for the web repository and verify access.",
-      );
-      // The textarea cleared on Enter; the echo must appear at once. Today
-      // the whole-transcript dedup (pages/assistant.tsx) mistakes the OLD
-      // message for the new one's projection and shows nothing for the
-      // whole transcript round-trip.
-      await expect(
-        thread(page)
-          .getByText(
-            "Rotate the deploy key for the web repository and verify access.",
-          )
-          .nth(1),
-      ).toBeVisible({ timeout: 1_000 });
-    },
-  );
-});
-
-test.describe("NYX-5: deciding an approval opens an episode nothing closes", () => {
-  test("current behavior: the card settles but the episode slot stays open forever", async ({
+  test("desired: re-sending text that appears earlier in the chat still echoes instantly", async ({
     page,
   }) => {
+    await openAssistant(page, {
+      conversation: "conversation-github",
+      faults: { historyDelayMs: 1_500 },
+    });
+    // The transcript already contains this exact user message.
+    await expect(
+      thread(page).getByText(
+        "Rotate the deploy key for the web repository and verify access.",
+      ),
+    ).toBeVisible({ timeout: 10_000 });
+
+    await sendMessage(
+      page,
+      "Rotate the deploy key for the web repository and verify access.",
+    );
+    // The textarea cleared on Enter; the second copy must appear at once,
+    // before the deliberately slow transcript projection lands.
+    await expect(
+      thread(page)
+        .getByText(
+          "Rotate the deploy key for the web repository and verify access.",
+        )
+        .nth(1),
+    ).toBeVisible({ timeout: 1_000 });
+  });
+});
+
+test.describe("NYX-5: approval episode cleanup", () => {
+  test("the card settles without leaving an open episode", async ({ page }) => {
     await openAssistant(page, { conversation: "conversation-stripe" });
     await expect(
       thread(page).getByText("one write step needs your approval", {
@@ -185,13 +157,9 @@ test.describe("NYX-5: deciding an approval opens an episode nothing closes", () 
       thread(page).getByText("Approved", { exact: false }).first(),
     ).toBeVisible({ timeout: 5_000 });
 
-    // With the current seeded fixtures the leak is invisible (the thread's
-    // tail is an assistant message, which suppresses the thinking row), so
-    // pin the state itself: the episode opened by the decision's pump never
-    // closes.
     await page.waitForTimeout(2_000);
     const episode = await readEpisode(page, "conversation-stripe");
-    expect(episode).toMatchObject({ open: true, printed: false });
+    expect(episode === null || episode.open === false).toBe(true);
 
     // The chat still works afterwards — the next send replaces the pump.
     await sendMessage(page, "Thanks, confirm it posted.");
@@ -202,20 +170,19 @@ test.describe("NYX-5: deciding an approval opens an episode nothing closes", () 
     await expect(sendButton(page)).toBeVisible();
   });
 
-  test.fail(
-    "desired: a settled approval leaves no open episode behind",
-    async ({ page }) => {
-      await openAssistant(page, { conversation: "conversation-stripe" });
-      await thread(page)
-        .getByRole("button", { name: "Approve and send" })
-        .click();
-      await expect(
-        thread(page).getByText("Approved", { exact: false }).first(),
-      ).toBeVisible({ timeout: 5_000 });
+  test("desired: a settled approval leaves no open episode behind", async ({
+    page,
+  }) => {
+    await openAssistant(page, { conversation: "conversation-stripe" });
+    await thread(page)
+      .getByRole("button", { name: "Approve and send" })
+      .click();
+    await expect(
+      thread(page).getByText("Approved", { exact: false }).first(),
+    ).toBeVisible({ timeout: 5_000 });
 
-      await page.waitForTimeout(2_000);
-      const episode = await readEpisode(page, "conversation-stripe");
-      expect(episode === null || episode.open === false).toBe(true);
-    },
-  );
+    await page.waitForTimeout(2_000);
+    const episode = await readEpisode(page, "conversation-stripe");
+    expect(episode === null || episode.open === false).toBe(true);
+  });
 });

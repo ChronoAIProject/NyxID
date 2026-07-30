@@ -78,11 +78,10 @@ test("a 404 transcript shows the no-transcript-yet notice above a usable compose
 }) => {
   await openAssistant(page, { faults: { historyErrorStatus: 404 } });
 
-  // The query retries 3 times before surfacing; allow for the backoff.
   const notice = page
     .getByRole("status")
     .filter({ hasText: "no saved transcript" });
-  await expect(notice).toBeVisible({ timeout: 20_000 });
+  await expect(notice).toBeVisible({ timeout: 1_000 });
   await expect(notice).toContainText("You can keep chatting");
   await expect(composerInput(page)).toBeEnabled();
 });
