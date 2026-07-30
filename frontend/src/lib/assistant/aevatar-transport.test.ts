@@ -5266,6 +5266,83 @@ describe("typed new chats and legacy workflow compatibility", () => {
     ).toBe(false);
   });
 
+  it("wakes a typed conversation out of band with an empty action list", async () => {
+    const bodies: Array<{ url: string; body: Record<string, unknown> }> = [];
+    const mock = stubFetch((url, init) => {
+      if (
+        (url === TYPED_URL ||
+          url ===
+            `${ASSISTANT_BASE}/conversations/${TYPED_CONVERSATION}/stream`) &&
+        init?.method === "POST"
+      ) {
+        const body = JSON.parse(String(init.body)) as Record<string, unknown>;
+        bodies.push({ url, body });
+        return sseResponse([
+          {
+            type: "RUN_STARTED",
+            actorId: TYPED_CONVERSATION,
+            turnId: url === TYPED_URL ? TYPED_TURN : "turn-typed-wake-1",
+          },
+          {
+            type: "RUN_FINISHED",
+            runFinished: {
+              status: url === TYPED_URL ? "blocked" : "completed",
+            },
+          },
+        ]);
+      }
+      return undefined;
+    });
+    const transport = new AevatarAssistantTransport();
+    const conversation = await transport.createConversation();
+    await collectWorkflowTurn(transport, conversation.id, "wait for access");
+
+    await new Promise<void>((resolve) => {
+      transport.wakeActions(conversation.id, TYPED_TURN, (event) => {
+        if (event.event === "turn.completed") resolve();
+      });
+    });
+
+    expect(bodies.map((entry) => entry.url)).toEqual([
+      TYPED_URL,
+      `${ASSISTANT_BASE}/conversations/${TYPED_CONVERSATION}/stream`,
+    ]);
+    expect(Object.keys(bodies[1]?.body ?? {})).toEqual([
+      "type",
+      "clientRequestId",
+      "originTurnId",
+      "actions",
+    ]);
+    expect(bodies[1]?.body).toEqual({
+      type: "action.continue",
+      clientRequestId: bodies[1]?.body["clientRequestId"],
+      originTurnId: TYPED_TURN,
+      actions: [],
+    });
+    expect(bodies[1]?.body["clientRequestId"]).not.toBe(
+      bodies[0]?.body["clientRequestId"],
+    );
+    expect(
+      mock.mock.calls.some(([input]) => String(input) === WORKFLOW_URL),
+    ).toBe(false);
+  });
+
+  it("refuses to wake a legacy workflow conversation", async () => {
+    const mock = stubFetch();
+    const transport = new AevatarAssistantTransport();
+    const conversation = await seedWorkflowConversation(transport);
+
+    expect(() => transport.wakeActions(conversation.id, WORKFLOW_TURN)).toThrow(
+      /typed assistant conversation/,
+    );
+    expect(
+      mock.mock.calls.some(
+        ([input, init]) =>
+          String(input) === WORKFLOW_URL && init?.method === "POST",
+      ),
+    ).toBe(false);
+  });
+
   it("fails closed when typed chat does not identify a nyxid-chat actor", async () => {
     stubFetch((url, init) =>
       url === TYPED_URL && init?.method === "POST"

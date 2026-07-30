@@ -16,9 +16,11 @@ import {
   actionReportSchema,
   assistantActionRequestSchema,
   buildActionContinueBody,
+  buildActionWakeBody,
   recoverUnsupportedAssistantActionRequest,
   type ActionContinueBody,
   type ActionReport,
+  type ActionWakeBody,
   type AssistantActionRequest,
 } from "@/schemas/assistant-actions";
 import {
@@ -1543,6 +1545,45 @@ export class AevatarAssistantTransport implements AssistantTransport {
     return this.drainPendingActions(conversationId);
   }
 
+  wakeActions(
+    conversationId: string,
+    originTurnId: string,
+    onEvent: (event: TurnEvent) => void = noopEvent,
+  ): TurnHandle {
+    const requestedId = conversationId;
+    const actorId = this.canonicalConversationId(conversationId);
+    const stored =
+      this.conversations.get(requestedId) ?? this.conversations.get(actorId);
+    if (!stored) throw new Error("Conversation was not found.");
+    if (this.deletingConversations.has(actorId)) {
+      throw new Error("This conversation is being deleted.");
+    }
+    if (!TYPED_SERVER_CONVERSATION_ID_PATTERN.test(actorId)) {
+      throw new AssistantProtocolError(
+        "Action wakes require a typed assistant conversation.",
+      );
+    }
+    if (
+      this.running.has(requestedId) ||
+      this.running.has(actorId) ||
+      isTurnActive(stored.turnState.activeTurn?.status)
+    ) {
+      throw new AssistantTurnActiveError();
+    }
+
+    const body = buildActionWakeBody(crypto.randomUUID(), originTurnId);
+    const run = this.newRun(onEvent, null, "actor");
+    run.cursor = stored.turnState.lastCursor;
+    this.running.set(requestedId, run);
+    void this.streamActionContinuation(requestedId, actorId, run, body);
+    return {
+      get turnId() {
+        return run.turnId;
+      },
+      cancel: () => this.cancelTurn(requestedId, run),
+    };
+  }
+
   private findActionCard(
     conversationId: string,
     blockId: string,
@@ -2106,16 +2147,18 @@ export class AevatarAssistantTransport implements AssistantTransport {
     conversationId: string,
     actorId: string,
     run: RunningTurn,
-    body: ActionContinueBody,
+    body: ActionContinueBody | ActionWakeBody,
   ): Promise<void> {
-    // Action continuations share the actor turn's ordering fence: a report
-    // must not overtake a still-pending stop from the prior turn.
+    // Action continuations share the actor turn's ordering fence and must not
+    // overtake a still-pending stop from the prior turn.
     await this.awaitPendingStop(conversationId);
 
+    const isWake = body.actions.length === 0;
     let finalFailure = {
       code: "network_error",
-      message:
-        "The action report could not be delivered. It will be retried after the next turn.",
+      message: isWake
+        ? "The action wake could not be delivered. Try again."
+        : "The action report could not be delivered. It will be retried after the next turn.",
     };
 
     for (let attempt = 0; attempt < STREAM_DELIVERY_ATTEMPTS; attempt += 1) {
@@ -2133,8 +2176,8 @@ export class AevatarAssistantTransport implements AssistantTransport {
               Accept: "text/event-stream",
             },
             credentials: "include",
-            // This DTO is already rebuilt from the strict allowlist in
-            // buildActionContinueBody; no card or model object is spread here.
+            // This DTO is rebuilt by one of the strict action-continuation
+            // builders; no card or model object is spread here.
             body: JSON.stringify(body),
             signal: run.controller.signal,
           },
@@ -2163,8 +2206,9 @@ export class AevatarAssistantTransport implements AssistantTransport {
         await response.body?.cancel().catch(() => undefined);
         finalFailure = {
           code: "stream_protocol_error",
-          message:
-            "The action report endpoint did not return an event stream. Delivery will retry after the next turn.",
+          message: isWake
+            ? "The action wake endpoint did not return an event stream."
+            : "The action report endpoint did not return an event stream. Delivery will retry after the next turn.",
         };
         break;
       }

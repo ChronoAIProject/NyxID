@@ -9,6 +9,7 @@ import { toTerminalBlock } from "@/lib/assistant/stream";
 import {
   actionReportSchema,
   buildActionContinueBody,
+  buildActionWakeBody,
   type ActionReport,
 } from "@/schemas/assistant-actions";
 import type {
@@ -170,6 +171,25 @@ class MockAssistantTransport implements AssistantTransport {
     return this.startPendingAction(conversationId);
   }
 
+  wakeActions(
+    conversationId: string,
+    originTurnId: string,
+    onEvent: (event: TurnEvent) => void = () => undefined,
+  ): TurnHandle {
+    buildActionWakeBody(crypto.randomUUID(), originTurnId);
+    const currentStatus =
+      assistantMockStore.getTurnState(conversationId).activeTurn?.status;
+    if (this.running.has(conversationId) || isTurnActive(currentStatus)) {
+      throw new AssistantTurnActiveError();
+    }
+    const pending = this.pendingActions.get(conversationId) ?? [];
+    pending.push({ originTurnId, reports: [], onEvent });
+    this.pendingActions.set(conversationId, pending);
+    const handle = this.startPendingAction(conversationId);
+    if (!handle) throw new AssistantTurnActiveError();
+    return handle;
+  }
+
   reset(now: () => number = Date.now): void {
     for (const script of this.running.values()) {
       script.cancelled = true;
@@ -206,12 +226,15 @@ class MockAssistantTransport implements AssistantTransport {
     const turnId = assistantMockStore.nextId("turn-action");
     const messageId = assistantMockStore.nextId("assistant-action-message");
     const blockId = assistantMockStore.nextId("assistant-action-block");
-    const declined = batch.reports.every(
-      (report) => report.disposition === "declined",
-    );
-    const text = declined
-      ? "Understood. I did not connect the service, and I will continue without it."
-      : "The service connection is ready. I can now continue with brokered access.";
+    const wake = batch.reports.length === 0;
+    const declined =
+      !wake &&
+      batch.reports.every((report) => report.disposition === "declined");
+    const text = wake
+      ? "The assistant resumed the blocked turn."
+      : declined
+        ? "Understood. I did not connect the service, and I will continue without it."
+        : "The service connection is ready. I can now continue with brokered access.";
     const events: TurnEvent[] = [
       { cursor: 1, event: "turn.status", turn_id: turnId, status: "running" },
       {
