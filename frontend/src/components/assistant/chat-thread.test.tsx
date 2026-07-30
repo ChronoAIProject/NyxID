@@ -235,7 +235,7 @@ describe("ChatThread", () => {
     expect(dots?.children).toHaveLength(5);
     Object.defineProperty(dots?.firstElementChild, "getAnimations", {
       configurable: true,
-      value: () => [{ currentTime: 1_200 }],
+      value: () => [{ currentTime: 850 }],
     });
 
     rerender(
@@ -297,7 +297,7 @@ describe("ChatThread", () => {
       screen.getByRole("status", { name: "Assistant is answering" }),
     ).toBeInTheDocument();
 
-    act(() => vi.advanceTimersByTime(200));
+    act(() => vi.advanceTimersByTime(800));
     rerender(
       <ChatThread
         messages={[

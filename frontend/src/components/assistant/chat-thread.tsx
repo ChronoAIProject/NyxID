@@ -235,6 +235,13 @@ function groupMessages(messages: readonly AssistantMessage[]): MessageGroup[] {
  */
 const DOMINO_PERIOD_MS = 1_800;
 const DOMINO_EXIT_MS = 360;
+// CSS starts 10% into its timeline via the negative delay; dot 5 reaches its
+// out-swing peak at 57%, which is the instant the impulse reverses left.
+const DOMINO_CSS_HEAD_START = 10 / 100;
+const DOMINO_CSS_REVERSAL_KEYFRAME = 57 / 100;
+const DOMINO_REVERSAL_MS =
+  DOMINO_PERIOD_MS *
+  (DOMINO_CSS_REVERSAL_KEYFRAME - DOMINO_CSS_HEAD_START);
 
 function StreamingDots({
   visible,
@@ -280,7 +287,7 @@ function StreamingDots({
     const rect = lastVisibleRect.current ?? root.getBoundingClientRect();
 
     root.dataset.exitDirection =
-      phase < DOMINO_PERIOD_MS / 2 ? "right" : "left";
+      phase < DOMINO_REVERSAL_MS ? "right" : "left";
     root.classList.remove("relative");
     root.classList.add(
       "assistant-streaming-dots--leaving",
