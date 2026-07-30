@@ -516,6 +516,261 @@ html.theme-dark .assistant-halo--visible {
   }
 }
 
+/*
+ * A quiet, horizontal Newton's-cradle loop. The shared -180ms delay starts the
+ * five bespoke dot timelines at 10%, where the left striker begins the next
+ * rightward pass. The second half mirrors the collision back to the left.
+ */
+.assistant-streaming-dot {
+  animation-duration: 1.8s;
+  animation-timing-function: linear;
+  animation-delay: -180ms;
+  animation-iteration-count: infinite;
+  will-change: transform;
+}
+
+.assistant-streaming-dot:nth-child(1) {
+  animation-name: assistant-domino-dot-1;
+}
+
+.assistant-streaming-dot:nth-child(2) {
+  animation-name: assistant-domino-dot-2;
+}
+
+.assistant-streaming-dot:nth-child(3) {
+  animation-name: assistant-domino-dot-3;
+}
+
+.assistant-streaming-dot:nth-child(4) {
+  animation-name: assistant-domino-dot-4;
+}
+
+.assistant-streaming-dot:nth-child(5) {
+  animation-name: assistant-domino-dot-5;
+}
+
+@keyframes assistant-domino-dot-1 {
+  0% {
+    transform: translateX(-2px);
+    animation-timing-function: ease-in;
+  }
+  5%,
+  10% {
+    transform: translateX(0);
+    animation-timing-function: ease-out;
+  }
+  14% {
+    transform: translateX(-6px);
+    animation-timing-function: ease-in;
+  }
+  20% {
+    transform: translateX(0);
+    animation-timing-function: ease-out;
+  }
+  24% {
+    transform: translateX(2px);
+    animation-timing-function: ease-in;
+  }
+  28%,
+  88% {
+    transform: translateX(0);
+    animation-timing-function: ease-out;
+  }
+  92% {
+    transform: translateX(-2px);
+    animation-timing-function: ease-in;
+  }
+  94% {
+    transform: translateX(0);
+    animation-timing-function: ease-out;
+  }
+  98% {
+    transform: translateX(-6px);
+    animation-timing-function: ease-in;
+  }
+  100% {
+    transform: translateX(-2px);
+  }
+}
+
+@keyframes assistant-domino-dot-2 {
+  0%,
+  25% {
+    transform: translateX(0);
+    animation-timing-function: ease-out;
+  }
+  29% {
+    transform: translateX(2px);
+    animation-timing-function: ease-in;
+  }
+  33%,
+  81% {
+    transform: translateX(0);
+    animation-timing-function: ease-out;
+  }
+  85% {
+    transform: translateX(-2px);
+    animation-timing-function: ease-in;
+  }
+  89%,
+  100% {
+    transform: translateX(0);
+  }
+}
+
+@keyframes assistant-domino-dot-3 {
+  0%,
+  32% {
+    transform: translateX(0);
+    animation-timing-function: ease-out;
+  }
+  36% {
+    transform: translateX(2px);
+    animation-timing-function: ease-in;
+  }
+  40%,
+  74% {
+    transform: translateX(0);
+    animation-timing-function: ease-out;
+  }
+  78% {
+    transform: translateX(-2px);
+    animation-timing-function: ease-in;
+  }
+  82%,
+  100% {
+    transform: translateX(0);
+  }
+}
+
+@keyframes assistant-domino-dot-4 {
+  0%,
+  39% {
+    transform: translateX(0);
+    animation-timing-function: ease-out;
+  }
+  43% {
+    transform: translateX(2px);
+    animation-timing-function: ease-in;
+  }
+  47%,
+  67% {
+    transform: translateX(0);
+    animation-timing-function: ease-out;
+  }
+  71% {
+    transform: translateX(-2px);
+    animation-timing-function: ease-in;
+  }
+  75%,
+  100% {
+    transform: translateX(0);
+  }
+}
+
+@keyframes assistant-domino-dot-5 {
+  0%,
+  46% {
+    transform: translateX(0);
+    animation-timing-function: ease-out;
+  }
+  50% {
+    transform: translateX(2px);
+    animation-timing-function: ease-in;
+  }
+  53% {
+    transform: translateX(0);
+    animation-timing-function: ease-out;
+  }
+  57% {
+    transform: translateX(6px);
+    animation-timing-function: ease-in;
+  }
+  61% {
+    transform: translateX(0);
+    animation-timing-function: ease-out;
+  }
+  65% {
+    transform: translateX(-2px);
+    animation-timing-function: ease-in;
+  }
+  69%,
+  100% {
+    transform: translateX(0);
+  }
+}
+
+.assistant-streaming-dots--leaving {
+  z-index: 20;
+  margin: 0 !important;
+}
+
+.assistant-streaming-dots--leaving .assistant-streaming-dot {
+  animation-duration: 280ms;
+  animation-timing-function: cubic-bezier(0.16, 1, 0.3, 1);
+  animation-iteration-count: 1;
+  animation-fill-mode: forwards;
+}
+
+.assistant-streaming-dots--leaving[data-exit-direction="right"]
+  .assistant-streaming-dot {
+  animation-name: assistant-domino-exit-right;
+}
+
+.assistant-streaming-dots--leaving[data-exit-direction="left"]
+  .assistant-streaming-dot {
+  animation-name: assistant-domino-exit-left;
+}
+
+.assistant-streaming-dots--leaving[data-exit-direction="right"]
+  .assistant-streaming-dot:nth-child(1),
+.assistant-streaming-dots--leaving[data-exit-direction="left"]
+  .assistant-streaming-dot:nth-child(5) {
+  animation-delay: 72ms;
+}
+
+.assistant-streaming-dots--leaving[data-exit-direction="right"]
+  .assistant-streaming-dot:nth-child(2),
+.assistant-streaming-dots--leaving[data-exit-direction="left"]
+  .assistant-streaming-dot:nth-child(4) {
+  animation-delay: 54ms;
+}
+
+.assistant-streaming-dots--leaving[data-exit-direction="right"]
+  .assistant-streaming-dot:nth-child(3),
+.assistant-streaming-dots--leaving[data-exit-direction="left"]
+  .assistant-streaming-dot:nth-child(3) {
+  animation-delay: 36ms;
+}
+
+.assistant-streaming-dots--leaving[data-exit-direction="right"]
+  .assistant-streaming-dot:nth-child(4),
+.assistant-streaming-dots--leaving[data-exit-direction="left"]
+  .assistant-streaming-dot:nth-child(2) {
+  animation-delay: 18ms;
+}
+
+.assistant-streaming-dots--leaving[data-exit-direction="right"]
+  .assistant-streaming-dot:nth-child(5),
+.assistant-streaming-dots--leaving[data-exit-direction="left"]
+  .assistant-streaming-dot:nth-child(1) {
+  animation-delay: 0ms;
+}
+
+@keyframes assistant-domino-exit-right {
+  to {
+    opacity: 0;
+    transform: translateX(24px);
+  }
+}
+
+@keyframes assistant-domino-exit-left {
+  to {
+    opacity: 0;
+    transform: translateX(-24px);
+  }
+}
+
 @media (prefers-reduced-motion: reduce) {
   /* Parks on frame 0 rather than hiding the halo — the turn is still running
      and the mark is the only signal that it is. */
@@ -527,6 +782,21 @@ html.theme-dark .assistant-halo--visible {
   html.theme-light .assistant-halo--visible,
   html.theme-dark .assistant-halo--visible {
     opacity: 0.5;
+  }
+
+  .assistant-streaming-dot {
+    animation: none;
+  }
+
+  .assistant-streaming-dots--leaving .assistant-streaming-dot {
+    animation: assistant-domino-exit-fade 200ms ease-out forwards;
+  }
+}
+
+@keyframes assistant-domino-exit-fade {
+  to {
+    opacity: 0;
+    transform: none;
   }
 }
 

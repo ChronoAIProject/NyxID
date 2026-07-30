@@ -233,22 +233,107 @@ function groupMessages(messages: readonly AssistantMessage[]): MessageGroup[] {
  * briefly held a standalone caret instead; the dots replace it, because a
  * caret alone is thinner than the gap it has to explain.
  */
-function StreamingDots({ live = false }: { readonly live?: boolean }) {
+const DOMINO_PERIOD_MS = 1_800;
+const DOMINO_EXIT_MS = 360;
+
+function StreamingDots({
+  visible,
+  live = false,
+}: {
+  readonly visible: boolean;
+  readonly live?: boolean;
+}) {
+  const rootRef = useRef<HTMLSpanElement>(null);
+  const mountedAt = useRef(0);
+  const previousVisible = useRef(false);
+  const lastVisibleRect = useRef<DOMRect | undefined>(undefined);
+  const [present, setPresent] = useState(visible);
+
+  if (visible && !present) setPresent(true);
+
+  useLayoutEffect(() => {
+    if (visible && !previousVisible.current) mountedAt.current = Date.now();
+    previousVisible.current = visible;
+  }, [visible]);
+
+  useLayoutEffect(() => {
+    if (visible && rootRef.current) {
+      lastVisibleRect.current = rootRef.current.getBoundingClientRect();
+    }
+  });
+
+  useLayoutEffect(() => {
+    const root = rootRef.current;
+    if (visible || !present || !root) return;
+
+    const animatedDot = root.querySelector<HTMLElement>(
+      ".assistant-streaming-dot",
+    );
+    const animation = animatedDot?.getAnimations?.()[0];
+    const animationTime = animation?.currentTime;
+    const elapsed =
+      typeof animationTime === "number"
+        ? animationTime
+        : Date.now() - mountedAt.current;
+    const phase =
+      ((elapsed % DOMINO_PERIOD_MS) + DOMINO_PERIOD_MS) % DOMINO_PERIOD_MS;
+    const rect = lastVisibleRect.current ?? root.getBoundingClientRect();
+
+    root.dataset.exitDirection =
+      phase < DOMINO_PERIOD_MS / 2 ? "right" : "left";
+    root.classList.remove("relative");
+    root.classList.add(
+      "assistant-streaming-dots--leaving",
+      "pointer-events-none",
+      "fixed",
+    );
+    root.style.left = `${String(rect.left)}px`;
+    root.style.top = `${String(rect.top)}px`;
+    root.style.width = `${String(rect.width)}px`;
+    root.style.height = `${String(rect.height)}px`;
+
+    const exitTimer = window.setTimeout(() => {
+      setPresent(false);
+    }, DOMINO_EXIT_MS);
+    return () => {
+      window.clearTimeout(exitTimer);
+      delete root.dataset.exitDirection;
+      root.classList.add("relative");
+      root.classList.remove(
+        "assistant-streaming-dots--leaving",
+        "pointer-events-none",
+        "fixed",
+      );
+      root.style.removeProperty("left");
+      root.style.removeProperty("top");
+      root.style.removeProperty("width");
+      root.style.removeProperty("height");
+    };
+  }, [present, visible]);
+
+  if (!present) return null;
+
   return (
     <span
+      ref={rootRef}
       data-streaming-dots
-      className="flex items-center gap-1 py-[5px]"
+      className="assistant-streaming-dots relative flex h-[18px] w-max items-center gap-1"
       // The standalone thinking row is itself a live region, so its dots stay
       // decorative. Dots inside an opened-but-still-empty assistant message
       // have no such wrapper — without their own role that whole pre-content
       // state is silent to a screen reader.
-      role={live ? "status" : undefined}
-      aria-label={live ? "Assistant is answering" : undefined}
-      aria-hidden={live ? undefined : true}
+      role={visible && live ? "status" : undefined}
+      aria-label={visible && live ? "Assistant is answering" : undefined}
+      aria-hidden={!visible || !live ? true : undefined}
     >
-      <span className="h-1.5 w-1.5 animate-bounce rounded-full bg-text-tertiary [animation-delay:-0.3s] motion-reduce:animate-none" />
-      <span className="h-1.5 w-1.5 animate-bounce rounded-full bg-text-tertiary [animation-delay:-0.15s] motion-reduce:animate-none" />
-      <span className="h-1.5 w-1.5 animate-bounce rounded-full bg-text-tertiary motion-reduce:animate-none" />
+      {Array.from({ length: 5 }, (_, index) => (
+        <span
+          // The dots have no independent meaning; the parent owns the status.
+          aria-hidden="true"
+          className="assistant-streaming-dot h-1 w-1 rounded-full bg-text-tertiary opacity-70"
+          key={index}
+        />
+      ))}
     </span>
   );
 }
@@ -271,17 +356,25 @@ function EmptyTurnError() {
   );
 }
 
-function ThinkingRow({ loading }: { readonly loading: boolean }) {
+function ThinkingRow({
+  loading,
+  overlay,
+}: {
+  readonly loading: boolean;
+  readonly overlay: boolean;
+}) {
+  const active = loading && !overlay;
+
   return (
     <article
-      className={ASSISTANT_ROW}
-      role={loading ? "status" : undefined}
-      aria-label={loading ? "Assistant is thinking" : undefined}
-      aria-hidden={loading ? undefined : true}
+      className={`${ASSISTANT_ROW} ${overlay ? "pointer-events-none absolute" : "relative"}`}
+      role={active ? "status" : undefined}
+      aria-label={active ? "Assistant is thinking" : undefined}
+      aria-hidden={active ? undefined : true}
     >
-      <AssistantIdentity time="" loading={loading} />
+      {overlay ? <span aria-hidden /> : <AssistantIdentity time="" loading={loading} />}
       <div className="min-h-[18px] min-w-0 flex-1">
-        <StreamingDots />
+        <StreamingDots visible={active} />
       </div>
     </article>
   );
@@ -588,15 +681,15 @@ export function ChatThread({
                       </Fragment>
                     );
                   })}
-                  {awaitingFirstBlock ? <StreamingDots live /> : null}
+                  <StreamingDots visible={awaitingFirstBlock} live />
                   {/* This group IS the tail, so its own answer never arrived. */}
                   {isLastGroup && showEmptyTurnError ? <EmptyTurnError /> : null}
                 </div>
               </article>
             );
           })}
-          {thinkingPresence.present && !streaming ? (
-            <ThinkingRow loading={thinking} />
+          {thinkingPresence.present ? (
+            <ThinkingRow loading={thinking} overlay={streaming} />
           ) : null}
           {/* The turn closed before it ever spoke, so there is no assistant
               group to carry the message — give it its own row under a mark. */}
