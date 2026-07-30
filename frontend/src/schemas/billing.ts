@@ -106,7 +106,7 @@ export const topUpHistoryEntrySchema = z.object({
   id: z.string().min(1),
   created_at: z.string().min(1),
   amount_credits: z.number().int(),
-  status: z.enum(["paid", "pending", "failed", "voided"]),
+  status: z.enum(["paid", "pending", "expired", "failed", "voided"]),
   invoice_number: z.string().nullable().optional(),
   lago_invoice_id: z.string().nullable().optional(),
   checkout_url: z.string().nullable().optional(),
@@ -116,6 +116,9 @@ export const topUpHistoryEntrySchema = z.object({
 export const topUpHistoryResponseSchema = z.object({
   owner_id: z.string().min(1),
   topups: z.array(topUpHistoryEntrySchema),
+  page: z.number().int().positive(),
+  per_page: z.number().int().positive(),
+  total: z.number().int().nonnegative(),
 });
 
 export const invoiceDownloadResponseSchema = z.object({

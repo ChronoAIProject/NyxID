@@ -206,13 +206,19 @@ export function BillingPage() {
 const TOPUP_STATUS_VARIANT = {
   paid: "success",
   pending: "secondary",
+  expired: "warning",
   failed: "destructive",
   voided: "secondary",
 } as const;
 
+const TOPUPS_PER_PAGE = 10;
+
 function TopUpHistory() {
-  const historyQuery = useTopUpHistory();
+  const [page, setPage] = useState(1);
+  const historyQuery = useTopUpHistory(page, TOPUPS_PER_PAGE);
   const topups = historyQuery.data?.topups ?? [];
+  const total = historyQuery.data?.total ?? 0;
+  const pageCount = Math.max(1, Math.ceil(total / TOPUPS_PER_PAGE));
 
   async function handleReceipt(lagoInvoiceId: string) {
     try {
@@ -303,6 +309,33 @@ function TopUpHistory() {
             </TableBody>
           </Table>
         </div>
+        {pageCount > 1 && (
+          <div className="mt-3 flex items-center justify-between text-[12px] text-muted-foreground">
+            <span>
+              Page {page} of {pageCount}
+            </span>
+            <div className="flex gap-2">
+              <Button
+                variant="outline"
+                size="sm"
+                disabled={page <= 1 || historyQuery.isFetching}
+                onClick={() => setPage((current) => Math.max(1, current - 1))}
+              >
+                Previous
+              </Button>
+              <Button
+                variant="outline"
+                size="sm"
+                disabled={page >= pageCount || historyQuery.isFetching}
+                onClick={() =>
+                  setPage((current) => Math.min(pageCount, current + 1))
+                }
+              >
+                Next
+              </Button>
+            </div>
+          </div>
+        )}
       </CardContent>
     </Card>
   );

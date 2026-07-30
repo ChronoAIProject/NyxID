@@ -137,7 +137,7 @@ pub struct TopUpHistoryEntry {
     pub id: String,
     pub created_at: chrono::DateTime<Utc>,
     pub amount_credits: i64,
-    /// paid | pending | failed | voided
+    /// paid | pending | expired | failed | voided
     pub status: String,
     pub invoice_number: Option<String>,
     pub lago_invoice_id: Option<String>,
@@ -151,6 +151,15 @@ pub struct TopUpHistoryEntry {
 pub struct TopUpHistoryResponse {
     pub owner_id: String,
     pub topups: Vec<TopUpHistoryEntry>,
+    pub page: u32,
+    pub per_page: u32,
+    pub total: u64,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct TopUpHistoryQuery {
+    pub page: Option<u32>,
+    pub per_page: Option<u32>,
 }
 
 #[derive(Debug, Serialize, ToSchema)]
@@ -419,6 +428,7 @@ pub async fn create_topup(
 pub async fn list_topups(
     State(state): State<AppState>,
     auth_user: AuthUser,
+    Query(query): Query<TopUpHistoryQuery>,
 ) -> AppResult<Json<TopUpHistoryResponse>> {
     let actor_id = auth_user.user_id.to_string();
     let owner = state
@@ -428,12 +438,20 @@ pub async fn list_topups(
         .await?;
     ensure_billing_rollout(&state, &owner.owner_id, &actor_id).await?;
 
-    let sessions: Vec<crate::models::billing_topup_session::BillingTopUpSession> = state
+    let page = query.page.unwrap_or(1).max(1);
+    let per_page = query.per_page.unwrap_or(10).clamp(1, 50);
+    let filter = doc! { "owner_id": &owner.owner_id };
+    let collection = state
         .db
-        .collection(crate::models::billing_topup_session::COLLECTION_NAME)
-        .find(doc! { "owner_id": &owner.owner_id })
+        .collection::<crate::models::billing_topup_session::BillingTopUpSession>(
+            crate::models::billing_topup_session::COLLECTION_NAME,
+        );
+    let total = collection.count_documents(filter.clone()).await?;
+    let sessions: Vec<crate::models::billing_topup_session::BillingTopUpSession> = collection
+        .find(filter)
         .sort(doc! { "created_at": -1 })
-        .limit(50)
+        .skip(u64::from((page - 1) * per_page))
+        .limit(i64::from(per_page))
         .await?
         .try_collect()
         .await?;
@@ -457,6 +475,7 @@ pub async fn list_topups(
         .map(|invoice| (invoice.lago_id.as_str(), invoice))
         .collect();
 
+    let checkout_expiry_cutoff = Utc::now() - Duration::hours(24);
     let topups = sessions
         .into_iter()
         .map(|session| {
@@ -475,6 +494,10 @@ pub async fn list_topups(
                 {
                     "failed"
                 }
+                // Stripe checkout sessions expire after 24 hours and Lago
+                // returns the same cached session per transaction, so an
+                // old pending checkout can no longer be completed.
+                _ if session.created_at < checkout_expiry_cutoff => "expired",
                 _ => "pending",
             };
             TopUpHistoryEntry {
@@ -495,6 +518,9 @@ pub async fn list_topups(
     Ok(Json(TopUpHistoryResponse {
         owner_id: owner.owner_id,
         topups,
+        page,
+        per_page,
+        total,
     }))
 }
 
