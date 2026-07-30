@@ -217,7 +217,7 @@ function TopUpHistory() {
   const [page, setPage] = useState(1);
   const historyQuery = useTopUpHistory(page, TOPUPS_PER_PAGE);
   const topups = historyQuery.data?.topups ?? [];
-  const total = historyQuery.data?.total ?? 0;
+  const total = historyQuery.data?.total || topups.length;
   const pageCount = Math.max(1, Math.ceil(total / TOPUPS_PER_PAGE));
 
   async function handleReceipt(lagoInvoiceId: string) {

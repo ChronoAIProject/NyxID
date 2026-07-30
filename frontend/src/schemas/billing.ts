@@ -116,9 +116,11 @@ export const topUpHistoryEntrySchema = z.object({
 export const topUpHistoryResponseSchema = z.object({
   owner_id: z.string().min(1),
   topups: z.array(topUpHistoryEntrySchema),
-  page: z.number().int().positive(),
-  per_page: z.number().int().positive(),
-  total: z.number().int().nonnegative(),
+  // Optional with defaults so older backends that omit pagination render
+  // a single page instead of failing the parse and blanking the card.
+  page: z.number().int().positive().optional().default(1),
+  per_page: z.number().int().positive().optional().default(10),
+  total: z.number().int().nonnegative().optional().default(0),
 });
 
 export const invoiceDownloadResponseSchema = z.object({
