@@ -225,6 +225,26 @@ async function actionCardsOf(
     );
 }
 
+function twoTurnStub(second: Record<string, unknown>): ReturnType<typeof vi.fn> {
+  let textTurns = 0;
+  return stubFetch((url, init) => {
+    if (!url.endsWith("/stream") || init?.method !== "POST") return undefined;
+    const body = JSON.parse(String(init.body)) as { readonly type: string };
+    if (body.type !== "text") {
+      return sseResponse([
+        { type: "RUN_STARTED", turnId: "turn-continuation" },
+        { type: "RUN_FINISHED" },
+      ]);
+    }
+    textTurns += 1;
+    return sseResponse([
+      { type: "RUN_STARTED", turnId: `${TURN_ID}-${textTurns}` },
+      textTurns === 1 ? actionRequestFrame() : second,
+      { type: "RUN_FINISHED", runFinished: { status: "blocked" } },
+    ]);
+  });
+}
+
 beforeEach(() => {
   useAuthStore.getState().setUser({ id: USER_ID } as User);
 });
@@ -3702,23 +3722,7 @@ describe("chat action cards", () => {
   });
 
   it("re-arms a blocked card when the assistant reissues the same request later", async () => {
-    let textTurns = 0;
-    stubFetch((url, init) => {
-      if (!url.endsWith("/stream") || init?.method !== "POST") return undefined;
-      const body = JSON.parse(String(init.body)) as { readonly type: string };
-      if (body.type !== "text") {
-        return sseResponse([
-          { type: "RUN_STARTED", turnId: "turn-unexpected-action" },
-          { type: "RUN_FINISHED" },
-        ]);
-      }
-      textTurns += 1;
-      return sseResponse([
-        { type: "RUN_STARTED", turnId: `${TURN_ID}-${textTurns}` },
-        actionRequestFrame(),
-        { type: "RUN_FINISHED", runFinished: { status: "blocked" } },
-      ]);
-    });
+    twoTurnStub(actionRequestFrame());
     const transport = new AevatarAssistantTransport();
     await seedActorConversation(transport);
     await collectTurn(transport, "Connect GitHub");
@@ -3739,6 +3743,124 @@ describe("chat action cards", () => {
       status: "pending",
       outcome_note: "",
     });
+  });
+
+  it("keeps a blocked reissue unsupported when the exact request is no longer serviceable", async () => {
+    twoTurnStub(actionRequestFrame({ schemaVersion: 5 }));
+    const transport = new AevatarAssistantTransport();
+    await seedActorConversation(transport);
+    await collectTurn(transport, "Connect GitHub");
+    const [card] = await actionCardsOf(transport);
+    if (!card) throw new Error("no action card");
+    transport.blockActionCard(CONVERSATION_ID, card.block_id, "no id");
+
+    await collectTurn(transport, "Please request it again");
+
+    expect((await actionCardsOf(transport))[0]).toMatchObject({
+      status: "unsupported",
+    });
+  });
+
+  it("keeps a mismatched blocked-card reissue conflicted and preserves the first request", async () => {
+    twoTurnStub(
+      actionRequestFrame({
+        params: { catalogService: { serviceSlug: "api-lark" } },
+      }),
+    );
+    const transport = new AevatarAssistantTransport();
+    await seedActorConversation(transport);
+    await collectTurn(transport, "Connect GitHub");
+    const [card] = await actionCardsOf(transport);
+    if (!card) throw new Error("no action card");
+    transport.blockActionCard(CONVERSATION_ID, card.block_id, "no id");
+
+    await collectTurn(transport, "Please request it again");
+
+    expect((await actionCardsOf(transport))[0]).toMatchObject({
+      status: "conflicted",
+      params: { variant: "catalog", service_slug: "api-github" },
+    });
+  });
+
+  it("completes the journey end-to-end after a blocked card is re-armed", async () => {
+    const fetchMock = twoTurnStub(actionRequestFrame());
+    const transport = new AevatarAssistantTransport();
+    await seedActorConversation(transport);
+    await collectTurn(transport, "Connect GitHub");
+    const [card] = await actionCardsOf(transport);
+    if (!card) throw new Error("no action card");
+    transport.blockActionCard(CONVERSATION_ID, card.block_id, "no id");
+    await collectTurn(transport, "Please request it again");
+    expect((await actionCardsOf(transport))[0]?.status).toBe("pending");
+
+    transport.setActionCardInProgress(CONVERSATION_ID, card.block_id, true);
+    await new Promise<void>((resolve) => {
+      transport.continueActions(
+        CONVERSATION_ID,
+        `${TURN_ID}-2`,
+        [
+          {
+            actionRequestId: "act-action-1",
+            originTurnId: `${TURN_ID}-2`,
+            disposition: "completed",
+            resource: {
+              userService: {
+                userServiceId: "00000000-0000-4000-8000-000000000123",
+              },
+            },
+          },
+        ],
+        (event) => {
+          if (event.event === "turn.completed") resolve();
+        },
+      );
+    });
+
+    expect((await actionCardsOf(transport))[0]?.status).toBe("completed");
+    expect(
+      fetchMock.mock.calls.some(([, init]) => {
+        const rawBody = (init as RequestInit | undefined)?.body;
+        if (!rawBody) return false;
+        const body = JSON.parse(String(rawBody)) as { readonly type?: string };
+        return body.type === "action.continue";
+      }),
+    ).toBe(true);
+  });
+
+  it("does not let a blocked card reach completed through an in_progress hop", async () => {
+    const fetchMock = twoTurnStub(actionRequestFrame());
+    const transport = new AevatarAssistantTransport();
+    await seedActorConversation(transport);
+    await collectTurn(transport, "Connect GitHub");
+    const [card] = await actionCardsOf(transport);
+    if (!card) throw new Error("no action card");
+    transport.blockActionCard(CONVERSATION_ID, card.block_id, "no id");
+
+    transport.setActionCardInProgress(CONVERSATION_ID, card.block_id, true);
+    expect((await actionCardsOf(transport))[0]?.status).toBe("blocked");
+    expect(() =>
+      transport.continueActions(CONVERSATION_ID, `${TURN_ID}-1`, [
+        {
+          actionRequestId: "act-action-1",
+          originTurnId: `${TURN_ID}-1`,
+          disposition: "completed",
+          resource: {
+            userService: {
+              userServiceId: "00000000-0000-4000-8000-000000000123",
+            },
+          },
+        },
+      ]),
+    ).toThrow();
+    await Promise.resolve();
+    expect(
+      fetchMock.mock.calls.some(([, init]) => {
+        const rawBody = (init as RequestInit | undefined)?.body;
+        if (!rawBody) return false;
+        const body = JSON.parse(String(rawBody)) as { readonly type?: string };
+        return body.type === "action.continue";
+      }),
+    ).toBe(false);
   });
 
   it("marks a same-id request with different params as conflicted and keeps the first request", async () => {
@@ -3838,9 +3960,13 @@ describe("chat action cards", () => {
     const [card] = await actionCardsOf(transport);
     expect(card).toMatchObject({
       status: "conflicted",
-      outcome_note:
-        "A service was connected in NyxID, but this action request could not notify the assistant. Review it in AI Services.",
     });
+    expect(card?.outcome_note).toContain(
+      "This action request was reissued with conflicting details. NyxID kept the first request and disabled this card.",
+    );
+    expect(card?.outcome_note).toContain(
+      "A service was connected in NyxID, but this action request could not notify the assistant. Review it in AI Services.",
+    );
     expect(
       fetchMock.mock.calls.some(([, init]) => {
         const rawBody = (init as RequestInit | undefined)?.body;
@@ -4628,7 +4754,7 @@ describe("chat action cards", () => {
     expect(cards[0]).toMatchObject({ status: "unsupported" });
   });
 
-  it("uses raw request fingerprints to distinguish different unsupported re-emissions across turns", async () => {
+  it("distinguishes recovered malformed re-emissions by their hashed original payloads", async () => {
     let textTurns = 0;
     stubFetch((url, init) => {
       if (!url.endsWith("/stream") || init?.method !== "POST") return undefined;
@@ -4645,13 +4771,15 @@ describe("chat action cards", () => {
           ? {
               customService: {
                 name: "Build API",
-                endpointUrl: "http://build.example.test/v1",
+                endpointUrl: "https://build.example.test/v1",
+                unexpected: "value-1",
               },
             }
           : {
               customService: {
                 name: "Build API",
-                endpointUrl: "https://build.example.test/v1?token=nope",
+                endpointUrl: "https://build.example.test/v1",
+                unexpected: "value-3",
               },
             };
       return sseResponse([
@@ -4665,15 +4793,15 @@ describe("chat action cards", () => {
 
     await collectTurn(transport, "Unsupported request 1");
     expect((await actionCardsOf(transport))[0]).toMatchObject({
-      status: "unsupported",
-      params: { variant: "unknown" },
-    });
+        status: "unsupported",
+        params: { variant: "unknown" },
+      });
 
     await collectTurn(transport, "Unsupported request 2");
     expect((await actionCardsOf(transport))[0]).toMatchObject({
-      status: "unsupported",
-      params: { variant: "unknown" },
-    });
+        status: "unsupported",
+        params: { variant: "unknown" },
+      });
 
     await collectTurn(transport, "Unsupported request 3");
     expect((await actionCardsOf(transport))[0]).toMatchObject({
@@ -4728,6 +4856,17 @@ describe("chat action cards", () => {
             },
           },
         }),
+        actionRequestFrame({
+          actionRequestId: "act-scope-overflow",
+          params: {
+            catalogService: {
+              serviceSlug: "api-github",
+              requestedScopes: Array.from({ length: 65 }, (_, index) => {
+                return `scope-${String(index)}`;
+              }),
+            },
+          },
+        }),
         { type: "RUN_FINISHED", runFinished: { status: "blocked" } },
       ]),
     );
@@ -4739,13 +4878,14 @@ describe("chat action cards", () => {
     const cards = history.messages
       .flatMap((message) => message.blocks)
       .filter((block) => block.type === "action_card");
-    expect(cards).toHaveLength(5);
+    expect(cards).toHaveLength(6);
     expect(cards.map((card) => card.action_request_id)).toEqual([
       "act-http-url",
       "act-query-url",
       "act-fragment-url",
       "act-bad-slug",
       "act-secret-value",
+      "act-scope-overflow",
     ]);
     for (const card of cards) {
       expect(card).toMatchObject({

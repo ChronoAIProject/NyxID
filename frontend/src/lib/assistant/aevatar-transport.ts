@@ -356,7 +356,11 @@ function historyStateVersion(body: AevatarHistoryResponse): number | undefined {
 interface StoredConversation {
   conversation: Conversation;
   turnState: TurnReducerState;
-  /** Stable raw request fingerprints keyed by actionRequestId. */
+  /**
+   * Stable hashed request identities keyed by actionRequestId. Valid requests
+   * hash parsed params; recovered requests hash the original unparsed payload.
+   * A fixed-size hash keeps the per-id retention bounded.
+   */
   actionRequestFingerprints: Map<string, string>;
   /**
    * Workflow-chat continuation watermark (`chatc-…` conversations only):
@@ -634,10 +638,26 @@ function stableJsonValue(value: unknown): unknown {
   return value;
 }
 
-function fingerprintActionRequestParams(
-  params: AssistantActionRequest["params"],
+function stableJsonText(value: unknown): string {
+  const serialized = JSON.stringify(stableJsonValue(value));
+  return serialized ?? "undefined";
+}
+
+// Non-crypto fingerprint: enough to spot same-id request drift while keeping
+// the retained per-request footprint fixed.
+function fnv1aHex(text: string): string {
+  let hash = 0x811c9dc5;
+  for (const char of text) {
+    hash ^= char.codePointAt(0) ?? 0;
+    hash = Math.imul(hash, 0x01000193) >>> 0;
+  }
+  return hash.toString(16).padStart(8, "0");
+}
+
+function fingerprintStableRequestInput(
+  value: AssistantActionRequest["params"] | unknown,
 ): string {
-  return JSON.stringify(stableJsonValue(params));
+  return fnv1aHex(stableJsonText(value));
 }
 
 function sameStringArray(
@@ -682,7 +702,8 @@ function matchesCommittedActionRequest(
   block: ActionCardContentBlock,
   request: AssistantActionRequest,
   params: ActionCardContentBlock["params"],
-  rawParamsFingerprint: string | undefined,
+  committedFingerprint: string | undefined,
+  requestFingerprint: string,
 ): boolean {
   return (
     block.action === request.action &&
@@ -691,8 +712,23 @@ function matchesCommittedActionRequest(
     block.task_id === request.taskId &&
     block.step_id === request.stepId &&
     sameActionCardParams(block.params, params) &&
-    rawParamsFingerprint === fingerprintActionRequestParams(request.params)
+    committedFingerprint === requestFingerprint
   );
+}
+
+function composedUnreportedCompletedNote(
+  card: ActionCardContentBlock,
+): string {
+  if (card.status !== "conflicted") {
+    return ACTION_REQUEST_UNREPORTED_COMPLETED_NOTE;
+  }
+  if (card.outcome_note.includes(ACTION_REQUEST_UNREPORTED_COMPLETED_NOTE)) {
+    return card.outcome_note;
+  }
+  const prefix = card.outcome_note.includes(ACTION_REQUEST_CONFLICT_NOTE)
+    ? ACTION_REQUEST_CONFLICT_NOTE
+    : card.outcome_note.trim() || ACTION_REQUEST_CONFLICT_NOTE;
+  return `${prefix} ${ACTION_REQUEST_UNREPORTED_COMPLETED_NOTE}`.trim();
 }
 
 /**
@@ -1442,6 +1478,7 @@ export class AevatarAssistantTransport implements AssistantTransport {
     const card = this.findActionCard(conversationId, blockId);
     if (!card) throw new Error("Action request was not found.");
     if (
+      card.status === "blocked" ||
       card.status === "completed" ||
       card.status === "conflicted" ||
       card.status === "declined" ||
@@ -1535,7 +1572,7 @@ export class AevatarAssistantTransport implements AssistantTransport {
             conversationId,
             card.block_id,
             {
-              outcome_note: ACTION_REQUEST_UNREPORTED_COMPLETED_NOTE,
+              outcome_note: composedUnreportedCompletedNote(card),
             },
             onEvent,
           );
@@ -2784,11 +2821,21 @@ export class AevatarAssistantTransport implements AssistantTransport {
       case "nyxid.action.request": {
         const request = assistantActionRequestSchema.safeParse(payload);
         if (request.success) {
-          this.addActionCard(conversationId, run, request.data);
+          this.addActionCard(
+            conversationId,
+            run,
+            request.data,
+            fingerprintStableRequestInput(request.data.params),
+          );
         } else {
           const unsupported = recoverUnsupportedAssistantActionRequest(payload);
           if (unsupported) {
-            this.addActionCard(conversationId, run, unsupported);
+            this.addActionCard(
+              conversationId,
+              run,
+              unsupported,
+              fingerprintStableRequestInput(payload),
+            );
           }
         }
         return;
@@ -3173,10 +3220,10 @@ export class AevatarAssistantTransport implements AssistantTransport {
     conversationId: string,
     run: RunningTurn,
     request: AssistantActionRequest,
+    requestFingerprint: string,
   ): void {
     const resolved = resolveAssistantAction(request);
     const stored = this.conversations.get(conversationId);
-    const rawParamsFingerprint = fingerprintActionRequestParams(request.params);
     const existing = stored?.turnState.messages
       .flatMap((message) => message.blocks)
       .find(
@@ -3200,6 +3247,7 @@ export class AevatarAssistantTransport implements AssistantTransport {
           request,
           resolved.params,
           stored?.actionRequestFingerprints.get(request.actionRequestId),
+          requestFingerprint,
         )
       ) {
         if (terminal) return;
@@ -3216,7 +3264,7 @@ export class AevatarAssistantTransport implements AssistantTransport {
       }
       stored?.actionRequestFingerprints.set(
         request.actionRequestId,
-        rawParamsFingerprint,
+        requestFingerprint,
       );
       if (existing.status === "blocked") {
         this.emit(conversationId, run, {
@@ -3224,7 +3272,7 @@ export class AevatarAssistantTransport implements AssistantTransport {
           event: "block.updated",
           block_id: knownBlockId,
           patch: {
-            status: "pending",
+            status: resolved.supported ? "pending" : "unsupported",
             outcome_note: "",
           },
         });
@@ -3262,7 +3310,7 @@ export class AevatarAssistantTransport implements AssistantTransport {
     run.promptedActionIds.set(request.actionRequestId, block.block_id);
     stored?.actionRequestFingerprints.set(
       request.actionRequestId,
-      rawParamsFingerprint,
+      requestFingerprint,
     );
     // Deliberately excluded from openCards: this browser action remains
     // interactive after the origin run reaches its normal terminal frame.

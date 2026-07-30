@@ -1,4 +1,4 @@
-import { useRef, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import {
   AlertTriangle,
   Globe,
@@ -177,6 +177,13 @@ export function ActionCard({
 }: ActionCardProps) {
   const [dialogOpen, setDialogOpen] = useState(false);
   const resolvingRef = useRef(false);
+
+  useEffect(() => {
+    if (block.status === "pending") {
+      resolvingRef.current = false;
+    }
+  }, [block.status]);
+
   const descriptor = descriptorForAction(
     block.action,
     block.params,
@@ -217,7 +224,8 @@ export function ActionCard({
       resolvingRef.current = true;
       void Promise.resolve()
         .then(() => onBlock(block.block_id, VERIFICATION_BLOCKED_NOTE))
-        .catch(() => {
+        .catch(() => undefined)
+        .finally(() => {
           resolvingRef.current = false;
         });
       return;

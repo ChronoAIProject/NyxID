@@ -198,6 +198,17 @@ describe("assistant action request schema", () => {
           },
         },
       },
+      {
+        ...BASE_REQUEST,
+        params: {
+          catalogService: {
+            serviceSlug: "api-github",
+            requestedScopes: Array.from({ length: 65 }, (_, index) => {
+              return `scope-${String(index)}`;
+            }),
+          },
+        },
+      },
     ];
 
     for (const request of invalidRequests) {

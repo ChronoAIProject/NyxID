@@ -424,6 +424,58 @@ describe("ActionCard", () => {
     });
   });
 
+  it("treats a re-armed card like a fresh dismissal path", async () => {
+    const user = userEvent.setup();
+    const onProgress = vi.fn();
+    const onBlock = vi.fn();
+    const props = {
+      onProgress,
+      onBlock,
+      onResolve: vi.fn(),
+    };
+    const { rerender } = render(<ActionCard block={catalogBlock()} {...props} />);
+
+    await user.click(screen.getByRole("button", { name: "Connect GitHub" }));
+    rerender(
+      <ActionCard
+        block={catalogBlock({ status: "in_progress" })}
+        {...props}
+      />,
+    );
+    await user.click(
+      screen.getByRole("button", { name: "Finish without service id" }),
+    );
+    expect(onBlock).toHaveBeenCalledTimes(1);
+    rerender(
+      <ActionCard
+        block={catalogBlock({ status: "blocked", outcome_note: "n" })}
+        {...props}
+      />,
+    );
+
+    rerender(
+      <ActionCard
+        block={catalogBlock({ status: "pending", outcome_note: "" })}
+        {...props}
+      />,
+    );
+
+    onProgress.mockClear();
+    await user.click(screen.getByRole("button", { name: "Connect GitHub" }));
+    expect(onProgress).toHaveBeenCalledWith("action-card-1", true);
+    rerender(
+      <ActionCard
+        block={catalogBlock({ status: "in_progress" })}
+        {...props}
+      />,
+    );
+    await user.click(
+      screen.getByRole("button", { name: "Dismiss mock connection" }),
+    );
+
+    expect(onProgress).toHaveBeenCalledWith("action-card-1", false);
+  });
+
   it("catches synchronous block failures from the connect dialog callback", async () => {
     const user = userEvent.setup();
     const onBlock = vi.fn(() => {

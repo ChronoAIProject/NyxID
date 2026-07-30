@@ -41,7 +41,11 @@ export const customServiceAuthMethodSchema = z.enum([
 export const catalogServiceActionParamsSchema = z
   .object({
     serviceSlug: requiredWireStringSchema,
-    requestedScopes: z.array(z.string().max(256)).optional().default([]),
+    requestedScopes: z
+      .array(z.string().max(256))
+      .max(64)
+      .optional()
+      .default([]),
     viaNodeId: wireIdSchema,
     targetOrgId: wireIdSchema,
   })

@@ -12,6 +12,7 @@ import {
   type ActionReport,
 } from "@/schemas/assistant-actions";
 import type {
+  ActionCardContentBlock,
   AssistantTransport,
   Conversation,
   ConversationHistory,
@@ -25,6 +26,23 @@ export { AssistantTurnActiveError };
 const EVENT_CADENCE_MS = 100;
 const ACTION_REQUEST_UNREPORTED_COMPLETED_NOTE =
   "A service was connected in NyxID, but this action request could not notify the assistant. Review it in AI Services.";
+const ACTION_REQUEST_CONFLICT_NOTE =
+  "This action request was reissued with conflicting details. NyxID kept the first request and disabled this card.";
+
+function composedUnreportedCompletedNote(
+  block: ActionCardContentBlock,
+): string {
+  if (block.status !== "conflicted") {
+    return ACTION_REQUEST_UNREPORTED_COMPLETED_NOTE;
+  }
+  if (block.outcome_note.includes(ACTION_REQUEST_UNREPORTED_COMPLETED_NOTE)) {
+    return block.outcome_note;
+  }
+  const prefix = block.outcome_note.includes(ACTION_REQUEST_CONFLICT_NOTE)
+    ? ACTION_REQUEST_CONFLICT_NOTE
+    : block.outcome_note.trim() || ACTION_REQUEST_CONFLICT_NOTE;
+  return `${prefix} ${ACTION_REQUEST_UNREPORTED_COMPLETED_NOTE}`.trim();
+}
 
 interface RunningScript {
   readonly turnId: string;
@@ -111,6 +129,7 @@ class MockAssistantTransport implements AssistantTransport {
       throw new Error("Action request was not found.");
     }
     if (
+      block.status === "blocked" ||
       block.status === "completed" ||
       block.status === "conflicted" ||
       block.status === "declined" ||
@@ -189,7 +208,7 @@ class MockAssistantTransport implements AssistantTransport {
           this.emitLocalActionPatch(
             conversationId,
             card.block_id,
-            { outcome_note: ACTION_REQUEST_UNREPORTED_COMPLETED_NOTE },
+            { outcome_note: composedUnreportedCompletedNote(card) },
             onEvent,
           );
         }
