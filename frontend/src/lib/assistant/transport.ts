@@ -23,6 +23,8 @@ import { isTurnActive } from "@/types/assistant";
 export { AssistantTurnActiveError };
 
 const EVENT_CADENCE_MS = 100;
+const ACTION_REQUEST_UNREPORTED_COMPLETED_NOTE =
+  "A service was connected in NyxID, but this action request could not notify the assistant. Review it in AI Services.";
 
 interface RunningScript {
   readonly turnId: string;
@@ -109,7 +111,6 @@ class MockAssistantTransport implements AssistantTransport {
       throw new Error("Action request was not found.");
     }
     if (
-      block.status === "blocked" ||
       block.status === "completed" ||
       block.status === "conflicted" ||
       block.status === "declined" ||
@@ -139,6 +140,14 @@ class MockAssistantTransport implements AssistantTransport {
     if (block?.type !== "action_card") {
       throw new Error("Action request was not found.");
     }
+    if (
+      block.status === "completed" ||
+      block.status === "conflicted" ||
+      block.status === "declined" ||
+      block.status === "failed"
+    ) {
+      return;
+    }
     this.emitLocalActionPatch(
       conversationId,
       blockId,
@@ -164,16 +173,29 @@ class MockAssistantTransport implements AssistantTransport {
             block.type === "action_card" &&
             block.action_request_id === report.actionRequestId,
         );
-      if (
+      if (card?.type === "action_card") {
+        actionLookup.set(report.actionRequestId, card.action);
+      }
+      const refusedByCardState =
         card?.type === "action_card" &&
-        (card.status === "blocked" || card.status === "conflicted")
-      ) {
+        (card.status === "conflicted" ||
+          (card.status === "blocked" && report.disposition === "completed"));
+      if (refusedByCardState) {
+        if (
+          card?.type === "action_card" &&
+          report.disposition === "completed" &&
+          report.resource
+        ) {
+          this.emitLocalActionPatch(
+            conversationId,
+            card.block_id,
+            { outcome_note: ACTION_REQUEST_UNREPORTED_COMPLETED_NOTE },
+            onEvent,
+          );
+        }
         throw new Error(
           "This action request can no longer be continued from the current card state.",
         );
-      }
-      if (card?.type === "action_card") {
-        actionLookup.set(report.actionRequestId, card.action);
       }
     }
     buildActionContinueBody(

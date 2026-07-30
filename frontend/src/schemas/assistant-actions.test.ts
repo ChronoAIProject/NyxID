@@ -117,8 +117,20 @@ describe("assistant action request schema", () => {
         },
       },
     });
+    const badAuthKeyName = assistantActionRequestSchema.parse({
+      ...BASE_REQUEST,
+      actionRequestId: "act-bad-auth-key",
+      params: {
+        customService: {
+          name: "Build API",
+          endpointUrl: "https://build.example.test/v1",
+          authMethod: "header",
+          authKeyName: "X Auth",
+        },
+      },
+    });
 
-    for (const request of [badSlug, httpUrl, queryUrl, fragmentUrl]) {
+    for (const request of [badSlug, httpUrl, queryUrl, fragmentUrl, badAuthKeyName]) {
       expect(resolveAssistantAction(request)).toMatchObject({
         supported: false,
         params: { variant: "unknown" },
@@ -224,8 +236,8 @@ describe("assistant action request schema", () => {
     });
   });
 
-  it("fails closed when a forbidden key or secret-shaped value appears anywhere", () => {
-    const forbiddenKey = {
+  it("fails closed on undeclared members and secret-shaped values", () => {
+    const undeclaredMember = {
       ...BASE_REQUEST,
       params: {
         customService: {
@@ -250,9 +262,9 @@ describe("assistant action request schema", () => {
       },
     };
 
-    expect(assistantActionRequestSchema.safeParse(forbiddenKey).success).toBe(
-      false,
-    );
+    expect(
+      assistantActionRequestSchema.safeParse(undeclaredMember).success,
+    ).toBe(false);
     expect(assistantActionRequestSchema.safeParse(secretValue).success).toBe(
       false,
     );
@@ -276,6 +288,7 @@ describe("action continuation schema", () => {
           },
         },
       ],
+      new Map([["act-1", "service.connect"]]),
     );
 
     expect(Object.keys(body)).toEqual([
@@ -393,6 +406,23 @@ describe("action continuation schema", () => {
     ).toThrow(
       "service.connect completed reports must include resource.userService.userServiceId",
     );
+  });
+
+  it("fails closed for completed reports without resources when the action lookup is missing", () => {
+    expect(() =>
+      buildActionContinueBody(
+        "request-1",
+        "turn-origin-1",
+        [
+          {
+            actionRequestId: "act-1",
+            originTurnId: "turn-origin-1",
+            disposition: "completed",
+          },
+        ],
+        new Map(),
+      ),
+    ).toThrow("Completed action reports must include a resource reference");
   });
 
   it("enforces the control-identity character and length rules", () => {

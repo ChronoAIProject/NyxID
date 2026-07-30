@@ -10,7 +10,12 @@ import capturedHistory from "@/lib/assistant/__fixtures__/aevatar-chat-history.j
 import capturedStream from "@/lib/assistant/__fixtures__/aevatar-nyxid-chat-stream.sse?raw";
 import { useAuthStore } from "@/stores/auth-store";
 import type { User } from "@/types/api";
-import type { ContentBlock, Conversation, TurnEvent } from "@/types/assistant";
+import type {
+  ActionCardContentBlock,
+  ContentBlock,
+  Conversation,
+  TurnEvent,
+} from "@/types/assistant";
 
 const USER_ID = "add69059-bece-4f0e-9559-99cfd10b47eb";
 const CONVERSATION_ID = "nyxid-chat-f8369965a444433f92ec50e67ad8ee52";
@@ -207,6 +212,17 @@ function collectTurn(
       reject(error instanceof Error ? error : new Error(String(error)));
     }
   });
+}
+
+async function actionCardsOf(
+  transport: AevatarAssistantTransport,
+): Promise<ActionCardContentBlock[]> {
+  const history = await transport.getHistory(CONVERSATION_ID);
+  return history.messages
+    .flatMap((message) => message.blocks)
+    .filter(
+      (block): block is ActionCardContentBlock => block.type === "action_card",
+    );
 }
 
 beforeEach(() => {
@@ -3685,6 +3701,46 @@ describe("chat action cards", () => {
     expect(events.at(-1)).toMatchObject({ status: "blocked" });
   });
 
+  it("re-arms a blocked card when the assistant reissues the same request later", async () => {
+    let textTurns = 0;
+    stubFetch((url, init) => {
+      if (!url.endsWith("/stream") || init?.method !== "POST") return undefined;
+      const body = JSON.parse(String(init.body)) as { readonly type: string };
+      if (body.type !== "text") {
+        return sseResponse([
+          { type: "RUN_STARTED", turnId: "turn-unexpected-action" },
+          { type: "RUN_FINISHED" },
+        ]);
+      }
+      textTurns += 1;
+      return sseResponse([
+        { type: "RUN_STARTED", turnId: `${TURN_ID}-${textTurns}` },
+        actionRequestFrame(),
+        { type: "RUN_FINISHED", runFinished: { status: "blocked" } },
+      ]);
+    });
+    const transport = new AevatarAssistantTransport();
+    await seedActorConversation(transport);
+    await collectTurn(transport, "Connect GitHub");
+
+    const [card] = await actionCardsOf(transport);
+    if (!card) throw new Error("no action card");
+    transport.blockActionCard(
+      CONVERSATION_ID,
+      card.block_id,
+      "Connected, but NyxID could not verify which service was created. Manage it in AI Services, then ask the assistant to request it again.",
+    );
+    expect((await actionCardsOf(transport))[0]?.status).toBe("blocked");
+
+    await collectTurn(transport, "Please request it again");
+
+    const [after] = await actionCardsOf(transport);
+    expect(after).toMatchObject({
+      status: "pending",
+      outcome_note: "",
+    });
+  });
+
   it("marks a same-id request with different params as conflicted and keeps the first request", async () => {
     const fetchMock = stubFetch(
       routeStream([
@@ -3732,6 +3788,178 @@ describe("chat action cards", () => {
     ).toThrow(
       "This action request can no longer be continued from the current card state.",
     );
+    expect(
+      fetchMock.mock.calls.some(([, init]) => {
+        const rawBody = (init as RequestInit | undefined)?.body;
+        if (!rawBody) return false;
+        const body = JSON.parse(String(rawBody)) as { readonly type?: string };
+        return body.type === "action.continue";
+      }),
+    ).toBe(false);
+  });
+
+  it("patches conflicted cards when a connected service could not be reported", async () => {
+    const fetchMock = stubFetch(
+      routeStream([
+        { type: "RUN_STARTED", turnId: TURN_ID },
+        actionRequestFrame(),
+        actionRequestFrame({
+          params: {
+            catalogService: {
+              serviceSlug: "api-lark",
+              requestedScopes: ["messages:write"],
+            },
+          },
+        }),
+        { type: "RUN_FINISHED", runFinished: { status: "blocked" } },
+      ]),
+    );
+    const transport = new AevatarAssistantTransport();
+    await seedActorConversation(transport);
+    await collectTurn(transport, "Connect GitHub");
+
+    expect(() =>
+      transport.continueActions(CONVERSATION_ID, TURN_ID, [
+        {
+          actionRequestId: "act-action-1",
+          originTurnId: TURN_ID,
+          disposition: "completed",
+          resource: {
+            userService: {
+              userServiceId: "00000000-0000-4000-8000-000000000123",
+            },
+          },
+        },
+      ]),
+    ).toThrow(
+      "This action request can no longer be continued from the current card state.",
+    );
+
+    const [card] = await actionCardsOf(transport);
+    expect(card).toMatchObject({
+      status: "conflicted",
+      outcome_note:
+        "A service was connected in NyxID, but this action request could not notify the assistant. Review it in AI Services.",
+    });
+    expect(
+      fetchMock.mock.calls.some(([, init]) => {
+        const rawBody = (init as RequestInit | undefined)?.body;
+        if (!rawBody) return false;
+        const body = JSON.parse(String(rawBody)) as { readonly type?: string };
+        return body.type === "action.continue";
+      }),
+    ).toBe(false);
+  });
+
+  it("accepts decline and failure reports from blocked cards", async () => {
+    const fetchMock = stubFetch((url, init) => {
+      if (!url.endsWith("/stream") || init?.method !== "POST") return undefined;
+      const body = JSON.parse(String(init.body)) as { readonly type: string };
+      if (body.type === "text") {
+        return sseResponse([
+          { type: "RUN_STARTED", turnId: TURN_ID },
+          actionRequestFrame(),
+          actionRequestFrame({ actionRequestId: "act-action-2" }),
+          { type: "RUN_FINISHED", runFinished: { status: "blocked" } },
+        ]);
+      }
+      return sseResponse([
+        { type: "RUN_STARTED", turnId: "turn-blocked-resolution" },
+        { type: "RUN_FINISHED" },
+      ]);
+    });
+    const transport = new AevatarAssistantTransport();
+    await seedActorConversation(transport);
+    await collectTurn(transport, "Connect both services");
+
+    for (const card of await actionCardsOf(transport)) {
+      transport.blockActionCard(CONVERSATION_ID, card.block_id, "no id");
+    }
+
+    await new Promise<void>((resolve) => {
+      const handle = transport.continueActions(
+        CONVERSATION_ID,
+        TURN_ID,
+        [
+          {
+            actionRequestId: "act-action-1",
+            originTurnId: TURN_ID,
+            disposition: "failed",
+          },
+          {
+            actionRequestId: "act-action-2",
+            originTurnId: TURN_ID,
+            disposition: "declined",
+          },
+        ],
+        (event) => {
+          if (event.event === "turn.completed") resolve();
+        },
+      );
+      expect(handle).not.toBeNull();
+    });
+
+    const cards = await actionCardsOf(transport);
+    expect(cards).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          action_request_id: "act-action-1",
+          status: "failed",
+        }),
+        expect.objectContaining({
+          action_request_id: "act-action-2",
+          status: "declined",
+        }),
+      ]),
+    );
+    expect(
+      fetchMock.mock.calls.some(([, init]) => {
+        const rawBody = (init as RequestInit | undefined)?.body;
+        if (!rawBody) return false;
+        const body = JSON.parse(String(rawBody)) as { readonly type?: string };
+        return body.type === "action.continue";
+      }),
+    ).toBe(true);
+  });
+
+  it("patches blocked cards before refusing a completed report that carries a resource", async () => {
+    const fetchMock = stubFetch(
+      routeStream([
+        { type: "RUN_STARTED", turnId: TURN_ID },
+        actionRequestFrame(),
+        { type: "RUN_FINISHED", runFinished: { status: "blocked" } },
+      ]),
+    );
+    const transport = new AevatarAssistantTransport();
+    await seedActorConversation(transport);
+    await collectTurn(transport, "Connect GitHub");
+
+    const [card] = await actionCardsOf(transport);
+    if (!card) throw new Error("no action card");
+    transport.blockActionCard(CONVERSATION_ID, card.block_id, "no id");
+
+    expect(() =>
+      transport.continueActions(CONVERSATION_ID, TURN_ID, [
+        {
+          actionRequestId: "act-action-1",
+          originTurnId: TURN_ID,
+          disposition: "completed",
+          resource: {
+            userService: {
+              userServiceId: "00000000-0000-4000-8000-000000000123",
+            },
+          },
+        },
+      ]),
+    ).toThrow(
+      "This action request can no longer be continued from the current card state.",
+    );
+
+    expect((await actionCardsOf(transport))[0]).toMatchObject({
+      status: "blocked",
+      outcome_note:
+        "A service was connected in NyxID, but this action request could not notify the assistant. Review it in AI Services.",
+    });
     expect(
       fetchMock.mock.calls.some(([, init]) => {
         const rawBody = (init as RequestInit | undefined)?.body;
@@ -4398,6 +4626,61 @@ describe("chat action cards", () => {
       .filter((block) => block.type === "action_card");
     expect(cards).toHaveLength(1);
     expect(cards[0]).toMatchObject({ status: "unsupported" });
+  });
+
+  it("uses raw request fingerprints to distinguish different unsupported re-emissions across turns", async () => {
+    let textTurns = 0;
+    stubFetch((url, init) => {
+      if (!url.endsWith("/stream") || init?.method !== "POST") return undefined;
+      const body = JSON.parse(String(init.body)) as { readonly type: string };
+      if (body.type !== "text") {
+        return sseResponse([
+          { type: "RUN_STARTED", turnId: "turn-unsupported-action" },
+          { type: "RUN_FINISHED" },
+        ]);
+      }
+      textTurns += 1;
+      const params =
+        textTurns < 3
+          ? {
+              customService: {
+                name: "Build API",
+                endpointUrl: "http://build.example.test/v1",
+              },
+            }
+          : {
+              customService: {
+                name: "Build API",
+                endpointUrl: "https://build.example.test/v1?token=nope",
+              },
+            };
+      return sseResponse([
+        { type: "RUN_STARTED", turnId: `${TURN_ID}-${textTurns}` },
+        actionRequestFrame({ params }),
+        { type: "RUN_FINISHED", runFinished: { status: "blocked" } },
+      ]);
+    });
+    const transport = new AevatarAssistantTransport();
+    await seedActorConversation(transport);
+
+    await collectTurn(transport, "Unsupported request 1");
+    expect((await actionCardsOf(transport))[0]).toMatchObject({
+      status: "unsupported",
+      params: { variant: "unknown" },
+    });
+
+    await collectTurn(transport, "Unsupported request 2");
+    expect((await actionCardsOf(transport))[0]).toMatchObject({
+      status: "unsupported",
+      params: { variant: "unknown" },
+    });
+
+    await collectTurn(transport, "Unsupported request 3");
+    expect((await actionCardsOf(transport))[0]).toMatchObject({
+      status: "conflicted",
+      outcome_note:
+        "This action request was reissued with conflicting details. NyxID kept the first request and disabled this card.",
+    });
   });
 
   it("renders fail-closed unsupported cards for invalid or secret-shaped params", async () => {

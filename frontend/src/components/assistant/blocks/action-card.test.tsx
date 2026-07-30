@@ -1,6 +1,7 @@
 import { render, screen } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { describe, expect, it, vi } from "vitest";
+import type { AddKeyDialogCompletion } from "@/components/dashboard/add-key-dialog";
 import type { ActionCardContentBlock } from "@/types/assistant";
 import { ActionCard } from "./action-card";
 
@@ -22,7 +23,7 @@ vi.mock("@/components/dashboard/add-key-dialog", () => ({
     readonly prefillSlug?: string;
     readonly prefillIncludeAllCatalog?: boolean;
     readonly prefillCustom?: { readonly name?: string };
-    readonly onSuccess?: (result: { readonly userServiceId?: string }) => void;
+    readonly onSuccess?: (result: AddKeyDialogCompletion) => void;
   }) =>
     open ? (
       <div
@@ -40,8 +41,17 @@ vi.mock("@/components/dashboard/add-key-dialog", () => ({
         >
           Finish mock connection
         </button>
-        <button type="button" onClick={() => onSuccess?.({})}>
+        <button
+          type="button"
+          onClick={() => onSuccess?.({ userServiceId: "" })}
+        >
           Finish without service id
+        </button>
+        <button
+          type="button"
+          onClick={() => onSuccess?.({ userServiceId: "   " })}
+        >
+          Finish with whitespace service id
         </button>
         <button type="button" onClick={() => onOpenChange(false)}>
           Dismiss mock connection
@@ -351,27 +361,87 @@ describe("ActionCard", () => {
   });
 
   it("blocks the card locally when a connection completes without a userServiceId", async () => {
+    for (const finishLabel of [
+      "Finish without service id",
+      "Finish with whitespace service id",
+    ]) {
+      const user = userEvent.setup();
+      const onBlock = vi.fn();
+      const onResolve = vi.fn();
+      const { unmount } = render(
+        <ActionCard
+          block={catalogBlock()}
+          onProgress={vi.fn()}
+          onBlock={onBlock}
+          onResolve={onResolve}
+        />,
+      );
+
+      await user.click(screen.getByRole("button", { name: "Connect GitHub" }));
+      await user.click(screen.getByRole("button", { name: finishLabel }));
+
+      expect(onResolve).not.toHaveBeenCalled();
+      expect(onBlock).toHaveBeenCalledWith(
+        "action-card-1",
+        "Connected, but NyxID could not verify which service was created. Manage it in AI Services, then ask the assistant to request it again.",
+      );
+      unmount();
+    }
+  });
+
+  it("keeps blocked cards recoverable through decline and failure reports", async () => {
     const user = userEvent.setup();
-    const onBlock = vi.fn();
     const onResolve = vi.fn();
+    render(
+      <ActionCard
+        block={catalogBlock({
+          status: "blocked",
+          outcome_note:
+            "Connected, but NyxID could not verify which service was created. Manage it in AI Services, then ask the assistant to request it again.",
+        })}
+        onProgress={vi.fn()}
+        onBlock={vi.fn()}
+        onResolve={onResolve}
+      />,
+    );
+
+    expect(screen.getByRole("button", { name: "Connect GitHub" })).toBeDisabled();
+    expect(screen.getByRole("button", { name: "Decline" })).toBeEnabled();
+    expect(screen.getByRole("button", { name: "Report failure" })).toBeEnabled();
+
+    await user.click(screen.getByRole("button", { name: "Decline" }));
+    expect(onResolve).toHaveBeenCalledWith({
+      actionRequestId: "act-1",
+      originTurnId: "turn-origin-1",
+      disposition: "declined",
+    });
+
+    await user.click(screen.getByRole("button", { name: "Report failure" }));
+    expect(onResolve).toHaveBeenLastCalledWith({
+      actionRequestId: "act-1",
+      originTurnId: "turn-origin-1",
+      disposition: "failed",
+    });
+  });
+
+  it("catches synchronous block failures from the connect dialog callback", async () => {
+    const user = userEvent.setup();
+    const onBlock = vi.fn(() => {
+      throw new Error("sync block failure");
+    });
     render(
       <ActionCard
         block={catalogBlock()}
         onProgress={vi.fn()}
         onBlock={onBlock}
-        onResolve={onResolve}
+        onResolve={vi.fn()}
       />,
     );
 
     await user.click(screen.getByRole("button", { name: "Connect GitHub" }));
-    await user.click(
-      screen.getByRole("button", { name: "Finish without service id" }),
-    );
-
-    expect(onResolve).not.toHaveBeenCalled();
-    expect(onBlock).toHaveBeenCalledWith(
-      "action-card-1",
-      "Connected, but NyxID could not verify which service was created. Manage it in AI Services, then ask the assistant to request it again.",
-    );
+    await expect(
+      user.click(screen.getByRole("button", { name: "Finish without service id" })),
+    ).resolves.toBeUndefined();
+    expect(onBlock).toHaveBeenCalledTimes(1);
   });
 });

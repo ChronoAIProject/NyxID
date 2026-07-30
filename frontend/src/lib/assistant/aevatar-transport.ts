@@ -356,6 +356,8 @@ function historyStateVersion(body: AevatarHistoryResponse): number | undefined {
 interface StoredConversation {
   conversation: Conversation;
   turnState: TurnReducerState;
+  /** Stable raw request fingerprints keyed by actionRequestId. */
+  actionRequestFingerprints: Map<string, string>;
   /**
    * Workflow-chat continuation watermark (`chatc-…` conversations only):
    * the last `stateVersion` observed from the transcript read or the
@@ -614,6 +616,29 @@ function deriveTitle(messages: AssistantMessage[]): string | null {
 
 const ACTION_REQUEST_CONFLICT_NOTE =
   "This action request was reissued with conflicting details. NyxID kept the first request and disabled this card.";
+const ACTION_REQUEST_UNREPORTED_COMPLETED_NOTE =
+  "A service was connected in NyxID, but this action request could not notify the assistant. Review it in AI Services.";
+
+function stableJsonValue(value: unknown): unknown {
+  if (Array.isArray(value)) {
+    return value.map((entry) => stableJsonValue(entry));
+  }
+  if (value && typeof value === "object") {
+    const entries = Object.entries(value as Record<string, unknown>).sort(
+      ([left], [right]) => left.localeCompare(right),
+    );
+    return Object.fromEntries(
+      entries.map(([key, entry]) => [key, stableJsonValue(entry)]),
+    );
+  }
+  return value;
+}
+
+function fingerprintActionRequestParams(
+  params: AssistantActionRequest["params"],
+): string {
+  return JSON.stringify(stableJsonValue(params));
+}
 
 function sameStringArray(
   left: readonly string[],
@@ -657,6 +682,7 @@ function matchesCommittedActionRequest(
   block: ActionCardContentBlock,
   request: AssistantActionRequest,
   params: ActionCardContentBlock["params"],
+  rawParamsFingerprint: string | undefined,
 ): boolean {
   return (
     block.action === request.action &&
@@ -664,7 +690,8 @@ function matchesCommittedActionRequest(
     (block.actor_id ?? "") === request.actorId &&
     block.task_id === request.taskId &&
     block.step_id === request.stepId &&
-    sameActionCardParams(block.params, params)
+    sameActionCardParams(block.params, params) &&
+    rawParamsFingerprint === fingerprintActionRequestParams(request.params)
   );
 }
 
@@ -954,6 +981,7 @@ export class AevatarAssistantTransport implements AssistantTransport {
     this.conversations.set(conversation.id, {
       conversation,
       turnState: EMPTY_TURN_STATE,
+      actionRequestFingerprints: new Map(),
     });
     return conversation;
   }
@@ -1414,7 +1442,6 @@ export class AevatarAssistantTransport implements AssistantTransport {
     const card = this.findActionCard(conversationId, blockId);
     if (!card) throw new Error("Action request was not found.");
     if (
-      card.status === "blocked" ||
       card.status === "completed" ||
       card.status === "conflicted" ||
       card.status === "declined" ||
@@ -1453,7 +1480,6 @@ export class AevatarAssistantTransport implements AssistantTransport {
     const card = this.findActionCard(conversationId, blockId);
     if (!card) throw new Error("Action request was not found.");
     if (
-      card.status === "blocked" ||
       card.status === "completed" ||
       card.status === "conflicted" ||
       card.status === "declined" ||
@@ -1497,13 +1523,26 @@ export class AevatarAssistantTransport implements AssistantTransport {
         conversationId,
         report.actionRequestId,
       );
-      if (card?.status === "blocked" || card?.status === "conflicted") {
+      if (card?.action) {
+        reportActionLookup.set(report.actionRequestId, card.action);
+      }
+      const refusedByCardState =
+        card?.status === "conflicted" ||
+        (card?.status === "blocked" && report.disposition === "completed");
+      if (refusedByCardState) {
+        if (card && report.disposition === "completed" && report.resource) {
+          this.emitLocalBlockPatch(
+            conversationId,
+            card.block_id,
+            {
+              outcome_note: ACTION_REQUEST_UNREPORTED_COMPLETED_NOTE,
+            },
+            onEvent,
+          );
+        }
         throw new AssistantProtocolError(
           "This action request can no longer be continued from the current card state.",
         );
-      }
-      if (card?.action) {
-        reportActionLookup.set(report.actionRequestId, card.action);
       }
     }
     // Validate origin matching, non-empty actions and duplicate ids before
@@ -1871,6 +1910,8 @@ export class AevatarAssistantTransport implements AssistantTransport {
     this.conversations.set(id, {
       conversation,
       turnState: existing?.turnState ?? EMPTY_TURN_STATE,
+      actionRequestFingerprints:
+        existing?.actionRequestFingerprints ?? new Map(),
       stateVersion: existing?.stateVersion,
     });
   }
@@ -1923,6 +1964,8 @@ export class AevatarAssistantTransport implements AssistantTransport {
         activeTurn: existing?.turnState.activeTurn ?? null,
         lastCursor: existing?.turnState.lastCursor ?? 0,
       },
+      actionRequestFingerprints:
+        existing?.actionRequestFingerprints ?? new Map(),
       stateVersion: freshStateVersion ?? existing?.stateVersion,
     };
     this.conversations.set(conversationId, stored);
@@ -3133,6 +3176,7 @@ export class AevatarAssistantTransport implements AssistantTransport {
   ): void {
     const resolved = resolveAssistantAction(request);
     const stored = this.conversations.get(conversationId);
+    const rawParamsFingerprint = fingerprintActionRequestParams(request.params);
     const existing = stored?.turnState.messages
       .flatMap((message) => message.blocks)
       .find(
@@ -3146,13 +3190,17 @@ export class AevatarAssistantTransport implements AssistantTransport {
       run.promptedActionIds.set(request.actionRequestId, knownBlockId);
       if (!existing) return;
       const terminal =
-        existing.status === "blocked" ||
-        existing?.status === "completed" ||
+        existing.status === "completed" ||
         existing.status === "conflicted" ||
-        existing?.status === "declined" ||
-        existing?.status === "failed";
+        existing.status === "declined" ||
+        existing.status === "failed";
       if (
-        !matchesCommittedActionRequest(existing, request, resolved.params)
+        !matchesCommittedActionRequest(
+          existing,
+          request,
+          resolved.params,
+          stored?.actionRequestFingerprints.get(request.actionRequestId),
+        )
       ) {
         if (terminal) return;
         this.emit(conversationId, run, {
@@ -3162,6 +3210,22 @@ export class AevatarAssistantTransport implements AssistantTransport {
           patch: {
             status: "conflicted",
             outcome_note: ACTION_REQUEST_CONFLICT_NOTE,
+          },
+        });
+        return;
+      }
+      stored?.actionRequestFingerprints.set(
+        request.actionRequestId,
+        rawParamsFingerprint,
+      );
+      if (existing.status === "blocked") {
+        this.emit(conversationId, run, {
+          cursor: this.nextCursor(run),
+          event: "block.updated",
+          block_id: knownBlockId,
+          patch: {
+            status: "pending",
+            outcome_note: "",
           },
         });
         return;
@@ -3196,6 +3260,10 @@ export class AevatarAssistantTransport implements AssistantTransport {
     };
     this.appendActivityBlock(conversationId, run, block);
     run.promptedActionIds.set(request.actionRequestId, block.block_id);
+    stored?.actionRequestFingerprints.set(
+      request.actionRequestId,
+      rawParamsFingerprint,
+    );
     // Deliberately excluded from openCards: this browser action remains
     // interactive after the origin run reaches its normal terminal frame.
   }

@@ -276,6 +276,9 @@ function findSecretPath(
   if (typeof value !== "object" || value === null) return null;
 
   for (const [key, entry] of Object.entries(value)) {
+    // The current request schemas are `.strict()`, so undeclared members are
+    // rejected before this key scan can fire. Keep the scan anyway as
+    // defense-in-depth for any future schema widening or nested passthrough.
     if (FORBIDDEN_ACTION_KEY.test(key)) return [...path, key];
     const entryPath = findSecretPath(entry, [...path, key]);
     if (entryPath) return entryPath;
@@ -285,9 +288,8 @@ function findSecretPath(
 
 function actionForReport(
   actionRequestId: string,
-  reportActions: ActionReportActionLookup | undefined,
+  reportActions: ActionReportActionLookup,
 ): string | undefined {
-  if (!reportActions) return undefined;
   if (reportActions instanceof Map) {
     return reportActions.get(actionRequestId);
   }
@@ -300,14 +302,17 @@ function assertReportMatchesAction(
   report: ActionReport,
   action: string | undefined,
 ): void {
+  if (report.disposition !== "completed") return;
   if (
     action === "service.connect" &&
-    report.disposition === "completed" &&
     (!report.resource || !("userService" in report.resource))
   ) {
     throw new Error(
       "service.connect completed reports must include resource.userService.userServiceId",
     );
+  }
+  if (!report.resource) {
+    throw new Error("Completed action reports must include a resource reference");
   }
 }
 
@@ -337,7 +342,7 @@ export function buildActionContinueBody(
   clientRequestId: string,
   originTurnId: string,
   reports: readonly ActionReport[],
-  reportActions?: ActionReportActionLookup,
+  reportActions: ActionReportActionLookup,
 ): ActionContinueBody {
   const actions = reports.map((report): ActionReport => {
     assertReportMatchesAction(

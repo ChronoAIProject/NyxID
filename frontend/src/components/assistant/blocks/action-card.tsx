@@ -198,7 +198,8 @@ export function ActionCard({
   const busy = block.status === "in_progress";
   const blocked = block.status === "blocked";
   const conflicted = block.status === "conflicted";
-  const controlsDisabled = busy || blocked || conflicted;
+  const primaryDisabled = busy || blocked || conflicted;
+  const secondaryDisabled = busy || conflicted;
   const params = block.params;
 
   function setOpen(next: boolean) {
@@ -209,16 +210,16 @@ export function ActionCard({
   }
 
   function report(
-    disposition: "completed" | "declined",
+    disposition: "completed" | "declined" | "failed",
     userServiceId?: string,
   ) {
     if (disposition === "completed" && !userServiceId?.trim()) {
       resolvingRef.current = true;
-      void Promise.resolve(
-        onBlock(block.block_id, VERIFICATION_BLOCKED_NOTE),
-      ).catch(() => {
-        resolvingRef.current = false;
-      });
+      void Promise.resolve()
+        .then(() => onBlock(block.block_id, VERIFICATION_BLOCKED_NOTE))
+        .catch(() => {
+          resolvingRef.current = false;
+        });
       return;
     }
     resolvingRef.current = true;
@@ -227,20 +228,22 @@ export function ActionCard({
       originTurnId: block.origin_turn_id,
       disposition,
     } as const;
-    void Promise.resolve(
-      onResolve(
-        disposition === "completed" && userServiceId
-          ? {
-              ...base,
-              resource: { userService: { userServiceId } },
-            }
-          : base,
-      ),
-    ).catch(() => {
-      // The transport retains failed/rejected reports for retry. This guard
-      // only prevents a synchronous validation failure from locking dismissal.
-      resolvingRef.current = false;
-    });
+    void Promise.resolve()
+      .then(() =>
+        onResolve(
+          disposition === "completed" && userServiceId
+            ? {
+                ...base,
+                resource: { userService: { userServiceId } },
+              }
+            : base,
+        ),
+      )
+      .catch(() => {
+        // The transport retains failed/rejected reports for retry. This guard
+        // only prevents a synchronous validation failure from locking dismissal.
+        resolvingRef.current = false;
+      });
   }
 
   return (
@@ -311,7 +314,7 @@ export function ActionCard({
             type="button"
             variant="primary"
             size="sm"
-            disabled={controlsDisabled}
+            disabled={primaryDisabled}
             onClick={() => {
               onProgress(block.block_id, true);
               setDialogOpen(true);
@@ -325,12 +328,24 @@ export function ActionCard({
           type="button"
           variant="outline"
           size="sm"
-          disabled={controlsDisabled}
+          disabled={secondaryDisabled}
           onClick={() => report("declined")}
         >
           <X />
           Decline
         </Button>
+        {blocked ? (
+          <Button
+            type="button"
+            variant="outline"
+            size="sm"
+            disabled={secondaryDisabled}
+            onClick={() => report("failed")}
+          >
+            <AlertTriangle />
+            Report failure
+          </Button>
+        ) : null}
         <span className="ml-auto text-[10px] text-muted-foreground">
           Nothing is shared until you finish.
         </span>

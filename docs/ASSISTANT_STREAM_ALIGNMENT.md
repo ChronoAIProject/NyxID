@@ -95,6 +95,23 @@ Assistant prose is inert Markdown as of 2026-07-30: a
 ` ```nyxid:connect ` fence in streamed text or history now renders as an
 ordinary code block, never as an executable card.
 
+Card states have distinct browser semantics:
+
+- `pending` / `in_progress`: normal connect journey. Completing the dialog does
+  not show a success receipt; the card moves to "Reported — awaiting assistant
+  verification" only after the completed report has been admitted and settled.
+- `blocked`: NyxID finished the browser journey but could not verify the created
+  `userServiceId`. The primary connect CTA stays disabled because this card can
+  no longer send `completed`, but `Decline` remains enabled and a secondary
+  `Report failure` action can send `failed`. If the assistant later re-emits the
+  exact same request idempotently, NyxID re-arms the card back to `pending` and
+  clears the note so the journey can restart cleanly.
+- `conflicted`: the same `actionRequestId` was reissued with different validated
+  request details. NyxID keeps the first request, disables every button, and
+  excludes the card from continuation sending. A byte-identical re-emission is a
+  no-op; a mismatched re-emission stays conflicted even when both variants would
+  otherwise render as the same unsupported card.
+
 Completing or explicitly declining a card creates a strict continuation turn:
 
 ```json
@@ -118,6 +135,13 @@ origin turn are batched together and never mixed with another origin.
 In-session resume now comes only from that typed `action.continue` body; v4 has
 no original-prompt replay path, and NyxID no longer treats prompt re-send as a
 browser-action recovery primitive.
+
+`service.connect` continuations stay fail-closed: `completed` must carry
+`resource.userService.userServiceId`. `declined`, `failed`, `cancelled`, and
+`expired` need no resource. If a `blocked` or `conflicted` card refuses a
+completed report even though a service was connected locally, the card note is
+patched to say NyxID connected a service but could not notify the assistant and
+to direct the user to AI Services.
 
 A continuation Aevatar refuses to admit (`NYXID_ACTION_CONTINUATION_ACTIVE_TURN`
 / `_CONFLICT` / `_INVALID`) is **not** signalled as a run-error code on the
