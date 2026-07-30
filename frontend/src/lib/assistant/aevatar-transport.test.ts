@@ -128,10 +128,10 @@ function stubFetch(...routes: FetchRoute[]): ReturnType<typeof vi.fn> {
   return mock;
 }
 
-// `createConversation` is client-local now (new chats are workflow
-// conversations created server-side by their first turn), so the legacy
-// `nyxid-chat-…` actor conversations these AG-UI tests exercise are seeded
-// the only way they still arrive: through the Chat History index. The
+// `createConversation` is client-local and its first turn now creates the
+// typed actor through `/assistant/chat`. Existing actor conversations these
+// AG-UI tests exercise are seeded the way they arrive after reload: through
+// the Chat History index. The
 // helper stubs one list fetch, seeds `CONVERSATION_ID`, then restores the
 // test's own fetch stub and the list-fetch throttle.
 async function seedActorConversation(
@@ -4964,12 +4964,10 @@ describe("a conversation with no committed turn has no server transcript", () =>
   });
 });
 
-describe("workflow chat turns (studio engine)", () => {
-  // New conversations run on Aevatar's workflow chat through the typed
-  // `POST /api/v1/assistant/workflow-chat` pass-through. The frame shapes
-  // below mirror the live `/api/chat` capture (2026-07-29): body-keyed
-  // protobuf-JSON envelopes, `aevatar.chat.context` first, trailing
-  // `stateSnapshot` after the terminal.
+describe("typed new chats and legacy workflow compatibility", () => {
+  const TYPED_URL = "/api/v1/assistant/chat";
+  const TYPED_CONVERSATION = "nyxid-chat-4a1e60ebd1fd44f192bf4bb90e1812ae";
+  const TYPED_TURN = "turn-typed-create-1";
   const WORKFLOW_URL = "/api/v1/assistant/workflow-chat";
   const WORKFLOW_CONVERSATION = "chatc-8bd999c402fb37d60cdcd81e3b78cfd";
   const WORKFLOW_TURN = "turn-d619940adcd817c4aeb5d1c3e57f1ca5";
@@ -5034,6 +5032,47 @@ describe("workflow chat turns (studio engine)", () => {
         : undefined;
   }
 
+  async function seedWorkflowConversation(
+    transport: AevatarAssistantTransport,
+  ): Promise<Conversation> {
+    const active = globalThis.fetch;
+    vi.stubGlobal(
+      "fetch",
+      vi.fn((input: RequestInfo | URL, init?: RequestInit) => {
+        const url = String(input);
+        if (
+          url === `${ASSISTANT_BASE}/conversations` &&
+          (init?.method ?? "GET") === "GET"
+        ) {
+          return Promise.resolve(
+            jsonResponse({
+              conversations: [
+                {
+                  id: WORKFLOW_CONVERSATION,
+                  title: "Legacy workflow conversation",
+                  updatedAt: "2026-07-29T00:00:00.000Z",
+                },
+              ],
+            }),
+          );
+        }
+        return active(input, init);
+      }),
+    );
+    try {
+      (transport as unknown as { listFetchedAt: number }).listFetchedAt = 0;
+      const conversations = await transport.listConversations();
+      const seeded = conversations.find(
+        (conversation) => conversation.id === WORKFLOW_CONVERSATION,
+      );
+      if (!seeded) throw new Error("workflow conversation did not merge");
+      return seeded;
+    } finally {
+      vi.stubGlobal("fetch", active);
+      (transport as unknown as { listFetchedAt: number }).listFetchedAt = 0;
+    }
+  }
+
   function collectWorkflowTurn(
     transport: AevatarAssistantTransport,
     conversationId: string,
@@ -5052,64 +5091,210 @@ describe("workflow chat turns (studio engine)", () => {
     });
   }
 
-  it("creates conversations locally and runs the first turn through the workflow route", async () => {
-    const mock = stubFetch(
-      routeWorkflow([
-        ...WORKFLOW_PREAMBLE,
-        { textMessageStart: { messageId: "wm-1" } },
-        {
-          textMessageContent: {
-            delta: "Here's what's available on your NyxID account.",
+  it("creates a typed actor on the first turn and preserves its blocked action contract", async () => {
+    const actionBodies: Record<string, unknown>[] = [];
+    const mock = stubFetch((url, init) => {
+      if (url === TYPED_URL && init?.method === "POST") {
+        return sseResponse([
+          {
+            runStarted: {
+              actorId: TYPED_CONVERSATION,
+              turnId: TYPED_TURN,
+            },
           },
-        },
-        { textMessageEnd: {} },
-        ...WORKFLOW_TAIL,
-      ]),
-    );
+          actionRequestFrame({
+            actorId: TYPED_CONVERSATION,
+            originTurnId: TYPED_TURN,
+            params: {
+              catalogService: {
+                serviceSlug: "api-aws-cost-explorer",
+                requestedScopes: ["billing:read"],
+              },
+            },
+          }),
+          { type: "RUN_FINISHED", runFinished: { status: "blocked" } },
+        ]);
+      }
+      if (
+        url ===
+          `${ASSISTANT_BASE}/conversations/${TYPED_CONVERSATION}/stream` &&
+        init?.method === "POST"
+      ) {
+        actionBodies.push(
+          JSON.parse(String(init.body)) as Record<string, unknown>,
+        );
+        return sseResponse([
+          {
+            type: "RUN_STARTED",
+            actorId: TYPED_CONVERSATION,
+            turnId: "turn-action-continue-1",
+          },
+          { type: "RUN_FINISHED" },
+        ]);
+      }
+      return undefined;
+    });
     const transport = new AevatarAssistantTransport();
     const conversation = await transport.createConversation();
-    expect(conversation.id.startsWith("workflow-pending-")).toBe(true);
+    expect(conversation.id.startsWith("nyxid-pending-")).toBe(true);
+    expect(conversation.id.startsWith("workflow-pending-")).toBe(false);
     // Create is client-local: nothing goes to the wire until the send.
     expect(mock).not.toHaveBeenCalled();
 
-    const events = await collectWorkflowTurn(transport, conversation.id, "hi");
+    const events = await collectWorkflowTurn(
+      transport,
+      conversation.id,
+      "show api-aws-cost-explorer billing",
+    );
 
     const turnCall = mock.mock.calls.find(
-      ([input]) => String(input) === WORKFLOW_URL,
+      ([input]) => String(input) === TYPED_URL,
     );
     expect(turnCall).toBeDefined();
-    const body = JSON.parse(String(turnCall?.[1]?.body)) as Record<
-      string,
-      unknown
-    >;
-    // First turn = create intent: no conversation id, but an idempotency
-    // command id the retry loop can replay.
-    expect(body["conversationId"]).toBeUndefined();
-    expect(typeof body["commandId"]).toBe("string");
-    expect(body["prompt"]).toBe("hi");
+    const body = JSON.parse(String(turnCall?.[1]?.body)) as {
+      type: string;
+      prompt: string;
+      clientRequestId: string;
+    };
+    expect(Object.keys(body)).toEqual(["type", "prompt", "clientRequestId"]);
+    expect(body).toEqual({
+      type: "text",
+      prompt: "show api-aws-cost-explorer billing",
+      clientRequestId: body.clientRequestId,
+    });
+    expect(body.clientRequestId).toMatch(/^[0-9a-f-]{36}$/);
+    expect(
+      mock.mock.calls.some(([input]) => String(input) === WORKFLOW_URL),
+    ).toBe(false);
 
     const terminal = events[events.length - 1];
     expect(terminal?.event === "turn.completed" && terminal.status).toBe(
-      "completed",
+      "blocked",
     );
-    const completed = events.find((event) => event.event === "block.completed");
-    expect(completed?.event === "block.completed" && completed.block).toEqual({
-      type: "text",
-      block_id: "wm-1-text",
-      text: "Here's what's available on your NyxID account.",
+    const actionCards = events.filter(
+      (event) =>
+        event.event === "block.started" && event.block.type === "action_card",
+    );
+    expect(actionCards).toHaveLength(1);
+    expect(actionCards[0]).toMatchObject({
+      block: {
+        action: "service.connect",
+        origin_turn_id: TYPED_TURN,
+        params: {
+          service_slug: "api-aws-cost-explorer",
+        },
+      },
     });
 
-    // `aevatar.chat.context` aliased the placeholder to the server id: the
-    // conversation now reports the `chatc-…` id through either address.
+    // The first typed frame aliases the placeholder to its server actor.
     const history = await transport.getHistory(conversation.id);
-    expect(history.conversation.id).toBe(WORKFLOW_CONVERSATION);
+    expect(history.conversation.id).toBe(TYPED_CONVERSATION);
     expect(history.messages.length).toBeGreaterThanOrEqual(2);
+
+    await new Promise<void>((resolve) => {
+      const handle = transport.continueActions(
+        conversation.id,
+        TYPED_TURN,
+        [
+          {
+            actionRequestId: "act-action-1",
+            originTurnId: TYPED_TURN,
+            disposition: "declined",
+          },
+        ],
+        (event) => {
+          if (event.event === "turn.completed") resolve();
+        },
+      );
+      expect(handle).not.toBeNull();
+    });
+    expect(actionBodies).toHaveLength(1);
+    expect(actionBodies[0]).toMatchObject({
+      type: "action.continue",
+      originTurnId: TYPED_TURN,
+      actions: [
+        {
+          actionRequestId: "act-action-1",
+          originTurnId: TYPED_TURN,
+          disposition: "declined",
+        },
+      ],
+    });
   });
 
-  it("renders the run result when nothing streamed as text", async () => {
-    stubFetch(routeWorkflow([...WORKFLOW_PREAMBLE, ...WORKFLOW_TAIL]));
+  it("continues typed conversations on their actor with a fresh request identity", async () => {
+    const bodies: Array<{ url: string; body: Record<string, unknown> }> = [];
+    const mock = stubFetch((url, init) => {
+      if (
+        (url === TYPED_URL ||
+          url ===
+            `${ASSISTANT_BASE}/conversations/${TYPED_CONVERSATION}/stream`) &&
+        init?.method === "POST"
+      ) {
+        bodies.push({
+          url,
+          body: JSON.parse(String(init.body)) as Record<string, unknown>,
+        });
+        return sseResponse([
+          {
+            type: "RUN_STARTED",
+            actorId: TYPED_CONVERSATION,
+            turnId: url === TYPED_URL ? TYPED_TURN : "turn-typed-follow-up-1",
+          },
+          { type: "RUN_FINISHED" },
+        ]);
+      }
+      return undefined;
+    });
     const transport = new AevatarAssistantTransport();
     const conversation = await transport.createConversation();
+
+    await collectWorkflowTurn(transport, conversation.id, "first");
+    await collectWorkflowTurn(transport, conversation.id, "second");
+
+    expect(bodies.map((entry) => entry.url)).toEqual([
+      TYPED_URL,
+      `${ASSISTANT_BASE}/conversations/${TYPED_CONVERSATION}/stream`,
+    ]);
+    expect(bodies[0]?.body).toMatchObject({ type: "text", prompt: "first" });
+    expect(bodies[1]?.body).toMatchObject({ type: "text", prompt: "second" });
+    expect(bodies[0]?.body["clientRequestId"]).not.toBe(
+      bodies[1]?.body["clientRequestId"],
+    );
+    expect(
+      mock.mock.calls.some(([input]) => String(input) === WORKFLOW_URL),
+    ).toBe(false);
+  });
+
+  it("fails closed when typed chat does not identify a nyxid-chat actor", async () => {
+    stubFetch((url, init) =>
+      url === TYPED_URL && init?.method === "POST"
+        ? sseResponse([
+            {
+              type: "RUN_STARTED",
+              actorId: WORKFLOW_CONVERSATION,
+              turnId: TYPED_TURN,
+            },
+            { type: "RUN_FINISHED" },
+          ])
+        : undefined,
+    );
+    const transport = new AevatarAssistantTransport();
+    const conversation = await transport.createConversation();
+
+    const events = await collectWorkflowTurn(transport, conversation.id, "hi");
+
+    expect(events.at(-1)).toMatchObject({
+      event: "turn.completed",
+      status: "failed",
+      error: { code: "stream_protocol_error" },
+    });
+  });
+
+  it("keeps legacy chatc history continuable and renders its workflow result", async () => {
+    stubFetch(routeWorkflow([...WORKFLOW_PREAMBLE, ...WORKFLOW_TAIL]));
+    const transport = new AevatarAssistantTransport();
+    const conversation = await seedWorkflowConversation(transport);
 
     const events = await collectWorkflowTurn(transport, conversation.id, "hi");
 
@@ -5139,7 +5324,7 @@ describe("workflow chat turns (studio engine)", () => {
       ]),
     );
     const transport = new AevatarAssistantTransport();
-    const conversation = await transport.createConversation();
+    const conversation = await seedWorkflowConversation(transport);
     await collectWorkflowTurn(transport, conversation.id, "first");
     await collectWorkflowTurn(transport, conversation.id, "second");
 
@@ -5149,9 +5334,11 @@ describe("workflow chat turns (studio engine)", () => {
         ([, init]) => JSON.parse(String(init?.body)) as Record<string, unknown>,
       );
     expect(turnBodies).toHaveLength(2);
-    expect(turnBodies[0]?.["conversationId"]).toBeUndefined();
-    // The follow-up addresses the server conversation with the read fence
-    // from the first turn's chat.context (stateVersion "3").
+    // Existing chatc rows stay on the workflow route. Before a stream supplies
+    // a newer watermark, the compatibility floor is 1.
+    expect(turnBodies[0]?.["conversationId"]).toBe(WORKFLOW_CONVERSATION);
+    expect(turnBodies[0]?.["minimumStateVersion"]).toBe(1);
+    // The follow-up uses the watermark from the first turn's chat.context.
     expect(turnBodies[1]?.["conversationId"]).toBe(WORKFLOW_CONVERSATION);
     expect(turnBodies[1]?.["minimumStateVersion"]).toBe(3);
     expect(turnBodies[1]?.["commandId"]).not.toBe(turnBodies[0]?.["commandId"]);
@@ -5165,7 +5352,7 @@ describe("workflow chat turns (studio engine)", () => {
       ]),
     );
     const transport = new AevatarAssistantTransport();
-    const conversation = await transport.createConversation();
+    const conversation = await seedWorkflowConversation(transport);
 
     const events = await collectWorkflowTurn(transport, conversation.id, "hi");
 
@@ -5207,7 +5394,7 @@ describe("workflow chat turns (studio engine)", () => {
       return undefined;
     });
     const transport = new AevatarAssistantTransport();
-    const conversation = await transport.createConversation();
+    const conversation = await seedWorkflowConversation(transport);
 
     const events: TurnEvent[] = [];
     const terminal = new Promise<void>((resolve) => {
@@ -5232,7 +5419,7 @@ describe("workflow chat turns (studio engine)", () => {
     ).toBe(false);
   });
 
-  it("deletes an aliased conversation through its server id", async () => {
+  it("deletes a legacy workflow conversation through its server id", async () => {
     const mock = stubFetch(
       routeWorkflow([
         ...WORKFLOW_PREAMBLE,
@@ -5245,7 +5432,7 @@ describe("workflow chat turns (studio engine)", () => {
         init?.method === "DELETE" ? jsonResponse({}) : undefined,
     );
     const transport = new AevatarAssistantTransport();
-    const conversation = await transport.createConversation();
+    const conversation = await seedWorkflowConversation(transport);
     await collectWorkflowTurn(transport, conversation.id, "first");
 
     await transport.deleteConversation(conversation.id);
@@ -5299,7 +5486,7 @@ describe("workflow chat turns (studio engine)", () => {
       },
     );
     const transport = new AevatarAssistantTransport();
-    const conversation = await transport.createConversation();
+    const conversation = await seedWorkflowConversation(transport);
     await collectWorkflowTurn(transport, conversation.id, "Connect GitHub");
 
     const events: TurnEvent[] = [];
@@ -5371,12 +5558,28 @@ describe("workflow conversations fail approvals honestly", () => {
   // still render (the workflow mapper emits `aevatar.tool_approval.pending`),
   // so the decision must fail with a legible message instead of a 404.
   it("refuses to post the actor approve route for a chatc conversation", async () => {
-    const mock = stubFetch();
+    const workflowConversation = "chatc-8bd999c402fb37d60cdcd81e3b78cfd";
+    const mock = stubFetch((url, init) =>
+      url === `${ASSISTANT_BASE}/conversations` &&
+      (init?.method ?? "GET") === "GET"
+        ? jsonResponse({
+            conversations: [
+              {
+                id: workflowConversation,
+                title: "Legacy workflow conversation",
+              },
+            ],
+          })
+        : undefined,
+    );
     const transport = new AevatarAssistantTransport();
-    const conversation = await transport.createConversation();
+    const conversation = (await transport.listConversations()).find(
+      (candidate) => candidate.id === workflowConversation,
+    );
+    expect(conversation).toBeDefined();
 
     await expect(
-      transport.decideApproval(conversation.id, "block-1", true),
+      transport.decideApproval(workflowConversation, "block-1", true),
     ).rejects.toThrow(/Approvals cannot be decided from this chat yet/);
     expect(
       mock.mock.calls.some(([input]) => String(input).endsWith("/approve")),

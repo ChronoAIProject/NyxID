@@ -516,9 +516,45 @@ pub async fn completions(
     .await
 }
 
-/// Bounds the caller turn body: a 32k-char prompt is ≤128 KiB of UTF-8 plus
-/// JSON escaping headroom.
-const MAX_WORKFLOW_CHAT_REQUEST_BYTES: usize = 256 * 1024;
+/// Bounds caller chat bodies: a 32k-char prompt is at most 128 KiB of UTF-8,
+/// with additional room for JSON escaping.
+const MAX_ASSISTANT_CHAT_REQUEST_BYTES: usize = 256 * 1024;
+
+/// `POST /api/v1/assistant/chat` -- typed NyxIdChat create-and-first-turn SSE.
+///
+/// The browser request is parsed with an explicit allowlist, then rebuilt as
+/// the exact Aevatar discriminator, prompt, and idempotency identity. The
+/// authoritative conversation actor and turn arrive on the returned stream;
+/// scope comes only from the propagated verified principal.
+pub async fn typed_chat(
+    State(state): State<AppState>,
+    auth_user: AuthUser,
+    request: Request<Body>,
+) -> AppResult<Response> {
+    let (mut parts, body) = request.into_parts();
+    let bytes = to_bytes(body, MAX_ASSISTANT_CHAT_REQUEST_BYTES)
+        .await
+        .map_err(|_| AppError::BadRequest("Typed chat request body is too large.".to_string()))?;
+    let turn: assistant_service::TypedChatTurnRequest = serde_json::from_slice(&bytes)
+        .map_err(|e| AppError::BadRequest(format!("Invalid typed chat request: {e}")))?;
+    let upstream = assistant_service::typed_chat_body(&turn)?;
+    let payload = serde_json::to_vec(&upstream).map_err(|_| {
+        AppError::Internal("assistant: failed to encode the typed chat body".to_string())
+    })?;
+    parts.headers.remove(header::CONTENT_LENGTH);
+    parts.headers.insert(
+        header::CONTENT_TYPE,
+        HeaderValue::from_static("application/json"),
+    );
+    let request = Request::from_parts(parts, Body::from(payload));
+    forward(
+        &state,
+        &auth_user,
+        assistant_service::typed_chat_path(),
+        request,
+    )
+    .await
+}
 
 /// `POST /api/v1/assistant/workflow-chat` -- workflow ("studio") chat turn,
 /// answered as the upstream SSE stream.
@@ -542,7 +578,7 @@ pub async fn workflow_chat(
     request: Request<Body>,
 ) -> AppResult<Response> {
     let (mut parts, body) = request.into_parts();
-    let bytes = to_bytes(body, MAX_WORKFLOW_CHAT_REQUEST_BYTES)
+    let bytes = to_bytes(body, MAX_ASSISTANT_CHAT_REQUEST_BYTES)
         .await
         .map_err(|_| {
             AppError::BadRequest("Workflow chat request body is too large.".to_string())
