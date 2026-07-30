@@ -26,6 +26,14 @@ const {
     conversations: [] as Conversation[] | undefined,
     conversationsResolved: true,
     historyError: false,
+    // Mirrors what TanStack exposes for an in-flight mutation.
+    sendPending: undefined as string | undefined,
+    historyMessages: [] as unknown[],
+    episode: null as {
+      open: boolean;
+      printed: boolean;
+      projecting: boolean;
+    } | null,
   },
 }));
 
@@ -86,22 +94,25 @@ vi.mock("@/hooks/use-assistant", () => ({
             created_at: "2026-07-29T00:00:00.000Z",
             last_message_at: "2026-07-29T00:00:00.000Z",
           },
-          messages: [],
+          messages: state.historyMessages,
           has_more: false,
         }
       : undefined,
     isLoading: false,
+    isFetching: false,
     isError: state.historyError,
     error: undefined,
   }),
   useAssistantTurn: () => ({ data: null }),
+  useTurnEpisode: () => ({ data: state.episode }),
   useCreateConversation: () => ({
     mutateAsync: mockCreateMutateAsync,
     isPending: false,
   }),
   useSendMessage: () => ({
     mutateAsync: mockSendMutateAsync,
-    isPending: false,
+    isPending: state.sendPending !== undefined,
+    variables: state.sendPending,
   }),
   useCancelTurn: () => ({ mutateAsync: vi.fn() }),
   useDecideApproval: () => ({ mutateAsync: vi.fn() }),
@@ -154,12 +165,35 @@ const boundConversation: Conversation = {
   last_message_at: "2026-07-29T00:00:00.000Z",
 };
 
-function renderPage() {
-  return render(
+function userTranscriptMessage(id: string, text: string) {
+  return {
+    id,
+    role: "user" as const,
+    schema_version: 1,
+    blocks: [{ type: "text", block_id: `${id}-block`, text }],
+    created_at: "2026-07-29T00:00:00.000Z",
+  };
+}
+
+function page() {
+  return (
     <TooltipProvider>
       <AssistantPage />
-    </TooltipProvider>,
+    </TooltipProvider>
   );
+}
+
+function renderPage() {
+  return render(page());
+}
+
+/** Type into the composer and submit, as the reader does. */
+async function sendThrough(
+  event: ReturnType<typeof userEvent.setup>,
+  text: string,
+) {
+  await event.type(screen.getByRole("textbox"), text);
+  await event.click(screen.getByRole("button", { name: /send/i }));
 }
 
 beforeEach(() => {
@@ -170,6 +204,9 @@ beforeEach(() => {
   state.conversations = [existingConversation];
   state.conversationsResolved = true;
   state.historyError = false;
+  state.sendPending = undefined;
+  state.historyMessages = [];
+  state.episode = null;
   useAuthStore.setState({
     user,
     isAuthenticated: true,
@@ -223,6 +260,89 @@ describe("AssistantPage new chat", () => {
     expect(mockNavigate).toHaveBeenCalledWith(
       expect.objectContaining({ search: { c: "conv-new" } }),
     );
+  });
+
+  it("shows the sent message and a thinking state while the draft allocates", () => {
+    // The conversation does not exist yet, so there is no id, no history query
+    // and nothing to render — and the composer has already cleared the text.
+    // Without the optimistic echo the reader watches their message vanish into
+    // the empty state for the length of the create round-trip.
+    state.search = { draft: true };
+    state.sendPending = "check my issues";
+    renderPage();
+
+    expect(screen.getByText("check my issues")).toBeInTheDocument();
+    expect(
+      screen.getByRole("status", { name: "Assistant is thinking" }),
+    ).toBeInTheDocument();
+    expect(
+      screen.queryByText("Start a new conversation"),
+    ).not.toBeInTheDocument();
+  });
+
+  it("does not echo the sent message twice once the transport projects it", async () => {
+    const event = userEvent.setup();
+    state.search = { c: existingConversation.id };
+    const { rerender } = renderPage();
+
+    // Sent through the composer first so the page records the send's target
+    // conversation, then the transcript and pending flag are advanced to the
+    // state they reach mid-send. Setting `sendPending` up front would make the
+    // composer refuse the submit as already-sending.
+    await sendThrough(event, "already projected");
+    state.historyMessages = [
+      userTranscriptMessage("user-projected", "already projected"),
+    ];
+    state.sendPending = "already projected";
+    rerender(page());
+
+    expect(screen.getAllByText("already projected")).toHaveLength(1);
+  });
+
+  it("does not echo below the answer when the assistant projects first", async () => {
+    // The assistant's first message can land while the send mutation is still
+    // pending. A tail-only projection test appended a second copy of the
+    // reader's message UNDER the answer, and flipped streaming back to thinking.
+    const event = userEvent.setup();
+    state.search = { c: existingConversation.id };
+    const { rerender } = renderPage();
+
+    await sendThrough(event, "racing send");
+    state.historyMessages = [
+      userTranscriptMessage("user-projected", "racing send"),
+      {
+        id: "assistant-first",
+        role: "assistant",
+        schema_version: 1,
+        blocks: [{ type: "text", block_id: "b2", text: "Answering" }],
+        created_at: "2026-07-29T00:00:01.000Z",
+      },
+    ];
+    state.sendPending = "racing send";
+    rerender(page());
+
+    expect(screen.getAllByText("racing send")).toHaveLength(1);
+    expect(screen.getByText("Answering")).toBeInTheDocument();
+  });
+
+  it("keeps a pending echo out of a conversation the reader switched to", async () => {
+    const event = userEvent.setup();
+    state.search = { c: existingConversation.id };
+    state.conversations = [existingConversation, boundConversation];
+    const { rerender } = renderPage();
+
+    await sendThrough(event, "meant for the first chat");
+    state.sendPending = "meant for the first chat";
+    rerender(page());
+    expect(screen.getByText("meant for the first chat")).toBeInTheDocument();
+
+    // Same mutation still pending, different conversation on screen.
+    state.search = { c: boundConversation.id };
+    rerender(page());
+
+    expect(
+      screen.queryByText("meant for the first chat"),
+    ).not.toBeInTheDocument();
   });
 
   it("renders the empty draft thread rather than a binding or newest chat", () => {

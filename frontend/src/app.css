@@ -456,26 +456,6 @@ input[type="number"] {
   opacity: 0;
 }
 
-@keyframes halo-spin {
-  to {
-    transform: rotate(360deg);
-  }
-}
-
-@keyframes halo-spin-reverse {
-  to {
-    transform: rotate(-360deg);
-  }
-}
-
-.animate-halo-spin {
-  animation: halo-spin 3s linear infinite;
-}
-
-.animate-halo-spin-reverse {
-  animation: halo-spin-reverse 5s linear infinite;
-}
-
 .assistant-halo {
   position: absolute;
   top: 50%;
@@ -502,43 +482,44 @@ html.theme-dark .assistant-halo--visible {
   opacity: 0.82;
 }
 
-.assistant-halo-ring {
+/*
+ * The halo is a keyed source clip baked into one horizontal sprite strip:
+ * 104 frames of 64px (2x the 32px render box), stepped a frame at a time.
+ *
+ * Played in 1.89s rather than the 5.2s the clip was authored for (104 frames
+ * at 20fps): a full revolution that slow reads as stalled on a loading state,
+ * which is the opposite of what the halo is for. 104 steps over 1.89s lands
+ * at ~55fps, so the source is the smoothness ceiling, not the playback.
+ *
+ * The step count and the strip width are one unit — re-cutting
+ * assets/halo-sheet.webp means updating both together.
+ */
+.assistant-halo-sprite {
   position: absolute;
   inset: 0;
-  border-radius: 9999px;
-  background: conic-gradient(
-    from 12deg,
-    transparent 0deg 20deg,
-    #60a5fa 52deg,
-    var(--color-nyx-secondary-400) 105deg,
-    transparent 145deg 182deg,
-    #f472b6 218deg,
-    #fb923c 265deg,
-    transparent 310deg 360deg
-  );
-  filter: blur(3px) saturate(1.4);
-  mask-image: radial-gradient(closest-side, transparent 58%, black 78%);
-  -webkit-mask-image: radial-gradient(closest-side, transparent 58%, black 78%);
+  /* background-image is set on the element from the JS-imported asset URL, not
+     here: app.css is also the CLI wizard bundle's stylesheet, and that build
+     inlines every referenced asset as base64 into one HTML file. A url() here
+     would embed the whole strip into a CLI binary that has no chat UI. */
+  background-repeat: no-repeat;
+  /* 104 frames x 32px rendered = 3328px; height pins each frame to the box. */
+  background-size: 3328px 32px;
+  animation: halo-sprite 1.89s steps(104) infinite;
 }
 
-.assistant-halo-ring-reverse {
-  opacity: 0.7;
-  background: conic-gradient(
-    from 168deg,
-    transparent 0deg 34deg,
-    #fb923c 68deg,
-    #f472b6 112deg,
-    transparent 148deg 212deg,
-    var(--color-nyx-secondary-400) 250deg,
-    #60a5fa 300deg,
-    transparent 338deg 360deg
-  );
-  filter: blur(4px) saturate(1.4);
+@keyframes halo-sprite {
+  from {
+    background-position-x: 0;
+  }
+  to {
+    background-position-x: -3328px;
+  }
 }
 
 @media (prefers-reduced-motion: reduce) {
-  .animate-halo-spin,
-  .animate-halo-spin-reverse {
+  /* Parks on frame 0 rather than hiding the halo — the turn is still running
+     and the mark is the only signal that it is. */
+  .assistant-halo-sprite {
     animation: none;
   }
 

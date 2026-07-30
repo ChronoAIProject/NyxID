@@ -62,6 +62,15 @@ const queryClient = new QueryClient({
   },
 });
 
+// Dev-only handle for the e2e harness (frontend/e2e/): flow specs assert on
+// cache slots nothing renders yet (e.g. the per-conversation turn episode).
+// Stripped from production builds with the rest of the DEV branch.
+if (import.meta.env.DEV) {
+  (
+    window as { __nyxQueryClient?: QueryClient }
+  ).__nyxQueryClient = queryClient;
+}
+
 function Root() {
   const [ready, setReady] = useState(false);
   const isAuthenticated = useAuthStore((s) => s.isAuthenticated);

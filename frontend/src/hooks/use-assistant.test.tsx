@@ -21,6 +21,7 @@ import {
   useCreateConversation,
   useDecideApproval,
   useSendMessage,
+  useTurnEpisode,
   type SentMessage,
 } from "./use-assistant";
 
@@ -96,6 +97,89 @@ describe("assistant hooks", () => {
     if (completed?.type === "text") {
       expect(completed.text).toContain("API transport swap");
     }
+
+    unmount();
+    queryClient.clear();
+  });
+
+  it("opens an episode at send and closes it only when the stream ends", async () => {
+    // The episode is what the thread reads to tell "this stream is starting"
+    // from "the previous turn's terminal status is still cached", and to know
+    // whether THIS stream has printed anything. Neither is answerable from the
+    // turn status or the transcript.
+    const { queryClient, Wrapper } = createHarness();
+    const { result, unmount } = renderHook(
+      () => ({
+        episode: useTurnEpisode("conversation-stripe"),
+        send: useSendMessage("conversation-stripe"),
+      }),
+      { wrapper: Wrapper },
+    );
+
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(0);
+    });
+    expect(result.current.episode.data).toBeNull();
+
+    await act(async () => {
+      await result.current.send.mutateAsync("Check the audit trail.");
+      await vi.advanceTimersByTimeAsync(0);
+    });
+    expect(result.current.episode.data?.open).toBe(true);
+    expect(result.current.episode.data?.printed).toBe(false);
+
+    // First characters stream: the dots have to give way from here on.
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(500);
+    });
+    expect(result.current.episode.data?.printed).toBe(true);
+    expect(result.current.episode.data?.open).toBe(true);
+
+    // Past the end of the scripted turn with room to spare. Don't tighten this
+    // to land exactly on the terminal event: the script grows as mock blocks
+    // are added (the run and action-card blocks pushed turn.completed from
+    // 800ms to 1200ms), and the closing projection settles a tick after it.
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(1500);
+    });
+    expect(result.current.episode.data?.open).toBe(false);
+    expect(result.current.episode.data?.projecting).toBe(false);
+
+    unmount();
+    queryClient.clear();
+  });
+
+  it("restores the live episode when a concurrent send is rejected", async () => {
+    const { queryClient, Wrapper } = createHarness();
+    const { result, unmount } = renderHook(
+      () => ({
+        episode: useTurnEpisode("conversation-stripe"),
+        first: useSendMessage("conversation-stripe"),
+        second: useSendMessage("conversation-stripe"),
+      }),
+      { wrapper: Wrapper },
+    );
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(0);
+    });
+
+    await act(async () => {
+      await result.current.first.mutateAsync("First");
+      await vi.advanceTimersByTimeAsync(0);
+    });
+
+    // Rejected by the active-turn guard: the losing pump must restore the
+    // current stream's episode instead of clearing or replacing it.
+    await act(async () => {
+      await expect(
+        result.current.second.mutateAsync("Second"),
+      ).rejects.toBeInstanceOf(AssistantTurnActiveError);
+      await vi.advanceTimersByTimeAsync(0);
+    });
+    expect(result.current.episode.data).toMatchObject({
+      open: true,
+      printed: false,
+    });
 
     unmount();
     queryClient.clear();
@@ -206,7 +290,9 @@ describe("assistant hooks", () => {
     let sent: SentMessage | null = null;
     await act(async () => {
       const createPromise = result.current.create.mutateAsync();
-      const sendPromise = result.current.send.mutateAsync("Sent mid-provision.");
+      const sendPromise = result.current.send.mutateAsync(
+        "Sent mid-provision.",
+      );
       await vi.advanceTimersByTimeAsync(0);
       [created, sent] = await Promise.all([createPromise, sendPromise]);
     });
