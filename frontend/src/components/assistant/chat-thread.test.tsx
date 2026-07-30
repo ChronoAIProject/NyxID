@@ -1,4 +1,4 @@
-import { act, render, screen } from "@testing-library/react";
+import { act, fireEvent, render, screen } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { AssistantMessage } from "@/types/assistant";
 import { ChatThread } from "./chat-thread";
@@ -25,6 +25,7 @@ function message(overrides: Partial<AssistantMessage>): AssistantMessage {
 describe("ChatThread", () => {
   afterEach(() => {
     vi.useRealTimers();
+    vi.restoreAllMocks();
   });
 
   it("renders an unsupported shell for an unknown block type", () => {
@@ -86,7 +87,7 @@ describe("ChatThread", () => {
     );
   });
 
-  it("reserves tail room and fades over the composer it scrolls behind", () => {
+  it("reserves tail room and fades over the floating composer", () => {
     const { container } = render(
       <ChatThread
         messages={[
@@ -99,12 +100,13 @@ describe("ChatThread", () => {
       />,
     );
 
-    const scroller = container.querySelector<HTMLElement>(".overflow-y-auto");
+    const scroller = container.querySelector<HTMLElement>(
+      ".assistant-scrollbar",
+    );
     expect(scroller?.style.maskImage).toContain("calc(100% - 140px)");
-    // Tail padding keeps the last turn clear of the composer at scroll bottom.
-    expect(
-      scroller?.firstElementChild?.getAttribute("style"),
-    ).toContain("140px");
+    expect(scroller?.firstElementChild?.getAttribute("style")).toContain(
+      "140px",
+    );
   });
 
   it("hides the thinking indicator once assistant content streams", () => {
@@ -286,5 +288,60 @@ describe("ChatThread", () => {
     expect(screen.getByTestId("action-card-dispatch")).toHaveTextContent(
       "act-1",
     );
+  });
+
+  it("publishes native scrollbar width for composer alignment", () => {
+    vi.spyOn(HTMLElement.prototype, "offsetWidth", "get").mockReturnValue(500);
+    vi.spyOn(HTMLElement.prototype, "clientWidth", "get").mockReturnValue(489);
+
+    const { container } = render(
+      <ChatThread
+        messages={[
+          message({
+            blocks: [{ type: "text", block_id: "text-1", text: "Answer" }],
+          }),
+        ]}
+        onDecideApproval={vi.fn()}
+      />,
+    );
+
+    expect(
+      container.style.getPropertyValue("--assistant-scrollbar-width"),
+    ).toBe("11px");
+  });
+
+  it("uses the fixed icon grid and reveals the top fade after scrolling", () => {
+    const { container } = render(
+      <ChatThread
+        messages={[
+          message({
+            blocks: [{ type: "text", block_id: "text-1", text: "Answer" }],
+          }),
+        ]}
+        onDecideApproval={vi.fn()}
+      />,
+    );
+    const scrollRegion = container.querySelector<HTMLDivElement>(
+      ".assistant-scrollbar",
+    );
+    expect(scrollRegion).not.toBeNull();
+    if (!scrollRegion) return;
+    expect(container.querySelector("article")).toHaveClass(
+      "grid",
+      "grid-cols-[18px_minmax(0,1fr)]",
+    );
+
+    const topFade = container.querySelector(
+      ':scope > div > [aria-hidden="true"]',
+    );
+    expect(topFade).toHaveClass("opacity-0");
+
+    Object.defineProperties(scrollRegion, {
+      clientHeight: { configurable: true, value: 200 },
+      scrollHeight: { configurable: true, value: 500 },
+      scrollTop: { configurable: true, writable: true, value: 120 },
+    });
+    fireEvent.scroll(scrollRegion);
+    expect(topFade).toHaveClass("opacity-100");
   });
 });
