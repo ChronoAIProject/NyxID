@@ -11,7 +11,12 @@ import {
   renderableText,
   splitConnectMarkers,
 } from "@/lib/assistant/connect-fence";
-import { drainSseBuffer, flushSseBuffer } from "@/lib/assistant/sse";
+import {
+  chatStreamClient,
+  type ChatStreamCompletionResult,
+  type ChatStreamRequestHandle,
+} from "@/lib/assistant/chat-stream-worker-client";
+import type { ChatStreamFrame } from "@/lib/assistant/chat-stream-worker-protocol";
 import {
   actionReportSchema,
   assistantActionRequestSchema,
@@ -1293,26 +1298,23 @@ export class AevatarAssistantTransport implements AssistantTransport {
       return null;
     }
 
-    let response: Response;
-    try {
-      run.streamDispatched = true;
-      response = await fetch(
-        `/api/v1${ASSISTANT_PREFIX}/conversations/${conversationId}/approve`,
-        {
-          method: "POST",
-          headers: {
-            "Content-Type": "application/json",
-            Accept: "text/event-stream",
-          },
-          credentials: "include",
-          body: JSON.stringify({
-            requestId: card.approval_request_id,
-            approved,
-          }),
-          signal: run.controller.signal,
-        },
-      );
-    } catch (error) {
+    const stream = this.startChatStream(
+      conversationId,
+      run,
+      `/api/v1${ASSISTANT_PREFIX}/conversations/${conversationId}/approve`,
+      JSON.stringify({
+        requestId: card.approval_request_id,
+        approved,
+      }),
+    );
+    const response = await stream.headers;
+    if (response.kind === "cancelled") {
+      // cancelTurn already emitted the terminal events when the user stopped
+      // this request before response headers arrived.
+      this.finishTurn(conversationId, run, "cancelled", null);
+      throw new AssistantTurnCancelledError();
+    }
+    if (response.kind === "network_error") {
       const aborted = run.controller.signal.aborted;
       // cancelTurn may already have settled the run; finishTurn is a no-op
       // then. The card was never flipped, so the decision stays retryable.
@@ -1325,11 +1327,12 @@ export class AevatarAssistantTransport implements AssistantTransport {
         aborted ? "cancelled" : "failed",
         null,
       );
-      throw aborted ? new AssistantTurnCancelledError() : error;
+      throw aborted
+        ? new AssistantTurnCancelledError()
+        : new Error(response.message);
     }
-    if (!response.ok) {
-      const bodyText = await response.text().catch(() => "");
-      const failure = streamStartError(response.status, bodyText);
+    if (response.kind === "http_error") {
+      const failure = streamStartError(response.status, response.body);
       // Null turn error for the same single-toast reason as above.
       this.finishTurn(conversationId, run, "failed", null);
       throw new Error(failure.message);
@@ -1390,14 +1393,14 @@ export class AevatarAssistantTransport implements AssistantTransport {
       });
     }
 
-    const contentType = response.headers.get("content-type") ?? "";
-    if (response.body && contentType.includes("text/event-stream")) {
-      void this.consumeApprovalContinuation(conversationId, run, response);
+    if (response.contentType.includes("text/event-stream")) {
+      void this.consumeApprovalContinuation(conversationId, run, stream);
     } else {
       // Older backend acknowledging with JSON: nothing further will stream,
       // and there is no live continuation for the caller to hold a handle
       // to — returning one would let a stale entry linger in the caller's
       // handle registry after this turn already completed.
+      stream.cancel();
       this.finishTurn(conversationId, run, "completed", null);
       return null;
     }
@@ -2048,12 +2051,12 @@ export class AevatarAssistantTransport implements AssistantTransport {
       run.protocol === "workflow"
         ? {
             url: WORKFLOW_CHAT_URL,
-            body: this.workflowTurnBody(conversationId, run, prompt),
+            bodyText: this.workflowTurnBody(conversationId, run, prompt),
           }
         : run.protocol === "typed-create"
           ? {
               url: TYPED_CHAT_URL,
-              body: JSON.stringify({
+              bodyText: JSON.stringify({
                 type: "text",
                 prompt,
                 clientRequestId: run.clientRequestId,
@@ -2061,7 +2064,7 @@ export class AevatarAssistantTransport implements AssistantTransport {
             }
           : {
               url: `/api/v1${ASSISTANT_PREFIX}/conversations/${conversationId}/stream`,
-              body: JSON.stringify({
+              bodyText: JSON.stringify({
                 // Aevatar NyxIdChatEndpoints.Streaming.cs:58 uses an ordinal
                 // discriminator comparison, so a normal turn requires this
                 // exact lowercase value.
@@ -2076,56 +2079,33 @@ export class AevatarAssistantTransport implements AssistantTransport {
       // path defers its abort); a finished run must never re-POST.
       if (run.finished || run.controller.signal.aborted) return;
       this.resetDeliveryState(run);
-      let response: Response;
-      try {
-        // Hand-rolled fetch (not `apiClient`): the response is an SSE stream,
-        // and the endpoint 415s without an explicit JSON content type.
-        run.streamDispatched = true;
-        response = await fetch(target.url, {
-          method: "POST",
-          headers: {
-            "Content-Type": "application/json",
-            Accept: "text/event-stream",
-          },
-          credentials: "include",
-          body: target.body,
-          signal: run.controller.signal,
-        });
-      } catch {
-        // The cancel path aborts the fetch after emitting its own terminal
-        // events; an abort here is not a failure.
+      const stream = this.startChatStream(
+        conversationId,
+        run,
+        target.url,
+        target.bodyText,
+      );
+      const response = await stream.headers;
+
+      if (response.kind === "cancelled") return;
+      if (response.kind === "network_error") {
         if (run.finished || run.controller.signal.aborted) return;
+        finalFailure = { code: response.code, message: response.message };
         if (attempt + 1 < STREAM_DELIVERY_ATTEMPTS) continue;
         break;
       }
-
-      if (!response.ok) {
+      if (response.kind === "http_error") {
         if (
           RETRYABLE_STREAM_STATUSES.has(response.status) &&
           attempt + 1 < STREAM_DELIVERY_ATTEMPTS
         ) {
-          await response.body?.cancel().catch(() => undefined);
           continue;
         }
-        const bodyText = await response.text().catch(() => "");
-        finalFailure = streamStartError(response.status, bodyText);
+        finalFailure = streamStartError(response.status, response.body);
         break;
       }
 
-      if (!response.body) {
-        finalFailure = {
-          code: "stream_closed",
-          message: "The assistant stream closed before it started.",
-        };
-        if (attempt + 1 < STREAM_DELIVERY_ATTEMPTS) continue;
-        break;
-      }
-
-      const result = await this.consumeTurnStream(
-        conversationId,
-        run,
-        response,
-      );
+      const result = await this.consumeTurnStream(conversationId, run, stream);
       if (result.kind === "settled" || run.finished) return;
       finalFailure = result.error;
       if (
@@ -2160,50 +2140,41 @@ export class AevatarAssistantTransport implements AssistantTransport {
         ? "The action wake could not be delivered. Try again."
         : "The action report could not be delivered. It will be retried after the next turn.",
     };
+    // This DTO is already rebuilt from the strict allowlist in
+    // buildActionContinueBody; no card or model object is spread here.
+    const bodyText = JSON.stringify(body);
 
     for (let attempt = 0; attempt < STREAM_DELIVERY_ATTEMPTS; attempt += 1) {
       if (run.finished || run.controller.signal.aborted) return;
       this.resetDeliveryState(run);
-      let response: Response;
-      try {
-        run.streamDispatched = true;
-        response = await fetch(
-          `/api/v1${ASSISTANT_PREFIX}/conversations/${encodeURIComponent(actorId)}/stream`,
-          {
-            method: "POST",
-            headers: {
-              "Content-Type": "application/json",
-              Accept: "text/event-stream",
-            },
-            credentials: "include",
-            // This DTO is rebuilt by one of the strict action-continuation
-            // builders; no card or model object is spread here.
-            body: JSON.stringify(body),
-            signal: run.controller.signal,
-          },
-        );
-      } catch {
+      const stream = this.startChatStream(
+        conversationId,
+        run,
+        `/api/v1${ASSISTANT_PREFIX}/conversations/${encodeURIComponent(actorId)}/stream`,
+        bodyText,
+      );
+      const response = await stream.headers;
+
+      if (response.kind === "cancelled") return;
+      if (response.kind === "network_error") {
         if (run.finished || run.controller.signal.aborted) return;
+        finalFailure = { ...finalFailure, code: response.code };
         if (attempt + 1 < STREAM_DELIVERY_ATTEMPTS) continue;
         break;
       }
-
-      if (!response.ok) {
+      if (response.kind === "http_error") {
         if (
           RETRYABLE_STREAM_STATUSES.has(response.status) &&
           attempt + 1 < STREAM_DELIVERY_ATTEMPTS
         ) {
-          await response.body?.cancel().catch(() => undefined);
           continue;
         }
-        const bodyText = await response.text().catch(() => "");
-        finalFailure = streamStartError(response.status, bodyText);
+        finalFailure = streamStartError(response.status, response.body);
         break;
       }
 
-      const contentType = response.headers.get("content-type") ?? "";
-      if (!contentType.includes("text/event-stream")) {
-        await response.body?.cancel().catch(() => undefined);
+      if (!response.contentType.includes("text/event-stream")) {
+        stream.cancel();
         finalFailure = {
           code: "stream_protocol_error",
           message: isWake
@@ -2212,22 +2183,19 @@ export class AevatarAssistantTransport implements AssistantTransport {
         };
         break;
       }
-      if (!response.body) {
-        finalFailure = {
-          code: "stream_closed",
-          message: "The action continuation closed before it started.",
-        };
-        if (attempt + 1 < STREAM_DELIVERY_ATTEMPTS) continue;
-        break;
-      }
 
-      const result = await this.consumeTurnStream(
-        conversationId,
-        run,
-        response,
-      );
+      const result = await this.consumeTurnStream(conversationId, run, stream);
       if (result.kind === "settled" || run.finished) return;
-      finalFailure = result.error;
+      finalFailure =
+        result.error.code === "stream_closed"
+          ? {
+              code: "stream_closed",
+              message: "The action continuation closed before it started.",
+            }
+          : result.error.code === "network_error" ||
+              result.error.code === "worker_error"
+            ? { ...finalFailure, code: result.error.code }
+            : result.error;
       if (
         result.kind === "retryable" &&
         attempt + 1 < STREAM_DELIVERY_ATTEMPTS
@@ -2245,55 +2213,28 @@ export class AevatarAssistantTransport implements AssistantTransport {
   }
 
   /**
-   * Shared SSE consumption for the original turn stream and the approval
-   * continuation stream: same framing, same adapter, same watchdog and
-   * truncation semantics.
+   * Shared completion handling for initial turns, approval continuations, and
+   * action continuations. Fetch, UTF-8 decoding, SSE framing, JSON parsing,
+   * and bounded batching happen in the stream worker (or inline fallback).
    */
   private async consumeTurnStream(
     conversationId: string,
     run: RunningTurn,
-    response: Response,
+    stream: ChatStreamRequestHandle,
   ): Promise<StreamConsumptionResult> {
-    if (!response.body) {
-      return {
-        kind: "retryable",
-        error: {
-          code: "stream_closed",
-          message: "The assistant stream closed before it started.",
-        },
-      };
-    }
     try {
       this.armWatchdog(conversationId, run);
-      const reader = response.body.getReader();
-      const decoder = new TextDecoder();
-      let buffer = "";
-      readLoop: for (;;) {
-        const { done, value } = await reader.read();
-        if (done) break;
-        buffer += decoder.decode(value, { stream: true });
-        const { payloads, rest } = drainSseBuffer(buffer);
-        buffer = rest;
-        for (const payload of payloads) {
-          this.handleAgUiFrame(conversationId, run, payload);
-          if (run.finished) return { kind: "settled" };
-          if (run.deliveryProtocolError) break readLoop;
-        }
-      }
-      if (!run.deliveryProtocolError) {
-        // The final frame may arrive without a trailing blank line; flush it
-        // before judging how the stream ended.
-        buffer += decoder.decode();
-        for (const payload of flushSseBuffer(buffer)) {
-          this.handleAgUiFrame(conversationId, run, payload);
-          if (run.finished) return { kind: "settled" };
-          if (run.deliveryProtocolError) break;
-        }
+      const completion = await stream.completion;
+      if (run.finished || run.controller.signal.aborted) {
+        return { kind: "settled" };
       }
 
       if (run.deliveryProtocolError) {
-        await reader.cancel().catch(() => undefined);
+        stream.cancel();
         return { kind: "protocol_error", error: run.deliveryProtocolError };
+      }
+      if (completion.kind !== "complete") {
+        return this.streamCompletionFailure(completion);
       }
       if (run.deliveryTerminal) {
         this.settleDeliveryTerminal(conversationId, run, run.deliveryTerminal);
@@ -2324,17 +2265,6 @@ export class AevatarAssistantTransport implements AssistantTransport {
             "The stream ended before the assistant finished. The reply may be incomplete; it will appear in full once the conversation reloads.",
         },
       };
-    } catch {
-      if (run.finished || run.controller.signal.aborted) {
-        return { kind: "settled" };
-      }
-      return {
-        kind: "retryable",
-        error: {
-          code: "network_error",
-          message: "The assistant stream was interrupted. Try again.",
-        },
-      };
     } finally {
       this.clearWatchdog(run);
     }
@@ -2343,13 +2273,54 @@ export class AevatarAssistantTransport implements AssistantTransport {
   private async consumeApprovalContinuation(
     conversationId: string,
     run: RunningTurn,
-    response: Response,
+    stream: ChatStreamRequestHandle,
   ): Promise<void> {
-    const result = await this.consumeTurnStream(conversationId, run, response);
+    const result = await this.consumeTurnStream(conversationId, run, stream);
     if (result.kind === "settled" || run.finished) return;
     this.closeOpenMessage(conversationId, run);
     this.finalizeActivity(conversationId, run, "failed");
     this.finishTurn(conversationId, run, "failed", result.error);
+  }
+
+  private startChatStream(
+    conversationId: string,
+    run: RunningTurn,
+    url: string,
+    bodyText: string,
+  ): ChatStreamRequestHandle {
+    let stream: ChatStreamRequestHandle | null = null;
+    run.streamDispatched = true;
+    stream = chatStreamClient.start({
+      url,
+      bodyText,
+      signal: run.controller.signal,
+      onFrames: (frames) => {
+        for (const frame of frames) {
+          this.handleAgUiFrame(conversationId, run, frame);
+          if (run.finished || run.deliveryProtocolError) {
+            if (run.deliveryProtocolError) stream?.cancel();
+            break;
+          }
+        }
+      },
+    });
+    return stream;
+  }
+
+  private streamCompletionFailure(
+    completion: Exclude<ChatStreamCompletionResult, { kind: "complete" }>,
+  ): StreamConsumptionResult {
+    if (completion.kind === "cancelled") return { kind: "settled" };
+    if (completion.kind === "http_error") {
+      return {
+        kind: "retryable",
+        error: streamStartError(completion.status, completion.body),
+      };
+    }
+    return {
+      kind: "retryable",
+      error: { code: completion.code, message: completion.message },
+    };
   }
 
   private resetDeliveryState(run: RunningTurn): void {
@@ -2402,14 +2373,9 @@ export class AevatarAssistantTransport implements AssistantTransport {
   private handleAgUiFrame(
     conversationId: string,
     run: RunningTurn,
-    payload: string,
+    payload: ChatStreamFrame,
   ): void {
-    let frame: AgUiFrame;
-    try {
-      frame = JSON.parse(payload) as AgUiFrame;
-    } catch {
-      return;
-    }
+    const frame = payload as AgUiFrame;
     if (typeof frame !== "object" || frame === null) return;
 
     const type = this.frameType(frame);

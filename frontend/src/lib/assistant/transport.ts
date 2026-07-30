@@ -1,4 +1,5 @@
 import { AevatarAssistantTransport } from "@/lib/assistant/aevatar-transport";
+import { ApiError } from "@/lib/api-client";
 import { AssistantTurnActiveError } from "@/lib/assistant/errors";
 import {
   assistantMockStore,
@@ -24,6 +25,30 @@ import { isTurnActive } from "@/types/assistant";
 export { AssistantTurnActiveError };
 
 const EVENT_CADENCE_MS = 100;
+
+/**
+ * Dev/e2e-only fault injection for the mock transport. The e2e harness
+ * (frontend/e2e/) sets `window.__assistantMockFaults` via addInitScript to
+ * reproduce latency- and failure-dependent states the instant mock cannot
+ * otherwise reach (slow transcript reads, transcript errors, a stream that
+ * never starts). Inert in production: the mock transport itself is only
+ * selected in dev/test sessions.
+ */
+export interface AssistantMockFaults {
+  /** Delay every getHistory resolution by this many ms. */
+  readonly historyDelayMs?: number;
+  /** Make every getHistory reject with an ApiError of this HTTP status. */
+  readonly historyErrorStatus?: number;
+  /** Accept sends (user message lands) but never emit a single turn event. */
+  readonly sendSilent?: boolean;
+}
+
+function mockFaults(): AssistantMockFaults {
+  return (
+    (globalThis as { __assistantMockFaults?: AssistantMockFaults })
+      .__assistantMockFaults ?? {}
+  );
+}
 
 interface RunningScript {
   readonly turnId: string;
@@ -54,6 +79,19 @@ class MockAssistantTransport implements AssistantTransport {
   }
 
   async getHistory(conversationId: string): Promise<ConversationHistory> {
+    const faults = mockFaults();
+    if (faults.historyDelayMs) {
+      await new Promise((resolve) =>
+        setTimeout(resolve, faults.historyDelayMs),
+      );
+    }
+    if (faults.historyErrorStatus) {
+      throw new ApiError(faults.historyErrorStatus, {
+        error: "mock_history_fault",
+        error_code: 0,
+        message: "Injected mock transcript failure.",
+      });
+    }
     return assistantMockStore.getHistory(conversationId);
   }
 
@@ -80,7 +118,9 @@ class MockAssistantTransport implements AssistantTransport {
     const messageId = assistantMockStore.nextId("assistant-message");
     const blockId = assistantMockStore.nextId("assistant-block");
     const events = createScriptedTurn(turnId, messageId, blockId);
-    return this.startScript(conversationId, turnId, messageId, events, onEvent);
+    return this.startScript(conversationId, turnId, messageId, events, onEvent, {
+      silent: mockFaults().sendSilent,
+    });
   }
 
   cancelActiveTurn(conversationId: string): void {
@@ -281,6 +321,7 @@ class MockAssistantTransport implements AssistantTransport {
     messageId: string,
     events: readonly TurnEvent[],
     onEvent: (event: TurnEvent) => void,
+    options: { readonly silent?: boolean } = {},
   ): TurnHandle {
     const script: RunningScript = {
       turnId,
@@ -292,6 +333,16 @@ class MockAssistantTransport implements AssistantTransport {
       finished: false,
     };
     this.running.set(conversationId, script);
+
+    // A "silent" send mirrors the real transport hanging before response
+    // headers: the user message landed, the turn is reserved, but no event
+    // will ever arrive. Cancel still settles it.
+    if (options.silent) {
+      return {
+        turnId,
+        cancel: () => this.cancelScript(conversationId, script),
+      };
+    }
 
     const emit = (sourceEvent: TurnEvent) => {
       if (script.cancelled || script.finished) return;

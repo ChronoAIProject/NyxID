@@ -16,6 +16,8 @@
     "test": "NODE_ENV=test vitest run",
     "test:producer-contract": "node scripts/verify-aevatar-action-wake.mjs",
     "test:coverage": "NODE_ENV=test vitest run --coverage",
+    "test:e2e": "playwright test",
+    "test:e2e:headed": "playwright test --headed",
     "test:watch": "NODE_ENV=test vitest"
   },
   "dependencies": {
@@ -65,6 +67,7 @@
   },
   "devDependencies": {
     "@eslint/js": "^9.39.1",
+    "@playwright/test": "^1.62.0",
     "@tailwindcss/vite": "^4.2.2",
     "@tanstack/react-query-devtools": "^5.91.3",
     "@tanstack/router-devtools": "^1.159.5",

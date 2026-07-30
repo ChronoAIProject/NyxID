@@ -52,6 +52,19 @@ function channelLabel(channel: ApprovalDecisionChannel | null): string {
   }
 }
 
+/** ISO-8601 comparator that always sorts absent values after present ones. */
+function compareIsoDates(
+  left: string | null | undefined,
+  right: string | null | undefined,
+  direction: "ascending" | "descending",
+): number {
+  if (!left) return right ? 1 : 0;
+  if (!right) return -1;
+  return direction === "ascending"
+    ? left.localeCompare(right)
+    : right.localeCompare(left);
+}
+
 function ServiceCell({ slug }: { readonly slug: string }) {
   return (
     <span className="inline-flex items-center gap-1.5 whitespace-nowrap">
@@ -89,10 +102,12 @@ function PendingSection({
 
   return (
     <>
-      <p className="mb-2.5 flex items-center gap-2 text-[10px] font-semibold uppercase tracking-[1.5px] text-text-tertiary">
+      {/* A div, not a p: `Badge` renders a div, which is invalid inside a p and
+          gets reparented by the browser. */}
+      <div className="mb-2.5 flex items-center gap-2 text-[10px] font-semibold uppercase tracking-[1.5px] text-text-tertiary">
         Waiting on you
         <Badge variant="warning">{entries.length}</Badge>
-      </p>
+      </div>
       <div className="space-y-5">
         {entries.map((entry) => (
           <div key={entry.requestId}>
@@ -212,11 +227,18 @@ export function ApprovalsView() {
   const decide = useDecideApproval();
 
   // Pending: most urgent (soonest expiry) first. History: newest first.
+  // Both keys are ISO strings the API always sends, but a comparator that
+  // throws takes the whole route down with it (the router unmounts to a blank
+  // page), so one absent timestamp must degrade to "sorts last" instead.
   const pending = [...approvals.pending].sort((a, b) =>
-    a.block.expires_at.localeCompare(b.block.expires_at),
+    compareIsoDates(a.block.expires_at, b.block.expires_at, "ascending"),
   );
   const decided = [...approvals.history].sort((a, b) =>
-    (b.decidedAt ?? b.requestedAt).localeCompare(a.decidedAt ?? a.requestedAt),
+    compareIsoDates(
+      a.decidedAt ?? a.requestedAt,
+      b.decidedAt ?? b.requestedAt,
+      "descending",
+    ),
   );
 
   async function handleDecide(
@@ -243,8 +265,7 @@ export function ApprovalsView() {
         </h1>
         <p className="mt-1 max-w-2xl text-[12px] text-muted-foreground">
           Write actions gated by your NyxID policy wait here for your decision.
-          Deciding here, in Telegram, or on mobile converges to the same
-          result.
+          Deciding here, in Telegram, or on mobile converges to the same result.
         </p>
       </div>
 

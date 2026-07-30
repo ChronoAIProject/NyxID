@@ -21,6 +21,7 @@ import {
   useCreateConversation,
   useDecideApproval,
   useSendMessage,
+  useTurnEpisode,
   type SentMessage,
 } from "./use-assistant";
 
@@ -96,6 +97,89 @@ describe("assistant hooks", () => {
     if (completed?.type === "text") {
       expect(completed.text).toContain("API transport swap");
     }
+
+    unmount();
+    queryClient.clear();
+  });
+
+  it("opens an episode at send and closes it only when the stream ends", async () => {
+    // The episode is what the thread reads to tell "this stream is starting"
+    // from "the previous turn's terminal status is still cached", and to know
+    // whether THIS stream has printed anything. Neither is answerable from the
+    // turn status or the transcript.
+    const { queryClient, Wrapper } = createHarness();
+    const { result, unmount } = renderHook(
+      () => ({
+        episode: useTurnEpisode("conversation-stripe"),
+        send: useSendMessage("conversation-stripe"),
+      }),
+      { wrapper: Wrapper },
+    );
+
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(0);
+    });
+    expect(result.current.episode.data).toBeNull();
+
+    await act(async () => {
+      await result.current.send.mutateAsync("Check the audit trail.");
+      await vi.advanceTimersByTimeAsync(0);
+    });
+    expect(result.current.episode.data?.open).toBe(true);
+    expect(result.current.episode.data?.printed).toBe(false);
+
+    // First characters stream: the dots have to give way from here on.
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(500);
+    });
+    expect(result.current.episode.data?.printed).toBe(true);
+    expect(result.current.episode.data?.open).toBe(true);
+
+    // Past the end of the scripted turn with room to spare. Don't tighten this
+    // to land exactly on the terminal event: the script grows as mock blocks
+    // are added (the run and action-card blocks pushed turn.completed from
+    // 800ms to 1200ms), and the closing projection settles a tick after it.
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(1500);
+    });
+    expect(result.current.episode.data?.open).toBe(false);
+    expect(result.current.episode.data?.projecting).toBe(false);
+
+    unmount();
+    queryClient.clear();
+  });
+
+  it("restores the live episode when a concurrent send is rejected", async () => {
+    const { queryClient, Wrapper } = createHarness();
+    const { result, unmount } = renderHook(
+      () => ({
+        episode: useTurnEpisode("conversation-stripe"),
+        first: useSendMessage("conversation-stripe"),
+        second: useSendMessage("conversation-stripe"),
+      }),
+      { wrapper: Wrapper },
+    );
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(0);
+    });
+
+    await act(async () => {
+      await result.current.first.mutateAsync("First");
+      await vi.advanceTimersByTimeAsync(0);
+    });
+
+    // Rejected by the active-turn guard: the losing pump must restore the
+    // current stream's episode instead of clearing or replacing it.
+    await act(async () => {
+      await expect(
+        result.current.second.mutateAsync("Second"),
+      ).rejects.toBeInstanceOf(AssistantTurnActiveError);
+      await vi.advanceTimersByTimeAsync(0);
+    });
+    expect(result.current.episode.data).toMatchObject({
+      open: true,
+      printed: false,
+    });
 
     unmount();
     queryClient.clear();
@@ -206,7 +290,9 @@ describe("assistant hooks", () => {
     let sent: SentMessage | null = null;
     await act(async () => {
       const createPromise = result.current.create.mutateAsync();
-      const sendPromise = result.current.send.mutateAsync("Sent mid-provision.");
+      const sendPromise = result.current.send.mutateAsync(
+        "Sent mid-provision.",
+      );
       await vi.advanceTimersByTimeAsync(0);
       [created, sent] = await Promise.all([createPromise, sendPromise]);
     });
@@ -265,6 +351,74 @@ describe("assistant hooks", () => {
 
     sendSpy.mockRestore();
     toastSpy.mockRestore();
+    unmount();
+    queryClient.clear();
+  });
+
+  it("coalesces bursty stream frames before projecting them into React", async () => {
+    const { queryClient, Wrapper } = createHarness();
+    const historySpy = vi.spyOn(assistantTransport, "getHistory");
+    let emit: Parameters<typeof assistantTransport.sendMessage>[2] | undefined;
+    const sendSpy = vi
+      .spyOn(assistantTransport, "sendMessage")
+      .mockImplementation((_conversationId, _content, onEvent) => {
+        emit = onEvent;
+        for (let cursor = 1; cursor <= 250; cursor += 1) {
+          onEvent({
+            cursor,
+            event: "block.delta",
+            block_id: "streaming-text",
+            text: "x",
+          });
+        }
+        return { turnId: "turn-burst", cancel: () => {} };
+      });
+    const { result, unmount } = renderHook(
+      () => ({ send: useSendMessage("conversation-stripe") }),
+      { wrapper: Wrapper },
+    );
+
+    await act(async () => {
+      await result.current.send.mutateAsync("Bursty response.");
+    });
+    // Ignore the send mutation's intentional immediate projection. The 250
+    // stream callbacks above must produce only one additional projection.
+    historySpy.mockClear();
+
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(49);
+    });
+    expect(historySpy).not.toHaveBeenCalled();
+
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(1);
+    });
+    expect(historySpy).toHaveBeenCalledTimes(1);
+
+    act(() => {
+      emit?.({
+        cursor: 251,
+        event: "block.delta",
+        block_id: "streaming-text",
+        text: "final",
+      });
+      emit?.({
+        cursor: 252,
+        event: "turn.completed",
+        turn_id: "turn-burst",
+        status: "completed",
+        error: null,
+      });
+    });
+    // Terminal events bypass the interval so Stop/send state cannot linger.
+    expect(historySpy).toHaveBeenCalledTimes(2);
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(50);
+    });
+    expect(historySpy).toHaveBeenCalledTimes(2);
+
+    sendSpy.mockRestore();
+    historySpy.mockRestore();
     unmount();
     queryClient.clear();
   });

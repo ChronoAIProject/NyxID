@@ -228,6 +228,26 @@ export type TurnEvent =
       } | null;
     });
 
+/**
+ * Loading state for ONE stream episode, owned by the event pump that serves it.
+ *
+ * A send and an approval continuation each get their own pump, which makes the
+ * pump the only thing in the client that knows where one episode ends and the
+ * next begins. Neither the transcript nor the turn id can stand in for it: a
+ * continuation is appended to the previous turn's assistant group AND reuses its
+ * server turn id, so "has this episode said anything yet" is unanswerable from
+ * either. That question is what the streaming dots and the empty-turn error
+ * both turn on.
+ */
+export interface TurnEpisode {
+  /** Pump created, no terminal event delivered yet. */
+  readonly open: boolean;
+  /** This episode has emitted at least one block a reader can see. */
+  readonly printed: boolean;
+  /** A transcript projection for this episode is in flight. */
+  readonly projecting: boolean;
+}
+
 export interface ActiveTurn {
   readonly turnId: string | null;
   readonly status: TurnStatus;
