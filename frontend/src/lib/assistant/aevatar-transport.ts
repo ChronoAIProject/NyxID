@@ -1,5 +1,10 @@
 import { ApiError, apiClient } from "@/lib/api-client";
 import {
+  ACTION_REQUEST_CONFLICT_NOTE,
+  composeBlockedUnsupportedNote,
+  composeUnreportedCompletedNote,
+} from "@/lib/assistant/action-notes";
+import {
   AssistantProtocolError,
   AssistantTurnActiveError,
   AssistantTurnCancelledError,
@@ -618,18 +623,14 @@ function deriveTitle(messages: AssistantMessage[]): string | null {
   return firstText.text.trim().slice(0, 40);
 }
 
-const ACTION_REQUEST_CONFLICT_NOTE =
-  "This action request was reissued with conflicting details. NyxID kept the first request and disabled this card.";
-const ACTION_REQUEST_UNREPORTED_COMPLETED_NOTE =
-  "A service was connected in NyxID, but this action request could not notify the assistant. Review it in AI Services.";
-
 function stableJsonValue(value: unknown): unknown {
   if (Array.isArray(value)) {
     return value.map((entry) => stableJsonValue(entry));
   }
   if (value && typeof value === "object") {
     const entries = Object.entries(value as Record<string, unknown>).sort(
-      ([left], [right]) => left.localeCompare(right),
+      ([left], [right]) =>
+        left < right ? -1 : left > right ? 1 : 0,
     );
     return Object.fromEntries(
       entries.map(([key, entry]) => [key, stableJsonValue(entry)]),
@@ -714,21 +715,6 @@ function matchesCommittedActionRequest(
     sameActionCardParams(block.params, params) &&
     committedFingerprint === requestFingerprint
   );
-}
-
-function composedUnreportedCompletedNote(
-  card: ActionCardContentBlock,
-): string {
-  if (card.status !== "conflicted") {
-    return ACTION_REQUEST_UNREPORTED_COMPLETED_NOTE;
-  }
-  if (card.outcome_note.includes(ACTION_REQUEST_UNREPORTED_COMPLETED_NOTE)) {
-    return card.outcome_note;
-  }
-  const prefix = card.outcome_note.includes(ACTION_REQUEST_CONFLICT_NOTE)
-    ? ACTION_REQUEST_CONFLICT_NOTE
-    : card.outcome_note.trim() || ACTION_REQUEST_CONFLICT_NOTE;
-  return `${prefix} ${ACTION_REQUEST_UNREPORTED_COMPLETED_NOTE}`.trim();
 }
 
 /**
@@ -1572,7 +1558,10 @@ export class AevatarAssistantTransport implements AssistantTransport {
             conversationId,
             card.block_id,
             {
-              outcome_note: composedUnreportedCompletedNote(card),
+              outcome_note: composeUnreportedCompletedNote(
+                card.status,
+                card.outcome_note,
+              ),
             },
             onEvent,
           );
@@ -3267,13 +3256,17 @@ export class AevatarAssistantTransport implements AssistantTransport {
         requestFingerprint,
       );
       if (existing.status === "blocked") {
+        const nextStatus = resolved.supported ? "pending" : "unsupported";
         this.emit(conversationId, run, {
           cursor: this.nextCursor(run),
           event: "block.updated",
           block_id: knownBlockId,
           patch: {
-            status: resolved.supported ? "pending" : "unsupported",
-            outcome_note: "",
+            status: nextStatus,
+            outcome_note:
+              nextStatus === "unsupported"
+                ? composeBlockedUnsupportedNote(existing.outcome_note)
+                : "",
           },
         });
         return;

@@ -1,4 +1,7 @@
 import { AevatarAssistantTransport } from "@/lib/assistant/aevatar-transport";
+import {
+  composeUnreportedCompletedNote,
+} from "@/lib/assistant/action-notes";
 import { AssistantTurnActiveError } from "@/lib/assistant/errors";
 import {
   assistantMockStore,
@@ -12,7 +15,6 @@ import {
   type ActionReport,
 } from "@/schemas/assistant-actions";
 import type {
-  ActionCardContentBlock,
   AssistantTransport,
   Conversation,
   ConversationHistory,
@@ -24,25 +26,6 @@ import { isTurnActive } from "@/types/assistant";
 export { AssistantTurnActiveError };
 
 const EVENT_CADENCE_MS = 100;
-const ACTION_REQUEST_UNREPORTED_COMPLETED_NOTE =
-  "A service was connected in NyxID, but this action request could not notify the assistant. Review it in AI Services.";
-const ACTION_REQUEST_CONFLICT_NOTE =
-  "This action request was reissued with conflicting details. NyxID kept the first request and disabled this card.";
-
-function composedUnreportedCompletedNote(
-  block: ActionCardContentBlock,
-): string {
-  if (block.status !== "conflicted") {
-    return ACTION_REQUEST_UNREPORTED_COMPLETED_NOTE;
-  }
-  if (block.outcome_note.includes(ACTION_REQUEST_UNREPORTED_COMPLETED_NOTE)) {
-    return block.outcome_note;
-  }
-  const prefix = block.outcome_note.includes(ACTION_REQUEST_CONFLICT_NOTE)
-    ? ACTION_REQUEST_CONFLICT_NOTE
-    : block.outcome_note.trim() || ACTION_REQUEST_CONFLICT_NOTE;
-  return `${prefix} ${ACTION_REQUEST_UNREPORTED_COMPLETED_NOTE}`.trim();
-}
 
 interface RunningScript {
   readonly turnId: string;
@@ -208,7 +191,12 @@ class MockAssistantTransport implements AssistantTransport {
           this.emitLocalActionPatch(
             conversationId,
             card.block_id,
-            { outcome_note: composedUnreportedCompletedNote(card) },
+            {
+              outcome_note: composeUnreportedCompletedNote(
+                card.status,
+                card.outcome_note,
+              ),
+            },
             onEvent,
           );
         }

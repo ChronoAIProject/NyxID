@@ -245,6 +245,29 @@ function twoTurnStub(second: Record<string, unknown>): ReturnType<typeof vi.fn> 
   });
 }
 
+function perTurnStub(
+  frames: readonly Record<string, unknown>[],
+): ReturnType<typeof vi.fn> {
+  let textTurns = 0;
+  return stubFetch((url, init) => {
+    if (!url.endsWith("/stream") || init?.method !== "POST") return undefined;
+    const body = JSON.parse(String(init.body)) as { readonly type: string };
+    if (body.type !== "text") {
+      return sseResponse([
+        { type: "RUN_STARTED", turnId: "turn-continuation" },
+        { type: "RUN_FINISHED" },
+      ]);
+    }
+    const frame = frames[textTurns] ?? frames[frames.length - 1];
+    textTurns += 1;
+    return sseResponse([
+      { type: "RUN_STARTED", turnId: `${TURN_ID}-${textTurns}` },
+      frame,
+      { type: "RUN_FINISHED", runFinished: { status: "blocked" } },
+    ]);
+  });
+}
+
 beforeEach(() => {
   useAuthStore.getState().setUser({ id: USER_ID } as User);
 });
@@ -3758,6 +3781,7 @@ describe("chat action cards", () => {
 
     expect((await actionCardsOf(transport))[0]).toMatchObject({
       status: "unsupported",
+      outcome_note: "no id",
     });
   });
 
@@ -4754,61 +4778,197 @@ describe("chat action cards", () => {
     expect(cards[0]).toMatchObject({ status: "unsupported" });
   });
 
-  it("distinguishes recovered malformed re-emissions by their hashed original payloads", async () => {
-    let textTurns = 0;
-    stubFetch((url, init) => {
-      if (!url.endsWith("/stream") || init?.method !== "POST") return undefined;
-      const body = JSON.parse(String(init.body)) as { readonly type: string };
-      if (body.type !== "text") {
-        return sseResponse([
-          { type: "RUN_STARTED", turnId: "turn-unsupported-action" },
-          { type: "RUN_FINISHED" },
-        ]);
-      }
-      textTurns += 1;
-      const params =
-        textTurns < 3
-          ? {
-              customService: {
-                name: "Build API",
-                endpointUrl: "https://build.example.test/v1",
-                unexpected: "value-1",
-              },
-            }
-          : {
-              customService: {
-                name: "Build API",
-                endpointUrl: "https://build.example.test/v1",
-                unexpected: "value-3",
-              },
-            };
-      return sseResponse([
-        { type: "RUN_STARTED", turnId: `${TURN_ID}-${textTurns}` },
-        actionRequestFrame({ params }),
-        { type: "RUN_FINISHED", runFinished: { status: "blocked" } },
-      ]);
-    });
+  it("conflicts schema-valid requests that both normalize to unknown under one actionRequestId", async () => {
+    perTurnStub([
+      actionRequestFrame({
+        params: {
+          customService: {
+            name: "Build API",
+            endpointUrl: "http://build.example.test/v1",
+          },
+        },
+      }),
+      actionRequestFrame({
+        params: {
+          customService: {
+            name: "Build API",
+            endpointUrl: "https://build.example.test/v1?token=nope",
+          },
+        },
+      }),
+    ]);
     const transport = new AevatarAssistantTransport();
     await seedActorConversation(transport);
 
     await collectTurn(transport, "Unsupported request 1");
     expect((await actionCardsOf(transport))[0]).toMatchObject({
-        status: "unsupported",
-        params: { variant: "unknown" },
-      });
+      status: "unsupported",
+      params: { variant: "unknown" },
+    });
 
     await collectTurn(transport, "Unsupported request 2");
     expect((await actionCardsOf(transport))[0]).toMatchObject({
-        status: "unsupported",
-        params: { variant: "unknown" },
-      });
+      status: "conflicted",
+    });
+  });
 
-    await collectTurn(transport, "Unsupported request 3");
+  it("treats recovered payloads with stable key reordering as a no-op", async () => {
+    perTurnStub([
+      {
+        type: "CUSTOM",
+        custom: {
+          name: "nyxid.action.request",
+          payload: {
+            schemaVersion: 4,
+            actorId: CONVERSATION_ID,
+            originTurnId: TURN_ID,
+            actionRequestId: "act-action-1",
+            action: "service.connect",
+            params: {
+              customService: {
+                name: "Build API",
+                endpointUrl: "https://build.example.test/v1",
+                unexpected: { beta: 2, alpha: [1, "x", true, null] },
+              },
+            },
+          },
+        },
+      },
+      {
+        type: "CUSTOM",
+        custom: {
+          name: "nyxid.action.request",
+          payload: {
+            action: "service.connect",
+            actionRequestId: "act-action-1",
+            originTurnId: TURN_ID,
+            actorId: CONVERSATION_ID,
+            schemaVersion: 4,
+            params: {
+              customService: {
+                unexpected: { alpha: [1, "x", true, null], beta: 2 },
+                endpointUrl: "https://build.example.test/v1",
+                name: "Build API",
+              },
+            },
+          },
+        },
+      },
+    ]);
+    const transport = new AevatarAssistantTransport();
+    await seedActorConversation(transport);
+
+    await collectTurn(transport, "Recovered request 1");
+    expect((await actionCardsOf(transport))[0]?.status).toBe("unsupported");
+
+    await collectTurn(transport, "Recovered request 2");
+    expect((await actionCardsOf(transport))[0]?.status).toBe("unsupported");
+  });
+
+  it("treats requested scope array reordering as a different request", async () => {
+    perTurnStub([
+      actionRequestFrame({
+        params: {
+          catalogService: {
+            serviceSlug: "api-github",
+            requestedScopes: ["repo", "user"],
+          },
+        },
+      }),
+      actionRequestFrame({
+        params: {
+          catalogService: {
+            serviceSlug: "api-github",
+            requestedScopes: ["user", "repo"],
+          },
+        },
+      }),
+    ]);
+    const transport = new AevatarAssistantTransport();
+    await seedActorConversation(transport);
+
+    await collectTurn(transport, "Scope order 1");
+    expect((await actionCardsOf(transport))[0]?.status).toBe("pending");
+
+    await collectTurn(transport, "Scope order 2");
+    expect((await actionCardsOf(transport))[0]?.status).toBe("conflicted");
+  });
+
+  it("distinguishes recovered malformed re-emissions by their hashed original payloads", async () => {
+    perTurnStub([
+      actionRequestFrame({
+        params: {
+          customService: {
+            name: "Build API",
+            endpointUrl: "https://build.example.test/v1",
+            unexpected: "value-1",
+          },
+        },
+      }),
+      actionRequestFrame({
+        params: {
+          customService: {
+            name: "Build API",
+            endpointUrl: "https://build.example.test/v1",
+            unexpected: "value-1",
+          },
+        },
+      }),
+      actionRequestFrame({
+        params: {
+          customService: {
+            name: "Build API",
+            endpointUrl: "https://build.example.test/v1",
+            unexpected: "value-3",
+          },
+        },
+      }),
+    ]);
+    const transport = new AevatarAssistantTransport();
+    await seedActorConversation(transport);
+
+    await collectTurn(transport, "Recovered malformed request 1");
+    expect((await actionCardsOf(transport))[0]).toMatchObject({
+      status: "unsupported",
+      params: { variant: "unknown" },
+    });
+
+    await collectTurn(transport, "Recovered malformed request 2");
+    expect((await actionCardsOf(transport))[0]).toMatchObject({
+      status: "unsupported",
+      params: { variant: "unknown" },
+    });
+
+    await collectTurn(transport, "Recovered malformed request 3");
     expect((await actionCardsOf(transport))[0]).toMatchObject({
       status: "conflicted",
       outcome_note:
         "This action request was reissued with conflicting details. NyxID kept the first request and disabled this card.",
     });
+  });
+
+  it("keeps a blocked-to-unsupported downgrade one-way across later serviceable reissues", async () => {
+    perTurnStub([
+      actionRequestFrame(),
+      actionRequestFrame({ schemaVersion: 5 }),
+      actionRequestFrame(),
+    ]);
+    const transport = new AevatarAssistantTransport();
+    await seedActorConversation(transport);
+
+    await collectTurn(transport, "Downgrade step 1");
+    const [card] = await actionCardsOf(transport);
+    if (!card) throw new Error("no card");
+    transport.blockActionCard(CONVERSATION_ID, card.block_id, "no id");
+
+    await collectTurn(transport, "Downgrade step 2");
+    expect((await actionCardsOf(transport))[0]).toMatchObject({
+      status: "unsupported",
+      outcome_note: "no id",
+    });
+
+    await collectTurn(transport, "Downgrade step 3");
+    expect((await actionCardsOf(transport))[0]?.status).toBe("unsupported");
   });
 
   it("renders fail-closed unsupported cards for invalid or secret-shaped params", async () => {

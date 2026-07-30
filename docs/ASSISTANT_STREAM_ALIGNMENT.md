@@ -144,6 +144,8 @@ patched to say NyxID connected a service but could not notify the assistant and
 to direct the user to AI Services.
 Until a registered browser action explicitly declares resource-free completion
 legal, the client default-denies `completed` without a resource for every verb.
+Until a registered browser action explicitly declares resource-free completion
+legal, the client default-denies `completed` without a resource for every verb.
 
 A continuation Aevatar refuses to admit (`NYXID_ACTION_CONTINUATION_ACTIVE_TURN`
 / `_CONFLICT` / `_INVALID`) is **not** signalled as a run-error code on the
