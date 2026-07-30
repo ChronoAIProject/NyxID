@@ -69,8 +69,11 @@ export async function sendMessage(page: Page, text: string): Promise<void> {
 export interface TurnContinuitySnapshot {
   readonly sawMessage: boolean;
   readonly sawLoading: boolean;
+  readonly sawReply: boolean;
   readonly bouncedToEmptyState: boolean;
   readonly loadingGapBeforeReply: boolean;
+  readonly loadingAfterReply: boolean;
+  readonly emptyAfterReply: boolean;
 }
 
 interface TurnContinuityProbe extends TurnContinuitySnapshot {
@@ -96,8 +99,11 @@ export async function observeTurnContinuity(
       const probe = {
         sawMessage: false,
         sawLoading: false,
+        sawReply: false,
         bouncedToEmptyState: false,
         loadingGapBeforeReply: false,
+        loadingAfterReply: false,
+        emptyAfterReply: false,
         disconnect: () => observer.disconnect(),
       };
       const isVisible = (element: Element): boolean => {
@@ -109,25 +115,36 @@ export async function observeTurnContinuity(
         );
       };
       const inspect = () => {
-        const visibleText = document.body.innerText;
+        const visibleText =
+          document.querySelector("main")?.innerText ?? document.body.innerText;
         if (visibleText.includes(message)) probe.sawMessage = true;
-        if (
-          probe.sawMessage &&
-          visibleText.includes("Start a new conversation")
-        ) {
+        const emptyStateVisible = visibleText.includes(
+          "Start a new conversation",
+        );
+        if (probe.sawMessage && emptyStateVisible) {
           probe.bouncedToEmptyState = true;
         }
 
-        const replyStarted = visibleText.includes(replyStart);
+        const replyVisible = visibleText.includes(replyStart);
+        if (replyVisible) probe.sawReply = true;
+        const conversationLoading = visibleText.includes(
+          "Loading conversation...",
+        );
+        if (probe.sawReply && conversationLoading) {
+          probe.loadingAfterReply = true;
+        }
+        if (probe.sawReply && emptyStateVisible) {
+          probe.emptyAfterReply = true;
+        }
         const loading =
-          visibleText.includes("Loading conversation...") ||
+          conversationLoading ||
           [
             ...document.querySelectorAll(
               '[data-streaming-dots], [data-assistant-halo], button[aria-label="Stop assistant turn"]',
             ),
           ].some(isVisible);
         if (loading) probe.sawLoading = true;
-        if (probe.sawMessage && probe.sawLoading && !replyStarted && !loading) {
+        if (probe.sawMessage && probe.sawLoading && !replyVisible && !loading) {
           probe.loadingGapBeforeReply = true;
         }
       };
@@ -156,8 +173,11 @@ export async function readTurnContinuity(
     return {
       sawMessage: probe?.sawMessage ?? false,
       sawLoading: probe?.sawLoading ?? false,
+      sawReply: probe?.sawReply ?? false,
       bouncedToEmptyState: probe?.bouncedToEmptyState ?? false,
       loadingGapBeforeReply: probe?.loadingGapBeforeReply ?? false,
+      loadingAfterReply: probe?.loadingAfterReply ?? false,
+      emptyAfterReply: probe?.emptyAfterReply ?? false,
     };
   });
 }

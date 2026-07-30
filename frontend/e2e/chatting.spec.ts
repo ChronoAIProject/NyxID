@@ -112,8 +112,8 @@ test("Stop ends the turn quietly: no red error for a reader-cancelled turn", asy
 
   // The chat is still alive: a follow-up send works.
   await sendMessage(page, "Short version instead, please.");
-  await expect(page.getByText("Short version instead, please.")).toBeVisible({
-    timeout: 2_000,
-  });
+  await expect(
+    page.getByText("Short version instead, please."),
+  ).toBeVisible({ timeout: 2_000 });
   await expect(composerInput(page)).toBeEnabled({ timeout: 10_000 });
 });
