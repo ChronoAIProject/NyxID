@@ -1,4 +1,11 @@
-import { Fragment, useCallback, useEffect, useRef } from "react";
+import {
+  Fragment,
+  useCallback,
+  useEffect,
+  useLayoutEffect,
+  useRef,
+  useState,
+} from "react";
 import { AlertCircle } from "lucide-react";
 import { NyxidIcon } from "@/components/brand/nyxid-icon";
 import { ActionCard } from "@/components/assistant/blocks/action-card";
@@ -34,12 +41,9 @@ function blockId(block: unknown): string {
 }
 
 /**
- * A text block with nothing in it.
- *
- * The transport always leads an assistant message with a text block, even when
- * the message opens with a connect card, so the live and reloaded block lists
- * stay identical (that convergence is what lets cards survive a reload). Such a
- * block has no content to show and must not occupy a row.
+ * The transport can lead an assistant message with an empty text block before
+ * a card. It keeps live and reloaded block lists identical, but has no row to
+ * render in the transcript.
  */
 function isEmptyTextBlock(block: unknown): boolean {
   return (
@@ -103,13 +107,8 @@ function renderBlock(
 }
 
 /**
- * Assistant identity mark (no bubble — the answer reads as the assistant
- * "speaking" directly). The brand mark stays so the reader can tell turns
- * apart; the user side drops its icon for a cleaner asymmetric layout.
- *
- * Placement is container-query driven (see `ASSISTANT_ROW`): while the chat
- * has room it sits in a left gutter beside the answer; once the chat window
- * narrows past the thread's natural width it stacks on top instead.
+ * The brand mark occupies a fixed left gutter. The transcript, cards, user
+ * bubbles, and composer all use the adjacent content column at every width.
  */
 function AssistantIdentity({
   time,
@@ -124,7 +123,7 @@ function AssistantIdentity({
   const showHalo = halo.present && (loading || allowHaloExit);
 
   return (
-    <div className="flex shrink-0 items-center gap-2 @min-[680px]:flex-col @min-[680px]:items-start @min-[680px]:gap-1">
+    <div className="flex shrink-0 flex-col items-start gap-1">
       <span className="relative flex h-[18px] w-[18px] shrink-0 items-center justify-center overflow-visible">
         {showHalo ? (
           <span
@@ -149,11 +148,8 @@ function AssistantIdentity({
   );
 }
 
-// Icon-left when the chat window is at least as wide as the thread; icon-on-top
-// once it is squeezed narrower. Queried against the thread container, not the
-// viewport, since the assistant surface sits beside a sidebar.
 const ASSISTANT_ROW =
-  "group flex flex-col gap-1.5 @min-[680px]:flex-row @min-[680px]:items-start @min-[680px]:gap-3";
+  "group grid grid-cols-[18px_minmax(0,1fr)] items-start gap-x-3";
 
 type MessageGroup = {
   readonly role: AssistantMessage["role"];
@@ -162,9 +158,7 @@ type MessageGroup = {
 
 /**
  * Collapse consecutive same-role messages into one group. Aevatar streams a
- * single turn as several messages (text, then a tool run, then more text);
- * they belong to one "voice" and must render under a single identity mark, not
- * repeat the icon per message.
+ * single turn as several messages, and they belong under one identity mark.
  */
 function groupMessages(messages: readonly AssistantMessage[]): MessageGroup[] {
   const groups: {
@@ -179,8 +173,6 @@ function groupMessages(messages: readonly AssistantMessage[]): MessageGroup[] {
   return groups;
 }
 
-// Standalone caret for the brief window after a turn starts but before its
-// first block arrives (the inline caret in TextBlock covers streaming text).
 function StreamingCaret() {
   return (
     <span
@@ -204,9 +196,7 @@ function ThinkingRow({ loading }: { readonly loading: boolean }) {
   );
 }
 
-// Slack, in px, within which the thread still counts as "following" the tail.
-// Below it the reader has deliberately scrolled up and must not be yanked back
-// while the assistant streams.
+// Slack within which the thread still counts as following the tail.
 const FOLLOW_THRESHOLD = 48;
 
 export function ChatThread({
@@ -219,23 +209,9 @@ export function ChatThread({
   onResolveAction = async () => undefined,
 }: {
   readonly messages: readonly AssistantMessage[];
-  /**
-   * Turn is running but no assistant content has arrived yet. Aevatar can
-   * take seconds before its first frame; without this the thread reads as
-   * dead between send and first answer.
-   */
   readonly thinking?: boolean;
-  /**
-   * Turn is running and the assistant is the current speaker — drives the
-   * blinking caret at the end of the latest assistant group so streaming
-   * reads as live typing rather than a frozen partial answer.
-   */
   readonly streaming?: boolean;
-  /**
-   * Height in px of the composer floating over the thread. Turns are allowed to
-   * scroll behind it (ChatGPT-style), so the thread reserves this much room at
-   * the tail and dissolves into it over the same distance.
-   */
+  /** Height of the composer floating over the transcript. */
   readonly bottomInset?: number;
   readonly onDecideApproval: (
     blockId: string,
@@ -244,41 +220,81 @@ export function ChatThread({
   readonly onActionProgress?: (blockId: string, inProgress: boolean) => void;
   readonly onResolveAction?: (report: ActionReport) => Promise<void>;
 }) {
+  const rootRef = useRef<HTMLDivElement>(null);
   const scrollRef = useRef<HTMLDivElement>(null);
+  const [scrolledFromTop, setScrolledFromTop] = useState(false);
   const thinkingPresence = useFadingPresence(thinking, 500);
   const following = useRef(true);
   const lastSentId = useRef<string | undefined>(undefined);
+  const hasMessages = messages.length > 0;
 
-  const handleScroll = useCallback(() => {
-    const element = scrollRef.current;
-    if (!element) return;
+  const syncScrollPosition = useCallback((element: HTMLDivElement) => {
     following.current =
       element.scrollHeight - element.scrollTop - element.clientHeight <
       FOLLOW_THRESHOLD;
+    setScrolledFromTop(element.scrollTop > 1);
   }, []);
 
   useEffect(() => {
     const element = scrollRef.current;
     if (!element) return;
-    // Sending always pulls the view back to the tail; only assistant streaming
-    // respects a deliberate scroll-up. Keyed on the message id so the poll loop
-    // re-rendering the same turn doesn't keep yanking a reader back down.
+    // Sending always pulls the view back to the tail; assistant streaming still
+    // respects a reader who deliberately scrolled upward.
     const latest = messages.at(-1);
     if (latest?.role === "user" && latest.id !== lastSentId.current) {
       lastSentId.current = latest.id;
       following.current = true;
     }
     if (following.current) element.scrollTop = element.scrollHeight;
+    setScrolledFromTop(element.scrollTop > 1);
   }, [messages, thinking, streaming, bottomInset]);
+
+  useLayoutEffect(() => {
+    const root = rootRef.current;
+    const scroll = scrollRef.current;
+    const chatSurface = root?.parentElement;
+    if (!scroll || !chatSurface) return;
+
+    const previousWidth = chatSurface.style.getPropertyValue(
+      "--assistant-scrollbar-width",
+    );
+    const restoreScrollbarWidth = () => {
+      if (previousWidth) {
+        chatSurface.style.setProperty(
+          "--assistant-scrollbar-width",
+          previousWidth,
+        );
+      } else {
+        chatSurface.style.removeProperty("--assistant-scrollbar-width");
+      }
+    };
+    const syncScrollbarWidth = () => {
+      const width = Math.max(0, scroll.offsetWidth - scroll.clientWidth);
+      chatSurface.style.setProperty(
+        "--assistant-scrollbar-width",
+        `${String(width)}px`,
+      );
+    };
+
+    syncScrollbarWidth();
+    if (typeof ResizeObserver === "undefined") {
+      return restoreScrollbarWidth;
+    }
+
+    const observer = new ResizeObserver(syncScrollbarWidth);
+    observer.observe(scroll);
+    return () => {
+      observer.disconnect();
+      restoreScrollbarWidth();
+    };
+  }, [hasMessages]);
 
   const groups = groupMessages(messages);
 
-  // Opaque down to the top of the composer, then dissolved to nothing by the
-  // bottom edge — content passing behind the composer fades out instead of
-  // being clipped by a hard line.
+  // Content passes behind the floating composer and dissolves into its top.
   const fadeMask = `linear-gradient(to bottom, #000 0, #000 calc(100% - ${String(bottomInset)}px), transparent 100%)`;
 
-  if (messages.length === 0) {
+  if (!hasMessages) {
     return (
       <div
         className="flex flex-1 items-center justify-center px-6 text-center"
@@ -300,15 +316,15 @@ export function ChatThread({
   }
 
   return (
-    <div className="relative flex min-h-0 flex-1 flex-col">
+    <div ref={rootRef} className="relative flex min-h-0 flex-1 flex-col">
       <div
         ref={scrollRef}
-        onScroll={handleScroll}
-        className="@container min-h-0 flex-1 overflow-y-auto overscroll-contain"
+        onScroll={(event) => syncScrollPosition(event.currentTarget)}
+        className="assistant-scrollbar min-h-0 flex-1 overflow-y-auto overscroll-contain"
         style={{ maskImage: fadeMask, WebkitMaskImage: fadeMask }}
       >
         <div
-          className="mx-auto flex w-full max-w-[680px] flex-col gap-6 px-4 py-6 sm:px-6 sm:py-8"
+          className="mx-auto flex w-full max-w-[758px] flex-col gap-6 px-4 py-6 sm:px-6 sm:py-8"
           style={{ paddingBottom: `calc(${String(bottomInset)}px + 1.5rem)` }}
         >
           {groups.map((group, groupIndex) => {
@@ -320,7 +336,7 @@ export function ChatThread({
               return (
                 <article
                   key={first?.id}
-                  className="group flex flex-col items-end gap-1"
+                  className="group ml-[30px] flex flex-col items-end gap-1"
                 >
                   <span className="sr-only">You</span>
                   {group.messages.map((message) => (
@@ -355,8 +371,6 @@ export function ChatThread({
               );
             }
 
-            // One identity for the whole group; every message's blocks (text,
-            // tool runs, cards) stack in the shared content column below it.
             const streamingGroup = isLastGroup && streaming;
             const lastMessage = group.messages.at(-1);
             const awaitingFirstBlock =
@@ -381,14 +395,14 @@ export function ChatThread({
                           const isLastBlock =
                             isLastMessage &&
                             index === message.blocks.length - 1;
-                          // A message that opens with a connect card still
-                          // carries an empty leading text block, so the live
-                          // and reloaded block lists stay identical. Rendering
-                          // its wrapper would add a `space-y-3` gap above the
-                          // card for no content.
                           if (isEmptyTextBlock(block)) return null;
                           return (
-                            <div key={`${blockId(block)}-${String(index)}`}>
+                            <div
+                              key={`${blockId(block)}-${String(index)}`}
+                              className={
+                                isTextBlock(block) ? "pl-[7px]" : undefined
+                              }
+                            >
                               {renderBlock(
                                 block,
                                 onDecideApproval,
@@ -404,7 +418,11 @@ export function ChatThread({
                       </Fragment>
                     );
                   })}
-                  {awaitingFirstBlock ? <StreamingCaret /> : null}
+                  {awaitingFirstBlock ? (
+                    <span className="ml-[7px]">
+                      <StreamingCaret />
+                    </span>
+                  ) : null}
                 </div>
               </article>
             );
@@ -414,6 +432,12 @@ export function ChatThread({
           ) : null}
         </div>
       </div>
+      <div
+        aria-hidden
+        className={`pointer-events-none absolute inset-x-0 top-0 h-7 bg-gradient-to-b from-background via-background/70 to-transparent transition-opacity duration-150 motion-reduce:transition-none ${
+          scrolledFromTop ? "opacity-100" : "opacity-0"
+        }`}
+      />
     </div>
   );
 }
