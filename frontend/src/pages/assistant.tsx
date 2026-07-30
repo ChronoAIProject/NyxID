@@ -23,7 +23,37 @@ import { parseAssistantSearch } from "@/lib/assistant/search";
 import { useAssistantContextStore } from "@/stores/assistant-context-store";
 import { useAssistantDraftStore } from "@/stores/assistant-draft-store";
 import { useAuthStore } from "@/stores/auth-store";
-import { isTurnActive } from "@/types/assistant";
+import { isTurnActive, type AssistantMessage } from "@/types/assistant";
+
+/** Text of a user message's first text block, for the optimistic-echo check. */
+function userMessageText(
+  message: AssistantMessage | undefined,
+): string | undefined {
+  if (message?.role !== "user") return undefined;
+  for (const block of message.blocks as unknown[]) {
+    if (
+      typeof block === "object" &&
+      block !== null &&
+      "type" in block &&
+      block.type === "text" &&
+      "text" in block &&
+      typeof block.text === "string"
+    ) {
+      return block.text;
+    }
+  }
+  return undefined;
+}
+
+function optimisticUserMessage(text: string): AssistantMessage {
+  return {
+    id: "optimistic-user-message",
+    role: "user",
+    schema_version: 1,
+    blocks: [{ type: "text", block_id: "optimistic-user-block", text }],
+    created_at: new Date().toISOString(),
+  };
+}
 
 export function AssistantPage({
   view = "chat",
@@ -246,6 +276,34 @@ export function AssistantPage({
         : (history.data?.conversation.title ?? "New chat");
   const turnStatus = turn.data?.status;
   const active = isTurnActive(turnStatus);
+
+  /**
+   * Paint the turn from the in-flight send until the transcript catches up.
+   *
+   * "New chat" allocates nothing, so the first send has to create the
+   * conversation before it has an id — and until that round-trip returns there
+   * is no id, no enabled history query, and nothing on screen. The composer has
+   * already cleared the textarea by then (it clears, THEN awaits), so the reader
+   * watches their message vanish into the empty state for the whole create.
+   *
+   * Also covers the shorter gap on an existing conversation, between the send
+   * starting and the projection landing.
+   */
+  const pendingContent = sendMessage.isPending
+    ? sendMessage.variables
+    : undefined;
+  const messages = useMemo(() => {
+    const transcript = history.data?.messages ?? [];
+    if (pendingContent === undefined) return transcript;
+    // Drop the echo once the transport's own copy of the same message projects
+    // in, or the reader sees their message twice mid-send.
+    const projected =
+      userMessageText(transcript.at(-1))?.trim() === pendingContent.trim();
+    return projected
+      ? transcript
+      : [...transcript, optimisticUserMessage(pendingContent)];
+  }, [history.data?.messages, pendingContent]);
+  const awaitingFirstTurn = active || sendMessage.isPending;
   // Cancelled is deliberately excluded: the reader pressed Stop, and calling
   // their own decision an error would be a lie. `blocked` is not terminal.
   const turnEnded = turnStatus === "completed" || turnStatus === "failed";
@@ -295,20 +353,18 @@ export function AssistantPage({
             messages are unaffected.
           </div>
         ) : null}
-        {history.isLoading ? (
+        {history.isLoading && messages.length === 0 ? (
           <div className="flex flex-1 items-center justify-center text-[12px] text-text-tertiary">
             Loading conversation...
           </div>
         ) : (
           <ChatThread
-            messages={history.data?.messages ?? []}
+            messages={messages}
             bottomInset={composerHeight}
             thinking={
-              active && history.data?.messages.at(-1)?.role !== "assistant"
+              awaitingFirstTurn && messages.at(-1)?.role !== "assistant"
             }
-            streaming={
-              active && history.data?.messages.at(-1)?.role === "assistant"
-            }
+            streaming={active && messages.at(-1)?.role === "assistant"}
             turnEnded={turnEnded}
             onDecideApproval={(blockId, approved) =>
               decideApproval.mutateAsync({ blockId, approved })

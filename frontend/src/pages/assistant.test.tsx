@@ -26,6 +26,9 @@ const {
     conversations: [] as Conversation[] | undefined,
     conversationsResolved: true,
     historyError: false,
+    // Mirrors what TanStack exposes for an in-flight mutation.
+    sendPending: undefined as string | undefined,
+    historyMessages: [] as unknown[],
   },
 }));
 
@@ -86,7 +89,7 @@ vi.mock("@/hooks/use-assistant", () => ({
             created_at: "2026-07-29T00:00:00.000Z",
             last_message_at: "2026-07-29T00:00:00.000Z",
           },
-          messages: [],
+          messages: state.historyMessages,
           has_more: false,
         }
       : undefined,
@@ -101,7 +104,8 @@ vi.mock("@/hooks/use-assistant", () => ({
   }),
   useSendMessage: () => ({
     mutateAsync: mockSendMutateAsync,
-    isPending: false,
+    isPending: state.sendPending !== undefined,
+    variables: state.sendPending,
   }),
   useCancelTurn: () => ({ mutateAsync: vi.fn() }),
   useDecideApproval: () => ({ mutateAsync: vi.fn() }),
@@ -166,6 +170,8 @@ beforeEach(() => {
   state.conversations = [existingConversation];
   state.conversationsResolved = true;
   state.historyError = false;
+  state.sendPending = undefined;
+  state.historyMessages = [];
   useAuthStore.setState({
     user,
     isAuthenticated: true,
@@ -219,6 +225,47 @@ describe("AssistantPage new chat", () => {
     expect(mockNavigate).toHaveBeenCalledWith(
       expect.objectContaining({ search: { c: "conv-new" } }),
     );
+  });
+
+  it("shows the sent message and a thinking state while the draft allocates", () => {
+    // The conversation does not exist yet, so there is no id, no history query
+    // and nothing to render — and the composer has already cleared the text.
+    // Without the optimistic echo the reader watches their message vanish into
+    // the empty state for the length of the create round-trip.
+    state.search = { draft: true };
+    state.sendPending = "check my issues";
+    renderPage();
+
+    expect(screen.getByText("check my issues")).toBeInTheDocument();
+    expect(
+      screen.getByRole("status", { name: "Assistant is thinking" }),
+    ).toBeInTheDocument();
+    expect(
+      screen.queryByText("Start a new conversation"),
+    ).not.toBeInTheDocument();
+  });
+
+  it("does not echo the sent message twice once the transport projects it", () => {
+    state.search = { c: existingConversation.id };
+    state.sendPending = "already projected";
+    state.historyMessages = [
+      {
+        id: "user-projected",
+        role: "user",
+        schema_version: 1,
+        blocks: [
+          {
+            type: "text",
+            block_id: "b1",
+            text: "already projected",
+          },
+        ],
+        created_at: "2026-07-29T00:00:00.000Z",
+      },
+    ];
+    renderPage();
+
+    expect(screen.getAllByText("already projected")).toHaveLength(1);
   });
 
   it("renders the empty draft thread rather than a binding or newest chat", () => {
