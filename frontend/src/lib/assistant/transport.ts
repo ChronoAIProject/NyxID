@@ -41,6 +41,8 @@ export interface AssistantMockFaults {
   readonly historyErrorStatus?: number;
   /** Accept sends (user message lands) but never emit a single turn event. */
   readonly sendSilent?: boolean;
+  /** Rename a locally pending draft to its canonical id on the first send. */
+  readonly aliasOnFirstSend?: boolean;
 }
 
 function mockFaults(): AssistantMockFaults {
@@ -75,7 +77,9 @@ class MockAssistantTransport implements AssistantTransport {
   }
 
   async createConversation(): Promise<Conversation> {
-    return assistantMockStore.createConversation();
+    return assistantMockStore.createConversation({
+      pendingAlias: mockFaults().aliasOnFirstSend,
+    });
   }
 
   async getHistory(conversationId: string): Promise<ConversationHistory> {
@@ -114,18 +118,38 @@ class MockAssistantTransport implements AssistantTransport {
     }
 
     assistantMockStore.appendUserMessage(conversationId, content);
+    if (
+      mockFaults().aliasOnFirstSend &&
+      conversationId.startsWith("local-pending-")
+    ) {
+      assistantMockStore.aliasConversation(conversationId);
+    }
     const turnId = assistantMockStore.nextId("turn");
     const messageId = assistantMockStore.nextId("assistant-message");
     const blockId = assistantMockStore.nextId("assistant-block");
     const events = createScriptedTurn(turnId, messageId, blockId);
-    return this.startScript(conversationId, turnId, messageId, events, onEvent, {
-      silent: mockFaults().sendSilent,
-    });
+    return this.startScript(
+      conversationId,
+      turnId,
+      messageId,
+      events,
+      onEvent,
+      {
+        silent: mockFaults().sendSilent,
+      },
+    );
   }
 
   cancelActiveTurn(conversationId: string): void {
-    const script = this.running.get(conversationId);
-    if (script) this.cancelScript(conversationId, script);
+    for (const address of assistantMockStore.conversationAddresses(
+      conversationId,
+    )) {
+      const script = this.running.get(address);
+      if (script) {
+        this.cancelScript(address, script);
+        return;
+      }
+    }
   }
 
   async decideApproval(

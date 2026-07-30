@@ -5091,6 +5091,111 @@ describe("typed new chats and legacy workflow compatibility", () => {
     });
   }
 
+  it("cancels a typed first turn before its placeholder is canonicalized", async () => {
+    const mock = stubFetch((url, init) =>
+      url === TYPED_URL && init?.method === "POST"
+        ? sseResponse([
+            {
+              type: "RUN_STARTED",
+              actorId: TYPED_CONVERSATION,
+              turnId: TYPED_TURN,
+            },
+          ])
+        : undefined,
+    );
+    const transport = new AevatarAssistantTransport();
+    const conversation = await transport.createConversation();
+    const events: TurnEvent[] = [];
+
+    transport.sendMessage(conversation.id, "cancel before start", (event) => {
+      events.push(event);
+    });
+    transport.cancelActiveTurn(conversation.id);
+    await vi.waitFor(() => {
+      expect(events.at(-1)).toMatchObject({
+        event: "turn.completed",
+        status: "cancelled",
+      });
+    });
+
+    expect(mock.mock.calls.some(([input]) => String(input) === TYPED_URL)).toBe(
+      false,
+    );
+    expect((await transport.getHistory(conversation.id)).conversation.id).toBe(
+      conversation.id,
+    );
+  });
+
+  it("resolves a canonical cancel address back to its placeholder-keyed run", async () => {
+    const encoder = new TextEncoder();
+    let started = false;
+    let releasePendingPull: (() => void) | undefined;
+    const mock = stubFetch((url, init) => {
+      if (url === TYPED_URL && init?.method === "POST") {
+        return new Response(
+          new ReadableStream<Uint8Array>({
+            pull(controller) {
+              if (!started) {
+                started = true;
+                controller.enqueue(
+                  encoder.encode(
+                    `data: ${JSON.stringify({
+                      type: "RUN_STARTED",
+                      actorId: TYPED_CONVERSATION,
+                      turnId: TYPED_TURN,
+                    })}\n\n`,
+                  ),
+                );
+                return;
+              }
+              return new Promise<void>((resolve) => {
+                releasePendingPull = resolve;
+              });
+            },
+            cancel: () => releasePendingPull?.(),
+          }),
+          { status: 200, headers: { "Content-Type": "text/event-stream" } },
+        );
+      }
+      if (
+        url === `${ASSISTANT_BASE}/conversations/${TYPED_CONVERSATION}/stop` &&
+        init?.method === "POST"
+      ) {
+        return jsonResponse({}, 202);
+      }
+      return undefined;
+    });
+    const transport = new AevatarAssistantTransport();
+    const conversation = await transport.createConversation();
+    const events: TurnEvent[] = [];
+
+    await new Promise<void>((resolve) => {
+      transport.sendMessage(
+        conversation.id,
+        "cancel by canonical id",
+        (event) => {
+          events.push(event);
+          if (event.event === "turn.status" && event.status === "running") {
+            transport.cancelActiveTurn(TYPED_CONVERSATION);
+          }
+          if (event.event === "turn.completed") resolve();
+        },
+      );
+    });
+
+    expect(events.at(-1)).toMatchObject({
+      event: "turn.completed",
+      status: "cancelled",
+    });
+    expect((await transport.getHistory(conversation.id)).conversation.id).toBe(
+      TYPED_CONVERSATION,
+    );
+    expect(mock).toHaveBeenCalledWith(
+      `${ASSISTANT_BASE}/conversations/${TYPED_CONVERSATION}/stop`,
+      expect.objectContaining({ method: "POST" }),
+    );
+  });
+
   it("creates a typed actor on the first turn and preserves its blocked action contract", async () => {
     const actionBodies: Record<string, unknown>[] = [];
     const mock = stubFetch((url, init) => {
@@ -5190,6 +5295,13 @@ describe("typed new chats and legacy workflow compatibility", () => {
     const history = await transport.getHistory(conversation.id);
     expect(history.conversation.id).toBe(TYPED_CONVERSATION);
     expect(history.messages.length).toBeGreaterThanOrEqual(2);
+    (transport as unknown as { listFetchedAt: number }).listFetchedAt =
+      Date.now();
+    const listed = await transport.listConversations();
+    expect(
+      listed.filter((item) => item.id === TYPED_CONVERSATION),
+    ).toHaveLength(1);
+    expect(listed.some((item) => item.id === conversation.id)).toBe(false);
 
     await new Promise<void>((resolve) => {
       const handle = transport.continueActions(
@@ -5250,7 +5362,7 @@ describe("typed new chats and legacy workflow compatibility", () => {
     const conversation = await transport.createConversation();
 
     await collectWorkflowTurn(transport, conversation.id, "first");
-    await collectWorkflowTurn(transport, conversation.id, "second");
+    await collectWorkflowTurn(transport, TYPED_CONVERSATION, "second");
 
     expect(bodies.map((entry) => entry.url)).toEqual([
       TYPED_URL,

@@ -411,6 +411,7 @@ function buildInitialConversations(now: number): StoredConversation[] {
 
 export class MockAssistantStore {
   private readonly conversations = new Map<string, StoredConversation>();
+  private readonly conversationAliases = new Map<string, string>();
   private now: () => number = Date.now;
   private localCounter = 0;
   private idCounter = 0;
@@ -424,6 +425,7 @@ export class MockAssistantStore {
     this.localCounter = 0;
     this.idCounter = 0;
     this.conversations.clear();
+    this.conversationAliases.clear();
     for (const item of buildInitialConversations(this.now())) {
       this.conversations.set(item.conversation.id, item);
     }
@@ -435,14 +437,24 @@ export class MockAssistantStore {
   }
 
   listConversations(): Conversation[] {
-    return [...this.conversations.values()]
-      .map((item) => clone(item.conversation))
-      .sort((a, b) => b.last_message_at.localeCompare(a.last_message_at));
+    const byId = new Map<string, Conversation>();
+    for (const [key, item] of this.conversations) {
+      if (!byId.has(item.conversation.id) || key === item.conversation.id) {
+        byId.set(item.conversation.id, clone(item.conversation));
+      }
+    }
+    return [...byId.values()].sort((a, b) =>
+      b.last_message_at.localeCompare(a.last_message_at),
+    );
   }
 
-  createConversation(): Conversation {
+  createConversation(
+    options: { readonly pendingAlias?: boolean } = {},
+  ): Conversation {
     this.localCounter += 1;
-    const id = `local-${String(this.localCounter)}`;
+    const id = options.pendingAlias
+      ? `local-pending-${String(this.localCounter)}`
+      : `local-${String(this.localCounter)}`;
     const createdAt = timestamp(this.now());
     const conversation: Conversation = {
       id,
@@ -457,6 +469,28 @@ export class MockAssistantStore {
     return clone(conversation);
   }
 
+  aliasConversation(conversationId: string): string {
+    const existing = this.conversationAliases.get(conversationId);
+    if (existing) return existing;
+
+    const stored = this.requireConversation(conversationId);
+    const canonicalId = `nyxid-chat-mock-${String(this.localCounter)}`;
+    stored.conversation = { ...stored.conversation, id: canonicalId };
+    this.conversations.set(canonicalId, stored);
+    this.conversationAliases.set(conversationId, canonicalId);
+    return canonicalId;
+  }
+
+  conversationAddresses(conversationId: string): readonly string[] {
+    const canonicalId =
+      this.conversationAliases.get(conversationId) ?? conversationId;
+    const addresses = new Set([conversationId, canonicalId]);
+    for (const [placeholderId, targetId] of this.conversationAliases) {
+      if (targetId === canonicalId) addresses.add(placeholderId);
+    }
+    return [...addresses];
+  }
+
   getHistory(conversationId: string): ConversationHistory {
     const stored = this.requireConversation(conversationId);
     return clone({
@@ -469,7 +503,11 @@ export class MockAssistantStore {
   // Idempotent, like the real composite delete: repeating a delete (or
   // deleting an id the store never had) is a no-op, not an error.
   deleteConversation(conversationId: string): void {
-    this.conversations.delete(conversationId);
+    const addresses = this.conversationAddresses(conversationId);
+    for (const address of addresses) {
+      this.conversations.delete(address);
+      this.conversationAliases.delete(address);
+    }
   }
 
   getTurnState(conversationId: string): TurnReducerState {
@@ -658,7 +696,11 @@ export class MockAssistantStore {
   }
 
   private requireConversation(conversationId: string): StoredConversation {
-    const stored = this.conversations.get(conversationId);
+    const canonicalId =
+      this.conversationAliases.get(conversationId) ?? conversationId;
+    const stored =
+      this.conversations.get(canonicalId) ??
+      this.conversations.get(conversationId);
     if (!stored) throw new Error("Conversation was not found.");
     return stored;
   }

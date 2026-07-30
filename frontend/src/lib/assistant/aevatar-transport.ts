@@ -1208,11 +1208,14 @@ export class AevatarAssistantTransport implements AssistantTransport {
    */
   cancelActiveTurn(conversationId: string): void {
     // A create-and-first-turn run is keyed under the placeholder id the send
-    // used; check both addresses and cancel under the run's own key.
-    for (const key of [
-      conversationId,
-      this.canonicalConversationId(conversationId),
-    ]) {
+    // used. Resolve forward and reverse so either the placeholder or the
+    // canonical address can stop it, then cancel under the run's own key.
+    const canonicalId = this.canonicalConversationId(conversationId);
+    const addresses = new Set([conversationId, canonicalId]);
+    for (const [placeholderId, targetId] of this.conversationAliases) {
+      if (targetId === canonicalId) addresses.add(placeholderId);
+    }
+    for (const key of addresses) {
       const run = this.running.get(key);
       if (run) {
         this.cancelTurn(key, run);
