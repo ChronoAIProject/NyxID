@@ -2,99 +2,107 @@ import { expect, test } from "@playwright/test";
 import {
   composerInput,
   conversationRow,
+  emptyTurnError,
+  observeTurnContinuity,
   openAssistant,
+  readTurnContinuity,
   SCRIPTED_REPLY_START,
   SEEDED,
   sendMessage,
+  stopButton,
   thread,
 } from "./helpers";
 
 /**
- * Flow 3 — New chat / old chat.
- *
- * "New chat" is navigation only: it allocates nothing, so the sidebar must
- * not grow and no conversation id may appear until the first send. That send
- * must paint the reader's message and the thinking state IMMEDIATELY (the
- * composer clears the textarea before awaiting — any gap reads as the app
- * dying), allocate lazily, and then behave like any other conversation.
- * Switching to an old chat and back must keep both transcripts intact.
+ * A draft allocates nothing. Its first send keeps the placeholder address for
+ * the whole live turn, then settles onto the canonical conversation without
+ * losing the optimistic message, loading state, transcript, or sidebar row.
  */
 
-test("New chat allocates nothing until the first send, which paints instantly", async ({
+test("a first send stays continuous through the canonical id transition", async ({
   page,
 }) => {
-  await openAssistant(page);
+  const message = "Plan my week with my connected calendar.";
+  await openAssistant(page, { faults: { aliasOnFirstSend: true } });
   const sidebarRows = page
     .getByRole("navigation")
     .getByRole("button", { name: "Options for" });
-  await expect(sidebarRows).toHaveCount(3);
 
-  await page.getByRole("button", { name: "New chat" }).click();
-
-  // Draft state: URL says draft, screen shows the empty state, and the
-  // sidebar has NOT gained a row — nothing was provisioned.
-  await expect(page).toHaveURL(/draft=true/);
+  await expect(
+    page.locator("header").getByText("New chat", { exact: true }),
+  ).toBeVisible();
   await expect(
     thread(page).getByText("Start a new conversation"),
   ).toBeVisible();
+  expect(new URL(page.url()).searchParams.has("c")).toBe(false);
   await expect(sidebarRows).toHaveCount(3);
+  for (const conversation of Object.values(SEEDED)) {
+    await expect(conversationRow(page, conversation.title)).toHaveCSS(
+      "font-weight",
+      "400",
+    );
+  }
 
-  await sendMessage(page, "Plan my week with my connected calendar.");
+  await observeTurnContinuity(page, message);
+  await sendMessage(page, message);
 
-  // The reader's message appears immediately — the textarea already
-  // cleared, so any blank gap here looks like data loss.
-  await expect(
-    thread(page).getByText("Plan my week with my connected calendar."),
-  ).toBeVisible({ timeout: 1_000 });
+  const echoedMessage = thread(page).getByText(message, { exact: true });
+  await expect(echoedMessage).toHaveCount(1, { timeout: 1_000 });
   await expect(composerInput(page)).toHaveValue("");
+  await expect(page).toHaveURL(/c=local-pending-/, { timeout: 2_000 });
+  await expect(stopButton(page)).toBeVisible({ timeout: 1_000 });
 
-  // Lazy allocation: the URL now addresses the created conversation.
-  await expect(page).toHaveURL(/c=local-/, { timeout: 5_000 });
-
-  // The turn streams and completes like any other conversation.
   await expect(
     thread(page).getByText(SCRIPTED_REPLY_START, { exact: false }),
   ).toBeVisible({ timeout: 5_000 });
   await expect(composerInput(page)).toBeEnabled({ timeout: 10_000 });
-
-  // The sidebar row exists now, titled from the first message (40-char cap).
+  await expect(page).toHaveURL(/c=nyxid-chat-mock-/, { timeout: 5_000 });
+  await expect(echoedMessage).toHaveCount(1);
   await expect(sidebarRows).toHaveCount(4);
-  await expect(
-    conversationRow(page, "Plan my week with my connected calendar."),
-  ).toBeVisible();
+
+  const newRow = conversationRow(page, message);
+  await expect(newRow).toHaveCount(1);
+  await expect(newRow).toHaveCSS("font-weight", "500");
+  await expect(emptyTurnError(page)).toHaveCount(0);
+
+  // Leave enough time for query invalidation, loader exit, and any delayed
+  // normalization to expose a regression that briefly returns to the draft.
+  await page.waitForTimeout(2_500);
+  await expect(echoedMessage).toHaveCount(1);
+  await expect(thread(page).getByText("Start a new conversation")).toHaveCount(
+    0,
+  );
+  expect(await readTurnContinuity(page)).toEqual({
+    sawMessage: true,
+    sawLoading: true,
+    bouncedToEmptyState: false,
+    loadingGapBeforeReply: false,
+  });
 });
 
-test("switching from the new chat to an old one and back keeps both intact", async ({
+test("switching away from a canonicalized new chat and back keeps both transcripts", async ({
   page,
 }) => {
-  await openAssistant(page);
-  await page.getByRole("button", { name: "New chat" }).click();
-  await expect(
-    thread(page).getByText("Start a new conversation"),
-  ).toBeVisible();
+  const message = "Summarize my pending approvals.";
+  await openAssistant(page, { faults: { aliasOnFirstSend: true } });
 
-  await sendMessage(page, "Summarize my pending approvals.");
+  await sendMessage(page, message);
   await expect(
     thread(page).getByText(SCRIPTED_REPLY_START, { exact: false }),
   ).toBeVisible({ timeout: 5_000 });
   await expect(composerInput(page)).toBeEnabled({ timeout: 10_000 });
+  await expect(page).toHaveURL(/c=nyxid-chat-mock-/, { timeout: 5_000 });
 
-  // Old chat: its own transcript, nothing from the new one.
   await conversationRow(page, SEEDED.weekly.title).click();
   await expect(
     thread(page).getByText("Prepare last week's NyxID usage report.", {
       exact: false,
     }),
   ).toBeVisible();
-  await expect(
-    thread(page).getByText("Summarize my pending approvals."),
-  ).toBeHidden();
+  await expect(thread(page).getByText(message, { exact: true })).toHaveCount(0);
 
-  // Back to the new chat: transcript intact.
-  await conversationRow(page, "Summarize my pending approvals.").click();
-  await expect(
-    thread(page).getByText("Summarize my pending approvals."),
-  ).toBeVisible();
+  await conversationRow(page, message).click();
+  await expect(thread(page).getByText(message, { exact: true })).toHaveCount(1);
   await expect(
     thread(page).getByText(SCRIPTED_REPLY_START, { exact: false }),
   ).toBeVisible();
@@ -102,5 +110,5 @@ test("switching from the new chat to an old one and back keeps both intact", asy
     thread(page).getByText("Prepare last week's NyxID usage report.", {
       exact: false,
     }),
-  ).toBeHidden();
+  ).toHaveCount(0);
 });

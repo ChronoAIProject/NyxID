@@ -15,10 +15,10 @@ import {
  * Flow 2 — Chatting.
  *
  * The contract, in order: the sent message appears immediately; a thinking
- * state (halo + bouncing dots) holds the floor until the first streamed
- * content; the dots are REPLACED by the answer; the turn completes with the
- * full answer and its tool ledger on screen; the red empty-turn error never
- * appears on a turn that answered.
+ * state (halo + domino dots) holds the floor until the first streamed content;
+ * the loader leaves the accessibility tree as content arrives and then exits;
+ * the turn completes with the full answer and its tool ledger on screen; the
+ * red empty-turn error never appears on a turn that answered.
  */
 
 test("a sent message echoes immediately and the reply streams to completion", async ({
@@ -82,11 +82,14 @@ test("thinking dots hold the floor before the first content, then are replaced b
     page.getByRole("status", { name: /Assistant is (thinking|answering)/ }),
   ).toBeVisible();
 
-  // The dots are replaced by streamed text — never both, never neither, and
-  // no error in between.
+  // Streamed text takes over without an error. The dots may remain visually
+  // for their bounded exit, but they stop announcing a loading state at once.
   await expect(
     page.getByText(SCRIPTED_REPLY_START, { exact: false }),
   ).toBeVisible({ timeout: 10_000 });
+  await expect(
+    page.getByRole("status", { name: /Assistant is (thinking|answering)/ }),
+  ).toHaveCount(0);
   await expect(streamingDots(page)).toHaveCount(0, { timeout: 5_000 });
   await expect(emptyTurnError(page)).toHaveCount(0);
 });
@@ -109,8 +112,8 @@ test("Stop ends the turn quietly: no red error for a reader-cancelled turn", asy
 
   // The chat is still alive: a follow-up send works.
   await sendMessage(page, "Short version instead, please.");
-  await expect(
-    page.getByText("Short version instead, please."),
-  ).toBeVisible({ timeout: 2_000 });
+  await expect(page.getByText("Short version instead, please.")).toBeVisible({
+    timeout: 2_000,
+  });
   await expect(composerInput(page)).toBeEnabled({ timeout: 10_000 });
 });

@@ -19,6 +19,43 @@ import {
  * mapping to live-transport behavior is argued in the audit report.
  */
 
+test.describe("explicit conversation repair", () => {
+  test("a confirmed missing deep link repairs to New chat", async ({
+    page,
+  }) => {
+    await openAssistant(page, {
+      conversation: "conversation-does-not-exist",
+      faults: { historyErrorStatus: 404 },
+    });
+
+    await expect(
+      page.locator("header").getByText("New chat", { exact: true }),
+    ).toBeVisible({ timeout: 5_000 });
+    await expect(
+      thread(page).getByText("Start a new conversation"),
+    ).toBeVisible();
+    expect(new URL(page.url()).searchParams.has("c")).toBe(false);
+  });
+
+  test("a transient transcript failure retains the explicit address", async ({
+    page,
+  }) => {
+    const conversationId = "conversation-temporarily-unavailable";
+    await openAssistant(page, {
+      conversation: conversationId,
+      faults: { historyErrorStatus: 500 },
+    });
+
+    await expect(
+      page
+        .getByRole("status")
+        .filter({ hasText: "Could not load earlier messages" }),
+    ).toBeVisible({ timeout: 20_000 });
+    expect(new URL(page.url()).searchParams.get("c")).toBe(conversationId);
+    await expect(composerInput(page)).toBeEnabled();
+  });
+});
+
 test.describe("NYX-1: a turn that never starts reaches a deadline", () => {
   test("a silent turn reports an error and frees the composer", async ({
     page,
