@@ -155,12 +155,35 @@ const boundConversation: Conversation = {
   last_message_at: "2026-07-29T00:00:00.000Z",
 };
 
-function renderPage() {
-  return render(
+function userTranscriptMessage(id: string, text: string) {
+  return {
+    id,
+    role: "user" as const,
+    schema_version: 1,
+    blocks: [{ type: "text", block_id: `${id}-block`, text }],
+    created_at: "2026-07-29T00:00:00.000Z",
+  };
+}
+
+function page() {
+  return (
     <TooltipProvider>
       <AssistantPage />
-    </TooltipProvider>,
+    </TooltipProvider>
   );
+}
+
+function renderPage() {
+  return render(page());
+}
+
+/** Type into the composer and submit, as the reader does. */
+async function sendThrough(
+  event: ReturnType<typeof userEvent.setup>,
+  text: string,
+) {
+  await event.type(screen.getByRole("textbox"), text);
+  await event.click(screen.getByRole("button", { name: /send/i }));
 }
 
 beforeEach(() => {
@@ -246,27 +269,69 @@ describe("AssistantPage new chat", () => {
     ).not.toBeInTheDocument();
   });
 
-  it("does not echo the sent message twice once the transport projects it", () => {
+  it("does not echo the sent message twice once the transport projects it", async () => {
+    const event = userEvent.setup();
     state.search = { c: existingConversation.id };
-    state.sendPending = "already projected";
+    const { rerender } = renderPage();
+
+    // Sent through the composer first so the page records the send's target
+    // conversation, then the transcript and pending flag are advanced to the
+    // state they reach mid-send. Setting `sendPending` up front would make the
+    // composer refuse the submit as already-sending.
+    await sendThrough(event, "already projected");
     state.historyMessages = [
-      {
-        id: "user-projected",
-        role: "user",
-        schema_version: 1,
-        blocks: [
-          {
-            type: "text",
-            block_id: "b1",
-            text: "already projected",
-          },
-        ],
-        created_at: "2026-07-29T00:00:00.000Z",
-      },
+      userTranscriptMessage("user-projected", "already projected"),
     ];
-    renderPage();
+    state.sendPending = "already projected";
+    rerender(page());
 
     expect(screen.getAllByText("already projected")).toHaveLength(1);
+  });
+
+  it("does not echo below the answer when the assistant projects first", async () => {
+    // The assistant's first message can land while the send mutation is still
+    // pending. A tail-only projection test appended a second copy of the
+    // reader's message UNDER the answer, and flipped streaming back to thinking.
+    const event = userEvent.setup();
+    state.search = { c: existingConversation.id };
+    const { rerender } = renderPage();
+
+    await sendThrough(event, "racing send");
+    state.historyMessages = [
+      userTranscriptMessage("user-projected", "racing send"),
+      {
+        id: "assistant-first",
+        role: "assistant",
+        schema_version: 1,
+        blocks: [{ type: "text", block_id: "b2", text: "Answering" }],
+        created_at: "2026-07-29T00:00:01.000Z",
+      },
+    ];
+    state.sendPending = "racing send";
+    rerender(page());
+
+    expect(screen.getAllByText("racing send")).toHaveLength(1);
+    expect(screen.getByText("Answering")).toBeInTheDocument();
+  });
+
+  it("keeps a pending echo out of a conversation the reader switched to", async () => {
+    const event = userEvent.setup();
+    state.search = { c: existingConversation.id };
+    state.conversations = [existingConversation, boundConversation];
+    const { rerender } = renderPage();
+
+    await sendThrough(event, "meant for the first chat");
+    state.sendPending = "meant for the first chat";
+    rerender(page());
+    expect(screen.getByText("meant for the first chat")).toBeInTheDocument();
+
+    // Same mutation still pending, different conversation on screen.
+    state.search = { c: boundConversation.id };
+    rerender(page());
+
+    expect(
+      screen.queryByText("meant for the first chat"),
+    ).not.toBeInTheDocument();
   });
 
   it("renders the empty draft thread rather than a binding or newest chat", () => {

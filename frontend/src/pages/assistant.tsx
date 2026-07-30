@@ -87,6 +87,12 @@ export function AssistantPage({
   // and place its fade.
   const composerRef = useRef<HTMLDivElement>(null);
   const [composerHeight, setComposerHeight] = useState(0);
+  // Which conversation the in-flight send was aimed at, so its optimistic echo
+  // cannot follow the reader into a different thread. State rather than a ref:
+  // it is read during render to build the message list.
+  const [pendingSendTarget, setPendingSendTarget] = useState<
+    string | undefined
+  >(undefined);
 
   useLayoutEffect(() => {
     const element = composerRef.current;
@@ -256,6 +262,11 @@ export function AssistantPage({
   // that fails before any turn exists must be said out loud — the composer
   // restores the text, and without the toast the button just looks dead.
   async function handleSend(content: string) {
+    // The mutation outlives a conversation switch, and its `variables` say
+    // nothing about where the text was going — without this the reader can
+    // switch chats mid-send and watch the previous chat's message appear in
+    // this one's transcript. `undefined` is the draft thread, which matches.
+    setPendingSendTarget(selectedId);
     try {
       const sent = await sendMessage.mutateAsync(content);
       if (sent.conversationId !== selectedId) {
@@ -289,16 +300,22 @@ export function AssistantPage({
    * Also covers the shorter gap on an existing conversation, between the send
    * starting and the projection landing.
    */
-  const pendingContent = sendMessage.isPending
-    ? sendMessage.variables
-    : undefined;
+  const pendingContent =
+    sendMessage.isPending && pendingSendTarget === selectedId
+      ? sendMessage.variables
+      : undefined;
   const messages = useMemo(() => {
     const transcript = history.data?.messages ?? [];
     if (pendingContent === undefined) return transcript;
-    // Drop the echo once the transport's own copy of the same message projects
-    // in, or the reader sees their message twice mid-send.
-    const projected =
-      userMessageText(transcript.at(-1))?.trim() === pendingContent.trim();
+    // Scanned across the whole transcript, not just its tail: the assistant's
+    // first message can project while the send mutation is still pending, and a
+    // tail-only test would then append a SECOND copy of the reader's message
+    // below the answer — and flip the page out of `streaming` back to
+    // `thinking`. The cost is that re-sending identical text twice in one
+    // conversation skips its echo, which is the harmless direction.
+    const projected = transcript.some(
+      (message) => userMessageText(message)?.trim() === pendingContent.trim(),
+    );
     return projected
       ? transcript
       : [...transcript, optimisticUserMessage(pendingContent)];

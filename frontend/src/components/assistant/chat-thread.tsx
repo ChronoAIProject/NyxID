@@ -392,6 +392,12 @@ export function ChatThread({
     EMPTY_TURN_GRACE_MS,
   );
 
+  // Deliberately the RAW terminal state, not the settled error. A turn that has
+  // closed is never "no conversation yet", and gating the screen on the delayed
+  // error would show "start a new conversation" all through the grace period —
+  // or forever, if something keeps the settle condition suppressed.
+  const turnHasRun = thinking || streaming || turnEnded;
+
   // Opaque down to the top of the composer, then dissolved to nothing by the
   // bottom edge — content passing behind the composer fades out instead of
   // being clipped by a hard line.
@@ -401,12 +407,7 @@ export function ChatThread({
   // have closed empty) while the transcript is still bare — a conversation
   // whose first turn died before any history row materialized reads as an
   // untouched chat, and this screen would bury both the dots and the error.
-  if (
-    messages.length === 0 &&
-    !thinking &&
-    !streaming &&
-    !showEmptyTurnError
-  ) {
+  if (messages.length === 0 && !turnHasRun) {
     return (
       <div
         className="flex flex-1 items-center justify-center px-6 text-center"
