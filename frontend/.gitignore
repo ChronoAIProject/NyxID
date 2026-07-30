@@ -30,3 +30,7 @@ public/sitemap.xml
 
 # Test coverage output
 coverage/
+
+# Playwright (e2e harness)
+test-results
+playwright-report
