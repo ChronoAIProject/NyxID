@@ -8,7 +8,10 @@ import { act, render, renderHook, screen } from "@testing-library/react";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import type { PropsWithChildren } from "react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { AssistantTurnActiveError } from "@/lib/assistant/errors";
+import {
+  AssistantTurnActiveError,
+  AssistantTurnCancelledError,
+} from "@/lib/assistant/errors";
 import {
   assistantTransport,
   resetAssistantTransport,
@@ -115,6 +118,57 @@ describe("stream deadlines (NYX-1 / NYX-7)", () => {
       await vi.advanceTimersByTimeAsync(8_001);
     });
 
+    expect(result.current.turn.data).toMatchObject({
+      status: "failed",
+      error: { code: "stream_start_timeout" },
+    });
+    expect(result.current.episode.data).toEqual({
+      open: false,
+      printed: false,
+      projecting: false,
+    });
+  });
+
+  it("applies the same start deadline to an approval continuation", async () => {
+    let rejectApproval:
+      | ((reason: AssistantTurnCancelledError) => void)
+      | undefined;
+    vi.spyOn(assistantTransport, "decideApproval").mockImplementation(
+      () =>
+        new Promise((_resolve, reject) => {
+          rejectApproval = reject;
+        }),
+    );
+    const cancelSpy = vi
+      .spyOn(assistantTransport, "cancelActiveTurn")
+      .mockImplementation(() => {
+        rejectApproval?.(new AssistantTurnCancelledError());
+      });
+
+    const { Wrapper } = createHarness();
+    const { result } = renderHook(
+      () => ({
+        decide: useDecideApproval("conversation-stripe"),
+        episode: useTurnEpisode("conversation-stripe"),
+        turn: useAssistantTurn("conversation-stripe"),
+      }),
+      { wrapper: Wrapper },
+    );
+
+    let outcome: unknown;
+    await act(async () => {
+      const pending = result.current.decide
+        .mutateAsync({
+          blockId: "approval-stripe-lark",
+          approved: true,
+        })
+        .catch((error: unknown) => error);
+      await vi.advanceTimersByTimeAsync(8_001);
+      outcome = await pending;
+    });
+
+    expect(outcome).toBeInstanceOf(AssistantTurnCancelledError);
+    expect(cancelSpy).toHaveBeenCalledWith("conversation-stripe");
     expect(result.current.turn.data).toMatchObject({
       status: "failed",
       error: { code: "stream_start_timeout" },
