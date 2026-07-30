@@ -4,7 +4,10 @@ import type { PropsWithChildren } from "react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { toast } from "sonner";
 import { ApiError } from "@/lib/api-client";
-import { AssistantTurnActiveError } from "@/lib/assistant/errors";
+import {
+  AssistantConversationNotFoundError,
+  AssistantTurnActiveError,
+} from "@/lib/assistant/errors";
 import {
   assistantTransport,
   resetAssistantTransport,
@@ -601,6 +604,32 @@ describe("describeSendFailure", () => {
       new Error("Aevatar did not return a conversation id."),
     );
     expect(description).toBe("Aevatar did not return a conversation id.");
+  });
+});
+
+describe("conversation not-found resolution", () => {
+  it("does not retry a confirmed typed not-found transcript", async () => {
+    const { queryClient, Wrapper } = createHarness();
+    const historySpy = vi
+      .spyOn(assistantTransport, "getHistory")
+      .mockRejectedValue(new AssistantConversationNotFoundError());
+    const { result, unmount } = renderHook(
+      () => useConversation("nyxid-pending-lost-after-reload"),
+      { wrapper: Wrapper },
+    );
+
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(10_000);
+    });
+
+    expect(result.current.error).toBeInstanceOf(
+      AssistantConversationNotFoundError,
+    );
+    expect(historySpy).toHaveBeenCalledTimes(1);
+
+    historySpy.mockRestore();
+    unmount();
+    queryClient.clear();
   });
 });
 

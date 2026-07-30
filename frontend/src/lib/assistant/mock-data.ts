@@ -1,5 +1,6 @@
 import { applyTurnEvent } from "@/lib/assistant/stream";
 import { resolveAssistantAction } from "@/lib/assistant/action-registry";
+import { AssistantConversationNotFoundError } from "@/lib/assistant/errors";
 import { assistantActionRequestSchema } from "@/schemas/assistant-actions";
 import type {
   ApprovalCardContentBlock,
@@ -414,6 +415,7 @@ export class MockAssistantStore {
   private readonly conversationAliases = new Map<string, string>();
   private now: () => number = Date.now;
   private localCounter = 0;
+  private aliasCounter = 0;
   private idCounter = 0;
 
   constructor() {
@@ -423,6 +425,7 @@ export class MockAssistantStore {
   reset(now: () => number = Date.now): void {
     this.now = now;
     this.localCounter = 0;
+    this.aliasCounter = 0;
     this.idCounter = 0;
     this.conversations.clear();
     this.conversationAliases.clear();
@@ -474,7 +477,8 @@ export class MockAssistantStore {
     if (existing) return existing;
 
     const stored = this.requireConversation(conversationId);
-    const canonicalId = `nyxid-chat-mock-${String(this.localCounter)}`;
+    this.aliasCounter += 1;
+    const canonicalId = `nyxid-chat-mock-${String(this.aliasCounter)}`;
     stored.conversation = { ...stored.conversation, id: canonicalId };
     this.conversations.set(canonicalId, stored);
     this.conversationAliases.set(conversationId, canonicalId);
@@ -701,7 +705,7 @@ export class MockAssistantStore {
     const stored =
       this.conversations.get(canonicalId) ??
       this.conversations.get(conversationId);
-    if (!stored) throw new Error("Conversation was not found.");
+    if (!stored) throw new AssistantConversationNotFoundError();
     return stored;
   }
 }

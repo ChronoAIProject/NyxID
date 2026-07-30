@@ -4,7 +4,10 @@ import {
   redactDisplayText,
   summarizeToolResult,
 } from "@/lib/assistant/aevatar-transport";
-import { AssistantTurnActiveError } from "@/lib/assistant/errors";
+import {
+  AssistantConversationNotFoundError,
+  AssistantTurnActiveError,
+} from "@/lib/assistant/errors";
 import { selectAssistantTransportKind } from "@/lib/assistant/transport";
 import capturedHistory from "@/lib/assistant/__fixtures__/aevatar-chat-history.json";
 import capturedStream from "@/lib/assistant/__fixtures__/aevatar-nyxid-chat-stream.sse?raw";
@@ -1202,7 +1205,7 @@ describe("AevatarAssistantTransport", () => {
     // After success the tombstone takes over.
     expect(() =>
       transport.sendMessage(CONVERSATION_ID, "After delete", () => {}),
-    ).toThrow("Conversation was not found.");
+    ).toThrow(AssistantConversationNotFoundError);
   });
 
   it("guards against re-entrant sends and deletes from the cancellation callback", async () => {
@@ -1363,7 +1366,7 @@ describe("AevatarAssistantTransport", () => {
       expect(deleteCalls).toBe(2);
       expect(() =>
         transport.sendMessage(CONVERSATION_ID, "after delete", () => {}),
-      ).toThrow("Conversation was not found.");
+      ).toThrow(AssistantConversationNotFoundError);
     } finally {
       vi.useRealTimers();
     }
@@ -1465,7 +1468,7 @@ describe("AevatarAssistantTransport", () => {
     expect(deleteCalls).toBe(1);
     expect(() =>
       transport.sendMessage(CONVERSATION_ID, "After delete", () => {}),
-    ).toThrow("Conversation was not found.");
+    ).toThrow(AssistantConversationNotFoundError);
   });
 
   it("holds an approval decision behind the in-flight stop fence", async () => {
@@ -1735,7 +1738,7 @@ describe("AevatarAssistantTransport", () => {
     const transport = new AevatarAssistantTransport();
     expect(() => {
       transport.sendMessage("unknown", "Hello", () => {});
-    }).toThrow("Conversation was not found.");
+    }).toThrow(AssistantConversationNotFoundError);
   });
 
   it("never puts a scope id on the wire, even with no user in the store", async () => {
@@ -1868,7 +1871,7 @@ describe("AevatarAssistantTransport", () => {
     );
     expect(
       transport.sendMessage.bind(transport, CONVERSATION_ID, "again", () => {}),
-    ).toThrow("Conversation was not found.");
+    ).toThrow(AssistantConversationNotFoundError);
   });
 });
 
@@ -3075,8 +3078,8 @@ describe("live AG-UI frame taxonomy", () => {
 
     await transport.deleteConversation(CONVERSATION_ID);
 
-    await expect(transport.getHistory(CONVERSATION_ID)).rejects.toThrow(
-      "Conversation was not found.",
+    await expect(transport.getHistory(CONVERSATION_ID)).rejects.toBeInstanceOf(
+      AssistantConversationNotFoundError,
     );
     expect(await transport.listConversations()).toHaveLength(0);
   });
@@ -3135,7 +3138,9 @@ describe("live AG-UI frame taxonomy", () => {
     await transport.deleteConversation(CONVERSATION_ID);
     releaseHistory();
 
-    await expect(pendingRead).rejects.toThrow("Conversation was not found.");
+    await expect(pendingRead).rejects.toBeInstanceOf(
+      AssistantConversationNotFoundError,
+    );
   });
 
   it("answers not-found, not the read failure, when a delete lands mid-read and the read then fails", async () => {
@@ -3183,7 +3188,9 @@ describe("live AG-UI frame taxonomy", () => {
     await transport.deleteConversation(CONVERSATION_ID);
     rejectHistory(new Error("network down"));
 
-    await expect(pendingRead).rejects.toThrow("Conversation was not found.");
+    await expect(pendingRead).rejects.toBeInstanceOf(
+      AssistantConversationNotFoundError,
+    );
   });
 
   it("stops an approve request hung before response headers", async () => {
@@ -4936,13 +4943,23 @@ describe("a conversation with no committed turn has no server transcript", () =>
     expect(history.conversation.id).toBe(CONVERSATION_ID);
   });
 
-  it("still rejects a 404 for a conversation it has never seen", async () => {
+  it("types a 404 for a conversation it has never seen as not-found", async () => {
     stubFetch();
     const transport = new AevatarAssistantTransport();
 
     await expect(
       transport.getHistory("nyxid-chat-never-created"),
-    ).rejects.toThrow();
+    ).rejects.toBeInstanceOf(AssistantConversationNotFoundError);
+  });
+
+  it("types an unrecoverable pending placeholder as not-found without a request", async () => {
+    const mock = stubFetch();
+    const transport = new AevatarAssistantTransport();
+
+    await expect(
+      transport.getHistory("nyxid-pending-lost-after-reload"),
+    ).rejects.toBeInstanceOf(AssistantConversationNotFoundError);
+    expect(mock).not.toHaveBeenCalled();
   });
 
   it("still rejects a transient failure on a conversation with no local transcript", async () => {
@@ -5634,12 +5651,12 @@ describe("typed new chats and legacy workflow compatibility", () => {
           init?.method === "DELETE",
       ),
     ).toBe(true);
-    await expect(transport.getHistory(conversation.id)).rejects.toThrow(
-      "Conversation was not found.",
+    await expect(transport.getHistory(conversation.id)).rejects.toBeInstanceOf(
+      AssistantConversationNotFoundError,
     );
-    await expect(transport.getHistory(WORKFLOW_CONVERSATION)).rejects.toThrow(
-      "Conversation was not found.",
-    );
+    await expect(
+      transport.getHistory(WORKFLOW_CONVERSATION),
+    ).rejects.toBeInstanceOf(AssistantConversationNotFoundError);
   });
 
   it("posts a workflow action continuation to the actor named by its frame", async () => {

@@ -100,9 +100,13 @@ class MockAssistantTransport implements AssistantTransport {
   }
 
   async deleteConversation(conversationId: string): Promise<void> {
-    const script = this.running.get(conversationId);
-    if (script) this.cancelScript(conversationId, script);
-    this.pendingActions.delete(conversationId);
+    for (const address of assistantMockStore.conversationAddresses(
+      conversationId,
+    )) {
+      const script = this.running.get(address);
+      if (script) this.cancelScript(address, script);
+      this.pendingActions.delete(address);
+    }
     assistantMockStore.deleteConversation(conversationId);
   }
 
@@ -128,16 +132,9 @@ class MockAssistantTransport implements AssistantTransport {
     const messageId = assistantMockStore.nextId("assistant-message");
     const blockId = assistantMockStore.nextId("assistant-block");
     const events = createScriptedTurn(turnId, messageId, blockId);
-    return this.startScript(
-      conversationId,
-      turnId,
-      messageId,
-      events,
-      onEvent,
-      {
-        silent: mockFaults().sendSilent,
-      },
-    );
+    return this.startScript(conversationId, turnId, messageId, events, onEvent, {
+      silent: mockFaults().sendSilent,
+    });
   }
 
   cancelActiveTurn(conversationId: string): void {

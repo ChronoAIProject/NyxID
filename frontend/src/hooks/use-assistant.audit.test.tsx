@@ -9,6 +9,7 @@ import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import type { PropsWithChildren } from "react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
+  AssistantConversationNotFoundError,
   AssistantTurnActiveError,
   AssistantTurnCancelledError,
 } from "@/lib/assistant/errors";
@@ -235,6 +236,67 @@ describe("placeholder-to-canonical conversation aliases", () => {
         .getQueryData<ConversationHistory>(assistantKeys.history(canonicalId))
         ?.messages.filter((message) => message.role === "user"),
     ).toHaveLength(2);
+  });
+
+  it("assigns distinct canonical ids when multiple pending drafts alias", async () => {
+    const first = await assistantTransport.createConversation();
+    const second = await assistantTransport.createConversation();
+
+    assistantTransport.sendMessage(
+      first.id,
+      "First independent draft.",
+      () => {},
+    );
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(2_000);
+    });
+    assistantTransport.sendMessage(
+      second.id,
+      "Second independent draft.",
+      () => {},
+    );
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(2_000);
+    });
+
+    const firstHistory = await assistantTransport.getHistory(first.id);
+    const secondHistory = await assistantTransport.getHistory(second.id);
+    expect(firstHistory.conversation.id).not.toBe(
+      secondHistory.conversation.id,
+    );
+    expect(firstHistory.messages[0]?.blocks[0]).toMatchObject({
+      type: "text",
+      text: "First independent draft.",
+    });
+    expect(secondHistory.messages[0]?.blocks[0]).toMatchObject({
+      type: "text",
+      text: "Second independent draft.",
+    });
+    const canonicalIds = new Set(
+      (await assistantTransport.listConversations())
+        .map((conversation) => conversation.id)
+        .filter((id) => id.startsWith("nyxid-chat-mock-")),
+    );
+    expect(canonicalIds).toEqual(
+      new Set([firstHistory.conversation.id, secondHistory.conversation.id]),
+    );
+  });
+});
+
+describe("mock conversation not-found sentinel", () => {
+  it("types tombstoned, unknown, and unrecoverable-placeholder reads", async () => {
+    const tombstoned = await assistantTransport.createConversation();
+    await assistantTransport.deleteConversation(tombstoned.id);
+
+    for (const conversationId of [
+      tombstoned.id,
+      "conversation-never-created",
+      "local-pending-lost-after-reload",
+    ]) {
+      await expect(
+        assistantTransport.getHistory(conversationId),
+      ).rejects.toBeInstanceOf(AssistantConversationNotFoundError);
+    }
   });
 });
 
