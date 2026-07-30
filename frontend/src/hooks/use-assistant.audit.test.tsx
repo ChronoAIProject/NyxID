@@ -9,6 +9,7 @@ import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import type { PropsWithChildren } from "react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
+  AssistantConversationNotFoundError,
   AssistantTurnActiveError,
   AssistantTurnCancelledError,
 } from "@/lib/assistant/errors";
@@ -17,12 +18,21 @@ import {
   resetAssistantTransport,
 } from "@/lib/assistant/transport";
 import { ChatThread } from "@/components/assistant/chat-thread";
-import type { AssistantMessage, TurnEvent } from "@/types/assistant";
+import type {
+  AssistantMessage,
+  Conversation,
+  ConversationHistory,
+  TurnEpisode,
+  TurnEvent,
+} from "@/types/assistant";
 import {
+  assistantKeys,
   useAssistantTurn,
+  useCancelTurn,
   useDecideApproval,
   useSendMessage,
   useTurnEpisode,
+  type SentMessage,
 } from "./use-assistant";
 
 const TEST_NOW = Date.parse("2026-07-16T04:00:00.000Z");
@@ -92,6 +102,201 @@ describe("episode-slot ownership (NYX-2 / hypothesis P1-a)", () => {
       printed: false,
       projecting: false,
     });
+  });
+});
+
+describe("placeholder-to-canonical conversation aliases", () => {
+  beforeEach(() => {
+    (
+      globalThis as {
+        __assistantMockFaults?: { aliasOnFirstSend?: boolean };
+      }
+    ).__assistantMockFaults = { aliasOnFirstSend: true };
+  });
+
+  it("keeps placeholder history continuous while listing one canonical conversation", async () => {
+    const { queryClient, Wrapper } = createHarness();
+    const { result } = renderHook(
+      () => ({
+        send: useSendMessage(undefined),
+      }),
+      { wrapper: Wrapper },
+    );
+
+    let sent: SentMessage | undefined;
+    await act(async () => {
+      sent = await result.current.send.mutateAsync(
+        "Audit the alias transition.",
+      );
+      await vi.advanceTimersByTimeAsync(0);
+    });
+
+    const placeholderId = sent?.conversationId ?? "";
+    expect(placeholderId).toMatch(/^local-pending-/);
+    const liveHistory = queryClient.getQueryData<ConversationHistory>(
+      assistantKeys.history(placeholderId),
+    );
+    const canonicalId = liveHistory?.conversation.id ?? "";
+    expect(canonicalId).toMatch(/^nyxid-chat-/);
+    expect(canonicalId).not.toBe(placeholderId);
+    expect(
+      liveHistory?.messages.filter((message) => message.role === "user"),
+    ).toHaveLength(1);
+    expect(liveHistory?.messages[0]?.blocks[0]).toMatchObject({
+      type: "text",
+      text: "Audit the alias transition.",
+    });
+
+    const listed =
+      queryClient.getQueryData<Conversation[]>(assistantKeys.conversations) ??
+      [];
+    expect(listed.filter((item) => item.id === canonicalId)).toHaveLength(1);
+    expect(listed.some((item) => item.id === placeholderId)).toBe(false);
+
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(2_000);
+    });
+
+    const settledHistory = queryClient.getQueryData<ConversationHistory>(
+      assistantKeys.history(placeholderId),
+    );
+    const episode = queryClient.getQueryData<TurnEpisode | null>(
+      assistantKeys.episode(placeholderId),
+    );
+    expect(settledHistory?.conversation.id).toBe(canonicalId);
+    expect(episode).toEqual({ open: false, printed: true, projecting: false });
+    expect(
+      queryClient.getQueryData(assistantKeys.turn(placeholderId)),
+    ).toMatchObject({ status: "completed", error: null });
+
+    render(
+      <ChatThread
+        messages={settledHistory?.messages ?? []}
+        turnEnded
+        turnPrinted={episode?.printed}
+        onDecideApproval={() => Promise.resolve()}
+      />,
+      { wrapper: Wrapper },
+    );
+    expect(
+      screen.queryByText(
+        "Sorry, there seems to be an error with the request for now.",
+      ),
+    ).not.toBeInTheDocument();
+  });
+
+  it("stops the placeholder-keyed run through its canonical address", async () => {
+    const { queryClient, Wrapper } = createHarness();
+    const first = renderHook(() => useSendMessage(undefined), {
+      wrapper: Wrapper,
+    });
+
+    let sent: SentMessage | undefined;
+    await act(async () => {
+      sent = await first.result.current.mutateAsync("Stop this aliased turn.");
+      await vi.advanceTimersByTimeAsync(0);
+    });
+    const placeholderId = sent?.conversationId ?? "";
+    const canonicalId =
+      queryClient.getQueryData<ConversationHistory>(
+        assistantKeys.history(placeholderId),
+      )?.conversation.id ?? "";
+    const canonical = renderHook(
+      () => ({
+        cancel: useCancelTurn(canonicalId),
+        send: useSendMessage(canonicalId),
+      }),
+      { wrapper: Wrapper },
+    );
+
+    await act(async () => {
+      await canonical.result.current.cancel.mutateAsync();
+      await vi.advanceTimersByTimeAsync(0);
+    });
+    expect(
+      queryClient.getQueryData(assistantKeys.turn(placeholderId)),
+    ).toMatchObject({ status: "cancelled", error: null });
+    expect(
+      queryClient.getQueryData<TurnEpisode | null>(
+        assistantKeys.episode(placeholderId),
+      ),
+    ).toMatchObject({ open: false });
+
+    await act(async () => {
+      await canonical.result.current.send.mutateAsync(
+        "Continue through the canonical address.",
+      );
+      await vi.advanceTimersByTimeAsync(2_000);
+    });
+    expect(
+      queryClient.getQueryData(assistantKeys.turn(canonicalId)),
+    ).toMatchObject({ status: "completed", error: null });
+    expect(
+      queryClient
+        .getQueryData<ConversationHistory>(assistantKeys.history(canonicalId))
+        ?.messages.filter((message) => message.role === "user"),
+    ).toHaveLength(2);
+  });
+
+  it("assigns distinct canonical ids when multiple pending drafts alias", async () => {
+    const first = await assistantTransport.createConversation();
+    const second = await assistantTransport.createConversation();
+
+    assistantTransport.sendMessage(
+      first.id,
+      "First independent draft.",
+      () => {},
+    );
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(2_000);
+    });
+    assistantTransport.sendMessage(
+      second.id,
+      "Second independent draft.",
+      () => {},
+    );
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(2_000);
+    });
+
+    const firstHistory = await assistantTransport.getHistory(first.id);
+    const secondHistory = await assistantTransport.getHistory(second.id);
+    expect(firstHistory.conversation.id).not.toBe(
+      secondHistory.conversation.id,
+    );
+    expect(firstHistory.messages[0]?.blocks[0]).toMatchObject({
+      type: "text",
+      text: "First independent draft.",
+    });
+    expect(secondHistory.messages[0]?.blocks[0]).toMatchObject({
+      type: "text",
+      text: "Second independent draft.",
+    });
+    const canonicalIds = new Set(
+      (await assistantTransport.listConversations())
+        .map((conversation) => conversation.id)
+        .filter((id) => id.startsWith("nyxid-chat-mock-")),
+    );
+    expect(canonicalIds).toEqual(
+      new Set([firstHistory.conversation.id, secondHistory.conversation.id]),
+    );
+  });
+});
+
+describe("mock conversation not-found sentinel", () => {
+  it("types tombstoned, unknown, and unrecoverable-placeholder reads", async () => {
+    const tombstoned = await assistantTransport.createConversation();
+    await assistantTransport.deleteConversation(tombstoned.id);
+
+    for (const conversationId of [
+      tombstoned.id,
+      "conversation-never-created",
+      "local-pending-lost-after-reload",
+    ]) {
+      await expect(
+        assistantTransport.getHistory(conversationId),
+      ).rejects.toBeInstanceOf(AssistantConversationNotFoundError);
+    }
   });
 });
 

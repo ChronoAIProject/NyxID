@@ -8,6 +8,7 @@ import {
 import { toast } from "sonner";
 import { ApiError } from "@/lib/api-client";
 import {
+  AssistantConversationNotFoundError,
   AssistantTurnActiveError,
   AssistantTurnCancelledError,
 } from "@/lib/assistant/errors";
@@ -280,6 +281,7 @@ export function useConversation(conversationId: string | undefined) {
     queryFn: () => assistantTransport.getHistory(conversationId ?? ""),
     enabled: Boolean(conversationId),
     retry: (failureCount, error) => {
+      if (error instanceof AssistantConversationNotFoundError) return false;
       if (error instanceof ApiError && error.status === 404) return false;
       return failureCount < 3;
     },

@@ -1,5 +1,6 @@
 import { ApiError, apiClient } from "@/lib/api-client";
 import {
+  AssistantConversationNotFoundError,
   AssistantProtocolError,
   AssistantTurnActiveError,
   AssistantTurnCancelledError,
@@ -1060,9 +1061,16 @@ export class AevatarAssistantTransport implements AssistantTransport {
   async getHistory(conversationId: string): Promise<ConversationHistory> {
     conversationId = this.canonicalConversationId(conversationId);
     if (this.deletedConversationIds.has(conversationId)) {
-      throw new Error("Conversation was not found.");
+      throw new AssistantConversationNotFoundError();
     }
     const existing = this.conversations.get(conversationId);
+    if (
+      !existing &&
+      (conversationId.startsWith(PENDING_TYPED_CONVERSATION_PREFIX) ||
+        conversationId.startsWith(PENDING_WORKFLOW_CONVERSATION_PREFIX))
+    ) {
+      throw new AssistantConversationNotFoundError();
+    }
     // During a streaming turn the local mirror is ahead of the server;
     // serving it keeps per-event re-projection off the network entirely.
     if (existing && isTurnActive(existing.turnState.activeTurn?.status)) {
@@ -1080,14 +1088,20 @@ export class AevatarAssistantTransport implements AssistantTransport {
       // once the conversation is tombstoned, "not found" is the answer, not
       // whatever the doomed read happened to fail with.
       if (this.deletedConversationIds.has(conversationId)) {
-        throw new Error("Conversation was not found.");
+        throw new AssistantConversationNotFoundError();
       }
       // A contract break must reach the user. Swallowing it here is what
       // turned the PR #2923 array→`{messages, stateVersion}` change into a
       // blank transcript instead of a visible failure.
       if (error instanceof AssistantProtocolError) throw error;
-      // Nothing local to answer with.
-      if (!existing) throw error;
+      // Nothing local to answer with. A server 404 confirms the id is unknown;
+      // transient and protocol failures retain their original type.
+      if (!existing) {
+        if (error instanceof ApiError && error.status === 404) {
+          throw new AssistantConversationNotFoundError();
+        }
+        throw error;
+      }
       // 404 is the EXPECTED answer for a conversation that has not yet
       // completed a turn. The two upstream halves materialize at different
       // times: `nyxid-chat` mints the actor at create, while the
@@ -1113,7 +1127,7 @@ export class AevatarAssistantTransport implements AssistantTransport {
     // request was in flight must not be answered with the pre-delete
     // snapshot captured above (the fallback `existing`).
     if (this.deletedConversationIds.has(conversationId)) {
-      throw new Error("Conversation was not found.");
+      throw new AssistantConversationNotFoundError();
     }
     return {
       conversation: stored.conversation,
@@ -1131,7 +1145,7 @@ export class AevatarAssistantTransport implements AssistantTransport {
     conversationId = this.canonicalConversationId(conversationId);
     const stored = this.conversations.get(conversationId);
     if (!stored) {
-      throw new Error("Conversation was not found.");
+      throw new AssistantConversationNotFoundError();
     }
     if (this.deletingConversations.has(conversationId)) {
       throw new Error("This conversation is being deleted.");
@@ -1208,11 +1222,14 @@ export class AevatarAssistantTransport implements AssistantTransport {
    */
   cancelActiveTurn(conversationId: string): void {
     // A create-and-first-turn run is keyed under the placeholder id the send
-    // used; check both addresses and cancel under the run's own key.
-    for (const key of [
-      conversationId,
-      this.canonicalConversationId(conversationId),
-    ]) {
+    // used. Resolve forward and reverse so either the placeholder or the
+    // canonical address can stop it, then cancel under the run's own key.
+    const canonicalId = this.canonicalConversationId(conversationId);
+    const addresses = new Set([conversationId, canonicalId]);
+    for (const [placeholderId, targetId] of this.conversationAliases) {
+      if (targetId === canonicalId) addresses.add(placeholderId);
+    }
+    for (const key of addresses) {
       const run = this.running.get(key);
       if (run) {
         this.cancelTurn(key, run);
@@ -1455,7 +1472,7 @@ export class AevatarAssistantTransport implements AssistantTransport {
     onEvent: (event: TurnEvent) => void = noopEvent,
   ): TurnHandle | null {
     if (!this.conversations.has(conversationId)) {
-      throw new Error("Conversation was not found.");
+      throw new AssistantConversationNotFoundError();
     }
     if (
       this.deletingConversations.has(
@@ -1557,7 +1574,7 @@ export class AevatarAssistantTransport implements AssistantTransport {
     const actorId = this.canonicalConversationId(conversationId);
     const stored =
       this.conversations.get(requestedId) ?? this.conversations.get(actorId);
-    if (!stored) throw new Error("Conversation was not found.");
+    if (!stored) throw new AssistantConversationNotFoundError();
     if (this.deletingConversations.has(actorId)) {
       throw new Error("This conversation is being deleted.");
     }
@@ -1621,7 +1638,7 @@ export class AevatarAssistantTransport implements AssistantTransport {
     onEvent: (event: TurnEvent) => void,
   ): void {
     const stored = this.conversations.get(conversationId);
-    if (!stored) throw new Error("Conversation was not found.");
+    if (!stored) throw new AssistantConversationNotFoundError();
     const activeRun = this.running.get(conversationId);
     if (activeRun) {
       this.emit(conversationId, activeRun, {
@@ -1870,7 +1887,7 @@ export class AevatarAssistantTransport implements AssistantTransport {
     // flight (deleting an active chat races cancel-driven projections);
     // writing the stale result back would resurrect it locally.
     if (this.deletedConversationIds.has(conversationId)) {
-      throw new Error("Conversation was not found.");
+      throw new AssistantConversationNotFoundError();
     }
     const entries = readHistoryEntries(body);
     const existing = this.conversations.get(conversationId);

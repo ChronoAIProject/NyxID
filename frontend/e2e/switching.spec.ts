@@ -136,3 +136,29 @@ test("an in-flight send's optimistic echo never follows the reader into another 
   ).toBeVisible({ timeout: 10_000 });
   await expect(composerInput(page)).toBeEnabled({ timeout: 15_000 });
 });
+
+test("a queued canonical swap cannot override a newer conversation choice", async ({
+  page,
+}) => {
+  const message = "Keep this draft running in the background.";
+  await openAssistant(page, { faults: { aliasOnFirstSend: true } });
+
+  await sendMessage(page, message);
+  await expect(page).toHaveURL(/c=local-pending-/, { timeout: 2_000 });
+  await expect(stopButton(page)).toBeVisible({ timeout: 1_000 });
+
+  await conversationRow(page, SEEDED.github.title).click();
+  await expect(page).toHaveURL(/c=conversation-github/);
+  await expect(
+    thread(page).getByText("Rotate the deploy key for the web repository", {
+      exact: false,
+    }),
+  ).toBeVisible();
+  await expect(thread(page).getByText(message, { exact: true })).toHaveCount(0);
+
+  // The background turn reaches its quiet moment, but its stale swap effect
+  // must not pull the reader away from the chat chosen after that turn began.
+  await page.waitForTimeout(3_000);
+  await expect(page).toHaveURL(/c=conversation-github/);
+  await expect(thread(page).getByText(message, { exact: true })).toHaveCount(0);
+});

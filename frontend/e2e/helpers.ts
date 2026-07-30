@@ -39,9 +39,14 @@ export async function openAssistant(
   const search = new URLSearchParams({ mock: "1" });
   if (options.conversation) search.set("c", options.conversation);
   await page.goto(`/assistant?${search.toString()}`);
-  await expect(
-    page.getByRole("button", { name: "New chat" }),
-  ).toBeVisible({ timeout: 20_000 });
+  await expect
+    .poll(
+      async () =>
+        (await page.getByRole("button", { name: "New chat" }).isVisible()) ||
+        (await page.getByRole("button", { name: "Open chats" }).isVisible()),
+      { timeout: 20_000 },
+    )
+    .toBe(true);
 }
 
 /** The chat surface (thread + composer), excluding sidebar and header. */
@@ -59,6 +64,122 @@ export async function sendMessage(page: Page, text: string): Promise<void> {
   const input = composerInput(page);
   await input.fill(text);
   await input.press("Enter");
+}
+
+export interface TurnContinuitySnapshot {
+  readonly sawMessage: boolean;
+  readonly sawLoading: boolean;
+  readonly sawReply: boolean;
+  readonly bouncedToEmptyState: boolean;
+  readonly loadingGapBeforeReply: boolean;
+  readonly loadingAfterReply: boolean;
+  readonly emptyAfterReply: boolean;
+}
+
+interface TurnContinuityProbe extends TurnContinuitySnapshot {
+  disconnect(): void;
+}
+
+/**
+ * Watch only reader-visible turn states. MutationObserver runs after each DOM
+ * commit, so a genuine empty-state bounce or pre-reply loading gap is retained
+ * even if the screen recovers before the next Playwright assertion poll.
+ */
+export async function observeTurnContinuity(
+  page: Page,
+  userMessage: string,
+): Promise<void> {
+  await page.evaluate(
+    ({ message, replyStart }) => {
+      const probeWindow = window as Window & {
+        __assistantTurnContinuity?: TurnContinuityProbe;
+      };
+      probeWindow.__assistantTurnContinuity?.disconnect();
+
+      const probe = {
+        sawMessage: false,
+        sawLoading: false,
+        sawReply: false,
+        bouncedToEmptyState: false,
+        loadingGapBeforeReply: false,
+        loadingAfterReply: false,
+        emptyAfterReply: false,
+        disconnect: () => observer.disconnect(),
+      };
+      const isVisible = (element: Element): boolean => {
+        const style = window.getComputedStyle(element);
+        return (
+          style.display !== "none" &&
+          style.visibility !== "hidden" &&
+          element.getClientRects().length > 0
+        );
+      };
+      const inspect = () => {
+        const visibleText =
+          document.querySelector("main")?.innerText ?? document.body.innerText;
+        if (visibleText.includes(message)) probe.sawMessage = true;
+        const emptyStateVisible = visibleText.includes(
+          "Start a new conversation",
+        );
+        if (probe.sawMessage && emptyStateVisible) {
+          probe.bouncedToEmptyState = true;
+        }
+
+        const replyVisible = visibleText.includes(replyStart);
+        if (replyVisible) probe.sawReply = true;
+        const conversationLoading = visibleText.includes(
+          "Loading conversation...",
+        );
+        if (probe.sawReply && conversationLoading) {
+          probe.loadingAfterReply = true;
+        }
+        if (probe.sawReply && emptyStateVisible) {
+          probe.emptyAfterReply = true;
+        }
+        const loading =
+          conversationLoading ||
+          [
+            ...document.querySelectorAll(
+              '[data-streaming-dots], [data-assistant-halo], button[aria-label="Stop assistant turn"]',
+            ),
+          ].some(isVisible);
+        if (loading) probe.sawLoading = true;
+        if (probe.sawMessage && probe.sawLoading && !replyVisible && !loading) {
+          probe.loadingGapBeforeReply = true;
+        }
+      };
+      const observer = new MutationObserver(inspect);
+      observer.observe(document.body, {
+        childList: true,
+        subtree: true,
+        attributes: true,
+      });
+      probeWindow.__assistantTurnContinuity = probe;
+      inspect();
+    },
+    { message: userMessage, replyStart: SCRIPTED_REPLY_START },
+  );
+}
+
+export async function readTurnContinuity(
+  page: Page,
+): Promise<TurnContinuitySnapshot> {
+  return page.evaluate(() => {
+    const probeWindow = window as Window & {
+      __assistantTurnContinuity?: TurnContinuityProbe;
+    };
+    const probe = probeWindow.__assistantTurnContinuity;
+    probe?.disconnect();
+    return {
+      sawMessage: probe?.sawMessage ?? false,
+      sawLoading: probe?.sawLoading ?? false,
+      sawReply: probe?.sawReply ?? false,
+      bouncedToEmptyState: probe?.bouncedToEmptyState ?? false,
+      loadingGapBeforeReply: probe?.loadingGapBeforeReply ?? false,
+      loadingAfterReply: probe?.loadingAfterReply ?? false,
+      emptyAfterReply: probe?.emptyAfterReply ?? false,
+    };
+  });
 }
 
 export function streamingDots(page: Page) {

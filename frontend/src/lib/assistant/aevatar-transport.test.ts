@@ -4,7 +4,10 @@ import {
   redactDisplayText,
   summarizeToolResult,
 } from "@/lib/assistant/aevatar-transport";
-import { AssistantTurnActiveError } from "@/lib/assistant/errors";
+import {
+  AssistantConversationNotFoundError,
+  AssistantTurnActiveError,
+} from "@/lib/assistant/errors";
 import { selectAssistantTransportKind } from "@/lib/assistant/transport";
 import capturedHistory from "@/lib/assistant/__fixtures__/aevatar-chat-history.json";
 import capturedStream from "@/lib/assistant/__fixtures__/aevatar-nyxid-chat-stream.sse?raw";
@@ -1202,7 +1205,7 @@ describe("AevatarAssistantTransport", () => {
     // After success the tombstone takes over.
     expect(() =>
       transport.sendMessage(CONVERSATION_ID, "After delete", () => {}),
-    ).toThrow("Conversation was not found.");
+    ).toThrow(AssistantConversationNotFoundError);
   });
 
   it("guards against re-entrant sends and deletes from the cancellation callback", async () => {
@@ -1363,7 +1366,7 @@ describe("AevatarAssistantTransport", () => {
       expect(deleteCalls).toBe(2);
       expect(() =>
         transport.sendMessage(CONVERSATION_ID, "after delete", () => {}),
-      ).toThrow("Conversation was not found.");
+      ).toThrow(AssistantConversationNotFoundError);
     } finally {
       vi.useRealTimers();
     }
@@ -1465,7 +1468,7 @@ describe("AevatarAssistantTransport", () => {
     expect(deleteCalls).toBe(1);
     expect(() =>
       transport.sendMessage(CONVERSATION_ID, "After delete", () => {}),
-    ).toThrow("Conversation was not found.");
+    ).toThrow(AssistantConversationNotFoundError);
   });
 
   it("holds an approval decision behind the in-flight stop fence", async () => {
@@ -1735,7 +1738,7 @@ describe("AevatarAssistantTransport", () => {
     const transport = new AevatarAssistantTransport();
     expect(() => {
       transport.sendMessage("unknown", "Hello", () => {});
-    }).toThrow("Conversation was not found.");
+    }).toThrow(AssistantConversationNotFoundError);
   });
 
   it("never puts a scope id on the wire, even with no user in the store", async () => {
@@ -1868,7 +1871,7 @@ describe("AevatarAssistantTransport", () => {
     );
     expect(
       transport.sendMessage.bind(transport, CONVERSATION_ID, "again", () => {}),
-    ).toThrow("Conversation was not found.");
+    ).toThrow(AssistantConversationNotFoundError);
   });
 });
 
@@ -3075,8 +3078,8 @@ describe("live AG-UI frame taxonomy", () => {
 
     await transport.deleteConversation(CONVERSATION_ID);
 
-    await expect(transport.getHistory(CONVERSATION_ID)).rejects.toThrow(
-      "Conversation was not found.",
+    await expect(transport.getHistory(CONVERSATION_ID)).rejects.toBeInstanceOf(
+      AssistantConversationNotFoundError,
     );
     expect(await transport.listConversations()).toHaveLength(0);
   });
@@ -3135,7 +3138,9 @@ describe("live AG-UI frame taxonomy", () => {
     await transport.deleteConversation(CONVERSATION_ID);
     releaseHistory();
 
-    await expect(pendingRead).rejects.toThrow("Conversation was not found.");
+    await expect(pendingRead).rejects.toBeInstanceOf(
+      AssistantConversationNotFoundError,
+    );
   });
 
   it("answers not-found, not the read failure, when a delete lands mid-read and the read then fails", async () => {
@@ -3183,7 +3188,9 @@ describe("live AG-UI frame taxonomy", () => {
     await transport.deleteConversation(CONVERSATION_ID);
     rejectHistory(new Error("network down"));
 
-    await expect(pendingRead).rejects.toThrow("Conversation was not found.");
+    await expect(pendingRead).rejects.toBeInstanceOf(
+      AssistantConversationNotFoundError,
+    );
   });
 
   it("stops an approve request hung before response headers", async () => {
@@ -4936,13 +4943,23 @@ describe("a conversation with no committed turn has no server transcript", () =>
     expect(history.conversation.id).toBe(CONVERSATION_ID);
   });
 
-  it("still rejects a 404 for a conversation it has never seen", async () => {
+  it("types a 404 for a conversation it has never seen as not-found", async () => {
     stubFetch();
     const transport = new AevatarAssistantTransport();
 
     await expect(
       transport.getHistory("nyxid-chat-never-created"),
-    ).rejects.toThrow();
+    ).rejects.toBeInstanceOf(AssistantConversationNotFoundError);
+  });
+
+  it("types an unrecoverable pending placeholder as not-found without a request", async () => {
+    const mock = stubFetch();
+    const transport = new AevatarAssistantTransport();
+
+    await expect(
+      transport.getHistory("nyxid-pending-lost-after-reload"),
+    ).rejects.toBeInstanceOf(AssistantConversationNotFoundError);
+    expect(mock).not.toHaveBeenCalled();
   });
 
   it("still rejects a transient failure on a conversation with no local transcript", async () => {
@@ -5091,6 +5108,111 @@ describe("typed new chats and legacy workflow compatibility", () => {
     });
   }
 
+  it("cancels a typed first turn before its placeholder is canonicalized", async () => {
+    const mock = stubFetch((url, init) =>
+      url === TYPED_URL && init?.method === "POST"
+        ? sseResponse([
+            {
+              type: "RUN_STARTED",
+              actorId: TYPED_CONVERSATION,
+              turnId: TYPED_TURN,
+            },
+          ])
+        : undefined,
+    );
+    const transport = new AevatarAssistantTransport();
+    const conversation = await transport.createConversation();
+    const events: TurnEvent[] = [];
+
+    transport.sendMessage(conversation.id, "cancel before start", (event) => {
+      events.push(event);
+    });
+    transport.cancelActiveTurn(conversation.id);
+    await vi.waitFor(() => {
+      expect(events.at(-1)).toMatchObject({
+        event: "turn.completed",
+        status: "cancelled",
+      });
+    });
+
+    expect(mock.mock.calls.some(([input]) => String(input) === TYPED_URL)).toBe(
+      false,
+    );
+    expect((await transport.getHistory(conversation.id)).conversation.id).toBe(
+      conversation.id,
+    );
+  });
+
+  it("resolves a canonical cancel address back to its placeholder-keyed run", async () => {
+    const encoder = new TextEncoder();
+    let started = false;
+    let releasePendingPull: (() => void) | undefined;
+    const mock = stubFetch((url, init) => {
+      if (url === TYPED_URL && init?.method === "POST") {
+        return new Response(
+          new ReadableStream<Uint8Array>({
+            pull(controller) {
+              if (!started) {
+                started = true;
+                controller.enqueue(
+                  encoder.encode(
+                    `data: ${JSON.stringify({
+                      type: "RUN_STARTED",
+                      actorId: TYPED_CONVERSATION,
+                      turnId: TYPED_TURN,
+                    })}\n\n`,
+                  ),
+                );
+                return;
+              }
+              return new Promise<void>((resolve) => {
+                releasePendingPull = resolve;
+              });
+            },
+            cancel: () => releasePendingPull?.(),
+          }),
+          { status: 200, headers: { "Content-Type": "text/event-stream" } },
+        );
+      }
+      if (
+        url === `${ASSISTANT_BASE}/conversations/${TYPED_CONVERSATION}/stop` &&
+        init?.method === "POST"
+      ) {
+        return jsonResponse({}, 202);
+      }
+      return undefined;
+    });
+    const transport = new AevatarAssistantTransport();
+    const conversation = await transport.createConversation();
+    const events: TurnEvent[] = [];
+
+    await new Promise<void>((resolve) => {
+      transport.sendMessage(
+        conversation.id,
+        "cancel by canonical id",
+        (event) => {
+          events.push(event);
+          if (event.event === "turn.status" && event.status === "running") {
+            transport.cancelActiveTurn(TYPED_CONVERSATION);
+          }
+          if (event.event === "turn.completed") resolve();
+        },
+      );
+    });
+
+    expect(events.at(-1)).toMatchObject({
+      event: "turn.completed",
+      status: "cancelled",
+    });
+    expect((await transport.getHistory(conversation.id)).conversation.id).toBe(
+      TYPED_CONVERSATION,
+    );
+    expect(mock).toHaveBeenCalledWith(
+      `${ASSISTANT_BASE}/conversations/${TYPED_CONVERSATION}/stop`,
+      expect.objectContaining({ method: "POST" }),
+    );
+  });
+
   it("creates a typed actor on the first turn and preserves its blocked action contract", async () => {
     const actionBodies: Record<string, unknown>[] = [];
     const mock = stubFetch((url, init) => {
@@ -5190,6 +5312,13 @@ describe("typed new chats and legacy workflow compatibility", () => {
     const history = await transport.getHistory(conversation.id);
     expect(history.conversation.id).toBe(TYPED_CONVERSATION);
     expect(history.messages.length).toBeGreaterThanOrEqual(2);
+    (transport as unknown as { listFetchedAt: number }).listFetchedAt =
+      Date.now();
+    const listed = await transport.listConversations();
+    expect(
+      listed.filter((item) => item.id === TYPED_CONVERSATION),
+    ).toHaveLength(1);
+    expect(listed.some((item) => item.id === conversation.id)).toBe(false);
 
     await new Promise<void>((resolve) => {
       const handle = transport.continueActions(
@@ -5250,7 +5379,7 @@ describe("typed new chats and legacy workflow compatibility", () => {
     const conversation = await transport.createConversation();
 
     await collectWorkflowTurn(transport, conversation.id, "first");
-    await collectWorkflowTurn(transport, conversation.id, "second");
+    await collectWorkflowTurn(transport, TYPED_CONVERSATION, "second");
 
     expect(bodies.map((entry) => entry.url)).toEqual([
       TYPED_URL,
@@ -5522,12 +5651,12 @@ describe("typed new chats and legacy workflow compatibility", () => {
           init?.method === "DELETE",
       ),
     ).toBe(true);
-    await expect(transport.getHistory(conversation.id)).rejects.toThrow(
-      "Conversation was not found.",
+    await expect(transport.getHistory(conversation.id)).rejects.toBeInstanceOf(
+      AssistantConversationNotFoundError,
     );
-    await expect(transport.getHistory(WORKFLOW_CONVERSATION)).rejects.toThrow(
-      "Conversation was not found.",
-    );
+    await expect(
+      transport.getHistory(WORKFLOW_CONVERSATION),
+    ).rejects.toBeInstanceOf(AssistantConversationNotFoundError);
   });
 
   it("posts a workflow action continuation to the actor named by its frame", async () => {

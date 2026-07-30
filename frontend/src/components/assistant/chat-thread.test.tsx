@@ -216,7 +216,8 @@ describe("ChatThread", () => {
     ).not.toBeInTheDocument();
   });
 
-  it("shows dots where the answer will appear until a turn has printed", () => {
+  it("drags the thinking dots out without displacing arriving content", () => {
+    vi.useFakeTimers();
     const userMessage = message({
       role: "user",
       blocks: [{ type: "text", block_id: "text-1", text: "Question" }],
@@ -229,11 +230,14 @@ describe("ChatThread", () => {
       />,
     );
 
-    expect(
-      document.querySelector("[data-streaming-dots]"),
-    ).toBeInTheDocument();
+    const dots = document.querySelector<HTMLElement>("[data-streaming-dots]");
+    expect(dots).toBeInTheDocument();
+    expect(dots?.children).toHaveLength(5);
+    Object.defineProperty(dots?.firstElementChild, "getAnimations", {
+      configurable: true,
+      value: () => [{ currentTime: 850 }],
+    });
 
-    // Content arrives: the dots must give way to it, not sit alongside.
     rerender(
       <ChatThread
         messages={[
@@ -246,6 +250,78 @@ describe("ChatThread", () => {
     );
 
     expect(screen.getByText("Hi")).toBeInTheDocument();
+    const leavingDots = document.querySelector<HTMLElement>(
+      "[data-streaming-dots]",
+    );
+    expect(leavingDots).toBeInTheDocument();
+    expect(leavingDots).toHaveAttribute("aria-hidden", "true");
+    expect(leavingDots).not.toHaveAttribute("role");
+    expect(leavingDots).toHaveAttribute("data-exit-direction", "left");
+    expect(leavingDots).toHaveClass("fixed");
+    expect(leavingDots?.closest("article")).toHaveClass("absolute");
+    expect(
+      screen.queryByRole("status", { name: "Assistant is thinking" }),
+    ).not.toBeInTheDocument();
+
+    act(() => vi.advanceTimersByTime(359));
+    expect(
+      document.querySelector("[data-streaming-dots]"),
+    ).toBeInTheDocument();
+    act(() => vi.advanceTimersByTime(1));
+    expect(
+      document.querySelector("[data-streaming-dots]"),
+    ).not.toBeInTheDocument();
+  });
+
+  it("retains inline dots as an inaccessible overlay when the first block arrives", () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date(0));
+    const userMessage = message({
+      id: "user-question",
+      role: "user",
+      blocks: [{ type: "text", block_id: "t1", text: "Question" }],
+    });
+    const emptyAssistant = message({
+      id: "assistant-answer",
+      blocks: [{ type: "text", block_id: "t2", text: "" }],
+    });
+    const { rerender } = render(
+      <ChatThread
+        messages={[userMessage, emptyAssistant]}
+        streaming
+        onDecideApproval={vi.fn()}
+      />,
+    );
+
+    expect(
+      screen.getByRole("status", { name: "Assistant is answering" }),
+    ).toBeInTheDocument();
+
+    act(() => vi.advanceTimersByTime(800));
+    rerender(
+      <ChatThread
+        messages={[
+          userMessage,
+          message({
+            id: "assistant-answer",
+            blocks: [{ type: "text", block_id: "t2", text: "First card" }],
+          }),
+        ]}
+        streaming
+        onDecideApproval={vi.fn()}
+      />,
+    );
+
+    expect(screen.getByText("First card")).toBeInTheDocument();
+    const leavingDots = document.querySelector<HTMLElement>(
+      "[data-streaming-dots]",
+    );
+    expect(leavingDots).toHaveAttribute("aria-hidden", "true");
+    expect(leavingDots).not.toHaveAttribute("role");
+    expect(leavingDots).toHaveAttribute("data-exit-direction", "right");
+    expect(leavingDots).toHaveClass("fixed");
+
+    act(() => vi.advanceTimersByTime(360));
     expect(
       document.querySelector("[data-streaming-dots]"),
     ).not.toBeInTheDocument();
@@ -268,9 +344,7 @@ describe("ChatThread", () => {
       />,
     );
 
-    expect(
-      document.querySelector("[data-streaming-dots]"),
-    ).toBeInTheDocument();
+    expect(document.querySelector("[data-streaming-dots]")).toBeInTheDocument();
   });
 
   it("reports an error when a turn closes having printed nothing", () => {
