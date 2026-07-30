@@ -20,6 +20,8 @@ import {
   useBillingWallet,
   useProvisionBillingWallet,
   useTopUpBilling,
+  useTopUpHistory,
+  openInvoiceReceipt,
 } from "@/hooks/use-billing";
 import { Button, ButtonIcon } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
@@ -195,7 +197,114 @@ export function BillingPage() {
         totals={usageQuery.data?.totals}
         loading={usageQuery.isLoading}
       />
+
+      <TopUpHistory />
     </div>
+  );
+}
+
+const TOPUP_STATUS_VARIANT = {
+  paid: "success",
+  pending: "secondary",
+  failed: "destructive",
+  voided: "secondary",
+} as const;
+
+function TopUpHistory() {
+  const historyQuery = useTopUpHistory();
+  const topups = historyQuery.data?.topups ?? [];
+
+  async function handleReceipt(lagoInvoiceId: string) {
+    try {
+      await openInvoiceReceipt(lagoInvoiceId);
+    } catch (error) {
+      toast.error(
+        error instanceof ApiError
+          ? error.message
+          : "The receipt is not ready yet; try again shortly",
+      );
+    }
+  }
+
+  if (historyQuery.isLoading) {
+    return <Skeleton className="h-[200px] w-full" />;
+  }
+
+  return (
+    <Card>
+      <CardHeader>
+        <CardTitle>Top-up history</CardTitle>
+        <p className="mt-1 text-[12px] text-muted-foreground">
+          Payments, their status, and downloadable receipts.
+        </p>
+      </CardHeader>
+      <CardContent>
+        <div className="overflow-hidden rounded-lg border border-border">
+          <Table>
+            <TableHeader>
+              <TableRow>
+                <TableHead>Date</TableHead>
+                <TableHead className="text-right">Credits</TableHead>
+                <TableHead>Invoice</TableHead>
+                <TableHead>Status</TableHead>
+                <TableHead className="text-right">Actions</TableHead>
+              </TableRow>
+            </TableHeader>
+            <TableBody>
+              {topups.length === 0 ? (
+                <TableRow>
+                  <TableCell colSpan={5} className="py-8 text-center text-muted-foreground">
+                    No top-ups yet.
+                  </TableCell>
+                </TableRow>
+              ) : (
+                topups.map((topup) => (
+                  <TableRow key={topup.id}>
+                    <TableCell>
+                      {new Date(topup.created_at).toLocaleString()}
+                    </TableCell>
+                    <TableCell className="text-right">
+                      {formatNumber(topup.amount_credits)}
+                    </TableCell>
+                    <TableCell className="text-muted-foreground">
+                      {topup.invoice_number ?? "—"}
+                    </TableCell>
+                    <TableCell>
+                      <Badge variant={TOPUP_STATUS_VARIANT[topup.status]}>
+                        {labelize(topup.status)}
+                      </Badge>
+                    </TableCell>
+                    <TableCell className="text-right">
+                      {topup.status === "pending" && topup.checkout_url ? (
+                        <Button
+                          variant="outline"
+                          size="sm"
+                          onClick={() => openExternal(topup.checkout_url ?? "")}
+                        >
+                          Resume payment
+                        </Button>
+                      ) : topup.receipt_available && topup.lago_invoice_id ? (
+                        <Button
+                          variant="outline"
+                          size="sm"
+                          onClick={() =>
+                            void handleReceipt(topup.lago_invoice_id ?? "")
+                          }
+                        >
+                          Download receipt
+                        </Button>
+                      ) : (
+                        <span className="text-muted-foreground">—</span>
+                      )}
+                    </TableCell>
+                  </TableRow>
+                ))
+              )}
+            </TableBody>
+          </Table>
+        </div>
+      </CardContent>
+    </Card>
   );
 }
 

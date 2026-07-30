@@ -102,6 +102,29 @@ export type BillingReadOnlyBlock = z.infer<typeof billingReadOnlyBlockSchema>;
 export type BillingUsageRow = z.infer<typeof billingUsageRowSchema>;
 export type BillingUsageTotals = z.infer<typeof billingUsageTotalsSchema>;
 export type BillingUsageResponse = z.infer<typeof billingUsageResponseSchema>;
+export const topUpHistoryEntrySchema = z.object({
+  id: z.string().min(1),
+  created_at: z.string().min(1),
+  amount_credits: z.number().int(),
+  status: z.enum(["paid", "pending", "failed", "voided"]),
+  invoice_number: z.string().nullable().optional(),
+  lago_invoice_id: z.string().nullable().optional(),
+  checkout_url: z.string().nullable().optional(),
+  receipt_available: z.boolean(),
+});
+
+export const topUpHistoryResponseSchema = z.object({
+  owner_id: z.string().min(1),
+  topups: z.array(topUpHistoryEntrySchema),
+});
+
+export const invoiceDownloadResponseSchema = z.object({
+  file_url: z.string().min(1),
+});
+
+export type TopUpHistoryEntry = z.infer<typeof topUpHistoryEntrySchema>;
+export type TopUpHistoryResponse = z.infer<typeof topUpHistoryResponseSchema>;
+
 export type BillingWalletResponse = z.infer<typeof billingWalletResponseSchema>;
 export type ProvisionBillingWalletRequest = z.infer<typeof provisionBillingWalletRequestSchema>;
 export type TopUpBillingRequest = z.infer<typeof topUpBillingRequestSchema>;
