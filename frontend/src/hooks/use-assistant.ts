@@ -49,6 +49,10 @@ const PENDING_APPROVALS_PAGE_SIZE = 50;
 const APPROVAL_HISTORY_PAGE_SIZE = 20;
 const STREAM_START_DEADLINE_MS = 8_000;
 const PROJECTION_DEADLINE_MS = 5_000;
+// Streaming events update the transport mirror synchronously. Projecting that
+// mirror into React Query at most twenty times per second keeps Markdown-heavy
+// active threads from starving sidebar navigation on the main thread.
+const STREAM_PROJECTION_INTERVAL_MS = 50;
 
 const activeHandles = new Map<string, TurnHandle>();
 const episodeOwners = new WeakMap<QueryClient, Map<string, symbol>>();
@@ -426,6 +430,7 @@ function createTurnEventPump(
   let hasReceivedEvent = false;
   let startExpired = false;
   let startDeadline: ReturnType<typeof setTimeout> | undefined;
+  let projectionTimer: ReturnType<typeof setTimeout> | undefined;
   const ownsEpisode = () => owners.get(targetId) === owner;
   const clearStartDeadline = () => {
     if (startDeadline !== undefined) {
@@ -439,6 +444,34 @@ function createTurnEventPump(
       assistantKeys.episode(targetId),
       () => ({ open, printed, projecting: projections > 0 }),
     );
+  };
+  const clearProjectionTimer = () => {
+    if (projectionTimer !== undefined) {
+      clearTimeout(projectionTimer);
+      projectionTimer = undefined;
+    }
+  };
+  const project = () => {
+    projectionTimer = undefined;
+    if (!ownsEpisode()) return;
+    projections += 1;
+    publish();
+    // A delete can race a cancel-driven projection, in which case the history
+    // read legitimately rejects for the tombstoned id.
+    void projectTransportState(queryClient, targetId)
+      .catch(() => undefined)
+      .finally(() => {
+        projections -= 1;
+        publish();
+      });
+  };
+  const scheduleProjection = (immediate = false) => {
+    if (immediate) {
+      clearProjectionTimer();
+      project();
+      return;
+    }
+    projectionTimer ??= setTimeout(project, STREAM_PROJECTION_INTERVAL_MS);
   };
   owners.set(targetId, owner);
   publish();
@@ -497,22 +530,10 @@ function createTurnEventPump(
         });
       }
     }
-    // Counted, and published, because this projection is the work the thread
-    // would otherwise have to guess the duration of: the terminal status is
-    // delivered synchronously above while the content it refers to arrives
-    // through this read. Reporting "the turn printed nothing" before it settles
-    // is how a turn that DID answer gets called an error.
-    projections += 1;
-    publish();
-    // Swallow projection failures: after a delete races a cancel-driven
-    // event, the history read legitimately rejects (tombstoned id) and
-    // must not surface as an unhandled rejection.
-    projectTransportState(queryClient, targetId)
-      .catch(() => undefined)
-      .finally(() => {
-        projections -= 1;
-        publish();
-      });
+    // Intermediate token/tool frames can share one UI projection. A terminal
+    // event flushes immediately so the composer and episode state settle with
+    // no extra interval of latency.
+    scheduleProjection(event.event === "turn.completed");
   };
 
   return {
@@ -521,6 +542,7 @@ function createTurnEventPump(
     expired: () => startExpired,
     restorePrevious: () => {
       clearStartDeadline();
+      clearProjectionTimer();
       if (!ownsEpisode()) return;
       if (previousOwner) {
         owners.set(targetId, previousOwner);
@@ -534,6 +556,7 @@ function createTurnEventPump(
     },
     disown: () => {
       clearStartDeadline();
+      clearProjectionTimer();
       if (!ownsEpisode()) return;
       owners.delete(targetId);
       queryClient.setQueryData<TurnEpisode | null>(

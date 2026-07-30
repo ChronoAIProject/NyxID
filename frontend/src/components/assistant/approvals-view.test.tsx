@@ -1,5 +1,5 @@
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import { render, screen, waitFor } from "@testing-library/react";
+import { render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import type { ReactNode } from "react";
@@ -153,5 +153,48 @@ describe("ApprovalsView", () => {
     expect(
       await screen.findByText("Nothing waiting on you"),
     ).toBeInTheDocument();
+  });
+
+  // A row missing a sort key used to throw out of `Array.sort`, and with no
+  // router error component that unmounted the whole app — sidebar included —
+  // so the page read as "every button is dead" rather than "one row is odd".
+  it("still renders when a row is missing its sort timestamps", async () => {
+    // Order matters: `Array.sort` only throws when the undated row lands on the
+    // left of the comparison, so the undated row must not be first.
+    const undated = request({
+      id: "req-undated",
+      action_description: "Post without an expiry",
+      expires_at: undefined as unknown as string,
+    });
+    const undecided = request({
+      id: "req-undecided",
+      status: "approved",
+      action_description: "Decided at an unknown time",
+      created_at: undefined as unknown as string,
+      decided_at: null,
+    });
+    mockGet.mockImplementation((url: string) => {
+      if (url.startsWith("/notifications/settings")) {
+        return Promise.resolve({ grant_expiry_days: 7 });
+      }
+      if (url.includes("status=pending")) {
+        return Promise.resolve(listResponse([PENDING, undated]));
+      }
+      return Promise.resolve(listResponse([DECIDED[0]!, undecided]));
+    });
+
+    render(<ApprovalsView />, { wrapper: createWrapper() });
+
+    expect(await screen.findByText("Waiting on you")).toBeInTheDocument();
+    expect(screen.getByText("Post without an expiry")).toBeInTheDocument();
+    expect(
+      screen.getByText("Post the drafted summary to #payments-oncall"),
+    ).toBeInTheDocument();
+    expect(
+      await screen.findAllByText("Decided at an unknown time"),
+    ).toHaveLength(2);
+    const historyRows = within(screen.getByRole("table")).getAllByRole("row");
+    expect(historyRows[1]).toHaveTextContent("Rotate the deploy key");
+    expect(historyRows[2]).toHaveTextContent("Decided at an unknown time");
   });
 });

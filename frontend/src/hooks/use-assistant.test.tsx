@@ -355,6 +355,74 @@ describe("assistant hooks", () => {
     queryClient.clear();
   });
 
+  it("coalesces bursty stream frames before projecting them into React", async () => {
+    const { queryClient, Wrapper } = createHarness();
+    const historySpy = vi.spyOn(assistantTransport, "getHistory");
+    let emit: Parameters<typeof assistantTransport.sendMessage>[2] | undefined;
+    const sendSpy = vi
+      .spyOn(assistantTransport, "sendMessage")
+      .mockImplementation((_conversationId, _content, onEvent) => {
+        emit = onEvent;
+        for (let cursor = 1; cursor <= 250; cursor += 1) {
+          onEvent({
+            cursor,
+            event: "block.delta",
+            block_id: "streaming-text",
+            text: "x",
+          });
+        }
+        return { turnId: "turn-burst", cancel: () => {} };
+      });
+    const { result, unmount } = renderHook(
+      () => ({ send: useSendMessage("conversation-stripe") }),
+      { wrapper: Wrapper },
+    );
+
+    await act(async () => {
+      await result.current.send.mutateAsync("Bursty response.");
+    });
+    // Ignore the send mutation's intentional immediate projection. The 250
+    // stream callbacks above must produce only one additional projection.
+    historySpy.mockClear();
+
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(49);
+    });
+    expect(historySpy).not.toHaveBeenCalled();
+
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(1);
+    });
+    expect(historySpy).toHaveBeenCalledTimes(1);
+
+    act(() => {
+      emit?.({
+        cursor: 251,
+        event: "block.delta",
+        block_id: "streaming-text",
+        text: "final",
+      });
+      emit?.({
+        cursor: 252,
+        event: "turn.completed",
+        turn_id: "turn-burst",
+        status: "completed",
+        error: null,
+      });
+    });
+    // Terminal events bypass the interval so Stop/send state cannot linger.
+    expect(historySpy).toHaveBeenCalledTimes(2);
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(50);
+    });
+    expect(historySpy).toHaveBeenCalledTimes(2);
+
+    sendSpy.mockRestore();
+    historySpy.mockRestore();
+    unmount();
+    queryClient.clear();
+  });
+
   it("rejects a concurrent send without disturbing the active turn", async () => {
     const { queryClient, Wrapper } = createHarness();
     const { result, unmount } = renderHook(
