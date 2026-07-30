@@ -25,6 +25,7 @@ import type {
   ActiveTurn,
   Conversation,
   ConversationHistory,
+  TurnEpisode,
   TurnEvent,
   TurnHandle,
 } from "@/types/assistant";
@@ -36,6 +37,8 @@ export const assistantKeys = {
   history: (conversationId: string) =>
     [...ROOT, "history", conversationId] as const,
   turn: (conversationId: string) => [...ROOT, "turn", conversationId] as const,
+  episode: (conversationId: string) =>
+    [...ROOT, "episode", conversationId] as const,
   workspace: [...ROOT, "workspace"] as const,
 } as const;
 
@@ -43,8 +46,33 @@ export const assistantKeys = {
 // simultaneously-pending; the badge uses the server-side total anyway.
 const PENDING_APPROVALS_PAGE_SIZE = 50;
 const APPROVAL_HISTORY_PAGE_SIZE = 20;
+const STREAM_START_DEADLINE_MS = 8_000;
+const PROJECTION_DEADLINE_MS = 5_000;
 
 const activeHandles = new Map<string, TurnHandle>();
+const episodeOwners = new WeakMap<QueryClient, Map<string, symbol>>();
+
+function ownersFor(queryClient: QueryClient): Map<string, symbol> {
+  const existing = episodeOwners.get(queryClient);
+  if (existing) return existing;
+  const owners = new Map<string, symbol>();
+  episodeOwners.set(queryClient, owners);
+  return owners;
+}
+
+async function waitWithDeadline(
+  task: Promise<void>,
+  timeoutMs: number,
+): Promise<void> {
+  let timeout: ReturnType<typeof setTimeout> | undefined;
+  await Promise.race([
+    task,
+    new Promise<void>((resolve) => {
+      timeout = setTimeout(resolve, timeoutMs);
+    }),
+  ]);
+  if (timeout !== undefined) clearTimeout(timeout);
+}
 
 /**
  * Warm the query cache from the transport. BEST EFFORT, and deliberately
@@ -66,23 +94,30 @@ async function projectTransportState(
   queryClient: QueryClient,
   conversationId: string,
 ): Promise<void> {
-  const [history, conversations] = await Promise.allSettled([
-    assistantTransport.getHistory(conversationId),
-    assistantTransport.listConversations(),
-  ]);
-  if (history.status === "fulfilled") {
-    queryClient.setQueryData<ConversationHistory>(
-      assistantKeys.history(conversationId),
-      () => history.value,
-    );
-  }
-  if (conversations.status === "fulfilled") {
-    queryClient.setQueryData<Conversation[]>(
-      assistantKeys.conversations,
-      () => conversations.value,
-    );
-  }
-  await queryClient.invalidateQueries({ queryKey: assistantKeys.workspace });
+  await waitWithDeadline(
+    (async () => {
+      const [history, conversations] = await Promise.allSettled([
+        assistantTransport.getHistory(conversationId),
+        assistantTransport.listConversations(),
+      ]);
+      if (history.status === "fulfilled") {
+        queryClient.setQueryData<ConversationHistory>(
+          assistantKeys.history(conversationId),
+          () => history.value,
+        );
+      }
+      if (conversations.status === "fulfilled") {
+        queryClient.setQueryData<Conversation[]>(
+          assistantKeys.conversations,
+          () => conversations.value,
+        );
+      }
+      await queryClient.invalidateQueries({
+        queryKey: assistantKeys.workspace,
+      });
+    })(),
+    PROJECTION_DEADLINE_MS,
+  );
 }
 
 function turnFromEvent(event: TurnEvent): ActiveTurn | undefined {
@@ -130,9 +165,7 @@ export function useAssistantApprovals() {
   const pending: AssistantApprovalEntry[] = (
     pendingQuery.data?.requests ?? []
   ).map((request) => toAssistantApprovalEntry(request, grantDurationSec));
-  const history: AssistantApprovalEntry[] = (
-    historyQuery.data?.requests ?? []
-  )
+  const history: AssistantApprovalEntry[] = (historyQuery.data?.requests ?? [])
     .filter((request) => request.status !== "pending")
     .map((request) => toAssistantApprovalEntry(request, grantDurationSec));
 
@@ -241,6 +274,10 @@ export function useConversation(conversationId: string | undefined) {
     queryKey: assistantKeys.history(conversationId ?? ""),
     queryFn: () => assistantTransport.getHistory(conversationId ?? ""),
     enabled: Boolean(conversationId),
+    retry: (failureCount, error) => {
+      if (error instanceof ApiError && error.status === 404) return false;
+      return failureCount < 3;
+    },
   });
 }
 
@@ -248,6 +285,22 @@ export function useAssistantTurn(conversationId: string | undefined) {
   return useQuery({
     queryKey: assistantKeys.turn(conversationId ?? ""),
     queryFn: async (): Promise<ActiveTurn | null> => null,
+    enabled: false,
+    initialData: null,
+    staleTime: Number.POSITIVE_INFINITY,
+  });
+}
+
+/**
+ * The current episode's loading state, written by its event pump. A pure cache
+ * slot like the turn above — nothing fetches it. Null means no stream has run
+ * for this conversation in this session, which is also the state after a
+ * reload, so the thread falls back to reading the transcript.
+ */
+export function useTurnEpisode(conversationId: string | undefined) {
+  return useQuery({
+    queryKey: assistantKeys.episode(conversationId ?? ""),
+    queryFn: async (): Promise<TurnEpisode | null> => null,
     enabled: false,
     initialData: null,
     staleTime: Number.POSITIVE_INFINITY,
@@ -321,14 +374,106 @@ export interface SentMessage {
  * concurrent send never touches it, and at-least-once duplicates (e.g. a
  * late "running") cannot regress terminal state.
  */
+/**
+ * Whether an event puts something on screen. Block COUNT will not do: a turn
+ * that opens with a connect card carries an empty leading text block, and an
+ * opened text block with no characters is present-yet-blank.
+ */
+function eventPrintsContent(event: TurnEvent): boolean {
+  switch (event.event) {
+    case "block.delta":
+      return event.text.trim().length > 0;
+    case "block.updated":
+      return "decision" in event.patch && event.patch.decision !== null;
+    case "block.started":
+    case "block.completed":
+      return (
+        event.block.type !== "text" ||
+        (typeof event.block.text === "string" &&
+          event.block.text.trim().length > 0)
+      );
+    default:
+      return false;
+  }
+}
+
+interface TurnEventPump {
+  readonly onEvent: (event: TurnEvent) => void;
+  readonly receivedEvent: () => boolean;
+  readonly expired: () => boolean;
+  readonly restorePrevious: () => void;
+  readonly disown: () => void;
+}
+
 function createTurnEventPump(
   queryClient: QueryClient,
   targetId: string,
-): (event: TurnEvent) => void {
+): TurnEventPump {
+  const owners = ownersFor(queryClient);
+  const owner = Symbol(targetId);
+  const previousOwner = owners.get(targetId);
+  const previousEpisode = queryClient.getQueryData<TurnEpisode | null>(
+    assistantKeys.episode(targetId),
+  );
   let lastSeenCursor = 0;
-  return (event) => {
+  // Per-episode, because the pump itself is per-episode. Opening it here rather
+  // than on the first event is what lets the thread tell "a stream is starting"
+  // from "the previous turn's terminal status is still cached".
+  let printed = false;
+  let open = true;
+  let projections = 0;
+  let hasReceivedEvent = false;
+  let startExpired = false;
+  let startDeadline: ReturnType<typeof setTimeout> | undefined;
+  const ownsEpisode = () => owners.get(targetId) === owner;
+  const clearStartDeadline = () => {
+    if (startDeadline !== undefined) {
+      clearTimeout(startDeadline);
+      startDeadline = undefined;
+    }
+  };
+  const publish = () => {
+    if (!ownsEpisode()) return;
+    queryClient.setQueryData<TurnEpisode | null>(
+      assistantKeys.episode(targetId),
+      () => ({ open, printed, projecting: projections > 0 }),
+    );
+  };
+  owners.set(targetId, owner);
+  publish();
+
+  startDeadline = setTimeout(() => {
+    if (!ownsEpisode() || hasReceivedEvent) return;
+    startExpired = true;
+    assistantTransport.cancelActiveTurn(targetId);
+    if (!ownsEpisode()) return;
+
+    const handle = activeHandles.get(targetId);
+    const error = {
+      code: "stream_start_timeout",
+      message: "The assistant did not start replying in time. Try again.",
+    };
+    open = false;
+    activeHandles.delete(targetId);
+    queryClient.setQueryData<ActiveTurn | null>(
+      assistantKeys.turn(targetId),
+      () => ({ turnId: handle?.turnId ?? null, status: "failed", error }),
+    );
+    publish();
+    toast.error("The assistant reply failed", {
+      id: `assistant-turn-start-timeout-${targetId}`,
+      description: error.message,
+    });
+  }, STREAM_START_DEADLINE_MS);
+
+  const onEvent = (event: TurnEvent) => {
+    if (!ownsEpisode()) return;
+    hasReceivedEvent = true;
+    clearStartDeadline();
     if (event.cursor <= lastSeenCursor) return;
     lastSeenCursor = event.cursor;
+    if (eventPrintsContent(event)) printed = true;
+    if (event.event === "turn.completed") open = false;
     const turn = turnFromEvent(event);
     if (turn) {
       queryClient.setQueryData<ActiveTurn | null>(
@@ -351,10 +496,50 @@ function createTurnEventPump(
         });
       }
     }
+    // Counted, and published, because this projection is the work the thread
+    // would otherwise have to guess the duration of: the terminal status is
+    // delivered synchronously above while the content it refers to arrives
+    // through this read. Reporting "the turn printed nothing" before it settles
+    // is how a turn that DID answer gets called an error.
+    projections += 1;
+    publish();
     // Swallow projection failures: after a delete races a cancel-driven
     // event, the history read legitimately rejects (tombstoned id) and
     // must not surface as an unhandled rejection.
-    projectTransportState(queryClient, targetId).catch(() => undefined);
+    projectTransportState(queryClient, targetId)
+      .catch(() => undefined)
+      .finally(() => {
+        projections -= 1;
+        publish();
+      });
+  };
+
+  return {
+    onEvent,
+    receivedEvent: () => hasReceivedEvent,
+    expired: () => startExpired,
+    restorePrevious: () => {
+      clearStartDeadline();
+      if (!ownsEpisode()) return;
+      if (previousOwner) {
+        owners.set(targetId, previousOwner);
+      } else {
+        owners.delete(targetId);
+      }
+      queryClient.setQueryData<TurnEpisode | null>(
+        assistantKeys.episode(targetId),
+        () => previousEpisode ?? null,
+      );
+    },
+    disown: () => {
+      clearStartDeadline();
+      if (!ownsEpisode()) return;
+      owners.delete(targetId);
+      queryClient.setQueryData<TurnEpisode | null>(
+        assistantKeys.episode(targetId),
+        () => null,
+      );
+    },
   };
 }
 
@@ -380,14 +565,28 @@ export function useSendMessage(conversationId: string | undefined) {
         await projectTransportState(queryClient, target);
       }
       const targetId = target;
-      const handle = assistantTransport.sendMessage(
-        targetId,
-        content,
-        createTurnEventPump(queryClient, targetId),
-      );
-      activeHandles.set(targetId, handle);
-      await projectTransportState(queryClient, targetId);
-      return { conversationId: targetId, handle };
+      // The pump opens this send's episode as it is constructed, which is what
+      // stops the PREVIOUS turn's cached terminal status from reading as "this
+      // turn closed having printed nothing". Writing `running` into the turn
+      // cache here instead would survive a stream that hangs before its
+      // response headers — the transport arms its watchdog only once a body
+      // exists — and leave the composer disabled with no turn to stop.
+      const pump = createTurnEventPump(queryClient, targetId);
+      try {
+        const handle = assistantTransport.sendMessage(
+          targetId,
+          content,
+          pump.onEvent,
+        );
+        activeHandles.set(targetId, handle);
+        await projectTransportState(queryClient, targetId);
+        return { conversationId: targetId, handle };
+      } catch (error) {
+        // A rejected candidate never became the owner of a real turn. Restore
+        // the prior pump and its state instead of clearing a live episode.
+        pump.restorePrevious();
+        throw error;
+      }
     },
   });
 }
@@ -403,7 +602,10 @@ export function describeSendFailure(error: unknown): {
   readonly message: string;
   readonly description: string;
 } {
-  if (error instanceof ApiError && (error.status === 401 || error.status === 403)) {
+  if (
+    error instanceof ApiError &&
+    (error.status === 401 || error.status === 403)
+  ) {
     return {
       message: "Message not sent",
       description:
@@ -454,14 +656,26 @@ export function useDecideApproval(conversationId: string | undefined) {
       // On the live contract the approve endpoint streams an SSE
       // continuation of the run; the pump projects its events and the
       // handle makes the stop button work during it.
-      const handle = await assistantTransport.decideApproval(
-        conversationId,
-        blockId,
-        approved,
-        createTurnEventPump(queryClient, conversationId),
-      );
-      if (handle) activeHandles.set(conversationId, handle);
-      await projectTransportState(queryClient, conversationId);
+      const pump = createTurnEventPump(queryClient, conversationId);
+      try {
+        const handle = await assistantTransport.decideApproval(
+          conversationId,
+          blockId,
+          approved,
+          pump.onEvent,
+        );
+        if (handle) {
+          activeHandles.set(conversationId, handle);
+        } else if (!pump.receivedEvent()) {
+          pump.disown();
+        }
+        await projectTransportState(queryClient, conversationId);
+      } catch (error) {
+        if (!pump.receivedEvent() && !pump.expired()) {
+          pump.restorePrevious();
+        }
+        throw error;
+      }
     },
     // Without this toast a failed approve POST (or an active-turn
     // rejection) is invisible: the buttons just re-enable and nothing

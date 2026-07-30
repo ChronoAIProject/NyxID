@@ -17,13 +17,50 @@ import {
   useDecideApproval,
   useDeleteConversation,
   useSendMessage,
+  useTurnEpisode,
 } from "@/hooks/use-assistant";
 import { resolveAssistantConversationId } from "@/lib/assistant/conversation-resolution";
 import { parseAssistantSearch } from "@/lib/assistant/search";
 import { useAssistantContextStore } from "@/stores/assistant-context-store";
 import { useAssistantDraftStore } from "@/stores/assistant-draft-store";
 import { useAuthStore } from "@/stores/auth-store";
-import { isTurnActive } from "@/types/assistant";
+import { isTurnActive, type AssistantMessage } from "@/types/assistant";
+
+/** Text of a user message's first text block, for the optimistic-echo check. */
+function userMessageText(
+  message: AssistantMessage | undefined,
+): string | undefined {
+  if (message?.role !== "user") return undefined;
+  for (const block of message.blocks as unknown[]) {
+    if (
+      typeof block === "object" &&
+      block !== null &&
+      "type" in block &&
+      block.type === "text" &&
+      "text" in block &&
+      typeof block.text === "string"
+    ) {
+      return block.text;
+    }
+  }
+  return undefined;
+}
+
+function optimisticUserMessage(text: string): AssistantMessage {
+  return {
+    id: "optimistic-user-message",
+    role: "user",
+    schema_version: 1,
+    blocks: [{ type: "text", block_id: "optimistic-user-block", text }],
+    created_at: new Date().toISOString(),
+  };
+}
+
+interface PendingSendEcho {
+  readonly targetId: string | undefined;
+  readonly content: string;
+  readonly matchingMessagesBeforeSend: number;
+}
 
 export function AssistantPage({
   view = "chat",
@@ -57,6 +94,10 @@ export function AssistantPage({
   // and place its fade.
   const composerRef = useRef<HTMLDivElement>(null);
   const [composerHeight, setComposerHeight] = useState(0);
+  // Which conversation the in-flight send was aimed at, so its optimistic echo
+  // cannot follow the reader into a different thread. State rather than a ref:
+  // it is read during render to build the message list.
+  const [pendingSendEcho, setPendingSendEcho] = useState<PendingSendEcho>();
 
   useLayoutEffect(() => {
     const element = composerRef.current;
@@ -102,6 +143,7 @@ export function AssistantPage({
   ]);
   const history = useConversation(selectedId);
   const turn = useAssistantTurn(selectedId);
+  const episode = useTurnEpisode(selectedId);
   const sendMessage = useSendMessage(selectedId);
   const cancelTurn = useCancelTurn(selectedId);
   const decideApproval = useDecideApproval(selectedId);
@@ -226,6 +268,19 @@ export function AssistantPage({
   // that fails before any turn exists must be said out loud — the composer
   // restores the text, and without the toast the button just looks dead.
   async function handleSend(content: string) {
+    // The mutation outlives a conversation switch, and its `variables` say
+    // nothing about where the text was going — without this the reader can
+    // switch chats mid-send and watch the previous chat's message appear in
+    // this one's transcript. `undefined` is the draft thread, which matches.
+    const normalizedContent = content.trim();
+    const matchingMessagesBeforeSend = (history.data?.messages ?? []).filter(
+      (message) => userMessageText(message)?.trim() === normalizedContent,
+    ).length;
+    setPendingSendEcho({
+      targetId: selectedId,
+      content,
+      matchingMessagesBeforeSend,
+    });
     try {
       const sent = await sendMessage.mutateAsync(content);
       if (sent.conversationId !== selectedId) {
@@ -244,7 +299,71 @@ export function AssistantPage({
       : view === "approvals"
         ? "Approvals"
         : (history.data?.conversation.title ?? "New chat");
-  const active = isTurnActive(turn.data?.status);
+  const turnStatus = turn.data?.status;
+  const active = isTurnActive(turnStatus);
+
+  /**
+   * Paint the turn from the in-flight send until the transcript catches up.
+   *
+   * "New chat" allocates nothing, so the first send has to create the
+   * conversation before it has an id — and until that round-trip returns there
+   * is no id, no enabled history query, and nothing on screen. The composer has
+   * already cleared the textarea by then (it clears, THEN awaits), so the reader
+   * watches their message vanish into the empty state for the whole create.
+   *
+   * Also covers the shorter gap on an existing conversation, between the send
+   * starting and the projection landing.
+   */
+  const pendingEcho = useMemo(
+    () =>
+      sendMessage.isPending &&
+      pendingSendEcho !== undefined &&
+      pendingSendEcho.targetId === selectedId
+        ? pendingSendEcho
+        : sendMessage.isPending &&
+            pendingSendEcho === undefined &&
+            typeof sendMessage.variables === "string"
+          ? {
+              targetId: selectedId,
+              content: sendMessage.variables,
+              matchingMessagesBeforeSend: 0,
+            }
+          : undefined,
+    [pendingSendEcho, selectedId, sendMessage.isPending, sendMessage.variables],
+  );
+  const messages = useMemo(() => {
+    const transcript = history.data?.messages ?? [];
+    if (pendingEcho === undefined) return transcript;
+    const normalizedContent = pendingEcho.content.trim();
+    const matchingMessages = transcript.filter(
+      (message) => userMessageText(message)?.trim() === normalizedContent,
+    ).length;
+    // The transport's projected copy is present only when the count advanced
+    // beyond the send-time snapshot. An older identical message is not the
+    // identity of this send and must not suppress its optimistic echo.
+    const projected = matchingMessages > pendingEcho.matchingMessagesBeforeSend;
+    return projected
+      ? transcript
+      : [...transcript, optimisticUserMessage(pendingEcho.content)];
+  }, [history.data?.messages, pendingEcho]);
+  const episodeState = episode.data ?? undefined;
+  const awaitingFirstTurn =
+    active || sendMessage.isPending || episodeState?.open === true;
+
+  /**
+   * Whether THIS episode has closed, per the pump that served it.
+   *
+   * Turn status cannot answer this. It still holds the previous turn's terminal
+   * value until the new episode's first event lands, and an approval
+   * continuation reuses the original turn id outright — so a closed status paired
+   * with a content-free tail is not evidence that the current stream said
+   * nothing. Cancelled stays excluded whichever way it arrives: the reader
+   * pressed Stop, and calling their own decision an error would be a lie.
+   */
+  const turnEnded =
+    episodeState !== undefined &&
+    !episodeState.open &&
+    turnStatus !== "cancelled";
   const draftKey =
     selectedId && (!conversations.isSuccess || selectedConversationExists)
       ? `conv:${selectedId}`
@@ -291,19 +410,23 @@ export function AssistantPage({
             messages are unaffected.
           </div>
         ) : null}
-        {history.isLoading ? (
+        {history.isLoading && messages.length === 0 ? (
           <div className="flex flex-1 items-center justify-center text-[12px] text-text-tertiary">
             Loading conversation...
           </div>
         ) : (
           <ChatThread
-            messages={history.data?.messages ?? []}
+            messages={messages}
             bottomInset={composerHeight}
             thinking={
-              active && history.data?.messages.at(-1)?.role !== "assistant"
+              awaitingFirstTurn &&
+              (!active || messages.at(-1)?.role !== "assistant")
             }
-            streaming={
-              active && history.data?.messages.at(-1)?.role === "assistant"
+            streaming={active && messages.at(-1)?.role === "assistant"}
+            turnEnded={turnEnded}
+            turnPrinted={episodeState?.printed}
+            transcriptSettling={
+              episodeState?.projecting === true || sendMessage.isPending
             }
             onDecideApproval={(blockId, approved) =>
               decideApproval.mutateAsync({ blockId, approved })
