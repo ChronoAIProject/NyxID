@@ -35,6 +35,13 @@ export function AssistantShell({
   useEffect(() => {
     if (!mobileSidebarOpen) return;
     function closeOnEscape(event: KeyboardEvent) {
+      // Radix layers opened inside the drawer (the row menu, its delete
+      // confirmation) handle Escape on `document` in the capture phase and
+      // preventDefault, well before this window-level listener. Escape must
+      // dismiss the innermost layer only -- taking the drawer down with it
+      // would unmount that layer's anchor and skip a whole step of the way
+      // back in one keypress.
+      if (event.defaultPrevented) return;
       if (event.key === "Escape") setMobileSidebarOpen(false);
     }
     window.addEventListener("keydown", closeOnEscape);
@@ -159,7 +166,11 @@ export function AssistantShell({
             <div
               className="min-h-0 flex-1"
               onClick={(event) => {
-                if ((event.target as HTMLElement).closest("a,button")) {
+                const target = event.target as HTMLElement;
+                // Menu triggers open something anchored inside the drawer --
+                // closing it would unmount the anchor out from under them.
+                if (target.closest("[data-keep-drawer-open]")) return;
+                if (target.closest("a,button")) {
                   setMobileSidebarOpen(false);
                 }
               }}

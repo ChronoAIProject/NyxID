@@ -1,4 +1,4 @@
-import { act, render, screen } from "@testing-library/react";
+import { act, fireEvent, render, screen } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { AssistantMessage } from "@/types/assistant";
 import { ChatThread } from "./chat-thread";
@@ -25,6 +25,7 @@ function message(overrides: Partial<AssistantMessage>): AssistantMessage {
 describe("ChatThread", () => {
   afterEach(() => {
     vi.useRealTimers();
+    vi.restoreAllMocks();
   });
 
   it("renders an unsupported shell for an unknown block type", () => {
@@ -86,7 +87,31 @@ describe("ChatThread", () => {
     );
   });
 
-  it("reserves tail room and fades over the composer it scrolls behind", () => {
+  it("draws the halo from the sprite strip rather than a bare CSS ring", () => {
+    render(
+      <ChatThread
+        messages={[
+          message({
+            role: "user",
+            blocks: [{ type: "text", block_id: "text-1", text: "Hi" }],
+          }),
+        ]}
+        thinking
+        onDecideApproval={vi.fn()}
+      />,
+    );
+
+    // The strip URL has to come from the JS import: app.css is shared with the
+    // CLI wizard bundle, whose single-file build would inline any asset a
+    // stylesheet references as base64 into a binary that has no chat UI.
+    const sprite = document.querySelector<HTMLElement>(
+      "[data-assistant-halo] .assistant-halo-sprite",
+    );
+    expect(sprite).toBeInTheDocument();
+    expect(sprite?.style.backgroundImage).toMatch(/^url\(.+\)$/);
+  });
+
+  it("reserves tail room and fades over the floating composer", () => {
     const { container } = render(
       <ChatThread
         messages={[
@@ -99,12 +124,13 @@ describe("ChatThread", () => {
       />,
     );
 
-    const scroller = container.querySelector<HTMLElement>(".overflow-y-auto");
+    const scroller = container.querySelector<HTMLElement>(
+      ".assistant-scrollbar",
+    );
     expect(scroller?.style.maskImage).toContain("calc(100% - 140px)");
-    // Tail padding keeps the last turn clear of the composer at scroll bottom.
-    expect(
-      scroller?.firstElementChild?.getAttribute("style"),
-    ).toContain("140px");
+    expect(scroller?.firstElementChild?.getAttribute("style")).toContain(
+      "140px",
+    );
   });
 
   it("hides the thinking indicator once assistant content streams", () => {
@@ -188,6 +214,333 @@ describe("ChatThread", () => {
     expect(
       document.querySelector("[data-assistant-halo]"),
     ).not.toBeInTheDocument();
+  });
+
+  it("shows dots where the answer will appear until a turn has printed", () => {
+    const userMessage = message({
+      role: "user",
+      blocks: [{ type: "text", block_id: "text-1", text: "Question" }],
+    });
+    const { rerender } = render(
+      <ChatThread
+        messages={[userMessage]}
+        thinking
+        onDecideApproval={vi.fn()}
+      />,
+    );
+
+    expect(
+      document.querySelector("[data-streaming-dots]"),
+    ).toBeInTheDocument();
+
+    // Content arrives: the dots must give way to it, not sit alongside.
+    rerender(
+      <ChatThread
+        messages={[
+          userMessage,
+          message({ blocks: [{ type: "text", block_id: "t2", text: "Hi" }] }),
+        ]}
+        streaming
+        onDecideApproval={vi.fn()}
+      />,
+    );
+
+    expect(screen.getByText("Hi")).toBeInTheDocument();
+    expect(
+      document.querySelector("[data-streaming-dots]"),
+    ).not.toBeInTheDocument();
+  });
+
+  it("keeps the dots up for a started message whose blocks are still blank", () => {
+    // An opened-but-empty text block is present-yet-blank; counting blocks
+    // rather than printable content would drop the dots onto an empty column.
+    render(
+      <ChatThread
+        messages={[
+          message({
+            role: "user",
+            blocks: [{ type: "text", block_id: "t1", text: "Question" }],
+          }),
+          message({ blocks: [{ type: "text", block_id: "t2", text: "" }] }),
+        ]}
+        streaming
+        onDecideApproval={vi.fn()}
+      />,
+    );
+
+    expect(
+      document.querySelector("[data-streaming-dots]"),
+    ).toBeInTheDocument();
+  });
+
+  it("reports an error when a turn closes having printed nothing", () => {
+    vi.useFakeTimers();
+    render(
+      <ChatThread
+        messages={[
+          message({
+            role: "user",
+            blocks: [{ type: "text", block_id: "t1", text: "Question" }],
+          }),
+        ]}
+        turnEnded
+        onDecideApproval={vi.fn()}
+      />,
+    );
+
+    // Held back briefly: turn status and transcript projection race, so a turn
+    // that did answer can look empty for a frame.
+    expect(screen.queryByRole("alert")).not.toBeInTheDocument();
+
+    act(() => vi.advanceTimersByTime(700));
+
+    expect(
+      screen.getByText("Sorry, there seems to be an error with the request for now."),
+    ).toBeInTheDocument();
+  });
+
+  it("reports an error for a closed turn whose only block stayed blank", () => {
+    vi.useFakeTimers();
+    render(
+      <ChatThread
+        messages={[
+          message({
+            role: "user",
+            blocks: [{ type: "text", block_id: "t1", text: "Question" }],
+          }),
+          message({ blocks: [{ type: "text", block_id: "t2", text: "" }] }),
+        ]}
+        turnEnded
+        onDecideApproval={vi.fn()}
+      />,
+    );
+    act(() => vi.advanceTimersByTime(700));
+
+    // Carried inside the existing assistant group — a second identity mark for
+    // a group that is already there would read as two separate turns.
+    expect(screen.getAllByRole("alert")).toHaveLength(1);
+    expect(document.querySelectorAll("[data-empty-turn-error]")).toHaveLength(1);
+  });
+
+  it("does not let the empty-conversation screen bury a live turn", () => {
+    // A first turn can die before any history row materializes, leaving the
+    // transcript bare. Showing "start a conversation" there hides the fact that
+    // anything happened at all.
+    const { rerender } = render(
+      <ChatThread messages={[]} thinking onDecideApproval={vi.fn()} />,
+    );
+
+    expect(
+      screen.queryByText("Start a new conversation"),
+    ).not.toBeInTheDocument();
+    expect(
+      document.querySelector("[data-streaming-dots]"),
+    ).toBeInTheDocument();
+
+    rerender(<ChatThread messages={[]} onDecideApproval={vi.fn()} />);
+    expect(screen.getByText("Start a new conversation")).toBeInTheDocument();
+  });
+
+  it("does not let the empty-conversation screen bury a closed-empty turn", () => {
+    vi.useFakeTimers();
+    render(<ChatThread messages={[]} turnEnded onDecideApproval={vi.fn()} />);
+    act(() => vi.advanceTimersByTime(700));
+
+    expect(screen.getByRole("alert")).toBeInTheDocument();
+    expect(
+      screen.queryByText("Start a new conversation"),
+    ).not.toBeInTheDocument();
+  });
+
+  it("waits for an in-flight transcript read instead of guessing at it", () => {
+    vi.useFakeTimers();
+    const messages = [
+      message({
+        role: "user",
+        blocks: [{ type: "text", block_id: "t1", text: "Question" }],
+      }),
+    ];
+    const { rerender } = render(
+      <ChatThread
+        messages={messages}
+        turnEnded
+        transcriptSettling
+        onDecideApproval={vi.fn()}
+      />,
+    );
+    // However slow the read is, a pending one is never called an error.
+    act(() => vi.advanceTimersByTime(10_000));
+    expect(screen.queryByRole("alert")).not.toBeInTheDocument();
+
+    rerender(
+      <ChatThread messages={messages} turnEnded onDecideApproval={vi.fn()} />,
+    );
+    act(() => vi.advanceTimersByTime(700));
+    expect(screen.getByRole("alert")).toBeInTheDocument();
+  });
+
+  it("makes a new settle episode wait even if the last one had settled", () => {
+    vi.useFakeTimers();
+    const userMessage = message({
+      role: "user",
+      blocks: [{ type: "text", block_id: "t1", text: "Question" }],
+    });
+    const { rerender } = render(
+      <ChatThread
+        messages={[userMessage]}
+        turnEnded
+        onDecideApproval={vi.fn()}
+      />,
+    );
+    act(() => vi.advanceTimersByTime(700));
+    expect(screen.getByRole("alert")).toBeInTheDocument();
+
+    // Condition drops and returns within one macrotask: the second episode must
+    // re-serve its own grace period, not inherit the first one's verdict.
+    rerender(
+      <ChatThread
+        messages={[userMessage]}
+        turnEnded
+        transcriptSettling
+        onDecideApproval={vi.fn()}
+      />,
+    );
+    rerender(
+      <ChatThread
+        messages={[userMessage]}
+        turnEnded
+        onDecideApproval={vi.fn()}
+      />,
+    );
+    expect(screen.queryByRole("alert")).not.toBeInTheDocument();
+
+    act(() => vi.advanceTimersByTime(700));
+    expect(screen.getByRole("alert")).toBeInTheDocument();
+  });
+
+  it("keeps the dots up for a continuation appended to an answered turn", () => {
+    // An approval continuation is appended to the SAME assistant group and
+    // reuses the turn id, so the group's earlier content is indistinguishable
+    // from the continuation's own. Only the episode can say it printed nothing.
+    render(
+      <ChatThread
+        messages={[
+          message({
+            role: "user",
+            blocks: [{ type: "text", block_id: "t1", text: "Question" }],
+          }),
+          message({
+            id: "answered",
+            blocks: [{ type: "text", block_id: "t2", text: "Earlier answer" }],
+          }),
+        ]}
+        streaming
+        turnPrinted={false}
+        onDecideApproval={vi.fn()}
+      />,
+    );
+
+    expect(screen.getByText("Earlier answer")).toBeInTheDocument();
+    expect(
+      document.querySelector("[data-streaming-dots]"),
+    ).toBeInTheDocument();
+  });
+
+  it("reports a continuation that closed empty behind an answered turn", () => {
+    vi.useFakeTimers();
+    render(
+      <ChatThread
+        messages={[
+          message({
+            role: "user",
+            blocks: [{ type: "text", block_id: "t1", text: "Question" }],
+          }),
+          message({
+            id: "answered",
+            blocks: [{ type: "text", block_id: "t2", text: "Earlier answer" }],
+          }),
+        ]}
+        turnEnded
+        turnPrinted={false}
+        onDecideApproval={vi.fn()}
+      />,
+    );
+    act(() => vi.advanceTimersByTime(700));
+
+    expect(screen.getByRole("alert")).toBeInTheDocument();
+  });
+
+  it("trusts the episode over the transcript when it says content printed", () => {
+    vi.useFakeTimers();
+    render(
+      <ChatThread
+        messages={[
+          message({
+            role: "user",
+            blocks: [{ type: "text", block_id: "t1", text: "Question" }],
+          }),
+          // Blank in the transcript, but the episode saw content stream.
+          message({ blocks: [{ type: "text", block_id: "t2", text: "" }] }),
+        ]}
+        turnEnded
+        turnPrinted
+        onDecideApproval={vi.fn()}
+      />,
+    );
+    act(() => vi.advanceTimersByTime(5000));
+
+    expect(screen.queryByRole("alert")).not.toBeInTheDocument();
+  });
+
+  it("stays quiet when a closed turn did print an answer", () => {
+    vi.useFakeTimers();
+    render(
+      <ChatThread
+        messages={[
+          message({
+            role: "user",
+            blocks: [{ type: "text", block_id: "t1", text: "Question" }],
+          }),
+          message({ blocks: [{ type: "text", block_id: "t2", text: "Answer" }] }),
+        ]}
+        turnEnded
+        onDecideApproval={vi.fn()}
+      />,
+    );
+    act(() => vi.advanceTimersByTime(5000));
+
+    expect(screen.queryByRole("alert")).not.toBeInTheDocument();
+  });
+
+  it("withdraws the pending error if content lands inside the grace window", () => {
+    vi.useFakeTimers();
+    const userMessage = message({
+      role: "user",
+      blocks: [{ type: "text", block_id: "t1", text: "Question" }],
+    });
+    const { rerender } = render(
+      <ChatThread
+        messages={[userMessage]}
+        turnEnded
+        onDecideApproval={vi.fn()}
+      />,
+    );
+    act(() => vi.advanceTimersByTime(400));
+
+    rerender(
+      <ChatThread
+        messages={[
+          userMessage,
+          message({ blocks: [{ type: "text", block_id: "t2", text: "Late" }] }),
+        ]}
+        turnEnded
+        onDecideApproval={vi.fn()}
+      />,
+    );
+    act(() => vi.advanceTimersByTime(5000));
+
+    expect(screen.getByText("Late")).toBeInTheDocument();
+    expect(screen.queryByRole("alert")).not.toBeInTheDocument();
   });
 
   it("removes live-region semantics during the thinking exit fade", () => {
@@ -286,5 +639,60 @@ describe("ChatThread", () => {
     expect(screen.getByTestId("action-card-dispatch")).toHaveTextContent(
       "act-1",
     );
+  });
+
+  it("publishes native scrollbar width for composer alignment", () => {
+    vi.spyOn(HTMLElement.prototype, "offsetWidth", "get").mockReturnValue(500);
+    vi.spyOn(HTMLElement.prototype, "clientWidth", "get").mockReturnValue(489);
+
+    const { container } = render(
+      <ChatThread
+        messages={[
+          message({
+            blocks: [{ type: "text", block_id: "text-1", text: "Answer" }],
+          }),
+        ]}
+        onDecideApproval={vi.fn()}
+      />,
+    );
+
+    expect(
+      container.style.getPropertyValue("--assistant-scrollbar-width"),
+    ).toBe("11px");
+  });
+
+  it("uses the fixed icon grid and reveals the top fade after scrolling", () => {
+    const { container } = render(
+      <ChatThread
+        messages={[
+          message({
+            blocks: [{ type: "text", block_id: "text-1", text: "Answer" }],
+          }),
+        ]}
+        onDecideApproval={vi.fn()}
+      />,
+    );
+    const scrollRegion = container.querySelector<HTMLDivElement>(
+      ".assistant-scrollbar",
+    );
+    expect(scrollRegion).not.toBeNull();
+    if (!scrollRegion) return;
+    expect(container.querySelector("article")).toHaveClass(
+      "grid",
+      "grid-cols-[18px_minmax(0,1fr)]",
+    );
+
+    const topFade = container.querySelector(
+      ':scope > div > [aria-hidden="true"]',
+    );
+    expect(topFade).toHaveClass("opacity-0");
+
+    Object.defineProperties(scrollRegion, {
+      clientHeight: { configurable: true, value: 200 },
+      scrollHeight: { configurable: true, value: 500 },
+      scrollTop: { configurable: true, writable: true, value: 120 },
+    });
+    fireEvent.scroll(scrollRegion);
+    expect(topFade).toHaveClass("opacity-100");
   });
 });
