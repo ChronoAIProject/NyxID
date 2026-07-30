@@ -247,8 +247,9 @@ export function AssistantPage({
 
   // Deleting the URL-addressed conversation must also drop `?c=`, or the
   // stale id lingers in the address bar and re-selects nothing on reload;
-  // selection then falls back to the newest remaining chat. Failures stay
-  // in the row's popover (still open) with the reason said out loud.
+  // selection then falls back to the newest remaining chat. Failures are said
+  // out loud here and re-thrown so the sidebar keeps its confirm dialog open
+  // and the delete stays retryable.
   async function handleDelete(conversationId: string) {
     try {
       await deleteConversation.mutateAsync(conversationId);
@@ -262,6 +263,7 @@ export function AssistantPage({
             ? error.message
             : "The assistant backend did not respond. Try again.",
       });
+      throw error;
     }
   }
 
@@ -382,7 +384,7 @@ export function AssistantPage({
       }
       onNewChat={() => void createNewChat()}
       onSelect={selectConversation}
-      onDelete={(conversationId) => void handleDelete(conversationId)}
+      onDelete={handleDelete}
     />
   );
 
