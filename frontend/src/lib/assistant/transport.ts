@@ -1,7 +1,6 @@
 import { AevatarAssistantTransport } from "@/lib/assistant/aevatar-transport";
-import {
-  composeUnreportedCompletedNote,
-} from "@/lib/assistant/action-notes";
+import { ApiError } from "@/lib/api-client";
+import { composeUnreportedCompletedNote } from "@/lib/assistant/action-notes";
 import { AssistantTurnActiveError } from "@/lib/assistant/errors";
 import {
   assistantMockStore,
@@ -12,6 +11,7 @@ import { toTerminalBlock } from "@/lib/assistant/stream";
 import {
   actionReportSchema,
   buildActionContinueBody,
+  buildActionWakeBody,
   type ActionReport,
 } from "@/schemas/assistant-actions";
 import type {
@@ -26,6 +26,32 @@ import { isTurnActive } from "@/types/assistant";
 export { AssistantTurnActiveError };
 
 const EVENT_CADENCE_MS = 100;
+
+/**
+ * Dev/e2e-only fault injection for the mock transport. The e2e harness
+ * (frontend/e2e/) sets `window.__assistantMockFaults` via addInitScript to
+ * reproduce latency- and failure-dependent states the instant mock cannot
+ * otherwise reach (slow transcript reads, transcript errors, a stream that
+ * never starts). Inert in production: the mock transport itself is only
+ * selected in dev/test sessions.
+ */
+export interface AssistantMockFaults {
+  /** Delay every getHistory resolution by this many ms. */
+  readonly historyDelayMs?: number;
+  /** Make every getHistory reject with an ApiError of this HTTP status. */
+  readonly historyErrorStatus?: number;
+  /** Accept sends (user message lands) but never emit a single turn event. */
+  readonly sendSilent?: boolean;
+  /** Rename a locally pending draft to its canonical id on the first send. */
+  readonly aliasOnFirstSend?: boolean;
+}
+
+function mockFaults(): AssistantMockFaults {
+  return (
+    (globalThis as { __assistantMockFaults?: AssistantMockFaults })
+      .__assistantMockFaults ?? {}
+  );
+}
 
 interface RunningScript {
   readonly turnId: string;
@@ -52,17 +78,36 @@ class MockAssistantTransport implements AssistantTransport {
   }
 
   async createConversation(): Promise<Conversation> {
-    return assistantMockStore.createConversation();
+    return assistantMockStore.createConversation({
+      pendingAlias: mockFaults().aliasOnFirstSend,
+    });
   }
 
   async getHistory(conversationId: string): Promise<ConversationHistory> {
+    const faults = mockFaults();
+    if (faults.historyDelayMs) {
+      await new Promise((resolve) =>
+        setTimeout(resolve, faults.historyDelayMs),
+      );
+    }
+    if (faults.historyErrorStatus) {
+      throw new ApiError(faults.historyErrorStatus, {
+        error: "mock_history_fault",
+        error_code: 0,
+        message: "Injected mock transcript failure.",
+      });
+    }
     return assistantMockStore.getHistory(conversationId);
   }
 
   async deleteConversation(conversationId: string): Promise<void> {
-    const script = this.running.get(conversationId);
-    if (script) this.cancelScript(conversationId, script);
-    this.pendingActions.delete(conversationId);
+    for (const address of assistantMockStore.conversationAddresses(
+      conversationId,
+    )) {
+      const script = this.running.get(address);
+      if (script) this.cancelScript(address, script);
+      this.pendingActions.delete(address);
+    }
     assistantMockStore.deleteConversation(conversationId);
   }
 
@@ -78,16 +123,31 @@ class MockAssistantTransport implements AssistantTransport {
     }
 
     assistantMockStore.appendUserMessage(conversationId, content);
+    if (
+      mockFaults().aliasOnFirstSend &&
+      conversationId.startsWith("local-pending-")
+    ) {
+      assistantMockStore.aliasConversation(conversationId);
+    }
     const turnId = assistantMockStore.nextId("turn");
     const messageId = assistantMockStore.nextId("assistant-message");
     const blockId = assistantMockStore.nextId("assistant-block");
     const events = createScriptedTurn(turnId, messageId, blockId);
-    return this.startScript(conversationId, turnId, messageId, events, onEvent);
+    return this.startScript(conversationId, turnId, messageId, events, onEvent, {
+      silent: mockFaults().sendSilent,
+    });
   }
 
   cancelActiveTurn(conversationId: string): void {
-    const script = this.running.get(conversationId);
-    if (script) this.cancelScript(conversationId, script);
+    for (const address of assistantMockStore.conversationAddresses(
+      conversationId,
+    )) {
+      const script = this.running.get(address);
+      if (script) {
+        this.cancelScript(address, script);
+        return;
+      }
+    }
   }
 
   async decideApproval(
@@ -246,6 +306,25 @@ class MockAssistantTransport implements AssistantTransport {
     return this.startPendingAction(conversationId);
   }
 
+  wakeActions(
+    conversationId: string,
+    originTurnId: string,
+    onEvent: (event: TurnEvent) => void = () => undefined,
+  ): TurnHandle {
+    buildActionWakeBody(crypto.randomUUID(), originTurnId);
+    const currentStatus =
+      assistantMockStore.getTurnState(conversationId).activeTurn?.status;
+    if (this.running.has(conversationId) || isTurnActive(currentStatus)) {
+      throw new AssistantTurnActiveError();
+    }
+    const pending = this.pendingActions.get(conversationId) ?? [];
+    pending.push({ originTurnId, reports: [], onEvent });
+    this.pendingActions.set(conversationId, pending);
+    const handle = this.startPendingAction(conversationId);
+    if (!handle) throw new AssistantTurnActiveError();
+    return handle;
+  }
+
   reset(now: () => number = Date.now): void {
     for (const script of this.running.values()) {
       script.cancelled = true;
@@ -282,12 +361,15 @@ class MockAssistantTransport implements AssistantTransport {
     const turnId = assistantMockStore.nextId("turn-action");
     const messageId = assistantMockStore.nextId("assistant-action-message");
     const blockId = assistantMockStore.nextId("assistant-action-block");
-    const declined = batch.reports.every(
-      (report) => report.disposition === "declined",
-    );
-    const text = declined
-      ? "Understood. I did not connect the service, and I will continue without it."
-      : "The service connection is ready. I can now continue with brokered access.";
+    const wake = batch.reports.length === 0;
+    const declined =
+      !wake &&
+      batch.reports.every((report) => report.disposition === "declined");
+    const text = wake
+      ? "The assistant resumed the blocked turn."
+      : declined
+        ? "Understood. I did not connect the service, and I will continue without it."
+        : "The service connection is ready. I can now continue with brokered access.";
     const events: TurnEvent[] = [
       { cursor: 1, event: "turn.status", turn_id: turnId, status: "running" },
       {
@@ -334,6 +416,7 @@ class MockAssistantTransport implements AssistantTransport {
     messageId: string,
     events: readonly TurnEvent[],
     onEvent: (event: TurnEvent) => void,
+    options: { readonly silent?: boolean } = {},
   ): TurnHandle {
     const script: RunningScript = {
       turnId,
@@ -345,6 +428,16 @@ class MockAssistantTransport implements AssistantTransport {
       finished: false,
     };
     this.running.set(conversationId, script);
+
+    // A "silent" send mirrors the real transport hanging before response
+    // headers: the user message landed, the turn is reserved, but no event
+    // will ever arrive. Cancel still settles it.
+    if (options.silent) {
+      return {
+        turnId,
+        cancel: () => this.cancelScript(conversationId, script),
+      };
+    }
 
     const emit = (sourceEvent: TurnEvent) => {
       if (script.cancelled || script.finished) return;

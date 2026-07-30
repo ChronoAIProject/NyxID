@@ -17,6 +17,22 @@ export class AssistantTurnCancelledError extends Error {
 }
 
 /**
+ * The conversation does not exist for this transport: deleted (tombstoned),
+ * never created, or a `nyxid-pending-*` placeholder whose in-memory mapping
+ * did not survive a reload. This is the transports' CONFIRMED not-found
+ * sentinel — the page may treat it (alongside an HTTP 404) as license to
+ * repair a stale `?c=` down to the draft state. Transient failures must stay
+ * plain errors: repairing on those would turn a recoverable read into
+ * navigation loss.
+ */
+export class AssistantConversationNotFoundError extends Error {
+  constructor() {
+    super("Conversation was not found.");
+    this.name = "AssistantConversationNotFoundError";
+  }
+}
+
+/**
  * Aevatar answered with a body that does not match any contract shape we
  * accept. Distinct from a transport failure on purpose: a transient blip may
  * fall back to a cached transcript, but a contract break must never be

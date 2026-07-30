@@ -250,10 +250,20 @@ export const actionContinueBodySchema = z
     }
   });
 
+export const actionWakeBodySchema = z
+  .object({
+    type: z.literal("action.continue"),
+    clientRequestId: actionControlIdentitySchema,
+    originTurnId: actionControlIdentitySchema,
+    actions: z.tuple([]),
+  })
+  .strict();
+
 export type ActionDisposition = z.infer<typeof actionDispositionSchema>;
 export type ActionResource = z.infer<typeof actionResourceSchema>;
 export type ActionReport = z.infer<typeof actionReportSchema>;
 export type ActionContinueBody = z.infer<typeof actionContinueBodySchema>;
+export type ActionWakeBody = z.infer<typeof actionWakeBodySchema>;
 export type ActionReportActionLookup =
   | ReadonlyMap<string, string>
   | Readonly<Record<string, string | undefined>>;
@@ -372,5 +382,18 @@ export function buildActionContinueBody(
     clientRequestId,
     originTurnId,
     actions,
+  });
+}
+
+/** Build the distinct out-of-band wake DTO with no action reports. */
+export function buildActionWakeBody(
+  clientRequestId: string,
+  originTurnId: string,
+): ActionWakeBody {
+  return actionWakeBodySchema.parse({
+    type: "action.continue",
+    clientRequestId,
+    originTurnId,
+    actions: [],
   });
 }

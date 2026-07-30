@@ -513,8 +513,25 @@ const MOCK_NOTIFICATION_SETTINGS = {
 };
 
 // ── Approval Requests ──
+// Every row carries `expires_at`, matching the required backend response
+// field. Consumers sort on it, so omitting it makes mock mode diverge from
+// production and can crash the Approvals view.
 const MOCK_APPROVAL_REQUESTS = {
   requests: [
+    {
+      id: "ar-0000",
+      service_name: "Lark", service_slug: "lark-bot",
+      requester_type: "api_key", requester_label: "claude-code-agent",
+      operation_summary: "POST /im/v1/messages",
+      action_description: "Post the drafted summary to #payments-oncall",
+      tool_name: null, tool_call_id: null, tool_arguments: null,
+      is_destructive: false, approval_mode: "per_request" as const,
+      status: "pending" as const,
+      created_at: new Date(Date.now() - 60_000).toISOString(),
+      decided_at: null,
+      expires_at: new Date(Date.now() + 14 * 60_000).toISOString(),
+      decision_channel: null,
+    },
     {
       id: "ar-0001",
       service_name: "OpenAI", service_slug: "openai",
@@ -525,6 +542,7 @@ const MOCK_APPROVAL_REQUESTS = {
       is_destructive: false, approval_mode: "per_request" as const,
       status: "approved" as const,
       created_at: "2026-05-06T14:20:00Z", decided_at: "2026-05-06T14:20:05Z",
+      expires_at: "2026-05-06T14:25:00Z",
       decision_channel: "telegram",
     },
     {
@@ -537,6 +555,7 @@ const MOCK_APPROVAL_REQUESTS = {
       is_destructive: true, approval_mode: "per_request" as const,
       status: "rejected" as const,
       created_at: "2026-05-05T18:00:00Z", decided_at: "2026-05-05T18:01:30Z",
+      expires_at: "2026-05-05T18:05:00Z",
       decision_channel: "push",
     },
     {
@@ -549,10 +568,11 @@ const MOCK_APPROVAL_REQUESTS = {
       is_destructive: false, approval_mode: "grant" as const,
       status: "approved" as const,
       created_at: "2026-05-04T10:00:00Z", decided_at: "2026-05-04T10:00:12Z",
+      expires_at: "2026-05-04T10:05:00Z",
       decision_channel: "telegram",
     },
   ],
-  total: 3, page: 1, per_page: 20,
+  total: 4, page: 1, per_page: 20,
 };
 
 // ── Approval Grants ──
@@ -1407,7 +1427,11 @@ const MOCK_FULL_CATALOG = (() => {
 })();
 
 // ── Dynamic endpoint resolver ──
-type MockHandler = (path: string) => unknown | undefined;
+// `path` is query-stripped so anchored endpoint patterns keep matching.
+type MockHandler = (
+  path: string,
+  params: URLSearchParams,
+) => unknown | undefined;
 
 const MOCK_HANDLERS: MockHandler[] = [
   // User
@@ -1485,7 +1509,17 @@ const MOCK_HANDLERS: MockHandler[] = [
   (p) => p.match(/^\/notifications\/telegram/) ? { link_code: "MOCK-LINK-CODE", bot_username: "nyxid_approvals_bot", expires_in_secs: 600 } : undefined,
 
   // Approvals
-  (p) => p.match(/^\/approvals\/requests/) ? MOCK_APPROVAL_REQUESTS : undefined,
+  // The real handler filters by status server-side; the assistant view relies
+  // on that behavior and deliberately does not re-filter the response.
+  (p, params) => {
+    if (!p.match(/^\/approvals\/requests/)) return undefined;
+    const status = params.get("status");
+    if (!status) return MOCK_APPROVAL_REQUESTS;
+    const requests = MOCK_APPROVAL_REQUESTS.requests.filter(
+      (request) => request.status === status,
+    );
+    return { ...MOCK_APPROVAL_REQUESTS, requests, total: requests.length };
+  },
   (p) => p.match(/^\/approvals\/grants/) ? MOCK_APPROVAL_GRANTS : undefined,
   (p) => p.match(/^\/approvals\/service-configs/) ? MOCK_SERVICE_APPROVAL_CONFIGS : undefined,
 
@@ -1664,10 +1698,11 @@ export function getMockResponse(
   body?: unknown,
 ): unknown | undefined {
   const [path = endpoint, query = ""] = endpoint.split("?", 2);
+  const params = new URLSearchParams(query);
   if (
     method === "GET" &&
     path === "/catalog" &&
-    new URLSearchParams(query).get("include_all") === "true"
+    params.get("include_all") === "true"
   ) {
     return { entries: MOCK_FULL_CATALOG };
   }
@@ -1701,7 +1736,7 @@ export function getMockResponse(
     };
   }
   for (const handler of MOCK_HANDLERS) {
-    const result = handler(path);
+    const result = handler(path, params);
     if (result !== undefined) return result;
   }
   return undefined;

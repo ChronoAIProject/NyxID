@@ -3,8 +3,10 @@ import { resolveAssistantAction } from "@/lib/assistant/action-registry";
 import {
   actionContinueBodySchema,
   actionControlIdentitySchema,
+  actionWakeBodySchema,
   assistantActionRequestSchema,
   buildActionContinueBody,
+  buildActionWakeBody,
 } from "./assistant-actions";
 
 const BASE_REQUEST = {
@@ -380,6 +382,33 @@ describe("action continuation schema", () => {
           },
         ],
       }).success,
+    ).toBe(false);
+  });
+
+  it("builds an exact empty out-of-band wake without accepting reports", () => {
+    const body = buildActionWakeBody("request-wake-1", "turn-origin-1");
+
+    expect(body).toEqual({
+      type: "action.continue",
+      clientRequestId: "request-wake-1",
+      originTurnId: "turn-origin-1",
+      actions: [],
+    });
+    expect(
+      actionWakeBodySchema.safeParse({
+        ...body,
+        actions: [
+          {
+            actionRequestId: "act-1",
+            originTurnId: "turn-origin-1",
+            disposition: "completed",
+          },
+        ],
+      }).success,
+    ).toBe(false);
+    expect(
+      actionWakeBodySchema.safeParse({ ...body, prompt: "must not be sent" })
+        .success,
     ).toBe(false);
   });
 

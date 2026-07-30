@@ -5,19 +5,27 @@ import {
   composeUnreportedCompletedNote,
 } from "@/lib/assistant/action-notes";
 import {
+  AssistantConversationNotFoundError,
   AssistantProtocolError,
   AssistantTurnActiveError,
   AssistantTurnCancelledError,
 } from "@/lib/assistant/errors";
 import { resolveAssistantAction } from "@/lib/assistant/action-registry";
-import { drainSseBuffer, flushSseBuffer } from "@/lib/assistant/sse";
+import {
+  chatStreamClient,
+  type ChatStreamCompletionResult,
+  type ChatStreamRequestHandle,
+} from "@/lib/assistant/chat-stream-worker-client";
+import type { ChatStreamFrame } from "@/lib/assistant/chat-stream-worker-protocol";
 import {
   actionReportSchema,
   assistantActionRequestSchema,
   buildActionContinueBody,
+  buildActionWakeBody,
   recoverUnsupportedAssistantActionRequest,
   type ActionContinueBody,
   type ActionReport,
+  type ActionWakeBody,
   type AssistantActionRequest,
 } from "@/schemas/assistant-actions";
 import {
@@ -84,11 +92,16 @@ const assistantApi = {
 // network round-trip per streamed token.
 const CONVERSATION_LIST_TTL_MS = 5_000;
 
-// New chats run on Aevatar's workflow ("studio") chat engine through NyxID's
-// typed pass-through; legacy `nyxid-chat-…` actor conversations keep the
-// AG-UI `:stream` route so their transcripts stay continuable. Routing is by
-// conversation-id family.
+// New chats use Aevatar's typed NyxIdChat create-and-first-turn contract.
+// Existing `nyxid-chat-…` actors continue on AG-UI `:stream`, while legacy
+// `chatc-…` conversations remain on Workflow Studio. Routing after the first
+// frame is by the server-owned conversation-id family.
+const TYPED_CHAT_URL = "/api/v1/assistant/chat";
 const WORKFLOW_CHAT_URL = "/api/v1/assistant/workflow-chat";
+
+// Client-local id before typed `/api/chat` returns the authoritative actor in
+// its first RUN_STARTED frame. It is never sent as an actor or scope.
+const PENDING_TYPED_CONVERSATION_PREFIX = "nyxid-pending-";
 
 // Server conversation ids minted by the workflow chat's history reservation
 // (`chatc-{hash[..32]}`).
@@ -107,7 +120,9 @@ function isWorkflowConversationId(id: string): boolean {
   );
 }
 
-const SERVER_CONVERSATION_ID_PATTERN = /^chatc-[A-Za-z0-9_-]{1,120}$/;
+const WORKFLOW_SERVER_CONVERSATION_ID_PATTERN = /^chatc-[A-Za-z0-9_-]{1,120}$/;
+const TYPED_SERVER_CONVERSATION_ID_PATTERN =
+  /^nyxid-chat-[A-Za-z0-9_-]{1,117}$/;
 
 const MAX_MESSAGE_CHARS = 32_768;
 
@@ -230,6 +245,7 @@ interface AgUiFrame {
   readonly runStarted?: {
     readonly runId?: string;
     readonly turnId?: string;
+    readonly actorId?: string;
   };
   readonly runFinished?: {
     readonly runId?: string;
@@ -407,14 +423,12 @@ interface ActionContinuationState {
 interface RunningTurn {
   readonly clientRequestId: string;
   /**
-   * Which turn surface this run speaks: `actor` = nyxid-chat AG-UI
-   * `:stream`, `workflow` = the studio workflow chat. Chosen from the
-   * conversation-id family at send time; gates the frame-ordering rules
-   * (`aevatar.chat.context` precedes `runStarted` on workflow streams,
-   * trailing `stateSnapshot` follows the terminal) and disables the
-   * `:stop` control, which only the actor surface serves.
+   * Which turn surface this run speaks: `typed-create` = typed NyxIdChat
+   * `/api/chat`, `actor` = an existing nyxid-chat AG-UI `:stream`, and
+   * `workflow` = legacy Workflow Studio. Chosen from the conversation-id
+   * family at send time; gates frame ordering and actor-only controls.
    */
-  readonly protocol: "actor" | "workflow";
+  readonly protocol: "actor" | "typed-create" | "workflow";
   turnId: string | null;
   /**
    * A cancel landed before RUN_STARTED delivered the server turn id. The
@@ -939,10 +953,10 @@ export class AevatarAssistantTransport implements AssistantTransport {
    */
   private readonly deletingConversations = new Map<string, Promise<void>>();
   /**
-   * Placeholder → server id, written when a new workflow conversation's
-   * first turn delivers its `aevatar.chat.context` frame. Public methods
-   * resolve through this so a page still addressing the placeholder (the
-   * URL keeps it for the session) reaches the server-backed entry.
+   * Placeholder → server id, written when a create-and-first-turn stream
+   * identifies its authoritative conversation. Public methods resolve
+   * through this so a page still addressing the local placeholder reaches
+   * the server-backed entry.
    */
   private readonly conversationAliases = new Map<string, string>();
   private listFetchedAt = 0;
@@ -987,15 +1001,12 @@ export class AevatarAssistantTransport implements AssistantTransport {
   }
 
   async createConversation(): Promise<Conversation> {
-    // New chats run on the workflow surface, where the conversation is
-    // created server-side by the FIRST turn's chat-history reservation
-    // (`conversation.conversationId: null` in the turn body) — there is no
-    // separate create call. Until that turn's `aevatar.chat.context` frame
-    // delivers the server `chatc-…` id, the conversation exists only under
-    // this client-local placeholder id; the frame aliases it in place.
+    // There is no separate actor-create request. The first typed turn creates
+    // the actor and returns its authoritative `nyxid-chat-…` id in
+    // RUN_STARTED; until then this id exists only in the local transport.
     const createdAt = new Date().toISOString();
     const conversation: Conversation = {
-      id: `${PENDING_WORKFLOW_CONVERSATION_PREFIX}${crypto.randomUUID()}`,
+      id: `${PENDING_TYPED_CONVERSATION_PREFIX}${crypto.randomUUID()}`,
       title: "New chat",
       created_at: createdAt,
       last_message_at: createdAt,
@@ -1032,7 +1043,7 @@ export class AevatarAssistantTransport implements AssistantTransport {
     // already see the deletion guard — otherwise it can admit a send (or
     // a second delete) into the exact window the reservation closes.
     const operation = Promise.resolve().then(async () => {
-      // A first-turn workflow run is keyed under the placeholder id the
+      // A create-and-first-turn run is keyed under the placeholder id the
       // send used; the same conversation is addressable through both.
       for (const key of [requestedId, conversationId]) {
         const run = this.running.get(key);
@@ -1096,9 +1107,16 @@ export class AevatarAssistantTransport implements AssistantTransport {
   async getHistory(conversationId: string): Promise<ConversationHistory> {
     conversationId = this.canonicalConversationId(conversationId);
     if (this.deletedConversationIds.has(conversationId)) {
-      throw new Error("Conversation was not found.");
+      throw new AssistantConversationNotFoundError();
     }
     const existing = this.conversations.get(conversationId);
+    if (
+      !existing &&
+      (conversationId.startsWith(PENDING_TYPED_CONVERSATION_PREFIX) ||
+        conversationId.startsWith(PENDING_WORKFLOW_CONVERSATION_PREFIX))
+    ) {
+      throw new AssistantConversationNotFoundError();
+    }
     // During a streaming turn the local mirror is ahead of the server;
     // serving it keeps per-event re-projection off the network entirely.
     if (existing && isTurnActive(existing.turnState.activeTurn?.status)) {
@@ -1116,14 +1134,20 @@ export class AevatarAssistantTransport implements AssistantTransport {
       // once the conversation is tombstoned, "not found" is the answer, not
       // whatever the doomed read happened to fail with.
       if (this.deletedConversationIds.has(conversationId)) {
-        throw new Error("Conversation was not found.");
+        throw new AssistantConversationNotFoundError();
       }
       // A contract break must reach the user. Swallowing it here is what
       // turned the PR #2923 array→`{messages, stateVersion}` change into a
       // blank transcript instead of a visible failure.
       if (error instanceof AssistantProtocolError) throw error;
-      // Nothing local to answer with.
-      if (!existing) throw error;
+      // Nothing local to answer with. A server 404 confirms the id is unknown;
+      // transient and protocol failures retain their original type.
+      if (!existing) {
+        if (error instanceof ApiError && error.status === 404) {
+          throw new AssistantConversationNotFoundError();
+        }
+        throw error;
+      }
       // 404 is the EXPECTED answer for a conversation that has not yet
       // completed a turn. The two upstream halves materialize at different
       // times: `nyxid-chat` mints the actor at create, while the
@@ -1149,7 +1173,7 @@ export class AevatarAssistantTransport implements AssistantTransport {
     // request was in flight must not be answered with the pre-delete
     // snapshot captured above (the fallback `existing`).
     if (this.deletedConversationIds.has(conversationId)) {
-      throw new Error("Conversation was not found.");
+      throw new AssistantConversationNotFoundError();
     }
     return {
       conversation: stored.conversation,
@@ -1167,7 +1191,7 @@ export class AevatarAssistantTransport implements AssistantTransport {
     conversationId = this.canonicalConversationId(conversationId);
     const stored = this.conversations.get(conversationId);
     if (!stored) {
-      throw new Error("Conversation was not found.");
+      throw new AssistantConversationNotFoundError();
     }
     if (this.deletingConversations.has(conversationId)) {
       throw new Error("This conversation is being deleted.");
@@ -1218,7 +1242,11 @@ export class AevatarAssistantTransport implements AssistantTransport {
     const run = this.newRun(
       onEvent,
       null,
-      isWorkflowConversationId(conversationId) ? "workflow" : "actor",
+      isWorkflowConversationId(conversationId)
+        ? "workflow"
+        : conversationId.startsWith(PENDING_TYPED_CONVERSATION_PREFIX)
+          ? "typed-create"
+          : "actor",
     );
     this.running.set(conversationId, run);
     void this.streamTurn(conversationId, run, normalized);
@@ -1239,12 +1267,15 @@ export class AevatarAssistantTransport implements AssistantTransport {
    * Stop needs a transport-level lookup to abort a hung request).
    */
   cancelActiveTurn(conversationId: string): void {
-    // A first-turn workflow run is keyed under the placeholder id the send
-    // used; check both addresses and cancel under the run's own key.
-    for (const key of [
-      conversationId,
-      this.canonicalConversationId(conversationId),
-    ]) {
+    // A create-and-first-turn run is keyed under the placeholder id the send
+    // used. Resolve forward and reverse so either the placeholder or the
+    // canonical address can stop it, then cancel under the run's own key.
+    const canonicalId = this.canonicalConversationId(conversationId);
+    const addresses = new Set([conversationId, canonicalId]);
+    for (const [placeholderId, targetId] of this.conversationAliases) {
+      if (targetId === canonicalId) addresses.add(placeholderId);
+    }
+    for (const key of addresses) {
       const run = this.running.get(key);
       if (run) {
         this.cancelTurn(key, run);
@@ -1330,26 +1361,23 @@ export class AevatarAssistantTransport implements AssistantTransport {
       return null;
     }
 
-    let response: Response;
-    try {
-      run.streamDispatched = true;
-      response = await fetch(
-        `/api/v1${ASSISTANT_PREFIX}/conversations/${conversationId}/approve`,
-        {
-          method: "POST",
-          headers: {
-            "Content-Type": "application/json",
-            Accept: "text/event-stream",
-          },
-          credentials: "include",
-          body: JSON.stringify({
-            requestId: card.approval_request_id,
-            approved,
-          }),
-          signal: run.controller.signal,
-        },
-      );
-    } catch (error) {
+    const stream = this.startChatStream(
+      conversationId,
+      run,
+      `/api/v1${ASSISTANT_PREFIX}/conversations/${conversationId}/approve`,
+      JSON.stringify({
+        requestId: card.approval_request_id,
+        approved,
+      }),
+    );
+    const response = await stream.headers;
+    if (response.kind === "cancelled") {
+      // cancelTurn already emitted the terminal events when the user stopped
+      // this request before response headers arrived.
+      this.finishTurn(conversationId, run, "cancelled", null);
+      throw new AssistantTurnCancelledError();
+    }
+    if (response.kind === "network_error") {
       const aborted = run.controller.signal.aborted;
       // cancelTurn may already have settled the run; finishTurn is a no-op
       // then. The card was never flipped, so the decision stays retryable.
@@ -1362,11 +1390,12 @@ export class AevatarAssistantTransport implements AssistantTransport {
         aborted ? "cancelled" : "failed",
         null,
       );
-      throw aborted ? new AssistantTurnCancelledError() : error;
+      throw aborted
+        ? new AssistantTurnCancelledError()
+        : new Error(response.message);
     }
-    if (!response.ok) {
-      const bodyText = await response.text().catch(() => "");
-      const failure = streamStartError(response.status, bodyText);
+    if (response.kind === "http_error") {
+      const failure = streamStartError(response.status, response.body);
       // Null turn error for the same single-toast reason as above.
       this.finishTurn(conversationId, run, "failed", null);
       throw new Error(failure.message);
@@ -1427,14 +1456,14 @@ export class AevatarAssistantTransport implements AssistantTransport {
       });
     }
 
-    const contentType = response.headers.get("content-type") ?? "";
-    if (response.body && contentType.includes("text/event-stream")) {
-      void this.consumeApprovalContinuation(conversationId, run, response);
+    if (response.contentType.includes("text/event-stream")) {
+      void this.consumeApprovalContinuation(conversationId, run, stream);
     } else {
       // Older backend acknowledging with JSON: nothing further will stream,
       // and there is no live continuation for the caller to hold a handle
       // to — returning one would let a stale entry linger in the caller's
       // handle registry after this turn already completed.
+      stream.cancel();
       this.finishTurn(conversationId, run, "completed", null);
       return null;
     }
@@ -1528,7 +1557,7 @@ export class AevatarAssistantTransport implements AssistantTransport {
     onEvent: (event: TurnEvent) => void = noopEvent,
   ): TurnHandle | null {
     if (!this.conversations.has(conversationId)) {
-      throw new Error("Conversation was not found.");
+      throw new AssistantConversationNotFoundError();
     }
     if (
       this.deletingConversations.has(
@@ -1657,6 +1686,45 @@ export class AevatarAssistantTransport implements AssistantTransport {
     return this.drainPendingActions(conversationId);
   }
 
+  wakeActions(
+    conversationId: string,
+    originTurnId: string,
+    onEvent: (event: TurnEvent) => void = noopEvent,
+  ): TurnHandle {
+    const requestedId = conversationId;
+    const actorId = this.canonicalConversationId(conversationId);
+    const stored =
+      this.conversations.get(requestedId) ?? this.conversations.get(actorId);
+    if (!stored) throw new AssistantConversationNotFoundError();
+    if (this.deletingConversations.has(actorId)) {
+      throw new Error("This conversation is being deleted.");
+    }
+    if (!TYPED_SERVER_CONVERSATION_ID_PATTERN.test(actorId)) {
+      throw new AssistantProtocolError(
+        "Action wakes require a typed assistant conversation.",
+      );
+    }
+    if (
+      this.running.has(requestedId) ||
+      this.running.has(actorId) ||
+      isTurnActive(stored.turnState.activeTurn?.status)
+    ) {
+      throw new AssistantTurnActiveError();
+    }
+
+    const body = buildActionWakeBody(crypto.randomUUID(), originTurnId);
+    const run = this.newRun(onEvent, null, "actor");
+    run.cursor = stored.turnState.lastCursor;
+    this.running.set(requestedId, run);
+    void this.streamActionContinuation(requestedId, actorId, run, body);
+    return {
+      get turnId() {
+        return run.turnId;
+      },
+      cancel: () => this.cancelTurn(requestedId, run),
+    };
+  }
+
   private findActionCard(
     conversationId: string,
     blockId: string,
@@ -1691,7 +1759,7 @@ export class AevatarAssistantTransport implements AssistantTransport {
     onEvent: (event: TurnEvent) => void,
   ): void {
     const stored = this.conversations.get(conversationId);
-    if (!stored) throw new Error("Conversation was not found.");
+    if (!stored) throw new AssistantConversationNotFoundError();
     const activeRun = this.running.get(conversationId);
     if (activeRun) {
       this.emit(conversationId, activeRun, {
@@ -1952,7 +2020,7 @@ export class AevatarAssistantTransport implements AssistantTransport {
     // flight (deleting an active chat races cancel-driven projections);
     // writing the stale result back would resurrect it locally.
     if (this.deletedConversationIds.has(conversationId)) {
-      throw new Error("Conversation was not found.");
+      throw new AssistantConversationNotFoundError();
     }
     const entries = readHistoryEntries(body);
     const existing = this.conversations.get(conversationId);
@@ -2001,7 +2069,7 @@ export class AevatarAssistantTransport implements AssistantTransport {
   private newRun(
     onEvent: (event: TurnEvent) => void,
     turnId: string | null = null,
-    protocol: "actor" | "workflow" = "actor",
+    protocol: "actor" | "typed-create" | "workflow" = "actor",
   ): RunningTurn {
     return {
       clientRequestId: crypto.randomUUID(),
@@ -2127,83 +2195,68 @@ export class AevatarAssistantTransport implements AssistantTransport {
       message: "The assistant stream could not be reached. Try again.",
     };
 
-    // Computed ONCE: a retry must replay the identical body — the workflow
-    // surface's create-replay recovery is keyed on (scope, commandId) with a
-    // request fingerprint, and a body that changed between attempts would
-    // 409 instead of resuming the same conversation/turn.
+    // Computed ONCE: both create surfaces key replay on the client identity
+    // plus a request fingerprint. A changed body would conflict instead of
+    // resuming the same conversation and turn.
     const target =
       run.protocol === "workflow"
         ? {
             url: WORKFLOW_CHAT_URL,
-            body: this.workflowTurnBody(conversationId, run, prompt),
+            bodyText: this.workflowTurnBody(conversationId, run, prompt),
           }
-        : {
-            url: `/api/v1${ASSISTANT_PREFIX}/conversations/${conversationId}/stream`,
-            body: JSON.stringify({
-              // Aevatar NyxIdChatEndpoints.Streaming.cs:58 uses an ordinal
-              // discriminator comparison, so a normal turn requires this
-              // exact lowercase value.
-              type: "text",
-              prompt,
-              clientRequestId: run.clientRequestId,
-            }),
-          };
+        : run.protocol === "typed-create"
+          ? {
+              url: TYPED_CHAT_URL,
+              bodyText: JSON.stringify({
+                type: "text",
+                prompt,
+                clientRequestId: run.clientRequestId,
+              }),
+            }
+          : {
+              url: `/api/v1${ASSISTANT_PREFIX}/conversations/${conversationId}/stream`,
+              bodyText: JSON.stringify({
+                // Aevatar NyxIdChatEndpoints.Streaming.cs:58 uses an ordinal
+                // discriminator comparison, so a normal turn requires this
+                // exact lowercase value.
+                type: "text",
+                prompt,
+                clientRequestId: run.clientRequestId,
+              }),
+            };
 
     for (let attempt = 0; attempt < STREAM_DELIVERY_ATTEMPTS; attempt += 1) {
       // A cancel can settle the run between attempts (the pre-RUN_STARTED
       // path defers its abort); a finished run must never re-POST.
       if (run.finished || run.controller.signal.aborted) return;
       this.resetDeliveryState(run);
-      let response: Response;
-      try {
-        // Hand-rolled fetch (not `apiClient`): the response is an SSE stream,
-        // and the endpoint 415s without an explicit JSON content type.
-        run.streamDispatched = true;
-        response = await fetch(target.url, {
-          method: "POST",
-          headers: {
-            "Content-Type": "application/json",
-            Accept: "text/event-stream",
-          },
-          credentials: "include",
-          body: target.body,
-          signal: run.controller.signal,
-        });
-      } catch {
-        // The cancel path aborts the fetch after emitting its own terminal
-        // events; an abort here is not a failure.
+      const stream = this.startChatStream(
+        conversationId,
+        run,
+        target.url,
+        target.bodyText,
+      );
+      const response = await stream.headers;
+
+      if (response.kind === "cancelled") return;
+      if (response.kind === "network_error") {
         if (run.finished || run.controller.signal.aborted) return;
+        finalFailure = { code: response.code, message: response.message };
         if (attempt + 1 < STREAM_DELIVERY_ATTEMPTS) continue;
         break;
       }
-
-      if (!response.ok) {
+      if (response.kind === "http_error") {
         if (
           RETRYABLE_STREAM_STATUSES.has(response.status) &&
           attempt + 1 < STREAM_DELIVERY_ATTEMPTS
         ) {
-          await response.body?.cancel().catch(() => undefined);
           continue;
         }
-        const bodyText = await response.text().catch(() => "");
-        finalFailure = streamStartError(response.status, bodyText);
+        finalFailure = streamStartError(response.status, response.body);
         break;
       }
 
-      if (!response.body) {
-        finalFailure = {
-          code: "stream_closed",
-          message: "The assistant stream closed before it started.",
-        };
-        if (attempt + 1 < STREAM_DELIVERY_ATTEMPTS) continue;
-        break;
-      }
-
-      const result = await this.consumeTurnStream(
-        conversationId,
-        run,
-        response,
-      );
+      const result = await this.consumeTurnStream(conversationId, run, stream);
       if (result.kind === "settled" || run.finished) return;
       finalFailure = result.error;
       if (
@@ -2225,84 +2278,75 @@ export class AevatarAssistantTransport implements AssistantTransport {
     conversationId: string,
     actorId: string,
     run: RunningTurn,
-    body: ActionContinueBody,
+    body: ActionContinueBody | ActionWakeBody,
   ): Promise<void> {
-    // Action continuations share the actor turn's ordering fence: a report
-    // must not overtake a still-pending stop from the prior turn.
+    // Action continuations share the actor turn's ordering fence and must not
+    // overtake a still-pending stop from the prior turn.
     await this.awaitPendingStop(conversationId);
 
+    const isWake = body.actions.length === 0;
     let finalFailure = {
       code: "network_error",
-      message:
-        "The action report could not be delivered. It will be retried after the next turn.",
+      message: isWake
+        ? "The action wake could not be delivered. Try again."
+        : "The action report could not be delivered. It will be retried after the next turn.",
     };
+    // This DTO is already rebuilt from the strict allowlist in
+    // buildActionContinueBody; no card or model object is spread here.
+    const bodyText = JSON.stringify(body);
 
     for (let attempt = 0; attempt < STREAM_DELIVERY_ATTEMPTS; attempt += 1) {
       if (run.finished || run.controller.signal.aborted) return;
       this.resetDeliveryState(run);
-      let response: Response;
-      try {
-        run.streamDispatched = true;
-        response = await fetch(
-          `/api/v1${ASSISTANT_PREFIX}/conversations/${encodeURIComponent(actorId)}/stream`,
-          {
-            method: "POST",
-            headers: {
-              "Content-Type": "application/json",
-              Accept: "text/event-stream",
-            },
-            credentials: "include",
-            // This DTO is already rebuilt from the strict allowlist in
-            // buildActionContinueBody; no card or model object is spread here.
-            body: JSON.stringify(body),
-            signal: run.controller.signal,
-          },
-        );
-      } catch {
+      const stream = this.startChatStream(
+        conversationId,
+        run,
+        `/api/v1${ASSISTANT_PREFIX}/conversations/${encodeURIComponent(actorId)}/stream`,
+        bodyText,
+      );
+      const response = await stream.headers;
+
+      if (response.kind === "cancelled") return;
+      if (response.kind === "network_error") {
         if (run.finished || run.controller.signal.aborted) return;
+        finalFailure = { ...finalFailure, code: response.code };
         if (attempt + 1 < STREAM_DELIVERY_ATTEMPTS) continue;
         break;
       }
-
-      if (!response.ok) {
+      if (response.kind === "http_error") {
         if (
           RETRYABLE_STREAM_STATUSES.has(response.status) &&
           attempt + 1 < STREAM_DELIVERY_ATTEMPTS
         ) {
-          await response.body?.cancel().catch(() => undefined);
           continue;
         }
-        const bodyText = await response.text().catch(() => "");
-        finalFailure = streamStartError(response.status, bodyText);
+        finalFailure = streamStartError(response.status, response.body);
         break;
       }
 
-      const contentType = response.headers.get("content-type") ?? "";
-      if (!contentType.includes("text/event-stream")) {
-        await response.body?.cancel().catch(() => undefined);
+      if (!response.contentType.includes("text/event-stream")) {
+        stream.cancel();
         finalFailure = {
           code: "stream_protocol_error",
-          message:
-            "The action report endpoint did not return an event stream. Delivery will retry after the next turn.",
+          message: isWake
+            ? "The action wake endpoint did not return an event stream."
+            : "The action report endpoint did not return an event stream. Delivery will retry after the next turn.",
         };
-        break;
-      }
-      if (!response.body) {
-        finalFailure = {
-          code: "stream_closed",
-          message: "The action continuation closed before it started.",
-        };
-        if (attempt + 1 < STREAM_DELIVERY_ATTEMPTS) continue;
         break;
       }
 
-      const result = await this.consumeTurnStream(
-        conversationId,
-        run,
-        response,
-      );
+      const result = await this.consumeTurnStream(conversationId, run, stream);
       if (result.kind === "settled" || run.finished) return;
-      finalFailure = result.error;
+      finalFailure =
+        result.error.code === "stream_closed"
+          ? {
+              code: "stream_closed",
+              message: "The action continuation closed before it started.",
+            }
+          : result.error.code === "network_error" ||
+              result.error.code === "worker_error"
+            ? { ...finalFailure, code: result.error.code }
+            : result.error;
       if (
         result.kind === "retryable" &&
         attempt + 1 < STREAM_DELIVERY_ATTEMPTS
@@ -2320,55 +2364,28 @@ export class AevatarAssistantTransport implements AssistantTransport {
   }
 
   /**
-   * Shared SSE consumption for the original turn stream and the approval
-   * continuation stream: same framing, same adapter, same watchdog and
-   * truncation semantics.
+   * Shared completion handling for initial turns, approval continuations, and
+   * action continuations. Fetch, UTF-8 decoding, SSE framing, JSON parsing,
+   * and bounded batching happen in the stream worker (or inline fallback).
    */
   private async consumeTurnStream(
     conversationId: string,
     run: RunningTurn,
-    response: Response,
+    stream: ChatStreamRequestHandle,
   ): Promise<StreamConsumptionResult> {
-    if (!response.body) {
-      return {
-        kind: "retryable",
-        error: {
-          code: "stream_closed",
-          message: "The assistant stream closed before it started.",
-        },
-      };
-    }
     try {
       this.armWatchdog(conversationId, run);
-      const reader = response.body.getReader();
-      const decoder = new TextDecoder();
-      let buffer = "";
-      readLoop: for (;;) {
-        const { done, value } = await reader.read();
-        if (done) break;
-        buffer += decoder.decode(value, { stream: true });
-        const { payloads, rest } = drainSseBuffer(buffer);
-        buffer = rest;
-        for (const payload of payloads) {
-          this.handleAgUiFrame(conversationId, run, payload);
-          if (run.finished) return { kind: "settled" };
-          if (run.deliveryProtocolError) break readLoop;
-        }
-      }
-      if (!run.deliveryProtocolError) {
-        // The final frame may arrive without a trailing blank line; flush it
-        // before judging how the stream ended.
-        buffer += decoder.decode();
-        for (const payload of flushSseBuffer(buffer)) {
-          this.handleAgUiFrame(conversationId, run, payload);
-          if (run.finished) return { kind: "settled" };
-          if (run.deliveryProtocolError) break;
-        }
+      const completion = await stream.completion;
+      if (run.finished || run.controller.signal.aborted) {
+        return { kind: "settled" };
       }
 
       if (run.deliveryProtocolError) {
-        await reader.cancel().catch(() => undefined);
+        stream.cancel();
         return { kind: "protocol_error", error: run.deliveryProtocolError };
+      }
+      if (completion.kind !== "complete") {
+        return this.streamCompletionFailure(completion);
       }
       if (run.deliveryTerminal) {
         this.settleDeliveryTerminal(conversationId, run, run.deliveryTerminal);
@@ -2399,17 +2416,6 @@ export class AevatarAssistantTransport implements AssistantTransport {
             "The stream ended before the assistant finished. The reply may be incomplete; it will appear in full once the conversation reloads.",
         },
       };
-    } catch {
-      if (run.finished || run.controller.signal.aborted) {
-        return { kind: "settled" };
-      }
-      return {
-        kind: "retryable",
-        error: {
-          code: "network_error",
-          message: "The assistant stream was interrupted. Try again.",
-        },
-      };
     } finally {
       this.clearWatchdog(run);
     }
@@ -2418,13 +2424,54 @@ export class AevatarAssistantTransport implements AssistantTransport {
   private async consumeApprovalContinuation(
     conversationId: string,
     run: RunningTurn,
-    response: Response,
+    stream: ChatStreamRequestHandle,
   ): Promise<void> {
-    const result = await this.consumeTurnStream(conversationId, run, response);
+    const result = await this.consumeTurnStream(conversationId, run, stream);
     if (result.kind === "settled" || run.finished) return;
     this.closeOpenMessage(conversationId, run);
     this.finalizeActivity(conversationId, run, "failed");
     this.finishTurn(conversationId, run, "failed", result.error);
+  }
+
+  private startChatStream(
+    conversationId: string,
+    run: RunningTurn,
+    url: string,
+    bodyText: string,
+  ): ChatStreamRequestHandle {
+    let stream: ChatStreamRequestHandle | null = null;
+    run.streamDispatched = true;
+    stream = chatStreamClient.start({
+      url,
+      bodyText,
+      signal: run.controller.signal,
+      onFrames: (frames) => {
+        for (const frame of frames) {
+          this.handleAgUiFrame(conversationId, run, frame);
+          if (run.finished || run.deliveryProtocolError) {
+            if (run.deliveryProtocolError) stream?.cancel();
+            break;
+          }
+        }
+      },
+    });
+    return stream;
+  }
+
+  private streamCompletionFailure(
+    completion: Exclude<ChatStreamCompletionResult, { kind: "complete" }>,
+  ): StreamConsumptionResult {
+    if (completion.kind === "cancelled") return { kind: "settled" };
+    if (completion.kind === "http_error") {
+      return {
+        kind: "retryable",
+        error: streamStartError(completion.status, completion.body),
+      };
+    }
+    return {
+      kind: "retryable",
+      error: { code: completion.code, message: completion.message },
+    };
   }
 
   private resetDeliveryState(run: RunningTurn): void {
@@ -2477,14 +2524,9 @@ export class AevatarAssistantTransport implements AssistantTransport {
   private handleAgUiFrame(
     conversationId: string,
     run: RunningTurn,
-    payload: string,
+    payload: ChatStreamFrame,
   ): void {
-    let frame: AgUiFrame;
-    try {
-      frame = JSON.parse(payload) as AgUiFrame;
-    } catch {
-      return;
-    }
+    const frame = payload as AgUiFrame;
     if (typeof frame !== "object" || frame === null) return;
 
     const type = this.frameType(frame);
@@ -2547,6 +2589,39 @@ export class AevatarAssistantTransport implements AssistantTransport {
               : "The assistant stream did not provide a valid turn id.",
           };
           return;
+        }
+        if (run.protocol === "typed-create") {
+          const candidateActorId = frame.actorId ?? frame.runStarted?.actorId;
+          const actorId =
+            typeof candidateActorId === "string" &&
+            TYPED_SERVER_CONVERSATION_ID_PATTERN.test(candidateActorId)
+              ? candidateActorId
+              : null;
+          const stored = this.conversations.get(conversationId);
+          if (!actorId || !stored) {
+            run.deliveryProtocolError ??= {
+              code: "stream_protocol_error",
+              message:
+                "The assistant stream did not provide a valid conversation id.",
+            };
+            return;
+          }
+          const priorId = stored.conversation.id;
+          if (
+            TYPED_SERVER_CONVERSATION_ID_PATTERN.test(priorId) &&
+            priorId !== actorId
+          ) {
+            run.deliveryProtocolError = {
+              code: "stream_protocol_error",
+              message: "The assistant replay changed the conversation id.",
+            };
+            return;
+          }
+          if (priorId !== actorId) {
+            stored.conversation = { ...stored.conversation, id: actorId };
+            this.conversations.set(actorId, stored);
+            this.conversationAliases.set(conversationId, actorId);
+          }
         }
         run.deliveryStarted = true;
         if (run.turnId && run.turnId !== authoritativeTurnId) {
@@ -2914,7 +2989,7 @@ export class AevatarAssistantTransport implements AssistantTransport {
     const stored = this.conversations.get(conversationId);
     const serverId =
       typeof payload.conversationId === "string" &&
-      SERVER_CONVERSATION_ID_PATTERN.test(payload.conversationId)
+      WORKFLOW_SERVER_CONVERSATION_ID_PATTERN.test(payload.conversationId)
         ? payload.conversationId
         : null;
     if (stored && serverId && stored.conversation.id !== serverId) {
@@ -3867,6 +3942,7 @@ export class AevatarAssistantTransport implements AssistantTransport {
     // posting the actor-surface stop for a `chatc-…` id would only 404.
     if (run.protocol === "workflow") return null;
     if (!run.turnId) return null;
+    const actorConversationId = this.canonicalConversationId(conversationId);
     // Own deadline: a server that accepts but never answers must not pin
     // the pendingStops entry (and tax every later send with the full fence
     // wait). A manual controller instead of AbortSignal.timeout so this
@@ -3878,7 +3954,7 @@ export class AevatarAssistantTransport implements AssistantTransport {
       STOP_REQUEST_DEADLINE_MS,
     );
     const pending = apiClient<unknown>(
-      `${ASSISTANT_PREFIX}/conversations/${conversationId}/stop`,
+      `${ASSISTANT_PREFIX}/conversations/${actorConversationId}/stop`,
       {
         method: "POST",
         body: {
@@ -3894,7 +3970,7 @@ export class AevatarAssistantTransport implements AssistantTransport {
       () => clearTimeout(deadlineTimer),
       () => clearTimeout(deadlineTimer),
     );
-    this.trackFence(conversationId, pending);
+    this.trackFence(actorConversationId, pending);
     return pending;
   }
 

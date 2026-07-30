@@ -37,7 +37,6 @@ beforeEach(() => {
   useAssistantContextStore.setState({
     ownerUserId: null,
     lastScreen: null,
-    bindings: {},
   });
   useAssistantDraftStore.setState({ ownerUserId: null, drafts: {} });
   useAuthStore.setState({
@@ -163,9 +162,7 @@ describe("logout", () => {
     apiMock.post.mockResolvedValueOnce(undefined);
 
     useAuthStore.setState({ isAuthenticated: true, mfaRequired: true });
-    useAssistantContextStore
-      .getState()
-      .bindConversation("u1", "/keys", "conversation-private");
+    useAssistantContextStore.getState().recordScreen("u1", "/keys");
     useAssistantDraftStore
       .getState()
       .saveDraft("u1", "conv:conversation-private", "Private draft");
@@ -175,7 +172,10 @@ describe("logout", () => {
     expect(state.user).toBeNull();
     expect(state.isAuthenticated).toBe(false);
     expect(state.mfaRequired).toBe(false);
-    expect(useAssistantContextStore.getState().bindings).toEqual({});
+    expect(useAssistantContextStore.getState()).toMatchObject({
+      ownerUserId: null,
+      lastScreen: null,
+    });
     expect(useAssistantDraftStore.getState().drafts).toEqual({});
     expect(localStorage.getItem("nyxid.assistant_context")).toBeNull();
     expect(localStorage.getItem("nyxid.assistant_drafts")).toBeNull();
