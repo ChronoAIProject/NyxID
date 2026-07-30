@@ -305,8 +305,13 @@ export function AssistantPage({
   }, [history.data?.messages, pendingContent]);
   const awaitingFirstTurn = active || sendMessage.isPending;
   // Cancelled is deliberately excluded: the reader pressed Stop, and calling
-  // their own decision an error would be a lie. `blocked` is not terminal.
-  const turnEnded = turnStatus === "completed" || turnStatus === "failed";
+  // their own decision an error would be a lie. `blocked` IS included — the
+  // transport settles it through `finishTurn`, so a turn that ends blocked
+  // without emitting a card has closed with nothing the reader can act on.
+  const turnEnded =
+    turnStatus === "completed" ||
+    turnStatus === "failed" ||
+    turnStatus === "blocked";
   const draftKey =
     selectedId && (!conversations.isSuccess || selectedConversationExists)
       ? `conv:${selectedId}`
@@ -366,6 +371,7 @@ export function AssistantPage({
             }
             streaming={active && messages.at(-1)?.role === "assistant"}
             turnEnded={turnEnded}
+            transcriptSettling={history.isFetching || sendMessage.isPending}
             onDecideApproval={(blockId, approved) =>
               decideApproval.mutateAsync({ blockId, approved })
             }

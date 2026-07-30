@@ -94,6 +94,7 @@ vi.mock("@/hooks/use-assistant", () => ({
         }
       : undefined,
     isLoading: false,
+    isFetching: false,
     isError: state.historyError,
     error: undefined,
   }),

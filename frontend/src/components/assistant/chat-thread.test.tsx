@@ -312,6 +312,102 @@ describe("ChatThread", () => {
     expect(document.querySelectorAll("[data-empty-turn-error]")).toHaveLength(1);
   });
 
+  it("does not let the empty-conversation screen bury a live turn", () => {
+    // A first turn can die before any history row materializes, leaving the
+    // transcript bare. Showing "start a conversation" there hides the fact that
+    // anything happened at all.
+    const { rerender } = render(
+      <ChatThread messages={[]} thinking onDecideApproval={vi.fn()} />,
+    );
+
+    expect(
+      screen.queryByText("Start a new conversation"),
+    ).not.toBeInTheDocument();
+    expect(
+      document.querySelector("[data-streaming-dots]"),
+    ).toBeInTheDocument();
+
+    rerender(<ChatThread messages={[]} onDecideApproval={vi.fn()} />);
+    expect(screen.getByText("Start a new conversation")).toBeInTheDocument();
+  });
+
+  it("does not let the empty-conversation screen bury a closed-empty turn", () => {
+    vi.useFakeTimers();
+    render(<ChatThread messages={[]} turnEnded onDecideApproval={vi.fn()} />);
+    act(() => vi.advanceTimersByTime(700));
+
+    expect(screen.getByRole("alert")).toBeInTheDocument();
+    expect(
+      screen.queryByText("Start a new conversation"),
+    ).not.toBeInTheDocument();
+  });
+
+  it("waits for an in-flight transcript read instead of guessing at it", () => {
+    vi.useFakeTimers();
+    const messages = [
+      message({
+        role: "user",
+        blocks: [{ type: "text", block_id: "t1", text: "Question" }],
+      }),
+    ];
+    const { rerender } = render(
+      <ChatThread
+        messages={messages}
+        turnEnded
+        transcriptSettling
+        onDecideApproval={vi.fn()}
+      />,
+    );
+    // However slow the read is, a pending one is never called an error.
+    act(() => vi.advanceTimersByTime(10_000));
+    expect(screen.queryByRole("alert")).not.toBeInTheDocument();
+
+    rerender(
+      <ChatThread messages={messages} turnEnded onDecideApproval={vi.fn()} />,
+    );
+    act(() => vi.advanceTimersByTime(700));
+    expect(screen.getByRole("alert")).toBeInTheDocument();
+  });
+
+  it("makes a new settle episode wait even if the last one had settled", () => {
+    vi.useFakeTimers();
+    const userMessage = message({
+      role: "user",
+      blocks: [{ type: "text", block_id: "t1", text: "Question" }],
+    });
+    const { rerender } = render(
+      <ChatThread
+        messages={[userMessage]}
+        turnEnded
+        onDecideApproval={vi.fn()}
+      />,
+    );
+    act(() => vi.advanceTimersByTime(700));
+    expect(screen.getByRole("alert")).toBeInTheDocument();
+
+    // Condition drops and returns within one macrotask: the second episode must
+    // re-serve its own grace period, not inherit the first one's verdict.
+    rerender(
+      <ChatThread
+        messages={[userMessage]}
+        turnEnded
+        transcriptSettling
+        onDecideApproval={vi.fn()}
+      />,
+    );
+    rerender(
+      <ChatThread
+        messages={[userMessage]}
+        turnEnded
+        onDecideApproval={vi.fn()}
+      />,
+    );
+    expect(screen.queryByRole("alert")).not.toBeInTheDocument();
+
+    act(() => vi.advanceTimersByTime(700));
+    expect(screen.getByRole("alert")).toBeInTheDocument();
+  });
+
   it("stays quiet when a closed turn did print an answer", () => {
     vi.useFakeTimers();
     render(

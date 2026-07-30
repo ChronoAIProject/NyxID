@@ -178,22 +178,23 @@ function hasPrintableContent(messages: readonly AssistantMessage[]): boolean {
  */
 function useSettled(condition: boolean, delayMs: number): boolean {
   const [settled, setSettled] = useState(false);
+  const [armedFor, setArmedFor] = useState(condition);
+
+  // Render-phase reset, not an effect. Clearing in an effect leaves `settled`
+  // true across a false -> true flip that happens inside one macrotask: the
+  // rearm's cleanup cancels the pending reset before it ever runs, and the new
+  // episode then reports settled immediately instead of waiting its turn.
+  if (armedFor !== condition) {
+    setArmedFor(condition);
+    setSettled(false);
+  }
 
   useEffect(() => {
-    if (!condition) {
-      // Cleared on a timer rather than synchronously, for the same reason
-      // useFadingPresence does it: a synchronous setState inside an effect
-      // cascades renders. The `condition &&` below is what makes the reset
-      // latency invisible.
-      const reset = window.setTimeout(() => setSettled(false), 0);
-      return () => window.clearTimeout(reset);
-    }
+    if (!condition) return;
     const timer = window.setTimeout(() => setSettled(true), delayMs);
     return () => window.clearTimeout(timer);
   }, [condition, delayMs]);
 
-  // Gated on the live condition too, so a stale `settled` from a previous
-  // episode can never show an error before this one has waited its turn.
   return condition && settled;
 }
 
@@ -224,12 +225,18 @@ function groupMessages(messages: readonly AssistantMessage[]): MessageGroup[] {
  *
  * The inline caret in TextBlock takes over once characters exist.
  */
-function StreamingDots() {
+function StreamingDots({ live = false }: { readonly live?: boolean }) {
   return (
     <span
-      aria-hidden
       data-streaming-dots
       className="flex items-center gap-1 py-[5px]"
+      // The standalone thinking row is itself a live region, so its dots stay
+      // decorative. Dots inside an opened-but-still-empty assistant message
+      // have no such wrapper — without their own role that whole pre-content
+      // state is silent to a screen reader.
+      role={live ? "status" : undefined}
+      aria-label={live ? "Assistant is answering" : undefined}
+      aria-hidden={live ? undefined : true}
     >
       <span className="h-1.5 w-1.5 animate-bounce rounded-full bg-text-tertiary [animation-delay:-0.3s] motion-reduce:animate-none" />
       <span className="h-1.5 w-1.5 animate-bounce rounded-full bg-text-tertiary [animation-delay:-0.15s] motion-reduce:animate-none" />
@@ -287,6 +294,7 @@ export function ChatThread({
   thinking = false,
   streaming = false,
   turnEnded = false,
+  transcriptSettling = false,
   bottomInset = 0,
   onDecideApproval,
 }: {
@@ -310,6 +318,12 @@ export function ChatThread({
    * having printed nothing" from "no turn has run yet".
    */
   readonly turnEnded?: boolean;
+  /**
+   * A transcript read is in flight. The turn's terminal status and its
+   * transcript arrive independently, so this is what keeps a slow-projecting
+   * answer from being reported as a turn that printed nothing.
+   */
+  readonly transcriptSettling?: boolean;
   /**
    * Height in px of the composer floating over the thread. Turns are allowed to
    * scroll behind it (ChatGPT-style), so the thread reserves this much room at
@@ -367,7 +381,14 @@ export function ChatThread({
   const tailAnswered =
     tail?.role === "assistant" && hasPrintableContent(tail.messages);
   const showEmptyTurnError = useSettled(
-    turnEnded && !thinking && !streaming && !tailAnswered,
+    turnEnded &&
+      !thinking &&
+      !streaming &&
+      !tailAnswered &&
+      // A read still in flight is the case the grace period is guessing at.
+      // When the caller can tell us outright, don't guess: an answer that is
+      // simply slow to project must never be reported as an error.
+      !transcriptSettling,
     EMPTY_TURN_GRACE_MS,
   );
 
@@ -376,7 +397,16 @@ export function ChatThread({
   // being clipped by a hard line.
   const fadeMask = `linear-gradient(to bottom, #000 0, #000 calc(100% - ${String(bottomInset)}px), transparent 100%)`;
 
-  if (messages.length === 0) {
+  // Only when there is genuinely nothing going on. A turn can be live (or can
+  // have closed empty) while the transcript is still bare — a conversation
+  // whose first turn died before any history row materialized reads as an
+  // untouched chat, and this screen would bury both the dots and the error.
+  if (
+    messages.length === 0 &&
+    !thinking &&
+    !streaming &&
+    !showEmptyTurnError
+  ) {
     return (
       <div
         className="flex flex-1 items-center justify-center px-6 text-center"
@@ -495,7 +525,7 @@ export function ChatThread({
                       </Fragment>
                     );
                   })}
-                  {awaitingFirstBlock ? <StreamingDots /> : null}
+                  {awaitingFirstBlock ? <StreamingDots live /> : null}
                   {/* This group IS the tail, so its own answer never arrived. */}
                   {isLastGroup && showEmptyTurnError ? <EmptyTurnError /> : null}
                 </div>
