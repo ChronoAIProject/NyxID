@@ -10,6 +10,7 @@ import { TooltipProvider } from "@/components/ui/tooltip";
 import { Toaster } from "@/components/ui/toast";
 import { ChunkErrorBoundary } from "@/components/chunk-error-boundary";
 import { AppNotFound } from "@/components/shared/app-not-found";
+import { AppRouteError } from "@/components/shared/app-route-error";
 import { AuthLayout } from "@/components/layout/auth-layout";
 import { DashboardLayout } from "@/components/layout/dashboard-layout";
 import { BillingRouteGuard } from "@/components/billing-route-guard";
@@ -908,6 +909,10 @@ export const router = createRouter({
   routeTree,
   defaultPreload: "intent",
   defaultNotFoundComponent: AppNotFound,
+  // Without an error component the router's CatchBoundary renders nothing on a
+  // render error, blanking the whole app — nav chrome included — so a single
+  // broken view reads as "every button is dead".
+  defaultErrorComponent: AppRouteError,
 });
 
 declare module "@tanstack/react-router" {
