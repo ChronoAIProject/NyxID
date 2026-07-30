@@ -198,7 +198,7 @@ export function BillingPage() {
         loading={usageQuery.isLoading}
       />
 
-      <TopUpHistory />
+      <TopUpHistory key={period} period={period} />
     </div>
   );
 }
@@ -213,9 +213,9 @@ const TOPUP_STATUS_VARIANT = {
 
 const TOPUPS_PER_PAGE = 10;
 
-function TopUpHistory() {
+function TopUpHistory({ period }: { readonly period: BillingUsagePeriod }) {
   const [page, setPage] = useState(1);
-  const historyQuery = useTopUpHistory(page, TOPUPS_PER_PAGE);
+  const historyQuery = useTopUpHistory(page, TOPUPS_PER_PAGE, period);
   const topups = historyQuery.data?.topups ?? [];
   const total = historyQuery.data?.total || topups.length;
   const pageCount = Math.max(1, Math.ceil(total / TOPUPS_PER_PAGE));
@@ -553,7 +553,6 @@ function Detail({ label, value }: { readonly label: string; readonly value: stri
 function periodLabel(period: BillingUsagePeriod): string {
   switch (period) {
     case "24h":
-    case "1d":
       return "24 hours";
     case "7d":
       return "7 days";

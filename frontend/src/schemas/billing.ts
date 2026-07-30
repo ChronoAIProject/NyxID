@@ -1,6 +1,6 @@
 import { z } from "zod";
 
-export const BILLING_USAGE_PERIODS = ["24h", "1d", "7d", "30d", "90d", "all"] as const;
+export const BILLING_USAGE_PERIODS = ["24h", "7d", "30d", "90d", "all"] as const;
 
 export type BillingUsagePeriod = (typeof BILLING_USAGE_PERIODS)[number];
 

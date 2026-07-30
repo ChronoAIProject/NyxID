@@ -80,12 +80,12 @@ export function useBillingUsage(period?: BillingUsagePeriod) {
 
 export const BILLING_TOPUPS_KEY = ["billing", "topups"] as const;
 
-export function useTopUpHistory(page = 1, perPage = 10) {
+export function useTopUpHistory(page = 1, perPage = 10, period = "all") {
   return useQuery({
-    queryKey: [...BILLING_TOPUPS_KEY, page, perPage],
+    queryKey: [...BILLING_TOPUPS_KEY, page, perPage, period],
     queryFn: async (): Promise<TopUpHistoryResponse> => {
       const response = await api.get<unknown>(
-        `/billing/topups?page=${page}&per_page=${perPage}`,
+        `/billing/topups?page=${page}&per_page=${perPage}&period=${encodeURIComponent(period)}`,
       );
       return topUpHistoryResponseSchema.parse(response);
     },

@@ -160,6 +160,7 @@ pub struct TopUpHistoryResponse {
 pub struct TopUpHistoryQuery {
     pub page: Option<u32>,
     pub per_page: Option<u32>,
+    pub period: Option<String>,
 }
 
 #[derive(Debug, Serialize, ToSchema)]
@@ -440,7 +441,13 @@ pub async fn list_topups(
 
     let page = query.page.unwrap_or(1).max(1);
     let per_page = query.per_page.unwrap_or(10).clamp(1, 50);
-    let filter = doc! { "owner_id": &owner.owner_id };
+    let mut filter = doc! { "owner_id": &owner.owner_id };
+    if let Some(period) = query.period.as_deref().filter(|period| *period != "all") {
+        filter.insert(
+            "created_at",
+            doc! { "$gte": bson::DateTime::from_chrono(period_start(period)) },
+        );
+    }
     let collection = state
         .db
         .collection::<crate::models::billing_topup_session::BillingTopUpSession>(
