@@ -81,6 +81,51 @@ describe("assistant action request schema", () => {
     });
   });
 
+  it("resolves bad catalog slugs and insecure custom urls as unsupported", () => {
+    const badSlug = assistantActionRequestSchema.parse({
+      ...BASE_REQUEST,
+      actionRequestId: "act-bad-slug",
+      params: { catalogService: { serviceSlug: "api github" } },
+    });
+    const httpUrl = assistantActionRequestSchema.parse({
+      ...BASE_REQUEST,
+      actionRequestId: "act-http",
+      params: {
+        customService: {
+          name: "Build API",
+          endpointUrl: "http://build.example.test/v1",
+        },
+      },
+    });
+    const queryUrl = assistantActionRequestSchema.parse({
+      ...BASE_REQUEST,
+      actionRequestId: "act-query",
+      params: {
+        customService: {
+          name: "Build API",
+          endpointUrl: "https://build.example.test/v1?token=nope",
+        },
+      },
+    });
+    const fragmentUrl = assistantActionRequestSchema.parse({
+      ...BASE_REQUEST,
+      actionRequestId: "act-fragment",
+      params: {
+        customService: {
+          name: "Build API",
+          endpointUrl: "https://build.example.test/v1#secret",
+        },
+      },
+    });
+
+    for (const request of [badSlug, httpUrl, queryUrl, fragmentUrl]) {
+      expect(resolveAssistantAction(request)).toMatchObject({
+        supported: false,
+        params: { variant: "unknown" },
+      });
+    }
+  });
+
   it("routes a wrong schema version and unknown verb to the fallback", () => {
     const wrongVersion = assistantActionRequestSchema.parse({
       ...BASE_REQUEST,
@@ -177,6 +222,40 @@ describe("assistant action request schema", () => {
         },
       },
     });
+  });
+
+  it("fails closed when a forbidden key or secret-shaped value appears anywhere", () => {
+    const forbiddenKey = {
+      ...BASE_REQUEST,
+      params: {
+        customService: {
+          name: "Build API",
+          endpointUrl: "https://build.example.test/v1",
+          authMethod: "header",
+          authKeyName: "Authorization",
+          deviceCode: "nyx_adc_secret1234",
+        },
+      },
+    };
+    const secretValue = {
+      ...BASE_REQUEST,
+      params: {
+        customService: {
+          name: "Build API",
+          endpointUrl: "https://build.example.test/v1",
+          authMethod: "header",
+          authKeyName: "X-Auth",
+          targetOrgId: "Bearer top-secret-value",
+        },
+      },
+    };
+
+    expect(assistantActionRequestSchema.safeParse(forbiddenKey).success).toBe(
+      false,
+    );
+    expect(assistantActionRequestSchema.safeParse(secretValue).success).toBe(
+      false,
+    );
   });
 });
 
@@ -278,6 +357,42 @@ describe("action continuation schema", () => {
         ],
       }).success,
     ).toBe(false);
+  });
+
+  it("rejects completed service.connect reports without a userService resource", () => {
+    expect(() =>
+      buildActionContinueBody(
+        "request-1",
+        "turn-origin-1",
+        [
+          {
+            actionRequestId: "act-1",
+            originTurnId: "turn-origin-1",
+            disposition: "completed",
+          },
+        ],
+        new Map([["act-1", "service.connect"]]),
+      ),
+    ).toThrow(
+      "service.connect completed reports must include resource.userService.userServiceId",
+    );
+    expect(() =>
+      buildActionContinueBody(
+        "request-1",
+        "turn-origin-1",
+        [
+          {
+            actionRequestId: "act-1",
+            originTurnId: "turn-origin-1",
+            disposition: "completed",
+            resource: { key: { keyId: "key-1" } },
+          },
+        ],
+        new Map([["act-1", "service.connect"]]),
+      ),
+    ).toThrow(
+      "service.connect completed reports must include resource.userService.userServiceId",
+    );
   });
 
   it("enforces the control-identity character and length rules", () => {

@@ -497,6 +497,15 @@ export function useActionCardActions(conversationId: string | undefined) {
         createTurnEventPump(queryClient, conversationId),
       );
     },
+    blockAction(blockId: string, note: string): void {
+      if (!conversationId) return;
+      assistantTransport.blockActionCard(
+        conversationId,
+        blockId,
+        note,
+        createTurnEventPump(queryClient, conversationId),
+      );
+    },
     async continueAction(report: ActionReport): Promise<void> {
       if (!conversationId) throw new Error("Select a conversation first.");
       const handle = assistantTransport.continueActions(

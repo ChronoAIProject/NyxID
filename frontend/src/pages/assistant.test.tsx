@@ -107,6 +107,7 @@ vi.mock("@/hooks/use-assistant", () => ({
   useDecideApproval: () => ({ mutateAsync: vi.fn() }),
   useActionCardActions: () => ({
     setInProgress: vi.fn(),
+    blockAction: vi.fn(),
     continueAction: vi.fn(),
   }),
   useDeleteConversation: () => ({

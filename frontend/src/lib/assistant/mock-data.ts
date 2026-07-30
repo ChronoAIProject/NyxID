@@ -792,6 +792,8 @@ export function createScriptedTurn(
         action: actionRequest.action,
         action_request_id: actionRequest.actionRequestId,
         origin_turn_id: actionRequest.originTurnId,
+        task_id: actionRequest.taskId,
+        step_id: actionRequest.stepId,
         params: resolvedAction.params,
         status: "pending",
         outcome_note: "",

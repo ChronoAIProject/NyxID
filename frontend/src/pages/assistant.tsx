@@ -311,6 +311,7 @@ export function AssistantPage({
               decideApproval.mutateAsync({ blockId, approved })
             }
             onActionProgress={actionCards.setInProgress}
+            onBlockAction={actionCards.blockAction}
             onResolveAction={actionCards.continueAction}
           />
         )}

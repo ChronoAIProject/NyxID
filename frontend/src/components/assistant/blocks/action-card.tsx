@@ -1,7 +1,6 @@
 import { useRef, useState } from "react";
 import {
   AlertTriangle,
-  Check,
   Globe,
   Loader2,
   Server,
@@ -23,8 +22,12 @@ import type { ActionCardContentBlock } from "@/types/assistant";
 interface ActionCardProps {
   readonly block: ActionCardContentBlock;
   readonly onProgress: (blockId: string, inProgress: boolean) => void;
+  readonly onBlock: (blockId: string, note: string) => Promise<void> | void;
   readonly onResolve: (report: ActionReport) => Promise<void> | void;
 }
+
+const VERIFICATION_BLOCKED_NOTE =
+  "Connected, but NyxID could not verify which service was created. Manage it in AI Services, then ask the assistant to request it again.";
 
 function ParameterSummary({
   block,
@@ -107,10 +110,10 @@ function ParameterSummary({
 
 const RECEIPT = {
   completed: {
-    title: "Service connected",
-    icon: Check,
-    container: "border-success/30 bg-success/[0.06]",
-    iconClass: "text-success",
+    title: "Reported — awaiting assistant verification",
+    icon: ShieldCheck,
+    container: "border-border bg-overlay",
+    iconClass: "text-nyx-secondary-400",
   },
   declined: {
     title: "Action declined",
@@ -152,7 +155,26 @@ function Receipt({ block }: { readonly block: ActionCardContentBlock }) {
   );
 }
 
-export function ActionCard({ block, onProgress, onResolve }: ActionCardProps) {
+function StatusNotice({ block }: { readonly block: ActionCardContentBlock }) {
+  if (block.status !== "blocked" && block.status !== "conflicted") {
+    return null;
+  }
+  return (
+    <div className="flex items-start gap-2 border-t border-border bg-muted px-4 py-3">
+      <AlertTriangle className="mt-0.5 h-3.5 w-3.5 shrink-0 text-warning" />
+      <p className="text-[11px] leading-relaxed text-muted-foreground">
+        {block.outcome_note}
+      </p>
+    </div>
+  );
+}
+
+export function ActionCard({
+  block,
+  onProgress,
+  onBlock,
+  onResolve,
+}: ActionCardProps) {
   const [dialogOpen, setDialogOpen] = useState(false);
   const resolvingRef = useRef(false);
   const descriptor = descriptorForAction(
@@ -174,6 +196,9 @@ export function ActionCard({ block, onProgress, onResolve }: ActionCardProps) {
   const unsupported =
     block.status === "unsupported" || descriptor.risk === "unsupported";
   const busy = block.status === "in_progress";
+  const blocked = block.status === "blocked";
+  const conflicted = block.status === "conflicted";
+  const controlsDisabled = busy || blocked || conflicted;
   const params = block.params;
 
   function setOpen(next: boolean) {
@@ -187,6 +212,15 @@ export function ActionCard({ block, onProgress, onResolve }: ActionCardProps) {
     disposition: "completed" | "declined",
     userServiceId?: string,
   ) {
+    if (disposition === "completed" && !userServiceId?.trim()) {
+      resolvingRef.current = true;
+      void Promise.resolve(
+        onBlock(block.block_id, VERIFICATION_BLOCKED_NOTE),
+      ).catch(() => {
+        resolvingRef.current = false;
+      });
+      return;
+    }
     resolvingRef.current = true;
     const base = {
       actionRequestId: block.action_request_id,
@@ -233,13 +267,23 @@ export function ActionCard({ block, onProgress, onResolve }: ActionCardProps) {
               {descriptor.title(params)}
             </h3>
             <Badge
-              variant={unsupported ? "destructive" : "accent"}
+              variant={
+                unsupported || conflicted
+                  ? "destructive"
+                  : blocked
+                    ? "warning"
+                    : "accent"
+              }
             >
               {unsupported
                 ? "Unsupported"
-                : busy
-                  ? "In progress"
-                  : "Action required"}
+                : conflicted
+                  ? "Conflict"
+                  : blocked
+                    ? "Blocked"
+                    : busy
+                      ? "In progress"
+                      : "Action required"}
             </Badge>
           </div>
           <p className="mt-1.5 text-[12px] leading-relaxed text-muted-foreground">
@@ -249,6 +293,7 @@ export function ActionCard({ block, onProgress, onResolve }: ActionCardProps) {
       </div>
 
       <ParameterSummary block={block} />
+      <StatusNotice block={block} />
 
       {!unsupported ? (
         <div className="flex items-start gap-2 px-4 py-3">
@@ -266,7 +311,7 @@ export function ActionCard({ block, onProgress, onResolve }: ActionCardProps) {
             type="button"
             variant="primary"
             size="sm"
-            disabled={busy}
+            disabled={controlsDisabled}
             onClick={() => {
               onProgress(block.block_id, true);
               setDialogOpen(true);
@@ -280,7 +325,7 @@ export function ActionCard({ block, onProgress, onResolve }: ActionCardProps) {
           type="button"
           variant="outline"
           size="sm"
-          disabled={busy}
+          disabled={controlsDisabled}
           onClick={() => report("declined")}
         >
           <X />

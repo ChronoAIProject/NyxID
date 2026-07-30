@@ -107,7 +107,9 @@ export interface ArtifactContentBlock {
 export type ActionCardStatus =
   | "pending"
   | "in_progress"
+  | "blocked"
   | "completed"
+  | "conflicted"
   | "declined"
   | "failed"
   | "unsupported";
@@ -120,6 +122,8 @@ export interface ActionCardContentBlock {
   readonly origin_turn_id: string;
   /** Actor that emitted the request; used only to address action.continue. */
   readonly actor_id?: string;
+  readonly task_id: string;
+  readonly step_id: string;
   readonly params: ActionCardParams;
   readonly status: ActionCardStatus;
   readonly outcome_note: string;
@@ -279,6 +283,12 @@ export interface AssistantTransport {
     conversationId: string,
     blockId: string,
     inProgress: boolean,
+    onEvent?: (event: TurnEvent) => void,
+  ): void;
+  blockActionCard(
+    conversationId: string,
+    blockId: string,
+    note: string,
     onEvent?: (event: TurnEvent) => void,
   ): void;
   continueActions(

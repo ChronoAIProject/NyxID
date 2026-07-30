@@ -22,7 +22,7 @@ vi.mock("@/components/dashboard/add-key-dialog", () => ({
     readonly prefillSlug?: string;
     readonly prefillIncludeAllCatalog?: boolean;
     readonly prefillCustom?: { readonly name?: string };
-    readonly onSuccess?: (result: { readonly userServiceId: string }) => void;
+    readonly onSuccess?: (result: { readonly userServiceId?: string }) => void;
   }) =>
     open ? (
       <div
@@ -40,6 +40,9 @@ vi.mock("@/components/dashboard/add-key-dialog", () => ({
         >
           Finish mock connection
         </button>
+        <button type="button" onClick={() => onSuccess?.({})}>
+          Finish without service id
+        </button>
         <button type="button" onClick={() => onOpenChange(false)}>
           Dismiss mock connection
         </button>
@@ -56,6 +59,8 @@ function catalogBlock(
     action: "service.connect",
     action_request_id: "act-1",
     origin_turn_id: "turn-origin-1",
+    task_id: "task-1",
+    step_id: "step-1",
     params: {
       variant: "catalog",
       service_slug: "api-github",
@@ -82,11 +87,13 @@ describe("ActionCard", () => {
   it("renders owned consent copy and opens the prefilled connect journey", async () => {
     const user = userEvent.setup();
     const onProgress = vi.fn();
+    const onBlock = vi.fn();
     const onResolve = vi.fn();
     render(
       <ActionCard
         block={catalogBlock()}
         onProgress={onProgress}
+        onBlock={onBlock}
         onResolve={onResolve}
       />,
     );
@@ -137,6 +144,7 @@ describe("ActionCard", () => {
       <ActionCard
         block={catalogBlock()}
         onProgress={vi.fn()}
+        onBlock={vi.fn()}
         onResolve={vi.fn()}
       />,
     );
@@ -169,6 +177,7 @@ describe("ActionCard", () => {
           status: "unsupported",
         })}
         onProgress={vi.fn()}
+        onBlock={vi.fn()}
         onResolve={vi.fn()}
       />,
     );
@@ -180,6 +189,7 @@ describe("ActionCard", () => {
       <ActionCard
         block={catalogBlock()}
         onProgress={vi.fn()}
+        onBlock={vi.fn()}
         onResolve={vi.fn()}
       />,
     );
@@ -203,6 +213,7 @@ describe("ActionCard", () => {
       <ActionCard
         block={catalogBlock({ status: "in_progress" })}
         onProgress={vi.fn()}
+        onBlock={vi.fn()}
         onResolve={vi.fn()}
       />,
     );
@@ -212,11 +223,13 @@ describe("ActionCard", () => {
   it("treats modal dismissal as pending and decline as an explicit report", async () => {
     const user = userEvent.setup();
     const onProgress = vi.fn();
+    const onBlock = vi.fn();
     const onResolve = vi.fn();
     const { rerender } = render(
       <ActionCard
         block={catalogBlock()}
         onProgress={onProgress}
+        onBlock={onBlock}
         onResolve={onResolve}
       />,
     );
@@ -225,6 +238,7 @@ describe("ActionCard", () => {
       <ActionCard
         block={catalogBlock({ status: "in_progress" })}
         onProgress={onProgress}
+        onBlock={onBlock}
         onResolve={onResolve}
       />,
     );
@@ -238,6 +252,7 @@ describe("ActionCard", () => {
       <ActionCard
         block={catalogBlock()}
         onProgress={onProgress}
+        onBlock={onBlock}
         onResolve={onResolve}
       />,
     );
@@ -250,18 +265,22 @@ describe("ActionCard", () => {
   });
 
   it("renders terminal receipts and the unsupported decline-only state", () => {
+    const onBlock = vi.fn();
     const onResolve = vi.fn();
     const { rerender } = render(
       <ActionCard
         block={catalogBlock({
           status: "completed",
-          outcome_note: "Connected safely.",
+          outcome_note: "Reported — awaiting assistant verification.",
         })}
         onProgress={vi.fn()}
+        onBlock={onBlock}
         onResolve={onResolve}
       />,
     );
-    expect(screen.getByText("Service connected")).toBeInTheDocument();
+    expect(
+      screen.getByText("Reported — awaiting assistant verification"),
+    ).toBeInTheDocument();
     expect(screen.queryByRole("button")).not.toBeInTheDocument();
 
     rerender(
@@ -272,6 +291,7 @@ describe("ActionCard", () => {
           status: "unsupported",
         })}
         onProgress={vi.fn()}
+        onBlock={onBlock}
         onResolve={onResolve}
       />,
     );
@@ -299,6 +319,7 @@ describe("ActionCard", () => {
           },
         })}
         onProgress={vi.fn()}
+        onBlock={vi.fn()}
         onResolve={vi.fn()}
       />,
     );
@@ -319,6 +340,7 @@ describe("ActionCard", () => {
         // is actionable, but nothing can service `admin.open`.
         block={catalogBlock({ action: "admin.open", status: "pending" })}
         onProgress={vi.fn()}
+        onBlock={vi.fn()}
         onResolve={vi.fn()}
       />,
     );
@@ -326,5 +348,30 @@ describe("ActionCard", () => {
     expect(screen.getByText("Unsupported action request")).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "Decline" })).toBeInTheDocument();
     expect(screen.getAllByRole("button")).toHaveLength(1);
+  });
+
+  it("blocks the card locally when a connection completes without a userServiceId", async () => {
+    const user = userEvent.setup();
+    const onBlock = vi.fn();
+    const onResolve = vi.fn();
+    render(
+      <ActionCard
+        block={catalogBlock()}
+        onProgress={vi.fn()}
+        onBlock={onBlock}
+        onResolve={onResolve}
+      />,
+    );
+
+    await user.click(screen.getByRole("button", { name: "Connect GitHub" }));
+    await user.click(
+      screen.getByRole("button", { name: "Finish without service id" }),
+    );
+
+    expect(onResolve).not.toHaveBeenCalled();
+    expect(onBlock).toHaveBeenCalledWith(
+      "action-card-1",
+      "Connected, but NyxID could not verify which service was created. Manage it in AI Services, then ask the assistant to request it again.",
+    );
   });
 });

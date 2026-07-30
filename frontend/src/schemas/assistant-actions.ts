@@ -1,6 +1,7 @@
 import { z } from "zod";
 
 export const ACTION_SCHEMA_VERSION = 4;
+export const ACTION_SERVICE_SLUG_PATTERN = /^[A-Za-z0-9._-]{1,128}$/;
 
 // Aevatar uses these values as control-plane identities. Keep this stricter
 // than a generic non-empty string so an invalid report never reaches /stream.
@@ -22,6 +23,10 @@ const requiredWireStringSchema = z
   .max(4_096)
   .transform((value) => value.trim())
   .pipe(z.string().min(1));
+
+const SECRET_VALUE = /(Bearer\s+)[A-Za-z0-9._~+/-]+|nyx(?:id)?_[A-Za-z0-9_-]{8,}/gi;
+const FORBIDDEN_ACTION_KEY =
+  /(?:^|[_-])(authorization|api[-_]?key|token|secret|password|credential|cookie|user[-_]?code|device[-_]?code)(?:$|[_-])/i;
 
 export const customServiceAuthMethodSchema = z.enum([
   "bearer",
@@ -78,7 +83,16 @@ export const assistantActionRequestSchema = z
     action: requiredWireStringSchema,
     params: assistantActionParamsSchema,
   })
-  .strict();
+  .strict()
+  .superRefine((request, context) => {
+    const secretPath = findSecretPath(request);
+    if (!secretPath) return;
+    context.addIssue({
+      code: "custom",
+      path: [...secretPath],
+      message: "Action request contained secret material",
+    });
+  });
 
 export type AssistantActionRequest = z.infer<
   typeof assistantActionRequestSchema
@@ -236,6 +250,66 @@ export type ActionDisposition = z.infer<typeof actionDispositionSchema>;
 export type ActionResource = z.infer<typeof actionResourceSchema>;
 export type ActionReport = z.infer<typeof actionReportSchema>;
 export type ActionContinueBody = z.infer<typeof actionContinueBodySchema>;
+export type ActionReportActionLookup =
+  | ReadonlyMap<string, string>
+  | Readonly<Record<string, string | undefined>>;
+
+function matchesSecretValue(value: string): boolean {
+  SECRET_VALUE.lastIndex = 0;
+  return SECRET_VALUE.test(value);
+}
+
+function findSecretPath(
+  value: unknown,
+  path: ReadonlyArray<string | number> = [],
+): ReadonlyArray<string | number> | null {
+  if (typeof value === "string") {
+    return matchesSecretValue(value) ? path : null;
+  }
+  if (Array.isArray(value)) {
+    for (const [index, entry] of value.entries()) {
+      const entryPath = findSecretPath(entry, [...path, index]);
+      if (entryPath) return entryPath;
+    }
+    return null;
+  }
+  if (typeof value !== "object" || value === null) return null;
+
+  for (const [key, entry] of Object.entries(value)) {
+    if (FORBIDDEN_ACTION_KEY.test(key)) return [...path, key];
+    const entryPath = findSecretPath(entry, [...path, key]);
+    if (entryPath) return entryPath;
+  }
+  return null;
+}
+
+function actionForReport(
+  actionRequestId: string,
+  reportActions: ActionReportActionLookup | undefined,
+): string | undefined {
+  if (!reportActions) return undefined;
+  if (reportActions instanceof Map) {
+    return reportActions.get(actionRequestId);
+  }
+  return (reportActions as Readonly<Record<string, string | undefined>>)[
+    actionRequestId
+  ];
+}
+
+function assertReportMatchesAction(
+  report: ActionReport,
+  action: string | undefined,
+): void {
+  if (
+    action === "service.connect" &&
+    report.disposition === "completed" &&
+    (!report.resource || !("userService" in report.resource))
+  ) {
+    throw new Error(
+      "service.connect completed reports must include resource.userService.userServiceId",
+    );
+  }
+}
 
 function copyResource(resource: ActionResource): ActionResource {
   if ("userService" in resource) {
@@ -263,8 +337,13 @@ export function buildActionContinueBody(
   clientRequestId: string,
   originTurnId: string,
   reports: readonly ActionReport[],
+  reportActions?: ActionReportActionLookup,
 ): ActionContinueBody {
   const actions = reports.map((report): ActionReport => {
+    assertReportMatchesAction(
+      report,
+      actionForReport(report.actionRequestId, reportActions),
+    );
     if (report.resource) {
       return {
         actionRequestId: report.actionRequestId,

@@ -266,6 +266,8 @@ describe("ChatThread", () => {
                 action: "service.connect",
                 action_request_id: "act-1",
                 origin_turn_id: "turn-1",
+                task_id: "task-1",
+                step_id: "step-1",
                 params: {
                   variant: "catalog",
                   service_slug: "api-github",
