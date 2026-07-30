@@ -60,8 +60,8 @@ test.describe("NYX-1: a turn that never starts reaches a deadline", () => {
     await expect(streamingDots(page).first()).toBeVisible({ timeout: 5_000 });
     await expect(emptyTurnError(page)).toHaveCount(0);
     await expect(stopButton(page)).toHaveCount(0);
-    // The rejected text was restored — the reader's earlier message hangs
-    // unanswered above a composer that claims nothing is running.
+    // The rejected text is restored so the reader can retry it once the
+    // hanging turn reaches its deadline, rather than losing what they typed.
     await expect(composerInput(page)).toHaveValue(
       "Hello? Are you still there?",
     );
