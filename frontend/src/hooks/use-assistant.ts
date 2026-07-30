@@ -380,14 +380,37 @@ export function useSendMessage(conversationId: string | undefined) {
         await projectTransportState(queryClient, target);
       }
       const targetId = target;
-      const handle = assistantTransport.sendMessage(
-        targetId,
-        content,
-        createTurnEventPump(queryClient, targetId),
+      // Claim the turn as running BEFORE the stream starts. Until the first
+      // turn.status event lands, this cache still holds the PREVIOUS turn's
+      // terminal status, and the thread reads "closed status + a tail with no
+      // assistant answer" as a turn that finished having printed nothing —
+      // which would flash an error on top of every send.
+      const previousTurn =
+        queryClient.getQueryData<ActiveTurn | null>(
+          assistantKeys.turn(targetId),
+        ) ?? null;
+      queryClient.setQueryData<ActiveTurn | null>(
+        assistantKeys.turn(targetId),
+        () => ({ turnId: null, status: "running", error: null }),
       );
-      activeHandles.set(targetId, handle);
-      await projectTransportState(queryClient, targetId);
-      return { conversationId: targetId, handle };
+      try {
+        const handle = assistantTransport.sendMessage(
+          targetId,
+          content,
+          createTurnEventPump(queryClient, targetId),
+        );
+        activeHandles.set(targetId, handle);
+        await projectTransportState(queryClient, targetId);
+        return { conversationId: targetId, handle };
+      } catch (error) {
+        // A send that never became a turn (active-turn guard, transport throw)
+        // must not leave the thread believing one is running forever.
+        queryClient.setQueryData<ActiveTurn | null>(
+          assistantKeys.turn(targetId),
+          () => previousTurn,
+        );
+        throw error;
+      }
     },
   });
 }

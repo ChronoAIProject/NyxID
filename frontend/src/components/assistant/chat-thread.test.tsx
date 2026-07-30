@@ -206,6 +206,163 @@ describe("ChatThread", () => {
     ).not.toBeInTheDocument();
   });
 
+  it("shows dots where the answer will appear until a turn has printed", () => {
+    const userMessage = message({
+      role: "user",
+      blocks: [{ type: "text", block_id: "text-1", text: "Question" }],
+    });
+    const { rerender } = render(
+      <ChatThread
+        messages={[userMessage]}
+        thinking
+        onDecideApproval={vi.fn()}
+      />,
+    );
+
+    expect(
+      document.querySelector("[data-streaming-dots]"),
+    ).toBeInTheDocument();
+
+    // Content arrives: the dots must give way to it, not sit alongside.
+    rerender(
+      <ChatThread
+        messages={[
+          userMessage,
+          message({ blocks: [{ type: "text", block_id: "t2", text: "Hi" }] }),
+        ]}
+        streaming
+        onDecideApproval={vi.fn()}
+      />,
+    );
+
+    expect(screen.getByText("Hi")).toBeInTheDocument();
+    expect(
+      document.querySelector("[data-streaming-dots]"),
+    ).not.toBeInTheDocument();
+  });
+
+  it("keeps the dots up for a started message whose blocks are still blank", () => {
+    // An opened-but-empty text block is present-yet-blank; counting blocks
+    // rather than printable content would drop the dots onto an empty column.
+    render(
+      <ChatThread
+        messages={[
+          message({
+            role: "user",
+            blocks: [{ type: "text", block_id: "t1", text: "Question" }],
+          }),
+          message({ blocks: [{ type: "text", block_id: "t2", text: "" }] }),
+        ]}
+        streaming
+        onDecideApproval={vi.fn()}
+      />,
+    );
+
+    expect(
+      document.querySelector("[data-streaming-dots]"),
+    ).toBeInTheDocument();
+  });
+
+  it("reports an error when a turn closes having printed nothing", () => {
+    vi.useFakeTimers();
+    render(
+      <ChatThread
+        messages={[
+          message({
+            role: "user",
+            blocks: [{ type: "text", block_id: "t1", text: "Question" }],
+          }),
+        ]}
+        turnEnded
+        onDecideApproval={vi.fn()}
+      />,
+    );
+
+    // Held back briefly: turn status and transcript projection race, so a turn
+    // that did answer can look empty for a frame.
+    expect(screen.queryByRole("alert")).not.toBeInTheDocument();
+
+    act(() => vi.advanceTimersByTime(700));
+
+    expect(
+      screen.getByText("Sorry, there seems to be an error with the request for now."),
+    ).toBeInTheDocument();
+  });
+
+  it("reports an error for a closed turn whose only block stayed blank", () => {
+    vi.useFakeTimers();
+    render(
+      <ChatThread
+        messages={[
+          message({
+            role: "user",
+            blocks: [{ type: "text", block_id: "t1", text: "Question" }],
+          }),
+          message({ blocks: [{ type: "text", block_id: "t2", text: "" }] }),
+        ]}
+        turnEnded
+        onDecideApproval={vi.fn()}
+      />,
+    );
+    act(() => vi.advanceTimersByTime(700));
+
+    // Carried inside the existing assistant group — a second identity mark for
+    // a group that is already there would read as two separate turns.
+    expect(screen.getAllByRole("alert")).toHaveLength(1);
+    expect(document.querySelectorAll("[data-empty-turn-error]")).toHaveLength(1);
+  });
+
+  it("stays quiet when a closed turn did print an answer", () => {
+    vi.useFakeTimers();
+    render(
+      <ChatThread
+        messages={[
+          message({
+            role: "user",
+            blocks: [{ type: "text", block_id: "t1", text: "Question" }],
+          }),
+          message({ blocks: [{ type: "text", block_id: "t2", text: "Answer" }] }),
+        ]}
+        turnEnded
+        onDecideApproval={vi.fn()}
+      />,
+    );
+    act(() => vi.advanceTimersByTime(5000));
+
+    expect(screen.queryByRole("alert")).not.toBeInTheDocument();
+  });
+
+  it("withdraws the pending error if content lands inside the grace window", () => {
+    vi.useFakeTimers();
+    const userMessage = message({
+      role: "user",
+      blocks: [{ type: "text", block_id: "t1", text: "Question" }],
+    });
+    const { rerender } = render(
+      <ChatThread
+        messages={[userMessage]}
+        turnEnded
+        onDecideApproval={vi.fn()}
+      />,
+    );
+    act(() => vi.advanceTimersByTime(400));
+
+    rerender(
+      <ChatThread
+        messages={[
+          userMessage,
+          message({ blocks: [{ type: "text", block_id: "t2", text: "Late" }] }),
+        ]}
+        turnEnded
+        onDecideApproval={vi.fn()}
+      />,
+    );
+    act(() => vi.advanceTimersByTime(5000));
+
+    expect(screen.getByText("Late")).toBeInTheDocument();
+    expect(screen.queryByRole("alert")).not.toBeInTheDocument();
+  });
+
   it("removes live-region semantics during the thinking exit fade", () => {
     vi.useFakeTimers();
     const userMessage = message({

@@ -244,7 +244,11 @@ export function AssistantPage({
       : view === "approvals"
         ? "Approvals"
         : (history.data?.conversation.title ?? "New chat");
-  const active = isTurnActive(turn.data?.status);
+  const turnStatus = turn.data?.status;
+  const active = isTurnActive(turnStatus);
+  // Cancelled is deliberately excluded: the reader pressed Stop, and calling
+  // their own decision an error would be a lie. `blocked` is not terminal.
+  const turnEnded = turnStatus === "completed" || turnStatus === "failed";
   const draftKey =
     selectedId && (!conversations.isSuccess || selectedConversationExists)
       ? `conv:${selectedId}`
@@ -305,6 +309,7 @@ export function AssistantPage({
             streaming={
               active && history.data?.messages.at(-1)?.role === "assistant"
             }
+            turnEnded={turnEnded}
             onDecideApproval={(blockId, approved) =>
               decideApproval.mutateAsync({ blockId, approved })
             }

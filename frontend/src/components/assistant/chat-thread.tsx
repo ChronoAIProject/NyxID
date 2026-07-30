@@ -1,4 +1,4 @@
-import { Fragment, useCallback, useEffect, useRef } from "react";
+import { Fragment, useCallback, useEffect, useRef, useState } from "react";
 import { AlertCircle } from "lucide-react";
 import { NyxidIcon } from "@/components/brand/nyxid-icon";
 import { ApprovalCard } from "@/components/assistant/blocks/approval-card";
@@ -152,6 +152,52 @@ type MessageGroup = {
 };
 
 /**
+ * Whether a group has anything the reader can actually see. Block COUNT is not
+ * the test: a turn that opens with a connect card carries an empty leading text
+ * block, and a text block that has started but produced no characters is also
+ * present-but-blank. Both must still count as "nothing printed yet", or the
+ * dots would vanish before any answer appeared.
+ *
+ * An unsupported-schema message renders a visible shell, so it counts.
+ */
+function hasPrintableContent(messages: readonly AssistantMessage[]): boolean {
+  return messages.some(
+    (message) =>
+      message.schema_version !== 1 ||
+      (message.blocks as unknown[]).some((block) => !isEmptyTextBlock(block)),
+  );
+}
+
+/**
+ * True once `condition` has held continuously for `delayMs`.
+ *
+ * The turn-status event and the transcript projection land in either order, so
+ * a turn that DID answer can look content-free for a frame or two. Used to gate
+ * the empty-turn error: a wrong "there was an error" is far worse than showing
+ * a right one a beat late.
+ */
+function useSettled(condition: boolean, delayMs: number): boolean {
+  const [settled, setSettled] = useState(false);
+
+  useEffect(() => {
+    if (!condition) {
+      // Cleared on a timer rather than synchronously, for the same reason
+      // useFadingPresence does it: a synchronous setState inside an effect
+      // cascades renders. The `condition &&` below is what makes the reset
+      // latency invisible.
+      const reset = window.setTimeout(() => setSettled(false), 0);
+      return () => window.clearTimeout(reset);
+    }
+    const timer = window.setTimeout(() => setSettled(true), delayMs);
+    return () => window.clearTimeout(timer);
+  }, [condition, delayMs]);
+
+  // Gated on the live condition too, so a stale `settled` from a previous
+  // episode can never show an error before this one has waited its turn.
+  return condition && settled;
+}
+
+/**
  * Collapse consecutive same-role messages into one group. Aevatar streams a
  * single turn as several messages (text, then a tool run, then more text);
  * they belong to one "voice" and must render under a single identity mark, not
@@ -170,14 +216,43 @@ function groupMessages(messages: readonly AssistantMessage[]): MessageGroup[] {
   return groups;
 }
 
-// Standalone caret for the brief window after a turn starts but before its
-// first block arrives (the inline caret in TextBlock covers streaming text).
-function StreamingCaret() {
+/**
+ * Placeholder for the window between a turn starting and its first printable
+ * content: it sits exactly where the answer will appear, so the dots are
+ * replaced by text rather than pushing it around. The halo says a turn is
+ * running; these say the answer itself is on its way.
+ *
+ * The inline caret in TextBlock takes over once characters exist.
+ */
+function StreamingDots() {
   return (
     <span
       aria-hidden
-      className="inline-block h-4 w-[2px] animate-pulse rounded-full bg-nyx-secondary-400 align-middle"
-    />
+      data-streaming-dots
+      className="flex items-center gap-1 py-[5px]"
+    >
+      <span className="h-1.5 w-1.5 animate-bounce rounded-full bg-text-tertiary [animation-delay:-0.3s] motion-reduce:animate-none" />
+      <span className="h-1.5 w-1.5 animate-bounce rounded-full bg-text-tertiary [animation-delay:-0.15s] motion-reduce:animate-none" />
+      <span className="h-1.5 w-1.5 animate-bounce rounded-full bg-text-tertiary motion-reduce:animate-none" />
+    </span>
+  );
+}
+
+/**
+ * A turn that closed having printed nothing. The stream is over, so neither
+ * the halo nor the dots are still honest, and an empty gutter reads as the
+ * chat having died silently.
+ */
+function EmptyTurnError() {
+  return (
+    <p
+      role="alert"
+      data-empty-turn-error
+      className="flex items-start gap-1.5 text-[13px] text-destructive"
+    >
+      <AlertCircle className="mt-[3px] h-3.5 w-3.5 shrink-0" />
+      <span>Sorry, there seems to be an error with the request for now.</span>
+    </p>
   );
 }
 
@@ -190,10 +265,17 @@ function ThinkingRow({ loading }: { readonly loading: boolean }) {
       aria-hidden={loading ? undefined : true}
     >
       <AssistantIdentity time="" loading={loading} />
-      <div className="min-h-[18px] min-w-0 flex-1" />
+      <div className="min-h-[18px] min-w-0 flex-1">
+        <StreamingDots />
+      </div>
     </article>
   );
 }
+
+// How long a content-free closed turn must stay content-free before it is
+// called an error. Longer than the thinking row's 500 ms exit fade, so the two
+// never overlap.
+const EMPTY_TURN_GRACE_MS = 700;
 
 // Slack, in px, within which the thread still counts as "following" the tail.
 // Below it the reader has deliberately scrolled up and must not be yanked back
@@ -204,6 +286,7 @@ export function ChatThread({
   messages,
   thinking = false,
   streaming = false,
+  turnEnded = false,
   bottomInset = 0,
   onDecideApproval,
 }: {
@@ -220,6 +303,13 @@ export function ChatThread({
    * reads as live typing rather than a frozen partial answer.
    */
   readonly streaming?: boolean;
+  /**
+   * The latest turn reached a terminal state on its own (completed or failed —
+   * NOT cancelled, which is the reader pressing Stop and not an error). Paired
+   * with a content-free tail this is what distinguishes "the stream closed
+   * having printed nothing" from "no turn has run yet".
+   */
+  readonly turnEnded?: boolean;
   /**
    * Height in px of the composer floating over the thread. Turns are allowed to
    * scroll behind it (ChatGPT-style), so the thread reserves this much room at
@@ -267,6 +357,19 @@ export function ChatThread({
   }, [messages, thinking, streaming, bottomInset]);
 
   const groups = groupMessages(messages);
+
+  // A turn that closed having printed nothing: either it never produced an
+  // assistant message at all (tail is still the reader's own), or it produced
+  // one that never got past empty blocks. Settled over a beat so the two
+  // out-of-order arrivals — turn status and transcript projection — cannot
+  // flash an error onto a turn that did answer.
+  const tail = groups.at(-1);
+  const tailAnswered =
+    tail?.role === "assistant" && hasPrintableContent(tail.messages);
+  const showEmptyTurnError = useSettled(
+    turnEnded && !thinking && !streaming && !tailAnswered,
+    EMPTY_TURN_GRACE_MS,
+  );
 
   // Opaque down to the top of the composer, then dissolved to nothing by the
   // bottom edge — content passing behind the composer fades out instead of
@@ -350,7 +453,7 @@ export function ChatThread({
             const streamingGroup = isLastGroup && streaming;
             const lastMessage = group.messages.at(-1);
             const awaitingFirstBlock =
-              streamingGroup && (lastMessage?.blocks.length ?? 0) === 0;
+              streamingGroup && !hasPrintableContent(group.messages);
 
             return (
               <article key={first?.id} className={ASSISTANT_ROW}>
@@ -392,13 +495,25 @@ export function ChatThread({
                       </Fragment>
                     );
                   })}
-                  {awaitingFirstBlock ? <StreamingCaret /> : null}
+                  {awaitingFirstBlock ? <StreamingDots /> : null}
+                  {/* This group IS the tail, so its own answer never arrived. */}
+                  {isLastGroup && showEmptyTurnError ? <EmptyTurnError /> : null}
                 </div>
               </article>
             );
           })}
           {thinkingPresence.present && !streaming ? (
             <ThinkingRow loading={thinking} />
+          ) : null}
+          {/* The turn closed before it ever spoke, so there is no assistant
+              group to carry the message — give it its own row under a mark. */}
+          {showEmptyTurnError && tail?.role !== "assistant" ? (
+            <article className={ASSISTANT_ROW}>
+              <AssistantIdentity time="" />
+              <div className="min-w-0 flex-1">
+                <EmptyTurnError />
+              </div>
+            </article>
           ) : null}
         </div>
       </div>
