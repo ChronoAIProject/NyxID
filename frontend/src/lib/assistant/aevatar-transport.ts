@@ -21,9 +21,11 @@ import {
   actionReportSchema,
   assistantActionRequestSchema,
   buildActionContinueBody,
+  buildActionWakeBody,
   recoverUnsupportedAssistantActionRequest,
   type ActionContinueBody,
   type ActionReport,
+  type ActionWakeBody,
   type AssistantActionRequest,
 } from "@/schemas/assistant-actions";
 import {
@@ -90,11 +92,16 @@ const assistantApi = {
 // network round-trip per streamed token.
 const CONVERSATION_LIST_TTL_MS = 5_000;
 
-// New chats run on Aevatar's workflow ("studio") chat engine through NyxID's
-// typed pass-through; legacy `nyxid-chat-…` actor conversations keep the
-// AG-UI `:stream` route so their transcripts stay continuable. Routing is by
-// conversation-id family.
+// New chats use Aevatar's typed NyxIdChat create-and-first-turn contract.
+// Existing `nyxid-chat-…` actors continue on AG-UI `:stream`, while legacy
+// `chatc-…` conversations remain on Workflow Studio. Routing after the first
+// frame is by the server-owned conversation-id family.
+const TYPED_CHAT_URL = "/api/v1/assistant/chat";
 const WORKFLOW_CHAT_URL = "/api/v1/assistant/workflow-chat";
+
+// Client-local id before typed `/api/chat` returns the authoritative actor in
+// its first RUN_STARTED frame. It is never sent as an actor or scope.
+const PENDING_TYPED_CONVERSATION_PREFIX = "nyxid-pending-";
 
 // Server conversation ids minted by the workflow chat's history reservation
 // (`chatc-{hash[..32]}`).
@@ -113,7 +120,9 @@ function isWorkflowConversationId(id: string): boolean {
   );
 }
 
-const SERVER_CONVERSATION_ID_PATTERN = /^chatc-[A-Za-z0-9_-]{1,120}$/;
+const WORKFLOW_SERVER_CONVERSATION_ID_PATTERN = /^chatc-[A-Za-z0-9_-]{1,120}$/;
+const TYPED_SERVER_CONVERSATION_ID_PATTERN =
+  /^nyxid-chat-[A-Za-z0-9_-]{1,117}$/;
 
 const MAX_MESSAGE_CHARS = 32_768;
 
@@ -236,6 +245,7 @@ interface AgUiFrame {
   readonly runStarted?: {
     readonly runId?: string;
     readonly turnId?: string;
+    readonly actorId?: string;
   };
   readonly runFinished?: {
     readonly runId?: string;
@@ -407,14 +417,12 @@ interface ActionContinuationState {
 interface RunningTurn {
   readonly clientRequestId: string;
   /**
-   * Which turn surface this run speaks: `actor` = nyxid-chat AG-UI
-   * `:stream`, `workflow` = the studio workflow chat. Chosen from the
-   * conversation-id family at send time; gates the frame-ordering rules
-   * (`aevatar.chat.context` precedes `runStarted` on workflow streams,
-   * trailing `stateSnapshot` follows the terminal) and disables the
-   * `:stop` control, which only the actor surface serves.
+   * Which turn surface this run speaks: `typed-create` = typed NyxIdChat
+   * `/api/chat`, `actor` = an existing nyxid-chat AG-UI `:stream`, and
+   * `workflow` = legacy Workflow Studio. Chosen from the conversation-id
+   * family at send time; gates frame ordering and actor-only controls.
    */
-  readonly protocol: "actor" | "workflow";
+  readonly protocol: "actor" | "typed-create" | "workflow";
   turnId: string | null;
   /**
    * A cancel landed before RUN_STARTED delivered the server turn id. The
@@ -899,10 +907,10 @@ export class AevatarAssistantTransport implements AssistantTransport {
    */
   private readonly deletingConversations = new Map<string, Promise<void>>();
   /**
-   * Placeholder → server id, written when a new workflow conversation's
-   * first turn delivers its `aevatar.chat.context` frame. Public methods
-   * resolve through this so a page still addressing the placeholder (the
-   * URL keeps it for the session) reaches the server-backed entry.
+   * Placeholder → server id, written when a create-and-first-turn stream
+   * identifies its authoritative conversation. Public methods resolve
+   * through this so a page still addressing the local placeholder reaches
+   * the server-backed entry.
    */
   private readonly conversationAliases = new Map<string, string>();
   private listFetchedAt = 0;
@@ -947,15 +955,12 @@ export class AevatarAssistantTransport implements AssistantTransport {
   }
 
   async createConversation(): Promise<Conversation> {
-    // New chats run on the workflow surface, where the conversation is
-    // created server-side by the FIRST turn's chat-history reservation
-    // (`conversation.conversationId: null` in the turn body) — there is no
-    // separate create call. Until that turn's `aevatar.chat.context` frame
-    // delivers the server `chatc-…` id, the conversation exists only under
-    // this client-local placeholder id; the frame aliases it in place.
+    // There is no separate actor-create request. The first typed turn creates
+    // the actor and returns its authoritative `nyxid-chat-…` id in
+    // RUN_STARTED; until then this id exists only in the local transport.
     const createdAt = new Date().toISOString();
     const conversation: Conversation = {
-      id: `${PENDING_WORKFLOW_CONVERSATION_PREFIX}${crypto.randomUUID()}`,
+      id: `${PENDING_TYPED_CONVERSATION_PREFIX}${crypto.randomUUID()}`,
       title: "New chat",
       created_at: createdAt,
       last_message_at: createdAt,
@@ -991,7 +996,7 @@ export class AevatarAssistantTransport implements AssistantTransport {
     // already see the deletion guard — otherwise it can admit a send (or
     // a second delete) into the exact window the reservation closes.
     const operation = Promise.resolve().then(async () => {
-      // A first-turn workflow run is keyed under the placeholder id the
+      // A create-and-first-turn run is keyed under the placeholder id the
       // send used; the same conversation is addressable through both.
       for (const key of [requestedId, conversationId]) {
         const run = this.running.get(key);
@@ -1177,7 +1182,11 @@ export class AevatarAssistantTransport implements AssistantTransport {
     const run = this.newRun(
       onEvent,
       null,
-      isWorkflowConversationId(conversationId) ? "workflow" : "actor",
+      isWorkflowConversationId(conversationId)
+        ? "workflow"
+        : conversationId.startsWith(PENDING_TYPED_CONVERSATION_PREFIX)
+          ? "typed-create"
+          : "actor",
     );
     this.running.set(conversationId, run);
     void this.streamTurn(conversationId, run, normalized);
@@ -1198,7 +1207,7 @@ export class AevatarAssistantTransport implements AssistantTransport {
    * Stop needs a transport-level lookup to abort a hung request).
    */
   cancelActiveTurn(conversationId: string): void {
-    // A first-turn workflow run is keyed under the placeholder id the send
+    // A create-and-first-turn run is keyed under the placeholder id the send
     // used; check both addresses and cancel under the run's own key.
     for (const key of [
       conversationId,
@@ -1539,6 +1548,45 @@ export class AevatarAssistantTransport implements AssistantTransport {
     return this.drainPendingActions(conversationId);
   }
 
+  wakeActions(
+    conversationId: string,
+    originTurnId: string,
+    onEvent: (event: TurnEvent) => void = noopEvent,
+  ): TurnHandle {
+    const requestedId = conversationId;
+    const actorId = this.canonicalConversationId(conversationId);
+    const stored =
+      this.conversations.get(requestedId) ?? this.conversations.get(actorId);
+    if (!stored) throw new Error("Conversation was not found.");
+    if (this.deletingConversations.has(actorId)) {
+      throw new Error("This conversation is being deleted.");
+    }
+    if (!TYPED_SERVER_CONVERSATION_ID_PATTERN.test(actorId)) {
+      throw new AssistantProtocolError(
+        "Action wakes require a typed assistant conversation.",
+      );
+    }
+    if (
+      this.running.has(requestedId) ||
+      this.running.has(actorId) ||
+      isTurnActive(stored.turnState.activeTurn?.status)
+    ) {
+      throw new AssistantTurnActiveError();
+    }
+
+    const body = buildActionWakeBody(crypto.randomUUID(), originTurnId);
+    const run = this.newRun(onEvent, null, "actor");
+    run.cursor = stored.turnState.lastCursor;
+    this.running.set(requestedId, run);
+    void this.streamActionContinuation(requestedId, actorId, run, body);
+    return {
+      get turnId() {
+        return run.turnId;
+      },
+      cancel: () => this.cancelTurn(requestedId, run),
+    };
+  }
+
   private findActionCard(
     conversationId: string,
     blockId: string,
@@ -1869,7 +1917,7 @@ export class AevatarAssistantTransport implements AssistantTransport {
   private newRun(
     onEvent: (event: TurnEvent) => void,
     turnId: string | null = null,
-    protocol: "actor" | "workflow" = "actor",
+    protocol: "actor" | "typed-create" | "workflow" = "actor",
   ): RunningTurn {
     return {
       clientRequestId: crypto.randomUUID(),
@@ -1996,27 +2044,35 @@ export class AevatarAssistantTransport implements AssistantTransport {
       message: "The assistant stream could not be reached. Try again.",
     };
 
-    // Computed ONCE: a retry must replay the identical body — the workflow
-    // surface's create-replay recovery is keyed on (scope, commandId) with a
-    // request fingerprint, and a body that changed between attempts would
-    // 409 instead of resuming the same conversation/turn.
+    // Computed ONCE: both create surfaces key replay on the client identity
+    // plus a request fingerprint. A changed body would conflict instead of
+    // resuming the same conversation and turn.
     const target =
       run.protocol === "workflow"
         ? {
             url: WORKFLOW_CHAT_URL,
             bodyText: this.workflowTurnBody(conversationId, run, prompt),
           }
-        : {
-            url: `/api/v1${ASSISTANT_PREFIX}/conversations/${conversationId}/stream`,
-            bodyText: JSON.stringify({
-              // Aevatar NyxIdChatEndpoints.Streaming.cs:58 uses an ordinal
-              // discriminator comparison, so a normal turn requires this
-              // exact lowercase value.
-              type: "text",
-              prompt,
-              clientRequestId: run.clientRequestId,
-            }),
-          };
+        : run.protocol === "typed-create"
+          ? {
+              url: TYPED_CHAT_URL,
+              bodyText: JSON.stringify({
+                type: "text",
+                prompt,
+                clientRequestId: run.clientRequestId,
+              }),
+            }
+          : {
+              url: `/api/v1${ASSISTANT_PREFIX}/conversations/${conversationId}/stream`,
+              bodyText: JSON.stringify({
+                // Aevatar NyxIdChatEndpoints.Streaming.cs:58 uses an ordinal
+                // discriminator comparison, so a normal turn requires this
+                // exact lowercase value.
+                type: "text",
+                prompt,
+                clientRequestId: run.clientRequestId,
+              }),
+            };
 
     for (let attempt = 0; attempt < STREAM_DELIVERY_ATTEMPTS; attempt += 1) {
       // A cancel can settle the run between attempts (the pre-RUN_STARTED
@@ -2071,16 +2127,18 @@ export class AevatarAssistantTransport implements AssistantTransport {
     conversationId: string,
     actorId: string,
     run: RunningTurn,
-    body: ActionContinueBody,
+    body: ActionContinueBody | ActionWakeBody,
   ): Promise<void> {
-    // Action continuations share the actor turn's ordering fence: a report
-    // must not overtake a still-pending stop from the prior turn.
+    // Action continuations share the actor turn's ordering fence and must not
+    // overtake a still-pending stop from the prior turn.
     await this.awaitPendingStop(conversationId);
 
+    const isWake = body.actions.length === 0;
     let finalFailure = {
       code: "network_error",
-      message:
-        "The action report could not be delivered. It will be retried after the next turn.",
+      message: isWake
+        ? "The action wake could not be delivered. Try again."
+        : "The action report could not be delivered. It will be retried after the next turn.",
     };
     // This DTO is already rebuilt from the strict allowlist in
     // buildActionContinueBody; no card or model object is spread here.
@@ -2119,8 +2177,9 @@ export class AevatarAssistantTransport implements AssistantTransport {
         stream.cancel();
         finalFailure = {
           code: "stream_protocol_error",
-          message:
-            "The action report endpoint did not return an event stream. Delivery will retry after the next turn.",
+          message: isWake
+            ? "The action wake endpoint did not return an event stream."
+            : "The action report endpoint did not return an event stream. Delivery will retry after the next turn.",
         };
         break;
       }
@@ -2379,6 +2438,39 @@ export class AevatarAssistantTransport implements AssistantTransport {
               : "The assistant stream did not provide a valid turn id.",
           };
           return;
+        }
+        if (run.protocol === "typed-create") {
+          const candidateActorId = frame.actorId ?? frame.runStarted?.actorId;
+          const actorId =
+            typeof candidateActorId === "string" &&
+            TYPED_SERVER_CONVERSATION_ID_PATTERN.test(candidateActorId)
+              ? candidateActorId
+              : null;
+          const stored = this.conversations.get(conversationId);
+          if (!actorId || !stored) {
+            run.deliveryProtocolError ??= {
+              code: "stream_protocol_error",
+              message:
+                "The assistant stream did not provide a valid conversation id.",
+            };
+            return;
+          }
+          const priorId = stored.conversation.id;
+          if (
+            TYPED_SERVER_CONVERSATION_ID_PATTERN.test(priorId) &&
+            priorId !== actorId
+          ) {
+            run.deliveryProtocolError = {
+              code: "stream_protocol_error",
+              message: "The assistant replay changed the conversation id.",
+            };
+            return;
+          }
+          if (priorId !== actorId) {
+            stored.conversation = { ...stored.conversation, id: actorId };
+            this.conversations.set(actorId, stored);
+            this.conversationAliases.set(conversationId, actorId);
+          }
         }
         run.deliveryStarted = true;
         if (run.turnId && run.turnId !== authoritativeTurnId) {
@@ -2746,7 +2838,7 @@ export class AevatarAssistantTransport implements AssistantTransport {
     const stored = this.conversations.get(conversationId);
     const serverId =
       typeof payload.conversationId === "string" &&
-      SERVER_CONVERSATION_ID_PATTERN.test(payload.conversationId)
+      WORKFLOW_SERVER_CONVERSATION_ID_PATTERN.test(payload.conversationId)
         ? payload.conversationId
         : null;
     if (stored && serverId && stored.conversation.id !== serverId) {
@@ -3708,6 +3800,7 @@ export class AevatarAssistantTransport implements AssistantTransport {
     // posting the actor-surface stop for a `chatc-…` id would only 404.
     if (run.protocol === "workflow") return null;
     if (!run.turnId) return null;
+    const actorConversationId = this.canonicalConversationId(conversationId);
     // Own deadline: a server that accepts but never answers must not pin
     // the pendingStops entry (and tax every later send with the full fence
     // wait). A manual controller instead of AbortSignal.timeout so this
@@ -3719,7 +3812,7 @@ export class AevatarAssistantTransport implements AssistantTransport {
       STOP_REQUEST_DEADLINE_MS,
     );
     const pending = apiClient<unknown>(
-      `${ASSISTANT_PREFIX}/conversations/${conversationId}/stop`,
+      `${ASSISTANT_PREFIX}/conversations/${actorConversationId}/stop`,
       {
         method: "POST",
         body: {
@@ -3735,7 +3828,7 @@ export class AevatarAssistantTransport implements AssistantTransport {
       () => clearTimeout(deadlineTimer),
       () => clearTimeout(deadlineTimer),
     );
-    this.trackFence(conversationId, pending);
+    this.trackFence(actorConversationId, pending);
     return pending;
   }
 

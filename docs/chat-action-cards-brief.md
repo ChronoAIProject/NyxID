@@ -119,8 +119,9 @@ Validated server-side (violations → 400 or a rejected continuation):
 - `prompt` and `inputParts` must be absent for `action.continue`.
 - `originTurnId` (top-level) is **required**; every report's `originTurnId` must equal it
   ordinally. A single continue can only report actions from **one** origin turn.
-- `actions` must be **non-empty** (the spec doc's "trigger 2: empty actions array" is NOT
-  supported by the live server — never send an empty array).
+- Report-bearing card completion must use a **non-empty** `actions` array. The distinct
+  out-of-band wake uses the same envelope with `actions: []` and is built only through
+  `wakeActions`; it does not fabricate a card report.
 - No duplicate `actionRequestId` within one continue.
 - `disposition` ∈ `completed | declined | failed | cancelled | expired`. v1 uses:
   `completed` (journey succeeded), `declined` (user explicitly said no), `failed` (journey
@@ -167,6 +168,24 @@ The discriminated body (`type:"text"`) is **required** by Aevatar ≥ `feature/i
 prod Aevatar. This branch must deploy **after** the Aevatar dev contract reaches prod.
 Same for the whole action-card feature.
 
+### 2.4 Producer contract smoke
+
+After reproducing the missing-service blocked turn, run the credentialed smoke against the
+deployed NyxID/Aevatar pair. Use the `actorId` and `originTurnId` from the producer's
+`nyxid.action.request`; the smoke posts the exact out-of-band `actions: []` envelope and passes
+only when Aevatar admits it by emitting `RUN_STARTED` for a distinct continuation turn:
+
+```bash
+NYXID_URL=https://nyx-api.example.com \
+NYXID_ACCESS_TOKEN=<approved-test-session> \
+NYXID_AEVATAR_ACTOR_ID=nyxid-chat-... \
+NYXID_AEVATAR_ORIGIN_TURN_ID=turn-... \
+npm --prefix frontend run test:producer-contract
+```
+
+This is deliberately separate from the hermetic frontend suite: it requires an explicitly
+approved production-smoke identity and performs real producer writes.
+
 ## 3. Current frontend anatomy (verified file map)
 
 All paths relative to `frontend/src`.
@@ -207,13 +226,15 @@ All paths relative to `frontend/src`.
      `actionRequestId` → `appendActivityBlock` an `action_card` block.
    - Discriminated stream bodies: `{type:"text", …}` for `sendMessage`, and a new
      `continueActions(conversationId, originTurnId, reports)` transport method posting
-     `{type:"action.continue", …}` and consuming the SSE continuation exactly like a turn
+     report-bearing `{type:"action.continue", …}`, plus a distinct
+     `wakeActions(conversationId, originTurnId)` method posting `actions: []`; both consume
+     the SSE continuation exactly like a turn
      (reserve conversation, cursor continuity, retry with the same `clientRequestId`,
      content-type sniff like `decideApproval`).
    - Pending-report queue: card resolutions accumulate per `originTurnId`; a continue fires
      immediately when the conversation is idle, otherwise queues until the active turn
      terminates. Batch all unsent reports that share an `originTurnId` into one POST; never
-     mix origin turns in one body; never send an empty `actions`.
+     mix origin turns in one report-bearing body.
    - Lifecycle: action cards survive turn end (exempt from `finalizeActivity` expiry);
      `block.updated` drives status transitions; `toTerminalBlock` gets an `action_card`
      case (a still-`pending` card stays pending — it must not be zombified by cancel).

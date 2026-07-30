@@ -265,6 +265,66 @@ pub fn workflow_chat_path() -> String {
     "api/chat".to_string()
 }
 
+/// `api/chat` -- typed NyxIdChat create-and-first-turn stream.
+///
+/// Aevatar selects the typed NyxIdChat producer from the discriminated body
+/// when no Workflow Studio fields are present. Scope remains absent from the
+/// wire body: the propagated, verified NyxID identity is authoritative.
+pub fn typed_chat_path() -> String {
+    "api/chat".to_string()
+}
+
+/// Matches the client cap in `aevatar-transport.ts` (`MAX_MESSAGE_CHARS`).
+const TYPED_CHAT_PROMPT_MAX_CHARS: usize = 32_768;
+
+/// Caller half of the typed NyxIdChat create-and-first-turn contract.
+///
+/// The browser can provide only the user prompt and its idempotency identity.
+/// In particular, scope, actor identity, workflow selection, tool context, and
+/// action reports are not expressible on this route.
+#[derive(Debug, serde::Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct TypedChatTurnRequest {
+    #[serde(rename = "type")]
+    pub turn_type: String,
+    pub prompt: String,
+    pub client_request_id: String,
+}
+
+fn validate_typed_chat_client_request_id(value: &str) -> AppResult<()> {
+    let valid = !value.is_empty()
+        && value.encode_utf16().count() <= 256
+        && value
+            .chars()
+            .all(|c| !c.is_whitespace() && !c.is_control() && !matches!(c, '/' | '\\' | '?' | '#'));
+    if !valid {
+        return Err(AppError::BadRequest("Invalid clientRequestId.".to_string()));
+    }
+    Ok(())
+}
+
+/// Build the exact upstream typed NyxIdChat `/api/chat` body.
+pub fn typed_chat_body(request: &TypedChatTurnRequest) -> AppResult<serde_json::Value> {
+    if request.turn_type != "text" {
+        return Err(AppError::BadRequest(
+            "Typed chat first turns must use type 'text'.".to_string(),
+        ));
+    }
+    let prompt = request.prompt.trim();
+    if prompt.is_empty() || request.prompt.chars().count() > TYPED_CHAT_PROMPT_MAX_CHARS {
+        return Err(AppError::BadRequest(format!(
+            "Prompt must contain between 1 and {TYPED_CHAT_PROMPT_MAX_CHARS} characters."
+        )));
+    }
+    validate_typed_chat_client_request_id(&request.client_request_id)?;
+
+    Ok(serde_json::json!({
+        "type": "text",
+        "prompt": request.prompt,
+        "clientRequestId": request.client_request_id,
+    }))
+}
+
 /// The one workflow the assistant surface may start. Pinned server-side:
 /// Aevatar's `/api/chat` runs whatever catalog workflow the body names
 /// (`direct`, `auto`, `auto_review`, file-loaded definitions, …), and which
@@ -581,6 +641,7 @@ mod tests {
             format!("api/scopes/{USER}/chat-history")
         );
         assert_eq!(completions_path(), "v1/chat/completions");
+        assert_eq!(typed_chat_path(), "api/chat");
         assert_eq!(workflow_chat_path(), "api/chat");
         assert_eq!(workflow_chat_ws_path(), "api/ws/chat");
     }
@@ -611,6 +672,80 @@ mod tests {
     }
 
     const WORKFLOW_CONV: &str = "chatc-650906f30cc985fa341477281303b6de";
+
+    fn typed_turn_request(json: serde_json::Value) -> TypedChatTurnRequest {
+        serde_json::from_value(json).unwrap()
+    }
+
+    #[test]
+    fn typed_chat_body_is_the_exact_nyxid_chat_discriminator_contract() {
+        let body = typed_chat_body(&typed_turn_request(serde_json::json!({
+            "type": "text",
+            "prompt": "show api-github repositories",
+            "clientRequestId": "0d4b0a52-3d5f-4d2e-9f10-8f6f9b1c2d3e",
+        })))
+        .unwrap();
+
+        assert_eq!(
+            body,
+            serde_json::json!({
+                "type": "text",
+                "prompt": "show api-github repositories",
+                "clientRequestId": "0d4b0a52-3d5f-4d2e-9f10-8f6f9b1c2d3e",
+            })
+        );
+        assert!(body.get("scopeId").is_none());
+        assert!(body.get("workflow").is_none());
+        assert!(body.get("conversation").is_none());
+    }
+
+    #[test]
+    fn typed_chat_body_rejects_non_text_invalid_and_caller_owned_fields() {
+        assert!(
+            typed_chat_body(&typed_turn_request(serde_json::json!({
+                "type": "action.continue",
+                "prompt": "hi",
+                "clientRequestId": "request-1",
+            })))
+            .is_err()
+        );
+        assert!(
+            typed_chat_body(&typed_turn_request(serde_json::json!({
+                "type": "text",
+                "prompt": "  ",
+                "clientRequestId": "request-1",
+            })))
+            .is_err()
+        );
+        assert!(
+            typed_chat_body(&typed_turn_request(serde_json::json!({
+                "type": "text",
+                "prompt": "hi",
+                "clientRequestId": "request/escape",
+            })))
+            .is_err()
+        );
+        assert!(
+            serde_json::from_value::<TypedChatTurnRequest>(serde_json::json!({
+                "type": "text",
+                "prompt": "hi",
+                "clientRequestId": "request-1",
+                "scopeId": "someone-else",
+            }))
+            .is_err(),
+            "caller-supplied scope must fail at the NyxID boundary"
+        );
+        assert!(
+            serde_json::from_value::<TypedChatTurnRequest>(serde_json::json!({
+                "type": "text",
+                "prompt": "hi",
+                "clientRequestId": "request-1",
+                "workflow": "studio",
+            }))
+            .is_err(),
+            "workflow selection does not belong to the typed Assistant route"
+        );
+    }
 
     fn turn_request(json: serde_json::Value) -> WorkflowChatTurnRequest {
         serde_json::from_value(json).unwrap()

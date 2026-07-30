@@ -307,6 +307,12 @@ export interface AssistantTransport {
     reports: readonly ActionReport[],
     onEvent?: (event: TurnEvent) => void,
   ): TurnHandle | null;
+  /** Resume a blocked typed turn without fabricating an action report. */
+  wakeActions(
+    conversationId: string,
+    originTurnId: string,
+    onEvent?: (event: TurnEvent) => void,
+  ): TurnHandle;
 }
 
 export function isTurnActive(status: TurnStatus | undefined): boolean {

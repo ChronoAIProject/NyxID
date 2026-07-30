@@ -7947,15 +7947,15 @@ mod proxy_resolution_integration_tests {
         server.abort();
     }
 
-    /// End-to-end through the real assistant handler: the caller's typed
-    /// workflow-chat body is rebuilt into the pinned `studio` body, and the
+    /// End-to-end through the real assistant handlers: both caller contracts
+    /// are rebuilt into their exact typed or pinned-workflow body, and each
     /// upstream request carries the injected identity material with NO
     /// caller `Authorization` — the exact wire shape Aevatar's `/api/chat`
     /// authenticates (`NyxIdIdentityAssertionAuthentication` forwards the
     /// Bearer scheme to the identity-assertion handler only when
     /// `Authorization` is absent, and a malformed one 400s the whole turn).
     #[tokio::test]
-    async fn workflow_chat_handler_rebuilds_the_body_for_the_admin_service() {
+    async fn assistant_chat_handlers_rebuild_bodies_for_the_admin_service() {
         use std::sync::Mutex as StdMutex;
 
         let Some(db) = connect_test_database("assistant_workflow_chat").await else {
@@ -8018,6 +8018,8 @@ mod proxy_resolution_integration_tests {
 
         let state = test_app_state(db.clone());
         let auth = access_token_auth(&user_id);
+        let typed_state = state.clone();
+        let typed_auth = auth.clone();
 
         let mut request = Request::builder()
             .method(Method::POST)
@@ -8063,6 +8065,47 @@ mod proxy_resolution_integration_tests {
             headers.get("x-nyxid-delegation-token").is_some(),
             "the delegation token is the workflow tool credential"
         );
+
+        let mut request = Request::builder()
+            .method(Method::POST)
+            .uri("/api/v1/assistant/chat")
+            .header(axum::http::header::CONTENT_TYPE, "application/json")
+            .body(Body::from(
+                r#"{"type":"text","prompt":"connect api-github","clientRequestId":"00000000-0000-4000-8000-000000000001"}"#,
+            ))
+            .expect("build typed chat request");
+        request.extensions_mut().insert(
+            crate::services::billing::route_inventory::BillingRoutePolicy::Metered(
+                crate::services::billing::BillingIngress::Proxy,
+            ),
+        );
+
+        let response = crate::handlers::assistant::typed_chat(
+            axum::extract::State(typed_state),
+            typed_auth,
+            request,
+        )
+        .await
+        .expect("typed chat handler must forward");
+        assert_eq!(response.status(), StatusCode::OK);
+
+        let (path, body, headers) = captured
+            .lock()
+            .unwrap()
+            .take()
+            .expect("downstream must have received the typed turn");
+        assert_eq!(path, "/api/chat");
+        assert_eq!(
+            serde_json::from_slice::<serde_json::Value>(&body).unwrap(),
+            serde_json::json!({
+                "type": "text",
+                "prompt": "connect api-github",
+                "clientRequestId": "00000000-0000-4000-8000-000000000001",
+            })
+        );
+        assert!(headers.get(axum::http::header::AUTHORIZATION).is_none());
+        assert!(headers.get("x-nyxid-identity-token").is_some());
+        assert!(headers.get("x-nyxid-delegation-token").is_some());
         server.abort();
     }
 
