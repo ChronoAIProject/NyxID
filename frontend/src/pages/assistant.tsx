@@ -1,4 +1,5 @@
 import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
+import { useQueryClient } from "@tanstack/react-query";
 import { useNavigate, useRouterState } from "@tanstack/react-router";
 import { toast } from "sonner";
 import { AssistantShell } from "@/components/assistant/assistant-shell";
@@ -8,6 +9,7 @@ import { ChatThread } from "@/components/assistant/chat-thread";
 import { ApprovalsView } from "@/components/assistant/approvals-view";
 import { PluginsView } from "@/components/assistant/plugins-view";
 import {
+  assistantKeys,
   describeHistoryError,
   describeSendFailure,
   useAssistantTurn,
@@ -21,6 +23,7 @@ import {
   useTurnEpisode,
 } from "@/hooks/use-assistant";
 import { ApiError } from "@/lib/api-client";
+import { AssistantConversationNotFoundError } from "@/lib/assistant/errors";
 import { parseAssistantSearch } from "@/lib/assistant/search";
 import type { ActionReport } from "@/schemas/assistant-actions";
 import { useAssistantContextStore } from "@/stores/assistant-context-store";
@@ -70,6 +73,7 @@ export function AssistantPage({
   readonly view?: "chat" | "plugins" | "approvals";
 }) {
   const navigate = useNavigate();
+  const queryClient = useQueryClient();
   const user = useAuthStore((state) => state.user);
   const [entryScreen] = useState(() => {
     const context = useAssistantContextStore.getState();
@@ -133,6 +137,7 @@ export function AssistantPage({
   const reactiveTurnLive =
     active ||
     sendMessage.isPending ||
+    cancelTurn.isPending ||
     decideApproval.isPending ||
     episodeState?.open === true;
 
@@ -172,8 +177,8 @@ export function AssistantPage({
       (conversation) => conversation.id === selectedFromSearch,
     ) &&
     history.isError &&
-    history.error instanceof ApiError &&
-    history.error.status === 404 &&
+    (history.error instanceof AssistantConversationNotFoundError ||
+      (history.error instanceof ApiError && history.error.status === 404)) &&
     !reactiveTurnLive,
   );
 
@@ -206,20 +211,46 @@ export function AssistantPage({
     if (currentConversationRef.current !== sourceConversationId) return;
     if (turnLiveRef.current) return;
 
+    if (shouldRepairStaleId) {
+      void navigate({
+        to: "/assistant" as never,
+        search: {} as never,
+        replace: true,
+      });
+      return;
+    }
+    if (!canonicalConversationId || !history.data) return;
+
+    // The event pump owns the placeholder slots. Transfer its settled
+    // projection before changing the query key so the canonical render has a
+    // complete transcript and terminal turn state on its very first frame.
+    queryClient.setQueryData(
+      assistantKeys.history(canonicalConversationId),
+      history.data,
+    );
+    queryClient.setQueryData(
+      assistantKeys.episode(canonicalConversationId),
+      episode.data ?? null,
+    );
+    queryClient.setQueryData(
+      assistantKeys.turn(canonicalConversationId),
+      turn.data ?? null,
+    );
     void navigate({
       to: "/assistant" as never,
-      search: shouldRepairStaleId
-        ? ({} as never)
-        : ({ c: canonicalConversationId } as never),
+      search: { c: canonicalConversationId } as never,
       replace: true,
     });
   }, [
     currentPathname,
+    episode.data,
     explicitConversationIsConfirmedStale,
-    history.data?.conversation.id,
+    history.data,
     navigate,
+    queryClient,
     reactiveTurnLive,
     selectedFromSearch,
+    turn.data,
     view,
   ]);
 
@@ -263,7 +294,10 @@ export function AssistantPage({
   async function handleDelete(conversationId: string) {
     try {
       await deleteConversation.mutateAsync(conversationId);
-      if (conversationId === selectedFromSearch) {
+      if (
+        conversationId === selectedFromSearch ||
+        conversationId === history.data?.conversation.id
+      ) {
         void navigate({ to: "/assistant" as never, search: {} as never });
       }
     } catch (error) {

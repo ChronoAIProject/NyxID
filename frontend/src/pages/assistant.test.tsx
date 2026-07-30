@@ -1,9 +1,12 @@
 import type { AnchorHTMLAttributes, ReactNode } from "react";
+import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { TooltipProvider } from "@/components/ui/tooltip";
+import { assistantKeys } from "@/hooks/use-assistant";
 import { ApiError } from "@/lib/api-client";
+import { AssistantConversationNotFoundError } from "@/lib/assistant/errors";
 import { useAssistantContextStore } from "@/stores/assistant-context-store";
 import { useAssistantDraftStore } from "@/stores/assistant-draft-store";
 import { useAuthStore } from "@/stores/auth-store";
@@ -13,16 +16,20 @@ import type { User } from "@/types/api";
 const {
   mockNavigate,
   mockCreateMutateAsync,
+  mockCancelMutateAsync,
   mockDecideMutateAsync,
   mockContinueAction,
+  mockDeleteMutateAsync,
   mockSendMutateAsync,
   mockToastError,
   state,
 } = vi.hoisted(() => ({
   mockNavigate: vi.fn(),
   mockCreateMutateAsync: vi.fn(),
+  mockCancelMutateAsync: vi.fn(),
   mockDecideMutateAsync: vi.fn(),
   mockContinueAction: vi.fn(),
+  mockDeleteMutateAsync: vi.fn(),
   mockSendMutateAsync: vi.fn(),
   mockToastError: vi.fn(),
   state: {
@@ -42,6 +49,7 @@ const {
       | null,
     // Mirrors what TanStack exposes for an in-flight mutation.
     sendPending: undefined as string | undefined,
+    cancelPending: false,
     decisionPending: false,
     historyMessages: [] as unknown[],
     episode: null as {
@@ -97,6 +105,19 @@ vi.mock("@/components/assistant/assistant-shell", () => ({
 }));
 
 vi.mock("@/hooks/use-assistant", () => ({
+  assistantKeys: {
+    history: (conversationId: string) => [
+      "assistant",
+      "history",
+      conversationId,
+    ],
+    turn: (conversationId: string) => ["assistant", "turn", conversationId],
+    episode: (conversationId: string) => [
+      "assistant",
+      "episode",
+      conversationId,
+    ],
+  },
   useConversations: () => ({
     data: state.conversations,
     isSuccess: state.conversationsResolved,
@@ -140,7 +161,10 @@ vi.mock("@/hooks/use-assistant", () => ({
     isPending: state.sendPending !== undefined,
     variables: state.sendPending,
   }),
-  useCancelTurn: () => ({ mutateAsync: vi.fn() }),
+  useCancelTurn: () => ({
+    mutateAsync: mockCancelMutateAsync,
+    isPending: state.cancelPending,
+  }),
   useDecideApproval: () => ({
     mutateAsync: mockDecideMutateAsync,
     isPending: state.decisionPending,
@@ -150,7 +174,7 @@ vi.mock("@/hooks/use-assistant", () => ({
     continueAction: mockContinueAction,
   }),
   useDeleteConversation: () => ({
-    mutateAsync: vi.fn(),
+    mutateAsync: mockDeleteMutateAsync,
     isPending: false,
     variables: undefined,
   }),
@@ -167,6 +191,13 @@ vi.mock("sonner", () => ({
 }));
 
 import { AssistantPage } from "./assistant";
+
+const queryClient = new QueryClient({
+  defaultOptions: {
+    queries: { retry: false },
+    mutations: { retry: false },
+  },
+});
 
 const user: User = {
   id: "user-1",
@@ -206,9 +237,11 @@ function userTranscriptMessage(id: string, text: string) {
 
 function page() {
   return (
-    <TooltipProvider>
-      <AssistantPage />
-    </TooltipProvider>
+    <QueryClientProvider client={queryClient}>
+      <TooltipProvider>
+        <AssistantPage />
+      </TooltipProvider>
+    </QueryClientProvider>
   );
 }
 
@@ -227,6 +260,7 @@ async function sendThrough(
 
 beforeEach(() => {
   vi.clearAllMocks();
+  queryClient.clear();
   localStorage.clear();
   state.pathname = "/assistant";
   state.search = {};
@@ -236,6 +270,7 @@ beforeEach(() => {
   state.historyCanonicalId = undefined;
   state.turnStatus = null;
   state.sendPending = undefined;
+  state.cancelPending = false;
   state.decisionPending = false;
   state.historyMessages = [];
   state.episode = null;
@@ -448,11 +483,7 @@ describe("AssistantPage conversation resolution", () => {
 
     state.search = { c: boundConversation.id };
     state.conversations = [boundConversation];
-    rerender(
-      <TooltipProvider>
-        <AssistantPage />
-      </TooltipProvider>,
-    );
+    rerender(page());
 
     await waitFor(() => {
       expect(screen.getByRole("textbox")).toHaveValue(
@@ -486,11 +517,7 @@ describe("AssistantPage conversation resolution", () => {
       error_code: 404,
       message: "Conversation not found",
     });
-    rerender(
-      <TooltipProvider>
-        <AssistantPage />
-      </TooltipProvider>,
-    );
+    rerender(page());
 
     await waitFor(() => {
       expect(mockNavigate).toHaveBeenCalledWith({
@@ -507,8 +534,24 @@ describe("AssistantPage conversation resolution", () => {
     ).toBeInTheDocument();
   });
 
+  it("repairs a missing explicit id for the typed transport not-found", async () => {
+    state.search = { c: "nyxid-pending-lost-after-reload" };
+    state.conversations = [boundConversation];
+    state.historyError = new AssistantConversationNotFoundError();
+    renderPage();
+
+    await waitFor(() => {
+      expect(mockNavigate).toHaveBeenCalledWith({
+        to: "/assistant",
+        search: {},
+        replace: true,
+      });
+    });
+  });
+
   it.each([
     ["network", new Error("Network unavailable")],
+    ["untyped not-found", new Error("Conversation was not found.")],
     [
       "forbidden",
       new ApiError(403, {
@@ -581,6 +624,7 @@ describe("AssistantPage canonical conversation resolution", () => {
       "open episode",
       { episode: { open: true, printed: false, projecting: false } },
     ],
+    ["pending cancellation", { cancelPending: true }],
     ["approval continuation", { decisionPending: true }],
   ])("does not swap during an %s", (_label, liveState) => {
     useAliasedConversation();
@@ -590,13 +634,41 @@ describe("AssistantPage canonical conversation resolution", () => {
     expect(mockNavigate).not.toHaveBeenCalled();
   });
 
-  it("replaces the placeholder with the history canonical id once quiet", async () => {
+  it("seeds the canonical transcript and turn slots before navigating", async () => {
     useAliasedConversation();
+    state.historyMessages = [
+      userTranscriptMessage("user-finished", "Question"),
+      {
+        id: "assistant-finished",
+        role: "assistant",
+        schema_version: 1,
+        blocks: [
+          { type: "text", block_id: "assistant-block", text: "Finished" },
+        ],
+        created_at: "2026-07-29T00:00:01.000Z",
+      },
+    ];
+    state.turnStatus = "completed";
     state.episode = { open: true, printed: true, projecting: false };
     const { rerender } = renderPage();
     expect(mockNavigate).not.toHaveBeenCalled();
+    expect(
+      queryClient.getQueryData(assistantKeys.history(canonicalConversation.id)),
+    ).toBeUndefined();
 
     state.episode = { open: false, printed: true, projecting: false };
+    let cachesWereSeededBeforeNavigate = false;
+    mockNavigate.mockImplementationOnce(() => {
+      cachesWereSeededBeforeNavigate = Boolean(
+        queryClient.getQueryData(
+          assistantKeys.history(canonicalConversation.id),
+        ) &&
+        queryClient.getQueryData(
+          assistantKeys.episode(canonicalConversation.id),
+        ) &&
+        queryClient.getQueryData(assistantKeys.turn(canonicalConversation.id)),
+      );
+    });
     rerender(page());
 
     await waitFor(() => {
@@ -604,6 +676,46 @@ describe("AssistantPage canonical conversation resolution", () => {
         to: "/assistant",
         search: { c: canonicalConversation.id },
         replace: true,
+      });
+    });
+    expect(cachesWereSeededBeforeNavigate).toBe(true);
+    expect(
+      queryClient.getQueryData(assistantKeys.history(canonicalConversation.id)),
+    ).toMatchObject({
+      conversation: { id: canonicalConversation.id },
+      messages: [
+        expect.objectContaining({ id: "user-finished" }),
+        expect.objectContaining({ id: "assistant-finished" }),
+      ],
+    });
+    expect(
+      queryClient.getQueryData(assistantKeys.episode(canonicalConversation.id)),
+    ).toEqual({ open: false, printed: true, projecting: false });
+    expect(
+      queryClient.getQueryData(assistantKeys.turn(canonicalConversation.id)),
+    ).toMatchObject({ status: "completed" });
+  });
+
+  it("drops the placeholder URL when its canonical sidebar row is deleted", async () => {
+    const event = userEvent.setup();
+    useAliasedConversation();
+    state.episode = { open: true, printed: true, projecting: false };
+    mockDeleteMutateAsync.mockResolvedValue(undefined);
+    renderPage();
+
+    await event.click(
+      screen.getByLabelText(`Options for ${canonicalConversation.title}`),
+    );
+    await event.click(await screen.findByRole("menuitem", { name: /delete/i }));
+    await event.click(screen.getByRole("button", { name: "Delete" }));
+
+    await waitFor(() => {
+      expect(mockDeleteMutateAsync).toHaveBeenCalledWith(
+        canonicalConversation.id,
+      );
+      expect(mockNavigate).toHaveBeenCalledWith({
+        to: "/assistant",
+        search: {},
       });
     });
   });
