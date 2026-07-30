@@ -20,8 +20,9 @@ import {
   useSendMessage,
   useTurnEpisode,
 } from "@/hooks/use-assistant";
-import { resolveAssistantConversationId } from "@/lib/assistant/conversation-resolution";
+import { ApiError } from "@/lib/api-client";
 import { parseAssistantSearch } from "@/lib/assistant/search";
+import type { ActionReport } from "@/schemas/assistant-actions";
 import { useAssistantContextStore } from "@/stores/assistant-context-store";
 import { useAssistantDraftStore } from "@/stores/assistant-draft-store";
 import { useAuthStore } from "@/stores/auth-store";
@@ -88,6 +89,9 @@ export function AssistantPage({
       parseAssistantSearch(state.location.search as Record<string, unknown>)
         .draft === true,
   });
+  const currentPathname = useRouterState({
+    select: (state) => state.location.pathname,
+  });
   const conversations = useConversations();
 
   // The composer floats over the thread, so the thread has to know how tall it
@@ -110,38 +114,11 @@ export function AssistantPage({
     return () => observer.disconnect();
   }, [view]);
 
-  const boundConversationId = useAssistantContextStore((state) => {
-    if (!user || !entryScreen || state.ownerUserId !== user.id) {
-      return undefined;
-    }
-    return state.bindings[entryScreen]?.conversationId;
-  });
-  const selectedId = useMemo(() => {
-    if (drafting) {
-      const explicitConversationIsUsable = Boolean(
-        selectedFromSearch &&
-        (!conversations.isSuccess ||
-          (conversations.data ?? []).some(
-            (conversation) => conversation.id === selectedFromSearch,
-          )),
-      );
-      return explicitConversationIsUsable ? selectedFromSearch : undefined;
-    }
-    return resolveAssistantConversationId({
-      explicitConversationId: selectedFromSearch,
-      boundConversationId,
-      entryScreen,
-      conversationsResolved: conversations.isSuccess,
-      conversations: conversations.data ?? [],
-    });
-  }, [
-    boundConversationId,
-    conversations.data,
-    conversations.isSuccess,
-    drafting,
-    entryScreen,
-    selectedFromSearch,
-  ]);
+  // A conversation is selected only when the URL explicitly addresses it.
+  // Keep that id through list/history failures so the history query can prove
+  // a real 404; `?draft=true` is the same empty state as bare `/assistant`.
+  const selectedId =
+    !drafting && selectedFromSearch ? selectedFromSearch : undefined;
   const history = useConversation(selectedId);
   const turn = useAssistantTurn(selectedId);
   const episode = useTurnEpisode(selectedId);
@@ -150,15 +127,54 @@ export function AssistantPage({
   const decideApproval = useDecideApproval(selectedId);
   const actionCards = useActionCardActions(selectedId);
   const deleteConversation = useDeleteConversation();
-  const selectedConversationExists = (conversations.data ?? []).some(
-    (conversation) => conversation.id === selectedId,
-  );
-  const explicitConversationIsStale = Boolean(
+  const turnStatus = turn.data?.status;
+  const active = isTurnActive(turnStatus);
+  const episodeState = episode.data ?? undefined;
+  const reactiveTurnLive =
+    active ||
+    sendMessage.isPending ||
+    decideApproval.isPending ||
+    episodeState?.open === true;
+
+  // Effects queued by an earlier quiet render must observe a continuation
+  // that starts before they fire. The counter covers the synchronous window
+  // before React Query publishes pending/episode state.
+  const synchronousContinuationsRef = useRef(0);
+  const reactiveTurnLiveRef = useRef(reactiveTurnLive);
+  const turnLiveRef = useRef(reactiveTurnLive);
+  reactiveTurnLiveRef.current = reactiveTurnLive;
+  turnLiveRef.current =
+    reactiveTurnLive || synchronousContinuationsRef.current > 0;
+
+  function beginContinuation() {
+    synchronousContinuationsRef.current += 1;
+    turnLiveRef.current = true;
+  }
+
+  function endContinuation() {
+    synchronousContinuationsRef.current = Math.max(
+      0,
+      synchronousContinuationsRef.current - 1,
+    );
+    turnLiveRef.current =
+      reactiveTurnLiveRef.current || synchronousContinuationsRef.current > 0;
+  }
+
+  const currentConversationRef = useRef(selectedFromSearch);
+  const currentPathnameRef = useRef(currentPathname);
+  currentConversationRef.current = selectedFromSearch;
+  currentPathnameRef.current = currentPathname;
+
+  const explicitConversationIsConfirmedStale = Boolean(
     selectedFromSearch &&
     conversations.isSuccess &&
     !(conversations.data ?? []).some(
       (conversation) => conversation.id === selectedFromSearch,
-    ),
+    ) &&
+    history.isError &&
+    history.error instanceof ApiError &&
+    history.error.status === 404 &&
+    !reactiveTurnLive,
   );
 
   useEffect(() => {
@@ -166,51 +182,46 @@ export function AssistantPage({
     const existingIds = (conversations.data ?? []).map(
       (conversation) => conversation.id,
     );
-    useAssistantContextStore.getState().pruneBindings(existingIds);
     useAssistantDraftStore.getState().pruneConversationDrafts(existingIds);
   }, [conversations.data, conversations.isSuccess]);
 
   useEffect(() => {
-    if (view !== "chat" || !conversations.isSuccess) {
-      return;
-    }
-    if (selectedFromSearch && !explicitConversationIsStale) return;
-    if (!selectedId && !explicitConversationIsStale) return;
+    if (view !== "chat" || currentPathname !== "/assistant") return;
+    const sourceConversationId = selectedFromSearch;
+    if (!sourceConversationId) return;
+
+    const canonicalConversationId = history.data?.conversation.id;
+    const shouldRepairStaleId = explicitConversationIsConfirmedStale;
+    const shouldSwapToCanonicalId = Boolean(
+      !shouldRepairStaleId &&
+      canonicalConversationId &&
+      canonicalConversationId !== sourceConversationId &&
+      !reactiveTurnLive,
+    );
+    if (!shouldRepairStaleId && !shouldSwapToCanonicalId) return;
+
+    // Fire-time guards: router state and turn state can both advance after
+    // this effect was queued. A stale effect may never override either one.
+    if (currentPathnameRef.current !== "/assistant") return;
+    if (currentConversationRef.current !== sourceConversationId) return;
+    if (turnLiveRef.current) return;
+
     void navigate({
       to: "/assistant" as never,
-      search: selectedId
-        ? ({ c: selectedId } as never)
-        : drafting
-          ? ({ draft: true } as never)
-          : ({} as never),
+      search: shouldRepairStaleId
+        ? ({} as never)
+        : ({ c: canonicalConversationId } as never),
       replace: true,
     });
   }, [
-    conversations.isSuccess,
-    drafting,
-    explicitConversationIsStale,
+    currentPathname,
+    explicitConversationIsConfirmedStale,
+    history.data?.conversation.id,
     navigate,
+    reactiveTurnLive,
     selectedFromSearch,
-    selectedId,
     view,
   ]);
-
-  useEffect(() => {
-    if (
-      view !== "chat" ||
-      !user ||
-      !entryScreen ||
-      !selectedId ||
-      !(conversations.data ?? []).some(
-        (conversation) => conversation.id === selectedId,
-      )
-    ) {
-      return;
-    }
-    useAssistantContextStore
-      .getState()
-      .bindConversation(user.id, entryScreen, selectedId);
-  }, [conversations.data, entryScreen, selectedId, user, view]);
 
   function selectConversation(conversationId: string, replace = false) {
     void navigate({
@@ -246,10 +257,9 @@ export function AssistantPage({
   }
 
   // Deleting the URL-addressed conversation must also drop `?c=`, or the
-  // stale id lingers in the address bar and re-selects nothing on reload;
-  // selection then falls back to the newest remaining chat. Failures are said
-  // out loud here and re-thrown so the sidebar keeps its confirm dialog open
-  // and the delete stays retryable.
+  // stale id lingers in the address bar and re-selects nothing on reload.
+  // Failures are said out loud here and re-thrown so the sidebar keeps its
+  // confirm dialog open and the delete stays retryable.
   async function handleDelete(conversationId: string) {
     try {
       await deleteConversation.mutateAsync(conversationId);
@@ -272,6 +282,7 @@ export function AssistantPage({
   // that fails before any turn exists must be said out loud — the composer
   // restores the text, and without the toast the button just looks dead.
   async function handleSend(content: string) {
+    beginContinuation();
     // The mutation outlives a conversation switch, and its `variables` say
     // nothing about where the text was going — without this the reader can
     // switch chats mid-send and watch the previous chat's message appear in
@@ -294,6 +305,26 @@ export function AssistantPage({
       const { message, description } = describeSendFailure(error);
       toast.error(message, { description });
       throw error;
+    } finally {
+      endContinuation();
+    }
+  }
+
+  async function handleDecideApproval(blockId: string, approved: boolean) {
+    beginContinuation();
+    try {
+      await decideApproval.mutateAsync({ blockId, approved });
+    } finally {
+      endContinuation();
+    }
+  }
+
+  async function handleResolveAction(report: ActionReport) {
+    beginContinuation();
+    try {
+      await actionCards.continueAction(report);
+    } finally {
+      endContinuation();
     }
   }
 
@@ -303,9 +334,6 @@ export function AssistantPage({
       : view === "approvals"
         ? "Approvals"
         : (history.data?.conversation.title ?? "New chat");
-  const turnStatus = turn.data?.status;
-  const active = isTurnActive(turnStatus);
-
   /**
    * Paint the turn from the in-flight send until the transcript catches up.
    *
@@ -350,7 +378,6 @@ export function AssistantPage({
       ? transcript
       : [...transcript, optimisticUserMessage(pendingEcho.content)];
   }, [history.data?.messages, pendingEcho]);
-  const episodeState = episode.data ?? undefined;
   const awaitingFirstTurn =
     active || sendMessage.isPending || episodeState?.open === true;
 
@@ -368,16 +395,19 @@ export function AssistantPage({
     episodeState !== undefined &&
     !episodeState.open &&
     turnStatus !== "cancelled";
-  const draftKey =
-    selectedId && (!conversations.isSuccess || selectedConversationExists)
-      ? `conv:${selectedId}`
-      : !selectedFromSearch && entryScreen
-        ? `screen:${entryScreen}`
-        : null;
+  const draftKey = selectedId
+    ? `conv:${selectedId}`
+    : entryScreen
+      ? `screen:${entryScreen}`
+      : null;
   const sidebar = (
     <AssistantSidebar
       conversations={conversations.data ?? []}
-      activeConversationId={view === "chat" ? selectedId : undefined}
+      activeConversationId={
+        view === "chat"
+          ? (history.data?.conversation.id ?? selectedId)
+          : undefined
+      }
       activeView={view}
       deletingId={
         deleteConversation.isPending ? deleteConversation.variables : undefined
@@ -432,11 +462,9 @@ export function AssistantPage({
             transcriptSettling={
               episodeState?.projecting === true || sendMessage.isPending
             }
-            onDecideApproval={(blockId, approved) =>
-              decideApproval.mutateAsync({ blockId, approved })
-            }
+            onDecideApproval={handleDecideApproval}
             onActionProgress={actionCards.setInProgress}
-            onResolveAction={actionCards.continueAction}
+            onResolveAction={handleResolveAction}
           />
         )}
         <div ref={composerRef} className="absolute inset-x-0 bottom-0 z-10">

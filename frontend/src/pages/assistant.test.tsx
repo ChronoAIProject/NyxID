@@ -3,6 +3,7 @@ import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { TooltipProvider } from "@/components/ui/tooltip";
+import { ApiError } from "@/lib/api-client";
 import { useAssistantContextStore } from "@/stores/assistant-context-store";
 import { useAssistantDraftStore } from "@/stores/assistant-draft-store";
 import { useAuthStore } from "@/stores/auth-store";
@@ -12,12 +13,16 @@ import type { User } from "@/types/api";
 const {
   mockNavigate,
   mockCreateMutateAsync,
+  mockDecideMutateAsync,
+  mockContinueAction,
   mockSendMutateAsync,
   mockToastError,
   state,
 } = vi.hoisted(() => ({
   mockNavigate: vi.fn(),
   mockCreateMutateAsync: vi.fn(),
+  mockDecideMutateAsync: vi.fn(),
+  mockContinueAction: vi.fn(),
   mockSendMutateAsync: vi.fn(),
   mockToastError: vi.fn(),
   state: {
@@ -25,9 +30,19 @@ const {
     search: {} as Record<string, unknown>,
     conversations: [] as Conversation[] | undefined,
     conversationsResolved: true,
-    historyError: false,
+    historyError: undefined as unknown,
+    historyCanonicalId: undefined as string | undefined,
+    turnStatus: null as
+      | "queued"
+      | "running"
+      | "waiting_approval"
+      | "completed"
+      | "failed"
+      | "cancelled"
+      | null,
     // Mirrors what TanStack exposes for an in-flight mutation.
     sendPending: undefined as string | undefined,
+    decisionPending: false,
     historyMessages: [] as unknown[],
     episode: null as {
       open: boolean;
@@ -43,9 +58,12 @@ vi.mock("@tanstack/react-router", () => ({
     select,
   }: {
     select: (routerState: {
-      location: { search: Record<string, unknown> };
+      location: { pathname: string; search: Record<string, unknown> };
     }) => unknown;
-  }) => select({ location: { search: state.search } }),
+  }) =>
+    select({
+      location: { pathname: state.pathname, search: state.search },
+    }),
   Link: ({
     to,
     children,
@@ -86,13 +104,16 @@ vi.mock("@/hooks/use-assistant", () => ({
   useConversation: (conversationId: string | undefined) => ({
     data: conversationId
       ? {
-          conversation: state.conversations?.find(
-            (conversation) => conversation.id === conversationId,
-          ) ?? {
-            id: conversationId,
-            title: "Loading",
-            created_at: "2026-07-29T00:00:00.000Z",
-            last_message_at: "2026-07-29T00:00:00.000Z",
+          conversation: {
+            ...(state.conversations?.find(
+              (conversation) => conversation.id === conversationId,
+            ) ?? {
+              id: conversationId,
+              title: "Loading",
+              created_at: "2026-07-29T00:00:00.000Z",
+              last_message_at: "2026-07-29T00:00:00.000Z",
+            }),
+            id: state.historyCanonicalId ?? conversationId,
           },
           messages: state.historyMessages,
           has_more: false,
@@ -100,10 +121,15 @@ vi.mock("@/hooks/use-assistant", () => ({
       : undefined,
     isLoading: false,
     isFetching: false,
-    isError: state.historyError,
-    error: undefined,
+    isError: state.historyError !== undefined,
+    error: state.historyError,
   }),
-  useAssistantTurn: () => ({ data: null }),
+  useAssistantTurn: () => ({
+    data:
+      state.turnStatus === null
+        ? null
+        : { turnId: "turn-1", status: state.turnStatus, error: null },
+  }),
   useTurnEpisode: () => ({ data: state.episode }),
   useCreateConversation: () => ({
     mutateAsync: mockCreateMutateAsync,
@@ -115,10 +141,13 @@ vi.mock("@/hooks/use-assistant", () => ({
     variables: state.sendPending,
   }),
   useCancelTurn: () => ({ mutateAsync: vi.fn() }),
-  useDecideApproval: () => ({ mutateAsync: vi.fn() }),
+  useDecideApproval: () => ({
+    mutateAsync: mockDecideMutateAsync,
+    isPending: state.decisionPending,
+  }),
   useActionCardActions: () => ({
     setInProgress: vi.fn(),
-    continueAction: vi.fn(),
+    continueAction: mockContinueAction,
   }),
   useDeleteConversation: () => ({
     mutateAsync: vi.fn(),
@@ -203,8 +232,11 @@ beforeEach(() => {
   state.search = {};
   state.conversations = [existingConversation];
   state.conversationsResolved = true;
-  state.historyError = false;
+  state.historyError = undefined;
+  state.historyCanonicalId = undefined;
+  state.turnStatus = null;
   state.sendPending = undefined;
+  state.decisionPending = false;
   state.historyMessages = [];
   state.episode = null;
   useAuthStore.setState({
@@ -216,7 +248,6 @@ beforeEach(() => {
   useAssistantContextStore.setState({
     ownerUserId: user.id,
     lastScreen: null,
-    bindings: {},
   });
   useAssistantDraftStore.setState({ ownerUserId: user.id, drafts: {} });
 });
@@ -345,17 +376,11 @@ describe("AssistantPage new chat", () => {
     ).not.toBeInTheDocument();
   });
 
-  it("renders the empty draft thread rather than a binding or newest chat", () => {
+  it("renders the explicit draft state rather than the newest chat", () => {
     state.search = { draft: true };
     useAssistantContextStore.setState({
       ownerUserId: user.id,
       lastScreen: "/keys",
-      bindings: {
-        "/keys": {
-          conversationId: existingConversation.id,
-          updatedAt: 1,
-        },
-      },
     });
     renderPage();
 
@@ -365,7 +390,7 @@ describe("AssistantPage new chat", () => {
   });
 
   it("reports a failed transcript read without taking the chat away", () => {
-    state.historyError = true;
+    state.historyError = new Error("Network unavailable");
     state.search = { c: existingConversation.id };
     renderPage();
 
@@ -375,36 +400,54 @@ describe("AssistantPage new chat", () => {
     expect(screen.getByRole("textbox")).toBeInTheDocument();
   });
 
-  it("still falls back to the newest chat with no recorded entry screen", () => {
+  it("keeps bare /assistant as a new-chat draft when chats exist", () => {
     renderPage();
 
     expect(
-      screen.getByRole("heading", { name: existingConversation.title }),
+      screen.getByRole("heading", { name: "New chat" }),
     ).toBeInTheDocument();
+    expect(mockNavigate).not.toHaveBeenCalled();
+  });
+
+  it("does not infer a conversation when a cold list resolves", () => {
+    state.conversations = undefined;
+    state.conversationsResolved = false;
+    const { rerender } = renderPage();
+
+    state.conversations = [existingConversation];
+    state.conversationsResolved = true;
+    rerender(page());
+
+    expect(
+      screen.getByRole("heading", { name: "New chat" }),
+    ).toBeInTheDocument();
+    expect(mockNavigate).not.toHaveBeenCalled();
+  });
+
+  it("treats ?draft=true as bare even when an old c parameter is present", () => {
+    state.search = { c: existingConversation.id, draft: true };
+    renderPage();
+
+    expect(
+      screen.getByRole("heading", { name: "New chat" }),
+    ).toBeInTheDocument();
+    expect(mockNavigate).not.toHaveBeenCalled();
   });
 });
 
 describe("AssistantPage conversation resolution", () => {
-  it("migrates the live screen draft when a cold list resolves its binding", async () => {
-    state.conversations = undefined;
-    state.conversationsResolved = false;
+  it("keeps lastScreen only for a draft that later follows an explicit selection", async () => {
     useAssistantContextStore.setState({
       ownerUserId: user.id,
       lastScreen: "/keys",
-      bindings: {
-        "/keys": {
-          conversationId: boundConversation.id,
-          updatedAt: 1,
-        },
-      },
     });
     const { rerender } = renderPage();
     fireEvent.change(screen.getByRole("textbox"), {
-      target: { value: "Question typed while conversations load" },
+      target: { value: "Question typed in the screen draft" },
     });
 
+    state.search = { c: boundConversation.id };
     state.conversations = [boundConversation];
-    state.conversationsResolved = true;
     rerender(
       <TooltipProvider>
         <AssistantPage />
@@ -413,7 +456,7 @@ describe("AssistantPage conversation resolution", () => {
 
     await waitFor(() => {
       expect(screen.getByRole("textbox")).toHaveValue(
-        "Question typed while conversations load",
+        "Question typed in the screen draft",
       );
     });
     expect(useAssistantDraftStore.getState().getDraft("screen:/keys")).toBe("");
@@ -421,22 +464,28 @@ describe("AssistantPage conversation resolution", () => {
       useAssistantDraftStore
         .getState()
         .getDraft(`conv:${boundConversation.id}`),
-    ).toBe("Question typed while conversations load");
+    ).toBe("Question typed in the screen draft");
   });
 
-  it("removes a stale explicit conversation and falls through to blank for its screen", async () => {
+  it("repairs a missing explicit id only after history confirms a 404", async () => {
     state.search = { c: "deleted-conversation" };
     state.conversations = undefined;
     state.conversationsResolved = false;
     useAssistantContextStore.setState({
       ownerUserId: user.id,
       lastScreen: "/nodes",
-      bindings: {},
     });
     const { rerender } = renderPage();
 
+    expect(mockNavigate).not.toHaveBeenCalled();
+
     state.conversations = [boundConversation];
     state.conversationsResolved = true;
+    state.historyError = new ApiError(404, {
+      error: "not_found",
+      error_code: 404,
+      message: "Conversation not found",
+    });
     rerender(
       <TooltipProvider>
         <AssistantPage />
@@ -450,8 +499,120 @@ describe("AssistantPage conversation resolution", () => {
         replace: true,
       });
     });
+    state.search = {};
+    state.historyError = undefined;
+    rerender(page());
     expect(
       screen.getByRole("heading", { name: "New chat" }),
     ).toBeInTheDocument();
+  });
+
+  it.each([
+    ["network", new Error("Network unavailable")],
+    [
+      "forbidden",
+      new ApiError(403, {
+        error: "forbidden",
+        error_code: 403,
+        message: "Forbidden",
+      }),
+    ],
+    [
+      "server",
+      new ApiError(503, {
+        error: "unavailable",
+        error_code: 503,
+        message: "Unavailable",
+      }),
+    ],
+  ])("retains an explicit id after a %s history failure", (_label, error) => {
+    state.search = { c: "unlisted-conversation" };
+    state.conversations = [boundConversation];
+    state.historyError = error;
+    renderPage();
+
+    expect(mockNavigate).not.toHaveBeenCalled();
+    expect(screen.getByRole("status")).toHaveTextContent(
+      /You can keep chatting/i,
+    );
+  });
+
+  it("retains an unlisted explicit id while history is still resolving", () => {
+    state.search = { c: "unlisted-conversation" };
+    state.conversations = [boundConversation];
+    renderPage();
+
+    expect(
+      screen.getByRole("heading", { name: "Loading" }),
+    ).toBeInTheDocument();
+    expect(mockNavigate).not.toHaveBeenCalled();
+  });
+});
+
+describe("AssistantPage canonical conversation resolution", () => {
+  const placeholderId = "nyxid-pending-local";
+  const canonicalConversation: Conversation = {
+    id: "nyxid-chat-canonical",
+    title: "Canonical chat",
+    created_at: "2026-07-29T00:00:00.000Z",
+    last_message_at: "2026-07-29T00:00:01.000Z",
+  };
+
+  function useAliasedConversation() {
+    state.search = { c: placeholderId };
+    state.conversations = [canonicalConversation];
+    state.historyCanonicalId = canonicalConversation.id;
+  }
+
+  it("keeps the placeholder URL live and marks the canonical sidebar row active", () => {
+    useAliasedConversation();
+    state.sendPending = "hello";
+    renderPage();
+
+    expect(mockNavigate).not.toHaveBeenCalled();
+    expect(
+      screen.getByRole("button", { name: canonicalConversation.title }),
+    ).toHaveClass("font-medium");
+  });
+
+  it.each([
+    ["active turn", { turnStatus: "running" as const }],
+    [
+      "open episode",
+      { episode: { open: true, printed: false, projecting: false } },
+    ],
+    ["approval continuation", { decisionPending: true }],
+  ])("does not swap during an %s", (_label, liveState) => {
+    useAliasedConversation();
+    Object.assign(state, liveState);
+    renderPage();
+
+    expect(mockNavigate).not.toHaveBeenCalled();
+  });
+
+  it("replaces the placeholder with the history canonical id once quiet", async () => {
+    useAliasedConversation();
+    state.episode = { open: true, printed: true, projecting: false };
+    const { rerender } = renderPage();
+    expect(mockNavigate).not.toHaveBeenCalled();
+
+    state.episode = { open: false, printed: true, projecting: false };
+    rerender(page());
+
+    await waitFor(() => {
+      expect(mockNavigate).toHaveBeenCalledWith({
+        to: "/assistant",
+        search: { c: canonicalConversation.id },
+        replace: true,
+      });
+    });
+  });
+
+  it("does not normalize after router state has moved off /assistant", () => {
+    useAliasedConversation();
+    state.pathname = "/assistant/plugins";
+    renderPage();
+
+    expect(mockNavigate).not.toHaveBeenCalled();
   });
 });
