@@ -475,12 +475,38 @@ pub async fn list_topups(
         .map(|invoice| (invoice.lago_id.as_str(), invoice))
         .collect();
 
+    // Sessions written before the invoice id was captured at creation
+    // (invoice attachment is asynchronous) carry no invoice link. Lago's
+    // wallet transactions do, so backfill the mapping with one call per
+    // distinct wallet on this page.
+    let mut txn_invoices: std::collections::HashMap<String, String> =
+        std::collections::HashMap::new();
+    if let Some(lago) = state.billing.lago_client() {
+        let wallets_needing_backfill: std::collections::BTreeSet<&str> = sessions
+            .iter()
+            .filter(|session| {
+                session.lago_invoice_id.is_none() && session.lago_wallet_transaction_id.is_some()
+            })
+            .map(|session| session.lago_wallet_id.as_str())
+            .collect();
+        for wallet_id in wallets_needing_backfill {
+            if let Ok(pairs) = lago.wallet_transaction_invoices(wallet_id).await {
+                txn_invoices.extend(pairs);
+            }
+        }
+    }
+
     let checkout_expiry_cutoff = Utc::now() - Duration::hours(24);
     let topups = sessions
         .into_iter()
         .map(|session| {
-            let invoice = session
-                .lago_invoice_id
+            let lago_invoice_id = session.lago_invoice_id.clone().or_else(|| {
+                session
+                    .lago_wallet_transaction_id
+                    .as_deref()
+                    .and_then(|txn| txn_invoices.get(txn).cloned())
+            });
+            let invoice = lago_invoice_id
                 .as_deref()
                 .and_then(|id| invoices_by_id.get(id).copied());
             let status = match invoice {
@@ -506,7 +532,7 @@ pub async fn list_topups(
                 amount_credits: session.amount_credits,
                 status: status.to_string(),
                 invoice_number: invoice.map(|invoice| invoice.number.clone()),
-                lago_invoice_id: session.lago_invoice_id,
+                lago_invoice_id,
                 checkout_url: (status == "pending")
                     .then_some(session.payment_url)
                     .flatten(),

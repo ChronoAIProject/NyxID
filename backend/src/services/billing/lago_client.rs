@@ -65,6 +65,15 @@ pub trait LagoApi: Send + Sync {
     async fn invoice_download_url(&self, _lago_invoice_id: &str) -> AppResult<Option<String>> {
         Ok(None)
     }
+    /// (wallet_transaction_id, invoice_id) pairs for a wallet, used to
+    /// backfill invoice links on top-up sessions stored before the id was
+    /// captured at creation. Defaults to empty for fakes.
+    async fn wallet_transaction_invoices(
+        &self,
+        _wallet_id: &str,
+    ) -> AppResult<Vec<(String, String)>> {
+        Ok(Vec::new())
+    }
 }
 
 /// A trimmed Lago invoice used for top-up history and receipt downloads.
@@ -446,6 +455,38 @@ impl LagoApi for LagoClient {
                             code,
                             raw: item.clone(),
                         })
+                    })
+                    .collect()
+            })
+            .unwrap_or_default())
+    }
+
+    async fn wallet_transaction_invoices(
+        &self,
+        wallet_id: &str,
+    ) -> AppResult<Vec<(String, String)>> {
+        let value = self
+            .json_request(
+                reqwest::Method::GET,
+                &format!(
+                    "wallets/{}/wallet_transactions?per_page=100",
+                    urlencoding::encode(wallet_id)
+                ),
+                None,
+            )
+            .await
+            .map_err(lago_error_to_app)?;
+        Ok(value
+            .get("wallet_transactions")
+            .and_then(Value::as_array)
+            .map(|items| {
+                items
+                    .iter()
+                    .filter_map(|item| {
+                        Some((
+                            value_string(item, &["lago_id"])?,
+                            value_string(item, &["lago_invoice_id"])?,
+                        ))
                     })
                     .collect()
             })
