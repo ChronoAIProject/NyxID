@@ -294,6 +294,7 @@ export function ChatThread({
   thinking = false,
   streaming = false,
   turnEnded = false,
+  turnPrinted,
   transcriptSettling = false,
   bottomInset = 0,
   onDecideApproval,
@@ -318,6 +319,14 @@ export function ChatThread({
    * having printed nothing" from "no turn has run yet".
    */
   readonly turnEnded?: boolean;
+  /**
+   * Whether the CURRENT stream episode has printed anything, as reported by the
+   * pump serving it. Authoritative when given, because the transcript cannot
+   * answer it: an approval continuation is appended to the previous turn's
+   * assistant group, so earlier content is indistinguishable from its own.
+   * Undefined after a reload, where the transcript is all there is.
+   */
+  readonly turnPrinted?: boolean;
   /**
    * A transcript read is in flight. The turn's terminal status and its
    * transcript arrive independently, so this is what keeps a slow-projecting
@@ -378,8 +387,11 @@ export function ChatThread({
   // out-of-order arrivals — turn status and transcript projection — cannot
   // flash an error onto a turn that did answer.
   const tail = groups.at(-1);
+  // `turnPrinted` when the pump can tell us; the transcript only as the
+  // after-a-reload fallback, where it is the sole record that exists.
   const tailAnswered =
-    tail?.role === "assistant" && hasPrintableContent(tail.messages);
+    turnPrinted ??
+    (tail?.role === "assistant" && hasPrintableContent(tail.messages));
   const showEmptyTurnError = useSettled(
     turnEnded &&
       !thinking &&
@@ -484,7 +496,8 @@ export function ChatThread({
             const streamingGroup = isLastGroup && streaming;
             const lastMessage = group.messages.at(-1);
             const awaitingFirstBlock =
-              streamingGroup && !hasPrintableContent(group.messages);
+              streamingGroup &&
+              !(turnPrinted ?? hasPrintableContent(group.messages));
 
             return (
               <article key={first?.id} className={ASSISTANT_ROW}>

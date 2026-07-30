@@ -25,6 +25,7 @@ import type {
   ActiveTurn,
   Conversation,
   ConversationHistory,
+  TurnEpisode,
   TurnEvent,
   TurnHandle,
 } from "@/types/assistant";
@@ -36,6 +37,8 @@ export const assistantKeys = {
   history: (conversationId: string) =>
     [...ROOT, "history", conversationId] as const,
   turn: (conversationId: string) => [...ROOT, "turn", conversationId] as const,
+  episode: (conversationId: string) =>
+    [...ROOT, "episode", conversationId] as const,
   workspace: [...ROOT, "workspace"] as const,
 } as const;
 
@@ -255,6 +258,22 @@ export function useAssistantTurn(conversationId: string | undefined) {
 }
 
 /**
+ * The current episode's loading state, written by its event pump. A pure cache
+ * slot like the turn above — nothing fetches it. Null means no stream has run
+ * for this conversation in this session, which is also the state after a
+ * reload, so the thread falls back to reading the transcript.
+ */
+export function useTurnEpisode(conversationId: string | undefined) {
+  return useQuery({
+    queryKey: assistantKeys.episode(conversationId ?? ""),
+    queryFn: async (): Promise<TurnEpisode | null> => null,
+    enabled: false,
+    initialData: null,
+    staleTime: Number.POSITIVE_INFINITY,
+  });
+}
+
+/**
  * Single-flight guard around actor creation, shared by every path that can
  * allocate one: the "New chat" button and the empty-state auto-create in
  * `useSendMessage`. Both are legitimately in flight at once now that the
@@ -321,14 +340,51 @@ export interface SentMessage {
  * concurrent send never touches it, and at-least-once duplicates (e.g. a
  * late "running") cannot regress terminal state.
  */
+/**
+ * Whether an event puts something on screen. Block COUNT will not do: a turn
+ * that opens with a connect card carries an empty leading text block, and an
+ * opened text block with no characters is present-yet-blank.
+ */
+function eventPrintsContent(event: TurnEvent): boolean {
+  switch (event.event) {
+    case "block.delta":
+      return event.text.trim().length > 0;
+    case "block.started":
+    case "block.completed":
+      return (
+        event.block.type !== "text" ||
+        (typeof event.block.text === "string" &&
+          event.block.text.trim().length > 0)
+      );
+    default:
+      return false;
+  }
+}
+
 function createTurnEventPump(
   queryClient: QueryClient,
   targetId: string,
 ): (event: TurnEvent) => void {
   let lastSeenCursor = 0;
+  // Per-episode, because the pump itself is per-episode. Opening it here rather
+  // than on the first event is what lets the thread tell "a stream is starting"
+  // from "the previous turn's terminal status is still cached".
+  let printed = false;
+  let open = true;
+  let projections = 0;
+  const publish = () => {
+    queryClient.setQueryData<TurnEpisode | null>(
+      assistantKeys.episode(targetId),
+      () => ({ open, printed, projecting: projections > 0 }),
+    );
+  };
+  publish();
+
   return (event) => {
     if (event.cursor <= lastSeenCursor) return;
     lastSeenCursor = event.cursor;
+    if (eventPrintsContent(event)) printed = true;
+    if (event.event === "turn.completed") open = false;
     const turn = turnFromEvent(event);
     if (turn) {
       queryClient.setQueryData<ActiveTurn | null>(
@@ -351,10 +407,22 @@ function createTurnEventPump(
         });
       }
     }
+    // Counted, and published, because this projection is the work the thread
+    // would otherwise have to guess the duration of: the terminal status is
+    // delivered synchronously above while the content it refers to arrives
+    // through this read. Reporting "the turn printed nothing" before it settles
+    // is how a turn that DID answer gets called an error.
+    projections += 1;
+    publish();
     // Swallow projection failures: after a delete races a cancel-driven
     // event, the history read legitimately rejects (tombstoned id) and
     // must not surface as an unhandled rejection.
-    projectTransportState(queryClient, targetId).catch(() => undefined);
+    projectTransportState(queryClient, targetId)
+      .catch(() => undefined)
+      .finally(() => {
+        projections -= 1;
+        publish();
+      });
   };
 }
 
@@ -380,34 +448,25 @@ export function useSendMessage(conversationId: string | undefined) {
         await projectTransportState(queryClient, target);
       }
       const targetId = target;
-      // Claim the turn as running BEFORE the stream starts. Until the first
-      // turn.status event lands, this cache still holds the PREVIOUS turn's
-      // terminal status, and the thread reads "closed status + a tail with no
-      // assistant answer" as a turn that finished having printed nothing —
-      // which would flash an error on top of every send.
-      const previousTurn =
-        queryClient.getQueryData<ActiveTurn | null>(
-          assistantKeys.turn(targetId),
-        ) ?? null;
-      queryClient.setQueryData<ActiveTurn | null>(
-        assistantKeys.turn(targetId),
-        () => ({ turnId: null, status: "running", error: null }),
-      );
+      // The pump opens this send's episode as it is constructed, which is what
+      // stops the PREVIOUS turn's cached terminal status from reading as "this
+      // turn closed having printed nothing". Writing `running` into the turn
+      // cache here instead would survive a stream that hangs before its
+      // response headers — the transport arms its watchdog only once a body
+      // exists — and leave the composer disabled with no turn to stop.
+      const pump = createTurnEventPump(queryClient, targetId);
       try {
-        const handle = assistantTransport.sendMessage(
-          targetId,
-          content,
-          createTurnEventPump(queryClient, targetId),
-        );
+        const handle = assistantTransport.sendMessage(targetId, content, pump);
         activeHandles.set(targetId, handle);
         await projectTransportState(queryClient, targetId);
         return { conversationId: targetId, handle };
       } catch (error) {
         // A send that never became a turn (active-turn guard, transport throw)
-        // must not leave the thread believing one is running forever.
-        queryClient.setQueryData<ActiveTurn | null>(
-          assistantKeys.turn(targetId),
-          () => previousTurn,
+        // must not leave its episode open, or the thread waits on a stream that
+        // was never started.
+        queryClient.setQueryData<TurnEpisode | null>(
+          assistantKeys.episode(targetId),
+          () => null,
         );
         throw error;
       }

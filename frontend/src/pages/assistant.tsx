@@ -17,6 +17,7 @@ import {
   useDecideApproval,
   useDeleteConversation,
   useSendMessage,
+  useTurnEpisode,
 } from "@/hooks/use-assistant";
 import { resolveAssistantConversationId } from "@/lib/assistant/conversation-resolution";
 import { parseAssistantSearch } from "@/lib/assistant/search";
@@ -138,6 +139,7 @@ export function AssistantPage({
   ]);
   const history = useConversation(selectedId);
   const turn = useAssistantTurn(selectedId);
+  const episode = useTurnEpisode(selectedId);
   const sendMessage = useSendMessage(selectedId);
   const cancelTurn = useCancelTurn(selectedId);
   const decideApproval = useDecideApproval(selectedId);
@@ -320,15 +322,24 @@ export function AssistantPage({
       ? transcript
       : [...transcript, optimisticUserMessage(pendingContent)];
   }, [history.data?.messages, pendingContent]);
-  const awaitingFirstTurn = active || sendMessage.isPending;
-  // Cancelled is deliberately excluded: the reader pressed Stop, and calling
-  // their own decision an error would be a lie. `blocked` IS included — the
-  // transport settles it through `finishTurn`, so a turn that ends blocked
-  // without emitting a card has closed with nothing the reader can act on.
+  const episodeState = episode.data ?? undefined;
+  const awaitingFirstTurn =
+    active || sendMessage.isPending || episodeState?.open === true;
+
+  /**
+   * Whether THIS episode has closed, per the pump that served it.
+   *
+   * Turn status cannot answer this. It still holds the previous turn's terminal
+   * value until the new episode's first event lands, and an approval
+   * continuation reuses the original turn id outright — so a closed status paired
+   * with a content-free tail is not evidence that the current stream said
+   * nothing. Cancelled stays excluded whichever way it arrives: the reader
+   * pressed Stop, and calling their own decision an error would be a lie.
+   */
   const turnEnded =
-    turnStatus === "completed" ||
-    turnStatus === "failed" ||
-    turnStatus === "blocked";
+    episodeState !== undefined &&
+    !episodeState.open &&
+    turnStatus !== "cancelled";
   const draftKey =
     selectedId && (!conversations.isSuccess || selectedConversationExists)
       ? `conv:${selectedId}`
@@ -388,7 +399,10 @@ export function AssistantPage({
             }
             streaming={active && messages.at(-1)?.role === "assistant"}
             turnEnded={turnEnded}
-            transcriptSettling={history.isFetching || sendMessage.isPending}
+            turnPrinted={episodeState?.printed}
+            transcriptSettling={
+              episodeState?.projecting === true || sendMessage.isPending
+            }
             onDecideApproval={(blockId, approved) =>
               decideApproval.mutateAsync({ blockId, approved })
             }

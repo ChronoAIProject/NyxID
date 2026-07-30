@@ -29,6 +29,11 @@ const {
     // Mirrors what TanStack exposes for an in-flight mutation.
     sendPending: undefined as string | undefined,
     historyMessages: [] as unknown[],
+    episode: null as {
+      open: boolean;
+      printed: boolean;
+      projecting: boolean;
+    } | null,
   },
 }));
 
@@ -99,6 +104,7 @@ vi.mock("@/hooks/use-assistant", () => ({
     error: undefined,
   }),
   useAssistantTurn: () => ({ data: null }),
+  useTurnEpisode: () => ({ data: state.episode }),
   useCreateConversation: () => ({
     mutateAsync: mockCreateMutateAsync,
     isPending: false,
@@ -196,6 +202,7 @@ beforeEach(() => {
   state.historyError = false;
   state.sendPending = undefined;
   state.historyMessages = [];
+  state.episode = null;
   useAuthStore.setState({
     user,
     isAuthenticated: true,

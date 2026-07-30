@@ -21,6 +21,7 @@ import {
   useCreateConversation,
   useDecideApproval,
   useSendMessage,
+  useTurnEpisode,
   type SentMessage,
 } from "./use-assistant";
 
@@ -94,6 +95,82 @@ describe("assistant hooks", () => {
     if (completed?.type === "text") {
       expect(completed.text).toContain("API transport swap");
     }
+
+    unmount();
+    queryClient.clear();
+  });
+
+  it("opens an episode at send and closes it only when the stream ends", async () => {
+    // The episode is what the thread reads to tell "this stream is starting"
+    // from "the previous turn's terminal status is still cached", and to know
+    // whether THIS stream has printed anything. Neither is answerable from the
+    // turn status or the transcript.
+    const { queryClient, Wrapper } = createHarness();
+    const { result, unmount } = renderHook(
+      () => ({
+        episode: useTurnEpisode("conversation-stripe"),
+        send: useSendMessage("conversation-stripe"),
+      }),
+      { wrapper: Wrapper },
+    );
+
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(0);
+    });
+    expect(result.current.episode.data).toBeNull();
+
+    await act(async () => {
+      await result.current.send.mutateAsync("Check the audit trail.");
+      await vi.advanceTimersByTimeAsync(0);
+    });
+    expect(result.current.episode.data?.open).toBe(true);
+    expect(result.current.episode.data?.printed).toBe(false);
+
+    // First characters stream: the dots have to give way from here on.
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(500);
+    });
+    expect(result.current.episode.data?.printed).toBe(true);
+    expect(result.current.episode.data?.open).toBe(true);
+
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(700);
+    });
+    expect(result.current.episode.data?.open).toBe(false);
+    expect(result.current.episode.data?.projecting).toBe(false);
+
+    unmount();
+    queryClient.clear();
+  });
+
+  it("clears the episode when a send never becomes a turn", async () => {
+    const { queryClient, Wrapper } = createHarness();
+    const { result, unmount } = renderHook(
+      () => ({
+        episode: useTurnEpisode("conversation-stripe"),
+        first: useSendMessage("conversation-stripe"),
+        second: useSendMessage("conversation-stripe"),
+      }),
+      { wrapper: Wrapper },
+    );
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(0);
+    });
+
+    await act(async () => {
+      await result.current.first.mutateAsync("First");
+      await vi.advanceTimersByTimeAsync(0);
+    });
+
+    // Rejected by the active-turn guard: its episode must not be left open, or
+    // the thread waits forever on a stream that never started.
+    await act(async () => {
+      await expect(
+        result.current.second.mutateAsync("Second"),
+      ).rejects.toBeInstanceOf(AssistantTurnActiveError);
+      await vi.advanceTimersByTimeAsync(0);
+    });
+    expect(result.current.episode.data).toBeNull();
 
     unmount();
     queryClient.clear();

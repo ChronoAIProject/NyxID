@@ -408,6 +408,80 @@ describe("ChatThread", () => {
     expect(screen.getByRole("alert")).toBeInTheDocument();
   });
 
+  it("keeps the dots up for a continuation appended to an answered turn", () => {
+    // An approval continuation is appended to the SAME assistant group and
+    // reuses the turn id, so the group's earlier content is indistinguishable
+    // from the continuation's own. Only the episode can say it printed nothing.
+    render(
+      <ChatThread
+        messages={[
+          message({
+            role: "user",
+            blocks: [{ type: "text", block_id: "t1", text: "Question" }],
+          }),
+          message({
+            id: "answered",
+            blocks: [{ type: "text", block_id: "t2", text: "Earlier answer" }],
+          }),
+        ]}
+        streaming
+        turnPrinted={false}
+        onDecideApproval={vi.fn()}
+      />,
+    );
+
+    expect(screen.getByText("Earlier answer")).toBeInTheDocument();
+    expect(
+      document.querySelector("[data-streaming-dots]"),
+    ).toBeInTheDocument();
+  });
+
+  it("reports a continuation that closed empty behind an answered turn", () => {
+    vi.useFakeTimers();
+    render(
+      <ChatThread
+        messages={[
+          message({
+            role: "user",
+            blocks: [{ type: "text", block_id: "t1", text: "Question" }],
+          }),
+          message({
+            id: "answered",
+            blocks: [{ type: "text", block_id: "t2", text: "Earlier answer" }],
+          }),
+        ]}
+        turnEnded
+        turnPrinted={false}
+        onDecideApproval={vi.fn()}
+      />,
+    );
+    act(() => vi.advanceTimersByTime(700));
+
+    expect(screen.getByRole("alert")).toBeInTheDocument();
+  });
+
+  it("trusts the episode over the transcript when it says content printed", () => {
+    vi.useFakeTimers();
+    render(
+      <ChatThread
+        messages={[
+          message({
+            role: "user",
+            blocks: [{ type: "text", block_id: "t1", text: "Question" }],
+          }),
+          // Blank in the transcript, but the episode saw content stream.
+          message({ blocks: [{ type: "text", block_id: "t2", text: "" }] }),
+        ]}
+        turnEnded
+        turnPrinted
+        onDecideApproval={vi.fn()}
+      />,
+    );
+    act(() => vi.advanceTimersByTime(5000));
+
+    expect(screen.queryByRole("alert")).not.toBeInTheDocument();
+  });
+
   it("stays quiet when a closed turn did print an answer", () => {
     vi.useFakeTimers();
     render(
