@@ -240,24 +240,16 @@ pub async fn list_conversations(
             Vec::new(),
         )
         .await
+            && legacy_response.status().is_success()
+            && let Ok(legacy_bytes) = to_bytes(
+                legacy_response.into_body(),
+                MAX_CONVERSATION_INDEX_RESPONSE_BYTES,
+            )
+            .await
+            && let Ok(legacy_index) = serde_json::from_slice::<serde_json::Value>(&legacy_bytes)
         {
-            if legacy_response.status().is_success() {
-                if let Ok(legacy_bytes) = to_bytes(
-                    legacy_response.into_body(),
-                    MAX_CONVERSATION_INDEX_RESPONSE_BYTES,
-                )
-                .await
-                {
-                    if let Ok(legacy_index) =
-                        serde_json::from_slice::<serde_json::Value>(&legacy_bytes)
-                    {
-                        changed |= assistant_service::merge_workflow_history_rows(
-                            &mut canonical,
-                            &legacy_index,
-                        );
-                    }
-                }
-            }
+            changed |=
+                assistant_service::merge_workflow_history_rows(&mut canonical, &legacy_index);
         }
     }
     if !changed {

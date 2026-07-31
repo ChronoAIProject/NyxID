@@ -695,13 +695,13 @@ pub fn parse_assistant_chat_command(bytes: &[u8]) -> AppResult<AssistantChatComm
             for report in raw.actions {
                 validate_control_identity(&report.action_request_id, "actionRequestId")?;
                 validate_control_identity(&report.origin_turn_id, "originTurnId")?;
-                if let Some(origin_turn_id) = raw.origin_turn_id.as_deref() {
-                    if report.origin_turn_id != origin_turn_id {
-                        return Err(AppError::BadRequest(
-                            "Action report originTurnId must match the continuation origin."
-                                .to_string(),
-                        ));
-                    }
+                if let Some(origin_turn_id) = raw.origin_turn_id.as_deref()
+                    && report.origin_turn_id != origin_turn_id
+                {
+                    return Err(AppError::BadRequest(
+                        "Action report originTurnId must match the continuation origin."
+                            .to_string(),
+                    ));
                 }
                 if !seen.insert(report.action_request_id.clone()) {
                     return Err(AppError::BadRequest(
