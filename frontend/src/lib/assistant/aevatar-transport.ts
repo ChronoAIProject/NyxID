@@ -428,29 +428,35 @@ function hasStructuredBlocks(message: AssistantMessage): boolean {
 
 /**
  * History v4 is text-only until `/state` card rehydration ships. Reinsert each
- * client-owned activity message after the same number of text messages that
- * preceded it live, while the server projection supplies text, ids, and turn
- * status. This keeps typed block ids/order stable without pinning stale text.
+ * client-owned activity message after the last server row from its turn while
+ * the server projection supplies text, ids, and turn status. This keeps typed
+ * block ids/order stable without pinning stale text.
  */
 function preserveLocalStructuredMessages(
   serverMessages: readonly AssistantMessage[],
   localMessages: readonly AssistantMessage[],
+  activityMessageTurnIds: ReadonlyMap<string, string | null>,
 ): AssistantMessage[] {
   const buckets = Array.from(
     { length: serverMessages.length + 1 },
     () => [] as AssistantMessage[],
   );
   const serverMessageIds = new Set(serverMessages.map((message) => message.id));
-  let precedingTextMessages = 0;
+  const lastServerIndexByTurnId = new Map<string, number>();
+  serverMessages.forEach((message, index) => {
+    if (message.turnId) lastServerIndexByTurnId.set(message.turnId, index);
+  });
+
   for (const message of localMessages) {
-    if (!hasStructuredBlocks(message)) {
-      precedingTextMessages += 1;
-      continue;
-    }
+    if (!hasStructuredBlocks(message)) continue;
     if (serverMessageIds.has(message.id)) continue;
-    buckets[Math.min(precedingTextMessages, serverMessages.length)]?.push(
-      message,
-    );
+    const turnId = activityMessageTurnIds.get(message.id);
+    const serverIndex = turnId
+      ? lastServerIndexByTurnId.get(turnId)
+      : undefined;
+    const insertionIndex =
+      serverIndex === undefined ? serverMessages.length : serverIndex + 1;
+    buckets[insertionIndex]?.push(message);
   }
 
   const merged: AssistantMessage[] = [...(buckets[0] ?? [])];
@@ -469,6 +475,8 @@ interface StoredConversation {
    * A fixed-size hash keeps the per-id retention bounded.
    */
   actionRequestFingerprints: Map<string, string>;
+  /** Server turn ownership for client-only activity messages. */
+  activityMessageTurnIds: Map<string, string | null>;
   /** Epoch milliseconds of the latest turn.completed applied to this mirror. */
   lastLocalTurnCompletedAt?: number;
   /**
@@ -1124,6 +1132,7 @@ export class AevatarAssistantTransport implements AssistantTransport {
       conversation,
       turnState: EMPTY_TURN_STATE,
       actionRequestFingerprints: new Map(),
+      activityMessageTurnIds: new Map(),
     });
     return conversation;
   }
@@ -2112,6 +2121,7 @@ export class AevatarAssistantTransport implements AssistantTransport {
       turnState: existing?.turnState ?? EMPTY_TURN_STATE,
       actionRequestFingerprints:
         existing?.actionRequestFingerprints ?? new Map(),
+      activityMessageTurnIds: existing?.activityMessageTurnIds ?? new Map(),
       lastLocalTurnCompletedAt: existing?.lastLocalTurnCompletedAt,
       stateVersion: existing?.stateVersion,
       sessionId: existing?.sessionId,
@@ -2162,15 +2172,18 @@ export class AevatarAssistantTransport implements AssistantTransport {
     if (
       existing &&
       serverLacksLocalStructure &&
-      (localMessages.length === messages.length ||
-        comparableLocalMessageCount === messages.length) &&
+      comparableLocalMessageCount === messages.length &&
       withinMaterializationGrace
     ) {
       return existing;
     }
     const projectedMessages =
       existing && serverLacksLocalStructure
-        ? preserveLocalStructuredMessages(messages, localMessages)
+        ? preserveLocalStructuredMessages(
+            messages,
+            localMessages,
+            existing.activityMessageTurnIds,
+          )
         : messages;
     const first = projectedMessages[0];
     const last = projectedMessages[projectedMessages.length - 1];
@@ -2193,6 +2206,7 @@ export class AevatarAssistantTransport implements AssistantTransport {
       },
       actionRequestFingerprints:
         existing?.actionRequestFingerprints ?? new Map(),
+      activityMessageTurnIds: existing?.activityMessageTurnIds ?? new Map(),
       lastLocalTurnCompletedAt: existing?.lastLocalTurnCompletedAt,
       stateVersion: freshStateVersion ?? existing?.stateVersion,
       sessionId: existing?.sessionId,
@@ -2254,8 +2268,14 @@ export class AevatarAssistantTransport implements AssistantTransport {
     let drainActions = false;
     const stored = this.conversations.get(conversationId);
     if (stored) {
-      stored.turnState = applyTurnEvent(stored.turnState, event);
-      if (event.event === "turn.completed") {
+      const previousTurnState = stored.turnState;
+      const nextTurnState = applyTurnEvent(previousTurnState, event);
+      stored.turnState = nextTurnState;
+      if (
+        event.event === "turn.completed" &&
+        nextTurnState !== previousTurnState &&
+        run.streamDispatched
+      ) {
         stored.lastLocalTurnCompletedAt = this.now();
       }
       stored.conversation = {
@@ -3283,6 +3303,9 @@ export class AevatarAssistantTransport implements AssistantTransport {
     if (run.activityMessageId) return run.activityMessageId;
     const messageId = newId("assistant-activity");
     run.activityMessageId = messageId;
+    this.conversations
+      .get(conversationId)
+      ?.activityMessageTurnIds.set(messageId, run.turnId);
     this.emit(conversationId, run, {
       cursor: this.nextCursor(run),
       event: "message.started",

@@ -19,10 +19,20 @@ import type {
 
 const SERVER_CONVERSATION = "chatc-8bd999c402fb37d60cdcd81e3b78cfd";
 const TURN_ID = "turn-d619940adcd817c4aeb5d1c3e57f1ca5";
+const SECOND_TURN_ID = "turn-261a6458c9b647e99d91a99697115385";
 const RUN_ACTOR = "workflow-definition:studio:run:probe";
 const HISTORY_URL = `/api/v1/assistant/conversations/${SERVER_CONVERSATION}`;
 
 type HistoryMode = "missing" | "materialized";
+
+interface ServerHistoryMessage {
+  readonly id: string;
+  readonly role: "user" | "assistant";
+  readonly content: string;
+  readonly timestamp: number;
+  readonly turnId: string;
+  readonly status?: "blocked";
+}
 
 function jsonResponse(body: unknown, status = 200): Response {
   return new Response(JSON.stringify(body), {
@@ -31,30 +41,42 @@ function jsonResponse(body: unknown, status = 200): Response {
   });
 }
 
-function serverHistory(assistantText: string) {
+function serverTurnMessages(
+  turnId: string,
+  userText: string,
+  assistantText: string,
+  timestamp: number,
+): readonly ServerHistoryMessage[] {
+  return [
+    {
+      id: `${turnId}:user`,
+      role: "user",
+      content: userText,
+      timestamp,
+      turnId,
+    },
+    {
+      id: `${turnId}:assistant`,
+      role: "assistant",
+      content: assistantText,
+      timestamp: timestamp + 1_000,
+      turnId,
+      status: "blocked",
+    },
+  ];
+}
+
+function serverHistory(messages: readonly ServerHistoryMessage[]) {
   return {
-    messages: [
-      {
-        id: `${TURN_ID}:user`,
-        role: "user",
-        content: "Connect GitHub",
-        timestamp: 1785297207000,
-        turnId: TURN_ID,
-      },
-      {
-        id: `${TURN_ID}:assistant`,
-        role: "assistant",
-        content: assistantText,
-        timestamp: 1785297208000,
-        turnId: TURN_ID,
-        status: "blocked",
-      },
-    ],
+    messages,
     stateVersion: 4,
   };
 }
 
-function workflowContextFrame(): ChatStreamFrame {
+function workflowContextFrame(
+  turnId = TURN_ID,
+  stateVersion = 3,
+): ChatStreamFrame {
   return {
     custom: {
       name: "aevatar.chat.context",
@@ -63,14 +85,18 @@ function workflowContextFrame(): ChatStreamFrame {
           "type.googleapis.com/aevatar.workflow.runs.WorkflowChatContextPayload",
         scopeId: "user-probe",
         conversationId: SERVER_CONVERSATION,
-        turnId: TURN_ID,
-        stateVersion: "3",
+        turnId,
+        stateVersion: String(stateVersion),
       },
     },
   };
 }
 
-function actionRequestFrame(): ChatStreamFrame {
+function actionRequestFrame(
+  turnId = TURN_ID,
+  actionRequestId = `action-${turnId}`,
+  serviceSlug = "api-github",
+): ChatStreamFrame {
   return {
     type: "CUSTOM",
     custom: {
@@ -78,14 +104,14 @@ function actionRequestFrame(): ChatStreamFrame {
       payload: {
         schemaVersion: 4,
         actorId: "nyxid-chat-workflow-action-probe",
-        originTurnId: TURN_ID,
-        taskId: "task-probe",
-        stepId: "step-probe",
-        actionRequestId: "action-probe",
+        originTurnId: turnId,
+        taskId: `task-${turnId}`,
+        stepId: `step-${turnId}`,
+        actionRequestId,
         action: "service.connect",
         params: {
           catalogService: {
-            serviceSlug: "api-github",
+            serviceSlug,
             requestedScopes: ["repo"],
           },
         },
@@ -117,6 +143,7 @@ function createHarness() {
 
 interface ManualStream {
   request: ChatStreamRequest | null;
+  readonly startCount: number;
   emit(frames: readonly ChatStreamFrame[]): void;
   finish(): void;
 }
@@ -124,7 +151,9 @@ interface ManualStream {
 function installManualStream(): ManualStream {
   let request: ChatStreamRequest | null = null;
   let settle: ((result: { readonly kind: "complete" }) => void) | undefined;
+  let startCount = 0;
   vi.spyOn(chatStreamClient, "start").mockImplementation((nextRequest) => {
+    startCount += 1;
     request = nextRequest;
     const completion = new Promise<{ readonly kind: "complete" }>((resolve) => {
       settle = resolve;
@@ -143,13 +172,18 @@ function installManualStream(): ManualStream {
     get request() {
       return request;
     },
+    get startCount() {
+      return startCount;
+    },
     emit(frames) {
       if (!request) throw new Error("The workflow stream has not started.");
       request.onFrames(frames);
     },
     finish() {
       if (!settle) throw new Error("The workflow stream has not started.");
-      settle({ kind: "complete" });
+      const finish = settle;
+      settle = undefined;
+      finish({ kind: "complete" });
     },
   };
 }
@@ -184,15 +218,23 @@ interface ProbeSession {
   readonly observedEvents: TurnEvent[];
   readonly cacheSawCardWhileRunning: () => boolean;
   readonly advanceHistoryClock: (milliseconds: number) => void;
+  readonly send: (content: string) => Promise<void>;
   readonly setHistoryMode: (mode: HistoryMode) => void;
+  readonly setServerMessages: (
+    messages: readonly ServerHistoryMessage[],
+  ) => void;
   readonly setServerAssistantText: (text: string) => void;
   readonly unmount: () => void;
 }
 
 async function startProbe(): Promise<ProbeSession> {
   let historyMode: HistoryMode = "missing";
-  let serverAssistantText =
-    "Complete the requested action in NyxID, then continue this conversation.";
+  let serverMessages = serverTurnMessages(
+    TURN_ID,
+    "Connect GitHub",
+    "Complete the requested action in NyxID, then continue this conversation.",
+    1785297207000,
+  );
   let now = Date.parse("2026-07-31T13:00:00.000Z");
   vi.stubGlobal(
     "fetch",
@@ -211,7 +253,7 @@ async function startProbe(): Promise<ProbeSession> {
                 { error: "not_found", error_code: -1, message: "404" },
                 404,
               )
-            : jsonResponse(serverHistory(serverAssistantText)),
+            : jsonResponse(serverHistory(serverMessages)),
         );
       }
       return Promise.resolve(
@@ -244,11 +286,17 @@ async function startProbe(): Promise<ProbeSession> {
   const hook = renderHook(() => useSendMessage(conversation.id), {
     wrapper: Wrapper,
   });
+  const send = async (content: string) => {
+    const previousStartCount = stream.startCount;
+    await act(async () => {
+      await hook.result.current.mutateAsync(content);
+    });
+    await vi.waitFor(() =>
+      expect(stream.startCount).toBe(previousStartCount + 1),
+    );
+  };
 
-  await act(async () => {
-    await hook.result.current.mutateAsync("Connect GitHub");
-  });
-  await vi.waitFor(() => expect(stream.request).not.toBeNull());
+  await send("Connect GitHub");
 
   return {
     transport,
@@ -260,11 +308,19 @@ async function startProbe(): Promise<ProbeSession> {
     advanceHistoryClock: (milliseconds) => {
       now += milliseconds;
     },
+    send,
     setHistoryMode: (mode) => {
       historyMode = mode;
     },
+    setServerMessages: (messages) => {
+      serverMessages = [...messages];
+    },
     setServerAssistantText: (text) => {
-      serverAssistantText = text;
+      serverMessages = serverMessages.map((message) =>
+        message.id === `${TURN_ID}:assistant`
+          ? { ...message, content: text }
+          : message,
+      );
     },
     unmount: () => {
       unsubscribe();
@@ -274,16 +330,19 @@ async function startProbe(): Promise<ProbeSession> {
   };
 }
 
-async function finishAndWait(session: ProbeSession): Promise<void> {
+async function finishAndWait(
+  session: ProbeSession,
+  completedTurnCount = 1,
+): Promise<void> {
   await act(async () => {
     session.stream.finish();
   });
   await vi.waitFor(() => {
     expect(
-      session.observedEvents.some(
+      session.observedEvents.filter(
         (event) => event.event === "turn.completed",
       ),
-    ).toBe(true);
+    ).toHaveLength(completedTurnCount);
   });
   await vi.waitFor(() => {
     const episode = session.queryClient.getQueryData<TurnEpisode | null>(
@@ -312,6 +371,32 @@ function mirrorMintedCard(events: readonly TurnEvent[]): boolean {
   );
 }
 
+function actionActivityMessageIds(events: readonly TurnEvent[]): string[] {
+  return events.flatMap((event) =>
+    event.event === "block.started" && event.block.type === "action_card"
+      ? [event.message_id]
+      : [],
+  );
+}
+
+function actionCardBlockIds(history: ConversationHistory): string[] {
+  return history.messages.flatMap((message) =>
+    message.blocks.flatMap((block) =>
+      block.type === "action_card" ? [block.block_id] : [],
+    ),
+  );
+}
+
+function onlyActionActivityMessageId(events: readonly TurnEvent[]): string {
+  const ids = actionActivityMessageIds(events);
+  if (ids.length !== 1 || !ids[0]) {
+    throw new Error(
+      `Expected one action activity message, received ${ids.length}.`,
+    );
+  }
+  return ids[0];
+}
+
 afterEach(() => {
   vi.restoreAllMocks();
   vi.unstubAllGlobals();
@@ -332,9 +417,11 @@ describe("workflow action-card projection probes", () => {
       },
       { textMessageEnd: { messageId: "message-s1" } },
       actionRequestFrame(),
-      { runFinished: { threadId: RUN_ACTOR, status: "completed" } },
     ]);
     session.setHistoryMode("materialized");
+    session.stream.emit([
+      { runFinished: { threadId: RUN_ACTOR, status: "completed" } },
+    ]);
     await finishAndWait(session);
 
     expect(mirrorMintedCard(session.observedEvents)).toBe(true);
@@ -346,45 +433,59 @@ describe("workflow action-card projection probes", () => {
         ),
       ),
     ).toBe(true);
+    const activityMessageId = onlyActionActivityMessageId(
+      session.observedEvents,
+    );
     const withinGrace = await switchRead(session);
     expect(hasActionCard(withinGrace)).toBe(true);
     expect(withinGrace.messages.map((message) => message.id)).not.toContain(
       `${TURN_ID}:assistant`,
     );
+    expect(withinGrace.messages.at(-1)?.id).toBe(activityMessageId);
     session.unmount();
   });
 
-  it("S2 preserves a card-only blocked turn while adopting materialized text after grace", async () => {
+  it("S2 preserves a card-only blocked turn while adopting materialized text in turn order", async () => {
     const session = await startProbe();
     session.stream.emit([
       workflowContextFrame(),
       { runStarted: { threadId: RUN_ACTOR, runId: RUN_ACTOR } },
       actionRequestFrame(),
-      { runFinished: { threadId: RUN_ACTOR, status: "blocked" } },
     ]);
     session.setHistoryMode("materialized");
+    session.stream.emit([
+      { runFinished: { threadId: RUN_ACTOR, status: "blocked" } },
+    ]);
     await finishAndWait(session);
 
+    const activityMessageId = onlyActionActivityMessageId(
+      session.observedEvents,
+    );
+    const expectedOrder = [
+      `${TURN_ID}:user`,
+      `${TURN_ID}:assistant`,
+      activityMessageId,
+    ];
     expect(mirrorMintedCard(session.observedEvents)).toBe(true);
     expect(session.cacheSawCardWhileRunning()).toBe(false);
-    expect(
-      hasActionCard(
-        session.queryClient.getQueryData(
-          assistantKeys.history(session.placeholderId),
-        ),
-      ),
-    ).toBe(true);
+    const projected = session.queryClient.getQueryData<ConversationHistory>(
+      assistantKeys.history(session.placeholderId),
+    );
+    expect(hasActionCard(projected)).toBe(true);
+    expect(projected?.messages.map((message) => message.id)).toEqual(
+      expectedOrder,
+    );
     const withinGrace = await switchRead(session);
     expect(hasActionCard(withinGrace)).toBe(true);
-    expect(withinGrace.messages.map((message) => message.id)).not.toContain(
-      `${TURN_ID}:assistant`,
+    expect(withinGrace.messages.map((message) => message.id)).toEqual(
+      expectedOrder,
     );
 
     session.advanceHistoryClock(15_001);
     const materialized = await switchRead(session);
     expect(hasActionCard(materialized)).toBe(true);
-    expect(materialized.messages.map((message) => message.id)).toContain(
-      `${TURN_ID}:assistant`,
+    expect(materialized.messages.map((message) => message.id)).toEqual(
+      expectedOrder,
     );
     expect(
       materialized.messages.find(
@@ -395,6 +496,9 @@ describe("workflow action-card projection probes", () => {
     session.setServerAssistantText("The server transcript caught up.");
     const converged = await switchRead(session);
     expect(hasActionCard(converged)).toBe(true);
+    expect(converged.messages.map((message) => message.id)).toEqual(
+      expectedOrder,
+    );
     expect(
       converged.messages
         .flatMap((message) => message.blocks)
@@ -403,6 +507,152 @@ describe("workflow action-card projection probes", () => {
       type: "text",
       text: "The server transcript caught up.",
     });
+    session.unmount();
+  });
+
+  it("anchors two card-only blocked turns after their own server rows", async () => {
+    const firstTurnMessages = serverTurnMessages(
+      TURN_ID,
+      "Connect GitHub",
+      "GitHub needs your confirmation.",
+      1785297207000,
+    );
+    const secondTurnMessages = serverTurnMessages(
+      SECOND_TURN_ID,
+      "Connect Slack",
+      "Slack needs your confirmation.",
+      1785297210000,
+    );
+    const session = await startProbe();
+    session.stream.emit([
+      workflowContextFrame(),
+      { runStarted: { threadId: RUN_ACTOR, runId: RUN_ACTOR } },
+      actionRequestFrame(),
+    ]);
+    session.setServerMessages(firstTurnMessages);
+    session.setHistoryMode("materialized");
+    session.stream.emit([
+      { runFinished: { threadId: RUN_ACTOR, status: "blocked" } },
+    ]);
+    await finishAndWait(session);
+
+    const firstActivityMessageId = onlyActionActivityMessageId(
+      session.observedEvents,
+    );
+    expect(
+      (await switchRead(session)).messages.map((message) => message.id),
+    ).toEqual([
+      `${TURN_ID}:user`,
+      `${TURN_ID}:assistant`,
+      firstActivityMessageId,
+    ]);
+
+    await session.send("Connect Slack");
+    session.stream.emit([
+      workflowContextFrame(SECOND_TURN_ID, 5),
+      { runStarted: { threadId: RUN_ACTOR, runId: RUN_ACTOR } },
+      actionRequestFrame(
+        SECOND_TURN_ID,
+        `action-${SECOND_TURN_ID}`,
+        "api-slack",
+      ),
+    ]);
+    session.setServerMessages([...firstTurnMessages, ...secondTurnMessages]);
+    session.stream.emit([
+      { runFinished: { threadId: RUN_ACTOR, status: "blocked" } },
+    ]);
+    await finishAndWait(session, 2);
+
+    const activityMessageIds = actionActivityMessageIds(session.observedEvents);
+    expect(activityMessageIds).toHaveLength(2);
+    const secondActivityMessageId = activityMessageIds[1];
+    if (!secondActivityMessageId) {
+      throw new Error("Expected a second action activity message.");
+    }
+    const expectedOrder = [
+      `${TURN_ID}:user`,
+      `${TURN_ID}:assistant`,
+      firstActivityMessageId,
+      `${SECOND_TURN_ID}:user`,
+      `${SECOND_TURN_ID}:assistant`,
+      secondActivityMessageId,
+    ];
+    const withinGrace = await switchRead(session);
+    expect(withinGrace.messages.map((message) => message.id)).toEqual(
+      expectedOrder,
+    );
+    expect(withinGrace.messages.map((message) => message.role)).toEqual([
+      "user",
+      "assistant",
+      "assistant",
+      "user",
+      "assistant",
+      "assistant",
+    ]);
+
+    session.advanceHistoryClock(15_001);
+    const postGrace = await switchRead(session);
+    expect(postGrace.messages.map((message) => message.id)).toEqual(
+      expectedOrder,
+    );
+    expect(actionCardBlockIds(postGrace)).toHaveLength(2);
+    session.unmount();
+  });
+
+  it("appends an activity for an unmaterialized turn, then moves it to its turn anchor", async () => {
+    const priorTurnId = "turn-prior-materialized";
+    const priorTurnMessages = serverTurnMessages(
+      priorTurnId,
+      "Earlier question",
+      "Earlier answer",
+      1785297200000,
+    );
+    const currentTurnMessages = serverTurnMessages(
+      TURN_ID,
+      "Connect GitHub",
+      "GitHub needs your confirmation.",
+      1785297207000,
+    );
+    const session = await startProbe();
+    session.stream.emit([
+      workflowContextFrame(),
+      { runStarted: { threadId: RUN_ACTOR, runId: RUN_ACTOR } },
+      actionRequestFrame(),
+    ]);
+    session.setServerMessages(priorTurnMessages);
+    session.setHistoryMode("materialized");
+    session.stream.emit([
+      { runFinished: { threadId: RUN_ACTOR, status: "blocked" } },
+    ]);
+    await finishAndWait(session);
+
+    const activityMessageId = onlyActionActivityMessageId(
+      session.observedEvents,
+    );
+    const firstRead = await switchRead(session);
+    const [actionBlockId] = actionCardBlockIds(firstRead);
+    if (!actionBlockId) throw new Error("Expected an action-card block.");
+    expect(firstRead.messages.map((message) => message.id)).toEqual([
+      `${priorTurnId}:user`,
+      `${priorTurnId}:assistant`,
+      activityMessageId,
+    ]);
+
+    session.setServerMessages([...priorTurnMessages, ...currentTurnMessages]);
+    const materialized = await switchRead(session);
+    expect(materialized.messages.map((message) => message.id)).toEqual([
+      `${priorTurnId}:user`,
+      `${priorTurnId}:assistant`,
+      `${TURN_ID}:user`,
+      `${TURN_ID}:assistant`,
+      activityMessageId,
+    ]);
+    expect(actionCardBlockIds(materialized)).toEqual([actionBlockId]);
+    expect(
+      materialized.messages.filter(
+        (message) => message.id === activityMessageId,
+      ),
+    ).toHaveLength(1);
     session.unmount();
   });
 
