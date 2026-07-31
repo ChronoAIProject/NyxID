@@ -5,7 +5,12 @@
     "version": "v1-nyxid-overlay",
     "description": "NyxID-hosted overlay of common Google API operations reachable under www.googleapis.com (userinfo, Gmail, Drive, Calendar). NyxID injects the OAuth token; each product still requires its scope on the stored credential."
   },
-  "servers": [{ "url": "https://www.googleapis.com", "description": "Google APIs" }],
+  "servers": [
+    {
+      "url": "https://www.googleapis.com",
+      "description": "Google APIs"
+    }
+  ],
   "paths": {
     "/oauth2/v2/userinfo": {
       "get": {
@@ -23,7 +28,10 @@
             "description": "User profile",
             "content": {
               "application/json": {
-                "schema": { "type": "object", "additionalProperties": true }
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true
+                }
               }
             }
           }
@@ -47,19 +55,27 @@
             "in": "query",
             "required": false,
             "description": "Gmail search query, e.g. from:someone is:unread.",
-            "schema": { "type": "string" }
+            "schema": {
+              "type": "string"
+            }
           },
           {
             "name": "maxResults",
             "in": "query",
             "required": false,
-            "schema": { "type": "integer", "minimum": 1, "maximum": 500 }
+            "schema": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 500
+            }
           },
           {
             "name": "pageToken",
             "in": "query",
             "required": false,
-            "schema": { "type": "string" }
+            "schema": {
+              "type": "string"
+            }
           }
         ],
         "responses": {
@@ -67,7 +83,10 @@
             "description": "Message id page",
             "content": {
               "application/json": {
-                "schema": { "type": "object", "additionalProperties": true }
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true
+                }
               }
             }
           }
@@ -90,13 +109,24 @@
             "name": "id",
             "in": "path",
             "required": true,
-            "schema": { "type": "string", "minLength": 1 }
+            "schema": {
+              "type": "string",
+              "minLength": 1
+            }
           },
           {
             "name": "format",
             "in": "query",
             "required": false,
-            "schema": { "type": "string", "enum": ["minimal", "full", "raw", "metadata"] }
+            "schema": {
+              "type": "string",
+              "enum": [
+                "minimal",
+                "full",
+                "raw",
+                "metadata"
+              ]
+            }
           }
         ],
         "responses": {
@@ -104,7 +134,10 @@
             "description": "Message",
             "content": {
               "application/json": {
-                "schema": { "type": "object", "additionalProperties": true }
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true
+                }
               }
             }
           }
@@ -128,19 +161,27 @@
             "in": "query",
             "required": false,
             "description": "Drive search query, e.g. name contains 'report'.",
-            "schema": { "type": "string" }
+            "schema": {
+              "type": "string"
+            }
           },
           {
             "name": "pageSize",
             "in": "query",
             "required": false,
-            "schema": { "type": "integer", "minimum": 1, "maximum": 1000 }
+            "schema": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 1000
+            }
           },
           {
             "name": "pageToken",
             "in": "query",
             "required": false,
-            "schema": { "type": "string" }
+            "schema": {
+              "type": "string"
+            }
           }
         ],
         "responses": {
@@ -148,7 +189,10 @@
             "description": "File page",
             "content": {
               "application/json": {
-                "schema": { "type": "object", "additionalProperties": true }
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true
+                }
               }
             }
           }
@@ -172,26 +216,36 @@
             "in": "query",
             "required": false,
             "description": "RFC3339 lower bound for event end time.",
-            "schema": { "type": "string" }
+            "schema": {
+              "type": "string"
+            }
           },
           {
             "name": "timeMax",
             "in": "query",
             "required": false,
             "description": "RFC3339 upper bound for event start time.",
-            "schema": { "type": "string" }
+            "schema": {
+              "type": "string"
+            }
           },
           {
             "name": "maxResults",
             "in": "query",
             "required": false,
-            "schema": { "type": "integer", "minimum": 1, "maximum": 2500 }
+            "schema": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 2500
+            }
           },
           {
             "name": "pageToken",
             "in": "query",
             "required": false,
-            "schema": { "type": "string" }
+            "schema": {
+              "type": "string"
+            }
           }
         ],
         "responses": {
@@ -199,7 +253,170 @@
             "description": "Event page",
             "content": {
               "application/json": {
-                "schema": { "type": "object", "additionalProperties": true }
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true
+                }
+              }
+            }
+          }
+        }
+      },
+      "post": {
+        "operationId": "calendar_create_event",
+        "summary": "Create a calendar event",
+        "x-aevatar-tool": {
+          "name": "calendar_create_event",
+          "description": "Create an event on the user's primary Google Calendar.",
+          "readOnly": false,
+          "destructive": false,
+          "requiresApproval": true
+        },
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "additionalProperties": true,
+                "required": [
+                  "start",
+                  "end"
+                ],
+                "properties": {
+                  "summary": {
+                    "type": "string"
+                  },
+                  "description": {
+                    "type": "string"
+                  },
+                  "start": {
+                    "type": "object",
+                    "description": "dateTime or date + timeZone.",
+                    "additionalProperties": true
+                  },
+                  "end": {
+                    "type": "object",
+                    "description": "dateTime or date + timeZone.",
+                    "additionalProperties": true
+                  },
+                  "attendees": {
+                    "type": "array",
+                    "items": {
+                      "type": "object",
+                      "additionalProperties": true
+                    }
+                  }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "ok",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/gmail/v1/users/me/messages/send": {
+      "post": {
+        "operationId": "gmail_send_message",
+        "summary": "Send an email",
+        "x-aevatar-tool": {
+          "name": "gmail_send_message",
+          "description": "Send a Gmail message as the authenticated user.",
+          "readOnly": false,
+          "destructive": false,
+          "requiresApproval": true
+        },
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "additionalProperties": false,
+                "required": [
+                  "raw"
+                ],
+                "properties": {
+                  "raw": {
+                    "type": "string",
+                    "description": "Base64url-encoded RFC 2822 message."
+                  },
+                  "threadId": {
+                    "type": "string",
+                    "description": "Optional thread to reply within."
+                  }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "ok",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/drive/v3/files/{fileId}": {
+      "get": {
+        "operationId": "drive_get_file",
+        "summary": "Get file metadata",
+        "x-aevatar-tool": {
+          "name": "drive_get_file",
+          "description": "Get Google Drive file metadata by id.",
+          "readOnly": true,
+          "destructive": false,
+          "requiresApproval": false
+        },
+        "parameters": [
+          {
+            "name": "fileId",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "minLength": 1
+            }
+          },
+          {
+            "name": "fields",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string"
+            },
+            "description": "Comma-separated metadata fields to return."
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "ok",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true
+                }
               }
             }
           }

@@ -5,7 +5,12 @@
     "version": "v21.0-nyxid-overlay",
     "description": "NyxID-hosted overlay of the Facebook Graph API operations most used by agents. Paths are relative to the /v21.0 base; NyxID injects the OAuth token."
   },
-  "servers": [{ "url": "https://graph.facebook.com/v21.0", "description": "Facebook Graph API" }],
+  "servers": [
+    {
+      "url": "https://graph.facebook.com/v21.0",
+      "description": "Facebook Graph API"
+    }
+  ],
   "paths": {
     "/me": {
       "get": {
@@ -24,7 +29,9 @@
             "in": "query",
             "required": false,
             "description": "Comma-separated fields, e.g. id,name,email.",
-            "schema": { "type": "string" }
+            "schema": {
+              "type": "string"
+            }
           }
         ],
         "responses": {
@@ -32,7 +39,10 @@
             "description": "User profile",
             "content": {
               "application/json": {
-                "schema": { "type": "object", "additionalProperties": true }
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true
+                }
               }
             }
           }
@@ -55,13 +65,19 @@
             "name": "fields",
             "in": "query",
             "required": false,
-            "schema": { "type": "string" }
+            "schema": {
+              "type": "string"
+            }
           },
           {
             "name": "limit",
             "in": "query",
             "required": false,
-            "schema": { "type": "integer", "minimum": 1, "maximum": 100 }
+            "schema": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 100
+            }
           }
         ],
         "responses": {
@@ -69,7 +85,122 @@
             "description": "Page list",
             "content": {
               "application/json": {
-                "schema": { "type": "object", "additionalProperties": true }
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/{page_id}/feed": {
+      "get": {
+        "operationId": "page_feed_list",
+        "summary": "List page posts",
+        "x-aevatar-tool": {
+          "name": "page_feed_list",
+          "description": "List posts of a Facebook page the user manages.",
+          "readOnly": true,
+          "destructive": false,
+          "requiresApproval": false
+        },
+        "parameters": [
+          {
+            "name": "page_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "minLength": 1
+            }
+          },
+          {
+            "name": "fields",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string"
+            },
+            "description": "Comma-separated fields per post."
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 100
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "ok",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true
+                }
+              }
+            }
+          }
+        }
+      },
+      "post": {
+        "operationId": "page_feed_create",
+        "summary": "Publish a page post",
+        "x-aevatar-tool": {
+          "name": "page_feed_create",
+          "description": "Publish a post to a Facebook page (requires a page access token).",
+          "readOnly": false,
+          "destructive": false,
+          "requiresApproval": true
+        },
+        "parameters": [
+          {
+            "name": "page_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "minLength": 1
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "additionalProperties": true,
+                "properties": {
+                  "message": {
+                    "type": "string",
+                    "description": "Post text."
+                  },
+                  "link": {
+                    "type": "string",
+                    "description": "Optional URL to share."
+                  }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "ok",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true
+                }
               }
             }
           }

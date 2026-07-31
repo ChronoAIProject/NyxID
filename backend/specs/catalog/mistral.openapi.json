@@ -5,7 +5,12 @@
     "version": "v1-nyxid-overlay",
     "description": "NyxID-hosted overlay of the core Mistral API operations. Paths are relative to the /v1 base; NyxID injects the API key."
   },
-  "servers": [{ "url": "https://api.mistral.ai/v1", "description": "Mistral AI API" }],
+  "servers": [
+    {
+      "url": "https://api.mistral.ai/v1",
+      "description": "Mistral AI API"
+    }
+  ],
   "paths": {
     "/chat/completions": {
       "post": {
@@ -24,16 +29,29 @@
             "application/json": {
               "schema": {
                 "type": "object",
-                "required": ["model", "messages"],
+                "required": [
+                  "model",
+                  "messages"
+                ],
                 "additionalProperties": true,
                 "properties": {
-                  "model": { "type": "string", "description": "Model id, e.g. mistral-large-latest." },
+                  "model": {
+                    "type": "string",
+                    "description": "Model id, e.g. mistral-large-latest."
+                  },
                   "messages": {
                     "type": "array",
-                    "items": { "type": "object", "additionalProperties": true }
+                    "items": {
+                      "type": "object",
+                      "additionalProperties": true
+                    }
                   },
-                  "temperature": { "type": "number" },
-                  "max_tokens": { "type": "integer" }
+                  "temperature": {
+                    "type": "number"
+                  },
+                  "max_tokens": {
+                    "type": "integer"
+                  }
                 }
               }
             }
@@ -44,7 +62,10 @@
             "description": "Chat completion",
             "content": {
               "application/json": {
-                "schema": { "type": "object", "additionalProperties": true }
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true
+                }
               }
             }
           }
@@ -68,11 +89,22 @@
             "application/json": {
               "schema": {
                 "type": "object",
-                "required": ["model", "input"],
+                "required": [
+                  "model",
+                  "input"
+                ],
                 "additionalProperties": true,
                 "properties": {
-                  "model": { "type": "string", "description": "e.g. mistral-embed." },
-                  "input": { "type": ["string", "array"] }
+                  "model": {
+                    "type": "string",
+                    "description": "e.g. mistral-embed."
+                  },
+                  "input": {
+                    "type": [
+                      "string",
+                      "array"
+                    ]
+                  }
                 }
               }
             }
@@ -83,7 +115,10 @@
             "description": "Embedding vectors",
             "content": {
               "application/json": {
-                "schema": { "type": "object", "additionalProperties": true }
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true
+                }
               }
             }
           }
@@ -106,7 +141,103 @@
             "description": "Model list",
             "content": {
               "application/json": {
-                "schema": { "type": "object", "additionalProperties": true }
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/models/{model_id}": {
+      "get": {
+        "operationId": "models_get",
+        "summary": "Get a model",
+        "x-aevatar-tool": {
+          "name": "models_get",
+          "description": "Get a Mistral model by id.",
+          "readOnly": true,
+          "destructive": false,
+          "requiresApproval": false
+        },
+        "parameters": [
+          {
+            "name": "model_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "minLength": 1
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "ok",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/fim/completions": {
+      "post": {
+        "operationId": "fim_completions",
+        "summary": "Create a fill-in-the-middle completion",
+        "x-aevatar-tool": {
+          "name": "fim_completions",
+          "description": "Create a Mistral FIM (code infill) completion.",
+          "readOnly": false,
+          "destructive": false,
+          "requiresApproval": false
+        },
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "additionalProperties": true,
+                "required": [
+                  "model",
+                  "prompt"
+                ],
+                "properties": {
+                  "model": {
+                    "type": "string",
+                    "description": "e.g. codestral-latest."
+                  },
+                  "prompt": {
+                    "type": "string"
+                  },
+                  "suffix": {
+                    "type": "string"
+                  },
+                  "max_tokens": {
+                    "type": "integer"
+                  }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "ok",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true
+                }
               }
             }
           }

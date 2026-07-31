@@ -5,7 +5,12 @@
     "version": "v10-nyxid-overlay",
     "description": "NyxID-hosted overlay of the Discord Bot API operations most used by agents. Paths are relative to the /api/v10 base; NyxID injects the bot token."
   },
-  "servers": [{ "url": "https://discord.com/api/v10", "description": "Discord API" }],
+  "servers": [
+    {
+      "url": "https://discord.com/api/v10",
+      "description": "Discord API"
+    }
+  ],
   "paths": {
     "/users/@me": {
       "get": {
@@ -23,7 +28,10 @@
             "description": "Bot user profile",
             "content": {
               "application/json": {
-                "schema": { "type": "object", "additionalProperties": true }
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true
+                }
               }
             }
           }
@@ -46,7 +54,10 @@
             "name": "channel_id",
             "in": "path",
             "required": true,
-            "schema": { "type": "string", "minLength": 1 }
+            "schema": {
+              "type": "string",
+              "minLength": 1
+            }
           }
         ],
         "responses": {
@@ -54,7 +65,10 @@
             "description": "Channel",
             "content": {
               "application/json": {
-                "schema": { "type": "object", "additionalProperties": true }
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true
+                }
               }
             }
           }
@@ -77,20 +91,29 @@
             "name": "channel_id",
             "in": "path",
             "required": true,
-            "schema": { "type": "string", "minLength": 1 }
+            "schema": {
+              "type": "string",
+              "minLength": 1
+            }
           },
           {
             "name": "limit",
             "in": "query",
             "required": false,
-            "schema": { "type": "integer", "minimum": 1, "maximum": 100 }
+            "schema": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 100
+            }
           },
           {
             "name": "before",
             "in": "query",
             "required": false,
             "description": "Message id cursor for pagination.",
-            "schema": { "type": "string" }
+            "schema": {
+              "type": "string"
+            }
           }
         ],
         "responses": {
@@ -98,7 +121,13 @@
             "description": "Message list",
             "content": {
               "application/json": {
-                "schema": { "type": "array", "items": { "type": "object", "additionalProperties": true } }
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "type": "object",
+                    "additionalProperties": true
+                  }
+                }
               }
             }
           }
@@ -119,7 +148,10 @@
             "name": "channel_id",
             "in": "path",
             "required": true,
-            "schema": { "type": "string", "minLength": 1 }
+            "schema": {
+              "type": "string",
+              "minLength": 1
+            }
           }
         ],
         "requestBody": {
@@ -130,10 +162,16 @@
                 "type": "object",
                 "additionalProperties": true,
                 "properties": {
-                  "content": { "type": "string", "description": "Message text (up to 2000 chars)." },
+                  "content": {
+                    "type": "string",
+                    "description": "Message text (up to 2000 chars)."
+                  },
                   "embeds": {
                     "type": "array",
-                    "items": { "type": "object", "additionalProperties": true }
+                    "items": {
+                      "type": "object",
+                      "additionalProperties": true
+                    }
                   },
                   "message_reference": {
                     "type": "object",
@@ -150,9 +188,288 @@
             "description": "Created message",
             "content": {
               "application/json": {
-                "schema": { "type": "object", "additionalProperties": true }
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true
+                }
               }
             }
+          }
+        }
+      }
+    },
+    "/channels/{channel_id}/messages/{message_id}": {
+      "patch": {
+        "operationId": "edit_message",
+        "summary": "Edit a message",
+        "x-aevatar-tool": {
+          "name": "edit_message",
+          "description": "Edit a Discord message the bot sent.",
+          "readOnly": false,
+          "destructive": false,
+          "requiresApproval": true
+        },
+        "parameters": [
+          {
+            "name": "channel_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "minLength": 1
+            }
+          },
+          {
+            "name": "message_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "minLength": 1
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "additionalProperties": true,
+                "properties": {
+                  "content": {
+                    "type": "string"
+                  },
+                  "embeds": {
+                    "type": "array",
+                    "items": {
+                      "type": "object",
+                      "additionalProperties": true
+                    }
+                  }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "ok",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true
+                }
+              }
+            }
+          }
+        }
+      },
+      "delete": {
+        "operationId": "delete_message",
+        "summary": "Delete a message",
+        "x-aevatar-tool": {
+          "name": "delete_message",
+          "description": "Delete a Discord message.",
+          "readOnly": false,
+          "destructive": true,
+          "requiresApproval": true
+        },
+        "parameters": [
+          {
+            "name": "channel_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "minLength": 1
+            }
+          },
+          {
+            "name": "message_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "minLength": 1
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "Deleted"
+          }
+        }
+      }
+    },
+    "/guilds/{guild_id}": {
+      "get": {
+        "operationId": "get_guild",
+        "summary": "Get a guild",
+        "x-aevatar-tool": {
+          "name": "get_guild",
+          "description": "Get a Discord guild (server) by id.",
+          "readOnly": true,
+          "destructive": false,
+          "requiresApproval": false
+        },
+        "parameters": [
+          {
+            "name": "guild_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "minLength": 1
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "ok",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/guilds/{guild_id}/channels": {
+      "get": {
+        "operationId": "list_guild_channels",
+        "summary": "List guild channels",
+        "x-aevatar-tool": {
+          "name": "list_guild_channels",
+          "description": "List channels of a Discord guild.",
+          "readOnly": true,
+          "destructive": false,
+          "requiresApproval": false
+        },
+        "parameters": [
+          {
+            "name": "guild_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "minLength": 1
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Channel list",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "type": "object",
+                    "additionalProperties": true
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/guilds/{guild_id}/members/{user_id}": {
+      "get": {
+        "operationId": "get_guild_member",
+        "summary": "Get a guild member",
+        "x-aevatar-tool": {
+          "name": "get_guild_member",
+          "description": "Get a member of a Discord guild.",
+          "readOnly": true,
+          "destructive": false,
+          "requiresApproval": false
+        },
+        "parameters": [
+          {
+            "name": "guild_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "minLength": 1
+            }
+          },
+          {
+            "name": "user_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "minLength": 1
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "ok",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/channels/{channel_id}/messages/{message_id}/reactions/{emoji_name}/@me": {
+      "put": {
+        "operationId": "add_reaction",
+        "summary": "Add a reaction",
+        "x-aevatar-tool": {
+          "name": "add_reaction",
+          "description": "Add an emoji reaction to a Discord message as the bot.",
+          "readOnly": false,
+          "destructive": false,
+          "requiresApproval": true
+        },
+        "parameters": [
+          {
+            "name": "channel_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "minLength": 1
+            }
+          },
+          {
+            "name": "message_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "minLength": 1
+            }
+          },
+          {
+            "name": "emoji_name",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "minLength": 1
+            },
+            "description": "URL-encoded emoji, e.g. %F0%9F%91%8D or name:id for custom."
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "Reaction added"
           }
         }
       }

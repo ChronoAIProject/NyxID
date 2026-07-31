@@ -5,7 +5,12 @@
     "version": "v2-nyxid-overlay",
     "description": "NyxID-hosted overlay of the Slack Web API methods most used by agents. Works with both user (xoxp) and bot (xoxb) tokens; NyxID injects the bearer token."
   },
-  "servers": [{ "url": "https://slack.com/api", "description": "Slack Web API" }],
+  "servers": [
+    {
+      "url": "https://slack.com/api",
+      "description": "Slack Web API"
+    }
+  ],
   "paths": {
     "/auth.test": {
       "post": {
@@ -23,7 +28,10 @@
             "description": "Identity info",
             "content": {
               "application/json": {
-                "schema": { "type": "object", "additionalProperties": true }
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true
+                }
               }
             }
           }
@@ -47,20 +55,30 @@
             "application/json": {
               "schema": {
                 "type": "object",
-                "required": ["channel"],
+                "required": [
+                  "channel"
+                ],
                 "additionalProperties": true,
                 "properties": {
                   "channel": {
                     "type": "string",
                     "description": "Channel id (C...), user id (U...), or channel name."
                   },
-                  "text": { "type": "string" },
+                  "text": {
+                    "type": "string"
+                  },
                   "blocks": {
                     "type": "array",
                     "description": "Block Kit blocks; when set, text becomes the fallback.",
-                    "items": { "type": "object", "additionalProperties": true }
+                    "items": {
+                      "type": "object",
+                      "additionalProperties": true
+                    }
                   },
-                  "thread_ts": { "type": "string", "description": "Reply in this thread." }
+                  "thread_ts": {
+                    "type": "string",
+                    "description": "Reply in this thread."
+                  }
                 }
               }
             }
@@ -71,7 +89,10 @@
             "description": "Send result",
             "content": {
               "application/json": {
-                "schema": { "type": "object", "additionalProperties": true }
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true
+                }
               }
             }
           }
@@ -95,19 +116,27 @@
             "in": "query",
             "required": false,
             "description": "Comma-separated: public_channel, private_channel, mpim, im.",
-            "schema": { "type": "string" }
+            "schema": {
+              "type": "string"
+            }
           },
           {
             "name": "limit",
             "in": "query",
             "required": false,
-            "schema": { "type": "integer", "minimum": 1, "maximum": 1000 }
+            "schema": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 1000
+            }
           },
           {
             "name": "cursor",
             "in": "query",
             "required": false,
-            "schema": { "type": "string" }
+            "schema": {
+              "type": "string"
+            }
           }
         ],
         "responses": {
@@ -115,7 +144,10 @@
             "description": "Conversation list page",
             "content": {
               "application/json": {
-                "schema": { "type": "object", "additionalProperties": true }
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true
+                }
               }
             }
           }
@@ -138,26 +170,37 @@
             "name": "channel",
             "in": "query",
             "required": true,
-            "schema": { "type": "string", "minLength": 1 }
+            "schema": {
+              "type": "string",
+              "minLength": 1
+            }
           },
           {
             "name": "limit",
             "in": "query",
             "required": false,
-            "schema": { "type": "integer", "minimum": 1, "maximum": 1000 }
+            "schema": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 1000
+            }
           },
           {
             "name": "cursor",
             "in": "query",
             "required": false,
-            "schema": { "type": "string" }
+            "schema": {
+              "type": "string"
+            }
           },
           {
             "name": "oldest",
             "in": "query",
             "required": false,
             "description": "Only messages after this Unix timestamp.",
-            "schema": { "type": "string" }
+            "schema": {
+              "type": "string"
+            }
           }
         ],
         "responses": {
@@ -165,7 +208,10 @@
             "description": "Message history page",
             "content": {
               "application/json": {
-                "schema": { "type": "object", "additionalProperties": true }
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true
+                }
               }
             }
           }
@@ -188,7 +234,10 @@
             "name": "user",
             "in": "query",
             "required": true,
-            "schema": { "type": "string", "minLength": 1 }
+            "schema": {
+              "type": "string",
+              "minLength": 1
+            }
           }
         ],
         "responses": {
@@ -196,7 +245,331 @@
             "description": "User info",
             "content": {
               "application/json": {
-                "schema": { "type": "object", "additionalProperties": true }
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/conversations.replies": {
+      "get": {
+        "operationId": "conversations_replies",
+        "summary": "Fetch a thread",
+        "x-aevatar-tool": {
+          "name": "conversations_replies",
+          "description": "Fetch replies of a Slack thread.",
+          "readOnly": true,
+          "destructive": false,
+          "requiresApproval": false
+        },
+        "parameters": [
+          {
+            "name": "channel",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "minLength": 1
+            }
+          },
+          {
+            "name": "ts",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "minLength": 1
+            },
+            "description": "Parent message timestamp."
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 1000
+            }
+          },
+          {
+            "name": "cursor",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "ok",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/conversations.info": {
+      "get": {
+        "operationId": "conversations_info",
+        "summary": "Get conversation info",
+        "x-aevatar-tool": {
+          "name": "conversations_info",
+          "description": "Get info about a Slack conversation.",
+          "readOnly": true,
+          "destructive": false,
+          "requiresApproval": false
+        },
+        "parameters": [
+          {
+            "name": "channel",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "minLength": 1
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "ok",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/users.list": {
+      "get": {
+        "operationId": "users_list",
+        "summary": "List workspace users",
+        "x-aevatar-tool": {
+          "name": "users_list",
+          "description": "List users of the Slack workspace.",
+          "readOnly": true,
+          "destructive": false,
+          "requiresApproval": false
+        },
+        "parameters": [
+          {
+            "name": "limit",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 1000
+            }
+          },
+          {
+            "name": "cursor",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "ok",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/chat.update": {
+      "post": {
+        "operationId": "chat_update",
+        "summary": "Edit a sent message",
+        "x-aevatar-tool": {
+          "name": "chat_update",
+          "description": "Edit a previously sent Slack message.",
+          "readOnly": false,
+          "destructive": false,
+          "requiresApproval": true
+        },
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "additionalProperties": true,
+                "required": [
+                  "channel",
+                  "ts"
+                ],
+                "properties": {
+                  "channel": {
+                    "type": "string",
+                    "minLength": 1
+                  },
+                  "ts": {
+                    "type": "string",
+                    "description": "Timestamp of the message to edit."
+                  },
+                  "text": {
+                    "type": "string"
+                  },
+                  "blocks": {
+                    "type": "array",
+                    "items": {
+                      "type": "object",
+                      "additionalProperties": true
+                    }
+                  }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "ok",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/reactions.add": {
+      "post": {
+        "operationId": "reactions_add",
+        "summary": "Add an emoji reaction",
+        "x-aevatar-tool": {
+          "name": "reactions_add",
+          "description": "Add an emoji reaction to a Slack message.",
+          "readOnly": false,
+          "destructive": false,
+          "requiresApproval": true
+        },
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "additionalProperties": false,
+                "required": [
+                  "channel",
+                  "timestamp",
+                  "name"
+                ],
+                "properties": {
+                  "channel": {
+                    "type": "string",
+                    "minLength": 1
+                  },
+                  "timestamp": {
+                    "type": "string",
+                    "description": "Message timestamp."
+                  },
+                  "name": {
+                    "type": "string",
+                    "description": "Emoji name without colons."
+                  }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "ok",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/search.messages": {
+      "get": {
+        "operationId": "search_messages",
+        "summary": "Search messages",
+        "x-aevatar-tool": {
+          "name": "search_messages",
+          "description": "Search Slack messages (user tokens only; bot tokens are rejected by Slack).",
+          "readOnly": true,
+          "destructive": false,
+          "requiresApproval": false
+        },
+        "parameters": [
+          {
+            "name": "query",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "minLength": 1
+            }
+          },
+          {
+            "name": "count",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 100
+            }
+          },
+          {
+            "name": "page",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "minimum": 1
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "ok",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true
+                }
               }
             }
           }

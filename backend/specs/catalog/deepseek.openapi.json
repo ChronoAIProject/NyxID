@@ -5,7 +5,12 @@
     "version": "v1-nyxid-overlay",
     "description": "NyxID-hosted overlay of the core DeepSeek API operations. Paths are relative to the /v1 base; NyxID injects the API key."
   },
-  "servers": [{ "url": "https://api.deepseek.com/v1", "description": "DeepSeek API" }],
+  "servers": [
+    {
+      "url": "https://api.deepseek.com/v1",
+      "description": "DeepSeek API"
+    }
+  ],
   "paths": {
     "/chat/completions": {
       "post": {
@@ -24,16 +29,29 @@
             "application/json": {
               "schema": {
                 "type": "object",
-                "required": ["model", "messages"],
+                "required": [
+                  "model",
+                  "messages"
+                ],
                 "additionalProperties": true,
                 "properties": {
-                  "model": { "type": "string", "description": "deepseek-chat or deepseek-reasoner." },
+                  "model": {
+                    "type": "string",
+                    "description": "deepseek-chat or deepseek-reasoner."
+                  },
                   "messages": {
                     "type": "array",
-                    "items": { "type": "object", "additionalProperties": true }
+                    "items": {
+                      "type": "object",
+                      "additionalProperties": true
+                    }
                   },
-                  "temperature": { "type": "number" },
-                  "max_tokens": { "type": "integer" }
+                  "temperature": {
+                    "type": "number"
+                  },
+                  "max_tokens": {
+                    "type": "integer"
+                  }
                 }
               }
             }
@@ -44,7 +62,10 @@
             "description": "Chat completion",
             "content": {
               "application/json": {
-                "schema": { "type": "object", "additionalProperties": true }
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true
+                }
               }
             }
           }
@@ -67,7 +88,36 @@
             "description": "Model list",
             "content": {
               "application/json": {
-                "schema": { "type": "object", "additionalProperties": true }
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/user/balance": {
+      "get": {
+        "operationId": "user_balance",
+        "summary": "Get account balance",
+        "x-aevatar-tool": {
+          "name": "user_balance",
+          "description": "Get the DeepSeek account balance for the credential.",
+          "readOnly": true,
+          "destructive": false,
+          "requiresApproval": false
+        },
+        "responses": {
+          "200": {
+            "description": "ok",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true
+                }
               }
             }
           }

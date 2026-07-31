@@ -5,7 +5,12 @@
     "version": "v1-nyxid-overlay",
     "description": "NyxID-hosted overlay of the Telegram Bot API methods most used by agents. Pass only the method name as the path; NyxID prepends bot<token>/ automatically."
   },
-  "servers": [{ "url": "https://api.telegram.org", "description": "Telegram Bot API" }],
+  "servers": [
+    {
+      "url": "https://api.telegram.org",
+      "description": "Telegram Bot API"
+    }
+  ],
   "paths": {
     "/getMe": {
       "get": {
@@ -23,7 +28,10 @@
             "description": "Bot identity",
             "content": {
               "application/json": {
-                "schema": { "type": "object", "additionalProperties": true }
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true
+                }
               }
             }
           }
@@ -47,19 +55,34 @@
             "application/json": {
               "schema": {
                 "type": "object",
-                "required": ["chat_id", "text"],
+                "required": [
+                  "chat_id",
+                  "text"
+                ],
                 "additionalProperties": true,
                 "properties": {
                   "chat_id": {
                     "description": "Target chat id or @channelusername.",
-                    "type": ["integer", "string"]
+                    "type": [
+                      "integer",
+                      "string"
+                    ]
                   },
-                  "text": { "type": "string", "minLength": 1 },
+                  "text": {
+                    "type": "string",
+                    "minLength": 1
+                  },
                   "parse_mode": {
                     "type": "string",
-                    "enum": ["MarkdownV2", "HTML", "Markdown"]
+                    "enum": [
+                      "MarkdownV2",
+                      "HTML",
+                      "Markdown"
+                    ]
                   },
-                  "reply_to_message_id": { "type": "integer" }
+                  "reply_to_message_id": {
+                    "type": "integer"
+                  }
                 }
               }
             }
@@ -70,7 +93,10 @@
             "description": "Sent message",
             "content": {
               "application/json": {
-                "schema": { "type": "object", "additionalProperties": true }
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true
+                }
               }
             }
           }
@@ -94,7 +120,10 @@
             "in": "query",
             "required": true,
             "description": "Chat id or @channelusername.",
-            "schema": { "type": "string", "minLength": 1 }
+            "schema": {
+              "type": "string",
+              "minLength": 1
+            }
           }
         ],
         "responses": {
@@ -102,7 +131,10 @@
             "description": "Chat info",
             "content": {
               "application/json": {
-                "schema": { "type": "object", "additionalProperties": true }
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true
+                }
               }
             }
           }
@@ -126,19 +158,28 @@
             "name": "offset",
             "in": "query",
             "required": false,
-            "schema": { "type": "integer" }
+            "schema": {
+              "type": "integer"
+            }
           },
           {
             "name": "limit",
             "in": "query",
             "required": false,
-            "schema": { "type": "integer", "minimum": 1, "maximum": 100 }
+            "schema": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 100
+            }
           },
           {
             "name": "timeout",
             "in": "query",
             "required": false,
-            "schema": { "type": "integer", "minimum": 0 }
+            "schema": {
+              "type": "integer",
+              "minimum": 0
+            }
           }
         ],
         "responses": {
@@ -146,7 +187,384 @@
             "description": "Update list",
             "content": {
               "application/json": {
-                "schema": { "type": "object", "additionalProperties": true }
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/sendPhoto": {
+      "post": {
+        "operationId": "send_photo",
+        "summary": "Send a photo",
+        "x-aevatar-tool": {
+          "name": "send_photo",
+          "description": "Send a photo to a Telegram chat (URL or file_id).",
+          "readOnly": false,
+          "destructive": false,
+          "requiresApproval": true
+        },
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "additionalProperties": true,
+                "required": [
+                  "chat_id",
+                  "photo"
+                ],
+                "properties": {
+                  "chat_id": {
+                    "type": [
+                      "integer",
+                      "string"
+                    ]
+                  },
+                  "photo": {
+                    "type": "string",
+                    "description": "HTTP URL or Telegram file_id."
+                  },
+                  "caption": {
+                    "type": "string"
+                  },
+                  "parse_mode": {
+                    "type": "string",
+                    "enum": [
+                      "MarkdownV2",
+                      "HTML",
+                      "Markdown"
+                    ]
+                  }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "ok",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/sendDocument": {
+      "post": {
+        "operationId": "send_document",
+        "summary": "Send a document",
+        "x-aevatar-tool": {
+          "name": "send_document",
+          "description": "Send a document to a Telegram chat (URL or file_id).",
+          "readOnly": false,
+          "destructive": false,
+          "requiresApproval": true
+        },
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "additionalProperties": true,
+                "required": [
+                  "chat_id",
+                  "document"
+                ],
+                "properties": {
+                  "chat_id": {
+                    "type": [
+                      "integer",
+                      "string"
+                    ]
+                  },
+                  "document": {
+                    "type": "string",
+                    "description": "HTTP URL or Telegram file_id."
+                  },
+                  "caption": {
+                    "type": "string"
+                  }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "ok",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/editMessageText": {
+      "post": {
+        "operationId": "edit_message_text",
+        "summary": "Edit a message's text",
+        "x-aevatar-tool": {
+          "name": "edit_message_text",
+          "description": "Edit the text of a Telegram message the bot sent.",
+          "readOnly": false,
+          "destructive": false,
+          "requiresApproval": true
+        },
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "additionalProperties": true,
+                "required": [
+                  "chat_id",
+                  "message_id",
+                  "text"
+                ],
+                "properties": {
+                  "chat_id": {
+                    "type": [
+                      "integer",
+                      "string"
+                    ]
+                  },
+                  "message_id": {
+                    "type": "integer"
+                  },
+                  "text": {
+                    "type": "string",
+                    "minLength": 1
+                  },
+                  "parse_mode": {
+                    "type": "string",
+                    "enum": [
+                      "MarkdownV2",
+                      "HTML",
+                      "Markdown"
+                    ]
+                  }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "ok",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/deleteMessage": {
+      "post": {
+        "operationId": "delete_message",
+        "summary": "Delete a message",
+        "x-aevatar-tool": {
+          "name": "delete_message",
+          "description": "Delete a Telegram message.",
+          "readOnly": false,
+          "destructive": true,
+          "requiresApproval": true
+        },
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "additionalProperties": false,
+                "required": [
+                  "chat_id",
+                  "message_id"
+                ],
+                "properties": {
+                  "chat_id": {
+                    "type": [
+                      "integer",
+                      "string"
+                    ]
+                  },
+                  "message_id": {
+                    "type": "integer"
+                  }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "ok",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/forwardMessage": {
+      "post": {
+        "operationId": "forward_message",
+        "summary": "Forward a message",
+        "x-aevatar-tool": {
+          "name": "forward_message",
+          "description": "Forward a Telegram message to another chat.",
+          "readOnly": false,
+          "destructive": false,
+          "requiresApproval": true
+        },
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "additionalProperties": false,
+                "required": [
+                  "chat_id",
+                  "from_chat_id",
+                  "message_id"
+                ],
+                "properties": {
+                  "chat_id": {
+                    "type": [
+                      "integer",
+                      "string"
+                    ]
+                  },
+                  "from_chat_id": {
+                    "type": [
+                      "integer",
+                      "string"
+                    ]
+                  },
+                  "message_id": {
+                    "type": "integer"
+                  }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "ok",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/getWebhookInfo": {
+      "get": {
+        "operationId": "get_webhook_info",
+        "summary": "Get webhook status",
+        "x-aevatar-tool": {
+          "name": "get_webhook_info",
+          "description": "Get the Telegram bot's current webhook status.",
+          "readOnly": true,
+          "destructive": false,
+          "requiresApproval": false
+        },
+        "responses": {
+          "200": {
+            "description": "ok",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/answerCallbackQuery": {
+      "post": {
+        "operationId": "answer_callback_query",
+        "summary": "Answer a callback query",
+        "x-aevatar-tool": {
+          "name": "answer_callback_query",
+          "description": "Answer a Telegram inline-keyboard callback query.",
+          "readOnly": false,
+          "destructive": false,
+          "requiresApproval": false
+        },
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "additionalProperties": true,
+                "required": [
+                  "callback_query_id"
+                ],
+                "properties": {
+                  "callback_query_id": {
+                    "type": "string",
+                    "minLength": 1
+                  },
+                  "text": {
+                    "type": "string"
+                  },
+                  "show_alert": {
+                    "type": "boolean"
+                  }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "ok",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true
+                }
               }
             }
           }

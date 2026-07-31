@@ -5,7 +5,12 @@
     "version": "v1.0-nyxid-overlay",
     "description": "NyxID-hosted overlay of the Microsoft Graph operations most used by agents. Paths are relative to the /v1.0 base; NyxID injects the OAuth token."
   },
-  "servers": [{ "url": "https://graph.microsoft.com/v1.0", "description": "Microsoft Graph" }],
+  "servers": [
+    {
+      "url": "https://graph.microsoft.com/v1.0",
+      "description": "Microsoft Graph"
+    }
+  ],
   "paths": {
     "/me": {
       "get": {
@@ -23,7 +28,10 @@
             "description": "User profile",
             "content": {
               "application/json": {
-                "schema": { "type": "object", "additionalProperties": true }
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true
+                }
               }
             }
           }
@@ -46,28 +54,38 @@
             "name": "$top",
             "in": "query",
             "required": false,
-            "schema": { "type": "integer", "minimum": 1, "maximum": 1000 }
+            "schema": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 1000
+            }
           },
           {
             "name": "$filter",
             "in": "query",
             "required": false,
             "description": "OData filter expression.",
-            "schema": { "type": "string" }
+            "schema": {
+              "type": "string"
+            }
           },
           {
             "name": "$search",
             "in": "query",
             "required": false,
             "description": "Search phrase in quotes.",
-            "schema": { "type": "string" }
+            "schema": {
+              "type": "string"
+            }
           },
           {
             "name": "$select",
             "in": "query",
             "required": false,
             "description": "Comma-separated properties to return.",
-            "schema": { "type": "string" }
+            "schema": {
+              "type": "string"
+            }
           }
         ],
         "responses": {
@@ -75,7 +93,10 @@
             "description": "Message page",
             "content": {
               "application/json": {
-                "schema": { "type": "object", "additionalProperties": true }
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true
+                }
               }
             }
           }
@@ -99,7 +120,9 @@
             "application/json": {
               "schema": {
                 "type": "object",
-                "required": ["message"],
+                "required": [
+                  "message"
+                ],
                 "additionalProperties": true,
                 "properties": {
                   "message": {
@@ -107,7 +130,9 @@
                     "description": "Message with subject, body, and toRecipients.",
                     "additionalProperties": true
                   },
-                  "saveToSentItems": { "type": "boolean" }
+                  "saveToSentItems": {
+                    "type": "boolean"
+                  }
                 }
               }
             }
@@ -118,7 +143,10 @@
             "description": "Accepted",
             "content": {
               "application/json": {
-                "schema": { "type": "object", "additionalProperties": true }
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true
+                }
               }
             }
           }
@@ -141,19 +169,27 @@
             "name": "$top",
             "in": "query",
             "required": false,
-            "schema": { "type": "integer", "minimum": 1, "maximum": 1000 }
+            "schema": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 1000
+            }
           },
           {
             "name": "$filter",
             "in": "query",
             "required": false,
-            "schema": { "type": "string" }
+            "schema": {
+              "type": "string"
+            }
           },
           {
             "name": "$orderby",
             "in": "query",
             "required": false,
-            "schema": { "type": "string" }
+            "schema": {
+              "type": "string"
+            }
           }
         ],
         "responses": {
@@ -161,7 +197,81 @@
             "description": "Event page",
             "content": {
               "application/json": {
-                "schema": { "type": "object", "additionalProperties": true }
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true
+                }
+              }
+            }
+          }
+        }
+      },
+      "post": {
+        "operationId": "create_event",
+        "summary": "Create a calendar event",
+        "x-aevatar-tool": {
+          "name": "create_event",
+          "description": "Create an Outlook calendar event.",
+          "readOnly": false,
+          "destructive": false,
+          "requiresApproval": true
+        },
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "additionalProperties": true,
+                "required": [
+                  "subject",
+                  "start",
+                  "end"
+                ],
+                "properties": {
+                  "subject": {
+                    "type": "string",
+                    "minLength": 1
+                  },
+                  "start": {
+                    "type": "object",
+                    "description": "dateTime + timeZone.",
+                    "additionalProperties": true
+                  },
+                  "end": {
+                    "type": "object",
+                    "description": "dateTime + timeZone.",
+                    "additionalProperties": true
+                  },
+                  "body": {
+                    "type": "object",
+                    "additionalProperties": true
+                  },
+                  "attendees": {
+                    "type": "array",
+                    "items": {
+                      "type": "object",
+                      "additionalProperties": true
+                    }
+                  },
+                  "location": {
+                    "type": "object",
+                    "additionalProperties": true
+                  }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "201": {
+            "description": "Created event",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true
+                }
               }
             }
           }
@@ -184,7 +294,11 @@
             "name": "$top",
             "in": "query",
             "required": false,
-            "schema": { "type": "integer", "minimum": 1, "maximum": 1000 }
+            "schema": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 1000
+            }
           }
         ],
         "responses": {
@@ -192,7 +306,103 @@
             "description": "Drive item page",
             "content": {
               "application/json": {
-                "schema": { "type": "object", "additionalProperties": true }
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/me/messages/{message_id}": {
+      "get": {
+        "operationId": "get_message",
+        "summary": "Get a mail message",
+        "x-aevatar-tool": {
+          "name": "get_message",
+          "description": "Get an Outlook mail message by id.",
+          "readOnly": true,
+          "destructive": false,
+          "requiresApproval": false
+        },
+        "parameters": [
+          {
+            "name": "message_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "minLength": 1
+            }
+          },
+          {
+            "name": "$select",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string"
+            },
+            "description": "Comma-separated properties to return."
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "ok",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/me/contacts": {
+      "get": {
+        "operationId": "list_my_contacts",
+        "summary": "List contacts",
+        "x-aevatar-tool": {
+          "name": "list_my_contacts",
+          "description": "List Outlook contacts of the authenticated user.",
+          "readOnly": true,
+          "destructive": false,
+          "requiresApproval": false
+        },
+        "parameters": [
+          {
+            "name": "$top",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 1000
+            }
+          },
+          {
+            "name": "$filter",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string"
+            },
+            "description": "OData filter expression."
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "ok",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true
+                }
               }
             }
           }
