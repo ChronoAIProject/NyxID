@@ -54,6 +54,7 @@ import {
   captureAssistantWireLogHeader,
   useAssistantWireLogStore,
 } from "@/stores/assistant-wire-log-store";
+import { useAuthStore } from "@/stores/auth-store";
 
 // NyxID's own assistant pass-through (PRD decision 4). NyxID resolves the
 // admin-managed aevatar service and derives the aevatar scope from the
@@ -88,9 +89,10 @@ function assistantWireLogOptions(): {
 // redirect to /login. Scoped to this transport; the rest of the app keeps
 // strict 401 handling.
 const assistantApi = {
-  get<T>(endpoint: string): Promise<T> {
+  get<T>(endpoint: string, signal?: AbortSignal): Promise<T> {
     return apiClient<T>(endpoint, {
       preserveSessionOn401: true,
+      signal,
       ...assistantWireLogOptions(),
     });
   },
@@ -192,6 +194,10 @@ const DELETE_REQUEST_DEADLINE_MS = 15_000;
 const MAX_MEDIA_DATA_CHARS = 8_000_000;
 
 const MAX_TOOL_SUMMARY_CHARS = 160;
+
+const HISTORY_RECONCILIATION_DELAYS_MS = [0, 300, 900, 1_800] as const;
+const RESERVATION_RETRY_DELAYS_MS = [300, 900] as const;
+const HISTORY_RESERVATION_UNAVAILABLE = "CHAT_HISTORY_RESERVATION_UNAVAILABLE";
 
 // A POST can be retried only because `clientRequestId` makes Aevatar an
 // idempotent receiver. Keep the budget deliberately small: one replay covers
@@ -373,6 +379,13 @@ interface AevatarConversationListResponse {
   readonly conversations?: readonly AevatarHistoryIndexEntry[];
 }
 
+interface AevatarCreateRecoveryResponse {
+  readonly status?: unknown;
+  readonly conversationId?: unknown;
+  readonly stateVersion?: unknown;
+  readonly turnId?: unknown;
+}
+
 interface AevatarHistoryEntry {
   readonly id?: string;
   readonly role?: string;
@@ -409,9 +422,7 @@ type AevatarHistoryResponse =
 function historyStateVersion(body: AevatarHistoryResponse): number | undefined {
   if (Array.isArray(body)) return undefined;
   const raw = (body as { readonly stateVersion?: unknown }).stateVersion;
-  const parsed =
-    typeof raw === "number" ? raw : typeof raw === "string" ? Number(raw) : NaN;
-  return Number.isFinite(parsed) && parsed > 0 ? parsed : undefined;
+  return positiveStateVersion(raw);
 }
 
 function structuredBlockCount(messages: readonly AssistantMessage[]): number {
@@ -495,6 +506,8 @@ interface StoredConversation {
    * (conversation continuity is `conversationId` + `minimumStateVersion`).
    */
   sessionId?: string;
+  /** Create idempotency identity retained across a user retry of one prompt. */
+  createRequest?: { readonly prompt: string; readonly commandId: string };
 }
 
 interface RunStepState {
@@ -601,6 +614,8 @@ interface RunningTurn {
     readonly message: string;
   } | null;
   actionContinuation: ActionContinuationState | null;
+  optimisticMessageAppended: boolean;
+  createRecoveryStarted: boolean;
 }
 
 type StreamConsumptionResult =
@@ -636,6 +651,45 @@ function safeTurnId(value: unknown): string | null {
   if (typeof value !== "string") return null;
   const normalized = value.trim();
   return OPAQUE_TURN_ID_PATTERN.test(normalized) ? normalized : null;
+}
+
+function positiveStateVersion(value: unknown): number | undefined {
+  const parsed =
+    typeof value === "number"
+      ? value
+      : typeof value === "string"
+        ? Number(value)
+        : NaN;
+  return Number.isSafeInteger(parsed) && parsed > 0 ? parsed : undefined;
+}
+
+function abortableDelay(delayMs: number, signal: AbortSignal): Promise<void> {
+  if (signal.aborted) {
+    return Promise.reject(new DOMException("Aborted", "AbortError"));
+  }
+  if (delayMs <= 0) return Promise.resolve();
+  return new Promise((resolve, reject) => {
+    const timeout = globalThis.setTimeout(() => {
+      signal.removeEventListener("abort", onAbort);
+      resolve();
+    }, delayMs);
+    const onAbort = () => {
+      globalThis.clearTimeout(timeout);
+      reject(new DOMException("Aborted", "AbortError"));
+    };
+    signal.addEventListener("abort", onAbort, { once: true });
+  });
+}
+
+function historyIncludesAssistantTurn(
+  entries: readonly AevatarHistoryEntry[],
+  turnId: string | null,
+): boolean {
+  if (!turnId) return true;
+  return entries.some(
+    (entry) =>
+      entry.role === "assistant" && safeTurnId(entry.turnId) === turnId,
+  );
 }
 
 function safeErrorCode(value: unknown, fallback: string): string {
@@ -752,8 +806,7 @@ function stableJsonValue(value: unknown): unknown {
   }
   if (value && typeof value === "object") {
     const entries = Object.entries(value as Record<string, unknown>).sort(
-      ([left], [right]) =>
-        left < right ? -1 : left > right ? 1 : 0,
+      ([left], [right]) => (left < right ? -1 : left > right ? 1 : 0),
     );
     return Object.fromEntries(
       entries.map(([key, entry]) => [key, stableJsonValue(entry)]),
@@ -789,7 +842,8 @@ function sameStringArray(
   right: readonly string[],
 ): boolean {
   return (
-    left.length === right.length && left.every((value, index) => value === right[index])
+    left.length === right.length &&
+    left.every((value, index) => value === right[index])
   );
 }
 
@@ -1068,6 +1122,8 @@ export class AevatarAssistantTransport implements AssistantTransport {
    * the server-backed entry.
    */
   private readonly conversationAliases = new Map<string, string>();
+  /** Conversation currently materialized in the chat view. */
+  private activeConversationId: string | null = null;
   private readonly now: () => number;
   private listFetchedAt = 0;
 
@@ -1134,6 +1190,7 @@ export class AevatarAssistantTransport implements AssistantTransport {
       actionRequestFingerprints: new Map(),
       activityMessageTurnIds: new Map(),
     });
+    this.activeConversationId = conversation.id;
     return conversation;
   }
 
@@ -1294,11 +1351,57 @@ export class AevatarAssistantTransport implements AssistantTransport {
     if (this.deletedConversationIds.has(conversationId)) {
       throw new AssistantConversationNotFoundError();
     }
+    if (
+      conversationId.startsWith(WORKFLOW_CONVERSATION_PREFIX) &&
+      this.activeConversationId !== conversationId
+    ) {
+      stored.sessionId = crypto.randomUUID();
+    }
+    this.activeConversationId = conversationId;
     return {
       conversation: stored.conversation,
       messages: stored.turnState.messages,
       has_more: false,
     };
+  }
+
+  private appendOptimisticUserMessage(
+    conversationId: string,
+    run: RunningTurn,
+    content: string,
+  ): void {
+    if (run.optimisticMessageAppended) return;
+    const stored = this.conversations.get(conversationId);
+    if (!stored) return;
+
+    const createdAt = new Date().toISOString();
+    const firstMessage = stored.turnState.messages.length === 0;
+    stored.turnState = {
+      ...stored.turnState,
+      messages: [
+        ...stored.turnState.messages,
+        {
+          id: newId("user-message"),
+          role: "user",
+          schema_version: 1,
+          blocks: [
+            {
+              type: "text",
+              block_id: newId("user-block"),
+              text: content,
+            },
+          ],
+          created_at: createdAt,
+        },
+      ],
+      lastCursor: 0,
+    };
+    stored.conversation = {
+      ...stored.conversation,
+      title: firstMessage ? content.slice(0, 40) : stored.conversation.title,
+      last_message_at: createdAt,
+    };
+    run.optimisticMessageAppended = true;
   }
 
   sendMessage(
@@ -1327,43 +1430,29 @@ export class AevatarAssistantTransport implements AssistantTransport {
       throw new Error("Message must contain between 1 and 32768 characters.");
     }
 
-    // Optimistic user message; the server materializes its own copy, which
-    // replaces this one on the post-turn history reload.
-    const createdAt = new Date().toISOString();
-    const firstMessage = stored.turnState.messages.length === 0;
-    stored.turnState = {
-      ...stored.turnState,
-      messages: [
-        ...stored.turnState.messages,
-        {
-          id: newId("user-message"),
-          role: "user",
-          schema_version: 1,
-          blocks: [
-            {
-              type: "text",
-              block_id: newId("user-block"),
-              text: normalized,
-            },
-          ],
-          created_at: createdAt,
-        },
-      ],
-      // Cursors restart at 1 for each turn's event stream.
-      lastCursor: 0,
-    };
-    stored.conversation = {
-      ...stored.conversation,
-      title: firstMessage ? normalized.slice(0, 40) : stored.conversation.title,
-      last_message_at: createdAt,
-    };
-
-    const run = this.newRun(
-      onEvent,
-      null,
-      isWorkflowConversationId(conversationId) ? "workflow" : "actor",
-    );
+    const protocol = isWorkflowConversationId(conversationId)
+      ? "workflow"
+      : "actor";
+    let clientRequestId: string | undefined;
+    if (
+      protocol === "workflow" &&
+      !stored.conversation.id.startsWith(WORKFLOW_CONVERSATION_PREFIX)
+    ) {
+      clientRequestId =
+        stored.createRequest?.prompt === normalized
+          ? stored.createRequest.commandId
+          : crypto.randomUUID();
+      stored.createRequest = { prompt: normalized, commandId: clientRequestId };
+    }
+    const run = this.newRun(onEvent, null, protocol, clientRequestId);
     this.running.set(conversationId, run);
+    const needsWorkflowPreflight =
+      protocol === "workflow" &&
+      stored.conversation.id.startsWith(WORKFLOW_CONVERSATION_PREFIX) &&
+      positiveStateVersion(stored.stateVersion) === undefined;
+    if (!needsWorkflowPreflight) {
+      this.appendOptimisticUserMessage(conversationId, run, normalized);
+    }
     void this.streamTurn(conversationId, run, normalized);
     return {
       get turnId() {
@@ -1831,7 +1920,11 @@ export class AevatarAssistantTransport implements AssistantTransport {
       throw new AssistantTurnActiveError();
     }
 
-    const body = buildActionWakeBody(actorId, crypto.randomUUID(), originTurnId);
+    const body = buildActionWakeBody(
+      actorId,
+      crypto.randomUUID(),
+      originTurnId,
+    );
     const run = this.newRun(onEvent, null, "actor");
     run.cursor = stored.turnState.lastCursor;
     this.running.set(requestedId, run);
@@ -2125,6 +2218,7 @@ export class AevatarAssistantTransport implements AssistantTransport {
       lastLocalTurnCompletedAt: existing?.lastLocalTurnCompletedAt,
       stateVersion: existing?.stateVersion,
       sessionId: existing?.sessionId,
+      createRequest: existing?.createRequest,
     });
   }
 
@@ -2134,6 +2228,13 @@ export class AevatarAssistantTransport implements AssistantTransport {
     const body = await assistantApi.get<AevatarHistoryResponse>(
       `${ASSISTANT_PREFIX}/conversations/${conversationId}`,
     );
+    return this.applyHistoryResponse(conversationId, body);
+  }
+
+  private applyHistoryResponse(
+    conversationId: string,
+    body: AevatarHistoryResponse,
+  ): StoredConversation {
     // The conversation may have been deleted while this request was in
     // flight (deleting an active chat races cancel-driven projections);
     // writing the stale result back would resurrect it locally.
@@ -2149,7 +2250,10 @@ export class AevatarAssistantTransport implements AssistantTransport {
     // below keeps the local mirror (keep-max), so capture it first.
     const freshStateVersion = historyStateVersion(body);
     if (existing && freshStateVersion !== undefined) {
-      existing.stateVersion = freshStateVersion;
+      existing.stateVersion = Math.max(
+        existing.stateVersion ?? 0,
+        freshStateVersion,
+      );
     }
     const localMessages = existing?.turnState.messages ?? [];
     const localStructuredBlocks = structuredBlockCount(localMessages);
@@ -2208,8 +2312,12 @@ export class AevatarAssistantTransport implements AssistantTransport {
         existing?.actionRequestFingerprints ?? new Map(),
       activityMessageTurnIds: existing?.activityMessageTurnIds ?? new Map(),
       lastLocalTurnCompletedAt: existing?.lastLocalTurnCompletedAt,
-      stateVersion: freshStateVersion ?? existing?.stateVersion,
+      stateVersion:
+        freshStateVersion === undefined
+          ? existing?.stateVersion
+          : Math.max(existing?.stateVersion ?? 0, freshStateVersion),
       sessionId: existing?.sessionId,
+      createRequest: existing?.createRequest,
     };
     this.conversations.set(conversationId, stored);
     return stored;
@@ -2219,9 +2327,10 @@ export class AevatarAssistantTransport implements AssistantTransport {
     onEvent: (event: TurnEvent) => void,
     turnId: string | null = null,
     protocol: "actor" | "workflow" = "actor",
+    clientRequestId: string = crypto.randomUUID(),
   ): RunningTurn {
     return {
-      clientRequestId: crypto.randomUUID(),
+      clientRequestId,
       protocol,
       turnId,
       stopPendingStart: false,
@@ -2251,6 +2360,8 @@ export class AevatarAssistantTransport implements AssistantTransport {
       deliveryTerminalCount: 0,
       deliveryProtocolError: null,
       actionContinuation: null,
+      optimisticMessageAppended: false,
+      createRecoveryStarted: false,
     };
   }
 
@@ -2311,9 +2422,8 @@ export class AevatarAssistantTransport implements AssistantTransport {
    * server-side; NyxID builds the strict upstream `/api/chat` body from it).
    * A `chatc-…` conversation continues with the last observed `stateVersion`
    * as the read fence; a placeholder (or missing) id starts a new
-   * conversation. `commandId` is the run's idempotency identity — the retry
-   * loop replays it so a dropped first delivery resumes the same
-   * conversation/turn instead of minting a second one.
+   * conversation. `commandId` is create-only; Aevatar owns continuation
+   * command identities and uses the observed state version as their fence.
    */
   private workflowTurnBody(
     conversationId: string,
@@ -2324,17 +2434,16 @@ export class AevatarAssistantTransport implements AssistantTransport {
     const sessionId = this.conversationSessionId(conversationId);
     const serverId = stored?.conversation.id;
     if (serverId && serverId.startsWith(WORKFLOW_CONVERSATION_PREFIX)) {
+      const stateVersion = positiveStateVersion(stored.stateVersion);
+      if (stateVersion === undefined) {
+        throw new AssistantProtocolError(
+          "Conversation history is still synchronizing.",
+        );
+      }
       return JSON.stringify({
         prompt,
         conversationId: serverId,
-        // The fence only requires the projection to have REACHED the
-        // version, so the floor of 1 (a conversation that exists has
-        // version ≥ 1) keeps a missing watermark from blocking the turn.
-        minimumStateVersion:
-          stored.stateVersion && stored.stateVersion > 0
-            ? stored.stateVersion
-            : 1,
-        commandId: run.clientRequestId,
+        minimumStateVersion: stateVersion,
         sessionId,
       });
     }
@@ -2358,6 +2467,377 @@ export class AevatarAssistantTransport implements AssistantTransport {
     return stored.sessionId;
   }
 
+  private latestAssistantTurnId(stored: StoredConversation): string | null {
+    for (
+      let index = stored.turnState.messages.length - 1;
+      index >= 0;
+      index -= 1
+    ) {
+      const message = stored.turnState.messages[index];
+      if (message?.role !== "assistant") continue;
+      const turnId = safeTurnId(message.turnId);
+      if (turnId) return turnId;
+    }
+    return null;
+  }
+
+  private async readWorkflowHistory(
+    conversationId: string,
+    signal: AbortSignal,
+  ): Promise<{
+    readonly body: AevatarHistoryResponse;
+    readonly entries: readonly AevatarHistoryEntry[];
+    readonly stateVersion: number | undefined;
+  }> {
+    const body = await assistantApi.get<AevatarHistoryResponse>(
+      `${ASSISTANT_PREFIX}/conversations/${conversationId}`,
+      signal,
+    );
+    return {
+      body,
+      entries: readHistoryEntries(body),
+      stateVersion: historyStateVersion(body),
+    };
+  }
+
+  private async reconcileWorkflowHistory(
+    conversationId: string,
+    minimumStateVersion: number,
+    requiredTurnId: string | null,
+    signal: AbortSignal,
+  ): Promise<{
+    readonly body: AevatarHistoryResponse;
+    readonly stateVersion: number;
+  } | null> {
+    for (const delayMs of HISTORY_RECONCILIATION_DELAYS_MS) {
+      await abortableDelay(delayMs, signal);
+      try {
+        const observation = await this.readWorkflowHistory(
+          conversationId,
+          signal,
+        );
+        if (
+          observation.stateVersion !== undefined &&
+          observation.stateVersion >= minimumStateVersion &&
+          historyIncludesAssistantTurn(observation.entries, requiredTurnId)
+        ) {
+          return {
+            body: observation.body,
+            stateVersion: observation.stateVersion,
+          };
+        }
+      } catch (error) {
+        if (signal.aborted) throw error;
+      }
+    }
+    return null;
+  }
+
+  private decodeCreateRecovery(value: AevatarCreateRecoveryResponse): {
+    readonly conversationId: string;
+    readonly stateVersion: number;
+    readonly turnId: string;
+  } {
+    const conversationId =
+      typeof value.conversationId === "string" ? value.conversationId : "";
+    const turnId = safeTurnId(value.turnId);
+    const rawVersion = value.stateVersion;
+    const stateVersion =
+      typeof rawVersion === "number"
+        ? rawVersion
+        : typeof rawVersion === "string"
+          ? Number(rawVersion)
+          : NaN;
+    if (
+      !WORKFLOW_SERVER_CONVERSATION_ID_PATTERN.test(conversationId) ||
+      !turnId ||
+      !Number.isSafeInteger(stateVersion) ||
+      stateVersion < 0
+    ) {
+      throw new AssistantProtocolError(
+        "Chat create recovery returned an invalid conversation identity.",
+      );
+    }
+    return { conversationId, stateVersion, turnId };
+  }
+
+  private async pollCreateRecovery(
+    commandId: string,
+    signal: AbortSignal,
+  ): Promise<ReturnType<
+    AevatarAssistantTransport["decodeCreateRecovery"]
+  > | null> {
+    for (const delayMs of HISTORY_RECONCILIATION_DELAYS_MS) {
+      await abortableDelay(delayMs, signal);
+      try {
+        const response = await assistantApi.get<AevatarCreateRecoveryResponse>(
+          `${ASSISTANT_PREFIX}/conversations/create-recovery/${encodeURIComponent(commandId)}`,
+          signal,
+        );
+        return this.decodeCreateRecovery(response);
+      } catch (error) {
+        if (signal.aborted) throw error;
+        if (error instanceof ApiError && error.status === 404) continue;
+        throw error;
+      }
+    }
+    return null;
+  }
+
+  private async recoverWorkflowCreate(
+    conversationId: string,
+    run: RunningTurn,
+    signal: AbortSignal,
+  ): Promise<boolean> {
+    const scopeId = useAuthStore.getState().user?.id;
+    if (!scopeId) return false;
+    const recovery = await this.pollCreateRecovery(run.clientRequestId, signal);
+    if (
+      !recovery ||
+      useAuthStore.getState().user?.id !== scopeId ||
+      this.deletedConversationIds.has(conversationId)
+    ) {
+      return false;
+    }
+
+    const stored = this.conversations.get(conversationId);
+    if (!stored) return false;
+    const priorId = stored.conversation.id;
+    if (
+      (priorId.startsWith(WORKFLOW_CONVERSATION_PREFIX) &&
+        priorId !== recovery.conversationId) ||
+      (run.turnId !== null && run.turnId !== recovery.turnId)
+    ) {
+      throw new AssistantProtocolError(
+        "Chat create recovery changed the conversation identity.",
+      );
+    }
+
+    const reconciled = await this.reconcileWorkflowHistory(
+      recovery.conversationId,
+      Math.max(1, recovery.stateVersion),
+      recovery.turnId,
+      signal,
+    );
+    if (
+      !reconciled ||
+      useAuthStore.getState().user?.id !== scopeId ||
+      this.deletedConversationIds.has(conversationId)
+    )
+      return false;
+
+    stored.conversation = {
+      ...stored.conversation,
+      id: recovery.conversationId,
+    };
+    stored.stateVersion = Math.max(
+      stored.stateVersion ?? 0,
+      recovery.stateVersion,
+      reconciled.stateVersion,
+    );
+    stored.createRequest = undefined;
+    this.conversations.set(recovery.conversationId, stored);
+    this.conversationAliases.set(conversationId, recovery.conversationId);
+    if (this.activeConversationId === conversationId) {
+      this.activeConversationId = recovery.conversationId;
+    }
+    run.turnId ??= recovery.turnId;
+    const authoritative = this.applyHistoryResponse(
+      recovery.conversationId,
+      reconciled.body,
+    );
+    this.conversations.set(conversationId, authoritative);
+    return true;
+  }
+
+  private startCreateRecoveryInBackground(
+    conversationId: string,
+    run: RunningTurn,
+  ): void {
+    if (run.createRecoveryStarted || run.protocol !== "workflow") return;
+    const stored = this.conversations.get(conversationId);
+    if (
+      !stored ||
+      stored.conversation.id.startsWith(WORKFLOW_CONVERSATION_PREFIX)
+    ) {
+      return;
+    }
+    run.createRecoveryStarted = true;
+    const recoveryController = new AbortController();
+    void this.recoverWorkflowCreate(
+      conversationId,
+      run,
+      recoveryController.signal,
+    ).catch(() => undefined);
+  }
+
+  private async streamWorkflowTurn(
+    conversationId: string,
+    run: RunningTurn,
+    prompt: string,
+  ): Promise<void> {
+    const stored = this.conversations.get(conversationId);
+    if (!stored) return;
+    const isCreate = !stored.conversation.id.startsWith(
+      WORKFLOW_CONVERSATION_PREFIX,
+    );
+
+    if (!isCreate && positiveStateVersion(stored.stateVersion) === undefined) {
+      const reconciled = await this.reconcileWorkflowHistory(
+        stored.conversation.id,
+        1,
+        this.latestAssistantTurnId(stored),
+        run.controller.signal,
+      );
+      if (run.finished || run.controller.signal.aborted) return;
+      if (!reconciled) {
+        this.finishTurn(conversationId, run, "failed", {
+          code: "history_synchronizing",
+          message:
+            "Conversation history is still synchronizing. Try again shortly.",
+        });
+        return;
+      }
+      this.applyHistoryResponse(stored.conversation.id, reconciled.body);
+    }
+
+    if (run.finished || run.controller.signal.aborted) return;
+    this.appendOptimisticUserMessage(conversationId, run, prompt);
+    let finalFailure = {
+      code: "network_error",
+      message: "The assistant stream could not be reached. Try again.",
+    };
+    let reservationDelayIndex = 0;
+
+    while (!run.finished && !run.controller.signal.aborted) {
+      this.resetDeliveryState(run);
+      const bodyText = this.workflowTurnBody(conversationId, run, prompt);
+      const stream = this.startChatStream(
+        conversationId,
+        run,
+        WORKFLOW_CHAT_URL,
+        bodyText,
+      );
+      const response = await stream.headers;
+      if (response.kind === "cancelled") return;
+      if (response.kind === "network_error") {
+        finalFailure = { code: response.code, message: response.message };
+        if (isCreate && !run.deliveryStarted) {
+          run.createRecoveryStarted = true;
+          const recoveryController = new AbortController();
+          try {
+            if (
+              await this.recoverWorkflowCreate(
+                conversationId,
+                run,
+                recoveryController.signal,
+              )
+            ) {
+              this.finishTurn(conversationId, run, "completed", null);
+              return;
+            }
+          } catch (error) {
+            if (error instanceof AssistantProtocolError) {
+              finalFailure = {
+                code: "stream_protocol_error",
+                message: error.message,
+              };
+            }
+          }
+        }
+        break;
+      }
+      if (response.kind === "http_error") {
+        const error = streamStartError(response.status, response.body);
+        if (
+          !isCreate &&
+          response.status === 503 &&
+          error.code === HISTORY_RESERVATION_UNAVAILABLE &&
+          reservationDelayIndex < RESERVATION_RETRY_DELAYS_MS.length
+        ) {
+          let refreshed = false;
+          while (reservationDelayIndex < RESERVATION_RETRY_DELAYS_MS.length) {
+            const delayMs = RESERVATION_RETRY_DELAYS_MS[reservationDelayIndex]!;
+            reservationDelayIndex += 1;
+            await abortableDelay(delayMs, run.controller.signal);
+            try {
+              const observation = await this.readWorkflowHistory(
+                stored.conversation.id,
+                run.controller.signal,
+              );
+              const fence = positiveStateVersion(stored.stateVersion) ?? 1;
+              if (
+                observation.stateVersion === undefined ||
+                observation.stateVersion < fence
+              ) {
+                continue;
+              }
+              this.applyHistoryResponse(
+                stored.conversation.id,
+                observation.body,
+              );
+              refreshed = true;
+              break;
+            } catch (refreshError) {
+              if (run.controller.signal.aborted) return;
+              if (
+                refreshError instanceof ApiError &&
+                refreshError.status >= 500 &&
+                refreshError.status < 600
+              ) {
+                continue;
+              }
+              finalFailure = {
+                code: "history_refresh_failed",
+                message:
+                  refreshError instanceof Error
+                    ? refreshError.message
+                    : "Conversation history could not be refreshed.",
+              };
+              break;
+            }
+          }
+          if (refreshed) continue;
+        }
+        finalFailure = error;
+        break;
+      }
+
+      const result = await this.consumeTurnStream(conversationId, run, stream);
+      if (result.kind === "settled" || run.finished) return;
+      finalFailure = result.error;
+      if (isCreate && !run.deliveryStarted && result.kind === "retryable") {
+        run.createRecoveryStarted = true;
+        const recoveryController = new AbortController();
+        try {
+          if (
+            await this.recoverWorkflowCreate(
+              conversationId,
+              run,
+              recoveryController.signal,
+            )
+          ) {
+            this.finishTurn(conversationId, run, "completed", null);
+            return;
+          }
+        } catch (error) {
+          if (error instanceof AssistantProtocolError) {
+            finalFailure = {
+              code: "stream_protocol_error",
+              message: error.message,
+            };
+          }
+        }
+      }
+      break;
+    }
+
+    if (run.finished || run.controller.signal.aborted) return;
+    this.closeOpenMessage(conversationId, run);
+    this.finalizeActivity(conversationId, run, "failed");
+    this.finishTurn(conversationId, run, "failed", finalFailure);
+  }
+
   private async streamTurn(
     conversationId: string,
     run: RunningTurn,
@@ -2367,32 +2847,44 @@ export class AevatarAssistantTransport implements AssistantTransport {
     // arrive upstream before the fence commits.
     await this.awaitPendingStop(conversationId);
 
+    if (run.protocol === "workflow") {
+      try {
+        await this.streamWorkflowTurn(conversationId, run, prompt);
+      } catch (error) {
+        if (run.finished || run.controller.signal.aborted) return;
+        this.finishTurn(conversationId, run, "failed", {
+          code:
+            error instanceof AssistantProtocolError
+              ? "stream_protocol_error"
+              : "network_error",
+          message:
+            error instanceof Error
+              ? error.message
+              : "The assistant stream could not be reached. Try again.",
+        });
+      }
+      return;
+    }
+
     let finalFailure = {
       code: "network_error",
       message: "The assistant stream could not be reached. Try again.",
     };
 
-    // Computed ONCE: a retry must replay the identical body — the workflow
-    // surface's create-replay recovery is keyed on (scope, commandId) with a
-    // request fingerprint, and a body that changed between attempts would
-    // 409 instead of resuming the same conversation/turn.
-    const target =
-      run.protocol === "workflow"
-        ? {
-            url: WORKFLOW_CHAT_URL,
-            bodyText: this.workflowTurnBody(conversationId, run, prompt),
-          }
-        : {
-            url: TYPED_CHAT_URL,
-            bodyText: JSON.stringify({
-              // Aevatar dispatches `/api/chat` on this discriminator; the
-              // comparison is ordinal, so the exact lowercase value matters.
-              type: "text",
-              conversationId,
-              prompt,
-              clientRequestId: run.clientRequestId,
-            }),
-          };
+    // Actor delivery keeps its existing idempotent replay contract. Workflow
+    // retries are handled separately above because their continuation body and
+    // reservation-fence semantics differ.
+    const target = {
+      url: TYPED_CHAT_URL,
+      bodyText: JSON.stringify({
+        // Aevatar dispatches `/api/chat` on this discriminator; the comparison
+        // is ordinal, so the exact lowercase value matters.
+        type: "text",
+        conversationId,
+        prompt,
+        clientRequestId: run.clientRequestId,
+      }),
+    };
 
     for (let attempt = 0; attempt < STREAM_DELIVERY_ATTEMPTS; attempt += 1) {
       // A cancel can settle the run between attempts (the pre-RUN_STARTED
@@ -3138,6 +3630,18 @@ export class AevatarAssistantTransport implements AssistantTransport {
     if (run.protocol !== "workflow") return;
 
     const stored = this.conversations.get(conversationId);
+    const activeScopeId = useAuthStore.getState().user?.id;
+    if (
+      !activeScopeId ||
+      typeof payload.scopeId !== "string" ||
+      payload.scopeId !== activeScopeId
+    ) {
+      run.deliveryProtocolError = {
+        code: "stream_protocol_error",
+        message: "The assistant stream returned a context for another scope.",
+      };
+      return;
+    }
     const serverId =
       typeof payload.conversationId === "string" &&
       WORKFLOW_SERVER_CONVERSATION_ID_PATTERN.test(payload.conversationId)
@@ -3177,15 +3681,26 @@ export class AevatarAssistantTransport implements AssistantTransport {
     }
     if (stored && serverId && stored.conversation.id !== serverId) {
       stored.conversation = { ...stored.conversation, id: serverId };
+      stored.createRequest = undefined;
       this.conversations.set(serverId, stored);
       this.conversationAliases.set(conversationId, serverId);
+      if (this.activeConversationId === conversationId) {
+        this.activeConversationId = serverId;
+      }
     }
 
     const rawVersion = payload.stateVersion;
     const stateVersion =
       typeof rawVersion === "number" ? rawVersion : Number(rawVersion);
-    if (stored && Number.isFinite(stateVersion) && stateVersion > 0) {
-      stored.stateVersion = stateVersion;
+    if (!Number.isSafeInteger(stateVersion) || stateVersion < 0) {
+      run.deliveryProtocolError = {
+        code: "stream_protocol_error",
+        message: "The assistant stream returned an invalid state version.",
+      };
+      return;
+    }
+    if (stored && stateVersion > 0) {
+      stored.stateVersion = Math.max(stored.stateVersion ?? 0, stateVersion);
     }
 
     if (run.deliveryStarted) return;
@@ -4048,6 +4563,9 @@ export class AevatarAssistantTransport implements AssistantTransport {
       // Workflow runs take this path unconditionally: the surface has no
       // `:stop` control, so there is nothing to defer the abort for — the
       // server run finishes on its own and surfaces on the next reload.
+      if (run.protocol === "workflow" && run.streamDispatched) {
+        this.startCreateRecoveryInBackground(conversationId, run);
+      }
       run.controller.abort();
     } else {
       run.stopPendingStart = true;
@@ -4148,23 +4666,20 @@ export class AevatarAssistantTransport implements AssistantTransport {
       () => deadline.abort(),
       STOP_REQUEST_DEADLINE_MS,
     );
-    const pending = apiClient<unknown>(
-      `${ASSISTANT_PREFIX}/chat`,
-      {
-        method: "POST",
-        body: {
-          type: "task.stop",
-          conversationId: actorConversationId,
-          turnId: run.turnId,
-          stopRequestId: crypto.randomUUID(),
-          clientRequestId: crypto.randomUUID(),
-          expectedStateVersion: 0,
-        },
-        preserveSessionOn401: true,
-        signal: deadline.signal,
-        ...assistantWireLogOptions(),
+    const pending = apiClient<unknown>(`${ASSISTANT_PREFIX}/chat`, {
+      method: "POST",
+      body: {
+        type: "task.stop",
+        conversationId: actorConversationId,
+        turnId: run.turnId,
+        stopRequestId: crypto.randomUUID(),
+        clientRequestId: crypto.randomUUID(),
+        expectedStateVersion: 0,
       },
-    ).then(
+      preserveSessionOn401: true,
+      signal: deadline.signal,
+      ...assistantWireLogOptions(),
+    }).then(
       () => clearTimeout(deadlineTimer),
       () => clearTimeout(deadlineTimer),
     );
