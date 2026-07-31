@@ -38,6 +38,37 @@ function cssPixels(value: string): number {
   return Number.isFinite(parsed) ? parsed : 0;
 }
 
+/**
+ * Whether the composer may take focus without being asked to.
+ *
+ * On a touch device, focusing a textarea raises the on-screen keyboard over
+ * half the screen. Opening a conversation to read it is the common case there,
+ * so autofocus would cost a dismiss on nearly every visit; a pointer is the
+ * closest available proxy for "typing is cheap here".
+ */
+function autoFocusAllowed(): boolean {
+  if (typeof window === "undefined") return false;
+  // No matchMedia (jsdom, older engines) means no evidence of a touch device.
+  if (typeof window.matchMedia !== "function") return true;
+  return !window.matchMedia("(pointer: coarse)").matches;
+}
+
+/**
+ * Whether focus is sitting on nothing in particular.
+ *
+ * Only the turn-end restore consults this. A turn can end while the reader is
+ * mid-way through an approval card or a sidebar row, and pulling focus out
+ * from under that is worse than the click it saves.
+ */
+function focusIsParked(textarea: HTMLTextAreaElement): boolean {
+  const active = textarea.ownerDocument.activeElement;
+  return (
+    active === null ||
+    active === textarea.ownerDocument.body ||
+    active === textarea
+  );
+}
+
 export function ChatComposer({
   ownerUserId,
   draftKey,
@@ -57,6 +88,14 @@ interface ChatComposerProps {
   readonly sending: boolean;
   readonly ownerUserId: string | null;
   readonly draftKey: string | null;
+  /**
+   * Bumped by the page when the reader explicitly asks to be put in a chat —
+   * a sidebar row or New Chat. Every change takes focus. Deliberately NOT
+   * `draftKey`: the URL also moves on its own (canonical-id repair, stale-route
+   * cleanup, the first send's migration off a draft thread) and none of those
+   * are a request to start typing.
+   */
+  readonly focusRequest?: number;
   readonly onSend: (content: string) => Promise<void>;
   readonly onStop: () => Promise<void>;
 }
@@ -76,6 +115,7 @@ function DraftedChatComposer({
   sending,
   ownerUserId,
   draftKey,
+  focusRequest = 0,
   onSend,
   onStop,
 }: ChatComposerProps) {
@@ -278,6 +318,150 @@ function DraftedChatComposer({
     element.style.overflowY = natural > maxHeight ? "auto" : "hidden";
     setScrollEdges(getScrollEdges(element));
   }, [content]);
+
+  /**
+   * A turn disables the textarea, and the browser answers that by dropping
+   * focus to the body — so focus has to be given back when the turn ends or
+   * the reader has to click into the composer after every single answer.
+   *
+   * Restore only what the turn took, though. Whether the composer held focus
+   * has to be read HERE, during the render that flips `active`, because by the
+   * time an effect runs the commit has already disabled the field and the
+   * browser has already moved focus away.
+   *
+   * The `disabled` guard is what keeps that read honest. A render that turns
+   * out to be abandoned can leave `renderedActiveRef` reporting a transition
+   * that never committed, and a later render would then re-read focus against
+   * a DOM whose field is already disabled — overwriting a true flag with the
+   * body. If the committed field is disabled, the turn is already under way
+   * and there is nothing new to learn.
+   */
+  const composerHeldFocusRef = useRef(false);
+  const renderedActiveRef = useRef(active);
+  if (renderedActiveRef.current !== active) {
+    if (active && textareaRef.current?.disabled !== true) {
+      composerHeldFocusRef.current = Boolean(
+        composerRef.current?.contains(document.activeElement),
+      );
+    }
+    renderedActiveRef.current = active;
+  }
+
+  /**
+   * The reader has moved on: since this turn started they have clicked,
+   * typed, scrolled or tapped somewhere that is not the composer.
+   *
+   * DOM focus cannot answer that on its own. Scrolling the transcript,
+   * selecting an answer to copy, and driving a screen reader's virtual cursor
+   * all leave `activeElement` on the body — the exact state a disabled
+   * textarea leaves behind — so "focus is parked" reads identically whether
+   * the turn took it or the reader put it down and went elsewhere.
+   *
+   * Listens from the moment the send starts, not from `active`. Those are not
+   * the same instant: the field is disabled by `active` alone, and a first
+   * send waits on conversation creation and cache projection (deadline 5s)
+   * before the transport publishes `running`. Watching only `active` leaves
+   * that whole interval unobserved, and a reader who scrolls away inside it
+   * would still have focus pulled back at the end of the turn.
+   *
+   * The window is one boolean on purpose. Keying the effect on `active` and
+   * `sending` separately would tear it down and re-arm — clearing the flag —
+   * at the handover between them, wiping exactly the movement it exists to
+   * catch.
+   */
+  const readerMovedOnRef = useRef(false);
+  const turnRunning = active || sending;
+  useEffect(() => {
+    if (!turnRunning) return;
+    readerMovedOnRef.current = false;
+    function noteInteraction(event: Event) {
+      const target = event.target;
+      if (target instanceof Node && composerRef.current?.contains(target)) {
+        return;
+      }
+      readerMovedOnRef.current = true;
+    }
+    const types = ["pointerdown", "keydown", "wheel", "touchstart"] as const;
+    for (const type of types) {
+      document.addEventListener(type, noteInteraction, true);
+    }
+    return () => {
+      for (const type of types) {
+        document.removeEventListener(type, noteInteraction, true);
+      }
+    };
+  }, [turnRunning]);
+
+  /**
+   * The composer is the only thing anyone opens this screen to use, so it
+   * holds focus by default: on arrival, on every explicit `focusRequest`, and
+   * when a turn hands the field back.
+   *
+   * An explicit request takes focus outright — including off the sidebar row
+   * that was just clicked, which IS the request. Everything else is
+   * conditional: a turn ending restores only focus the turn itself took and
+   * only if focus is still parked, and a `draftKey` that moves without a
+   * request (browser Back, canonical-id repair) claims only parked focus.
+   *
+   * Parked is a weaker signal than it looks — a reader scrolling the
+   * transcript also leaves focus on the body — but outside a running turn
+   * there is nothing better to go on, and the automatic `draftKey` moves are
+   * canonical-id repair and stale-route cleanup, both of which land within
+   * moments of the conversation opening rather than at an arbitrary time.
+   *
+   * A request that lands while the field is disabled is held rather than
+   * dropped — but it is dropped if the reader moves on in the meantime, since
+   * by then it is a minutes-old intent. See `autoFocusAllowed` for why touch
+   * devices opt out.
+   */
+  const focusPendingRef = useRef(true);
+  const seenFocusRequestRef = useRef(focusRequest);
+  const previouslyActiveRef = useRef(active);
+  const previousDraftKeyRef = useRef(draftKey);
+  useEffect(() => {
+    const element = textareaRef.current;
+    if (!element) return;
+
+    const requested = seenFocusRequestRef.current !== focusRequest;
+    const draftKeyMoved = previousDraftKeyRef.current !== draftKey;
+    const turnJustEnded = previouslyActiveRef.current && !active;
+    seenFocusRequestRef.current = focusRequest;
+    previousDraftKeyRef.current = draftKey;
+    previouslyActiveRef.current = active;
+
+    if (requested) {
+      // They just asked for this composer; nothing before it still counts.
+      readerMovedOnRef.current = false;
+      focusPendingRef.current = true;
+    } else if (
+      (draftKeyMoved ||
+        (turnJustEnded && composerHeldFocusRef.current)) &&
+      focusIsParked(element)
+    ) {
+      focusPendingRef.current = true;
+    }
+
+    // The flag is a verdict on the turn that set it, so it is spent the moment
+    // the field comes back — whether or not anything is waiting to consume it.
+    // Leaving it set past its turn would let it veto an unrelated focus much
+    // later: a reader who stepped away mid-turn, came back, and pressed Back
+    // would land in a chat with no caret in it.
+    const readerMovedOn = readerMovedOnRef.current;
+    if (!element.disabled) readerMovedOnRef.current = false;
+
+    if (!focusPendingRef.current) return;
+    // Still disabled — a turn is running. Keep the request and honour it when
+    // the field comes back rather than firing into a control that cannot take
+    // focus at all.
+    if (element.disabled) return;
+    focusPendingRef.current = false;
+    if (readerMovedOn || !autoFocusAllowed()) return;
+    element.focus();
+    // Restored drafts arrive whole; the caret belongs after them, not at the
+    // start of what the reader was last writing.
+    const caret = element.value.length;
+    element.setSelectionRange(caret, caret);
+  }, [active, draftKey, focusRequest]);
 
   function updateContent(nextContent: string) {
     contentRef.current = nextContent;
