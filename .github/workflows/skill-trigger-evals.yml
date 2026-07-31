@@ -75,8 +75,19 @@ jobs:
     permissions:
       actions: read
       contents: read
-      models: read
     steps:
+      # GitHub Models was retired, so the evaluator calls the OpenAI API
+      # with the NYXID_SKILL_EVAL_API_KEY repository secret. Fail with a
+      # clear provisioning message instead of an opaque empty-model run.
+      - name: Require evaluator API key secret
+        env:
+          EVAL_API_KEY: ${{ secrets.NYXID_SKILL_EVAL_API_KEY }}
+        run: |
+          if [ -z "$EVAL_API_KEY" ]; then
+            echo "::error::NYXID_SKILL_EVAL_API_KEY repository secret is not set. Provision an OpenAI API key (used for gpt-4.1-mini trigger evaluations) to run this check."
+            exit 1
+          fi
+
       - name: Check out trusted evaluator
         uses: actions/checkout@v6
         with:
@@ -107,7 +118,7 @@ jobs:
 
       - name: Exercise native OpenClaw skill selection
         env:
-          NYXID_SKILL_EVAL_API_KEY: ${{ github.token }}
+          NYXID_SKILL_EVAL_API_KEY: ${{ secrets.NYXID_SKILL_EVAL_API_KEY }}
           NYXID_SKILL_EVAL_GH_TOKEN: ${{ github.token }}
         run: >-
           ruby skills/nyxid/evals/run_trigger_evals.rb

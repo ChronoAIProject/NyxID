@@ -11,9 +11,14 @@ require "yaml"
 MAX_SKILL_BYTES = 256 * 1024
 MAX_CASES_BYTES = 128 * 1024
 GH_AUTH_MARKER = "NYXID_EVAL_GH_AUTH_VERIFIED"
-MODEL_PROVIDER = "github-models"
-MODEL_ID = "openai/gpt-4.1-mini"
+# GitHub Models was retired (inference API returns
+# github_models_retirement_brownout), so the evaluator talks to the OpenAI
+# API directly. NYXID_SKILL_EVAL_BASE_URL overrides the endpoint for any
+# OpenAI-compatible gateway (e.g. a NyxID-brokered proxy in local runs).
+MODEL_PROVIDER = "openai"
+MODEL_ID = "gpt-4.1-mini"
 MODEL_REF = "#{MODEL_PROVIDER}/#{MODEL_ID}"
+MODEL_BASE_URL = ENV.fetch("NYXID_SKILL_EVAL_BASE_URL", "https://api.openai.com/v1")
 
 options = {
   candidate_root: File.expand_path("..", __dir__),
@@ -230,7 +235,7 @@ Dir.mktmpdir("nyxid-openclaw-trigger-evals-") do |tmpdir|
       "mode" => "replace",
       "providers" => {
         MODEL_PROVIDER => {
-          "baseUrl" => "https://models.github.ai/inference",
+          "baseUrl" => MODEL_BASE_URL,
           "apiKey" => "${NYXID_SKILL_EVAL_API_KEY}",
           "api" => "openai-completions",
           "models" => [
