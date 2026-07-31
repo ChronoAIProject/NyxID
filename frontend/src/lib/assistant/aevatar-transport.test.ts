@@ -6347,6 +6347,7 @@ describe("studio new chats and typed actor compatibility", () => {
     // turn's chat.context: the session must survive that re-key.
     const conversation = await transport.createConversation();
     await collectWorkflowTurn(transport, conversation.id, "first");
+    await transport.getHistory(conversation.id);
     await collectWorkflowTurn(transport, conversation.id, "second");
 
     const bodies = mock.mock.calls
@@ -6357,7 +6358,7 @@ describe("studio new chats and typed actor compatibility", () => {
     expect(bodies).toHaveLength(2);
     const sessionId = bodies[0]?.["sessionId"];
     expect(sessionId).toMatch(/^[0-9a-f-]{36}$/);
-    // Same session across turns; continuations carry no client command id.
+    // A same-conversation history re-read must not count as a reopen or remint.
     expect(bodies[1]?.["sessionId"]).toBe(sessionId);
     expect(bodies[1]).not.toHaveProperty("commandId");
     // The create turn carries no conversationId, so it stays on the studio
@@ -6405,6 +6406,7 @@ describe("studio new chats and typed actor compatibility", () => {
       expect(bodies).toHaveLength(2);
       expect(bodies[0]?.["minimumStateVersion"]).toBe(2);
       expect(bodies[1]?.["minimumStateVersion"]).toBe(5);
+      expect(bodies[1]?.["sessionId"]).toBe(bodies[0]?.["sessionId"]);
       expect(bodies[0]).not.toHaveProperty("commandId");
       expect(bodies[1]).not.toHaveProperty("commandId");
     } finally {
@@ -6555,6 +6557,12 @@ describe("studio new chats and typed actor compatibility", () => {
         expect(events.at(-1)).toMatchObject({
           event: "turn.completed",
           status: "failed",
+          error: {
+            code:
+              status === 404
+                ? "history_refresh_failed"
+                : "CHAT_HISTORY_RESERVATION_UNAVAILABLE",
+          },
         });
         expect(streams).toHaveBeenCalledTimes(1);
       } finally {
@@ -6749,6 +6757,104 @@ describe("studio new chats and typed actor compatibility", () => {
     });
   });
 
+  it("recovers after a context-free terminal and fails closed when recovery stays empty", async () => {
+    vi.useFakeTimers();
+    try {
+      const streams = mockChatStreams((request) =>
+        request.url === WORKFLOW_URL
+          ? {
+              frames: [
+                { runStarted: { threadId: RUN_ACTOR, runId: RUN_ACTOR } },
+                ...WORKFLOW_TAIL,
+              ],
+            }
+          : undefined,
+      );
+      let recoveryAttempts = 0;
+      stubFetch((url) => {
+        if (!url.includes("/conversations/create-recovery/")) return undefined;
+        recoveryAttempts += 1;
+        return jsonResponse(
+          { code: "CREATE_NOT_FOUND", message: "Not ready." },
+          404,
+        );
+      });
+      const transport = new AevatarAssistantTransport();
+      const conversation = await transport.createConversation();
+
+      const turn = collectWorkflowTurn(transport, conversation.id, "create");
+      await vi.advanceTimersByTimeAsync(3_000);
+      const events = await turn;
+
+      expect(events.at(-1)).toMatchObject({
+        event: "turn.completed",
+        status: "failed",
+        error: { code: "stream_protocol_error" },
+      });
+      expect(recoveryAttempts).toBe(4);
+      expect(streams).toHaveBeenCalledTimes(1);
+      expect(
+        (await transport.getHistory(conversation.id)).conversation.id,
+      ).toMatch(/^workflow-pending-/);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("recovers a create truncated after RUN_STARTED", async () => {
+    const streams = mockChatStreams((request) =>
+      request.url === WORKFLOW_URL
+        ? {
+            frames: [{ runStarted: { threadId: RUN_ACTOR, runId: RUN_ACTOR } }],
+            completion: {
+              kind: "network_error",
+              code: "stream_closed",
+              message: "truncated",
+            },
+          }
+        : undefined,
+    );
+    const fetchMock = stubFetch((url, init) => {
+      if (url.includes("/conversations/create-recovery/")) {
+        return jsonResponse({
+          status: "append_committed",
+          conversationId: WORKFLOW_CONVERSATION,
+          stateVersion: 3,
+          turnId: WORKFLOW_TURN,
+        });
+      }
+      if (
+        url === `${ASSISTANT_BASE}/conversations/${WORKFLOW_CONVERSATION}` &&
+        (init?.method ?? "GET") === "GET"
+      ) {
+        return jsonResponse(workflowHistory(3, WORKFLOW_TURN));
+      }
+      return undefined;
+    });
+    const transport = new AevatarAssistantTransport();
+    const conversation = await transport.createConversation();
+
+    const events = await collectWorkflowTurn(
+      transport,
+      conversation.id,
+      "create",
+    );
+
+    expect(events.at(-1)).toMatchObject({
+      event: "turn.completed",
+      status: "completed",
+    });
+    expect(streams).toHaveBeenCalledTimes(1);
+    expect(
+      fetchMock.mock.calls.some(([input]) =>
+        String(input).includes("/conversations/create-recovery/"),
+      ),
+    ).toBe(true);
+    expect((await transport.getHistory(conversation.id)).conversation.id).toBe(
+      WORKFLOW_CONVERSATION,
+    );
+  });
+
   it("recovers a context-free create and waits for its assistant transcript", async () => {
     vi.useFakeTimers();
     try {
@@ -6876,22 +6982,33 @@ describe("studio new chats and typed actor compatibility", () => {
     },
   );
 
-  it("continues create recovery in the background after an ambiguous abort", async () => {
-    const streamSpy = vi.spyOn(chatStreamClient, "start").mockImplementation(
-      (request): ChatStreamRequestHandle => ({
-        headers: Promise.resolve({
-          kind: "response",
-          status: 200,
-          contentType: "text/event-stream",
-        }),
-        completion: new Promise<ChatStreamCompletionResult>(() => undefined),
-        cancel() {
-          // The production client settles this through the abort signal. The
-          // transport's independent recovery must not share that signal.
-          void request;
-        },
-      }),
-    );
+  it("adopts abort-path recovery after RUN_STARTED supplied a run actor id", async () => {
+    let markRunStartedDelivered: (() => void) | undefined;
+    const runStartedDelivered = new Promise<void>((resolve) => {
+      markRunStartedDelivered = resolve;
+    });
+    const streamSpy = vi
+      .spyOn(chatStreamClient, "start")
+      .mockImplementation((request): ChatStreamRequestHandle => {
+        queueMicrotask(() => {
+          request.onFrames([
+            { runStarted: { threadId: RUN_ACTOR, runId: RUN_ACTOR } },
+          ]);
+          markRunStartedDelivered?.();
+        });
+        return {
+          headers: Promise.resolve({
+            kind: "response",
+            status: 200,
+            contentType: "text/event-stream",
+          }),
+          completion: new Promise<ChatStreamCompletionResult>(() => undefined),
+          cancel() {
+            // The production client settles this through the abort signal. The
+            // transport's independent recovery must not share that signal.
+          },
+        };
+      });
     const fetchMock = stubFetch((url, init) => {
       if (url.includes("/conversations/create-recovery/")) {
         return jsonResponse({
@@ -6916,6 +7033,7 @@ describe("studio new chats and typed actor compatibility", () => {
       events.push(event);
     });
     await vi.waitFor(() => expect(streamSpy).toHaveBeenCalledTimes(1));
+    await runStartedDelivered;
 
     handle.cancel();
 
@@ -6997,6 +7115,31 @@ describe("studio new chats and typed actor compatibility", () => {
       event: "turn.completed",
       status: "failed",
       error: { code: "stream_protocol_error" },
+    });
+    expect(
+      fetchMock.mock.calls.some(([input]) =>
+        String(input).includes("/conversations/create-recovery/"),
+      ),
+    ).toBe(false);
+  });
+
+  it("accepts workflow context when the local auth user is not hydrated", async () => {
+    useAuthStore.getState().setUser(null);
+    const fetchMock = stubFetch(
+      routeWorkflow([...WORKFLOW_PREAMBLE, ...WORKFLOW_TAIL]),
+    );
+    const transport = new AevatarAssistantTransport();
+    const conversation = await transport.createConversation();
+
+    const events = await collectWorkflowTurn(
+      transport,
+      conversation.id,
+      "create",
+    );
+
+    expect(events.at(-1)).toMatchObject({
+      event: "turn.completed",
+      status: "completed",
     });
     expect(
       fetchMock.mock.calls.some(([input]) =>

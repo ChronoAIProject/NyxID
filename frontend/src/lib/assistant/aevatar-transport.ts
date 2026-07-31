@@ -2609,9 +2609,8 @@ export class AevatarAssistantTransport implements AssistantTransport {
     if (!stored) return false;
     const priorId = stored.conversation.id;
     if (
-      (priorId.startsWith(WORKFLOW_CONVERSATION_PREFIX) &&
-        priorId !== recovery.conversationId) ||
-      (run.turnId !== null && run.turnId !== recovery.turnId)
+      priorId.startsWith(WORKFLOW_CONVERSATION_PREFIX) &&
+      priorId !== recovery.conversationId
     ) {
       throw new AssistantProtocolError(
         "Chat create recovery changed the conversation identity.",
@@ -2646,7 +2645,9 @@ export class AevatarAssistantTransport implements AssistantTransport {
     if (this.activeConversationId === conversationId) {
       this.activeConversationId = recovery.conversationId;
     }
-    run.turnId ??= recovery.turnId;
+    // RUN_STARTED may have supplied a run-actor id from a different identity
+    // space. Chat History owns the recovered turn identity.
+    run.turnId = recovery.turnId;
     const authoritative = this.applyHistoryResponse(
       recovery.conversationId,
       reconciled.body,
@@ -2660,13 +2661,7 @@ export class AevatarAssistantTransport implements AssistantTransport {
     run: RunningTurn,
   ): void {
     if (run.createRecoveryStarted || run.protocol !== "workflow") return;
-    const stored = this.conversations.get(conversationId);
-    if (
-      !stored ||
-      stored.conversation.id.startsWith(WORKFLOW_CONVERSATION_PREFIX)
-    ) {
-      return;
-    }
+    if (!this.workflowCreateNeedsRecovery(conversationId)) return;
     run.createRecoveryStarted = true;
     const recoveryController = new AbortController();
     void this.recoverWorkflowCreate(
@@ -2674,6 +2669,14 @@ export class AevatarAssistantTransport implements AssistantTransport {
       run,
       recoveryController.signal,
     ).catch(() => undefined);
+  }
+
+  private workflowCreateNeedsRecovery(conversationId: string): boolean {
+    return Boolean(
+      this.conversations
+        .get(conversationId)
+        ?.conversation.id.startsWith(PENDING_WORKFLOW_CONVERSATION_PREFIX),
+    );
   }
 
   private async streamWorkflowTurn(
@@ -2727,7 +2730,7 @@ export class AevatarAssistantTransport implements AssistantTransport {
       if (response.kind === "cancelled") return;
       if (response.kind === "network_error") {
         finalFailure = { code: response.code, message: response.message };
-        if (isCreate && !run.deliveryStarted) {
+        if (isCreate && this.workflowCreateNeedsRecovery(conversationId)) {
           run.createRecoveryStarted = true;
           const recoveryController = new AbortController();
           try {
@@ -2761,6 +2764,7 @@ export class AevatarAssistantTransport implements AssistantTransport {
           reservationDelayIndex < RESERVATION_RETRY_DELAYS_MS.length
         ) {
           let refreshed = false;
+          let refreshFailed = false;
           while (reservationDelayIndex < RESERVATION_RETRY_DELAYS_MS.length) {
             const delayMs = RESERVATION_RETRY_DELAYS_MS[reservationDelayIndex]!;
             reservationDelayIndex += 1;
@@ -2799,10 +2803,12 @@ export class AevatarAssistantTransport implements AssistantTransport {
                     ? refreshError.message
                     : "Conversation history could not be refreshed.",
               };
+              refreshFailed = true;
               break;
             }
           }
           if (refreshed) continue;
+          if (refreshFailed) break;
         }
         finalFailure = error;
         break;
@@ -2811,7 +2817,11 @@ export class AevatarAssistantTransport implements AssistantTransport {
       const result = await this.consumeTurnStream(conversationId, run, stream);
       if (result.kind === "settled" || run.finished) return;
       finalFailure = result.error;
-      if (isCreate && !run.deliveryStarted && result.kind === "retryable") {
+      if (
+        isCreate &&
+        this.workflowCreateNeedsRecovery(conversationId) &&
+        result.kind === "retryable"
+      ) {
         run.createRecoveryStarted = true;
         const recoveryController = new AbortController();
         try {
@@ -3053,6 +3063,18 @@ export class AevatarAssistantTransport implements AssistantTransport {
         return this.streamCompletionFailure(completion);
       }
       if (run.deliveryTerminal) {
+        if (
+          run.protocol === "workflow" &&
+          this.workflowCreateNeedsRecovery(conversationId)
+        ) {
+          return {
+            kind: "retryable",
+            error: {
+              code: "stream_protocol_error",
+              message: "Chat completed without a conversation context.",
+            },
+          };
+        }
         this.settleDeliveryTerminal(conversationId, run, run.deliveryTerminal);
         return { kind: "settled" };
       }
@@ -3636,10 +3658,12 @@ export class AevatarAssistantTransport implements AssistantTransport {
 
     const stored = this.conversations.get(conversationId);
     const activeScopeId = useAuthStore.getState().user?.id;
+    // The console always knows its active scope. NyxID can receive a stream
+    // before the auth store hydrates, so enforce the comparison only when the
+    // local user id is known pending a live production capture.
     if (
-      !activeScopeId ||
-      typeof payload.scopeId !== "string" ||
-      payload.scopeId !== activeScopeId
+      activeScopeId &&
+      (typeof payload.scopeId !== "string" || payload.scopeId !== activeScopeId)
     ) {
       run.deliveryProtocolError = {
         code: "stream_protocol_error",
@@ -4555,22 +4579,23 @@ export class AevatarAssistantTransport implements AssistantTransport {
     if (run.actionContinuation) {
       this.keepActionBatchQueued(conversationId, run);
     }
-    if (run.turnId) {
+    if (run.protocol === "workflow") {
+      // Workflow has no stop control. Once a create request was dispatched,
+      // recover its Chat History identity even if RUN_STARTED already supplied
+      // a run-actor id; cancellation cannot prove the create was rejected.
+      if (run.streamDispatched) {
+        this.startCreateRecoveryInBackground(conversationId, run);
+      }
+      run.controller.abort();
+    } else if (run.turnId) {
       run.controller.abort();
       this.requestServerStop(conversationId, run);
-    } else if (!run.streamDispatched || run.protocol === "workflow") {
+    } else if (!run.streamDispatched) {
       // The stream request never left the client (e.g. the send is still
       // queued behind an earlier turn's stop fence): nothing reached
       // upstream, so cancel is purely local. Installing a placeholder here
       // would OVERWRITE that earlier fence and let a later send overtake
       // the still-pending stop.
-      //
-      // Workflow runs take this path unconditionally: the surface has no
-      // `:stop` control, so there is nothing to defer the abort for — the
-      // server run finishes on its own and surfaces on the next reload.
-      if (run.protocol === "workflow" && run.streamDispatched) {
-        this.startCreateRecoveryInBackground(conversationId, run);
-      }
       run.controller.abort();
     } else {
       run.stopPendingStart = true;
