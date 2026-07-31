@@ -745,6 +745,20 @@ export function useActionCardActions(conversationId: string | undefined) {
         pump.restorePrevious();
       }
     },
+    blockAction(blockId: string, note: string): void {
+      if (!conversationId) return;
+      const pump = createTurnEventPump(queryClient, conversationId);
+      try {
+        assistantTransport.blockActionCard(
+          conversationId,
+          blockId,
+          note,
+          pump.onEvent,
+        );
+      } finally {
+        pump.restorePrevious();
+      }
+    },
     async continueAction(report: ActionReport): Promise<void> {
       if (!conversationId) throw new Error("Select a conversation first.");
       // This one does stream a continuation of the run, so it follows the

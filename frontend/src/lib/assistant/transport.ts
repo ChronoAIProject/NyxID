@@ -1,5 +1,6 @@
 import { AevatarAssistantTransport } from "@/lib/assistant/aevatar-transport";
 import { ApiError } from "@/lib/api-client";
+import { composeUnreportedCompletedNote } from "@/lib/assistant/action-notes";
 import { AssistantTurnActiveError } from "@/lib/assistant/errors";
 import {
   assistantMockStore,
@@ -171,7 +172,9 @@ class MockAssistantTransport implements AssistantTransport {
       throw new Error("Action request was not found.");
     }
     if (
+      block.status === "blocked" ||
       block.status === "completed" ||
+      block.status === "conflicted" ||
       block.status === "declined" ||
       block.status === "failed" ||
       block.status === "unsupported"
@@ -189,6 +192,32 @@ class MockAssistantTransport implements AssistantTransport {
     );
   }
 
+  blockActionCard(
+    conversationId: string,
+    blockId: string,
+    note: string,
+    onEvent: (event: TurnEvent) => void = () => undefined,
+  ): void {
+    const block = assistantMockStore.findBlock(conversationId, blockId);
+    if (block?.type !== "action_card") {
+      throw new Error("Action request was not found.");
+    }
+    if (
+      block.status === "completed" ||
+      block.status === "conflicted" ||
+      block.status === "declined" ||
+      block.status === "failed"
+    ) {
+      return;
+    }
+    this.emitLocalActionPatch(
+      conversationId,
+      blockId,
+      { status: "blocked", outcome_note: note },
+      onEvent,
+    );
+  }
+
   continueActions(
     conversationId: string,
     originTurnId: string,
@@ -196,7 +225,53 @@ class MockAssistantTransport implements AssistantTransport {
     onEvent: (event: TurnEvent) => void = () => undefined,
   ): TurnHandle | null {
     const validated = reports.map((report) => actionReportSchema.parse(report));
-    buildActionContinueBody(crypto.randomUUID(), originTurnId, validated);
+    const actionLookup = new Map<string, string>();
+    for (const report of validated) {
+      const messages = assistantMockStore.getHistory(conversationId).messages;
+      const card = messages
+        .flatMap((message) => message.blocks)
+        .find(
+          (block) =>
+            block.type === "action_card" &&
+            block.action_request_id === report.actionRequestId,
+        );
+      if (card?.type === "action_card") {
+        actionLookup.set(report.actionRequestId, card.action);
+      }
+      const refusedByCardState =
+        card?.type === "action_card" &&
+        (card.status === "conflicted" ||
+          (card.status === "blocked" && report.disposition === "completed"));
+      if (refusedByCardState) {
+        if (
+          card?.type === "action_card" &&
+          report.disposition === "completed" &&
+          report.resource
+        ) {
+          this.emitLocalActionPatch(
+            conversationId,
+            card.block_id,
+            {
+              outcome_note: composeUnreportedCompletedNote(
+                card.status,
+                card.outcome_note,
+              ),
+            },
+            onEvent,
+          );
+        }
+        throw new Error(
+          "This action request can no longer be continued from the current card state.",
+        );
+      }
+    }
+    buildActionContinueBody(
+      conversationId,
+      crypto.randomUUID(),
+      originTurnId,
+      validated,
+      actionLookup,
+    );
     for (const report of validated) {
       const messages = assistantMockStore.getHistory(conversationId).messages;
       const card = messages
@@ -215,7 +290,7 @@ class MockAssistantTransport implements AssistantTransport {
             : "failed";
       const outcomeNote =
         report.disposition === "completed"
-          ? "Connected in NyxID. The assistant received only the new service reference."
+          ? "Reported — awaiting assistant verification."
           : report.disposition === "declined"
             ? "You declined this request. No service was connected and no credential was shared."
             : "The connection could not be completed. Ask the assistant to request it again.";

@@ -1,17 +1,16 @@
 import { ApiError, apiClient } from "@/lib/api-client";
 import {
+  ACTION_REQUEST_CONFLICT_NOTE,
+  composeBlockedUnsupportedNote,
+  composeUnreportedCompletedNote,
+} from "@/lib/assistant/action-notes";
+import {
   AssistantConversationNotFoundError,
   AssistantProtocolError,
   AssistantTurnActiveError,
   AssistantTurnCancelledError,
 } from "@/lib/assistant/errors";
 import { resolveAssistantAction } from "@/lib/assistant/action-registry";
-import {
-  connectMarkerToBlock,
-  hasConnectMarker,
-  renderableText,
-  splitConnectMarkers,
-} from "@/lib/assistant/connect-fence";
 import {
   chatStreamClient,
   type ChatStreamCompletionResult,
@@ -379,6 +378,12 @@ interface StoredConversation {
   conversation: Conversation;
   turnState: TurnReducerState;
   /**
+   * Stable hashed request identities keyed by actionRequestId. Valid requests
+   * hash parsed params; recovered requests hash the original unparsed payload.
+   * A fixed-size hash keeps the per-id retention bounded.
+   */
+  actionRequestFingerprints: Map<string, string>;
+  /**
    * Workflow-chat continuation watermark (`chatc-…` conversations only):
    * the last `stateVersion` observed from the transcript read or the
    * turn's `aevatar.chat.context` frame.
@@ -452,8 +457,6 @@ interface RunningTurn {
   currentMessageId: string | null;
   currentBlockId: string | null;
   accumulatedText: string;
-  /** Prose already forwarded as `block.delta`; markers are withheld. */
-  emittedText: string;
   finished: boolean;
   /** Any assistant text streamed this turn (gates the batched-content fallback). */
   sawText: boolean;
@@ -571,57 +574,11 @@ function historyError(
   };
 }
 
-/**
- * Project one message's stored text into typed blocks.
- *
- * This is the only reason connect cards survive a reload. Aevatar's history
- * returns a flat `content` string per message and the FE may call nothing but
- * chat + history, so a card that lived only in a live SSE frame is gone the
- * moment the tab reloads — precisely when it matters, since "I'll go fetch my
- * API key" is the most likely time for a user to navigate away.
- *
- * Messages with no marker keep the exact single-text-block shape they had
- * before, so nothing that doesn't use markers changes behaviour.
- */
 function textToBlocks(
   text: string,
   messageId: string,
 ): readonly ContentBlock[] {
-  if (!hasConnectMarker(text)) {
-    return [{ type: "text", block_id: `${messageId}-text`, text }];
-  }
-  const segments = splitConnectMarkers(text);
-  // The live path opens `${messageId}-text` on TEXT_MESSAGE_START, before it
-  // can know whether the message even begins with prose. So the canonical
-  // projection ALWAYS leads with that block — empty when the message opens
-  // with a marker — and both paths agree block-for-block. Without this the
-  // two diverge in order and id, and a reload silently reshuffles the
-  // transcript.
-  const leading = segments[0]?.kind === "text" ? segments[0].text : "";
-  const blocks: ContentBlock[] = [
-    { type: "text", block_id: `${messageId}-text`, text: leading },
-  ];
-  let textIndex = 1;
-  let connectIndex = 0;
-  for (const segment of segments.slice(segments[0]?.kind === "text" ? 1 : 0)) {
-    if (segment.kind === "text") {
-      blocks.push({
-        type: "text",
-        block_id: `${messageId}-text-${String(textIndex)}`,
-        text: segment.text,
-      });
-      textIndex += 1;
-    } else if (segment.kind === "connect") {
-      blocks.push(
-        connectMarkerToBlock(
-          segment.marker,
-          `${messageId}-connect-${String(connectIndex)}`,
-        ),
-      );
-      connectIndex += 1;
-    }
-  }
-  return blocks;
+  return [{ type: "text", block_id: `${messageId}-text`, text }];
 }
 
 function historyEntryToMessage(
@@ -638,13 +595,7 @@ function historyEntryToMessage(
     id,
     role: entry.role,
     schema_version: 1,
-    // Markers are Aevatar-authored, so only assistant messages carry them;
-    // a user pasting the encoding into chat must never mint a card.
-    blocks: text
-      ? entry.role === "assistant"
-        ? [...textToBlocks(text, id)]
-        : [{ type: "text", block_id: `${id}-text`, text }]
-      : [],
+    blocks: text ? [...textToBlocks(text, id)] : [],
     created_at: isoFromEpochMs(entry.timestamp, new Date(0).toISOString()),
     ...(turnId ? { turnId } : {}),
     ...(status ? { status } : {}),
@@ -684,6 +635,100 @@ function deriveTitle(messages: AssistantMessage[]): string | null {
     return null;
   }
   return firstText.text.trim().slice(0, 40);
+}
+
+function stableJsonValue(value: unknown): unknown {
+  if (Array.isArray(value)) {
+    return value.map((entry) => stableJsonValue(entry));
+  }
+  if (value && typeof value === "object") {
+    const entries = Object.entries(value as Record<string, unknown>).sort(
+      ([left], [right]) =>
+        left < right ? -1 : left > right ? 1 : 0,
+    );
+    return Object.fromEntries(
+      entries.map(([key, entry]) => [key, stableJsonValue(entry)]),
+    );
+  }
+  return value;
+}
+
+function stableJsonText(value: unknown): string {
+  const serialized = JSON.stringify(stableJsonValue(value));
+  return serialized ?? "undefined";
+}
+
+// Non-crypto fingerprint: enough to spot same-id request drift while keeping
+// the retained per-request footprint fixed.
+function fnv1aHex(text: string): string {
+  let hash = 0x811c9dc5;
+  for (const char of text) {
+    hash ^= char.codePointAt(0) ?? 0;
+    hash = Math.imul(hash, 0x01000193) >>> 0;
+  }
+  return hash.toString(16).padStart(8, "0");
+}
+
+function fingerprintStableRequestInput(
+  value: AssistantActionRequest["params"] | unknown,
+): string {
+  return fnv1aHex(stableJsonText(value));
+}
+
+function sameStringArray(
+  left: readonly string[],
+  right: readonly string[],
+): boolean {
+  return (
+    left.length === right.length && left.every((value, index) => value === right[index])
+  );
+}
+
+function sameActionCardParams(
+  left: ActionCardContentBlock["params"],
+  right: ActionCardContentBlock["params"],
+): boolean {
+  if (left.variant !== right.variant) return false;
+  switch (left.variant) {
+    case "catalog":
+      return (
+        right.variant === "catalog" &&
+        left.service_slug === right.service_slug &&
+        sameStringArray(left.requested_scopes, right.requested_scopes) &&
+        left.via_node_id === right.via_node_id &&
+        left.target_org_id === right.target_org_id
+      );
+    case "custom":
+      return (
+        right.variant === "custom" &&
+        left.name === right.name &&
+        left.endpoint_url === right.endpoint_url &&
+        left.auth_method === right.auth_method &&
+        left.auth_key_name === right.auth_key_name &&
+        left.via_node_id === right.via_node_id &&
+        left.target_org_id === right.target_org_id
+      );
+    case "unknown":
+      return right.variant === "unknown";
+  }
+}
+
+function matchesCommittedActionRequest(
+  block: ActionCardContentBlock,
+  request: AssistantActionRequest,
+  params: ActionCardContentBlock["params"],
+  committedFingerprint: string | undefined,
+  requestFingerprint: string,
+): boolean {
+  return (
+    block.action === request.action &&
+    block.origin_turn_id === request.originTurnId &&
+    (block.actor_id ?? "") === request.actorId &&
+    block.task_id === request.taskId &&
+    block.step_id === request.stepId &&
+    sameActionCardParams(block.params, params) &&
+    committedFingerprint === requestFingerprint
+  );
 }
 
 /**
@@ -969,6 +1014,7 @@ export class AevatarAssistantTransport implements AssistantTransport {
     this.conversations.set(conversation.id, {
       conversation,
       turnState: EMPTY_TURN_STATE,
+      actionRequestFingerprints: new Map(),
     });
     return conversation;
   }
@@ -1318,8 +1364,11 @@ export class AevatarAssistantTransport implements AssistantTransport {
     const stream = this.startChatStream(
       conversationId,
       run,
-      `/api/v1${ASSISTANT_PREFIX}/conversations/${conversationId}/approve`,
+      TYPED_CHAT_URL,
       JSON.stringify({
+        type: "approval.resolve",
+        conversationId,
+        clientRequestId: crypto.randomUUID(),
         requestId: card.approval_request_id,
         approved,
       }),
@@ -1447,7 +1496,9 @@ export class AevatarAssistantTransport implements AssistantTransport {
     const card = this.findActionCard(conversationId, blockId);
     if (!card) throw new Error("Action request was not found.");
     if (
+      card.status === "blocked" ||
       card.status === "completed" ||
+      card.status === "conflicted" ||
       card.status === "declined" ||
       card.status === "failed" ||
       card.status === "unsupported"
@@ -1460,6 +1511,43 @@ export class AevatarAssistantTransport implements AssistantTransport {
       {
         status: inProgress ? "in_progress" : "pending",
         outcome_note: "",
+      },
+      onEvent,
+    );
+  }
+
+  blockActionCard(
+    conversationId: string,
+    blockId: string,
+    note: string,
+    onEvent: (event: TurnEvent) => void = noopEvent,
+  ): void {
+    if (!this.conversations.has(conversationId)) {
+      throw new Error("Conversation was not found.");
+    }
+    if (
+      this.deletingConversations.has(
+        this.canonicalConversationId(conversationId),
+      )
+    ) {
+      throw new Error("This conversation is being deleted.");
+    }
+    const card = this.findActionCard(conversationId, blockId);
+    if (!card) throw new Error("Action request was not found.");
+    if (
+      card.status === "completed" ||
+      card.status === "conflicted" ||
+      card.status === "declined" ||
+      card.status === "failed"
+    ) {
+      return;
+    }
+    this.emitLocalBlockPatch(
+      conversationId,
+      blockId,
+      {
+        status: "blocked",
+        outcome_note: note,
       },
       onEvent,
     );
@@ -1484,9 +1572,46 @@ export class AevatarAssistantTransport implements AssistantTransport {
     const validatedReports = reports.map((report) =>
       actionReportSchema.parse(report),
     );
+    const reportActionLookup = new Map<string, string>();
+    for (const report of validatedReports) {
+      const card = this.findActionCardByRequestId(
+        conversationId,
+        report.actionRequestId,
+      );
+      if (card?.action) {
+        reportActionLookup.set(report.actionRequestId, card.action);
+      }
+      const refusedByCardState =
+        card?.status === "conflicted" ||
+        (card?.status === "blocked" && report.disposition === "completed");
+      if (refusedByCardState) {
+        if (card && report.disposition === "completed" && report.resource) {
+          this.emitLocalBlockPatch(
+            conversationId,
+            card.block_id,
+            {
+              outcome_note: composeUnreportedCompletedNote(
+                card.status,
+                card.outcome_note,
+              ),
+            },
+            onEvent,
+          );
+        }
+        throw new AssistantProtocolError(
+          "This action request can no longer be continued from the current card state.",
+        );
+      }
+    }
     // Validate origin matching, non-empty actions and duplicate ids before
     // changing any card. The real client id is allocated only when drained.
-    buildActionContinueBody("validation", originTurnId, validatedReports);
+    buildActionContinueBody(
+      this.canonicalConversationId(conversationId),
+      "validation",
+      originTurnId,
+      validatedReports,
+      reportActionLookup,
+    );
 
     const stored = this.conversations.get(conversationId);
     const actorIds = new Set(
@@ -1591,11 +1716,11 @@ export class AevatarAssistantTransport implements AssistantTransport {
       throw new AssistantTurnActiveError();
     }
 
-    const body = buildActionWakeBody(crypto.randomUUID(), originTurnId);
+    const body = buildActionWakeBody(actorId, crypto.randomUUID(), originTurnId);
     const run = this.newRun(onEvent, null, "actor");
     run.cursor = stored.turnState.lastCursor;
     this.running.set(requestedId, run);
-    void this.streamActionContinuation(requestedId, actorId, run, body);
+    void this.streamActionContinuation(requestedId, run, body);
     return {
       get turnId() {
         return run.turnId;
@@ -1673,7 +1798,7 @@ export class AevatarAssistantTransport implements AssistantTransport {
 
   private actionOutcomeNote(disposition: ActionReport["disposition"]): string {
     if (disposition === "completed") {
-      return "Connected in NyxID. Sending the new service reference to the assistant.";
+      return "Reporting the new service reference to the assistant.";
     }
     if (disposition === "declined") {
       return "You declined this request. Sending the decision to the assistant; no credential was shared.";
@@ -1687,8 +1812,8 @@ export class AevatarAssistantTransport implements AssistantTransport {
   ): string {
     if (disposition === "completed") {
       return delivered
-        ? "Connected in NyxID. The assistant received only the new service reference."
-        : "Connected in NyxID. The service reference has not reached the assistant; delivery will retry after the next turn.";
+        ? "Reported — awaiting assistant verification."
+        : "The new service reference has not reached the assistant; delivery will retry after the next turn.";
     }
     if (disposition === "declined") {
       return delivered
@@ -1757,10 +1882,21 @@ export class AevatarAssistantTransport implements AssistantTransport {
     }
 
     batch.clientRequestId ??= crypto.randomUUID();
+    const reportActionLookup = new Map(
+      [...batch.reports.keys()].flatMap((actionRequestId) => {
+        const action = this.findActionCardByRequestId(
+          conversationId,
+          actionRequestId,
+        )?.action;
+        return action ? [[actionRequestId, action] as const] : [];
+      }),
+    );
     const body = buildActionContinueBody(
+      batch.actorId,
       batch.clientRequestId,
       batch.originTurnId,
       [...batch.reports.values()],
+      reportActionLookup,
     );
     const run = this.newRun(batch.onEvent, null, "actor");
     run.cursor = stored.turnState.lastCursor;
@@ -1771,12 +1907,7 @@ export class AevatarAssistantTransport implements AssistantTransport {
     };
     batch.inFlight = true;
     this.running.set(conversationId, run);
-    void this.streamActionContinuation(
-      conversationId,
-      batch.actorId,
-      run,
-      body,
-    );
+    void this.streamActionContinuation(conversationId, run, body);
     return {
       get turnId() {
         return run.turnId;
@@ -1873,6 +2004,8 @@ export class AevatarAssistantTransport implements AssistantTransport {
     this.conversations.set(id, {
       conversation,
       turnState: existing?.turnState ?? EMPTY_TURN_STATE,
+      actionRequestFingerprints:
+        existing?.actionRequestFingerprints ?? new Map(),
       stateVersion: existing?.stateVersion,
     });
   }
@@ -1925,6 +2058,8 @@ export class AevatarAssistantTransport implements AssistantTransport {
         activeTurn: existing?.turnState.activeTurn ?? null,
         lastCursor: existing?.turnState.lastCursor ?? 0,
       },
+      actionRequestFingerprints:
+        existing?.actionRequestFingerprints ?? new Map(),
       stateVersion: freshStateVersion ?? existing?.stateVersion,
     };
     this.conversations.set(conversationId, stored);
@@ -1949,7 +2084,6 @@ export class AevatarAssistantTransport implements AssistantTransport {
       currentMessageId: null,
       currentBlockId: null,
       accumulatedText: "",
-      emittedText: "",
       finished: false,
       sawText: false,
       activityMessageId: null,
@@ -2080,12 +2214,10 @@ export class AevatarAssistantTransport implements AssistantTransport {
               }),
             }
           : {
-              url: `/api/v1${ASSISTANT_PREFIX}/conversations/${conversationId}/stream`,
+              url: TYPED_CHAT_URL,
               bodyText: JSON.stringify({
-                // Aevatar NyxIdChatEndpoints.Streaming.cs:58 uses an ordinal
-                // discriminator comparison, so a normal turn requires this
-                // exact lowercase value.
                 type: "text",
+                conversationId,
                 prompt,
                 clientRequestId: run.clientRequestId,
               }),
@@ -2142,7 +2274,6 @@ export class AevatarAssistantTransport implements AssistantTransport {
 
   private async streamActionContinuation(
     conversationId: string,
-    actorId: string,
     run: RunningTurn,
     body: ActionContinueBody | ActionWakeBody,
   ): Promise<void> {
@@ -2167,7 +2298,7 @@ export class AevatarAssistantTransport implements AssistantTransport {
       const stream = this.startChatStream(
         conversationId,
         run,
-        `/api/v1${ASSISTANT_PREFIX}/conversations/${encodeURIComponent(actorId)}/stream`,
+        TYPED_CHAT_URL,
         bodyText,
       );
       const response = await stream.headers;
@@ -2545,7 +2676,6 @@ export class AevatarAssistantTransport implements AssistantTransport {
         run.currentMessageId = messageId;
         run.currentBlockId = `${messageId}-text`;
         run.accumulatedText = "";
-        run.emittedText = "";
         this.emit(conversationId, run, {
           cursor: this.nextCursor(run),
           event: "message.started",
@@ -2567,20 +2697,11 @@ export class AevatarAssistantTransport implements AssistantTransport {
         if (!delta || !run.currentBlockId) return;
         run.accumulatedText += delta;
         run.sawText = true;
-        // Stream only text the user should see. A connect marker is
-        // structure, not prose: emitting it raw would flash half-written
-        // JSON into the transcript before the card replaces it at message
-        // end. `renderableText` withholds the marker (and anything after an
-        // unterminated one), so we forward just the newly-safe suffix.
-        const safeText = renderableText(run.accumulatedText);
-        if (safeText.length <= run.emittedText.length) return;
-        const pending = safeText.slice(run.emittedText.length);
-        run.emittedText = safeText;
         this.emit(conversationId, run, {
           cursor: this.nextCursor(run),
           event: "block.delta",
           block_id: run.currentBlockId,
-          text: pending,
+          text: delta,
         });
         return;
       }
@@ -2761,11 +2882,21 @@ export class AevatarAssistantTransport implements AssistantTransport {
       case "nyxid.action.request": {
         const request = assistantActionRequestSchema.safeParse(payload);
         if (request.success) {
-          this.addActionCard(conversationId, run, request.data);
+          this.addActionCard(
+            conversationId,
+            run,
+            request.data,
+            fingerprintStableRequestInput(request.data.params),
+          );
         } else {
           const unsupported = recoverUnsupportedAssistantActionRequest(payload);
           if (unsupported) {
-            this.addActionCard(conversationId, run, unsupported);
+            this.addActionCard(
+              conversationId,
+              run,
+              unsupported,
+              fingerprintStableRequestInput(payload),
+            );
           }
         }
         return;
@@ -3150,6 +3281,7 @@ export class AevatarAssistantTransport implements AssistantTransport {
     conversationId: string,
     run: RunningTurn,
     request: AssistantActionRequest,
+    requestFingerprint: string,
   ): void {
     const resolved = resolveAssistantAction(request);
     const stored = this.conversations.get(conversationId);
@@ -3164,32 +3296,63 @@ export class AevatarAssistantTransport implements AssistantTransport {
       run.promptedActionIds.get(request.actionRequestId) ?? existing?.block_id;
     if (knownBlockId) {
       run.promptedActionIds.set(request.actionRequestId, knownBlockId);
+      if (!existing) return;
       const terminal =
-        existing?.status === "completed" ||
-        existing?.status === "declined" ||
-        existing?.status === "failed";
-      // A re-emission the client can no longer service (server upgraded past
-      // this schema version, or the verb left the registry) must downgrade the
-      // card to `unsupported` — leaving it `pending` would render a CTA with
-      // no journey behind it. Already-resolved cards keep their receipt.
-      const status: ActionCardStatus = terminal
-        ? existing.status
-        : !resolved.supported
-          ? "unsupported"
-          : existing?.status === "in_progress"
-            ? "in_progress"
-            : "pending";
+        existing.status === "completed" ||
+        existing.status === "conflicted" ||
+        existing.status === "declined" ||
+        existing.status === "failed";
+      if (
+        !matchesCommittedActionRequest(
+          existing,
+          request,
+          resolved.params,
+          stored?.actionRequestFingerprints.get(request.actionRequestId),
+          requestFingerprint,
+        )
+      ) {
+        if (terminal) return;
+        this.emit(conversationId, run, {
+          cursor: this.nextCursor(run),
+          event: "block.updated",
+          block_id: knownBlockId,
+          patch: {
+            status: "conflicted",
+            outcome_note: ACTION_REQUEST_CONFLICT_NOTE,
+          },
+        });
+        return;
+      }
+      stored?.actionRequestFingerprints.set(
+        request.actionRequestId,
+        requestFingerprint,
+      );
+      if (existing.status === "blocked") {
+        const nextStatus = resolved.supported ? "pending" : "unsupported";
+        this.emit(conversationId, run, {
+          cursor: this.nextCursor(run),
+          event: "block.updated",
+          block_id: knownBlockId,
+          patch: {
+            status: nextStatus,
+            outcome_note:
+              nextStatus === "unsupported"
+                ? composeBlockedUnsupportedNote(existing.outcome_note)
+                : "",
+          },
+        });
+        return;
+      }
+      if (terminal || resolved.supported || existing.status === "unsupported") {
+        return;
+      }
       this.emit(conversationId, run, {
         cursor: this.nextCursor(run),
         event: "block.updated",
         block_id: knownBlockId,
         patch: {
-          action: request.action,
-          origin_turn_id: request.originTurnId,
-          actor_id: request.actorId || undefined,
-          params: resolved.params,
-          status,
-          outcome_note: terminal ? existing.outcome_note : "",
+          status: "unsupported",
+          outcome_note: "",
         },
       });
       return;
@@ -3202,12 +3365,18 @@ export class AevatarAssistantTransport implements AssistantTransport {
       action_request_id: request.actionRequestId,
       origin_turn_id: request.originTurnId,
       actor_id: request.actorId || undefined,
+      task_id: request.taskId,
+      step_id: request.stepId,
       params: resolved.params,
       status: resolved.supported ? "pending" : "unsupported",
       outcome_note: "",
     };
     this.appendActivityBlock(conversationId, run, block);
     run.promptedActionIds.set(request.actionRequestId, block.block_id);
+    stored?.actionRequestFingerprints.set(
+      request.actionRequestId,
+      requestFingerprint,
+    );
     // Deliberately excluded from openCards: this browser action remains
     // interactive after the origin run reaches its normal terminal frame.
   }
@@ -3504,15 +3673,9 @@ export class AevatarAssistantTransport implements AssistantTransport {
   private closeOpenMessage(conversationId: string, run: RunningTurn): void {
     if (!run.currentMessageId || !run.currentBlockId) return;
     const messageId = run.currentMessageId;
-    // One projection for both paths. `textToBlocks` is the same function
-    // `historyEntryToMessage` uses, so the blocks a live turn produces are
-    // block-for-block identical to what a reload replays — same order, same
-    // ids, same text. Deriving them separately here is how they drift.
     const blocks = textToBlocks(run.accumulatedText, messageId);
-    const [leadingBlock, ...appended] = blocks;
+    const [leadingBlock] = blocks;
 
-    // The leading block is already open from TEXT_MESSAGE_START; complete it
-    // in place under its existing id rather than starting a second one.
     this.emit(conversationId, run, {
       cursor: this.nextCursor(run),
       event: "block.completed",
@@ -3523,23 +3686,6 @@ export class AevatarAssistantTransport implements AssistantTransport {
           : { type: "text", block_id: run.currentBlockId, text: "" },
     });
 
-    appended.forEach((block, offset) => {
-      this.emit(conversationId, run, {
-        cursor: this.nextCursor(run),
-        event: "block.started",
-        message_id: messageId,
-        block_id: block.block_id,
-        index: offset + 1,
-        block,
-      });
-      this.emit(conversationId, run, {
-        cursor: this.nextCursor(run),
-        event: "block.completed",
-        block_id: block.block_id,
-        block,
-      });
-    });
-
     this.emit(conversationId, run, {
       cursor: this.nextCursor(run),
       event: "message.completed",
@@ -3548,7 +3694,6 @@ export class AevatarAssistantTransport implements AssistantTransport {
     run.currentMessageId = null;
     run.currentBlockId = null;
     run.accumulatedText = "";
-    run.emittedText = "";
   }
 
   /**
@@ -3730,17 +3875,11 @@ export class AevatarAssistantTransport implements AssistantTransport {
     }
     this.clearWatchdog(run);
     if (run.currentBlockId) {
-      // Cancel runs the SAME projection as a normal message close. Two things
-      // go wrong otherwise: the partial text is emitted raw, so a marker the
-      // streaming path deliberately withheld leaks into the transcript as
-      // visible prose; and any card in the cancelled text is never emitted, so
-      // stopping a turn and then reloading it show different transcripts.
       const messageId = run.currentMessageId;
-      const projected = textToBlocks(
+      const [leadingBlock] = textToBlocks(
         run.accumulatedText,
         messageId ?? run.currentBlockId,
       );
-      const [leadingBlock, ...appended] = projected;
       const stored = this.conversations.get(conversationId);
       const openBlock = stored?.turnState.messages
         .flatMap((message) => message.blocks)
@@ -3757,22 +3896,6 @@ export class AevatarAssistantTransport implements AssistantTransport {
               : { type: "text", block_id: run.currentBlockId, text: "" },
       });
       if (messageId) {
-        appended.forEach((block, offset) => {
-          this.emit(conversationId, run, {
-            cursor: this.nextCursor(run),
-            event: "block.started",
-            message_id: messageId,
-            block_id: block.block_id,
-            index: offset + 1,
-            block,
-          });
-          this.emit(conversationId, run, {
-            cursor: this.nextCursor(run),
-            event: "block.completed",
-            block_id: block.block_id,
-            block: toTerminalBlock(block),
-          });
-        });
         this.emit(conversationId, run, {
           cursor: this.nextCursor(run),
           event: "message.completed",
@@ -3782,7 +3905,6 @@ export class AevatarAssistantTransport implements AssistantTransport {
       run.currentMessageId = null;
       run.currentBlockId = null;
       run.accumulatedText = "";
-      run.emittedText = "";
     }
     this.finalizeActivity(conversationId, run, "cancelled");
     if (run.turnId) {
@@ -3812,9 +3934,8 @@ export class AevatarAssistantTransport implements AssistantTransport {
     conversationId: string,
     run: RunningTurn,
   ): Promise<void> | null {
-    // The workflow surface has no `:stop` route (run control lives on
-    // scope-service `runs/{runId}:stop`, which this mount does not proxy);
-    // posting the actor-surface stop for a `chatc-…` id would only 404.
+    // The workflow surface still stops elsewhere (`runs/{runId}:stop`), so
+    // only typed assistant conversations use the canonical chat command here.
     if (run.protocol === "workflow") return null;
     if (!run.turnId) return null;
     const actorConversationId = this.canonicalConversationId(conversationId);
@@ -3829,10 +3950,12 @@ export class AevatarAssistantTransport implements AssistantTransport {
       STOP_REQUEST_DEADLINE_MS,
     );
     const pending = apiClient<unknown>(
-      `${ASSISTANT_PREFIX}/conversations/${actorConversationId}/stop`,
+      `${ASSISTANT_PREFIX}/chat`,
       {
         method: "POST",
         body: {
+          type: "task.stop",
+          conversationId: actorConversationId,
           turnId: run.turnId,
           stopRequestId: crypto.randomUUID(),
           clientRequestId: crypto.randomUUID(),

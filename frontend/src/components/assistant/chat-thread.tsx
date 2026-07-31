@@ -71,6 +71,7 @@ function renderBlock(
   block: unknown,
   onDecideApproval: (blockId: string, approved: boolean) => Promise<void>,
   onActionProgress: (blockId: string, inProgress: boolean) => void,
+  onBlockAction: (blockId: string, note: string) => void,
   onResolveAction: (report: ActionReport) => Promise<void>,
   streaming = false,
 ) {
@@ -97,6 +98,7 @@ function renderBlock(
         <ActionCard
           block={typed}
           onProgress={onActionProgress}
+          onBlock={onBlockAction}
           onResolve={onResolveAction}
         />
       );
@@ -478,6 +480,7 @@ export function ChatThread({
   bottomInset = 0,
   onDecideApproval,
   onActionProgress = () => undefined,
+  onBlockAction = () => undefined,
   onResolveAction = async () => undefined,
 }: {
   readonly messages: readonly AssistantMessage[];
@@ -515,6 +518,7 @@ export function ChatThread({
     approved: boolean,
   ) => Promise<void>;
   readonly onActionProgress?: (blockId: string, inProgress: boolean) => void;
+  readonly onBlockAction?: (blockId: string, note: string) => void;
   readonly onResolveAction?: (report: ActionReport) => Promise<void>;
 }) {
   const rootRef = useRef<HTMLDivElement>(null);
@@ -694,6 +698,7 @@ export function ChatThread({
                                 block,
                                 onDecideApproval,
                                 onActionProgress,
+                                onBlockAction,
                                 onResolveAction,
                               )}
                             </div>
@@ -748,6 +753,7 @@ export function ChatThread({
                                 block,
                                 onDecideApproval,
                                 onActionProgress,
+                                onBlockAction,
                                 onResolveAction,
                                 streamingGroup &&
                                   isLastBlock &&

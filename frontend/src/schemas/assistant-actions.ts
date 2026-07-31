@@ -1,6 +1,7 @@
 import { z } from "zod";
 
 export const ACTION_SCHEMA_VERSION = 4;
+export const ACTION_SERVICE_SLUG_PATTERN = /^[A-Za-z0-9._-]{1,128}$/;
 
 // Aevatar uses these values as control-plane identities. Keep this stricter
 // than a generic non-empty string so an invalid report never reaches /stream.
@@ -23,6 +24,10 @@ const requiredWireStringSchema = z
   .transform((value) => value.trim())
   .pipe(z.string().min(1));
 
+const SECRET_VALUE = /(Bearer\s+)[A-Za-z0-9._~+/-]+|nyx(?:id)?_[A-Za-z0-9_-]{8,}/gi;
+const FORBIDDEN_ACTION_KEY =
+  /(?:^|[_-])(authorization|api[-_]?key|token|secret|password|credential|cookie|user[-_]?code|device[-_]?code)(?:$|[_-])/i;
+
 export const customServiceAuthMethodSchema = z.enum([
   "bearer",
   "header",
@@ -36,7 +41,11 @@ export const customServiceAuthMethodSchema = z.enum([
 export const catalogServiceActionParamsSchema = z
   .object({
     serviceSlug: requiredWireStringSchema,
-    requestedScopes: z.array(z.string().max(256)).optional().default([]),
+    requestedScopes: z
+      .array(z.string().max(256))
+      .max(64)
+      .optional()
+      .default([]),
     viaNodeId: wireIdSchema,
     targetOrgId: wireIdSchema,
   })
@@ -78,7 +87,16 @@ export const assistantActionRequestSchema = z
     action: requiredWireStringSchema,
     params: assistantActionParamsSchema,
   })
-  .strict();
+  .strict()
+  .superRefine((request, context) => {
+    const secretPath = findSecretPath(request);
+    if (!secretPath) return;
+    context.addIssue({
+      code: "custom",
+      path: [...secretPath],
+      message: "Action request contained secret material",
+    });
+  });
 
 export type AssistantActionRequest = z.infer<
   typeof assistantActionRequestSchema
@@ -206,6 +224,7 @@ export const actionReportSchema = z
 export const actionContinueBodySchema = z
   .object({
     type: z.literal("action.continue"),
+    conversationId: actionControlIdentitySchema,
     clientRequestId: actionControlIdentitySchema,
     originTurnId: actionControlIdentitySchema,
     actions: z.array(actionReportSchema).min(1),
@@ -235,8 +254,9 @@ export const actionContinueBodySchema = z
 export const actionWakeBodySchema = z
   .object({
     type: z.literal("action.continue"),
+    conversationId: actionControlIdentitySchema,
     clientRequestId: actionControlIdentitySchema,
-    originTurnId: actionControlIdentitySchema,
+    originTurnId: actionControlIdentitySchema.optional(),
     actions: z.tuple([]),
   })
   .strict();
@@ -246,6 +266,71 @@ export type ActionResource = z.infer<typeof actionResourceSchema>;
 export type ActionReport = z.infer<typeof actionReportSchema>;
 export type ActionContinueBody = z.infer<typeof actionContinueBodySchema>;
 export type ActionWakeBody = z.infer<typeof actionWakeBodySchema>;
+export type ActionReportActionLookup =
+  | ReadonlyMap<string, string>
+  | Readonly<Record<string, string | undefined>>;
+
+function matchesSecretValue(value: string): boolean {
+  SECRET_VALUE.lastIndex = 0;
+  return SECRET_VALUE.test(value);
+}
+
+function findSecretPath(
+  value: unknown,
+  path: ReadonlyArray<string | number> = [],
+): ReadonlyArray<string | number> | null {
+  if (typeof value === "string") {
+    return matchesSecretValue(value) ? path : null;
+  }
+  if (Array.isArray(value)) {
+    for (const [index, entry] of value.entries()) {
+      const entryPath = findSecretPath(entry, [...path, index]);
+      if (entryPath) return entryPath;
+    }
+    return null;
+  }
+  if (typeof value !== "object" || value === null) return null;
+
+  for (const [key, entry] of Object.entries(value)) {
+    // The current request schemas are `.strict()`, so undeclared members are
+    // rejected before this key scan can fire. Keep the scan anyway as
+    // defense-in-depth for any future schema widening or nested passthrough.
+    if (FORBIDDEN_ACTION_KEY.test(key)) return [...path, key];
+    const entryPath = findSecretPath(entry, [...path, key]);
+    if (entryPath) return entryPath;
+  }
+  return null;
+}
+
+function actionForReport(
+  actionRequestId: string,
+  reportActions: ActionReportActionLookup,
+): string | undefined {
+  if (reportActions instanceof Map) {
+    return reportActions.get(actionRequestId);
+  }
+  return (reportActions as Readonly<Record<string, string | undefined>>)[
+    actionRequestId
+  ];
+}
+
+function assertReportMatchesAction(
+  report: ActionReport,
+  action: string | undefined,
+): void {
+  if (report.disposition !== "completed") return;
+  if (
+    action === "service.connect" &&
+    (!report.resource || !("userService" in report.resource))
+  ) {
+    throw new Error(
+      "service.connect completed reports must include resource.userService.userServiceId",
+    );
+  }
+  if (!report.resource) {
+    throw new Error("Completed action reports must include a resource reference");
+  }
+}
 
 function copyResource(resource: ActionResource): ActionResource {
   if ("userService" in resource) {
@@ -270,11 +355,17 @@ function copyResource(resource: ActionResource): ActionResource {
 
 /** Build the strict DTO from an explicit allowlist of wire members. */
 export function buildActionContinueBody(
+  conversationId: string,
   clientRequestId: string,
   originTurnId: string,
   reports: readonly ActionReport[],
+  reportActions: ActionReportActionLookup,
 ): ActionContinueBody {
   const actions = reports.map((report): ActionReport => {
+    assertReportMatchesAction(
+      report,
+      actionForReport(report.actionRequestId, reportActions),
+    );
     if (report.resource) {
       return {
         actionRequestId: report.actionRequestId,
@@ -291,6 +382,7 @@ export function buildActionContinueBody(
   });
   return actionContinueBodySchema.parse({
     type: "action.continue",
+    conversationId,
     clientRequestId,
     originTurnId,
     actions,
@@ -299,11 +391,13 @@ export function buildActionContinueBody(
 
 /** Build the distinct out-of-band wake DTO with no action reports. */
 export function buildActionWakeBody(
+  conversationId: string,
   clientRequestId: string,
-  originTurnId: string,
+  originTurnId?: string,
 ): ActionWakeBody {
   return actionWakeBodySchema.parse({
     type: "action.continue",
+    conversationId,
     clientRequestId,
     originTurnId,
     actions: [],

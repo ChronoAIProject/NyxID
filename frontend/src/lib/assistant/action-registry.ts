@@ -1,5 +1,6 @@
 import {
   ACTION_SCHEMA_VERSION,
+  ACTION_SERVICE_SLUG_PATTERN,
   type ActionCardParams,
   type AssistantActionRequest,
 } from "@/schemas/assistant-actions";
@@ -31,6 +32,7 @@ const SERVICE_LABELS: Readonly<Record<string, string>> = {
  * verify") can never masquerade as NyxID-authored consent copy.
  */
 const MAX_SERVICE_LABEL_CHARS = 32;
+const AUTH_KEY_NAME_PATTERN = /^[!#$%&'*+.^_`|~0-9A-Za-z-]{1,256}$/;
 
 export function clampServiceLabel(value: string): string {
   const collapsed = value
@@ -102,40 +104,56 @@ function nullableId(value: string): string | null {
   return trimmed || null;
 }
 
-function safeEndpointUrl(value: string): string {
+function safeCatalogServiceSlug(value: string): string | null {
   const trimmed = value.trim();
-  if (!trimmed) return "";
+  return ACTION_SERVICE_SLUG_PATTERN.test(trimmed) ? trimmed : null;
+}
+
+function safeEndpointUrl(value: string): string | null {
+  const trimmed = value.trim();
+  if (!trimmed) return null;
   try {
     const parsed = new URL(trimmed);
-    if (parsed.protocol !== "http:" && parsed.protocol !== "https:") return "";
-    if (parsed.username || parsed.password) return "";
+    if (parsed.protocol !== "https:") return null;
+    if (!parsed.hostname) return null;
+    if (parsed.username || parsed.password) return null;
+    if (parsed.search || parsed.hash) return null;
     return parsed.toString();
   } catch {
-    // Leave an invalid/missing field blank so the user can complete it in the
-    // wizard instead of rejecting the whole custom-service journey.
-    return "";
+    return null;
   }
+}
+
+function safeAuthKeyName(value: string): string | null {
+  const trimmed = value.trim();
+  if (!trimmed) return "";
+  return AUTH_KEY_NAME_PATTERN.test(trimmed) ? trimmed : null;
 }
 
 function normalizeParams(request: AssistantActionRequest): ActionCardParams {
   const catalog = request.params.catalogService;
   const custom = request.params.customService;
   if (catalog && !custom) {
+    const serviceSlug = safeCatalogServiceSlug(catalog.serviceSlug);
+    if (!serviceSlug) return { variant: "unknown" };
     return {
       variant: "catalog",
-      service_slug: catalog.serviceSlug.trim(),
+      service_slug: serviceSlug,
       requested_scopes: catalog.requestedScopes.map((scope) => scope.trim()),
       via_node_id: nullableId(catalog.viaNodeId),
       target_org_id: nullableId(catalog.targetOrgId),
     };
   }
   if (custom && !catalog) {
+    const endpointUrl = safeEndpointUrl(custom.endpointUrl);
+    const authKeyName = safeAuthKeyName(custom.authKeyName);
+    if (!endpointUrl || authKeyName === null) return { variant: "unknown" };
     return {
       variant: "custom",
       name: custom.name.trim(),
-      endpoint_url: safeEndpointUrl(custom.endpointUrl),
+      endpoint_url: endpointUrl,
       auth_method: custom.authMethod.trim(),
-      auth_key_name: custom.authKeyName.trim(),
+      auth_key_name: authKeyName,
       via_node_id: nullableId(custom.viaNodeId),
       target_org_id: nullableId(custom.targetOrgId),
     };

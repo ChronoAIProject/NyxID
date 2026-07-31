@@ -83,6 +83,63 @@ describe("assistant action request schema", () => {
     });
   });
 
+  it("resolves bad catalog slugs and insecure custom urls as unsupported", () => {
+    const badSlug = assistantActionRequestSchema.parse({
+      ...BASE_REQUEST,
+      actionRequestId: "act-bad-slug",
+      params: { catalogService: { serviceSlug: "api github" } },
+    });
+    const httpUrl = assistantActionRequestSchema.parse({
+      ...BASE_REQUEST,
+      actionRequestId: "act-http",
+      params: {
+        customService: {
+          name: "Build API",
+          endpointUrl: "http://build.example.test/v1",
+        },
+      },
+    });
+    const queryUrl = assistantActionRequestSchema.parse({
+      ...BASE_REQUEST,
+      actionRequestId: "act-query",
+      params: {
+        customService: {
+          name: "Build API",
+          endpointUrl: "https://build.example.test/v1?token=nope",
+        },
+      },
+    });
+    const fragmentUrl = assistantActionRequestSchema.parse({
+      ...BASE_REQUEST,
+      actionRequestId: "act-fragment",
+      params: {
+        customService: {
+          name: "Build API",
+          endpointUrl: "https://build.example.test/v1#secret",
+        },
+      },
+    });
+    const badAuthKeyName = assistantActionRequestSchema.parse({
+      ...BASE_REQUEST,
+      actionRequestId: "act-bad-auth-key",
+      params: {
+        customService: {
+          name: "Build API",
+          endpointUrl: "https://build.example.test/v1",
+          authMethod: "header",
+          authKeyName: "X Auth",
+        },
+      },
+    });
+
+    for (const request of [badSlug, httpUrl, queryUrl, fragmentUrl, badAuthKeyName]) {
+      expect(resolveAssistantAction(request)).toMatchObject({
+        supported: false,
+        params: { variant: "unknown" },
+      });
+    }
+  });
+
   it("routes a wrong schema version and unknown verb to the fallback", () => {
     const wrongVersion = assistantActionRequestSchema.parse({
       ...BASE_REQUEST,
@@ -143,6 +200,17 @@ describe("assistant action request schema", () => {
           },
         },
       },
+      {
+        ...BASE_REQUEST,
+        params: {
+          catalogService: {
+            serviceSlug: "api-github",
+            requestedScopes: Array.from({ length: 65 }, (_, index) => {
+              return `scope-${String(index)}`;
+            }),
+          },
+        },
+      },
     ];
 
     for (const request of invalidRequests) {
@@ -180,11 +248,46 @@ describe("assistant action request schema", () => {
       },
     });
   });
+
+  it("fails closed on undeclared members and secret-shaped values", () => {
+    const undeclaredMember = {
+      ...BASE_REQUEST,
+      params: {
+        customService: {
+          name: "Build API",
+          endpointUrl: "https://build.example.test/v1",
+          authMethod: "header",
+          authKeyName: "Authorization",
+          deviceCode: "nyx_adc_secret1234",
+        },
+      },
+    };
+    const secretValue = {
+      ...BASE_REQUEST,
+      params: {
+        customService: {
+          name: "Build API",
+          endpointUrl: "https://build.example.test/v1",
+          authMethod: "header",
+          authKeyName: "X-Auth",
+          targetOrgId: "Bearer top-secret-value",
+        },
+      },
+    };
+
+    expect(
+      assistantActionRequestSchema.safeParse(undeclaredMember).success,
+    ).toBe(false);
+    expect(assistantActionRequestSchema.safeParse(secretValue).success).toBe(
+      false,
+    );
+  });
 });
 
 describe("action continuation schema", () => {
   it("builds the exact strict completed body with a safe resource ref", () => {
     const body = buildActionContinueBody(
+      "nyxid-chat-actor-1",
       "00000000-0000-4000-8000-000000000001",
       "turn-origin-1",
       [
@@ -199,10 +302,12 @@ describe("action continuation schema", () => {
           },
         },
       ],
+      new Map([["act-1", "service.connect"]]),
     );
 
     expect(Object.keys(body)).toEqual([
       "type",
+      "conversationId",
       "clientRequestId",
       "originTurnId",
       "actions",
@@ -215,6 +320,7 @@ describe("action continuation schema", () => {
     ]);
     expect(body).toEqual({
       type: "action.continue",
+      conversationId: "nyxid-chat-actor-1",
       clientRequestId: "00000000-0000-4000-8000-000000000001",
       originTurnId: "turn-origin-1",
       actions: [
@@ -240,6 +346,7 @@ describe("action continuation schema", () => {
     } as const;
     const base = {
       type: "action.continue",
+      conversationId: "nyxid-chat-actor-1",
       clientRequestId: "request-1",
       originTurnId: "turn-origin-1",
     } as const;
@@ -283,10 +390,15 @@ describe("action continuation schema", () => {
   });
 
   it("builds an exact empty out-of-band wake without accepting reports", () => {
-    const body = buildActionWakeBody("request-wake-1", "turn-origin-1");
+    const body = buildActionWakeBody(
+      "nyxid-chat-actor-1",
+      "request-wake-1",
+      "turn-origin-1",
+    );
 
     expect(body).toEqual({
       type: "action.continue",
+      conversationId: "nyxid-chat-actor-1",
       clientRequestId: "request-wake-1",
       originTurnId: "turn-origin-1",
       actions: [],
@@ -307,6 +419,62 @@ describe("action continuation schema", () => {
       actionWakeBodySchema.safeParse({ ...body, prompt: "must not be sent" })
         .success,
     ).toBe(false);
+  });
+
+  it("rejects completed service.connect reports without a userService resource", () => {
+    expect(() =>
+      buildActionContinueBody(
+        "nyxid-chat-actor-1",
+        "request-1",
+        "turn-origin-1",
+        [
+          {
+            actionRequestId: "act-1",
+            originTurnId: "turn-origin-1",
+            disposition: "completed",
+          },
+        ],
+        new Map([["act-1", "service.connect"]]),
+      ),
+    ).toThrow(
+      "service.connect completed reports must include resource.userService.userServiceId",
+    );
+    expect(() =>
+      buildActionContinueBody(
+        "nyxid-chat-actor-1",
+        "request-1",
+        "turn-origin-1",
+        [
+          {
+            actionRequestId: "act-1",
+            originTurnId: "turn-origin-1",
+            disposition: "completed",
+            resource: { key: { keyId: "key-1" } },
+          },
+        ],
+        new Map([["act-1", "service.connect"]]),
+      ),
+    ).toThrow(
+      "service.connect completed reports must include resource.userService.userServiceId",
+    );
+  });
+
+  it("fails closed for completed reports without resources when the action lookup is missing", () => {
+    expect(() =>
+      buildActionContinueBody(
+        "nyxid-chat-actor-1",
+        "request-1",
+        "turn-origin-1",
+        [
+          {
+            actionRequestId: "act-1",
+            originTurnId: "turn-origin-1",
+            disposition: "completed",
+          },
+        ],
+        new Map(),
+      ),
+    ).toThrow("Completed action reports must include a resource reference");
   });
 
   it("enforces the control-identity character and length rules", () => {

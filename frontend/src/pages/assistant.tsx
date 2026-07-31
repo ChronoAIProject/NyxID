@@ -498,6 +498,7 @@ export function AssistantPage({
             }
             onDecideApproval={handleDecideApproval}
             onActionProgress={actionCards.setInProgress}
+            onBlockAction={actionCards.blockAction}
             onResolveAction={handleResolveAction}
           />
         )}

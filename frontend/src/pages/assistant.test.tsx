@@ -171,6 +171,7 @@ vi.mock("@/hooks/use-assistant", () => ({
   }),
   useActionCardActions: () => ({
     setInProgress: vi.fn(),
+    blockAction: vi.fn(),
     continueAction: mockContinueAction,
   }),
   useDeleteConversation: () => ({

@@ -2,14 +2,15 @@
 
 Status of NyxID's assistant chat surface against the reference client
 [`eanz17/nyxid-chat`](https://github.com/eanz17/nyxid-chat) (`main`, commit
-`819dc0d`), which is the working implementation of the Aevatar chat contract.
+`f1807da`), which is the working implementation of the Aevatar chat contract.
 
 Scope: the live AG-UI stream (frames → rendered blocks), the NyxID proxy's
 streaming behaviour, and the recovery flows around them. The PRD
 (`nyx-chat-prd.md`, Draft v8) remains the contract SSOT; this file records
 where our implementation stands against the reference *implementation*.
 
-Last verified: 2026-07-29 against Aevatar `origin/dev` at `020a9acd2`.
+Last verified: 2026-07-30 against Aevatar `origin/feature/integrate` and the
+reference client at `f1807da`.
 
 ---
 
@@ -28,7 +29,7 @@ Every frame family is accepted in both `type`-tagged and body-keyed shapes.
 | `TEXT_MESSAGE_START/CONTENT/END` | ✅ | ✅ | streamed `text` block |
 | `TOOL_CALL_START` / `TOOL_CALL_END` | ✅ | ✅ | transient run-ledger step |
 | `TOOL_APPROVAL_REQUEST` | ✅ | ✅ | `approval_card` |
-| `AUTHORIZATION_REQUIRED` | ✅ | ✅ | `connect_card` |
+| `AUTHORIZATION_REQUIRED` | ✅ | ignored | — |
 | `USAGE` | ✅ | ✅ | conversation model metadata |
 | `MEDIA_CONTENT` | ✅ | ✅ | `artifact` block |
 | `stateSnapshot` | normalized, unrendered | ignored | — |
@@ -37,7 +38,7 @@ Every frame family is accepted in both `type`-tagged and body-keyed shapes.
 | `CUSTOM aevatar.step.request/completed` | ✅ | ✅ | run-ledger step |
 | `CUSTOM aevatar.tool_approval.pending` | ✅ | ✅ | `approval_card` + step parked |
 | `CUSTOM aevatar.human_input.request` | ✅ | ✅ | `approval_card` |
-| `CUSTOM aevatar.authorization.required` | ✅ | ✅ | `connect_card` |
+| `CUSTOM aevatar.authorization.required` | ✅ | ignored | — |
 | `CUSTOM nyxid.authorization.required` | ✅ | ✅ | `connect_card` |
 | `CUSTOM nyxid.action.request` (schema v4) | ✅ | ✅ | persistent `action_card` + connect journey |
 | `CUSTOM aevatar.workflow.waiting_signal` | ✅ | ✅ | turn status `waiting` |
@@ -90,6 +91,26 @@ Aevatar may end a turn as blocked after emitting a `CUSTOM` frame named
 `service.connect` to either the catalog-service or custom-service path in the
 existing Add Service dialog. The card uses NyxID-owned consent copy, shows safe
 request parameters, and remains interactive after the origin stream terminates.
+Assistant prose is inert Markdown as of 2026-07-30: a
+` ```nyxid:connect ` fence in streamed text or history now renders as an
+ordinary code block, never as an executable card.
+
+Card states have distinct browser semantics:
+
+- `pending` / `in_progress`: normal connect journey. Completing the dialog does
+  not show a success receipt; the card moves to "Reported — awaiting assistant
+  verification" only after the completed report has been admitted and settled.
+- `blocked`: NyxID finished the browser journey but could not verify the created
+  `userServiceId`. The primary connect CTA stays disabled because this card can
+  no longer send `completed`, but `Decline` remains enabled and a secondary
+  `Report failure` action can send `failed`. If the assistant later re-emits the
+  exact same request idempotently, NyxID re-arms the card back to `pending` and
+  clears the note so the journey can restart cleanly.
+- `conflicted`: the same `actionRequestId` was reissued with different validated
+  request details. NyxID keeps the first request, disables every button, and
+  excludes the card from continuation sending. A byte-identical re-emission is a
+  no-op; a mismatched re-emission stays conflicted even when both variants would
+  otherwise render as the same unsupported card.
 
 Completing or explicitly declining a card creates a strict continuation turn:
 
@@ -111,6 +132,20 @@ Completing or explicitly declining a card creates a strict continuation turn:
 
 Reports resolving during another local turn stay queued. Reports from one
 origin turn are batched together and never mixed with another origin.
+In-session resume now comes only from that typed `action.continue` body; v4 has
+no original-prompt replay path, and NyxID no longer treats prompt re-send as a
+browser-action recovery primitive.
+
+`service.connect` continuations stay fail-closed: `completed` must carry
+`resource.userService.userServiceId`. `declined`, `failed`, `cancelled`, and
+`expired` need no resource. If a `blocked` or `conflicted` card refuses a
+completed report even though a service was connected locally, the card note is
+patched to say NyxID connected a service but could not notify the assistant and
+to direct the user to AI Services.
+Until a registered browser action explicitly declares resource-free completion
+legal, the client default-denies `completed` without a resource for every verb.
+Until a registered browser action explicitly declares resource-free completion
+legal, the client default-denies `completed` without a resource for every verb.
 
 A continuation Aevatar refuses to admit (`NYXID_ACTION_CONTINUATION_ACTIVE_TURN`
 / `_CONFLICT` / `_INVALID`) is **not** signalled as a run-error code on the
@@ -130,7 +165,8 @@ under a schema version this build cannot service.
 
 Action cards are not rehydrated after a page reload because conversation history
 is currently text-only. A subsequent text turn lets Aevatar re-emit the pending
-action idempotently.
+action idempotently, but that is separate from the in-session `action.continue`
+resume path above.
 
 ### Deployment gate
 
@@ -146,19 +182,16 @@ Aevatar dev contract reaches prod. Same for the whole action-card feature.
 Ordered by user-visible impact. None are believed to block the current
 surface; each states what "closed" looks like.
 
-### G1 — No explicit retry after connecting a service (UX)
+### G1 — Pending action cards do not rehydrate after a page reload
 
-The reference preserves the original request when `AUTHORIZATION_REQUIRED`
-arrives and offers a "重试请求" button once the service reports connected —
-deliberately never auto-retrying, since the run may have partially executed.
+Prompt replay is not the v4 recovery model: once a browser action settles in
+the page, the actor resumes only through `action.continue`. The remaining gap is
+reload durability: if the page reloads before the actor re-emits or verifies the
+action, the pending card is lost because the transcript is still text-only.
 
-NyxID renders the connect card and opens the connect wizard in place, but
-the user must retype/re-send. Their message is still in the transcript, so
-recovery is one action away, but it is not one click.
-
-*Closed when:* the connect card holds the originating prompt and offers an
-explicit re-send once `useKeys()` reports the service active. Must stay
-explicit — never auto-retry.
+*Closed when:* the conversation state query plus session-scoped cached params can
+restore pending action cards after reload, executable only when all five action
+identities match exactly.
 
 ### G2 — No production-assembly test for the SSE header (test coverage)
 
@@ -211,6 +244,35 @@ optional upstream; would matter if Aevatar starts requiring or surfacing it.
 
 *Closed when:* the approval card collects an optional deny reason and
 forwards it.
+
+### G7 — Backend pass-through still targets the deprecated scoped facade
+
+The reference migrated on 2026-07-29 to the canonical `POST /api/chat` and
+`/api/chat/conversations/**` surface. NyxID's backend pass-through still speaks
+the older scoped family and compatibility transcript endpoints.
+
+*Closed when:* the backend pass-through migrates to the canonical facade and
+derives conversation identity solely from `RUN_STARTED`, removing pre-create,
+index polling, and dual-delete compatibility paths.
+
+### G8 — Authoritative controls are not surfaced end-to-end
+
+The reference gates stop/steer/retry/skip by `availableActions` and uses the
+exact upstream `expectedStateVersion`. NyxID still sends a placeholder
+`expectedStateVersion: 0` on stop and does not expose steer/retry/skip UI.
+
+*Closed when:* the frontend tracks authoritative state versions and
+`availableActions`, and the backend/browser surface ship stop/steer/retry/skip
+with exact upstream control semantics.
+
+### G9 — No empty-actions wake-up for out-of-band browser journeys
+
+The canon allows `{type:"action.continue", actions: []}` as a wake-up when a
+browser-side journey finished outside the active page. NyxID never sends this
+form, so an out-of-band completion still depends on a later user turn.
+
+*Closed when:* the frontend and backend support the empty-actions wake-up form
+for already-finished journeys that need the actor to resume.
 
 ---
 

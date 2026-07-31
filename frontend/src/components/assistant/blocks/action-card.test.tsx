@@ -1,6 +1,7 @@
 import { render, screen } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { describe, expect, it, vi } from "vitest";
+import type { AddKeyDialogCompletion } from "@/components/dashboard/add-key-dialog";
 import type { ActionCardContentBlock } from "@/types/assistant";
 import { ActionCard } from "./action-card";
 
@@ -22,7 +23,7 @@ vi.mock("@/components/dashboard/add-key-dialog", () => ({
     readonly prefillSlug?: string;
     readonly prefillIncludeAllCatalog?: boolean;
     readonly prefillCustom?: { readonly name?: string };
-    readonly onSuccess?: (result: { readonly userServiceId: string }) => void;
+    readonly onSuccess?: (result: AddKeyDialogCompletion) => void;
   }) =>
     open ? (
       <div
@@ -40,6 +41,18 @@ vi.mock("@/components/dashboard/add-key-dialog", () => ({
         >
           Finish mock connection
         </button>
+        <button
+          type="button"
+          onClick={() => onSuccess?.({ userServiceId: "" })}
+        >
+          Finish without service id
+        </button>
+        <button
+          type="button"
+          onClick={() => onSuccess?.({ userServiceId: "   " })}
+        >
+          Finish with whitespace service id
+        </button>
         <button type="button" onClick={() => onOpenChange(false)}>
           Dismiss mock connection
         </button>
@@ -56,6 +69,8 @@ function catalogBlock(
     action: "service.connect",
     action_request_id: "act-1",
     origin_turn_id: "turn-origin-1",
+    task_id: "task-1",
+    step_id: "step-1",
     params: {
       variant: "catalog",
       service_slug: "api-github",
@@ -82,11 +97,13 @@ describe("ActionCard", () => {
   it("renders owned consent copy and opens the prefilled connect journey", async () => {
     const user = userEvent.setup();
     const onProgress = vi.fn();
+    const onBlock = vi.fn();
     const onResolve = vi.fn();
     render(
       <ActionCard
         block={catalogBlock()}
         onProgress={onProgress}
+        onBlock={onBlock}
         onResolve={onResolve}
       />,
     );
@@ -137,6 +154,7 @@ describe("ActionCard", () => {
       <ActionCard
         block={catalogBlock()}
         onProgress={vi.fn()}
+        onBlock={vi.fn()}
         onResolve={vi.fn()}
       />,
     );
@@ -169,6 +187,7 @@ describe("ActionCard", () => {
           status: "unsupported",
         })}
         onProgress={vi.fn()}
+        onBlock={vi.fn()}
         onResolve={vi.fn()}
       />,
     );
@@ -180,6 +199,7 @@ describe("ActionCard", () => {
       <ActionCard
         block={catalogBlock()}
         onProgress={vi.fn()}
+        onBlock={vi.fn()}
         onResolve={vi.fn()}
       />,
     );
@@ -203,6 +223,7 @@ describe("ActionCard", () => {
       <ActionCard
         block={catalogBlock({ status: "in_progress" })}
         onProgress={vi.fn()}
+        onBlock={vi.fn()}
         onResolve={vi.fn()}
       />,
     );
@@ -212,11 +233,13 @@ describe("ActionCard", () => {
   it("treats modal dismissal as pending and decline as an explicit report", async () => {
     const user = userEvent.setup();
     const onProgress = vi.fn();
+    const onBlock = vi.fn();
     const onResolve = vi.fn();
     const { rerender } = render(
       <ActionCard
         block={catalogBlock()}
         onProgress={onProgress}
+        onBlock={onBlock}
         onResolve={onResolve}
       />,
     );
@@ -225,6 +248,7 @@ describe("ActionCard", () => {
       <ActionCard
         block={catalogBlock({ status: "in_progress" })}
         onProgress={onProgress}
+        onBlock={onBlock}
         onResolve={onResolve}
       />,
     );
@@ -238,6 +262,7 @@ describe("ActionCard", () => {
       <ActionCard
         block={catalogBlock()}
         onProgress={onProgress}
+        onBlock={onBlock}
         onResolve={onResolve}
       />,
     );
@@ -250,18 +275,22 @@ describe("ActionCard", () => {
   });
 
   it("renders terminal receipts and the unsupported decline-only state", () => {
+    const onBlock = vi.fn();
     const onResolve = vi.fn();
     const { rerender } = render(
       <ActionCard
         block={catalogBlock({
           status: "completed",
-          outcome_note: "Connected safely.",
+          outcome_note: "Reported — awaiting assistant verification.",
         })}
         onProgress={vi.fn()}
+        onBlock={onBlock}
         onResolve={onResolve}
       />,
     );
-    expect(screen.getByText("Service connected")).toBeInTheDocument();
+    expect(
+      screen.getByText("Reported — awaiting assistant verification"),
+    ).toBeInTheDocument();
     expect(screen.queryByRole("button")).not.toBeInTheDocument();
 
     rerender(
@@ -272,6 +301,7 @@ describe("ActionCard", () => {
           status: "unsupported",
         })}
         onProgress={vi.fn()}
+        onBlock={onBlock}
         onResolve={onResolve}
       />,
     );
@@ -299,6 +329,7 @@ describe("ActionCard", () => {
           },
         })}
         onProgress={vi.fn()}
+        onBlock={vi.fn()}
         onResolve={vi.fn()}
       />,
     );
@@ -319,6 +350,7 @@ describe("ActionCard", () => {
         // is actionable, but nothing can service `admin.open`.
         block={catalogBlock({ action: "admin.open", status: "pending" })}
         onProgress={vi.fn()}
+        onBlock={vi.fn()}
         onResolve={vi.fn()}
       />,
     );
@@ -326,5 +358,142 @@ describe("ActionCard", () => {
     expect(screen.getByText("Unsupported action request")).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "Decline" })).toBeInTheDocument();
     expect(screen.getAllByRole("button")).toHaveLength(1);
+  });
+
+  it("blocks the card locally when a connection completes without a userServiceId", async () => {
+    for (const finishLabel of [
+      "Finish without service id",
+      "Finish with whitespace service id",
+    ]) {
+      const user = userEvent.setup();
+      const onBlock = vi.fn();
+      const onResolve = vi.fn();
+      const { unmount } = render(
+        <ActionCard
+          block={catalogBlock()}
+          onProgress={vi.fn()}
+          onBlock={onBlock}
+          onResolve={onResolve}
+        />,
+      );
+
+      await user.click(screen.getByRole("button", { name: "Connect GitHub" }));
+      await user.click(screen.getByRole("button", { name: finishLabel }));
+
+      expect(onResolve).not.toHaveBeenCalled();
+      expect(onBlock).toHaveBeenCalledWith(
+        "action-card-1",
+        "Connected, but NyxID could not verify which service was created. Manage it in AI Services, then ask the assistant to request it again.",
+      );
+      unmount();
+    }
+  });
+
+  it("keeps blocked cards recoverable through decline and failure reports", async () => {
+    const user = userEvent.setup();
+    const onResolve = vi.fn();
+    render(
+      <ActionCard
+        block={catalogBlock({
+          status: "blocked",
+          outcome_note:
+            "Connected, but NyxID could not verify which service was created. Manage it in AI Services, then ask the assistant to request it again.",
+        })}
+        onProgress={vi.fn()}
+        onBlock={vi.fn()}
+        onResolve={onResolve}
+      />,
+    );
+
+    expect(screen.getByRole("button", { name: "Connect GitHub" })).toBeDisabled();
+    expect(screen.getByRole("button", { name: "Decline" })).toBeEnabled();
+    expect(screen.getByRole("button", { name: "Report failure" })).toBeEnabled();
+
+    await user.click(screen.getByRole("button", { name: "Decline" }));
+    expect(onResolve).toHaveBeenCalledWith({
+      actionRequestId: "act-1",
+      originTurnId: "turn-origin-1",
+      disposition: "declined",
+    });
+
+    await user.click(screen.getByRole("button", { name: "Report failure" }));
+    expect(onResolve).toHaveBeenLastCalledWith({
+      actionRequestId: "act-1",
+      originTurnId: "turn-origin-1",
+      disposition: "failed",
+    });
+  });
+
+  it("treats a re-armed card like a fresh dismissal path", async () => {
+    const user = userEvent.setup();
+    const onProgress = vi.fn();
+    const onBlock = vi.fn();
+    const props = {
+      onProgress,
+      onBlock,
+      onResolve: vi.fn(),
+    };
+    const { rerender } = render(<ActionCard block={catalogBlock()} {...props} />);
+
+    await user.click(screen.getByRole("button", { name: "Connect GitHub" }));
+    rerender(
+      <ActionCard
+        block={catalogBlock({ status: "in_progress" })}
+        {...props}
+      />,
+    );
+    await user.click(
+      screen.getByRole("button", { name: "Finish without service id" }),
+    );
+    expect(onBlock).toHaveBeenCalledTimes(1);
+    rerender(
+      <ActionCard
+        block={catalogBlock({ status: "blocked", outcome_note: "n" })}
+        {...props}
+      />,
+    );
+
+    rerender(
+      <ActionCard
+        block={catalogBlock({ status: "pending", outcome_note: "" })}
+        {...props}
+      />,
+    );
+
+    onProgress.mockClear();
+    await user.click(screen.getByRole("button", { name: "Connect GitHub" }));
+    expect(onProgress).toHaveBeenCalledWith("action-card-1", true);
+    rerender(
+      <ActionCard
+        block={catalogBlock({ status: "in_progress" })}
+        {...props}
+      />,
+    );
+    await user.click(
+      screen.getByRole("button", { name: "Dismiss mock connection" }),
+    );
+
+    expect(onProgress).toHaveBeenCalledWith("action-card-1", false);
+  });
+
+  it("catches synchronous block failures from the connect dialog callback", async () => {
+    const user = userEvent.setup();
+    const onBlock = vi.fn(() => {
+      throw new Error("sync block failure");
+    });
+    render(
+      <ActionCard
+        block={catalogBlock()}
+        onProgress={vi.fn()}
+        onBlock={onBlock}
+        onResolve={vi.fn()}
+      />,
+    );
+
+    await user.click(screen.getByRole("button", { name: "Connect GitHub" }));
+    await expect(
+      user.click(screen.getByRole("button", { name: "Finish without service id" })),
+    ).resolves.toBeUndefined();
+    expect(onBlock).toHaveBeenCalledTimes(1);
   });
 });

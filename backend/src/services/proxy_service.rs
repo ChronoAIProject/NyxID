@@ -2566,6 +2566,42 @@ pub async fn forward_request(
     cloud_response_cache: &CloudResponseCache,
     _billing_egress_permit: crate::services::billing::route_inventory::BillingEgressPermit,
 ) -> AppResult<reqwest::Response> {
+    forward_request_with_extra_outbound_headers(
+        client,
+        target,
+        method,
+        path,
+        query,
+        headers,
+        body,
+        identity_headers,
+        delegated_credentials,
+        caller_token,
+        token_exchange_cache,
+        cloud_response_cache,
+        Vec::new(),
+        _billing_egress_permit,
+    )
+    .await
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(crate) async fn forward_request_with_extra_outbound_headers(
+    client: &Client,
+    target: &ProxyTarget,
+    method: reqwest::Method,
+    path: &str,
+    query: Option<&str>,
+    headers: reqwest::header::HeaderMap,
+    body: ProxyBody,
+    identity_headers: Vec<(String, String)>,
+    delegated_credentials: Vec<DelegatedCredential>,
+    caller_token: Option<&str>,
+    token_exchange_cache: &TokenExchangeCache,
+    cloud_response_cache: &CloudResponseCache,
+    extra_outbound_headers: Vec<(String, String)>,
+    _billing_egress_permit: crate::services::billing::route_inventory::BillingEgressPermit,
+) -> AppResult<reqwest::Response> {
     let mut all_delegated = delegated_credentials;
     extend_with_path_credential(&mut all_delegated, target);
     let prepared = prepare_delegated_request(path, query, &all_delegated)?;
@@ -2652,6 +2688,7 @@ pub async fn forward_request(
             target.user_service_default_headers.as_slice(),
         ],
     );
+    append_extra_outbound_headers(&mut outbound_headers, extra_outbound_headers);
 
     // `reqwest::RequestBuilder::header` appends — it does NOT replace an
     // existing value for the same name. Credential injection (including
@@ -2981,6 +3018,16 @@ pub async fn forward_request(
     Ok(response)
 }
 
+fn append_extra_outbound_headers(
+    outbound_headers: &mut Vec<(String, String)>,
+    extra_outbound_headers: Vec<(String, String)>,
+) {
+    for (name, value) in extra_outbound_headers {
+        outbound_headers.retain(|(existing_name, _)| !existing_name.eq_ignore_ascii_case(&name));
+        outbound_headers.push((name, value));
+    }
+}
+
 /// Whether an HTTP method semantically supports a request body.
 ///
 /// Used to guard body-auth credential injection: injecting a JSON body on
@@ -3175,6 +3222,7 @@ mod tests {
         // infrastructure headers.
         assert!(!is_allowed_forward_header("authorization"));
         assert!(!is_allowed_forward_header("cookie"));
+        assert!(!is_allowed_forward_header("idempotency-key"));
         assert!(!is_allowed_forward_header("x-nyxid-internal"));
         assert!(!is_allowed_forward_header("x-forwarded-for"));
         assert!(!is_allowed_forward_header("host"));
@@ -3188,6 +3236,7 @@ mod tests {
         path: String,
         query: Option<String>,
         content_type: Option<String>,
+        idempotency_key: Option<String>,
         user_agent: Option<String>,
         body: Vec<u8>,
     }
@@ -3203,6 +3252,10 @@ mod tests {
             query: uri.query().map(ToString::to_string),
             content_type: headers
                 .get(reqwest::header::CONTENT_TYPE)
+                .and_then(|value| value.to_str().ok())
+                .map(ToString::to_string),
+            idempotency_key: headers
+                .get("idempotency-key")
                 .and_then(|value| value.to_str().ok())
                 .map(ToString::to_string),
             user_agent: headers
@@ -3838,6 +3891,51 @@ mod tests {
             captured.user_agent.as_deref(),
             Some("OpenAI/Python 2.30.0"),
             "client User-Agent should be forwarded when no custom_user_agent is set"
+        );
+
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn forward_request_strips_caller_supplied_idempotency_key() {
+        let (sender, mut receiver) = mpsc::unbounded_channel();
+        let app = Router::new()
+            .route("/api/v1/test", post(capture_request))
+            .with_state(sender);
+
+        let listener = TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind test listener");
+        let addr = listener.local_addr().expect("listener addr");
+        let server = tokio::spawn(async move {
+            axum::serve(listener, app).await.expect("serve test app");
+        });
+
+        let mut headers = reqwest::header::HeaderMap::new();
+        headers.insert("idempotency-key", "caller-supplied-key".parse().unwrap());
+
+        let response = forward_request(
+            &Client::new(),
+            &make_proxy_target(format!("http://{addr}")),
+            reqwest::Method::POST,
+            "api/v1/test",
+            None,
+            headers,
+            ProxyBody::Buffered(Some(Bytes::from_static(b"{}"))),
+            vec![],
+            vec![],
+            None,
+            &empty_token_cache(),
+            &empty_response_cache(),
+        )
+        .await
+        .expect("proxy request should succeed");
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let captured = receiver.recv().await.expect("captured request");
+        assert_eq!(
+            captured.idempotency_key, None,
+            "caller-supplied idempotency keys must not reach shared downstreams"
         );
 
         server.abort();
