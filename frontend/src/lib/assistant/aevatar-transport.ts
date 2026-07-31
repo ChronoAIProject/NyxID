@@ -120,6 +120,11 @@ const assistantApi = {
 // network round-trip per streamed token.
 const CONVERSATION_LIST_TTL_MS = 5_000;
 
+// Chat History materializes after the stream terminal. Keep the exact live
+// transcript briefly so an equal-length stale read cannot replace optimistic
+// identities before the authoritative turn is visible.
+const HISTORY_MATERIALIZATION_GRACE_MS = 15_000;
+
 // New chats run on Aevatar's Workflow Studio chat engine: the turn body
 // carries `workflow: "studio"`, which is the only thing that selects that
 // engine upstream. Aevatar's `/api/chat` dispatches on the PRESENCE of a
@@ -409,6 +414,58 @@ function historyStateVersion(body: AevatarHistoryResponse): number | undefined {
   return Number.isFinite(parsed) && parsed > 0 ? parsed : undefined;
 }
 
+function structuredBlockCount(messages: readonly AssistantMessage[]): number {
+  return messages.reduce(
+    (count, message) =>
+      count + message.blocks.filter((block) => block.type !== "text").length,
+    0,
+  );
+}
+
+function hasStructuredBlocks(message: AssistantMessage): boolean {
+  return message.blocks.some((block) => block.type !== "text");
+}
+
+/**
+ * History v4 is text-only until `/state` card rehydration ships. Reinsert each
+ * client-owned activity message after the last server row from its turn while
+ * the server projection supplies text, ids, and turn status. This keeps typed
+ * block ids/order stable without pinning stale text.
+ */
+function preserveLocalStructuredMessages(
+  serverMessages: readonly AssistantMessage[],
+  localMessages: readonly AssistantMessage[],
+  activityMessageTurnIds: ReadonlyMap<string, string | null>,
+): AssistantMessage[] {
+  const buckets = Array.from(
+    { length: serverMessages.length + 1 },
+    () => [] as AssistantMessage[],
+  );
+  const serverMessageIds = new Set(serverMessages.map((message) => message.id));
+  const lastServerIndexByTurnId = new Map<string, number>();
+  serverMessages.forEach((message, index) => {
+    if (message.turnId) lastServerIndexByTurnId.set(message.turnId, index);
+  });
+
+  for (const message of localMessages) {
+    if (!hasStructuredBlocks(message)) continue;
+    if (serverMessageIds.has(message.id)) continue;
+    const turnId = activityMessageTurnIds.get(message.id);
+    const serverIndex = turnId
+      ? lastServerIndexByTurnId.get(turnId)
+      : undefined;
+    const insertionIndex =
+      serverIndex === undefined ? serverMessages.length : serverIndex + 1;
+    buckets[insertionIndex]?.push(message);
+  }
+
+  const merged: AssistantMessage[] = [...(buckets[0] ?? [])];
+  serverMessages.forEach((message, index) => {
+    merged.push(message, ...(buckets[index + 1] ?? []));
+  });
+  return merged;
+}
+
 interface StoredConversation {
   conversation: Conversation;
   turnState: TurnReducerState;
@@ -418,6 +475,10 @@ interface StoredConversation {
    * A fixed-size hash keeps the per-id retention bounded.
    */
   actionRequestFingerprints: Map<string, string>;
+  /** Server turn ownership for client-only activity messages. */
+  activityMessageTurnIds: Map<string, string | null>;
+  /** Epoch milliseconds of the latest turn.completed applied to this mirror. */
+  lastLocalTurnCompletedAt?: number;
   /**
    * Workflow-chat continuation watermark (`chatc-…` conversations only):
    * the last `stateVersion` observed from the transcript read or the
@@ -1007,7 +1068,12 @@ export class AevatarAssistantTransport implements AssistantTransport {
    * the server-backed entry.
    */
   private readonly conversationAliases = new Map<string, string>();
+  private readonly now: () => number;
   private listFetchedAt = 0;
+
+  constructor(now: () => number = Date.now) {
+    this.now = now;
+  }
 
   /** Follow a placeholder alias to the server conversation id, if any. */
   private canonicalConversationId(conversationId: string): string {
@@ -1066,6 +1132,7 @@ export class AevatarAssistantTransport implements AssistantTransport {
       conversation,
       turnState: EMPTY_TURN_STATE,
       actionRequestFingerprints: new Map(),
+      activityMessageTurnIds: new Map(),
     });
     return conversation;
   }
@@ -2054,6 +2121,8 @@ export class AevatarAssistantTransport implements AssistantTransport {
       turnState: existing?.turnState ?? EMPTY_TURN_STATE,
       actionRequestFingerprints:
         existing?.actionRequestFingerprints ?? new Map(),
+      activityMessageTurnIds: existing?.activityMessageTurnIds ?? new Map(),
+      lastLocalTurnCompletedAt: existing?.lastLocalTurnCompletedAt,
       stateVersion: existing?.stateVersion,
       sessionId: existing?.sessionId,
     });
@@ -2082,14 +2151,42 @@ export class AevatarAssistantTransport implements AssistantTransport {
     if (existing && freshStateVersion !== undefined) {
       existing.stateVersion = freshStateVersion;
     }
-    // Keep-max guard: immediately after a turn completes, the server-side
-    // materialization can briefly lag the local mirror. Never replace a
-    // richer local transcript with a shorter server one.
-    if (existing && existing.turnState.messages.length > messages.length) {
+    const localMessages = existing?.turnState.messages ?? [];
+    const localStructuredBlocks = structuredBlockCount(localMessages);
+    const serverStructuredBlocks = structuredBlockCount(messages);
+    const serverLacksLocalStructure =
+      localStructuredBlocks > serverStructuredBlocks;
+    // Structured activity messages are not part of the text-only History v4
+    // transcript. Exclude them from keep-max's length comparison or their
+    // permanent retention would also permanently pin optimistic text ids.
+    const comparableLocalMessageCount = serverLacksLocalStructure
+      ? localMessages.filter((message) => !hasStructuredBlocks(message)).length
+      : localMessages.length;
+    if (existing && comparableLocalMessageCount > messages.length) {
       return existing;
     }
-    const first = messages[0];
-    const last = messages[messages.length - 1];
+    const withinMaterializationGrace =
+      existing?.lastLocalTurnCompletedAt !== undefined &&
+      this.now() - existing.lastLocalTurnCompletedAt <=
+        HISTORY_MATERIALIZATION_GRACE_MS;
+    if (
+      existing &&
+      serverLacksLocalStructure &&
+      comparableLocalMessageCount === messages.length &&
+      withinMaterializationGrace
+    ) {
+      return existing;
+    }
+    const projectedMessages =
+      existing && serverLacksLocalStructure
+        ? preserveLocalStructuredMessages(
+            messages,
+            localMessages,
+            existing.activityMessageTurnIds,
+          )
+        : messages;
+    const first = projectedMessages[0];
+    const last = projectedMessages[projectedMessages.length - 1];
     const nowIso = new Date().toISOString();
     const conversation: Conversation = {
       id: conversationId,
@@ -2103,12 +2200,14 @@ export class AevatarAssistantTransport implements AssistantTransport {
     const stored: StoredConversation = {
       conversation,
       turnState: {
-        messages,
+        messages: projectedMessages,
         activeTurn: existing?.turnState.activeTurn ?? null,
         lastCursor: existing?.turnState.lastCursor ?? 0,
       },
       actionRequestFingerprints:
         existing?.actionRequestFingerprints ?? new Map(),
+      activityMessageTurnIds: existing?.activityMessageTurnIds ?? new Map(),
+      lastLocalTurnCompletedAt: existing?.lastLocalTurnCompletedAt,
       stateVersion: freshStateVersion ?? existing?.stateVersion,
       sessionId: existing?.sessionId,
     };
@@ -2169,7 +2268,16 @@ export class AevatarAssistantTransport implements AssistantTransport {
     let drainActions = false;
     const stored = this.conversations.get(conversationId);
     if (stored) {
-      stored.turnState = applyTurnEvent(stored.turnState, event);
+      const previousTurnState = stored.turnState;
+      const nextTurnState = applyTurnEvent(previousTurnState, event);
+      stored.turnState = nextTurnState;
+      if (
+        event.event === "turn.completed" &&
+        nextTurnState !== previousTurnState &&
+        run.streamDispatched
+      ) {
+        stored.lastLocalTurnCompletedAt = this.now();
+      }
       stored.conversation = {
         ...stored.conversation,
         last_message_at: new Date().toISOString(),
@@ -3195,6 +3303,9 @@ export class AevatarAssistantTransport implements AssistantTransport {
     if (run.activityMessageId) return run.activityMessageId;
     const messageId = newId("assistant-activity");
     run.activityMessageId = messageId;
+    this.conversations
+      .get(conversationId)
+      ?.activityMessageTurnIds.set(messageId, run.turnId);
     this.emit(conversationId, run, {
       cursor: this.nextCursor(run),
       event: "message.started",
