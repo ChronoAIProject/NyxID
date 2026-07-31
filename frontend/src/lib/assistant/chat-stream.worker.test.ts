@@ -48,24 +48,33 @@ describe("chat stream worker", () => {
         close = () => controller.close();
       },
     });
-    vi.stubGlobal(
-      "fetch",
-      vi.fn().mockResolvedValue(
+    const fetchMock = vi.fn().mockResolvedValue(
         new Response(body, {
           status: 200,
-          headers: { "Content-Type": "text/event-stream" },
+          headers: {
+            "Content-Type": "text/event-stream",
+            "X-NyxID-Debug-Upstream-Log": "encoded-envelope-array",
+          },
         }),
-      ),
-    );
+      );
+    vi.stubGlobal("fetch", fetchMock);
     const scope = await installWorker();
     send(scope, {
       type: "stream.start",
       requestId: "request-batch",
       url: "/stream",
       bodyText: '{"prompt":"hello"}',
+      headers: { "X-NyxID-Debug-Upstream": "1" },
     });
     await vi.waitFor(() => {
       expect(messages(scope)[0]).toMatchObject({ type: "stream.response" });
+    });
+    expect(messages(scope)[0]).toMatchObject({
+      type: "stream.response",
+      debugUpstream: "encoded-envelope-array",
+    });
+    expect((fetchMock.mock.calls[0]?.[1] as RequestInit).headers).toMatchObject({
+      "X-NyxID-Debug-Upstream": "1",
     });
 
     push(
@@ -212,7 +221,12 @@ describe("chat stream worker", () => {
     const fetchMock = vi
       .fn()
       .mockResolvedValueOnce(
-        new Response('{"code":"UPSTREAM_DOWN"}', { status: 502 }),
+        new Response('{"code":"UPSTREAM_DOWN"}', {
+          status: 502,
+          headers: {
+            "X-NyxID-Debug-Upstream-Log": "encoded-error-envelope-array",
+          },
+        }),
       )
       .mockRejectedValueOnce(new TypeError("connection reset"));
     vi.stubGlobal("fetch", fetchMock);
@@ -238,6 +252,7 @@ describe("chat stream worker", () => {
             requestId: "request-http",
             status: 502,
             body: '{"code":"UPSTREAM_DOWN"}',
+            debugUpstream: "encoded-error-envelope-array",
           },
           {
             type: "stream.network_error",

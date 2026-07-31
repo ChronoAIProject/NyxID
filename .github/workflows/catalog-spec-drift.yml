@@ -1,0 +1,40 @@
+# Weekly check that the curated catalog overlays in backend/specs/catalog/
+# have not drifted from the official upstream OpenAPI specs (for the
+# providers that publish one). A red run means an overlay references an
+# operation the provider removed or moved -- update the overlay by hand
+# (backend/specs/catalog/) or adjust the mapping in
+# scripts/check-catalog-spec-drift.py.
+#
+# This intentionally does NOT auto-update anything: the overlays are the
+# reviewed, curated source of truth for seeded ServiceEndpoint rows and
+# Aevatar tool annotations.
+
+name: Catalog Spec Drift
+
+on:
+  schedule:
+    - cron: "17 3 * * 1" # Mondays 03:17 UTC
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  drift-check:
+    name: Overlay vs official spec drift
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install dependencies
+        run: pip install pyyaml
+
+      - name: Check overlays against official specs
+        run: |
+          set -o pipefail
+          python3 scripts/check-catalog-spec-drift.py | tee "$GITHUB_STEP_SUMMARY"

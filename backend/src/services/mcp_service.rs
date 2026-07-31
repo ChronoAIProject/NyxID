@@ -834,23 +834,37 @@ async fn load_user_tools_inner(
         let (endpoints, is_generic, invalid_openapi_contract) = if let Some(catalog_id) =
             us.catalog_service_id.as_deref()
         {
-            // Catalog-backed: use the ServiceEndpoint rows pre-parsed at catalog
-            // registration time.
-            let eps = eps_by_svc
+            // Catalog-backed: the instance's user-mounted spec is a
+            // deliberate per-instance override and takes precedence over
+            // the template's registered ServiceEndpoint rows. A broken or
+            // empty user spec falls back to the template rows when they
+            // exist so a bad override never takes a working catalog
+            // service offline; with no rows either, it degrades to the
+            // generic proxy tool exactly like a custom endpoint (#1290).
+            let template_rows = eps_by_svc
                 .get(catalog_id)
                 .map(|eps| service_endpoints_to_mcp(eps))
                 .unwrap_or_default();
-            if !eps.is_empty() {
-                (eps, false, false)
-            } else if let Some(spec_url) = user_spec_url {
-                // The catalog service has no registered endpoint rows; honor
-                // the instance's user-mounted spec instead of publishing an
-                // empty operation set that operation-catalog consumers drop
-                // as invalid-contract (issue #1290). Registered catalog rows
-                // keep precedence when they exist.
-                user_spec_endpoints(spec_url, &r.effective_owner_id, &us.id, endpoint_label).await
-            } else {
-                (eps, false, false)
+            match user_spec_url {
+                Some(spec_url) => {
+                    match try_user_spec_endpoints(spec_url, &r.effective_owner_id, &us.id).await {
+                        Some(instance_endpoints) => (instance_endpoints, false, false),
+                        None if !template_rows.is_empty() => {
+                            tracing::warn!(
+                                user_service_id = %us.id,
+                                spec_url = %api_docs_service::redact_url_for_logs(spec_url),
+                                "User-mounted spec unusable; falling back to catalog template endpoints"
+                            );
+                            (template_rows, false, false)
+                        }
+                        None => (
+                            vec![build_generic_proxy_endpoint(endpoint_label)],
+                            true,
+                            true,
+                        ),
+                    }
+                }
+                None => (template_rows, false, false),
             }
         } else if let Some(spec_url) = user_spec_url {
             // Custom endpoint with a user-supplied OpenAPI spec: fetch + parse
@@ -963,6 +977,37 @@ async fn fetch_and_parse_user_spec(
         .collect())
 }
 
+/// Fetch and parse a user-mounted OpenAPI spec, returning `Some(endpoints)`
+/// only when it yields at least one operation. Empty or unusable specs log
+/// and return `None` so the caller can pick the right fallback (catalog
+/// template rows or the generic proxy tool).
+async fn try_user_spec_endpoints(
+    spec_url: &str,
+    owner_id: &str,
+    user_service_id: &str,
+) -> Option<Vec<McpToolEndpoint>> {
+    match fetch_and_parse_user_spec(spec_url, owner_id).await {
+        Ok(mcp_endpoints) if !mcp_endpoints.is_empty() => Some(mcp_endpoints),
+        Ok(_) => {
+            tracing::debug!(
+                user_service_id = %user_service_id,
+                spec_url = %api_docs_service::redact_url_for_logs(spec_url),
+                "Parsed user OpenAPI spec contained no operations"
+            );
+            None
+        }
+        Err(error) => {
+            tracing::warn!(
+                user_service_id = %user_service_id,
+                spec_url = %api_docs_service::redact_url_for_logs(spec_url),
+                %error,
+                "Failed to parse user OpenAPI spec"
+            );
+            None
+        }
+    }
+}
+
 /// Resolve a user-mounted OpenAPI spec into `(endpoints, is_generic_proxy,
 /// invalid_openapi_contract)`. On an empty or unparseable spec we silently
 /// fall back to the generic proxy tool so a broken spec URL never takes the
@@ -973,33 +1018,13 @@ async fn user_spec_endpoints(
     user_service_id: &str,
     endpoint_label: &str,
 ) -> (Vec<McpToolEndpoint>, bool, bool) {
-    match fetch_and_parse_user_spec(spec_url, owner_id).await {
-        Ok(mcp_endpoints) if !mcp_endpoints.is_empty() => (mcp_endpoints, false, false),
-        Ok(_) => {
-            tracing::debug!(
-                user_service_id = %user_service_id,
-                spec_url = %api_docs_service::redact_url_for_logs(spec_url),
-                "Parsed user OpenAPI spec contained no operations; falling back to generic proxy tool"
-            );
-            (
-                vec![build_generic_proxy_endpoint(endpoint_label)],
-                true,
-                true,
-            )
-        }
-        Err(error) => {
-            tracing::warn!(
-                user_service_id = %user_service_id,
-                spec_url = %api_docs_service::redact_url_for_logs(spec_url),
-                %error,
-                "Failed to parse user OpenAPI spec; falling back to generic proxy tool"
-            );
-            (
-                vec![build_generic_proxy_endpoint(endpoint_label)],
-                true,
-                true,
-            )
-        }
+    match try_user_spec_endpoints(spec_url, owner_id, user_service_id).await {
+        Some(mcp_endpoints) => (mcp_endpoints, false, false),
+        None => (
+            vec![build_generic_proxy_endpoint(endpoint_label)],
+            true,
+            true,
+        ),
     }
 }
 
@@ -4256,6 +4281,210 @@ mod tests {
         assert_eq!(service.endpoints[0].name, "im_message_create");
         assert_eq!(service.endpoints[0].method, "POST");
         assert_eq!(service.endpoints[0].path, "/open-apis/im/v1/messages");
+    }
+
+    #[tokio::test]
+    async fn instance_mounted_spec_overrides_catalog_template_rows() {
+        let Some(db) = connect_test_database("mcp_instance_spec_precedence").await else {
+            eprintln!("skipping MCP precedence test: no local MongoDB available");
+            return;
+        };
+        let _cache_guard = crate::services::api_docs_service::SpecCacheTestGuard::acquire();
+
+        let user_id = uuid::Uuid::new_v4().to_string();
+        let catalog_id = uuid::Uuid::new_v4().to_string();
+        let user_service_id = uuid::Uuid::new_v4().to_string();
+        let user_endpoint_id = uuid::Uuid::new_v4().to_string();
+        const SPEC_URL: &str = "https://example.com/instance-override.json";
+
+        let mut catalog = dummy_service();
+        catalog.id = catalog_id.clone();
+        catalog.slug = "catalog-with-rows".to_string();
+        catalog.requires_user_credential = true;
+        db.collection::<DownstreamService>(DOWNSTREAM_SERVICES)
+            .insert_one(catalog)
+            .await
+            .expect("insert catalog service");
+
+        // Template row that would publish `template_op` without an override.
+        db.collection::<ServiceEndpoint>(SERVICE_ENDPOINTS)
+            .insert_one(ServiceEndpoint {
+                id: uuid::Uuid::new_v4().to_string(),
+                service_id: catalog_id.clone(),
+                name: "template_op".to_string(),
+                description: None,
+                method: "GET".to_string(),
+                path: "/template".to_string(),
+                parameters: None,
+                request_body_schema: None,
+                request_content_type: None,
+                request_body_required: false,
+                response_description: None,
+                response: OperationResponseContract::default(),
+                is_active: true,
+                created_at: chrono::Utc::now(),
+                updated_at: chrono::Utc::now(),
+            })
+            .await
+            .expect("insert template endpoint");
+
+        db.collection::<UserEndpoint>(USER_ENDPOINTS)
+            .insert_one(test_user_endpoint(
+                &user_endpoint_id,
+                &user_id,
+                "Overridden Instance",
+                "https://api.example.com",
+                Some(SPEC_URL),
+                Some(&catalog_id),
+            ))
+            .await
+            .expect("insert user endpoint");
+        db.collection::<UserService>(USER_SERVICES)
+            .insert_one(test_user_service(
+                &user_service_id,
+                &user_id,
+                "overridden-instance",
+                &user_endpoint_id,
+                Some(&catalog_id),
+                None,
+            ))
+            .await
+            .expect("insert user service");
+
+        crate::services::api_docs_service::cache_test_spec(
+            SPEC_URL,
+            Some(&user_id),
+            serde_json::json!({
+                "openapi": "3.1.0",
+                "info": { "title": "Instance Override", "version": "1.0.0" },
+                "paths": {
+                    "/custom": {
+                        "get": {
+                            "operationId": "instance_op",
+                            "responses": {
+                                "200": {
+                                    "description": "ok",
+                                    "content": {
+                                        "application/json": { "schema": { "type": "object" } }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }),
+        );
+
+        let catalog_result = load_operation_catalog(
+            &db,
+            &NodeWsManager::new(30, 100),
+            &user_id,
+            NodeScope::Unrestricted,
+            ServiceScope::Unrestricted,
+        )
+        .await
+        .expect("load operation catalog");
+
+        let service = catalog_result
+            .services
+            .iter()
+            .find(|service| service.service_id == user_service_id)
+            .expect("instance should be published");
+        assert_eq!(service.endpoints.len(), 1);
+        assert_eq!(
+            service.endpoints[0].name, "instance_op",
+            "user-mounted spec must take precedence over template rows"
+        );
+    }
+
+    #[tokio::test]
+    async fn broken_instance_spec_falls_back_to_catalog_template_rows() {
+        let Some(db) = connect_test_database("mcp_broken_spec_fallback").await else {
+            eprintln!("skipping MCP precedence test: no local MongoDB available");
+            return;
+        };
+        let _cache_guard = crate::services::api_docs_service::SpecCacheTestGuard::acquire();
+
+        let user_id = uuid::Uuid::new_v4().to_string();
+        let catalog_id = uuid::Uuid::new_v4().to_string();
+        let user_service_id = uuid::Uuid::new_v4().to_string();
+        let user_endpoint_id = uuid::Uuid::new_v4().to_string();
+
+        let mut catalog = dummy_service();
+        catalog.id = catalog_id.clone();
+        catalog.slug = "catalog-fallback-rows".to_string();
+        catalog.requires_user_credential = true;
+        db.collection::<DownstreamService>(DOWNSTREAM_SERVICES)
+            .insert_one(catalog)
+            .await
+            .expect("insert catalog service");
+
+        db.collection::<ServiceEndpoint>(SERVICE_ENDPOINTS)
+            .insert_one(ServiceEndpoint {
+                id: uuid::Uuid::new_v4().to_string(),
+                service_id: catalog_id.clone(),
+                name: "template_op".to_string(),
+                description: None,
+                method: "GET".to_string(),
+                path: "/template".to_string(),
+                parameters: None,
+                request_body_schema: None,
+                request_content_type: None,
+                request_body_required: false,
+                response_description: None,
+                response: OperationResponseContract::default(),
+                is_active: true,
+                created_at: chrono::Utc::now(),
+                updated_at: chrono::Utc::now(),
+            })
+            .await
+            .expect("insert template endpoint");
+
+        // Spec URL that will fail to fetch (unresolvable host, nothing cached).
+        db.collection::<UserEndpoint>(USER_ENDPOINTS)
+            .insert_one(test_user_endpoint(
+                &user_endpoint_id,
+                &user_id,
+                "Broken Override",
+                "https://api.example.com",
+                Some("https://spec-host.invalid/openapi.json"),
+                Some(&catalog_id),
+            ))
+            .await
+            .expect("insert user endpoint");
+        db.collection::<UserService>(USER_SERVICES)
+            .insert_one(test_user_service(
+                &user_service_id,
+                &user_id,
+                "broken-override",
+                &user_endpoint_id,
+                Some(&catalog_id),
+                None,
+            ))
+            .await
+            .expect("insert user service");
+
+        let catalog_result = load_operation_catalog(
+            &db,
+            &NodeWsManager::new(30, 100),
+            &user_id,
+            NodeScope::Unrestricted,
+            ServiceScope::Unrestricted,
+        )
+        .await
+        .expect("load operation catalog");
+
+        let service = catalog_result
+            .services
+            .iter()
+            .find(|service| service.service_id == user_service_id)
+            .expect("instance should fall back to template rows");
+        assert!(!service.is_generic_proxy);
+        assert_eq!(service.endpoints.len(), 1);
+        assert_eq!(
+            service.endpoints[0].name, "template_op",
+            "broken override must fall back to template rows, not go generic"
+        );
     }
 
     #[tokio::test]

@@ -8,6 +8,7 @@ import { ChatComposer } from "@/components/assistant/chat-composer";
 import { ChatThread } from "@/components/assistant/chat-thread";
 import { ApprovalsView } from "@/components/assistant/approvals-view";
 import { PluginsView } from "@/components/assistant/plugins-view";
+import { AssistantWireLogAction } from "@/components/assistant/assistant-wire-log-panel";
 import {
   assistantKeys,
   describeHistoryError,
@@ -480,14 +481,22 @@ export function AssistantPage({
 
   if (view === "plugins" || view === "approvals") {
     return (
-      <AssistantShell title={title} sidebar={sidebar}>
+      <AssistantShell
+        title={title}
+        sidebar={sidebar}
+        headerActions={<AssistantWireLogAction user={user} />}
+      >
         {view === "plugins" ? <PluginsView /> : <ApprovalsView />}
       </AssistantShell>
     );
   }
 
   return (
-    <AssistantShell title={title} sidebar={sidebar}>
+    <AssistantShell
+      title={title}
+      sidebar={sidebar}
+      headerActions={<AssistantWireLogAction user={user} />}
+    >
       <div className="relative flex h-full min-h-0 flex-col bg-background">
         {/* A failed transcript read is REPORTED, never blocking. It used to
             replace the whole thread, which also took the composer's context

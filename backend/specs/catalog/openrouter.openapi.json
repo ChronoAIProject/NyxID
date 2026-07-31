@@ -5,7 +5,12 @@
     "version": "v1-nyxid-overlay",
     "description": "NyxID-hosted overlay of the core OpenRouter API operations. Paths are relative to the /api/v1 base; NyxID injects the API key and attribution headers."
   },
-  "servers": [{ "url": "https://openrouter.ai/api/v1", "description": "OpenRouter API" }],
+  "servers": [
+    {
+      "url": "https://openrouter.ai/api/v1",
+      "description": "OpenRouter API"
+    }
+  ],
   "paths": {
     "/chat/completions": {
       "post": {
@@ -24,7 +29,10 @@
             "application/json": {
               "schema": {
                 "type": "object",
-                "required": ["model", "messages"],
+                "required": [
+                  "model",
+                  "messages"
+                ],
                 "additionalProperties": true,
                 "properties": {
                   "model": {
@@ -33,10 +41,17 @@
                   },
                   "messages": {
                     "type": "array",
-                    "items": { "type": "object", "additionalProperties": true }
+                    "items": {
+                      "type": "object",
+                      "additionalProperties": true
+                    }
                   },
-                  "temperature": { "type": "number" },
-                  "max_tokens": { "type": "integer" }
+                  "temperature": {
+                    "type": "number"
+                  },
+                  "max_tokens": {
+                    "type": "integer"
+                  }
                 }
               }
             }
@@ -47,7 +62,10 @@
             "description": "Chat completion",
             "content": {
               "application/json": {
-                "schema": { "type": "object", "additionalProperties": true }
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true
+                }
               }
             }
           }
@@ -70,7 +88,73 @@
             "description": "Model list",
             "content": {
               "application/json": {
-                "schema": { "type": "object", "additionalProperties": true }
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/key": {
+      "get": {
+        "operationId": "key_info",
+        "summary": "Get API key limits and usage",
+        "x-aevatar-tool": {
+          "name": "key_info",
+          "description": "Get rate limit and credit usage for the stored OpenRouter key.",
+          "readOnly": true,
+          "destructive": false,
+          "requiresApproval": false
+        },
+        "responses": {
+          "200": {
+            "description": "ok",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/generation": {
+      "get": {
+        "operationId": "generation_stats",
+        "summary": "Get generation stats",
+        "x-aevatar-tool": {
+          "name": "generation_stats",
+          "description": "Get token/cost stats for a completed OpenRouter generation.",
+          "readOnly": true,
+          "destructive": false,
+          "requiresApproval": false
+        },
+        "parameters": [
+          {
+            "name": "id",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "type": "string"
+            },
+            "description": "Generation id from a completion response."
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "ok",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true
+                }
               }
             }
           }

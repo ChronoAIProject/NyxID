@@ -6,8 +6,14 @@
     "description": "NyxID-hosted overlay of the Lark / Feishu tenant (bot) open APIs most used by agents: IM messaging, chat discovery, and Bitable reads. Paths are relative to the domain root; NyxID injects the tenant access token."
   },
   "servers": [
-    { "url": "https://open.larksuite.com", "description": "Lark (global)" },
-    { "url": "https://open.feishu.cn", "description": "Feishu (China)" }
+    {
+      "url": "https://open.larksuite.com",
+      "description": "Lark (global)"
+    },
+    {
+      "url": "https://open.feishu.cn",
+      "description": "Feishu (China)"
+    }
   ],
   "paths": {
     "/open-apis/im/v1/messages": {
@@ -30,7 +36,13 @@
             "description": "Type of the receive_id value.",
             "schema": {
               "type": "string",
-              "enum": ["open_id", "union_id", "user_id", "email", "chat_id"]
+              "enum": [
+                "open_id",
+                "union_id",
+                "user_id",
+                "email",
+                "chat_id"
+              ]
             }
           }
         ],
@@ -40,7 +52,11 @@
             "application/json": {
               "schema": {
                 "type": "object",
-                "required": ["receive_id", "msg_type", "content"],
+                "required": [
+                  "receive_id",
+                  "msg_type",
+                  "content"
+                ],
                 "additionalProperties": false,
                 "properties": {
                   "receive_id": {
@@ -69,7 +85,91 @@
             "description": "Message sent",
             "content": {
               "application/json": {
-                "schema": { "type": "object", "additionalProperties": true }
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true
+                }
+              }
+            }
+          }
+        }
+      },
+      "get": {
+        "operationId": "im_messages_list",
+        "summary": "List messages in a chat",
+        "x-aevatar-tool": {
+          "name": "im_messages_list",
+          "description": "List Lark/Feishu messages of a chat (container).",
+          "readOnly": true,
+          "destructive": false,
+          "requiresApproval": false
+        },
+        "parameters": [
+          {
+            "name": "container_id_type",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "enum": [
+                "chat"
+              ]
+            },
+            "description": "Currently only chat."
+          },
+          {
+            "name": "container_id",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "type": "string"
+            },
+            "description": "Chat id (oc_...)."
+          },
+          {
+            "name": "start_time",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string"
+            },
+            "description": "Unix seconds lower bound."
+          },
+          {
+            "name": "end_time",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string"
+            },
+            "description": "Unix seconds upper bound."
+          },
+          {
+            "name": "page_size",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer"
+            }
+          },
+          {
+            "name": "page_token",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "ok",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true
+                }
               }
             }
           }
@@ -93,13 +193,17 @@
             "name": "page_size",
             "in": "query",
             "required": false,
-            "schema": { "type": "integer", "minimum": 1, "maximum": 100 }
+            "schema": {
+              "type": "integer"
+            }
           },
           {
             "name": "page_token",
             "in": "query",
             "required": false,
-            "schema": { "type": "string" }
+            "schema": {
+              "type": "string"
+            }
           }
         ],
         "responses": {
@@ -107,7 +211,10 @@
             "description": "Chat list page",
             "content": {
               "application/json": {
-                "schema": { "type": "object", "additionalProperties": true }
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true
+                }
               }
             }
           }
@@ -131,19 +238,25 @@
             "in": "path",
             "required": true,
             "description": "Bitable app token.",
-            "schema": { "type": "string", "minLength": 1 }
+            "schema": {
+              "type": "string"
+            }
           },
           {
             "name": "page_size",
             "in": "query",
             "required": false,
-            "schema": { "type": "integer", "minimum": 1, "maximum": 100 }
+            "schema": {
+              "type": "integer"
+            }
           },
           {
             "name": "page_token",
             "in": "query",
             "required": false,
-            "schema": { "type": "string" }
+            "schema": {
+              "type": "string"
+            }
           }
         ],
         "responses": {
@@ -151,7 +264,10 @@
             "description": "Table list page",
             "content": {
               "application/json": {
-                "schema": { "type": "object", "additionalProperties": true }
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true
+                }
               }
             }
           }
@@ -174,45 +290,59 @@
             "name": "app_token",
             "in": "path",
             "required": true,
-            "schema": { "type": "string", "minLength": 1 }
+            "schema": {
+              "type": "string"
+            }
           },
           {
             "name": "table_id",
             "in": "path",
             "required": true,
-            "schema": { "type": "string", "minLength": 1 }
+            "schema": {
+              "type": "string"
+            }
           },
           {
             "name": "view_id",
             "in": "query",
             "required": false,
-            "schema": { "type": "string" }
+            "schema": {
+              "type": "string"
+            }
           },
           {
             "name": "filter",
             "in": "query",
             "required": false,
             "description": "Bitable filter formula, e.g. CurrentValue.[Status] = \"Done\".",
-            "schema": { "type": "string" }
+            "schema": {
+              "type": "string"
+            }
           },
           {
             "name": "sort",
             "in": "query",
             "required": false,
             "description": "JSON array of sort clauses, e.g. [\"Amount DESC\"].",
-            "schema": { "type": "string" }
+            "schema": {
+              "type": "string"
+            }
           },
           {
             "name": "page_size",
             "in": "query",
             "required": false,
-            "schema": { "type": "integer", "minimum": 1, "maximum": 500 }
+            "schema": {
+              "type": "integer"
+            }
           },
           {
             "name": "page_token",
             "in": "query",
             "required": false,
-            "schema": { "type": "string" }
+            "schema": {
+              "type": "string"
+            }
           }
         ],
         "responses": {
@@ -220,7 +350,73 @@
             "description": "Record list page",
             "content": {
               "application/json": {
-                "schema": { "type": "object", "additionalProperties": true }
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true
+                }
+              }
+            }
+          }
+        }
+      },
+      "post": {
+        "operationId": "bitable_record_create",
+        "summary": "Create a Bitable record",
+        "x-aevatar-tool": {
+          "name": "bitable_record_create",
+          "description": "Create a record in a Lark/Feishu Bitable table.",
+          "readOnly": false,
+          "destructive": false,
+          "requiresApproval": true
+        },
+        "parameters": [
+          {
+            "name": "app_token",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "table_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "additionalProperties": false,
+                "required": [
+                  "fields"
+                ],
+                "properties": {
+                  "fields": {
+                    "type": "object",
+                    "description": "Field name to value map.",
+                    "additionalProperties": true
+                  }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "ok",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true
+                }
               }
             }
           }
@@ -244,25 +440,33 @@
             "name": "app_token",
             "in": "path",
             "required": true,
-            "schema": { "type": "string", "minLength": 1 }
+            "schema": {
+              "type": "string"
+            }
           },
           {
             "name": "table_id",
             "in": "path",
             "required": true,
-            "schema": { "type": "string", "minLength": 1 }
+            "schema": {
+              "type": "string"
+            }
           },
           {
             "name": "page_size",
             "in": "query",
             "required": false,
-            "schema": { "type": "integer", "minimum": 1, "maximum": 500 }
+            "schema": {
+              "type": "integer"
+            }
           },
           {
             "name": "page_token",
             "in": "query",
             "required": false,
-            "schema": { "type": "string" }
+            "schema": {
+              "type": "string"
+            }
           }
         ],
         "requestBody": {
@@ -273,10 +477,14 @@
                 "type": "object",
                 "additionalProperties": false,
                 "properties": {
-                  "view_id": { "type": "string" },
+                  "view_id": {
+                    "type": "string"
+                  },
                   "field_names": {
                     "type": "array",
-                    "items": { "type": "string" }
+                    "items": {
+                      "type": "string"
+                    }
                   },
                   "filter": {
                     "type": "object",
@@ -285,9 +493,14 @@
                   },
                   "sort": {
                     "type": "array",
-                    "items": { "type": "object", "additionalProperties": true }
+                    "items": {
+                      "type": "object",
+                      "additionalProperties": true
+                    }
                   },
-                  "automatic_fields": { "type": "boolean" }
+                  "automatic_fields": {
+                    "type": "boolean"
+                  }
                 }
               }
             }
@@ -298,7 +511,192 @@
             "description": "Record search page",
             "content": {
               "application/json": {
-                "schema": { "type": "object", "additionalProperties": true }
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/open-apis/im/v1/messages/{message_id}/reply": {
+      "post": {
+        "operationId": "im_message_reply",
+        "summary": "Reply to a message",
+        "x-aevatar-tool": {
+          "name": "im_message_reply",
+          "description": "Reply to a Lark/Feishu message in its thread.",
+          "readOnly": false,
+          "destructive": false,
+          "requiresApproval": true
+        },
+        "parameters": [
+          {
+            "name": "message_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "additionalProperties": false,
+                "required": [
+                  "msg_type",
+                  "content"
+                ],
+                "properties": {
+                  "msg_type": {
+                    "type": "string",
+                    "description": "Message type, e.g. text, post, interactive."
+                  },
+                  "content": {
+                    "type": "string",
+                    "description": "JSON-encoded message content string matching msg_type."
+                  },
+                  "uuid": {
+                    "type": "string",
+                    "description": "Optional client-generated idempotency key."
+                  }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "ok",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/open-apis/bitable/v1/apps/{app_token}/tables/{table_id}/records/{record_id}": {
+      "put": {
+        "operationId": "bitable_record_update",
+        "summary": "Update a Bitable record",
+        "x-aevatar-tool": {
+          "name": "bitable_record_update",
+          "description": "Update a record in a Lark/Feishu Bitable table.",
+          "readOnly": false,
+          "destructive": false,
+          "requiresApproval": true
+        },
+        "parameters": [
+          {
+            "name": "app_token",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "table_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "record_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "additionalProperties": false,
+                "required": [
+                  "fields"
+                ],
+                "properties": {
+                  "fields": {
+                    "type": "object",
+                    "description": "Field name to value map.",
+                    "additionalProperties": true
+                  }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "ok",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/open-apis/docx/v1/documents/{document_id}/raw_content": {
+      "get": {
+        "operationId": "docx_raw_content",
+        "summary": "Read a document as plain text",
+        "x-aevatar-tool": {
+          "name": "docx_raw_content",
+          "description": "Read a Lark/Feishu Docs document as plain text.",
+          "readOnly": true,
+          "destructive": false,
+          "requiresApproval": false
+        },
+        "parameters": [
+          {
+            "name": "document_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "lang",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "ok",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true
+                }
               }
             }
           }

@@ -6,7 +6,10 @@
     "description": "NyxID-hosted overlay of the core Gemini generateContent operations. Paths are relative to the /v1beta base; NyxID injects the API key."
   },
   "servers": [
-    { "url": "https://generativelanguage.googleapis.com/v1beta", "description": "Google AI API" }
+    {
+      "url": "https://generativelanguage.googleapis.com/v1beta",
+      "description": "Google AI API"
+    }
   ],
   "paths": {
     "/models/{model}:generateContent": {
@@ -26,7 +29,9 @@
             "in": "path",
             "required": true,
             "description": "Model id, e.g. gemini-2.0-flash.",
-            "schema": { "type": "string", "minLength": 1 }
+            "schema": {
+              "type": "string"
+            }
           }
         ],
         "requestBody": {
@@ -35,16 +40,27 @@
             "application/json": {
               "schema": {
                 "type": "object",
-                "required": ["contents"],
+                "required": [
+                  "contents"
+                ],
                 "additionalProperties": true,
                 "properties": {
                   "contents": {
                     "type": "array",
                     "description": "Conversation turns with role and parts.",
-                    "items": { "type": "object", "additionalProperties": true }
+                    "items": {
+                      "type": "object",
+                      "additionalProperties": true
+                    }
                   },
-                  "generationConfig": { "type": "object", "additionalProperties": true },
-                  "systemInstruction": { "type": "object", "additionalProperties": true }
+                  "generationConfig": {
+                    "type": "object",
+                    "additionalProperties": true
+                  },
+                  "systemInstruction": {
+                    "type": "object",
+                    "additionalProperties": true
+                  }
                 }
               }
             }
@@ -55,7 +71,10 @@
             "description": "Generated content",
             "content": {
               "application/json": {
-                "schema": { "type": "object", "additionalProperties": true }
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true
+                }
               }
             }
           }
@@ -78,13 +97,17 @@
             "name": "pageSize",
             "in": "query",
             "required": false,
-            "schema": { "type": "integer", "minimum": 1, "maximum": 1000 }
+            "schema": {
+              "type": "integer"
+            }
           },
           {
             "name": "pageToken",
             "in": "query",
             "required": false,
-            "schema": { "type": "string" }
+            "schema": {
+              "type": "string"
+            }
           }
         ],
         "responses": {
@@ -92,7 +115,162 @@
             "description": "Model list",
             "content": {
               "application/json": {
-                "schema": { "type": "object", "additionalProperties": true }
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/models/{model}:countTokens": {
+      "post": {
+        "operationId": "count_tokens",
+        "summary": "Count tokens for a request",
+        "x-aevatar-tool": {
+          "name": "count_tokens",
+          "description": "Count tokens a Gemini request would consume.",
+          "readOnly": false,
+          "destructive": false,
+          "requiresApproval": false
+        },
+        "parameters": [
+          {
+            "name": "model",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "additionalProperties": true,
+                "required": [
+                  "contents"
+                ],
+                "properties": {
+                  "contents": {
+                    "type": "array",
+                    "items": {
+                      "type": "object",
+                      "additionalProperties": true
+                    }
+                  }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "ok",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/models/{model}:embedContent": {
+      "post": {
+        "operationId": "embed_content",
+        "summary": "Create an embedding",
+        "x-aevatar-tool": {
+          "name": "embed_content",
+          "description": "Create a Gemini embedding for content.",
+          "readOnly": false,
+          "destructive": false,
+          "requiresApproval": false
+        },
+        "parameters": [
+          {
+            "name": "model",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            },
+            "description": "Embedding model id, e.g. text-embedding-004."
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "additionalProperties": true,
+                "required": [
+                  "content"
+                ],
+                "properties": {
+                  "content": {
+                    "type": "object",
+                    "additionalProperties": true
+                  }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "ok",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/models/{model}": {
+      "get": {
+        "operationId": "models_get",
+        "summary": "Get a model",
+        "x-aevatar-tool": {
+          "name": "models_get",
+          "description": "Get a Google AI model by id.",
+          "readOnly": true,
+          "destructive": false,
+          "requiresApproval": false
+        },
+        "parameters": [
+          {
+            "name": "model",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "ok",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true
+                }
               }
             }
           }

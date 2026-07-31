@@ -25,6 +25,7 @@ interface RequestOptions {
   readonly body?: unknown;
   readonly headers?: Record<string, string>;
   readonly signal?: AbortSignal;
+  readonly onResponse?: (response: Response) => void;
   /**
    * Opt this request out of the global sign-out on 401. For page-scoped
    * integrations (e.g. the /assistant transports calling a downstream through
@@ -126,6 +127,7 @@ export async function apiClient<T>(
   const url = `${BASE_URL}${endpoint}`;
 
   const response = await fetch(url, config);
+  options.onResponse?.(response);
 
   if (
     response.status === 401 &&
