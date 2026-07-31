@@ -108,6 +108,21 @@ export function AssistantPage({
   // cannot follow the reader into a different thread. State rather than a ref:
   // it is read during render to build the message list.
   const [pendingSendEcho, setPendingSendEcho] = useState<PendingSendEcho>();
+  /**
+   * Bumped only by an explicit "put me in this chat" action — a sidebar row or
+   * New Chat. The composer takes focus on every bump.
+   *
+   * A `draftKey` change cannot stand in for this. The URL also moves on its
+   * own: canonical-id repair swaps `?c=` under a conversation the reader is
+   * already in, confirmed-stale repair drops it entirely, and the first send
+   * migrates a draft thread onto a real id. None of those are anyone asking to
+   * type, and focusing the composer for them would pull a reader out of
+   * whatever they were actually doing.
+   */
+  const [composerFocusRequest, setComposerFocusRequest] = useState(0);
+  function requestComposerFocus() {
+    setComposerFocusRequest((request) => request + 1);
+  }
 
   useLayoutEffect(() => {
     const element = composerRef.current;
@@ -299,6 +314,11 @@ export function AssistantPage({
         conversationId === selectedFromSearch ||
         conversationId === history.data?.conversation.id
       ) {
+        // Deleting the chat you were in lands you on the draft screen, and the
+        // confirm dialog's trigger went with it — so focus has nowhere to
+        // return to. This one IS a reader-initiated arrival at an empty
+        // composer, unlike the repair navigations, so it asks for focus.
+        requestComposerFocus();
         void navigate({ to: "/assistant" as never, search: {} as never });
       }
     } catch (error) {
@@ -447,8 +467,14 @@ export function AssistantPage({
       deletingId={
         deleteConversation.isPending ? deleteConversation.variables : undefined
       }
-      onNewChat={() => void createNewChat()}
-      onSelect={selectConversation}
+      onNewChat={() => {
+        requestComposerFocus();
+        createNewChat();
+      }}
+      onSelect={(conversationId) => {
+        requestComposerFocus();
+        selectConversation(conversationId);
+      }}
       onDelete={handleDelete}
     />
   );
@@ -517,6 +543,7 @@ export function AssistantPage({
             sending={sendMessage.isPending}
             ownerUserId={user?.id ?? null}
             draftKey={draftKey}
+            focusRequest={composerFocusRequest}
             onSend={handleSend}
             onStop={() => cancelTurn.mutateAsync()}
           />
