@@ -39,6 +39,10 @@ use crate::services::assistant_service;
 /// Conversation indexes carry titles, timestamps, and counts per row, so the
 /// list route gets its own buffering headroom before any merge/reshape.
 const MAX_CONVERSATION_INDEX_RESPONSE_BYTES: usize = 4 * 1024 * 1024;
+/// Aggregate page-body budget for one cursor drain. This keeps a valid but
+/// adversarial 40-page chain near the pre-drain memory ceiling instead of
+/// allowing up to 160 MiB of history rows to accumulate in one request.
+const MAX_HISTORY_INDEX_AGGREGATE_BYTES: usize = 8 * 1024 * 1024;
 /// Safety ceiling for a corrupt or adversarial upstream cursor chain. The
 /// response intentionally exposes only the rows drained through this page;
 /// there is no synthetic cursor or truncation flag in NyxID's list contract.
@@ -420,6 +424,7 @@ pub async fn list_conversations(
     let mut seen_ids = HashSet::new();
     let mut seen_cursors = HashSet::new();
     let mut cursor: Option<String> = None;
+    let mut aggregate_page_bytes = 0usize;
 
     for _ in 0..MAX_HISTORY_INDEX_PAGES {
         let mut page_request =
@@ -428,6 +433,9 @@ pub async fn list_conversations(
                     "assistant: failed to build the history list request".to_string(),
                 )
             })?;
+        page_request
+            .headers_mut()
+            .insert(header::ACCEPT, HeaderValue::from_static("application/json"));
         if let Some(cursor) = cursor.as_deref() {
             *page_request.uri_mut() = format!("/?cursor={}", urlencoding::encode(cursor))
                 .parse()
@@ -458,9 +466,18 @@ pub async fn list_conversations(
                     "assistant: conversation index page exceeded the buffer cap".to_string(),
                 )
             })?;
-        let page = serde_json::from_slice::<serde_json::Value>(&bytes).map_err(|_| {
-            AppError::Internal("assistant: chat history index returned invalid JSON".to_string())
-        })?;
+        let Some(next_aggregate_bytes) = aggregate_page_bytes.checked_add(bytes.len()) else {
+            break;
+        };
+        if next_aggregate_bytes > MAX_HISTORY_INDEX_AGGREGATE_BYTES {
+            break;
+        }
+        aggregate_page_bytes = next_aggregate_bytes;
+        let Ok(page) = serde_json::from_slice::<serde_json::Value>(&bytes) else {
+            // Preserve already-collected rows across a mixed-version or
+            // partially deployed upstream response shape.
+            break;
+        };
         let next_cursor = assistant_service::append_addressable_history_page(
             &page,
             &mut conversations,

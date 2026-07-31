@@ -8023,6 +8023,13 @@ mod proxy_resolution_integration_tests {
                             }))
                             .into_response()
                         }
+                        (Method::GET, path)
+                            if path.ends_with(
+                                "/create-recovery/00000000-0000-4000-8000-000000000404",
+                            ) =>
+                        {
+                            StatusCode::NOT_FOUND.into_response()
+                        }
                         (Method::GET, path) if path.contains("/create-recovery/") => {
                             axum::Json(serde_json::json!({
                                 "status": "append_committed",
@@ -8313,6 +8320,22 @@ mod proxy_resolution_integration_tests {
         .await
         .expect("create recovery handler must forward");
         assert_eq!(recovery_response.status(), StatusCode::OK);
+        let missing_recovery_command = "00000000-0000-4000-8000-000000000404";
+        let missing_recovery_response = crate::handlers::assistant::get_create_recovery(
+            axum::extract::State(state.clone()),
+            auth.clone(),
+            Path(missing_recovery_command.to_string()),
+            request(
+                Method::GET,
+                &format!(
+                    "/api/v1/assistant/conversations/create-recovery/{missing_recovery_command}"
+                ),
+                None,
+            ),
+        )
+        .await
+        .expect("create recovery 404 must pass through as a response");
+        assert_eq!(missing_recovery_response.status(), StatusCode::NOT_FOUND);
         assert!(
             crate::handlers::assistant::get_create_recovery(
                 axum::extract::State(state.clone()),
@@ -8383,6 +8406,9 @@ mod proxy_resolution_integration_tests {
                 format!("/api/scopes/{user_id}/chat-history/conversations/{workflow_id}"),
                 format!("/api/scopes/{user_id}/chat-history/conversations/{workflow_id}"),
                 format!("/api/scopes/{user_id}/chat-history/create-recovery/{recovery_command}"),
+                format!(
+                    "/api/scopes/{user_id}/chat-history/create-recovery/{missing_recovery_command}"
+                ),
                 format!("/api/scopes/{user_id}/chat-history/create-recovery/{recovery_command}"),
             ]
         );
@@ -8679,7 +8705,7 @@ mod proxy_resolution_integration_tests {
             return;
         };
 
-        type Captured = (Method, String);
+        type Captured = (Method, String, bool);
         let captured: std::sync::Arc<StdMutex<Vec<Captured>>> =
             std::sync::Arc::new(StdMutex::new(Vec::new()));
         let sink = captured.clone();
@@ -8697,12 +8723,24 @@ mod proxy_resolution_integration_tests {
                         .map(ToString::to_string)
                         .unwrap_or_default();
                     let cursor = request.uri().query();
-                    sink.lock().unwrap().push((method.clone(), path_and_query));
+                    let accepts_json = request.headers().get(axum::http::header::ACCEPT)
+                        == Some(&HeaderValue::from_static("application/json"));
+                    sink.lock()
+                        .unwrap()
+                        .push((method.clone(), path_and_query, accepts_json));
                     if method != Method::GET || !request.uri().path().ends_with("/chat-history") {
                         return StatusCode::NOT_FOUND.into_response();
                     }
 
-                    let page = if downstream_mode.load(Ordering::Relaxed) == 1 {
+                    let mode = downstream_mode.load(Ordering::Relaxed);
+                    if mode == 3 && cursor.is_some() {
+                        return Body::from("not-json").into_response();
+                    }
+                    if mode == 4 && cursor.is_some() {
+                        return axum::Json(serde_json::json!({ "items": [] })).into_response();
+                    }
+
+                    let page = if mode == 1 {
                         serde_json::json!({
                             "conversations": [{
                                 "id": "nyxid-chat-00000000000000000000000000000000",
@@ -8710,7 +8748,7 @@ mod proxy_resolution_integration_tests {
                             }],
                             "nextCursor": "repeated"
                         })
-                    } else if downstream_mode.load(Ordering::Relaxed) == 2 {
+                    } else if mode == 2 {
                         let page_number = cursor
                             .and_then(|query| query.strip_prefix("cursor=page-"))
                             .and_then(|value| value.parse::<usize>().ok())
@@ -8721,6 +8759,27 @@ mod proxy_resolution_integration_tests {
                                 "updatedAt": "2026-07-29T12:00:00.000Z"
                             }],
                             "nextCursor": format!("page-{}", page_number + 1)
+                        })
+                    } else if mode == 5 {
+                        let page_number = cursor
+                            .and_then(|query| query.strip_prefix("cursor=page-"))
+                            .and_then(|value| value.parse::<usize>().ok())
+                            .unwrap_or(0);
+                        serde_json::json!({
+                            "conversations": [{
+                                "id": format!("nyxid-chat-{page_number:032x}"),
+                                "updatedAt": "2026-07-29T12:00:00.000Z",
+                                "padding": "x".repeat(3 * 1024 * 1024),
+                            }],
+                            "nextCursor": format!("page-{}", page_number + 1)
+                        })
+                    } else if mode == 3 || mode == 4 {
+                        serde_json::json!({
+                            "conversations": [{
+                                "id": "nyxid-chat-00000000000000000000000000000000",
+                                "updatedAt": "2026-07-29T12:00:00.000Z"
+                            }],
+                            "nextCursor": "shape-page-2"
                         })
                     } else if cursor.is_none() {
                         let mut rows = (0..30)
@@ -8857,12 +8916,12 @@ mod proxy_resolution_integration_tests {
         assert_eq!(
             calls,
             vec![
-                (Method::GET, history_path.clone()),
-                (Method::GET, format!("{history_path}?cursor=page-2")),
+                (Method::GET, history_path.clone(), true),
+                (Method::GET, format!("{history_path}?cursor=page-2"), true,),
             ]
         );
         assert_eq!(echoes.len(), 2);
-        for (envelope, (method, path)) in echoes.iter().zip(&calls) {
+        for (envelope, (method, path, accepts_json)) in echoes.iter().zip(&calls) {
             assert_eq!(envelope["method"], method.as_str());
             assert_eq!(
                 envelope["path"],
@@ -8870,6 +8929,7 @@ mod proxy_resolution_integration_tests {
             );
             assert!(envelope["commandType"].is_null());
             assert!(envelope["body"].is_null());
+            assert!(*accepts_json, "every drained page must request JSON");
         }
 
         response_mode.store(1, Ordering::Relaxed);
@@ -8884,11 +8944,12 @@ mod proxy_resolution_integration_tests {
         let repeated_calls = std::mem::take(&mut *captured.lock().unwrap());
         assert_eq!(repeated_calls.len(), 2);
         assert!(repeated_calls[1].1.ends_with("?cursor=repeated"));
+        assert!(repeated_calls.iter().all(|call| call.2));
 
         response_mode.store(2, Ordering::Relaxed);
         let capped_response = crate::handlers::assistant::list_conversations(
-            axum::extract::State(state),
-            auth,
+            axum::extract::State(state.clone()),
+            auth.clone(),
             list_request(),
         )
         .await
@@ -8900,7 +8961,47 @@ mod proxy_resolution_integration_tests {
         let capped_body: serde_json::Value = serde_json::from_slice(&capped_body).unwrap();
         assert_eq!(capped_body["conversations"].as_array().unwrap().len(), 40);
         assert!(capped_body.get("nextCursor").is_none());
-        assert_eq!(captured.lock().unwrap().len(), 40);
+        let capped_calls = std::mem::take(&mut *captured.lock().unwrap());
+        assert_eq!(capped_calls.len(), 40);
+        assert!(capped_calls.iter().all(|call| call.2));
+
+        for mode in [3, 4] {
+            response_mode.store(mode, Ordering::Relaxed);
+            let degraded_response = crate::handlers::assistant::list_conversations(
+                axum::extract::State(state.clone()),
+                auth.clone(),
+                list_request(),
+            )
+            .await
+            .expect("an invalid later page must preserve rows already collected");
+            assert_eq!(degraded_response.status(), StatusCode::OK);
+            let degraded_body = to_bytes(degraded_response.into_body(), 1024 * 1024)
+                .await
+                .unwrap();
+            let degraded_body: serde_json::Value = serde_json::from_slice(&degraded_body).unwrap();
+            assert_eq!(degraded_body["conversations"].as_array().unwrap().len(), 1);
+            let degraded_calls = std::mem::take(&mut *captured.lock().unwrap());
+            assert_eq!(degraded_calls.len(), 2);
+            assert!(degraded_calls.iter().all(|call| call.2));
+        }
+
+        response_mode.store(5, Ordering::Relaxed);
+        let budgeted_response = crate::handlers::assistant::list_conversations(
+            axum::extract::State(state),
+            auth,
+            list_request(),
+        )
+        .await
+        .expect("the aggregate byte budget must return collected rows");
+        assert_eq!(budgeted_response.status(), StatusCode::OK);
+        let budgeted_body = to_bytes(budgeted_response.into_body(), 8 * 1024 * 1024)
+            .await
+            .unwrap();
+        let budgeted_body: serde_json::Value = serde_json::from_slice(&budgeted_body).unwrap();
+        assert_eq!(budgeted_body["conversations"].as_array().unwrap().len(), 2);
+        let budgeted_calls = std::mem::take(&mut *captured.lock().unwrap());
+        assert_eq!(budgeted_calls.len(), 3);
+        assert!(budgeted_calls.iter().all(|call| call.2));
         server.abort();
     }
 

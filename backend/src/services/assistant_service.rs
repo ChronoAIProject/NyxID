@@ -105,9 +105,7 @@ pub fn conversation_resource_family(
     if conversation_id.starts_with(WORKFLOW_CHAT_CONVERSATION_PREFIX) {
         return Ok(ConversationResourceFamily::Workflow);
     }
-    Err(AppError::BadRequest(
-        "Unsupported conversation id.".to_string(),
-    ))
+    Err(AppError::NotFound("Conversation not found".to_string()))
 }
 
 /// Add one shared-index page to a drained result, filtering to the two
@@ -117,14 +115,14 @@ pub fn append_addressable_history_page(
     conversations: &mut Vec<serde_json::Value>,
     seen: &mut HashSet<String>,
 ) -> AppResult<Option<String>> {
-    let rows = index
+    let Some(rows) = index
         .get("conversations")
         .and_then(serde_json::Value::as_array)
-        .ok_or_else(|| {
-            AppError::Internal(
-                "assistant: chat history index omitted the conversations array".to_string(),
-            )
-        })?;
+    else {
+        // A mixed-version upstream can briefly return a different index shape.
+        // Preserve the rows already drained instead of blanking the sidebar.
+        return Ok(None);
+    };
 
     for row in rows {
         let Some(id) = row.get("id").and_then(serde_json::Value::as_str) else {
@@ -1346,6 +1344,14 @@ mod tests {
     }
 
     #[test]
+    fn unknown_conversation_families_are_not_found_shaped() {
+        assert!(matches!(
+            conversation_resource_family("workflow-pending-123"),
+            Err(AppError::NotFound(_))
+        ));
+    }
+
+    #[test]
     fn rejects_conversation_ids_that_would_escape_the_canonical_path_segment() {
         for bad in [
             "",
@@ -1370,14 +1376,27 @@ mod tests {
     #[test]
     fn migration_guard_keeps_scoped_typed_commands_and_per_conversation_commands_out() {
         const SOURCE: &str = include_str!("assistant_service.rs");
+        const TEST_MODULE_MARKER: &str = "#[cfg(test)]\nmod tests";
+        let production_source = SOURCE
+            .split_once(TEST_MODULE_MARKER)
+            .map_or(SOURCE, |(production, _)| production);
         let scoped_prefix = ["nyxid", "-chat/"].concat();
         assert!(
-            !SOURCE.contains(&scoped_prefix),
+            !production_source.contains(&scoped_prefix),
             "scoped typed command paths must not return"
         );
+        let typed_detail = match conversation_resource_family(CONV).unwrap() {
+            ConversationResourceFamily::Typed => canonical_conversation_path(CONV).unwrap(),
+            ConversationResourceFamily::Workflow => history_conversation_path(USER, CONV).unwrap(),
+        };
+        assert!(
+            !typed_detail.contains("/chat-history/conversations"),
+            "typed conversations must remain on the canonical resource family"
+        );
         for suffix in [":stream", "/approve", "/stop", "/steer", "/retry", "/skip"] {
+            let forbidden_builder_fragment = format!("conversations/{{conversation_id}}{suffix}");
             assert!(
-                !SOURCE.contains(&["conversations/", suffix].concat()),
+                !production_source.contains(&forbidden_builder_fragment),
                 "per-conversation command route {suffix} must not return"
             );
         }
@@ -1873,6 +1892,15 @@ mod tests {
             WORKFLOW_CHAT_PROMPT_MAX_CHARS
         );
         assert!(body["prompt"].as_str().unwrap().chars().all(|c| c == 'a'));
+
+        let over_boundary = format!(" \t{}\n", "a".repeat(WORKFLOW_CHAT_PROMPT_MAX_CHARS + 1));
+        assert!(matches!(
+            workflow_chat_body(&workflow_turn_request(json!({
+                "prompt": over_boundary,
+                "commandId": "4380055d-e9c3-468e-bc93-64719a9f4658",
+            }))),
+            Err(AppError::BadRequest(_))
+        ));
     }
 
     #[test]
