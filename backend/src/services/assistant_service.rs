@@ -200,7 +200,10 @@ pub fn canonical_conversation_path(conversation_id: &str) -> AppResult<String> {
 
 /// `api/chat/conversations/{id}/state` -- canonical reconnect surface.
 pub fn canonical_state_path(conversation_id: &str) -> AppResult<String> {
-    Ok(format!("{}/state", canonical_conversation_path(conversation_id)?))
+    Ok(format!(
+        "{}/state",
+        canonical_conversation_path(conversation_id)?
+    ))
 }
 
 /// `v1/chat/completions` -- OpenAI-compatible surface. Scope-free: the
@@ -526,9 +529,9 @@ struct RawStepSkipCommand {
 fn validate_control_identity(value: &str, label: &str) -> AppResult<()> {
     let valid = !value.is_empty()
         && value.encode_utf16().count() <= 256
-        && value.chars().all(|c| {
-            !c.is_whitespace() && !c.is_control() && !matches!(c, '/' | '\\' | '?' | '#')
-        });
+        && value
+            .chars()
+            .all(|c| !c.is_whitespace() && !c.is_control() && !matches!(c, '/' | '\\' | '?' | '#'));
     if !valid {
         return Err(AppError::BadRequest(format!("Invalid {label}.")));
     }
@@ -609,18 +612,17 @@ fn parse_action_resource(value: Option<serde_json::Value>) -> AppResult<Option<A
     if payload.len() != 1 {
         return Err(AppError::BadRequest("Invalid action resource.".to_string()));
     }
-    let parse_identity =
-        |payload: &serde_json::Map<String, serde_json::Value>,
-         key: &str,
-         label: &str|
-         -> AppResult<String> {
-            let value = payload
-                .get(key)
-                .and_then(serde_json::Value::as_str)
-                .ok_or_else(|| AppError::BadRequest("Invalid action resource.".to_string()))?;
-            validate_control_identity(value, label)?;
-            Ok(value.to_string())
-        };
+    let parse_identity = |payload: &serde_json::Map<String, serde_json::Value>,
+                          key: &str,
+                          label: &str|
+     -> AppResult<String> {
+        let value = payload
+            .get(key)
+            .and_then(serde_json::Value::as_str)
+            .ok_or_else(|| AppError::BadRequest("Invalid action resource.".to_string()))?;
+        validate_control_identity(value, label)?;
+        Ok(value.to_string())
+    };
     let resource = match variant.as_str() {
         "userService" => ActionResource::UserService {
             user_service_id: parse_identity(payload, "userServiceId", "userServiceId")?,
@@ -632,11 +634,7 @@ fn parse_action_resource(value: Option<serde_json::Value>) -> AppResult<Option<A
             node_id: parse_identity(payload, "nodeId", "nodeId")?,
         },
         "serviceAccount" => ActionResource::ServiceAccount {
-            service_account_id: parse_identity(
-                payload,
-                "serviceAccountId",
-                "serviceAccountId",
-            )?,
+            service_account_id: parse_identity(payload, "serviceAccountId", "serviceAccountId")?,
         },
         "developerApp" => ActionResource::DeveloperApp {
             client_id: parse_identity(payload, "clientId", "clientId")?,
@@ -655,14 +653,15 @@ pub fn parse_assistant_chat_command(bytes: &[u8]) -> AppResult<AssistantChatComm
     let command_type = value
         .get("type")
         .and_then(serde_json::Value::as_str)
-        .ok_or_else(|| AppError::BadRequest("Assistant chat commands require a type.".to_string()))?;
+        .ok_or_else(|| {
+            AppError::BadRequest("Assistant chat commands require a type.".to_string())
+        })?;
     reject_secret_shaped_command(&value)?;
 
     match command_type {
         "text" => {
-            let raw: RawTextChatCommand = serde_json::from_value(value).map_err(|e| {
-                AppError::BadRequest(format!("Invalid text chat request: {e}"))
-            })?;
+            let raw: RawTextChatCommand = serde_json::from_value(value)
+                .map_err(|e| AppError::BadRequest(format!("Invalid text chat request: {e}")))?;
             validate_prompt(&raw.prompt, TYPED_CHAT_PROMPT_MAX_CHARS)?;
             validate_control_identity(&raw.client_request_id, "clientRequestId")?;
             if let Some(conversation_id) = raw.conversation_id.as_deref() {
@@ -675,19 +674,16 @@ pub fn parse_assistant_chat_command(bytes: &[u8]) -> AppResult<AssistantChatComm
             }))
         }
         "action.continue" => {
-            let raw: RawActionContinueCommand =
-                serde_json::from_value(value).map_err(|e| {
-                    AppError::BadRequest(format!("Invalid action continuation request: {e}"))
-                })?;
+            let raw: RawActionContinueCommand = serde_json::from_value(value).map_err(|e| {
+                AppError::BadRequest(format!("Invalid action continuation request: {e}"))
+            })?;
             validate_conversation_id(&raw.conversation_id)?;
             validate_control_identity(&raw.client_request_id, "clientRequestId")?;
             if let Some(origin_turn_id) = raw.origin_turn_id.as_deref() {
                 validate_control_identity(origin_turn_id, "originTurnId")?;
             }
             if raw.actions.len() > ACTION_CONTINUATION_MAX_REPORTS {
-                return Err(AppError::BadRequest(
-                    "Too many action reports.".to_string(),
-                ));
+                return Err(AppError::BadRequest("Too many action reports.".to_string()));
             }
             if !raw.actions.is_empty() && raw.origin_turn_id.is_none() {
                 return Err(AppError::BadRequest(
@@ -715,7 +711,9 @@ pub fn parse_assistant_chat_command(bytes: &[u8]) -> AppResult<AssistantChatComm
                 let disposition = ActionDisposition::parse(&report.disposition)?;
                 let resource = parse_action_resource(report.resource)?;
                 if disposition == ActionDisposition::Completed
-                    && !resource.as_ref().is_some_and(ActionResource::is_user_service)
+                    && !resource
+                        .as_ref()
+                        .is_some_and(ActionResource::is_user_service)
                 {
                     return Err(AppError::BadRequest(
                         "Completed action reports require resource.userService.userServiceId."
@@ -729,12 +727,14 @@ pub fn parse_assistant_chat_command(bytes: &[u8]) -> AppResult<AssistantChatComm
                     resource,
                 });
             }
-            Ok(AssistantChatCommand::ActionContinue(ActionContinueCommand {
-                conversation_id: raw.conversation_id,
-                client_request_id: raw.client_request_id,
-                origin_turn_id: raw.origin_turn_id,
-                actions,
-            }))
+            Ok(AssistantChatCommand::ActionContinue(
+                ActionContinueCommand {
+                    conversation_id: raw.conversation_id,
+                    client_request_id: raw.client_request_id,
+                    origin_turn_id: raw.origin_turn_id,
+                    actions,
+                },
+            ))
         }
         "approval.resolve" => {
             let raw: RawApprovalResolveCommand = serde_json::from_value(value).map_err(|e| {
@@ -744,18 +744,19 @@ pub fn parse_assistant_chat_command(bytes: &[u8]) -> AppResult<AssistantChatComm
             validate_control_identity(&raw.client_request_id, "clientRequestId")?;
             validate_control_identity(&raw.request_id, "requestId")?;
             let reason = normalize_reason(raw.reason)?;
-            Ok(AssistantChatCommand::ApprovalResolve(ApprovalResolveCommand {
-                conversation_id: raw.conversation_id,
-                client_request_id: raw.client_request_id,
-                request_id: raw.request_id,
-                approved: raw.approved,
-                reason,
-            }))
+            Ok(AssistantChatCommand::ApprovalResolve(
+                ApprovalResolveCommand {
+                    conversation_id: raw.conversation_id,
+                    client_request_id: raw.client_request_id,
+                    request_id: raw.request_id,
+                    approved: raw.approved,
+                    reason,
+                },
+            ))
         }
         "task.stop" => {
-            let raw: RawTaskStopCommand = serde_json::from_value(value).map_err(|e| {
-                AppError::BadRequest(format!("Invalid stop request: {e}"))
-            })?;
+            let raw: RawTaskStopCommand = serde_json::from_value(value)
+                .map_err(|e| AppError::BadRequest(format!("Invalid stop request: {e}")))?;
             validate_conversation_id(&raw.conversation_id)?;
             validate_control_identity(&raw.turn_id, "turnId")?;
             validate_control_identity(&raw.stop_request_id, "stopRequestId")?;
@@ -770,9 +771,8 @@ pub fn parse_assistant_chat_command(bytes: &[u8]) -> AppResult<AssistantChatComm
             }))
         }
         "task.steer" => {
-            let raw: RawTaskSteerCommand = serde_json::from_value(value).map_err(|e| {
-                AppError::BadRequest(format!("Invalid steering request: {e}"))
-            })?;
+            let raw: RawTaskSteerCommand = serde_json::from_value(value)
+                .map_err(|e| AppError::BadRequest(format!("Invalid steering request: {e}")))?;
             validate_conversation_id(&raw.conversation_id)?;
             validate_control_identity(&raw.turn_id, "turnId")?;
             validate_control_identity(&raw.steering_id, "steeringId")?;
@@ -791,9 +791,8 @@ pub fn parse_assistant_chat_command(bytes: &[u8]) -> AppResult<AssistantChatComm
             }))
         }
         "step.retry" => {
-            let raw: RawStepRetryCommand = serde_json::from_value(value).map_err(|e| {
-                AppError::BadRequest(format!("Invalid retry request: {e}"))
-            })?;
+            let raw: RawStepRetryCommand = serde_json::from_value(value)
+                .map_err(|e| AppError::BadRequest(format!("Invalid retry request: {e}")))?;
             validate_conversation_id(&raw.conversation_id)?;
             validate_control_identity(&raw.turn_id, "turnId")?;
             validate_control_identity(&raw.task_id, "taskId")?;
@@ -817,9 +816,8 @@ pub fn parse_assistant_chat_command(bytes: &[u8]) -> AppResult<AssistantChatComm
             }))
         }
         "step.skip" => {
-            let raw: RawStepSkipCommand = serde_json::from_value(value).map_err(|e| {
-                AppError::BadRequest(format!("Invalid skip request: {e}"))
-            })?;
+            let raw: RawStepSkipCommand = serde_json::from_value(value)
+                .map_err(|e| AppError::BadRequest(format!("Invalid skip request: {e}")))?;
             validate_conversation_id(&raw.conversation_id)?;
             validate_control_identity(&raw.turn_id, "turnId")?;
             validate_control_identity(&raw.task_id, "taskId")?;
@@ -971,7 +969,10 @@ pub fn prepare_assistant_chat_command(
                 "requestId".to_string(),
                 serde_json::Value::String(command.request_id.clone()),
             );
-            body.insert("approved".to_string(), serde_json::Value::Bool(command.approved));
+            body.insert(
+                "approved".to_string(),
+                serde_json::Value::Bool(command.approved),
+            );
             if let Some(reason) = &command.reason {
                 body.insert(
                     "reason".to_string(),
@@ -1687,7 +1688,10 @@ mod tests {
         .unwrap();
 
         assert_eq!(approval.response_kind, AssistantChatResponseKind::Stream);
-        assert_eq!(approval.response_kind.accept_header_value(), "text/event-stream");
+        assert_eq!(
+            approval.response_kind.accept_header_value(),
+            "text/event-stream"
+        );
         assert_eq!(
             approval.body,
             json!({
@@ -1713,7 +1717,10 @@ mod tests {
             })
         );
         assert_eq!(retry.response_kind, AssistantChatResponseKind::Json);
-        assert_eq!(retry.response_kind.accept_header_value(), "application/json");
+        assert_eq!(
+            retry.response_kind.accept_header_value(),
+            "application/json"
+        );
         assert_eq!(
             retry.body,
             json!({

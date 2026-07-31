@@ -8018,9 +8018,7 @@ mod proxy_resolution_integration_tests {
                         (_, "/api/chat") => Response::builder()
                             .status(StatusCode::OK)
                             .header(axum::http::header::CONTENT_TYPE, "text/event-stream")
-                            .body(Body::from(
-                                "data: {\"type\":\"RUN_FINISHED\"}\n\n",
-                            ))
+                            .body(Body::from("data: {\"type\":\"RUN_FINISHED\"}\n\n"))
                             .unwrap(),
                         _ => axum::Json(serde_json::json!({ "ok": true })).into_response(),
                     }
@@ -8065,10 +8063,9 @@ mod proxy_resolution_integration_tests {
 
         let state = test_app_state(db.clone());
         let auth = access_token_auth(&user_id);
-        let billing_policy =
-            crate::services::billing::route_inventory::BillingRoutePolicy::Metered(
-                crate::services::billing::BillingIngress::Proxy,
-            );
+        let billing_policy = crate::services::billing::route_inventory::BillingRoutePolicy::Metered(
+            crate::services::billing::BillingIngress::Proxy,
+        );
         let request = |method: Method, uri: &str, body: Option<&str>| {
             let mut request = Request::builder()
                 .method(method)
@@ -8200,7 +8197,11 @@ mod proxy_resolution_integration_tests {
         assert_eq!(workflow["workflow"], "studio");
         assert_eq!(workflow["prompt"], "hi there");
         assert!(workflow["conversation"]["conversationId"].is_null());
-        assert!(workflow["commandId"].as_str().is_some_and(|id| !id.is_empty()));
+        assert!(
+            workflow["commandId"]
+                .as_str()
+                .is_some_and(|id| !id.is_empty())
+        );
 
         let expected_chat_bodies = [
             serde_json::json!({
@@ -8290,7 +8291,10 @@ mod proxy_resolution_integration_tests {
         ];
         for (offset, expected) in expected_chat_bodies.into_iter().enumerate() {
             let (_, _, body, headers) = &calls[offset + 1];
-            assert_eq!(serde_json::from_slice::<serde_json::Value>(body).unwrap(), expected);
+            assert_eq!(
+                serde_json::from_slice::<serde_json::Value>(body).unwrap(),
+                expected
+            );
             assert!(headers.get(axum::http::header::AUTHORIZATION).is_none());
             assert!(headers.get("x-nyxid-identity-token").is_some());
             assert!(headers.get("x-nyxid-delegation-token").is_some());

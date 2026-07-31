@@ -1295,7 +1295,10 @@ pub fn build_router(
     // is a human session surface, so API-key, service-account, delegated, and
     // relay callers are rejected by that router's layers.
     let assistant_routes = Router::new()
-        .route("/conversations", get(handlers::assistant::list_conversations))
+        .route(
+            "/conversations",
+            get(handlers::assistant::list_conversations),
+        )
         .route(
             "/conversations/{conversation_id}",
             get(handlers::assistant::get_history).delete(handlers::assistant::delete_conversation),
