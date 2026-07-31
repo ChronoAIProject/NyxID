@@ -641,6 +641,29 @@ describe("AevatarAssistantTransport", () => {
     expect(detailFetch).not.toHaveBeenCalled();
   });
 
+  it("requests assistant resources as JSON", async () => {
+    const fetchMock = stubFetch(
+      (url, init) =>
+        url === `${ASSISTANT_BASE}/conversations` &&
+        (init?.method ?? "GET") === "GET"
+          ? jsonResponse({ conversations: [] })
+          : undefined,
+      routeHistory([]),
+    );
+    const transport = new AevatarAssistantTransport();
+
+    await transport.listConversations();
+    await transport.getHistory(CONVERSATION_ID);
+
+    const getCalls = fetchMock.mock.calls.filter(
+      ([, init]) => (init?.method ?? "GET") === "GET",
+    );
+    expect(getCalls).toHaveLength(2);
+    for (const [, init] of getCalls) {
+      expect(init?.headers).toMatchObject({ Accept: "application/json" });
+    }
+  });
+
   it("keeps a streaming conversation's live title over stale index metadata", async () => {
     stubFetch(routeStream(OBSERVED_FRAMES));
     const transport = new AevatarAssistantTransport();
@@ -1964,7 +1987,7 @@ describe("AevatarAssistantTransport", () => {
     }
   });
 
-  it("deletes a conversation upstream and drops it from the local list", async () => {
+  it("accepts a bodyless 204 delete and drops the conversation locally", async () => {
     const routeIndex: FetchRoute = (url, init) =>
       url === `${ASSISTANT_BASE}/conversations` &&
       (init?.method ?? "GET") === "GET"
@@ -1973,7 +1996,7 @@ describe("AevatarAssistantTransport", () => {
     const routeDelete: FetchRoute = (url, init) =>
       url === `${ASSISTANT_BASE}/conversations/${CONVERSATION_ID}` &&
       init?.method === "DELETE"
-        ? jsonResponse({})
+        ? new Response(null, { status: 204 })
         : undefined;
     const fetchMock = stubFetch(routeIndex, routeDelete);
     const transport = new AevatarAssistantTransport();
@@ -5500,8 +5523,23 @@ describe("a conversation with no committed turn has no server transcript", () =>
     expect(history.conversation.id).toBe(CONVERSATION_ID);
   });
 
-  it("types a 404 for a conversation it has never seen as not-found", async () => {
-    stubFetch();
+  it.each([
+    [
+      "an Aevatar error envelope",
+      () =>
+        jsonResponse(
+          { code: "CONVERSATION_NOT_FOUND", message: "Missing." },
+          404,
+        ),
+    ],
+    ["an empty body", () => new Response(null, { status: 404 })],
+  ])("types a 404 with %s as not-found", async (_label, response) => {
+    stubFetch((url, init) =>
+      url.endsWith("/nyxid-chat-never-created") &&
+      (init?.method ?? "GET") === "GET"
+        ? response()
+        : undefined,
+    );
     const transport = new AevatarAssistantTransport();
 
     await expect(

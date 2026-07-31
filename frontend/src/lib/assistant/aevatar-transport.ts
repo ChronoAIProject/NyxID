@@ -90,10 +90,15 @@ function assistantWireLogOptions(): {
 // strict 401 handling.
 const assistantApi = {
   get<T>(endpoint: string, signal?: AbortSignal): Promise<T> {
+    const wireLog = assistantWireLogOptions();
     return apiClient<T>(endpoint, {
+      headers: {
+        Accept: "application/json",
+        ...wireLog.headers,
+      },
       preserveSessionOn401: true,
       signal,
-      ...assistantWireLogOptions(),
+      onResponse: wireLog.onResponse,
     });
   },
   post<T>(endpoint: string, body?: unknown): Promise<T> {
