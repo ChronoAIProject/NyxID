@@ -235,15 +235,51 @@ function groupMessages(messages: readonly AssistantMessage[]): MessageGroup[] {
  * briefly held a standalone caret instead; the dots replace it, because a
  * caret alone is thinner than the gap it has to explain.
  */
-const DOMINO_PERIOD_MS = 1_800;
-const DOMINO_EXIT_MS = 360;
-// CSS starts 10% into its timeline via the negative delay; dot 5 reaches its
-// out-swing peak at 57%, which is the instant the impulse reverses left.
-const DOMINO_CSS_HEAD_START = 10 / 100;
-const DOMINO_CSS_REVERSAL_KEYFRAME = 57 / 100;
-const DOMINO_REVERSAL_MS =
+const DOMINO_BALLS = 4;
+const DOMINO_PERIOD_MS = 2_200;
+// The exit sweep is a 280ms flight plus 72ms of stagger before the last ball
+// leaves. 352ms is the floor; the margin here is deliberate slack so the final
+// frame is painted rather than raced against the unmount.
+const DOMINO_EXIT_MS = 380;
+// Mirrors `.assistant-streaming-dot` in app.css: the shared negative delay
+// starts every ball 24% into the cradle timeline, on the frame the right ball
+// launches and they are all still level. The impulse then travels rightward
+// until the right apex at 50% and leftward for the rest of the period. The two
+// apex dwells have no instantaneous direction; each falls inside the pass that
+// put the ball out there, so the sweep continues the travel already on screen.
+const DOMINO_CSS_HEAD_START = 24 / 100;
+const DOMINO_CSS_REVERSAL_KEYFRAME = 50 / 100;
+// Elapsed time is measured from mount, which the head start has already
+// consumed — so in that frame the rightward pass is split in two: it runs from
+// mount to the reversal, and resumes once the timeline wraps past 100%.
+const DOMINO_RIGHTWARD_UNTIL_MS =
   DOMINO_PERIOD_MS *
   (DOMINO_CSS_REVERSAL_KEYFRAME - DOMINO_CSS_HEAD_START);
+const DOMINO_RIGHTWARD_FROM_MS =
+  DOMINO_PERIOD_MS * (1 - DOMINO_CSS_HEAD_START);
+
+/**
+ * Horizontal offset out of a computed `transform`. Chromium resolves the
+ * cradle's `translate3d` to a `matrix3d`, other engines may flatten it to the
+ * 2D `matrix`, and jsdom reports nothing at all — hence the DOMMatrix path
+ * with a hand parse behind it and a resting 0 behind that.
+ */
+function readTranslateX(transform: string): number {
+  if (!transform || transform === "none") return 0;
+  if (typeof DOMMatrixReadOnly === "function") {
+    try {
+      return new DOMMatrixReadOnly(transform).m41;
+    } catch {
+      // Fall through to the textual parse below.
+    }
+  }
+  const values = /matrix(?:3d)?\(([^)]+)\)/.exec(transform)?.[1];
+  if (!values) return 0;
+  const parts = values.split(",").map(Number);
+  // `matrix()` carries tx in slot 5; `matrix3d()` in slot 13.
+  const x = parts.length === 6 ? parts[4] : parts[12];
+  return typeof x === "number" && Number.isFinite(x) ? x : 0;
+}
 
 function StreamingDots({
   visible,
@@ -288,8 +324,29 @@ function StreamingDots({
       ((elapsed % DOMINO_PERIOD_MS) + DOMINO_PERIOD_MS) % DOMINO_PERIOD_MS;
     const rect = lastVisibleRect.current ?? root.getBoundingClientRect();
 
+    // Hand each ball its own live position and brightness before the exit
+    // animation replaces the cradle loop. Without this the exit interpolates
+    // from the element's *underlying* style — no transform, resting opacity —
+    // so a striker caught at its apex snaps a full 7px back into the pack on
+    // the first frame and only then flies out. One frame of teleport undoes
+    // every other claim this loader makes about mass.
+    for (const ball of root.querySelectorAll<HTMLElement>(
+      ".assistant-streaming-dot",
+    )) {
+      const computed = window.getComputedStyle(ball);
+      ball.style.setProperty(
+        "--domino-exit-x",
+        `${String(readTranslateX(computed.transform))}px`,
+      );
+      if (computed.opacity) {
+        ball.style.setProperty("--domino-exit-opacity", computed.opacity);
+      }
+    }
+
     root.dataset.exitDirection =
-      phase < DOMINO_REVERSAL_MS ? "right" : "left";
+      phase < DOMINO_RIGHTWARD_UNTIL_MS || phase >= DOMINO_RIGHTWARD_FROM_MS
+        ? "right"
+        : "left";
     root.classList.remove("relative");
     root.classList.add(
       "assistant-streaming-dots--leaving",
@@ -317,6 +374,12 @@ function StreamingDots({
       root.style.removeProperty("top");
       root.style.removeProperty("width");
       root.style.removeProperty("height");
+      for (const ball of root.querySelectorAll<HTMLElement>(
+        ".assistant-streaming-dot",
+      )) {
+        ball.style.removeProperty("--domino-exit-x");
+        ball.style.removeProperty("--domino-exit-opacity");
+      }
     };
   }, [present, visible]);
 
@@ -326,7 +389,12 @@ function StreamingDots({
     <span
       ref={rootRef}
       data-streaming-dots
-      className="assistant-streaming-dots relative flex h-[18px] w-max items-center gap-1"
+      // 6px balls on an 8px pitch — a 30px pack, narrower than the five 4px
+      // dots' 36px, with a 2px seam where they had a full 4px ball-width of
+      // air between neighbours. That tightness is what lets a swing look like
+      // a ball leaving the pack rather than a dot drifting between its
+      // neighbours.
+      className="assistant-streaming-dots relative flex h-[18px] w-max items-center gap-[2px]"
       // The standalone thinking row is itself a live region, so its dots stay
       // decorative. Dots inside an opened-but-still-empty assistant message
       // have no such wrapper — without their own role that whole pre-content
@@ -335,11 +403,14 @@ function StreamingDots({
       aria-label={visible && live ? "Assistant is answering" : undefined}
       aria-hidden={!visible || !live ? true : undefined}
     >
-      {Array.from({ length: 5 }, (_, index) => (
+      {Array.from({ length: DOMINO_BALLS }, (_, index) => (
         <span
-          // The dots have no independent meaning; the parent owns the status.
+          // The balls have no independent meaning; the parent owns the status.
           aria-hidden="true"
-          className="assistant-streaming-dot h-1 w-1 rounded-full bg-text-tertiary opacity-70"
+          // Opacity is animated (it tracks each ball's kinetic energy), so the
+          // resting value lives in app.css beside the keyframes rather than as
+          // a utility here that the animation would only override.
+          className="assistant-streaming-dot h-[6px] w-[6px] rounded-full bg-muted-foreground"
           key={index}
         />
       ))}
