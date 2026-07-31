@@ -62,15 +62,10 @@
                 "additionalProperties": true,
                 "properties": {
                   "chat_id": {
-                    "description": "Target chat id or @channelusername.",
-                    "type": [
-                      "integer",
-                      "string"
-                    ]
+                    "description": "Target chat id or @channelusername."
                   },
                   "text": {
-                    "type": "string",
-                    "minLength": 1
+                    "type": "string"
                   },
                   "parse_mode": {
                     "type": "string",
@@ -121,8 +116,7 @@
             "required": true,
             "description": "Chat id or @channelusername.",
             "schema": {
-              "type": "string",
-              "minLength": 1
+              "type": "string"
             }
           }
         ],
@@ -167,9 +161,7 @@
             "in": "query",
             "required": false,
             "schema": {
-              "type": "integer",
-              "minimum": 1,
-              "maximum": 100
+              "type": "integer"
             }
           },
           {
@@ -177,8 +169,7 @@
             "in": "query",
             "required": false,
             "schema": {
-              "type": "integer",
-              "minimum": 0
+              "type": "integer"
             }
           }
         ],
@@ -220,12 +211,7 @@
                   "photo"
                 ],
                 "properties": {
-                  "chat_id": {
-                    "type": [
-                      "integer",
-                      "string"
-                    ]
-                  },
+                  "chat_id": {},
                   "photo": {
                     "type": "string",
                     "description": "HTTP URL or Telegram file_id."
@@ -284,12 +270,7 @@
                   "document"
                 ],
                 "properties": {
-                  "chat_id": {
-                    "type": [
-                      "integer",
-                      "string"
-                    ]
-                  },
+                  "chat_id": {},
                   "document": {
                     "type": "string",
                     "description": "HTTP URL or Telegram file_id."
@@ -341,18 +322,12 @@
                   "text"
                 ],
                 "properties": {
-                  "chat_id": {
-                    "type": [
-                      "integer",
-                      "string"
-                    ]
-                  },
+                  "chat_id": {},
                   "message_id": {
                     "type": "integer"
                   },
                   "text": {
-                    "type": "string",
-                    "minLength": 1
+                    "type": "string"
                   },
                   "parse_mode": {
                     "type": "string",
@@ -405,12 +380,7 @@
                   "message_id"
                 ],
                 "properties": {
-                  "chat_id": {
-                    "type": [
-                      "integer",
-                      "string"
-                    ]
-                  },
+                  "chat_id": {},
                   "message_id": {
                     "type": "integer"
                   }
@@ -458,18 +428,8 @@
                   "message_id"
                 ],
                 "properties": {
-                  "chat_id": {
-                    "type": [
-                      "integer",
-                      "string"
-                    ]
-                  },
-                  "from_chat_id": {
-                    "type": [
-                      "integer",
-                      "string"
-                    ]
-                  },
+                  "chat_id": {},
+                  "from_chat_id": {},
                   "message_id": {
                     "type": "integer"
                   }
@@ -542,8 +502,7 @@
                 ],
                 "properties": {
                   "callback_query_id": {
-                    "type": "string",
-                    "minLength": 1
+                    "type": "string"
                   },
                   "text": {
                     "type": "string"

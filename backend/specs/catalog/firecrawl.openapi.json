@@ -29,7 +29,37 @@
           "content": {
             "application/json": {
               "schema": {
-                "$ref": "#/components/schemas/AgentSubmitRequest"
+                "type": "object",
+                "required": [
+                  "prompt"
+                ],
+                "additionalProperties": false,
+                "properties": {
+                  "prompt": {
+                    "type": "string",
+                    "description": "Natural-language task for the Firecrawl agent."
+                  },
+                  "urls": {
+                    "type": "array",
+                    "description": "Optional starting URLs for the agent.",
+                    "items": {
+                      "type": "string"
+                    }
+                  },
+                  "schema": {
+                    "type": "object",
+                    "description": "Optional structured extraction schema.",
+                    "additionalProperties": true
+                  },
+                  "model": {
+                    "type": "string",
+                    "description": "Optional model override."
+                  },
+                  "maxCredits": {
+                    "type": "integer",
+                    "description": "Optional maximum credits to spend on the task."
+                  }
+                }
               }
             }
           }
@@ -40,7 +70,17 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/AgentSubmitResponse"
+                  "type": "object",
+                  "additionalProperties": true,
+                  "properties": {
+                    "success": {
+                      "type": "boolean"
+                    },
+                    "id": {
+                      "type": "string",
+                      "description": "Agent task id to poll."
+                    }
+                  }
                 }
               }
             }
@@ -77,7 +117,24 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/AgentStatusResponse"
+                  "type": "object",
+                  "additionalProperties": true,
+                  "properties": {
+                    "success": {
+                      "type": "boolean"
+                    },
+                    "status": {
+                      "type": "string",
+                      "description": "Current task status."
+                    },
+                    "data": {
+                      "description": "Completed task result, when available."
+                    },
+                    "error": {
+                      "type": "string",
+                      "description": "Failure details, when available."
+                    }
+                  }
                 }
               }
             }
@@ -108,8 +165,7 @@
                 ],
                 "properties": {
                   "url": {
-                    "type": "string",
-                    "format": "uri"
+                    "type": "string"
                   },
                   "formats": {
                     "type": "array",
@@ -164,13 +220,10 @@
                 ],
                 "properties": {
                   "query": {
-                    "type": "string",
-                    "minLength": 1
+                    "type": "string"
                   },
                   "limit": {
-                    "type": "integer",
-                    "minimum": 1,
-                    "maximum": 100
+                    "type": "integer"
                   },
                   "scrapeOptions": {
                     "type": "object",
@@ -219,17 +272,14 @@
                 ],
                 "properties": {
                   "url": {
-                    "type": "string",
-                    "format": "uri"
+                    "type": "string"
                   },
                   "search": {
                     "type": "string",
                     "description": "Optional filter query."
                   },
                   "limit": {
-                    "type": "integer",
-                    "minimum": 1,
-                    "maximum": 30000
+                    "type": "integer"
                   }
                 }
               }
@@ -258,75 +308,6 @@
         "type": "http",
         "scheme": "bearer",
         "bearerFormat": "Firecrawl API key"
-      }
-    },
-    "schemas": {
-      "AgentSubmitRequest": {
-        "type": "object",
-        "required": [
-          "prompt"
-        ],
-        "additionalProperties": false,
-        "properties": {
-          "prompt": {
-            "type": "string",
-            "description": "Natural-language task for the Firecrawl agent."
-          },
-          "urls": {
-            "type": "array",
-            "description": "Optional starting URLs for the agent.",
-            "items": {
-              "type": "string",
-              "format": "uri"
-            }
-          },
-          "schema": {
-            "type": "object",
-            "description": "Optional structured extraction schema.",
-            "additionalProperties": true
-          },
-          "model": {
-            "type": "string",
-            "description": "Optional model override."
-          },
-          "maxCredits": {
-            "type": "integer",
-            "description": "Optional maximum credits to spend on the task."
-          }
-        }
-      },
-      "AgentSubmitResponse": {
-        "type": "object",
-        "additionalProperties": true,
-        "properties": {
-          "success": {
-            "type": "boolean"
-          },
-          "id": {
-            "type": "string",
-            "description": "Agent task id to poll."
-          }
-        }
-      },
-      "AgentStatusResponse": {
-        "type": "object",
-        "additionalProperties": true,
-        "properties": {
-          "success": {
-            "type": "boolean"
-          },
-          "status": {
-            "type": "string",
-            "description": "Current task status."
-          },
-          "data": {
-            "description": "Completed task result, when available."
-          },
-          "error": {
-            "type": "string",
-            "description": "Failure details, when available."
-          }
-        }
       }
     }
   },

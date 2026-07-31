@@ -99,12 +99,7 @@
                     "type": "string",
                     "description": "e.g. mistral-embed."
                   },
-                  "input": {
-                    "type": [
-                      "string",
-                      "array"
-                    ]
-                  }
+                  "input": {}
                 }
               }
             }
@@ -168,8 +163,7 @@
             "in": "path",
             "required": true,
             "schema": {
-              "type": "string",
-              "minLength": 1
+              "type": "string"
             }
           }
         ],

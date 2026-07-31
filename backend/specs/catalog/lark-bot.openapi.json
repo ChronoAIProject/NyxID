@@ -122,8 +122,7 @@
             "in": "query",
             "required": true,
             "schema": {
-              "type": "string",
-              "minLength": 1
+              "type": "string"
             },
             "description": "Chat id (oc_...)."
           },
@@ -150,9 +149,7 @@
             "in": "query",
             "required": false,
             "schema": {
-              "type": "integer",
-              "minimum": 1,
-              "maximum": 50
+              "type": "integer"
             }
           },
           {
@@ -197,9 +194,7 @@
             "in": "query",
             "required": false,
             "schema": {
-              "type": "integer",
-              "minimum": 1,
-              "maximum": 100
+              "type": "integer"
             }
           },
           {
@@ -244,8 +239,7 @@
             "required": true,
             "description": "Bitable app token.",
             "schema": {
-              "type": "string",
-              "minLength": 1
+              "type": "string"
             }
           },
           {
@@ -253,9 +247,7 @@
             "in": "query",
             "required": false,
             "schema": {
-              "type": "integer",
-              "minimum": 1,
-              "maximum": 100
+              "type": "integer"
             }
           },
           {
@@ -299,8 +291,7 @@
             "in": "path",
             "required": true,
             "schema": {
-              "type": "string",
-              "minLength": 1
+              "type": "string"
             }
           },
           {
@@ -308,8 +299,7 @@
             "in": "path",
             "required": true,
             "schema": {
-              "type": "string",
-              "minLength": 1
+              "type": "string"
             }
           },
           {
@@ -343,9 +333,7 @@
             "in": "query",
             "required": false,
             "schema": {
-              "type": "integer",
-              "minimum": 1,
-              "maximum": 500
+              "type": "integer"
             }
           },
           {
@@ -387,8 +375,7 @@
             "in": "path",
             "required": true,
             "schema": {
-              "type": "string",
-              "minLength": 1
+              "type": "string"
             }
           },
           {
@@ -396,8 +383,7 @@
             "in": "path",
             "required": true,
             "schema": {
-              "type": "string",
-              "minLength": 1
+              "type": "string"
             }
           }
         ],
@@ -455,8 +441,7 @@
             "in": "path",
             "required": true,
             "schema": {
-              "type": "string",
-              "minLength": 1
+              "type": "string"
             }
           },
           {
@@ -464,8 +449,7 @@
             "in": "path",
             "required": true,
             "schema": {
-              "type": "string",
-              "minLength": 1
+              "type": "string"
             }
           },
           {
@@ -473,9 +457,7 @@
             "in": "query",
             "required": false,
             "schema": {
-              "type": "integer",
-              "minimum": 1,
-              "maximum": 500
+              "type": "integer"
             }
           },
           {
@@ -556,8 +538,7 @@
             "in": "path",
             "required": true,
             "schema": {
-              "type": "string",
-              "minLength": 1
+              "type": "string"
             }
           }
         ],
@@ -622,8 +603,7 @@
             "in": "path",
             "required": true,
             "schema": {
-              "type": "string",
-              "minLength": 1
+              "type": "string"
             }
           },
           {
@@ -631,8 +611,7 @@
             "in": "path",
             "required": true,
             "schema": {
-              "type": "string",
-              "minLength": 1
+              "type": "string"
             }
           },
           {
@@ -640,8 +619,7 @@
             "in": "path",
             "required": true,
             "schema": {
-              "type": "string",
-              "minLength": 1
+              "type": "string"
             }
           }
         ],
@@ -698,8 +676,7 @@
             "in": "path",
             "required": true,
             "schema": {
-              "type": "string",
-              "minLength": 1
+              "type": "string"
             }
           },
           {
@@ -707,9 +684,7 @@
             "in": "query",
             "required": false,
             "schema": {
-              "type": "integer",
-              "minimum": 0,
-              "maximum": 2
+              "type": "integer"
             }
           }
         ],

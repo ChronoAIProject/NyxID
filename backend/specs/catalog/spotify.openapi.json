@@ -55,8 +55,7 @@
             "in": "query",
             "required": true,
             "schema": {
-              "type": "string",
-              "minLength": 1
+              "type": "string"
             }
           },
           {
@@ -65,8 +64,7 @@
             "required": true,
             "description": "Comma-separated: album, artist, playlist, track, show, episode, audiobook.",
             "schema": {
-              "type": "string",
-              "minLength": 1
+              "type": "string"
             }
           },
           {
@@ -74,9 +72,7 @@
             "in": "query",
             "required": false,
             "schema": {
-              "type": "integer",
-              "minimum": 1,
-              "maximum": 50
+              "type": "integer"
             }
           },
           {
@@ -84,8 +80,7 @@
             "in": "query",
             "required": false,
             "schema": {
-              "type": "integer",
-              "minimum": 0
+              "type": "integer"
             }
           }
         ],
@@ -121,9 +116,7 @@
             "in": "query",
             "required": false,
             "schema": {
-              "type": "integer",
-              "minimum": 1,
-              "maximum": 50
+              "type": "integer"
             }
           },
           {
@@ -131,8 +124,7 @@
             "in": "query",
             "required": false,
             "schema": {
-              "type": "integer",
-              "minimum": 0
+              "type": "integer"
             }
           }
         ],
@@ -208,8 +200,7 @@
                     }
                   },
                   "position_ms": {
-                    "type": "integer",
-                    "minimum": 0
+                    "type": "integer"
                   }
                 }
               }
@@ -258,8 +249,7 @@
             "in": "path",
             "required": true,
             "schema": {
-              "type": "string",
-              "minLength": 1
+              "type": "string"
             }
           },
           {
@@ -267,9 +257,7 @@
             "in": "query",
             "required": false,
             "schema": {
-              "type": "integer",
-              "minimum": 1,
-              "maximum": 50
+              "type": "integer"
             }
           },
           {
@@ -277,8 +265,7 @@
             "in": "query",
             "required": false,
             "schema": {
-              "type": "integer",
-              "minimum": 0
+              "type": "integer"
             }
           }
         ],
@@ -312,8 +299,7 @@
             "in": "path",
             "required": true,
             "schema": {
-              "type": "string",
-              "minLength": 1
+              "type": "string"
             }
           }
         ],
@@ -336,8 +322,7 @@
                     }
                   },
                   "position": {
-                    "type": "integer",
-                    "minimum": 0
+                    "type": "integer"
                   }
                 }
               }
@@ -401,9 +386,7 @@
             "in": "query",
             "required": false,
             "schema": {
-              "type": "integer",
-              "minimum": 1,
-              "maximum": 50
+              "type": "integer"
             }
           }
         ],
@@ -439,9 +422,7 @@
             "in": "query",
             "required": false,
             "schema": {
-              "type": "integer",
-              "minimum": 1,
-              "maximum": 50
+              "type": "integer"
             }
           },
           {

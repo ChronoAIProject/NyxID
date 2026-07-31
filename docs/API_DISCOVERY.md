@@ -183,6 +183,7 @@ GET /api/v1/catalog-specs/{spec_key}/openapi.json
 
 - The registry (`backend/src/services/catalog_spec_registry.rs`) maps catalog slugs to spec keys; several slugs can share one overlay (`api-github` / `api-github-pat`, the Lark / Feishu pairs).
 - Each operation carries an `x-aevatar-tool` annotation (`name`, `readOnly`, `destructive`, `requiresApproval`) so agent runtimes can admit operations without guessing.
+- Overlay schemas are restricted to the schema-keyword subset aevatar's workflow admission accepts (`type, enum, properties, required, items, additionalProperties, title, description, default, example, examples, deprecated`; no `$ref`, no union `type` arrays) -- anything outside it makes the operation inadmissible for workflow binding. Enforced by a registry unit test; upstream APIs still enforce real limits (lengths, ranges) at runtime.
 - Seeded services get their `openapi_spec_url` pointed at the hosted overlay automatically (new rows at seed time; existing rows via a null-guarded backfill that never overwrites an admin-set URL).
 - At startup, `catalog_spec_sync` parses every overlay and additively upserts `ServiceEndpoint` rows for the seeded services (matched by endpoint name; admin-added endpoints under other names are never touched or soft-deleted). This is what makes `/api/v1/mcp/config` publish concrete `service_id` + `endpoint_id` operations for catalog-backed user services -- required by Aevatar v4 workflow admission (issue #1290).
 

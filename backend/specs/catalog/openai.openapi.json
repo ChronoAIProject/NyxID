@@ -100,11 +100,7 @@
                     "type": "string"
                   },
                   "input": {
-                    "description": "String prompt or structured input items.",
-                    "type": [
-                      "string",
-                      "array"
-                    ]
+                    "description": "String prompt or structured input items."
                   }
                 }
               }
@@ -153,12 +149,7 @@
                     "type": "string",
                     "description": "e.g. text-embedding-3-small."
                   },
-                  "input": {
-                    "type": [
-                      "string",
-                      "array"
-                    ]
-                  }
+                  "input": {}
                 }
               }
             }
@@ -232,13 +223,10 @@
                     "description": "e.g. gpt-image-1."
                   },
                   "prompt": {
-                    "type": "string",
-                    "minLength": 1
+                    "type": "string"
                   },
                   "n": {
-                    "type": "integer",
-                    "minimum": 1,
-                    "maximum": 10
+                    "type": "integer"
                   },
                   "size": {
                     "type": "string"
@@ -288,12 +276,7 @@
                   "model": {
                     "type": "string"
                   },
-                  "input": {
-                    "type": [
-                      "string",
-                      "array"
-                    ]
-                  }
+                  "input": {}
                 }
               }
             }
@@ -331,8 +314,7 @@
             "in": "path",
             "required": true,
             "schema": {
-              "type": "string",
-              "minLength": 1
+              "type": "string"
             }
           }
         ],

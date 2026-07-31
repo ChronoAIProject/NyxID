@@ -125,9 +125,7 @@
             "in": "query",
             "required": false,
             "schema": {
-              "type": "integer",
-              "minimum": 1,
-              "maximum": 1000
+              "type": "integer"
             }
           },
           {
@@ -171,8 +169,7 @@
             "in": "query",
             "required": true,
             "schema": {
-              "type": "string",
-              "minLength": 1
+              "type": "string"
             }
           },
           {
@@ -180,9 +177,7 @@
             "in": "query",
             "required": false,
             "schema": {
-              "type": "integer",
-              "minimum": 1,
-              "maximum": 1000
+              "type": "integer"
             }
           },
           {
@@ -235,8 +230,7 @@
             "in": "query",
             "required": true,
             "schema": {
-              "type": "string",
-              "minLength": 1
+              "type": "string"
             }
           }
         ],
@@ -272,8 +266,7 @@
             "in": "query",
             "required": true,
             "schema": {
-              "type": "string",
-              "minLength": 1
+              "type": "string"
             }
           },
           {
@@ -281,8 +274,7 @@
             "in": "query",
             "required": true,
             "schema": {
-              "type": "string",
-              "minLength": 1
+              "type": "string"
             },
             "description": "Parent message timestamp."
           },
@@ -291,9 +283,7 @@
             "in": "query",
             "required": false,
             "schema": {
-              "type": "integer",
-              "minimum": 1,
-              "maximum": 1000
+              "type": "integer"
             }
           },
           {
@@ -337,8 +327,7 @@
             "in": "query",
             "required": true,
             "schema": {
-              "type": "string",
-              "minLength": 1
+              "type": "string"
             }
           }
         ],
@@ -374,9 +363,7 @@
             "in": "query",
             "required": false,
             "schema": {
-              "type": "integer",
-              "minimum": 1,
-              "maximum": 1000
+              "type": "integer"
             }
           },
           {
@@ -427,8 +414,7 @@
                 ],
                 "properties": {
                   "channel": {
-                    "type": "string",
-                    "minLength": 1
+                    "type": "string"
                   },
                   "ts": {
                     "type": "string",
@@ -489,8 +475,7 @@
                 ],
                 "properties": {
                   "channel": {
-                    "type": "string",
-                    "minLength": 1
+                    "type": "string"
                   },
                   "timestamp": {
                     "type": "string",
@@ -537,8 +522,7 @@
             "in": "query",
             "required": true,
             "schema": {
-              "type": "string",
-              "minLength": 1
+              "type": "string"
             }
           },
           {
@@ -546,9 +530,7 @@
             "in": "query",
             "required": false,
             "schema": {
-              "type": "integer",
-              "minimum": 1,
-              "maximum": 100
+              "type": "integer"
             }
           },
           {
@@ -556,8 +538,7 @@
             "in": "query",
             "required": false,
             "schema": {
-              "type": "integer",
-              "minimum": 1
+              "type": "integer"
             }
           }
         ],
