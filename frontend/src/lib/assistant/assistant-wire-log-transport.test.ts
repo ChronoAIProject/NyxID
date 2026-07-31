@@ -83,10 +83,22 @@ describe("assistant wire-log transport", () => {
     }
     expect(capturedEcho.identity).not.toHaveProperty("futureIdentityMetadata");
     expect(capturedEcho).not.toHaveProperty("futureEnvelopeMetadata");
+    await vi.waitFor(() => {
+      expect(useAssistantWireLogStore.getState().entries[0]?.capture).toEqual({
+        state: "settled",
+        outcome: "complete",
+        body: {
+          text: JSON.stringify({ conversations: [] }),
+          bytes: 20,
+          truncated: false,
+        },
+      });
+    });
   });
 
-  it("captures streaming response metadata without delivering it as chat content", async () => {
+  it("buffers wire data until its backend echo arrives without delivering it as chat content", async () => {
     const debugOnlyMarker = "wire-log-only-prompt";
+    const rawWireMarker = "raw-wire-line-only";
     const debugUpstream = btoa(
       String.fromCharCode(
         ...new TextEncoder().encode(
@@ -113,15 +125,42 @@ describe("assistant wire-log transport", () => {
       ),
     );
     useAssistantWireLogStore.getState().setCaptureEnabled(true);
+    let resolveHeaders:
+      | ((value: Awaited<ChatStreamRequestHandle["headers"]>) => void)
+      | undefined;
+    const headers = new Promise<Awaited<ChatStreamRequestHandle["headers"]>>(
+      (resolve) => {
+        resolveHeaders = resolve;
+      },
+    );
     const start = vi.spyOn(chatStreamClient, "start").mockImplementation(
       (request): ChatStreamRequestHandle => ({
-        headers: Promise.resolve({
-          kind: "response",
-          status: 200,
-          contentType: "text/event-stream",
-          debugUpstream,
-        }),
+        headers,
         completion: Promise.resolve().then(() => {
+          request.onWire?.({
+            type: "lines",
+            requestId: "worker-request-1",
+            lines: [
+              {
+                text: `data: {"debug":"${rawWireMarker}"}`,
+                ending: "\r\n",
+              },
+              { text: "", ending: "\r\n" },
+            ],
+            bytes: 48,
+            truncated: false,
+          });
+          request.onWire?.({
+            type: "end",
+            requestId: "worker-request-1",
+            outcome: "complete",
+          });
+          resolveHeaders?.({
+            kind: "response",
+            status: 200,
+            contentType: "text/event-stream",
+            debugUpstream,
+          });
           request.onFrames([
             {
               type: "RUN_STARTED",
@@ -181,5 +220,72 @@ describe("assistant wire-log transport", () => {
     });
     expect(JSON.stringify(events)).toContain("Visible assistant reply");
     expect(JSON.stringify(events)).not.toContain(debugOnlyMarker);
+    expect(JSON.stringify(events)).not.toContain(rawWireMarker);
+    await vi.waitFor(() => {
+      expect(useAssistantWireLogStore.getState().entries[0]?.capture).toEqual({
+        state: "settled",
+        outcome: "complete",
+        sse: {
+          lines: [
+            {
+              text: `data: {"debug":"${rawWireMarker}"}`,
+              ending: "\r\n",
+            },
+            { text: "", ending: "\r\n" },
+          ],
+          bytes: 48,
+          retainedBytes: 40,
+          truncated: false,
+        },
+      });
+    });
+  });
+
+  it("discards buffered wire data when the backend returned no echo", async () => {
+    useAssistantWireLogStore.getState().setCaptureEnabled(true);
+    const start = vi.spyOn(chatStreamClient, "start").mockImplementation(
+      (request): ChatStreamRequestHandle => ({
+        headers: Promise.resolve({
+          kind: "response",
+          status: 200,
+          contentType: "text/event-stream",
+        }),
+        completion: Promise.resolve().then(() => {
+          request.onWire?.({
+            type: "lines",
+            requestId: "worker-request-without-echo",
+            lines: [{ text: "data: private", ending: "\n" }],
+            bytes: 14,
+            truncated: false,
+          });
+          request.onWire?.({
+            type: "end",
+            requestId: "worker-request-without-echo",
+            outcome: "complete",
+          });
+          request.onFrames([
+            {
+              type: "RUN_STARTED",
+              actorId: "nyxid-chat-wire-log",
+              turnId: "turn-without-echo",
+            },
+            { type: "RUN_FINISHED" },
+          ]);
+          return { kind: "complete" };
+        }),
+        cancel: vi.fn(),
+      }),
+    );
+
+    const transport = new AevatarAssistantTransport();
+    const conversation = await transport.createConversation();
+    await new Promise<void>((resolve) => {
+      transport.sendMessage(conversation.id, "hello", (event) => {
+        if (event.event === "turn.completed") resolve();
+      });
+    });
+
+    expect(start).toHaveBeenCalledOnce();
+    expect(useAssistantWireLogStore.getState().entries).toEqual([]);
   });
 });

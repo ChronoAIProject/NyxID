@@ -358,7 +358,12 @@ describe("chat stream worker", () => {
       ).toHaveLength(2);
     });
     const gated = messages(scope).filter(
-      (message) =>
+      (
+        message,
+      ): message is Extract<
+        ChatStreamWorkerMessage,
+        { type: "stream.wire_batch" }
+      > =>
         message.requestId === "request-gated" &&
         message.type === "stream.wire_batch",
     );
@@ -590,7 +595,12 @@ describe("chat stream worker", () => {
     const all = messages(scope);
     const fragments = all
       .filter(
-        (message) =>
+        (
+          message,
+        ): message is Extract<
+          ChatStreamWorkerMessage,
+          { type: "stream.wire_batch" }
+        > =>
           message.requestId === "request-cancel-wire" &&
           message.type === "stream.wire_batch",
       )

@@ -16,7 +16,12 @@ import {
   type ChatStreamCompletionResult,
   type ChatStreamRequestHandle,
 } from "@/lib/assistant/chat-stream-worker-client";
-import type { ChatStreamFrame } from "@/lib/assistant/chat-stream-worker-protocol";
+import {
+  CHAT_STREAM_MAX_BODY_BYTES,
+  type ChatStreamFrame,
+  type ChatStreamWireEvent,
+} from "@/lib/assistant/chat-stream-worker-protocol";
+import { WireBodyCapture } from "@/lib/assistant/wire-body-capture";
 import {
   actionReportSchema,
   assistantActionRequestSchema,
@@ -72,13 +77,92 @@ function assistantWireLogOptions(): {
   return {
     headers: { [DEBUG_UPSTREAM_REQUEST_HEADER]: "1" },
     onResponse: (response) => {
-      captureAssistantWireLogHeader(
-        response.headers.get(DEBUG_UPSTREAM_RESPONSE_HEADER),
-        "header",
-        response.status,
-      );
+      try {
+        const exchangeId = captureAssistantWireLogHeader(
+          response.headers.get(DEBUG_UPSTREAM_RESPONSE_HEADER),
+          "header",
+          response.status,
+        );
+        if (!exchangeId) return;
+        const clone = response.clone();
+        void captureDeliveredResponseBody(exchangeId, clone).catch(() => {
+          useAssistantWireLogStore
+            .getState()
+            .finalizeCapture(exchangeId, "network_error");
+        });
+      } catch {
+        // Wire capture is diagnostic-only and cannot affect the API request.
+      }
     },
   };
+}
+
+async function captureDeliveredResponseBody(
+  exchangeId: string,
+  response: Response,
+): Promise<void> {
+  const store = useAssistantWireLogStore.getState();
+  if (!response.body) {
+    store.attachResponseBody(exchangeId, "", 0, false);
+    store.finalizeCapture(exchangeId, "complete");
+    return;
+  }
+
+  const reader = response.body.getReader();
+  const capture = new WireBodyCapture(CHAT_STREAM_MAX_BODY_BYTES);
+  try {
+    for (;;) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      capture.push(value);
+      if (capture.truncated) {
+        await reader.cancel().catch(() => undefined);
+        break;
+      }
+    }
+    const result = capture.finish();
+    const latestStore = useAssistantWireLogStore.getState();
+    latestStore.attachResponseBody(
+      exchangeId,
+      result.text,
+      result.bytes,
+      result.truncated,
+    );
+    latestStore.finalizeCapture(exchangeId, "complete");
+  } catch {
+    useAssistantWireLogStore
+      .getState()
+      .finalizeCapture(exchangeId, "network_error");
+  } finally {
+    reader.releaseLock();
+  }
+}
+
+function attachStreamWireEvent(
+  exchangeId: string,
+  event: ChatStreamWireEvent,
+): void {
+  const store = useAssistantWireLogStore.getState();
+  switch (event.type) {
+    case "lines":
+      store.attachWireLines(
+        exchangeId,
+        event.lines,
+        event.bytes,
+        event.truncated,
+      );
+      return;
+    case "body":
+      store.attachResponseBody(
+        exchangeId,
+        event.text,
+        event.bytes,
+        event.truncated,
+      );
+      return;
+    case "end":
+      store.finalizeCapture(exchangeId, event.outcome);
+  }
 }
 
 // A 401 from the assistant mount means the downstream (aevatar) rejected the
@@ -752,8 +836,7 @@ function stableJsonValue(value: unknown): unknown {
   }
   if (value && typeof value === "object") {
     const entries = Object.entries(value as Record<string, unknown>).sort(
-      ([left], [right]) =>
-        left < right ? -1 : left > right ? 1 : 0,
+      ([left], [right]) => (left < right ? -1 : left > right ? 1 : 0),
     );
     return Object.fromEntries(
       entries.map(([key, entry]) => [key, stableJsonValue(entry)]),
@@ -789,7 +872,8 @@ function sameStringArray(
   right: readonly string[],
 ): boolean {
   return (
-    left.length === right.length && left.every((value, index) => value === right[index])
+    left.length === right.length &&
+    left.every((value, index) => value === right[index])
   );
 }
 
@@ -1831,7 +1915,11 @@ export class AevatarAssistantTransport implements AssistantTransport {
       throw new AssistantTurnActiveError();
     }
 
-    const body = buildActionWakeBody(actorId, crypto.randomUUID(), originTurnId);
+    const body = buildActionWakeBody(
+      actorId,
+      crypto.randomUUID(),
+      originTurnId,
+    );
     const run = this.newRun(onEvent, null, "actor");
     run.cursor = stored.turnState.lastCursor;
     this.running.set(requestedId, run);
@@ -2610,6 +2698,23 @@ export class AevatarAssistantTransport implements AssistantTransport {
     let stream: ChatStreamRequestHandle | null = null;
     run.streamDispatched = true;
     const captureEnabled = useAssistantWireLogStore.getState().captureEnabled;
+    const bufferedWireEvents = new Map<string, ChatStreamWireEvent[]>();
+    let wireExchangeId: string | null | undefined;
+    const onWire = captureEnabled
+      ? (event: ChatStreamWireEvent) => {
+          try {
+            if (wireExchangeId === null) return;
+            if (wireExchangeId !== undefined) {
+              attachStreamWireEvent(wireExchangeId, event);
+              return;
+            }
+            const buffered = bufferedWireEvents.get(event.requestId) ?? [];
+            bufferedWireEvents.set(event.requestId, [...buffered, event]);
+          } catch {
+            // Diagnostic capture must not affect live frame delivery.
+          }
+        }
+      : undefined;
     stream = chatStreamClient.start({
       url,
       bodyText,
@@ -2617,6 +2722,7 @@ export class AevatarAssistantTransport implements AssistantTransport {
       headers: captureEnabled
         ? { [DEBUG_UPSTREAM_REQUEST_HEADER]: "1" }
         : undefined,
+      onWire,
       onFrames: (frames) => {
         for (const frame of frames) {
           this.handleAgUiFrame(conversationId, run, frame);
@@ -2628,16 +2734,33 @@ export class AevatarAssistantTransport implements AssistantTransport {
       },
     });
     if (captureEnabled) {
-      void stream.headers.then((response) => {
-        if (response.kind !== "response" && response.kind !== "http_error") {
-          return;
-        }
-        captureAssistantWireLogHeader(
-          response.debugUpstream,
-          "sse",
-          response.status,
-        );
-      });
+      void stream.headers
+        .then((response) => {
+          if (response.kind !== "response" && response.kind !== "http_error") {
+            wireExchangeId = null;
+            bufferedWireEvents.clear();
+            return;
+          }
+          wireExchangeId = captureAssistantWireLogHeader(
+            response.debugUpstream,
+            "sse",
+            response.status,
+          );
+          if (!wireExchangeId) {
+            bufferedWireEvents.clear();
+            return;
+          }
+          for (const events of bufferedWireEvents.values()) {
+            for (const event of events) {
+              attachStreamWireEvent(wireExchangeId, event);
+            }
+          }
+          bufferedWireEvents.clear();
+        })
+        .catch(() => {
+          wireExchangeId = null;
+          bufferedWireEvents.clear();
+        });
     }
     return stream;
   }
@@ -4148,23 +4271,20 @@ export class AevatarAssistantTransport implements AssistantTransport {
       () => deadline.abort(),
       STOP_REQUEST_DEADLINE_MS,
     );
-    const pending = apiClient<unknown>(
-      `${ASSISTANT_PREFIX}/chat`,
-      {
-        method: "POST",
-        body: {
-          type: "task.stop",
-          conversationId: actorConversationId,
-          turnId: run.turnId,
-          stopRequestId: crypto.randomUUID(),
-          clientRequestId: crypto.randomUUID(),
-          expectedStateVersion: 0,
-        },
-        preserveSessionOn401: true,
-        signal: deadline.signal,
-        ...assistantWireLogOptions(),
+    const pending = apiClient<unknown>(`${ASSISTANT_PREFIX}/chat`, {
+      method: "POST",
+      body: {
+        type: "task.stop",
+        conversationId: actorConversationId,
+        turnId: run.turnId,
+        stopRequestId: crypto.randomUUID(),
+        clientRequestId: crypto.randomUUID(),
+        expectedStateVersion: 0,
       },
-    ).then(
+      preserveSessionOn401: true,
+      signal: deadline.signal,
+      ...assistantWireLogOptions(),
+    }).then(
       () => clearTimeout(deadlineTimer),
       () => clearTimeout(deadlineTimer),
     );

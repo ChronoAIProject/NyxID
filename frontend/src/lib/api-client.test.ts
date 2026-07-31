@@ -146,6 +146,18 @@ describe("apiClient", () => {
     expect(onResponse).toHaveBeenCalledOnce();
     expect(onResponse).toHaveBeenCalledWith(response);
   });
+
+  it("does not let a response observer reject the application request", async () => {
+    mockFetch.mockResolvedValueOnce(jsonResponse({ ok: true }));
+
+    await expect(
+      apiClient("/endpoint", {
+        onResponse: () => {
+          throw new Error("diagnostic observer failed");
+        },
+      }),
+    ).resolves.toEqual({ ok: true });
+  });
 });
 
 describe("401 auth state handling", () => {
