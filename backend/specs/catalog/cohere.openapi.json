@@ -117,7 +117,7 @@
                   "model": { "type": "string", "description": "e.g. rerank-v3.5." },
                   "query": { "type": "string" },
                   "documents": { "type": "array", "items": { "type": "string" } },
-                  "top_n": { "type": "integer", "minimum": 1 }
+                  "top_n": { "type": "integer" }
                 }
               }
             }

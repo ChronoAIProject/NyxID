@@ -56,13 +56,13 @@
             "in": "query",
             "required": true,
             "description": "Search query using X search operators.",
-            "schema": { "type": "string", "minLength": 1 }
+            "schema": { "type": "string" }
           },
           {
             "name": "max_results",
             "in": "query",
             "required": false,
-            "schema": { "type": "integer", "minimum": 10, "maximum": 100 }
+            "schema": { "type": "integer" }
           },
           {
             "name": "next_token",

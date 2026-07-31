@@ -54,7 +54,7 @@
                     "description": "Target chat id or @channelusername.",
                     "type": ["integer", "string"]
                   },
-                  "text": { "type": "string", "minLength": 1 },
+                  "text": { "type": "string" },
                   "parse_mode": {
                     "type": "string",
                     "enum": ["MarkdownV2", "HTML", "Markdown"]
@@ -94,7 +94,7 @@
             "in": "query",
             "required": true,
             "description": "Chat id or @channelusername.",
-            "schema": { "type": "string", "minLength": 1 }
+            "schema": { "type": "string" }
           }
         ],
         "responses": {
@@ -132,13 +132,13 @@
             "name": "limit",
             "in": "query",
             "required": false,
-            "schema": { "type": "integer", "minimum": 1, "maximum": 100 }
+            "schema": { "type": "integer" }
           },
           {
             "name": "timeout",
             "in": "query",
             "required": false,
-            "schema": { "type": "integer", "minimum": 0 }
+            "schema": { "type": "integer" }
           }
         ],
         "responses": {

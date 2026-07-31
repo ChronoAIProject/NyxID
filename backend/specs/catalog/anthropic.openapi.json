@@ -33,7 +33,7 @@
                     "description": "Conversation messages with role and content.",
                     "items": { "type": "object", "additionalProperties": true }
                   },
-                  "max_tokens": { "type": "integer", "minimum": 1 },
+                  "max_tokens": { "type": "integer" },
                   "system": { "description": "Optional system prompt." },
                   "temperature": { "type": "number" }
                 }
@@ -69,7 +69,7 @@
             "name": "limit",
             "in": "query",
             "required": false,
-            "schema": { "type": "integer", "minimum": 1, "maximum": 1000 }
+            "schema": { "type": "integer" }
           }
         ],
         "responses": {

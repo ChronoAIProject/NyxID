@@ -46,26 +46,26 @@
             "name": "q",
             "in": "query",
             "required": true,
-            "schema": { "type": "string", "minLength": 1 }
+            "schema": { "type": "string" }
           },
           {
             "name": "type",
             "in": "query",
             "required": true,
             "description": "Comma-separated: album, artist, playlist, track, show, episode, audiobook.",
-            "schema": { "type": "string", "minLength": 1 }
+            "schema": { "type": "string" }
           },
           {
             "name": "limit",
             "in": "query",
             "required": false,
-            "schema": { "type": "integer", "minimum": 1, "maximum": 50 }
+            "schema": { "type": "integer" }
           },
           {
             "name": "offset",
             "in": "query",
             "required": false,
-            "schema": { "type": "integer", "minimum": 0 }
+            "schema": { "type": "integer" }
           }
         ],
         "responses": {
@@ -96,13 +96,13 @@
             "name": "limit",
             "in": "query",
             "required": false,
-            "schema": { "type": "integer", "minimum": 1, "maximum": 50 }
+            "schema": { "type": "integer" }
           },
           {
             "name": "offset",
             "in": "query",
             "required": false,
-            "schema": { "type": "integer", "minimum": 0 }
+            "schema": { "type": "integer" }
           }
         ],
         "responses": {

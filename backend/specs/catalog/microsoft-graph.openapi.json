@@ -46,7 +46,7 @@
             "name": "$top",
             "in": "query",
             "required": false,
-            "schema": { "type": "integer", "minimum": 1, "maximum": 1000 }
+            "schema": { "type": "integer" }
           },
           {
             "name": "$filter",
@@ -141,7 +141,7 @@
             "name": "$top",
             "in": "query",
             "required": false,
-            "schema": { "type": "integer", "minimum": 1, "maximum": 1000 }
+            "schema": { "type": "integer" }
           },
           {
             "name": "$filter",
@@ -184,7 +184,7 @@
             "name": "$top",
             "in": "query",
             "required": false,
-            "schema": { "type": "integer", "minimum": 1, "maximum": 1000 }
+            "schema": { "type": "integer" }
           }
         ],
         "responses": {

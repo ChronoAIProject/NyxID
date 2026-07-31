@@ -46,7 +46,7 @@
             "name": "channel_id",
             "in": "path",
             "required": true,
-            "schema": { "type": "string", "minLength": 1 }
+            "schema": { "type": "string" }
           }
         ],
         "responses": {
@@ -77,13 +77,13 @@
             "name": "channel_id",
             "in": "path",
             "required": true,
-            "schema": { "type": "string", "minLength": 1 }
+            "schema": { "type": "string" }
           },
           {
             "name": "limit",
             "in": "query",
             "required": false,
-            "schema": { "type": "integer", "minimum": 1, "maximum": 100 }
+            "schema": { "type": "integer" }
           },
           {
             "name": "before",
@@ -119,7 +119,7 @@
             "name": "channel_id",
             "in": "path",
             "required": true,
-            "schema": { "type": "string", "minLength": 1 }
+            "schema": { "type": "string" }
           }
         ],
         "requestBody": {

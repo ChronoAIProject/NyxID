@@ -93,7 +93,7 @@
             "name": "page_size",
             "in": "query",
             "required": false,
-            "schema": { "type": "integer", "minimum": 1, "maximum": 100 }
+            "schema": { "type": "integer" }
           },
           {
             "name": "page_token",
@@ -131,13 +131,13 @@
             "in": "path",
             "required": true,
             "description": "Bitable app token.",
-            "schema": { "type": "string", "minLength": 1 }
+            "schema": { "type": "string" }
           },
           {
             "name": "page_size",
             "in": "query",
             "required": false,
-            "schema": { "type": "integer", "minimum": 1, "maximum": 100 }
+            "schema": { "type": "integer" }
           },
           {
             "name": "page_token",
@@ -174,13 +174,13 @@
             "name": "app_token",
             "in": "path",
             "required": true,
-            "schema": { "type": "string", "minLength": 1 }
+            "schema": { "type": "string" }
           },
           {
             "name": "table_id",
             "in": "path",
             "required": true,
-            "schema": { "type": "string", "minLength": 1 }
+            "schema": { "type": "string" }
           },
           {
             "name": "view_id",
@@ -206,7 +206,7 @@
             "name": "page_size",
             "in": "query",
             "required": false,
-            "schema": { "type": "integer", "minimum": 1, "maximum": 500 }
+            "schema": { "type": "integer" }
           },
           {
             "name": "page_token",
@@ -244,19 +244,19 @@
             "name": "app_token",
             "in": "path",
             "required": true,
-            "schema": { "type": "string", "minLength": 1 }
+            "schema": { "type": "string" }
           },
           {
             "name": "table_id",
             "in": "path",
             "required": true,
-            "schema": { "type": "string", "minLength": 1 }
+            "schema": { "type": "string" }
           },
           {
             "name": "page_size",
             "in": "query",
             "required": false,
-            "schema": { "type": "integer", "minimum": 1, "maximum": 500 }
+            "schema": { "type": "integer" }
           },
           {
             "name": "page_token",

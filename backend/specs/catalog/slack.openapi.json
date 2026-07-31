@@ -101,7 +101,7 @@
             "name": "limit",
             "in": "query",
             "required": false,
-            "schema": { "type": "integer", "minimum": 1, "maximum": 1000 }
+            "schema": { "type": "integer" }
           },
           {
             "name": "cursor",
@@ -138,13 +138,13 @@
             "name": "channel",
             "in": "query",
             "required": true,
-            "schema": { "type": "string", "minLength": 1 }
+            "schema": { "type": "string" }
           },
           {
             "name": "limit",
             "in": "query",
             "required": false,
-            "schema": { "type": "integer", "minimum": 1, "maximum": 1000 }
+            "schema": { "type": "integer" }
           },
           {
             "name": "cursor",
@@ -188,7 +188,7 @@
             "name": "user",
             "in": "query",
             "required": true,
-            "schema": { "type": "string", "minLength": 1 }
+            "schema": { "type": "string" }
           }
         ],
         "responses": {

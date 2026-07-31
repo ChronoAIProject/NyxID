@@ -52,13 +52,13 @@
             "name": "per_page",
             "in": "query",
             "required": false,
-            "schema": { "type": "integer", "minimum": 1, "maximum": 100 }
+            "schema": { "type": "integer" }
           },
           {
             "name": "page",
             "in": "query",
             "required": false,
-            "schema": { "type": "integer", "minimum": 1 }
+            "schema": { "type": "integer" }
           }
         ],
         "responses": {
@@ -85,8 +85,8 @@
           "requiresApproval": false
         },
         "parameters": [
-          { "name": "owner", "in": "path", "required": true, "schema": { "type": "string", "minLength": 1 } },
-          { "name": "repo", "in": "path", "required": true, "schema": { "type": "string", "minLength": 1 } }
+          { "name": "owner", "in": "path", "required": true, "schema": { "type": "string" } },
+          { "name": "repo", "in": "path", "required": true, "schema": { "type": "string" } }
         ],
         "responses": {
           "200": {
@@ -112,8 +112,8 @@
           "requiresApproval": false
         },
         "parameters": [
-          { "name": "owner", "in": "path", "required": true, "schema": { "type": "string", "minLength": 1 } },
-          { "name": "repo", "in": "path", "required": true, "schema": { "type": "string", "minLength": 1 } },
+          { "name": "owner", "in": "path", "required": true, "schema": { "type": "string" } },
+          { "name": "repo", "in": "path", "required": true, "schema": { "type": "string" } },
           {
             "name": "state",
             "in": "query",
@@ -131,13 +131,13 @@
             "name": "per_page",
             "in": "query",
             "required": false,
-            "schema": { "type": "integer", "minimum": 1, "maximum": 100 }
+            "schema": { "type": "integer" }
           },
           {
             "name": "page",
             "in": "query",
             "required": false,
-            "schema": { "type": "integer", "minimum": 1 }
+            "schema": { "type": "integer" }
           }
         ],
         "responses": {
@@ -162,8 +162,8 @@
           "requiresApproval": true
         },
         "parameters": [
-          { "name": "owner", "in": "path", "required": true, "schema": { "type": "string", "minLength": 1 } },
-          { "name": "repo", "in": "path", "required": true, "schema": { "type": "string", "minLength": 1 } }
+          { "name": "owner", "in": "path", "required": true, "schema": { "type": "string" } },
+          { "name": "repo", "in": "path", "required": true, "schema": { "type": "string" } }
         ],
         "requestBody": {
           "required": true,
@@ -174,7 +174,7 @@
                 "required": ["title"],
                 "additionalProperties": true,
                 "properties": {
-                  "title": { "type": "string", "minLength": 1 },
+                  "title": { "type": "string" },
                   "body": { "type": "string" },
                   "labels": { "type": "array", "items": { "type": "string" } },
                   "assignees": { "type": "array", "items": { "type": "string" } }
@@ -207,9 +207,9 @@
           "requiresApproval": true
         },
         "parameters": [
-          { "name": "owner", "in": "path", "required": true, "schema": { "type": "string", "minLength": 1 } },
-          { "name": "repo", "in": "path", "required": true, "schema": { "type": "string", "minLength": 1 } },
-          { "name": "issue_number", "in": "path", "required": true, "schema": { "type": "integer", "minimum": 1 } }
+          { "name": "owner", "in": "path", "required": true, "schema": { "type": "string" } },
+          { "name": "repo", "in": "path", "required": true, "schema": { "type": "string" } },
+          { "name": "issue_number", "in": "path", "required": true, "schema": { "type": "integer" } }
         ],
         "requestBody": {
           "required": true,
@@ -220,7 +220,7 @@
                 "required": ["body"],
                 "additionalProperties": false,
                 "properties": {
-                  "body": { "type": "string", "minLength": 1 }
+                  "body": { "type": "string" }
                 }
               }
             }
@@ -255,19 +255,19 @@
             "in": "query",
             "required": true,
             "description": "Search query using GitHub search syntax.",
-            "schema": { "type": "string", "minLength": 1 }
+            "schema": { "type": "string" }
           },
           {
             "name": "per_page",
             "in": "query",
             "required": false,
-            "schema": { "type": "integer", "minimum": 1, "maximum": 100 }
+            "schema": { "type": "integer" }
           },
           {
             "name": "page",
             "in": "query",
             "required": false,
-            "schema": { "type": "integer", "minimum": 1 }
+            "schema": { "type": "integer" }
           }
         ],
         "responses": {

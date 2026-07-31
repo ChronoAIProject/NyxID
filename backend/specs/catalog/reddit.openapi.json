@@ -46,13 +46,13 @@
             "name": "subreddit",
             "in": "path",
             "required": true,
-            "schema": { "type": "string", "minLength": 1 }
+            "schema": { "type": "string" }
           },
           {
             "name": "limit",
             "in": "query",
             "required": false,
-            "schema": { "type": "integer", "minimum": 1, "maximum": 100 }
+            "schema": { "type": "integer" }
           },
           {
             "name": "after",
@@ -90,7 +90,7 @@
             "name": "q",
             "in": "query",
             "required": true,
-            "schema": { "type": "string", "minLength": 1 }
+            "schema": { "type": "string" }
           },
           {
             "name": "sort",
@@ -109,7 +109,7 @@
             "name": "limit",
             "in": "query",
             "required": false,
-            "schema": { "type": "integer", "minimum": 1, "maximum": 100 }
+            "schema": { "type": "integer" }
           }
         ],
         "responses": {
