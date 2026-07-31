@@ -6,7 +6,7 @@
         crate::handlers::docs::catalog_ui,
         crate::handlers::docs::openapi_json,
         crate::handlers::docs::asyncapi_json,
-        crate::handlers::docs::firecrawl_openapi_json,
+        crate::handlers::docs::catalog_spec_json,
         crate::handlers::docs::service_docs_ui,
         crate::handlers::docs::service_openapi_json,
         crate::handlers::docs::service_asyncapi_json,

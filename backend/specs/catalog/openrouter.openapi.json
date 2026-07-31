@@ -1,0 +1,81 @@
+{
+  "openapi": "3.1.0",
+  "info": {
+    "title": "OpenRouter API",
+    "version": "v1-nyxid-overlay",
+    "description": "NyxID-hosted overlay of the core OpenRouter API operations. Paths are relative to the /api/v1 base; NyxID injects the API key and attribution headers."
+  },
+  "servers": [{ "url": "https://openrouter.ai/api/v1", "description": "OpenRouter API" }],
+  "paths": {
+    "/chat/completions": {
+      "post": {
+        "operationId": "chat_completions",
+        "summary": "Create a chat completion",
+        "x-aevatar-tool": {
+          "name": "chat_completions",
+          "description": "Create an OpenRouter chat completion (OpenAI-compatible, any routed model).",
+          "readOnly": false,
+          "destructive": false,
+          "requiresApproval": false
+        },
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "required": ["model", "messages"],
+                "additionalProperties": true,
+                "properties": {
+                  "model": {
+                    "type": "string",
+                    "description": "vendor/model id, e.g. anthropic/claude-sonnet-4."
+                  },
+                  "messages": {
+                    "type": "array",
+                    "items": { "type": "object", "additionalProperties": true }
+                  },
+                  "temperature": { "type": "number" },
+                  "max_tokens": { "type": "integer" }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Chat completion",
+            "content": {
+              "application/json": {
+                "schema": { "type": "object", "additionalProperties": true }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/models": {
+      "get": {
+        "operationId": "models_list",
+        "summary": "List routable models",
+        "x-aevatar-tool": {
+          "name": "models_list",
+          "description": "List models routable through OpenRouter.",
+          "readOnly": true,
+          "destructive": false,
+          "requiresApproval": false
+        },
+        "responses": {
+          "200": {
+            "description": "Model list",
+            "content": {
+              "application/json": {
+                "schema": { "type": "object", "additionalProperties": true }
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+}

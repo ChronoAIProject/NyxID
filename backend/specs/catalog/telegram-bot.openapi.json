@@ -1,0 +1,157 @@
+{
+  "openapi": "3.1.0",
+  "info": {
+    "title": "Telegram Bot API",
+    "version": "v1-nyxid-overlay",
+    "description": "NyxID-hosted overlay of the Telegram Bot API methods most used by agents. Pass only the method name as the path; NyxID prepends bot<token>/ automatically."
+  },
+  "servers": [{ "url": "https://api.telegram.org", "description": "Telegram Bot API" }],
+  "paths": {
+    "/getMe": {
+      "get": {
+        "operationId": "get_me",
+        "summary": "Get the bot identity",
+        "x-aevatar-tool": {
+          "name": "get_me",
+          "description": "Get the Telegram bot's own identity.",
+          "readOnly": true,
+          "destructive": false,
+          "requiresApproval": false
+        },
+        "responses": {
+          "200": {
+            "description": "Bot identity",
+            "content": {
+              "application/json": {
+                "schema": { "type": "object", "additionalProperties": true }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/sendMessage": {
+      "post": {
+        "operationId": "send_message",
+        "summary": "Send a text message",
+        "x-aevatar-tool": {
+          "name": "send_message",
+          "description": "Send a Telegram message to a chat as the bot.",
+          "readOnly": false,
+          "destructive": false,
+          "requiresApproval": true
+        },
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "required": ["chat_id", "text"],
+                "additionalProperties": true,
+                "properties": {
+                  "chat_id": {
+                    "description": "Target chat id or @channelusername.",
+                    "type": ["integer", "string"]
+                  },
+                  "text": { "type": "string", "minLength": 1 },
+                  "parse_mode": {
+                    "type": "string",
+                    "enum": ["MarkdownV2", "HTML", "Markdown"]
+                  },
+                  "reply_to_message_id": { "type": "integer" }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Sent message",
+            "content": {
+              "application/json": {
+                "schema": { "type": "object", "additionalProperties": true }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/getChat": {
+      "get": {
+        "operationId": "get_chat",
+        "summary": "Get chat info",
+        "x-aevatar-tool": {
+          "name": "get_chat",
+          "description": "Get information about a Telegram chat.",
+          "readOnly": true,
+          "destructive": false,
+          "requiresApproval": false
+        },
+        "parameters": [
+          {
+            "name": "chat_id",
+            "in": "query",
+            "required": true,
+            "description": "Chat id or @channelusername.",
+            "schema": { "type": "string", "minLength": 1 }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Chat info",
+            "content": {
+              "application/json": {
+                "schema": { "type": "object", "additionalProperties": true }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/getUpdates": {
+      "get": {
+        "operationId": "get_updates",
+        "summary": "Poll bot updates",
+        "description": "Long-poll incoming updates. Only usable when no webhook is configured for the bot.",
+        "x-aevatar-tool": {
+          "name": "get_updates",
+          "description": "Poll incoming Telegram updates for the bot (webhook must be unset).",
+          "readOnly": true,
+          "destructive": false,
+          "requiresApproval": false
+        },
+        "parameters": [
+          {
+            "name": "offset",
+            "in": "query",
+            "required": false,
+            "schema": { "type": "integer" }
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "required": false,
+            "schema": { "type": "integer", "minimum": 1, "maximum": 100 }
+          },
+          {
+            "name": "timeout",
+            "in": "query",
+            "required": false,
+            "schema": { "type": "integer", "minimum": 0 }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Update list",
+            "content": {
+              "application/json": {
+                "schema": { "type": "object", "additionalProperties": true }
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+}

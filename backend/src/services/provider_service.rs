@@ -1846,7 +1846,6 @@ struct DefaultServiceSeed {
     default_request_headers: Option<&'static [SeededHeader]>,
     service_category: &'static str,
     requires_user_credential: bool,
-    openapi_spec_path: Option<&'static str>,
     homepage_url: Option<&'static str>,
     auth_notes: Option<&'static str>,
     known_limitations: Option<&'static str>,
@@ -1965,7 +1964,6 @@ const DEFAULT_SERVICE_SEEDS: &[DefaultServiceSeed] = &[
         default_request_headers: None,
         service_category: "internal",
         requires_user_credential: false,
-        openapi_spec_path: None,
         homepage_url: None,
         auth_notes: None,
         known_limitations: None,
@@ -1983,7 +1981,6 @@ const DEFAULT_SERVICE_SEEDS: &[DefaultServiceSeed] = &[
         default_request_headers: None,
         service_category: "internal",
         requires_user_credential: false,
-        openapi_spec_path: None,
         homepage_url: None,
         auth_notes: None,
         known_limitations: None,
@@ -2001,7 +1998,6 @@ const DEFAULT_SERVICE_SEEDS: &[DefaultServiceSeed] = &[
         default_request_headers: Some(ANTHROPIC_DEFAULT_HEADERS),
         service_category: "internal",
         requires_user_credential: false,
-        openapi_spec_path: None,
         homepage_url: None,
         auth_notes: None,
         known_limitations: None,
@@ -2019,7 +2015,6 @@ const DEFAULT_SERVICE_SEEDS: &[DefaultServiceSeed] = &[
         default_request_headers: None,
         service_category: "internal",
         requires_user_credential: false,
-        openapi_spec_path: None,
         homepage_url: None,
         auth_notes: None,
         known_limitations: None,
@@ -2037,7 +2032,6 @@ const DEFAULT_SERVICE_SEEDS: &[DefaultServiceSeed] = &[
         default_request_headers: None,
         service_category: "internal",
         requires_user_credential: false,
-        openapi_spec_path: None,
         homepage_url: None,
         auth_notes: None,
         known_limitations: None,
@@ -2055,7 +2049,6 @@ const DEFAULT_SERVICE_SEEDS: &[DefaultServiceSeed] = &[
         default_request_headers: None,
         service_category: "internal",
         requires_user_credential: false,
-        openapi_spec_path: None,
         homepage_url: None,
         auth_notes: None,
         known_limitations: None,
@@ -2073,7 +2066,6 @@ const DEFAULT_SERVICE_SEEDS: &[DefaultServiceSeed] = &[
         default_request_headers: None,
         service_category: "internal",
         requires_user_credential: false,
-        openapi_spec_path: None,
         homepage_url: None,
         auth_notes: None,
         known_limitations: None,
@@ -2096,7 +2088,6 @@ const DEFAULT_SERVICE_SEEDS: &[DefaultServiceSeed] = &[
         default_request_headers: None,
         service_category: "connection",
         requires_user_credential: true,
-        openapi_spec_path: Some("/api/v1/catalog-specs/firecrawl/openapi.json"),
         homepage_url: Some("https://www.firecrawl.dev"),
         auth_notes: Some(
             "Firecrawl uses bearer API keys. Paste the raw `fc-...` key; NyxID adds the `Bearer` prefix.",
@@ -2118,7 +2109,6 @@ const DEFAULT_SERVICE_SEEDS: &[DefaultServiceSeed] = &[
         default_request_headers: None,
         service_category: "internal",
         requires_user_credential: false,
-        openapi_spec_path: None,
         homepage_url: None,
         auth_notes: None,
         known_limitations: None,
@@ -2136,7 +2126,6 @@ const DEFAULT_SERVICE_SEEDS: &[DefaultServiceSeed] = &[
         default_request_headers: None,
         service_category: "internal",
         requires_user_credential: false,
-        openapi_spec_path: None,
         homepage_url: None,
         auth_notes: None,
         known_limitations: None,
@@ -2154,7 +2143,6 @@ const DEFAULT_SERVICE_SEEDS: &[DefaultServiceSeed] = &[
         default_request_headers: None,
         service_category: "internal",
         requires_user_credential: false,
-        openapi_spec_path: None,
         homepage_url: None,
         auth_notes: None,
         known_limitations: None,
@@ -2175,7 +2163,6 @@ const DEFAULT_SERVICE_SEEDS: &[DefaultServiceSeed] = &[
         default_request_headers: None,
         service_category: "internal",
         requires_user_credential: false,
-        openapi_spec_path: None,
         homepage_url: None,
         auth_notes: None,
         known_limitations: None,
@@ -2193,7 +2180,6 @@ const DEFAULT_SERVICE_SEEDS: &[DefaultServiceSeed] = &[
         default_request_headers: None,
         service_category: "internal",
         requires_user_credential: false,
-        openapi_spec_path: None,
         homepage_url: None,
         auth_notes: None,
         known_limitations: None,
@@ -2211,7 +2197,6 @@ const DEFAULT_SERVICE_SEEDS: &[DefaultServiceSeed] = &[
         default_request_headers: None,
         service_category: "internal",
         requires_user_credential: false,
-        openapi_spec_path: None,
         homepage_url: None,
         auth_notes: None,
         known_limitations: None,
@@ -2229,7 +2214,6 @@ const DEFAULT_SERVICE_SEEDS: &[DefaultServiceSeed] = &[
         default_request_headers: None,
         service_category: "internal",
         requires_user_credential: false,
-        openapi_spec_path: None,
         homepage_url: None,
         auth_notes: None,
         known_limitations: None,
@@ -2252,7 +2236,6 @@ const DEFAULT_SERVICE_SEEDS: &[DefaultServiceSeed] = &[
         default_request_headers: None,
         service_category: "internal",
         requires_user_credential: false,
-        openapi_spec_path: None,
         homepage_url: None,
         auth_notes: None,
         known_limitations: None,
@@ -2270,7 +2253,6 @@ const DEFAULT_SERVICE_SEEDS: &[DefaultServiceSeed] = &[
         default_request_headers: None,
         service_category: "internal",
         requires_user_credential: false,
-        openapi_spec_path: None,
         homepage_url: None,
         auth_notes: None,
         known_limitations: None,
@@ -2288,7 +2270,6 @@ const DEFAULT_SERVICE_SEEDS: &[DefaultServiceSeed] = &[
         default_request_headers: None,
         service_category: "internal",
         requires_user_credential: false,
-        openapi_spec_path: None,
         homepage_url: None,
         auth_notes: None,
         known_limitations: None,
@@ -2306,7 +2287,6 @@ const DEFAULT_SERVICE_SEEDS: &[DefaultServiceSeed] = &[
         default_request_headers: None,
         service_category: "internal",
         requires_user_credential: false,
-        openapi_spec_path: None,
         homepage_url: None,
         auth_notes: None,
         known_limitations: None,
@@ -2324,7 +2304,6 @@ const DEFAULT_SERVICE_SEEDS: &[DefaultServiceSeed] = &[
         default_request_headers: None,
         service_category: "internal",
         requires_user_credential: false,
-        openapi_spec_path: None,
         homepage_url: None,
         auth_notes: None,
         known_limitations: None,
@@ -2346,7 +2325,6 @@ const DEFAULT_SERVICE_SEEDS: &[DefaultServiceSeed] = &[
         default_request_headers: None,
         service_category: "internal",
         requires_user_credential: false,
-        openapi_spec_path: None,
         homepage_url: None,
         auth_notes: None,
         known_limitations: None,
@@ -2372,7 +2350,6 @@ const DEFAULT_SERVICE_SEEDS: &[DefaultServiceSeed] = &[
         default_request_headers: None,
         service_category: "internal",
         requires_user_credential: false,
-        openapi_spec_path: None,
         homepage_url: None,
         auth_notes: None,
         known_limitations: None,
@@ -2397,7 +2374,6 @@ const DEFAULT_SERVICE_SEEDS: &[DefaultServiceSeed] = &[
         default_request_headers: None,
         service_category: "internal",
         requires_user_credential: false,
-        openapi_spec_path: None,
         homepage_url: None,
         auth_notes: None,
         known_limitations: None,
@@ -2419,7 +2395,6 @@ const DEFAULT_SERVICE_SEEDS: &[DefaultServiceSeed] = &[
         default_request_headers: None,
         service_category: "internal",
         requires_user_credential: false,
-        openapi_spec_path: None,
         homepage_url: None,
         auth_notes: None,
         known_limitations: None,
@@ -2442,7 +2417,6 @@ const DEFAULT_SERVICE_SEEDS: &[DefaultServiceSeed] = &[
         default_request_headers: None,
         service_category: "internal",
         requires_user_credential: false,
-        openapi_spec_path: None,
         homepage_url: None,
         auth_notes: None,
         known_limitations: None,
@@ -2465,7 +2439,6 @@ const DEFAULT_SERVICE_SEEDS: &[DefaultServiceSeed] = &[
         default_request_headers: None,
         service_category: "internal",
         requires_user_credential: false,
-        openapi_spec_path: None,
         homepage_url: None,
         auth_notes: None,
         known_limitations: None,
@@ -2491,7 +2464,6 @@ const DEFAULT_SERVICE_SEEDS: &[DefaultServiceSeed] = &[
         default_request_headers: None,
         service_category: "internal",
         requires_user_credential: false,
-        openapi_spec_path: None,
         homepage_url: None,
         auth_notes: None,
         known_limitations: None,
@@ -2511,7 +2483,6 @@ const DEFAULT_SERVICE_SEEDS: &[DefaultServiceSeed] = &[
         default_request_headers: None,
         service_category: "internal",
         requires_user_credential: false,
-        openapi_spec_path: None,
         homepage_url: None,
         auth_notes: None,
         known_limitations: None,
@@ -2534,7 +2505,6 @@ const DEFAULT_SERVICE_SEEDS: &[DefaultServiceSeed] = &[
         default_request_headers: Some(OPENROUTER_DEFAULT_HEADERS),
         service_category: "internal",
         requires_user_credential: false,
-        openapi_spec_path: None,
         homepage_url: Some("https://openrouter.ai"),
         auth_notes: None,
         known_limitations: None,
@@ -2565,7 +2535,6 @@ const DEFAULT_SERVICE_SEEDS: &[DefaultServiceSeed] = &[
         default_request_headers: None,
         service_category: "internal",
         requires_user_credential: false,
-        openapi_spec_path: None,
         homepage_url: None,
         auth_notes: None,
         known_limitations: None,
@@ -2594,7 +2563,6 @@ const DEFAULT_SERVICE_SEEDS: &[DefaultServiceSeed] = &[
         default_request_headers: None,
         service_category: "internal",
         requires_user_credential: false,
-        openapi_spec_path: None,
         homepage_url: None,
         auth_notes: None,
         known_limitations: None,
@@ -2817,6 +2785,38 @@ fn seeded_header_to_model(seed: &SeededHeader) -> DefaultRequestHeader {
     }
 }
 
+/// Set `openapi_spec_url` on seeded catalog rows whose slug has a hosted
+/// overlay but whose stored URL is missing or null. Only rows created by
+/// the seed (`created_by: "system"`) are touched, and an admin-set URL is
+/// never overwritten.
+async fn backfill_seeded_openapi_spec_urls(
+    service_col: &mongodb::Collection<DownstreamService>,
+    now: chrono::DateTime<Utc>,
+) -> AppResult<()> {
+    for slug in crate::services::catalog_spec_registry::hydrated_slugs() {
+        let Some(path) = crate::services::catalog_spec_registry::spec_path_for_slug(slug) else {
+            continue;
+        };
+        let updated = service_col
+            .update_one(
+                doc! {
+                    "slug": slug,
+                    "created_by": "system",
+                    "openapi_spec_url": bson::Bson::Null,
+                },
+                doc! { "$set": {
+                    "openapi_spec_url": hosted_spec_url(&path),
+                    "updated_at": bson::DateTime::from_chrono(now),
+                }},
+            )
+            .await?;
+        if updated.modified_count > 0 {
+            tracing::info!(slug, "Backfilled hosted catalog spec URL on seeded service");
+        }
+    }
+    Ok(())
+}
+
 fn hosted_spec_url(path: &str) -> String {
     let base_url =
         std::env::var("BASE_URL").unwrap_or_else(|_| "http://localhost:3001".to_string());
@@ -2953,7 +2953,9 @@ async fn reconcile_firecrawl_seed_metadata(
             "Failed to serialize Firecrawl capabilities: {error}"
         ))
     })?;
-    let openapi_spec_url = seed.openapi_spec_path.map(hosted_spec_url);
+    let openapi_spec_url =
+        crate::services::catalog_spec_registry::spec_path_for_slug(seed.service_slug)
+            .map(|path| hosted_spec_url(&path));
 
     let mut set_doc = doc! {
         "base_url": seed.base_url,
@@ -3079,6 +3081,14 @@ pub async fn seed_default_services(
     backfill_missing_service_provider_requirements(&provider_col, &service_col, &req_col, now)
         .await?;
 
+    // Backfill hosted overlay spec URLs onto pre-existing seeded rows. The
+    // seed loop below is insert-only, so deployments seeded before a slug
+    // gained a hosted overlay would otherwise never publish a spec (and
+    // `catalog_spec_sync` would still populate endpoints, but docs and
+    // discovery surfaces would miss the spec URL). Null-guarded: an
+    // admin-configured `openapi_spec_url` is never overwritten.
+    backfill_seeded_openapi_spec_urls(&service_col, now).await?;
+
     // Reconcile seeded `default_request_headers` on every restart so a
     // system-required header (e.g. `anthropic-version`, required by the
     // Anthropic API on every request) can't be permanently removed by an
@@ -3153,7 +3163,9 @@ pub async fn seed_default_services(
             Some((caps, streaming)) => (Some(caps), streaming),
             None => (None, false),
         };
-        let openapi_spec_url = seed.openapi_spec_path.map(hosted_spec_url);
+        let openapi_spec_url =
+            crate::services::catalog_spec_registry::spec_path_for_slug(seed.service_slug)
+                .map(|path| hosted_spec_url(&path));
 
         let default_request_headers = seed
             .default_request_headers
@@ -4385,7 +4397,8 @@ mod tests {
         assert_eq!(seed.service_category, "connection");
         assert!(seed.requires_user_credential);
         assert_eq!(
-            seed.openapi_spec_path,
+            crate::services::catalog_spec_registry::spec_path_for_slug(seed.service_slug)
+                .as_deref(),
             Some("/api/v1/catalog-specs/firecrawl/openapi.json")
         );
 

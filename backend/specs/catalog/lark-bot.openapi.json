@@ -1,0 +1,309 @@
+{
+  "openapi": "3.1.0",
+  "info": {
+    "title": "Lark / Feishu Bot API",
+    "version": "v1-nyxid-overlay",
+    "description": "NyxID-hosted overlay of the Lark / Feishu tenant (bot) open APIs most used by agents: IM messaging, chat discovery, and Bitable reads. Paths are relative to the domain root; NyxID injects the tenant access token."
+  },
+  "servers": [
+    { "url": "https://open.larksuite.com", "description": "Lark (global)" },
+    { "url": "https://open.feishu.cn", "description": "Feishu (China)" }
+  ],
+  "paths": {
+    "/open-apis/im/v1/messages": {
+      "post": {
+        "operationId": "im_message_create",
+        "summary": "Send a message as the bot",
+        "description": "Sends a message to a user or chat. `content` is a JSON-encoded string matching `msg_type` (e.g. {\"text\":\"hello\"} for msg_type=text).",
+        "x-aevatar-tool": {
+          "name": "im_message_create",
+          "description": "Send a Lark/Feishu message to a user or chat as the bot.",
+          "readOnly": false,
+          "destructive": false,
+          "requiresApproval": true
+        },
+        "parameters": [
+          {
+            "name": "receive_id_type",
+            "in": "query",
+            "required": true,
+            "description": "Type of the receive_id value.",
+            "schema": {
+              "type": "string",
+              "enum": ["open_id", "union_id", "user_id", "email", "chat_id"]
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "required": ["receive_id", "msg_type", "content"],
+                "additionalProperties": false,
+                "properties": {
+                  "receive_id": {
+                    "type": "string",
+                    "description": "Receiver id matching receive_id_type."
+                  },
+                  "msg_type": {
+                    "type": "string",
+                    "description": "Message type, e.g. text, post, interactive, image."
+                  },
+                  "content": {
+                    "type": "string",
+                    "description": "JSON-encoded message content string matching msg_type."
+                  },
+                  "uuid": {
+                    "type": "string",
+                    "description": "Optional client-generated idempotency key."
+                  }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Message sent",
+            "content": {
+              "application/json": {
+                "schema": { "type": "object", "additionalProperties": true }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/open-apis/im/v1/chats": {
+      "get": {
+        "operationId": "im_chats_list",
+        "summary": "List chats the bot is in",
+        "description": "Lists group chats that the bot has joined; use the returned chat_id values with im_message_create.",
+        "x-aevatar-tool": {
+          "name": "im_chats_list",
+          "description": "List Lark/Feishu chats the bot has joined.",
+          "readOnly": true,
+          "destructive": false,
+          "requiresApproval": false
+        },
+        "parameters": [
+          {
+            "name": "page_size",
+            "in": "query",
+            "required": false,
+            "schema": { "type": "integer", "minimum": 1, "maximum": 100 }
+          },
+          {
+            "name": "page_token",
+            "in": "query",
+            "required": false,
+            "schema": { "type": "string" }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Chat list page",
+            "content": {
+              "application/json": {
+                "schema": { "type": "object", "additionalProperties": true }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/open-apis/bitable/v1/apps/{app_token}/tables": {
+      "get": {
+        "operationId": "bitable_tables_list",
+        "summary": "List tables in a Bitable app",
+        "x-aevatar-tool": {
+          "name": "bitable_tables_list",
+          "description": "List tables of a Lark/Feishu Bitable app.",
+          "readOnly": true,
+          "destructive": false,
+          "requiresApproval": false
+        },
+        "parameters": [
+          {
+            "name": "app_token",
+            "in": "path",
+            "required": true,
+            "description": "Bitable app token.",
+            "schema": { "type": "string", "minLength": 1 }
+          },
+          {
+            "name": "page_size",
+            "in": "query",
+            "required": false,
+            "schema": { "type": "integer", "minimum": 1, "maximum": 100 }
+          },
+          {
+            "name": "page_token",
+            "in": "query",
+            "required": false,
+            "schema": { "type": "string" }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Table list page",
+            "content": {
+              "application/json": {
+                "schema": { "type": "object", "additionalProperties": true }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/open-apis/bitable/v1/apps/{app_token}/tables/{table_id}/records": {
+      "get": {
+        "operationId": "bitable_records_list",
+        "summary": "List records in a Bitable table",
+        "x-aevatar-tool": {
+          "name": "bitable_records_list",
+          "description": "List records of a Lark/Feishu Bitable table.",
+          "readOnly": true,
+          "destructive": false,
+          "requiresApproval": false
+        },
+        "parameters": [
+          {
+            "name": "app_token",
+            "in": "path",
+            "required": true,
+            "schema": { "type": "string", "minLength": 1 }
+          },
+          {
+            "name": "table_id",
+            "in": "path",
+            "required": true,
+            "schema": { "type": "string", "minLength": 1 }
+          },
+          {
+            "name": "view_id",
+            "in": "query",
+            "required": false,
+            "schema": { "type": "string" }
+          },
+          {
+            "name": "filter",
+            "in": "query",
+            "required": false,
+            "description": "Bitable filter formula, e.g. CurrentValue.[Status] = \"Done\".",
+            "schema": { "type": "string" }
+          },
+          {
+            "name": "sort",
+            "in": "query",
+            "required": false,
+            "description": "JSON array of sort clauses, e.g. [\"Amount DESC\"].",
+            "schema": { "type": "string" }
+          },
+          {
+            "name": "page_size",
+            "in": "query",
+            "required": false,
+            "schema": { "type": "integer", "minimum": 1, "maximum": 500 }
+          },
+          {
+            "name": "page_token",
+            "in": "query",
+            "required": false,
+            "schema": { "type": "string" }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Record list page",
+            "content": {
+              "application/json": {
+                "schema": { "type": "object", "additionalProperties": true }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/open-apis/bitable/v1/apps/{app_token}/tables/{table_id}/records/search": {
+      "post": {
+        "operationId": "bitable_records_search",
+        "summary": "Search records in a Bitable table",
+        "description": "Structured record search with typed filter conditions; preferred over the list endpoint for complex queries.",
+        "x-aevatar-tool": {
+          "name": "bitable_records_search",
+          "description": "Search records of a Lark/Feishu Bitable table with structured filters.",
+          "readOnly": true,
+          "destructive": false,
+          "requiresApproval": false
+        },
+        "parameters": [
+          {
+            "name": "app_token",
+            "in": "path",
+            "required": true,
+            "schema": { "type": "string", "minLength": 1 }
+          },
+          {
+            "name": "table_id",
+            "in": "path",
+            "required": true,
+            "schema": { "type": "string", "minLength": 1 }
+          },
+          {
+            "name": "page_size",
+            "in": "query",
+            "required": false,
+            "schema": { "type": "integer", "minimum": 1, "maximum": 500 }
+          },
+          {
+            "name": "page_token",
+            "in": "query",
+            "required": false,
+            "schema": { "type": "string" }
+          }
+        ],
+        "requestBody": {
+          "required": false,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "additionalProperties": false,
+                "properties": {
+                  "view_id": { "type": "string" },
+                  "field_names": {
+                    "type": "array",
+                    "items": { "type": "string" }
+                  },
+                  "filter": {
+                    "type": "object",
+                    "description": "Structured filter with conjunction and conditions.",
+                    "additionalProperties": true
+                  },
+                  "sort": {
+                    "type": "array",
+                    "items": { "type": "object", "additionalProperties": true }
+                  },
+                  "automatic_fields": { "type": "boolean" }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Record search page",
+            "content": {
+              "application/json": {
+                "schema": { "type": "object", "additionalProperties": true }
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+}

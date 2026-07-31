@@ -1,0 +1,141 @@
+{
+  "openapi": "3.1.0",
+  "info": {
+    "title": "Twitch Helix API",
+    "version": "helix-nyxid-overlay",
+    "description": "NyxID-hosted overlay of the Twitch Helix API operations most used by agents. Paths are relative to the /helix base; NyxID injects the OAuth token and Client-Id."
+  },
+  "servers": [{ "url": "https://api.twitch.tv/helix", "description": "Twitch Helix API" }],
+  "paths": {
+    "/users": {
+      "get": {
+        "operationId": "get_users",
+        "summary": "Get users",
+        "description": "Without parameters returns the authenticated user; otherwise looks up by login or id.",
+        "x-aevatar-tool": {
+          "name": "get_users",
+          "description": "Get Twitch users by login/id, or the authenticated user.",
+          "readOnly": true,
+          "destructive": false,
+          "requiresApproval": false
+        },
+        "parameters": [
+          {
+            "name": "login",
+            "in": "query",
+            "required": false,
+            "schema": { "type": "string" }
+          },
+          {
+            "name": "id",
+            "in": "query",
+            "required": false,
+            "schema": { "type": "string" }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "User list",
+            "content": {
+              "application/json": {
+                "schema": { "type": "object", "additionalProperties": true }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/streams": {
+      "get": {
+        "operationId": "get_streams",
+        "summary": "List live streams",
+        "x-aevatar-tool": {
+          "name": "get_streams",
+          "description": "List live Twitch streams, optionally filtered by user or game.",
+          "readOnly": true,
+          "destructive": false,
+          "requiresApproval": false
+        },
+        "parameters": [
+          {
+            "name": "user_login",
+            "in": "query",
+            "required": false,
+            "schema": { "type": "string" }
+          },
+          {
+            "name": "game_id",
+            "in": "query",
+            "required": false,
+            "schema": { "type": "string" }
+          },
+          {
+            "name": "first",
+            "in": "query",
+            "required": false,
+            "schema": { "type": "integer", "minimum": 1, "maximum": 100 }
+          },
+          {
+            "name": "after",
+            "in": "query",
+            "required": false,
+            "schema": { "type": "string" }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Stream page",
+            "content": {
+              "application/json": {
+                "schema": { "type": "object", "additionalProperties": true }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/search/channels": {
+      "get": {
+        "operationId": "search_channels",
+        "summary": "Search channels",
+        "x-aevatar-tool": {
+          "name": "search_channels",
+          "description": "Search Twitch channels by name.",
+          "readOnly": true,
+          "destructive": false,
+          "requiresApproval": false
+        },
+        "parameters": [
+          {
+            "name": "query",
+            "in": "query",
+            "required": true,
+            "schema": { "type": "string", "minLength": 1 }
+          },
+          {
+            "name": "live_only",
+            "in": "query",
+            "required": false,
+            "schema": { "type": "boolean" }
+          },
+          {
+            "name": "first",
+            "in": "query",
+            "required": false,
+            "schema": { "type": "integer", "minimum": 1, "maximum": 100 }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Channel search page",
+            "content": {
+              "application/json": {
+                "schema": { "type": "object", "additionalProperties": true }
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+}

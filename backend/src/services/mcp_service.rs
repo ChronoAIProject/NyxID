@@ -830,50 +830,33 @@ async fn load_user_tools_inner(
             .map(|ep| ep.label.as_str())
             .unwrap_or(&us.slug);
 
+        let user_spec_url = user_endpoint.and_then(|ep| ep.openapi_spec_url.as_deref());
         let (endpoints, is_generic, invalid_openapi_contract) = if let Some(catalog_id) =
             us.catalog_service_id.as_deref()
         {
             // Catalog-backed: use the ServiceEndpoint rows pre-parsed at catalog
-            // registration time. Unchanged path.
+            // registration time.
             let eps = eps_by_svc
                 .get(catalog_id)
                 .map(|eps| service_endpoints_to_mcp(eps))
                 .unwrap_or_default();
-            (eps, false, false)
-        } else if let Some(spec_url) = user_endpoint.and_then(|ep| ep.openapi_spec_url.as_deref()) {
+            if !eps.is_empty() {
+                (eps, false, false)
+            } else if let Some(spec_url) = user_spec_url {
+                // The catalog service has no registered endpoint rows; honor
+                // the instance's user-mounted spec instead of publishing an
+                // empty operation set that operation-catalog consumers drop
+                // as invalid-contract (issue #1290). Registered catalog rows
+                // keep precedence when they exist.
+                user_spec_endpoints(spec_url, &r.effective_owner_id, &us.id, endpoint_label).await
+            } else {
+                (eps, false, false)
+            }
+        } else if let Some(spec_url) = user_spec_url {
             // Custom endpoint with a user-supplied OpenAPI spec: fetch + parse
             // through the hardened cache (scoped by owner) and surface each
-            // operation as a tool. On any failure we silently fall back to the
-            // generic proxy tool so a broken spec URL never takes the service
-            // offline for the agent.
-            match fetch_and_parse_user_spec(spec_url, &r.effective_owner_id).await {
-                Ok(mcp_endpoints) if !mcp_endpoints.is_empty() => (mcp_endpoints, false, false),
-                Ok(_) => {
-                    tracing::debug!(
-                        user_service_id = %us.id,
-                        spec_url = %api_docs_service::redact_url_for_logs(spec_url),
-                        "Parsed user OpenAPI spec contained no operations; falling back to generic proxy tool"
-                    );
-                    (
-                        vec![build_generic_proxy_endpoint(endpoint_label)],
-                        true,
-                        true,
-                    )
-                }
-                Err(error) => {
-                    tracing::warn!(
-                        user_service_id = %us.id,
-                        spec_url = %api_docs_service::redact_url_for_logs(spec_url),
-                        %error,
-                        "Failed to parse user OpenAPI spec; falling back to generic proxy tool"
-                    );
-                    (
-                        vec![build_generic_proxy_endpoint(endpoint_label)],
-                        true,
-                        true,
-                    )
-                }
-            }
+            // operation as a tool.
+            user_spec_endpoints(spec_url, &r.effective_owner_id, &us.id, endpoint_label).await
         } else {
             let generic_ep = build_generic_proxy_endpoint(endpoint_label);
             (vec![generic_ep], true, false)
@@ -978,6 +961,46 @@ async fn fetch_and_parse_user_spec(
             response: p.response,
         })
         .collect())
+}
+
+/// Resolve a user-mounted OpenAPI spec into `(endpoints, is_generic_proxy,
+/// invalid_openapi_contract)`. On an empty or unparseable spec we silently
+/// fall back to the generic proxy tool so a broken spec URL never takes the
+/// service offline for the agent.
+async fn user_spec_endpoints(
+    spec_url: &str,
+    owner_id: &str,
+    user_service_id: &str,
+    endpoint_label: &str,
+) -> (Vec<McpToolEndpoint>, bool, bool) {
+    match fetch_and_parse_user_spec(spec_url, owner_id).await {
+        Ok(mcp_endpoints) if !mcp_endpoints.is_empty() => (mcp_endpoints, false, false),
+        Ok(_) => {
+            tracing::debug!(
+                user_service_id = %user_service_id,
+                spec_url = %api_docs_service::redact_url_for_logs(spec_url),
+                "Parsed user OpenAPI spec contained no operations; falling back to generic proxy tool"
+            );
+            (
+                vec![build_generic_proxy_endpoint(endpoint_label)],
+                true,
+                true,
+            )
+        }
+        Err(error) => {
+            tracing::warn!(
+                user_service_id = %user_service_id,
+                spec_url = %api_docs_service::redact_url_for_logs(spec_url),
+                %error,
+                "Failed to parse user OpenAPI spec; falling back to generic proxy tool"
+            );
+            (
+                vec![build_generic_proxy_endpoint(endpoint_label)],
+                true,
+                true,
+            )
+        }
+    }
 }
 
 /// A resolved user service ready for MCP tool generation.
@@ -4134,6 +4157,105 @@ mod tests {
             McpToolSource::Platform { .. }
         ));
         assert_eq!(catalog.diagnostics.unavailable_services, 1);
+    }
+
+    #[tokio::test]
+    async fn catalog_backed_service_without_endpoint_rows_uses_user_mounted_spec() {
+        let Some(db) = connect_test_database("mcp_catalog_user_spec_fallback").await else {
+            eprintln!("skipping MCP catalog fallback test: no local MongoDB available");
+            return;
+        };
+        let _cache_guard = crate::services::api_docs_service::SpecCacheTestGuard::acquire();
+
+        let user_id = uuid::Uuid::new_v4().to_string();
+        let catalog_id = uuid::Uuid::new_v4().to_string();
+        let user_service_id = uuid::Uuid::new_v4().to_string();
+        let user_endpoint_id = uuid::Uuid::new_v4().to_string();
+        const SPEC_URL: &str = "https://example.com/lark-bot-subset.json";
+
+        // Catalog service with NO registered ServiceEndpoint rows.
+        let mut catalog = dummy_service();
+        catalog.id = catalog_id.clone();
+        catalog.name = "Lark Bot".to_string();
+        catalog.slug = "catalog-no-endpoint-rows".to_string();
+        catalog.requires_user_credential = true;
+        db.collection::<DownstreamService>(DOWNSTREAM_SERVICES)
+            .insert_one(catalog)
+            .await
+            .expect("insert catalog service");
+
+        db.collection::<UserEndpoint>(USER_ENDPOINTS)
+            .insert_one(test_user_endpoint(
+                &user_endpoint_id,
+                &user_id,
+                "Team Lark Bot",
+                "https://open.larksuite.com",
+                Some(SPEC_URL),
+                Some(&catalog_id),
+            ))
+            .await
+            .expect("insert user endpoint");
+        db.collection::<UserService>(USER_SERVICES)
+            .insert_one(test_user_service(
+                &user_service_id,
+                &user_id,
+                "team-lark-bot",
+                &user_endpoint_id,
+                Some(&catalog_id),
+                None,
+            ))
+            .await
+            .expect("insert user service");
+
+        crate::services::api_docs_service::cache_test_spec(
+            SPEC_URL,
+            Some(&user_id),
+            serde_json::json!({
+                "openapi": "3.1.0",
+                "info": { "title": "Lark Bot Subset", "version": "1.0.0" },
+                "paths": {
+                    "/open-apis/im/v1/messages": {
+                        "post": {
+                            "operationId": "im_message_create",
+                            "responses": {
+                                "200": {
+                                    "description": "ok",
+                                    "content": {
+                                        "application/json": {
+                                            "schema": { "type": "object" }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }),
+        );
+
+        let catalog_result = load_operation_catalog(
+            &db,
+            &NodeWsManager::new(30, 100),
+            &user_id,
+            NodeScope::Unrestricted,
+            ServiceScope::Unrestricted,
+        )
+        .await
+        .expect("load operation catalog");
+
+        // Before the issue #1290 fix this instance published an empty
+        // operation set and was dropped as invalid-contract.
+        let service = catalog_result
+            .services
+            .iter()
+            .find(|service| service.service_id == user_service_id)
+            .expect("catalog-backed instance with user-mounted spec should be published");
+        assert!(!service.is_generic_proxy);
+        assert!(!service.invalid_openapi_contract);
+        assert_eq!(service.endpoints.len(), 1);
+        assert_eq!(service.endpoints[0].name, "im_message_create");
+        assert_eq!(service.endpoints[0].method, "POST");
+        assert_eq!(service.endpoints[0].path, "/open-apis/im/v1/messages");
     }
 
     #[tokio::test]

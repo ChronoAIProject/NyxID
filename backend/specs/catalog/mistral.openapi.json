@@ -1,0 +1,117 @@
+{
+  "openapi": "3.1.0",
+  "info": {
+    "title": "Mistral AI API",
+    "version": "v1-nyxid-overlay",
+    "description": "NyxID-hosted overlay of the core Mistral API operations. Paths are relative to the /v1 base; NyxID injects the API key."
+  },
+  "servers": [{ "url": "https://api.mistral.ai/v1", "description": "Mistral AI API" }],
+  "paths": {
+    "/chat/completions": {
+      "post": {
+        "operationId": "chat_completions",
+        "summary": "Create a chat completion",
+        "x-aevatar-tool": {
+          "name": "chat_completions",
+          "description": "Create a Mistral chat completion.",
+          "readOnly": false,
+          "destructive": false,
+          "requiresApproval": false
+        },
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "required": ["model", "messages"],
+                "additionalProperties": true,
+                "properties": {
+                  "model": { "type": "string", "description": "Model id, e.g. mistral-large-latest." },
+                  "messages": {
+                    "type": "array",
+                    "items": { "type": "object", "additionalProperties": true }
+                  },
+                  "temperature": { "type": "number" },
+                  "max_tokens": { "type": "integer" }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Chat completion",
+            "content": {
+              "application/json": {
+                "schema": { "type": "object", "additionalProperties": true }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/embeddings": {
+      "post": {
+        "operationId": "embeddings_create",
+        "summary": "Create embeddings",
+        "x-aevatar-tool": {
+          "name": "embeddings_create",
+          "description": "Create Mistral embeddings for input text.",
+          "readOnly": false,
+          "destructive": false,
+          "requiresApproval": false
+        },
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "required": ["model", "input"],
+                "additionalProperties": true,
+                "properties": {
+                  "model": { "type": "string", "description": "e.g. mistral-embed." },
+                  "input": { "type": ["string", "array"] }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Embedding vectors",
+            "content": {
+              "application/json": {
+                "schema": { "type": "object", "additionalProperties": true }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/models": {
+      "get": {
+        "operationId": "models_list",
+        "summary": "List available models",
+        "x-aevatar-tool": {
+          "name": "models_list",
+          "description": "List Mistral models available to the credential.",
+          "readOnly": true,
+          "destructive": false,
+          "requiresApproval": false
+        },
+        "responses": {
+          "200": {
+            "description": "Model list",
+            "content": {
+              "application/json": {
+                "schema": { "type": "object", "additionalProperties": true }
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+}

@@ -173,6 +173,25 @@ nyxid catalog endpoints <slug>          # parsed OpenAPI endpoints
 
 ---
 
+## Hosted Catalog Overlay Specs
+
+Most official upstream APIs either publish no OpenAPI document, publish one in YAML (unsupported), or publish one far above the 5MB fetch limit. For those, NyxID ships small hand-curated OpenAPI 3.1 overlays in-tree under `backend/specs/catalog/` and serves them publicly at:
+
+```text
+GET /api/v1/catalog-specs/{spec_key}/openapi.json
+```
+
+- The registry (`backend/src/services/catalog_spec_registry.rs`) maps catalog slugs to spec keys; several slugs can share one overlay (`api-github` / `api-github-pat`, the Lark / Feishu pairs).
+- Each operation carries an `x-aevatar-tool` annotation (`name`, `readOnly`, `destructive`, `requiresApproval`) so agent runtimes can admit operations without guessing.
+- Seeded services get their `openapi_spec_url` pointed at the hosted overlay automatically (new rows at seed time; existing rows via a null-guarded backfill that never overwrites an admin-set URL).
+- At startup, `catalog_spec_sync` parses every overlay and additively upserts `ServiceEndpoint` rows for the seeded services (matched by endpoint name; admin-added endpoints under other names are never touched or soft-deleted). This is what makes `/api/v1/mcp/config` publish concrete `service_id` + `endpoint_id` operations for catalog-backed user services -- required by Aevatar v4 workflow admission (issue #1290).
+
+Catalog-backed user services whose catalog template has **no** registered endpoint rows fall through to the instance's user-mounted `openapi_spec_url` (set via `nyxid service update --openapi-spec-url`) instead of publishing an empty operation set. Registered catalog rows keep precedence when they exist.
+
+To extend coverage: add a JSON overlay under `backend/specs/catalog/`, register it in `HOSTED_SPEC_SOURCES` and `SLUG_TO_SPEC_KEY`, and the seed, backfill, sync, and serving paths all pick it up.
+
+---
+
 ## Recommended Operator Flow
 
 1. Register the downstream service with its `base_url`.

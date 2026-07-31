@@ -1,0 +1,207 @@
+{
+  "openapi": "3.1.0",
+  "info": {
+    "title": "Slack Web API",
+    "version": "v2-nyxid-overlay",
+    "description": "NyxID-hosted overlay of the Slack Web API methods most used by agents. Works with both user (xoxp) and bot (xoxb) tokens; NyxID injects the bearer token."
+  },
+  "servers": [{ "url": "https://slack.com/api", "description": "Slack Web API" }],
+  "paths": {
+    "/auth.test": {
+      "post": {
+        "operationId": "auth_test",
+        "summary": "Check the authenticated identity",
+        "x-aevatar-tool": {
+          "name": "auth_test",
+          "description": "Check which Slack workspace and identity the stored token belongs to.",
+          "readOnly": true,
+          "destructive": false,
+          "requiresApproval": false
+        },
+        "responses": {
+          "200": {
+            "description": "Identity info",
+            "content": {
+              "application/json": {
+                "schema": { "type": "object", "additionalProperties": true }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/chat.postMessage": {
+      "post": {
+        "operationId": "chat_post_message",
+        "summary": "Send a message to a channel",
+        "x-aevatar-tool": {
+          "name": "chat_post_message",
+          "description": "Send a Slack message to a channel or user.",
+          "readOnly": false,
+          "destructive": false,
+          "requiresApproval": true
+        },
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "required": ["channel"],
+                "additionalProperties": true,
+                "properties": {
+                  "channel": {
+                    "type": "string",
+                    "description": "Channel id (C...), user id (U...), or channel name."
+                  },
+                  "text": { "type": "string" },
+                  "blocks": {
+                    "type": "array",
+                    "description": "Block Kit blocks; when set, text becomes the fallback.",
+                    "items": { "type": "object", "additionalProperties": true }
+                  },
+                  "thread_ts": { "type": "string", "description": "Reply in this thread." }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Send result",
+            "content": {
+              "application/json": {
+                "schema": { "type": "object", "additionalProperties": true }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/conversations.list": {
+      "get": {
+        "operationId": "conversations_list",
+        "summary": "List conversations",
+        "x-aevatar-tool": {
+          "name": "conversations_list",
+          "description": "List Slack channels and conversations visible to the token.",
+          "readOnly": true,
+          "destructive": false,
+          "requiresApproval": false
+        },
+        "parameters": [
+          {
+            "name": "types",
+            "in": "query",
+            "required": false,
+            "description": "Comma-separated: public_channel, private_channel, mpim, im.",
+            "schema": { "type": "string" }
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "required": false,
+            "schema": { "type": "integer", "minimum": 1, "maximum": 1000 }
+          },
+          {
+            "name": "cursor",
+            "in": "query",
+            "required": false,
+            "schema": { "type": "string" }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Conversation list page",
+            "content": {
+              "application/json": {
+                "schema": { "type": "object", "additionalProperties": true }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/conversations.history": {
+      "get": {
+        "operationId": "conversations_history",
+        "summary": "Fetch conversation history",
+        "x-aevatar-tool": {
+          "name": "conversations_history",
+          "description": "Fetch recent messages of a Slack conversation.",
+          "readOnly": true,
+          "destructive": false,
+          "requiresApproval": false
+        },
+        "parameters": [
+          {
+            "name": "channel",
+            "in": "query",
+            "required": true,
+            "schema": { "type": "string", "minLength": 1 }
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "required": false,
+            "schema": { "type": "integer", "minimum": 1, "maximum": 1000 }
+          },
+          {
+            "name": "cursor",
+            "in": "query",
+            "required": false,
+            "schema": { "type": "string" }
+          },
+          {
+            "name": "oldest",
+            "in": "query",
+            "required": false,
+            "description": "Only messages after this Unix timestamp.",
+            "schema": { "type": "string" }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Message history page",
+            "content": {
+              "application/json": {
+                "schema": { "type": "object", "additionalProperties": true }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/users.info": {
+      "get": {
+        "operationId": "users_info",
+        "summary": "Get a user's info",
+        "x-aevatar-tool": {
+          "name": "users_info",
+          "description": "Get a Slack user's profile by user id.",
+          "readOnly": true,
+          "destructive": false,
+          "requiresApproval": false
+        },
+        "parameters": [
+          {
+            "name": "user",
+            "in": "query",
+            "required": true,
+            "schema": { "type": "string", "minLength": 1 }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "User info",
+            "content": {
+              "application/json": {
+                "schema": { "type": "object", "additionalProperties": true }
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+}

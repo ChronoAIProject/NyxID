@@ -1,0 +1,80 @@
+{
+  "openapi": "3.1.0",
+  "info": {
+    "title": "Facebook Graph API",
+    "version": "v21.0-nyxid-overlay",
+    "description": "NyxID-hosted overlay of the Facebook Graph API operations most used by agents. Paths are relative to the /v21.0 base; NyxID injects the OAuth token."
+  },
+  "servers": [{ "url": "https://graph.facebook.com/v21.0", "description": "Facebook Graph API" }],
+  "paths": {
+    "/me": {
+      "get": {
+        "operationId": "get_me",
+        "summary": "Get the authenticated user",
+        "x-aevatar-tool": {
+          "name": "get_me",
+          "description": "Get the authenticated Facebook user profile.",
+          "readOnly": true,
+          "destructive": false,
+          "requiresApproval": false
+        },
+        "parameters": [
+          {
+            "name": "fields",
+            "in": "query",
+            "required": false,
+            "description": "Comma-separated fields, e.g. id,name,email.",
+            "schema": { "type": "string" }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "User profile",
+            "content": {
+              "application/json": {
+                "schema": { "type": "object", "additionalProperties": true }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/me/accounts": {
+      "get": {
+        "operationId": "list_my_pages",
+        "summary": "List pages the user manages",
+        "x-aevatar-tool": {
+          "name": "list_my_pages",
+          "description": "List Facebook pages managed by the authenticated user.",
+          "readOnly": true,
+          "destructive": false,
+          "requiresApproval": false
+        },
+        "parameters": [
+          {
+            "name": "fields",
+            "in": "query",
+            "required": false,
+            "schema": { "type": "string" }
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "required": false,
+            "schema": { "type": "integer", "minimum": 1, "maximum": 100 }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Page list",
+            "content": {
+              "application/json": {
+                "schema": { "type": "object", "additionalProperties": true }
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+}

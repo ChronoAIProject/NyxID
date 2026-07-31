@@ -1,0 +1,137 @@
+{
+  "openapi": "3.1.0",
+  "info": {
+    "title": "Twitter / X API v2",
+    "version": "v2-nyxid-overlay",
+    "description": "NyxID-hosted overlay of the X API v2 operations most used by agents. Paths are relative to the /2 base; NyxID injects the OAuth token."
+  },
+  "servers": [{ "url": "https://api.x.com/2", "description": "X API v2" }],
+  "paths": {
+    "/users/me": {
+      "get": {
+        "operationId": "get_me",
+        "summary": "Get the authenticated user",
+        "x-aevatar-tool": {
+          "name": "get_me",
+          "description": "Get the authenticated X user profile.",
+          "readOnly": true,
+          "destructive": false,
+          "requiresApproval": false
+        },
+        "parameters": [
+          {
+            "name": "user.fields",
+            "in": "query",
+            "required": false,
+            "description": "Comma-separated extra user fields.",
+            "schema": { "type": "string" }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "User profile",
+            "content": {
+              "application/json": {
+                "schema": { "type": "object", "additionalProperties": true }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/tweets/search/recent": {
+      "get": {
+        "operationId": "search_recent_tweets",
+        "summary": "Search recent posts",
+        "x-aevatar-tool": {
+          "name": "search_recent_tweets",
+          "description": "Search X posts from the last 7 days.",
+          "readOnly": true,
+          "destructive": false,
+          "requiresApproval": false
+        },
+        "parameters": [
+          {
+            "name": "query",
+            "in": "query",
+            "required": true,
+            "description": "Search query using X search operators.",
+            "schema": { "type": "string", "minLength": 1 }
+          },
+          {
+            "name": "max_results",
+            "in": "query",
+            "required": false,
+            "schema": { "type": "integer", "minimum": 10, "maximum": 100 }
+          },
+          {
+            "name": "next_token",
+            "in": "query",
+            "required": false,
+            "schema": { "type": "string" }
+          },
+          {
+            "name": "tweet.fields",
+            "in": "query",
+            "required": false,
+            "description": "Comma-separated extra tweet fields.",
+            "schema": { "type": "string" }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Search results page",
+            "content": {
+              "application/json": {
+                "schema": { "type": "object", "additionalProperties": true }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/tweets": {
+      "post": {
+        "operationId": "create_tweet",
+        "summary": "Create a post",
+        "x-aevatar-tool": {
+          "name": "create_tweet",
+          "description": "Publish an X post as the authenticated user.",
+          "readOnly": false,
+          "destructive": false,
+          "requiresApproval": true
+        },
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "additionalProperties": true,
+                "properties": {
+                  "text": { "type": "string", "description": "Post text (required unless media/poll only)." },
+                  "reply": {
+                    "type": "object",
+                    "description": "Reply target settings.",
+                    "additionalProperties": true
+                  },
+                  "quote_tweet_id": { "type": "string" }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "201": {
+            "description": "Created post",
+            "content": {
+              "application/json": {
+                "schema": { "type": "object", "additionalProperties": true }
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+}

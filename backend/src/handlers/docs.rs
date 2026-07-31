@@ -90,14 +90,20 @@ pub async fn asyncapi_json(
 
 #[utoipa::path(
     get,
-    path = "/api/v1/catalog-specs/firecrawl/openapi.json",
+    path = "/api/v1/catalog-specs/{spec_key}/openapi.json",
+    params(
+        ("spec_key" = String, Path, description = "Hosted catalog spec key, e.g. firecrawl or lark-bot")
+    ),
     responses(
-        (status = 200, description = "NyxID-hosted Firecrawl OpenAPI overlay with Aevatar tool annotations", content_type = "application/json")
+        (status = 200, description = "NyxID-hosted OpenAPI overlay with Aevatar tool annotations", content_type = "application/json"),
+        (status = 404, description = "Unknown catalog spec", body = crate::errors::ErrorResponse)
     ),
     tag = "Catalog"
 )]
-pub async fn firecrawl_openapi_json() -> Json<serde_json::Value> {
-    Json(api_docs_service::build_firecrawl_openapi_document())
+pub async fn catalog_spec_json(Path(spec_key): Path<String>) -> AppResult<Json<serde_json::Value>> {
+    let spec = crate::services::catalog_spec_registry::spec_for_key(&spec_key)
+        .ok_or_else(|| AppError::NotFound("Catalog spec not found".to_string()))?;
+    Ok(Json(spec.as_ref().clone()))
 }
 
 #[utoipa::path(
@@ -259,7 +265,7 @@ fn html_response_with_csp(html: String, csp: &str) -> Response {
 
 #[cfg(test)]
 mod tests {
-    use super::{catalog_ui, docs_ui, firecrawl_openapi_json, openapi_json, service_openapi_json};
+    use super::{catalog_spec_json, catalog_ui, docs_ui, openapi_json, service_openapi_json};
     use crate::errors::AppError;
     use crate::models::user::COLLECTION_NAME as USERS;
     use crate::models::user::UserType;
@@ -390,8 +396,10 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn firecrawl_openapi_json_returns_overlay_with_aevatar_annotations() {
-        let axum::Json(value) = firecrawl_openapi_json().await;
+    async fn catalog_spec_json_returns_firecrawl_overlay_with_aevatar_annotations() {
+        let axum::Json(value) = catalog_spec_json(Path("firecrawl".to_string()))
+            .await
+            .expect("firecrawl overlay registered");
 
         assert_eq!(value["info"]["title"], "Firecrawl API");
         assert_eq!(value["paths"]["/v2/agent"]["post"]["operationId"], "agent");
@@ -403,6 +411,31 @@ mod tests {
             value["paths"]["/v2/agent/{id}"]["get"]["x-aevatar-tool"]["readOnly"],
             true
         );
+    }
+
+    #[tokio::test]
+    async fn catalog_spec_json_returns_lark_bot_overlay() {
+        let axum::Json(value) = catalog_spec_json(Path("lark-bot".to_string()))
+            .await
+            .expect("lark-bot overlay registered");
+
+        assert_eq!(
+            value["paths"]["/open-apis/im/v1/messages"]["post"]["operationId"],
+            "im_message_create"
+        );
+        assert_eq!(
+            value["paths"]["/open-apis/bitable/v1/apps/{app_token}/tables/{table_id}/records/search"]
+                ["post"]["operationId"],
+            "bitable_records_search"
+        );
+    }
+
+    #[tokio::test]
+    async fn catalog_spec_json_rejects_unknown_spec_key() {
+        let err = catalog_spec_json(Path("does-not-exist".to_string()))
+            .await
+            .expect_err("unknown spec key should 404");
+        assert!(matches!(err, AppError::NotFound(_)));
     }
 
     #[tokio::test]

@@ -1,0 +1,72 @@
+{
+  "openapi": "3.1.0",
+  "info": {
+    "title": "Discord API (User OAuth)",
+    "version": "v10-nyxid-overlay",
+    "description": "NyxID-hosted overlay of the Discord API operations available to user OAuth tokens. Paths are relative to the /api/v10 base; NyxID injects the bearer token."
+  },
+  "servers": [{ "url": "https://discord.com/api/v10", "description": "Discord API" }],
+  "paths": {
+    "/users/@me": {
+      "get": {
+        "operationId": "get_current_user",
+        "summary": "Get the current user",
+        "x-aevatar-tool": {
+          "name": "get_current_user",
+          "description": "Get the authenticated Discord user profile.",
+          "readOnly": true,
+          "destructive": false,
+          "requiresApproval": false
+        },
+        "responses": {
+          "200": {
+            "description": "User profile",
+            "content": {
+              "application/json": {
+                "schema": { "type": "object", "additionalProperties": true }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/users/@me/guilds": {
+      "get": {
+        "operationId": "list_current_user_guilds",
+        "summary": "List the current user's guilds",
+        "x-aevatar-tool": {
+          "name": "list_current_user_guilds",
+          "description": "List Discord guilds (servers) the authenticated user belongs to.",
+          "readOnly": true,
+          "destructive": false,
+          "requiresApproval": false
+        },
+        "parameters": [
+          {
+            "name": "limit",
+            "in": "query",
+            "required": false,
+            "schema": { "type": "integer", "minimum": 1, "maximum": 200 }
+          },
+          {
+            "name": "after",
+            "in": "query",
+            "required": false,
+            "description": "Guild id cursor for pagination.",
+            "schema": { "type": "string" }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Guild list",
+            "content": {
+              "application/json": {
+                "schema": { "type": "array", "items": { "type": "object", "additionalProperties": true } }
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+}
