@@ -71,22 +71,27 @@ The split-brain: a card could arrive on turn 1 (row 4), but the entire journey
 lifecycle (rows 5–8) ran on the deprecated family, and none of the round-1
 envelope hardening existed on main.
 
-## 4. Our flow AFTER this branch (implemented) — ean-parity
+## 4. Our flow AFTER this branch (implemented) — family-aware parity
 
 | # | Page action | Browser → NyxID | Upstream | Body |
 |---|---|---|---|---|
-| 1 | List sidebar | `GET /api/v1/assistant/conversations` | `GET /api/chat/conversations` (+ legacy `chat-history` restricted to `chatc-` workflow rows, merged) | — |
-| 2 | Open conversation | `GET …/conversations/{id}` | `GET /api/chat/conversations/{id}` | — |
-| 3 | New chat | *(local `nyxid-pending-…` id; no network)* | — | — |
-| 4 | First turn | `POST /api/v1/assistant/chat` | `POST /api/chat` (SSE) | `{type:"text", prompt, clientRequestId}`; identity adopted from `RUN_STARTED` |
-| 5 | Every later turn | **same** `POST …/assistant/chat` | **same** `POST /api/chat` (SSE) | `{type:"text", conversationId, prompt, clientRequestId}` |
-| 6 | Card continuation | same | same (SSE) | `{type:"action.continue", conversationId, clientRequestId, originTurnId, actions:[…]}` |
-| 6b | Wake | same | same (SSE) | `{type:"action.continue", conversationId, clientRequestId, actions:[]}` |
-| 7 | Tool approval | same | same (SSE) | `{type:"approval.resolve", conversationId, clientRequestId, requestId, approved[, reason]}` |
-| 8 | Stop (and future steer/retry/skip) | same | same (**JSON 202**) | `{type:"task.stop", conversationId, turnId, stopRequestId, clientRequestId, expectedStateVersion}` |
-| 9 | Delete | `DELETE …/conversations/{id}` | `DELETE /api/chat/conversations/{id}` (single) | — |
-| 10 | State | `GET …/conversations/{id}/state` | `GET /api/chat/conversations/{id}/state` | cursor passthrough |
-| W | Workflow chat | unchanged | unchanged | unchanged |
+| 1 | List sidebar | `GET /api/v1/assistant/conversations` | Drain `GET api/scopes/{uid}/chat-history` through every `nextCursor` (40-page safety cap) | Filter to `nyxid-chat-*` + `chatc-*`, dedupe, newest-first |
+| 2T | Open typed conversation | `GET …/conversations/nyxid-chat-*` | `GET /api/chat/conversations/{id}` | Canonical typed transcript passthrough |
+| 2W | Open workflow conversation | `GET …/conversations/chatc-*` | `GET api/scopes/{uid}/chat-history/conversations/{id}` | Scoped workflow transcript passthrough |
+| 3 | New chat | *(local `workflow-pending-*` id; no network)* | — | — |
+| 4W | First workflow turn | `POST …/assistant/workflow-chat` | `POST /api/chat` (SSE) | Create has `{commandId, conversation:{conversationId:null}, prompt, sessionId, workflow:"studio"}` |
+| 5W | Workflow continuation | same | same (SSE) | Exactly `{conversation:{conversationId,minimumStateVersion}, prompt, sessionId, workflow:"studio"}`; **no `commandId`** |
+| 4T/5T | Typed text turn | `POST …/assistant/chat` | `POST /api/chat` (SSE) | `{type:"text", prompt, clientRequestId[, conversationId]}` |
+| 6 | Typed card continuation | same | same (SSE) | `{type:"action.continue", conversationId, clientRequestId, originTurnId, actions:[…]}` |
+| 6b | Typed wake | same | same (SSE) | `{type:"action.continue", conversationId, clientRequestId, actions:[]}` |
+| 7 | Typed tool approval | same | same (SSE) | `{type:"approval.resolve", conversationId, clientRequestId, requestId, approved[, reason]}` |
+| 8 | Typed stop/steer/retry/skip | same | same (**JSON 202**) | Strict typed command envelope for the selected control |
+| 9T | Delete typed conversation | `DELETE …/conversations/nyxid-chat-*` | `DELETE /api/chat/conversations/{id}` | Canonical 202 + JSON passthrough |
+| 9W | Delete workflow conversation | `DELETE …/conversations/chatc-*` | `DELETE api/scopes/{uid}/chat-history/conversations/{id}` | Upstream bare 200 normalized to NyxID 204 |
+| 10T | Typed state | `GET …/conversations/nyxid-chat-*/state` | `GET /api/chat/conversations/{id}/state` | Cursor passthrough |
+| 10W | Workflow state | `GET …/conversations/chatc-*/state` | No upstream call | Not-found-shaped response; workflow has no state resource |
+| 11W | Recover workflow create | `GET …/conversations/create-recovery/{commandId}` | `GET api/scopes/{uid}/chat-history/create-recovery/{commandId}` | Identity passthrough; client validates and reconciles the transcript |
+| WSS | Workflow WebSocket twin | `GET …/workflow-chat/ws` | `GET /api/ws/chat` | Unchanged |
 
 Deleted outright (per Calvin 2026-07-31, matching ean's migration): the
 per-conversation command routes `/{id}/stream`, `/{id}/approve`, `/{id}/stop`,
@@ -97,8 +102,9 @@ the build if they come back:
 - BE: proxy-handler tests assert `/api/chat`-family upstream paths only and
   deleted-route unroutability.
 
-`Idempotency-Key: clientRequestId` is set on all command forwards (required a
-one-line addition to the proxy forward-header allowlist).
+`Idempotency-Key: clientRequestId` is set on typed command forwards. Workflow
+create replay is keyed by its create-only `commandId`; workflow continuations
+carry no client `commandId` and recover the server fence from Chat History.
 
 ## 5. The frames that come back (unchanged by the migration)
 

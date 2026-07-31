@@ -1,3 +1,11 @@
+> **Correction (2026-07-31):** This is a historical implementation brief. The
+> audit v2 in `docs/chat-aevatar-dev-parity-audit.md` supersedes two claims
+> below: `chatc-*` workflow resources belong to scoped Chat History while
+> `nyxid-chat-*` typed resources remain canonical, and
+> `frontend/src/lib/assistant/**` is not in the committed wizard bundle graph.
+> Transport-only changes therefore require the freshness gate, not a wizard
+> rebuild. See the audit v2 for the verified family map and evidence.
+
 # Chat Canonical `/api/chat` Migration — Round-2 Implementation Brief
 
 Owner: Calvin · PM/final review: Fable · Implementer: Codex · Adversary: Opus

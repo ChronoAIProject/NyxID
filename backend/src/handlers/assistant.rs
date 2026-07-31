@@ -715,13 +715,13 @@ pub async fn typed_chat(
 /// `POST /api/v1/assistant/workflow-chat` -- workflow ("studio") chat turn,
 /// answered as the upstream SSE stream.
 ///
-/// The caller body is the typed `WorkflowChatTurnRequest` (prompt +
-/// conversation continuation + idempotency id); the upstream `/api/chat`
-/// body is built server-side with the workflow pinned to `studio` and the
-/// `conversation` object always present, so every turn persists to chat
-/// history and no caller can select another engine or smuggle fields into
-/// Aevatar's strict `HttpChatInput`. Scope comes from the propagated
-/// identity token (Aevatar ignores any body scope).
+/// The caller body is the typed `WorkflowChatTurnRequest`: prompt, session,
+/// create-only command id, or a conversation id plus observed state fence.
+/// The upstream `/api/chat` body is built server-side with the workflow pinned
+/// to `studio` and the `conversation` object always present, so every turn
+/// persists to chat history and no caller can select another engine or smuggle
+/// fields into Aevatar's strict `HttpChatInput`. Scope comes from the
+/// propagated identity token (Aevatar ignores any body scope).
 ///
 /// Streams Aevatar's raw workflow engine events (`aevatar.raw.observed`
 /// envelopes carrying workflow YAML, system prompts, and kernel state) to the
