@@ -7972,10 +7972,10 @@ mod proxy_resolution_integration_tests {
         server.abort();
     }
 
-    /// End-to-end through the real assistant handlers: every typed command
-    /// lands on canonical `/api/chat`, resources land on
-    /// `/api/chat/conversations/**`, and each upstream request carries the
-    /// injected identity material with NO caller `Authorization`.
+    /// End-to-end through the real assistant handlers: typed commands land on
+    /// `/api/chat`, resources map by conversation family, and each upstream
+    /// request carries injected identity material with NO caller
+    /// `Authorization`.
     #[tokio::test]
     async fn assistant_chat_handlers_rebuild_bodies_for_the_admin_service() {
         use std::sync::Mutex as StdMutex;
@@ -8008,19 +8008,30 @@ mod proxy_resolution_integration_tests {
                         parts.headers.clone(),
                     ));
                     match (parts.method, parts.uri.path()) {
-                        (Method::GET, "/api/chat/conversations") => axum::Json(serde_json::json!({
-                            "conversations": [
-                                {
-                                    "id": "nyxid-chat-4a1e60ebd1fd44f192bf4bb90e1812ae",
-                                    "updatedAt": "2026-07-29T13:00:00.000Z"
-                                },
-                                {
-                                    "id": "chatc-8bd999c402fb37d60cdcd81e3b78cfd",
-                                    "updatedAt": "2026-07-29T12:00:00.000Z"
-                                }
-                            ]
-                        }))
-                        .into_response(),
+                        (Method::GET, path) if path.ends_with("/chat-history") => {
+                            axum::Json(serde_json::json!({
+                                "conversations": [
+                                    {
+                                        "id": "nyxid-chat-4a1e60ebd1fd44f192bf4bb90e1812ae",
+                                        "updatedAt": "2026-07-29T13:00:00.000Z"
+                                    },
+                                    {
+                                        "id": "chatc-8bd999c402fb37d60cdcd81e3b78cfd",
+                                        "updatedAt": "2026-07-29T12:00:00.000Z"
+                                    }
+                                ]
+                            }))
+                            .into_response()
+                        }
+                        (Method::GET, path) if path.contains("/create-recovery/") => {
+                            axum::Json(serde_json::json!({
+                                "status": "append_committed",
+                                "conversationId": "chatc-8bd999c402fb37d60cdcd81e3b78cfd",
+                                "stateVersion": 4,
+                                "turnId": "turn-workflow-1"
+                            }))
+                            .into_response()
+                        }
                         (Method::GET, path) if path.starts_with("/api/chat/conversations/") => {
                             axum::Json(serde_json::json!({
                                 "messages": [],
@@ -8028,8 +8039,20 @@ mod proxy_resolution_integration_tests {
                             }))
                             .into_response()
                         }
-                        (Method::DELETE, path) if path.starts_with("/api/chat/conversations/") => {
-                            axum::Json(serde_json::json!({})).into_response()
+                        (Method::GET, path) if path.contains("/chat-history/conversations/") => {
+                            axum::Json(serde_json::json!({
+                                "messages": [],
+                                "stateVersion": 4
+                            }))
+                            .into_response()
+                        }
+                        (Method::DELETE, path) if path.starts_with("/api/chat/conversations/") => (
+                            StatusCode::ACCEPTED,
+                            axum::Json(serde_json::json!({ "status": "accepted" })),
+                        )
+                            .into_response(),
+                        (Method::DELETE, path) if path.contains("/chat-history/conversations/") => {
+                            StatusCode::OK.into_response()
                         }
                         (_, "/api/chat") if wants_json => {
                             axum::Json(serde_json::json!({ "ok": true })).into_response()
@@ -8178,7 +8201,7 @@ mod proxy_resolution_integration_tests {
         assert_eq!(list_response.status(), StatusCode::OK);
         debug_echoes.push(assistant_echoes(&list_response));
 
-        crate::handlers::assistant::get_history(
+        let typed_history_response = crate::handlers::assistant::get_history(
             axum::extract::State(state.clone()),
             auth.clone(),
             Path("nyxid-chat-4a1e60ebd1fd44f192bf4bb90e1812ae".to_string()),
@@ -8190,7 +8213,8 @@ mod proxy_resolution_integration_tests {
         )
         .await
         .expect("history handler must forward");
-        crate::handlers::assistant::get_state(
+        assert_eq!(typed_history_response.status(), StatusCode::OK);
+        let typed_state_response = crate::handlers::assistant::get_state(
             axum::extract::State(state.clone()),
             auth.clone(),
             Path("nyxid-chat-4a1e60ebd1fd44f192bf4bb90e1812ae".to_string()),
@@ -8202,7 +8226,8 @@ mod proxy_resolution_integration_tests {
         )
         .await
         .expect("state handler must forward");
-        crate::handlers::assistant::delete_conversation(
+        assert_eq!(typed_state_response.status(), StatusCode::OK);
+        let typed_delete_response = crate::handlers::assistant::delete_conversation(
             axum::extract::State(state.clone()),
             auth.clone(),
             Path("nyxid-chat-4a1e60ebd1fd44f192bf4bb90e1812ae".to_string()),
@@ -8214,36 +8239,154 @@ mod proxy_resolution_integration_tests {
         )
         .await
         .expect("delete handler must forward");
+        assert_eq!(typed_delete_response.status(), StatusCode::ACCEPTED);
+        let typed_delete_body = to_bytes(typed_delete_response.into_body(), 1024)
+            .await
+            .unwrap();
+        assert_eq!(
+            serde_json::from_slice::<serde_json::Value>(&typed_delete_body).unwrap(),
+            serde_json::json!({ "status": "accepted" })
+        );
+
+        let workflow_id = "chatc-8bd999c402fb37d60cdcd81e3b78cfd";
+        let workflow_history_response = crate::handlers::assistant::get_history(
+            axum::extract::State(state.clone()),
+            auth.clone(),
+            Path(workflow_id.to_string()),
+            request(
+                Method::GET,
+                &format!("/api/v1/assistant/conversations/{workflow_id}"),
+                None,
+            ),
+        )
+        .await
+        .expect("workflow history handler must forward");
+        assert_eq!(workflow_history_response.status(), StatusCode::OK);
+
+        let calls_before_workflow_state = captured.lock().unwrap().len();
+        let workflow_state_error = crate::handlers::assistant::get_state(
+            axum::extract::State(state.clone()),
+            auth.clone(),
+            Path(workflow_id.to_string()),
+            request(
+                Method::GET,
+                &format!("/api/v1/assistant/conversations/{workflow_id}/state"),
+                None,
+            ),
+        )
+        .await
+        .expect_err("workflow state must be not-found locally");
+        assert!(matches!(workflow_state_error, AppError::NotFound(_)));
+        assert_eq!(captured.lock().unwrap().len(), calls_before_workflow_state);
+
+        let workflow_delete_response = crate::handlers::assistant::delete_conversation(
+            axum::extract::State(state.clone()),
+            auth.clone(),
+            Path(workflow_id.to_string()),
+            request(
+                Method::DELETE,
+                &format!("/api/v1/assistant/conversations/{workflow_id}"),
+                None,
+            ),
+        )
+        .await
+        .expect("workflow delete handler must forward");
+        assert_eq!(workflow_delete_response.status(), StatusCode::NO_CONTENT);
+        assert!(
+            to_bytes(workflow_delete_response.into_body(), 1024)
+                .await
+                .unwrap()
+                .is_empty()
+        );
+
+        let recovery_command = "4380055d-e9c3-468e-bc93-64719a9f4658";
+        let recovery_response = crate::handlers::assistant::get_create_recovery(
+            axum::extract::State(state.clone()),
+            auth.clone(),
+            Path(recovery_command.to_string()),
+            request(
+                Method::GET,
+                &format!("/api/v1/assistant/conversations/create-recovery/{recovery_command}"),
+                None,
+            ),
+        )
+        .await
+        .expect("create recovery handler must forward");
+        assert_eq!(recovery_response.status(), StatusCode::OK);
+        assert!(
+            crate::handlers::assistant::get_create_recovery(
+                axum::extract::State(state.clone()),
+                auth.clone(),
+                Path("not a token!".to_string()),
+                request(
+                    Method::GET,
+                    "/api/v1/assistant/conversations/create-recovery/not%20a%20token!",
+                    None,
+                ),
+            )
+            .await
+            .is_err()
+        );
+
+        let token = crate::crypto::jwt::generate_access_token(
+            &state.jwt_keys,
+            &state.config,
+            &Uuid::parse_str(&user_id).unwrap(),
+            "openid profile email",
+            None,
+            None,
+            None,
+            None,
+            None,
+        )
+        .unwrap();
+        let (_, private) = crate::routes::build_router(
+            state.config.proxy_max_body_size,
+            state.config.public_proxy_max_body_size,
+        );
+        let routed_recovery = private
+            .with_state(state.clone())
+            .oneshot(
+                Request::builder()
+                    .method(Method::GET)
+                    .uri(format!(
+                        "/api/v1/assistant/conversations/create-recovery/{recovery_command}"
+                    ))
+                    .header(axum::http::header::AUTHORIZATION, format!("Bearer {token}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(routed_recovery.status(), StatusCode::OK);
 
         let calls = std::mem::take(&mut *captured.lock().unwrap());
-        let paths: Vec<&str> = calls.iter().map(|(_, path, _, _)| path.as_str()).collect();
+        let paths: Vec<String> = calls.iter().map(|(_, path, _, _)| path.clone()).collect();
         assert_eq!(
             paths,
             vec![
-                "/api/chat",
-                "/api/chat",
-                "/api/chat",
-                "/api/chat",
-                "/api/chat",
-                "/api/chat",
-                "/api/chat",
-                "/api/chat",
-                "/api/chat",
-                "/api/chat",
-                "/api/chat/conversations",
-                "/api/chat/conversations/nyxid-chat-4a1e60ebd1fd44f192bf4bb90e1812ae",
-                "/api/chat/conversations/nyxid-chat-4a1e60ebd1fd44f192bf4bb90e1812ae/state",
-                "/api/chat/conversations/nyxid-chat-4a1e60ebd1fd44f192bf4bb90e1812ae",
+                "/api/chat".to_string(),
+                "/api/chat".to_string(),
+                "/api/chat".to_string(),
+                "/api/chat".to_string(),
+                "/api/chat".to_string(),
+                "/api/chat".to_string(),
+                "/api/chat".to_string(),
+                "/api/chat".to_string(),
+                "/api/chat".to_string(),
+                "/api/chat".to_string(),
+                format!("/api/scopes/{user_id}/chat-history"),
+                "/api/chat/conversations/nyxid-chat-4a1e60ebd1fd44f192bf4bb90e1812ae".to_string(),
+                "/api/chat/conversations/nyxid-chat-4a1e60ebd1fd44f192bf4bb90e1812ae/state"
+                    .to_string(),
+                "/api/chat/conversations/nyxid-chat-4a1e60ebd1fd44f192bf4bb90e1812ae".to_string(),
+                format!("/api/scopes/{user_id}/chat-history/conversations/{workflow_id}"),
+                format!("/api/scopes/{user_id}/chat-history/conversations/{workflow_id}"),
+                format!("/api/scopes/{user_id}/chat-history/create-recovery/{recovery_command}"),
+                format!("/api/scopes/{user_id}/chat-history/create-recovery/{recovery_command}"),
             ]
         );
-        assert!(
-            paths.iter().all(|path| !path.contains("api/scopes/")),
-            "typed assistant traffic must not hit scoped paths"
-        );
-        assert!(
-            paths.iter().all(|path| !path.contains("chat-history")),
-            "canonical list/detail/state/delete must not hit chat-history when the upstream canonical list already includes workflow rows"
-        );
+        assert!(paths.iter().any(|path| path.contains("chat-history")));
         assert_eq!(debug_echoes.last().map(Vec::len), Some(1));
 
         let workflow = serde_json::from_slice::<serde_json::Value>(&calls[0].2).unwrap();
@@ -8527,10 +8670,11 @@ mod proxy_resolution_integration_tests {
     }
 
     #[tokio::test]
-    async fn assistant_list_echo_captures_both_upstream_calls_when_the_legacy_fallback_fires() {
+    async fn assistant_list_drains_mixed_history_pages_and_captures_every_upstream_call() {
         use std::sync::Mutex as StdMutex;
+        use std::sync::atomic::{AtomicU8, Ordering};
 
-        let Some(db) = connect_test_database("assistant_list_echo_legacy_fallback").await else {
+        let Some(db) = connect_test_database("assistant_list_history_pagination").await else {
             eprintln!("skipping proxy integration test: no local MongoDB available");
             return;
         };
@@ -8539,33 +8683,80 @@ mod proxy_resolution_integration_tests {
         let captured: std::sync::Arc<StdMutex<Vec<Captured>>> =
             std::sync::Arc::new(StdMutex::new(Vec::new()));
         let sink = captured.clone();
+        let response_mode = std::sync::Arc::new(AtomicU8::new(0));
+        let downstream_mode = response_mode.clone();
         let app = Router::new().route(
             "/{*path}",
             any(move |request: Request<Body>| {
                 let sink = sink.clone();
                 async move {
                     let method = request.method().clone();
-                    let path = request.uri().path().to_string();
-                    sink.lock().unwrap().push((method.clone(), path.clone()));
-                    match (method, path.as_str()) {
-                        (Method::GET, "/api/chat/conversations") => axum::Json(serde_json::json!({
-                            "conversations": [{
-                                "id": "nyxid-chat-4a1e60ebd1fd44f192bf4bb90e1812ae",
-                                "updatedAt": "2026-07-29T13:00:00.000Z"
-                            }]
-                        }))
-                        .into_response(),
-                        (Method::GET, path) if path.ends_with("/chat-history") => {
-                            axum::Json(serde_json::json!({
-                                "conversations": [{
-                                    "id": "chatc-8bd999c402fb37d60cdcd81e3b78cfd",
-                                    "updatedAt": "2026-07-29T12:00:00.000Z"
-                                }]
-                            }))
-                            .into_response()
-                        }
-                        _ => axum::Json(serde_json::json!({ "ok": true })).into_response(),
+                    let path_and_query = request
+                        .uri()
+                        .path_and_query()
+                        .map(ToString::to_string)
+                        .unwrap_or_default();
+                    let cursor = request.uri().query();
+                    sink.lock().unwrap().push((method.clone(), path_and_query));
+                    if method != Method::GET || !request.uri().path().ends_with("/chat-history") {
+                        return StatusCode::NOT_FOUND.into_response();
                     }
+
+                    let page = if downstream_mode.load(Ordering::Relaxed) == 1 {
+                        serde_json::json!({
+                            "conversations": [{
+                                "id": "nyxid-chat-00000000000000000000000000000000",
+                                "updatedAt": "2026-07-29T12:00:00.000Z"
+                            }],
+                            "nextCursor": "repeated"
+                        })
+                    } else if downstream_mode.load(Ordering::Relaxed) == 2 {
+                        let page_number = cursor
+                            .and_then(|query| query.strip_prefix("cursor=page-"))
+                            .and_then(|value| value.parse::<usize>().ok())
+                            .unwrap_or(0);
+                        serde_json::json!({
+                            "conversations": [{
+                                "id": format!("nyxid-chat-{page_number:032x}"),
+                                "updatedAt": "2026-07-29T12:00:00.000Z"
+                            }],
+                            "nextCursor": format!("page-{}", page_number + 1)
+                        })
+                    } else if cursor.is_none() {
+                        let mut rows = (0..30)
+                            .map(|i| {
+                                serde_json::json!({
+                                    "id": format!("nyxid-chat-{i:032x}"),
+                                    "updatedAt": format!("2026-07-29T12:{i:02}:00.000Z")
+                                })
+                            })
+                            .collect::<Vec<_>>();
+                        rows.push(serde_json::json!({
+                            "id": "voicec-unsupported",
+                            "updatedAt": "2026-07-30T00:00:00.000Z"
+                        }));
+                        serde_json::json!({
+                            "conversations": rows,
+                            "nextCursor": "page-2"
+                        })
+                    } else {
+                        assert_eq!(cursor, Some("cursor=page-2"));
+                        let mut rows = (30..52)
+                            .map(|i| {
+                                serde_json::json!({
+                                    "id": format!("chatc-{i:032x}"),
+                                    "updatedAt": format!("2026-07-29T12:{i:02}:00.000Z")
+                                })
+                            })
+                            .collect::<Vec<_>>();
+                        rows.push(serde_json::json!({
+                            "id": "nyxid-chat-00000000000000000000000000000000",
+                            "updatedAt": "2026-07-31T00:00:00.000Z",
+                            "title": "duplicate must not replace the first row"
+                        }));
+                        serde_json::json!({ "conversations": rows })
+                    };
+                    axum::Json(page).into_response()
                 }
             }),
         );
@@ -8614,44 +8805,102 @@ mod proxy_resolution_integration_tests {
 
         let state = test_app_state(db);
         let auth = access_token_auth(&user_id);
-        let mut request = Request::builder()
-            .method(Method::GET)
-            .uri("/api/v1/assistant/conversations")
-            .header(axum::http::header::CONTENT_TYPE, "application/json")
-            .header("x-nyxid-debug-upstream", "1")
-            .body(Body::empty())
-            .expect("build assistant list request");
-        request.extensions_mut().insert(
-            crate::services::billing::route_inventory::BillingRoutePolicy::Metered(
-                crate::services::billing::BillingIngress::Proxy,
-            ),
-        );
+        let list_request = || {
+            let mut request = Request::builder()
+                .method(Method::GET)
+                .uri("/api/v1/assistant/conversations")
+                .header(axum::http::header::CONTENT_TYPE, "application/json")
+                .header("x-nyxid-debug-upstream", "1")
+                .body(Body::empty())
+                .expect("build assistant list request");
+            request.extensions_mut().insert(
+                crate::services::billing::route_inventory::BillingRoutePolicy::Metered(
+                    crate::services::billing::BillingIngress::Proxy,
+                ),
+            );
+            request
+        };
 
         let response = crate::handlers::assistant::list_conversations(
-            axum::extract::State(state),
-            auth,
-            request,
+            axum::extract::State(state.clone()),
+            auth.clone(),
+            list_request(),
         )
         .await
-        .expect("list conversations handler must forward both calls");
+        .expect("list conversations handler must drain both pages");
         assert_eq!(response.status(), StatusCode::OK);
         let echoes = assistant_echoes(&response);
+        let body = to_bytes(response.into_body(), 1024 * 1024).await.unwrap();
+        let body: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        let rows = body["conversations"].as_array().unwrap();
+        assert_eq!(rows.len(), 52);
+        assert_eq!(rows[0]["id"], "chatc-00000000000000000000000000000033");
+        assert_eq!(
+            rows[51]["id"],
+            "nyxid-chat-00000000000000000000000000000000"
+        );
+        assert!(rows.iter().any(|row| {
+            row["id"]
+                .as_str()
+                .is_some_and(|id| id.starts_with("chatc-"))
+        }));
+        assert!(rows.iter().any(|row| {
+            row["id"]
+                .as_str()
+                .is_some_and(|id| id.starts_with("nyxid-chat-"))
+        }));
+        assert!(!rows.iter().any(|row| row["id"] == "voicec-unsupported"));
+        assert!(rows[51].get("title").is_none(), "first duplicate must win");
+
         let calls = std::mem::take(&mut *captured.lock().unwrap());
-        let legacy_path = format!("/api/scopes/{user_id}/chat-history");
+        let history_path = format!("/api/scopes/{user_id}/chat-history");
         assert_eq!(
             calls,
             vec![
-                (Method::GET, "/api/chat/conversations".to_string()),
-                (Method::GET, legacy_path),
+                (Method::GET, history_path.clone()),
+                (Method::GET, format!("{history_path}?cursor=page-2")),
             ]
         );
         assert_eq!(echoes.len(), 2);
         for (envelope, (method, path)) in echoes.iter().zip(&calls) {
             assert_eq!(envelope["method"], method.as_str());
-            assert_eq!(envelope["path"], path.trim_start_matches('/'));
+            assert_eq!(
+                envelope["path"],
+                path.split('?').next().unwrap().trim_start_matches('/')
+            );
             assert!(envelope["commandType"].is_null());
             assert!(envelope["body"].is_null());
         }
+
+        response_mode.store(1, Ordering::Relaxed);
+        let repeated_cursor_error = crate::handlers::assistant::list_conversations(
+            axum::extract::State(state.clone()),
+            auth.clone(),
+            list_request(),
+        )
+        .await
+        .expect_err("a repeated history cursor must fail closed");
+        assert!(matches!(repeated_cursor_error, AppError::Internal(_)));
+        let repeated_calls = std::mem::take(&mut *captured.lock().unwrap());
+        assert_eq!(repeated_calls.len(), 2);
+        assert!(repeated_calls[1].1.ends_with("?cursor=repeated"));
+
+        response_mode.store(2, Ordering::Relaxed);
+        let capped_response = crate::handlers::assistant::list_conversations(
+            axum::extract::State(state),
+            auth,
+            list_request(),
+        )
+        .await
+        .expect("the bounded history drain must return collected rows");
+        assert_eq!(capped_response.status(), StatusCode::OK);
+        let capped_body = to_bytes(capped_response.into_body(), 1024 * 1024)
+            .await
+            .unwrap();
+        let capped_body: serde_json::Value = serde_json::from_slice(&capped_body).unwrap();
+        assert_eq!(capped_body["conversations"].as_array().unwrap().len(), 40);
+        assert!(capped_body.get("nextCursor").is_none());
+        assert_eq!(captured.lock().unwrap().len(), 40);
         server.abort();
     }
 

@@ -75,8 +75,8 @@ fn validate_conversation_id(conversation_id: &str) -> AppResult<()> {
     Ok(())
 }
 
-/// `chat-history` -- legacy workflow (`chatc-…`) index used only when the
-/// canonical `/api/chat/conversations` list does not yet include those rows.
+/// Shared Chat History index. Both supported conversation families are
+/// projected here, so callers can drain one cursor sequence for the sidebar.
 pub fn history_index_path(user_id: &str) -> String {
     format!("api/scopes/{user_id}/chat-history")
 }
@@ -89,93 +89,69 @@ const NYXID_CHAT_ACTOR_PREFIX: &str = "nyxid-chat-";
 /// `ChatHistoryActorIds.CreateConversationId`; ids are `chatc-{hash[..32]}`).
 const WORKFLOW_CHAT_CONVERSATION_PREFIX: &str = "chatc-";
 
-/// Drop conversation rows this surface cannot address.
-///
-/// The canonical `/api/chat/conversations` list and the legacy workflow
-/// `chat-history` index are both shared read models. Only the two assistant
-/// families stay visible here: typed `nyxid-chat-…` rows and workflow
-/// `chatc-…` rows.
-///
-/// Shape-tolerant by design — an index that is not `{"conversations": [...]}`
-/// (or a row without a string `id`) is returned untouched, matching the
-/// deploy-independence posture of the transcript route.
-pub fn filter_addressable_conversation_index(index: &mut serde_json::Value) -> bool {
-    let Some(rows) = index
-        .get_mut("conversations")
-        .and_then(serde_json::Value::as_array_mut)
-    else {
-        return false;
-    };
-    let before = rows.len();
-    rows.retain(|row| {
-        row.get("id")
-            .and_then(serde_json::Value::as_str)
-            // Keep unknown-shaped rows: a row we cannot classify is not
-            // evidence that it belongs to another surface.
-            .is_none_or(|id| {
-                id.starts_with(NYXID_CHAT_ACTOR_PREFIX)
-                    || id.starts_with(WORKFLOW_CHAT_CONVERSATION_PREFIX)
-            })
-    });
-    rows.len() != before
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ConversationResourceFamily {
+    Typed,
+    Workflow,
 }
 
-/// Whether the canonical index already includes workflow rows.
-pub fn conversation_index_includes_workflow(index: &serde_json::Value) -> bool {
-    index
-        .get("conversations")
-        .and_then(serde_json::Value::as_array)
-        .is_some_and(|rows| {
-            rows.iter().any(|row| {
-                row.get("id")
-                    .and_then(serde_json::Value::as_str)
-                    .is_some_and(|id| id.starts_with(WORKFLOW_CHAT_CONVERSATION_PREFIX))
-            })
-        })
-}
-
-/// Merge workflow-only `chat-history` rows into the canonical index, newest
-/// first, deduping by id and keeping the canonical row when both exist.
-pub fn merge_workflow_history_rows(
-    canonical: &mut serde_json::Value,
-    workflow_history: &serde_json::Value,
-) -> bool {
-    let Some(canonical_rows) = canonical
-        .get_mut("conversations")
-        .and_then(serde_json::Value::as_array_mut)
-    else {
-        return false;
-    };
-
-    let Some(history_rows) = workflow_history
-        .get("conversations")
-        .and_then(serde_json::Value::as_array)
-    else {
-        return false;
-    };
-
-    let before = canonical_rows.len();
-    let mut merged = Vec::with_capacity(canonical_rows.len() + history_rows.len());
-    let mut seen = HashSet::new();
-
-    for row in canonical_rows.iter() {
-        if let Some(id) = row.get("id").and_then(serde_json::Value::as_str) {
-            seen.insert(id.to_string());
-        }
-        merged.push(row.clone());
+pub fn conversation_resource_family(
+    conversation_id: &str,
+) -> AppResult<ConversationResourceFamily> {
+    validate_conversation_id(conversation_id)?;
+    if conversation_id.starts_with(NYXID_CHAT_ACTOR_PREFIX) {
+        return Ok(ConversationResourceFamily::Typed);
     }
+    if conversation_id.starts_with(WORKFLOW_CHAT_CONVERSATION_PREFIX) {
+        return Ok(ConversationResourceFamily::Workflow);
+    }
+    Err(AppError::BadRequest(
+        "Unsupported conversation id.".to_string(),
+    ))
+}
 
-    for row in history_rows {
+/// Add one shared-index page to a drained result, filtering to the two
+/// addressable families and keeping the first occurrence of each id.
+pub fn append_addressable_history_page(
+    index: &serde_json::Value,
+    conversations: &mut Vec<serde_json::Value>,
+    seen: &mut HashSet<String>,
+) -> AppResult<Option<String>> {
+    let rows = index
+        .get("conversations")
+        .and_then(serde_json::Value::as_array)
+        .ok_or_else(|| {
+            AppError::Internal(
+                "assistant: chat history index omitted the conversations array".to_string(),
+            )
+        })?;
+
+    for row in rows {
         let Some(id) = row.get("id").and_then(serde_json::Value::as_str) else {
             continue;
         };
-        if !id.starts_with(WORKFLOW_CHAT_CONVERSATION_PREFIX) || !seen.insert(id.to_string()) {
-            continue;
+        if (id.starts_with(NYXID_CHAT_ACTOR_PREFIX)
+            || id.starts_with(WORKFLOW_CHAT_CONVERSATION_PREFIX))
+            && seen.insert(id.to_string())
+        {
+            conversations.push(row.clone());
         }
-        merged.push(row.clone());
     }
 
-    merged.sort_by(|left, right| {
+    match index.get("nextCursor") {
+        None | Some(serde_json::Value::Null) => Ok(None),
+        Some(serde_json::Value::String(cursor)) => {
+            let cursor = cursor.trim();
+            Ok((!cursor.is_empty()).then(|| cursor.to_string()))
+        }
+        Some(_) => Err(AppError::Internal(
+            "assistant: chat history index returned an invalid nextCursor".to_string(),
+        )),
+    }
+}
+
+pub fn sort_conversation_rows_newest_first(conversations: &mut [serde_json::Value]) {
+    conversations.sort_by(|left, right| {
         let left_key = conversation_updated_at_key(left);
         let right_key = conversation_updated_at_key(right);
         match (left_key.parsed.as_ref(), right_key.parsed.as_ref()) {
@@ -183,8 +159,6 @@ pub fn merge_workflow_history_rows(
             _ => right_key.raw.cmp(&left_key.raw),
         }
     });
-    *canonical_rows = merged;
-    canonical_rows.len() != before
 }
 
 /// `api/chat/conversations` -- canonical conversation list.
@@ -196,6 +170,24 @@ pub fn canonical_conversations_path() -> String {
 pub fn canonical_conversation_path(conversation_id: &str) -> AppResult<String> {
     validate_conversation_id(conversation_id)?;
     Ok(format!("api/chat/conversations/{conversation_id}"))
+}
+
+/// Scoped workflow transcript/delete resource.
+pub fn history_conversation_path(user_id: &str, conversation_id: &str) -> AppResult<String> {
+    validate_conversation_id(conversation_id)?;
+    Ok(format!(
+        "{}/conversations/{conversation_id}",
+        history_index_path(user_id)
+    ))
+}
+
+/// Scoped create identity recovery resource.
+pub fn history_create_recovery_path(user_id: &str, command_id: &str) -> AppResult<String> {
+    validate_client_token(command_id, "commandId")?;
+    Ok(format!(
+        "{}/create-recovery/{command_id}",
+        history_index_path(user_id)
+    ))
 }
 
 /// `api/chat/conversations/{id}/state` -- canonical reconnect surface.
@@ -1071,8 +1063,8 @@ pub struct WorkflowChatTurnRequest {
     /// id (`CHAT_HISTORY_RESERVATION_UNAVAILABLE` otherwise).
     #[serde(default)]
     pub minimum_state_version: Option<i64>,
-    /// Client idempotency identity for the create/turn (Aevatar replays the
-    /// same conversation/turn for a repeated id, 409s on payload mismatch).
+    /// Client idempotency identity for a create. Continuations omit it so the
+    /// upstream workflow engine owns their delivery identity.
     #[serde(default)]
     pub command_id: Option<String>,
     /// Client-controlled session correlation handle, stable for the life of
@@ -1110,10 +1102,16 @@ fn validate_client_token(value: &str, label: &str) -> AppResult<()> {
 /// Aevatar (trusted scope wins), so none is sent.
 pub fn workflow_chat_body(request: &WorkflowChatTurnRequest) -> AppResult<serde_json::Value> {
     let prompt = request.prompt.trim();
-    if prompt.is_empty() || request.prompt.chars().count() > WORKFLOW_CHAT_PROMPT_MAX_CHARS {
+    if prompt.is_empty() || prompt.chars().count() > WORKFLOW_CHAT_PROMPT_MAX_CHARS {
         return Err(AppError::BadRequest(format!(
             "Prompt must contain between 1 and {WORKFLOW_CHAT_PROMPT_MAX_CHARS} characters."
         )));
+    }
+
+    if request.conversation_id.is_some() && request.command_id.is_some() {
+        return Err(AppError::BadRequest(
+            "commandId is only valid when creating a conversation.".to_string(),
+        ));
     }
 
     let conversation = match (&request.conversation_id, request.minimum_state_version) {
@@ -1143,30 +1141,52 @@ pub fn workflow_chat_body(request: &WorkflowChatTurnRequest) -> AppResult<serde_
         }
     };
 
-    let command_id = match &request.command_id {
-        Some(id) => {
-            validate_client_token(id, "commandId")?;
-            id.clone()
-        }
-        None => uuid::Uuid::new_v4().to_string(),
+    let command_id = if request.conversation_id.is_none() {
+        Some(match &request.command_id {
+            Some(id) => {
+                validate_client_token(id, "commandId")?;
+                id.clone()
+            }
+            None => uuid::Uuid::new_v4().to_string(),
+        })
+    } else {
+        None
     };
 
-    let mut body = serde_json::json!({
-        "commandId": command_id,
-        "conversation": conversation,
-        "prompt": request.prompt,
-        "workflow": WORKFLOW_CHAT_WORKFLOW,
-    });
-
-    // Omitted rather than sent null when the caller has none: Aevatar
-    // normalizes blank to null anyway, and an absent member keeps the body
-    // identical to the pre-sessionId shape for callers that never send one.
-    if let Some(session_id) = &request.session_id {
+    let session_id = if let Some(session_id) = &request.session_id {
         validate_client_token(session_id, "sessionId")?;
-        body["sessionId"] = serde_json::Value::String(session_id.clone());
-    }
+        Some(session_id.clone())
+    } else {
+        None
+    };
 
-    Ok(body)
+    // Preserve the console's JSON insertion order exactly. Aevatar rejects
+    // unknown members, and the parity fixtures intentionally compare bytes.
+    let mut body = serde_json::Map::new();
+    if let Some(command_id) = command_id {
+        body.insert(
+            "commandId".to_string(),
+            serde_json::Value::String(command_id),
+        );
+    }
+    body.insert("conversation".to_string(), conversation);
+    body.insert(
+        "prompt".to_string(),
+        serde_json::Value::String(prompt.to_string()),
+    );
+    // Omitted rather than sent null when the caller has none.
+    if let Some(session_id) = session_id {
+        body.insert(
+            "sessionId".to_string(),
+            serde_json::Value::String(session_id),
+        );
+    }
+    body.insert(
+        "workflow".to_string(),
+        serde_json::Value::String(WORKFLOW_CHAT_WORKFLOW.to_string()),
+    );
+
+    Ok(serde_json::Value::Object(body))
 }
 
 /// `api/ws/chat` -- WebSocket twin of the workflow chat
@@ -1194,40 +1214,35 @@ mod tests {
     }
 
     #[test]
-    fn filters_indexes_to_the_addressable_families_only() {
-        let mut index = json!({
+    fn drains_index_pages_to_the_addressable_families_only() {
+        let index = json!({
             "conversations": [
                 { "id": WORKFLOW_CONV, "updatedAt": "2026-07-29T12:00:00.000Z" },
                 { "id": CONV, "updatedAt": "2026-07-29T13:00:00.000Z" },
                 { "id": "voicec-1", "updatedAt": "2026-07-29T14:00:00.000Z" },
                 { "title": "unknown-shaped row" }
-            ]
+            ],
+            "nextCursor": "page-2"
         });
+        let mut conversations = Vec::new();
+        let mut seen = HashSet::new();
 
-        assert!(filter_addressable_conversation_index(&mut index));
         assert_eq!(
-            index["conversations"]
-                .as_array()
-                .unwrap()
+            append_addressable_history_page(&index, &mut conversations, &mut seen).unwrap(),
+            Some("page-2".to_string())
+        );
+        assert_eq!(
+            conversations
                 .iter()
                 .map(|row| row.get("id").and_then(serde_json::Value::as_str))
                 .collect::<Vec<_>>(),
-            vec![Some(WORKFLOW_CONV), Some(CONV), None]
+            vec![Some(WORKFLOW_CONV), Some(CONV)]
         );
     }
 
     #[test]
-    fn merge_prefers_canonical_rows_and_appends_workflow_history_newest_first() {
-        let mut canonical = json!({
-            "conversations": [
-                {
-                    "id": CONV,
-                    "title": "typed",
-                    "updatedAt": "2026-07-29T13:00:00.000Z"
-                }
-            ]
-        });
-        let legacy = json!({
+    fn drained_index_dedupes_and_sorts_newest_first() {
+        let page = json!({
             "conversations": [
                 {
                     "id": WORKFLOW_CONV,
@@ -1236,55 +1251,53 @@ mod tests {
                 },
                 {
                     "id": CONV,
-                    "title": "stale duplicate",
-                    "updatedAt": "2026-07-29T12:00:00.000Z"
+                    "title": "typed",
+                    "updatedAt": "2026-07-29T13:00:00.000Z"
+                },
+                {
+                    "id": CONV,
+                    "title": "duplicate",
+                    "updatedAt": "2026-07-29T15:00:00.000Z"
                 }
             ]
         });
+        let mut conversations = Vec::new();
+        let mut seen = HashSet::new();
 
-        assert!(merge_workflow_history_rows(&mut canonical, &legacy));
+        append_addressable_history_page(&page, &mut conversations, &mut seen).unwrap();
+        sort_conversation_rows_newest_first(&mut conversations);
         assert_eq!(
-            canonical["conversations"]
-                .as_array()
-                .unwrap()
+            conversations
                 .iter()
                 .map(|row| row["id"].as_str().unwrap())
                 .collect::<Vec<_>>(),
             vec![WORKFLOW_CONV, CONV]
         );
         assert_eq!(
-            canonical["conversations"][1]["title"].as_str(),
+            conversations[1]["title"].as_str(),
             Some("typed"),
-            "canonical rows must win the dedupe"
+            "the first occurrence must win the dedupe"
         );
     }
 
     #[test]
     fn merge_sorts_rfc3339_offsets_across_updated_and_created_keys() {
-        let mut canonical = json!({
-            "conversations": [
-                {
-                    "id": CONV,
-                    "title": "typed",
-                    "createdAt": "2026-07-29T05:30:00.000Z"
-                }
-            ]
-        });
-        let legacy = json!({
-            "conversations": [
-                {
-                    "id": WORKFLOW_CONV,
-                    "title": "workflow",
-                    "updatedAt": "2026-07-29T13:00:00.000+08:00"
-                }
-            ]
-        });
+        let mut conversations = vec![
+            json!({
+                "id": CONV,
+                "title": "typed",
+                "createdAt": "2026-07-29T05:30:00.000Z"
+            }),
+            json!({
+                "id": WORKFLOW_CONV,
+                "title": "workflow",
+                "updatedAt": "2026-07-29T13:00:00.000+08:00"
+            }),
+        ];
 
-        assert!(merge_workflow_history_rows(&mut canonical, &legacy));
+        sort_conversation_rows_newest_first(&mut conversations);
         assert_eq!(
-            canonical["conversations"]
-                .as_array()
-                .unwrap()
+            conversations
                 .iter()
                 .map(|row| row["id"].as_str().unwrap())
                 .collect::<Vec<_>>(),
@@ -1294,17 +1307,7 @@ mod tests {
     }
 
     #[test]
-    fn canonical_index_workflow_detection_is_prefix_based() {
-        assert!(conversation_index_includes_workflow(&json!({
-            "conversations": [{ "id": WORKFLOW_CONV }]
-        })));
-        assert!(!conversation_index_includes_workflow(&json!({
-            "conversations": [{ "id": CONV }]
-        })));
-    }
-
-    #[test]
-    fn builds_canonical_paths_only() {
+    fn builds_family_aware_resource_paths() {
         assert_eq!(
             history_index_path(USER),
             format!("api/scopes/{USER}/chat-history")
@@ -1317,6 +1320,24 @@ mod tests {
         assert_eq!(
             canonical_state_path(CONV).unwrap(),
             format!("api/chat/conversations/{CONV}/state")
+        );
+        assert_eq!(
+            history_conversation_path(USER, WORKFLOW_CONV).unwrap(),
+            format!("api/scopes/{USER}/chat-history/conversations/{WORKFLOW_CONV}")
+        );
+        assert_eq!(
+            history_create_recovery_path(USER, "4380055d-e9c3-468e-bc93-64719a9f4658").unwrap(),
+            format!(
+                "api/scopes/{USER}/chat-history/create-recovery/4380055d-e9c3-468e-bc93-64719a9f4658"
+            )
+        );
+        assert_eq!(
+            conversation_resource_family(CONV).unwrap(),
+            ConversationResourceFamily::Typed
+        );
+        assert_eq!(
+            conversation_resource_family(WORKFLOW_CONV).unwrap(),
+            ConversationResourceFamily::Workflow
         );
         assert_eq!(typed_chat_path(), "api/chat");
         assert_eq!(workflow_chat_path(), "api/chat");
@@ -1341,22 +1362,25 @@ mod tests {
                 "expected {bad:?} to be rejected"
             );
             assert!(canonical_state_path(bad).is_err());
+            assert!(history_conversation_path(USER, bad).is_err());
         }
+        assert!(history_create_recovery_path(USER, "not a token!").is_err());
     }
 
     #[test]
-    fn migration_guard_keeps_scoped_typed_paths_out_of_runtime_source() {
+    fn migration_guard_keeps_scoped_typed_commands_and_per_conversation_commands_out() {
         const SOURCE: &str = include_str!("assistant_service.rs");
         let scoped_prefix = ["nyxid", "-chat/"].concat();
-        let legacy_history_path = ["/chat-history", "/conversations"].concat();
         assert!(
             !SOURCE.contains(&scoped_prefix),
-            "scoped typed command/resource paths must not return"
+            "scoped typed command paths must not return"
         );
-        assert!(
-            !SOURCE.contains(&legacy_history_path),
-            "legacy transcript/delete paths must not return to assistant_service.rs"
-        );
+        for suffix in [":stream", "/approve", "/stop", "/steer", "/retry", "/skip"] {
+            assert!(
+                !SOURCE.contains(&["conversations/", suffix].concat()),
+                "per-conversation command route {suffix} must not return"
+            );
+        }
     }
 
     #[test]
@@ -1777,8 +1801,7 @@ mod tests {
         );
     }
 
-    /// Byte-for-byte parity with the reference create payload, `sessionId`
-    /// included.
+    /// Byte-for-byte parity with the console's create fixture.
     #[test]
     fn workflow_body_matches_the_reference_create_payload() {
         let body = workflow_chat_body(&workflow_turn_request(json!({
@@ -1788,40 +1811,25 @@ mod tests {
         })))
         .unwrap();
         assert_eq!(
-            body,
-            json!({
-                "commandId": "4380055d-e9c3-468e-bc93-64719a9f4658",
-                "conversation": { "conversationId": null },
-                "prompt": "1",
-                "sessionId": "91927706-e174-4544-8570-61fd263b6c87",
-                "workflow": "studio",
-            })
+            serde_json::to_vec(&body).unwrap(),
+            br#"{"commandId":"4380055d-e9c3-468e-bc93-64719a9f4658","conversation":{"conversationId":null},"prompt":"1","sessionId":"91927706-e174-4544-8570-61fd263b6c87","workflow":"studio"}"#
         );
     }
 
-    /// Byte-for-byte parity with the reference continuation payload.
+    /// Byte-for-byte parity with the console's continuation fixture. Unknown
+    /// member paranoia matters here because upstream disallows unmapped JSON.
     #[test]
     fn workflow_body_matches_the_reference_continuation_payload() {
         let body = workflow_chat_body(&workflow_turn_request(json!({
             "prompt": "2",
             "conversationId": "chatc-bd3fc31745343dc910773dad977eb24b",
             "minimumStateVersion": 1,
-            "commandId": "1c2f4f0e-6a1d-4a7b-8d3c-5e9f0a1b2c3d",
             "sessionId": "775668ff-d9fd-4023-a007-a9db572a4b3f",
         })))
         .unwrap();
         assert_eq!(
-            body,
-            json!({
-                "commandId": "1c2f4f0e-6a1d-4a7b-8d3c-5e9f0a1b2c3d",
-                "conversation": {
-                    "conversationId": "chatc-bd3fc31745343dc910773dad977eb24b",
-                    "minimumStateVersion": 1,
-                },
-                "prompt": "2",
-                "sessionId": "775668ff-d9fd-4023-a007-a9db572a4b3f",
-                "workflow": "studio",
-            })
+            serde_json::to_vec(&body).unwrap(),
+            br#"{"conversation":{"conversationId":"chatc-bd3fc31745343dc910773dad977eb24b","minimumStateVersion":1},"prompt":"2","sessionId":"775668ff-d9fd-4023-a007-a9db572a4b3f","workflow":"studio"}"#
         );
     }
 
@@ -1849,7 +1857,35 @@ mod tests {
         assert_eq!(body["conversation"]["conversationId"], WORKFLOW_CONV);
         assert_eq!(body["conversation"]["minimumStateVersion"], 18);
         assert_eq!(body["workflow"], "studio");
-        assert!(body["commandId"].as_str().is_some_and(|id| !id.is_empty()));
+        assert!(body.get("commandId").is_none());
+    }
+
+    #[test]
+    fn workflow_body_trims_before_boundary_validation_and_serialization() {
+        let boundary = format!("  {}\n", "a".repeat(WORKFLOW_CHAT_PROMPT_MAX_CHARS));
+        let body = workflow_chat_body(&workflow_turn_request(json!({
+            "prompt": boundary,
+            "commandId": "4380055d-e9c3-468e-bc93-64719a9f4658",
+        })))
+        .unwrap();
+        assert_eq!(
+            body["prompt"].as_str().unwrap().chars().count(),
+            WORKFLOW_CHAT_PROMPT_MAX_CHARS
+        );
+        assert!(body["prompt"].as_str().unwrap().chars().all(|c| c == 'a'));
+    }
+
+    #[test]
+    fn workflow_body_rejects_a_command_id_on_continuation() {
+        assert!(
+            workflow_chat_body(&workflow_turn_request(json!({
+                "prompt": "continue",
+                "conversationId": WORKFLOW_CONV,
+                "minimumStateVersion": 4,
+                "commandId": "4380055d-e9c3-468e-bc93-64719a9f4658",
+            })))
+            .is_err()
+        );
     }
 
     #[test]
