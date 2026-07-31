@@ -16,6 +16,7 @@ import {
   TooltipContent,
   TooltipTrigger,
 } from "@/components/ui/tooltip";
+import type { AssistantWireLogEntry } from "@/schemas/assistant-wire-log";
 import { useAssistantWireLogStore } from "@/stores/assistant-wire-log-store";
 import { canAdminWrite, type User } from "@/types/api";
 import { cn } from "@/lib/utils";
@@ -26,11 +27,15 @@ function statusVariant(status: number): "success" | "destructive" | "warning" {
   return "warning";
 }
 
-function entryJson(entry: ReturnType<typeof useAssistantWireLogStore.getState>["entries"][number]) {
+function normalizedPath(path: string): string {
+  return path.startsWith("/") ? path : `/${path}`;
+}
+
+function entryJson(entry: AssistantWireLogEntry) {
   return JSON.stringify(
     {
       method: entry.method,
-      path: entry.path,
+      path: normalizedPath(entry.path),
       commandType: entry.commandType,
       body: entry.body,
       headers: entry.headers,
@@ -94,8 +99,12 @@ export function AssistantWireLogPanel() {
         </SheetHeader>
 
         <div className="flex shrink-0 items-center justify-between gap-4 border-b border-border/60 px-5 py-3">
-          <label className="flex items-center gap-2 text-[12px] font-medium text-foreground">
+          <label
+            htmlFor="wire-log-capture"
+            className="flex items-center gap-2 text-[12px] font-medium text-foreground"
+          >
             <Switch
+              id="wire-log-capture"
               checked={captureEnabled}
               onCheckedChange={setCaptureEnabled}
               aria-label="Capture Aevatar requests"
@@ -163,7 +172,7 @@ export function AssistantWireLogPanel() {
                             <strong className="font-semibold text-foreground">
                               {entry.method}
                             </strong>{" "}
-                            {entry.path}
+                            {normalizedPath(entry.path)}
                           </span>
                         </span>
                       </button>
@@ -176,7 +185,9 @@ export function AssistantWireLogPanel() {
                             aria-label={`Copy ${entry.method} ${entry.path} as JSON`}
                             className="h-7 w-7 shrink-0"
                             onClick={() =>
-                              void navigator.clipboard.writeText(entryJson(entry))
+                              void navigator.clipboard.writeText(
+                                entryJson(entry),
+                              )
                             }
                           >
                             <Copy />

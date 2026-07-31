@@ -40,6 +40,11 @@ beforeEach(() => {
     lastScreen: null,
   });
   useAssistantDraftStore.setState({ ownerUserId: null, drafts: {} });
+  useAssistantWireLogStore.setState({
+    captureEnabled: false,
+    entries: [],
+    totalBytes: 0,
+  });
   useAuthStore.setState({
     user: null,
     isAuthenticated: false,
@@ -167,6 +172,7 @@ describe("logout", () => {
     useAssistantDraftStore
       .getState()
       .saveDraft("u1", "conv:conversation-private", "Private draft");
+    useAssistantWireLogStore.getState().setCaptureEnabled(true);
     useAssistantWireLogStore.getState().record(
       {
         method: "POST",
@@ -185,7 +191,6 @@ describe("logout", () => {
       "sse",
       200,
     );
-    useAssistantWireLogStore.getState().setCaptureEnabled(true);
     await useAuthStore.getState().logout();
 
     const state = useAuthStore.getState();
@@ -198,6 +203,7 @@ describe("logout", () => {
     });
     expect(useAssistantDraftStore.getState().drafts).toEqual({});
     expect(useAssistantWireLogStore.getState().entries).toEqual([]);
+    expect(useAssistantWireLogStore.getState().totalBytes).toBe(0);
     expect(useAssistantWireLogStore.getState().captureEnabled).toBe(false);
     expect(localStorage.getItem("nyxid.assistant_context")).toBeNull();
     expect(localStorage.getItem("nyxid.assistant_drafts")).toBeNull();

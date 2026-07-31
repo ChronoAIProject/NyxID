@@ -26,8 +26,12 @@ function envelope(index: number): AssistantUpstreamEnvelope {
   };
 }
 
-function resetStore() {
-  useAssistantWireLogStore.setState({ captureEnabled: false, entries: [] });
+function resetStore(captureEnabled = false) {
+  useAssistantWireLogStore.setState({
+    captureEnabled,
+    entries: [],
+    totalBytes: 0,
+  });
 }
 
 describe("useAssistantWireLogStore", () => {
@@ -35,7 +39,7 @@ describe("useAssistantWireLogStore", () => {
     vi.unstubAllGlobals();
     vi.restoreAllMocks();
     localStorage.clear();
-    resetStore();
+    resetStore(true);
   });
 
   it("evicts the oldest entries from the 100-entry ring", () => {
@@ -48,27 +52,33 @@ describe("useAssistantWireLogStore", () => {
     expect(entries).toHaveLength(100);
     expect(entries[0]?.body).toMatchObject({ prompt: "prompt-5" });
     expect(entries.at(-1)?.body).toMatchObject({ prompt: "prompt-104" });
+    expect(entries.every((entry) => entry.bytes > 0)).toBe(true);
   });
 
   it("evicts oldest payloads to stay below the two-megabyte budget", () => {
     const first = envelope(1);
     const second = envelope(2);
-    useAssistantWireLogStore.getState().record(
-      { ...first, body: { prompt: "a".repeat(1_200_000) } },
-      "header",
-      200,
-    );
-    useAssistantWireLogStore.getState().record(
-      { ...second, body: { prompt: "b".repeat(1_200_000) } },
-      "header",
-      200,
-    );
+    useAssistantWireLogStore
+      .getState()
+      .record(
+        { ...first, body: { prompt: "a".repeat(1_200_000) } },
+        "header",
+        200,
+      );
+    useAssistantWireLogStore
+      .getState()
+      .record(
+        { ...second, body: { prompt: "b".repeat(1_200_000) } },
+        "header",
+        200,
+      );
 
-    const entries = useAssistantWireLogStore.getState().entries;
+    const { entries, totalBytes } = useAssistantWireLogStore.getState();
     expect(entries).toHaveLength(1);
-    expect((entries[0]?.body as { prompt: string }).prompt.startsWith("b")).toBe(
-      true,
-    );
+    expect(
+      (entries[0]?.body as { prompt: string }).prompt.startsWith("b"),
+    ).toBe(true);
+    expect(totalBytes).toBe(entries[0]?.bytes);
   });
 
   it("round-trips validated entries through persistence", async () => {
@@ -85,9 +95,11 @@ describe("useAssistantWireLogStore", () => {
       status: 201,
       body: { prompt: "prompt-1" },
     });
+    expect(useAssistantWireLogStore.getState().totalBytes).toBeGreaterThan(0);
   });
 
   it("drops corrupt persisted state during hydration", async () => {
+    resetStore();
     localStorage.setItem(
       ASSISTANT_WIRE_LOG_STORAGE_KEY,
       JSON.stringify({
@@ -116,6 +128,15 @@ describe("useAssistantWireLogStore", () => {
     expect(useAssistantWireLogStore.getState().captureEnabled).toBe(true);
   });
 
+  it("ignores a response that arrives after capture is disabled", () => {
+    useAssistantWireLogStore.getState().setCaptureEnabled(false);
+
+    useAssistantWireLogStore.getState().record(envelope(1), "header", 200);
+
+    expect(useAssistantWireLogStore.getState().entries).toEqual([]);
+    expect(useAssistantWireLogStore.getState().totalBytes).toBe(0);
+  });
+
   it("drops the oldest persisted entry and retries once after quota exhaustion", () => {
     useAssistantWireLogStore.getState().record(envelope(1), "header", 200);
     useAssistantWireLogStore.getState().record(envelope(2), "header", 200);
@@ -126,7 +147,10 @@ describe("useAssistantWireLogStore", () => {
       setItem: vi.fn((_name: string, value: string) => {
         writes.push(value);
         if (writes.length === 1) {
-          throw new DOMException("Storage quota exceeded", "QuotaExceededError");
+          throw new DOMException(
+            "Storage quota exceeded",
+            "QuotaExceededError",
+          );
         }
       }),
     });

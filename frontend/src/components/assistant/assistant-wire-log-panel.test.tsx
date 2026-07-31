@@ -31,12 +31,16 @@ describe("AssistantWireLogPanel", () => {
     useAssistantWireLogStore.setState({
       captureEnabled: true,
       entries: [],
+      totalBytes: 0,
     });
-    vi.stubGlobal("ResizeObserver", class {
-      observe() {}
-      unobserve() {}
-      disconnect() {}
-    });
+    vi.stubGlobal(
+      "ResizeObserver",
+      class {
+        observe() {}
+        unobserve() {}
+        disconnect() {}
+      },
+    );
   });
 
   it("renders, expands, and clears captured entries", () => {
@@ -61,9 +65,10 @@ describe("AssistantWireLogPanel", () => {
     renderWithTooltips(<AssistantWireLogPanel />);
 
     fireEvent.click(screen.getByRole("button", { name: "Aevatar wire log" }));
-    expect(screen.getByText("api/chat")).toBeInTheDocument();
-    fireEvent.click(screen.getByText("api/chat").closest("button")!);
+    expect(screen.getByText("/api/chat")).toBeInTheDocument();
+    fireEvent.click(screen.getByText("/api/chat").closest("button")!);
     expect(screen.getByText(/inspect this payload/)).toBeInTheDocument();
+    expect(screen.getByText(/"path": "\/api\/chat"/)).toBeInTheDocument();
 
     fireEvent.click(screen.getByRole("button", { name: /clear/i }));
     expect(screen.getByText("No captured requests")).toBeInTheDocument();
@@ -72,7 +77,9 @@ describe("AssistantWireLogPanel", () => {
 
   it("hides the icon for a non-admin user", () => {
     renderWithTooltips(
-      <AssistantWireLogAction user={{ ...admin, is_admin: false, role: "user" }} />,
+      <AssistantWireLogAction
+        user={{ ...admin, is_admin: false, role: "user" }}
+      />,
     );
 
     expect(

@@ -1,25 +1,21 @@
 import { z } from "zod";
 
-export const assistantUpstreamIdentitySchema = z
-  .object({
-    mode: z.string(),
-    forward_access_token: z.boolean(),
-    inject_delegation_token: z.boolean(),
-    bridge_minted: z.boolean(),
-  })
-  .strict();
+export const assistantUpstreamIdentitySchema = z.object({
+  mode: z.string(),
+  forward_access_token: z.boolean(),
+  inject_delegation_token: z.boolean(),
+  bridge_minted: z.boolean(),
+});
 
-export const assistantUpstreamEnvelopeSchema = z
-  .object({
-    method: z.string(),
-    path: z.string(),
-    commandType: z.string().nullable(),
-    body: z.unknown(),
-    headers: z.record(z.string(), z.string()),
-    identity: assistantUpstreamIdentitySchema,
-    truncated: z.boolean(),
-  })
-  .strict();
+export const assistantUpstreamEnvelopeSchema = z.object({
+  method: z.string(),
+  path: z.string(),
+  commandType: z.string().nullable(),
+  body: z.unknown(),
+  headers: z.record(z.string(), z.string()),
+  identity: assistantUpstreamIdentitySchema,
+  truncated: z.boolean(),
+});
 
 export const assistantUpstreamEnvelopeListSchema = z.array(
   assistantUpstreamEnvelopeSchema,
@@ -31,6 +27,7 @@ export const assistantWireLogEntrySchema = assistantUpstreamEnvelopeSchema
     ts: z.number().finite(),
     kind: z.enum(["sse", "header"]),
     status: z.number().int().min(100).max(599),
+    bytes: z.number().int().nonnegative(),
   })
   .strict();
 
@@ -44,6 +41,4 @@ export const assistantWireLogPersistedSchema = z
 export type AssistantUpstreamEnvelope = z.infer<
   typeof assistantUpstreamEnvelopeSchema
 >;
-export type AssistantWireLogEntry = z.infer<
-  typeof assistantWireLogEntrySchema
->;
+export type AssistantWireLogEntry = z.infer<typeof assistantWireLogEntrySchema>;

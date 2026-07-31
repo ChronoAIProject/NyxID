@@ -41,7 +41,11 @@ const MAX_CONVERSATION_INDEX_RESPONSE_BYTES: usize = 4 * 1024 * 1024;
 
 const DEBUG_UPSTREAM_REQUEST_HEADER: &str = "x-nyxid-debug-upstream";
 const DEBUG_UPSTREAM_RESPONSE_HEADER: &str = "x-nyxid-debug-upstream-log";
-const DEBUG_UPSTREAM_HEADER_MAX_BYTES: usize = 16 * 1024;
+// Node's default `http.maxHeaderSize` limits the whole response header block,
+// which includes this value when Vite's development proxy parses it. Leave
+// about 4 KiB for the status line and security headers; production nginx is
+// configured for 32 KiB, so local development is the binding constraint.
+const DEBUG_UPSTREAM_HEADER_MAX_BYTES: usize = 12 * 1024;
 
 #[derive(Clone, Debug, Serialize)]
 struct UpstreamIdentityEcho {
@@ -129,15 +133,13 @@ fn serialize_echoes(echoes: &[UpstreamEcho]) -> AppResult<Vec<u8>> {
         .map_err(|_| AppError::Internal("assistant: failed to encode upstream echoes".to_string()))
 }
 
-fn encode_echo_header(echoes: &[UpstreamEcho]) -> AppResult<HeaderValue> {
-    let encode = |candidate: &[UpstreamEcho]| -> AppResult<String> {
-        Ok(base64::engine::general_purpose::STANDARD.encode(serialize_echoes(candidate)?))
+fn encode_echo_header(echoes: &[UpstreamEcho]) -> Option<HeaderValue> {
+    let encode = |candidate: &[UpstreamEcho]| -> Option<String> {
+        Some(base64::engine::general_purpose::STANDARD.encode(serialize_echoes(candidate).ok()?))
     };
     let encoded = encode(echoes)?;
     if encoded.len() <= DEBUG_UPSTREAM_HEADER_MAX_BYTES {
-        return HeaderValue::from_str(&encoded).map_err(|_| {
-            AppError::Internal("assistant: failed to build upstream echo header".to_string())
-        });
+        return HeaderValue::from_str(&encoded).ok();
     }
 
     let mut bodies = Vec::new();
@@ -145,9 +147,7 @@ fn encode_echo_header(echoes: &[UpstreamEcho]) -> AppResult<HeaderValue> {
         if echo.body.is_null() {
             continue;
         }
-        let body = serde_json::to_string(&echo.body).map_err(|_| {
-            AppError::Internal("assistant: failed to encode upstream echo body".to_string())
-        })?;
+        let body = serde_json::to_string(&echo.body).ok()?;
         bodies.push((index, body.chars().collect::<Vec<_>>()));
     }
     bodies.sort_by_key(|(_, body)| std::cmp::Reverse(body.len()));
@@ -177,29 +177,22 @@ fn encode_echo_header(echoes: &[UpstreamEcho]) -> AppResult<HeaderValue> {
                 high = middle - 1;
             }
         }
-        return HeaderValue::from_str(&best).map_err(|_| {
-            AppError::Internal("assistant: failed to build upstream echo header".to_string())
-        });
+        return HeaderValue::from_str(&best).ok();
     }
 
-    Err(AppError::Internal(
-        "assistant: upstream echo metadata exceeds header limit".to_string(),
-    ))
+    None
 }
 
-fn attach_upstream_echoes(
-    mut response: Response,
-    echoes: Option<&[UpstreamEcho]>,
-) -> AppResult<Response> {
-    if let Some(Ok(value)) = echoes
+fn attach_upstream_echoes(mut response: Response, echoes: Option<&[UpstreamEcho]>) -> Response {
+    if let Some(value) = echoes
         .filter(|echoes| !echoes.is_empty())
-        .map(encode_echo_header)
+        .and_then(encode_echo_header)
     {
         response
             .headers_mut()
             .insert(DEBUG_UPSTREAM_RESPONSE_HEADER, value);
     }
-    Ok(response)
+    response
 }
 
 /// Server-initiated upstream request derived from a caller request (the
@@ -428,7 +421,7 @@ pub async fn list_conversations(
     )
     .await?;
     if !response.status().is_success() {
-        return attach_upstream_echoes(response, echoes.as_deref());
+        return Ok(attach_upstream_echoes(response, echoes.as_deref()));
     }
     let (mut parts, body) = response.into_parts();
     let Ok(bytes) = to_bytes(body, MAX_CONVERSATION_INDEX_RESPONSE_BYTES).await else {
@@ -437,10 +430,10 @@ pub async fn list_conversations(
         ));
     };
     let Ok(mut canonical) = serde_json::from_slice::<serde_json::Value>(&bytes) else {
-        return attach_upstream_echoes(
+        return Ok(attach_upstream_echoes(
             Response::from_parts(parts, Body::from(bytes)),
             echoes.as_deref(),
-        );
+        ));
     };
     let mut changed = assistant_service::filter_addressable_conversation_index(&mut canonical);
     if !assistant_service::conversation_index_includes_workflow(&canonical) {
@@ -472,22 +465,22 @@ pub async fn list_conversations(
         }
     }
     if !changed {
-        return attach_upstream_echoes(
+        return Ok(attach_upstream_echoes(
             Response::from_parts(parts, Body::from(bytes)),
             echoes.as_deref(),
-        );
+        ));
     }
     let Ok(filtered) = serde_json::to_vec(&canonical) else {
-        return attach_upstream_echoes(
+        return Ok(attach_upstream_echoes(
             Response::from_parts(parts, Body::from(bytes)),
             echoes.as_deref(),
-        );
+        ));
     };
     parts.headers.remove(header::CONTENT_LENGTH);
-    attach_upstream_echoes(
+    Ok(attach_upstream_echoes(
         Response::from_parts(parts, Body::from(filtered)),
         echoes.as_deref(),
-    )
+    ))
 }
 
 /// `GET /api/v1/assistant/conversations/{id}` -- canonical conversation
@@ -516,7 +509,7 @@ pub async fn get_history(
         ForwardEcho::enabled(None, None, echoes.as_mut()),
     )
     .await?;
-    attach_upstream_echoes(response, echoes.as_deref())
+    Ok(attach_upstream_echoes(response, echoes.as_deref()))
 }
 
 /// `DELETE /api/v1/assistant/conversations/{id}` -- canonical single delete.
@@ -537,7 +530,7 @@ pub async fn delete_conversation(
         ForwardEcho::enabled(None, None, echoes.as_mut()),
     )
     .await?;
-    attach_upstream_echoes(response, echoes.as_deref())
+    Ok(attach_upstream_echoes(response, echoes.as_deref()))
 }
 
 /// `GET /api/v1/assistant/conversations/{id}/state` -- conditional
@@ -562,7 +555,7 @@ pub async fn get_state(
         ForwardEcho::enabled(None, None, echoes.as_mut()),
     )
     .await?;
-    attach_upstream_echoes(response, echoes.as_deref())
+    Ok(attach_upstream_echoes(response, echoes.as_deref()))
 }
 
 /// `POST /api/v1/assistant/completions` -- OpenAI-compatible SSE stream.
@@ -581,7 +574,7 @@ pub async fn completions(
         ForwardEcho::enabled(None, None, echoes.as_mut()),
     )
     .await?;
-    attach_upstream_echoes(response, echoes.as_deref())
+    Ok(attach_upstream_echoes(response, echoes.as_deref()))
 }
 
 /// Bounds caller chat bodies: a 32k-char prompt is at most 128 KiB of UTF-8,
@@ -606,7 +599,6 @@ pub async fn typed_chat(
         })?;
     let command = assistant_service::parse_assistant_chat_command(&bytes)?;
     let prepared = assistant_service::prepare_assistant_chat_command(&command)?;
-    let echoed_body = prepared.body.clone();
     let payload = serde_json::to_vec(&prepared.body).map_err(|_| {
         AppError::Internal("assistant: failed to encode the assistant chat body".to_string())
     })?;
@@ -627,6 +619,7 @@ pub async fn typed_chat(
         ),
     ];
     let mut echoes = upstream_echo_collector(&state, &auth_user, request.headers()).await;
+    let echoed_body = echoes.as_ref().map(|_| prepared.body.clone());
     let response = forward(
         &state,
         &auth_user,
@@ -638,12 +631,12 @@ pub async fn typed_chat(
                 .body
                 .get("type")
                 .and_then(serde_json::Value::as_str),
-            Some(echoed_body),
+            echoed_body,
             echoes.as_mut(),
         ),
     )
     .await?;
-    attach_upstream_echoes(response, echoes.as_deref())
+    Ok(attach_upstream_echoes(response, echoes.as_deref()))
 }
 
 /// `POST /api/v1/assistant/workflow-chat` -- workflow ("studio") chat turn,
@@ -676,7 +669,6 @@ pub async fn workflow_chat(
     let turn: assistant_service::WorkflowChatTurnRequest = serde_json::from_slice(&bytes)
         .map_err(|e| AppError::BadRequest(format!("Invalid workflow chat request: {e}")))?;
     let upstream = assistant_service::workflow_chat_body(&turn)?;
-    let echoed_body = upstream.clone();
     let payload = serde_json::to_vec(&upstream).map_err(|_| {
         AppError::Internal("assistant: failed to encode the workflow chat body".to_string())
     })?;
@@ -688,16 +680,17 @@ pub async fn workflow_chat(
     );
     let request = Request::from_parts(parts, Body::from(payload));
     let mut echoes = upstream_echo_collector(&state, &auth_user, request.headers()).await;
+    let echoed_body = echoes.as_ref().map(|_| upstream.clone());
     let response = forward(
         &state,
         &auth_user,
         assistant_service::workflow_chat_path(),
         request,
         Vec::new(),
-        ForwardEcho::enabled(Some("workflow.studio"), Some(echoed_body), echoes.as_mut()),
+        ForwardEcho::enabled(Some("workflow.studio"), echoed_body, echoes.as_mut()),
     )
     .await?;
-    attach_upstream_echoes(response, echoes.as_deref())
+    Ok(attach_upstream_echoes(response, echoes.as_deref()))
 }
 
 /// `GET /api/v1/assistant/workflow-chat/ws` -- WebSocket twin of the workflow
@@ -757,8 +750,8 @@ mod tests {
         serde_json::from_slice(&bytes).expect("echo header is JSON")
     }
 
-    #[tokio::test]
-    async fn echo_uses_an_allowlist_before_identity_injection() {
+    #[test]
+    fn echo_uses_an_allowlist_before_identity_injection() {
         let request = Request::builder()
             .method(Method::POST)
             .uri("/")
@@ -828,6 +821,29 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn absent_echo_gate_returns_before_admin_lookup() {
+        let state = crate::test_utils::test_app_state_no_db().await;
+        let auth_user = crate::test_utils::test_auth_user("00000000-0000-4000-8000-000000000001");
+
+        let echoes = upstream_echo_collector(&state, &auth_user, &HeaderMap::new()).await;
+
+        assert!(echoes.is_none());
+    }
+
+    #[test]
+    fn absent_echo_collector_leaves_response_headers_untouched() {
+        let response = Response::builder()
+            .header("x-existing", "unchanged")
+            .body(Body::empty())
+            .unwrap();
+        let expected = response.headers().clone();
+
+        let response = attach_upstream_echoes(response, None);
+
+        assert_eq!(response.headers(), &expected);
+    }
+
+    #[tokio::test]
     async fn echo_header_leaves_sse_and_json_response_bodies_unmodified() {
         let upstream = b"data: {\"type\":\"RUN_FINISHED\"}\n\n";
         let echo = test_echo(serde_json::json!({ "type": "text", "prompt": "hello" }));
@@ -837,8 +853,7 @@ mod tests {
                 .header(header::CONTENT_LENGTH, upstream.len())
                 .body(Body::from(upstream.as_slice()))
                 .unwrap();
-            let response =
-                attach_upstream_echoes(response, Some(std::slice::from_ref(&echo))).unwrap();
+            let response = attach_upstream_echoes(response, Some(std::slice::from_ref(&echo)));
             assert_eq!(
                 response.headers().get(header::CONTENT_LENGTH),
                 Some(&HeaderValue::from_static("31"))
@@ -855,7 +870,7 @@ mod tests {
     }
 
     #[test]
-    fn oversized_header_echo_truncates_only_the_body_within_sixteen_kib() {
+    fn oversized_header_echo_truncates_only_the_body_within_configured_limit() {
         let original = "steer ".repeat(4_000);
         let echo = test_echo(serde_json::json!({
             "type": "task.steer",

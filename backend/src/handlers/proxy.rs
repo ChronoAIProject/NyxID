@@ -8013,19 +8013,14 @@ mod proxy_resolution_integration_tests {
                                 {
                                     "id": "nyxid-chat-4a1e60ebd1fd44f192bf4bb90e1812ae",
                                     "updatedAt": "2026-07-29T13:00:00.000Z"
+                                },
+                                {
+                                    "id": "chatc-8bd999c402fb37d60cdcd81e3b78cfd",
+                                    "updatedAt": "2026-07-29T12:00:00.000Z"
                                 }
                             ]
                         }))
                         .into_response(),
-                        (Method::GET, path) if path.ends_with("/chat-history") => {
-                            axum::Json(serde_json::json!({
-                                "conversations": [{
-                                    "id": "chatc-8bd999c402fb37d60cdcd81e3b78cfd",
-                                    "updatedAt": "2026-07-29T12:00:00.000Z"
-                                }]
-                            }))
-                            .into_response()
-                        }
                         (Method::GET, path) if path.starts_with("/api/chat/conversations/") => {
                             axum::Json(serde_json::json!({
                                 "messages": [],
@@ -8222,7 +8217,6 @@ mod proxy_resolution_integration_tests {
 
         let calls = std::mem::take(&mut *captured.lock().unwrap());
         let paths: Vec<&str> = calls.iter().map(|(_, path, _, _)| path.as_str()).collect();
-        let legacy_path = format!("/api/scopes/{user_id}/chat-history");
         assert_eq!(
             paths,
             vec![
@@ -8237,17 +8231,20 @@ mod proxy_resolution_integration_tests {
                 "/api/chat",
                 "/api/chat",
                 "/api/chat/conversations",
-                legacy_path.as_str(),
                 "/api/chat/conversations/nyxid-chat-4a1e60ebd1fd44f192bf4bb90e1812ae",
                 "/api/chat/conversations/nyxid-chat-4a1e60ebd1fd44f192bf4bb90e1812ae/state",
                 "/api/chat/conversations/nyxid-chat-4a1e60ebd1fd44f192bf4bb90e1812ae",
             ]
         );
         assert!(
-            paths[..10].iter().all(|path| !path.contains("api/scopes/")),
+            paths.iter().all(|path| !path.contains("api/scopes/")),
             "typed assistant traffic must not hit scoped paths"
         );
-        assert_eq!(debug_echoes.last().map(Vec::len), Some(2));
+        assert!(
+            paths.iter().all(|path| !path.contains("chat-history")),
+            "canonical list/detail/state/delete must not hit chat-history when the upstream canonical list already includes workflow rows"
+        );
+        assert_eq!(debug_echoes.last().map(Vec::len), Some(1));
 
         let workflow = serde_json::from_slice::<serde_json::Value>(&calls[0].2).unwrap();
         assert_eq!(workflow["workflow"], "studio");
@@ -8364,6 +8361,7 @@ mod proxy_resolution_integration_tests {
                 expected
             );
             assert!(headers.get(axum::http::header::AUTHORIZATION).is_none());
+            assert!(headers.get("x-nyxid-debug-upstream").is_none());
             assert!(headers.get("x-nyxid-identity-token").is_some());
             assert!(headers.get("x-nyxid-delegation-token").is_some());
             assert_eq!(
@@ -8418,8 +8416,8 @@ mod proxy_resolution_integration_tests {
         }
 
         let list_echoes = &debug_echoes[10];
-        assert_eq!(list_echoes.len(), 2);
-        for (envelope, call) in list_echoes.iter().zip(&calls[10..12]) {
+        assert_eq!(list_echoes.len(), 1);
+        for (envelope, call) in list_echoes.iter().zip(&calls[10..11]) {
             assert_eq!(envelope["method"], "GET");
             assert_eq!(envelope["path"], call.1.trim_start_matches('/'));
             assert!(envelope["commandType"].is_null());
@@ -8441,9 +8439,7 @@ mod proxy_resolution_integration_tests {
             );
         }
 
-        for (_, _, _, headers) in [
-            &calls[0], &calls[10], &calls[11], &calls[12], &calls[13], &calls[14],
-        ] {
+        for (_, _, _, headers) in [&calls[0], &calls[10], &calls[11], &calls[12], &calls[13]] {
             assert!(headers.get(axum::http::header::AUTHORIZATION).is_none());
             assert!(headers.get("x-nyxid-identity-token").is_some());
             assert!(headers.get("x-nyxid-delegation-token").is_some());
@@ -8470,6 +8466,26 @@ mod proxy_resolution_integration_tests {
         assert_eq!(
             gate_off_body.as_ref(),
             b"data: {\"type\":\"RUN_FINISHED\"}\n\n"
+        );
+
+        let mut websocket_request =
+            request(Method::GET, "/api/v1/assistant/workflow-chat/ws", None);
+        websocket_request.headers_mut().insert(
+            HeaderName::from_static("x-nyxid-debug-upstream"),
+            HeaderValue::from_static("1"),
+        );
+        let websocket_response = crate::handlers::assistant::workflow_chat_ws(
+            axum::extract::State(state.clone()),
+            auth.clone(),
+            websocket_request,
+        )
+        .await
+        .expect("workflow WebSocket handler must skip the debug echo");
+        assert!(
+            websocket_response
+                .headers()
+                .get("x-nyxid-debug-upstream-log")
+                .is_none()
         );
 
         let non_admin_id = Uuid::new_v4().to_string();
@@ -8507,6 +8523,135 @@ mod proxy_resolution_integration_tests {
             non_admin_body.as_ref(),
             b"data: {\"type\":\"RUN_FINISHED\"}\n\n"
         );
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn assistant_list_echo_captures_both_upstream_calls_when_the_legacy_fallback_fires() {
+        use std::sync::Mutex as StdMutex;
+
+        let Some(db) = connect_test_database("assistant_list_echo_legacy_fallback").await else {
+            eprintln!("skipping proxy integration test: no local MongoDB available");
+            return;
+        };
+
+        type Captured = (Method, String);
+        let captured: std::sync::Arc<StdMutex<Vec<Captured>>> =
+            std::sync::Arc::new(StdMutex::new(Vec::new()));
+        let sink = captured.clone();
+        let app = Router::new().route(
+            "/{*path}",
+            any(move |request: Request<Body>| {
+                let sink = sink.clone();
+                async move {
+                    let method = request.method().clone();
+                    let path = request.uri().path().to_string();
+                    sink.lock().unwrap().push((method.clone(), path.clone()));
+                    match (method, path.as_str()) {
+                        (Method::GET, "/api/chat/conversations") => axum::Json(serde_json::json!({
+                            "conversations": [{
+                                "id": "nyxid-chat-4a1e60ebd1fd44f192bf4bb90e1812ae",
+                                "updatedAt": "2026-07-29T13:00:00.000Z"
+                            }]
+                        }))
+                        .into_response(),
+                        (Method::GET, path) if path.ends_with("/chat-history") => {
+                            axum::Json(serde_json::json!({
+                                "conversations": [{
+                                    "id": "chatc-8bd999c402fb37d60cdcd81e3b78cfd",
+                                    "updatedAt": "2026-07-29T12:00:00.000Z"
+                                }]
+                            }))
+                            .into_response()
+                        }
+                        _ => axum::Json(serde_json::json!({ "ok": true })).into_response(),
+                    }
+                }
+            }),
+        );
+        let listener = TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind assistant list downstream listener");
+        let addr = listener.local_addr().expect("downstream listener addr");
+        let server = tokio::spawn(async move {
+            axum::serve(listener, app)
+                .await
+                .expect("serve assistant list downstream");
+        });
+
+        let user_id = Uuid::new_v4().to_string();
+        crate::services::role_service::seed_system_roles(&db)
+            .await
+            .expect("seed platform roles");
+        let role_ids = crate::services::role_service::get_platform_role_ids(&db)
+            .await
+            .expect("resolve platform roles");
+        let mut admin_user = test_user(&user_id, UserType::Person);
+        admin_user.role_ids.push(role_ids.admin);
+        admin_user.is_admin = true;
+        db.collection::<crate::models::user::User>(USERS)
+            .insert_one(admin_user)
+            .await
+            .unwrap();
+
+        let mut service = crate::models::downstream_service::test_helpers::dummy_service();
+        service.id = Uuid::new_v4().to_string();
+        service.slug = crate::services::assistant_service::AEVATAR_SLUG.to_string();
+        service.name = "Aevatar".to_string();
+        service.base_url = format!("http://{addr}");
+        service.service_category = "internal".to_string();
+        service.requires_user_credential = false;
+        service.identity_propagation_mode = "jwt".to_string();
+        service.identity_jwt_audience = Some("urn:aevatar:api".to_string());
+        service.inject_delegation_token = true;
+        service.delegation_token_scope = "proxy:*".to_string();
+        db.collection::<crate::models::downstream_service::DownstreamService>(
+            crate::models::downstream_service::COLLECTION_NAME,
+        )
+        .insert_one(service)
+        .await
+        .unwrap();
+
+        let state = test_app_state(db);
+        let auth = access_token_auth(&user_id);
+        let mut request = Request::builder()
+            .method(Method::GET)
+            .uri("/api/v1/assistant/conversations")
+            .header(axum::http::header::CONTENT_TYPE, "application/json")
+            .header("x-nyxid-debug-upstream", "1")
+            .body(Body::empty())
+            .expect("build assistant list request");
+        request.extensions_mut().insert(
+            crate::services::billing::route_inventory::BillingRoutePolicy::Metered(
+                crate::services::billing::BillingIngress::Proxy,
+            ),
+        );
+
+        let response = crate::handlers::assistant::list_conversations(
+            axum::extract::State(state),
+            auth,
+            request,
+        )
+        .await
+        .expect("list conversations handler must forward both calls");
+        assert_eq!(response.status(), StatusCode::OK);
+        let echoes = assistant_echoes(&response);
+        let calls = std::mem::take(&mut *captured.lock().unwrap());
+        let legacy_path = format!("/api/scopes/{user_id}/chat-history");
+        assert_eq!(
+            calls,
+            vec![
+                (Method::GET, "/api/chat/conversations".to_string()),
+                (Method::GET, legacy_path),
+            ]
+        );
+        assert_eq!(echoes.len(), 2);
+        for (envelope, (method, path)) in echoes.iter().zip(&calls) {
+            assert_eq!(envelope["method"], method.as_str());
+            assert_eq!(envelope["path"], path.trim_start_matches('/'));
+            assert!(envelope["commandType"].is_null());
+            assert!(envelope["body"].is_null());
+        }
         server.abort();
     }
 

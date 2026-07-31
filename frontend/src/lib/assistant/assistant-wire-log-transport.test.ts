@@ -20,8 +20,10 @@ function encodedEcho(): string {
         forward_access_token: false,
         inject_delegation_token: true,
         bridge_minted: false,
+        futureIdentityMetadata: "ignored",
       },
       truncated: false,
+      futureEnvelopeMetadata: "ignored",
     },
   ]);
   return btoa(String.fromCharCode(...new TextEncoder().encode(json)));
@@ -32,18 +34,24 @@ describe("assistant wire-log transport", () => {
     vi.unstubAllGlobals();
     vi.restoreAllMocks();
     localStorage.clear();
-    useAssistantWireLogStore.setState({ captureEnabled: false, entries: [] });
+    useAssistantWireLogStore.setState({
+      captureEnabled: false,
+      entries: [],
+      totalBytes: 0,
+    });
   });
 
   it("sends the gate only when enabled and decodes header delivery", async () => {
     const fetchMock = vi.fn().mockImplementation(() =>
-      Promise.resolve(new Response(JSON.stringify({ conversations: [] }), {
-        status: 200,
-        headers: {
-          "Content-Type": "application/json",
-          "X-NyxID-Debug-Upstream-Log": encodedEcho(),
-        },
-      })),
+      Promise.resolve(
+        new Response(JSON.stringify({ conversations: [] }), {
+          status: 200,
+          headers: {
+            "Content-Type": "application/json",
+            "X-NyxID-Debug-Upstream-Log": encodedEcho(),
+          },
+        }),
+      ),
     );
     vi.stubGlobal("fetch", fetchMock);
 
@@ -64,6 +72,12 @@ describe("assistant wire-log transport", () => {
       path: "api/chat/conversations",
       status: 200,
     });
+    expect(useAssistantWireLogStore.getState().entries[0]).not.toHaveProperty(
+      "futureEnvelopeMetadata",
+    );
+    expect(
+      useAssistantWireLogStore.getState().entries[0]?.identity,
+    ).not.toHaveProperty("futureIdentityMetadata");
   });
 
   it("captures streaming response metadata without delivering it as chat content", async () => {
@@ -94,9 +108,8 @@ describe("assistant wire-log transport", () => {
       ),
     );
     useAssistantWireLogStore.getState().setCaptureEnabled(true);
-    const start = vi
-      .spyOn(chatStreamClient, "start")
-      .mockImplementation((request): ChatStreamRequestHandle => ({
+    const start = vi.spyOn(chatStreamClient, "start").mockImplementation(
+      (request): ChatStreamRequestHandle => ({
         headers: Promise.resolve({
           kind: "response",
           status: 200,
@@ -130,7 +143,8 @@ describe("assistant wire-log transport", () => {
           return { kind: "complete" };
         }),
         cancel: vi.fn(),
-      }));
+      }),
+    );
     const transport = new AevatarAssistantTransport();
     const conversation = await transport.createConversation();
 
