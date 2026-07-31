@@ -424,6 +424,16 @@ interface StoredConversation {
    * turn's `aevatar.chat.context` frame.
    */
   stateVersion?: number;
+  /**
+   * Client session correlation handle sent on every workflow turn of this
+   * conversation. Minted once and reused so the whole conversation shares
+   * one session: a per-turn value would make the field meaningless, and
+   * Aevatar folds `sessionId` into its create-replay fingerprint, so it must
+   * also stay stable across a turn's delivery retries. Transport-local, so a
+   * reload starts a new session id — nothing upstream reads it as identity
+   * (conversation continuity is `conversationId` + `minimumStateVersion`).
+   */
+  sessionId?: string;
 }
 
 interface RunStepState {
@@ -2045,6 +2055,7 @@ export class AevatarAssistantTransport implements AssistantTransport {
       actionRequestFingerprints:
         existing?.actionRequestFingerprints ?? new Map(),
       stateVersion: existing?.stateVersion,
+      sessionId: existing?.sessionId,
     });
   }
 
@@ -2099,6 +2110,7 @@ export class AevatarAssistantTransport implements AssistantTransport {
       actionRequestFingerprints:
         existing?.actionRequestFingerprints ?? new Map(),
       stateVersion: freshStateVersion ?? existing?.stateVersion,
+      sessionId: existing?.sessionId,
     };
     this.conversations.set(conversationId, stored);
     return stored;
@@ -2201,6 +2213,7 @@ export class AevatarAssistantTransport implements AssistantTransport {
     prompt: string,
   ): string {
     const stored = this.conversations.get(conversationId);
+    const sessionId = this.conversationSessionId(conversationId);
     const serverId = stored?.conversation.id;
     if (serverId && serverId.startsWith(WORKFLOW_CONVERSATION_PREFIX)) {
       return JSON.stringify({
@@ -2214,9 +2227,27 @@ export class AevatarAssistantTransport implements AssistantTransport {
             ? stored.stateVersion
             : 1,
         commandId: run.clientRequestId,
+        sessionId,
       });
     }
-    return JSON.stringify({ prompt, commandId: run.clientRequestId });
+    return JSON.stringify({
+      prompt,
+      commandId: run.clientRequestId,
+      sessionId,
+    });
+  }
+
+  /**
+   * The conversation's session handle, minted on first use and reused for
+   * every later turn. Conversations adopted from the server list have no
+   * stored id yet, so this fills one in lazily rather than leaving the field
+   * absent for legacy `chatc-…` rows.
+   */
+  private conversationSessionId(conversationId: string): string {
+    const stored = this.conversations.get(conversationId);
+    if (!stored) return crypto.randomUUID();
+    stored.sessionId ??= crypto.randomUUID();
+    return stored.sessionId;
   }
 
   private async streamTurn(
@@ -3004,6 +3035,38 @@ export class AevatarAssistantTransport implements AssistantTransport {
       WORKFLOW_SERVER_CONVERSATION_ID_PATTERN.test(payload.conversationId)
         ? payload.conversationId
         : null;
+    const priorId = stored?.conversation.id;
+    // Fail closed when the create turn never names its server conversation:
+    // accepting the turn would leave the record on its `workflow-pending-…`
+    // placeholder, so the NEXT send would build another create body and mint
+    // a SECOND upstream conversation instead of continuing this one.
+    if (
+      !serverId &&
+      priorId !== undefined &&
+      !priorId.startsWith(WORKFLOW_CONVERSATION_PREFIX)
+    ) {
+      run.deliveryProtocolError ??= {
+        code: "stream_protocol_error",
+        message:
+          "The assistant stream did not provide a valid conversation id.",
+      };
+      return;
+    }
+    // A replay must resolve to the conversation it already adopted. Silently
+    // re-keying would orphan the first server row while later events stay
+    // attributed to the old identity.
+    if (
+      serverId &&
+      priorId !== undefined &&
+      priorId !== serverId &&
+      priorId.startsWith(WORKFLOW_CONVERSATION_PREFIX)
+    ) {
+      run.deliveryProtocolError = {
+        code: "stream_protocol_error",
+        message: "The assistant replay changed the conversation id.",
+      };
+      return;
+    }
     if (stored && serverId && stored.conversation.id !== serverId) {
       stored.conversation = { ...stored.conversation, id: serverId };
       this.conversations.set(serverId, stored);
@@ -3023,6 +3086,16 @@ export class AevatarAssistantTransport implements AssistantTransport {
       run.deliveryProtocolError = {
         code: "stream_protocol_error",
         message: "The assistant stream did not provide a valid turn id.",
+      };
+      return;
+    }
+    // Same replay guard as the conversation id: a retry that comes back on a
+    // DIFFERENT turn is not the turn this run is streaming, and attributing
+    // its events to the original turn id would interleave two turns.
+    if (run.turnId && run.turnId !== turnId) {
+      run.deliveryProtocolError = {
+        code: "stream_protocol_error",
+        message: "The assistant replay changed the turn id.",
       };
       return;
     }

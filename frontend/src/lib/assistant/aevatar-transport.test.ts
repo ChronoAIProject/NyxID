@@ -5833,17 +5833,20 @@ describe("studio new chats and typed actor compatibility", () => {
     const body = JSON.parse(String(turnCall?.[1]?.body)) as {
       prompt: string;
       commandId: string;
+      sessionId: string;
     };
-    // A new conversation sends prompt + commandId ONLY: no `conversationId`
-    // (the backend fills `conversation.conversationId: null`) and no `type`,
-    // whose presence would divert the request to the typed actor handler
-    // instead of the studio workflow engine.
-    expect(Object.keys(body)).toEqual(["prompt", "commandId"]);
+    // A new conversation sends prompt + commandId + sessionId ONLY: no
+    // `conversationId` (the backend fills `conversation.conversationId:
+    // null`) and no `type`, whose presence would divert the request to the
+    // typed actor handler instead of the studio workflow engine.
+    expect(Object.keys(body)).toEqual(["prompt", "commandId", "sessionId"]);
     expect(body).toEqual({
       prompt: "show api-aws-cost-explorer billing",
       commandId: body.commandId,
+      sessionId: body.sessionId,
     });
     expect(body.commandId).toMatch(/^[0-9a-f-]{36}$/);
+    expect(body.sessionId).toMatch(/^[0-9a-f-]{36}$/);
     expect(
       mock.mock.calls.some(
         ([input, init]) =>
@@ -6246,6 +6249,125 @@ describe("studio new chats and typed actor compatibility", () => {
     expect(turnBodies[1]?.["conversationId"]).toBe(WORKFLOW_CONVERSATION);
     expect(turnBodies[1]?.["minimumStateVersion"]).toBe(3);
     expect(turnBodies[1]?.["commandId"]).not.toBe(turnBodies[0]?.["commandId"]);
+  });
+
+  it("reuses one sessionId for every turn of a conversation", async () => {
+    const mock = stubFetch(
+      routeWorkflow([
+        ...WORKFLOW_PREAMBLE,
+        { textMessageStart: { messageId: "wm-1" } },
+        { textMessageContent: { delta: "First." } },
+        { textMessageEnd: {} },
+        ...WORKFLOW_TAIL,
+      ]),
+    );
+    const transport = new AevatarAssistantTransport();
+    // Starts on the client placeholder, adopts `chatc-…` from the first
+    // turn's chat.context: the session must survive that re-key.
+    const conversation = await transport.createConversation();
+    await collectWorkflowTurn(transport, conversation.id, "first");
+    await collectWorkflowTurn(transport, conversation.id, "second");
+
+    const bodies = mock.mock.calls
+      .filter(([input]) => String(input) === WORKFLOW_URL)
+      .map(
+        ([, init]) => JSON.parse(String(init?.body)) as Record<string, unknown>,
+      );
+    expect(bodies).toHaveLength(2);
+    const sessionId = bodies[0]?.["sessionId"];
+    expect(sessionId).toMatch(/^[0-9a-f-]{36}$/);
+    // Same session across turns; the commandId still rotates per turn.
+    expect(bodies[1]?.["sessionId"]).toBe(sessionId);
+    expect(bodies[1]?.["commandId"]).not.toBe(bodies[0]?.["commandId"]);
+    // The create turn carries no conversationId, so it stays on the studio
+    // branch of the upstream dispatcher.
+    expect(bodies[0]?.["conversationId"]).toBeUndefined();
+    expect(bodies[1]?.["conversationId"]).toBe(WORKFLOW_CONVERSATION);
+  });
+
+  it("fails closed when a create turn never names its server conversation", async () => {
+    stubFetch(
+      routeWorkflow([
+        {
+          timestamp: "1785297207163",
+          custom: {
+            name: "aevatar.chat.context",
+            payload: {
+              "@type":
+                "type.googleapis.com/aevatar.workflow.runs.WorkflowChatContextPayload",
+              scopeId: USER_ID,
+              // No conversationId: accepting this would strand the record on
+              // its placeholder and mint a second conversation on the next
+              // send.
+              turnId: WORKFLOW_TURN,
+              stateVersion: "3",
+            },
+          },
+        },
+        { runStarted: { threadId: RUN_ACTOR, runId: RUN_ACTOR } },
+        { runFinished: { threadId: RUN_ACTOR } },
+      ]),
+    );
+    const transport = new AevatarAssistantTransport();
+    const conversation = await transport.createConversation();
+
+    const events = await collectWorkflowTurn(transport, conversation.id, "hi");
+
+    expect(events.at(-1)).toMatchObject({
+      event: "turn.completed",
+      status: "failed",
+      error: { code: "stream_protocol_error" },
+    });
+  });
+
+  it("rejects a replay that moves the turn to another conversation", async () => {
+    let attempt = 0;
+    mockChatStreams((request) => {
+      if (request.url !== WORKFLOW_URL) return undefined;
+      attempt += 1;
+      // The retry comes back on a different `chatc-…` than the one this run
+      // already adopted.
+      const conversationId =
+        attempt === 1
+          ? WORKFLOW_CONVERSATION
+          : "chatc-1111111111111111111111111111111";
+      return {
+        frames: [
+          {
+            timestamp: "1785297207163",
+            custom: {
+              name: "aevatar.chat.context",
+              payload: {
+                "@type":
+                  "type.googleapis.com/aevatar.workflow.runs.WorkflowChatContextPayload",
+                scopeId: USER_ID,
+                conversationId,
+                turnId: WORKFLOW_TURN,
+                stateVersion: "3",
+              },
+            },
+          },
+          { runStarted: { threadId: RUN_ACTOR, runId: RUN_ACTOR } },
+          { runFinished: { threadId: RUN_ACTOR } },
+        ],
+      };
+    });
+    const transport = new AevatarAssistantTransport();
+    const conversation = await transport.createConversation();
+    await collectWorkflowTurn(transport, conversation.id, "first");
+
+    // Second turn: the conversation has adopted WORKFLOW_CONVERSATION, and a
+    // context frame naming a different one must not silently re-key it.
+    const events = await collectWorkflowTurn(transport, conversation.id, "two");
+
+    expect(events.at(-1)).toMatchObject({
+      event: "turn.completed",
+      status: "failed",
+      error: { code: "stream_protocol_error" },
+    });
+    expect((await transport.getHistory(conversation.id)).conversation.id).toBe(
+      WORKFLOW_CONVERSATION,
+    );
   });
 
   it("maps runError to a failed turn with its upstream code", async () => {
