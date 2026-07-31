@@ -67,8 +67,7 @@
             "required": true,
             "description": "Firecrawl agent task id returned by POST /v2/agent.",
             "schema": {
-              "type": "string",
-              "minLength": 1
+              "type": "string"
             }
           }
         ],
@@ -271,7 +270,6 @@
         "properties": {
           "prompt": {
             "type": "string",
-            "minLength": 1,
             "description": "Natural-language task for the Firecrawl agent."
           },
           "urls": {
@@ -293,7 +291,6 @@
           },
           "maxCredits": {
             "type": "integer",
-            "minimum": 1,
             "description": "Optional maximum credits to spend on the task."
           }
         }
