@@ -232,10 +232,13 @@ describe("ChatThread", () => {
 
     const dots = document.querySelector<HTMLElement>("[data-streaming-dots]");
     expect(dots).toBeInTheDocument();
-    expect(dots?.children).toHaveLength(5);
+    expect(dots?.children).toHaveLength(4);
+    // 1200ms into the 2200ms cradle, measured from mount: past the 572ms
+    // reversal and before the 1672ms wrap, so the impulse is travelling left
+    // and the sweep has to follow it out that way.
     Object.defineProperty(dots?.firstElementChild, "getAnimations", {
       configurable: true,
-      value: () => [{ currentTime: 850 }],
+      value: () => [{ currentTime: 1200 }],
     });
 
     rerender(
@@ -263,7 +266,7 @@ describe("ChatThread", () => {
       screen.queryByRole("status", { name: "Assistant is thinking" }),
     ).not.toBeInTheDocument();
 
-    act(() => vi.advanceTimersByTime(359));
+    act(() => vi.advanceTimersByTime(379));
     expect(
       document.querySelector("[data-streaming-dots]"),
     ).toBeInTheDocument();
@@ -271,6 +274,136 @@ describe("ChatThread", () => {
     expect(
       document.querySelector("[data-streaming-dots]"),
     ).not.toBeInTheDocument();
+  });
+
+  it("sweeps the dots out rightward again once the cradle timeline wraps", () => {
+    // The CSS head start means elapsed time and the cradle's own timeline are
+    // 24% out of phase, so the rightward pass is split across the wrap: it
+    // runs from mount to 572ms and resumes at 1672ms. A single threshold reads
+    // that tail as leftward and sweeps the dots against the impulse.
+    vi.useFakeTimers();
+    const userMessage = message({
+      role: "user",
+      blocks: [{ type: "text", block_id: "text-1", text: "Question" }],
+    });
+    const { rerender } = render(
+      <ChatThread
+        messages={[userMessage]}
+        thinking
+        onDecideApproval={vi.fn()}
+      />,
+    );
+
+    const dots = document.querySelector<HTMLElement>("[data-streaming-dots]");
+    Object.defineProperty(dots?.firstElementChild, "getAnimations", {
+      configurable: true,
+      value: () => [{ currentTime: 2_100 }],
+    });
+
+    rerender(
+      <ChatThread
+        messages={[
+          userMessage,
+          message({ blocks: [{ type: "text", block_id: "t2", text: "Hi" }] }),
+        ]}
+        streaming
+        onDecideApproval={vi.fn()}
+      />,
+    );
+
+    expect(
+      document.querySelector("[data-streaming-dots]"),
+    ).toHaveAttribute("data-exit-direction", "right");
+  });
+
+  it("classifies the exact phase boundaries the cradle timeline sets", () => {
+    // 2200ms period offset 24% by the CSS negative delay, reversing at 50%:
+    // rightward over [0, 572) and again over [1672, 2200). The boundaries are
+    // where an off-by-one sends the sweep against the visible motion, and no
+    // other test exercises them.
+    vi.useFakeTimers();
+    const cases = [
+      { currentTime: 0, direction: "right" },
+      { currentTime: 571, direction: "right" },
+      { currentTime: 572, direction: "left" },
+      { currentTime: 1_671, direction: "left" },
+      { currentTime: 1_672, direction: "right" },
+    ] as const;
+
+    for (const { currentTime, direction } of cases) {
+      const userMessage = message({
+        role: "user",
+        blocks: [{ type: "text", block_id: "text-1", text: "Question" }],
+      });
+      const view = render(
+        <ChatThread
+          messages={[userMessage]}
+          thinking
+          onDecideApproval={vi.fn()}
+        />,
+      );
+      const ball = document.querySelector("[data-streaming-dots]")
+        ?.firstElementChild;
+      Object.defineProperty(ball, "getAnimations", {
+        configurable: true,
+        value: () => [{ currentTime }],
+      });
+
+      view.rerender(
+        <ChatThread
+          messages={[
+            userMessage,
+            message({ blocks: [{ type: "text", block_id: "t2", text: "Hi" }] }),
+          ]}
+          streaming
+          onDecideApproval={vi.fn()}
+        />,
+      );
+
+      expect(document.querySelector("[data-streaming-dots]")).toHaveAttribute(
+        "data-exit-direction",
+        direction,
+      );
+      view.unmount();
+    }
+  });
+
+  it("pins each ball's live position before the exit replaces the loop", () => {
+    // The exit keyframes read `--domino-exit-x` / `--domino-exit-opacity`. If
+    // they are not written, the sweep interpolates from the element's
+    // underlying (undisplaced, resting) style instead, and a striker caught at
+    // its apex snaps a full swing back into the pack on the first frame.
+    vi.useFakeTimers();
+    const userMessage = message({
+      role: "user",
+      blocks: [{ type: "text", block_id: "text-1", text: "Question" }],
+    });
+    const { rerender } = render(
+      <ChatThread
+        messages={[userMessage]}
+        thinking
+        onDecideApproval={vi.fn()}
+      />,
+    );
+
+    rerender(
+      <ChatThread
+        messages={[
+          userMessage,
+          message({ blocks: [{ type: "text", block_id: "t2", text: "Hi" }] }),
+        ]}
+        streaming
+        onDecideApproval={vi.fn()}
+      />,
+    );
+
+    const balls = document.querySelectorAll<HTMLElement>(
+      "[data-streaming-dots] .assistant-streaming-dot",
+    );
+    expect(balls).toHaveLength(4);
+    for (const ball of balls) {
+      expect(ball.style.getPropertyValue("--domino-exit-x")).toBe("0px");
+    }
   });
 
   it("retains inline dots as an inaccessible overlay when the first block arrives", () => {
@@ -297,7 +430,10 @@ describe("ChatThread", () => {
       screen.getByRole("status", { name: "Assistant is answering" }),
     ).toBeInTheDocument();
 
-    act(() => vi.advanceTimersByTime(800));
+    // No getAnimations in jsdom, so the exit direction falls back to wall
+    // clock. 400ms in is still inside the cradle's first rightward pass (which
+    // runs to 572ms), so the sweep leaves to the right.
+    act(() => vi.advanceTimersByTime(400));
     rerender(
       <ChatThread
         messages={[
@@ -321,7 +457,7 @@ describe("ChatThread", () => {
     expect(leavingDots).toHaveAttribute("data-exit-direction", "right");
     expect(leavingDots).toHaveClass("fixed");
 
-    act(() => vi.advanceTimersByTime(360));
+    act(() => vi.advanceTimersByTime(380));
     expect(
       document.querySelector("[data-streaming-dots]"),
     ).not.toBeInTheDocument();
