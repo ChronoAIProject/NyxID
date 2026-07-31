@@ -62,7 +62,6 @@ jobs:
       frontend: ${{ steps.filter.outputs.frontend }}
       sdk: ${{ steps.filter.outputs.sdk }}
       wizard: ${{ steps.filter.outputs.wizard }}
-      skills: ${{ steps.filter.outputs.skills }}
       ci: ${{ steps.filter.outputs.ci }}
     steps:
       - uses: actions/checkout@v6
@@ -118,11 +117,6 @@ jobs:
             sdk:
               - 'sdk/**'
               - '.node-version'
-            # Skill descriptions are the model-side routing contract. Changes
-            # here must run the trigger-regression evaluator even when no
-            # application package changed.
-            skills:
-              - 'skills/**'
             # Inputs hashed by `cli/tests/wizard_bundle_freshness.rs`:
             #   - every file listed in `cli/src/wizard/bundle-meta/index.manifest`
             #     (always under `frontend/`).
@@ -370,32 +364,6 @@ jobs:
           cache-dependency-path: sdk/package-lock.json
       - run: npm ci
       - run: npm run build
-
-  # ---------------------------------------------------------------------------
-  # Skill routing: validate the candidate inputs and publish them as inert
-  # data. The credentialed model run is performed by skill-trigger-evals.yml,
-  # whose workflow_run trigger always uses trusted default-branch code.
-  # ---------------------------------------------------------------------------
-  skill-trigger-evals:
-    name: Skill Trigger Evaluation Payload
-    needs: changes
-    if: inputs.force-all || needs.changes.outputs.ci == 'true' || needs.changes.outputs.skills == 'true'
-    runs-on: ubuntu-latest
-    timeout-minutes: 5
-    permissions:
-      contents: read
-    steps:
-      - uses: actions/checkout@v6
-      - name: Validate NyxID trigger evaluation inputs
-        run: ruby skills/nyxid/evals/run_trigger_evals.rb --validate-only
-      - name: Upload NyxID trigger evaluation inputs
-        uses: actions/upload-artifact@v4
-        with:
-          name: nyxid-skill-trigger-candidate
-          path: |
-            skills/nyxid/SKILL.md
-            skills/nyxid/evals/trigger-regression.json
-          if-no-files-found: error
 
   # ===========================================================================
   # Code coverage gates (issue #785).
@@ -749,7 +717,6 @@ jobs:
       - frontend
       - wizard-bundle-freshness
       - sdk
-      - skill-trigger-evals
       - coverage-backend
       - coverage-cli
       - coverage-frontend
@@ -771,7 +738,6 @@ jobs:
             frontend=${{ needs.frontend.result }}
             wizard-bundle-freshness=${{ needs.wizard-bundle-freshness.result }}
             sdk=${{ needs.sdk.result }}
-            skill-trigger-evals=${{ needs.skill-trigger-evals.result }}
             coverage-backend=${{ needs.coverage-backend.result }}
             coverage-cli=${{ needs.coverage-cli.result }}
             coverage-frontend=${{ needs.coverage-frontend.result }}
