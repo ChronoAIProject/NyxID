@@ -47,6 +47,8 @@ nyxid service add <slug>                                  # API key (CLI prompts
 nyxid service add --custom                                # add custom endpoint (CLI prompts for details)
 ```
 
+Official catalog services ship NyxID-hosted curated OpenAPI overlays (served at `/api/v1/catalog-specs/{spec_key}/openapi.json`), so `nyxid catalog endpoints <slug>` returns real operations for the official slugs (LLM providers, GitHub, Slack, Discord, Telegram, Lark/Feishu incl. Bitable, Spotify, X, Microsoft Graph, Google, Reddit, Twitch, Facebook, Firecrawl) with no admin setup. The matching endpoint rows are materialized automatically at backend startup; they are what publishes concrete `service_id + endpoint_id` operations to MCP/workflow consumers. A user-mounted `--openapi-spec-url` on a catalog-backed service is honored only when the catalog template has no registered endpoint rows; registered template rows take precedence (official services are platform-managed).
+
 > For API key services, just run `nyxid service add <slug>` without flags. The CLI securely prompts for the key (input hidden). Never ask the user to paste secrets into chat or set environment variables manually.
 > For automation/scripting only: `--credential-env <VAR>` reads from an environment variable.
 > For multi-field credentials such as AWS access-key JSON: `--credential-file <PATH>` reads the credential bytes from a file. Pass `-` to read from stdin.

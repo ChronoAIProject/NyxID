@@ -23,8 +23,8 @@ use crate::models::ws_frame_injection::WsFrameInjection;
 use crate::mw::auth::{AuthUser, SERVICE_DELEGATION_SCOPES};
 use crate::services::url_validation::{validate_base_url, validate_optional_spec_url};
 use crate::services::{
-    anonymous_endpoint_service, api_docs_service, audit_service, oauth_client_service, ssh_service,
-    user_service_service,
+    anonymous_endpoint_service, api_docs_service, audit_service, catalog_spec_sync,
+    oauth_client_service, ssh_service, user_service_service,
 };
 use crate::telemetry::{TelemetryContext, TelemetryEvent, emit_event};
 
@@ -1095,6 +1095,17 @@ pub async fn create_service(
         },
     );
 
+    // Auto-run endpoint discovery when the new service already carries a
+    // spec URL so MCP tools and workflow operations appear without a
+    // manual discover-endpoints call (#1290 follow-up).
+    if new_service
+        .openapi_spec_url
+        .as_deref()
+        .is_some_and(|url| !url.is_empty())
+    {
+        catalog_spec_sync::spawn_spec_endpoint_sync(state.db.clone(), id.clone());
+    }
+
     // Brand-new catalog row -- no `UserService` can reference it yet,
     // so the viewer-routing fields default to "no binding" without a
     // lookup query.
@@ -1944,6 +1955,19 @@ pub async fn update_service(
 
     // Re-fetch the updated service to return fresh data
     let updated = fetch_service(&state, &service_id).await?;
+
+    // Auto-run endpoint discovery when the service now carries a spec URL
+    // but has no endpoint rows yet (zero-row guard lives inside the sync),
+    // so setting openapi_spec_url is enough to surface MCP tools and
+    // workflow operations without a manual discover-endpoints call
+    // (#1290 follow-up).
+    if updated
+        .openapi_spec_url
+        .as_deref()
+        .is_some_and(|url| !url.is_empty())
+    {
+        catalog_spec_sync::spawn_spec_endpoint_sync(state.db.clone(), service_id.clone());
+    }
 
     emit_event(
         state.telemetry.as_deref(),
