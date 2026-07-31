@@ -476,6 +476,21 @@ async fn main() {
         .await
         .expect("Failed to sync seeded catalog spec endpoints");
 
+    // Auto-run endpoint discovery for admin catalog services that have an
+    // openapi_spec_url but never had discover-endpoints run (#1290
+    // follow-up). Remote spec fetches run in the background so a slow or
+    // unreachable URL never blocks startup.
+    {
+        let db = db.clone();
+        tokio::spawn(async move {
+            if let Err(error) =
+                services::catalog_spec_sync::sync_spec_backed_service_endpoints(&db).await
+            {
+                tracing::error!(%error, "Spec-backed endpoint sync sweep failed");
+            }
+        });
+    }
+
     // Heal UserService rows whose `auth_method` was snapshotted as the raw
     // catalog `"none"` instead of the SPR-derived injection config, which
     // stops the proxy from injecting the caller's stored credential.

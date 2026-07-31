@@ -188,6 +188,8 @@ GET /api/v1/catalog-specs/{spec_key}/openapi.json
 
 Catalog-backed user services whose catalog template has **no** registered endpoint rows fall through to the instance's user-mounted `openapi_spec_url` (set via `nyxid service update --openapi-spec-url`) instead of publishing an empty operation set. Registered catalog rows keep precedence when they exist.
 
+Admin-created catalog services get the same treatment: any active HTTP service with an `openapi_spec_url` and **zero** endpoint rows has discovery run automatically -- once at startup (background sweep) and whenever an admin creates or updates the service with a spec URL. The fetch uses the hardened SSRF-checked path, so spec URLs on private/internal hosts still require the manual `POST /services/{id}/discover-endpoints` route. Services with any existing endpoint rows are never touched automatically; re-run manual discovery to refresh them.
+
 To extend coverage: add a JSON overlay under `backend/specs/catalog/`, register it in `HOSTED_SPEC_SOURCES` and `SLUG_TO_SPEC_KEY`, and the seed, backfill, sync, and serving paths all pick it up.
 
 ---

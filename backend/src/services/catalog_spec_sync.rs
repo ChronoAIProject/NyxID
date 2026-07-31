@@ -16,6 +16,7 @@
 //!   soft-deleted (unlike the admin discover-endpoints route, which
 //!   reconciles the full set).
 
+use futures::TryStreamExt;
 use mongodb::bson::doc;
 
 use crate::errors::AppResult;
@@ -66,13 +67,147 @@ pub async fn sync_seeded_service_endpoints(db: &mongodb::Database) -> AppResult<
     Ok(())
 }
 
+/// Auto-run endpoint discovery for catalog services that have an
+/// `openapi_spec_url` but never had `discover-endpoints` run.
+///
+/// Historically an admin could set a spec URL on a service and still get no
+/// `ServiceEndpoint` rows (and therefore no MCP tools and no workflow
+/// operations) until someone manually called
+/// `POST /services/{id}/discover-endpoints`. This sweep closes that gap for
+/// every active HTTP catalog service with a spec URL and **zero** endpoint
+/// rows. Services with any existing rows (active or soft-deleted) are left
+/// alone -- discovery already ran there, and re-running it automatically
+/// could resurrect rows an admin deliberately removed.
+///
+/// Spec fetches go through the hardened `fetch_spec_json` path (SSRF
+/// checks, size limit, cache), so spec URLs on private/internal hosts are
+/// not fetched automatically -- the manual admin discover-endpoints route
+/// remains the path for those. Failures are logged per service and never
+/// abort the sweep.
+pub async fn sync_spec_backed_service_endpoints(db: &mongodb::Database) -> AppResult<()> {
+    let service_col = db.collection::<DownstreamService>(DOWNSTREAM_SERVICES);
+    let services: Vec<DownstreamService> = service_col
+        .find(doc! {
+            "is_active": true,
+            "service_type": "http",
+            "openapi_spec_url": { "$type": "string", "$ne": "" },
+        })
+        .await?
+        .try_collect()
+        .await?;
+
+    for service in services {
+        sync_service_endpoints_from_spec_url(db, &service).await;
+    }
+    Ok(())
+}
+
+/// Fire-and-forget wrapper for the admin create/update handlers: re-reads
+/// the service and runs the zero-row-guarded discovery in the background so
+/// a slow or unreachable spec URL never delays the HTTP response.
+pub fn spawn_spec_endpoint_sync(db: mongodb::Database, service_id: String) {
+    tokio::spawn(async move {
+        let service = match db
+            .collection::<DownstreamService>(DOWNSTREAM_SERVICES)
+            .find_one(doc! { "_id": &service_id, "is_active": true, "service_type": "http" })
+            .await
+        {
+            Ok(Some(service)) => service,
+            Ok(None) => return,
+            Err(error) => {
+                tracing::warn!(service_id = %service_id, %error, "Spec endpoint sync: failed to load service");
+                return;
+            }
+        };
+        if service
+            .openapi_spec_url
+            .as_deref()
+            .is_none_or(str::is_empty)
+        {
+            return;
+        }
+        sync_service_endpoints_from_spec_url(&db, &service).await;
+    });
+}
+
+/// Zero-row-guarded discovery for one service. Logs and returns on any
+/// failure instead of erroring so callers (startup sweep, admin handlers)
+/// are never blocked by a broken spec URL.
+async fn sync_service_endpoints_from_spec_url(db: &mongodb::Database, service: &DownstreamService) {
+    let Some(spec_url) = service.openapi_spec_url.as_deref() else {
+        return;
+    };
+
+    let existing_rows = match db
+        .collection::<crate::models::service_endpoint::ServiceEndpoint>(
+            crate::models::service_endpoint::COLLECTION_NAME,
+        )
+        .count_documents(doc! { "service_id": &service.id })
+        .await
+    {
+        Ok(count) => count,
+        Err(error) => {
+            tracing::warn!(slug = %service.slug, %error, "Spec endpoint sync: failed to count endpoints");
+            return;
+        }
+    };
+    if existing_rows > 0 {
+        return; // Discovery already ran (or rows were curated); leave alone.
+    }
+
+    let spec = match crate::services::api_docs_service::fetch_spec_json(spec_url).await {
+        Ok(spec) => spec,
+        Err(error) => {
+            tracing::warn!(
+                slug = %service.slug,
+                spec_url = %crate::services::api_docs_service::redact_url_for_logs(spec_url),
+                %error,
+                "Spec endpoint sync: failed to fetch OpenAPI spec; run discover-endpoints manually"
+            );
+            return;
+        }
+    };
+
+    let inputs = match endpoint_inputs_from_spec(&spec) {
+        Ok(inputs) if !inputs.is_empty() => inputs,
+        Ok(_) => {
+            tracing::warn!(slug = %service.slug, "Spec endpoint sync: spec contained no operations");
+            return;
+        }
+        Err(error) => {
+            tracing::warn!(slug = %service.slug, %error, "Spec endpoint sync: spec failed validation");
+            return;
+        }
+    };
+
+    let count = inputs.len();
+    match upsert_endpoints_additive(db, &service.id, inputs).await {
+        Ok(_) => {
+            tracing::info!(
+                slug = %service.slug,
+                service_id = %service.id,
+                endpoint_count = count,
+                "Auto-discovered service endpoints from openapi_spec_url"
+            );
+        }
+        Err(error) => {
+            tracing::warn!(slug = %service.slug, %error, "Spec endpoint sync: failed to upsert endpoints");
+        }
+    }
+}
+
 /// Parse and validate the hosted overlay for a slug into endpoint inputs.
 fn seeded_endpoint_inputs(slug: &str) -> AppResult<Vec<EndpointInput>> {
     let spec = catalog_spec_registry::spec_for_slug(slug).ok_or_else(|| {
         crate::errors::AppError::Internal(format!("no hosted catalog spec registered for '{slug}'"))
     })?;
+    endpoint_inputs_from_spec(&spec)
+}
 
-    let parsed = openapi_parser::parse_openapi_spec_value(&spec)?;
+/// Parse and validate an OpenAPI document into endpoint inputs, applying
+/// the same per-endpoint validation as the admin discover-endpoints route.
+fn endpoint_inputs_from_spec(spec: &serde_json::Value) -> AppResult<Vec<EndpointInput>> {
+    let parsed = openapi_parser::parse_openapi_spec_value(spec)?;
     let mut inputs = Vec::with_capacity(parsed.len());
     for endpoint in parsed {
         if let Some(content_type) = endpoint.request_content_type.as_deref() {
@@ -123,6 +258,97 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[tokio::test]
+    async fn spec_backed_sweep_discovers_admin_service_endpoints_once() {
+        let Some(db) = crate::test_utils::connect_test_database("catalog_spec_url_sweep").await
+        else {
+            eprintln!("skipping: no MongoDB");
+            return;
+        };
+        let _cache_guard = crate::services::api_docs_service::SpecCacheTestGuard::acquire();
+
+        const SPEC_URL: &str = "https://example.com/admin-service-openapi.json";
+        let mut service = crate::models::downstream_service::test_helpers::dummy_service();
+        service.id = uuid::Uuid::new_v4().to_string();
+        service.slug = "admin-custom-api".to_string();
+        service.created_by = uuid::Uuid::new_v4().to_string();
+        service.openapi_spec_url = Some(SPEC_URL.to_string());
+        db.collection::<DownstreamService>(DOWNSTREAM_SERVICES)
+            .insert_one(&service)
+            .await
+            .expect("insert admin service");
+
+        crate::services::api_docs_service::cache_test_spec(
+            SPEC_URL,
+            None,
+            serde_json::json!({
+                "openapi": "3.1.0",
+                "info": { "title": "Admin API", "version": "1.0.0" },
+                "paths": {
+                    "/widgets": {
+                        "get": {
+                            "operationId": "list_widgets",
+                            "responses": {
+                                "200": {
+                                    "description": "ok",
+                                    "content": {
+                                        "application/json": {
+                                            "schema": { "type": "object" }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }),
+        );
+
+        sync_spec_backed_service_endpoints(&db)
+            .await
+            .expect("spec-backed sweep");
+
+        let endpoints = crate::services::service_endpoint_service::list_endpoints(&db, &service.id)
+            .await
+            .expect("list endpoints");
+        assert_eq!(endpoints.len(), 1);
+        assert_eq!(endpoints[0].name, "list_widgets");
+        assert_eq!(endpoints[0].method, "GET");
+        assert_eq!(endpoints[0].path, "/widgets");
+
+        // A service that already has rows must be left alone: replace the
+        // cached spec with a different document and re-run the sweep.
+        crate::services::api_docs_service::cache_test_spec(
+            SPEC_URL,
+            None,
+            serde_json::json!({
+                "openapi": "3.1.0",
+                "info": { "title": "Admin API", "version": "2.0.0" },
+                "paths": {
+                    "/gadgets": {
+                        "get": {
+                            "operationId": "list_gadgets",
+                            "responses": {
+                                "200": { "description": "ok" }
+                            }
+                        }
+                    }
+                }
+            }),
+        );
+        sync_spec_backed_service_endpoints(&db)
+            .await
+            .expect("second sweep");
+        let after = crate::services::service_endpoint_service::list_endpoints(&db, &service.id)
+            .await
+            .expect("list endpoints again");
+        assert_eq!(after.len(), 1);
+        assert_eq!(
+            after[0].name, "list_widgets",
+            "existing rows must not be replaced"
+        );
     }
 
     #[tokio::test]
