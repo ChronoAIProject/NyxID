@@ -210,6 +210,307 @@ describe("ChatComposer IME handling", () => {
   });
 });
 
+/**
+ * Park focus on the body, the way a browser does when the element holding it
+ * is disabled. jsdom's `blur()` is a no-op on a disabled element, so focus a
+ * throwaway node and remove it instead.
+ */
+function dropFocusToBody() {
+  const scratch = document.createElement("button");
+  document.body.append(scratch);
+  scratch.focus();
+  scratch.remove();
+}
+
+describe("ChatComposer focus", () => {
+  beforeEach(() => {
+    localStorage.clear();
+    useAssistantDraftStore.setState({ ownerUserId: null, drafts: {} });
+  });
+
+  afterEach(() => {
+    vi.unstubAllGlobals();
+  });
+
+  it("holds focus as soon as the chat is on screen", () => {
+    render(<ChatComposer {...baseProps} draftKey="conv:one" />);
+
+    expect(screen.getByRole("textbox")).toHaveFocus();
+  });
+
+  it("follows the reader into a newly selected conversation, caret last", () => {
+    useAssistantDraftStore
+      .getState()
+      .saveDraft("user-1", "conv:two", "Half-written");
+    const { rerender } = render(
+      <ChatComposer {...baseProps} draftKey="conv:one" focusRequest={1} />,
+    );
+    // Selecting a conversation means clicking its sidebar row, so the composer
+    // has to take focus back off whatever was clicked.
+    const elsewhere = document.createElement("button");
+    document.body.append(elsewhere);
+    elsewhere.focus();
+    expect(elsewhere).toHaveFocus();
+
+    rerender(
+      <ChatComposer {...baseProps} draftKey="conv:two" focusRequest={2} />,
+    );
+
+    const textarea = screen.getByRole("textbox") as HTMLTextAreaElement;
+    expect(textarea).toHaveFocus();
+    expect(textarea.selectionStart).toBe("Half-written".length);
+    expect(textarea.selectionEnd).toBe("Half-written".length);
+    elsewhere.remove();
+  });
+
+  it("still lands in the new conversation when the old one was mid-turn", () => {
+    // Selecting away from a running turn changes `active` and the selection in
+    // one render. Reading that as "a turn just ended" would apply the
+    // leave-focus-alone rule to the sidebar row the reader just clicked.
+    const { rerender } = render(
+      <ChatComposer {...baseProps} active draftKey="conv:one" focusRequest={1} />,
+    );
+    const sidebarRow = document.createElement("button");
+    document.body.append(sidebarRow);
+    sidebarRow.focus();
+
+    rerender(
+      <ChatComposer {...baseProps} draftKey="conv:two" focusRequest={2} />,
+    );
+
+    expect(screen.getByRole("textbox")).toHaveFocus();
+    sidebarRow.remove();
+  });
+
+  it("holds a focus request that arrives while a turn owns the field", () => {
+    // A conversation selected while its own turn is still running cannot take
+    // focus yet — the request has to survive until the field comes back.
+    const { rerender } = render(
+      <ChatComposer {...baseProps} active draftKey="conv:one" focusRequest={1} />,
+    );
+    rerender(
+      <ChatComposer {...baseProps} active draftKey="conv:two" focusRequest={2} />,
+    );
+    expect(screen.getByRole("textbox")).not.toHaveFocus();
+
+    rerender(
+      <ChatComposer {...baseProps} draftKey="conv:two" focusRequest={2} />,
+    );
+
+    expect(screen.getByRole("textbox")).toHaveFocus();
+  });
+
+  it("ignores a draft-key change nobody asked for", () => {
+    // Canonical-id repair, confirmed-stale cleanup and the first send's
+    // migration all rewrite the URL on their own. None of them is a request to
+    // start typing, so focus must stay where the reader put it.
+    const { rerender } = render(
+      <ChatComposer {...baseProps} draftKey="conv:source" focusRequest={1} />,
+    );
+    const themeToggle = document.createElement("button");
+    document.body.append(themeToggle);
+    themeToggle.focus();
+
+    rerender(
+      <ChatComposer {...baseProps} draftKey="conv:canonical" focusRequest={1} />,
+    );
+
+    expect(themeToggle).toHaveFocus();
+    expect(screen.getByRole("textbox")).not.toHaveFocus();
+    themeToggle.remove();
+  });
+
+  it("still claims parked focus when the chat changes under browser Back", () => {
+    // History navigation moves between conversations without remounting the
+    // composer and without a request. Nobody is holding focus, so taking it is
+    // free — and leaving the caret out of the composer is the whole complaint.
+    const { rerender } = render(
+      <ChatComposer {...baseProps} draftKey="conv:one" focusRequest={1} />,
+    );
+    dropFocusToBody();
+
+    rerender(
+      <ChatComposer {...baseProps} draftKey="conv:two" focusRequest={1} />,
+    );
+
+    expect(screen.getByRole("textbox")).toHaveFocus();
+  });
+
+  it("does not restore focus to a reader who scrolled off during the turn", () => {
+    // Sending with Enter means the composer held focus, so the turn owes it
+    // back — until the reader scrolls the transcript or selects an answer.
+    // Those leave `activeElement` on the body, exactly like the disable did,
+    // so DOM focus alone cannot tell the two apart.
+    const { rerender } = render(
+      <ChatComposer {...baseProps} draftKey="conv:one" />,
+    );
+    expect(screen.getByRole("textbox")).toHaveFocus();
+
+    rerender(<ChatComposer {...baseProps} active draftKey="conv:one" />);
+    dropFocusToBody();
+    document.body.dispatchEvent(new Event("wheel", { bubbles: true }));
+
+    rerender(<ChatComposer {...baseProps} draftKey="conv:one" />);
+
+    expect(screen.getByRole("textbox")).not.toHaveFocus();
+  });
+
+  it("drops a held request once the reader goes somewhere else", () => {
+    // A request queued behind a long turn is a minutes-old intent by the time
+    // the field comes back; honouring it would yank focus off whatever the
+    // reader picked up in the meantime.
+    const { rerender } = render(
+      <ChatComposer {...baseProps} active draftKey="conv:one" focusRequest={1} />,
+    );
+    rerender(
+      <ChatComposer {...baseProps} active draftKey="conv:two" focusRequest={2} />,
+    );
+
+    const accountMenu = document.createElement("button");
+    document.body.append(accountMenu);
+    accountMenu.focus();
+    accountMenu.dispatchEvent(new Event("pointerdown", { bubbles: true }));
+
+    rerender(
+      <ChatComposer {...baseProps} draftKey="conv:two" focusRequest={2} />,
+    );
+
+    expect(accountMenu).toHaveFocus();
+    expect(screen.getByRole("textbox")).not.toHaveFocus();
+    accountMenu.remove();
+  });
+
+  it("watches from the send, not from the turn going active", () => {
+    // A first send waits on conversation creation and cache projection before
+    // the transport says `running`, so `sending && !active` can last seconds.
+    // Movement inside that window counts.
+    const { rerender } = render(
+      <ChatComposer {...baseProps} draftKey="conv:one" />,
+    );
+    expect(screen.getByRole("textbox")).toHaveFocus();
+
+    rerender(<ChatComposer {...baseProps} sending draftKey="conv:one" />);
+    document.body.dispatchEvent(new Event("wheel", { bubbles: true }));
+
+    rerender(
+      <ChatComposer {...baseProps} sending active draftKey="conv:one" />,
+    );
+    dropFocusToBody();
+    rerender(<ChatComposer {...baseProps} active draftKey="conv:one" />);
+    rerender(<ChatComposer {...baseProps} draftKey="conv:one" />);
+
+    expect(screen.getByRole("textbox")).not.toHaveFocus();
+  });
+
+  it("does not let one turn's verdict veto an unrelated later focus", () => {
+    // The reader moves on mid-turn and the turn ends with focus still on the
+    // control they moved to, so nothing consumes the verdict. It must not
+    // survive to suppress the next parked draft-key move.
+    const { rerender } = render(
+      <ChatComposer {...baseProps} draftKey="conv:one" />,
+    );
+    rerender(<ChatComposer {...baseProps} active draftKey="conv:one" />);
+    const menu = document.createElement("button");
+    document.body.append(menu);
+    menu.focus();
+    menu.dispatchEvent(new Event("pointerdown", { bubbles: true }));
+
+    rerender(<ChatComposer {...baseProps} draftKey="conv:one" />);
+    expect(menu).toHaveFocus();
+
+    // Later: the menu closes, then browser Back moves to another chat.
+    menu.remove();
+    rerender(<ChatComposer {...baseProps} draftKey="conv:two" />);
+
+    expect(screen.getByRole("textbox")).toHaveFocus();
+  });
+
+  it("does not count typing in the composer itself as moving on", () => {
+    const { rerender } = render(
+      <ChatComposer {...baseProps} draftKey="conv:one" />,
+    );
+    const textarea = screen.getByRole("textbox");
+
+    rerender(<ChatComposer {...baseProps} active draftKey="conv:one" />);
+    textarea.dispatchEvent(new Event("keydown", { bubbles: true }));
+    dropFocusToBody();
+
+    rerender(<ChatComposer {...baseProps} draftKey="conv:one" />);
+
+    expect(screen.getByRole("textbox")).toHaveFocus();
+  });
+
+  it("takes focus back when the turn that disabled it ends", () => {
+    // A disabled textarea drops focus to the body; without this the reader has
+    // to click back into the composer after every single answer.
+    const { rerender } = render(
+      <ChatComposer {...baseProps} draftKey="conv:one" />,
+    );
+    expect(screen.getByRole("textbox")).toHaveFocus();
+
+    rerender(<ChatComposer {...baseProps} active draftKey="conv:one" />);
+    // jsdom does not drop focus when an element is disabled; browsers do.
+    dropFocusToBody();
+    expect(screen.getByRole("textbox")).not.toHaveFocus();
+
+    rerender(<ChatComposer {...baseProps} draftKey="conv:one" />);
+
+    expect(screen.getByRole("textbox")).toHaveFocus();
+  });
+
+  it("does not grab focus from a reader who was not in the composer", () => {
+    // The turn took nothing from them, so it has nothing to give back — a
+    // reader scrolling the transcript stays where they are.
+    const { rerender } = render(
+      <ChatComposer {...baseProps} draftKey="conv:one" />,
+    );
+    dropFocusToBody();
+    expect(screen.getByRole("textbox")).not.toHaveFocus();
+
+    rerender(<ChatComposer {...baseProps} active draftKey="conv:one" />);
+    rerender(<ChatComposer {...baseProps} draftKey="conv:one" />);
+
+    expect(screen.getByRole("textbox")).not.toHaveFocus();
+  });
+
+  it("leaves focus alone when a turn ends under someone's hands", () => {
+    // Turns finish on their own schedule — often while the reader is part-way
+    // through an approval card. Yanking focus out of that is worse than the
+    // click it saves.
+    const { rerender } = render(
+      <ChatComposer {...baseProps} draftKey="conv:one" />,
+    );
+    expect(screen.getByRole("textbox")).toHaveFocus();
+
+    rerender(<ChatComposer {...baseProps} active draftKey="conv:one" />);
+    const approve = document.createElement("button");
+    document.body.append(approve);
+    approve.focus();
+
+    rerender(<ChatComposer {...baseProps} draftKey="conv:one" />);
+
+    expect(approve).toHaveFocus();
+    expect(screen.getByRole("textbox")).not.toHaveFocus();
+    approve.remove();
+  });
+
+  it("does not raise the on-screen keyboard on a touch device", () => {
+    vi.stubGlobal(
+      "matchMedia",
+      vi.fn((query: string) => ({
+        matches: query === "(pointer: coarse)",
+        media: query,
+        addEventListener: vi.fn(),
+        removeEventListener: vi.fn(),
+      })),
+    );
+
+    render(<ChatComposer {...baseProps} draftKey="conv:one" />);
+
+    expect(screen.getByRole("textbox")).not.toHaveFocus();
+  });
+});
+
 let resizeCallbacks: ResizeObserverCallback[];
 
 class ResizeObserverMock {

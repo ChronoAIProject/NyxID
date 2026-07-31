@@ -15,7 +15,7 @@ import {
  * Flow 2 — Chatting.
  *
  * The contract, in order: the sent message appears immediately; a thinking
- * state (halo + domino dots) holds the floor until the first streamed content;
+ * state (halo + thinking dots) holds the floor until the first streamed content;
  * the loader leaves the accessibility tree as content arrives and then exits;
  * the turn completes with the full answer and its tool ledger on screen; the
  * red empty-turn error never appears on a turn that answered.
