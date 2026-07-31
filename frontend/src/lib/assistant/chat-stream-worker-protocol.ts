@@ -1,8 +1,47 @@
 export const CHAT_STREAM_BATCH_INTERVAL_MS = 50;
 export const CHAT_STREAM_MAX_BATCH_FRAMES = 256;
-export const CHAT_STREAM_MAX_ERROR_BODY_CHARS = 65_536;
+export const CHAT_STREAM_MAX_BODY_BYTES = 64 * 1024;
+export const CHAT_STREAM_MAX_WIRE_BYTES = 512 * 1024;
+export const CHAT_STREAM_MAX_WIRE_BATCH_BYTES = 32 * 1024;
 
 export type ChatStreamFrame = Record<string, unknown>;
+
+export type ChatStreamWireOutcome =
+  | "complete"
+  | "cancelled"
+  | "network_error"
+  | "worker_error"
+  | "protocol_cancel";
+
+export interface ChatStreamWireLineFragment {
+  readonly text: string;
+  readonly ending?: "\n" | "\r\n" | "\r" | "";
+  readonly fragment: boolean;
+}
+
+export type ChatStreamWireEvent =
+  | {
+      readonly type: "lines";
+      readonly requestId: string;
+      readonly lines: readonly {
+        readonly text: string;
+        readonly ending: "\n" | "\r\n" | "\r" | "";
+      }[];
+      readonly bytes: number;
+      readonly truncated: boolean;
+    }
+  | {
+      readonly type: "body";
+      readonly requestId: string;
+      readonly text: string;
+      readonly bytes: number;
+      readonly truncated: boolean;
+    }
+  | {
+      readonly type: "end";
+      readonly requestId: string;
+      readonly outcome: ChatStreamWireOutcome;
+    };
 
 export type ChatStreamWorkerCommand =
   | {
@@ -29,6 +68,25 @@ export type ChatStreamWorkerMessage =
       readonly type: "stream.batch";
       readonly requestId: string;
       readonly frames: readonly ChatStreamFrame[];
+    }
+  | {
+      readonly type: "stream.wire_batch";
+      readonly requestId: string;
+      readonly fragments: readonly ChatStreamWireLineFragment[];
+      readonly bytes: number;
+      readonly truncated: boolean;
+    }
+  | {
+      readonly type: "stream.wire_body";
+      readonly requestId: string;
+      readonly text: string;
+      readonly bytes: number;
+      readonly truncated: boolean;
+    }
+  | {
+      readonly type: "stream.wire_end";
+      readonly requestId: string;
+      readonly outcome: ChatStreamWireOutcome;
     }
   | {
       readonly type: "stream.complete";

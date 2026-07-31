@@ -1,7 +1,12 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type {
+  ChatStreamWireLineFragment,
   ChatStreamWorkerCommand,
   ChatStreamWorkerMessage,
+} from "./chat-stream-worker-protocol";
+import {
+  CHAT_STREAM_MAX_WIRE_BATCH_BYTES,
+  CHAT_STREAM_MAX_WIRE_BYTES,
 } from "./chat-stream-worker-protocol";
 
 interface TestWorkerScope {
@@ -30,6 +35,21 @@ function messages(scope: TestWorkerScope): ChatStreamWorkerMessage[] {
   return scope.postMessage.mock.calls.map(([message]) => message);
 }
 
+function reassembleWireLines(
+  fragments: readonly ChatStreamWireLineFragment[],
+): Array<{ text: string; ending: string }> {
+  const lines: Array<{ text: string; ending: string }> = [];
+  let text = "";
+  for (const fragment of fragments) {
+    text += fragment.text;
+    if (fragment.fragment) continue;
+    lines.push({ text, ending: fragment.ending ?? "" });
+    text = "";
+  }
+  expect(text).toBe("");
+  return lines;
+}
+
 afterEach(() => {
   vi.unstubAllGlobals();
   vi.restoreAllMocks();
@@ -49,14 +69,14 @@ describe("chat stream worker", () => {
       },
     });
     const fetchMock = vi.fn().mockResolvedValue(
-        new Response(body, {
-          status: 200,
-          headers: {
-            "Content-Type": "text/event-stream",
-            "X-NyxID-Debug-Upstream-Log": "encoded-envelope-array",
-          },
-        }),
-      );
+      new Response(body, {
+        status: 200,
+        headers: {
+          "Content-Type": "text/event-stream",
+          "X-NyxID-Debug-Upstream-Log": "encoded-envelope-array",
+        },
+      }),
+    );
     vi.stubGlobal("fetch", fetchMock);
     const scope = await installWorker();
     send(scope, {
@@ -73,9 +93,11 @@ describe("chat stream worker", () => {
       type: "stream.response",
       debugUpstream: "encoded-envelope-array",
     });
-    expect((fetchMock.mock.calls[0]?.[1] as RequestInit).headers).toMatchObject({
-      "X-NyxID-Debug-Upstream": "1",
-    });
+    expect((fetchMock.mock.calls[0]?.[1] as RequestInit).headers).toMatchObject(
+      {
+        "X-NyxID-Debug-Upstream": "1",
+      },
+    );
 
     push(
       encoder.encode(
@@ -296,5 +318,298 @@ describe("chat stream worker", () => {
         requestId: "request-cancel",
       });
     });
+  });
+
+  it("tees exact SSE lines only when the debug gate is present", async () => {
+    const source = ': keepalive\r\ndata: {"type":"RUN_STARTED"}\n\nid: final\r';
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValueOnce(
+        new Response(source, {
+          status: 200,
+          headers: { "Content-Type": "text/event-stream; charset=utf-8" },
+        }),
+      )
+      .mockResolvedValueOnce(
+        new Response(source, {
+          status: 200,
+          headers: { "Content-Type": "text/event-stream; charset=utf-8" },
+        }),
+      );
+    vi.stubGlobal("fetch", fetchMock);
+    const scope = await installWorker();
+    send(scope, {
+      type: "stream.start",
+      requestId: "request-gated",
+      url: "/stream",
+      bodyText: "{}",
+      headers: { "X-NyxID-Debug-Upstream": "1" },
+    });
+    send(scope, {
+      type: "stream.start",
+      requestId: "request-ungated",
+      url: "/stream",
+      bodyText: "{}",
+    });
+
+    await vi.waitFor(() => {
+      expect(
+        messages(scope).filter((message) => message.type === "stream.complete"),
+      ).toHaveLength(2);
+    });
+    const gated = messages(scope).filter(
+      (message) =>
+        message.requestId === "request-gated" &&
+        message.type === "stream.wire_batch",
+    );
+    const fragments = gated.flatMap((message) => message.fragments);
+    expect(reassembleWireLines(fragments)).toEqual([
+      { text: ": keepalive", ending: "\r\n" },
+      { text: 'data: {"type":"RUN_STARTED"}', ending: "\n" },
+      { text: "", ending: "\n" },
+      { text: "id: final", ending: "\r" },
+    ]);
+    expect(gated.reduce((total, message) => total + message.bytes, 0)).toBe(
+      new TextEncoder().encode(source).byteLength,
+    );
+    expect(messages(scope)).toContainEqual({
+      type: "stream.wire_end",
+      requestId: "request-gated",
+      outcome: "complete",
+    });
+    expect(
+      messages(scope).some(
+        (message) =>
+          message.requestId === "request-ungated" &&
+          message.type.startsWith("stream.wire_"),
+      ),
+    ).toBe(false);
+  });
+
+  it("captures successful non-SSE and null-body responses as delivered bodies", async () => {
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValueOnce(
+        new Response('{"ok":true}', {
+          status: 200,
+          headers: { "Content-Type": "application/json" },
+        }),
+      )
+      .mockResolvedValueOnce(new Response(null, { status: 204 }));
+    vi.stubGlobal("fetch", fetchMock);
+    const scope = await installWorker();
+    for (const requestId of ["request-json", "request-empty"]) {
+      send(scope, {
+        type: "stream.start",
+        requestId,
+        url: "/stream",
+        bodyText: "{}",
+        headers: { "X-NyxID-Debug-Upstream": "1" },
+      });
+    }
+
+    await vi.waitFor(() => {
+      expect(
+        messages(scope).filter((message) => message.type === "stream.wire_end"),
+      ).toHaveLength(2);
+    });
+    expect(messages(scope)).toEqual(
+      expect.arrayContaining([
+        {
+          type: "stream.wire_body",
+          requestId: "request-json",
+          text: '{"ok":true}',
+          bytes: 11,
+          truncated: false,
+        },
+        {
+          type: "stream.wire_body",
+          requestId: "request-empty",
+          text: "",
+          bytes: 0,
+          truncated: false,
+        },
+        {
+          type: "stream.wire_end",
+          requestId: "request-empty",
+          outcome: "complete",
+        },
+      ]),
+    );
+    expect(
+      messages(scope).some(
+        (message) =>
+          message.requestId === "request-empty" &&
+          message.type === "stream.network_error",
+      ),
+    ).toBe(false);
+  });
+
+  it("reads an HTTP error body once and derives both error text and capture", async () => {
+    const pulls = vi.fn();
+    const body = new ReadableStream<Uint8Array>({
+      start(controller) {
+        pulls();
+        controller.enqueue(new TextEncoder().encode('{"code":"DOWN"}'));
+        controller.close();
+      },
+    });
+    vi.stubGlobal(
+      "fetch",
+      vi.fn().mockResolvedValue(
+        new Response(body, {
+          status: 502,
+          headers: {
+            "Content-Type": "application/json",
+            "X-NyxID-Debug-Upstream-Log": "encoded",
+          },
+        }),
+      ),
+    );
+    const scope = await installWorker();
+    send(scope, {
+      type: "stream.start",
+      requestId: "request-error-capture",
+      url: "/stream",
+      bodyText: "{}",
+      headers: { "X-NyxID-Debug-Upstream": "1" },
+    });
+
+    await vi.waitFor(() => {
+      expect(messages(scope)).toContainEqual({
+        type: "stream.http_error",
+        requestId: "request-error-capture",
+        status: 502,
+        body: '{"code":"DOWN"}',
+        debugUpstream: "encoded",
+      });
+    });
+    expect(pulls).toHaveBeenCalledOnce();
+    expect(messages(scope)).toContainEqual({
+      type: "stream.wire_body",
+      requestId: "request-error-capture",
+      text: '{"code":"DOWN"}',
+      bytes: 15,
+      truncated: false,
+    });
+  });
+
+  it("fragments oversized lines into byte-bounded posts and keeps truncation orthogonal", async () => {
+    const oversizedLine = `data: ${"x".repeat(40_000)}\n`;
+    const source = `${oversizedLine}${"#".repeat(CHAT_STREAM_MAX_WIRE_BYTES + 1)}`;
+    vi.stubGlobal(
+      "fetch",
+      vi.fn().mockResolvedValue(
+        new Response(source, {
+          status: 200,
+          headers: { "Content-Type": "text/event-stream" },
+        }),
+      ),
+    );
+    const scope = await installWorker();
+    send(scope, {
+      type: "stream.start",
+      requestId: "request-fragmented",
+      url: "/stream",
+      bodyText: "{}",
+      headers: { "X-NyxID-Debug-Upstream": "1" },
+    });
+
+    await vi.waitFor(() => {
+      expect(messages(scope)).toContainEqual({
+        type: "stream.wire_end",
+        requestId: "request-fragmented",
+        outcome: "complete",
+      });
+    });
+    const wireBatches = messages(scope).filter(
+      (message) => message.type === "stream.wire_batch",
+    );
+    expect(wireBatches.length).toBeGreaterThan(1);
+    expect(
+      wireBatches.every(
+        (message) =>
+          new TextEncoder().encode(JSON.stringify(message)).byteLength <=
+          CHAT_STREAM_MAX_WIRE_BATCH_BYTES,
+      ),
+    ).toBe(true);
+    expect(wireBatches.some((message) => message.truncated)).toBe(true);
+    const firstLine = reassembleWireLines(
+      wireBatches.flatMap((message) => message.fragments),
+    )[0];
+    expect(firstLine).toEqual({
+      text: oversizedLine.slice(0, -1),
+      ending: "\n",
+    });
+  });
+
+  it("flushes the retained tail and wire outcome before cancellation acknowledgement", async () => {
+    const encoder = new TextEncoder();
+    let push: (value: Uint8Array) => void = () => undefined;
+    let fail: (reason: unknown) => void = () => undefined;
+    let signal: AbortSignal | undefined;
+    const body = new ReadableStream<Uint8Array>({
+      start(controller) {
+        push = (value) => controller.enqueue(value);
+        fail = (reason) => controller.error(reason);
+      },
+    });
+    vi.stubGlobal(
+      "fetch",
+      vi.fn((_url: string, init?: RequestInit) => {
+        signal = init?.signal ?? undefined;
+        signal?.addEventListener("abort", () =>
+          fail(new DOMException("aborted", "AbortError")),
+        );
+        return Promise.resolve(
+          new Response(body, {
+            status: 200,
+            headers: { "Content-Type": "text/event-stream" },
+          }),
+        );
+      }),
+    );
+    const scope = await installWorker();
+    send(scope, {
+      type: "stream.start",
+      requestId: "request-cancel-wire",
+      url: "/stream",
+      bodyText: "{}",
+      headers: { "X-NyxID-Debug-Upstream": "1" },
+    });
+    await vi.waitFor(() => expect(signal).toBeDefined());
+    push(encoder.encode("data: partial"));
+    send(scope, { type: "stream.cancel", requestId: "request-cancel-wire" });
+
+    await vi.waitFor(() => {
+      expect(messages(scope)).toContainEqual({
+        type: "stream.cancelled",
+        requestId: "request-cancel-wire",
+      });
+    });
+    const all = messages(scope);
+    const fragments = all
+      .filter(
+        (message) =>
+          message.requestId === "request-cancel-wire" &&
+          message.type === "stream.wire_batch",
+      )
+      .flatMap((message) => message.fragments);
+    expect(reassembleWireLines(fragments)).toEqual([
+      { text: "data: partial", ending: "" },
+    ]);
+    const endIndex = all.findIndex(
+      (message) =>
+        message.type === "stream.wire_end" &&
+        message.requestId === "request-cancel-wire",
+    );
+    const acknowledgementIndex = all.findIndex(
+      (message) =>
+        message.type === "stream.cancelled" &&
+        message.requestId === "request-cancel-wire",
+    );
+    expect(all[endIndex]).toMatchObject({ outcome: "cancelled" });
+    expect(endIndex).toBeGreaterThanOrEqual(0);
+    expect(acknowledgementIndex).toBeGreaterThan(endIndex);
   });
 });
