@@ -5555,9 +5555,8 @@ describe("a conversation with no committed turn has no server transcript", () =>
   });
 });
 
-describe("typed new chats and legacy workflow compatibility", () => {
+describe("studio new chats and typed actor compatibility", () => {
   const TYPED_URL = "/api/v1/assistant/chat";
-  const TYPED_CONVERSATION = "nyxid-chat-4a1e60ebd1fd44f192bf4bb90e1812ae";
   const TYPED_TURN = "turn-typed-create-1";
   const WORKFLOW_URL = "/api/v1/assistant/workflow-chat";
   const WORKFLOW_CONVERSATION = "chatc-8bd999c402fb37d60cdcd81e3b78cfd";
@@ -5565,7 +5564,7 @@ describe("typed new chats and legacy workflow compatibility", () => {
   const RUN_ACTOR = "workflow-definition:studio:run:43bfe86961b44fc2a6422d0b";
   const ACTION_ACTOR = "nyxid-chat-workflow-action-1";
 
-  function workflowContextFrame(stateVersion: string): unknown {
+  function workflowContextFrame(stateVersion: string): ChatStreamFrame {
     return {
       timestamp: "1785297207163",
       custom: {
@@ -5582,7 +5581,7 @@ describe("typed new chats and legacy workflow compatibility", () => {
     };
   }
 
-  const WORKFLOW_PREAMBLE = [
+  const WORKFLOW_PREAMBLE: ChatStreamFrame[] = [
     workflowContextFrame("3"),
     {
       custom: {
@@ -5682,18 +5681,8 @@ describe("typed new chats and legacy workflow compatibility", () => {
     });
   }
 
-  it("cancels a typed first turn before its placeholder is canonicalized", async () => {
-    const mock = stubFetch((url, init) =>
-      url === TYPED_URL && init?.method === "POST"
-        ? sseResponse([
-            {
-              type: "RUN_STARTED",
-              actorId: TYPED_CONVERSATION,
-              turnId: TYPED_TURN,
-            },
-          ])
-        : undefined,
-    );
+  it("cancels a studio first turn before its placeholder is canonicalized", async () => {
+    const mock = stubFetch(routeWorkflow(WORKFLOW_PREAMBLE));
     const transport = new AevatarAssistantTransport();
     const conversation = await transport.createConversation();
     const events: TurnEvent[] = [];
@@ -5709,9 +5698,9 @@ describe("typed new chats and legacy workflow compatibility", () => {
       });
     });
 
-    expect(mock.mock.calls.some(([input]) => String(input) === TYPED_URL)).toBe(
-      false,
-    );
+    expect(
+      mock.mock.calls.some(([input]) => String(input) === WORKFLOW_URL),
+    ).toBe(false);
     expect((await transport.getHistory(conversation.id)).conversation.id).toBe(
       conversation.id,
     );
@@ -5719,22 +5708,20 @@ describe("typed new chats and legacy workflow compatibility", () => {
 
   it("resolves a canonical cancel address back to its placeholder-keyed run", async () => {
     const encoder = new TextEncoder();
-    let started = false;
+    let preambleSent = false;
     let releasePendingPull: (() => void) | undefined;
     const mock = stubFetch((url, init) => {
-      if (url === TYPED_URL && init?.method === "POST") {
+      if (url === WORKFLOW_URL && init?.method === "POST") {
         return new Response(
           new ReadableStream<Uint8Array>({
             pull(controller) {
-              if (!started) {
-                started = true;
+              if (!preambleSent) {
+                preambleSent = true;
                 controller.enqueue(
                   encoder.encode(
-                    `data: ${JSON.stringify({
-                      type: "RUN_STARTED",
-                      actorId: TYPED_CONVERSATION,
-                      turnId: TYPED_TURN,
-                    })}\n\n`,
+                    WORKFLOW_PREAMBLE.map(
+                      (frame) => `data: ${JSON.stringify(frame)}\n\n`,
+                    ).join(""),
                   ),
                 );
                 return;
@@ -5747,12 +5734,6 @@ describe("typed new chats and legacy workflow compatibility", () => {
           }),
           { status: 200, headers: { "Content-Type": "text/event-stream" } },
         );
-      }
-      if (
-        url === `${ASSISTANT_BASE}/conversations/${TYPED_CONVERSATION}/stop` &&
-        init?.method === "POST"
-      ) {
-        return jsonResponse({}, 202);
       }
       return undefined;
     });
@@ -5767,7 +5748,10 @@ describe("typed new chats and legacy workflow compatibility", () => {
         (event) => {
           events.push(event);
           if (event.event === "turn.status" && event.status === "running") {
-            transport.cancelActiveTurn(TYPED_CONVERSATION);
+            // `aevatar.chat.context` has already aliased the placeholder to
+            // the server `chatc-…` id; cancelling by that address must find
+            // the run still keyed under the placeholder.
+            transport.cancelActiveTurn(WORKFLOW_CONVERSATION);
           }
           if (event.event === "turn.completed") resolve();
         },
@@ -5779,85 +5763,62 @@ describe("typed new chats and legacy workflow compatibility", () => {
       status: "cancelled",
     });
     expect((await transport.getHistory(conversation.id)).conversation.id).toBe(
-      TYPED_CONVERSATION,
+      WORKFLOW_CONVERSATION,
     );
-    const stopCall = mock.mock.calls.find(([input, init]) =>
-      isTypedCommandRequest(
-        String(input),
-        init as RequestInit | undefined,
-        "task.stop",
+    // The workflow surface serves no `:stop`; the cancel is client-side only.
+    expect(
+      mock.mock.calls.some(([input, init]) =>
+        isTypedCommandRequest(
+          String(input),
+          init as RequestInit | undefined,
+          "task.stop",
+        ),
       ),
-    );
-    expect(stopCall).toBeDefined();
-    expect(stopCall?.[0]).toBe(TYPED_URL);
-    expect(JSON.parse(String(stopCall?.[1]?.body))).toMatchObject({
-      type: "task.stop",
-      conversationId: TYPED_CONVERSATION,
-      turnId: TYPED_TURN,
-      expectedStateVersion: 0,
-    });
+    ).toBe(false);
   });
 
-  it("creates a typed actor on the first turn and preserves its blocked action contract", async () => {
-    const fetchMock = stubFetch();
-    const streamMock = mockChatStreams(
-      (request) => {
-        const body = JSON.parse(request.bodyText) as {
-          type: string;
-          conversationId?: string;
-        };
+  it("creates a studio conversation on the first turn and preserves its blocked action contract", async () => {
+    const actionBodies: Record<string, unknown>[] = [];
+    const mock = stubFetch(
+      routeWorkflow([
+        ...WORKFLOW_PREAMBLE,
+        actionRequestFrame({
+          actorId: ACTION_ACTOR,
+          originTurnId: WORKFLOW_TURN,
+          params: {
+            catalogService: {
+              serviceSlug: "api-aws-cost-explorer",
+              requestedScopes: ["billing:read"],
+            },
+          },
+        }),
+        { runFinished: { threadId: RUN_ACTOR, status: "blocked" } },
+      ]),
+      (url, init) => {
         if (
-          request.url === TYPED_URL &&
-          body.type === "text" &&
-          !body.conversationId
+          url !== `${ASSISTANT_BASE}/conversations/${ACTION_ACTOR}/stream` ||
+          init?.method !== "POST"
         ) {
-          return {
-            frames: [
-              {
-                runStarted: {
-                  actorId: TYPED_CONVERSATION,
-                  turnId: TYPED_TURN,
-                },
-              },
-              actionRequestFrame({
-                actorId: TYPED_CONVERSATION,
-                originTurnId: TYPED_TURN,
-                params: {
-                  catalogService: {
-                    serviceSlug: "api-aws-cost-explorer",
-                    requestedScopes: ["billing:read"],
-                  },
-                },
-              }),
-              { type: "RUN_FINISHED", runFinished: { status: "blocked" } },
-            ],
-          };
+          return undefined;
         }
-        if (
-          request.url === TYPED_URL &&
-          body.type === "action.continue" &&
-          body.conversationId === TYPED_CONVERSATION
-        ) {
-          return {
-            frames: [
-              {
-                type: "RUN_STARTED",
-                actorId: TYPED_CONVERSATION,
-                turnId: "turn-action-continue-1",
-              },
-              { type: "RUN_FINISHED" },
-            ],
-          };
-        }
-        return undefined;
+        actionBodies.push(
+          JSON.parse(String(init.body)) as Record<string, unknown>,
+        );
+        return sseResponse([
+          {
+            type: "RUN_STARTED",
+            actorId: ACTION_ACTOR,
+            turnId: "turn-action-continue-1",
+          },
+          { type: "RUN_FINISHED" },
+        ]);
       },
     );
     const transport = new AevatarAssistantTransport();
     const conversation = await transport.createConversation();
-    expect(conversation.id.startsWith("nyxid-pending-")).toBe(true);
-    expect(conversation.id.startsWith("workflow-pending-")).toBe(false);
-    expect(streamMock).not.toHaveBeenCalled();
-    expect(fetchMock).not.toHaveBeenCalled();
+    expect(conversation.id.startsWith("workflow-pending-")).toBe(true);
+    expect(conversation.id.startsWith("nyxid-pending-")).toBe(false);
+    expect(mock).not.toHaveBeenCalled();
 
     const events = await collectWorkflowTurn(
       transport,
@@ -5865,23 +5826,34 @@ describe("typed new chats and legacy workflow compatibility", () => {
       "show api-aws-cost-explorer billing",
     );
 
-    const turnCall = streamMock.mock.calls.find(
-      ([request]) => request.url === TYPED_URL,
+    const turnCall = mock.mock.calls.find(
+      ([input]) => String(input) === WORKFLOW_URL,
     );
     expect(turnCall).toBeDefined();
-    const body = JSON.parse(String(turnCall?.[0].bodyText)) as {
-      type: string;
+    const body = JSON.parse(String(turnCall?.[1]?.body)) as {
       prompt: string;
-      clientRequestId: string;
+      commandId: string;
+      sessionId: string;
     };
-    expect(Object.keys(body)).toEqual(["type", "prompt", "clientRequestId"]);
+    // A new conversation sends prompt + commandId + sessionId ONLY: no
+    // `conversationId` (the backend fills `conversation.conversationId:
+    // null`) and no `type`, whose presence would divert the request to the
+    // typed actor handler instead of the studio workflow engine.
+    expect(Object.keys(body)).toEqual(["prompt", "commandId", "sessionId"]);
     expect(body).toEqual({
-      type: "text",
       prompt: "show api-aws-cost-explorer billing",
-      clientRequestId: body.clientRequestId,
+      commandId: body.commandId,
+      sessionId: body.sessionId,
     });
-    expect(body.clientRequestId).toMatch(/^[0-9a-f-]{36}$/);
-    expect(streamMock.mock.calls.some(([request]) => request.url === WORKFLOW_URL)).toBe(false);
+    expect(body.commandId).toMatch(/^[0-9a-f-]{36}$/);
+    expect(body.sessionId).toMatch(/^[0-9a-f-]{36}$/);
+    expect(
+      mock.mock.calls.some(
+        ([input, init]) =>
+          String(input) === TYPED_URL &&
+          (JSON.parse(String(init?.body)) as { type?: string }).type === "text",
+      ),
+    ).toBe(false);
 
     const terminal = events[events.length - 1];
     expect(terminal?.event === "turn.completed" && terminal.status).toBe(
@@ -5895,33 +5867,34 @@ describe("typed new chats and legacy workflow compatibility", () => {
     expect(actionCards[0]).toMatchObject({
       block: {
         action: "service.connect",
-        origin_turn_id: TYPED_TURN,
+        origin_turn_id: WORKFLOW_TURN,
         params: {
           service_slug: "api-aws-cost-explorer",
         },
       },
     });
 
-    // The first typed frame aliases the placeholder to its server actor.
+    // The first `aevatar.chat.context` frame aliases the placeholder to the
+    // server-minted chat-history id.
     const history = await transport.getHistory(conversation.id);
-    expect(history.conversation.id).toBe(TYPED_CONVERSATION);
+    expect(history.conversation.id).toBe(WORKFLOW_CONVERSATION);
     expect(history.messages.length).toBeGreaterThanOrEqual(2);
     (transport as unknown as { listFetchedAt: number }).listFetchedAt =
       Date.now();
     const listed = await transport.listConversations();
     expect(
-      listed.filter((item) => item.id === TYPED_CONVERSATION),
+      listed.filter((item) => item.id === WORKFLOW_CONVERSATION),
     ).toHaveLength(1);
     expect(listed.some((item) => item.id === conversation.id)).toBe(false);
 
     await new Promise<void>((resolve) => {
       const handle = transport.continueActions(
         conversation.id,
-        TYPED_TURN,
+        WORKFLOW_TURN,
         [
           {
             actionRequestId: "act-action-1",
-            originTurnId: TYPED_TURN,
+            originTurnId: WORKFLOW_TURN,
             disposition: "declined",
           },
         ],
@@ -5931,82 +5904,74 @@ describe("typed new chats and legacy workflow compatibility", () => {
       );
       expect(handle).not.toBeNull();
     });
-    const continueCall = streamMock.mock.calls.find(
-      ([request]) =>
-        request.url === TYPED_URL &&
-        JSON.parse(request.bodyText).type === "action.continue",
-    );
-    expect(continueCall).toBeDefined();
-    expect(JSON.parse(String(continueCall?.[0].bodyText))).toMatchObject({
+    // `action.continue` stays on the actor protocol, addressed to the actor
+    // the card frame named — never the `chatc-…` id, never `/workflow-chat`.
+    expect(actionBodies).toHaveLength(1);
+    expect(actionBodies[0]).toMatchObject({
       type: "action.continue",
-      conversationId: TYPED_CONVERSATION,
-      originTurnId: TYPED_TURN,
+      conversationId: ACTION_ACTOR,
+      originTurnId: WORKFLOW_TURN,
       actions: [
         {
           actionRequestId: "act-action-1",
-          originTurnId: TYPED_TURN,
+          originTurnId: WORKFLOW_TURN,
           disposition: "declined",
         },
       ],
     });
   });
 
-  it("keeps action-request fingerprints after typed-create adoption and still conflicts later reissues", async () => {
-    const streamMock = mockChatStreams(
-      (request) => {
-        const body = JSON.parse(request.bodyText) as {
-          type: string;
-          conversationId?: string;
+  it("keeps action-request fingerprints after studio adoption and still conflicts later reissues", async () => {
+    const FOLLOW_UP_TURN = "turn-workflow-follow-up-2";
+    const streamMock = mockChatStreams((request) => {
+      if (request.url !== WORKFLOW_URL) return undefined;
+      const body = JSON.parse(request.bodyText) as { conversationId?: string };
+      if (!body.conversationId) {
+        return {
+          frames: [
+            ...WORKFLOW_PREAMBLE,
+            actionRequestFrame({
+              actorId: ACTION_ACTOR,
+              originTurnId: WORKFLOW_TURN,
+            }),
+            { runFinished: { threadId: RUN_ACTOR, status: "blocked" } },
+          ],
         };
-        if (
-          request.url === TYPED_URL &&
-          body.type === "text" &&
-          !body.conversationId
-        ) {
-          return {
-            frames: [
-              {
-                type: "RUN_STARTED",
-                actorId: TYPED_CONVERSATION,
-                turnId: TYPED_TURN,
-              },
-              actionRequestFrame({
-                actorId: TYPED_CONVERSATION,
-                originTurnId: TYPED_TURN,
-              }),
-              { type: "RUN_FINISHED", runFinished: { status: "blocked" } },
-            ],
-          };
-        }
-        if (
-          request.url === TYPED_URL &&
-          body.type === "text" &&
-          body.conversationId === TYPED_CONVERSATION
-        ) {
-          return {
-            frames: [
-              {
-                type: "RUN_STARTED",
-                actorId: TYPED_CONVERSATION,
-                turnId: "turn-typed-follow-up-2",
-              },
-              actionRequestFrame({
-                actorId: TYPED_CONVERSATION,
-                originTurnId: "turn-typed-follow-up-2",
-                params: {
-                  catalogService: {
-                    serviceSlug: "api-lark",
-                    requestedScopes: ["messages:write"],
-                  },
+      }
+      if (body.conversationId === WORKFLOW_CONVERSATION) {
+        return {
+          frames: [
+            {
+              timestamp: "1785297207164",
+              custom: {
+                name: "aevatar.chat.context",
+                payload: {
+                  "@type":
+                    "type.googleapis.com/aevatar.workflow.runs.WorkflowChatContextPayload",
+                  scopeId: USER_ID,
+                  conversationId: WORKFLOW_CONVERSATION,
+                  turnId: FOLLOW_UP_TURN,
+                  stateVersion: "4",
                 },
-              }),
-              { type: "RUN_FINISHED", runFinished: { status: "blocked" } },
-            ],
-          };
-        }
-        return undefined;
-      },
-    );
+              },
+            },
+            { runStarted: { threadId: RUN_ACTOR, runId: RUN_ACTOR } },
+            actionRequestFrame({
+              actorId: ACTION_ACTOR,
+              originTurnId: FOLLOW_UP_TURN,
+              params: {
+                catalogService: {
+                  serviceSlug: "api-lark",
+                  requestedScopes: ["messages:write"],
+                },
+              },
+            }),
+            { runFinished: { threadId: RUN_ACTOR, status: "blocked" } },
+          ],
+        };
+      }
+      return undefined;
+    });
     const transport = new AevatarAssistantTransport();
     const conversation = await transport.createConversation();
 
@@ -6018,12 +5983,12 @@ describe("typed new chats and legacy workflow compatibility", () => {
     );
 
     expect(streamMock.mock.calls.map(([request]) => request.url)).toEqual([
-      TYPED_URL,
-      TYPED_URL,
+      WORKFLOW_URL,
+      WORKFLOW_URL,
     ]);
 
     const history = await transport.getHistory(conversation.id);
-    expect(history.conversation.id).toBe(TYPED_CONVERSATION);
+    expect(history.conversation.id).toBe(WORKFLOW_CONVERSATION);
     const cards = history.messages
       .flatMap((message) => message.blocks)
       .filter(
@@ -6032,7 +5997,7 @@ describe("typed new chats and legacy workflow compatibility", () => {
     expect(cards).toHaveLength(1);
     expect(cards[0]).toMatchObject({
       action_request_id: "act-action-1",
-      origin_turn_id: TYPED_TURN,
+      origin_turn_id: WORKFLOW_TURN,
       status: "conflicted",
       outcome_note:
         "This action request was reissued with conflicting details. NyxID kept the first request and disabled this card.",
@@ -6044,7 +6009,8 @@ describe("typed new chats and legacy workflow compatibility", () => {
     });
   });
 
-  it("continues typed conversations on their actor with a fresh request identity", async () => {
+  it("continues existing typed conversations on their actor with a fresh request identity", async () => {
+    let turnCounter = 0;
     const streamMock = mockChatStreams((request) => {
       const body = JSON.parse(request.bodyText) as {
         type: string;
@@ -6053,30 +6019,15 @@ describe("typed new chats and legacy workflow compatibility", () => {
       if (
         request.url === TYPED_URL &&
         body.type === "text" &&
-        !body.conversationId
+        body.conversationId === CONVERSATION_ID
       ) {
+        turnCounter += 1;
         return {
           frames: [
             {
               type: "RUN_STARTED",
-              actorId: TYPED_CONVERSATION,
-              turnId: TYPED_TURN,
-            },
-            { type: "RUN_FINISHED" },
-          ],
-        };
-      }
-      if (
-        request.url === TYPED_URL &&
-        body.type === "text" &&
-        body.conversationId === TYPED_CONVERSATION
-      ) {
-        return {
-          frames: [
-            {
-              type: "RUN_STARTED",
-              actorId: TYPED_CONVERSATION,
-              turnId: "turn-typed-follow-up-1",
+              actorId: CONVERSATION_ID,
+              turnId: `turn-typed-follow-up-${turnCounter}`,
             },
             { type: "RUN_FINISHED" },
           ],
@@ -6085,47 +6036,49 @@ describe("typed new chats and legacy workflow compatibility", () => {
       return undefined;
     });
     const transport = new AevatarAssistantTransport();
-    const conversation = await transport.createConversation();
+    // A `nyxid-chat-…` conversation predates the studio cutover; its
+    // transcript stays continuable on the typed actor surface.
+    const conversation = await seedActorConversation(transport);
 
     await collectWorkflowTurn(transport, conversation.id, "first");
-    await collectWorkflowTurn(transport, TYPED_CONVERSATION, "second");
+    await collectWorkflowTurn(transport, conversation.id, "second");
 
     const bodies = streamMock.mock.calls.map(([request]) => ({
       url: request.url,
       body: JSON.parse(request.bodyText) as Record<string, unknown>,
     }));
-    expect(bodies.map((entry) => entry.url)).toEqual([
-      TYPED_URL,
-      TYPED_URL,
-    ]);
-    expect(bodies[0]?.body).toMatchObject({ type: "text", prompt: "first" });
+    expect(bodies.map((entry) => entry.url)).toEqual([TYPED_URL, TYPED_URL]);
+    expect(bodies[0]?.body).toMatchObject({
+      type: "text",
+      conversationId: CONVERSATION_ID,
+      prompt: "first",
+    });
     expect(bodies[1]?.body).toMatchObject({
       type: "text",
-      conversationId: TYPED_CONVERSATION,
+      conversationId: CONVERSATION_ID,
       prompt: "second",
     });
     expect(bodies[0]?.body["clientRequestId"]).not.toBe(
       bodies[1]?.body["clientRequestId"],
     );
-    expect(streamMock.mock.calls.some(([request]) => request.url === WORKFLOW_URL)).toBe(false);
+    expect(
+      streamMock.mock.calls.some(([request]) => request.url === WORKFLOW_URL),
+    ).toBe(false);
   });
 
-  it("wakes a typed conversation out of band with an empty action list", async () => {
+  it("wakes an existing typed conversation out of band with an empty action list", async () => {
     const streamMock = mockChatStreams((request) => {
       const body = JSON.parse(request.bodyText) as {
         type: string;
         conversationId?: string;
       };
-      if (
-        request.url === TYPED_URL &&
-        body.type === "text" &&
-        !body.conversationId
-      ) {
+      if (request.url !== TYPED_URL) return undefined;
+      if (body.type === "text" && body.conversationId === CONVERSATION_ID) {
         return {
           frames: [
             {
               type: "RUN_STARTED",
-              actorId: TYPED_CONVERSATION,
+              actorId: CONVERSATION_ID,
               turnId: TYPED_TURN,
             },
             {
@@ -6138,15 +6091,14 @@ describe("typed new chats and legacy workflow compatibility", () => {
         };
       }
       if (
-        request.url === TYPED_URL &&
         body.type === "action.continue" &&
-        body.conversationId === TYPED_CONVERSATION
+        body.conversationId === CONVERSATION_ID
       ) {
         return {
           frames: [
             {
               type: "RUN_STARTED",
-              actorId: TYPED_CONVERSATION,
+              actorId: CONVERSATION_ID,
               turnId: "turn-typed-wake-1",
             },
             {
@@ -6161,7 +6113,7 @@ describe("typed new chats and legacy workflow compatibility", () => {
       return undefined;
     });
     const transport = new AevatarAssistantTransport();
-    const conversation = await transport.createConversation();
+    const conversation = await seedActorConversation(transport);
     await collectWorkflowTurn(transport, conversation.id, "wait for access");
 
     await new Promise<void>((resolve) => {
@@ -6174,10 +6126,7 @@ describe("typed new chats and legacy workflow compatibility", () => {
       url: request.url,
       body: JSON.parse(request.bodyText) as Record<string, unknown>,
     }));
-    expect(bodies.map((entry) => entry.url)).toEqual([
-      TYPED_URL,
-      TYPED_URL,
-    ]);
+    expect(bodies.map((entry) => entry.url)).toEqual([TYPED_URL, TYPED_URL]);
     expect(Object.keys(bodies[1]?.body ?? {})).toEqual([
       "type",
       "conversationId",
@@ -6187,7 +6136,7 @@ describe("typed new chats and legacy workflow compatibility", () => {
     ]);
     expect(bodies[1]?.body).toEqual({
       type: "action.continue",
-      conversationId: TYPED_CONVERSATION,
+      conversationId: CONVERSATION_ID,
       clientRequestId: bodies[1]?.body["clientRequestId"],
       originTurnId: TYPED_TURN,
       actions: [],
@@ -6195,7 +6144,9 @@ describe("typed new chats and legacy workflow compatibility", () => {
     expect(bodies[1]?.body["clientRequestId"]).not.toBe(
       bodies[0]?.body["clientRequestId"],
     );
-    expect(streamMock.mock.calls.some(([request]) => request.url === WORKFLOW_URL)).toBe(false);
+    expect(
+      streamMock.mock.calls.some(([request]) => request.url === WORKFLOW_URL),
+    ).toBe(false);
   });
 
   it("refuses to wake a legacy workflow conversation", async () => {
@@ -6214,20 +6165,26 @@ describe("typed new chats and legacy workflow compatibility", () => {
     ).toBe(false);
   });
 
-  it("fails closed when typed chat does not identify a nyxid-chat actor", async () => {
-    mockChatStreams((request) =>
-      request.url === TYPED_URL
-        ? {
-            frames: [
-              {
-                type: "RUN_STARTED",
-                actorId: WORKFLOW_CONVERSATION,
-                turnId: TYPED_TURN,
-              },
-              { type: "RUN_FINISHED" },
-            ],
-          }
-        : undefined,
+  it("fails closed when a studio stream does not identify its turn", async () => {
+    stubFetch(
+      routeWorkflow([
+        {
+          timestamp: "1785297207163",
+          custom: {
+            name: "aevatar.chat.context",
+            payload: {
+              "@type":
+                "type.googleapis.com/aevatar.workflow.runs.WorkflowChatContextPayload",
+              scopeId: USER_ID,
+              conversationId: WORKFLOW_CONVERSATION,
+              // No turnId: nothing downstream can be attributed to a turn.
+              stateVersion: "3",
+            },
+          },
+        },
+        { runStarted: { threadId: RUN_ACTOR, runId: RUN_ACTOR } },
+        { runFinished: { threadId: RUN_ACTOR } },
+      ]),
     );
     const transport = new AevatarAssistantTransport();
     const conversation = await transport.createConversation();
@@ -6292,6 +6249,125 @@ describe("typed new chats and legacy workflow compatibility", () => {
     expect(turnBodies[1]?.["conversationId"]).toBe(WORKFLOW_CONVERSATION);
     expect(turnBodies[1]?.["minimumStateVersion"]).toBe(3);
     expect(turnBodies[1]?.["commandId"]).not.toBe(turnBodies[0]?.["commandId"]);
+  });
+
+  it("reuses one sessionId for every turn of a conversation", async () => {
+    const mock = stubFetch(
+      routeWorkflow([
+        ...WORKFLOW_PREAMBLE,
+        { textMessageStart: { messageId: "wm-1" } },
+        { textMessageContent: { delta: "First." } },
+        { textMessageEnd: {} },
+        ...WORKFLOW_TAIL,
+      ]),
+    );
+    const transport = new AevatarAssistantTransport();
+    // Starts on the client placeholder, adopts `chatc-…` from the first
+    // turn's chat.context: the session must survive that re-key.
+    const conversation = await transport.createConversation();
+    await collectWorkflowTurn(transport, conversation.id, "first");
+    await collectWorkflowTurn(transport, conversation.id, "second");
+
+    const bodies = mock.mock.calls
+      .filter(([input]) => String(input) === WORKFLOW_URL)
+      .map(
+        ([, init]) => JSON.parse(String(init?.body)) as Record<string, unknown>,
+      );
+    expect(bodies).toHaveLength(2);
+    const sessionId = bodies[0]?.["sessionId"];
+    expect(sessionId).toMatch(/^[0-9a-f-]{36}$/);
+    // Same session across turns; the commandId still rotates per turn.
+    expect(bodies[1]?.["sessionId"]).toBe(sessionId);
+    expect(bodies[1]?.["commandId"]).not.toBe(bodies[0]?.["commandId"]);
+    // The create turn carries no conversationId, so it stays on the studio
+    // branch of the upstream dispatcher.
+    expect(bodies[0]?.["conversationId"]).toBeUndefined();
+    expect(bodies[1]?.["conversationId"]).toBe(WORKFLOW_CONVERSATION);
+  });
+
+  it("fails closed when a create turn never names its server conversation", async () => {
+    stubFetch(
+      routeWorkflow([
+        {
+          timestamp: "1785297207163",
+          custom: {
+            name: "aevatar.chat.context",
+            payload: {
+              "@type":
+                "type.googleapis.com/aevatar.workflow.runs.WorkflowChatContextPayload",
+              scopeId: USER_ID,
+              // No conversationId: accepting this would strand the record on
+              // its placeholder and mint a second conversation on the next
+              // send.
+              turnId: WORKFLOW_TURN,
+              stateVersion: "3",
+            },
+          },
+        },
+        { runStarted: { threadId: RUN_ACTOR, runId: RUN_ACTOR } },
+        { runFinished: { threadId: RUN_ACTOR } },
+      ]),
+    );
+    const transport = new AevatarAssistantTransport();
+    const conversation = await transport.createConversation();
+
+    const events = await collectWorkflowTurn(transport, conversation.id, "hi");
+
+    expect(events.at(-1)).toMatchObject({
+      event: "turn.completed",
+      status: "failed",
+      error: { code: "stream_protocol_error" },
+    });
+  });
+
+  it("rejects a replay that moves the turn to another conversation", async () => {
+    let attempt = 0;
+    mockChatStreams((request) => {
+      if (request.url !== WORKFLOW_URL) return undefined;
+      attempt += 1;
+      // The retry comes back on a different `chatc-…` than the one this run
+      // already adopted.
+      const conversationId =
+        attempt === 1
+          ? WORKFLOW_CONVERSATION
+          : "chatc-1111111111111111111111111111111";
+      return {
+        frames: [
+          {
+            timestamp: "1785297207163",
+            custom: {
+              name: "aevatar.chat.context",
+              payload: {
+                "@type":
+                  "type.googleapis.com/aevatar.workflow.runs.WorkflowChatContextPayload",
+                scopeId: USER_ID,
+                conversationId,
+                turnId: WORKFLOW_TURN,
+                stateVersion: "3",
+              },
+            },
+          },
+          { runStarted: { threadId: RUN_ACTOR, runId: RUN_ACTOR } },
+          { runFinished: { threadId: RUN_ACTOR } },
+        ],
+      };
+    });
+    const transport = new AevatarAssistantTransport();
+    const conversation = await transport.createConversation();
+    await collectWorkflowTurn(transport, conversation.id, "first");
+
+    // Second turn: the conversation has adopted WORKFLOW_CONVERSATION, and a
+    // context frame naming a different one must not silently re-key it.
+    const events = await collectWorkflowTurn(transport, conversation.id, "two");
+
+    expect(events.at(-1)).toMatchObject({
+      event: "turn.completed",
+      status: "failed",
+      error: { code: "stream_protocol_error" },
+    });
+    expect((await transport.getHistory(conversation.id)).conversation.id).toBe(
+      WORKFLOW_CONVERSATION,
+    );
   });
 
   it("maps runError to a failed turn with its upstream code", async () => {

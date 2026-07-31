@@ -18,8 +18,9 @@ export class AssistantTurnCancelledError extends Error {
 
 /**
  * The conversation does not exist for this transport: deleted (tombstoned),
- * never created, or a `nyxid-pending-*` placeholder whose in-memory mapping
- * did not survive a reload. This is the transports' CONFIRMED not-found
+ * never created, or a `workflow-pending-*` placeholder (or a legacy
+ * `nyxid-pending-*` one) whose in-memory mapping did not survive a reload.
+ * This is the transports' CONFIRMED not-found
  * sentinel — the page may treat it (alongside an HTTP 404) as license to
  * repair a stale `?c=` down to the draft state. Transient failures must stay
  * plain errors: repairing on those would turn a recoverable read into

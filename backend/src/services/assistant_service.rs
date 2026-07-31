@@ -1075,6 +1075,18 @@ pub struct WorkflowChatTurnRequest {
     /// same conversation/turn for a repeated id, 409s on payload mismatch).
     #[serde(default)]
     pub command_id: Option<String>,
+    /// Client-controlled session correlation handle, stable for the life of
+    /// one conversation. Aevatar's `HttpChatInput.SessionId` is optional and
+    /// falls back to the run's correlation id
+    /// (`WorkflowChatRequestEnvelopeFactory`), so this is correlation
+    /// plumbing, not conversation identity — chat continuity is carried by
+    /// `conversation.conversationId` + `minimumStateVersion`.
+    ///
+    /// It IS part of Aevatar's create-replay fingerprint
+    /// (`WorkflowChatCreateRequestFingerprint`), so a retry of the same
+    /// `commandId` MUST repeat the same value or the replay 409s.
+    #[serde(default)]
+    pub session_id: Option<String>,
 }
 
 /// Opaque client token (command ids): UUID-shaped material only, so nothing
@@ -1139,12 +1151,22 @@ pub fn workflow_chat_body(request: &WorkflowChatTurnRequest) -> AppResult<serde_
         None => uuid::Uuid::new_v4().to_string(),
     };
 
-    Ok(serde_json::json!({
+    let mut body = serde_json::json!({
         "commandId": command_id,
         "conversation": conversation,
         "prompt": request.prompt,
         "workflow": WORKFLOW_CHAT_WORKFLOW,
-    }))
+    });
+
+    // Omitted rather than sent null when the caller has none: Aevatar
+    // normalizes blank to null anyway, and an absent member keeps the body
+    // identical to the pre-sessionId shape for callers that never send one.
+    if let Some(session_id) = &request.session_id {
+        validate_client_token(session_id, "sessionId")?;
+        body["sessionId"] = serde_json::Value::String(session_id.clone());
+    }
+
+    Ok(body)
 }
 
 /// `api/ws/chat` -- WebSocket twin of the workflow chat
@@ -1752,6 +1774,67 @@ mod tests {
                 "prompt": "hi",
                 "workflow": "studio",
             })
+        );
+    }
+
+    /// Byte-for-byte parity with the reference create payload, `sessionId`
+    /// included.
+    #[test]
+    fn workflow_body_matches_the_reference_create_payload() {
+        let body = workflow_chat_body(&workflow_turn_request(json!({
+            "prompt": "1",
+            "commandId": "4380055d-e9c3-468e-bc93-64719a9f4658",
+            "sessionId": "91927706-e174-4544-8570-61fd263b6c87",
+        })))
+        .unwrap();
+        assert_eq!(
+            body,
+            json!({
+                "commandId": "4380055d-e9c3-468e-bc93-64719a9f4658",
+                "conversation": { "conversationId": null },
+                "prompt": "1",
+                "sessionId": "91927706-e174-4544-8570-61fd263b6c87",
+                "workflow": "studio",
+            })
+        );
+    }
+
+    /// Byte-for-byte parity with the reference continuation payload.
+    #[test]
+    fn workflow_body_matches_the_reference_continuation_payload() {
+        let body = workflow_chat_body(&workflow_turn_request(json!({
+            "prompt": "2",
+            "conversationId": "chatc-bd3fc31745343dc910773dad977eb24b",
+            "minimumStateVersion": 1,
+            "commandId": "1c2f4f0e-6a1d-4a7b-8d3c-5e9f0a1b2c3d",
+            "sessionId": "775668ff-d9fd-4023-a007-a9db572a4b3f",
+        })))
+        .unwrap();
+        assert_eq!(
+            body,
+            json!({
+                "commandId": "1c2f4f0e-6a1d-4a7b-8d3c-5e9f0a1b2c3d",
+                "conversation": {
+                    "conversationId": "chatc-bd3fc31745343dc910773dad977eb24b",
+                    "minimumStateVersion": 1,
+                },
+                "prompt": "2",
+                "sessionId": "775668ff-d9fd-4023-a007-a9db572a4b3f",
+                "workflow": "studio",
+            })
+        );
+    }
+
+    #[test]
+    fn workflow_body_omits_an_absent_session_id_and_rejects_a_malformed_one() {
+        let body = workflow_chat_body(&workflow_turn_request(json!({ "prompt": "hi" }))).unwrap();
+        assert!(body.get("sessionId").is_none());
+        assert!(
+            workflow_chat_body(&workflow_turn_request(json!({
+                "prompt": "hi",
+                "sessionId": "not a token/../",
+            })))
+            .is_err()
         );
     }
 
