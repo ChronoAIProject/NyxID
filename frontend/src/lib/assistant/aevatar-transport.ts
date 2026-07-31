@@ -50,6 +50,10 @@ import type {
   TurnStatus,
 } from "@/types/assistant";
 import { isTurnActive } from "@/types/assistant";
+import {
+  captureAssistantWireLogHeader,
+  useAssistantWireLogStore,
+} from "@/stores/assistant-wire-log-store";
 
 // NyxID's own assistant pass-through (PRD decision 4). NyxID resolves the
 // admin-managed aevatar service and derives the aevatar scope from the
@@ -57,6 +61,25 @@ import { isTurnActive } from "@/types/assistant";
 // cannot name a scope, and the surface does not depend on the caller having
 // personally connected aevatar.
 const ASSISTANT_PREFIX = "/assistant";
+const DEBUG_UPSTREAM_REQUEST_HEADER = "X-NyxID-Debug-Upstream";
+const DEBUG_UPSTREAM_RESPONSE_HEADER = "X-NyxID-Debug-Upstream-Log";
+
+function assistantWireLogOptions(): {
+  readonly headers?: Record<string, string>;
+  readonly onResponse?: (response: Response) => void;
+} {
+  if (!useAssistantWireLogStore.getState().captureEnabled) return {};
+  return {
+    headers: { [DEBUG_UPSTREAM_REQUEST_HEADER]: "1" },
+    onResponse: (response) => {
+      captureAssistantWireLogHeader(
+        response.headers.get(DEBUG_UPSTREAM_RESPONSE_HEADER),
+        "header",
+        response.status,
+      );
+    },
+  };
+}
 
 // A 401 from the assistant mount means the downstream (aevatar) rejected the
 // forwarded identity — page content failing, not the NyxID session dying — so
@@ -66,19 +89,24 @@ const ASSISTANT_PREFIX = "/assistant";
 // strict 401 handling.
 const assistantApi = {
   get<T>(endpoint: string): Promise<T> {
-    return apiClient<T>(endpoint, { preserveSessionOn401: true });
+    return apiClient<T>(endpoint, {
+      preserveSessionOn401: true,
+      ...assistantWireLogOptions(),
+    });
   },
   post<T>(endpoint: string, body?: unknown): Promise<T> {
     return apiClient<T>(endpoint, {
       method: "POST",
       body,
       preserveSessionOn401: true,
+      ...assistantWireLogOptions(),
     });
   },
   del<T>(endpoint: string): Promise<T> {
     return apiClient<T>(endpoint, {
       method: "DELETE",
       preserveSessionOn401: true,
+      ...assistantWireLogOptions(),
     });
   },
 } as const;
@@ -1069,6 +1097,7 @@ export class AevatarAssistantTransport implements AssistantTransport {
             method: "DELETE",
             preserveSessionOn401: true,
             signal: deadline.signal,
+            ...assistantWireLogOptions(),
           },
         );
       } finally {
@@ -2438,10 +2467,14 @@ export class AevatarAssistantTransport implements AssistantTransport {
   ): ChatStreamRequestHandle {
     let stream: ChatStreamRequestHandle | null = null;
     run.streamDispatched = true;
+    const captureEnabled = useAssistantWireLogStore.getState().captureEnabled;
     stream = chatStreamClient.start({
       url,
       bodyText,
       signal: run.controller.signal,
+      headers: captureEnabled
+        ? { [DEBUG_UPSTREAM_REQUEST_HEADER]: "1" }
+        : undefined,
       onFrames: (frames) => {
         for (const frame of frames) {
           this.handleAgUiFrame(conversationId, run, frame);
@@ -2452,6 +2485,18 @@ export class AevatarAssistantTransport implements AssistantTransport {
         }
       },
     });
+    if (captureEnabled) {
+      void stream.headers.then((response) => {
+        if (response.kind !== "response" && response.kind !== "http_error") {
+          return;
+        }
+        captureAssistantWireLogHeader(
+          response.debugUpstream,
+          "sse",
+          response.status,
+        );
+      });
+    }
     return stream;
   }
 
@@ -3963,6 +4008,7 @@ export class AevatarAssistantTransport implements AssistantTransport {
         },
         preserveSessionOn401: true,
         signal: deadline.signal,
+        ...assistantWireLogOptions(),
       },
     ).then(
       () => clearTimeout(deadlineTimer),

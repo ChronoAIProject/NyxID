@@ -6909,10 +6909,21 @@ mod proxy_resolution_integration_tests {
         response::{IntoResponse, Response},
         routing::{any, get},
     };
+    use base64::Engine as _;
     use chrono::Utc;
     use mongodb::bson::doc;
     use tokio::net::TcpListener;
     use tokio::sync::mpsc;
+
+    fn assistant_echoes(response: &Response) -> Vec<serde_json::Value> {
+        let Some(value) = response.headers().get("x-nyxid-debug-upstream-log") else {
+            return Vec::new();
+        };
+        let decoded = base64::engine::general_purpose::STANDARD
+            .decode(value.as_bytes())
+            .expect("assistant echo header is base64");
+        serde_json::from_slice(&decoded).expect("assistant echo header is a JSON array")
+    }
     use tower::ServiceExt;
     use uuid::Uuid;
 
@@ -7985,6 +7996,11 @@ mod proxy_resolution_integration_tests {
                 async move {
                     let (parts, body) = request.into_parts();
                     let bytes = axum::body::to_bytes(body, 1024 * 1024).await.unwrap();
+                    let wants_json = parts
+                        .headers
+                        .get(axum::http::header::ACCEPT)
+                        .and_then(|value| value.to_str().ok())
+                        == Some("application/json");
                     sink.lock().unwrap().push((
                         parts.method.clone(),
                         parts.uri.path().to_string(),
@@ -7997,14 +8013,19 @@ mod proxy_resolution_integration_tests {
                                 {
                                     "id": "nyxid-chat-4a1e60ebd1fd44f192bf4bb90e1812ae",
                                     "updatedAt": "2026-07-29T13:00:00.000Z"
-                                },
-                                {
-                                    "id": "chatc-8bd999c402fb37d60cdcd81e3b78cfd",
-                                    "updatedAt": "2026-07-29T12:00:00.000Z"
                                 }
                             ]
                         }))
                         .into_response(),
+                        (Method::GET, path) if path.ends_with("/chat-history") => {
+                            axum::Json(serde_json::json!({
+                                "conversations": [{
+                                    "id": "chatc-8bd999c402fb37d60cdcd81e3b78cfd",
+                                    "updatedAt": "2026-07-29T12:00:00.000Z"
+                                }]
+                            }))
+                            .into_response()
+                        }
                         (Method::GET, path) if path.starts_with("/api/chat/conversations/") => {
                             axum::Json(serde_json::json!({
                                 "messages": [],
@@ -8014,6 +8035,9 @@ mod proxy_resolution_integration_tests {
                         }
                         (Method::DELETE, path) if path.starts_with("/api/chat/conversations/") => {
                             axum::Json(serde_json::json!({})).into_response()
+                        }
+                        (_, "/api/chat") if wants_json => {
+                            axum::Json(serde_json::json!({ "ok": true })).into_response()
                         }
                         (_, "/api/chat") => Response::builder()
                             .status(StatusCode::OK)
@@ -8036,8 +8060,17 @@ mod proxy_resolution_integration_tests {
         });
 
         let user_id = Uuid::new_v4().to_string();
+        crate::services::role_service::seed_system_roles(&db)
+            .await
+            .expect("seed platform roles");
+        let role_ids = crate::services::role_service::get_platform_role_ids(&db)
+            .await
+            .expect("resolve platform roles");
+        let mut admin_user = test_user(&user_id, UserType::Person);
+        admin_user.role_ids.push(role_ids.admin);
+        admin_user.is_admin = true;
         db.collection::<crate::models::user::User>(USERS)
-            .insert_one(test_user(&user_id, UserType::Person))
+            .insert_one(admin_user)
             .await
             .unwrap();
         // The assistant resolves by slug: this must be the `aevatar` row,
@@ -8077,22 +8110,34 @@ mod proxy_resolution_integration_tests {
             request
         };
 
-        crate::handlers::assistant::workflow_chat(
+        let mut debug_echoes = Vec::new();
+        let mut workflow_request = request(
+            Method::POST,
+            "/api/v1/assistant/workflow-chat",
+            Some(r#"{"prompt":"hi there"}"#),
+        );
+        workflow_request.headers_mut().insert(
+            HeaderName::from_static("x-nyxid-debug-upstream"),
+            HeaderValue::from_static("1"),
+        );
+        workflow_request.headers_mut().insert(
+            axum::http::header::AUTHORIZATION,
+            HeaderValue::from_static("Bearer caller-secret"),
+        );
+        let workflow_response = crate::handlers::assistant::workflow_chat(
             axum::extract::State(state.clone()),
             auth.clone(),
-            request(
-                Method::POST,
-                "/api/v1/assistant/workflow-chat",
-                Some(r#"{"prompt":"hi there"}"#),
-            ),
+            workflow_request,
         )
         .await
         .expect("workflow chat handler must forward");
+        debug_echoes.push(assistant_echoes(&workflow_response));
 
         for body in [
             r#"{"type":"text","prompt":"connect api-github","clientRequestId":"00000000-0000-4000-8000-000000000001"}"#,
             r#"{"type":"text","prompt":"continue","clientRequestId":"00000000-0000-4000-8000-000000000002","conversationId":"nyxid-chat-4a1e60ebd1fd44f192bf4bb90e1812ae"}"#,
             r#"{"type":"action.continue","conversationId":"nyxid-chat-4a1e60ebd1fd44f192bf4bb90e1812ae","clientRequestId":"00000000-0000-4000-8000-000000000003","originTurnId":"turn-action-1","actions":[{"actionRequestId":"act-1","originTurnId":"turn-action-1","disposition":"completed","resource":{"userService":{"userServiceId":"00000000-0000-4000-8000-000000000123"}}}]}"#,
+            r#"{"type":"action.continue","conversationId":"nyxid-chat-4a1e60ebd1fd44f192bf4bb90e1812ae","clientRequestId":"00000000-0000-4000-8000-000000000009","originTurnId":"turn-action-2","actions":[{"actionRequestId":"act-2","originTurnId":"turn-action-2","disposition":"failed"}]}"#,
             r#"{"type":"approval.resolve","conversationId":"nyxid-chat-4a1e60ebd1fd44f192bf4bb90e1812ae","clientRequestId":"00000000-0000-4000-8000-000000000004","requestId":"approval-1","approved":true,"reason":"Approved by user"}"#,
             r#"{"type":"task.stop","conversationId":"nyxid-chat-4a1e60ebd1fd44f192bf4bb90e1812ae","turnId":"turn-1","stopRequestId":"stop-1","clientRequestId":"00000000-0000-4000-8000-000000000005","expectedStateVersion":0}"#,
             r#"{"type":"task.steer","conversationId":"nyxid-chat-4a1e60ebd1fd44f192bf4bb90e1812ae","turnId":"turn-1","steeringId":"steer-1","clientRequestId":"00000000-0000-4000-8000-000000000006","instruction":"Try again","expectedStateVersion":2}"#,
@@ -8108,6 +8153,10 @@ mod proxy_resolution_integration_tests {
                 HeaderName::from_static("idempotency-key"),
                 HeaderValue::from_static("caller-supplied-key"),
             );
+            typed_request.headers_mut().insert(
+                HeaderName::from_static("x-nyxid-debug-upstream"),
+                HeaderValue::from_static("1"),
+            );
             let response = crate::handlers::assistant::typed_chat(
                 axum::extract::State(state.clone()),
                 auth.clone(),
@@ -8116,16 +8165,23 @@ mod proxy_resolution_integration_tests {
             .await
             .expect("typed chat handler must forward");
             assert_eq!(response.status(), StatusCode::OK);
+            debug_echoes.push(assistant_echoes(&response));
         }
 
+        let mut list_request = request(Method::GET, "/api/v1/assistant/conversations", None);
+        list_request.headers_mut().insert(
+            HeaderName::from_static("x-nyxid-debug-upstream"),
+            HeaderValue::from_static("1"),
+        );
         let list_response = crate::handlers::assistant::list_conversations(
             axum::extract::State(state.clone()),
             auth.clone(),
-            request(Method::GET, "/api/v1/assistant/conversations", None),
+            list_request,
         )
         .await
         .expect("list conversations handler must forward");
         assert_eq!(list_response.status(), StatusCode::OK);
+        debug_echoes.push(assistant_echoes(&list_response));
 
         crate::handlers::assistant::get_history(
             axum::extract::State(state.clone()),
@@ -8166,6 +8222,7 @@ mod proxy_resolution_integration_tests {
 
         let calls = std::mem::take(&mut *captured.lock().unwrap());
         let paths: Vec<&str> = calls.iter().map(|(_, path, _, _)| path.as_str()).collect();
+        let legacy_path = format!("/api/scopes/{user_id}/chat-history");
         assert_eq!(
             paths,
             vec![
@@ -8178,20 +8235,19 @@ mod proxy_resolution_integration_tests {
                 "/api/chat",
                 "/api/chat",
                 "/api/chat",
+                "/api/chat",
                 "/api/chat/conversations",
+                legacy_path.as_str(),
                 "/api/chat/conversations/nyxid-chat-4a1e60ebd1fd44f192bf4bb90e1812ae",
                 "/api/chat/conversations/nyxid-chat-4a1e60ebd1fd44f192bf4bb90e1812ae/state",
                 "/api/chat/conversations/nyxid-chat-4a1e60ebd1fd44f192bf4bb90e1812ae",
             ]
         );
         assert!(
-            paths.iter().all(|path| !path.contains("api/scopes/")),
+            paths[..10].iter().all(|path| !path.contains("api/scopes/")),
             "typed assistant traffic must not hit scoped paths"
         );
-        assert!(
-            paths.iter().all(|path| !path.contains("chat-history")),
-            "canonical list/detail/state/delete must not hit chat-history when the upstream canonical list already includes workflow rows"
-        );
+        assert_eq!(debug_echoes.last().map(Vec::len), Some(2));
 
         let workflow = serde_json::from_slice::<serde_json::Value>(&calls[0].2).unwrap();
         assert_eq!(workflow["workflow"], "studio");
@@ -8229,6 +8285,17 @@ mod proxy_resolution_integration_tests {
                             "userServiceId": "00000000-0000-4000-8000-000000000123"
                         }
                     }
+                }]
+            }),
+            serde_json::json!({
+                "type": "action.continue",
+                "conversationId": "nyxid-chat-4a1e60ebd1fd44f192bf4bb90e1812ae",
+                "clientRequestId": "00000000-0000-4000-8000-000000000009",
+                "originTurnId": "turn-action-2",
+                "actions": [{
+                    "actionRequestId": "act-2",
+                    "originTurnId": "turn-action-2",
+                    "disposition": "failed",
                 }]
             }),
             serde_json::json!({
@@ -8284,6 +8351,7 @@ mod proxy_resolution_integration_tests {
             "text/event-stream",
             "text/event-stream",
             "text/event-stream",
+            "text/event-stream",
             "application/json",
             "application/json",
             "application/json",
@@ -8314,11 +8382,131 @@ mod proxy_resolution_integration_tests {
             );
         }
 
-        for (_, _, _, headers) in [&calls[0], &calls[9], &calls[10], &calls[11], &calls[12]] {
+        assert_eq!(debug_echoes.len(), 11);
+        for (call_index, envelope_array) in debug_echoes[..10].iter().enumerate() {
+            assert_eq!(envelope_array.len(), 1);
+            let envelope = &envelope_array[0];
+            let (method, path, body, _) = &calls[call_index];
+            assert_eq!(envelope["method"], method.as_str());
+            assert_eq!(envelope["path"], path.trim_start_matches('/'));
+            assert_eq!(
+                envelope["body"],
+                serde_json::from_slice::<serde_json::Value>(body).unwrap()
+            );
+            let expected_command_type = if call_index == 0 {
+                "workflow.studio"
+            } else {
+                envelope["body"]["type"].as_str().unwrap()
+            };
+            assert_eq!(envelope["commandType"], expected_command_type);
+            assert_eq!(envelope["truncated"], false);
+            assert_eq!(envelope["headers"]["content-type"], "application/json");
+            if call_index > 0 {
+                assert_eq!(
+                    envelope["headers"]["idempotency-key"],
+                    envelope["body"]["clientRequestId"]
+                );
+                assert_eq!(
+                    envelope["headers"]["accept"],
+                    expected_accepts[call_index - 1]
+                );
+            }
+            assert_eq!(envelope["identity"]["mode"], "jwt");
+            assert_eq!(envelope["identity"]["forward_access_token"], false);
+            assert_eq!(envelope["identity"]["inject_delegation_token"], true);
+            assert_eq!(envelope["identity"]["bridge_minted"], false);
+        }
+
+        let list_echoes = &debug_echoes[10];
+        assert_eq!(list_echoes.len(), 2);
+        for (envelope, call) in list_echoes.iter().zip(&calls[10..12]) {
+            assert_eq!(envelope["method"], "GET");
+            assert_eq!(envelope["path"], call.1.trim_start_matches('/'));
+            assert!(envelope["commandType"].is_null());
+            assert!(envelope["body"].is_null());
+            assert_eq!(envelope["truncated"], false);
+        }
+        let serialized_echoes = serde_json::to_string(&debug_echoes).unwrap();
+        for forbidden in [
+            "caller-secret",
+            "authorization",
+            "x-nyxid-user-token",
+            "x-nyxid-identity-token",
+            "x-nyxid-delegation-token",
+            "cookie",
+        ] {
+            assert!(
+                !serialized_echoes.to_ascii_lowercase().contains(forbidden),
+                "assistant echo leaked {forbidden}"
+            );
+        }
+
+        for (_, _, _, headers) in [
+            &calls[0], &calls[10], &calls[11], &calls[12], &calls[13], &calls[14],
+        ] {
             assert!(headers.get(axum::http::header::AUTHORIZATION).is_none());
             assert!(headers.get("x-nyxid-identity-token").is_some());
             assert!(headers.get("x-nyxid-delegation-token").is_some());
         }
+
+        let gate_off_response = crate::handlers::assistant::workflow_chat(
+            axum::extract::State(state.clone()),
+            auth.clone(),
+            request(
+                Method::POST,
+                "/api/v1/assistant/workflow-chat",
+                Some(r#"{"prompt":"gate off"}"#),
+            ),
+        )
+        .await
+        .expect("gate-off workflow chat must forward");
+        assert!(
+            gate_off_response
+                .headers()
+                .get("x-nyxid-debug-upstream-log")
+                .is_none()
+        );
+        let gate_off_body = to_bytes(gate_off_response.into_body(), 1024).await.unwrap();
+        assert_eq!(
+            gate_off_body.as_ref(),
+            b"data: {\"type\":\"RUN_FINISHED\"}\n\n"
+        );
+
+        let non_admin_id = Uuid::new_v4().to_string();
+        db.collection::<crate::models::user::User>(USERS)
+            .insert_one(test_user(&non_admin_id, UserType::Person))
+            .await
+            .unwrap();
+        let mut non_admin_request = request(
+            Method::POST,
+            "/api/v1/assistant/workflow-chat",
+            Some(r#"{"prompt":"not an admin"}"#),
+        );
+        non_admin_request.headers_mut().insert(
+            HeaderName::from_static("x-nyxid-debug-upstream"),
+            HeaderValue::from_static("1"),
+        );
+        let non_admin_response = crate::handlers::assistant::workflow_chat(
+            axum::extract::State(state),
+            access_token_auth(&non_admin_id),
+            non_admin_request,
+        )
+        .await
+        .expect("non-admin debug request must behave like a normal request");
+        assert_eq!(non_admin_response.status(), StatusCode::OK);
+        assert!(
+            non_admin_response
+                .headers()
+                .get("x-nyxid-debug-upstream-log")
+                .is_none()
+        );
+        let non_admin_body = to_bytes(non_admin_response.into_body(), 1024)
+            .await
+            .unwrap();
+        assert_eq!(
+            non_admin_body.as_ref(),
+            b"data: {\"type\":\"RUN_FINISHED\"}\n\n"
+        );
         server.abort();
     }
 

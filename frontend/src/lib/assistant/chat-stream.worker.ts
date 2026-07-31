@@ -94,6 +94,7 @@ async function runRequest(
       headers: {
         "Content-Type": "application/json",
         Accept: "text/event-stream",
+        ...command.headers,
       },
       credentials: "include",
       body: command.bodyText,
@@ -110,6 +111,8 @@ async function runRequest(
         requestId,
         status: response.status,
         body,
+        debugUpstream:
+          response.headers.get("x-nyxid-debug-upstream-log") ?? undefined,
       });
       return;
     }
@@ -119,6 +122,8 @@ async function runRequest(
       requestId,
       status: response.status,
       contentType: response.headers.get("content-type") ?? "",
+      debugUpstream:
+        response.headers.get("x-nyxid-debug-upstream-log") ?? undefined,
     });
 
     if (!response.body) {

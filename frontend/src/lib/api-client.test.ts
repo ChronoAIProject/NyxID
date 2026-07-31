@@ -135,6 +135,17 @@ describe("apiClient", () => {
     const [, config] = mockFetch.mock.calls[0] as [string, RequestInit];
     expect(config.body).toBeUndefined();
   });
+
+  it("exposes the raw response through the opt-in callback", async () => {
+    const response = jsonResponse({ ok: true });
+    const onResponse = vi.fn();
+    mockFetch.mockResolvedValueOnce(response);
+
+    await apiClient("/endpoint", { onResponse });
+
+    expect(onResponse).toHaveBeenCalledOnce();
+    expect(onResponse).toHaveBeenCalledWith(response);
+  });
 });
 
 describe("401 auth state handling", () => {
