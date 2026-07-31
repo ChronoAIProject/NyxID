@@ -11,11 +11,13 @@ export type ChatStreamHeadersResult =
       readonly kind: "response";
       readonly status: number;
       readonly contentType: string;
+      readonly debugUpstream?: string;
     }
   | {
       readonly kind: "http_error";
       readonly status: number;
       readonly body: string;
+      readonly debugUpstream?: string;
     }
   | {
       readonly kind: "network_error";
@@ -32,6 +34,7 @@ export interface ChatStreamRequest {
   readonly url: string;
   readonly bodyText: string;
   readonly signal: AbortSignal;
+  readonly headers?: Readonly<Record<string, string>>;
   readonly onFrames: (frames: readonly ChatStreamFrame[]) => void;
 }
 
@@ -166,6 +169,7 @@ export class ChatStreamWorkerClient {
           requestId,
           url: request.url,
           bodyText: request.bodyText,
+          headers: request.headers,
         } satisfies ChatStreamWorkerCommand);
       } catch {
         this.failWorker(worker);
@@ -183,6 +187,7 @@ export class ChatStreamWorkerClient {
           kind: "response",
           status: message.status,
           contentType: message.contentType,
+          debugUpstream: message.debugUpstream,
         });
         return;
       case "stream.batch":
@@ -198,6 +203,7 @@ export class ChatStreamWorkerClient {
           kind: "http_error",
           status: message.status,
           body: message.body,
+          debugUpstream: message.debugUpstream,
         });
         return;
       case "stream.network_error":
@@ -306,6 +312,7 @@ export class ChatStreamWorkerClient {
           headers: {
             "Content-Type": "application/json",
             Accept: "text/event-stream",
+            ...request.headers,
           },
           credentials: "include",
           body: request.bodyText,
@@ -316,7 +323,13 @@ export class ChatStreamWorkerClient {
             0,
             CHAT_STREAM_MAX_ERROR_BODY_CHARS,
           );
-          settle({ kind: "http_error", status: response.status, body });
+          settle({
+            kind: "http_error",
+            status: response.status,
+            body,
+            debugUpstream:
+              response.headers.get("x-nyxid-debug-upstream-log") ?? undefined,
+          });
           return;
         }
         headersSettled = true;
@@ -324,6 +337,8 @@ export class ChatStreamWorkerClient {
           kind: "response",
           status: response.status,
           contentType: response.headers.get("content-type") ?? "",
+          debugUpstream:
+            response.headers.get("x-nyxid-debug-upstream-log") ?? undefined,
         });
         if (!response.body) {
           settle(

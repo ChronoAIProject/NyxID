@@ -7,12 +7,14 @@ import {
 } from "@/lib/telemetry";
 import { useAssistantContextStore } from "@/stores/assistant-context-store";
 import { useAssistantDraftStore } from "@/stores/assistant-draft-store";
+import { useAssistantWireLogStore } from "@/stores/assistant-wire-log-store";
 
 const MFA_REQUIRED_ERROR_CODE = 2002;
 
 function clearAssistantLocalState(): void {
   useAssistantContextStore.getState().clear();
   useAssistantDraftStore.getState().clear();
+  useAssistantWireLogStore.getState().reset();
 }
 
 interface LoginResult {

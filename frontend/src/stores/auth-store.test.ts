@@ -2,6 +2,7 @@ import { describe, it, expect, vi, beforeEach } from "vitest";
 import { useAuthStore } from "./auth-store";
 import { useAssistantContextStore } from "./assistant-context-store";
 import { useAssistantDraftStore } from "./assistant-draft-store";
+import { useAssistantWireLogStore } from "./assistant-wire-log-store";
 import { ApiError } from "@/lib/api-client";
 
 vi.mock("@/lib/api-client", async () => {
@@ -39,6 +40,11 @@ beforeEach(() => {
     lastScreen: null,
   });
   useAssistantDraftStore.setState({ ownerUserId: null, drafts: {} });
+  useAssistantWireLogStore.setState({
+    captureEnabled: false,
+    entries: [],
+    totalBytes: 0,
+  });
   useAuthStore.setState({
     user: null,
     isAuthenticated: false,
@@ -166,6 +172,25 @@ describe("logout", () => {
     useAssistantDraftStore
       .getState()
       .saveDraft("u1", "conv:conversation-private", "Private draft");
+    useAssistantWireLogStore.getState().setCaptureEnabled(true);
+    useAssistantWireLogStore.getState().record(
+      {
+        method: "POST",
+        path: "api/chat",
+        commandType: "text",
+        body: { prompt: "Private prompt" },
+        headers: {},
+        identity: {
+          mode: "jwt",
+          forward_access_token: false,
+          inject_delegation_token: true,
+          bridge_minted: false,
+        },
+        truncated: false,
+      },
+      "sse",
+      200,
+    );
     await useAuthStore.getState().logout();
 
     const state = useAuthStore.getState();
@@ -177,6 +202,9 @@ describe("logout", () => {
       lastScreen: null,
     });
     expect(useAssistantDraftStore.getState().drafts).toEqual({});
+    expect(useAssistantWireLogStore.getState().entries).toEqual([]);
+    expect(useAssistantWireLogStore.getState().totalBytes).toBe(0);
+    expect(useAssistantWireLogStore.getState().captureEnabled).toBe(false);
     expect(localStorage.getItem("nyxid.assistant_context")).toBeNull();
     expect(localStorage.getItem("nyxid.assistant_drafts")).toBeNull();
   });

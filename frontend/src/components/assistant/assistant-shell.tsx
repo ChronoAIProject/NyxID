@@ -16,10 +16,12 @@ import { useAuthStore } from "@/stores/auth-store";
 export function AssistantShell({
   title,
   sidebar,
+  headerActions,
   children,
 }: {
   readonly title: string;
   readonly sidebar: ReactNode;
+  readonly headerActions?: ReactNode;
   readonly children: ReactNode;
 }) {
   const [mobileSidebarOpen, setMobileSidebarOpen] = useState(false);
@@ -124,6 +126,7 @@ export function AssistantShell({
           <div className="min-w-0 flex-1 truncate text-[12px] text-muted-foreground">
             {title}
           </div>
+          {headerActions}
           <ThemeToggle className="shrink-0" />
           {profileMenu}
         </div>

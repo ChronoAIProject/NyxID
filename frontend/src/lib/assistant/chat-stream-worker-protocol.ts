@@ -10,6 +10,7 @@ export type ChatStreamWorkerCommand =
       readonly requestId: string;
       readonly url: string;
       readonly bodyText: string;
+      readonly headers?: Readonly<Record<string, string>>;
     }
   | {
       readonly type: "stream.cancel";
@@ -22,6 +23,7 @@ export type ChatStreamWorkerMessage =
       readonly requestId: string;
       readonly status: number;
       readonly contentType: string;
+      readonly debugUpstream?: string;
     }
   | {
       readonly type: "stream.batch";
@@ -38,6 +40,7 @@ export type ChatStreamWorkerMessage =
       readonly requestId: string;
       readonly status: number;
       readonly body: string;
+      readonly debugUpstream?: string;
     }
   | {
       readonly type: "stream.network_error";

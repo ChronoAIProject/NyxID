@@ -111,6 +111,35 @@ describe("ChatStreamWorkerClient", () => {
     await expect(stream.completion).resolves.toEqual({ kind: "cancelled" });
   });
 
+  it("surfaces debug metadata from worker HTTP errors", async () => {
+    const worker = new FakeWorker();
+    const client = new ChatStreamWorkerClient(() => asWorker(worker));
+    const stream = client.start({
+      url: "/stream",
+      bodyText: "{}",
+      signal: new AbortController().signal,
+      onFrames: () => {},
+    });
+    const id = requestId(worker);
+
+    worker.emit({
+      type: "stream.http_error",
+      requestId: id,
+      status: 401,
+      body: '{"message":"unauthorized"}',
+      debugUpstream: "encoded-error-envelope-array",
+    });
+
+    const expected = {
+      kind: "http_error",
+      status: 401,
+      body: '{"message":"unauthorized"}',
+      debugUpstream: "encoded-error-envelope-array",
+    } as const;
+    await expect(stream.headers).resolves.toEqual(expected);
+    await expect(stream.completion).resolves.toEqual(expected);
+  });
+
   it("falls back inline after a worker fails before its first message", async () => {
     const worker = new FakeWorker();
     const factory = vi
@@ -238,5 +267,70 @@ describe("ChatStreamWorkerClient", () => {
       code: "worker_error",
     });
     expect(cancel).toHaveBeenCalledOnce();
+  });
+
+  it("sends optional headers and surfaces debug metadata outside frame batches", async () => {
+    const fetchMock = vi.fn().mockResolvedValue(
+      new Response('data: {"type":"RUN_FINISHED"}\n\n', {
+        status: 200,
+        headers: {
+          "Content-Type": "text/event-stream",
+          "X-NyxID-Debug-Upstream-Log": "encoded-envelope-array",
+        },
+      }),
+    );
+    vi.stubGlobal("fetch", fetchMock);
+    const delivered: unknown[] = [];
+    const client = new ChatStreamWorkerClient(() => null);
+
+    const stream = client.start({
+      url: "/stream",
+      bodyText: "{}",
+      signal: new AbortController().signal,
+      headers: { "X-NyxID-Debug-Upstream": "1" },
+      onFrames: (frames) => delivered.push(...frames),
+    });
+
+    await expect(stream.headers).resolves.toEqual({
+      kind: "response",
+      status: 200,
+      contentType: "text/event-stream",
+      debugUpstream: "encoded-envelope-array",
+    });
+    await expect(stream.completion).resolves.toEqual({ kind: "complete" });
+    expect(delivered).toEqual([{ type: "RUN_FINISHED" }]);
+    const init = fetchMock.mock.calls[0]?.[1] as RequestInit;
+    expect(init.headers).toMatchObject({ "X-NyxID-Debug-Upstream": "1" });
+  });
+
+  it("surfaces debug metadata from inline HTTP errors", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn().mockResolvedValue(
+        new Response('{"message":"unauthorized"}', {
+          status: 401,
+          headers: {
+            "X-NyxID-Debug-Upstream-Log": "encoded-error-envelope-array",
+          },
+        }),
+      ),
+    );
+    const client = new ChatStreamWorkerClient(() => null);
+
+    const stream = client.start({
+      url: "/stream",
+      bodyText: "{}",
+      signal: new AbortController().signal,
+      onFrames: () => {},
+    });
+
+    const expected = {
+      kind: "http_error",
+      status: 401,
+      body: '{"message":"unauthorized"}',
+      debugUpstream: "encoded-error-envelope-array",
+    } as const;
+    await expect(stream.headers).resolves.toEqual(expected);
+    await expect(stream.completion).resolves.toEqual(expected);
   });
 });
