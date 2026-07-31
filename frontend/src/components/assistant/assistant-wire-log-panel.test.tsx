@@ -30,8 +30,10 @@ describe("AssistantWireLogPanel", () => {
     localStorage.clear();
     useAssistantWireLogStore.setState({
       captureEnabled: true,
+      showResponses: true,
       entries: [],
       totalBytes: 0,
+      captureBytes: 0,
     });
     vi.stubGlobal(
       "ResizeObserver",
@@ -44,21 +46,26 @@ describe("AssistantWireLogPanel", () => {
   });
 
   it("renders, expands, and clears captured entries", () => {
-    useAssistantWireLogStore.getState().record(
-      {
-        method: "POST",
-        path: "api/chat",
-        commandType: "text",
-        body: { type: "text", prompt: "inspect this payload" },
-        headers: { accept: "text/event-stream" },
-        identity: {
-          mode: "jwt",
-          forward_access_token: false,
-          inject_delegation_token: true,
-          bridge_minted: false,
+    useAssistantWireLogStore.getState().recordExchange(
+      [
+        {
+          degraded: false,
+          method: "POST",
+          path: "api/chat",
+          commandType: "text",
+          body: { type: "text", prompt: "inspect this payload" },
+          headers: { accept: "text/event-stream" },
+          identity: {
+            mode: "jwt",
+            forward_access_token: false,
+            inject_delegation_token: true,
+            bridge_minted: false,
+          },
+          truncated: false,
+          response: null,
+          upstreamOutcome: "no_response",
         },
-        truncated: false,
-      },
+      ],
       "sse",
       200,
     );

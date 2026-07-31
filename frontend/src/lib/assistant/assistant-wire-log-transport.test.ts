@@ -36,8 +36,10 @@ describe("assistant wire-log transport", () => {
     localStorage.clear();
     useAssistantWireLogStore.setState({
       captureEnabled: false,
+      showResponses: true,
       entries: [],
       totalBytes: 0,
+      captureBytes: 0,
     });
   });
 
@@ -68,16 +70,19 @@ describe("assistant wire-log transport", () => {
     });
     expect(useAssistantWireLogStore.getState().entries[0]).toMatchObject({
       kind: "header",
-      method: "GET",
-      path: "api/chat/conversations",
       status: 200,
+      upstreamEchoes: [{ method: "GET", path: "api/chat/conversations" }],
     });
     expect(useAssistantWireLogStore.getState().entries[0]).not.toHaveProperty(
       "futureEnvelopeMetadata",
     );
-    expect(
-      useAssistantWireLogStore.getState().entries[0]?.identity,
-    ).not.toHaveProperty("futureIdentityMetadata");
+    const capturedEcho =
+      useAssistantWireLogStore.getState().entries[0]?.upstreamEchoes[0];
+    if (!capturedEcho || capturedEcho.degraded) {
+      throw new Error("expected a full legacy echo");
+    }
+    expect(capturedEcho.identity).not.toHaveProperty("futureIdentityMetadata");
+    expect(capturedEcho).not.toHaveProperty("futureEnvelopeMetadata");
   });
 
   it("captures streaming response metadata without delivering it as chat content", async () => {
@@ -163,11 +168,15 @@ describe("assistant wire-log transport", () => {
     await vi.waitFor(() => {
       expect(useAssistantWireLogStore.getState().entries[0]).toMatchObject({
         kind: "sse",
-        method: "POST",
-        path: "api/chat",
-        commandType: "text",
         status: 200,
-        body: { type: "text", prompt: debugOnlyMarker },
+        upstreamEchoes: [
+          {
+            method: "POST",
+            path: "api/chat",
+            commandType: "text",
+            body: { type: "text", prompt: debugOnlyMarker },
+          },
+        ],
       });
     });
     expect(JSON.stringify(events)).toContain("Visible assistant reply");

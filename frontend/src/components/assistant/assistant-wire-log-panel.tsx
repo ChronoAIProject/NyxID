@@ -16,7 +16,10 @@ import {
   TooltipContent,
   TooltipTrigger,
 } from "@/components/ui/tooltip";
-import type { AssistantWireLogEntry } from "@/schemas/assistant-wire-log";
+import type {
+  AssistantUpstreamEnvelope,
+  AssistantWireLogExchange,
+} from "@/schemas/assistant-wire-log";
 import { useAssistantWireLogStore } from "@/stores/assistant-wire-log-store";
 import { canAdminWrite, type User } from "@/types/api";
 import { cn } from "@/lib/utils";
@@ -31,17 +34,25 @@ function normalizedPath(path: string): string {
   return path.startsWith("/") ? path : `/${path}`;
 }
 
-function entryJson(entry: AssistantWireLogEntry) {
+function envelopeJson(envelope: AssistantUpstreamEnvelope) {
+  if (envelope.degraded) return envelope;
+  return {
+    method: envelope.method,
+    path: normalizedPath(envelope.path),
+    commandType: envelope.commandType,
+    body: envelope.body,
+    headers: envelope.headers,
+    identity: envelope.identity,
+    truncated: envelope.truncated,
+  };
+}
+
+function entryJson(entry: AssistantWireLogExchange) {
   return JSON.stringify(
     {
-      method: entry.method,
-      path: normalizedPath(entry.path),
-      commandType: entry.commandType,
-      body: entry.body,
-      headers: entry.headers,
-      identity: entry.identity,
+      upstreamEchoes: entry.upstreamEchoes.map(envelopeJson),
       status: entry.status,
-      truncated: entry.truncated,
+      droppedEchoCount: entry.droppedEchoCount,
     },
     null,
     2,
@@ -132,6 +143,8 @@ export function AssistantWireLogPanel() {
             <div className="space-y-2">
               {[...entries].reverse().map((entry) => {
                 const isExpanded = expanded.has(entry.id);
+                const primary = entry.upstreamEchoes[0];
+                if (!primary) return null;
                 return (
                   <div
                     key={entry.id}
@@ -159,9 +172,9 @@ export function AssistantWireLogPanel() {
                                 second: "2-digit",
                               })}
                             </span>
-                            {entry.commandType ? (
+                            {primary.commandType ? (
                               <Badge variant="secondary">
-                                {entry.commandType}
+                                {primary.commandType}
                               </Badge>
                             ) : null}
                             <Badge variant={statusVariant(entry.status)}>
@@ -170,9 +183,9 @@ export function AssistantWireLogPanel() {
                           </span>
                           <span className="mt-1 block break-all font-mono text-[11px] leading-5 text-muted-foreground">
                             <strong className="font-semibold text-foreground">
-                              {entry.method}
+                              {primary.method}
                             </strong>{" "}
-                            {normalizedPath(entry.path)}
+                            {normalizedPath(primary.path)}
                           </span>
                         </span>
                       </button>
@@ -182,7 +195,7 @@ export function AssistantWireLogPanel() {
                             type="button"
                             variant="ghost"
                             size="icon"
-                            aria-label={`Copy ${entry.method} ${entry.path} as JSON`}
+                            aria-label={`Copy ${primary.method} ${primary.path} as JSON`}
                             className="h-7 w-7 shrink-0"
                             onClick={() =>
                               void navigator.clipboard.writeText(
