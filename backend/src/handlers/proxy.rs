@@ -6922,7 +6922,14 @@ mod proxy_resolution_integration_tests {
         let decoded = base64::engine::general_purpose::STANDARD
             .decode(value.as_bytes())
             .expect("assistant echo header is base64");
-        serde_json::from_slice(&decoded).expect("assistant echo header is a JSON array")
+        let wrapper: serde_json::Value =
+            serde_json::from_slice(&decoded).expect("assistant echo header is JSON");
+        assert_eq!(wrapper["version"], 2);
+        assert_eq!(wrapper["droppedEchoCount"], 0);
+        wrapper["echoes"]
+            .as_array()
+            .expect("assistant echo wrapper has an echoes array")
+            .clone()
     }
     use tower::ServiceExt;
     use uuid::Uuid;
@@ -8037,6 +8044,8 @@ mod proxy_resolution_integration_tests {
                         (_, "/api/chat") => Response::builder()
                             .status(StatusCode::OK)
                             .header(axum::http::header::CONTENT_TYPE, "text/event-stream")
+                            .header("x-request-id", "aevatar-request-1")
+                            .header(axum::http::header::SET_COOKIE, "upstream=secret")
                             .body(Body::from("data: {\"type\":\"RUN_FINISHED\"}\n\n"))
                             .unwrap(),
                         _ => axum::Json(serde_json::json!({ "ok": true })).into_response(),
@@ -8413,6 +8422,21 @@ mod proxy_resolution_integration_tests {
             assert_eq!(envelope["identity"]["forward_access_token"], false);
             assert_eq!(envelope["identity"]["inject_delegation_token"], true);
             assert_eq!(envelope["identity"]["bridge_minted"], false);
+            assert_eq!(envelope["upstreamOutcome"], "response");
+            assert_eq!(envelope["response"]["status"], 200);
+            let expected_sse = call_index == 0
+                || (call_index > 0 && expected_accepts[call_index - 1] == "text/event-stream");
+            assert_eq!(envelope["response"]["sse"], expected_sse);
+            if expected_sse {
+                assert_eq!(
+                    envelope["response"]["headers"]["content-type"]["value"],
+                    "text/event-stream"
+                );
+                assert_eq!(
+                    envelope["response"]["headers"]["x-request-id"]["value"],
+                    "aevatar-request-1"
+                );
+            }
         }
 
         let list_echoes = &debug_echoes[10];
@@ -8423,6 +8447,9 @@ mod proxy_resolution_integration_tests {
             assert!(envelope["commandType"].is_null());
             assert!(envelope["body"].is_null());
             assert_eq!(envelope["truncated"], false);
+            assert_eq!(envelope["upstreamOutcome"], "response");
+            assert_eq!(envelope["response"]["status"], 200);
+            assert_eq!(envelope["response"]["sse"], false);
         }
         let serialized_echoes = serde_json::to_string(&debug_echoes).unwrap();
         for forbidden in [
@@ -8432,6 +8459,8 @@ mod proxy_resolution_integration_tests {
             "x-nyxid-identity-token",
             "x-nyxid-delegation-token",
             "cookie",
+            "set-cookie",
+            "upstream=secret",
         ] {
             assert!(
                 !serialized_echoes.to_ascii_lowercase().contains(forbidden),
@@ -8651,8 +8680,117 @@ mod proxy_resolution_integration_tests {
             assert_eq!(envelope["path"], path.trim_start_matches('/'));
             assert!(envelope["commandType"].is_null());
             assert!(envelope["body"].is_null());
+            assert_eq!(envelope["upstreamOutcome"], "response");
+            assert_eq!(envelope["response"]["status"], 200);
+            assert_eq!(envelope["response"]["sse"], false);
         }
         server.abort();
+    }
+
+    #[tokio::test]
+    async fn assistant_list_echo_marks_failed_legacy_proxy_call_as_no_response() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        let Some(db) = connect_test_database("assistant_list_echo_failed_legacy").await else {
+            eprintln!("skipping proxy integration test: no local MongoDB available");
+            return;
+        };
+
+        let listener = TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind one-shot assistant downstream listener");
+        let addr = listener.local_addr().expect("one-shot listener addr");
+        let server = tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.expect("accept canonical request");
+            let mut request = vec![0_u8; 4096];
+            let _ = stream
+                .read(&mut request)
+                .await
+                .expect("read canonical request");
+            let body = br#"{"conversations":[{"id":"nyxid-chat-4a1e60ebd1fd44f192bf4bb90e1812ae","updatedAt":"2026-07-29T13:00:00.000Z"}]}"#;
+            let response = format!(
+                "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n",
+                body.len()
+            );
+            stream
+                .write_all(response.as_bytes())
+                .await
+                .expect("write canonical response headers");
+            stream
+                .write_all(body)
+                .await
+                .expect("write canonical response body");
+            stream.shutdown().await.expect("close canonical response");
+        });
+
+        let user_id = Uuid::new_v4().to_string();
+        crate::services::role_service::seed_system_roles(&db)
+            .await
+            .expect("seed platform roles");
+        let role_ids = crate::services::role_service::get_platform_role_ids(&db)
+            .await
+            .expect("resolve platform roles");
+        let mut admin_user = test_user(&user_id, UserType::Person);
+        admin_user.role_ids.push(role_ids.admin);
+        admin_user.is_admin = true;
+        db.collection::<crate::models::user::User>(USERS)
+            .insert_one(admin_user)
+            .await
+            .unwrap();
+
+        let mut service = crate::models::downstream_service::test_helpers::dummy_service();
+        service.id = Uuid::new_v4().to_string();
+        service.slug = crate::services::assistant_service::AEVATAR_SLUG.to_string();
+        service.name = "Aevatar".to_string();
+        service.base_url = format!("http://{addr}");
+        service.service_category = "internal".to_string();
+        service.requires_user_credential = false;
+        service.identity_propagation_mode = "jwt".to_string();
+        service.identity_jwt_audience = Some("urn:aevatar:api".to_string());
+        service.inject_delegation_token = true;
+        service.delegation_token_scope = "proxy:*".to_string();
+        db.collection::<crate::models::downstream_service::DownstreamService>(
+            crate::models::downstream_service::COLLECTION_NAME,
+        )
+        .insert_one(service)
+        .await
+        .unwrap();
+
+        let state = test_app_state(db);
+        let auth = access_token_auth(&user_id);
+        let mut request = Request::builder()
+            .method(Method::GET)
+            .uri("/api/v1/assistant/conversations")
+            .header(axum::http::header::CONTENT_TYPE, "application/json")
+            .header("x-nyxid-debug-upstream", "1")
+            .body(Body::empty())
+            .expect("build assistant list request");
+        request.extensions_mut().insert(
+            crate::services::billing::route_inventory::BillingRoutePolicy::Metered(
+                crate::services::billing::BillingIngress::Proxy,
+            ),
+        );
+
+        let response = crate::handlers::assistant::list_conversations(
+            axum::extract::State(state),
+            auth,
+            request,
+        )
+        .await
+        .expect("canonical response must survive failed legacy fallback");
+        assert_eq!(response.status(), StatusCode::OK);
+        let echoes = assistant_echoes(&response);
+        assert_eq!(echoes.len(), 2);
+        assert_eq!(echoes[0]["upstreamOutcome"], "response");
+        assert_eq!(echoes[0]["response"]["status"], 200);
+        assert_eq!(echoes[1]["upstreamOutcome"], "no_response");
+        assert!(echoes[1]["response"].is_null());
+        assert!(
+            echoes[1]["path"]
+                .as_str()
+                .is_some_and(|path| path.ends_with("/chat-history"))
+        );
+        server.await.expect("one-shot downstream task");
     }
 
     #[tokio::test]

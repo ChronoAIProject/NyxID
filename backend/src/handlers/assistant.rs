@@ -46,6 +46,11 @@ const DEBUG_UPSTREAM_RESPONSE_HEADER: &str = "x-nyxid-debug-upstream-log";
 // about 4 KiB for the status line and security headers; production nginx is
 // configured for 32 KiB, so local development is the binding constraint.
 const DEBUG_UPSTREAM_HEADER_MAX_BYTES: usize = 12 * 1024;
+const DEBUG_UPSTREAM_MAX_ECHOES: usize = 8;
+const DEBUG_UPSTREAM_PATH_MAX_BYTES: usize = 256;
+const DEBUG_UPSTREAM_COMMAND_TYPE_MAX_BYTES: usize = 64;
+const DEBUG_UPSTREAM_HEADER_VALUE_MAX_BYTES: usize = 256;
+const DEBUG_UPSTREAM_MIN_TRUNCATED_BODY_BYTES: usize = 16;
 
 #[derive(Clone, Debug, Serialize)]
 struct UpstreamIdentityEcho {
@@ -58,6 +63,7 @@ struct UpstreamIdentityEcho {
 #[derive(Clone, Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 struct UpstreamEcho {
+    degraded: bool,
     method: String,
     path: String,
     command_type: Option<String>,
@@ -65,6 +71,83 @@ struct UpstreamEcho {
     headers: serde_json::Map<String, serde_json::Value>,
     identity: UpstreamIdentityEcho,
     truncated: bool,
+    response: Option<UpstreamResponseEcho>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    upstream_outcome: Option<UpstreamOutcome>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    dropped_headers: Option<bool>,
+}
+
+#[derive(Clone, Copy, Debug, Serialize)]
+#[serde(rename_all = "snake_case")]
+#[allow(dead_code)]
+enum UpstreamOutcome {
+    Response,
+    NoResponse,
+    Unknown,
+}
+
+#[derive(Clone, Debug, Serialize)]
+struct UpstreamResponseHeaderEcho {
+    value: String,
+    truncated: bool,
+}
+
+#[derive(Clone, Debug, Serialize)]
+struct UpstreamResponseEcho {
+    status: u16,
+    headers: serde_json::Map<String, serde_json::Value>,
+    sse: bool,
+}
+
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct MinimalUpstreamEcho {
+    degraded: bool,
+    method: String,
+    path: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    command_type: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    upstream_outcome: Option<UpstreamOutcome>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    status: Option<u16>,
+}
+
+#[derive(Clone, Debug, Serialize)]
+#[serde(untagged)]
+enum EncodedUpstreamEcho {
+    Full(Box<UpstreamEcho>),
+    Minimal(MinimalUpstreamEcho),
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct UpstreamEchoHeader {
+    version: u8,
+    echoes: Vec<EncodedUpstreamEcho>,
+    dropped_echo_count: u32,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum EchoEncodingRung {
+    Full,
+    TruncatedBodies,
+    DroppedBodies,
+    DroppedHeaders,
+    Minimal,
+    DroppedEchoes,
+}
+
+fn truncate_utf8(value: &str, max_bytes: usize) -> (String, bool) {
+    if value.len() <= max_bytes {
+        return (value.to_string(), false);
+    }
+    let mut end = max_bytes;
+    while !value.is_char_boundary(end) {
+        end -= 1;
+    }
+    (value[..end].to_string(), true)
 }
 
 async fn upstream_echo_collector(
@@ -95,15 +178,14 @@ fn echoed_headers(
         .get(header::CONTENT_TYPE)
         .and_then(|value| value.to_str().ok())
     {
-        headers.insert(
-            "content-type".to_string(),
-            serde_json::Value::String(value.to_string()),
-        );
+        let (value, _) = truncate_utf8(value, DEBUG_UPSTREAM_HEADER_VALUE_MAX_BYTES);
+        headers.insert("content-type".to_string(), serde_json::Value::String(value));
     }
     for (name, value) in extra_outbound_headers {
         let normalized = name.to_ascii_lowercase();
         if matches!(normalized.as_str(), "idempotency-key" | "accept") {
-            headers.insert(normalized, serde_json::Value::String(value.clone()));
+            let (value, _) = truncate_utf8(value, DEBUG_UPSTREAM_HEADER_VALUE_MAX_BYTES);
+            headers.insert(normalized, serde_json::Value::String(value));
         }
     }
     headers
@@ -117,47 +199,124 @@ fn build_upstream_echo(
     extra_outbound_headers: &[(String, String)],
     identity: UpstreamIdentityEcho,
 ) -> UpstreamEcho {
+    let (path, _) = truncate_utf8(&path, DEBUG_UPSTREAM_PATH_MAX_BYTES);
     UpstreamEcho {
+        degraded: false,
         method: request.method().as_str().to_string(),
         path,
-        command_type: command_type.map(str::to_string),
+        command_type: command_type
+            .map(|value| truncate_utf8(value, DEBUG_UPSTREAM_COMMAND_TYPE_MAX_BYTES).0),
         body: body.unwrap_or(serde_json::Value::Null),
         headers: echoed_headers(request.headers(), extra_outbound_headers),
         identity,
         truncated: false,
+        response: None,
+        upstream_outcome: Some(UpstreamOutcome::NoResponse),
+        dropped_headers: None,
     }
 }
 
-fn serialize_echoes(echoes: &[UpstreamEcho]) -> AppResult<Vec<u8>> {
-    serde_json::to_vec(echoes)
+fn response_echo(response: &Response) -> UpstreamResponseEcho {
+    let mut headers = serde_json::Map::new();
+    for name in ["content-type", "x-request-id", "x-correlation-id"] {
+        let Some(value) = response
+            .headers()
+            .get(name)
+            .and_then(|value| value.to_str().ok())
+        else {
+            continue;
+        };
+        let (value, truncated) = truncate_utf8(value, DEBUG_UPSTREAM_HEADER_VALUE_MAX_BYTES);
+        let value = serde_json::to_value(UpstreamResponseHeaderEcho { value, truncated })
+            .expect("response header echo is serializable");
+        headers.insert(name.to_string(), value);
+    }
+    let sse = response
+        .headers()
+        .get_all(header::CONTENT_TYPE)
+        .iter()
+        .filter_map(|value| value.to_str().ok())
+        .any(crate::mw::security_headers::is_sse_media_type);
+    UpstreamResponseEcho {
+        status: response.status().as_u16(),
+        headers,
+        sse,
+    }
+}
+
+fn serialize_echoes(header: &UpstreamEchoHeader) -> AppResult<Vec<u8>> {
+    serde_json::to_vec(header)
         .map_err(|_| AppError::Internal("assistant: failed to encode upstream echoes".to_string()))
 }
 
-fn encode_echo_header(echoes: &[UpstreamEcho]) -> Option<HeaderValue> {
-    let encode = |candidate: &[UpstreamEcho]| -> Option<String> {
-        Some(base64::engine::general_purpose::STANDARD.encode(serialize_echoes(candidate).ok()?))
-    };
-    let encoded = encode(echoes)?;
-    if encoded.len() <= DEBUG_UPSTREAM_HEADER_MAX_BYTES {
-        return HeaderValue::from_str(&encoded).ok();
+fn full_header(echoes: &[UpstreamEcho]) -> UpstreamEchoHeader {
+    UpstreamEchoHeader {
+        version: 2,
+        echoes: echoes
+            .iter()
+            .cloned()
+            .map(Box::new)
+            .map(EncodedUpstreamEcho::Full)
+            .collect(),
+        dropped_echo_count: 0,
     }
+}
 
-    let mut bodies = Vec::new();
-    for (index, echo) in echoes.iter().enumerate() {
-        if echo.body.is_null() {
-            continue;
-        }
-        let body = serde_json::to_string(&echo.body).ok()?;
-        bodies.push((index, body.chars().collect::<Vec<_>>()));
+fn minimal_echo(echo: &UpstreamEcho) -> MinimalUpstreamEcho {
+    MinimalUpstreamEcho {
+        degraded: true,
+        method: truncate_utf8(&echo.method, 16).0,
+        path: truncate_utf8(&echo.path, DEBUG_UPSTREAM_PATH_MAX_BYTES).0,
+        command_type: echo
+            .command_type
+            .as_deref()
+            .map(|value| truncate_utf8(value, DEBUG_UPSTREAM_COMMAND_TYPE_MAX_BYTES).0),
+        upstream_outcome: echo.upstream_outcome,
+        status: echo.response.as_ref().map(|response| response.status),
     }
-    bodies.sort_by_key(|(_, body)| std::cmp::Reverse(body.len()));
+}
 
+fn encode_header(header: &UpstreamEchoHeader) -> Option<String> {
+    Some(base64::engine::general_purpose::STANDARD.encode(serialize_echoes(header).ok()?))
+}
+
+fn encoded_header_if_fits(
+    header: &UpstreamEchoHeader,
+    rung: EchoEncodingRung,
+) -> Option<(HeaderValue, EchoEncodingRung)> {
+    let encoded = encode_header(header)?;
+    if encoded.len() > DEBUG_UPSTREAM_HEADER_MAX_BYTES {
+        return None;
+    }
+    Some((HeaderValue::from_str(&encoded).ok()?, rung))
+}
+
+fn encode_echo_header_with_rung(
+    echoes: &[UpstreamEcho],
+) -> Option<(HeaderValue, EchoEncodingRung)> {
     let mut candidates = echoes.to_vec();
+    if let Some(encoded) = encoded_header_if_fits(&full_header(&candidates), EchoEncodingRung::Full)
+    {
+        return Some(encoded);
+    }
+
+    let mut bodies = candidates
+        .iter()
+        .enumerate()
+        .filter(|(_, echo)| !echo.body.is_null())
+        .filter_map(|(index, echo)| {
+            serde_json::to_string(&echo.body)
+                .ok()
+                .map(|body| (index, body))
+        })
+        .collect::<Vec<_>>();
+    bodies.sort_by_key(|(_, body)| std::cmp::Reverse(body.len()));
     for (index, body) in bodies {
         candidates[index].body = serde_json::Value::String(String::new());
         candidates[index].truncated = true;
-
-        if encode(&candidates)?.len() > DEBUG_UPSTREAM_HEADER_MAX_BYTES {
+        if encoded_header_if_fits(&full_header(&candidates), EchoEncodingRung::TruncatedBodies)
+            .is_none()
+        {
             continue;
         }
 
@@ -166,10 +325,16 @@ fn encode_echo_header(echoes: &[UpstreamEcho]) -> Option<HeaderValue> {
         let mut best = String::new();
         while low <= high {
             let middle = low + (high - low) / 2;
-            candidates[index].body = serde_json::Value::String(body[..middle].iter().collect());
-            let candidate_encoded = encode(&candidates)?;
-            if candidate_encoded.len() <= DEBUG_UPSTREAM_HEADER_MAX_BYTES {
-                best = candidate_encoded;
+            let (prefix, _) = truncate_utf8(&body, middle);
+            candidates[index].body = serde_json::Value::String(prefix);
+            if encoded_header_if_fits(&full_header(&candidates), EchoEncodingRung::TruncatedBodies)
+                .is_some()
+            {
+                best = candidates[index]
+                    .body
+                    .as_str()
+                    .unwrap_or_default()
+                    .to_string();
                 low = middle + 1;
             } else if middle == 0 {
                 break;
@@ -177,10 +342,65 @@ fn encode_echo_header(echoes: &[UpstreamEcho]) -> Option<HeaderValue> {
                 high = middle - 1;
             }
         }
-        return HeaderValue::from_str(&best).ok();
+        candidates[index].body = serde_json::Value::String(best.clone());
+        if best.len() >= DEBUG_UPSTREAM_MIN_TRUNCATED_BODY_BYTES {
+            return encoded_header_if_fits(
+                &full_header(&candidates),
+                EchoEncodingRung::TruncatedBodies,
+            );
+        }
     }
 
-    None
+    candidates = echoes.to_vec();
+    for echo in &mut candidates {
+        if !echo.body.is_null() {
+            echo.body = serde_json::Value::Null;
+            echo.truncated = true;
+        }
+    }
+    if let Some(encoded) =
+        encoded_header_if_fits(&full_header(&candidates), EchoEncodingRung::DroppedBodies)
+    {
+        return Some(encoded);
+    }
+
+    for echo in &mut candidates {
+        echo.headers.clear();
+        if let Some(response) = &mut echo.response {
+            response.headers.clear();
+        }
+        echo.dropped_headers = Some(true);
+    }
+    if let Some(encoded) =
+        encoded_header_if_fits(&full_header(&candidates), EchoEncodingRung::DroppedHeaders)
+    {
+        return Some(encoded);
+    }
+
+    let mut minimal = UpstreamEchoHeader {
+        version: 2,
+        echoes: echoes
+            .iter()
+            .map(minimal_echo)
+            .map(EncodedUpstreamEcho::Minimal)
+            .collect(),
+        dropped_echo_count: 0,
+    };
+    if let Some(encoded) = encoded_header_if_fits(&minimal, EchoEncodingRung::Minimal) {
+        return Some(encoded);
+    }
+
+    let dropped = minimal
+        .echoes
+        .len()
+        .saturating_sub(DEBUG_UPSTREAM_MAX_ECHOES);
+    minimal.echoes.truncate(DEBUG_UPSTREAM_MAX_ECHOES);
+    minimal.dropped_echo_count = u32::try_from(dropped).unwrap_or(u32::MAX);
+    encoded_header_if_fits(&minimal, EchoEncodingRung::DroppedEchoes)
+}
+
+fn encode_echo_header(echoes: &[UpstreamEcho]) -> Option<HeaderValue> {
+    encode_echo_header_with_rung(echoes).map(|(value, _)| value)
 }
 
 fn attach_upstream_echoes(mut response: Response, echoes: Option<&[UpstreamEcho]>) -> Response {
@@ -335,16 +555,22 @@ async fn forward(
     extra_outbound_headers: Vec<(String, String)>,
     echo: ForwardEcho<'_>,
 ) -> AppResult<Response> {
+    let ForwardEcho {
+        command_type,
+        body,
+        mut collector,
+    } = echo;
     request.headers_mut().remove(DEBUG_UPSTREAM_REQUEST_HEADER);
     let service = assistant_service::resolve_admin_service(&state.db).await?;
     let bridge_minted =
         needs_forward_token_bridge(&auth_user.auth_method, service.forward_access_token);
-    if let Some(echoes) = echo.collector {
+    let echo_index = if let Some(echoes) = collector.as_deref_mut() {
+        let index = echoes.len();
         echoes.push(build_upstream_echo(
             &request,
             path.clone(),
-            echo.command_type,
-            echo.body,
+            command_type,
+            body,
             &extra_outbound_headers,
             UpstreamIdentityEcho {
                 mode: service.identity_propagation_mode.clone(),
@@ -353,7 +579,10 @@ async fn forward(
                 bridge_minted,
             },
         ));
-    }
+        Some(index)
+    } else {
+        None
+    };
 
     // TD-3 bridge: cookie sessions carry no bearer for `forward_access_token`
     // to forward, and prod Aevatar authenticates only `Authorization: Bearer
@@ -388,7 +617,7 @@ async fn forward(
     // the three inputs it switches off and why the delegation token still
     // carries the caller's restrictions.
     let mut resolved_slug = String::new();
-    execute_admin_proxy(
+    let response = execute_admin_proxy(
         state,
         auth_user,
         &service.id,
@@ -397,7 +626,14 @@ async fn forward(
         extra_outbound_headers,
         &mut resolved_slug,
     )
-    .await
+    .await?;
+    if let (Some(echoes), Some(index)) = (collector, echo_index)
+        && let Some(echo) = echoes.get_mut(index)
+    {
+        echo.response = Some(response_echo(&response));
+        echo.upstream_outcome = Some(UpstreamOutcome::Response);
+    }
+    Ok(response)
 }
 
 /// `GET /api/v1/assistant/conversations` -- canonical typed list, with a
@@ -719,6 +955,7 @@ mod tests {
 
     fn test_echo(body: serde_json::Value) -> UpstreamEcho {
         UpstreamEcho {
+            degraded: false,
             method: "POST".to_string(),
             path: "api/chat".to_string(),
             command_type: Some("task.steer".to_string()),
@@ -740,6 +977,9 @@ mod tests {
                 bridge_minted: false,
             },
             truncated: false,
+            response: None,
+            upstream_outcome: Some(UpstreamOutcome::NoResponse),
+            dropped_headers: None,
         }
     }
 
@@ -805,7 +1045,8 @@ mod tests {
                 ),
             ])
         );
-        let serialized = String::from_utf8(serialize_echoes(&[echo]).unwrap()).unwrap();
+        let serialized =
+            String::from_utf8(serialize_echoes(&full_header(&[echo])).unwrap()).unwrap();
         for secret in [
             "caller-secret",
             "session=private",
@@ -877,15 +1118,20 @@ mod tests {
             "instruction": original,
         }));
 
-        let header = encode_echo_header(&[echo]).unwrap();
+        let (header, rung) = encode_echo_header_with_rung(&[echo]).unwrap();
+        assert_eq!(rung, EchoEncodingRung::TruncatedBodies);
         assert!(header.as_bytes().len() <= DEBUG_UPSTREAM_HEADER_MAX_BYTES);
         let decoded = decode_echo_header(&header);
-        assert_eq!(decoded[0]["method"], "POST");
-        assert_eq!(decoded[0]["path"], "api/chat");
-        assert_eq!(decoded[0]["commandType"], "task.steer");
-        assert_eq!(decoded[0]["truncated"], true);
-        assert!(decoded[0]["body"].as_str().is_some());
-        assert!(decoded[0]["body"].as_str().unwrap().len() < original.len());
+        assert_eq!(decoded["version"], 2);
+        assert_eq!(decoded["droppedEchoCount"], 0);
+        let echo = &decoded["echoes"][0];
+        assert_eq!(echo["degraded"], false);
+        assert_eq!(echo["method"], "POST");
+        assert_eq!(echo["path"], "api/chat");
+        assert_eq!(echo["commandType"], "task.steer");
+        assert_eq!(echo["truncated"], true);
+        assert!(echo["body"].as_str().is_some());
+        assert!(echo["body"].as_str().unwrap().len() < original.len());
     }
 
     #[test]
@@ -903,10 +1149,196 @@ mod tests {
         let header = encode_echo_header(&[small_echo, large_echo]).unwrap();
         assert!(header.as_bytes().len() <= DEBUG_UPSTREAM_HEADER_MAX_BYTES);
         let decoded = decode_echo_header(&header);
-        assert_eq!(decoded[0]["body"], small_body);
-        assert_eq!(decoded[0]["truncated"], false);
-        assert!(decoded[1]["body"].as_str().is_some());
-        assert_eq!(decoded[1]["truncated"], true);
+        assert_eq!(decoded["echoes"][0]["body"], small_body);
+        assert_eq!(decoded["echoes"][0]["truncated"], false);
+        assert!(decoded["echoes"][1]["body"].as_str().is_some());
+        assert_eq!(decoded["echoes"][1]["truncated"], true);
+    }
+
+    #[test]
+    fn response_echo_is_allowlisted_bounded_and_rfc_aware() {
+        let long_request_id = format!("{}secret-tail", "r".repeat(300));
+        let response = Response::builder()
+            .status(202)
+            .header(header::CONTENT_TYPE, "Text/Event-Stream; charset=utf-8")
+            .header("x-request-id", long_request_id)
+            .header("x-correlation-id", "correlation-1")
+            .header(header::SET_COOKIE, "session=upstream-secret")
+            .header(header::AUTHORIZATION, "Bearer upstream-secret")
+            .header("x-nyxid-identity-token", "identity-secret")
+            .body(Body::empty())
+            .unwrap();
+
+        let response_echo = response_echo(&response);
+        let serialized = serde_json::to_string(&response_echo).unwrap();
+        assert_eq!(response_echo.status, 202);
+        assert!(response_echo.sse);
+        assert_eq!(
+            response_echo.headers["content-type"]["value"],
+            "Text/Event-Stream; charset=utf-8"
+        );
+        assert_eq!(
+            response_echo.headers["x-request-id"]["value"]
+                .as_str()
+                .unwrap()
+                .len(),
+            256
+        );
+        assert_eq!(response_echo.headers["x-request-id"]["truncated"], true);
+        assert_eq!(
+            response_echo.headers["x-correlation-id"]["truncated"],
+            false
+        );
+        let (utf8_prefix, utf8_truncated) = truncate_utf8(&"界".repeat(100), 256);
+        assert_eq!(utf8_prefix.len(), 255);
+        assert!(utf8_truncated);
+        for forbidden in [
+            "set-cookie",
+            "session=upstream-secret",
+            "authorization",
+            "upstream-secret",
+            "x-nyxid-identity-token",
+            "identity-secret",
+        ] {
+            assert!(
+                !serialized.to_ascii_lowercase().contains(forbidden),
+                "response echo leaked {forbidden}"
+            );
+        }
+    }
+
+    #[test]
+    fn degradation_ladder_emits_only_full_or_minimal_echoes() {
+        let (_, full_rung) = encode_echo_header_with_rung(&[test_echo(serde_json::json!({
+            "prompt": "short",
+        }))])
+        .unwrap();
+        assert_eq!(full_rung, EchoEncodingRung::Full);
+
+        let (_, truncated_rung) = encode_echo_header_with_rung(&[test_echo(serde_json::json!({
+            "prompt": "x".repeat(20_000),
+        }))])
+        .unwrap();
+        assert_eq!(truncated_rung, EchoEncodingRung::TruncatedBodies);
+
+        let dropped_body = (6_000..12_000)
+            .step_by(8)
+            .find_map(|identity_bytes| {
+                let mut echo = test_echo(serde_json::json!({ "prompt": "x".repeat(20_000) }));
+                echo.identity.mode = "i".repeat(identity_bytes);
+                let encoded = encode_echo_header_with_rung(&[echo])?;
+                (encoded.1 == EchoEncodingRung::DroppedBodies).then_some(encoded)
+            })
+            .expect("drop-body rung must be reachable");
+        assert_eq!(
+            decode_echo_header(&dropped_body.0)["echoes"][0]["body"],
+            serde_json::Value::Null
+        );
+
+        let mut header_heavy = Vec::new();
+        for index in 0..8 {
+            let mut echo = test_echo(serde_json::Value::Null);
+            echo.path = format!("{}-{index}", "p".repeat(250));
+            echo.headers = serde_json::Map::from_iter([
+                ("accept".to_string(), serde_json::json!("a".repeat(256))),
+                (
+                    "content-type".to_string(),
+                    serde_json::json!("c".repeat(256)),
+                ),
+                (
+                    "idempotency-key".to_string(),
+                    serde_json::json!("i".repeat(256)),
+                ),
+            ]);
+            echo.response = Some(UpstreamResponseEcho {
+                status: 200,
+                headers: serde_json::Map::from_iter([
+                    (
+                        "content-type".to_string(),
+                        serde_json::to_value(UpstreamResponseHeaderEcho {
+                            value: "r".repeat(256),
+                            truncated: false,
+                        })
+                        .unwrap(),
+                    ),
+                    (
+                        "x-request-id".to_string(),
+                        serde_json::to_value(UpstreamResponseHeaderEcho {
+                            value: "q".repeat(256),
+                            truncated: false,
+                        })
+                        .unwrap(),
+                    ),
+                    (
+                        "x-correlation-id".to_string(),
+                        serde_json::to_value(UpstreamResponseHeaderEcho {
+                            value: "z".repeat(256),
+                            truncated: false,
+                        })
+                        .unwrap(),
+                    ),
+                ]),
+                sse: false,
+            });
+            echo.upstream_outcome = Some(UpstreamOutcome::Response);
+            header_heavy.push(echo);
+        }
+        let (dropped_headers, dropped_headers_rung) =
+            encode_echo_header_with_rung(&header_heavy).unwrap();
+        assert_eq!(dropped_headers_rung, EchoEncodingRung::DroppedHeaders);
+        assert!(
+            decode_echo_header(&dropped_headers)["echoes"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .all(|echo| echo["degraded"] == false && echo["droppedHeaders"] == true)
+        );
+
+        let mut identity_heavy = test_echo(serde_json::Value::Null);
+        identity_heavy.identity.mode = "identity".repeat(4_000);
+        let (minimal, minimal_rung) = encode_echo_header_with_rung(&[identity_heavy]).unwrap();
+        assert_eq!(minimal_rung, EchoEncodingRung::Minimal);
+        assert_eq!(decode_echo_header(&minimal)["echoes"][0]["degraded"], true);
+
+        let many = (0..40)
+            .map(|index| {
+                let mut echo = test_echo(serde_json::Value::Null);
+                echo.path = format!("{}-{index}", "p".repeat(250));
+                echo.command_type = Some("c".repeat(64));
+                echo.identity.mode = "identity".repeat(4_000);
+                echo
+            })
+            .collect::<Vec<_>>();
+        let (dropped, dropped_rung) = encode_echo_header_with_rung(&many).unwrap();
+        assert_eq!(dropped_rung, EchoEncodingRung::DroppedEchoes);
+        let dropped = decode_echo_header(&dropped);
+        assert_eq!(dropped["echoes"].as_array().unwrap().len(), 8);
+        assert_eq!(dropped["droppedEchoCount"], 32);
+        assert_eq!(dropped["echoes"][0]["path"], many[0].path);
+    }
+
+    #[test]
+    fn worst_case_minimal_header_fits_with_total_header_headroom() {
+        let worst_echo = MinimalUpstreamEcho {
+            degraded: true,
+            method: "M".repeat(16),
+            path: "界".repeat(85),
+            command_type: Some("C".repeat(DEBUG_UPSTREAM_COMMAND_TYPE_MAX_BYTES)),
+            upstream_outcome: Some(UpstreamOutcome::Unknown),
+            status: Some(u16::MAX),
+        };
+        assert_eq!(worst_echo.path.len(), 255);
+        let header = UpstreamEchoHeader {
+            version: 2,
+            echoes: vec![EncodedUpstreamEcho::Minimal(worst_echo); 8],
+            dropped_echo_count: u32::MAX,
+        };
+        let json = serialize_echoes(&header).unwrap();
+        let encoded = base64::engine::general_purpose::STANDARD.encode(&json);
+
+        assert!(encoded.len() >= json.len() * 4 / 3);
+        assert!(encoded.len() <= DEBUG_UPSTREAM_HEADER_MAX_BYTES);
+        assert!(encoded.len() + 4 * 1024 <= 16 * 1024);
     }
 
     #[test]
