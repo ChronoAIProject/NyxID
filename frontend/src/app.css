@@ -517,188 +517,197 @@ html.theme-dark .assistant-halo--visible {
 }
 
 /*
- * A quiet, horizontal Newton's-cradle loop. The shared -180ms delay starts the
- * five bespoke dot timelines at 10%, where the left striker begins the next
- * rightward pass. The second half mirrors the collision back to the left.
+ * A four-ball Newton's cradle. Balls 1 and 4 are the strikers; 2 and 3 are
+ * ballast and never translate — a real cradle passes the impulse through its
+ * middle without displacing it, and the previous five-dot version's ±2px
+ * wiggle on the inner dots was the loudest tell that it was a decoration
+ * rather than a physical system.
+ *
+ * Everything below follows from treating a dot as a mass carrying energy:
+ *
+ *  - The pack is tight. 6px balls on an 8px pitch leave a 2px seam, so the
+ *    four read as a chain. The old 4px dots sat on the same 8px pitch, which
+ *    put a whole ball diameter of air between neighbours: nothing read as
+ *    being in contact, the impulse crossed open space, and no amount of timing
+ *    could have made that look like contact mechanics. The striker's 7px swing
+ *    is nearly a full pitch, opening the 2px seam to 9px — a separation you
+ *    cannot miss, where the old 6px travel never even cleared its own 4px gap
+ *    and so read as vibration.
+ *  - Gravity is asymmetric. Climbing away from the pack decelerates (ease-out
+ *    into the apex); falling back accelerates (ease-in into the collision).
+ *    The old timeline eased both directions the same way over 72ms — four
+ *    frames at 60Hz, below the window where an eye reads a trajectory at all,
+ *    so it read as raster positions changing rather than as motion.
+ *  - Brightness tracks speed. A ball is dimmest at the apex, where it is
+ *    momentarily stopped and all of its energy is height, and brightest at the
+ *    bottom of the swing, where it is fastest and about to collide. Only one
+ *    striker is ever lit outside the 66ms collision window: light is handed
+ *    over, not duplicated.
+ *  - The apex dwell is real, not padding. A pendulum spends most of its cycle
+ *    near the extremes, and that dwell is what makes 6px balls legible instead
+ *    of frantic.
+ *
+ * What is deliberately absent is a vertical rise. A bob does climb as it
+ * swings, but a rise small enough to imply a plausible pendulum arm is around
+ * a pixel — below what a 6px circle can show without just smearing its own
+ * antialiasing — and one large enough to see would need an arm about twice the
+ * loader's height, drawn as a straight diagonal chord between keyframes rather
+ * than a curve. It would read as a hop. Mass here is carried by contact,
+ * momentum, and light instead.
+ *
+ * Timeline, as percentages of --domino-period; 0% is ball 1 hanging at the
+ * left apex:
+ *
+ *    0–21%   ball 1 falls right, accelerating
+ *   21–24%   collision; ball 1's light hands over to ball 4
+ *   24–45%   ball 4 climbs right, decelerating
+ *   45–50%   ball 4 dwells at the right apex
+ *   50–71%   ball 4 falls left, accelerating
+ *   71–74%   collision; ball 4's light hands back to ball 1
+ *   74–95%   ball 1 climbs left, decelerating
+ *   95–100%  ball 1 dwells at the left apex
+ *
+ * The dwell is deliberately short — 5%, about 110ms. Gravity easing already
+ * parks a ball near its apex for a while, and a longer explicit hold on top of
+ * that stacks into half a second of apparent stillness at each end, which on a
+ * loader reads as the turn having died rather than as calm. For the same
+ * reason the period is 2200ms rather than a rounder 2400: one impact every
+ * 1100ms is still far calmer than the 1800ms loop it replaces, without letting
+ * the gaps between events grow long enough to feel stalled.
+ *
+ * The shared negative delay of 24% of the period starts the loop on the frame
+ * ball 4 launches: every ball is level and one immediately swings, so the
+ * loader neither pops in mid-displacement nor opens on a dwell. `StreamingDots`
+ * mirrors that 24% offset and the 50% reversal to pick an exit direction, so
+ * re-timing anything here means re-timing those constants too. During the two
+ * dwells there is no instantaneous direction; they are classified with the
+ * pass that put the ball out there, so the sweep always continues the travel
+ * the reader last saw.
  */
+.assistant-streaming-dots {
+  --domino-period: 2200ms;
+  --domino-swing: 7px;
+  /* Rest has to clear the 3:1 non-text bar in BOTH themes, since a striker
+     spends most of the cycle there: against `--color-muted-foreground` it
+     composites to #6F6F6F on dark (3.8:1) and #8D8D8D on light (3.2:1). The
+     old flat 70%-of-text-tertiary dots managed ~1.8:1 dark and ~2.7:1 light.
+     The peak keeps enough headroom above rest (7.7:1 dark) to read as light
+     arriving rather than as a colour change. */
+  --domino-rest: 0.65;
+  --domino-hot: 1;
+  /* Reduced motion trades travel for light, so its swing is deliberately
+     narrower than the cradle's — the substitute for movement should not
+     itself be a hard contrast pulse. */
+  --domino-still-peak: 0.85;
+}
+
 .assistant-streaming-dot {
-  animation-duration: 1.8s;
+  /* Also the resting appearance when the loop is suppressed (reduced motion)
+     or replaced (the exit sweep), so neither state pops brighter than the
+     animation it interrupts. */
+  opacity: var(--domino-rest);
+  animation-duration: var(--domino-period);
   animation-timing-function: linear;
-  animation-delay: -180ms;
+  animation-delay: calc(var(--domino-period) * -0.24);
   animation-iteration-count: infinite;
-  will-change: transform;
+  will-change: transform, opacity;
 }
 
 .assistant-streaming-dot:nth-child(1) {
-  animation-name: assistant-domino-dot-1;
+  animation-name: assistant-domino-striker-left;
 }
 
-.assistant-streaming-dot:nth-child(2) {
-  animation-name: assistant-domino-dot-2;
-}
-
-.assistant-streaming-dot:nth-child(3) {
-  animation-name: assistant-domino-dot-3;
-}
+/* Balls 2 and 3 are ballast and get no animation-name: they hold position and
+   brightness for the whole cycle. */
 
 .assistant-streaming-dot:nth-child(4) {
-  animation-name: assistant-domino-dot-4;
+  animation-name: assistant-domino-striker-right;
 }
 
-.assistant-streaming-dot:nth-child(5) {
-  animation-name: assistant-domino-dot-5;
-}
+/* Falls 0–21%, hands its energy over on contact, waits out the far ball's
+   round trip, is struck at 71%, and coasts back up to the left apex by 95%.
+   The two curves are the whole point, and they are each other's time-reverse
+   because gravity does not care which way a bob is going: `0.4, 0, 0.7, 0.4`
+   is a mass falling — at the halfway mark it has covered about a quarter of
+   the distance, which is what a real pendulum released from rest does — and
+   `0.3, 0.6, 0.6, 1` is that same motion run backwards, coasting to a stop
+   against gravity. Each swing runs 462ms, so the eye has ~28 frames to read
+   the trajectory instead of the old four.
 
-@keyframes assistant-domino-dot-1 {
+   The brightness handoff is exclusive: this ball's post-impact decay and the
+   far ball's rise both occupy the same 3% collision window, so outside those
+   66ms exactly one striker is above rest. Letting the decay run longer would
+   light both ends at once, which is not a transfer of energy — it is a copy
+   of it. */
+@keyframes assistant-domino-striker-left {
   0% {
-    transform: translateX(-2px);
-    animation-timing-function: ease-in;
+    transform: translate3d(calc(var(--domino-swing) * -1), 0, 0);
+    opacity: var(--domino-rest);
+    animation-timing-function: cubic-bezier(0.4, 0, 0.7, 0.4);
   }
-  5%,
-  10% {
-    transform: translateX(0);
+  21% {
+    transform: translate3d(0, 0, 0);
+    opacity: var(--domino-hot);
     animation-timing-function: ease-out;
   }
-  14% {
-    transform: translateX(-6px);
-    animation-timing-function: ease-in;
+  24%,
+  71% {
+    transform: translate3d(0, 0, 0);
+    opacity: var(--domino-rest);
   }
-  20% {
-    transform: translateX(0);
-    animation-timing-function: ease-out;
+  74% {
+    transform: translate3d(0, 0, 0);
+    opacity: var(--domino-hot);
+    animation-timing-function: cubic-bezier(0.3, 0.6, 0.6, 1);
+  }
+  95%,
+  100% {
+    transform: translate3d(calc(var(--domino-swing) * -1), 0, 0);
+    opacity: var(--domino-rest);
+  }
+}
+
+/* The right striker is the same body of motion offset by half a period. */
+@keyframes assistant-domino-striker-right {
+  0%,
+  21% {
+    transform: translate3d(0, 0, 0);
+    opacity: var(--domino-rest);
   }
   24% {
-    transform: translateX(2px);
-    animation-timing-function: ease-in;
+    transform: translate3d(0, 0, 0);
+    opacity: var(--domino-hot);
+    animation-timing-function: cubic-bezier(0.3, 0.6, 0.6, 1);
   }
-  28%,
-  88% {
-    transform: translateX(0);
-    animation-timing-function: ease-out;
-  }
-  92% {
-    transform: translateX(-2px);
-    animation-timing-function: ease-in;
-  }
-  94% {
-    transform: translateX(0);
-    animation-timing-function: ease-out;
-  }
-  98% {
-    transform: translateX(-6px);
-    animation-timing-function: ease-in;
-  }
-  100% {
-    transform: translateX(-2px);
-  }
-}
-
-@keyframes assistant-domino-dot-2 {
-  0%,
-  25% {
-    transform: translateX(0);
-    animation-timing-function: ease-out;
-  }
-  29% {
-    transform: translateX(2px);
-    animation-timing-function: ease-in;
-  }
-  33%,
-  81% {
-    transform: translateX(0);
-    animation-timing-function: ease-out;
-  }
-  85% {
-    transform: translateX(-2px);
-    animation-timing-function: ease-in;
-  }
-  89%,
-  100% {
-    transform: translateX(0);
-  }
-}
-
-@keyframes assistant-domino-dot-3 {
-  0%,
-  32% {
-    transform: translateX(0);
-    animation-timing-function: ease-out;
-  }
-  36% {
-    transform: translateX(2px);
-    animation-timing-function: ease-in;
-  }
-  40%,
-  74% {
-    transform: translateX(0);
-    animation-timing-function: ease-out;
-  }
-  78% {
-    transform: translateX(-2px);
-    animation-timing-function: ease-in;
-  }
-  82%,
-  100% {
-    transform: translateX(0);
-  }
-}
-
-@keyframes assistant-domino-dot-4 {
-  0%,
-  39% {
-    transform: translateX(0);
-    animation-timing-function: ease-out;
-  }
-  43% {
-    transform: translateX(2px);
-    animation-timing-function: ease-in;
-  }
-  47%,
-  67% {
-    transform: translateX(0);
-    animation-timing-function: ease-out;
+  45%,
+  50% {
+    transform: translate3d(var(--domino-swing), 0, 0);
+    opacity: var(--domino-rest);
+    animation-timing-function: cubic-bezier(0.4, 0, 0.7, 0.4);
   }
   71% {
-    transform: translateX(-2px);
-    animation-timing-function: ease-in;
+    transform: translate3d(0, 0, 0);
+    opacity: var(--domino-hot);
+    animation-timing-function: ease-out;
   }
-  75%,
+  74%,
   100% {
-    transform: translateX(0);
+    transform: translate3d(0, 0, 0);
+    opacity: var(--domino-rest);
   }
 }
 
-@keyframes assistant-domino-dot-5 {
-  0%,
-  46% {
-    transform: translateX(0);
-    animation-timing-function: ease-out;
-  }
-  50% {
-    transform: translateX(2px);
-    animation-timing-function: ease-in;
-  }
-  53% {
-    transform: translateX(0);
-    animation-timing-function: ease-out;
-  }
-  57% {
-    transform: translateX(6px);
-    animation-timing-function: ease-in;
-  }
-  61% {
-    transform: translateX(0);
-    animation-timing-function: ease-out;
-  }
-  65% {
-    transform: translateX(-2px);
-    animation-timing-function: ease-in;
-  }
-  69%,
-  100% {
-    transform: translateX(0);
-  }
-}
+/* Balls 2 and 3 have no keyframes at all — they hold the resting opacity the
+   base rule gives them and never move.
+ *
+ * An earlier pass lit them in sequence as the impulse crossed, which was
+ * wrong twice over. A cradle's famous property is that its middle does
+ * nothing; animating the ballast argues against the one thing that makes the
+ * mechanism legible, and it drags in the ambient twinkle of typing dots. And
+ * the sequencing was a lie the medium cannot tell: 22ms apart is 1.3 frames
+ * at 60Hz, so the two "successive" flashes land on the same frame as often as
+ * not — one central blink, not a wave. Energy stays on the balls that carry
+ * it. */
 
 .assistant-streaming-dots--leaving {
   z-index: 20;
@@ -709,7 +718,12 @@ html.theme-dark .assistant-halo--visible {
   animation-duration: 280ms;
   animation-timing-function: ease-in;
   animation-iteration-count: 1;
-  animation-fill-mode: forwards;
+  /* `both`, not `forwards`: the staggered balls wait out a positive delay
+     before their exit starts, and under `forwards` nothing is applied during
+     that wait, so they drop to their underlying (undisplaced) transform for up
+     to 72ms first. Back-filling the `from` state holds each one exactly where
+     `StreamingDots` captured it. */
+  animation-fill-mode: both;
 }
 
 .assistant-streaming-dots--leaving[data-exit-direction="right"]
@@ -722,52 +736,82 @@ html.theme-dark .assistant-halo--visible {
   animation-name: assistant-domino-exit-left;
 }
 
+/* The ball nearest the exit leaves first and the chain follows it, so the
+   sweep keeps the same direction the impulse was already travelling in. Total
+   flight is 280ms + the 72ms of stagger the far ball waits out; DOMINO_EXIT_MS
+   in `chat-thread.tsx` must stay at or above that sum or the dots unmount
+   mid-air. */
 .assistant-streaming-dots--leaving[data-exit-direction="right"]
   .assistant-streaming-dot:nth-child(1),
 .assistant-streaming-dots--leaving[data-exit-direction="left"]
-  .assistant-streaming-dot:nth-child(5) {
+  .assistant-streaming-dot:nth-child(4) {
   animation-delay: 72ms;
 }
 
 .assistant-streaming-dots--leaving[data-exit-direction="right"]
   .assistant-streaming-dot:nth-child(2),
 .assistant-streaming-dots--leaving[data-exit-direction="left"]
-  .assistant-streaming-dot:nth-child(4) {
-  animation-delay: 54ms;
+  .assistant-streaming-dot:nth-child(3) {
+  animation-delay: 48ms;
 }
 
 .assistant-streaming-dots--leaving[data-exit-direction="right"]
   .assistant-streaming-dot:nth-child(3),
 .assistant-streaming-dots--leaving[data-exit-direction="left"]
-  .assistant-streaming-dot:nth-child(3) {
-  animation-delay: 36ms;
+  .assistant-streaming-dot:nth-child(2) {
+  animation-delay: 24ms;
 }
 
 .assistant-streaming-dots--leaving[data-exit-direction="right"]
   .assistant-streaming-dot:nth-child(4),
 .assistant-streaming-dots--leaving[data-exit-direction="left"]
-  .assistant-streaming-dot:nth-child(2) {
-  animation-delay: 18ms;
-}
-
-.assistant-streaming-dots--leaving[data-exit-direction="right"]
-  .assistant-streaming-dot:nth-child(5),
-.assistant-streaming-dots--leaving[data-exit-direction="left"]
   .assistant-streaming-dot:nth-child(1) {
   animation-delay: 0ms;
 }
 
+/* Thrown clear rather than faded out: the scale-down is distance, and it is
+   what keeps the exit reading as the same physics as the loop.
+   `--domino-exit-x` / `--domino-exit-opacity` are written per ball by
+   `StreamingDots` from the live computed style at the instant the loop is
+   replaced. They must be honoured in BOTH keyframes — an exit that only
+   declares `to` interpolates from the element's underlying style, which is
+   undisplaced, so a striker caught out at its apex would snap back into the
+   pack before flying away. The throw is relative to wherever the ball
+   actually was. */
 @keyframes assistant-domino-exit-right {
+  from {
+    opacity: var(--domino-exit-opacity, var(--domino-rest));
+    transform: translate3d(var(--domino-exit-x, 0px), 0, 0);
+  }
   to {
     opacity: 0;
-    transform: translateX(24px);
+    transform: translate3d(calc(var(--domino-exit-x, 0px) + 26px), 0, 0)
+      scale(0.5);
   }
 }
 
 @keyframes assistant-domino-exit-left {
+  from {
+    opacity: var(--domino-exit-opacity, var(--domino-rest));
+    transform: translate3d(var(--domino-exit-x, 0px), 0, 0);
+  }
   to {
     opacity: 0;
-    transform: translateX(-24px);
+    transform: translate3d(calc(var(--domino-exit-x, 0px) - 26px), 0, 0)
+      scale(0.5);
+  }
+}
+
+/* The reduced-motion loop: liveness with no travel, and a narrower swing than
+   the cradle's own so the substitute for movement is not itself a hard
+   contrast pulse. */
+@keyframes assistant-domino-still {
+  0%,
+  100% {
+    opacity: var(--domino-rest);
+  }
+  50% {
+    opacity: var(--domino-still-peak);
   }
 }
 
@@ -784,19 +828,40 @@ html.theme-dark .assistant-halo--visible {
     opacity: 0.5;
   }
 
-  .assistant-streaming-dot {
-    animation: none;
+  /* Reduced motion drops the travel, not the signal — a frozen loader tells a
+     reader the turn died. The balls hold station and breathe together; a fade
+     is the accepted stand-in for movement, and one synchronised curve is
+     calmer than a relay for anyone who asked for less. `:nth-child(n)` matches
+     every ball and only exists to outweigh the per-ball animation-name rules
+     above; without it they would keep swinging. */
+  .assistant-streaming-dot:nth-child(n) {
+    animation-name: assistant-domino-still;
+    animation-duration: 2s;
+    animation-delay: 0ms;
+    animation-timing-function: ease-in-out;
   }
 
-  .assistant-streaming-dots--leaving .assistant-streaming-dot {
-    animation: assistant-domino-exit-fade 200ms ease-in forwards;
+  /* `[data-exit-direction]` is load-bearing, not decoration: the directional
+     stagger rules above weigh (0,4,0) because of their own attribute selector,
+     so a (0,3,0) rule here would lose to them and reduced-motion exits would
+     keep the 72ms sequential cascade — animation restored for exactly the
+     people who asked for less of it. */
+  .assistant-streaming-dots--leaving[data-exit-direction]
+    .assistant-streaming-dot:nth-child(n) {
+    animation: assistant-domino-exit-fade 200ms ease-in both;
   }
 }
 
 @keyframes assistant-domino-exit-fade {
+  from {
+    opacity: var(--domino-exit-opacity, var(--domino-rest));
+    transform: translate3d(var(--domino-exit-x, 0px), 0, 0);
+  }
   to {
     opacity: 0;
-    transform: none;
+    /* Held, not zeroed — fading in place is the reduced-motion exit; sliding
+       back to the origin on the way out would be motion. */
+    transform: translate3d(var(--domino-exit-x, 0px), 0, 0);
   }
 }
 
