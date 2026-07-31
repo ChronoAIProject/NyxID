@@ -1,0 +1,210 @@
+{
+  "openapi": "3.1.0",
+  "info": {
+    "title": "Google API",
+    "version": "v1-nyxid-overlay",
+    "description": "NyxID-hosted overlay of common Google API operations reachable under www.googleapis.com (userinfo, Gmail, Drive, Calendar). NyxID injects the OAuth token; each product still requires its scope on the stored credential."
+  },
+  "servers": [{ "url": "https://www.googleapis.com", "description": "Google APIs" }],
+  "paths": {
+    "/oauth2/v2/userinfo": {
+      "get": {
+        "operationId": "get_userinfo",
+        "summary": "Get the authenticated user's profile",
+        "x-aevatar-tool": {
+          "name": "get_userinfo",
+          "description": "Get the authenticated Google account profile.",
+          "readOnly": true,
+          "destructive": false,
+          "requiresApproval": false
+        },
+        "responses": {
+          "200": {
+            "description": "User profile",
+            "content": {
+              "application/json": {
+                "schema": { "type": "object", "additionalProperties": true }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/gmail/v1/users/me/messages": {
+      "get": {
+        "operationId": "gmail_list_messages",
+        "summary": "List Gmail messages",
+        "x-aevatar-tool": {
+          "name": "gmail_list_messages",
+          "description": "List Gmail message ids of the authenticated user.",
+          "readOnly": true,
+          "destructive": false,
+          "requiresApproval": false
+        },
+        "parameters": [
+          {
+            "name": "q",
+            "in": "query",
+            "required": false,
+            "description": "Gmail search query, e.g. from:someone is:unread.",
+            "schema": { "type": "string" }
+          },
+          {
+            "name": "maxResults",
+            "in": "query",
+            "required": false,
+            "schema": { "type": "integer", "minimum": 1, "maximum": 500 }
+          },
+          {
+            "name": "pageToken",
+            "in": "query",
+            "required": false,
+            "schema": { "type": "string" }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Message id page",
+            "content": {
+              "application/json": {
+                "schema": { "type": "object", "additionalProperties": true }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/gmail/v1/users/me/messages/{id}": {
+      "get": {
+        "operationId": "gmail_get_message",
+        "summary": "Get a Gmail message",
+        "x-aevatar-tool": {
+          "name": "gmail_get_message",
+          "description": "Get a Gmail message by id.",
+          "readOnly": true,
+          "destructive": false,
+          "requiresApproval": false
+        },
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": { "type": "string", "minLength": 1 }
+          },
+          {
+            "name": "format",
+            "in": "query",
+            "required": false,
+            "schema": { "type": "string", "enum": ["minimal", "full", "raw", "metadata"] }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Message",
+            "content": {
+              "application/json": {
+                "schema": { "type": "object", "additionalProperties": true }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/drive/v3/files": {
+      "get": {
+        "operationId": "drive_list_files",
+        "summary": "List Drive files",
+        "x-aevatar-tool": {
+          "name": "drive_list_files",
+          "description": "List Google Drive files of the authenticated user.",
+          "readOnly": true,
+          "destructive": false,
+          "requiresApproval": false
+        },
+        "parameters": [
+          {
+            "name": "q",
+            "in": "query",
+            "required": false,
+            "description": "Drive search query, e.g. name contains 'report'.",
+            "schema": { "type": "string" }
+          },
+          {
+            "name": "pageSize",
+            "in": "query",
+            "required": false,
+            "schema": { "type": "integer", "minimum": 1, "maximum": 1000 }
+          },
+          {
+            "name": "pageToken",
+            "in": "query",
+            "required": false,
+            "schema": { "type": "string" }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "File page",
+            "content": {
+              "application/json": {
+                "schema": { "type": "object", "additionalProperties": true }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/calendar/v3/calendars/primary/events": {
+      "get": {
+        "operationId": "calendar_list_events",
+        "summary": "List primary calendar events",
+        "x-aevatar-tool": {
+          "name": "calendar_list_events",
+          "description": "List events of the authenticated user's primary Google Calendar.",
+          "readOnly": true,
+          "destructive": false,
+          "requiresApproval": false
+        },
+        "parameters": [
+          {
+            "name": "timeMin",
+            "in": "query",
+            "required": false,
+            "description": "RFC3339 lower bound for event end time.",
+            "schema": { "type": "string" }
+          },
+          {
+            "name": "timeMax",
+            "in": "query",
+            "required": false,
+            "description": "RFC3339 upper bound for event start time.",
+            "schema": { "type": "string" }
+          },
+          {
+            "name": "maxResults",
+            "in": "query",
+            "required": false,
+            "schema": { "type": "integer", "minimum": 1, "maximum": 2500 }
+          },
+          {
+            "name": "pageToken",
+            "in": "query",
+            "required": false,
+            "schema": { "type": "string" }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Event page",
+            "content": {
+              "application/json": {
+                "schema": { "type": "object", "additionalProperties": true }
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+}

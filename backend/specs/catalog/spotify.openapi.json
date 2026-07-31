@@ -1,0 +1,121 @@
+{
+  "openapi": "3.1.0",
+  "info": {
+    "title": "Spotify Web API",
+    "version": "v1-nyxid-overlay",
+    "description": "NyxID-hosted overlay of the Spotify Web API operations most used by agents. Paths are relative to the /v1 base; NyxID injects the OAuth token."
+  },
+  "servers": [{ "url": "https://api.spotify.com/v1", "description": "Spotify Web API" }],
+  "paths": {
+    "/me": {
+      "get": {
+        "operationId": "get_current_user",
+        "summary": "Get the current user's profile",
+        "x-aevatar-tool": {
+          "name": "get_current_user",
+          "description": "Get the authenticated Spotify user's profile.",
+          "readOnly": true,
+          "destructive": false,
+          "requiresApproval": false
+        },
+        "responses": {
+          "200": {
+            "description": "User profile",
+            "content": {
+              "application/json": {
+                "schema": { "type": "object", "additionalProperties": true }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/search": {
+      "get": {
+        "operationId": "search",
+        "summary": "Search the Spotify catalog",
+        "x-aevatar-tool": {
+          "name": "search",
+          "description": "Search Spotify for tracks, artists, albums, playlists, shows, or episodes.",
+          "readOnly": true,
+          "destructive": false,
+          "requiresApproval": false
+        },
+        "parameters": [
+          {
+            "name": "q",
+            "in": "query",
+            "required": true,
+            "schema": { "type": "string", "minLength": 1 }
+          },
+          {
+            "name": "type",
+            "in": "query",
+            "required": true,
+            "description": "Comma-separated: album, artist, playlist, track, show, episode, audiobook.",
+            "schema": { "type": "string", "minLength": 1 }
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "required": false,
+            "schema": { "type": "integer", "minimum": 1, "maximum": 50 }
+          },
+          {
+            "name": "offset",
+            "in": "query",
+            "required": false,
+            "schema": { "type": "integer", "minimum": 0 }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Search results",
+            "content": {
+              "application/json": {
+                "schema": { "type": "object", "additionalProperties": true }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/me/playlists": {
+      "get": {
+        "operationId": "list_my_playlists",
+        "summary": "List the current user's playlists",
+        "x-aevatar-tool": {
+          "name": "list_my_playlists",
+          "description": "List the authenticated Spotify user's playlists.",
+          "readOnly": true,
+          "destructive": false,
+          "requiresApproval": false
+        },
+        "parameters": [
+          {
+            "name": "limit",
+            "in": "query",
+            "required": false,
+            "schema": { "type": "integer", "minimum": 1, "maximum": 50 }
+          },
+          {
+            "name": "offset",
+            "in": "query",
+            "required": false,
+            "schema": { "type": "integer", "minimum": 0 }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Playlist page",
+            "content": {
+              "application/json": {
+                "schema": { "type": "object", "additionalProperties": true }
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+}

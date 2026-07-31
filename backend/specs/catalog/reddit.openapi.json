@@ -1,0 +1,128 @@
+{
+  "openapi": "3.1.0",
+  "info": {
+    "title": "Reddit API",
+    "version": "v1-nyxid-overlay",
+    "description": "NyxID-hosted overlay of the Reddit OAuth API operations most used by agents. NyxID injects the OAuth token; requests go to oauth.reddit.com."
+  },
+  "servers": [{ "url": "https://oauth.reddit.com", "description": "Reddit OAuth API" }],
+  "paths": {
+    "/api/v1/me": {
+      "get": {
+        "operationId": "get_me",
+        "summary": "Get the authenticated user",
+        "x-aevatar-tool": {
+          "name": "get_me",
+          "description": "Get the authenticated Reddit user profile.",
+          "readOnly": true,
+          "destructive": false,
+          "requiresApproval": false
+        },
+        "responses": {
+          "200": {
+            "description": "User profile",
+            "content": {
+              "application/json": {
+                "schema": { "type": "object", "additionalProperties": true }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/r/{subreddit}/hot": {
+      "get": {
+        "operationId": "subreddit_hot",
+        "summary": "List hot posts in a subreddit",
+        "x-aevatar-tool": {
+          "name": "subreddit_hot",
+          "description": "List hot posts of a subreddit.",
+          "readOnly": true,
+          "destructive": false,
+          "requiresApproval": false
+        },
+        "parameters": [
+          {
+            "name": "subreddit",
+            "in": "path",
+            "required": true,
+            "schema": { "type": "string", "minLength": 1 }
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "required": false,
+            "schema": { "type": "integer", "minimum": 1, "maximum": 100 }
+          },
+          {
+            "name": "after",
+            "in": "query",
+            "required": false,
+            "description": "Fullname cursor for pagination.",
+            "schema": { "type": "string" }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Post listing",
+            "content": {
+              "application/json": {
+                "schema": { "type": "object", "additionalProperties": true }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/search": {
+      "get": {
+        "operationId": "search_posts",
+        "summary": "Search posts site-wide",
+        "x-aevatar-tool": {
+          "name": "search_posts",
+          "description": "Search Reddit posts.",
+          "readOnly": true,
+          "destructive": false,
+          "requiresApproval": false
+        },
+        "parameters": [
+          {
+            "name": "q",
+            "in": "query",
+            "required": true,
+            "schema": { "type": "string", "minLength": 1 }
+          },
+          {
+            "name": "sort",
+            "in": "query",
+            "required": false,
+            "schema": { "type": "string", "enum": ["relevance", "hot", "top", "new", "comments"] }
+          },
+          {
+            "name": "t",
+            "in": "query",
+            "required": false,
+            "description": "Time window for top/relevance sorts.",
+            "schema": { "type": "string", "enum": ["hour", "day", "week", "month", "year", "all"] }
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "required": false,
+            "schema": { "type": "integer", "minimum": 1, "maximum": 100 }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Search listing",
+            "content": {
+              "application/json": {
+                "schema": { "type": "object", "additionalProperties": true }
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+}

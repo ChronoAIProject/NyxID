@@ -1,0 +1,160 @@
+{
+  "openapi": "3.1.0",
+  "info": {
+    "title": "OpenAI API",
+    "version": "v1-nyxid-overlay",
+    "description": "NyxID-hosted overlay of the core OpenAI API operations. Paths are relative to the /v1 base; NyxID injects the API key."
+  },
+  "servers": [{ "url": "https://api.openai.com/v1", "description": "OpenAI API" }],
+  "paths": {
+    "/chat/completions": {
+      "post": {
+        "operationId": "chat_completions",
+        "summary": "Create a chat completion",
+        "x-aevatar-tool": {
+          "name": "chat_completions",
+          "description": "Create an OpenAI chat completion.",
+          "readOnly": false,
+          "destructive": false,
+          "requiresApproval": false
+        },
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "required": ["model", "messages"],
+                "additionalProperties": true,
+                "properties": {
+                  "model": { "type": "string", "description": "Model id, e.g. gpt-4o." },
+                  "messages": {
+                    "type": "array",
+                    "description": "Conversation messages with role and content.",
+                    "items": { "type": "object", "additionalProperties": true }
+                  },
+                  "temperature": { "type": "number" },
+                  "max_tokens": { "type": "integer" }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Chat completion",
+            "content": {
+              "application/json": {
+                "schema": { "type": "object", "additionalProperties": true }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/responses": {
+      "post": {
+        "operationId": "responses_create",
+        "summary": "Create a model response (Responses API)",
+        "x-aevatar-tool": {
+          "name": "responses_create",
+          "description": "Create an OpenAI Responses API response.",
+          "readOnly": false,
+          "destructive": false,
+          "requiresApproval": false
+        },
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "required": ["model", "input"],
+                "additionalProperties": true,
+                "properties": {
+                  "model": { "type": "string" },
+                  "input": {
+                    "description": "String prompt or structured input items.",
+                    "type": ["string", "array"]
+                  }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Model response",
+            "content": {
+              "application/json": {
+                "schema": { "type": "object", "additionalProperties": true }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/embeddings": {
+      "post": {
+        "operationId": "embeddings_create",
+        "summary": "Create embeddings",
+        "x-aevatar-tool": {
+          "name": "embeddings_create",
+          "description": "Create OpenAI embeddings for input text.",
+          "readOnly": false,
+          "destructive": false,
+          "requiresApproval": false
+        },
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "required": ["model", "input"],
+                "additionalProperties": true,
+                "properties": {
+                  "model": { "type": "string", "description": "e.g. text-embedding-3-small." },
+                  "input": { "type": ["string", "array"] }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Embedding vectors",
+            "content": {
+              "application/json": {
+                "schema": { "type": "object", "additionalProperties": true }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/models": {
+      "get": {
+        "operationId": "models_list",
+        "summary": "List available models",
+        "x-aevatar-tool": {
+          "name": "models_list",
+          "description": "List OpenAI models available to the credential.",
+          "readOnly": true,
+          "destructive": false,
+          "requiresApproval": false
+        },
+        "responses": {
+          "200": {
+            "description": "Model list",
+            "content": {
+              "application/json": {
+                "schema": { "type": "object", "additionalProperties": true }
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+}

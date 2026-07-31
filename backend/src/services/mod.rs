@@ -15,6 +15,8 @@ pub mod auth_service;
 pub mod billing;
 pub mod cae_webhook_service;
 pub mod catalog_service;
+pub mod catalog_spec_registry;
+pub mod catalog_spec_sync;
 pub mod channel_adapters;
 pub mod channel_bot_service;
 pub mod channel_event_service;

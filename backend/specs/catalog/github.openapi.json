@@ -1,0 +1,286 @@
+{
+  "openapi": "3.1.0",
+  "info": {
+    "title": "GitHub REST API",
+    "version": "v3-nyxid-overlay",
+    "description": "NyxID-hosted overlay of the GitHub REST API operations most used by agents. NyxID injects the OAuth or personal access token."
+  },
+  "servers": [{ "url": "https://api.github.com", "description": "GitHub REST API" }],
+  "paths": {
+    "/user": {
+      "get": {
+        "operationId": "get_authenticated_user",
+        "summary": "Get the authenticated user",
+        "x-aevatar-tool": {
+          "name": "get_authenticated_user",
+          "description": "Get the authenticated GitHub user profile.",
+          "readOnly": true,
+          "destructive": false,
+          "requiresApproval": false
+        },
+        "responses": {
+          "200": {
+            "description": "User profile",
+            "content": {
+              "application/json": {
+                "schema": { "type": "object", "additionalProperties": true }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/user/repos": {
+      "get": {
+        "operationId": "list_user_repos",
+        "summary": "List repositories for the authenticated user",
+        "x-aevatar-tool": {
+          "name": "list_user_repos",
+          "description": "List GitHub repositories accessible to the authenticated user.",
+          "readOnly": true,
+          "destructive": false,
+          "requiresApproval": false
+        },
+        "parameters": [
+          {
+            "name": "sort",
+            "in": "query",
+            "required": false,
+            "schema": { "type": "string", "enum": ["created", "updated", "pushed", "full_name"] }
+          },
+          {
+            "name": "per_page",
+            "in": "query",
+            "required": false,
+            "schema": { "type": "integer", "minimum": 1, "maximum": 100 }
+          },
+          {
+            "name": "page",
+            "in": "query",
+            "required": false,
+            "schema": { "type": "integer", "minimum": 1 }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Repository list",
+            "content": {
+              "application/json": {
+                "schema": { "type": "array", "items": { "type": "object", "additionalProperties": true } }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/repos/{owner}/{repo}": {
+      "get": {
+        "operationId": "get_repo",
+        "summary": "Get a repository",
+        "x-aevatar-tool": {
+          "name": "get_repo",
+          "description": "Get a GitHub repository by owner and name.",
+          "readOnly": true,
+          "destructive": false,
+          "requiresApproval": false
+        },
+        "parameters": [
+          { "name": "owner", "in": "path", "required": true, "schema": { "type": "string", "minLength": 1 } },
+          { "name": "repo", "in": "path", "required": true, "schema": { "type": "string", "minLength": 1 } }
+        ],
+        "responses": {
+          "200": {
+            "description": "Repository",
+            "content": {
+              "application/json": {
+                "schema": { "type": "object", "additionalProperties": true }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/repos/{owner}/{repo}/issues": {
+      "get": {
+        "operationId": "list_repo_issues",
+        "summary": "List repository issues",
+        "x-aevatar-tool": {
+          "name": "list_repo_issues",
+          "description": "List issues of a GitHub repository.",
+          "readOnly": true,
+          "destructive": false,
+          "requiresApproval": false
+        },
+        "parameters": [
+          { "name": "owner", "in": "path", "required": true, "schema": { "type": "string", "minLength": 1 } },
+          { "name": "repo", "in": "path", "required": true, "schema": { "type": "string", "minLength": 1 } },
+          {
+            "name": "state",
+            "in": "query",
+            "required": false,
+            "schema": { "type": "string", "enum": ["open", "closed", "all"] }
+          },
+          {
+            "name": "labels",
+            "in": "query",
+            "required": false,
+            "description": "Comma-separated label names.",
+            "schema": { "type": "string" }
+          },
+          {
+            "name": "per_page",
+            "in": "query",
+            "required": false,
+            "schema": { "type": "integer", "minimum": 1, "maximum": 100 }
+          },
+          {
+            "name": "page",
+            "in": "query",
+            "required": false,
+            "schema": { "type": "integer", "minimum": 1 }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Issue list",
+            "content": {
+              "application/json": {
+                "schema": { "type": "array", "items": { "type": "object", "additionalProperties": true } }
+              }
+            }
+          }
+        }
+      },
+      "post": {
+        "operationId": "create_issue",
+        "summary": "Create an issue",
+        "x-aevatar-tool": {
+          "name": "create_issue",
+          "description": "Create an issue in a GitHub repository.",
+          "readOnly": false,
+          "destructive": false,
+          "requiresApproval": true
+        },
+        "parameters": [
+          { "name": "owner", "in": "path", "required": true, "schema": { "type": "string", "minLength": 1 } },
+          { "name": "repo", "in": "path", "required": true, "schema": { "type": "string", "minLength": 1 } }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "required": ["title"],
+                "additionalProperties": true,
+                "properties": {
+                  "title": { "type": "string", "minLength": 1 },
+                  "body": { "type": "string" },
+                  "labels": { "type": "array", "items": { "type": "string" } },
+                  "assignees": { "type": "array", "items": { "type": "string" } }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "201": {
+            "description": "Created issue",
+            "content": {
+              "application/json": {
+                "schema": { "type": "object", "additionalProperties": true }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/repos/{owner}/{repo}/issues/{issue_number}/comments": {
+      "post": {
+        "operationId": "create_issue_comment",
+        "summary": "Comment on an issue",
+        "x-aevatar-tool": {
+          "name": "create_issue_comment",
+          "description": "Add a comment to a GitHub issue or pull request.",
+          "readOnly": false,
+          "destructive": false,
+          "requiresApproval": true
+        },
+        "parameters": [
+          { "name": "owner", "in": "path", "required": true, "schema": { "type": "string", "minLength": 1 } },
+          { "name": "repo", "in": "path", "required": true, "schema": { "type": "string", "minLength": 1 } },
+          { "name": "issue_number", "in": "path", "required": true, "schema": { "type": "integer", "minimum": 1 } }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "required": ["body"],
+                "additionalProperties": false,
+                "properties": {
+                  "body": { "type": "string", "minLength": 1 }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "201": {
+            "description": "Created comment",
+            "content": {
+              "application/json": {
+                "schema": { "type": "object", "additionalProperties": true }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/search/repositories": {
+      "get": {
+        "operationId": "search_repositories",
+        "summary": "Search repositories",
+        "x-aevatar-tool": {
+          "name": "search_repositories",
+          "description": "Search GitHub repositories.",
+          "readOnly": true,
+          "destructive": false,
+          "requiresApproval": false
+        },
+        "parameters": [
+          {
+            "name": "q",
+            "in": "query",
+            "required": true,
+            "description": "Search query using GitHub search syntax.",
+            "schema": { "type": "string", "minLength": 1 }
+          },
+          {
+            "name": "per_page",
+            "in": "query",
+            "required": false,
+            "schema": { "type": "integer", "minimum": 1, "maximum": 100 }
+          },
+          {
+            "name": "page",
+            "in": "query",
+            "required": false,
+            "schema": { "type": "integer", "minimum": 1 }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Search results",
+            "content": {
+              "application/json": {
+                "schema": { "type": "object", "additionalProperties": true }
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+}

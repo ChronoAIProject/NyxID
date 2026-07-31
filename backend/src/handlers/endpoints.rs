@@ -8,7 +8,9 @@ use crate::AppState;
 use crate::errors::{AppError, AppResult};
 use crate::models::service_endpoint::OperationResponseContract;
 use crate::mw::auth::AuthUser;
-use crate::services::service_endpoint_service::{EndpointInput, EndpointUpdate};
+use crate::services::service_endpoint_service::{
+    EndpointInput, EndpointUpdate, validate_request_content_type, validate_response_contract,
+};
 use crate::services::{openapi_parser, service_endpoint_service};
 
 use super::services_helpers::{fetch_service, require_admin_or_creator, require_http_service};
@@ -128,33 +130,6 @@ fn validate_path(path: &str) -> AppResult<()> {
         return Err(AppError::ValidationError(
             "path must not exceed 2048 characters".to_string(),
         ));
-    }
-    Ok(())
-}
-
-fn validate_request_content_type(content_type: &str) -> AppResult<()> {
-    if content_type.trim().is_empty() {
-        return Err(AppError::ValidationError(
-            "request_content_type must not be empty".to_string(),
-        ));
-    }
-
-    reqwest::header::HeaderValue::from_str(content_type).map_err(|_| {
-        AppError::ValidationError("request_content_type must be a valid HTTP content type".into())
-    })?;
-
-    Ok(())
-}
-
-fn validate_response_contract(response: &OperationResponseContract) -> AppResult<()> {
-    for content_type in &response.content_types {
-        if content_type.trim().is_empty()
-            || reqwest::header::HeaderValue::from_str(content_type).is_err()
-        {
-            return Err(AppError::ValidationError(
-                "response.content_types must contain valid HTTP content types".to_string(),
-            ));
-        }
     }
     Ok(())
 }

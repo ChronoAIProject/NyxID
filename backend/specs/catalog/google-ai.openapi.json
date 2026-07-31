@@ -1,0 +1,103 @@
+{
+  "openapi": "3.1.0",
+  "info": {
+    "title": "Google AI (Gemini) API",
+    "version": "v1beta-nyxid-overlay",
+    "description": "NyxID-hosted overlay of the core Gemini generateContent operations. Paths are relative to the /v1beta base; NyxID injects the API key."
+  },
+  "servers": [
+    { "url": "https://generativelanguage.googleapis.com/v1beta", "description": "Google AI API" }
+  ],
+  "paths": {
+    "/models/{model}:generateContent": {
+      "post": {
+        "operationId": "generate_content",
+        "summary": "Generate content with a Gemini model",
+        "x-aevatar-tool": {
+          "name": "generate_content",
+          "description": "Generate content with a Google Gemini model.",
+          "readOnly": false,
+          "destructive": false,
+          "requiresApproval": false
+        },
+        "parameters": [
+          {
+            "name": "model",
+            "in": "path",
+            "required": true,
+            "description": "Model id, e.g. gemini-2.0-flash.",
+            "schema": { "type": "string", "minLength": 1 }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "required": ["contents"],
+                "additionalProperties": true,
+                "properties": {
+                  "contents": {
+                    "type": "array",
+                    "description": "Conversation turns with role and parts.",
+                    "items": { "type": "object", "additionalProperties": true }
+                  },
+                  "generationConfig": { "type": "object", "additionalProperties": true },
+                  "systemInstruction": { "type": "object", "additionalProperties": true }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Generated content",
+            "content": {
+              "application/json": {
+                "schema": { "type": "object", "additionalProperties": true }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/models": {
+      "get": {
+        "operationId": "models_list",
+        "summary": "List available models",
+        "x-aevatar-tool": {
+          "name": "models_list",
+          "description": "List Google AI models available to the credential.",
+          "readOnly": true,
+          "destructive": false,
+          "requiresApproval": false
+        },
+        "parameters": [
+          {
+            "name": "pageSize",
+            "in": "query",
+            "required": false,
+            "schema": { "type": "integer", "minimum": 1, "maximum": 1000 }
+          },
+          {
+            "name": "pageToken",
+            "in": "query",
+            "required": false,
+            "schema": { "type": "string" }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Model list",
+            "content": {
+              "application/json": {
+                "schema": { "type": "object", "additionalProperties": true }
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+}

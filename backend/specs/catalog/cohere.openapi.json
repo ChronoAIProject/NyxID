@@ -1,0 +1,139 @@
+{
+  "openapi": "3.1.0",
+  "info": {
+    "title": "Cohere API",
+    "version": "v2-nyxid-overlay",
+    "description": "NyxID-hosted overlay of the core Cohere v2 API operations. Paths are relative to the /v2 base; NyxID injects the API key."
+  },
+  "servers": [{ "url": "https://api.cohere.com/v2", "description": "Cohere API" }],
+  "paths": {
+    "/chat": {
+      "post": {
+        "operationId": "chat",
+        "summary": "Create a chat completion",
+        "x-aevatar-tool": {
+          "name": "chat",
+          "description": "Create a Cohere chat completion.",
+          "readOnly": false,
+          "destructive": false,
+          "requiresApproval": false
+        },
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "required": ["model", "messages"],
+                "additionalProperties": true,
+                "properties": {
+                  "model": { "type": "string", "description": "Model id, e.g. command-a-03-2025." },
+                  "messages": {
+                    "type": "array",
+                    "items": { "type": "object", "additionalProperties": true }
+                  },
+                  "temperature": { "type": "number" }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Chat completion",
+            "content": {
+              "application/json": {
+                "schema": { "type": "object", "additionalProperties": true }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/embed": {
+      "post": {
+        "operationId": "embed",
+        "summary": "Create embeddings",
+        "x-aevatar-tool": {
+          "name": "embed",
+          "description": "Create Cohere embeddings for input texts.",
+          "readOnly": false,
+          "destructive": false,
+          "requiresApproval": false
+        },
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "required": ["model", "input_type"],
+                "additionalProperties": true,
+                "properties": {
+                  "model": { "type": "string", "description": "e.g. embed-v4.0." },
+                  "input_type": {
+                    "type": "string",
+                    "enum": ["search_document", "search_query", "classification", "clustering", "image"]
+                  },
+                  "texts": { "type": "array", "items": { "type": "string" } },
+                  "embedding_types": { "type": "array", "items": { "type": "string" } }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Embedding vectors",
+            "content": {
+              "application/json": {
+                "schema": { "type": "object", "additionalProperties": true }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/rerank": {
+      "post": {
+        "operationId": "rerank",
+        "summary": "Rerank documents for a query",
+        "x-aevatar-tool": {
+          "name": "rerank",
+          "description": "Rerank documents by relevance to a query with Cohere.",
+          "readOnly": false,
+          "destructive": false,
+          "requiresApproval": false
+        },
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "required": ["model", "query", "documents"],
+                "additionalProperties": true,
+                "properties": {
+                  "model": { "type": "string", "description": "e.g. rerank-v3.5." },
+                  "query": { "type": "string" },
+                  "documents": { "type": "array", "items": { "type": "string" } },
+                  "top_n": { "type": "integer", "minimum": 1 }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Ranked results",
+            "content": {
+              "application/json": {
+                "schema": { "type": "object", "additionalProperties": true }
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+}

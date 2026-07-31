@@ -429,182 +429,6 @@ pub fn render_catalog_html() -> &'static str {
 </html>"#
 }
 
-pub fn build_firecrawl_openapi_document() -> serde_json::Value {
-    serde_json::json!({
-        "openapi": "3.1.0",
-        "info": {
-            "title": "Firecrawl API",
-            "version": "v2-nyxid-overlay",
-            "description": "NyxID-hosted Firecrawl OpenAPI overlay with Aevatar tool annotations for asynchronous agent submit and poll operations."
-        },
-        "servers": [
-            {
-                "url": "https://api.firecrawl.dev",
-                "description": "Firecrawl API"
-            }
-        ],
-        "paths": {
-            "/v2/agent": {
-                "post": {
-                    "operationId": "agent",
-                    "summary": "Submit a Firecrawl agent task",
-                    "description": "Starts an asynchronous Firecrawl agent task. Poll the returned id with GET /v2/agent/{id}.",
-                    "x-aevatar-tool": {
-                        "name": "agent",
-                        "description": "Submit an asynchronous Firecrawl agent task.",
-                        "readOnly": false,
-                        "destructive": false,
-                        "requiresApproval": false
-                    },
-                    "requestBody": {
-                        "required": true,
-                        "content": {
-                            "application/json": {
-                                "schema": {
-                                    "$ref": "#/components/schemas/AgentSubmitRequest"
-                                }
-                            }
-                        }
-                    },
-                    "responses": {
-                        "200": {
-                            "description": "Agent task accepted",
-                            "content": {
-                                "application/json": {
-                                    "schema": {
-                                        "$ref": "#/components/schemas/AgentSubmitResponse"
-                                    }
-                                }
-                            }
-                        }
-                    }
-                }
-            },
-            "/v2/agent/{id}": {
-                "get": {
-                    "operationId": "agent_status",
-                    "summary": "Poll a Firecrawl agent task",
-                    "description": "Returns the current status and result for an asynchronous Firecrawl agent task.",
-                    "x-aevatar-tool": {
-                        "name": "agent_status",
-                        "description": "Poll an asynchronous Firecrawl agent task.",
-                        "readOnly": true,
-                        "destructive": false,
-                        "requiresApproval": false
-                    },
-                    "parameters": [
-                        {
-                            "name": "id",
-                            "in": "path",
-                            "required": true,
-                            "description": "Firecrawl agent task id returned by POST /v2/agent.",
-                            "schema": {
-                                "type": "string",
-                                "minLength": 1
-                            }
-                        }
-                    ],
-                    "responses": {
-                        "200": {
-                            "description": "Agent task status",
-                            "content": {
-                                "application/json": {
-                                    "schema": {
-                                        "$ref": "#/components/schemas/AgentStatusResponse"
-                                    }
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-        },
-        "components": {
-            "securitySchemes": {
-                "firecrawlApiKey": {
-                    "type": "http",
-                    "scheme": "bearer",
-                    "bearerFormat": "Firecrawl API key"
-                }
-            },
-            "schemas": {
-                "AgentSubmitRequest": {
-                    "type": "object",
-                    "required": ["prompt"],
-                    "additionalProperties": false,
-                    "properties": {
-                        "prompt": {
-                            "type": "string",
-                            "minLength": 1,
-                            "description": "Natural-language task for the Firecrawl agent."
-                        },
-                        "urls": {
-                            "type": "array",
-                            "description": "Optional starting URLs for the agent.",
-                            "items": {
-                                "type": "string",
-                                "format": "uri"
-                            }
-                        },
-                        "schema": {
-                            "type": "object",
-                            "description": "Optional structured extraction schema.",
-                            "additionalProperties": true
-                        },
-                        "model": {
-                            "type": "string",
-                            "description": "Optional model override."
-                        },
-                        "maxCredits": {
-                            "type": "integer",
-                            "minimum": 1,
-                            "description": "Optional maximum credits to spend on the task."
-                        }
-                    }
-                },
-                "AgentSubmitResponse": {
-                    "type": "object",
-                    "additionalProperties": true,
-                    "properties": {
-                        "success": {
-                            "type": "boolean"
-                        },
-                        "id": {
-                            "type": "string",
-                            "description": "Agent task id to poll."
-                        }
-                    }
-                },
-                "AgentStatusResponse": {
-                    "type": "object",
-                    "additionalProperties": true,
-                    "properties": {
-                        "success": {
-                            "type": "boolean"
-                        },
-                        "status": {
-                            "type": "string",
-                            "description": "Current task status."
-                        },
-                        "data": {
-                            "description": "Completed task result, when available."
-                        },
-                        "error": {
-                            "type": "string",
-                            "description": "Failure details, when available."
-                        }
-                    }
-                }
-            }
-        },
-        "security": [
-            {
-                "firecrawlApiKey": []
-            }
-        ]
-    })
-}
-
 pub fn scalar_docs_csp() -> String {
     format!(
         "default-src 'none'; script-src {}; style-src 'unsafe-inline'; img-src 'self' data: https:; font-src 'self' data: https:; connect-src 'self'; frame-ancestors 'none'",
@@ -949,10 +773,10 @@ fn hosted_catalog_spec_for_url(url: &str) -> AppResult<Option<serde_json::Value>
     if !matches!(parsed.scheme(), "http" | "https") {
         return Ok(None);
     }
-    if parsed.path() == "/api/v1/catalog-specs/firecrawl/openapi.json" {
-        return Ok(Some(build_firecrawl_openapi_document()));
-    }
-    Ok(None)
+    Ok(
+        crate::services::catalog_spec_registry::spec_for_url_path(parsed.path())
+            .map(|spec| spec.as_ref().clone()),
+    )
 }
 
 fn detect_streaming_from_openapi(spec: &serde_json::Value) -> bool {
@@ -1227,9 +1051,9 @@ fn is_rfc6598_cgnat(ipv4: Ipv4Addr) -> bool {
 mod tests {
     use super::{
         CachedSpecEntry, MAX_SPEC_CACHE_ENTRIES, ServiceDocumentationMetadata, SpecCacheTestGuard,
-        build_asyncapi_document, build_firecrawl_openapi_document, cache_spec, catalog_csp,
-        detect_streaming_from_openapi, fetch_spec_json, get_cached_spec, render_scalar_html,
-        scalar_docs_csp, validate_spec_fetch_target,
+        build_asyncapi_document, cache_spec, catalog_csp, detect_streaming_from_openapi,
+        fetch_spec_json, get_cached_spec, render_scalar_html, scalar_docs_csp,
+        validate_spec_fetch_target,
     };
     use crate::errors::AppError;
     use std::sync::Arc;
@@ -1261,7 +1085,9 @@ mod tests {
 
     #[test]
     fn firecrawl_overlay_declares_aevatar_agent_operations() {
-        let spec = build_firecrawl_openapi_document();
+        let spec = crate::services::catalog_spec_registry::spec_for_key("firecrawl")
+            .expect("firecrawl overlay registered");
+        let spec = spec.as_ref();
         assert_eq!(spec["openapi"], "3.1.0");
         assert_eq!(spec["servers"][0]["url"], "https://api.firecrawl.dev");
 

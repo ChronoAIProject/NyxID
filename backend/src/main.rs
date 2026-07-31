@@ -469,6 +469,13 @@ async fn main() {
         .await
         .expect("Failed to seed default services");
 
+    // Materialize ServiceEndpoint rows for seeded catalog services from the
+    // hosted overlay specs so /api/v1/mcp/config publishes concrete
+    // service_id + endpoint_id operations for workflow consumers (#1290).
+    services::catalog_spec_sync::sync_seeded_service_endpoints(&db)
+        .await
+        .expect("Failed to sync seeded catalog spec endpoints");
+
     // Heal UserService rows whose `auth_method` was snapshotted as the raw
     // catalog `"none"` instead of the SPR-derived injection config, which
     // stops the proxy from injecting the caller's stored credential.

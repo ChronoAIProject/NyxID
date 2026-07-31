@@ -38,6 +38,35 @@ pub struct EndpointUpdate {
     pub is_active: Option<bool>,
 }
 
+/// Validate a request content type value for storage on an endpoint.
+pub fn validate_request_content_type(content_type: &str) -> AppResult<()> {
+    if content_type.trim().is_empty() {
+        return Err(AppError::ValidationError(
+            "request_content_type must not be empty".to_string(),
+        ));
+    }
+
+    reqwest::header::HeaderValue::from_str(content_type).map_err(|_| {
+        AppError::ValidationError("request_content_type must be a valid HTTP content type".into())
+    })?;
+
+    Ok(())
+}
+
+/// Validate the response contract's media types for storage on an endpoint.
+pub fn validate_response_contract(response: &OperationResponseContract) -> AppResult<()> {
+    for content_type in &response.content_types {
+        if content_type.trim().is_empty()
+            || reqwest::header::HeaderValue::from_str(content_type).is_err()
+        {
+            return Err(AppError::ValidationError(
+                "response.content_types must contain valid HTTP content types".to_string(),
+            ));
+        }
+    }
+    Ok(())
+}
+
 fn normalize_response(mut response: OperationResponseContract) -> OperationResponseContract {
     response.content_types = response
         .content_types
@@ -220,98 +249,7 @@ pub async fn bulk_upsert_endpoints(
 
     for input in inputs {
         upserted_names.push(input.name.clone());
-
-        let existing = coll
-            .find_one(doc! { "service_id": service_id, "name": &input.name })
-            .await?;
-
-        if let Some(existing) = existing {
-            // Update existing endpoint
-            let mut set_doc = doc! {
-                "description": input.description.as_deref(),
-                "method": input.method.to_uppercase(),
-                "path": &input.path,
-                "is_active": true,
-                "updated_at": bson::DateTime::from_chrono(now),
-            };
-
-            if let Some(ref params) = input.parameters {
-                let bson_val = bson::to_bson(params)
-                    .map_err(|e| AppError::Internal(format!("BSON serialization error: {e}")))?;
-                set_doc.insert("parameters", bson_val);
-            } else {
-                set_doc.insert("parameters", bson::Bson::Null);
-            }
-
-            if let Some(ref schema) = input.request_body_schema {
-                let bson_val = bson::to_bson(schema)
-                    .map_err(|e| AppError::Internal(format!("BSON serialization error: {e}")))?;
-                set_doc.insert("request_body_schema", bson_val);
-            } else {
-                set_doc.insert("request_body_schema", bson::Bson::Null);
-            }
-
-            if let Some(ref content_type) = input.request_content_type {
-                set_doc.insert("request_content_type", content_type.as_str());
-            } else {
-                set_doc.insert("request_content_type", bson::Bson::Null);
-            }
-            set_doc.insert("request_body_required", input.request_body_required);
-
-            if let Some(ref desc) = input.response_description {
-                set_doc.insert("response_description", desc.as_str());
-            } else {
-                set_doc.insert("response_description", bson::Bson::Null);
-            }
-            let response = normalize_response(input.response);
-            let response_bson = bson::to_bson(&response)
-                .map_err(|e| AppError::Internal(format!("BSON serialization error: {e}")))?;
-            set_doc.insert("response", response_bson);
-
-            coll.update_one(doc! { "_id": &existing.id }, doc! { "$set": set_doc })
-                .await?;
-
-            // Return the updated version
-            let updated = ServiceEndpoint {
-                id: existing.id,
-                service_id: existing.service_id,
-                name: input.name,
-                description: input.description,
-                method: input.method.to_uppercase(),
-                path: input.path,
-                parameters: input.parameters,
-                request_body_schema: input.request_body_schema,
-                request_content_type: input.request_content_type,
-                request_body_required: input.request_body_required,
-                response_description: input.response_description,
-                response,
-                is_active: true,
-                created_at: existing.created_at,
-                updated_at: now,
-            };
-            result_endpoints.push(updated);
-        } else {
-            // Create new endpoint
-            let endpoint = ServiceEndpoint {
-                id: Uuid::new_v4().to_string(),
-                service_id: service_id.to_string(),
-                name: input.name,
-                description: input.description,
-                method: input.method.to_uppercase(),
-                path: input.path,
-                parameters: input.parameters,
-                request_body_schema: input.request_body_schema,
-                request_content_type: input.request_content_type,
-                request_body_required: input.request_body_required,
-                response_description: input.response_description,
-                response: normalize_response(input.response),
-                is_active: true,
-                created_at: now,
-                updated_at: now,
-            };
-            coll.insert_one(&endpoint).await?;
-            result_endpoints.push(endpoint);
-        }
+        result_endpoints.push(upsert_one_endpoint(&coll, service_id, input, now).await?);
     }
 
     // Soft-delete endpoints for this service that were not in the upsert list
@@ -331,6 +269,127 @@ pub async fn bulk_upsert_endpoints(
     }
 
     Ok(result_endpoints)
+}
+
+/// Additively upsert endpoints for a service.
+///
+/// Like `bulk_upsert_endpoints`, matches by (service_id, name) and creates or
+/// updates each input -- but endpoints with other names are left untouched
+/// (nothing is soft-deleted). Used by the seeded catalog spec sync so
+/// admin-added endpoints on a system service survive restarts.
+pub async fn upsert_endpoints_additive(
+    db: &mongodb::Database,
+    service_id: &str,
+    inputs: Vec<EndpointInput>,
+) -> AppResult<Vec<ServiceEndpoint>> {
+    let coll = db.collection::<ServiceEndpoint>(COLLECTION_NAME);
+    let now = Utc::now();
+
+    let mut result_endpoints: Vec<ServiceEndpoint> = Vec::with_capacity(inputs.len());
+    for input in inputs {
+        result_endpoints.push(upsert_one_endpoint(&coll, service_id, input, now).await?);
+    }
+    Ok(result_endpoints)
+}
+
+/// Create or update a single endpoint matched by (service_id, name).
+async fn upsert_one_endpoint(
+    coll: &mongodb::Collection<ServiceEndpoint>,
+    service_id: &str,
+    input: EndpointInput,
+    now: chrono::DateTime<Utc>,
+) -> AppResult<ServiceEndpoint> {
+    let existing = coll
+        .find_one(doc! { "service_id": service_id, "name": &input.name })
+        .await?;
+
+    if let Some(existing) = existing {
+        // Update existing endpoint
+        let mut set_doc = doc! {
+            "description": input.description.as_deref(),
+            "method": input.method.to_uppercase(),
+            "path": &input.path,
+            "is_active": true,
+            "updated_at": bson::DateTime::from_chrono(now),
+        };
+
+        if let Some(ref params) = input.parameters {
+            let bson_val = bson::to_bson(params)
+                .map_err(|e| AppError::Internal(format!("BSON serialization error: {e}")))?;
+            set_doc.insert("parameters", bson_val);
+        } else {
+            set_doc.insert("parameters", bson::Bson::Null);
+        }
+
+        if let Some(ref schema) = input.request_body_schema {
+            let bson_val = bson::to_bson(schema)
+                .map_err(|e| AppError::Internal(format!("BSON serialization error: {e}")))?;
+            set_doc.insert("request_body_schema", bson_val);
+        } else {
+            set_doc.insert("request_body_schema", bson::Bson::Null);
+        }
+
+        if let Some(ref content_type) = input.request_content_type {
+            set_doc.insert("request_content_type", content_type.as_str());
+        } else {
+            set_doc.insert("request_content_type", bson::Bson::Null);
+        }
+        set_doc.insert("request_body_required", input.request_body_required);
+
+        if let Some(ref desc) = input.response_description {
+            set_doc.insert("response_description", desc.as_str());
+        } else {
+            set_doc.insert("response_description", bson::Bson::Null);
+        }
+        let response = normalize_response(input.response);
+        let response_bson = bson::to_bson(&response)
+            .map_err(|e| AppError::Internal(format!("BSON serialization error: {e}")))?;
+        set_doc.insert("response", response_bson);
+
+        coll.update_one(doc! { "_id": &existing.id }, doc! { "$set": set_doc })
+            .await?;
+
+        // Return the updated version
+        let updated = ServiceEndpoint {
+            id: existing.id,
+            service_id: existing.service_id,
+            name: input.name,
+            description: input.description,
+            method: input.method.to_uppercase(),
+            path: input.path,
+            parameters: input.parameters,
+            request_body_schema: input.request_body_schema,
+            request_content_type: input.request_content_type,
+            request_body_required: input.request_body_required,
+            response_description: input.response_description,
+            response,
+            is_active: true,
+            created_at: existing.created_at,
+            updated_at: now,
+        };
+        Ok(updated)
+    } else {
+        // Create new endpoint
+        let endpoint = ServiceEndpoint {
+            id: Uuid::new_v4().to_string(),
+            service_id: service_id.to_string(),
+            name: input.name,
+            description: input.description,
+            method: input.method.to_uppercase(),
+            path: input.path,
+            parameters: input.parameters,
+            request_body_schema: input.request_body_schema,
+            request_content_type: input.request_content_type,
+            request_body_required: input.request_body_required,
+            response_description: input.response_description,
+            response: normalize_response(input.response),
+            is_active: true,
+            created_at: now,
+            updated_at: now,
+        };
+        coll.insert_one(&endpoint).await?;
+        Ok(endpoint)
+    }
 }
 
 #[cfg(test)]

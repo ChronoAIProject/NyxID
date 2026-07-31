@@ -1,0 +1,88 @@
+{
+  "openapi": "3.1.0",
+  "info": {
+    "title": "Anthropic API",
+    "version": "v1-nyxid-overlay",
+    "description": "NyxID-hosted overlay of the core Anthropic API operations. Paths are relative to the /v1 base; NyxID injects the API key and anthropic-version header."
+  },
+  "servers": [{ "url": "https://api.anthropic.com/v1", "description": "Anthropic API" }],
+  "paths": {
+    "/messages": {
+      "post": {
+        "operationId": "messages_create",
+        "summary": "Create a message",
+        "x-aevatar-tool": {
+          "name": "messages_create",
+          "description": "Create an Anthropic Messages API completion.",
+          "readOnly": false,
+          "destructive": false,
+          "requiresApproval": false
+        },
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "required": ["model", "messages", "max_tokens"],
+                "additionalProperties": true,
+                "properties": {
+                  "model": { "type": "string", "description": "Model id, e.g. claude-sonnet-4-5." },
+                  "messages": {
+                    "type": "array",
+                    "description": "Conversation messages with role and content.",
+                    "items": { "type": "object", "additionalProperties": true }
+                  },
+                  "max_tokens": { "type": "integer", "minimum": 1 },
+                  "system": { "description": "Optional system prompt." },
+                  "temperature": { "type": "number" }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Message completion",
+            "content": {
+              "application/json": {
+                "schema": { "type": "object", "additionalProperties": true }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/models": {
+      "get": {
+        "operationId": "models_list",
+        "summary": "List available models",
+        "x-aevatar-tool": {
+          "name": "models_list",
+          "description": "List Anthropic models available to the credential.",
+          "readOnly": true,
+          "destructive": false,
+          "requiresApproval": false
+        },
+        "parameters": [
+          {
+            "name": "limit",
+            "in": "query",
+            "required": false,
+            "schema": { "type": "integer", "minimum": 1, "maximum": 1000 }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Model list",
+            "content": {
+              "application/json": {
+                "schema": { "type": "object", "additionalProperties": true }
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+}

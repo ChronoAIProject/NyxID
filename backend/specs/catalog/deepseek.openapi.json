@@ -1,0 +1,78 @@
+{
+  "openapi": "3.1.0",
+  "info": {
+    "title": "DeepSeek API",
+    "version": "v1-nyxid-overlay",
+    "description": "NyxID-hosted overlay of the core DeepSeek API operations. Paths are relative to the /v1 base; NyxID injects the API key."
+  },
+  "servers": [{ "url": "https://api.deepseek.com/v1", "description": "DeepSeek API" }],
+  "paths": {
+    "/chat/completions": {
+      "post": {
+        "operationId": "chat_completions",
+        "summary": "Create a chat completion",
+        "x-aevatar-tool": {
+          "name": "chat_completions",
+          "description": "Create a DeepSeek chat completion.",
+          "readOnly": false,
+          "destructive": false,
+          "requiresApproval": false
+        },
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "required": ["model", "messages"],
+                "additionalProperties": true,
+                "properties": {
+                  "model": { "type": "string", "description": "deepseek-chat or deepseek-reasoner." },
+                  "messages": {
+                    "type": "array",
+                    "items": { "type": "object", "additionalProperties": true }
+                  },
+                  "temperature": { "type": "number" },
+                  "max_tokens": { "type": "integer" }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Chat completion",
+            "content": {
+              "application/json": {
+                "schema": { "type": "object", "additionalProperties": true }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/models": {
+      "get": {
+        "operationId": "models_list",
+        "summary": "List available models",
+        "x-aevatar-tool": {
+          "name": "models_list",
+          "description": "List DeepSeek models available to the credential.",
+          "readOnly": true,
+          "destructive": false,
+          "requiresApproval": false
+        },
+        "responses": {
+          "200": {
+            "description": "Model list",
+            "content": {
+              "application/json": {
+                "schema": { "type": "object", "additionalProperties": true }
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+}

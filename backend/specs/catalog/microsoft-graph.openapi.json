@@ -1,0 +1,203 @@
+{
+  "openapi": "3.1.0",
+  "info": {
+    "title": "Microsoft Graph API",
+    "version": "v1.0-nyxid-overlay",
+    "description": "NyxID-hosted overlay of the Microsoft Graph operations most used by agents. Paths are relative to the /v1.0 base; NyxID injects the OAuth token."
+  },
+  "servers": [{ "url": "https://graph.microsoft.com/v1.0", "description": "Microsoft Graph" }],
+  "paths": {
+    "/me": {
+      "get": {
+        "operationId": "get_me",
+        "summary": "Get the signed-in user",
+        "x-aevatar-tool": {
+          "name": "get_me",
+          "description": "Get the authenticated Microsoft account profile.",
+          "readOnly": true,
+          "destructive": false,
+          "requiresApproval": false
+        },
+        "responses": {
+          "200": {
+            "description": "User profile",
+            "content": {
+              "application/json": {
+                "schema": { "type": "object", "additionalProperties": true }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/me/messages": {
+      "get": {
+        "operationId": "list_my_messages",
+        "summary": "List the user's mail messages",
+        "x-aevatar-tool": {
+          "name": "list_my_messages",
+          "description": "List recent Outlook mail messages of the authenticated user.",
+          "readOnly": true,
+          "destructive": false,
+          "requiresApproval": false
+        },
+        "parameters": [
+          {
+            "name": "$top",
+            "in": "query",
+            "required": false,
+            "schema": { "type": "integer", "minimum": 1, "maximum": 1000 }
+          },
+          {
+            "name": "$filter",
+            "in": "query",
+            "required": false,
+            "description": "OData filter expression.",
+            "schema": { "type": "string" }
+          },
+          {
+            "name": "$search",
+            "in": "query",
+            "required": false,
+            "description": "Search phrase in quotes.",
+            "schema": { "type": "string" }
+          },
+          {
+            "name": "$select",
+            "in": "query",
+            "required": false,
+            "description": "Comma-separated properties to return.",
+            "schema": { "type": "string" }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Message page",
+            "content": {
+              "application/json": {
+                "schema": { "type": "object", "additionalProperties": true }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/me/sendMail": {
+      "post": {
+        "operationId": "send_mail",
+        "summary": "Send a mail message",
+        "x-aevatar-tool": {
+          "name": "send_mail",
+          "description": "Send an Outlook email as the authenticated user.",
+          "readOnly": false,
+          "destructive": false,
+          "requiresApproval": true
+        },
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "required": ["message"],
+                "additionalProperties": true,
+                "properties": {
+                  "message": {
+                    "type": "object",
+                    "description": "Message with subject, body, and toRecipients.",
+                    "additionalProperties": true
+                  },
+                  "saveToSentItems": { "type": "boolean" }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "202": {
+            "description": "Accepted",
+            "content": {
+              "application/json": {
+                "schema": { "type": "object", "additionalProperties": true }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/me/events": {
+      "get": {
+        "operationId": "list_my_events",
+        "summary": "List the user's calendar events",
+        "x-aevatar-tool": {
+          "name": "list_my_events",
+          "description": "List Outlook calendar events of the authenticated user.",
+          "readOnly": true,
+          "destructive": false,
+          "requiresApproval": false
+        },
+        "parameters": [
+          {
+            "name": "$top",
+            "in": "query",
+            "required": false,
+            "schema": { "type": "integer", "minimum": 1, "maximum": 1000 }
+          },
+          {
+            "name": "$filter",
+            "in": "query",
+            "required": false,
+            "schema": { "type": "string" }
+          },
+          {
+            "name": "$orderby",
+            "in": "query",
+            "required": false,
+            "schema": { "type": "string" }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Event page",
+            "content": {
+              "application/json": {
+                "schema": { "type": "object", "additionalProperties": true }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/me/drive/root/children": {
+      "get": {
+        "operationId": "list_drive_root_children",
+        "summary": "List files in the OneDrive root",
+        "x-aevatar-tool": {
+          "name": "list_drive_root_children",
+          "description": "List files and folders in the authenticated user's OneDrive root.",
+          "readOnly": true,
+          "destructive": false,
+          "requiresApproval": false
+        },
+        "parameters": [
+          {
+            "name": "$top",
+            "in": "query",
+            "required": false,
+            "schema": { "type": "integer", "minimum": 1, "maximum": 1000 }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Drive item page",
+            "content": {
+              "application/json": {
+                "schema": { "type": "object", "additionalProperties": true }
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+}
