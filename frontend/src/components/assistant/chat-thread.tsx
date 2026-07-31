@@ -394,7 +394,7 @@ function StreamingDots({
       // air between neighbours. That tightness is what lets a swing look like
       // a ball leaving the pack rather than a dot drifting between its
       // neighbours.
-      className="assistant-streaming-dots relative flex h-[18px] w-max items-center gap-[2px]"
+      className="assistant-streaming-dots relative ml-[7px] flex h-[18px] w-max items-center gap-[2px]"
       // The standalone thinking row is itself a live region, so its dots stay
       // decorative. Dots inside an opened-but-still-empty assistant message
       // have no such wrapper — without their own role that whole pre-content

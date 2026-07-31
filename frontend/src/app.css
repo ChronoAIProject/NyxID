@@ -518,10 +518,10 @@ html.theme-dark .assistant-halo--visible {
 
 /*
  * A four-ball Newton's cradle. Balls 1 and 4 are the strikers; 2 and 3 are
- * ballast and never translate — a real cradle passes the impulse through its
- * middle without displacing it, and the previous five-dot version's ±2px
- * wiggle on the inner dots was the loudest tell that it was a decoration
- * rather than a physical system.
+ * ballast. A real cradle passes the impulse through its middle with only a
+ * tiny compression, so the inner balls respond by half a pixel at impact and
+ * immediately settle. That is deliberately much quieter than the previous
+ * five-dot version's ±2px wiggle, which read as decoration rather than mass.
  *
  * Everything below follows from treating a dot as a mass carrying energy:
  *
@@ -587,6 +587,7 @@ html.theme-dark .assistant-halo--visible {
 .assistant-streaming-dots {
   --domino-period: 2200ms;
   --domino-swing: 7px;
+  --domino-compression: 0.5px;
   /* Rest has to clear the 3:1 non-text bar in BOTH themes, since a striker
      spends most of the cycle there: against `--color-muted-foreground` it
      composites to #6F6F6F on dark (3.8:1) and #8D8D8D on light (3.2:1). The
@@ -617,8 +618,10 @@ html.theme-dark .assistant-halo--visible {
   animation-name: assistant-domino-striker-left;
 }
 
-/* Balls 2 and 3 are ballast and get no animation-name: they hold position and
-   brightness for the whole cycle. */
+.assistant-streaming-dot:nth-child(2),
+.assistant-streaming-dot:nth-child(3) {
+  animation-name: assistant-domino-ballast;
+}
 
 .assistant-streaming-dot:nth-child(4) {
   animation-name: assistant-domino-striker-right;
@@ -697,17 +700,33 @@ html.theme-dark .assistant-halo--visible {
   }
 }
 
-/* Balls 2 and 3 have no keyframes at all — they hold the resting opacity the
-   base rule gives them and never move.
- *
- * An earlier pass lit them in sequence as the impulse crossed, which was
- * wrong twice over. A cradle's famous property is that its middle does
- * nothing; animating the ballast argues against the one thing that makes the
- * mechanism legible, and it drags in the ambient twinkle of typing dots. And
- * the sequencing was a lie the medium cannot tell: 22ms apart is 1.3 frames
- * at 60Hz, so the two "successive" flashes land on the same frame as often as
- * not — one central blink, not a wave. Energy stays on the balls that carry
- * it. */
+/* The center pair compresses as one body only at the two collisions. There is
+   no staggered wave: at this scale it would land within one or two frames and
+   read as typing dots. The 99ms response is long enough to interpolate
+   smoothly, but its half-pixel travel and restrained brightness keep the
+   strikers visually dominant. */
+@keyframes assistant-domino-ballast {
+  0%,
+  18%,
+  27%,
+  68%,
+  77%,
+  100% {
+    transform: translate3d(0, 0, 0);
+    opacity: var(--domino-rest);
+    animation-timing-function: ease-in;
+  }
+  22.5% {
+    transform: translate3d(var(--domino-compression), 0, 0);
+    opacity: 0.78;
+    animation-timing-function: ease-out;
+  }
+  72.5% {
+    transform: translate3d(calc(var(--domino-compression) * -1), 0, 0);
+    opacity: 0.78;
+    animation-timing-function: ease-out;
+  }
+}
 
 .assistant-streaming-dots--leaving {
   z-index: 20;

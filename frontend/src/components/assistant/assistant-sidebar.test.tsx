@@ -1,9 +1,18 @@
-import { render, screen, waitFor, within } from "@testing-library/react";
+import {
+  cleanup,
+  render,
+  screen,
+  waitFor,
+  within,
+} from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
-import { describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { AnchorHTMLAttributes, ReactNode } from "react";
 import { TooltipProvider } from "@/components/ui/tooltip";
+import { useAssistantDraftStore } from "@/stores/assistant-draft-store";
+import { useAuthStore } from "@/stores/auth-store";
 import type { Conversation } from "@/types/assistant";
+import type { User } from "@/types/api";
 import { AssistantSidebar } from "./assistant-sidebar";
 
 vi.mock("@/hooks/use-assistant", () => ({
@@ -41,24 +50,71 @@ const SECOND_CONVERSATION: Conversation = {
   last_message_at: "2026-07-19T00:05:00.000Z",
 };
 
+const USER: User = {
+  id: "user-1",
+  email: "reader@example.com",
+  display_name: "Reader",
+  avatar_url: null,
+  email_verified: true,
+  mfa_enabled: false,
+  is_admin: false,
+  is_active: true,
+  created_at: "2026-07-20T00:00:00.000Z",
+};
+
 function renderSidebar(
   onDelete: (id: string) => void | Promise<void> = vi.fn(),
   conversations: readonly Conversation[] = [CONVERSATION],
+  activeConversationId: string | undefined = CONVERSATION.id,
 ) {
   const onSelect = vi.fn();
-  render(
+  const view = render(
     <TooltipProvider>
       <AssistantSidebar
         conversations={conversations}
-        activeConversationId={CONVERSATION.id}
+        activeConversationId={activeConversationId}
         onNewChat={vi.fn()}
         onSelect={onSelect}
         onDelete={onDelete}
       />
     </TooltipProvider>,
   );
-  return { onSelect, onDelete };
+  return { ...view, onSelect, onDelete };
 }
+
+function seedDraft(ownerUserId: string, text: string) {
+  useAssistantDraftStore.setState({
+    ownerUserId,
+    drafts: {
+      [`conv:${CONVERSATION.id}`]: { text, updatedAt: 1 },
+    },
+  });
+}
+
+beforeEach(() => {
+  localStorage.clear();
+  useAssistantDraftStore.setState({ ownerUserId: null, drafts: {} });
+  useAuthStore.setState({
+    user: USER,
+    isAuthenticated: true,
+    isLoading: false,
+    mfaRequired: false,
+    mfaToken: null,
+  });
+});
+
+afterEach(() => {
+  cleanup();
+  useAssistantDraftStore.getState().clear();
+  useAuthStore.setState({
+    user: null,
+    isAuthenticated: false,
+    isLoading: true,
+    mfaRequired: false,
+    mfaToken: null,
+  });
+  localStorage.clear();
+});
 
 describe("AssistantSidebar conversation rows", () => {
   it("opens a menu -- not a delete prompt -- and only deletes after confirm", async () => {
@@ -213,6 +269,82 @@ describe("AssistantSidebar conversation rows", () => {
     const { onSelect, onDelete } = renderSidebar();
 
     await user.click(screen.getByText("Quarterly digest"));
+
+    expect(onSelect).toHaveBeenCalledWith(CONVERSATION.id);
+    expect(onDelete).not.toHaveBeenCalled();
+  });
+
+  it("shows an inactive conversation draft when the owner matches", () => {
+    seedDraft(USER.id, "Finish the quarterly summary");
+
+    const { container } = renderSidebar(
+      undefined,
+      [CONVERSATION],
+      SECOND_CONVERSATION.id,
+    );
+
+    expect(
+      screen.getByText("Finish the quarterly summary"),
+    ).toBeInTheDocument();
+    expect(container.querySelector(".lucide-pencil-line")).toBeInTheDocument();
+    expect(
+      screen.getByRole("button", { name: "Quarterly digest" }),
+    ).toHaveAccessibleDescription("Draft: Finish the quarterly summary");
+  });
+
+  it("does not show a draft owned by another user", () => {
+    seedDraft("previous-user", "Private draft from another account");
+
+    const { container } = renderSidebar(
+      undefined,
+      [CONVERSATION],
+      SECOND_CONVERSATION.id,
+    );
+
+    expect(
+      screen.queryByText("Private draft from another account"),
+    ).not.toBeInTheDocument();
+    expect(
+      container.querySelector(".lucide-pencil-line"),
+    ).not.toBeInTheDocument();
+  });
+
+  it("does not show the draft preview on the active conversation", () => {
+    seedDraft(USER.id, "Visible in the active composer");
+
+    const { container } = renderSidebar();
+
+    expect(
+      screen.queryByText("Visible in the active composer"),
+    ).not.toBeInTheDocument();
+    expect(
+      container.querySelector(".lucide-pencil-line"),
+    ).not.toBeInTheDocument();
+  });
+
+  it("collapses draft whitespace into a single preview line", () => {
+    seedDraft(USER.id, "  First line\n\n second\tline   and final words  ");
+
+    renderSidebar(undefined, [CONVERSATION], SECOND_CONVERSATION.id);
+
+    expect(
+      screen.getByText("First line second line and final words"),
+    ).toBeInTheDocument();
+  });
+
+  it("shows no draft line and still selects when no draft exists", async () => {
+    const user = userEvent.setup();
+    const { container, onSelect, onDelete } = renderSidebar(
+      undefined,
+      [CONVERSATION],
+      SECOND_CONVERSATION.id,
+    );
+
+    expect(
+      container.querySelector(".lucide-pencil-line"),
+    ).not.toBeInTheDocument();
+
+    await user.click(screen.getByRole("button", { name: "Quarterly digest" }));
 
     expect(onSelect).toHaveBeenCalledWith(CONVERSATION.id);
     expect(onDelete).not.toHaveBeenCalled();

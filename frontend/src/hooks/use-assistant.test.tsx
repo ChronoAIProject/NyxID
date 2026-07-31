@@ -358,6 +358,70 @@ describe("assistant hooks", () => {
     queryClient.clear();
   });
 
+  it("projects a large text backlog sooner than a sparse text delta", async () => {
+    const { queryClient, Wrapper } = createHarness();
+    const historySpy = vi.spyOn(assistantTransport, "getHistory");
+    const sendSpy = vi
+      .spyOn(assistantTransport, "sendMessage")
+      .mockImplementation((_conversationId, content, onEvent) => {
+        onEvent({
+          cursor: 1,
+          event: "block.delta",
+          block_id: "streaming-text",
+          text: content,
+        });
+        return {
+          turnId: `turn-${content.length.toString()}`,
+          cancel: () => {},
+        };
+      });
+    const first = renderHook(
+      () => ({ send: useSendMessage("conversation-stripe") }),
+      { wrapper: Wrapper },
+    );
+
+    await act(async () => {
+      await first.result.current.send.mutateAsync("x");
+    });
+    historySpy.mockClear();
+
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(88);
+    });
+    expect(historySpy).not.toHaveBeenCalled();
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(1);
+    });
+    expect(historySpy).toHaveBeenCalledTimes(1);
+
+    first.unmount();
+    queryClient.clear();
+
+    const secondHarness = createHarness();
+    const second = renderHook(
+      () => ({ send: useSendMessage("conversation-stripe") }),
+      { wrapper: secondHarness.Wrapper },
+    );
+    await act(async () => {
+      await second.result.current.send.mutateAsync("x".repeat(120));
+    });
+    historySpy.mockClear();
+
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(23);
+    });
+    expect(historySpy).not.toHaveBeenCalled();
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(1);
+    });
+    expect(historySpy).toHaveBeenCalledTimes(1);
+
+    sendSpy.mockRestore();
+    historySpy.mockRestore();
+    second.unmount();
+    secondHarness.queryClient.clear();
+  });
+
   it("coalesces bursty stream frames before projecting them into React", async () => {
     const { queryClient, Wrapper } = createHarness();
     const historySpy = vi.spyOn(assistantTransport, "getHistory");
@@ -389,7 +453,7 @@ describe("assistant hooks", () => {
     historySpy.mockClear();
 
     await act(async () => {
-      await vi.advanceTimersByTimeAsync(49);
+      await vi.advanceTimersByTimeAsync(23);
     });
     expect(historySpy).not.toHaveBeenCalled();
 
@@ -416,7 +480,7 @@ describe("assistant hooks", () => {
     // Terminal events bypass the interval so Stop/send state cannot linger.
     expect(historySpy).toHaveBeenCalledTimes(2);
     await act(async () => {
-      await vi.advanceTimersByTimeAsync(50);
+      await vi.advanceTimersByTimeAsync(90);
     });
     expect(historySpy).toHaveBeenCalledTimes(2);
 

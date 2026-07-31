@@ -50,10 +50,28 @@ const PENDING_APPROVALS_PAGE_SIZE = 50;
 const APPROVAL_HISTORY_PAGE_SIZE = 20;
 const STREAM_START_DEADLINE_MS = 8_000;
 const PROJECTION_DEADLINE_MS = 5_000;
-// Streaming events update the transport mirror synchronously. Projecting that
-// mirror into React Query at most twenty times per second keeps Markdown-heavy
-// active threads from starving sidebar navigation on the main thread.
+// Streaming events update the transport mirror synchronously. Sparse text can
+// arrive at a relaxed cadence, while a growing backlog needs shorter samples
+// to avoid landing as large Markdown jumps. The lower bound still limits a
+// busy stream to about 42 projections per second on the main thread.
+const STREAM_PROJECTION_MIN_INTERVAL_MS = 24;
+const STREAM_PROJECTION_MAX_INTERVAL_MS = 90;
 const STREAM_PROJECTION_INTERVAL_MS = 50;
+const STREAM_PROJECTION_FAST_BACKLOG_CHARS = 120;
+
+function streamProjectionInterval(pendingTextChars: number): number {
+  if (pendingTextChars <= 0) return STREAM_PROJECTION_INTERVAL_MS;
+  const pressure = Math.min(
+    pendingTextChars / STREAM_PROJECTION_FAST_BACKLOG_CHARS,
+    1,
+  );
+  return Math.round(
+    STREAM_PROJECTION_MAX_INTERVAL_MS -
+      pressure *
+        (STREAM_PROJECTION_MAX_INTERVAL_MS -
+          STREAM_PROJECTION_MIN_INTERVAL_MS),
+  );
+}
 
 const activeHandles = new Map<string, TurnHandle>();
 const episodeOwners = new WeakMap<QueryClient, Map<string, symbol>>();
@@ -433,6 +451,8 @@ function createTurnEventPump(
   let startExpired = false;
   let startDeadline: ReturnType<typeof setTimeout> | undefined;
   let projectionTimer: ReturnType<typeof setTimeout> | undefined;
+  let projectionDueAt: number | undefined;
+  let pendingTextChars = 0;
   const ownsEpisode = () => owners.get(targetId) === owner;
   const clearStartDeadline = () => {
     if (startDeadline !== undefined) {
@@ -452,9 +472,12 @@ function createTurnEventPump(
       clearTimeout(projectionTimer);
       projectionTimer = undefined;
     }
+    projectionDueAt = undefined;
   };
   const project = () => {
     projectionTimer = undefined;
+    projectionDueAt = undefined;
+    pendingTextChars = 0;
     if (!ownsEpisode()) return;
     projections += 1;
     publish();
@@ -473,7 +496,18 @@ function createTurnEventPump(
       project();
       return;
     }
-    projectionTimer ??= setTimeout(project, STREAM_PROJECTION_INTERVAL_MS);
+    const delay = streamProjectionInterval(pendingTextChars);
+    const dueAt = Date.now() + delay;
+    if (
+      projectionTimer !== undefined &&
+      projectionDueAt !== undefined &&
+      projectionDueAt <= dueAt
+    ) {
+      return;
+    }
+    clearProjectionTimer();
+    projectionDueAt = dueAt;
+    projectionTimer = setTimeout(project, delay);
   };
   owners.set(targetId, owner);
   publish();
@@ -508,6 +542,7 @@ function createTurnEventPump(
     clearStartDeadline();
     if (event.cursor <= lastSeenCursor) return;
     lastSeenCursor = event.cursor;
+    if (event.event === "block.delta") pendingTextChars += event.text.length;
     if (eventPrintsContent(event)) printed = true;
     if (event.event === "turn.completed") open = false;
     const turn = turnFromEvent(event);
