@@ -6571,6 +6571,98 @@ describe("studio new chats and typed actor compatibility", () => {
     },
   );
 
+  it("retries a status-less reservation refresh failure", async () => {
+    vi.useFakeTimers();
+    try {
+      let streamAttempt = 0;
+      let historyAttempt = 0;
+      const streams = mockChatStreams((request) => {
+        if (request.url !== WORKFLOW_URL) return undefined;
+        streamAttempt += 1;
+        return streamAttempt === 1
+          ? { headers: reservationUnavailable() }
+          : {
+              frames: [
+                workflowContextFrame("5"),
+                { runStarted: { threadId: RUN_ACTOR, runId: RUN_ACTOR } },
+                ...WORKFLOW_TAIL,
+              ],
+            };
+      });
+      stubFetch((url, init) => {
+        if (
+          url !== `${ASSISTANT_BASE}/conversations/${WORKFLOW_CONVERSATION}` ||
+          (init?.method ?? "GET") !== "GET"
+        ) {
+          return undefined;
+        }
+        historyAttempt += 1;
+        if (historyAttempt === 1) throw new TypeError("network disconnected");
+        return jsonResponse(workflowHistory(5));
+      });
+      const transport = new AevatarAssistantTransport();
+      const conversation = await seedWorkflowConversation(transport);
+
+      const turn = collectWorkflowTurn(transport, conversation.id, "continue");
+      await vi.advanceTimersByTimeAsync(1_200);
+      const events = await turn;
+
+      expect(events.at(-1)).toMatchObject({
+        event: "turn.completed",
+        status: "completed",
+      });
+      expect(historyAttempt).toBe(2);
+      expect(streams).toHaveBeenCalledTimes(2);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("fails reservation refresh immediately when the conversation is tombstoned", async () => {
+    vi.useFakeTimers();
+    try {
+      const streams = mockChatStreams((request) =>
+        request.url === WORKFLOW_URL
+          ? { headers: reservationUnavailable() }
+          : undefined,
+      );
+      let historyAttempt = 0;
+      const transport = new AevatarAssistantTransport();
+      const deletedConversationIds = (
+        transport as unknown as { deletedConversationIds: Set<string> }
+      ).deletedConversationIds;
+      stubFetch((url, init) => {
+        if (
+          url !== `${ASSISTANT_BASE}/conversations/${WORKFLOW_CONVERSATION}` ||
+          (init?.method ?? "GET") !== "GET"
+        ) {
+          return undefined;
+        }
+        historyAttempt += 1;
+        deletedConversationIds.add(WORKFLOW_CONVERSATION);
+        return jsonResponse(workflowHistory(5));
+      });
+      const conversation = await seedWorkflowConversation(transport);
+
+      const turn = collectWorkflowTurn(transport, conversation.id, "continue");
+      await vi.advanceTimersByTimeAsync(300);
+      const events = await turn;
+
+      expect(events.at(-1)).toMatchObject({
+        event: "turn.completed",
+        status: "failed",
+        error: {
+          code: "history_refresh_failed",
+          message: "Conversation was not found.",
+        },
+      });
+      expect(historyAttempt).toBe(1);
+      expect(streams).toHaveBeenCalledTimes(1);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it("does not dispatch a retry when cancellation lands during the reservation wait", async () => {
     vi.useFakeTimers();
     try {
@@ -6799,6 +6891,151 @@ describe("studio new chats and typed actor compatibility", () => {
     } finally {
       vi.useRealTimers();
     }
+  });
+
+  it("retains a context-free error terminal when recovery stays empty", async () => {
+    vi.useFakeTimers();
+    try {
+      mockChatStreams((request) =>
+        request.url === WORKFLOW_URL
+          ? {
+              frames: [
+                { runStarted: { threadId: RUN_ACTOR, runId: RUN_ACTOR } },
+                {
+                  runError: {
+                    code: "WORKFLOW_FAILED",
+                    message: "The upstream workflow failed permanently.",
+                  },
+                },
+              ],
+            }
+          : undefined,
+      );
+      stubFetch((url) =>
+        url.includes("/conversations/create-recovery/")
+          ? jsonResponse(
+              { code: "CREATE_NOT_FOUND", message: "Not ready." },
+              404,
+            )
+          : undefined,
+      );
+      const transport = new AevatarAssistantTransport();
+      const conversation = await transport.createConversation();
+
+      const turn = collectWorkflowTurn(transport, conversation.id, "create");
+      await vi.advanceTimersByTimeAsync(3_000);
+      const events = await turn;
+
+      expect(events.at(-1)).toMatchObject({
+        event: "turn.completed",
+        status: "failed",
+        error: {
+          code: "WORKFLOW_FAILED",
+          message: "The upstream workflow failed permanently.",
+        },
+      });
+      expect(
+        (await transport.getHistory(conversation.id)).conversation.id,
+      ).toMatch(/^workflow-pending-/);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("preserves an error terminal after context-free create recovery", async () => {
+    const streams = mockChatStreams((request) =>
+      request.url === WORKFLOW_URL
+        ? {
+            frames: [
+              { runStarted: { threadId: RUN_ACTOR, runId: RUN_ACTOR } },
+              {
+                runError: {
+                  code: "WORKFLOW_FAILED",
+                  message: "The workflow engine rejected this turn.",
+                },
+              },
+            ],
+          }
+        : undefined,
+    );
+    stubFetch((url, init) => {
+      if (url.includes("/conversations/create-recovery/")) {
+        return jsonResponse({
+          status: "append_committed",
+          conversationId: WORKFLOW_CONVERSATION,
+          stateVersion: 3,
+          turnId: WORKFLOW_TURN,
+        });
+      }
+      if (
+        url === `${ASSISTANT_BASE}/conversations/${WORKFLOW_CONVERSATION}` &&
+        (init?.method ?? "GET") === "GET"
+      ) {
+        return jsonResponse(workflowHistory(3, WORKFLOW_TURN));
+      }
+      return undefined;
+    });
+    const transport = new AevatarAssistantTransport();
+    const conversation = await transport.createConversation();
+
+    const events = await collectWorkflowTurn(
+      transport,
+      conversation.id,
+      "create",
+    );
+
+    expect(events.at(-1)).toMatchObject({
+      event: "turn.completed",
+      status: "failed",
+      error: {
+        code: "WORKFLOW_FAILED",
+        message: "The workflow engine rejected this turn.",
+      },
+    });
+    expect(streams).toHaveBeenCalledTimes(1);
+  });
+
+  it("preserves a blocked terminal after context-free create recovery", async () => {
+    mockChatStreams((request) =>
+      request.url === WORKFLOW_URL
+        ? {
+            frames: [
+              { runStarted: { threadId: RUN_ACTOR, runId: RUN_ACTOR } },
+              { runFinished: { status: "blocked" } },
+            ],
+          }
+        : undefined,
+    );
+    stubFetch((url, init) => {
+      if (url.includes("/conversations/create-recovery/")) {
+        return jsonResponse({
+          status: "append_committed",
+          conversationId: WORKFLOW_CONVERSATION,
+          stateVersion: 3,
+          turnId: WORKFLOW_TURN,
+        });
+      }
+      if (
+        url === `${ASSISTANT_BASE}/conversations/${WORKFLOW_CONVERSATION}` &&
+        (init?.method ?? "GET") === "GET"
+      ) {
+        return jsonResponse(workflowHistory(3, WORKFLOW_TURN));
+      }
+      return undefined;
+    });
+    const transport = new AevatarAssistantTransport();
+    const conversation = await transport.createConversation();
+
+    const events = await collectWorkflowTurn(
+      transport,
+      conversation.id,
+      "create",
+    );
+
+    expect(events.at(-1)).toMatchObject({
+      event: "turn.completed",
+      status: "blocked",
+    });
   });
 
   it("recovers a create truncated after RUN_STARTED", async () => {
@@ -7053,6 +7290,15 @@ describe("studio new chats and typed actor compatibility", () => {
         (await transport.getHistory(conversation.id)).conversation.id,
       ).toBe(WORKFLOW_CONVERSATION);
     });
+    expect(
+      fetchMock.mock.calls.some(([input, init]) =>
+        isTypedCommandRequest(
+          String(input),
+          init as RequestInit | undefined,
+          "task.stop",
+        ),
+      ),
+    ).toBe(false);
   });
 
   it("rejects a create recovery identity outside the chatc family", async () => {

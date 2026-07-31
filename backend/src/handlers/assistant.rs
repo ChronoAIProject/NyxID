@@ -475,7 +475,9 @@ pub async fn list_conversations(
         aggregate_page_bytes = next_aggregate_bytes;
         let Ok(page) = serde_json::from_slice::<serde_json::Value>(&bytes) else {
             // Preserve already-collected rows across a mixed-version or
-            // partially deployed upstream response shape.
+            // partially deployed upstream response shape. On the first page,
+            // the same deploy-independent posture intentionally degrades to an
+            // empty successful index using that upstream response's metadata.
             break;
         };
         let next_cursor = assistant_service::append_addressable_history_page(

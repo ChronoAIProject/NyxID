@@ -1394,9 +1394,16 @@ mod tests {
             "typed conversations must remain on the canonical resource family"
         );
         for suffix in [":stream", "/approve", "/stop", "/steer", "/retry", "/skip"] {
-            let forbidden_builder_fragment = format!("conversations/{{conversation_id}}{suffix}");
+            let has_forbidden_interpolation = production_source
+                .match_indices("conversations/{")
+                .any(|(start, fragment)| {
+                    let interpolation_tail = &production_source[start + fragment.len()..];
+                    interpolation_tail
+                        .find('}')
+                        .is_some_and(|end| interpolation_tail[end + 1..].starts_with(suffix))
+                });
             assert!(
-                !production_source.contains(&forbidden_builder_fragment),
+                !has_forbidden_interpolation,
                 "per-conversation command route {suffix} must not return"
             );
         }

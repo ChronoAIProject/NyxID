@@ -8733,6 +8733,9 @@ mod proxy_resolution_integration_tests {
                     }
 
                     let mode = downstream_mode.load(Ordering::Relaxed);
+                    if mode == 6 && cursor.is_none() {
+                        return Body::from("not-json").into_response();
+                    }
                     if mode == 3 && cursor.is_some() {
                         return Body::from("not-json").into_response();
                     }
@@ -8987,8 +8990,8 @@ mod proxy_resolution_integration_tests {
 
         response_mode.store(5, Ordering::Relaxed);
         let budgeted_response = crate::handlers::assistant::list_conversations(
-            axum::extract::State(state),
-            auth,
+            axum::extract::State(state.clone()),
+            auth.clone(),
             list_request(),
         )
         .await
@@ -9002,6 +9005,29 @@ mod proxy_resolution_integration_tests {
         let budgeted_calls = std::mem::take(&mut *captured.lock().unwrap());
         assert_eq!(budgeted_calls.len(), 3);
         assert!(budgeted_calls.iter().all(|call| call.2));
+
+        response_mode.store(6, Ordering::Relaxed);
+        let malformed_first_response = crate::handlers::assistant::list_conversations(
+            axum::extract::State(state),
+            auth,
+            list_request(),
+        )
+        .await
+        .expect("a malformed first page intentionally degrades to an empty index");
+        assert_eq!(malformed_first_response.status(), StatusCode::OK);
+        let malformed_first_body = to_bytes(malformed_first_response.into_body(), 1024)
+            .await
+            .unwrap();
+        let malformed_first_body: serde_json::Value =
+            serde_json::from_slice(&malformed_first_body).unwrap();
+        assert_eq!(
+            malformed_first_body,
+            serde_json::json!({ "conversations": [] })
+        );
+        assert!(malformed_first_body.get("nextCursor").is_none());
+        let malformed_first_calls = std::mem::take(&mut *captured.lock().unwrap());
+        assert_eq!(malformed_first_calls.len(), 1);
+        assert!(malformed_first_calls[0].2);
         server.abort();
     }
 

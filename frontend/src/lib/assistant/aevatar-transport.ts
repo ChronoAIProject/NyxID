@@ -950,6 +950,20 @@ function streamStartError(
   };
 }
 
+function isRetryableHistoryRefreshError(error: unknown): boolean {
+  // A tombstone means the local conversation was deleted while refresh was in
+  // flight. Unlike the console's generic status-less failures, retrying cannot
+  // make that conversation valid again, so preserve the not-found result.
+  if (error instanceof AssistantConversationNotFoundError) return false;
+  if (error instanceof AssistantProtocolError) return false;
+  if (error instanceof ApiError) {
+    return error.status >= 500 && error.status < 600;
+  }
+  // Raw fetch/network failures carry no HTTP status and are transient in the
+  // console retry contract, so they consume the next reservation attempt.
+  return true;
+}
+
 // ---------------------------------------------------------------------------
 // Redaction and tool-result summaries (ported from the reference client's
 // `protocol.js`): display strings derived from tool payloads are untrusted
@@ -2741,7 +2755,7 @@ export class AevatarAssistantTransport implements AssistantTransport {
                 recoveryController.signal,
               )
             ) {
-              this.finishTurn(conversationId, run, "completed", null);
+              this.settleRecoveredWorkflowCreate(conversationId, run);
               return;
             }
           } catch (error) {
@@ -2789,11 +2803,7 @@ export class AevatarAssistantTransport implements AssistantTransport {
               break;
             } catch (refreshError) {
               if (run.controller.signal.aborted) return;
-              if (
-                refreshError instanceof ApiError &&
-                refreshError.status >= 500 &&
-                refreshError.status < 600
-              ) {
+              if (isRetryableHistoryRefreshError(refreshError)) {
                 continue;
               }
               finalFailure = {
@@ -2832,7 +2842,7 @@ export class AevatarAssistantTransport implements AssistantTransport {
               recoveryController.signal,
             )
           ) {
-            this.finishTurn(conversationId, run, "completed", null);
+            this.settleRecoveredWorkflowCreate(conversationId, run);
             return;
           }
         } catch (error) {
@@ -3067,12 +3077,16 @@ export class AevatarAssistantTransport implements AssistantTransport {
           run.protocol === "workflow" &&
           this.workflowCreateNeedsRecovery(conversationId)
         ) {
+          const error =
+            run.deliveryTerminal.kind === "error"
+              ? run.deliveryTerminal.error
+              : {
+                  code: "stream_protocol_error",
+                  message: "Chat completed without a conversation context.",
+                };
           return {
             kind: "retryable",
-            error: {
-              code: "stream_protocol_error",
-              message: "Chat completed without a conversation context.",
-            },
+            error,
           };
         }
         this.settleDeliveryTerminal(conversationId, run, run.deliveryTerminal);
@@ -4411,6 +4425,19 @@ export class AevatarAssistantTransport implements AssistantTransport {
           this.finishTurn(conversationId, run, "completed", null);
         }
     }
+  }
+
+  private settleRecoveredWorkflowCreate(
+    conversationId: string,
+    run: RunningTurn,
+  ): void {
+    if (run.deliveryTerminal) {
+      this.settleDeliveryTerminal(conversationId, run, run.deliveryTerminal);
+      return;
+    }
+    // Header failures and truncated streams have no terminal kind to retain;
+    // the reconciled History row is the authoritative successful completion.
+    this.finishTurn(conversationId, run, "completed", null);
   }
 
   private closeOpenMessage(conversationId: string, run: RunningTurn): void {
