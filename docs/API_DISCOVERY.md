@@ -183,12 +183,15 @@ GET /api/v1/catalog-specs/{spec_key}/openapi.json
 
 - The registry (`backend/src/services/catalog_spec_registry.rs`) maps catalog slugs to spec keys; several slugs can share one overlay (`api-github` / `api-github-pat`, the Lark / Feishu pairs).
 - Each operation carries an `x-aevatar-tool` annotation (`name`, `readOnly`, `destructive`, `requiresApproval`) so agent runtimes can admit operations without guessing.
+- Overlay schemas are restricted to the schema-keyword subset aevatar's workflow admission accepts (`type, enum, properties, required, items, additionalProperties, title, description, default, example, examples, deprecated`; no `$ref`, no union `type` arrays) -- anything outside it makes the operation inadmissible for workflow binding. Enforced by a registry unit test; upstream APIs still enforce real limits (lengths, ranges) at runtime.
 - Seeded services get their `openapi_spec_url` pointed at the hosted overlay automatically (new rows at seed time; existing rows via a null-guarded backfill that never overwrites an admin-set URL).
 - At startup, `catalog_spec_sync` parses every overlay and additively upserts `ServiceEndpoint` rows for the seeded services (matched by endpoint name; admin-added endpoints under other names are never touched or soft-deleted). This is what makes `/api/v1/mcp/config` publish concrete `service_id` + `endpoint_id` operations for catalog-backed user services -- required by Aevatar v4 workflow admission (issue #1290).
 
-Catalog-backed user services whose catalog template has **no** registered endpoint rows fall through to the instance's user-mounted `openapi_spec_url` (set via `nyxid service update --openapi-spec-url`) instead of publishing an empty operation set. Registered catalog rows keep precedence when they exist.
+A valid instance-mounted `openapi_spec_url` (set via `nyxid service update --openapi-spec-url`) **overrides** the catalog template's registered endpoint rows for that instance -- the per-instance spec is a deliberate user decision. A broken or empty instance spec falls back to the template rows when they exist (so a bad override never takes a working catalog service offline); with no rows either, it degrades to the generic proxy tool like a custom endpoint.
 
 Admin-created catalog services get the same treatment: any active HTTP service with an `openapi_spec_url` and **zero** endpoint rows has discovery run automatically -- once at startup (background sweep) and whenever an admin creates or updates the service with a spec URL. The fetch uses the hardened SSRF-checked path, so spec URLs on private/internal hosts still require the manual `POST /services/{id}/discover-endpoints` route. Services with any existing endpoint rows are never touched automatically; re-run manual discovery to refresh them.
+
+A weekly `catalog-spec-drift` workflow (`scripts/check-catalog-spec-drift.py`) verifies every overlay operation still exists in the official upstream spec for providers that publish one (OpenAI, X, Discord). A red run means a provider moved or removed an operation; update the overlay by hand -- overlays are never auto-updated.
 
 To extend coverage: add a JSON overlay under `backend/specs/catalog/`, register it in `HOSTED_SPEC_SOURCES` and `SLUG_TO_SPEC_KEY`, and the seed, backfill, sync, and serving paths all pick it up.
 

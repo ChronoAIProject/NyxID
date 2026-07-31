@@ -29,7 +29,37 @@
           "content": {
             "application/json": {
               "schema": {
-                "$ref": "#/components/schemas/AgentSubmitRequest"
+                "type": "object",
+                "required": [
+                  "prompt"
+                ],
+                "additionalProperties": false,
+                "properties": {
+                  "prompt": {
+                    "type": "string",
+                    "description": "Natural-language task for the Firecrawl agent."
+                  },
+                  "urls": {
+                    "type": "array",
+                    "description": "Optional starting URLs for the agent.",
+                    "items": {
+                      "type": "string"
+                    }
+                  },
+                  "schema": {
+                    "type": "object",
+                    "description": "Optional structured extraction schema.",
+                    "additionalProperties": true
+                  },
+                  "model": {
+                    "type": "string",
+                    "description": "Optional model override."
+                  },
+                  "maxCredits": {
+                    "type": "integer",
+                    "description": "Optional maximum credits to spend on the task."
+                  }
+                }
               }
             }
           }
@@ -40,7 +70,17 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/AgentSubmitResponse"
+                  "type": "object",
+                  "additionalProperties": true,
+                  "properties": {
+                    "success": {
+                      "type": "boolean"
+                    },
+                    "id": {
+                      "type": "string",
+                      "description": "Agent task id to poll."
+                    }
+                  }
                 }
               }
             }
@@ -67,8 +107,7 @@
             "required": true,
             "description": "Firecrawl agent task id returned by POST /v2/agent.",
             "schema": {
-              "type": "string",
-              "minLength": 1
+              "type": "string"
             }
           }
         ],
@@ -78,7 +117,183 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/AgentStatusResponse"
+                  "type": "object",
+                  "additionalProperties": true,
+                  "properties": {
+                    "success": {
+                      "type": "boolean"
+                    },
+                    "status": {
+                      "type": "string",
+                      "description": "Current task status."
+                    },
+                    "data": {
+                      "description": "Completed task result, when available."
+                    },
+                    "error": {
+                      "type": "string",
+                      "description": "Failure details, when available."
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v2/scrape": {
+      "post": {
+        "operationId": "scrape",
+        "summary": "Scrape a single URL",
+        "x-aevatar-tool": {
+          "name": "scrape",
+          "description": "Scrape one URL with Firecrawl and return its content.",
+          "readOnly": false,
+          "destructive": false,
+          "requiresApproval": false
+        },
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "additionalProperties": true,
+                "required": [
+                  "url"
+                ],
+                "properties": {
+                  "url": {
+                    "type": "string"
+                  },
+                  "formats": {
+                    "type": "array",
+                    "description": "e.g. markdown, html, links.",
+                    "items": {
+                      "type": "string"
+                    }
+                  },
+                  "onlyMainContent": {
+                    "type": "boolean"
+                  }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "ok",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v2/search": {
+      "post": {
+        "operationId": "search",
+        "summary": "Search the web",
+        "x-aevatar-tool": {
+          "name": "search",
+          "description": "Run a Firecrawl web search, optionally scraping results.",
+          "readOnly": false,
+          "destructive": false,
+          "requiresApproval": false
+        },
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "additionalProperties": true,
+                "required": [
+                  "query"
+                ],
+                "properties": {
+                  "query": {
+                    "type": "string"
+                  },
+                  "limit": {
+                    "type": "integer"
+                  },
+                  "scrapeOptions": {
+                    "type": "object",
+                    "additionalProperties": true
+                  }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "ok",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v2/map": {
+      "post": {
+        "operationId": "map_site",
+        "summary": "Map a site's URLs",
+        "x-aevatar-tool": {
+          "name": "map_site",
+          "description": "List the URLs of a website with Firecrawl.",
+          "readOnly": false,
+          "destructive": false,
+          "requiresApproval": false
+        },
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "additionalProperties": true,
+                "required": [
+                  "url"
+                ],
+                "properties": {
+                  "url": {
+                    "type": "string"
+                  },
+                  "search": {
+                    "type": "string",
+                    "description": "Optional filter query."
+                  },
+                  "limit": {
+                    "type": "integer"
+                  }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "ok",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true
                 }
               }
             }
@@ -93,75 +308,6 @@
         "type": "http",
         "scheme": "bearer",
         "bearerFormat": "Firecrawl API key"
-      }
-    },
-    "schemas": {
-      "AgentSubmitRequest": {
-        "type": "object",
-        "required": ["prompt"],
-        "additionalProperties": false,
-        "properties": {
-          "prompt": {
-            "type": "string",
-            "minLength": 1,
-            "description": "Natural-language task for the Firecrawl agent."
-          },
-          "urls": {
-            "type": "array",
-            "description": "Optional starting URLs for the agent.",
-            "items": {
-              "type": "string",
-              "format": "uri"
-            }
-          },
-          "schema": {
-            "type": "object",
-            "description": "Optional structured extraction schema.",
-            "additionalProperties": true
-          },
-          "model": {
-            "type": "string",
-            "description": "Optional model override."
-          },
-          "maxCredits": {
-            "type": "integer",
-            "minimum": 1,
-            "description": "Optional maximum credits to spend on the task."
-          }
-        }
-      },
-      "AgentSubmitResponse": {
-        "type": "object",
-        "additionalProperties": true,
-        "properties": {
-          "success": {
-            "type": "boolean"
-          },
-          "id": {
-            "type": "string",
-            "description": "Agent task id to poll."
-          }
-        }
-      },
-      "AgentStatusResponse": {
-        "type": "object",
-        "additionalProperties": true,
-        "properties": {
-          "success": {
-            "type": "boolean"
-          },
-          "status": {
-            "type": "string",
-            "description": "Current task status."
-          },
-          "data": {
-            "description": "Completed task result, when available."
-          },
-          "error": {
-            "type": "string",
-            "description": "Failure details, when available."
-          }
-        }
       }
     }
   },

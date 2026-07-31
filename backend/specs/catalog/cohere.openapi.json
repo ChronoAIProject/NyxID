@@ -5,7 +5,12 @@
     "version": "v2-nyxid-overlay",
     "description": "NyxID-hosted overlay of the core Cohere v2 API operations. Paths are relative to the /v2 base; NyxID injects the API key."
   },
-  "servers": [{ "url": "https://api.cohere.com/v2", "description": "Cohere API" }],
+  "servers": [
+    {
+      "url": "https://api.cohere.com/v2",
+      "description": "Cohere API"
+    }
+  ],
   "paths": {
     "/chat": {
       "post": {
@@ -24,15 +29,26 @@
             "application/json": {
               "schema": {
                 "type": "object",
-                "required": ["model", "messages"],
+                "required": [
+                  "model",
+                  "messages"
+                ],
                 "additionalProperties": true,
                 "properties": {
-                  "model": { "type": "string", "description": "Model id, e.g. command-a-03-2025." },
+                  "model": {
+                    "type": "string",
+                    "description": "Model id, e.g. command-a-03-2025."
+                  },
                   "messages": {
                     "type": "array",
-                    "items": { "type": "object", "additionalProperties": true }
+                    "items": {
+                      "type": "object",
+                      "additionalProperties": true
+                    }
                   },
-                  "temperature": { "type": "number" }
+                  "temperature": {
+                    "type": "number"
+                  }
                 }
               }
             }
@@ -43,7 +59,10 @@
             "description": "Chat completion",
             "content": {
               "application/json": {
-                "schema": { "type": "object", "additionalProperties": true }
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true
+                }
               }
             }
           }
@@ -67,16 +86,38 @@
             "application/json": {
               "schema": {
                 "type": "object",
-                "required": ["model", "input_type"],
+                "required": [
+                  "model",
+                  "input_type"
+                ],
                 "additionalProperties": true,
                 "properties": {
-                  "model": { "type": "string", "description": "e.g. embed-v4.0." },
+                  "model": {
+                    "type": "string",
+                    "description": "e.g. embed-v4.0."
+                  },
                   "input_type": {
                     "type": "string",
-                    "enum": ["search_document", "search_query", "classification", "clustering", "image"]
+                    "enum": [
+                      "search_document",
+                      "search_query",
+                      "classification",
+                      "clustering",
+                      "image"
+                    ]
                   },
-                  "texts": { "type": "array", "items": { "type": "string" } },
-                  "embedding_types": { "type": "array", "items": { "type": "string" } }
+                  "texts": {
+                    "type": "array",
+                    "items": {
+                      "type": "string"
+                    }
+                  },
+                  "embedding_types": {
+                    "type": "array",
+                    "items": {
+                      "type": "string"
+                    }
+                  }
                 }
               }
             }
@@ -87,7 +128,10 @@
             "description": "Embedding vectors",
             "content": {
               "application/json": {
-                "schema": { "type": "object", "additionalProperties": true }
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true
+                }
               }
             }
           }
@@ -111,13 +155,29 @@
             "application/json": {
               "schema": {
                 "type": "object",
-                "required": ["model", "query", "documents"],
+                "required": [
+                  "model",
+                  "query",
+                  "documents"
+                ],
                 "additionalProperties": true,
                 "properties": {
-                  "model": { "type": "string", "description": "e.g. rerank-v3.5." },
-                  "query": { "type": "string" },
-                  "documents": { "type": "array", "items": { "type": "string" } },
-                  "top_n": { "type": "integer", "minimum": 1 }
+                  "model": {
+                    "type": "string",
+                    "description": "e.g. rerank-v3.5."
+                  },
+                  "query": {
+                    "type": "string"
+                  },
+                  "documents": {
+                    "type": "array",
+                    "items": {
+                      "type": "string"
+                    }
+                  },
+                  "top_n": {
+                    "type": "integer"
+                  }
                 }
               }
             }
@@ -128,7 +188,10 @@
             "description": "Ranked results",
             "content": {
               "application/json": {
-                "schema": { "type": "object", "additionalProperties": true }
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true
+                }
               }
             }
           }

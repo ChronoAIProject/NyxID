@@ -5,7 +5,12 @@
     "version": "v1-nyxid-overlay",
     "description": "NyxID-hosted overlay of the Reddit OAuth API operations most used by agents. NyxID injects the OAuth token; requests go to oauth.reddit.com."
   },
-  "servers": [{ "url": "https://oauth.reddit.com", "description": "Reddit OAuth API" }],
+  "servers": [
+    {
+      "url": "https://oauth.reddit.com",
+      "description": "Reddit OAuth API"
+    }
+  ],
   "paths": {
     "/api/v1/me": {
       "get": {
@@ -23,7 +28,10 @@
             "description": "User profile",
             "content": {
               "application/json": {
-                "schema": { "type": "object", "additionalProperties": true }
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true
+                }
               }
             }
           }
@@ -46,20 +54,26 @@
             "name": "subreddit",
             "in": "path",
             "required": true,
-            "schema": { "type": "string", "minLength": 1 }
+            "schema": {
+              "type": "string"
+            }
           },
           {
             "name": "limit",
             "in": "query",
             "required": false,
-            "schema": { "type": "integer", "minimum": 1, "maximum": 100 }
+            "schema": {
+              "type": "integer"
+            }
           },
           {
             "name": "after",
             "in": "query",
             "required": false,
             "description": "Fullname cursor for pagination.",
-            "schema": { "type": "string" }
+            "schema": {
+              "type": "string"
+            }
           }
         ],
         "responses": {
@@ -67,7 +81,10 @@
             "description": "Post listing",
             "content": {
               "application/json": {
-                "schema": { "type": "object", "additionalProperties": true }
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true
+                }
               }
             }
           }
@@ -90,26 +107,49 @@
             "name": "q",
             "in": "query",
             "required": true,
-            "schema": { "type": "string", "minLength": 1 }
+            "schema": {
+              "type": "string"
+            }
           },
           {
             "name": "sort",
             "in": "query",
             "required": false,
-            "schema": { "type": "string", "enum": ["relevance", "hot", "top", "new", "comments"] }
+            "schema": {
+              "type": "string",
+              "enum": [
+                "relevance",
+                "hot",
+                "top",
+                "new",
+                "comments"
+              ]
+            }
           },
           {
             "name": "t",
             "in": "query",
             "required": false,
             "description": "Time window for top/relevance sorts.",
-            "schema": { "type": "string", "enum": ["hour", "day", "week", "month", "year", "all"] }
+            "schema": {
+              "type": "string",
+              "enum": [
+                "hour",
+                "day",
+                "week",
+                "month",
+                "year",
+                "all"
+              ]
+            }
           },
           {
             "name": "limit",
             "in": "query",
             "required": false,
-            "schema": { "type": "integer", "minimum": 1, "maximum": 100 }
+            "schema": {
+              "type": "integer"
+            }
           }
         ],
         "responses": {
@@ -117,7 +157,238 @@
             "description": "Search listing",
             "content": {
               "application/json": {
-                "schema": { "type": "object", "additionalProperties": true }
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/comments/{article}": {
+      "get": {
+        "operationId": "get_post_comments",
+        "summary": "Get a post with its comments",
+        "x-aevatar-tool": {
+          "name": "get_post_comments",
+          "description": "Get a Reddit post and its comment tree by post id.",
+          "readOnly": true,
+          "destructive": false,
+          "requiresApproval": false
+        },
+        "parameters": [
+          {
+            "name": "article",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            },
+            "description": "Post id without the t3_ prefix."
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer"
+            }
+          },
+          {
+            "name": "depth",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer"
+            }
+          },
+          {
+            "name": "sort",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "enum": [
+                "confidence",
+                "top",
+                "new",
+                "controversial",
+                "old",
+                "qa"
+              ]
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "ok",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/r/{subreddit}/new": {
+      "get": {
+        "operationId": "subreddit_new",
+        "summary": "List newest posts in a subreddit",
+        "x-aevatar-tool": {
+          "name": "subreddit_new",
+          "description": "List newest posts of a subreddit.",
+          "readOnly": true,
+          "destructive": false,
+          "requiresApproval": false
+        },
+        "parameters": [
+          {
+            "name": "subreddit",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer"
+            }
+          },
+          {
+            "name": "after",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string"
+            },
+            "description": "Fullname cursor for pagination."
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "ok",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/r/{subreddit}/about": {
+      "get": {
+        "operationId": "subreddit_about",
+        "summary": "Get subreddit info",
+        "x-aevatar-tool": {
+          "name": "subreddit_about",
+          "description": "Get information about a subreddit.",
+          "readOnly": true,
+          "destructive": false,
+          "requiresApproval": false
+        },
+        "parameters": [
+          {
+            "name": "subreddit",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "ok",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/submit": {
+      "post": {
+        "operationId": "submit_post",
+        "summary": "Submit a post",
+        "x-aevatar-tool": {
+          "name": "submit_post",
+          "description": "Submit a new Reddit post (text or link).",
+          "readOnly": false,
+          "destructive": false,
+          "requiresApproval": true
+        },
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/x-www-form-urlencoded": {
+              "schema": {
+                "type": "object",
+                "additionalProperties": true,
+                "required": [
+                  "sr",
+                  "kind",
+                  "title"
+                ],
+                "properties": {
+                  "sr": {
+                    "type": "string",
+                    "description": "Subreddit name without r/."
+                  },
+                  "kind": {
+                    "type": "string",
+                    "enum": [
+                      "self",
+                      "link"
+                    ]
+                  },
+                  "title": {
+                    "type": "string"
+                  },
+                  "text": {
+                    "type": "string",
+                    "description": "Body for kind=self."
+                  },
+                  "url": {
+                    "type": "string",
+                    "description": "URL for kind=link."
+                  },
+                  "api_type": {
+                    "type": "string",
+                    "description": "Set to json for a JSON response."
+                  }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "ok",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true
+                }
               }
             }
           }

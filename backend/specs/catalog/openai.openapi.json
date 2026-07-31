@@ -5,7 +5,12 @@
     "version": "v1-nyxid-overlay",
     "description": "NyxID-hosted overlay of the core OpenAI API operations. Paths are relative to the /v1 base; NyxID injects the API key."
   },
-  "servers": [{ "url": "https://api.openai.com/v1", "description": "OpenAI API" }],
+  "servers": [
+    {
+      "url": "https://api.openai.com/v1",
+      "description": "OpenAI API"
+    }
+  ],
   "paths": {
     "/chat/completions": {
       "post": {
@@ -24,17 +29,30 @@
             "application/json": {
               "schema": {
                 "type": "object",
-                "required": ["model", "messages"],
+                "required": [
+                  "model",
+                  "messages"
+                ],
                 "additionalProperties": true,
                 "properties": {
-                  "model": { "type": "string", "description": "Model id, e.g. gpt-4o." },
+                  "model": {
+                    "type": "string",
+                    "description": "Model id, e.g. gpt-4o."
+                  },
                   "messages": {
                     "type": "array",
                     "description": "Conversation messages with role and content.",
-                    "items": { "type": "object", "additionalProperties": true }
+                    "items": {
+                      "type": "object",
+                      "additionalProperties": true
+                    }
                   },
-                  "temperature": { "type": "number" },
-                  "max_tokens": { "type": "integer" }
+                  "temperature": {
+                    "type": "number"
+                  },
+                  "max_tokens": {
+                    "type": "integer"
+                  }
                 }
               }
             }
@@ -45,7 +63,10 @@
             "description": "Chat completion",
             "content": {
               "application/json": {
-                "schema": { "type": "object", "additionalProperties": true }
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true
+                }
               }
             }
           }
@@ -69,13 +90,17 @@
             "application/json": {
               "schema": {
                 "type": "object",
-                "required": ["model", "input"],
+                "required": [
+                  "model",
+                  "input"
+                ],
                 "additionalProperties": true,
                 "properties": {
-                  "model": { "type": "string" },
+                  "model": {
+                    "type": "string"
+                  },
                   "input": {
-                    "description": "String prompt or structured input items.",
-                    "type": ["string", "array"]
+                    "description": "String prompt or structured input items."
                   }
                 }
               }
@@ -87,7 +112,10 @@
             "description": "Model response",
             "content": {
               "application/json": {
-                "schema": { "type": "object", "additionalProperties": true }
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true
+                }
               }
             }
           }
@@ -111,11 +139,17 @@
             "application/json": {
               "schema": {
                 "type": "object",
-                "required": ["model", "input"],
+                "required": [
+                  "model",
+                  "input"
+                ],
                 "additionalProperties": true,
                 "properties": {
-                  "model": { "type": "string", "description": "e.g. text-embedding-3-small." },
-                  "input": { "type": ["string", "array"] }
+                  "model": {
+                    "type": "string",
+                    "description": "e.g. text-embedding-3-small."
+                  },
+                  "input": {}
                 }
               }
             }
@@ -126,7 +160,10 @@
             "description": "Embedding vectors",
             "content": {
               "application/json": {
-                "schema": { "type": "object", "additionalProperties": true }
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true
+                }
               }
             }
           }
@@ -149,7 +186,147 @@
             "description": "Model list",
             "content": {
               "application/json": {
-                "schema": { "type": "object", "additionalProperties": true }
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/images/generations": {
+      "post": {
+        "operationId": "images_generate",
+        "summary": "Generate images",
+        "x-aevatar-tool": {
+          "name": "images_generate",
+          "description": "Generate images with OpenAI.",
+          "readOnly": false,
+          "destructive": false,
+          "requiresApproval": false
+        },
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "additionalProperties": true,
+                "required": [
+                  "prompt"
+                ],
+                "properties": {
+                  "model": {
+                    "type": "string",
+                    "description": "e.g. gpt-image-1."
+                  },
+                  "prompt": {
+                    "type": "string"
+                  },
+                  "n": {
+                    "type": "integer"
+                  },
+                  "size": {
+                    "type": "string"
+                  }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "ok",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/moderations": {
+      "post": {
+        "operationId": "moderations_create",
+        "summary": "Classify content for policy violations",
+        "x-aevatar-tool": {
+          "name": "moderations_create",
+          "description": "Run OpenAI content moderation over input text.",
+          "readOnly": false,
+          "destructive": false,
+          "requiresApproval": false
+        },
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "additionalProperties": true,
+                "required": [
+                  "input"
+                ],
+                "properties": {
+                  "model": {
+                    "type": "string"
+                  },
+                  "input": {}
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "ok",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/models/{model}": {
+      "get": {
+        "operationId": "models_get",
+        "summary": "Get a model",
+        "x-aevatar-tool": {
+          "name": "models_get",
+          "description": "Get an OpenAI model by id.",
+          "readOnly": true,
+          "destructive": false,
+          "requiresApproval": false
+        },
+        "parameters": [
+          {
+            "name": "model",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "ok",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true
+                }
               }
             }
           }

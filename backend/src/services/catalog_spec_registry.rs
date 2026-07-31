@@ -219,6 +219,121 @@ mod tests {
         }
     }
 
+    /// Aevatar's workflow admission proof builder
+    /// (`NyxIdOperationAdmissionProofBuilder`) accepts only this fixed
+    /// schema-keyword whitelist and drops the whole endpoint on any other
+    /// keyword, an unresolved `$ref`, or a union `type` array. Every
+    /// overlay schema must stay inside the subset or the operation becomes
+    /// invisible to workflow binding (see NyxID#1296).
+    const AEVATAR_SCHEMA_KEYWORDS: &[&str] = &[
+        "type",
+        "enum",
+        "properties",
+        "required",
+        "items",
+        "additionalProperties",
+        "title",
+        "description",
+        "default",
+        "example",
+        "examples",
+        "deprecated",
+    ];
+
+    fn assert_admissible_schema(spec_key: &str, context: &str, schema: &serde_json::Value) {
+        let Some(object) = schema.as_object() else {
+            return;
+        };
+        for (key, value) in object {
+            assert!(
+                AEVATAR_SCHEMA_KEYWORDS.contains(&key.as_str()),
+                "spec '{spec_key}' {context}: keyword '{key}' is outside the aevatar admission subset"
+            );
+            match key.as_str() {
+                "type" => assert!(
+                    value.is_string(),
+                    "spec '{spec_key}' {context}: union type arrays are inadmissible"
+                ),
+                "properties" | "additionalProperties" | "items" => {
+                    if let Some(children) = value.as_object() {
+                        if key == "properties" {
+                            for (name, child) in children {
+                                assert_admissible_schema(
+                                    spec_key,
+                                    &format!("{context}.{name}"),
+                                    child,
+                                );
+                            }
+                        } else {
+                            assert_admissible_schema(spec_key, context, value);
+                        }
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+
+    #[test]
+    fn every_schema_stays_inside_aevatar_admission_subset() {
+        for (key, _) in HOSTED_SPEC_SOURCES {
+            let spec = spec_for_key(key).expect("registered spec");
+            assert!(
+                spec.pointer("/components/schemas").is_none(),
+                "spec '{key}' must inline schemas; aevatar rejects unresolved $refs"
+            );
+            let paths = spec
+                .get("paths")
+                .and_then(|paths| paths.as_object())
+                .unwrap_or_else(|| panic!("spec '{key}' missing paths"));
+            for (path, item) in paths {
+                let Some(item) = item.as_object() else {
+                    continue;
+                };
+                for method in ["get", "post", "put", "patch", "delete"] {
+                    let Some(operation) = item.get(method) else {
+                        continue;
+                    };
+                    assert!(
+                        !serde_json::to_string(operation)
+                            .expect("serialize")
+                            .contains("$ref"),
+                        "spec '{key}' {method} {path} contains a $ref"
+                    );
+                    for param in operation
+                        .get("parameters")
+                        .and_then(|params| params.as_array())
+                        .into_iter()
+                        .flatten()
+                    {
+                        if let Some(schema) = param.get("schema") {
+                            let name = param.get("name").and_then(|n| n.as_str()).unwrap_or("?");
+                            assert_admissible_schema(
+                                key,
+                                &format!("{method} {path} param {name}"),
+                                schema,
+                            );
+                        }
+                    }
+                    if let Some(content) = operation
+                        .pointer("/requestBody/content")
+                        .and_then(|content| content.as_object())
+                    {
+                        for media in content.values() {
+                            if let Some(schema) = media.get("schema") {
+                                assert_admissible_schema(
+                                    key,
+                                    &format!("{method} {path} body"),
+                                    schema,
+                                );
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
     #[test]
     fn every_operation_has_unique_operation_id_and_aevatar_marker() {
         for (key, _) in HOSTED_SPEC_SOURCES {

@@ -5,7 +5,12 @@
     "version": "v1-nyxid-overlay",
     "description": "NyxID-hosted overlay of the core Anthropic API operations. Paths are relative to the /v1 base; NyxID injects the API key and anthropic-version header."
   },
-  "servers": [{ "url": "https://api.anthropic.com/v1", "description": "Anthropic API" }],
+  "servers": [
+    {
+      "url": "https://api.anthropic.com/v1",
+      "description": "Anthropic API"
+    }
+  ],
   "paths": {
     "/messages": {
       "post": {
@@ -24,18 +29,34 @@
             "application/json": {
               "schema": {
                 "type": "object",
-                "required": ["model", "messages", "max_tokens"],
+                "required": [
+                  "model",
+                  "messages",
+                  "max_tokens"
+                ],
                 "additionalProperties": true,
                 "properties": {
-                  "model": { "type": "string", "description": "Model id, e.g. claude-sonnet-4-5." },
+                  "model": {
+                    "type": "string",
+                    "description": "Model id, e.g. claude-sonnet-4-5."
+                  },
                   "messages": {
                     "type": "array",
                     "description": "Conversation messages with role and content.",
-                    "items": { "type": "object", "additionalProperties": true }
+                    "items": {
+                      "type": "object",
+                      "additionalProperties": true
+                    }
                   },
-                  "max_tokens": { "type": "integer", "minimum": 1 },
-                  "system": { "description": "Optional system prompt." },
-                  "temperature": { "type": "number" }
+                  "max_tokens": {
+                    "type": "integer"
+                  },
+                  "system": {
+                    "description": "Optional system prompt."
+                  },
+                  "temperature": {
+                    "type": "number"
+                  }
                 }
               }
             }
@@ -46,7 +67,10 @@
             "description": "Message completion",
             "content": {
               "application/json": {
-                "schema": { "type": "object", "additionalProperties": true }
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true
+                }
               }
             }
           }
@@ -69,7 +93,9 @@
             "name": "limit",
             "in": "query",
             "required": false,
-            "schema": { "type": "integer", "minimum": 1, "maximum": 1000 }
+            "schema": {
+              "type": "integer"
+            }
           }
         ],
         "responses": {
@@ -77,7 +103,100 @@
             "description": "Model list",
             "content": {
               "application/json": {
-                "schema": { "type": "object", "additionalProperties": true }
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/messages/count_tokens": {
+      "post": {
+        "operationId": "messages_count_tokens",
+        "summary": "Count tokens for a message request",
+        "x-aevatar-tool": {
+          "name": "messages_count_tokens",
+          "description": "Count tokens an Anthropic Messages request would consume.",
+          "readOnly": false,
+          "destructive": false,
+          "requiresApproval": false
+        },
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "additionalProperties": true,
+                "required": [
+                  "model",
+                  "messages"
+                ],
+                "properties": {
+                  "model": {
+                    "type": "string"
+                  },
+                  "messages": {
+                    "type": "array",
+                    "items": {
+                      "type": "object",
+                      "additionalProperties": true
+                    }
+                  },
+                  "system": {}
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "ok",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/models/{model_id}": {
+      "get": {
+        "operationId": "models_get",
+        "summary": "Get a model",
+        "x-aevatar-tool": {
+          "name": "models_get",
+          "description": "Get an Anthropic model by id.",
+          "readOnly": true,
+          "destructive": false,
+          "requiresApproval": false
+        },
+        "parameters": [
+          {
+            "name": "model_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "ok",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true
+                }
               }
             }
           }

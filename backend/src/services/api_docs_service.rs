@@ -1095,12 +1095,11 @@ mod tests {
         assert_eq!(submit["operationId"], "agent");
         assert_eq!(submit["x-aevatar-tool"]["name"], "agent");
         assert_eq!(submit["x-aevatar-tool"]["readOnly"], false);
-        assert_eq!(
-            submit["requestBody"]["content"]["application/json"]["schema"]["$ref"],
-            "#/components/schemas/AgentSubmitRequest"
-        );
 
-        let submit_schema = &spec["components"]["schemas"]["AgentSubmitRequest"];
+        // Schemas are inlined (no $ref): aevatar workflow admission rejects
+        // unresolved refs, see NyxID#1296.
+        let submit_schema = &submit["requestBody"]["content"]["application/json"]["schema"];
+        assert!(submit_schema.get("$ref").is_none());
         assert_eq!(submit_schema["required"][0], "prompt");
         assert!(submit_schema["properties"].get("urls").is_some());
         assert!(submit_schema["properties"].get("schema").is_some());

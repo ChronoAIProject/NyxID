@@ -5,7 +5,12 @@
     "version": "v1-nyxid-overlay",
     "description": "NyxID-hosted overlay of the Spotify Web API operations most used by agents. Paths are relative to the /v1 base; NyxID injects the OAuth token."
   },
-  "servers": [{ "url": "https://api.spotify.com/v1", "description": "Spotify Web API" }],
+  "servers": [
+    {
+      "url": "https://api.spotify.com/v1",
+      "description": "Spotify Web API"
+    }
+  ],
   "paths": {
     "/me": {
       "get": {
@@ -23,7 +28,10 @@
             "description": "User profile",
             "content": {
               "application/json": {
-                "schema": { "type": "object", "additionalProperties": true }
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true
+                }
               }
             }
           }
@@ -46,26 +54,34 @@
             "name": "q",
             "in": "query",
             "required": true,
-            "schema": { "type": "string", "minLength": 1 }
+            "schema": {
+              "type": "string"
+            }
           },
           {
             "name": "type",
             "in": "query",
             "required": true,
             "description": "Comma-separated: album, artist, playlist, track, show, episode, audiobook.",
-            "schema": { "type": "string", "minLength": 1 }
+            "schema": {
+              "type": "string"
+            }
           },
           {
             "name": "limit",
             "in": "query",
             "required": false,
-            "schema": { "type": "integer", "minimum": 1, "maximum": 50 }
+            "schema": {
+              "type": "integer"
+            }
           },
           {
             "name": "offset",
             "in": "query",
             "required": false,
-            "schema": { "type": "integer", "minimum": 0 }
+            "schema": {
+              "type": "integer"
+            }
           }
         ],
         "responses": {
@@ -73,7 +89,10 @@
             "description": "Search results",
             "content": {
               "application/json": {
-                "schema": { "type": "object", "additionalProperties": true }
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true
+                }
               }
             }
           }
@@ -96,13 +115,17 @@
             "name": "limit",
             "in": "query",
             "required": false,
-            "schema": { "type": "integer", "minimum": 1, "maximum": 50 }
+            "schema": {
+              "type": "integer"
+            }
           },
           {
             "name": "offset",
             "in": "query",
             "required": false,
-            "schema": { "type": "integer", "minimum": 0 }
+            "schema": {
+              "type": "integer"
+            }
           }
         ],
         "responses": {
@@ -110,7 +133,317 @@
             "description": "Playlist page",
             "content": {
               "application/json": {
-                "schema": { "type": "object", "additionalProperties": true }
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/me/player": {
+      "get": {
+        "operationId": "get_playback_state",
+        "summary": "Get playback state",
+        "x-aevatar-tool": {
+          "name": "get_playback_state",
+          "description": "Get the user's current Spotify playback state.",
+          "readOnly": true,
+          "destructive": false,
+          "requiresApproval": false
+        },
+        "responses": {
+          "200": {
+            "description": "ok",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/me/player/play": {
+      "put": {
+        "operationId": "start_playback",
+        "summary": "Start or resume playback",
+        "x-aevatar-tool": {
+          "name": "start_playback",
+          "description": "Start or resume Spotify playback on the active device.",
+          "readOnly": false,
+          "destructive": false,
+          "requiresApproval": true
+        },
+        "requestBody": {
+          "required": false,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "additionalProperties": true,
+                "properties": {
+                  "context_uri": {
+                    "type": "string",
+                    "description": "Album/playlist/artist URI."
+                  },
+                  "uris": {
+                    "type": "array",
+                    "description": "Track URIs.",
+                    "items": {
+                      "type": "string"
+                    }
+                  },
+                  "position_ms": {
+                    "type": "integer"
+                  }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "204": {
+            "description": "Playback started"
+          }
+        }
+      }
+    },
+    "/me/player/pause": {
+      "put": {
+        "operationId": "pause_playback",
+        "summary": "Pause playback",
+        "x-aevatar-tool": {
+          "name": "pause_playback",
+          "description": "Pause Spotify playback.",
+          "readOnly": false,
+          "destructive": false,
+          "requiresApproval": true
+        },
+        "responses": {
+          "204": {
+            "description": "Playback paused"
+          }
+        }
+      }
+    },
+    "/playlists/{playlist_id}/tracks": {
+      "get": {
+        "operationId": "get_playlist_tracks",
+        "summary": "List playlist tracks",
+        "x-aevatar-tool": {
+          "name": "get_playlist_tracks",
+          "description": "List tracks of a Spotify playlist.",
+          "readOnly": true,
+          "destructive": false,
+          "requiresApproval": false
+        },
+        "parameters": [
+          {
+            "name": "playlist_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer"
+            }
+          },
+          {
+            "name": "offset",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "ok",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true
+                }
+              }
+            }
+          }
+        }
+      },
+      "post": {
+        "operationId": "add_playlist_tracks",
+        "summary": "Add tracks to a playlist",
+        "x-aevatar-tool": {
+          "name": "add_playlist_tracks",
+          "description": "Add tracks to a Spotify playlist.",
+          "readOnly": false,
+          "destructive": false,
+          "requiresApproval": true
+        },
+        "parameters": [
+          {
+            "name": "playlist_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "additionalProperties": false,
+                "required": [
+                  "uris"
+                ],
+                "properties": {
+                  "uris": {
+                    "type": "array",
+                    "description": "Track URIs to add.",
+                    "items": {
+                      "type": "string"
+                    }
+                  },
+                  "position": {
+                    "type": "integer"
+                  }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "201": {
+            "description": "Tracks added",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/me/top/{type}": {
+      "get": {
+        "operationId": "get_top_items",
+        "summary": "Get the user's top artists or tracks",
+        "x-aevatar-tool": {
+          "name": "get_top_items",
+          "description": "Get the authenticated user's top Spotify artists or tracks.",
+          "readOnly": true,
+          "destructive": false,
+          "requiresApproval": false
+        },
+        "parameters": [
+          {
+            "name": "type",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "enum": [
+                "artists",
+                "tracks"
+              ]
+            }
+          },
+          {
+            "name": "time_range",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "enum": [
+                "short_term",
+                "medium_term",
+                "long_term"
+              ]
+            }
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "ok",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/me/player/recently-played": {
+      "get": {
+        "operationId": "recently_played",
+        "summary": "List recently played tracks",
+        "x-aevatar-tool": {
+          "name": "recently_played",
+          "description": "List the user's recently played Spotify tracks.",
+          "readOnly": true,
+          "destructive": false,
+          "requiresApproval": false
+        },
+        "parameters": [
+          {
+            "name": "limit",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer"
+            }
+          },
+          {
+            "name": "after",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string"
+            },
+            "description": "Unix ms cursor."
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "ok",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true
+                }
               }
             }
           }

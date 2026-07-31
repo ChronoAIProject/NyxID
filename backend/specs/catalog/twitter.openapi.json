@@ -5,7 +5,12 @@
     "version": "v2-nyxid-overlay",
     "description": "NyxID-hosted overlay of the X API v2 operations most used by agents. Paths are relative to the /2 base; NyxID injects the OAuth token."
   },
-  "servers": [{ "url": "https://api.x.com/2", "description": "X API v2" }],
+  "servers": [
+    {
+      "url": "https://api.x.com/2",
+      "description": "X API v2"
+    }
+  ],
   "paths": {
     "/users/me": {
       "get": {
@@ -24,7 +29,9 @@
             "in": "query",
             "required": false,
             "description": "Comma-separated extra user fields.",
-            "schema": { "type": "string" }
+            "schema": {
+              "type": "string"
+            }
           }
         ],
         "responses": {
@@ -32,7 +39,10 @@
             "description": "User profile",
             "content": {
               "application/json": {
-                "schema": { "type": "object", "additionalProperties": true }
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true
+                }
               }
             }
           }
@@ -56,26 +66,34 @@
             "in": "query",
             "required": true,
             "description": "Search query using X search operators.",
-            "schema": { "type": "string", "minLength": 1 }
+            "schema": {
+              "type": "string"
+            }
           },
           {
             "name": "max_results",
             "in": "query",
             "required": false,
-            "schema": { "type": "integer", "minimum": 10, "maximum": 100 }
+            "schema": {
+              "type": "integer"
+            }
           },
           {
             "name": "next_token",
             "in": "query",
             "required": false,
-            "schema": { "type": "string" }
+            "schema": {
+              "type": "string"
+            }
           },
           {
             "name": "tweet.fields",
             "in": "query",
             "required": false,
             "description": "Comma-separated extra tweet fields.",
-            "schema": { "type": "string" }
+            "schema": {
+              "type": "string"
+            }
           }
         ],
         "responses": {
@@ -83,7 +101,10 @@
             "description": "Search results page",
             "content": {
               "application/json": {
-                "schema": { "type": "object", "additionalProperties": true }
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true
+                }
               }
             }
           }
@@ -109,13 +130,18 @@
                 "type": "object",
                 "additionalProperties": true,
                 "properties": {
-                  "text": { "type": "string", "description": "Post text (required unless media/poll only)." },
+                  "text": {
+                    "type": "string",
+                    "description": "Post text (required unless media/poll only)."
+                  },
                   "reply": {
                     "type": "object",
                     "description": "Reply target settings.",
                     "additionalProperties": true
                   },
-                  "quote_tweet_id": { "type": "string" }
+                  "quote_tweet_id": {
+                    "type": "string"
+                  }
                 }
               }
             }
@@ -126,7 +152,152 @@
             "description": "Created post",
             "content": {
               "application/json": {
-                "schema": { "type": "object", "additionalProperties": true }
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/users/by/username/{username}": {
+      "get": {
+        "operationId": "get_user_by_username",
+        "summary": "Get a user by username",
+        "x-aevatar-tool": {
+          "name": "get_user_by_username",
+          "description": "Look up an X user by username.",
+          "readOnly": true,
+          "destructive": false,
+          "requiresApproval": false
+        },
+        "parameters": [
+          {
+            "name": "username",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "user.fields",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string"
+            },
+            "description": "Comma-separated extra user fields."
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "ok",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/users/{id}/tweets": {
+      "get": {
+        "operationId": "get_user_tweets",
+        "summary": "Get a user's posts",
+        "x-aevatar-tool": {
+          "name": "get_user_tweets",
+          "description": "Get recent posts of an X user by user id.",
+          "readOnly": true,
+          "destructive": false,
+          "requiresApproval": false
+        },
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "max_results",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer"
+            }
+          },
+          {
+            "name": "pagination_token",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "tweet.fields",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string"
+            },
+            "description": "Comma-separated extra tweet fields."
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "ok",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/tweets/{id}": {
+      "delete": {
+        "operationId": "delete_tweet",
+        "summary": "Delete a post",
+        "x-aevatar-tool": {
+          "name": "delete_tweet",
+          "description": "Delete an X post owned by the authenticated user.",
+          "readOnly": false,
+          "destructive": true,
+          "requiresApproval": true
+        },
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "ok",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true
+                }
               }
             }
           }
