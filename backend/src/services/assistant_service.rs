@@ -21,6 +21,7 @@ use crate::errors::{AppError, AppResult};
 use crate::models::downstream_service::{
     COLLECTION_NAME as DOWNSTREAM_SERVICES, DownstreamService,
 };
+use chrono::{DateTime, FixedOffset};
 use mongodb::bson::doc;
 use regex::Regex;
 use std::collections::HashSet;
@@ -177,19 +178,13 @@ pub fn merge_workflow_history_rows(
     merged.sort_by(|left, right| {
         let left_key = conversation_updated_at_key(left);
         let right_key = conversation_updated_at_key(right);
-        right_key.cmp(&left_key)
+        match (left_key.parsed.as_ref(), right_key.parsed.as_ref()) {
+            (Some(left_time), Some(right_time)) => right_time.cmp(left_time),
+            _ => right_key.raw.cmp(&left_key.raw),
+        }
     });
     *canonical_rows = merged;
     canonical_rows.len() != before
-}
-
-fn conversation_updated_at_key(row: &serde_json::Value) -> String {
-    for key in ["updatedAt", "updated_at", "lastMessageAt", "createdAt"] {
-        if let Some(value) = row.get(key).and_then(serde_json::Value::as_str) {
-            return value.to_string();
-        }
-    }
-    String::new()
 }
 
 /// `api/chat/conversations` -- canonical conversation list.
@@ -235,21 +230,30 @@ const TYPED_CHAT_PROMPT_MAX_CHARS: usize = 32_768;
 const ACTION_CONTINUATION_MAX_REPORTS: usize = 64;
 const APPROVAL_REASON_MAX_CHARS: usize = 2_048;
 
-static FORBIDDEN_CONTINUATION_KEY: LazyLock<Regex> = LazyLock::new(|| {
+static FORBIDDEN_COMMAND_KEY: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(
         r"(?i)(?:^|[_-])(authorization|api[-_]?key|token|secret|password|credential|cookie|user[-_]?code|device[-_]?code)(?:$|[_-])",
     )
-    .expect("FORBIDDEN_CONTINUATION_KEY regex")
+    .expect("FORBIDDEN_COMMAND_KEY regex")
 });
-static FORBIDDEN_CONTINUATION_VALUE: LazyLock<Regex> = LazyLock::new(|| {
+static FORBIDDEN_COMMAND_VALUE: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(r"(?i)Bearer\s+[A-Za-z0-9._~+/-]+|nyx(?:id)?_[A-Za-z0-9_-]{8,}")
-        .expect("FORBIDDEN_CONTINUATION_VALUE regex")
+        .expect("FORBIDDEN_COMMAND_VALUE regex")
 });
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AssistantChatResponseKind {
     Stream,
     Json,
+}
+
+impl AssistantChatResponseKind {
+    pub fn accept_header_value(self) -> &'static str {
+        match self {
+            Self::Stream => "text/event-stream",
+            Self::Json => "application/json",
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -568,10 +572,10 @@ fn normalize_reason(reason: Option<String>) -> AppResult<Option<String>> {
     Ok(Some(trimmed.to_string()))
 }
 
-fn reject_secret_shaped_continuation(value: &serde_json::Value) -> AppResult<()> {
+fn reject_secret_shaped_command(value: &serde_json::Value) -> AppResult<()> {
     if contains_secret_shaped_value(value) {
         return Err(AppError::BadRequest(
-            "Action continuation contained secret material.".to_string(),
+            "Assistant chat command contained secret material.".to_string(),
         ));
     }
     Ok(())
@@ -579,10 +583,10 @@ fn reject_secret_shaped_continuation(value: &serde_json::Value) -> AppResult<()>
 
 fn contains_secret_shaped_value(value: &serde_json::Value) -> bool {
     match value {
-        serde_json::Value::String(text) => FORBIDDEN_CONTINUATION_VALUE.is_match(text),
+        serde_json::Value::String(text) => FORBIDDEN_COMMAND_VALUE.is_match(text),
         serde_json::Value::Array(entries) => entries.iter().any(contains_secret_shaped_value),
         serde_json::Value::Object(entries) => entries.iter().any(|(key, entry)| {
-            FORBIDDEN_CONTINUATION_KEY.is_match(key) || contains_secret_shaped_value(entry)
+            FORBIDDEN_COMMAND_KEY.is_match(key) || contains_secret_shaped_value(entry)
         }),
         _ => false,
     }
@@ -652,6 +656,7 @@ pub fn parse_assistant_chat_command(bytes: &[u8]) -> AppResult<AssistantChatComm
         .get("type")
         .and_then(serde_json::Value::as_str)
         .ok_or_else(|| AppError::BadRequest("Assistant chat commands require a type.".to_string()))?;
+    reject_secret_shaped_command(&value)?;
 
     match command_type {
         "text" => {
@@ -670,7 +675,6 @@ pub fn parse_assistant_chat_command(bytes: &[u8]) -> AppResult<AssistantChatComm
             }))
         }
         "action.continue" => {
-            reject_secret_shaped_continuation(&value)?;
             let raw: RawActionContinueCommand =
                 serde_json::from_value(value).map_err(|e| {
                     AppError::BadRequest(format!("Invalid action continuation request: {e}"))
@@ -841,6 +845,34 @@ pub fn parse_assistant_chat_command(bytes: &[u8]) -> AppResult<AssistantChatComm
         _ => Err(AppError::BadRequest(
             "Unsupported assistant chat command.".to_string(),
         )),
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ConversationUpdatedAtSortKey {
+    parsed: Option<DateTime<FixedOffset>>,
+    raw: String,
+}
+
+fn conversation_updated_at_key(row: &serde_json::Value) -> ConversationUpdatedAtSortKey {
+    for key in [
+        "updatedAt",
+        "updated_at",
+        "lastMessageAt",
+        "last_message_at",
+        "createdAt",
+        "created_at",
+    ] {
+        if let Some(value) = row.get(key).and_then(serde_json::Value::as_str) {
+            return ConversationUpdatedAtSortKey {
+                parsed: DateTime::parse_from_rfc3339(value).ok(),
+                raw: value.to_string(),
+            };
+        }
+    }
+    ConversationUpdatedAtSortKey {
+        parsed: None,
+        raw: String::new(),
     }
 }
 
@@ -1205,6 +1237,40 @@ mod tests {
     }
 
     #[test]
+    fn merge_sorts_rfc3339_offsets_across_updated_and_created_keys() {
+        let mut canonical = json!({
+            "conversations": [
+                {
+                    "id": CONV,
+                    "title": "typed",
+                    "createdAt": "2026-07-29T05:30:00.000Z"
+                }
+            ]
+        });
+        let legacy = json!({
+            "conversations": [
+                {
+                    "id": WORKFLOW_CONV,
+                    "title": "workflow",
+                    "updatedAt": "2026-07-29T13:00:00.000+08:00"
+                }
+            ]
+        });
+
+        assert!(merge_workflow_history_rows(&mut canonical, &legacy));
+        assert_eq!(
+            canonical["conversations"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|row| row["id"].as_str().unwrap())
+                .collect::<Vec<_>>(),
+            vec![CONV, WORKFLOW_CONV],
+            "RFC3339 offsets and mixed timestamp keys must sort chronologically"
+        );
+    }
+
+    #[test]
     fn canonical_index_workflow_detection_is_prefix_based() {
         assert!(conversation_index_includes_workflow(&json!({
             "conversations": [{ "id": WORKFLOW_CONV }]
@@ -1297,6 +1363,13 @@ mod tests {
             }
         );
         assert_eq!(
+            prepare_assistant_chat_command(&create)
+                .unwrap()
+                .response_kind
+                .accept_header_value(),
+            "text/event-stream"
+        );
+        assert_eq!(
             prepare_assistant_chat_command(&continue_turn).unwrap(),
             PreparedAssistantChatCommand {
                 body: json!({
@@ -1308,6 +1381,13 @@ mod tests {
                 client_request_id: "00000000-0000-4000-8000-000000000002".to_string(),
                 response_kind: AssistantChatResponseKind::Stream,
             }
+        );
+        assert_eq!(
+            prepare_assistant_chat_command(&continue_turn)
+                .unwrap()
+                .response_kind
+                .accept_header_value(),
+            "text/event-stream"
         );
     }
 
@@ -1391,6 +1471,13 @@ mod tests {
                 "clientRequestId": "request-2",
                 "actions": []
             })
+        );
+        assert_eq!(
+            prepare_assistant_chat_command(&continuation)
+                .unwrap()
+                .response_kind
+                .accept_header_value(),
+            "text/event-stream"
         );
     }
 
@@ -1477,6 +1564,96 @@ mod tests {
     }
 
     #[test]
+    fn rejects_secret_shaped_approval_resolution_reason_before_deserialization() {
+        let value = json!({
+            "type": "approval.resolve",
+            "conversationId": CONV,
+            "clientRequestId": "request-approval-1",
+            "requestId": "approval-1",
+            "approved": true,
+            "reason": "Bearer eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9"
+        });
+
+        assert!(parse_assistant_chat_command(&serde_json::to_vec(&value).unwrap()).is_err());
+    }
+
+    #[test]
+    fn rejects_secret_shaped_task_steer_instruction_before_deserialization() {
+        let value = json!({
+            "type": "task.steer",
+            "conversationId": CONV,
+            "turnId": "turn-1",
+            "steeringId": "steer-1",
+            "clientRequestId": "request-steer-1",
+            "instruction": "Bearer eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9",
+            "expectedStateVersion": 2
+        });
+
+        assert!(parse_assistant_chat_command(&serde_json::to_vec(&value).unwrap()).is_err());
+    }
+
+    #[test]
+    fn rejects_secret_shaped_values_across_command_variants() {
+        for value in [
+            json!({
+                "type": "text",
+                "prompt": "Bearer eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9",
+                "clientRequestId": "request-text-1"
+            }),
+            json!({
+                "type": "action.continue",
+                "conversationId": CONV,
+                "clientRequestId": "request-action-1",
+                "originTurnId": "turn-1",
+                "actions": [
+                    {
+                        "actionRequestId": "act-1",
+                        "originTurnId": "turn-1",
+                        "disposition": "declined",
+                        "resource": {
+                            "device": {
+                                "deviceId": "nyxid_secret_abcdefgh"
+                            }
+                        }
+                    }
+                ]
+            }),
+            json!({
+                "type": "task.stop",
+                "conversationId": CONV,
+                "turnId": "nyxid_secret_abcdefgh",
+                "stopRequestId": "stop-1",
+                "clientRequestId": "request-stop-1",
+                "expectedStateVersion": 0
+            }),
+            json!({
+                "type": "step.retry",
+                "conversationId": CONV,
+                "turnId": "turn-1",
+                "taskId": "task-1",
+                "stepId": "nyxid_secret_abcdefgh",
+                "retryRequestId": "retry-1",
+                "clientRequestId": "request-retry-1",
+                "expectedOperationGeneration": 2,
+                "expectedStateVersion": 3
+            }),
+            json!({
+                "type": "step.skip",
+                "conversationId": CONV,
+                "turnId": "turn-1",
+                "taskId": "task-1",
+                "stepId": "nyxid_secret_abcdefgh",
+                "skipRequestId": "skip-1",
+                "clientRequestId": "request-skip-1",
+                "expectedOperationGeneration": 4,
+                "expectedStateVersion": 5
+            }),
+        ] {
+            assert!(parse_assistant_chat_command(&serde_json::to_vec(&value).unwrap()).is_err());
+        }
+    }
+
+    #[test]
     fn builds_exact_approval_and_control_bodies() {
         let approval = prepare_assistant_chat_command(&parse_command(json!({
             "type": "approval.resolve",
@@ -1510,6 +1687,7 @@ mod tests {
         .unwrap();
 
         assert_eq!(approval.response_kind, AssistantChatResponseKind::Stream);
+        assert_eq!(approval.response_kind.accept_header_value(), "text/event-stream");
         assert_eq!(
             approval.body,
             json!({
@@ -1522,6 +1700,7 @@ mod tests {
             })
         );
         assert_eq!(stop.response_kind, AssistantChatResponseKind::Json);
+        assert_eq!(stop.response_kind.accept_header_value(), "application/json");
         assert_eq!(
             stop.body,
             json!({
@@ -1534,6 +1713,7 @@ mod tests {
             })
         );
         assert_eq!(retry.response_kind, AssistantChatResponseKind::Json);
+        assert_eq!(retry.response_kind.accept_header_value(), "application/json");
         assert_eq!(
             retry.body,
             json!({

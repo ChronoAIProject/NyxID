@@ -189,10 +189,6 @@ const ALLOWED_FORWARD_HEADERS: &[&str] = &[
     "accept-encoding",
     "accept-language",
     "user-agent",
-    // Keep parity with the direct proxy path so canonical assistant chat
-    // commands preserve their `Idempotency-Key` even if the surface is ever
-    // node-routed in the future.
-    "idempotency-key",
     "x-request-id",
     "x-correlation-id",
     "range",
@@ -617,6 +613,7 @@ async fn proxy_request_inner(
                         .unwrap_or_else(|| user_id_str.clone()),
                 }),
                 TargetMode::CallerAddressed,
+                Vec::new(),
                 resolved_slug,
             )
             .await;
@@ -676,6 +673,7 @@ async fn proxy_request_inner(
                     .unwrap_or_else(|| user_id_str.clone()),
             }),
             TargetMode::CallerAddressed,
+            Vec::new(),
             resolved_slug,
         )
         .await;
@@ -835,6 +833,7 @@ async fn proxy_request_by_slug_inner(
                         .unwrap_or_else(|| user_id_str.clone()),
                 }),
                 TargetMode::CallerAddressed,
+                Vec::new(),
                 resolved_slug,
             )
             .await;
@@ -894,6 +893,7 @@ async fn proxy_request_by_slug_inner(
                     .unwrap_or_else(|| user_id_str.clone()),
             }),
             TargetMode::CallerAddressed,
+            Vec::new(),
             resolved_slug,
         )
         .await;
@@ -977,6 +977,7 @@ pub(crate) async fn execute_proxy(
         request,
         None,
         TargetMode::CallerAddressed,
+        Vec::new(),
         resolved_slug,
     )
     .await
@@ -1020,6 +1021,7 @@ pub(crate) async fn execute_admin_proxy(
     service_id: &str,
     path: &str,
     request: Request<Body>,
+    extra_outbound_headers: Vec<(String, String)>,
     resolved_slug: &mut String,
 ) -> AppResult<Response> {
     execute_proxy_inner(
@@ -1030,6 +1032,7 @@ pub(crate) async fn execute_admin_proxy(
         request,
         None,
         TargetMode::AdminManaged,
+        extra_outbound_headers,
         resolved_slug,
     )
     .await
@@ -1335,6 +1338,7 @@ async fn execute_proxy_inner(
     request: Request<Body>,
     pre_resolved: Option<PreResolved>,
     target_mode: TargetMode,
+    extra_outbound_headers: Vec<(String, String)>,
     resolved_slug: &mut String,
 ) -> AppResult<Response> {
     let downstream_cancellation = request_cancellation(&request);
@@ -2595,7 +2599,7 @@ async fn execute_proxy_inner(
     state.billing.mark_forwarded(&metered).await?;
     let downstream_response = until_client_disconnect(
         &downstream_cancellation,
-        proxy_service::forward_request(
+        proxy_service::forward_request_with_extra_outbound_headers(
             &state.http_client,
             &target,
             reqwest_method,
@@ -2608,6 +2612,7 @@ async fn execute_proxy_inner(
             caller_token.as_deref(),
             &state.token_exchange_cache,
             &state.cloud_response_cache,
+            extra_outbound_headers,
             billing_egress_permit,
         ),
     )
@@ -5755,20 +5760,6 @@ mod tests {
     }
 
     #[test]
-    fn node_forward_preserves_idempotency_key() {
-        let mut headers = axum::http::HeaderMap::new();
-        headers.insert("idempotency-key", "req-123".parse().unwrap());
-
-        let forwarded = node_forward_headers(&headers);
-        assert!(
-            forwarded
-                .iter()
-                .any(|(n, v)| n.eq_ignore_ascii_case("idempotency-key") && v == "req-123"),
-            "assistant command idempotency keys must survive node forwarding",
-        );
-    }
-
-    #[test]
     fn node_forward_preserves_arbitrary_openclaw_prefixed_headers() {
         // Any future x-openclaw-* header should pass through automatically.
         let mut headers = axum::http::HeaderMap::new();
@@ -5797,6 +5788,7 @@ mod tests {
         let mut headers = axum::http::HeaderMap::new();
         headers.insert("authorization", "Bearer leaked".parse().unwrap());
         headers.insert("cookie", "session=leaked".parse().unwrap());
+        headers.insert("idempotency-key", "caller-supplied-key".parse().unwrap());
         headers.insert("x-nyxid-internal", "should-not-leak".parse().unwrap());
 
         let forwarded = node_forward_headers(&headers);
@@ -6913,7 +6905,7 @@ mod proxy_resolution_integration_tests {
         Router,
         body::{Body, to_bytes},
         extract::{Path, State},
-        http::{Method, Request, StatusCode, Uri},
+        http::{HeaderName, HeaderValue, Method, Request, StatusCode, Uri},
         response::{IntoResponse, Response},
         routing::{any, get},
     };
@@ -7841,6 +7833,7 @@ mod proxy_resolution_integration_tests {
             &service.id,
             "status",
             proxy_request("/assistant/conversations"),
+            Vec::new(),
             &mut admin_slug,
         )
         .await
@@ -7915,6 +7908,7 @@ mod proxy_resolution_integration_tests {
             &service.id,
             "status",
             proxy_request("/assistant/conversations"),
+            Vec::new(),
             &mut admin_slug,
         )
         .await
@@ -7955,6 +7949,7 @@ mod proxy_resolution_integration_tests {
             &service.id,
             "status",
             proxy_request("/assistant/conversations"),
+            Vec::new(),
             &mut admin_slug,
         )
         .await
@@ -8107,10 +8102,19 @@ mod proxy_resolution_integration_tests {
             r#"{"type":"step.retry","conversationId":"nyxid-chat-4a1e60ebd1fd44f192bf4bb90e1812ae","turnId":"turn-1","taskId":"task-1","stepId":"step-1","retryRequestId":"retry-1","clientRequestId":"00000000-0000-4000-8000-000000000007","expectedOperationGeneration":2,"expectedStateVersion":3}"#,
             r#"{"type":"step.skip","conversationId":"nyxid-chat-4a1e60ebd1fd44f192bf4bb90e1812ae","turnId":"turn-1","taskId":"task-1","stepId":"step-2","skipRequestId":"skip-1","clientRequestId":"00000000-0000-4000-8000-000000000008","expectedOperationGeneration":4,"expectedStateVersion":5}"#,
         ] {
+            let mut typed_request = request(Method::POST, "/api/v1/assistant/chat", Some(body));
+            typed_request.headers_mut().insert(
+                axum::http::header::ACCEPT,
+                HeaderValue::from_static("text/plain"),
+            );
+            typed_request.headers_mut().insert(
+                HeaderName::from_static("idempotency-key"),
+                HeaderValue::from_static("caller-supplied-key"),
+            );
             let response = crate::handlers::assistant::typed_chat(
                 axum::extract::State(state.clone()),
                 auth.clone(),
-                request(Method::POST, "/api/v1/assistant/chat", Some(body)),
+                typed_request,
             )
             .await
             .expect("typed chat handler must forward");
@@ -8274,6 +8278,16 @@ mod proxy_resolution_integration_tests {
                 "expectedStateVersion": 5,
             }),
         ];
+        let expected_accepts = [
+            "text/event-stream",
+            "text/event-stream",
+            "text/event-stream",
+            "text/event-stream",
+            "application/json",
+            "application/json",
+            "application/json",
+            "application/json",
+        ];
         for (offset, expected) in expected_chat_bodies.into_iter().enumerate() {
             let (_, _, body, headers) = &calls[offset + 1];
             assert_eq!(serde_json::from_slice::<serde_json::Value>(body).unwrap(), expected);
@@ -8287,6 +8301,12 @@ mod proxy_resolution_integration_tests {
                 expected
                     .get("clientRequestId")
                     .and_then(serde_json::Value::as_str),
+            );
+            assert_eq!(
+                headers
+                    .get(axum::http::header::ACCEPT)
+                    .and_then(|value| value.to_str().ok()),
+                Some(expected_accepts[offset]),
             );
         }
 

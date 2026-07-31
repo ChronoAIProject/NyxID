@@ -145,6 +145,7 @@ async fn forward(
     auth_user: &AuthUser,
     path: String,
     mut request: Request<Body>,
+    extra_outbound_headers: Vec<(String, String)>,
 ) -> AppResult<Response> {
     let service = assistant_service::resolve_admin_service(&state.db).await?;
 
@@ -187,6 +188,7 @@ async fn forward(
         &service.id,
         &path,
         request,
+        extra_outbound_headers,
         &mut resolved_slug,
     )
     .await
@@ -207,6 +209,7 @@ pub async fn list_conversations(
         &auth_user,
         assistant_service::canonical_conversations_path(),
         request,
+        Vec::new(),
     )
     .await?;
     if !response.status().is_success() {
@@ -234,6 +237,7 @@ pub async fn list_conversations(
             &auth_user,
             assistant_service::history_index_path(&user_id),
             legacy_request,
+            Vec::new(),
         )
         .await
         {
@@ -280,7 +284,7 @@ pub async fn get_history(
     request: Request<Body>,
 ) -> AppResult<Response> {
     let path = assistant_service::canonical_conversation_path(&conversation_id)?;
-    forward(&state, &auth_user, path, request).await
+    forward(&state, &auth_user, path, request, Vec::new()).await
 }
 
 /// `DELETE /api/v1/assistant/conversations/{id}` -- canonical single delete.
@@ -291,7 +295,7 @@ pub async fn delete_conversation(
     request: Request<Body>,
 ) -> AppResult<Response> {
     let path = assistant_service::canonical_conversation_path(&conversation_id)?;
-    forward(&state, &auth_user, path, request).await
+    forward(&state, &auth_user, path, request, Vec::new()).await
 }
 
 /// `GET /api/v1/assistant/conversations/{id}/state` -- conditional
@@ -306,7 +310,7 @@ pub async fn get_state(
     request: Request<Body>,
 ) -> AppResult<Response> {
     let path = assistant_service::canonical_state_path(&conversation_id)?;
-    forward(&state, &auth_user, path, request).await
+    forward(&state, &auth_user, path, request, Vec::new()).await
 }
 
 /// `POST /api/v1/assistant/completions` -- OpenAI-compatible SSE stream.
@@ -320,6 +324,7 @@ pub async fn completions(
         &auth_user,
         assistant_service::completions_path(),
         request,
+        Vec::new(),
     )
     .await
 }
@@ -331,8 +336,8 @@ const MAX_ASSISTANT_CHAT_REQUEST_BYTES: usize = 256 * 1024;
 /// `POST /api/v1/assistant/chat` -- typed NyxIdChat create-and-first-turn SSE.
 ///
 /// The browser request is parsed with an explicit command allowlist, rebuilt
-/// into the exact canonical `/api/chat` body, and forwarded with
-/// `Idempotency-Key: clientRequestId`.
+/// into the exact canonical `/api/chat` body, and forwarded with an
+/// internally-derived `Idempotency-Key` and canonical `Accept` header.
 pub async fn typed_chat(
     State(state): State<AppState>,
     auth_user: AuthUser,
@@ -352,16 +357,23 @@ pub async fn typed_chat(
         header::CONTENT_TYPE,
         HeaderValue::from_static("application/json"),
     );
-    let idempotency = HeaderValue::from_str(&prepared.client_request_id).map_err(|_| {
-        AppError::Internal("assistant: failed to encode the idempotency key".to_string())
-    })?;
-    parts.headers.insert(header::HeaderName::from_static("idempotency-key"), idempotency);
     let request = Request::from_parts(parts, Body::from(payload));
+    let extra_outbound_headers = vec![
+        (
+            "idempotency-key".to_string(),
+            prepared.client_request_id.clone(),
+        ),
+        (
+            "accept".to_string(),
+            prepared.response_kind.accept_header_value().to_string(),
+        ),
+    ];
     forward(
         &state,
         &auth_user,
         assistant_service::typed_chat_path(),
         request,
+        extra_outbound_headers,
     )
     .await
 }
@@ -411,6 +423,7 @@ pub async fn workflow_chat(
         &auth_user,
         assistant_service::workflow_chat_path(),
         request,
+        Vec::new(),
     )
     .await
 }
@@ -429,6 +442,7 @@ pub async fn workflow_chat_ws(
         &auth_user,
         assistant_service::workflow_chat_ws_path(),
         request,
+        Vec::new(),
     )
     .await
 }
