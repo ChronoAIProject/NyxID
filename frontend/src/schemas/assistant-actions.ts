@@ -224,6 +224,7 @@ export const actionReportSchema = z
 export const actionContinueBodySchema = z
   .object({
     type: z.literal("action.continue"),
+    conversationId: actionControlIdentitySchema,
     clientRequestId: actionControlIdentitySchema,
     originTurnId: actionControlIdentitySchema,
     actions: z.array(actionReportSchema).min(1),
@@ -253,8 +254,9 @@ export const actionContinueBodySchema = z
 export const actionWakeBodySchema = z
   .object({
     type: z.literal("action.continue"),
+    conversationId: actionControlIdentitySchema,
     clientRequestId: actionControlIdentitySchema,
-    originTurnId: actionControlIdentitySchema,
+    originTurnId: actionControlIdentitySchema.optional(),
     actions: z.tuple([]),
   })
   .strict();
@@ -353,6 +355,7 @@ function copyResource(resource: ActionResource): ActionResource {
 
 /** Build the strict DTO from an explicit allowlist of wire members. */
 export function buildActionContinueBody(
+  conversationId: string,
   clientRequestId: string,
   originTurnId: string,
   reports: readonly ActionReport[],
@@ -379,6 +382,7 @@ export function buildActionContinueBody(
   });
   return actionContinueBodySchema.parse({
     type: "action.continue",
+    conversationId,
     clientRequestId,
     originTurnId,
     actions,
@@ -387,11 +391,13 @@ export function buildActionContinueBody(
 
 /** Build the distinct out-of-band wake DTO with no action reports. */
 export function buildActionWakeBody(
+  conversationId: string,
   clientRequestId: string,
-  originTurnId: string,
+  originTurnId?: string,
 ): ActionWakeBody {
   return actionWakeBodySchema.parse({
     type: "action.continue",
+    conversationId,
     clientRequestId,
     originTurnId,
     actions: [],

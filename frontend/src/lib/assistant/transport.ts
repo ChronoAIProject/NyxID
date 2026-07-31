@@ -266,6 +266,7 @@ class MockAssistantTransport implements AssistantTransport {
       }
     }
     buildActionContinueBody(
+      conversationId,
       crypto.randomUUID(),
       originTurnId,
       validated,

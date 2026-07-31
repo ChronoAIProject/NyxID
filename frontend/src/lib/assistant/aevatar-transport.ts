@@ -1364,8 +1364,11 @@ export class AevatarAssistantTransport implements AssistantTransport {
     const stream = this.startChatStream(
       conversationId,
       run,
-      `/api/v1${ASSISTANT_PREFIX}/conversations/${conversationId}/approve`,
+      TYPED_CHAT_URL,
       JSON.stringify({
+        type: "approval.resolve",
+        conversationId,
+        clientRequestId: crypto.randomUUID(),
         requestId: card.approval_request_id,
         approved,
       }),
@@ -1603,6 +1606,7 @@ export class AevatarAssistantTransport implements AssistantTransport {
     // Validate origin matching, non-empty actions and duplicate ids before
     // changing any card. The real client id is allocated only when drained.
     buildActionContinueBody(
+      this.canonicalConversationId(conversationId),
       "validation",
       originTurnId,
       validatedReports,
@@ -1712,11 +1716,11 @@ export class AevatarAssistantTransport implements AssistantTransport {
       throw new AssistantTurnActiveError();
     }
 
-    const body = buildActionWakeBody(crypto.randomUUID(), originTurnId);
+    const body = buildActionWakeBody(actorId, crypto.randomUUID(), originTurnId);
     const run = this.newRun(onEvent, null, "actor");
     run.cursor = stored.turnState.lastCursor;
     this.running.set(requestedId, run);
-    void this.streamActionContinuation(requestedId, actorId, run, body);
+    void this.streamActionContinuation(requestedId, run, body);
     return {
       get turnId() {
         return run.turnId;
@@ -1888,6 +1892,7 @@ export class AevatarAssistantTransport implements AssistantTransport {
       }),
     );
     const body = buildActionContinueBody(
+      batch.actorId,
       batch.clientRequestId,
       batch.originTurnId,
       [...batch.reports.values()],
@@ -1902,12 +1907,7 @@ export class AevatarAssistantTransport implements AssistantTransport {
     };
     batch.inFlight = true;
     this.running.set(conversationId, run);
-    void this.streamActionContinuation(
-      conversationId,
-      batch.actorId,
-      run,
-      body,
-    );
+    void this.streamActionContinuation(conversationId, run, body);
     return {
       get turnId() {
         return run.turnId;
@@ -2214,12 +2214,10 @@ export class AevatarAssistantTransport implements AssistantTransport {
               }),
             }
           : {
-              url: `/api/v1${ASSISTANT_PREFIX}/conversations/${conversationId}/stream`,
+              url: TYPED_CHAT_URL,
               bodyText: JSON.stringify({
-                // Aevatar NyxIdChatEndpoints.Streaming.cs:58 uses an ordinal
-                // discriminator comparison, so a normal turn requires this
-                // exact lowercase value.
                 type: "text",
+                conversationId,
                 prompt,
                 clientRequestId: run.clientRequestId,
               }),
@@ -2276,7 +2274,6 @@ export class AevatarAssistantTransport implements AssistantTransport {
 
   private async streamActionContinuation(
     conversationId: string,
-    actorId: string,
     run: RunningTurn,
     body: ActionContinueBody | ActionWakeBody,
   ): Promise<void> {
@@ -2301,7 +2298,7 @@ export class AevatarAssistantTransport implements AssistantTransport {
       const stream = this.startChatStream(
         conversationId,
         run,
-        `/api/v1${ASSISTANT_PREFIX}/conversations/${encodeURIComponent(actorId)}/stream`,
+        TYPED_CHAT_URL,
         bodyText,
       );
       const response = await stream.headers;
@@ -3937,9 +3934,8 @@ export class AevatarAssistantTransport implements AssistantTransport {
     conversationId: string,
     run: RunningTurn,
   ): Promise<void> | null {
-    // The workflow surface has no `:stop` route (run control lives on
-    // scope-service `runs/{runId}:stop`, which this mount does not proxy);
-    // posting the actor-surface stop for a `chatc-…` id would only 404.
+    // The workflow surface still stops elsewhere (`runs/{runId}:stop`), so
+    // only typed assistant conversations use the canonical chat command here.
     if (run.protocol === "workflow") return null;
     if (!run.turnId) return null;
     const actorConversationId = this.canonicalConversationId(conversationId);
@@ -3954,10 +3950,12 @@ export class AevatarAssistantTransport implements AssistantTransport {
       STOP_REQUEST_DEADLINE_MS,
     );
     const pending = apiClient<unknown>(
-      `${ASSISTANT_PREFIX}/conversations/${actorConversationId}/stop`,
+      `${ASSISTANT_PREFIX}/chat`,
       {
         method: "POST",
         body: {
+          type: "task.stop",
+          conversationId: actorConversationId,
           turnId: run.turnId,
           stopRequestId: crypto.randomUUID(),
           clientRequestId: crypto.randomUUID(),

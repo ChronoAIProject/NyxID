@@ -189,6 +189,10 @@ const ALLOWED_FORWARD_HEADERS: &[&str] = &[
     "accept-encoding",
     "accept-language",
     "user-agent",
+    // Keep parity with the direct proxy path so canonical assistant chat
+    // commands preserve their `Idempotency-Key` even if the surface is ever
+    // node-routed in the future.
+    "idempotency-key",
     "x-request-id",
     "x-correlation-id",
     "range",
@@ -5751,6 +5755,20 @@ mod tests {
     }
 
     #[test]
+    fn node_forward_preserves_idempotency_key() {
+        let mut headers = axum::http::HeaderMap::new();
+        headers.insert("idempotency-key", "req-123".parse().unwrap());
+
+        let forwarded = node_forward_headers(&headers);
+        assert!(
+            forwarded
+                .iter()
+                .any(|(n, v)| n.eq_ignore_ascii_case("idempotency-key") && v == "req-123"),
+            "assistant command idempotency keys must survive node forwarding",
+        );
+    }
+
+    #[test]
     fn node_forward_preserves_arbitrary_openclaw_prefixed_headers() {
         // Any future x-openclaw-* header should pass through automatically.
         let mut headers = axum::http::HeaderMap::new();
@@ -6897,12 +6915,13 @@ mod proxy_resolution_integration_tests {
         extract::{Path, State},
         http::{Method, Request, StatusCode, Uri},
         response::{IntoResponse, Response},
-        routing::get,
+        routing::{any, get},
     };
     use chrono::Utc;
     use mongodb::bson::doc;
     use tokio::net::TcpListener;
     use tokio::sync::mpsc;
+    use tower::ServiceExt;
     use uuid::Uuid;
 
     async fn downstream_ok(uri: Uri) -> (StatusCode, String) {
@@ -7947,13 +7966,10 @@ mod proxy_resolution_integration_tests {
         server.abort();
     }
 
-    /// End-to-end through the real assistant handlers: both caller contracts
-    /// are rebuilt into their exact typed or pinned-workflow body, and each
-    /// upstream request carries the injected identity material with NO
-    /// caller `Authorization` — the exact wire shape Aevatar's `/api/chat`
-    /// authenticates (`NyxIdIdentityAssertionAuthentication` forwards the
-    /// Bearer scheme to the identity-assertion handler only when
-    /// `Authorization` is absent, and a malformed one 400s the whole turn).
+    /// End-to-end through the real assistant handlers: every typed command
+    /// lands on canonical `/api/chat`, resources land on
+    /// `/api/chat/conversations/**`, and each upstream request carries the
+    /// injected identity material with NO caller `Authorization`.
     #[tokio::test]
     async fn assistant_chat_handlers_rebuild_bodies_for_the_admin_service() {
         use std::sync::Mutex as StdMutex;
@@ -7963,20 +7979,56 @@ mod proxy_resolution_integration_tests {
             return;
         };
 
-        type Captured = (String, Vec<u8>, axum::http::HeaderMap);
-        let captured: std::sync::Arc<StdMutex<Option<Captured>>> =
-            std::sync::Arc::new(StdMutex::new(None));
+        type Captured = (Method, String, Vec<u8>, axum::http::HeaderMap);
+        let captured: std::sync::Arc<StdMutex<Vec<Captured>>> =
+            std::sync::Arc::new(StdMutex::new(Vec::new()));
         let sink = captured.clone();
         let app = Router::new().route(
             "/{*path}",
-            axum::routing::post(move |request: Request<Body>| {
+            any(move |request: Request<Body>| {
                 let sink = sink.clone();
                 async move {
                     let (parts, body) = request.into_parts();
                     let bytes = axum::body::to_bytes(body, 1024 * 1024).await.unwrap();
-                    *sink.lock().unwrap() =
-                        Some((parts.uri.path().to_string(), bytes.to_vec(), parts.headers));
-                    axum::Json(serde_json::json!({ "ok": true }))
+                    sink.lock().unwrap().push((
+                        parts.method.clone(),
+                        parts.uri.path().to_string(),
+                        bytes.to_vec(),
+                        parts.headers.clone(),
+                    ));
+                    match (parts.method, parts.uri.path()) {
+                        (Method::GET, "/api/chat/conversations") => axum::Json(serde_json::json!({
+                            "conversations": [
+                                {
+                                    "id": "nyxid-chat-4a1e60ebd1fd44f192bf4bb90e1812ae",
+                                    "updatedAt": "2026-07-29T13:00:00.000Z"
+                                },
+                                {
+                                    "id": "chatc-8bd999c402fb37d60cdcd81e3b78cfd",
+                                    "updatedAt": "2026-07-29T12:00:00.000Z"
+                                }
+                            ]
+                        }))
+                        .into_response(),
+                        (Method::GET, path) if path.starts_with("/api/chat/conversations/") => {
+                            axum::Json(serde_json::json!({
+                                "messages": [],
+                                "stateVersion": 3
+                            }))
+                            .into_response()
+                        }
+                        (Method::DELETE, path) if path.starts_with("/api/chat/conversations/") => {
+                            axum::Json(serde_json::json!({})).into_response()
+                        }
+                        (_, "/api/chat") => Response::builder()
+                            .status(StatusCode::OK)
+                            .header(axum::http::header::CONTENT_TYPE, "text/event-stream")
+                            .body(Body::from(
+                                "data: {\"type\":\"RUN_FINISHED\"}\n\n",
+                            ))
+                            .unwrap(),
+                        _ => axum::Json(serde_json::json!({ "ok": true })).into_response(),
+                    }
                 }
             }),
         );
@@ -8018,95 +8070,305 @@ mod proxy_resolution_integration_tests {
 
         let state = test_app_state(db.clone());
         let auth = access_token_auth(&user_id);
-        let typed_state = state.clone();
-        let typed_auth = auth.clone();
-
-        let mut request = Request::builder()
-            .method(Method::POST)
-            .uri("/api/v1/assistant/workflow-chat")
-            .header(axum::http::header::CONTENT_TYPE, "application/json")
-            .body(Body::from(r#"{"prompt":"hi there"}"#))
-            .expect("build workflow chat request");
-        request.extensions_mut().insert(
+        let billing_policy =
             crate::services::billing::route_inventory::BillingRoutePolicy::Metered(
                 crate::services::billing::BillingIngress::Proxy,
+            );
+        let request = |method: Method, uri: &str, body: Option<&str>| {
+            let mut request = Request::builder()
+                .method(method)
+                .uri(uri)
+                .header(axum::http::header::CONTENT_TYPE, "application/json")
+                .body(Body::from(body.unwrap_or_default().to_string()))
+                .expect("build assistant request");
+            request.extensions_mut().insert(billing_policy);
+            request
+        };
+
+        crate::handlers::assistant::workflow_chat(
+            axum::extract::State(state.clone()),
+            auth.clone(),
+            request(
+                Method::POST,
+                "/api/v1/assistant/workflow-chat",
+                Some(r#"{"prompt":"hi there"}"#),
             ),
-        );
-
-        let response =
-            crate::handlers::assistant::workflow_chat(axum::extract::State(state), auth, request)
-                .await
-                .expect("workflow chat handler must forward");
-        assert_eq!(response.status(), StatusCode::OK);
-
-        let (path, body, headers) = captured
-            .lock()
-            .unwrap()
-            .take()
-            .expect("downstream must have received the turn");
-        assert_eq!(path, "/api/chat");
-        let body: serde_json::Value = serde_json::from_slice(&body).unwrap();
-        assert_eq!(body["workflow"], "studio");
-        assert_eq!(body["prompt"], "hi there");
-        assert!(body["conversation"]["conversationId"].is_null());
-        assert!(
-            body["commandId"].as_str().is_some_and(|id| !id.is_empty()),
-            "a server-minted commandId must be present"
-        );
-        assert!(
-            headers.get(axum::http::header::AUTHORIZATION).is_none(),
-            "no caller Authorization may reach /api/chat (a malformed one 400s upstream)"
-        );
-        assert!(
-            headers.get("x-nyxid-identity-token").is_some(),
-            "the identity assertion authenticates the request upstream"
-        );
-        assert!(
-            headers.get("x-nyxid-delegation-token").is_some(),
-            "the delegation token is the workflow tool credential"
-        );
-
-        let mut request = Request::builder()
-            .method(Method::POST)
-            .uri("/api/v1/assistant/chat")
-            .header(axum::http::header::CONTENT_TYPE, "application/json")
-            .body(Body::from(
-                r#"{"type":"text","prompt":"connect api-github","clientRequestId":"00000000-0000-4000-8000-000000000001"}"#,
-            ))
-            .expect("build typed chat request");
-        request.extensions_mut().insert(
-            crate::services::billing::route_inventory::BillingRoutePolicy::Metered(
-                crate::services::billing::BillingIngress::Proxy,
-            ),
-        );
-
-        let response = crate::handlers::assistant::typed_chat(
-            axum::extract::State(typed_state),
-            typed_auth,
-            request,
         )
         .await
-        .expect("typed chat handler must forward");
-        assert_eq!(response.status(), StatusCode::OK);
+        .expect("workflow chat handler must forward");
 
-        let (path, body, headers) = captured
-            .lock()
-            .unwrap()
-            .take()
-            .expect("downstream must have received the typed turn");
-        assert_eq!(path, "/api/chat");
+        for body in [
+            r#"{"type":"text","prompt":"connect api-github","clientRequestId":"00000000-0000-4000-8000-000000000001"}"#,
+            r#"{"type":"text","prompt":"continue","clientRequestId":"00000000-0000-4000-8000-000000000002","conversationId":"nyxid-chat-4a1e60ebd1fd44f192bf4bb90e1812ae"}"#,
+            r#"{"type":"action.continue","conversationId":"nyxid-chat-4a1e60ebd1fd44f192bf4bb90e1812ae","clientRequestId":"00000000-0000-4000-8000-000000000003","originTurnId":"turn-action-1","actions":[{"actionRequestId":"act-1","originTurnId":"turn-action-1","disposition":"completed","resource":{"userService":{"userServiceId":"00000000-0000-4000-8000-000000000123"}}}]}"#,
+            r#"{"type":"approval.resolve","conversationId":"nyxid-chat-4a1e60ebd1fd44f192bf4bb90e1812ae","clientRequestId":"00000000-0000-4000-8000-000000000004","requestId":"approval-1","approved":true,"reason":"Approved by user"}"#,
+            r#"{"type":"task.stop","conversationId":"nyxid-chat-4a1e60ebd1fd44f192bf4bb90e1812ae","turnId":"turn-1","stopRequestId":"stop-1","clientRequestId":"00000000-0000-4000-8000-000000000005","expectedStateVersion":0}"#,
+            r#"{"type":"task.steer","conversationId":"nyxid-chat-4a1e60ebd1fd44f192bf4bb90e1812ae","turnId":"turn-1","steeringId":"steer-1","clientRequestId":"00000000-0000-4000-8000-000000000006","instruction":"Try again","expectedStateVersion":2}"#,
+            r#"{"type":"step.retry","conversationId":"nyxid-chat-4a1e60ebd1fd44f192bf4bb90e1812ae","turnId":"turn-1","taskId":"task-1","stepId":"step-1","retryRequestId":"retry-1","clientRequestId":"00000000-0000-4000-8000-000000000007","expectedOperationGeneration":2,"expectedStateVersion":3}"#,
+            r#"{"type":"step.skip","conversationId":"nyxid-chat-4a1e60ebd1fd44f192bf4bb90e1812ae","turnId":"turn-1","taskId":"task-1","stepId":"step-2","skipRequestId":"skip-1","clientRequestId":"00000000-0000-4000-8000-000000000008","expectedOperationGeneration":4,"expectedStateVersion":5}"#,
+        ] {
+            let response = crate::handlers::assistant::typed_chat(
+                axum::extract::State(state.clone()),
+                auth.clone(),
+                request(Method::POST, "/api/v1/assistant/chat", Some(body)),
+            )
+            .await
+            .expect("typed chat handler must forward");
+            assert_eq!(response.status(), StatusCode::OK);
+        }
+
+        let list_response = crate::handlers::assistant::list_conversations(
+            axum::extract::State(state.clone()),
+            auth.clone(),
+            request(Method::GET, "/api/v1/assistant/conversations", None),
+        )
+        .await
+        .expect("list conversations handler must forward");
+        assert_eq!(list_response.status(), StatusCode::OK);
+
+        crate::handlers::assistant::get_history(
+            axum::extract::State(state.clone()),
+            auth.clone(),
+            Path("nyxid-chat-4a1e60ebd1fd44f192bf4bb90e1812ae".to_string()),
+            request(
+                Method::GET,
+                "/api/v1/assistant/conversations/nyxid-chat-4a1e60ebd1fd44f192bf4bb90e1812ae",
+                None,
+            ),
+        )
+        .await
+        .expect("history handler must forward");
+        crate::handlers::assistant::get_state(
+            axum::extract::State(state.clone()),
+            auth.clone(),
+            Path("nyxid-chat-4a1e60ebd1fd44f192bf4bb90e1812ae".to_string()),
+            request(
+                Method::GET,
+                "/api/v1/assistant/conversations/nyxid-chat-4a1e60ebd1fd44f192bf4bb90e1812ae/state",
+                None,
+            ),
+        )
+        .await
+        .expect("state handler must forward");
+        crate::handlers::assistant::delete_conversation(
+            axum::extract::State(state.clone()),
+            auth.clone(),
+            Path("nyxid-chat-4a1e60ebd1fd44f192bf4bb90e1812ae".to_string()),
+            request(
+                Method::DELETE,
+                "/api/v1/assistant/conversations/nyxid-chat-4a1e60ebd1fd44f192bf4bb90e1812ae",
+                None,
+            ),
+        )
+        .await
+        .expect("delete handler must forward");
+
+        let calls = std::mem::take(&mut *captured.lock().unwrap());
+        let paths: Vec<&str> = calls.iter().map(|(_, path, _, _)| path.as_str()).collect();
         assert_eq!(
-            serde_json::from_slice::<serde_json::Value>(&body).unwrap(),
+            paths,
+            vec![
+                "/api/chat",
+                "/api/chat",
+                "/api/chat",
+                "/api/chat",
+                "/api/chat",
+                "/api/chat",
+                "/api/chat",
+                "/api/chat",
+                "/api/chat",
+                "/api/chat/conversations",
+                "/api/chat/conversations/nyxid-chat-4a1e60ebd1fd44f192bf4bb90e1812ae",
+                "/api/chat/conversations/nyxid-chat-4a1e60ebd1fd44f192bf4bb90e1812ae/state",
+                "/api/chat/conversations/nyxid-chat-4a1e60ebd1fd44f192bf4bb90e1812ae",
+            ]
+        );
+        assert!(
+            paths.iter().all(|path| !path.contains("api/scopes/")),
+            "typed assistant traffic must not hit scoped paths"
+        );
+        assert!(
+            paths.iter().all(|path| !path.contains("chat-history")),
+            "canonical list/detail/state/delete must not hit chat-history when the upstream canonical list already includes workflow rows"
+        );
+
+        let workflow = serde_json::from_slice::<serde_json::Value>(&calls[0].2).unwrap();
+        assert_eq!(workflow["workflow"], "studio");
+        assert_eq!(workflow["prompt"], "hi there");
+        assert!(workflow["conversation"]["conversationId"].is_null());
+        assert!(workflow["commandId"].as_str().is_some_and(|id| !id.is_empty()));
+
+        let expected_chat_bodies = [
             serde_json::json!({
                 "type": "text",
                 "prompt": "connect api-github",
                 "clientRequestId": "00000000-0000-4000-8000-000000000001",
-            })
-        );
-        assert!(headers.get(axum::http::header::AUTHORIZATION).is_none());
-        assert!(headers.get("x-nyxid-identity-token").is_some());
-        assert!(headers.get("x-nyxid-delegation-token").is_some());
+            }),
+            serde_json::json!({
+                "type": "text",
+                "prompt": "continue",
+                "clientRequestId": "00000000-0000-4000-8000-000000000002",
+                "conversationId": "nyxid-chat-4a1e60ebd1fd44f192bf4bb90e1812ae",
+            }),
+            serde_json::json!({
+                "type": "action.continue",
+                "conversationId": "nyxid-chat-4a1e60ebd1fd44f192bf4bb90e1812ae",
+                "clientRequestId": "00000000-0000-4000-8000-000000000003",
+                "originTurnId": "turn-action-1",
+                "actions": [{
+                    "actionRequestId": "act-1",
+                    "originTurnId": "turn-action-1",
+                    "disposition": "completed",
+                    "resource": {
+                        "userService": {
+                            "userServiceId": "00000000-0000-4000-8000-000000000123"
+                        }
+                    }
+                }]
+            }),
+            serde_json::json!({
+                "type": "approval.resolve",
+                "conversationId": "nyxid-chat-4a1e60ebd1fd44f192bf4bb90e1812ae",
+                "clientRequestId": "00000000-0000-4000-8000-000000000004",
+                "requestId": "approval-1",
+                "approved": true,
+                "reason": "Approved by user",
+            }),
+            serde_json::json!({
+                "type": "task.stop",
+                "conversationId": "nyxid-chat-4a1e60ebd1fd44f192bf4bb90e1812ae",
+                "turnId": "turn-1",
+                "stopRequestId": "stop-1",
+                "clientRequestId": "00000000-0000-4000-8000-000000000005",
+                "expectedStateVersion": 0,
+            }),
+            serde_json::json!({
+                "type": "task.steer",
+                "conversationId": "nyxid-chat-4a1e60ebd1fd44f192bf4bb90e1812ae",
+                "turnId": "turn-1",
+                "steeringId": "steer-1",
+                "clientRequestId": "00000000-0000-4000-8000-000000000006",
+                "instruction": "Try again",
+                "expectedStateVersion": 2,
+            }),
+            serde_json::json!({
+                "type": "step.retry",
+                "conversationId": "nyxid-chat-4a1e60ebd1fd44f192bf4bb90e1812ae",
+                "turnId": "turn-1",
+                "taskId": "task-1",
+                "stepId": "step-1",
+                "retryRequestId": "retry-1",
+                "clientRequestId": "00000000-0000-4000-8000-000000000007",
+                "expectedOperationGeneration": 2,
+                "expectedStateVersion": 3,
+            }),
+            serde_json::json!({
+                "type": "step.skip",
+                "conversationId": "nyxid-chat-4a1e60ebd1fd44f192bf4bb90e1812ae",
+                "turnId": "turn-1",
+                "taskId": "task-1",
+                "stepId": "step-2",
+                "skipRequestId": "skip-1",
+                "clientRequestId": "00000000-0000-4000-8000-000000000008",
+                "expectedOperationGeneration": 4,
+                "expectedStateVersion": 5,
+            }),
+        ];
+        for (offset, expected) in expected_chat_bodies.into_iter().enumerate() {
+            let (_, _, body, headers) = &calls[offset + 1];
+            assert_eq!(serde_json::from_slice::<serde_json::Value>(body).unwrap(), expected);
+            assert!(headers.get(axum::http::header::AUTHORIZATION).is_none());
+            assert!(headers.get("x-nyxid-identity-token").is_some());
+            assert!(headers.get("x-nyxid-delegation-token").is_some());
+            assert_eq!(
+                headers
+                    .get("idempotency-key")
+                    .and_then(|value| value.to_str().ok()),
+                expected
+                    .get("clientRequestId")
+                    .and_then(serde_json::Value::as_str),
+            );
+        }
+
+        for (_, _, _, headers) in [&calls[0], &calls[9], &calls[10], &calls[11], &calls[12]] {
+            assert!(headers.get(axum::http::header::AUTHORIZATION).is_none());
+            assert!(headers.get("x-nyxid-identity-token").is_some());
+            assert!(headers.get("x-nyxid-delegation-token").is_some());
+        }
         server.abort();
+    }
+
+    #[tokio::test]
+    async fn assistant_deleted_scoped_command_routes_are_unroutable() {
+        use crate::crypto::jwt::generate_access_token;
+
+        let state = crate::test_utils::test_app_state_no_db().await;
+        let user_id = Uuid::new_v4();
+        let token = generate_access_token(
+            &state.jwt_keys,
+            &state.config,
+            &user_id,
+            "openid profile email",
+            None,
+            None,
+            None,
+            None,
+            None,
+        )
+        .unwrap();
+        let (_, private) = crate::routes::build_router(
+            state.config.proxy_max_body_size,
+            state.config.public_proxy_max_body_size,
+        );
+        let app = private.with_state(state);
+
+        for (method, path) in [
+            (
+                Method::POST,
+                "/api/v1/assistant/conversations/nyxid-chat-1/stream",
+            ),
+            (
+                Method::POST,
+                "/api/v1/assistant/conversations/nyxid-chat-1/approve",
+            ),
+            (
+                Method::POST,
+                "/api/v1/assistant/conversations/nyxid-chat-1/stop",
+            ),
+            (
+                Method::POST,
+                "/api/v1/assistant/conversations/nyxid-chat-1/steer",
+            ),
+            (
+                Method::POST,
+                "/api/v1/assistant/conversations/nyxid-chat-1/turns/turn-1/steps/step-1/retry",
+            ),
+            (
+                Method::POST,
+                "/api/v1/assistant/conversations/nyxid-chat-1/turns/turn-1/steps/step-1/skip",
+            ),
+        ] {
+            let response = app
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .method(method.clone())
+                        .uri(path)
+                        .header(axum::http::header::AUTHORIZATION, format!("Bearer {token}"))
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert!(
+                matches!(
+                    response.status(),
+                    StatusCode::NOT_FOUND | StatusCode::METHOD_NOT_ALLOWED
+                ),
+                "expected {path} to be removed, got {}",
+                response.status()
+            );
+        }
     }
 
     #[tokio::test]

@@ -287,6 +287,7 @@ describe("assistant action request schema", () => {
 describe("action continuation schema", () => {
   it("builds the exact strict completed body with a safe resource ref", () => {
     const body = buildActionContinueBody(
+      "nyxid-chat-actor-1",
       "00000000-0000-4000-8000-000000000001",
       "turn-origin-1",
       [
@@ -306,6 +307,7 @@ describe("action continuation schema", () => {
 
     expect(Object.keys(body)).toEqual([
       "type",
+      "conversationId",
       "clientRequestId",
       "originTurnId",
       "actions",
@@ -318,6 +320,7 @@ describe("action continuation schema", () => {
     ]);
     expect(body).toEqual({
       type: "action.continue",
+      conversationId: "nyxid-chat-actor-1",
       clientRequestId: "00000000-0000-4000-8000-000000000001",
       originTurnId: "turn-origin-1",
       actions: [
@@ -343,6 +346,7 @@ describe("action continuation schema", () => {
     } as const;
     const base = {
       type: "action.continue",
+      conversationId: "nyxid-chat-actor-1",
       clientRequestId: "request-1",
       originTurnId: "turn-origin-1",
     } as const;
@@ -386,10 +390,15 @@ describe("action continuation schema", () => {
   });
 
   it("builds an exact empty out-of-band wake without accepting reports", () => {
-    const body = buildActionWakeBody("request-wake-1", "turn-origin-1");
+    const body = buildActionWakeBody(
+      "nyxid-chat-actor-1",
+      "request-wake-1",
+      "turn-origin-1",
+    );
 
     expect(body).toEqual({
       type: "action.continue",
+      conversationId: "nyxid-chat-actor-1",
       clientRequestId: "request-wake-1",
       originTurnId: "turn-origin-1",
       actions: [],
@@ -415,6 +424,7 @@ describe("action continuation schema", () => {
   it("rejects completed service.connect reports without a userService resource", () => {
     expect(() =>
       buildActionContinueBody(
+        "nyxid-chat-actor-1",
         "request-1",
         "turn-origin-1",
         [
@@ -431,6 +441,7 @@ describe("action continuation schema", () => {
     );
     expect(() =>
       buildActionContinueBody(
+        "nyxid-chat-actor-1",
         "request-1",
         "turn-origin-1",
         [
@@ -451,6 +462,7 @@ describe("action continuation schema", () => {
   it("fails closed for completed reports without resources when the action lookup is missing", () => {
     expect(() =>
       buildActionContinueBody(
+        "nyxid-chat-actor-1",
         "request-1",
         "turn-origin-1",
         [

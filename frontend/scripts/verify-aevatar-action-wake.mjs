@@ -102,9 +102,10 @@ if (
 }
 
 const wakeFrames = await postSse(
-  `/api/v1/assistant/conversations/${encodeURIComponent(actorId)}/stream`,
+  "/api/v1/assistant/chat",
   {
     type: "action.continue",
+    conversationId: actorId,
     clientRequestId: randomUUID(),
     originTurnId,
     actions: [],

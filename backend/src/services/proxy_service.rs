@@ -103,6 +103,9 @@ const ALLOWED_FORWARD_HEADERS: &[&str] = &[
     // actual body, and forwarding the original value causes mismatches when
     // middleware or translators modify the request body.
     "user-agent",
+    // The canonical assistant command facade uses Idempotency-Key on
+    // `/api/chat`; the admin-managed assistant passthrough must preserve it.
+    "idempotency-key",
     "x-request-id",
     "x-correlation-id",
     "range",
@@ -3138,6 +3141,7 @@ mod tests {
     fn forward_allowlist_accepts_explicit_entries() {
         assert!(is_allowed_forward_header("content-type"));
         assert!(is_allowed_forward_header("user-agent"));
+        assert!(is_allowed_forward_header("idempotency-key"));
         assert!(is_allowed_forward_header("range"));
     }
 

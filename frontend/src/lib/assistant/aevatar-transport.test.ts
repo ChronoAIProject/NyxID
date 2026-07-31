@@ -34,6 +34,7 @@ const TURN_ID = "turn-server-owned-1";
 // NyxID's own assistant mount. No scope segment: the server derives the
 // aevatar scope from the session user (PRD decision 4).
 const ASSISTANT_BASE = "/api/v1/assistant";
+const TYPED_COMMAND_URL = `${ASSISTANT_BASE}/chat`;
 
 function jsonResponse(body: unknown, status = 200): Response {
   return new Response(JSON.stringify(body), {
@@ -129,11 +130,66 @@ type FetchRoute = (
   init: RequestInit | undefined,
 ) => Response | undefined;
 
+function legacyTypedCommandUrl(
+  url: string,
+  init: RequestInit | undefined,
+): string | null {
+  if (url !== TYPED_COMMAND_URL || init?.method !== "POST") return null;
+  const body = jsonRequestBody(init);
+  const conversationId =
+    typeof body["conversationId"] === "string"
+      ? body["conversationId"]
+      : null;
+  const turnId = typeof body["turnId"] === "string" ? body["turnId"] : null;
+  const taskId = typeof body["taskId"] === "string" ? body["taskId"] : null;
+  const stepId = typeof body["stepId"] === "string" ? body["stepId"] : null;
+
+  if (body["type"] === "text" || body["type"] === "action.continue") {
+    return conversationId
+      ? `${ASSISTANT_BASE}/conversations/${conversationId}/stream`
+      : null;
+  }
+  if (body["type"] === "approval.resolve") {
+    return conversationId
+      ? `${ASSISTANT_BASE}/conversations/${conversationId}/approve`
+      : null;
+  }
+  if (body["type"] === "task.stop") {
+    return conversationId
+      ? `${ASSISTANT_BASE}/conversations/${conversationId}/stop`
+      : null;
+  }
+  if (body["type"] === "task.steer") {
+    return conversationId
+      ? `${ASSISTANT_BASE}/conversations/${conversationId}/steer`
+      : null;
+  }
+  if (body["type"] === "step.retry") {
+    return conversationId && turnId && taskId && stepId
+      ? `${ASSISTANT_BASE}/conversations/${conversationId}/turns/${turnId}/steps/${stepId}/retry`
+      : null;
+  }
+  if (body["type"] === "step.skip") {
+    return conversationId && turnId && taskId && stepId
+      ? `${ASSISTANT_BASE}/conversations/${conversationId}/turns/${turnId}/steps/${stepId}/skip`
+      : null;
+  }
+  return null;
+}
+
+function compatibleAssistantUrl(
+  url: string,
+  init: RequestInit | undefined,
+): string {
+  return legacyTypedCommandUrl(url, init) ?? url;
+}
+
 function stubFetch(...routes: FetchRoute[]): ReturnType<typeof vi.fn> {
   const mock = vi.fn((input: RequestInfo | URL, init?: RequestInit) => {
     const url = String(input);
+    const legacyUrl = legacyTypedCommandUrl(url, init);
     for (const route of routes) {
-      const response = route(url, init);
+      const response = route(url, init) ?? (legacyUrl ? route(legacyUrl, init) : undefined);
       if (response) return Promise.resolve(response);
     }
     return Promise.resolve(
@@ -142,6 +198,20 @@ function stubFetch(...routes: FetchRoute[]): ReturnType<typeof vi.fn> {
   });
   vi.stubGlobal("fetch", mock);
   return mock;
+}
+
+function jsonRequestBody(init: RequestInit | undefined): Record<string, unknown> {
+  return JSON.parse(String(init?.body ?? "{}")) as Record<string, unknown>;
+}
+
+function isTypedCommandRequest(
+  url: string,
+  init: RequestInit | undefined,
+  type?: string,
+): boolean {
+  if (url !== TYPED_COMMAND_URL || init?.method !== "POST") return false;
+  if (!type) return true;
+  return jsonRequestBody(init)["type"] === type;
 }
 
 type ChatStreamRoute = (
@@ -159,11 +229,18 @@ function mockChatStreams(...routes: readonly ChatStreamRoute[]) {
   return vi
     .spyOn(chatStreamClient, "start")
     .mockImplementation((request): ChatStreamRequestHandle => {
+      const legacyUrl = legacyTypedCommandUrl(request.url, {
+        method: "POST",
+        body: request.bodyText,
+      });
+      const legacyRequest = legacyUrl
+        ? { ...request, url: legacyUrl }
+        : null;
       let matched:
         | ReturnType<ChatStreamRoute>
         | undefined;
       for (const route of routes) {
-        matched = route(request);
+        matched = route(request) ?? (legacyRequest ? route(legacyRequest) : undefined);
         if (matched) break;
       }
       if (!matched) {
@@ -1004,7 +1081,7 @@ describe("AevatarAssistantTransport", () => {
     let streamCalls = 0;
     const mock = vi.fn(
       (input: RequestInfo | URL, init?: RequestInit): Promise<Response> => {
-        const url = String(input);
+        const url = compatibleAssistantUrl(String(input), init);
         if (
           url === `${ASSISTANT_BASE}/conversations` &&
           init?.method === "POST"
@@ -1084,7 +1161,7 @@ describe("AevatarAssistantTransport", () => {
     let streamCalls = 0;
     const mock = vi.fn(
       (input: RequestInfo | URL, init?: RequestInit): Promise<Response> => {
-        const url = String(input);
+        const url = compatibleAssistantUrl(String(input), init);
         if (
           url === `${ASSISTANT_BASE}/conversations` &&
           init?.method === "POST"
@@ -1172,7 +1249,7 @@ describe("AevatarAssistantTransport", () => {
     const streamBodies: string[] = [];
     const mock = vi.fn(
       (input: RequestInfo | URL, init?: RequestInit): Promise<Response> => {
-        const url = String(input);
+        const url = compatibleAssistantUrl(String(input), init);
         if (
           url === `${ASSISTANT_BASE}/conversations` &&
           init?.method === "POST"
@@ -1271,7 +1348,7 @@ describe("AevatarAssistantTransport", () => {
     let deleteCalls = 0;
     const mock = vi.fn(
       (input: RequestInfo | URL, init?: RequestInit): Promise<Response> => {
-        const url = String(input);
+        const url = compatibleAssistantUrl(String(input), init);
         if (
           url === `${ASSISTANT_BASE}/conversations` &&
           init?.method === "POST"
@@ -1357,7 +1434,7 @@ describe("AevatarAssistantTransport", () => {
     let deleteCalls = 0;
     const mock = vi.fn(
       (input: RequestInfo | URL, init?: RequestInit): Promise<Response> => {
-        const url = String(input);
+        const url = compatibleAssistantUrl(String(input), init);
         if (
           url === `${ASSISTANT_BASE}/conversations` &&
           init?.method === "POST"
@@ -1554,7 +1631,7 @@ describe("AevatarAssistantTransport", () => {
     let deleteCalls = 0;
     const mock = vi.fn(
       (input: RequestInfo | URL, init?: RequestInit): Promise<Response> => {
-        const url = String(input);
+        const url = compatibleAssistantUrl(String(input), init);
         if (
           url === `${ASSISTANT_BASE}/conversations` &&
           init?.method === "POST"
@@ -1621,7 +1698,7 @@ describe("AevatarAssistantTransport", () => {
     let streamCalls = 0;
     const mock = vi.fn(
       (input: RequestInfo | URL, init?: RequestInit): Promise<Response> => {
-        const url = String(input);
+        const url = compatibleAssistantUrl(String(input), init);
         if (
           url === `${ASSISTANT_BASE}/conversations` &&
           init?.method === "POST"
@@ -1730,7 +1807,7 @@ describe("AevatarAssistantTransport", () => {
     let streamCalls = 0;
     const mock = vi.fn(
       (input: RequestInfo | URL, init?: RequestInit): Promise<Response> => {
-        const url = String(input);
+        const url = compatibleAssistantUrl(String(input), init);
         if (
           url === `${ASSISTANT_BASE}/conversations` &&
           init?.method === "POST"
@@ -2166,17 +2243,19 @@ describe("captured production wire shapes", () => {
 
     await collectTurn(transport, "Hello there");
 
-    const streamCall = fetchMock.mock.calls.find(([input]) =>
-      String(input).endsWith("/stream"),
+    const streamCall = fetchMock.mock.calls.find(([input, init]) =>
+      isTypedCommandRequest(
+        String(input),
+        init as RequestInit | undefined,
+        "text",
+      ),
     ) as [string, RequestInit] | undefined;
     expect(streamCall).toBeDefined();
     const [url, init] = streamCall ?? ["", {}];
     // NyxID's own route: no scope segment, because the server derives the
     // aevatar scope from the verified session. The endpoint still 415s
     // without the explicit JSON content type.
-    expect(url).toBe(
-      `${ASSISTANT_BASE}/conversations/${CONVERSATION_ID}/stream`,
-    );
+    expect(url).toBe(TYPED_COMMAND_URL);
     expect(url).not.toContain(USER_ID);
     expect(url).not.toContain("/proxy/");
     expect(init.method).toBe("POST");
@@ -2187,18 +2266,26 @@ describe("captured production wire shapes", () => {
     });
     const body = JSON.parse(String(init.body)) as {
       type: string;
+      conversationId: string;
       prompt: string;
       clientRequestId: string;
       sessionId?: string;
     };
-    expect(Object.keys(body)).toEqual(["type", "prompt", "clientRequestId"]);
+    expect(Object.keys(body)).toEqual([
+      "type",
+      "conversationId",
+      "prompt",
+      "clientRequestId",
+    ]);
     expect(body.type).toBe("text");
+    expect(body.conversationId).toBe(CONVERSATION_ID);
     expect(body.prompt).toBe("Hello there");
     expect(body.clientRequestId).toMatch(
       /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/,
     );
     expect(Object.keys(body).sort()).toEqual([
       "clientRequestId",
+      "conversationId",
       "prompt",
       "type",
     ]);
@@ -2248,7 +2335,13 @@ describe("captured production wire shapes", () => {
     await collectTurn(transport, "Second turn");
 
     const clientRequestIds = fetchMock.mock.calls
-      .filter(([input]) => String(input).endsWith("/stream"))
+      .filter(([input, init]) =>
+        isTypedCommandRequest(
+          String(input),
+          init as RequestInit | undefined,
+          "text",
+        ),
+      )
       .map(
         ([, init]) =>
           (JSON.parse(String(init?.body)) as { clientRequestId: string })
@@ -2262,7 +2355,7 @@ describe("captured production wire shapes", () => {
     let streamAttempts = 0;
     const fetchMock = vi.fn(
       (input: RequestInfo | URL, init?: RequestInit): Promise<Response> => {
-        const url = String(input);
+        const url = compatibleAssistantUrl(String(input), init);
         if (
           url === `${ASSISTANT_BASE}/conversations` &&
           init?.method === "POST"
@@ -2293,11 +2386,18 @@ describe("captured production wire shapes", () => {
       status: "completed",
     });
     const bodies = fetchMock.mock.calls
-      .filter(([input]) => String(input).endsWith("/stream"))
+      .filter(([input, init]) =>
+        isTypedCommandRequest(
+          String(input),
+          init as RequestInit | undefined,
+          "text",
+        ),
+      )
       .map(
         ([, init]) =>
           JSON.parse(String(init?.body)) as {
             prompt: string;
+            conversationId: string;
             clientRequestId: string;
             type: string;
             sessionId?: string;
@@ -2306,6 +2406,7 @@ describe("captured production wire shapes", () => {
     expect(bodies).toHaveLength(2);
     expect(bodies[0]?.clientRequestId).toBe(bodies[1]?.clientRequestId);
     expect(bodies[0]).toEqual({
+      conversationId: CONVERSATION_ID,
       prompt: "Retry this delivery",
       clientRequestId: bodies[0]?.clientRequestId,
       type: "text",
@@ -2337,7 +2438,13 @@ describe("captured production wire shapes", () => {
       status: "completed",
     });
     const requestIds = fetchMock.mock.calls
-      .filter(([input]) => String(input).endsWith("/stream"))
+      .filter(([input, init]) =>
+        isTypedCommandRequest(
+          String(input),
+          init as RequestInit | undefined,
+          "text",
+        ),
+      )
       .map(
         ([, requestInit]) =>
           (JSON.parse(String(requestInit?.body)) as { clientRequestId: string })
@@ -2662,7 +2769,13 @@ describe("live AG-UI frame taxonomy", () => {
       turn_id: "turn-server-owned-2",
     });
     const requestIds = fetchMock.mock.calls
-      .filter(([input]) => String(input).endsWith("/stream"))
+      .filter(([input, init]) =>
+        isTypedCommandRequest(
+          String(input),
+          init as RequestInit | undefined,
+          "text",
+        ),
+      )
       .map(
         ([, init]) =>
           (JSON.parse(String(init?.body)) as { clientRequestId: string })
@@ -2776,12 +2889,26 @@ describe("live AG-UI frame taxonomy", () => {
     });
     await done;
 
-    const approveCall = fetchMock.mock.calls.find(([input]) =>
-      String(input).endsWith("/approve"),
+    const approveCall = fetchMock.mock.calls.find(([input, init]) =>
+      isTypedCommandRequest(
+        String(input),
+        init as RequestInit | undefined,
+        "approval.resolve",
+      ),
     );
     const approveBody = JSON.parse(
       String((approveCall?.[1] as RequestInit | undefined)?.body),
-    ) as { requestId: string; approved: boolean; sessionId?: string };
+    ) as {
+      type: string;
+      conversationId: string;
+      clientRequestId: string;
+      requestId: string;
+      approved: boolean;
+      sessionId?: string;
+    };
+    expect(approveBody.type).toBe("approval.resolve");
+    expect(approveBody.conversationId).toBe(CONVERSATION_ID);
+    expect(approveBody.clientRequestId).toMatch(/^[0-9a-f-]{36}$/);
     expect(approveBody.requestId).toBe("req-1");
     expect(approveBody.approved).toBe(true);
     expect(approveBody.sessionId).toBeUndefined();
@@ -2891,7 +3018,13 @@ describe("live AG-UI frame taxonomy", () => {
     vi.stubGlobal(
       "fetch",
       vi.fn((input: RequestInfo | URL, init?: RequestInit) => {
-        if (String(input).endsWith("/approve")) {
+        if (
+          isTypedCommandRequest(
+            String(input),
+            init,
+            "approval.resolve",
+          )
+        ) {
           approveSignal = init?.signal;
           return new Promise<Response>((resolve) => {
             releaseApprove = () => {
@@ -3345,7 +3478,13 @@ describe("live AG-UI frame taxonomy", () => {
     vi.stubGlobal(
       "fetch",
       vi.fn((input: RequestInfo | URL, init?: RequestInit) => {
-        if (String(input).endsWith("/approve")) {
+        if (
+          isTypedCommandRequest(
+            String(input),
+            init,
+            "approval.resolve",
+          )
+        ) {
           // Hang until aborted.
           return new Promise<Response>((_resolve, reject) => {
             init?.signal?.addEventListener("abort", () => {
@@ -4262,12 +4401,14 @@ describe("chat action cards", () => {
     ) as Record<string, unknown>;
     expect(Object.keys(actionBody)).toEqual([
       "type",
+      "conversationId",
       "clientRequestId",
       "originTurnId",
       "actions",
     ]);
     expect(actionBody).toMatchObject({
       type: "action.continue",
+      conversationId: CONVERSATION_ID,
       originTurnId: TURN_ID,
       actions: [
         {
@@ -5640,51 +5781,76 @@ describe("typed new chats and legacy workflow compatibility", () => {
     expect((await transport.getHistory(conversation.id)).conversation.id).toBe(
       TYPED_CONVERSATION,
     );
-    expect(mock).toHaveBeenCalledWith(
-      `${ASSISTANT_BASE}/conversations/${TYPED_CONVERSATION}/stop`,
-      expect.objectContaining({ method: "POST" }),
+    const stopCall = mock.mock.calls.find(([input, init]) =>
+      isTypedCommandRequest(
+        String(input),
+        init as RequestInit | undefined,
+        "task.stop",
+      ),
     );
+    expect(stopCall).toBeDefined();
+    expect(stopCall?.[0]).toBe(TYPED_URL);
+    expect(JSON.parse(String(stopCall?.[1]?.body))).toMatchObject({
+      type: "task.stop",
+      conversationId: TYPED_CONVERSATION,
+      turnId: TYPED_TURN,
+      expectedStateVersion: 0,
+    });
   });
 
   it("creates a typed actor on the first turn and preserves its blocked action contract", async () => {
     const fetchMock = stubFetch();
     const streamMock = mockChatStreams(
-      (request) =>
-        request.url === TYPED_URL
-          ? {
-              frames: [
-                {
-                  runStarted: {
-                    actorId: TYPED_CONVERSATION,
-                    turnId: TYPED_TURN,
+      (request) => {
+        const body = JSON.parse(request.bodyText) as {
+          type: string;
+          conversationId?: string;
+        };
+        if (
+          request.url === TYPED_URL &&
+          body.type === "text" &&
+          !body.conversationId
+        ) {
+          return {
+            frames: [
+              {
+                runStarted: {
+                  actorId: TYPED_CONVERSATION,
+                  turnId: TYPED_TURN,
+                },
+              },
+              actionRequestFrame({
+                actorId: TYPED_CONVERSATION,
+                originTurnId: TYPED_TURN,
+                params: {
+                  catalogService: {
+                    serviceSlug: "api-aws-cost-explorer",
+                    requestedScopes: ["billing:read"],
                   },
                 },
-                actionRequestFrame({
-                  actorId: TYPED_CONVERSATION,
-                  originTurnId: TYPED_TURN,
-                  params: {
-                    catalogService: {
-                      serviceSlug: "api-aws-cost-explorer",
-                      requestedScopes: ["billing:read"],
-                    },
-                  },
-                }),
-                { type: "RUN_FINISHED", runFinished: { status: "blocked" } },
-              ],
-            }
-          : request.url ===
-              `${ASSISTANT_BASE}/conversations/${TYPED_CONVERSATION}/stream`
-            ? {
-                frames: [
-                  {
-                    type: "RUN_STARTED",
-                    actorId: TYPED_CONVERSATION,
-                    turnId: "turn-action-continue-1",
-                  },
-                  { type: "RUN_FINISHED" },
-                ],
-              }
-            : undefined,
+              }),
+              { type: "RUN_FINISHED", runFinished: { status: "blocked" } },
+            ],
+          };
+        }
+        if (
+          request.url === TYPED_URL &&
+          body.type === "action.continue" &&
+          body.conversationId === TYPED_CONVERSATION
+        ) {
+          return {
+            frames: [
+              {
+                type: "RUN_STARTED",
+                actorId: TYPED_CONVERSATION,
+                turnId: "turn-action-continue-1",
+              },
+              { type: "RUN_FINISHED" },
+            ],
+          };
+        }
+        return undefined;
+      },
     );
     const transport = new AevatarAssistantTransport();
     const conversation = await transport.createConversation();
@@ -5767,12 +5933,13 @@ describe("typed new chats and legacy workflow compatibility", () => {
     });
     const continueCall = streamMock.mock.calls.find(
       ([request]) =>
-        request.url ===
-        `${ASSISTANT_BASE}/conversations/${TYPED_CONVERSATION}/stream`,
+        request.url === TYPED_URL &&
+        JSON.parse(request.bodyText).type === "action.continue",
     );
     expect(continueCall).toBeDefined();
     expect(JSON.parse(String(continueCall?.[0].bodyText))).toMatchObject({
       type: "action.continue",
+      conversationId: TYPED_CONVERSATION,
       originTurnId: TYPED_TURN,
       actions: [
         {
@@ -5786,45 +5953,59 @@ describe("typed new chats and legacy workflow compatibility", () => {
 
   it("keeps action-request fingerprints after typed-create adoption and still conflicts later reissues", async () => {
     const streamMock = mockChatStreams(
-      (request) =>
-        request.url === TYPED_URL
-          ? {
-              frames: [
-                {
-                  type: "RUN_STARTED",
-                  actorId: TYPED_CONVERSATION,
-                  turnId: TYPED_TURN,
-                },
-                actionRequestFrame({
-                  actorId: TYPED_CONVERSATION,
-                  originTurnId: TYPED_TURN,
-                }),
-                { type: "RUN_FINISHED", runFinished: { status: "blocked" } },
-              ],
-            }
-          : request.url ===
-              `${ASSISTANT_BASE}/conversations/${TYPED_CONVERSATION}/stream`
-            ? {
-                frames: [
-                  {
-                    type: "RUN_STARTED",
-                    actorId: TYPED_CONVERSATION,
-                    turnId: "turn-typed-follow-up-2",
+      (request) => {
+        const body = JSON.parse(request.bodyText) as {
+          type: string;
+          conversationId?: string;
+        };
+        if (
+          request.url === TYPED_URL &&
+          body.type === "text" &&
+          !body.conversationId
+        ) {
+          return {
+            frames: [
+              {
+                type: "RUN_STARTED",
+                actorId: TYPED_CONVERSATION,
+                turnId: TYPED_TURN,
+              },
+              actionRequestFrame({
+                actorId: TYPED_CONVERSATION,
+                originTurnId: TYPED_TURN,
+              }),
+              { type: "RUN_FINISHED", runFinished: { status: "blocked" } },
+            ],
+          };
+        }
+        if (
+          request.url === TYPED_URL &&
+          body.type === "text" &&
+          body.conversationId === TYPED_CONVERSATION
+        ) {
+          return {
+            frames: [
+              {
+                type: "RUN_STARTED",
+                actorId: TYPED_CONVERSATION,
+                turnId: "turn-typed-follow-up-2",
+              },
+              actionRequestFrame({
+                actorId: TYPED_CONVERSATION,
+                originTurnId: "turn-typed-follow-up-2",
+                params: {
+                  catalogService: {
+                    serviceSlug: "api-lark",
+                    requestedScopes: ["messages:write"],
                   },
-                  actionRequestFrame({
-                    actorId: TYPED_CONVERSATION,
-                    originTurnId: "turn-typed-follow-up-2",
-                    params: {
-                      catalogService: {
-                        serviceSlug: "api-lark",
-                        requestedScopes: ["messages:write"],
-                      },
-                    },
-                  }),
-                  { type: "RUN_FINISHED", runFinished: { status: "blocked" } },
-                ],
-              }
-            : undefined,
+                },
+              }),
+              { type: "RUN_FINISHED", runFinished: { status: "blocked" } },
+            ],
+          };
+        }
+        return undefined;
+      },
     );
     const transport = new AevatarAssistantTransport();
     const conversation = await transport.createConversation();
@@ -5838,7 +6019,7 @@ describe("typed new chats and legacy workflow compatibility", () => {
 
     expect(streamMock.mock.calls.map(([request]) => request.url)).toEqual([
       TYPED_URL,
-      `${ASSISTANT_BASE}/conversations/${TYPED_CONVERSATION}/stream`,
+      TYPED_URL,
     ]);
 
     const history = await transport.getHistory(conversation.id);
@@ -5864,25 +6045,45 @@ describe("typed new chats and legacy workflow compatibility", () => {
   });
 
   it("continues typed conversations on their actor with a fresh request identity", async () => {
-    const streamMock = mockChatStreams((request) =>
-      request.url === TYPED_URL ||
-      request.url ===
-        `${ASSISTANT_BASE}/conversations/${TYPED_CONVERSATION}/stream`
-        ? {
-            frames: [
-              {
-                type: "RUN_STARTED",
-                actorId: TYPED_CONVERSATION,
-                turnId:
-                  request.url === TYPED_URL
-                    ? TYPED_TURN
-                    : "turn-typed-follow-up-1",
-              },
-              { type: "RUN_FINISHED" },
-            ],
-          }
-        : undefined,
-    );
+    const streamMock = mockChatStreams((request) => {
+      const body = JSON.parse(request.bodyText) as {
+        type: string;
+        conversationId?: string;
+      };
+      if (
+        request.url === TYPED_URL &&
+        body.type === "text" &&
+        !body.conversationId
+      ) {
+        return {
+          frames: [
+            {
+              type: "RUN_STARTED",
+              actorId: TYPED_CONVERSATION,
+              turnId: TYPED_TURN,
+            },
+            { type: "RUN_FINISHED" },
+          ],
+        };
+      }
+      if (
+        request.url === TYPED_URL &&
+        body.type === "text" &&
+        body.conversationId === TYPED_CONVERSATION
+      ) {
+        return {
+          frames: [
+            {
+              type: "RUN_STARTED",
+              actorId: TYPED_CONVERSATION,
+              turnId: "turn-typed-follow-up-1",
+            },
+            { type: "RUN_FINISHED" },
+          ],
+        };
+      }
+      return undefined;
+    });
     const transport = new AevatarAssistantTransport();
     const conversation = await transport.createConversation();
 
@@ -5895,10 +6096,14 @@ describe("typed new chats and legacy workflow compatibility", () => {
     }));
     expect(bodies.map((entry) => entry.url)).toEqual([
       TYPED_URL,
-      `${ASSISTANT_BASE}/conversations/${TYPED_CONVERSATION}/stream`,
+      TYPED_URL,
     ]);
     expect(bodies[0]?.body).toMatchObject({ type: "text", prompt: "first" });
-    expect(bodies[1]?.body).toMatchObject({ type: "text", prompt: "second" });
+    expect(bodies[1]?.body).toMatchObject({
+      type: "text",
+      conversationId: TYPED_CONVERSATION,
+      prompt: "second",
+    });
     expect(bodies[0]?.body["clientRequestId"]).not.toBe(
       bodies[1]?.body["clientRequestId"],
     );
@@ -5906,28 +6111,55 @@ describe("typed new chats and legacy workflow compatibility", () => {
   });
 
   it("wakes a typed conversation out of band with an empty action list", async () => {
-    const streamMock = mockChatStreams((request) =>
-      request.url === TYPED_URL ||
-      request.url ===
-        `${ASSISTANT_BASE}/conversations/${TYPED_CONVERSATION}/stream`
-        ? {
-            frames: [
-              {
-                type: "RUN_STARTED",
-                actorId: TYPED_CONVERSATION,
-                turnId:
-                  request.url === TYPED_URL ? TYPED_TURN : "turn-typed-wake-1",
+    const streamMock = mockChatStreams((request) => {
+      const body = JSON.parse(request.bodyText) as {
+        type: string;
+        conversationId?: string;
+      };
+      if (
+        request.url === TYPED_URL &&
+        body.type === "text" &&
+        !body.conversationId
+      ) {
+        return {
+          frames: [
+            {
+              type: "RUN_STARTED",
+              actorId: TYPED_CONVERSATION,
+              turnId: TYPED_TURN,
+            },
+            {
+              type: "RUN_FINISHED",
+              runFinished: {
+                status: "blocked",
               },
-              {
-                type: "RUN_FINISHED",
-                runFinished: {
-                  status: request.url === TYPED_URL ? "blocked" : "completed",
-                },
+            },
+          ],
+        };
+      }
+      if (
+        request.url === TYPED_URL &&
+        body.type === "action.continue" &&
+        body.conversationId === TYPED_CONVERSATION
+      ) {
+        return {
+          frames: [
+            {
+              type: "RUN_STARTED",
+              actorId: TYPED_CONVERSATION,
+              turnId: "turn-typed-wake-1",
+            },
+            {
+              type: "RUN_FINISHED",
+              runFinished: {
+                status: "completed",
               },
-            ],
-          }
-        : undefined,
-    );
+            },
+          ],
+        };
+      }
+      return undefined;
+    });
     const transport = new AevatarAssistantTransport();
     const conversation = await transport.createConversation();
     await collectWorkflowTurn(transport, conversation.id, "wait for access");
@@ -5944,16 +6176,18 @@ describe("typed new chats and legacy workflow compatibility", () => {
     }));
     expect(bodies.map((entry) => entry.url)).toEqual([
       TYPED_URL,
-      `${ASSISTANT_BASE}/conversations/${TYPED_CONVERSATION}/stream`,
+      TYPED_URL,
     ]);
     expect(Object.keys(bodies[1]?.body ?? {})).toEqual([
       "type",
+      "conversationId",
       "clientRequestId",
       "originTurnId",
       "actions",
     ]);
     expect(bodies[1]?.body).toEqual({
       type: "action.continue",
+      conversationId: TYPED_CONVERSATION,
       clientRequestId: bodies[1]?.body["clientRequestId"],
       originTurnId: TYPED_TURN,
       actions: [],

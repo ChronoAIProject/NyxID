@@ -22,6 +22,9 @@ use crate::models::downstream_service::{
     COLLECTION_NAME as DOWNSTREAM_SERVICES, DownstreamService,
 };
 use mongodb::bson::doc;
+use regex::Regex;
+use std::collections::HashSet;
+use std::sync::LazyLock;
 
 /// Catalog slug of the admin-seeded Aevatar service.
 pub const AEVATAR_SLUG: &str = "aevatar";
@@ -71,19 +74,8 @@ fn validate_conversation_id(conversation_id: &str) -> AppResult<()> {
     Ok(())
 }
 
-/// `nyxid-chat/conversations` -- create a conversation actor (POST).
-pub fn conversations_path(user_id: &str) -> String {
-    format!("api/scopes/{user_id}/nyxid-chat/conversations")
-}
-
-/// `chat-history` -- the conversation history index (GET).
-///
-/// This is the authoritative user-facing list per the Chat History contract:
-/// each row carries a server-owned title, timestamps, and message count, and
-/// only conversations that have materialized at least one terminal turn
-/// appear. The `nyxid-chat` actor index (`conversations_path`) is lifecycle
-/// plumbing -- it returns bare actor ids and includes not-yet-started actors
-/// -- so the list surface reads this instead.
+/// `chat-history` -- legacy workflow (`chatc-…`) index used only when the
+/// canonical `/api/chat/conversations` list does not yet include those rows.
 pub fn history_index_path(user_id: &str) -> String {
     format!("api/scopes/{user_id}/chat-history")
 }
@@ -96,20 +88,17 @@ const NYXID_CHAT_ACTOR_PREFIX: &str = "nyxid-chat-";
 /// `ChatHistoryActorIds.CreateConversationId`; ids are `chatc-{hash[..32]}`).
 const WORKFLOW_CHAT_CONVERSATION_PREFIX: &str = "chatc-";
 
-/// Drop chat-history rows this surface cannot address.
+/// Drop conversation rows this surface cannot address.
 ///
-/// `chat-history` is a **shared** read model. Two families in it are ours:
-/// `nyxid-chat-…` conversation actors (turns via `:stream`) and `chatc-…`
-/// workflow-chat conversations (turns via `POST /assistant/workflow-chat`,
-/// continued with `conversation.conversationId`). Anything else in the index
-/// belongs to another product surface and is dropped, keeping the client
-/// honest about what it can address: every id this route returns is a valid
-/// target for its family's turn route, the transcript route, and delete.
+/// The canonical `/api/chat/conversations` list and the legacy workflow
+/// `chat-history` index are both shared read models. Only the two assistant
+/// families stay visible here: typed `nyxid-chat-…` rows and workflow
+/// `chatc-…` rows.
 ///
 /// Shape-tolerant by design — an index that is not `{"conversations": [...]}`
 /// (or a row without a string `id`) is returned untouched, matching the
 /// deploy-independence posture of the transcript route.
-pub fn filter_chat_history_index(index: &mut serde_json::Value) -> bool {
+pub fn filter_addressable_conversation_index(index: &mut serde_json::Value) -> bool {
     let Some(rows) = index
         .get_mut("conversations")
         .and_then(serde_json::Value::as_array_mut)
@@ -130,126 +119,93 @@ pub fn filter_chat_history_index(index: &mut serde_json::Value) -> bool {
     rows.len() != before
 }
 
-/// `chat-history/conversations/{id}` -- transcript read.
-pub fn history_path(user_id: &str, conversation_id: &str) -> AppResult<String> {
-    validate_conversation_id(conversation_id)?;
-    Ok(format!(
-        "api/scopes/{user_id}/chat-history/conversations/{conversation_id}"
-    ))
-}
-
-/// `nyxid-chat/conversations/{id}` -- delete.
-pub fn conversation_path(user_id: &str, conversation_id: &str) -> AppResult<String> {
-    validate_conversation_id(conversation_id)?;
-    Ok(format!(
-        "api/scopes/{user_id}/nyxid-chat/conversations/{conversation_id}"
-    ))
-}
-
-/// `nyxid-chat/conversations/{id}:stream` -- AG-UI SSE turn.
-pub fn stream_path(user_id: &str, conversation_id: &str) -> AppResult<String> {
-    Ok(format!(
-        "{}:stream",
-        conversation_path(user_id, conversation_id)?
-    ))
-}
-
-/// `nyxid-chat/conversations/{id}:approve` -- approval decision.
-pub fn approve_path(user_id: &str, conversation_id: &str) -> AppResult<String> {
-    Ok(format!(
-        "{}:approve",
-        conversation_path(user_id, conversation_id)?
-    ))
-}
-
-/// `nyxid-chat/conversations/{id}:stop` -- stop active work (202-accepted
-/// control command; Aevatar commits a stop fence before any successor
-/// operation may start).
-pub fn stop_path(user_id: &str, conversation_id: &str) -> AppResult<String> {
-    Ok(format!(
-        "{}:stop",
-        conversation_path(user_id, conversation_id)?
-    ))
-}
-
-/// `nyxid-chat/conversations/{id}:steer` -- redirect active work
-/// (202-accepted; Aevatar serializes the steering fence and starts a
-/// server-owned continuation turn at a safe checkpoint).
-pub fn steer_path(user_id: &str, conversation_id: &str) -> AppResult<String> {
-    Ok(format!(
-        "{}:steer",
-        conversation_path(user_id, conversation_id)?
-    ))
-}
-
-/// `nyxid-chat/conversations/{id}/state` -- conditional current-state query
-/// (GET; `afterStateVersion` / `turnId` cursors ride the forwarded query
-/// string). This is the contract's reconnect surface: clients poll it
-/// instead of replaying events.
-pub fn state_path(user_id: &str, conversation_id: &str) -> AppResult<String> {
-    Ok(format!(
-        "{}/state",
-        conversation_path(user_id, conversation_id)?
-    ))
-}
-
-/// Turn/step ids follow the upstream control-identity grammar
-/// (`TryValidateControlIdentity`): at most 128 UTF-16 code units (the C#
-/// `string.Length` the upstream counts — NOT bytes, so 65 `é`s pass), no
-/// whitespace or control characters, and none of `/ \ ? #`. Accepted
-/// segments are percent-encoded before interpolation — an unencoded `:`
-/// inside a step id would collide with the `:retry`/`:skip` suffix parse.
-///
-/// Two documented NyxID narrowings of the upstream grammar, both
-/// fail-closed here rather than deeper with a less precise error:
-/// - `%` is rejected: the proxy's path hardening repeat-decodes nested
-///   escapes, so a literal `%2F`-shaped id would be 400'd downstream even
-///   double-encoded.
-/// - dot-only segments (`.`, `..`) are rejected: they form
-///   traversal-shaped path segments if any later layer normalizes.
-fn encode_control_segment(segment: &str) -> AppResult<String> {
-    let valid = !segment.is_empty()
-        && segment.encode_utf16().count() <= 128
-        && segment.chars().all(|c| {
-            !c.is_whitespace() && !c.is_control() && !matches!(c, '/' | '\\' | '?' | '#' | '%')
+/// Whether the canonical index already includes workflow rows.
+pub fn conversation_index_includes_workflow(index: &serde_json::Value) -> bool {
+    index
+        .get("conversations")
+        .and_then(serde_json::Value::as_array)
+        .is_some_and(|rows| {
+            rows.iter().any(|row| {
+                row.get("id")
+                    .and_then(serde_json::Value::as_str)
+                    .is_some_and(|id| id.starts_with(WORKFLOW_CHAT_CONVERSATION_PREFIX))
+            })
         })
-        && !segment.chars().all(|c| c == '.');
-    if !valid {
-        return Err(AppError::BadRequest("Invalid turn or step id.".to_string()));
+}
+
+/// Merge workflow-only `chat-history` rows into the canonical index, newest
+/// first, deduping by id and keeping the canonical row when both exist.
+pub fn merge_workflow_history_rows(
+    canonical: &mut serde_json::Value,
+    workflow_history: &serde_json::Value,
+) -> bool {
+    let Some(canonical_rows) = canonical
+        .get_mut("conversations")
+        .and_then(serde_json::Value::as_array_mut)
+    else {
+        return false;
+    };
+
+    let Some(history_rows) = workflow_history
+        .get("conversations")
+        .and_then(serde_json::Value::as_array)
+    else {
+        return false;
+    };
+
+    let before = canonical_rows.len();
+    let mut merged = Vec::with_capacity(canonical_rows.len() + history_rows.len());
+    let mut seen = HashSet::new();
+
+    for row in canonical_rows.iter() {
+        if let Some(id) = row.get("id").and_then(serde_json::Value::as_str) {
+            seen.insert(id.to_string());
+        }
+        merged.push(row.clone());
     }
-    Ok(urlencoding::encode(segment).into_owned())
+
+    for row in history_rows {
+        let Some(id) = row.get("id").and_then(serde_json::Value::as_str) else {
+            continue;
+        };
+        if !id.starts_with(WORKFLOW_CHAT_CONVERSATION_PREFIX) || !seen.insert(id.to_string()) {
+            continue;
+        }
+        merged.push(row.clone());
+    }
+
+    merged.sort_by(|left, right| {
+        let left_key = conversation_updated_at_key(left);
+        let right_key = conversation_updated_at_key(right);
+        right_key.cmp(&left_key)
+    });
+    *canonical_rows = merged;
+    canonical_rows.len() != before
 }
 
-/// `nyxid-chat/conversations/{id}/turns/{turn}/steps/{step}:retry` --
-/// retry one failed/interrupted step (202-accepted control command).
-pub fn retry_path(
-    user_id: &str,
-    conversation_id: &str,
-    turn_id: &str,
-    step_id: &str,
-) -> AppResult<String> {
-    let turn = encode_control_segment(turn_id)?;
-    let step = encode_control_segment(step_id)?;
-    Ok(format!(
-        "{}/turns/{turn}/steps/{step}:retry",
-        conversation_path(user_id, conversation_id)?
-    ))
+fn conversation_updated_at_key(row: &serde_json::Value) -> String {
+    for key in ["updatedAt", "updated_at", "lastMessageAt", "createdAt"] {
+        if let Some(value) = row.get(key).and_then(serde_json::Value::as_str) {
+            return value.to_string();
+        }
+    }
+    String::new()
 }
 
-/// `nyxid-chat/conversations/{id}/turns/{turn}/steps/{step}:skip` -- skip
-/// one optional step (202-accepted control command).
-pub fn skip_path(
-    user_id: &str,
-    conversation_id: &str,
-    turn_id: &str,
-    step_id: &str,
-) -> AppResult<String> {
-    let turn = encode_control_segment(turn_id)?;
-    let step = encode_control_segment(step_id)?;
-    Ok(format!(
-        "{}/turns/{turn}/steps/{step}:skip",
-        conversation_path(user_id, conversation_id)?
-    ))
+/// `api/chat/conversations` -- canonical conversation list.
+pub fn canonical_conversations_path() -> String {
+    "api/chat/conversations".to_string()
+}
+
+/// `api/chat/conversations/{id}` -- canonical conversation detail/delete.
+pub fn canonical_conversation_path(conversation_id: &str) -> AppResult<String> {
+    validate_conversation_id(conversation_id)?;
+    Ok(format!("api/chat/conversations/{conversation_id}"))
+}
+
+/// `api/chat/conversations/{id}/state` -- canonical reconnect surface.
+pub fn canonical_state_path(conversation_id: &str) -> AppResult<String> {
+    Ok(format!("{}/state", canonical_conversation_path(conversation_id)?))
 }
 
 /// `v1/chat/completions` -- OpenAI-compatible surface. Scope-free: the
@@ -276,53 +232,782 @@ pub fn typed_chat_path() -> String {
 
 /// Matches the client cap in `aevatar-transport.ts` (`MAX_MESSAGE_CHARS`).
 const TYPED_CHAT_PROMPT_MAX_CHARS: usize = 32_768;
+const ACTION_CONTINUATION_MAX_REPORTS: usize = 64;
+const APPROVAL_REASON_MAX_CHARS: usize = 2_048;
 
-/// Caller half of the typed NyxIdChat create-and-first-turn contract.
-///
-/// The browser can provide only the user prompt and its idempotency identity.
-/// In particular, scope, actor identity, workflow selection, tool context, and
-/// action reports are not expressible on this route.
-#[derive(Debug, serde::Deserialize)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
-pub struct TypedChatTurnRequest {
-    #[serde(rename = "type")]
-    pub turn_type: String,
-    pub prompt: String,
-    pub client_request_id: String,
+static FORBIDDEN_CONTINUATION_KEY: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(
+        r"(?i)(?:^|[_-])(authorization|api[-_]?key|token|secret|password|credential|cookie|user[-_]?code|device[-_]?code)(?:$|[_-])",
+    )
+    .expect("FORBIDDEN_CONTINUATION_KEY regex")
+});
+static FORBIDDEN_CONTINUATION_VALUE: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r"(?i)Bearer\s+[A-Za-z0-9._~+/-]+|nyx(?:id)?_[A-Za-z0-9_-]{8,}")
+        .expect("FORBIDDEN_CONTINUATION_VALUE regex")
+});
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AssistantChatResponseKind {
+    Stream,
+    Json,
 }
 
-fn validate_typed_chat_client_request_id(value: &str) -> AppResult<()> {
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PreparedAssistantChatCommand {
+    pub body: serde_json::Value,
+    pub client_request_id: String,
+    pub response_kind: AssistantChatResponseKind,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum AssistantChatCommand {
+    Text(TextChatCommand),
+    ActionContinue(ActionContinueCommand),
+    ApprovalResolve(ApprovalResolveCommand),
+    TaskStop(TaskStopCommand),
+    TaskSteer(TaskSteerCommand),
+    StepRetry(StepRetryCommand),
+    StepSkip(StepSkipCommand),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TextChatCommand {
+    pub prompt: String,
+    pub client_request_id: String,
+    pub conversation_id: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ActionContinueCommand {
+    pub conversation_id: String,
+    pub client_request_id: String,
+    pub origin_turn_id: Option<String>,
+    pub actions: Vec<ActionReport>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ApprovalResolveCommand {
+    pub conversation_id: String,
+    pub client_request_id: String,
+    pub request_id: String,
+    pub approved: bool,
+    pub reason: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TaskStopCommand {
+    pub conversation_id: String,
+    pub turn_id: String,
+    pub stop_request_id: String,
+    pub client_request_id: String,
+    pub expected_state_version: i64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TaskSteerCommand {
+    pub conversation_id: String,
+    pub turn_id: String,
+    pub steering_id: String,
+    pub client_request_id: String,
+    pub instruction: String,
+    pub expected_state_version: i64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StepRetryCommand {
+    pub conversation_id: String,
+    pub turn_id: String,
+    pub task_id: String,
+    pub step_id: String,
+    pub retry_request_id: String,
+    pub client_request_id: String,
+    pub expected_operation_generation: i64,
+    pub expected_state_version: i64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StepSkipCommand {
+    pub conversation_id: String,
+    pub turn_id: String,
+    pub task_id: String,
+    pub step_id: String,
+    pub skip_request_id: String,
+    pub client_request_id: String,
+    pub expected_operation_generation: i64,
+    pub expected_state_version: i64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ActionReport {
+    pub action_request_id: String,
+    pub origin_turn_id: String,
+    pub disposition: ActionDisposition,
+    pub resource: Option<ActionResource>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ActionDisposition {
+    Completed,
+    Declined,
+    Failed,
+    Cancelled,
+    Expired,
+}
+
+impl ActionDisposition {
+    fn parse(value: &str) -> AppResult<Self> {
+        match value {
+            "completed" => Ok(Self::Completed),
+            "declined" => Ok(Self::Declined),
+            "failed" => Ok(Self::Failed),
+            "cancelled" => Ok(Self::Cancelled),
+            "expired" => Ok(Self::Expired),
+            _ => Err(AppError::BadRequest(
+                "Invalid action report disposition.".to_string(),
+            )),
+        }
+    }
+
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Completed => "completed",
+            Self::Declined => "declined",
+            Self::Failed => "failed",
+            Self::Cancelled => "cancelled",
+            Self::Expired => "expired",
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ActionResource {
+    UserService { user_service_id: String },
+    Key { key_id: String },
+    Node { node_id: String },
+    ServiceAccount { service_account_id: String },
+    DeveloperApp { client_id: String },
+    Device { device_id: String },
+}
+
+impl ActionResource {
+    fn to_json(&self) -> serde_json::Value {
+        match self {
+            Self::UserService { user_service_id } => serde_json::json!({
+                "userService": { "userServiceId": user_service_id }
+            }),
+            Self::Key { key_id } => serde_json::json!({
+                "key": { "keyId": key_id }
+            }),
+            Self::Node { node_id } => serde_json::json!({
+                "node": { "nodeId": node_id }
+            }),
+            Self::ServiceAccount { service_account_id } => serde_json::json!({
+                "serviceAccount": { "serviceAccountId": service_account_id }
+            }),
+            Self::DeveloperApp { client_id } => serde_json::json!({
+                "developerApp": { "clientId": client_id }
+            }),
+            Self::Device { device_id } => serde_json::json!({
+                "device": { "deviceId": device_id }
+            }),
+        }
+    }
+
+    fn is_user_service(&self) -> bool {
+        matches!(self, Self::UserService { .. })
+    }
+}
+
+#[derive(Debug, serde::Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct RawTextChatCommand {
+    #[serde(rename = "type")]
+    _command_type: String,
+    prompt: String,
+    client_request_id: String,
+    #[serde(default)]
+    conversation_id: Option<String>,
+}
+
+#[derive(Debug, serde::Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct RawActionContinueCommand {
+    #[serde(rename = "type")]
+    _command_type: String,
+    conversation_id: String,
+    client_request_id: String,
+    #[serde(default)]
+    origin_turn_id: Option<String>,
+    actions: Vec<RawActionReport>,
+}
+
+#[derive(Debug, serde::Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct RawActionReport {
+    action_request_id: String,
+    origin_turn_id: String,
+    disposition: String,
+    #[serde(default)]
+    resource: Option<serde_json::Value>,
+}
+
+#[derive(Debug, serde::Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct RawApprovalResolveCommand {
+    #[serde(rename = "type")]
+    _command_type: String,
+    conversation_id: String,
+    client_request_id: String,
+    request_id: String,
+    approved: bool,
+    #[serde(default)]
+    reason: Option<String>,
+}
+
+#[derive(Debug, serde::Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct RawTaskStopCommand {
+    #[serde(rename = "type")]
+    _command_type: String,
+    conversation_id: String,
+    turn_id: String,
+    stop_request_id: String,
+    client_request_id: String,
+    expected_state_version: i64,
+}
+
+#[derive(Debug, serde::Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct RawTaskSteerCommand {
+    #[serde(rename = "type")]
+    _command_type: String,
+    conversation_id: String,
+    turn_id: String,
+    steering_id: String,
+    client_request_id: String,
+    instruction: String,
+    expected_state_version: i64,
+}
+
+#[derive(Debug, serde::Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct RawStepRetryCommand {
+    #[serde(rename = "type")]
+    _command_type: String,
+    conversation_id: String,
+    turn_id: String,
+    task_id: String,
+    step_id: String,
+    retry_request_id: String,
+    client_request_id: String,
+    expected_operation_generation: i64,
+    expected_state_version: i64,
+}
+
+#[derive(Debug, serde::Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct RawStepSkipCommand {
+    #[serde(rename = "type")]
+    _command_type: String,
+    conversation_id: String,
+    turn_id: String,
+    task_id: String,
+    step_id: String,
+    skip_request_id: String,
+    client_request_id: String,
+    expected_operation_generation: i64,
+    expected_state_version: i64,
+}
+
+fn validate_control_identity(value: &str, label: &str) -> AppResult<()> {
     let valid = !value.is_empty()
         && value.encode_utf16().count() <= 256
-        && value
-            .chars()
-            .all(|c| !c.is_whitespace() && !c.is_control() && !matches!(c, '/' | '\\' | '?' | '#'));
+        && value.chars().all(|c| {
+            !c.is_whitespace() && !c.is_control() && !matches!(c, '/' | '\\' | '?' | '#')
+        });
     if !valid {
-        return Err(AppError::BadRequest("Invalid clientRequestId.".to_string()));
+        return Err(AppError::BadRequest(format!("Invalid {label}.")));
     }
     Ok(())
 }
 
-/// Build the exact upstream typed NyxIdChat `/api/chat` body.
-pub fn typed_chat_body(request: &TypedChatTurnRequest) -> AppResult<serde_json::Value> {
-    if request.turn_type != "text" {
-        return Err(AppError::BadRequest(
-            "Typed chat first turns must use type 'text'.".to_string(),
-        ));
-    }
-    let prompt = request.prompt.trim();
-    if prompt.is_empty() || request.prompt.chars().count() > TYPED_CHAT_PROMPT_MAX_CHARS {
+fn validate_prompt(prompt: &str, max_chars: usize) -> AppResult<()> {
+    if prompt.trim().is_empty() || prompt.chars().count() > max_chars {
         return Err(AppError::BadRequest(format!(
-            "Prompt must contain between 1 and {TYPED_CHAT_PROMPT_MAX_CHARS} characters."
+            "Prompt must contain between 1 and {max_chars} characters."
         )));
     }
-    validate_typed_chat_client_request_id(&request.client_request_id)?;
+    Ok(())
+}
 
-    Ok(serde_json::json!({
-        "type": "text",
-        "prompt": request.prompt,
-        "clientRequestId": request.client_request_id,
-    }))
+fn validate_nonnegative(value: i64, label: &str) -> AppResult<()> {
+    if value < 0 {
+        return Err(AppError::BadRequest(format!("Invalid {label}.")));
+    }
+    Ok(())
+}
+
+fn validate_positive(value: i64, label: &str) -> AppResult<()> {
+    if value <= 0 {
+        return Err(AppError::BadRequest(format!("Invalid {label}.")));
+    }
+    Ok(())
+}
+
+fn normalize_reason(reason: Option<String>) -> AppResult<Option<String>> {
+    let Some(reason) = reason else {
+        return Ok(None);
+    };
+    let trimmed = reason.trim();
+    if trimmed.is_empty() {
+        return Ok(None);
+    }
+    if trimmed.chars().count() > APPROVAL_REASON_MAX_CHARS {
+        return Err(AppError::BadRequest("Invalid approval reason.".to_string()));
+    }
+    Ok(Some(trimmed.to_string()))
+}
+
+fn reject_secret_shaped_continuation(value: &serde_json::Value) -> AppResult<()> {
+    if contains_secret_shaped_value(value) {
+        return Err(AppError::BadRequest(
+            "Action continuation contained secret material.".to_string(),
+        ));
+    }
+    Ok(())
+}
+
+fn contains_secret_shaped_value(value: &serde_json::Value) -> bool {
+    match value {
+        serde_json::Value::String(text) => FORBIDDEN_CONTINUATION_VALUE.is_match(text),
+        serde_json::Value::Array(entries) => entries.iter().any(contains_secret_shaped_value),
+        serde_json::Value::Object(entries) => entries.iter().any(|(key, entry)| {
+            FORBIDDEN_CONTINUATION_KEY.is_match(key) || contains_secret_shaped_value(entry)
+        }),
+        _ => false,
+    }
+}
+
+fn parse_action_resource(value: Option<serde_json::Value>) -> AppResult<Option<ActionResource>> {
+    let Some(value) = value else {
+        return Ok(None);
+    };
+    let Some(resource) = value.as_object() else {
+        return Err(AppError::BadRequest("Invalid action resource.".to_string()));
+    };
+    if resource.len() != 1 {
+        return Err(AppError::BadRequest("Invalid action resource.".to_string()));
+    }
+    let (variant, payload) = resource.iter().next().expect("resource has one entry");
+    let Some(payload) = payload.as_object() else {
+        return Err(AppError::BadRequest("Invalid action resource.".to_string()));
+    };
+    if payload.len() != 1 {
+        return Err(AppError::BadRequest("Invalid action resource.".to_string()));
+    }
+    let parse_identity =
+        |payload: &serde_json::Map<String, serde_json::Value>,
+         key: &str,
+         label: &str|
+         -> AppResult<String> {
+            let value = payload
+                .get(key)
+                .and_then(serde_json::Value::as_str)
+                .ok_or_else(|| AppError::BadRequest("Invalid action resource.".to_string()))?;
+            validate_control_identity(value, label)?;
+            Ok(value.to_string())
+        };
+    let resource = match variant.as_str() {
+        "userService" => ActionResource::UserService {
+            user_service_id: parse_identity(payload, "userServiceId", "userServiceId")?,
+        },
+        "key" => ActionResource::Key {
+            key_id: parse_identity(payload, "keyId", "keyId")?,
+        },
+        "node" => ActionResource::Node {
+            node_id: parse_identity(payload, "nodeId", "nodeId")?,
+        },
+        "serviceAccount" => ActionResource::ServiceAccount {
+            service_account_id: parse_identity(
+                payload,
+                "serviceAccountId",
+                "serviceAccountId",
+            )?,
+        },
+        "developerApp" => ActionResource::DeveloperApp {
+            client_id: parse_identity(payload, "clientId", "clientId")?,
+        },
+        "device" => ActionResource::Device {
+            device_id: parse_identity(payload, "deviceId", "deviceId")?,
+        },
+        _ => return Err(AppError::BadRequest("Invalid action resource.".to_string())),
+    };
+    Ok(Some(resource))
+}
+
+pub fn parse_assistant_chat_command(bytes: &[u8]) -> AppResult<AssistantChatCommand> {
+    let value: serde_json::Value = serde_json::from_slice(bytes)
+        .map_err(|e| AppError::BadRequest(format!("Invalid assistant chat request: {e}")))?;
+    let command_type = value
+        .get("type")
+        .and_then(serde_json::Value::as_str)
+        .ok_or_else(|| AppError::BadRequest("Assistant chat commands require a type.".to_string()))?;
+
+    match command_type {
+        "text" => {
+            let raw: RawTextChatCommand = serde_json::from_value(value).map_err(|e| {
+                AppError::BadRequest(format!("Invalid text chat request: {e}"))
+            })?;
+            validate_prompt(&raw.prompt, TYPED_CHAT_PROMPT_MAX_CHARS)?;
+            validate_control_identity(&raw.client_request_id, "clientRequestId")?;
+            if let Some(conversation_id) = raw.conversation_id.as_deref() {
+                validate_conversation_id(conversation_id)?;
+            }
+            Ok(AssistantChatCommand::Text(TextChatCommand {
+                prompt: raw.prompt,
+                client_request_id: raw.client_request_id,
+                conversation_id: raw.conversation_id,
+            }))
+        }
+        "action.continue" => {
+            reject_secret_shaped_continuation(&value)?;
+            let raw: RawActionContinueCommand =
+                serde_json::from_value(value).map_err(|e| {
+                    AppError::BadRequest(format!("Invalid action continuation request: {e}"))
+                })?;
+            validate_conversation_id(&raw.conversation_id)?;
+            validate_control_identity(&raw.client_request_id, "clientRequestId")?;
+            if let Some(origin_turn_id) = raw.origin_turn_id.as_deref() {
+                validate_control_identity(origin_turn_id, "originTurnId")?;
+            }
+            if raw.actions.len() > ACTION_CONTINUATION_MAX_REPORTS {
+                return Err(AppError::BadRequest(
+                    "Too many action reports.".to_string(),
+                ));
+            }
+            if !raw.actions.is_empty() && raw.origin_turn_id.is_none() {
+                return Err(AppError::BadRequest(
+                    "Action continuations with reports require originTurnId.".to_string(),
+                ));
+            }
+            let mut seen = HashSet::new();
+            let mut actions = Vec::with_capacity(raw.actions.len());
+            for report in raw.actions {
+                validate_control_identity(&report.action_request_id, "actionRequestId")?;
+                validate_control_identity(&report.origin_turn_id, "originTurnId")?;
+                if let Some(origin_turn_id) = raw.origin_turn_id.as_deref() {
+                    if report.origin_turn_id != origin_turn_id {
+                        return Err(AppError::BadRequest(
+                            "Action report originTurnId must match the continuation origin."
+                                .to_string(),
+                        ));
+                    }
+                }
+                if !seen.insert(report.action_request_id.clone()) {
+                    return Err(AppError::BadRequest(
+                        "Duplicate actionRequestId in action continuation.".to_string(),
+                    ));
+                }
+                let disposition = ActionDisposition::parse(&report.disposition)?;
+                let resource = parse_action_resource(report.resource)?;
+                if disposition == ActionDisposition::Completed
+                    && !resource.as_ref().is_some_and(ActionResource::is_user_service)
+                {
+                    return Err(AppError::BadRequest(
+                        "Completed action reports require resource.userService.userServiceId."
+                            .to_string(),
+                    ));
+                }
+                actions.push(ActionReport {
+                    action_request_id: report.action_request_id,
+                    origin_turn_id: report.origin_turn_id,
+                    disposition,
+                    resource,
+                });
+            }
+            Ok(AssistantChatCommand::ActionContinue(ActionContinueCommand {
+                conversation_id: raw.conversation_id,
+                client_request_id: raw.client_request_id,
+                origin_turn_id: raw.origin_turn_id,
+                actions,
+            }))
+        }
+        "approval.resolve" => {
+            let raw: RawApprovalResolveCommand = serde_json::from_value(value).map_err(|e| {
+                AppError::BadRequest(format!("Invalid approval resolution request: {e}"))
+            })?;
+            validate_conversation_id(&raw.conversation_id)?;
+            validate_control_identity(&raw.client_request_id, "clientRequestId")?;
+            validate_control_identity(&raw.request_id, "requestId")?;
+            let reason = normalize_reason(raw.reason)?;
+            Ok(AssistantChatCommand::ApprovalResolve(ApprovalResolveCommand {
+                conversation_id: raw.conversation_id,
+                client_request_id: raw.client_request_id,
+                request_id: raw.request_id,
+                approved: raw.approved,
+                reason,
+            }))
+        }
+        "task.stop" => {
+            let raw: RawTaskStopCommand = serde_json::from_value(value).map_err(|e| {
+                AppError::BadRequest(format!("Invalid stop request: {e}"))
+            })?;
+            validate_conversation_id(&raw.conversation_id)?;
+            validate_control_identity(&raw.turn_id, "turnId")?;
+            validate_control_identity(&raw.stop_request_id, "stopRequestId")?;
+            validate_control_identity(&raw.client_request_id, "clientRequestId")?;
+            validate_nonnegative(raw.expected_state_version, "expectedStateVersion")?;
+            Ok(AssistantChatCommand::TaskStop(TaskStopCommand {
+                conversation_id: raw.conversation_id,
+                turn_id: raw.turn_id,
+                stop_request_id: raw.stop_request_id,
+                client_request_id: raw.client_request_id,
+                expected_state_version: raw.expected_state_version,
+            }))
+        }
+        "task.steer" => {
+            let raw: RawTaskSteerCommand = serde_json::from_value(value).map_err(|e| {
+                AppError::BadRequest(format!("Invalid steering request: {e}"))
+            })?;
+            validate_conversation_id(&raw.conversation_id)?;
+            validate_control_identity(&raw.turn_id, "turnId")?;
+            validate_control_identity(&raw.steering_id, "steeringId")?;
+            validate_control_identity(&raw.client_request_id, "clientRequestId")?;
+            validate_nonnegative(raw.expected_state_version, "expectedStateVersion")?;
+            if raw.instruction.trim().is_empty() {
+                return Err(AppError::BadRequest("Invalid instruction.".to_string()));
+            }
+            Ok(AssistantChatCommand::TaskSteer(TaskSteerCommand {
+                conversation_id: raw.conversation_id,
+                turn_id: raw.turn_id,
+                steering_id: raw.steering_id,
+                client_request_id: raw.client_request_id,
+                instruction: raw.instruction,
+                expected_state_version: raw.expected_state_version,
+            }))
+        }
+        "step.retry" => {
+            let raw: RawStepRetryCommand = serde_json::from_value(value).map_err(|e| {
+                AppError::BadRequest(format!("Invalid retry request: {e}"))
+            })?;
+            validate_conversation_id(&raw.conversation_id)?;
+            validate_control_identity(&raw.turn_id, "turnId")?;
+            validate_control_identity(&raw.task_id, "taskId")?;
+            validate_control_identity(&raw.step_id, "stepId")?;
+            validate_control_identity(&raw.retry_request_id, "retryRequestId")?;
+            validate_control_identity(&raw.client_request_id, "clientRequestId")?;
+            validate_positive(
+                raw.expected_operation_generation,
+                "expectedOperationGeneration",
+            )?;
+            validate_nonnegative(raw.expected_state_version, "expectedStateVersion")?;
+            Ok(AssistantChatCommand::StepRetry(StepRetryCommand {
+                conversation_id: raw.conversation_id,
+                turn_id: raw.turn_id,
+                task_id: raw.task_id,
+                step_id: raw.step_id,
+                retry_request_id: raw.retry_request_id,
+                client_request_id: raw.client_request_id,
+                expected_operation_generation: raw.expected_operation_generation,
+                expected_state_version: raw.expected_state_version,
+            }))
+        }
+        "step.skip" => {
+            let raw: RawStepSkipCommand = serde_json::from_value(value).map_err(|e| {
+                AppError::BadRequest(format!("Invalid skip request: {e}"))
+            })?;
+            validate_conversation_id(&raw.conversation_id)?;
+            validate_control_identity(&raw.turn_id, "turnId")?;
+            validate_control_identity(&raw.task_id, "taskId")?;
+            validate_control_identity(&raw.step_id, "stepId")?;
+            validate_control_identity(&raw.skip_request_id, "skipRequestId")?;
+            validate_control_identity(&raw.client_request_id, "clientRequestId")?;
+            validate_positive(
+                raw.expected_operation_generation,
+                "expectedOperationGeneration",
+            )?;
+            validate_nonnegative(raw.expected_state_version, "expectedStateVersion")?;
+            Ok(AssistantChatCommand::StepSkip(StepSkipCommand {
+                conversation_id: raw.conversation_id,
+                turn_id: raw.turn_id,
+                task_id: raw.task_id,
+                step_id: raw.step_id,
+                skip_request_id: raw.skip_request_id,
+                client_request_id: raw.client_request_id,
+                expected_operation_generation: raw.expected_operation_generation,
+                expected_state_version: raw.expected_state_version,
+            }))
+        }
+        _ => Err(AppError::BadRequest(
+            "Unsupported assistant chat command.".to_string(),
+        )),
+    }
+}
+
+pub fn prepare_assistant_chat_command(
+    command: &AssistantChatCommand,
+) -> AppResult<PreparedAssistantChatCommand> {
+    match command {
+        AssistantChatCommand::Text(command) => {
+            validate_prompt(&command.prompt, TYPED_CHAT_PROMPT_MAX_CHARS)?;
+            validate_control_identity(&command.client_request_id, "clientRequestId")?;
+            if let Some(conversation_id) = command.conversation_id.as_deref() {
+                validate_conversation_id(conversation_id)?;
+            }
+            Ok(PreparedAssistantChatCommand {
+                body: serde_json::json!({
+                    "type": "text",
+                    "prompt": command.prompt,
+                    "clientRequestId": command.client_request_id,
+                    "conversationId": command.conversation_id,
+                })
+                .as_object()
+                .map(|body| {
+                    let mut body = body.clone();
+                    if command.conversation_id.is_none() {
+                        body.remove("conversationId");
+                    }
+                    serde_json::Value::Object(body)
+                })
+                .expect("text command body is an object"),
+                client_request_id: command.client_request_id.clone(),
+                response_kind: AssistantChatResponseKind::Stream,
+            })
+        }
+        AssistantChatCommand::ActionContinue(command) => {
+            let mut actions = Vec::with_capacity(command.actions.len());
+            for report in &command.actions {
+                let mut body = serde_json::Map::new();
+                body.insert(
+                    "actionRequestId".to_string(),
+                    serde_json::Value::String(report.action_request_id.clone()),
+                );
+                body.insert(
+                    "originTurnId".to_string(),
+                    serde_json::Value::String(report.origin_turn_id.clone()),
+                );
+                body.insert(
+                    "disposition".to_string(),
+                    serde_json::Value::String(report.disposition.as_str().to_string()),
+                );
+                if let Some(resource) = &report.resource {
+                    body.insert("resource".to_string(), resource.to_json());
+                }
+                actions.push(serde_json::Value::Object(body));
+            }
+            let mut body = serde_json::Map::new();
+            body.insert(
+                "type".to_string(),
+                serde_json::Value::String("action.continue".to_string()),
+            );
+            body.insert(
+                "conversationId".to_string(),
+                serde_json::Value::String(command.conversation_id.clone()),
+            );
+            body.insert(
+                "clientRequestId".to_string(),
+                serde_json::Value::String(command.client_request_id.clone()),
+            );
+            if let Some(origin_turn_id) = &command.origin_turn_id {
+                body.insert(
+                    "originTurnId".to_string(),
+                    serde_json::Value::String(origin_turn_id.clone()),
+                );
+            }
+            body.insert("actions".to_string(), serde_json::Value::Array(actions));
+            Ok(PreparedAssistantChatCommand {
+                body: serde_json::Value::Object(body),
+                client_request_id: command.client_request_id.clone(),
+                response_kind: AssistantChatResponseKind::Stream,
+            })
+        }
+        AssistantChatCommand::ApprovalResolve(command) => {
+            let mut body = serde_json::Map::new();
+            body.insert(
+                "type".to_string(),
+                serde_json::Value::String("approval.resolve".to_string()),
+            );
+            body.insert(
+                "conversationId".to_string(),
+                serde_json::Value::String(command.conversation_id.clone()),
+            );
+            body.insert(
+                "clientRequestId".to_string(),
+                serde_json::Value::String(command.client_request_id.clone()),
+            );
+            body.insert(
+                "requestId".to_string(),
+                serde_json::Value::String(command.request_id.clone()),
+            );
+            body.insert("approved".to_string(), serde_json::Value::Bool(command.approved));
+            if let Some(reason) = &command.reason {
+                body.insert(
+                    "reason".to_string(),
+                    serde_json::Value::String(reason.clone()),
+                );
+            }
+            Ok(PreparedAssistantChatCommand {
+                body: serde_json::Value::Object(body),
+                client_request_id: command.client_request_id.clone(),
+                response_kind: AssistantChatResponseKind::Stream,
+            })
+        }
+        AssistantChatCommand::TaskStop(command) => Ok(PreparedAssistantChatCommand {
+            body: serde_json::json!({
+                "type": "task.stop",
+                "conversationId": command.conversation_id,
+                "turnId": command.turn_id,
+                "stopRequestId": command.stop_request_id,
+                "clientRequestId": command.client_request_id,
+                "expectedStateVersion": command.expected_state_version,
+            }),
+            client_request_id: command.client_request_id.clone(),
+            response_kind: AssistantChatResponseKind::Json,
+        }),
+        AssistantChatCommand::TaskSteer(command) => Ok(PreparedAssistantChatCommand {
+            body: serde_json::json!({
+                "type": "task.steer",
+                "conversationId": command.conversation_id,
+                "turnId": command.turn_id,
+                "steeringId": command.steering_id,
+                "clientRequestId": command.client_request_id,
+                "instruction": command.instruction,
+                "expectedStateVersion": command.expected_state_version,
+            }),
+            client_request_id: command.client_request_id.clone(),
+            response_kind: AssistantChatResponseKind::Json,
+        }),
+        AssistantChatCommand::StepRetry(command) => Ok(PreparedAssistantChatCommand {
+            body: serde_json::json!({
+                "type": "step.retry",
+                "conversationId": command.conversation_id,
+                "turnId": command.turn_id,
+                "taskId": command.task_id,
+                "stepId": command.step_id,
+                "retryRequestId": command.retry_request_id,
+                "clientRequestId": command.client_request_id,
+                "expectedOperationGeneration": command.expected_operation_generation,
+                "expectedStateVersion": command.expected_state_version,
+            }),
+            client_request_id: command.client_request_id.clone(),
+            response_kind: AssistantChatResponseKind::Json,
+        }),
+        AssistantChatCommand::StepSkip(command) => Ok(PreparedAssistantChatCommand {
+            body: serde_json::json!({
+                "type": "step.skip",
+                "conversationId": command.conversation_id,
+                "turnId": command.turn_id,
+                "taskId": command.task_id,
+                "stepId": command.step_id,
+                "skipRequestId": command.skip_request_id,
+                "clientRequestId": command.client_request_id,
+                "expectedOperationGeneration": command.expected_operation_generation,
+                "expectedStateVersion": command.expected_state_version,
+            }),
+            client_request_id: command.client_request_id.clone(),
+            response_kind: AssistantChatResponseKind::Json,
+        }),
+    }
 }
 
 /// The one workflow the assistant surface may start. Pinned server-side:
@@ -435,219 +1120,123 @@ pub fn workflow_chat_ws_path() -> String {
     "api/ws/chat".to_string()
 }
 
-/// Post-create materialization poll bounds. Conversation create is
-/// async-accepted (202 + `actorId`); streaming into an actor before it
-/// appears in the `nyxid-chat` actor index races the materialization, so
-/// create waits for the actor with the same attempt count and a comparable
-/// backoff budget (~2s) to the reference client (nyxid-chat `server.mjs`
-/// `waitForConversation`: 6 attempts, 250ms + 100ms/attempt).
-pub const CREATE_POLL_ATTEMPTS: u32 = 6;
-
-/// Delay before the next poll attempt (200ms, 300ms, ... capped by the
-/// attempt count; ~2.0s of sleeps worst case, before network time).
-pub fn create_poll_delay_ms(attempt: u32) -> u64 {
-    200 + u64::from(attempt) * 100
-}
-
-/// `actorId` from a create-conversation response body. Aevatar responses
-/// have been observed in both camel- and Pascal-case.
-pub fn extract_actor_id(body: &serde_json::Value) -> Option<&str> {
-    body.get("actorId")
-        .or_else(|| body.get("ActorId"))?
-        .as_str()
-}
-
-/// Whether the `nyxid-chat` actor index (`{"conversations":[{"actorId"}]}`)
-/// lists the given actor.
-pub fn actor_index_contains(index: &serde_json::Value, actor_id: &str) -> bool {
-    index
-        .get("conversations")
-        .or_else(|| index.get("Conversations"))
-        .and_then(serde_json::Value::as_array)
-        .is_some_and(|conversations| {
-            conversations.iter().any(|entry| {
-                entry
-                    .get("actorId")
-                    .or_else(|| entry.get("ActorId"))
-                    .and_then(serde_json::Value::as_str)
-                    == Some(actor_id)
-            })
-        })
-}
-
-/// Composite-delete tolerance: deleting a conversation removes both the
-/// `nyxid-chat` actor and the chat-history row, and either side may already
-/// be gone (an `/api/chat`-created row has no actor; a cascaded actor
-/// delete may have removed the history row first). 404 is success-shaped.
-pub fn delete_status_acceptable(status: u16) -> bool {
-    (200..300).contains(&status) || status == 404
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serde_json::json;
 
     const USER: &str = "add69059-bece-4f0e-9559-99cfd10b47eb";
     const CONV: &str = "nyxid-chat-f8369965a444433f92ec50e67ad8ee52";
 
-    /// The chat-history index is shared across product surfaces. Both of
-    /// ours stay — `nyxid-chat-…` actors (turns via `:stream`) and `chatc-…`
-    /// workflow conversations (turns via the workflow-chat route) — while
-    /// rows from any other surface are dropped.
+    const WORKFLOW_CONV: &str = "chatc-650906f30cc985fa341477281303b6de";
+
+    fn parse_command(value: serde_json::Value) -> AssistantChatCommand {
+        parse_assistant_chat_command(&serde_json::to_vec(&value).unwrap()).unwrap()
+    }
+
+    fn workflow_turn_request(value: serde_json::Value) -> WorkflowChatTurnRequest {
+        serde_json::from_value(value).unwrap()
+    }
+
     #[test]
-    fn history_index_keeps_both_addressable_families() {
-        let mut index = serde_json::json!({
+    fn filters_indexes_to_the_addressable_families_only() {
+        let mut index = json!({
             "conversations": [
-                { "id": "chatc-650906f30cc985fa341477281303b6de", "title": "workflow chat" },
-                { "id": CONV, "title": "assistant chat", "messageCount": 7 },
-                { "id": "voicec-9c1d3f24a88b41f7", "title": "another product" },
-                { "id": "nyxid-chat-bb78fd3b1d834e6b958f8dbc626cef17", "messageCount": 0 },
+                { "id": WORKFLOW_CONV, "updatedAt": "2026-07-29T12:00:00.000Z" },
+                { "id": CONV, "updatedAt": "2026-07-29T13:00:00.000Z" },
+                { "id": "voicec-1", "updatedAt": "2026-07-29T14:00:00.000Z" },
+                { "title": "unknown-shaped row" }
             ]
         });
-        assert!(filter_chat_history_index(&mut index));
-        let ids: Vec<&str> = index["conversations"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .map(|row| row["id"].as_str().unwrap())
-            .collect();
+
+        assert!(filter_addressable_conversation_index(&mut index));
         assert_eq!(
-            ids,
-            vec![
-                "chatc-650906f30cc985fa341477281303b6de",
-                CONV,
-                "nyxid-chat-bb78fd3b1d834e6b958f8dbc626cef17"
+            index["conversations"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|row| row.get("id").and_then(serde_json::Value::as_str))
+                .collect::<Vec<_>>(),
+            vec![Some(WORKFLOW_CONV), Some(CONV), None]
+        );
+    }
+
+    #[test]
+    fn merge_prefers_canonical_rows_and_appends_workflow_history_newest_first() {
+        let mut canonical = json!({
+            "conversations": [
+                {
+                    "id": CONV,
+                    "title": "typed",
+                    "updatedAt": "2026-07-29T13:00:00.000Z"
+                }
             ]
-        );
-    }
-
-    #[test]
-    fn history_index_filter_reports_no_change_when_every_row_is_addressable() {
-        let mut index = serde_json::json!({
-            "conversations": [{ "id": CONV }, { "id": "chatc-650906f30cc985fa3414" }]
         });
-        assert!(!filter_chat_history_index(&mut index));
-        assert_eq!(index["conversations"].as_array().unwrap().len(), 2);
-    }
+        let legacy = json!({
+            "conversations": [
+                {
+                    "id": WORKFLOW_CONV,
+                    "title": "workflow",
+                    "updatedAt": "2026-07-29T14:00:00.000Z"
+                },
+                {
+                    "id": CONV,
+                    "title": "stale duplicate",
+                    "updatedAt": "2026-07-29T12:00:00.000Z"
+                }
+            ]
+        });
 
-    /// Shape drift must not empty the sidebar: an index we do not recognise,
-    /// or a row without a string id, is left exactly as upstream sent it.
-    #[test]
-    fn history_index_filter_leaves_unknown_shapes_untouched() {
-        let mut array_shaped = serde_json::json!([{ "id": "chatc-1" }]);
-        assert!(!filter_chat_history_index(&mut array_shaped));
-        assert_eq!(array_shaped.as_array().unwrap().len(), 1);
-
-        let mut missing_key = serde_json::json!({ "rows": [{ "id": "chatc-1" }] });
-        assert!(!filter_chat_history_index(&mut missing_key));
-        assert!(missing_key.get("conversations").is_none());
-
-        let mut idless = serde_json::json!({ "conversations": [{ "title": "no id" }] });
-        assert!(!filter_chat_history_index(&mut idless));
-        assert_eq!(idless["conversations"].as_array().unwrap().len(), 1);
-    }
-
-    #[test]
-    fn builds_the_aevatar_paths_from_the_server_side_scope() {
+        assert!(merge_workflow_history_rows(&mut canonical, &legacy));
         assert_eq!(
-            conversations_path(USER),
-            format!("api/scopes/{USER}/nyxid-chat/conversations")
+            canonical["conversations"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|row| row["id"].as_str().unwrap())
+                .collect::<Vec<_>>(),
+            vec![WORKFLOW_CONV, CONV]
         );
         assert_eq!(
-            history_path(USER, CONV).unwrap(),
-            format!("api/scopes/{USER}/chat-history/conversations/{CONV}")
+            canonical["conversations"][1]["title"].as_str(),
+            Some("typed"),
+            "canonical rows must win the dedupe"
         );
-        assert_eq!(
-            stream_path(USER, CONV).unwrap(),
-            format!("api/scopes/{USER}/nyxid-chat/conversations/{CONV}:stream")
-        );
-        assert_eq!(
-            approve_path(USER, CONV).unwrap(),
-            format!("api/scopes/{USER}/nyxid-chat/conversations/{CONV}:approve")
-        );
-        assert_eq!(
-            stop_path(USER, CONV).unwrap(),
-            format!("api/scopes/{USER}/nyxid-chat/conversations/{CONV}:stop")
-        );
-        assert_eq!(
-            steer_path(USER, CONV).unwrap(),
-            format!("api/scopes/{USER}/nyxid-chat/conversations/{CONV}:steer")
-        );
-        assert_eq!(
-            state_path(USER, CONV).unwrap(),
-            format!("api/scopes/{USER}/nyxid-chat/conversations/{CONV}/state")
-        );
-        assert_eq!(
-            retry_path(USER, CONV, "turn-1", "step_a").unwrap(),
-            format!(
-                "api/scopes/{USER}/nyxid-chat/conversations/{CONV}/turns/turn-1/steps/step_a:retry"
-            )
-        );
-        assert_eq!(
-            skip_path(USER, CONV, "turn-1", "step_a").unwrap(),
-            format!(
-                "api/scopes/{USER}/nyxid-chat/conversations/{CONV}/turns/turn-1/steps/step_a:skip"
-            )
-        );
-        // Upstream may issue identities with `.` / `:`; they round-trip
-        // percent-encoded so a raw `:` cannot collide with the `:retry`
-        // suffix parse.
-        assert_eq!(
-            retry_path(USER, CONV, "turn.v2", "step:3").unwrap(),
-            format!(
-                "api/scopes/{USER}/nyxid-chat/conversations/{CONV}/turns/turn.v2/steps/step%3A3:retry"
-            )
-        );
-        // Non-ASCII identities count UTF-16 code units like the upstream
-        // C# validator: 65 `é`s are 65 units (130 UTF-8 bytes) and pass.
-        let accented = "é".repeat(65);
-        assert!(retry_path(USER, CONV, &accented, "step_a").is_ok());
     }
 
     #[test]
-    fn rejects_control_segments_outside_the_upstream_grammar() {
-        // The control-identity grammar forbids whitespace, control chars,
-        // and `/ \ ? #` (upstream `TryValidateControlIdentity`); everything
-        // else is accepted and percent-encoded.
-        // `%` and dot-only segments are documented NyxID narrowings of the
-        // upstream grammar: nested escapes would be 400'd by the proxy's
-        // repeat-decode hardening, and `.`/`..` are traversal-shaped.
-        for bad in [
-            "",
-            "abc/def",
-            "abc\\def",
-            "abc?x=1",
-            "abc#frag",
-            "abc def",
-            "tab\there",
-            "\u{7}bell",
-            "%2e%2e",
-            "a%2Fb",
-            ".",
-            "..",
-        ] {
-            assert!(
-                retry_path(USER, CONV, bad, "step_a").is_err(),
-                "expected turn {bad:?} to be rejected"
-            );
-            assert!(retry_path(USER, CONV, "turn-1", bad).is_err());
-            assert!(skip_path(USER, CONV, bad, "step_a").is_err());
-            assert!(skip_path(USER, CONV, "turn-1", bad).is_err());
-        }
-        assert!(retry_path(USER, CONV, &"a".repeat(129), "step_a").is_err());
-        assert!(retry_path(USER, CONV, "turn-1", &"a".repeat(129)).is_err());
+    fn canonical_index_workflow_detection_is_prefix_based() {
+        assert!(conversation_index_includes_workflow(&json!({
+            "conversations": [{ "id": WORKFLOW_CONV }]
+        })));
+        assert!(!conversation_index_includes_workflow(&json!({
+            "conversations": [{ "id": CONV }]
+        })));
+    }
+
+    #[test]
+    fn builds_canonical_paths_only() {
         assert_eq!(
             history_index_path(USER),
             format!("api/scopes/{USER}/chat-history")
         );
-        assert_eq!(completions_path(), "v1/chat/completions");
+        assert_eq!(canonical_conversations_path(), "api/chat/conversations");
+        assert_eq!(
+            canonical_conversation_path(CONV).unwrap(),
+            format!("api/chat/conversations/{CONV}")
+        );
+        assert_eq!(
+            canonical_state_path(CONV).unwrap(),
+            format!("api/chat/conversations/{CONV}/state")
+        );
         assert_eq!(typed_chat_path(), "api/chat");
         assert_eq!(workflow_chat_path(), "api/chat");
         assert_eq!(workflow_chat_ws_path(), "api/ws/chat");
+        assert_eq!(completions_path(), "v1/chat/completions");
     }
 
     #[test]
-    fn rejects_conversation_ids_that_would_escape_the_path_segment() {
+    fn rejects_conversation_ids_that_would_escape_the_canonical_path_segment() {
         for bad in [
             "",
             "../../admin",
@@ -659,110 +1248,318 @@ mod tests {
             "%2e%2e",
         ] {
             assert!(
-                history_path(USER, bad).is_err(),
+                canonical_conversation_path(bad).is_err(),
                 "expected {bad:?} to be rejected"
             );
-            assert!(stream_path(USER, bad).is_err());
-            assert!(approve_path(USER, bad).is_err());
-            assert!(stop_path(USER, bad).is_err());
-            assert!(steer_path(USER, bad).is_err());
-            assert!(state_path(USER, bad).is_err());
+            assert!(canonical_state_path(bad).is_err());
         }
-        assert!(history_path(USER, &"a".repeat(129)).is_err());
-    }
-
-    const WORKFLOW_CONV: &str = "chatc-650906f30cc985fa341477281303b6de";
-
-    fn typed_turn_request(json: serde_json::Value) -> TypedChatTurnRequest {
-        serde_json::from_value(json).unwrap()
     }
 
     #[test]
-    fn typed_chat_body_is_the_exact_nyxid_chat_discriminator_contract() {
-        let body = typed_chat_body(&typed_turn_request(serde_json::json!({
+    fn migration_guard_keeps_scoped_typed_paths_out_of_runtime_source() {
+        const SOURCE: &str = include_str!("assistant_service.rs");
+        let scoped_prefix = ["nyxid", "-chat/"].concat();
+        let legacy_history_path = ["/chat-history", "/conversations"].concat();
+        assert!(
+            !SOURCE.contains(&scoped_prefix),
+            "scoped typed command/resource paths must not return"
+        );
+        assert!(
+            !SOURCE.contains(&legacy_history_path),
+            "legacy transcript/delete paths must not return to assistant_service.rs"
+        );
+    }
+
+    #[test]
+    fn parses_text_commands_for_first_turn_and_continuation() {
+        let create = parse_command(json!({
             "type": "text",
-            "prompt": "show api-github repositories",
-            "clientRequestId": "0d4b0a52-3d5f-4d2e-9f10-8f6f9b1c2d3e",
+            "prompt": "show github repos",
+            "clientRequestId": "00000000-0000-4000-8000-000000000001"
+        }));
+        let continue_turn = parse_command(json!({
+            "type": "text",
+            "prompt": "and then",
+            "clientRequestId": "00000000-0000-4000-8000-000000000002",
+            "conversationId": CONV
+        }));
+
+        assert_eq!(
+            prepare_assistant_chat_command(&create).unwrap(),
+            PreparedAssistantChatCommand {
+                body: json!({
+                    "type": "text",
+                    "prompt": "show github repos",
+                    "clientRequestId": "00000000-0000-4000-8000-000000000001"
+                }),
+                client_request_id: "00000000-0000-4000-8000-000000000001".to_string(),
+                response_kind: AssistantChatResponseKind::Stream,
+            }
+        );
+        assert_eq!(
+            prepare_assistant_chat_command(&continue_turn).unwrap(),
+            PreparedAssistantChatCommand {
+                body: json!({
+                    "type": "text",
+                    "prompt": "and then",
+                    "clientRequestId": "00000000-0000-4000-8000-000000000002",
+                    "conversationId": CONV,
+                }),
+                client_request_id: "00000000-0000-4000-8000-000000000002".to_string(),
+                response_kind: AssistantChatResponseKind::Stream,
+            }
+        );
+    }
+
+    #[test]
+    fn rejects_invalid_text_commands_and_unknown_fields() {
+        for value in [
+            json!({
+                "type": "text",
+                "prompt": " ",
+                "clientRequestId": "request-1"
+            }),
+            json!({
+                "type": "text",
+                "prompt": "hi",
+                "clientRequestId": "bad/request"
+            }),
+            json!({
+                "type": "text",
+                "prompt": "hi",
+                "clientRequestId": "request-1",
+                "scopeId": "someone-else"
+            }),
+        ] {
+            assert!(parse_assistant_chat_command(&serde_json::to_vec(&value).unwrap()).is_err());
+        }
+    }
+
+    #[test]
+    fn parses_action_continue_for_reports_and_resource_free_wakes() {
+        let continuation = parse_command(json!({
+            "type": "action.continue",
+            "conversationId": CONV,
+            "clientRequestId": "request-1",
+            "originTurnId": "turn-1",
+            "actions": [
+                {
+                    "actionRequestId": "act-1",
+                    "originTurnId": "turn-1",
+                    "disposition": "completed",
+                    "resource": {
+                        "userService": {
+                            "userServiceId": "00000000-0000-4000-8000-000000000123"
+                        }
+                    }
+                }
+            ]
+        }));
+        let wake = parse_command(json!({
+            "type": "action.continue",
+            "conversationId": CONV,
+            "clientRequestId": "request-2",
+            "actions": []
+        }));
+
+        assert_eq!(
+            prepare_assistant_chat_command(&continuation).unwrap().body,
+            json!({
+                "type": "action.continue",
+                "conversationId": CONV,
+                "clientRequestId": "request-1",
+                "originTurnId": "turn-1",
+                "actions": [
+                    {
+                        "actionRequestId": "act-1",
+                        "originTurnId": "turn-1",
+                        "disposition": "completed",
+                        "resource": {
+                            "userService": {
+                                "userServiceId": "00000000-0000-4000-8000-000000000123"
+                            }
+                        }
+                    }
+                ]
+            })
+        );
+        assert_eq!(
+            prepare_assistant_chat_command(&wake).unwrap().body,
+            json!({
+                "type": "action.continue",
+                "conversationId": CONV,
+                "clientRequestId": "request-2",
+                "actions": []
+            })
+        );
+    }
+
+    #[test]
+    fn rejects_invalid_action_continuations_fail_closed() {
+        for value in [
+            json!({
+                "type": "action.continue",
+                "conversationId": CONV,
+                "clientRequestId": "request-1",
+                "actions": [
+                    {
+                        "actionRequestId": "act-1",
+                        "originTurnId": "turn-1",
+                        "disposition": "declined"
+                    }
+                ]
+            }),
+            json!({
+                "type": "action.continue",
+                "conversationId": CONV,
+                "clientRequestId": "request-1",
+                "originTurnId": "turn-1",
+                "actions": [
+                    {
+                        "actionRequestId": "act-1",
+                        "originTurnId": "turn-2",
+                        "disposition": "declined"
+                    }
+                ]
+            }),
+            json!({
+                "type": "action.continue",
+                "conversationId": CONV,
+                "clientRequestId": "request-1",
+                "originTurnId": "turn-1",
+                "actions": [
+                    {
+                        "actionRequestId": "act-1",
+                        "originTurnId": "turn-1",
+                        "disposition": "completed"
+                    }
+                ]
+            }),
+            json!({
+                "type": "action.continue",
+                "conversationId": CONV,
+                "clientRequestId": "request-1",
+                "originTurnId": "turn-1",
+                "actions": [
+                    {
+                        "actionRequestId": "act-1",
+                        "originTurnId": "turn-1",
+                        "disposition": "declined"
+                    },
+                    {
+                        "actionRequestId": "act-1",
+                        "originTurnId": "turn-1",
+                        "disposition": "failed"
+                    }
+                ]
+            }),
+            json!({
+                "type": "action.continue",
+                "conversationId": CONV,
+                "clientRequestId": "request-1",
+                "originTurnId": "turn-1",
+                "actions": [
+                    {
+                        "actionRequestId": "act-1",
+                        "originTurnId": "turn-1",
+                        "disposition": "declined",
+                        "resource": {
+                            "device": {
+                                "deviceId": "Bearer definitely-not-allowed"
+                            }
+                        }
+                    }
+                ]
+            }),
+        ] {
+            assert!(parse_assistant_chat_command(&serde_json::to_vec(&value).unwrap()).is_err());
+        }
+    }
+
+    #[test]
+    fn builds_exact_approval_and_control_bodies() {
+        let approval = prepare_assistant_chat_command(&parse_command(json!({
+            "type": "approval.resolve",
+            "conversationId": CONV,
+            "clientRequestId": "request-approval-1",
+            "requestId": "approval-1",
+            "approved": true,
+            "reason": "Approved by user"
+        })))
+        .unwrap();
+        let stop = prepare_assistant_chat_command(&parse_command(json!({
+            "type": "task.stop",
+            "conversationId": CONV,
+            "turnId": "turn-1",
+            "stopRequestId": "stop-1",
+            "clientRequestId": "client-stop-1",
+            "expectedStateVersion": 0
+        })))
+        .unwrap();
+        let retry = prepare_assistant_chat_command(&parse_command(json!({
+            "type": "step.retry",
+            "conversationId": CONV,
+            "turnId": "turn-1",
+            "taskId": "task-1",
+            "stepId": "step-1",
+            "retryRequestId": "retry-1",
+            "clientRequestId": "client-retry-1",
+            "expectedOperationGeneration": 2,
+            "expectedStateVersion": 3
         })))
         .unwrap();
 
+        assert_eq!(approval.response_kind, AssistantChatResponseKind::Stream);
         assert_eq!(
-            body,
-            serde_json::json!({
-                "type": "text",
-                "prompt": "show api-github repositories",
-                "clientRequestId": "0d4b0a52-3d5f-4d2e-9f10-8f6f9b1c2d3e",
+            approval.body,
+            json!({
+                "type": "approval.resolve",
+                "conversationId": CONV,
+                "clientRequestId": "request-approval-1",
+                "requestId": "approval-1",
+                "approved": true,
+                "reason": "Approved by user"
             })
         );
-        assert!(body.get("scopeId").is_none());
-        assert!(body.get("workflow").is_none());
-        assert!(body.get("conversation").is_none());
-    }
-
-    #[test]
-    fn typed_chat_body_rejects_non_text_invalid_and_caller_owned_fields() {
-        assert!(
-            typed_chat_body(&typed_turn_request(serde_json::json!({
-                "type": "action.continue",
-                "prompt": "hi",
-                "clientRequestId": "request-1",
-            })))
-            .is_err()
+        assert_eq!(stop.response_kind, AssistantChatResponseKind::Json);
+        assert_eq!(
+            stop.body,
+            json!({
+                "type": "task.stop",
+                "conversationId": CONV,
+                "turnId": "turn-1",
+                "stopRequestId": "stop-1",
+                "clientRequestId": "client-stop-1",
+                "expectedStateVersion": 0
+            })
         );
-        assert!(
-            typed_chat_body(&typed_turn_request(serde_json::json!({
-                "type": "text",
-                "prompt": "  ",
-                "clientRequestId": "request-1",
-            })))
-            .is_err()
-        );
-        assert!(
-            typed_chat_body(&typed_turn_request(serde_json::json!({
-                "type": "text",
-                "prompt": "hi",
-                "clientRequestId": "request/escape",
-            })))
-            .is_err()
-        );
-        assert!(
-            serde_json::from_value::<TypedChatTurnRequest>(serde_json::json!({
-                "type": "text",
-                "prompt": "hi",
-                "clientRequestId": "request-1",
-                "scopeId": "someone-else",
-            }))
-            .is_err(),
-            "caller-supplied scope must fail at the NyxID boundary"
-        );
-        assert!(
-            serde_json::from_value::<TypedChatTurnRequest>(serde_json::json!({
-                "type": "text",
-                "prompt": "hi",
-                "clientRequestId": "request-1",
-                "workflow": "studio",
-            }))
-            .is_err(),
-            "workflow selection does not belong to the typed Assistant route"
+        assert_eq!(retry.response_kind, AssistantChatResponseKind::Json);
+        assert_eq!(
+            retry.body,
+            json!({
+                "type": "step.retry",
+                "conversationId": CONV,
+                "turnId": "turn-1",
+                "taskId": "task-1",
+                "stepId": "step-1",
+                "retryRequestId": "retry-1",
+                "clientRequestId": "client-retry-1",
+                "expectedOperationGeneration": 2,
+                "expectedStateVersion": 3
+            })
         );
     }
 
-    fn turn_request(json: serde_json::Value) -> WorkflowChatTurnRequest {
-        serde_json::from_value(json).unwrap()
-    }
-
-    /// The upstream body is server-built end to end: pinned workflow, always
-    /// a `conversation` object (persistence contract), never a `scopeId`.
     #[test]
     fn workflow_body_creates_a_conversation_with_the_pinned_workflow() {
-        let body = workflow_chat_body(&turn_request(serde_json::json!({
+        let body = workflow_chat_body(&workflow_turn_request(json!({
             "prompt": "hi",
             "commandId": "0d4b0a52-3d5f-4d2e-9f10-8f6f9b1c2d3e",
         })))
         .unwrap();
         assert_eq!(
             body,
-            serde_json::json!({
+            json!({
                 "commandId": "0d4b0a52-3d5f-4d2e-9f10-8f6f9b1c2d3e",
                 "conversation": { "conversationId": null },
                 "prompt": "hi",
@@ -773,7 +1570,7 @@ mod tests {
 
     #[test]
     fn workflow_body_continues_with_the_observed_state_version() {
-        let body = workflow_chat_body(&turn_request(serde_json::json!({
+        let body = workflow_chat_body(&workflow_turn_request(json!({
             "prompt": "and then?",
             "conversationId": WORKFLOW_CONV,
             "minimumStateVersion": 18,
@@ -782,131 +1579,69 @@ mod tests {
         assert_eq!(body["conversation"]["conversationId"], WORKFLOW_CONV);
         assert_eq!(body["conversation"]["minimumStateVersion"], 18);
         assert_eq!(body["workflow"], "studio");
-        // No client commandId: the server mints one (idempotency identity
-        // must always exist for create-replay recovery).
-        assert!(
-            body["commandId"].as_str().is_some_and(|id| !id.is_empty()),
-            "server must mint a commandId"
-        );
+        assert!(body["commandId"].as_str().is_some_and(|id| !id.is_empty()));
     }
 
     #[test]
     fn workflow_body_rejects_out_of_contract_turns() {
-        // Empty / oversized prompt.
-        assert!(workflow_chat_body(&turn_request(serde_json::json!({ "prompt": "  " }))).is_err());
+        assert!(workflow_chat_body(&workflow_turn_request(json!({ "prompt": "  " }))).is_err());
         assert!(
-            workflow_chat_body(&turn_request(
-                serde_json::json!({ "prompt": "a".repeat(32_769) })
-            ))
-            .is_err()
-        );
-        // Continuation without the read fence (upstream would 503).
-        assert!(
-            workflow_chat_body(&turn_request(serde_json::json!({
-                "prompt": "hi", "conversationId": WORKFLOW_CONV,
+            workflow_chat_body(&workflow_turn_request(json!({
+                "prompt": "a".repeat(32_769)
             })))
             .is_err()
         );
         assert!(
-            workflow_chat_body(&turn_request(serde_json::json!({
-                "prompt": "hi", "conversationId": WORKFLOW_CONV, "minimumStateVersion": 0,
-            })))
-            .is_err()
-        );
-        // Fence without a conversation.
-        assert!(
-            workflow_chat_body(&turn_request(serde_json::json!({
-                "prompt": "hi", "minimumStateVersion": 3,
-            })))
-            .is_err()
-        );
-        // A nyxid-chat actor id is the other surface.
-        assert!(
-            workflow_chat_body(&turn_request(serde_json::json!({
-                "prompt": "hi", "conversationId": CONV, "minimumStateVersion": 3,
-            })))
-            .is_err()
-        );
-        // Path-escaping conversation ids and non-token command ids.
-        assert!(
-            workflow_chat_body(&turn_request(serde_json::json!({
-                "prompt": "hi", "conversationId": "chatc-a/b", "minimumStateVersion": 3,
+            workflow_chat_body(&workflow_turn_request(json!({
+                "prompt": "hi",
+                "conversationId": WORKFLOW_CONV
             })))
             .is_err()
         );
         assert!(
-            workflow_chat_body(&turn_request(serde_json::json!({
-                "prompt": "hi", "commandId": "not a token!",
+            workflow_chat_body(&workflow_turn_request(json!({
+                "prompt": "hi",
+                "conversationId": WORKFLOW_CONV,
+                "minimumStateVersion": 0
             })))
             .is_err()
         );
-        // Unknown fields fail loudly instead of silently dropping.
         assert!(
-            serde_json::from_value::<WorkflowChatTurnRequest>(serde_json::json!({
-                "prompt": "hi", "workflow": "direct",
-            }))
-            .is_err(),
-            "a caller-supplied workflow selection must be rejected"
+            workflow_chat_body(&workflow_turn_request(json!({
+                "prompt": "hi",
+                "minimumStateVersion": 3
+            })))
+            .is_err()
         );
         assert!(
-            serde_json::from_value::<WorkflowChatTurnRequest>(serde_json::json!({
-                "prompt": "hi", "scopeId": "someone-else",
+            workflow_chat_body(&workflow_turn_request(json!({
+                "prompt": "hi",
+                "conversationId": CONV,
+                "minimumStateVersion": 3
+            })))
+            .is_err()
+        );
+        assert!(
+            workflow_chat_body(&workflow_turn_request(json!({
+                "prompt": "hi",
+                "conversationId": "chatc-a/b",
+                "minimumStateVersion": 3
+            })))
+            .is_err()
+        );
+        assert!(
+            workflow_chat_body(&workflow_turn_request(json!({
+                "prompt": "hi",
+                "commandId": "not a token!"
+            })))
+            .is_err()
+        );
+        assert!(
+            serde_json::from_value::<WorkflowChatTurnRequest>(json!({
+                "prompt": "hi",
+                "workflow": "direct"
             }))
             .is_err()
-        );
-    }
-
-    #[test]
-    fn accepts_the_opaque_ids_aevatar_issues() {
-        assert!(history_path(USER, CONV).is_ok());
-        assert!(history_path(USER, "abc_DEF-123").is_ok());
-    }
-
-    #[test]
-    fn extracts_actor_ids_in_both_observed_casings() {
-        let camel = serde_json::json!({ "status": "accepted", "actorId": CONV });
-        let pascal = serde_json::json!({ "ActorId": CONV });
-        assert_eq!(extract_actor_id(&camel), Some(CONV));
-        assert_eq!(extract_actor_id(&pascal), Some(CONV));
-        assert_eq!(extract_actor_id(&serde_json::json!({})), None);
-        assert_eq!(extract_actor_id(&serde_json::json!({ "actorId": 7 })), None);
-    }
-
-    #[test]
-    fn finds_actors_in_the_index_and_tolerates_shape_drift() {
-        let index = serde_json::json!({
-            "conversations": [{ "actorId": "other" }, { "actorId": CONV }],
-            "stateVersion": 3,
-        });
-        assert!(actor_index_contains(&index, CONV));
-        assert!(!actor_index_contains(&index, "missing"));
-        let pascal = serde_json::json!({ "Conversations": [{ "ActorId": CONV }] });
-        assert!(actor_index_contains(&pascal, CONV));
-        assert!(!actor_index_contains(&serde_json::json!({}), CONV));
-        assert!(!actor_index_contains(&serde_json::json!([1, 2]), CONV));
-    }
-
-    #[test]
-    fn composite_delete_accepts_success_and_absent_but_nothing_else() {
-        assert!(delete_status_acceptable(200));
-        assert!(delete_status_acceptable(204));
-        assert!(delete_status_acceptable(404));
-        assert!(!delete_status_acceptable(401));
-        assert!(!delete_status_acceptable(403));
-        assert!(!delete_status_acceptable(500));
-        assert!(!delete_status_acceptable(502));
-    }
-
-    #[test]
-    fn create_poll_backoff_is_bounded() {
-        // Sleeps happen between attempts; the last attempt's delay is never
-        // slept.
-        let total: u64 = (0..CREATE_POLL_ATTEMPTS - 1)
-            .map(create_poll_delay_ms)
-            .sum();
-        assert!(
-            total <= 2_500,
-            "poll wait must stay well under stream-start latency budgets, got {total}ms"
         );
     }
 }

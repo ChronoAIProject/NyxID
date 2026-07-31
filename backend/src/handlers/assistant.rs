@@ -15,14 +15,11 @@
 //! all apply unchanged -- the assistant is not a special case in the data
 //! plane (PRD N4). SSE responses stream through it unbuffered.
 
-use std::time::Duration;
-
 use axum::{
-    Json,
     body::{Body, to_bytes},
     extract::{Path, State},
-    http::{HeaderValue, Method, Request, StatusCode, header},
-    response::{IntoResponse, Response},
+    http::{HeaderValue, Method, Request, header},
+    response::Response,
 };
 
 use crate::AppState;
@@ -35,15 +32,9 @@ use crate::models::downstream_service::DownstreamService;
 use crate::mw::auth::{AuthMethod, AuthUser, PROXY_SCOPE, scope_allows_rest_proxy};
 use crate::services::assistant_service;
 
-/// Create responses are a ~300-byte accepted envelope; the cap only guards
-/// against a misbehaving upstream.
-const MAX_CREATE_RESPONSE_BYTES: usize = 64 * 1024;
-/// The actor index is bare `{actorId}` rows (~60 bytes each).
-const MAX_INDEX_RESPONSE_BYTES: usize = 512 * 1024;
-/// The chat-history index carries titles and counts per row (~300 bytes
-/// each), and unlike the actor index it is buffered on the user-facing read
-/// path, so it gets its own headroom.
-const MAX_HISTORY_INDEX_RESPONSE_BYTES: usize = 4 * 1024 * 1024;
+/// Conversation indexes carry titles, timestamps, and counts per row, so the
+/// list route gets its own buffering headroom before any merge/reshape.
+const MAX_CONVERSATION_INDEX_RESPONSE_BYTES: usize = 4 * 1024 * 1024;
 
 /// Server-initiated upstream request derived from a caller request (the
 /// materialization polls, the history half of the composite delete).
@@ -201,139 +192,80 @@ async fn forward(
     .await
 }
 
-/// `POST /api/v1/assistant/conversations` -- create a conversation.
-///
-/// Create is async-accepted upstream (202 + `actorId`), and streaming into
-/// an actor before it appears in the `nyxid-chat` actor index races the
-/// materialization. Mirror the reference client (`waitForConversation`):
-/// after a successful create, poll the actor index with bounded backoff
-/// before returning, so a caller that immediately streams (the first-send
-/// flow) never hits the race. Best-effort — a poll failure never fails the
-/// create.
-pub async fn create_conversation(
-    State(state): State<AppState>,
-    auth_user: AuthUser,
-    request: Request<Body>,
-) -> AppResult<Response> {
-    let user_id = auth_user.user_id.to_string();
-    let authorization = request.headers().get(header::AUTHORIZATION).cloned();
-    let path = assistant_service::conversations_path(&user_id);
-    let response = forward(&state, &auth_user, path, request).await?;
-    if !response.status().is_success() {
-        return Ok(response);
-    }
-    let (parts, body) = response.into_parts();
-    let bytes = to_bytes(body, MAX_CREATE_RESPONSE_BYTES)
-        .await
-        .map_err(|_| {
-            AppError::Internal(
-                "assistant: conversation create response exceeded the buffer cap".to_string(),
-            )
-        })?;
-    if let Some(actor_id) = serde_json::from_slice::<serde_json::Value>(&bytes)
-        .ok()
-        .as_ref()
-        .and_then(assistant_service::extract_actor_id)
-        .map(str::to_owned)
-    {
-        wait_for_conversation_materialization(
-            &state,
-            &auth_user,
-            &user_id,
-            &actor_id,
-            authorization.as_ref(),
-        )
-        .await;
-    }
-    Ok(Response::from_parts(parts, Body::from(bytes)))
-}
-
-/// Poll the `nyxid-chat` actor index until it lists `actor_id`, giving up
-/// after the bounded backoff schedule. Never fails: the create already
-/// succeeded, and a stream that still races simply fails visibly and can be
-/// retried.
-async fn wait_for_conversation_materialization(
-    state: &AppState,
-    auth_user: &AuthUser,
-    user_id: &str,
-    actor_id: &str,
-    authorization: Option<&HeaderValue>,
-) {
-    for attempt in 0..assistant_service::CREATE_POLL_ATTEMPTS {
-        let Ok(index_request) = synthetic_request(Method::GET, authorization) else {
-            return;
-        };
-        let path = assistant_service::conversations_path(user_id);
-        let Ok(response) = forward(state, auth_user, path, index_request).await else {
-            return;
-        };
-        if response.status().is_success() {
-            let Ok(bytes) = to_bytes(response.into_body(), MAX_INDEX_RESPONSE_BYTES).await else {
-                return;
-            };
-            if serde_json::from_slice::<serde_json::Value>(&bytes)
-                .map(|index| assistant_service::actor_index_contains(&index, actor_id))
-                .unwrap_or(false)
-            {
-                return;
-            }
-        }
-        if attempt + 1 < assistant_service::CREATE_POLL_ATTEMPTS {
-            tokio::time::sleep(Duration::from_millis(
-                assistant_service::create_poll_delay_ms(attempt),
-            ))
-            .await;
-        }
-    }
-}
-
-/// `GET /api/v1/assistant/conversations` -- list the caller's conversations
-/// from the Chat History index (server titles, timestamps, message counts).
-///
-/// This reads a different upstream family than `create_conversation` above:
-/// creation targets the `nyxid-chat` actor, while the list is the materialized
-/// history read model, so a freshly created conversation appears here only
-/// after its first completed turn.
-///
-/// That read model is shared with Aevatar's workflow chat, so the rows are
-/// filtered down to `nyxid-chat` actors before they reach the client — see
-/// `assistant_service::filter_chat_history_index`. A body that does not parse,
-/// or whose shape we do not recognise, streams through byte-for-byte: this
-/// route stays shape-agnostic like the transcript route, and a mixed list is
-/// a better failure than an empty one. A body past the buffer cap cannot be
-/// re-streamed once buffering has failed, so it surfaces as an internal error
-/// rather than a silently truncated list.
+/// `GET /api/v1/assistant/conversations` -- canonical typed list, with a
+/// best-effort legacy workflow (`chatc-…`) merge when the upstream list has
+/// not absorbed those rows yet.
 pub async fn list_conversations(
     State(state): State<AppState>,
     auth_user: AuthUser,
     request: Request<Body>,
 ) -> AppResult<Response> {
-    let path = assistant_service::history_index_path(&auth_user.user_id.to_string());
-    let response = forward(&state, &auth_user, path, request).await?;
+    let authorization = request.headers().get(header::AUTHORIZATION).cloned();
+    let user_id = auth_user.user_id.to_string();
+    let response = forward(
+        &state,
+        &auth_user,
+        assistant_service::canonical_conversations_path(),
+        request,
+    )
+    .await?;
     if !response.status().is_success() {
         return Ok(response);
     }
     let (mut parts, body) = response.into_parts();
-    let Ok(bytes) = to_bytes(body, MAX_HISTORY_INDEX_RESPONSE_BYTES).await else {
+    let Ok(bytes) = to_bytes(body, MAX_CONVERSATION_INDEX_RESPONSE_BYTES).await else {
         return Err(AppError::Internal(
             "assistant: conversation index exceeded the buffer cap".to_string(),
         ));
     };
-    let Ok(mut index) = serde_json::from_slice::<serde_json::Value>(&bytes) else {
+    let Ok(mut canonical) = serde_json::from_slice::<serde_json::Value>(&bytes) else {
         return Ok(Response::from_parts(parts, Body::from(bytes)));
     };
-    if !assistant_service::filter_chat_history_index(&mut index) {
+    let mut changed = assistant_service::filter_addressable_conversation_index(&mut canonical);
+    if !assistant_service::conversation_index_includes_workflow(&canonical) {
+        let legacy_request =
+            synthetic_request(Method::GET, authorization.as_ref()).map_err(|_| {
+                AppError::Internal(
+                    "assistant: failed to build the workflow list request".to_string(),
+                )
+            })?;
+        if let Ok(legacy_response) = forward(
+            &state,
+            &auth_user,
+            assistant_service::history_index_path(&user_id),
+            legacy_request,
+        )
+        .await
+        {
+            if legacy_response.status().is_success() {
+                if let Ok(legacy_bytes) = to_bytes(
+                    legacy_response.into_body(),
+                    MAX_CONVERSATION_INDEX_RESPONSE_BYTES,
+                )
+                .await
+                {
+                    if let Ok(legacy_index) =
+                        serde_json::from_slice::<serde_json::Value>(&legacy_bytes)
+                    {
+                        changed |=
+                            assistant_service::merge_workflow_history_rows(&mut canonical, &legacy_index);
+                    }
+                }
+            }
+        }
+    }
+    if !changed {
         return Ok(Response::from_parts(parts, Body::from(bytes)));
     }
-    let Ok(filtered) = serde_json::to_vec(&index) else {
+    let Ok(filtered) = serde_json::to_vec(&canonical) else {
         return Ok(Response::from_parts(parts, Body::from(bytes)));
     };
-    // The upstream length no longer describes the body we are sending.
     parts.headers.remove(header::CONTENT_LENGTH);
     Ok(Response::from_parts(parts, Body::from(filtered)))
 }
 
-/// `GET /api/v1/assistant/conversations/{id}` -- transcript.
+/// `GET /api/v1/assistant/conversations/{id}` -- canonical conversation
+/// transcript/state wrapper.
 ///
 /// The body is opaque here: NyxID never parses or reshapes it. Aevatar PR
 /// #2923 wrapped the flat `[StoredChatMessage]` array in
@@ -347,105 +279,18 @@ pub async fn get_history(
     Path(conversation_id): Path<String>,
     request: Request<Body>,
 ) -> AppResult<Response> {
-    let path = assistant_service::history_path(&auth_user.user_id.to_string(), &conversation_id)?;
+    let path = assistant_service::canonical_conversation_path(&conversation_id)?;
     forward(&state, &auth_user, path, request).await
 }
 
-/// `DELETE /api/v1/assistant/conversations/{id}` -- composite delete.
-///
-/// Removes both the `nyxid-chat` actor and the chat-history row (the Chat
-/// History contract's dual-delete): an `/api/chat`-created row has no
-/// actor, and a cascaded actor delete may have already dropped the history
-/// row, so 404 from either side counts as done. Anything else propagates
-/// that upstream response unchanged.
-///
-/// Deliberate divergence from the reference BFF (which attempts both
-/// deletes even when the first hard-fails): a non-404 actor-delete failure
-/// short-circuits here so the conversation stays fully intact and
-/// retryable, instead of deleting the history row and leaving an orphaned
-/// actor that no list surface can show. Retrying converges either way
-/// (a half-gone actor answers 404 next time and the history delete runs).
+/// `DELETE /api/v1/assistant/conversations/{id}` -- canonical single delete.
 pub async fn delete_conversation(
     State(state): State<AppState>,
     auth_user: AuthUser,
     Path(conversation_id): Path<String>,
     request: Request<Body>,
 ) -> AppResult<Response> {
-    let user_id = auth_user.user_id.to_string();
-    let authorization = request.headers().get(header::AUTHORIZATION).cloned();
-    let actor_path = assistant_service::conversation_path(&user_id, &conversation_id)?;
-    let history_path = assistant_service::history_path(&user_id, &conversation_id)?;
-
-    let actor_response = forward(&state, &auth_user, actor_path, request).await?;
-    if !assistant_service::delete_status_acceptable(actor_response.status().as_u16()) {
-        return Ok(actor_response);
-    }
-
-    let history_request =
-        synthetic_request(Method::DELETE, authorization.as_ref()).map_err(|_| {
-            AppError::Internal("assistant: failed to build the history delete request".to_string())
-        })?;
-    let history_response = forward(&state, &auth_user, history_path, history_request).await?;
-    if !assistant_service::delete_status_acceptable(history_response.status().as_u16()) {
-        return Ok(history_response);
-    }
-
-    Ok((StatusCode::OK, Json(serde_json::json!({}))).into_response())
-}
-
-/// `POST /api/v1/assistant/conversations/{id}/stream` -- AG-UI SSE turn.
-pub async fn stream_turn(
-    State(state): State<AppState>,
-    auth_user: AuthUser,
-    Path(conversation_id): Path<String>,
-    request: Request<Body>,
-) -> AppResult<Response> {
-    let path = assistant_service::stream_path(&auth_user.user_id.to_string(), &conversation_id)?;
-    forward(&state, &auth_user, path, request).await
-}
-
-/// `POST /api/v1/assistant/conversations/{id}/approve` -- approval decision.
-/// Human-only by virtue of the router this mounts under (PRD N3).
-pub async fn decide_approval(
-    State(state): State<AppState>,
-    auth_user: AuthUser,
-    Path(conversation_id): Path<String>,
-    request: Request<Body>,
-) -> AppResult<Response> {
-    let path = assistant_service::approve_path(&auth_user.user_id.to_string(), &conversation_id)?;
-    forward(&state, &auth_user, path, request).await
-}
-
-/// `POST /api/v1/assistant/conversations/{id}/stop` -- stop active work.
-///
-/// Forwards the caller's control body (`turnId`, `stopRequestId`,
-/// `clientRequestId`, `expectedStateVersion`) verbatim to Aevatar's `:stop`
-/// route. Aevatar answers 202-accepted and commits a stop fence; without this
-/// route, cancel is a client-side abort only and the server run keeps
-/// executing until its own terminal.
-pub async fn stop_turn(
-    State(state): State<AppState>,
-    auth_user: AuthUser,
-    Path(conversation_id): Path<String>,
-    request: Request<Body>,
-) -> AppResult<Response> {
-    let path = assistant_service::stop_path(&auth_user.user_id.to_string(), &conversation_id)?;
-    forward(&state, &auth_user, path, request).await
-}
-
-/// `POST /api/v1/assistant/conversations/{id}/steer` -- redirect active
-/// work (`turnId`, `steeringId`, `clientRequestId`, `instruction`, optional
-/// `inputParts`, `expectedStateVersion`), forwarded verbatim to `:steer`.
-/// The contract's answer to "send while a turn is active": a plain text
-/// submission is rejected with `ACTIVE_TURN_REQUIRES_STEERING`; this is the
-/// sanctioned redirect.
-pub async fn steer_turn(
-    State(state): State<AppState>,
-    auth_user: AuthUser,
-    Path(conversation_id): Path<String>,
-    request: Request<Body>,
-) -> AppResult<Response> {
-    let path = assistant_service::steer_path(&auth_user.user_id.to_string(), &conversation_id)?;
+    let path = assistant_service::canonical_conversation_path(&conversation_id)?;
     forward(&state, &auth_user, path, request).await
 }
 
@@ -460,44 +305,7 @@ pub async fn get_state(
     Path(conversation_id): Path<String>,
     request: Request<Body>,
 ) -> AppResult<Response> {
-    let path = assistant_service::state_path(&auth_user.user_id.to_string(), &conversation_id)?;
-    forward(&state, &auth_user, path, request).await
-}
-
-/// `POST /api/v1/assistant/conversations/{id}/turns/{turn}/steps/{step}/retry`
-/// -- retry one step (`taskId`, `retryRequestId`, `clientRequestId`,
-/// `expectedOperationGeneration`, `expectedStateVersion`), forwarded
-/// verbatim to `:retry`. Availability is actor-computed upstream; NyxID
-/// only validates the path segments.
-pub async fn retry_step(
-    State(state): State<AppState>,
-    auth_user: AuthUser,
-    Path((conversation_id, turn_id, step_id)): Path<(String, String, String)>,
-    request: Request<Body>,
-) -> AppResult<Response> {
-    let path = assistant_service::retry_path(
-        &auth_user.user_id.to_string(),
-        &conversation_id,
-        &turn_id,
-        &step_id,
-    )?;
-    forward(&state, &auth_user, path, request).await
-}
-
-/// `POST /api/v1/assistant/conversations/{id}/turns/{turn}/steps/{step}/skip`
-/// -- skip one optional step, forwarded verbatim to `:skip`.
-pub async fn skip_step(
-    State(state): State<AppState>,
-    auth_user: AuthUser,
-    Path((conversation_id, turn_id, step_id)): Path<(String, String, String)>,
-    request: Request<Body>,
-) -> AppResult<Response> {
-    let path = assistant_service::skip_path(
-        &auth_user.user_id.to_string(),
-        &conversation_id,
-        &turn_id,
-        &step_id,
-    )?;
+    let path = assistant_service::canonical_state_path(&conversation_id)?;
     forward(&state, &auth_user, path, request).await
 }
 
@@ -522,10 +330,9 @@ const MAX_ASSISTANT_CHAT_REQUEST_BYTES: usize = 256 * 1024;
 
 /// `POST /api/v1/assistant/chat` -- typed NyxIdChat create-and-first-turn SSE.
 ///
-/// The browser request is parsed with an explicit allowlist, then rebuilt as
-/// the exact Aevatar discriminator, prompt, and idempotency identity. The
-/// authoritative conversation actor and turn arrive on the returned stream;
-/// scope comes only from the propagated verified principal.
+/// The browser request is parsed with an explicit command allowlist, rebuilt
+/// into the exact canonical `/api/chat` body, and forwarded with
+/// `Idempotency-Key: clientRequestId`.
 pub async fn typed_chat(
     State(state): State<AppState>,
     auth_user: AuthUser,
@@ -534,18 +341,21 @@ pub async fn typed_chat(
     let (mut parts, body) = request.into_parts();
     let bytes = to_bytes(body, MAX_ASSISTANT_CHAT_REQUEST_BYTES)
         .await
-        .map_err(|_| AppError::BadRequest("Typed chat request body is too large.".to_string()))?;
-    let turn: assistant_service::TypedChatTurnRequest = serde_json::from_slice(&bytes)
-        .map_err(|e| AppError::BadRequest(format!("Invalid typed chat request: {e}")))?;
-    let upstream = assistant_service::typed_chat_body(&turn)?;
-    let payload = serde_json::to_vec(&upstream).map_err(|_| {
-        AppError::Internal("assistant: failed to encode the typed chat body".to_string())
+        .map_err(|_| AppError::BadRequest("Assistant chat request body is too large.".to_string()))?;
+    let command = assistant_service::parse_assistant_chat_command(&bytes)?;
+    let prepared = assistant_service::prepare_assistant_chat_command(&command)?;
+    let payload = serde_json::to_vec(&prepared.body).map_err(|_| {
+        AppError::Internal("assistant: failed to encode the assistant chat body".to_string())
     })?;
     parts.headers.remove(header::CONTENT_LENGTH);
     parts.headers.insert(
         header::CONTENT_TYPE,
         HeaderValue::from_static("application/json"),
     );
+    let idempotency = HeaderValue::from_str(&prepared.client_request_id).map_err(|_| {
+        AppError::Internal("assistant: failed to encode the idempotency key".to_string())
+    })?;
+    parts.headers.insert(header::HeaderName::from_static("idempotency-key"), idempotency);
     let request = Request::from_parts(parts, Body::from(payload));
     forward(
         &state,
