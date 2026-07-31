@@ -5,6 +5,7 @@ import {
   FileText,
   LayoutGrid,
   MoreHorizontal,
+  PencilLine,
   Plus,
   Server,
   ShieldCheck,
@@ -37,6 +38,7 @@ import {
 import { useWorkspaceCounts } from "@/hooks/use-assistant";
 import { cn } from "@/lib/utils";
 import { useAuthStore } from "@/stores/auth-store";
+import { useAssistantDraftStore } from "@/stores/assistant-draft-store";
 import type { Conversation } from "@/types/assistant";
 
 /**
@@ -47,7 +49,7 @@ import type { Conversation } from "@/types/assistant";
  * so no single gradient colour would match all three.
  */
 const TITLE_FADE =
-  "[mask-image:linear-gradient(to_right,#000_calc(100%_-_2.5rem),transparent)]";
+  "[mask-image:linear-gradient(to_right,#000_calc(100%_-_3rem),transparent_calc(100%_-_1.75rem))]";
 
 function GroupLabel({ children }: { readonly children: string }) {
   return (
@@ -102,15 +104,26 @@ function ComingSoonItem({
 function ConversationRow({
   conversation,
   active,
+  ownerUserId,
   onSelect,
   onRequestDelete,
 }: {
   readonly conversation: Conversation;
   readonly active: boolean;
+  readonly ownerUserId: string | null;
   readonly onSelect: () => void;
   readonly onRequestDelete: () => void;
 }) {
   const [menuOpen, setMenuOpen] = useState(false);
+  const draft = useAssistantDraftStore((state) =>
+    ownerUserId && state.ownerUserId === ownerUserId
+      ? (state.drafts[`conv:${conversation.id}`]?.text ?? "")
+      : "",
+  );
+  const draftPreview = draft.replace(/\s+/g, " ").trim().slice(0, 80);
+  const showDraft = !active && draftPreview.length > 0;
+  const draftPreviewId = `assistant-draft-${conversation.id}`;
+
   return (
     <div
       className={cn(
@@ -121,17 +134,29 @@ function ConversationRow({
       <button
         type="button"
         onClick={onSelect}
+        aria-label={conversation.title}
+        aria-describedby={showDraft ? draftPreviewId : undefined}
         className={cn(
-          "w-full truncate px-3 py-2 text-left text-[13px] transition-colors",
+          "w-full overflow-hidden px-3 py-2 text-left text-[13px] transition-colors",
           active
             ? "font-medium text-foreground"
             : "text-muted-foreground group-hover:text-foreground",
-          "[@media(hover:none)]:[mask-image:linear-gradient(to_right,#000_calc(100%_-_2.5rem),transparent)]",
-          "group-hover:[mask-image:linear-gradient(to_right,#000_calc(100%_-_2.5rem),transparent)]",
+          "[@media(hover:none)]:[mask-image:linear-gradient(to_right,#000_calc(100%_-_3rem),transparent_calc(100%_-_1.75rem))]",
+          "group-hover:[mask-image:linear-gradient(to_right,#000_calc(100%_-_3rem),transparent_calc(100%_-_1.75rem))]",
           menuOpen && TITLE_FADE,
         )}
       >
-        {conversation.title}
+        <span className="block truncate">{conversation.title}</span>
+        {showDraft && (
+          <span
+            id={draftPreviewId}
+            className="mt-0.5 flex min-w-0 items-center gap-1 text-[11px] leading-4 text-text-tertiary"
+          >
+            <PencilLine aria-hidden="true" className="h-2.5 w-2.5 shrink-0" />
+            <span className="sr-only">Draft: </span>
+            <span className="min-w-0 flex-1 truncate">{draftPreview}</span>
+          </span>
+        )}
       </button>
       <DropdownMenu open={menuOpen} onOpenChange={setMenuOpen}>
         <DropdownMenuTrigger asChild>
@@ -140,7 +165,7 @@ function ConversationRow({
             aria-label={`Options for ${conversation.title}`}
             data-keep-drawer-open=""
             className={cn(
-              "absolute right-1 top-1/2 flex h-6 w-6 -translate-y-1/2 items-center justify-center rounded-md text-text-tertiary transition-opacity hover:bg-overlay-strong hover:text-foreground",
+              "absolute right-1 top-1 flex h-6 w-6 items-center justify-center rounded-md bg-card text-muted-foreground shadow-sm outline-none transition-opacity hover:bg-overlay-strong hover:text-foreground",
               "pointer-events-none opacity-0",
               "[@media(hover:none)]:pointer-events-auto [@media(hover:none)]:opacity-100",
               "group-hover:pointer-events-auto group-hover:opacity-100",
@@ -294,6 +319,7 @@ export function AssistantSidebar({
               key={conversation.id}
               conversation={conversation}
               active={conversation.id === activeConversationId}
+              ownerUserId={user?.id ?? null}
               onSelect={() => onSelect(conversation.id)}
               onRequestDelete={() => setDeleteTarget(conversation)}
             />
