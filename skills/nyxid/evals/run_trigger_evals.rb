@@ -193,7 +193,10 @@ Dir.mktmpdir("nyxid-openclaw-trigger-evals-") do |tmpdir|
   home_dir = File.join(tmpdir, "home")
   state_dir = File.join(tmpdir, "state")
   workspace_dir = File.join(tmpdir, "workspace")
-  fixture_bin = File.join(tmpdir, "bin")
+  # Must live under the workspace: OpenClaw's sandbox only allows bind-mount
+  # sources beneath its allowed roots (workspace, state/sandboxes) and
+  # rejects sources elsewhere in the temp dir.
+  fixture_bin = File.join(workspace_dir, ".fixture-bin")
   fixture_skill_dir = File.join(workspace_dir, "skills", skill_name)
   FileUtils.mkdir_p([home_dir, state_dir, fixture_bin, fixture_skill_dir])
   FileUtils.cp(skill_path, File.join(fixture_skill_dir, "SKILL.md"))
