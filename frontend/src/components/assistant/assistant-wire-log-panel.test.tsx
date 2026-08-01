@@ -264,8 +264,6 @@ describe("AssistantWireLogPanel", () => {
     fireEvent.click(screen.getByRole("button", { name: "Aevatar wire log" }));
     fireEvent.click(screen.getByText("/api/chat").closest("button")!);
     const renderedTab = screen.getByRole("tab", { name: "Rendered" });
-    renderedTab.focus();
-    fireEvent.keyDown(renderedTab, { key: "Enter" });
     fireEvent.click(renderedTab);
 
     expect(renderedTab).toHaveAttribute("aria-selected", "true");

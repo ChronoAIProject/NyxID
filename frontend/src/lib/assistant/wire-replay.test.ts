@@ -1,4 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import aevatarNyxidChatStream from "@/lib/assistant/__fixtures__/aevatar-nyxid-chat-stream.sse?raw";
 import { AevatarAssistantTransport } from "@/lib/assistant/aevatar-transport";
 import {
   chatStreamClient,
@@ -6,6 +7,7 @@ import {
 } from "@/lib/assistant/chat-stream-worker-client";
 import type { ChatStreamFrame } from "@/lib/assistant/chat-stream-worker-protocol";
 import { applyTurnEvent, EMPTY_TURN_STATE } from "@/lib/assistant/stream";
+import { WireLineFramer } from "@/lib/assistant/wire-line-framer";
 import {
   parseCapturedWireLines,
   projectReplayFrames,
@@ -213,6 +215,11 @@ const cases: readonly ReplayCase[] = [
     terminal: null,
     truncated: true,
   },
+  {
+    name: "EOF without terminal or approval gate",
+    body: [],
+    terminal: null,
+  },
 ];
 
 function startFrames(protocol: WireReplayProtocol): ChatStreamFrame[] {
@@ -398,6 +405,88 @@ describe("wire replay projector parity", () => {
       { type: "RUN_STARTED", turnId: TURN_ID },
       { type: "RUN_FINISHED" },
     ]);
+  });
+
+  it("matches the live actor transport for the real Aevatar SSE fixture", async () => {
+    const framer = new WireLineFramer(4 * 1024);
+    const pushed = framer.push(new TextEncoder().encode(aevatarNyxidChatStream));
+    const finished = framer.finish();
+    const frames = parseCapturedWireLines([
+      ...pushed.lines,
+      ...finished.lines,
+    ]);
+
+    const liveEvents = await projectThroughLiveTransport("actor", frames);
+    const replay = projectReplayFrames(frames, {
+      protocol: "actor",
+      captureOutcome: "complete",
+      truncated: false,
+    });
+
+    expect(normalizeGeneratedIds(replay.events)).toEqual(
+      normalizeGeneratedIds(liveEvents),
+    );
+    expect(normalizeGeneratedIds(replay.state.messages)).toEqual(
+      normalizeGeneratedIds(reduce(liveEvents).messages),
+    );
+  });
+
+  it.each([
+    {
+      captureOutcome: "cancelled" as const,
+      status: "cancelled",
+      error: null,
+    },
+    {
+      captureOutcome: "protocol_cancel" as const,
+      status: "cancelled",
+      error: null,
+    },
+    {
+      captureOutcome: "network_error" as const,
+      status: "failed",
+      error: { code: "network_error" },
+    },
+    {
+      captureOutcome: "worker_error" as const,
+      status: "failed",
+      error: { code: "worker_error" },
+    },
+  ])(
+    "reports terminal-free $captureOutcome captures as $status",
+    ({ captureOutcome, status, error }) => {
+      const projection = projectReplayFrames(
+        [...startFrames("actor"), ...textFrames],
+        { protocol: "actor", captureOutcome, truncated: true },
+      );
+      const terminal = projection.events.findLast(
+        (event) => event.event === "turn.completed",
+      );
+
+      expect(terminal).toMatchObject({
+        event: "turn.completed",
+        status,
+        error,
+      });
+      expect(terminal).not.toMatchObject({ status: "completed" });
+    },
+  );
+
+  it("reports a terminal-free open capture as stream_closed, never completed", () => {
+    const projection = projectReplayFrames(
+      [...startFrames("actor"), ...textFrames],
+      { protocol: "actor", truncated: true },
+    );
+    const terminal = projection.events.findLast(
+      (event) => event.event === "turn.completed",
+    );
+
+    expect(terminal).toMatchObject({
+      event: "turn.completed",
+      status: "failed",
+      error: { code: "stream_closed" },
+    });
+    expect(terminal).not.toMatchObject({ status: "completed" });
   });
 
   it("keeps original frame JSON in the block source sidecar", () => {

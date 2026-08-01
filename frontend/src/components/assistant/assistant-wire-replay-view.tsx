@@ -74,16 +74,24 @@ export function AssistantWireReplayView({
                         Not replayed
                       </span>
                     </div>
-                    <p className="px-3 pt-2 text-[10px] font-medium uppercase text-text-tertiary">
-                      Original source frame JSON
-                    </p>
-                    <pre className="max-h-56 overflow-auto whitespace-pre-wrap break-all p-3 pt-1 font-mono text-[10px] leading-5 text-muted-foreground">
-                      {JSON.stringify(
-                        frames.length === 1 ? frames[0] : frames,
-                        null,
-                        2,
-                      )}
-                    </pre>
+                    {frames.length === 0 ? (
+                      <p className="p-3 text-[10px] leading-5 text-text-tertiary">
+                        No source frame was retained for this block.
+                      </p>
+                    ) : (
+                      <>
+                        <p className="px-3 pt-2 text-[10px] font-medium uppercase text-text-tertiary">
+                          Original source frame JSON
+                        </p>
+                        <pre className="max-h-56 overflow-auto whitespace-pre-wrap break-all p-3 pt-1 font-mono text-[10px] leading-5 text-muted-foreground">
+                          {JSON.stringify(
+                            frames.length === 1 ? frames[0] : frames,
+                            null,
+                            2,
+                          )}
+                        </pre>
+                      </>
+                    )}
                   </section>
                 );
               })}
