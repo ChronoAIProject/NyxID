@@ -42,7 +42,7 @@ The conventional OpenAI sentinel `data: [DONE]` is not special-cased. It is not 
 
 Every reverse proxy or CDN in front of `/api/v1/assistant/**` must pass SSE without response buffering. NyxID's response-header middleware identifies `text/event-stream` case-insensitively and with parameters, then overwrites `X-Accel-Buffering` with `no`. On HTTP/1.1, a healthy live response exposes `x-accel-buffering: no` and `transfer-encoding: chunked`, and each upstream frame is flushed incrementally instead of the response arriving as one blob after the terminal frame. HTTP/2 and HTTP/3 do not use the HTTP/1.1 `Transfer-Encoding` header but must preserve the same incremental delivery.
 
-Implementation: `backend/src/mw/security_headers.rs:security_headers_middleware`; coverage: `duplicate_content_type_with_one_sse_value_is_marked` and `with_response_headers_marks_sse` in that file.
+Implementation: `backend/src/mw/security_headers.rs:security_headers_middleware`; coverage: `is_sse_media_type_ignores_case_and_parameters`, `duplicate_content_type_with_one_sse_value_is_marked`, and `with_response_headers_marks_sse` in that file.
 
 ## Frame type detection
 
@@ -211,7 +211,7 @@ The transport records a terminal while it is reading frames and settles after th
 
 | Wire outcome | Turn result | Activity result |
 | --- | --- | --- |
-| `RUN_FINISHED` absent/`completed` | `completed` | `done`, or `waiting` when an approval remains |
+| `RUN_FINISHED` absent/`completed` | `completed` | `done`, or `waiting` when an approval remains. A context-free Studio create is carved out below. |
 | `RUN_FINISHED status=blocked` | `blocked` | `blocked` |
 | `RUN_ERROR` | `failed` with sanitized error | `failed` |
 | `RUN_STOPPED` | `cancelled` | `cancelled` |
