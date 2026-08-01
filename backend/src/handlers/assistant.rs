@@ -16,6 +16,7 @@
 //! plane (PRD N4). SSE responses stream through it unbuffered.
 
 use axum::{
+    Json,
     body::{Body, to_bytes},
     extract::{Path, State},
     http::{HeaderValue, Method, Request, header},
@@ -30,7 +31,23 @@ use crate::errors::{AppError, AppResult};
 use crate::handlers::proxy::execute_admin_proxy;
 use crate::models::downstream_service::DownstreamService;
 use crate::mw::auth::{AuthMethod, AuthUser, PROXY_SCOPE, scope_allows_rest_proxy};
-use crate::services::assistant_service;
+use crate::services::{assistant_readiness_service, assistant_service};
+
+pub async fn readiness(
+    State(state): State<AppState>,
+    auth_user: AuthUser,
+) -> AppResult<Json<assistant_readiness_service::ReadinessSnapshot>> {
+    Ok(Json(
+        assistant_readiness_service::evaluate_readiness(
+            &state.db,
+            &state.encryption_keys,
+            &auth_user.user_id.to_string(),
+            &state.config.frontend_url,
+            chrono::Utc::now(),
+        )
+        .await?,
+    ))
+}
 
 /// Conversation indexes carry titles, timestamps, and counts per row, so the
 /// list route gets its own buffering headroom before any merge/reshape.
@@ -446,6 +463,146 @@ pub async fn workflow_chat_ws(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn readiness_handler_uses_the_authenticated_user_scope() {
+        use crate::models::downstream_service::{
+            COLLECTION_NAME as DOWNSTREAM_SERVICES, DownstreamService,
+        };
+        use crate::models::ssh_auth_mode::SshAuthMode;
+        use crate::models::user_api_key::{COLLECTION_NAME as USER_API_KEYS, UserApiKey};
+        use crate::models::user_endpoint::{COLLECTION_NAME as USER_ENDPOINTS, UserEndpoint};
+        use crate::models::user_service::{COLLECTION_NAME as USER_SERVICES, UserService};
+        use crate::test_utils::{
+            connect_test_database, test_app_config, test_app_state_with_config, test_auth_user,
+        };
+
+        let Some(db) = connect_test_database("assistant_readiness_handler_scope").await else {
+            eprintln!("skipping: no MongoDB");
+            return;
+        };
+        let owner_id = uuid::Uuid::new_v4().to_string();
+        let other_id = uuid::Uuid::new_v4().to_string();
+        let now = chrono::Utc::now();
+
+        let mut runtime = crate::models::downstream_service::test_helpers::dummy_service();
+        runtime.id = "core-runtime".to_string();
+        runtime.slug = "aevatar".to_string();
+        runtime.service_category = "internal".to_string();
+        let mut model = crate::models::downstream_service::test_helpers::dummy_service();
+        model.id = "core-model".to_string();
+        model.slug = "chrono-llm-public".to_string();
+        model.service_category = "internal".to_string();
+        let mut catalog = crate::models::downstream_service::test_helpers::dummy_service();
+        catalog.id = "catalog-github".to_string();
+        catalog.slug = "api-github".to_string();
+        catalog.name = "GitHub".to_string();
+        catalog.requires_user_credential = true;
+        db.collection::<DownstreamService>(DOWNSTREAM_SERVICES)
+            .insert_many([runtime, model, catalog])
+            .await
+            .unwrap();
+
+        db.collection::<UserEndpoint>(USER_ENDPOINTS)
+            .insert_one(UserEndpoint {
+                id: "endpoint-github".to_string(),
+                user_id: owner_id.clone(),
+                label: "GitHub".to_string(),
+                url: "https://api.github.example".to_string(),
+                catalog_service_id: Some("catalog-github".to_string()),
+                openapi_spec_url: None,
+                created_at: now,
+                updated_at: now,
+            })
+            .await
+            .unwrap();
+        db.collection::<UserApiKey>(USER_API_KEYS)
+            .insert_one(UserApiKey {
+                id: "key-github".to_string(),
+                user_id: owner_id.clone(),
+                label: "GitHub".to_string(),
+                credential_type: "oauth2".to_string(),
+                credential_encrypted: None,
+                access_token_encrypted: Some(vec![1]),
+                refresh_token_encrypted: None,
+                token_scopes: Some("repo".to_string()),
+                expires_at: None,
+                provider_config_id: None,
+                connection_id: None,
+                user_oauth_client_id_encrypted: None,
+                user_oauth_client_secret_encrypted: None,
+                credential_source: None,
+                status: "active".to_string(),
+                last_used_at: None,
+                last_authorized_at: None,
+                error_message: None,
+                source: None,
+                source_id: None,
+                created_at: now,
+                updated_at: now,
+            })
+            .await
+            .unwrap();
+        db.collection::<UserService>(USER_SERVICES)
+            .insert_one(UserService {
+                id: "service-github".to_string(),
+                user_id: owner_id.clone(),
+                slug: "github".to_string(),
+                endpoint_id: "endpoint-github".to_string(),
+                api_key_id: Some("key-github".to_string()),
+                auth_method: "bearer".to_string(),
+                auth_key_name: "Authorization".to_string(),
+                catalog_service_id: Some("catalog-github".to_string()),
+                node_id: None,
+                node_priority: 0,
+                service_type: "http".to_string(),
+                ssh_auth_mode: SshAuthMode::ProxyOnly,
+                admin_only: false,
+                ssh_node_keys_stale: false,
+                identity_propagation_mode: "none".to_string(),
+                identity_include_user_id: false,
+                identity_include_email: false,
+                identity_include_name: false,
+                identity_jwt_audience: None,
+                forward_access_token: false,
+                inject_delegation_token: false,
+                delegation_token_scope: "proxy".to_string(),
+                custom_user_agent: None,
+                default_request_headers: None,
+                ws_frame_injections: Vec::new(),
+                is_active: true,
+                source: None,
+                source_id: None,
+                source_app_id: None,
+                created_at: now,
+                updated_at: now,
+            })
+            .await
+            .unwrap();
+
+        let mut config = test_app_config();
+        config.frontend_url = "https://nyx.example".to_string();
+        let state = test_app_state_with_config(db, config);
+        let axum::Json(owner) = readiness(State(state.clone()), test_auth_user(&owner_id))
+            .await
+            .unwrap();
+        let axum::Json(other) = readiness(State(state), test_auth_user(&other_id))
+            .await
+            .unwrap();
+
+        assert!(
+            owner
+                .capabilities
+                .iter()
+                .any(|capability| capability.capability_id == "api-github")
+        );
+        assert!(
+            other
+                .capabilities
+                .iter()
+                .all(|capability| capability.capability_id != "api-github")
+        );
+    }
 
     #[test]
     fn synthetic_requests_carry_the_callers_authorization() {

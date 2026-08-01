@@ -42,6 +42,7 @@ None. This issue adds no UI or page.
 | `backend/src/services/mod.rs` | R4 | Export the service module | Not applicable |
 | `backend/src/handlers/assistant.rs` | R4 | Add the thin authenticated GET handler and handler-level serialization tests | Not applicable |
 | `backend/src/routes.rs` | R4 | Mount the handler on the existing human-only assistant router | Not applicable |
+| `backend/src/services/billing/route_inventory.rs` | R4 | Keep the mounted readiness billing classification identical to the static fail-closed inventory | Not applicable |
 | `backend/fixtures/assistant-readiness/v1.json` | R7 | Versioned cross-repository contract evidence has no existing fixture | Required consumer boundary |
 
 ## Deferred Simplifications
@@ -156,6 +157,8 @@ git commit -m "feat(assistant): evaluate readiness evidence"
 
 - Modify: `backend/src/handlers/assistant.rs`
 - Modify: `backend/src/routes.rs`
+- Modify: `backend/src/services/assistant_readiness_service.rs`
+- Modify: `backend/src/services/billing/route_inventory.rs`
 - Create: `backend/fixtures/assistant-readiness/v1.json`
 
 **Interfaces:**
@@ -167,7 +170,7 @@ pub async fn readiness(
 ) -> AppResult<Json<ReadinessSnapshot>>;
 ```
 
-- [ ] **Step 1: Write failing handler, route, and fixture tests**
+- [x] **Step 1: Write failing handler, route, and fixture tests**
 
 Assert the handler uses the authenticated UUID, serializes exact DTO keys, sets no secret fields, the real router mounts `GET /api/v1/assistant/readiness` inside the human-only class, and the versioned fixture parses into `ReadinessSnapshot` while covering every enum value.
 
@@ -175,18 +178,18 @@ Run: `cargo test -p nyxid assistant_readiness -- --nocapture`
 
 Expected: FAIL because the handler, route, and fixture do not exist.
 
-- [ ] **Step 2: Implement the thin handler, route, and fixture**
+- [x] **Step 2: Implement the thin handler, route, and fixture**
 
 The handler converts `auth_user.user_id` to a string, passes config and clock to the service, and returns `Json`. Apply an explicit exempt billing classification because it performs no downstream request.
 
-- [ ] **Step 3: Verify GREEN and commit**
+- [x] **Step 3: Verify GREEN and commit**
 
 Run: `cargo test -p nyxid assistant_readiness -- --nocapture && cargo fmt --check`
 
 Expected: service, handler, route, and fixture tests pass with the production path registered.
 
 ```bash
-git add backend/src/handlers/assistant.rs backend/src/routes.rs backend/fixtures/assistant-readiness/v1.json
+git add backend/src/handlers/assistant.rs backend/src/routes.rs backend/src/services/assistant_readiness_service.rs backend/src/services/billing/route_inventory.rs backend/fixtures/assistant-readiness/v1.json
 git commit -m "feat(assistant): publish readiness snapshot"
 ```
 

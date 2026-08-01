@@ -1,0 +1,127 @@
+{
+  "revision": "e014aa8133ffdfa79beb4ba42c1c4b79e670037979cd4432a19bea507c78906f",
+  "evaluatedAt": "2026-08-01T00:00:00Z",
+  "capabilities": [
+    {
+      "capabilityId": "model",
+      "label": "Model",
+      "required": true,
+      "status": "available",
+      "connectionState": "connected",
+      "grantState": "not_required",
+      "requestedScopes": [],
+      "managementUrl": "https://nyx.example/keys",
+      "reasonCode": null
+    },
+    {
+      "capabilityId": "runtime",
+      "label": "Chat runtime",
+      "required": true,
+      "status": "available",
+      "connectionState": "connected",
+      "grantState": "not_required",
+      "requestedScopes": [],
+      "managementUrl": "https://nyx.example/keys",
+      "reasonCode": null
+    },
+    {
+      "capabilityId": "api-connecting",
+      "label": "Connecting",
+      "required": false,
+      "status": "missing",
+      "connectionState": "connecting",
+      "grantState": "granted",
+      "requestedScopes": [],
+      "managementUrl": "https://nyx.example/keys",
+      "reasonCode": "connection_pending"
+    },
+    {
+      "capabilityId": "api-denied",
+      "label": "Denied",
+      "required": false,
+      "status": "cannot_use",
+      "connectionState": "connected",
+      "grantState": "missing",
+      "requestedScopes": [],
+      "managementUrl": "https://nyx.example/keys",
+      "reasonCode": "approval_denied"
+    },
+    {
+      "capabilityId": "api-expired",
+      "label": "Expired",
+      "required": false,
+      "status": "missing",
+      "connectionState": "expired",
+      "grantState": "expired",
+      "requestedScopes": [],
+      "managementUrl": "https://nyx.example/keys",
+      "reasonCode": "connection_expired"
+    },
+    {
+      "capabilityId": "api-missing",
+      "label": "Missing",
+      "required": false,
+      "status": "missing",
+      "connectionState": "not_connected",
+      "grantState": "missing",
+      "requestedScopes": [],
+      "managementUrl": "https://nyx.example/keys",
+      "reasonCode": "connection_missing"
+    },
+    {
+      "capabilityId": "api-partial",
+      "label": "Partial",
+      "required": false,
+      "status": "missing",
+      "connectionState": "connected",
+      "grantState": "partial",
+      "requestedScopes": [],
+      "managementUrl": "https://nyx.example/keys",
+      "reasonCode": "approval_partial"
+    },
+    {
+      "capabilityId": "api-revoked",
+      "label": "Revoked",
+      "required": false,
+      "status": "missing",
+      "connectionState": "revoked",
+      "grantState": "revoked",
+      "requestedScopes": [],
+      "managementUrl": "https://nyx.example/keys",
+      "reasonCode": "connection_revoked"
+    },
+    {
+      "capabilityId": "api-unknown-connection",
+      "label": "Unknown connection",
+      "required": false,
+      "status": "cannot_check",
+      "connectionState": "unknown",
+      "grantState": "granted",
+      "requestedScopes": [],
+      "managementUrl": "https://nyx.example/keys",
+      "reasonCode": "connection_unknown"
+    },
+    {
+      "capabilityId": "api-unknown-grant",
+      "label": "Unknown grant",
+      "required": false,
+      "status": "cannot_check",
+      "connectionState": "connected",
+      "grantState": "unknown",
+      "requestedScopes": [],
+      "managementUrl": "https://nyx.example/keys",
+      "reasonCode": "approval_unknown"
+    },
+    {
+      "capabilityId": "api-verifying",
+      "label": "Verifying",
+      "required": false,
+      "status": "missing",
+      "connectionState": "verifying",
+      "grantState": "granted",
+      "requestedScopes": [],
+      "managementUrl": "https://nyx.example/keys",
+      "reasonCode": "connection_pending"
+    }
+  ]
+}

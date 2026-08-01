@@ -644,6 +644,81 @@ mod tests {
         assert_eq!(build_management_url("not a url"), None);
     }
 
+    #[test]
+    fn versioned_fixture_is_parseable_complete_and_revision_consistent() {
+        use std::collections::BTreeSet;
+
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("fixtures/assistant-readiness/v1.json");
+        let body = std::fs::read_to_string(&path)
+            .unwrap_or_else(|error| panic!("read {}: {error}", path.display()));
+        let snapshot: ReadinessSnapshot = serde_json::from_str(&body).unwrap();
+        let rebuilt = build_snapshot(snapshot.capabilities.clone(), snapshot.evaluated_at).unwrap();
+        assert_eq!(snapshot.revision, rebuilt.revision);
+        assert_eq!(snapshot.capabilities, rebuilt.capabilities);
+
+        let value = serde_json::to_value(&snapshot).unwrap();
+        let statuses = value["capabilities"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(|capability| capability["status"].as_str())
+            .collect::<BTreeSet<_>>();
+        let connections = value["capabilities"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(|capability| capability["connectionState"].as_str())
+            .collect::<BTreeSet<_>>();
+        let grants = value["capabilities"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(|capability| capability["grantState"].as_str())
+            .collect::<BTreeSet<_>>();
+        assert_eq!(
+            statuses,
+            BTreeSet::from(["available", "cannot_check", "cannot_use", "missing"])
+        );
+        assert_eq!(
+            connections,
+            BTreeSet::from([
+                "connected",
+                "connecting",
+                "expired",
+                "not_connected",
+                "revoked",
+                "unknown",
+                "verifying",
+            ])
+        );
+        assert_eq!(
+            grants,
+            BTreeSet::from([
+                "expired",
+                "granted",
+                "missing",
+                "not_required",
+                "partial",
+                "revoked",
+                "unknown",
+            ])
+        );
+
+        let lower = body.to_ascii_lowercase();
+        for forbidden in [
+            "credential",
+            "authorization",
+            "cookie",
+            "access_token",
+            "refresh_token",
+            "client_secret",
+            "private_key",
+        ] {
+            assert!(!lower.contains(forbidden), "fixture contains {forbidden}");
+        }
+    }
+
     #[tokio::test]
     async fn evaluate_readiness_is_user_scoped_and_preserves_connector_grant_evidence() {
         use crate::models::approval_grant::{ApprovalGrant, COLLECTION_NAME as GRANTS};

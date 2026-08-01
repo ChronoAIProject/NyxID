@@ -139,6 +139,13 @@ pub const BILLING_ROUTE_INVENTORY: &[BillingRouteSpec] = &[
         policy: BillingRoutePolicy::Exempt("control-plane discovery; no downstream request"),
     },
     BillingRouteSpec {
+        handler: "handlers::assistant::readiness",
+        route: "/api/v1/assistant/readiness",
+        policy: BillingRoutePolicy::Exempt(
+            "identity control-plane snapshot; no downstream request",
+        ),
+    },
+    BillingRouteSpec {
         handler: "handlers::mcp_transport::mcp_post",
         route: "/mcp (POST)",
         policy: BillingRoutePolicy::Metered(BillingIngress::Mcp),

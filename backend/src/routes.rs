@@ -121,6 +121,22 @@ macro_rules! proxy_billing_routes {
     };
 }
 
+macro_rules! assistant_readiness_billing_routes {
+    ($apply:ident, $router:expr) => {
+        $apply!($router;
+            (
+                "/readiness",
+                "/api/v1/assistant/readiness",
+                "handlers::assistant::readiness",
+                get(handlers::assistant::readiness),
+                crate::services::billing::route_inventory::BillingRoutePolicy::Exempt(
+                    "identity control-plane snapshot; no downstream request"
+                )
+            ),
+        )
+    };
+}
+
 macro_rules! ssh_billing_routes {
     ($apply:ident, $router:expr) => {
         $apply!($router;
@@ -332,6 +348,10 @@ pub(crate) fn mounted_billing_route_inventory()
 -> Vec<crate::services::billing::route_inventory::BillingRouteSpec> {
     let mut routes = llm_billing_routes!(collect_billing_route_specs, ());
     routes.extend(proxy_billing_routes!(collect_billing_route_specs, ()));
+    routes.extend(assistant_readiness_billing_routes!(
+        collect_billing_route_specs,
+        ()
+    ));
     routes.extend(ssh_billing_routes!(collect_billing_route_specs, ()));
     routes.extend(mcp_billing_routes!(collect_billing_route_specs, ()));
     routes.extend(public_proxy_billing_routes!(
@@ -1318,6 +1338,10 @@ pub fn build_router(
             crate::services::billing::route_inventory::BillingRoutePolicy::Metered(
                 crate::services::billing::BillingIngress::Proxy,
             ),
+        ))
+        .merge(assistant_readiness_billing_routes!(
+            register_billing_routes,
+            Router::new()
         ));
 
     let ssh_billing_routes = ssh_billing_routes!(register_billing_routes, Router::new());
@@ -1483,4 +1507,49 @@ pub fn build_router(
     let private = public_mcp_billing_routes!(register_billing_routes, private);
 
     (public_oauth, private)
+}
+
+#[cfg(test)]
+mod tests {
+    use axum::body::Body;
+    use axum::http::{Request, StatusCode};
+    use tower::ServiceExt;
+
+    #[test]
+    fn assistant_readiness_route_is_explicitly_billing_exempt() {
+        let route = super::mounted_billing_route_inventory()
+            .into_iter()
+            .find(|entry| entry.route == "/api/v1/assistant/readiness")
+            .expect("assistant readiness route must be classified");
+
+        assert_eq!(route.handler, "handlers::assistant::readiness");
+        assert_eq!(
+            route.policy,
+            crate::services::billing::route_inventory::BillingRoutePolicy::Exempt(
+                "identity control-plane snapshot; no downstream request"
+            )
+        );
+    }
+
+    #[tokio::test]
+    async fn assistant_readiness_route_is_mounted_inside_the_human_only_router() {
+        let state = crate::test_utils::test_app_state_no_db().await;
+        let (_, private_api) = super::build_router(
+            1024 * 1024,
+            crate::services::anonymous_endpoint_service::DEFAULT_PUBLIC_PROXY_MAX_BODY_SIZE,
+        );
+
+        let response = private_api
+            .with_state(state)
+            .oneshot(
+                Request::builder()
+                    .uri("/api/v1/assistant/readiness")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+    }
 }
