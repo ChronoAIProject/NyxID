@@ -1,5 +1,6 @@
 /**
- * Regression probes from the chat-flow audit, docs/chat-flow-audit.md.
+ * Regression probes for the assistant chat surface,
+ * docs/chat/07-testing-and-gaps.md.
  *
  * They drive the real hooks against the real mock transport, plus targeted
  * spies for live-transport event vocabulary and failure paths.

@@ -12,7 +12,8 @@ import {
 } from "./helpers";
 
 /**
- * Regression specs from the chat-flow audit (docs/chat-flow-audit.md).
+ * Regression specs for the assistant chat surface
+ * (docs/chat/07-testing-and-gaps.md).
  *
  * Fault injection (silent turn, transcript latency) mirrors real transport
  * conditions the deterministic mock script cannot otherwise reach; the
