@@ -23,6 +23,7 @@ use crate::models::user_service_connection::{
 };
 use crate::services::mcp_service::{self, McpToolSource};
 use crate::services::node_ws_manager::NodeWsManager;
+use crate::services::proxy_service;
 use crate::services::user_service_service::{self, CredentialSource};
 
 pub const ASSISTANT_READINESS_REVISION: &str = "nyxid-assistant-readiness.v1";
@@ -476,10 +477,10 @@ async fn legacy_personal_evidence(
     let provider_tokens: Vec<UserProviderToken> =
         if let Some(provider_config_id) = catalog_service.provider_config_id.as_deref() {
             db.collection::<UserProviderToken>(USER_PROVIDER_TOKENS)
-                .find(doc! {
-                    "user_id": user_id,
-                    "provider_config_id": provider_config_id,
-                })
+                .find(proxy_service::legacy_personal_provider_token_filter(
+                    user_id,
+                    provider_config_id,
+                ))
                 .sort(doc! { "updated_at": -1 })
                 .limit(2)
                 .await?

@@ -1062,11 +1062,10 @@ async fn user_has_legacy_personal_connection(
     if let Some(provider_config_id) = &downstream.provider_config_id {
         let token_count = db
             .collection::<UserProviderToken>(USER_PROVIDER_TOKENS)
-            .count_documents(doc! {
-                "user_id": user_id,
-                "provider_config_id": provider_config_id,
-                "status": { "$in": ["active", "expired", "refresh_failed"] },
-            })
+            .count_documents(legacy_personal_provider_token_filter(
+                user_id,
+                provider_config_id,
+            ))
             .await?;
         if token_count > 0 {
             return Ok(true);
@@ -1074,6 +1073,18 @@ async fn user_has_legacy_personal_connection(
     }
 
     Ok(false)
+}
+
+/// Canonical legacy provider-token eligibility used before organization fallback.
+pub(crate) fn legacy_personal_provider_token_filter(
+    user_id: &str,
+    provider_config_id: &str,
+) -> mongodb::bson::Document {
+    doc! {
+        "user_id": user_id,
+        "provider_config_id": provider_config_id,
+        "status": { "$in": ["active", "expired", "refresh_failed"] },
+    }
 }
 
 /// Block a viewer from riding the legacy `DownstreamService` fallthrough
@@ -3106,6 +3117,18 @@ mod tests {
     };
     use chrono::Utc;
     use tokio::{net::TcpListener, sync::mpsc};
+
+    #[test]
+    fn legacy_provider_token_filter_matches_proxy_precedence() {
+        assert_eq!(
+            legacy_personal_provider_token_filter("user-id", "provider-id"),
+            doc! {
+                "user_id": "user-id",
+                "provider_config_id": "provider-id",
+                "status": { "$in": ["active", "expired", "refresh_failed"] },
+            }
+        );
+    }
 
     #[allow(clippy::too_many_arguments)]
     async fn forward_request(
