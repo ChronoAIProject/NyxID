@@ -67,13 +67,14 @@ Capabilities are sorted by `required` first, then `capabilityId`. Duplicate conn
 
 `requestedScopes` is empty in this endpoint until Aevatar supplies a typed task-specific required set. `KeyView.granted_scopes` describes scopes already granted to a connection and must not be relabelled as scopes requested by the current task. Approval grant evaluation reuses the existing org-aware policy and grant lookup for the delegated Aevatar requester. No session-bypass shortcut is used.
 
-Core checks are configuration checks, not network health probes. `runtime` requires an active `aevatar` row that does not require a user credential. `model` requires the exact assistant LLM row to be active and usable through the existing public/internal master-credential or no-auth path. A row that exists but violates those provisioning predicates is `cannot_use`, not `missing`.
+Core checks are configuration checks, not network health probes, and use `grantState = not_required`. `runtime` requires an active `aevatar` row that does not require a user credential. `model` requires the exact assistant LLM row to be active and usable through the existing public/internal master-credential or no-auth path. A row that exists but violates those provisioning predicates is `cannot_use`, not `missing`. Operation-specific approvals remain part of the actor execution loop; inventing an operation descriptor during readiness is forbidden.
 
 ## 5. Module boundaries
 
 | Module | Responsibility | Depends on |
 | --- | --- | --- |
 | `assistant_readiness_service` | Read authoritative safe evidence, map closed states, aggregate duplicates, and compute revision | existing assistant, key, proxy-owner, and approval services |
+| `approval_service` | Summarize existing org-aware approval policy and grant rows for one requester without inventing an operation descriptor | existing approval models and policy source selection |
 | `handlers::assistant` | Convert `AuthUser.user_id` to a service call and serialize the dedicated response DTO | `assistant_readiness_service` |
 | `routes` | Mount the GET under the existing human-only `/assistant` router with exempt billing classification | handler |
 | versioned fixture | Freeze a secret-free consumer contract covering all enum values | service contract |

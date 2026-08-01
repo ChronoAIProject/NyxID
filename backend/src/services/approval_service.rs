@@ -96,6 +96,163 @@ pub enum ApprovalOutcome {
     NeedsApproval(PendingApproval),
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ApprovalReadiness {
+    NotRequired,
+    Granted,
+    Partial,
+    Missing,
+    Expired,
+    Revoked,
+    Denied,
+    Unknown,
+}
+
+fn summarize_approval_readiness_from_evidence(
+    config: Option<&ServiceApprovalConfig>,
+    global_required: bool,
+    grants: &[ApprovalGrant],
+    now: chrono::DateTime<Utc>,
+) -> ApprovalReadiness {
+    let (required, mode) = match config {
+        Some(config) if !config.rules.is_empty() => return ApprovalReadiness::Unknown,
+        Some(config) => match config.default_effect {
+            Some(ApprovalEffect::Deny) => return ApprovalReadiness::Denied,
+            Some(ApprovalEffect::AutoAllow) => return ApprovalReadiness::NotRequired,
+            Some(ApprovalEffect::RequireApproval) => (true, config.approval_mode.clone()),
+            None => (config.approval_required, config.approval_mode.clone()),
+        },
+        None => (global_required, ApprovalMode::default()),
+    };
+
+    if !required {
+        return ApprovalReadiness::NotRequired;
+    }
+    if mode != ApprovalMode::Grant {
+        return ApprovalReadiness::Missing;
+    }
+
+    let active = grants
+        .iter()
+        .filter(|grant| !grant.revoked && grant.expires_at > now)
+        .collect::<Vec<_>>();
+    if active.iter().any(|grant| grant.scope.is_none()) {
+        return ApprovalReadiness::Granted;
+    }
+    if !active.is_empty() {
+        return ApprovalReadiness::Partial;
+    }
+
+    match grants.iter().max_by_key(|grant| grant.granted_at) {
+        Some(grant) if grant.revoked => ApprovalReadiness::Revoked,
+        Some(grant) if grant.expires_at <= now => ApprovalReadiness::Expired,
+        Some(_) => ApprovalReadiness::Unknown,
+        None => ApprovalReadiness::Missing,
+    }
+}
+
+#[derive(Debug)]
+struct ApprovalPolicySource {
+    config: Option<ServiceApprovalConfig>,
+    global_required: bool,
+    primary_owner_user_id: String,
+    from_org_policy: bool,
+}
+
+async fn resolve_approval_policy_source(
+    db: &Database,
+    actor_user_id: &str,
+    service_owner_user_id: &str,
+    service_id: &str,
+) -> AppResult<ApprovalPolicySource> {
+    let service_owner_is_org = db
+        .collection::<User>(USERS)
+        .find_one(doc! { "_id": service_owner_user_id })
+        .await?
+        .is_some_and(|user| user.user_type.is_org());
+    if service_owner_is_org
+        && let Some(config) = db
+            .collection::<ServiceApprovalConfig>(SERVICE_APPROVAL_CONFIGS)
+            .find_one(doc! {
+                "user_id": service_owner_user_id,
+                "service_id": service_id,
+            })
+            .await?
+    {
+        return Ok(ApprovalPolicySource {
+            config: Some(config),
+            global_required: false,
+            primary_owner_user_id: service_owner_user_id.to_string(),
+            from_org_policy: true,
+        });
+    }
+
+    let config = db
+        .collection::<ServiceApprovalConfig>(SERVICE_APPROVAL_CONFIGS)
+        .find_one(doc! { "user_id": actor_user_id, "service_id": service_id })
+        .await?;
+    let global_required = if config.is_none() {
+        user_requires_approval(db, actor_user_id).await?
+    } else {
+        false
+    };
+    Ok(ApprovalPolicySource {
+        config,
+        global_required,
+        primary_owner_user_id: actor_user_id.to_string(),
+        from_org_policy: false,
+    })
+}
+
+pub async fn summarize_approval_readiness(
+    db: &Database,
+    actor_user_id: &str,
+    service_owner_user_id: &str,
+    service_id: &str,
+    requester_type: &str,
+    requester_id: &str,
+    now: chrono::DateTime<Utc>,
+) -> AppResult<ApprovalReadiness> {
+    let source =
+        resolve_approval_policy_source(db, actor_user_id, service_owner_user_id, service_id)
+            .await?;
+    let filter = if source.from_org_policy {
+        doc! {
+            "user_id": &source.primary_owner_user_id,
+            "service_id": service_id,
+            "$or": [
+                { "org_scoped": true },
+                {
+                    "org_scoped": { "$ne": true },
+                    "requester_type": requester_type,
+                    "requester_id": requester_id,
+                },
+            ],
+        }
+    } else {
+        doc! {
+            "user_id": &source.primary_owner_user_id,
+            "service_id": service_id,
+            "requester_type": requester_type,
+            "requester_id": requester_id,
+            "org_scoped": { "$ne": true },
+        }
+    };
+    let grants = db
+        .collection::<ApprovalGrant>(GRANTS)
+        .find(filter)
+        .await?
+        .try_collect::<Vec<_>>()
+        .await?;
+
+    Ok(summarize_approval_readiness_from_evidence(
+        source.config.as_ref(),
+        source.global_required,
+        &grants,
+        now,
+    ))
+}
+
 /// Resolve the effective approval policy for a proxy call, accounting for
 /// org-owned services that may carry their own per-service approval config.
 ///
@@ -109,46 +266,11 @@ pub async fn resolve_org_aware_approval(
     service_id: &str,
     descriptor: &OperationDescriptor,
 ) -> AppResult<ApprovalResolution> {
-    // Step 1: if the resolved service is org-owned and the org has a
-    // policy, use it. We detect "org-owned" by looking up the owner's
-    // `user_type`, NOT by comparing `actor_user_id` to
-    // `service_owner_user_id` -- for org-owned NyxID API keys and
-    // service accounts, both are the org id, but the request still
-    // needs to fan out to the org's admins instead of being treated as
-    // a self-decided personal request.
-    let service_owner_is_org = db
-        .collection::<User>(USERS)
-        .find_one(doc! { "_id": service_owner_user_id })
-        .await?
-        .is_some_and(|u| u.user_type.is_org());
-    if service_owner_is_org
-        && let Some(org_config) = db
-            .collection::<ServiceApprovalConfig>(SERVICE_APPROVAL_CONFIGS)
-            .find_one(doc! {
-                "user_id": service_owner_user_id,
-                "service_id": service_id,
-            })
-            .await?
-    {
-        let decision = approval_policy::evaluate(&org_config, descriptor);
-        return Ok(ApprovalResolution {
-            required: decision.effect == ApprovalEffect::RequireApproval,
-            mode: decision.mode,
-            effect: decision.effect,
-            grant_scope: decision.grant_scope,
-            primary_owner_user_id: service_owner_user_id.to_string(),
-            from_org_policy: true,
-        });
-    }
-
-    // Step 2: fall back to the actor's policy (existing behavior).
-    let actor_config = db
-        .collection::<ServiceApprovalConfig>(SERVICE_APPROVAL_CONFIGS)
-        .find_one(doc! { "user_id": actor_user_id, "service_id": service_id })
-        .await?;
-
-    let (required, mode, effect, grant_scope) = if let Some(cfg) = actor_config {
-        let decision = approval_policy::evaluate(&cfg, descriptor);
+    let source =
+        resolve_approval_policy_source(db, actor_user_id, service_owner_user_id, service_id)
+            .await?;
+    let (required, mode, effect, grant_scope) = if let Some(config) = source.config.as_ref() {
+        let decision = approval_policy::evaluate(config, descriptor);
         (
             decision.effect == ApprovalEffect::RequireApproval,
             decision.mode,
@@ -156,7 +278,7 @@ pub async fn resolve_org_aware_approval(
             decision.grant_scope,
         )
     } else {
-        let required = user_requires_approval(db, actor_user_id).await?;
+        let required = source.global_required;
         (
             required,
             ApprovalMode::default(),
@@ -174,8 +296,8 @@ pub async fn resolve_org_aware_approval(
         mode,
         effect,
         grant_scope,
-        primary_owner_user_id: actor_user_id.to_string(),
-        from_org_policy: false,
+        primary_owner_user_id: source.primary_owner_user_id,
+        from_org_policy: source.from_org_policy,
     })
 }
 
@@ -2517,6 +2639,87 @@ mod tests {
             revoked,
             org_scoped: false,
         }
+    }
+
+    #[test]
+    fn approval_readiness_classifies_current_grant_evidence_without_guessing_an_operation() {
+        let now = Utc::now();
+        assert_eq!(
+            summarize_approval_readiness_from_evidence(None, false, &[], now),
+            ApprovalReadiness::NotRequired
+        );
+        assert_eq!(
+            summarize_approval_readiness_from_evidence(None, true, &[], now),
+            ApprovalReadiness::Missing
+        );
+
+        let mut config = make_service_config("user-1", "service-1", true, ApprovalMode::Grant);
+        assert_eq!(
+            summarize_approval_readiness_from_evidence(Some(&config), false, &[], now),
+            ApprovalReadiness::Missing
+        );
+
+        let mut unscoped = make_grant("user-1", "service-1", "delegated", "aevatar", false, 30);
+        unscoped.granted_at = now;
+        assert_eq!(
+            summarize_approval_readiness_from_evidence(
+                Some(&config),
+                false,
+                &[unscoped.clone()],
+                now,
+            ),
+            ApprovalReadiness::Granted
+        );
+
+        let mut scoped = unscoped.clone();
+        scoped.scope = Some("v1:http:post:write:/issues/**".to_string());
+        assert_eq!(
+            summarize_approval_readiness_from_evidence(Some(&config), false, &[scoped], now),
+            ApprovalReadiness::Partial
+        );
+
+        let mut expired = unscoped.clone();
+        expired.expires_at = now - chrono::Duration::seconds(1);
+        assert_eq!(
+            summarize_approval_readiness_from_evidence(Some(&config), false, &[expired], now,),
+            ApprovalReadiness::Expired
+        );
+
+        let mut revoked = unscoped;
+        revoked.revoked = true;
+        assert_eq!(
+            summarize_approval_readiness_from_evidence(Some(&config), false, &[revoked], now,),
+            ApprovalReadiness::Revoked
+        );
+
+        config.approval_mode = ApprovalMode::PerRequest;
+        assert_eq!(
+            summarize_approval_readiness_from_evidence(Some(&config), false, &[], now),
+            ApprovalReadiness::Missing
+        );
+        config.approval_required = false;
+        assert_eq!(
+            summarize_approval_readiness_from_evidence(Some(&config), true, &[], now),
+            ApprovalReadiness::NotRequired
+        );
+
+        config.default_effect = Some(ApprovalEffect::Deny);
+        assert_eq!(
+            summarize_approval_readiness_from_evidence(Some(&config), false, &[], now),
+            ApprovalReadiness::Denied
+        );
+
+        config.rules.push(ApprovalRule {
+            methods: vec!["POST".to_string()],
+            resource_pattern: "/issues/**".to_string(),
+            verbs: vec![],
+            effect: ApprovalEffect::RequireApproval,
+            mode: ApprovalMode::Grant,
+        });
+        assert_eq!(
+            summarize_approval_readiness_from_evidence(Some(&config), false, &[], now),
+            ApprovalReadiness::Unknown
+        );
     }
 
     fn make_pending_request_with_user(

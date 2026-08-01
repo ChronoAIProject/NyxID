@@ -38,6 +38,7 @@ None. This issue adds no UI or page.
 | Path | Rung | Responsibility | R7 reason |
 | --- | --- | --- | --- |
 | `backend/src/services/assistant_readiness_service.rs` | R4 | Extend the assistant domain with the smallest read-model composer using existing services | Not applicable |
+| `backend/src/services/approval_service.rs` | R4 | Add a read-only org-aware policy/grant summary used by readiness instead of duplicating approval semantics | Not applicable |
 | `backend/src/services/mod.rs` | R4 | Export the service module | Not applicable |
 | `backend/src/handlers/assistant.rs` | R4 | Add the thin authenticated GET handler and handler-level serialization tests | Not applicable |
 | `backend/src/routes.rs` | R4 | Mount the handler on the existing human-only assistant router | Not applicable |
@@ -69,7 +70,7 @@ pub struct ReadinessSnapshot { pub revision: String, pub evaluated_at: DateTime<
 pub fn build_snapshot(capabilities: Vec<ReadinessCapability>, evaluated_at: DateTime<Utc>) -> AppResult<ReadinessSnapshot>;
 ```
 
-- [ ] **Step 1: Write failing pure contract tests**
+- [x] **Step 1: Write failing pure contract tests**
 
 Cover literal state/status tables, duplicate fail-closed aggregation, empty task-request scopes, stable digest excluding time, HTTPS management URL construction, and JSON field names/secret absence.
 
@@ -77,11 +78,11 @@ Run: `cargo test -p nyxid assistant_readiness_service::tests -- --nocapture`
 
 Expected: FAIL because `assistant_readiness_service` and its types/functions do not exist.
 
-- [ ] **Step 2: Implement the minimum pure contract**
+- [x] **Step 2: Implement the minimum pure contract**
 
 Use serde snake_case enums, a dedicated camelCase DTO shape, `url::Url` for HTTPS validation, stable sort, `serde_json::to_vec`, and installed `sha2`. Keep mapping helpers private unless Task 2 consumes them.
 
-- [ ] **Step 3: Verify GREEN and commit**
+- [x] **Step 3: Verify GREEN and commit**
 
 Run: `cargo test -p nyxid assistant_readiness_service::tests -- --nocapture && cargo fmt --check`
 
@@ -99,10 +100,22 @@ git commit -m "feat(assistant): define readiness contract"
 **Files:**
 
 - Modify: `backend/src/services/assistant_readiness_service.rs`
+- Modify: `backend/src/services/approval_service.rs`
 
 **Interfaces:**
 
 ```rust
+pub enum ApprovalReadiness { NotRequired, Granted, Partial, Missing, Expired, Revoked, Denied, Unknown }
+pub async fn summarize_approval_readiness(
+    db: &mongodb::Database,
+    actor_user_id: &str,
+    service_owner_user_id: &str,
+    service_id: &str,
+    requester_type: &str,
+    requester_id: &str,
+    now: DateTime<Utc>,
+) -> AppResult<ApprovalReadiness>;
+
 pub async fn evaluate_readiness(
     db: &mongodb::Database,
     encryption_keys: &EncryptionKeys,
@@ -112,26 +125,26 @@ pub async fn evaluate_readiness(
 ) -> AppResult<ReadinessSnapshot>;
 ```
 
-- [ ] **Step 1: Write failing Mongo-backed service tests**
+- [x] **Step 1: Write failing Mongo-backed service tests**
 
-Insert the exact `aevatar` and `chrono-llm-public` core rows plus user/key/endpoint/catalog/approval fixtures. Assert: only the requested user's visible services appear; inactive or missing core is `missing`; misconfigured core is `cannot_use`; active/expired/revoked connector mapping is exact; delegated requester `aevatar` grant controls availability; role denial is `cannot_use`; absent or conflicting evidence is `cannot_check`.
+First add literal policy/grant-row tests for no-approval, unscoped grant, scoped partial grant, missing, expired, revoked, deny, and rule-dependent unknown. Then insert the exact `aevatar` and `chrono-llm-public` core rows plus user/key/endpoint/catalog/approval fixtures. Assert: only the requested user's visible services appear; inactive or missing core is `missing`; misconfigured core is `cannot_use`; core grant is `not_required`; connector grants use delegated requester `aevatar`; role denial is `cannot_use`; absent or conflicting evidence is `cannot_check`.
 
 Run: `cargo test -p nyxid assistant_readiness_service::tests::evaluate_ -- --nocapture`
 
 Expected: FAIL because `evaluate_readiness` and database composition do not exist.
 
-- [ ] **Step 2: Implement the minimum service composition**
+- [x] **Step 2: Implement the minimum service composition**
 
-Reuse `assistant_service` for the Aevatar admin row, `unified_key_service::list_keys` for safe visible connector views, `proxy_service` metadata lookup for the same effective owner/service ID the proxy selects, and `approval_service::resolve_org_aware_approval` plus `check_approval` for the delegated requester. Never serialize `KeyView` or model structs.
+Refactor the effective org/actor policy-source selection inside `approval_service` once, keeping existing operation evaluation behavior unchanged, then add the read-only summary there. A non-empty rule set is `Unknown` because no task operation descriptor exists; a simple all-service grant is `Granted` and a scoped grant is `Partial`. Reuse `assistant_service` for the Aevatar admin row, `unified_key_service::list_keys` for safe visible connector views, and `proxy_service` metadata lookup for the same effective owner/service ID the proxy selects. Never serialize `KeyView` or model structs.
 
-- [ ] **Step 3: Verify GREEN and commit**
+- [x] **Step 3: Verify GREEN and commit**
 
 Run: `cargo test -p nyxid assistant_readiness_service::tests -- --nocapture && cargo fmt --check`
 
 Expected: pure and Mongo-backed readiness service tests pass; a missing local Mongo is reported only through the repository existing skip guard.
 
 ```bash
-git add backend/src/services/assistant_readiness_service.rs
+git add backend/src/services/assistant_readiness_service.rs backend/src/services/approval_service.rs
 git commit -m "feat(assistant): evaluate readiness evidence"
 ```
 
