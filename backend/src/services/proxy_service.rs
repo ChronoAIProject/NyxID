@@ -1651,7 +1651,7 @@ async fn lookup_user_service(
     }
 }
 
-fn is_public_internal_master_credential_service(service: &DownstreamService) -> bool {
+pub(crate) fn is_public_internal_master_credential_service(service: &DownstreamService) -> bool {
     service.visibility == "public"
         && service.service_category == "internal"
         && service.auth_method != "none"

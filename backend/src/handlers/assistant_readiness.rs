@@ -113,7 +113,7 @@ mod tests {
         test_user_service,
     };
 
-    const FIXTURE: &str = include_str!("../../../tests/fixtures/assistant/readiness-v1.json");
+    const FIXTURE: &str = include_str!("../../../tests/fixtures/assistant/readiness-v2.json");
 
     #[test]
     fn management_url_is_https_configuration_owned_and_normalized() {
@@ -156,25 +156,30 @@ mod tests {
         let capabilities = fixture["capabilities"]
             .as_array()
             .expect("capabilities array");
-        assert_eq!(capabilities.len(), 1);
-        assert_eq!(capabilities[0]["capabilityId"], "api-github");
+        assert_eq!(capabilities.len(), 3);
+        assert_eq!(capabilities[0]["capabilityId"], "model");
+        assert_eq!(capabilities[0]["required"], true);
+        assert_eq!(capabilities[0]["grantState"], "not_required");
+        assert_eq!(capabilities[1]["capabilityId"], "runtime");
+        assert_eq!(capabilities[1]["required"], true);
+        assert_eq!(capabilities[1]["grantState"], "not_required");
+        assert_eq!(capabilities[2]["capabilityId"], "api-github");
+        assert_eq!(capabilities[2]["required"], false);
         assert_eq!(
-            capabilities[0]["requestedScopes"],
+            capabilities[2]["requestedScopes"],
             serde_json::json!(["repo"])
-        );
-        assert_eq!(
-            capabilities[0]["managementUrl"],
-            "https://id.nyx.example/keys"
         );
 
         assert_no_secret_shape(&fixture);
-        let management_url = capabilities[0]["managementUrl"]
-            .as_str()
-            .and_then(|value| url::Url::parse(value).ok())
-            .expect("safe fixture management URL");
-        assert_eq!(management_url.scheme(), "https");
-        assert!(management_url.username().is_empty());
-        assert!(management_url.password().is_none());
+        for capability in capabilities {
+            let management_url = capability["managementUrl"]
+                .as_str()
+                .and_then(|value| url::Url::parse(value).ok())
+                .expect("safe fixture management URL");
+            assert_eq!(management_url.scheme(), "https");
+            assert!(management_url.username().is_empty());
+            assert!(management_url.password().is_none());
+        }
     }
 
     #[tokio::test]
@@ -214,14 +219,30 @@ mod tests {
         let Json(response) = get_readiness(State(state), test_auth_user(&actor_id)).await;
         let json = serde_json::to_value(response).expect("serialize response");
 
-        assert_eq!(json["revision"], "nyxid-assistant-readiness.v1");
-        assert_eq!(json["capabilities"][0]["status"], "missing");
-        assert_eq!(json["capabilities"][0]["connectionState"], "not_connected");
-        assert_eq!(json["capabilities"][0]["grantState"], "missing");
-        assert_eq!(
-            json["capabilities"][0]["reasonCode"],
-            "service_not_connected"
-        );
+        assert_eq!(json["revision"], "nyxid-assistant-readiness.v2");
+        let capabilities = json["capabilities"].as_array().expect("capabilities");
+        let capability = |id: &str| {
+            capabilities
+                .iter()
+                .find(|capability| capability["capabilityId"] == id)
+                .expect("registered capability")
+        };
+
+        for id in ["model", "runtime"] {
+            let core = capability(id);
+            assert_eq!(core["required"], true);
+            assert_eq!(core["status"], "missing");
+            assert_eq!(core["connectionState"], "not_connected");
+            assert_eq!(core["grantState"], "not_required");
+            assert_eq!(core["reasonCode"], "service_not_connected");
+        }
+
+        let github = capability("api-github");
+        assert_eq!(github["required"], false);
+        assert_eq!(github["status"], "missing");
+        assert_eq!(github["connectionState"], "not_connected");
+        assert_eq!(github["grantState"], "missing");
+        assert_eq!(github["reasonCode"], "service_not_connected");
         assert!(json.to_string().find(&actor_id).is_none());
         assert!(json.to_string().find(&other_user_id).is_none());
     }

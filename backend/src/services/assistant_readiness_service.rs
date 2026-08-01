@@ -1,9 +1,9 @@
 //! Server-authoritative assistant capability readiness projection.
 //!
 //! This is a CQRS read model over existing execution authorities. It does not
-//! grant access and it never decrypts credentials. A capability is available
-//! only when connection, provider-scope, ownership, and canonical MCP
-//! callability evidence all agree.
+//! grant access and it never decrypts credentials. Core model/runtime rows use
+//! exact platform configuration evidence; connectors additionally require
+//! connection, provider-scope, ownership, and canonical MCP callability.
 
 use chrono::{DateTime, Utc};
 use futures::TryStreamExt;
@@ -26,7 +26,7 @@ use crate::services::node_ws_manager::NodeWsManager;
 use crate::services::proxy_service;
 use crate::services::user_service_service::{self, CredentialSource};
 
-pub const ASSISTANT_READINESS_REVISION: &str = "nyxid-assistant-readiness.v1";
+pub const ASSISTANT_READINESS_REVISION: &str = "nyxid-assistant-readiness.v2";
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum CapabilityStatus {
@@ -156,8 +156,16 @@ pub struct CapabilityReadiness {
     pub reason_code: Option<ReasonCode>,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum CapabilityEvidenceSource {
+    PlatformConfiguration,
+    Connector,
+}
+
 struct CapabilityProfile {
     capability_id: &'static str,
+    service_slug: &'static str,
+    evidence_source: CapabilityEvidenceSource,
     label: &'static str,
     required: bool,
     requested_scopes: &'static [&'static str],
@@ -166,13 +174,35 @@ struct CapabilityProfile {
 
 // The registry is deliberately closed and versioned with the response. Adding
 // or changing a row requires a readiness revision and a consumer fixture update.
-const CAPABILITY_PROFILES: &[CapabilityProfile] = &[CapabilityProfile {
-    capability_id: "api-github",
-    label: "GitHub",
-    required: false,
-    requested_scopes: &["repo"],
-    management_path: "/keys",
-}];
+const CAPABILITY_PROFILES: &[CapabilityProfile] = &[
+    CapabilityProfile {
+        capability_id: "model",
+        service_slug: "chrono-llm-public",
+        evidence_source: CapabilityEvidenceSource::PlatformConfiguration,
+        label: "Model",
+        required: true,
+        requested_scopes: &[],
+        management_path: "/keys",
+    },
+    CapabilityProfile {
+        capability_id: "runtime",
+        service_slug: "aevatar",
+        evidence_source: CapabilityEvidenceSource::PlatformConfiguration,
+        label: "Chat runtime",
+        required: true,
+        requested_scopes: &[],
+        management_path: "/keys",
+    },
+    CapabilityProfile {
+        capability_id: "api-github",
+        service_slug: "api-github",
+        evidence_source: CapabilityEvidenceSource::Connector,
+        label: "GitHub",
+        required: false,
+        requested_scopes: &["repo"],
+        management_path: "/keys",
+    },
+];
 
 #[derive(Clone, Copy, Debug)]
 struct CapabilityEvidence {
@@ -184,12 +214,15 @@ struct CapabilityEvidence {
 }
 
 impl CapabilityEvidence {
-    fn unavailable() -> Self {
+    fn unavailable(profile: &CapabilityProfile) -> Self {
         Self {
             catalog_available: false,
             access_allowed: true,
             connection_state: ConnectionState::Unknown,
-            grant_state: GrantState::Unknown,
+            grant_state: match profile.evidence_source {
+                CapabilityEvidenceSource::PlatformConfiguration => GrantState::NotRequired,
+                CapabilityEvidenceSource::Connector => GrantState::Unknown,
+            },
             executable: None,
         }
     }
@@ -235,7 +268,7 @@ pub async fn evaluate_readiness(
                         error = %error,
                         "Assistant readiness evidence could not be evaluated"
                     );
-                    CapabilityEvidence::unavailable()
+                    CapabilityEvidence::unavailable(profile)
                 }
             };
         capabilities.push(evaluate_profile(profile, evidence));
@@ -255,16 +288,16 @@ async fn load_capability_evidence(
     profile: &CapabilityProfile,
     evaluated_at: DateTime<Utc>,
 ) -> AppResult<CapabilityEvidence> {
-    let Some(catalog_service) = db
+    let service = db
         .collection::<DownstreamService>(DOWNSTREAM_SERVICES)
-        .find_one(doc! {
-            "slug": profile.capability_id,
-            "is_active": true,
-            "service_type": "http",
-        })
-        .await?
-    else {
-        return Ok(CapabilityEvidence::unavailable());
+        .find_one(capability_service_filter(profile))
+        .await?;
+    if profile.evidence_source == CapabilityEvidenceSource::PlatformConfiguration {
+        return Ok(platform_configuration_evidence(service.as_ref()));
+    }
+
+    let Some(catalog_service) = service else {
+        return Ok(CapabilityEvidence::unavailable(profile));
     };
 
     let visible_services =
@@ -335,6 +368,41 @@ async fn load_capability_evidence(
     Ok(CapabilityEvidence::not_connected())
 }
 
+fn capability_service_filter(profile: &CapabilityProfile) -> mongodb::bson::Document {
+    match profile.evidence_source {
+        CapabilityEvidenceSource::PlatformConfiguration => {
+            doc! { "slug": profile.service_slug, "is_active": true }
+        }
+        CapabilityEvidenceSource::Connector => doc! {
+            "slug": profile.service_slug,
+            "is_active": true,
+            "service_type": "http",
+        },
+    }
+}
+
+fn platform_configuration_evidence(service: Option<&DownstreamService>) -> CapabilityEvidence {
+    let Some(service) = service.filter(|service| service.is_active) else {
+        return CapabilityEvidence {
+            catalog_available: true,
+            access_allowed: true,
+            connection_state: ConnectionState::NotConnected,
+            grant_state: GrantState::NotRequired,
+            executable: Some(false),
+        };
+    };
+
+    CapabilityEvidence {
+        catalog_available: true,
+        access_allowed: true,
+        connection_state: ConnectionState::Connected,
+        grant_state: GrantState::NotRequired,
+        executable: Some(proxy_service::is_public_internal_master_credential_service(
+            service,
+        )),
+    }
+}
+
 fn select_user_service(
     mut candidates: Vec<SelectedUserService>,
     capability_id: &str,
@@ -368,14 +436,13 @@ async fn unified_service_evidence(
     };
 
     let Some(api_key_id) = selected.service.api_key_id.as_deref() else {
-        let connection_state = if selected.service.auth_method == "none" {
-            ConnectionState::Connected
-        } else if selected
-            .service
-            .node_id
-            .as_deref()
-            .is_some_and(|node_id| !node_id.is_empty())
-            && executable == Some(true)
+        let connection_state = if selected.service.auth_method == "none"
+            || (selected
+                .service
+                .node_id
+                .as_deref()
+                .is_some_and(|node_id| !node_id.is_empty())
+                && executable == Some(true))
         {
             ConnectionState::Connected
         } else {
@@ -573,9 +640,9 @@ fn connection_state_for_key(
                 .node_id
                 .as_deref()
                 .is_some_and(|node_id| !node_id.is_empty());
-            if node_routed && executable == Some(true) {
-                ConnectionState::Connected
-            } else if crate::services::user_api_key_service::has_server_credential(key) {
+            if (node_routed && executable == Some(true))
+                || crate::services::user_api_key_service::has_server_credential(key)
+            {
                 ConnectionState::Connected
             } else {
                 ConnectionState::Verifying
@@ -796,6 +863,8 @@ mod tests {
 
     const PROFILE: CapabilityProfile = CapabilityProfile {
         capability_id: "test-capability",
+        service_slug: "test-capability",
+        evidence_source: CapabilityEvidenceSource::Connector,
         label: "Test",
         required: true,
         requested_scopes: &["read", "write"],
@@ -1108,11 +1177,117 @@ mod tests {
     }
 
     #[test]
+    fn platform_configuration_evidence_is_fail_closed_and_never_invents_a_grant() {
+        let profile = &CAPABILITY_PROFILES[0];
+
+        let missing = evaluate_profile(profile, platform_configuration_evidence(None));
+        assert_eq!(missing.status, CapabilityStatus::Missing);
+        assert_eq!(missing.connection_state, ConnectionState::NotConnected);
+        assert_eq!(missing.grant_state, GrantState::NotRequired);
+        assert_eq!(missing.reason_code, Some(ReasonCode::ServiceNotConnected));
+
+        let mut service = crate::models::downstream_service::test_helpers::dummy_service();
+        service.slug = profile.service_slug.to_string();
+        service.visibility = "public".to_string();
+        service.service_category = "internal".to_string();
+        service.auth_method = "bearer".to_string();
+        service.credential_encrypted = vec![1];
+        service.provider_config_id = None;
+
+        let ready = evaluate_profile(profile, platform_configuration_evidence(Some(&service)));
+        assert_eq!(ready.status, CapabilityStatus::Available);
+        assert_eq!(ready.connection_state, ConnectionState::Connected);
+        assert_eq!(ready.grant_state, GrantState::NotRequired);
+        assert_eq!(ready.reason_code, None);
+
+        service.is_active = false;
+        let inactive = evaluate_profile(profile, platform_configuration_evidence(Some(&service)));
+        assert_eq!(inactive.status, CapabilityStatus::Missing);
+        assert_eq!(inactive.connection_state, ConnectionState::NotConnected);
+        assert_eq!(inactive.grant_state, GrantState::NotRequired);
+
+        service.is_active = true;
+        service.requires_user_credential = true;
+        let misconfigured =
+            evaluate_profile(profile, platform_configuration_evidence(Some(&service)));
+        assert_eq!(misconfigured.status, CapabilityStatus::CannotUse);
+        assert_eq!(
+            misconfigured.reason_code,
+            Some(ReasonCode::ExecutionUnavailable)
+        );
+        assert_eq!(misconfigured.grant_state, GrantState::NotRequired);
+    }
+
+    #[test]
+    fn backing_service_filters_use_exact_internal_slugs() {
+        assert_eq!(
+            capability_service_filter(&CAPABILITY_PROFILES[0]),
+            doc! { "slug": "chrono-llm-public", "is_active": true }
+        );
+        assert_eq!(
+            capability_service_filter(&CAPABILITY_PROFILES[1]),
+            doc! { "slug": "aevatar", "is_active": true }
+        );
+        assert_eq!(
+            capability_service_filter(&CAPABILITY_PROFILES[2]),
+            doc! {
+                "slug": "api-github",
+                "is_active": true,
+                "service_type": "http",
+            }
+        );
+    }
+
+    #[test]
+    fn unavailable_evidence_preserves_non_applicable_core_grants() {
+        let model = evaluate_profile(
+            &CAPABILITY_PROFILES[0],
+            CapabilityEvidence::unavailable(&CAPABILITY_PROFILES[0]),
+        );
+        assert_eq!(model.status, CapabilityStatus::CannotCheck);
+        assert_eq!(model.connection_state, ConnectionState::Unknown);
+        assert_eq!(model.grant_state, GrantState::NotRequired);
+
+        let github = evaluate_profile(
+            &CAPABILITY_PROFILES[2],
+            CapabilityEvidence::unavailable(&CAPABILITY_PROFILES[2]),
+        );
+        assert_eq!(github.status, CapabilityStatus::CannotCheck);
+        assert_eq!(github.connection_state, ConnectionState::Unknown);
+        assert_eq!(github.grant_state, GrantState::Unknown);
+    }
+
+    #[test]
     fn registry_identity_is_versioned_and_closed() {
-        assert_eq!(ASSISTANT_READINESS_REVISION, "nyxid-assistant-readiness.v1");
-        assert_eq!(CAPABILITY_PROFILES.len(), 1);
-        let github = &CAPABILITY_PROFILES[0];
+        assert_eq!(ASSISTANT_READINESS_REVISION, "nyxid-assistant-readiness.v2");
+        assert_eq!(CAPABILITY_PROFILES.len(), 3);
+
+        let model = &CAPABILITY_PROFILES[0];
+        assert_eq!(model.capability_id, "model");
+        assert_eq!(model.service_slug, "chrono-llm-public");
+        assert_eq!(
+            model.evidence_source,
+            CapabilityEvidenceSource::PlatformConfiguration
+        );
+        assert_eq!(model.label, "Model");
+        assert!(model.required);
+        assert!(model.requested_scopes.is_empty());
+
+        let runtime = &CAPABILITY_PROFILES[1];
+        assert_eq!(runtime.capability_id, "runtime");
+        assert_eq!(runtime.service_slug, "aevatar");
+        assert_eq!(
+            runtime.evidence_source,
+            CapabilityEvidenceSource::PlatformConfiguration
+        );
+        assert_eq!(runtime.label, "Chat runtime");
+        assert!(runtime.required);
+        assert!(runtime.requested_scopes.is_empty());
+
+        let github = &CAPABILITY_PROFILES[2];
         assert_eq!(github.capability_id, "api-github");
+        assert_eq!(github.service_slug, "api-github");
+        assert_eq!(github.evidence_source, CapabilityEvidenceSource::Connector);
         assert_eq!(github.label, "GitHub");
         assert!(!github.required);
         assert_eq!(github.requested_scopes, ["repo"]);
