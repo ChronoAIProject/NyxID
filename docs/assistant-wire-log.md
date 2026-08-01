@@ -71,6 +71,24 @@ The frontend also accepts the legacy bare-array payload. It does not infer an
 upstream outcome for legacy echoes because an older list fallback could record
 an attempted request whose proxy call subsequently failed.
 
+### Version skew
+
+Compatibility is one-directional by design:
+
+- **New frontend + old backend** — supported. The decoder accepts the legacy
+  bare array and normalises it, leaving `upstreamOutcome` and `response` absent.
+- **Old frontend + new backend** — the panel shows no entries. A pre-version-2
+  frontend expects a top-level JSON array and rejects the version 2 wrapper, so
+  `captureAssistantWireLogHeader` discards the header.
+
+The second case is a transient, admin-only, capture-only diagnostic gap during a
+rolling deploy where the backend ships ahead of the frontend. It clears as soon
+as the browser loads the current frontend bundle. It does not affect chat
+delivery, and no other surface reads this header. The wrapper is deliberately
+*not* emitted conditionally to preserve old-frontend parsing: a dual wire format
+would leave the degraded path exercised only in rare production cases, which is
+worse than a self-healing empty panel.
+
 ## Echo Shapes
 
 Every version 2 echo is one member of a discriminated union.
