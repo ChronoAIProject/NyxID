@@ -1,4 +1,5 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
+import backendLadderFixtures from "./__fixtures__/assistant-upstream-envelope-ladder.json";
 import {
   assistantUpstreamEnvelopeHeaderDecoderSchema,
   type AssistantUpstreamEnvelope,
@@ -58,65 +59,11 @@ function encodeHeader(value: unknown): string {
 
 describe("assistant upstream envelope decoder", () => {
   it("accepts every backend degradation rung through the real union decoder", () => {
-    const full = envelope(1);
-    const rungs = [
-      { version: 2, echoes: [full], droppedEchoCount: 0 },
-      {
-        version: 2,
-        echoes: [{ ...full, body: '{"prompt":"partial', truncated: true }],
-        droppedEchoCount: 0,
-      },
-      {
-        version: 2,
-        echoes: [{ ...full, body: null, truncated: true }],
-        droppedEchoCount: 0,
-      },
-      {
-        version: 2,
-        echoes: [
-          {
-            ...full,
-            body: null,
-            headers: {},
-            truncated: true,
-            droppedHeaders: true,
-            response: { status: 200, headers: {}, sse: true },
-          },
-        ],
-        droppedEchoCount: 0,
-      },
-      {
-        version: 2,
-        echoes: [
-          {
-            degraded: true,
-            method: "POST",
-            path: "api/chat",
-            commandType: "text",
-            upstreamOutcome: "response",
-            status: 200,
-          },
-        ],
-        droppedEchoCount: 0,
-      },
-      {
-        version: 2,
-        echoes: [
-          {
-            degraded: true,
-            method: "POST",
-            path: "api/chat",
-            upstreamOutcome: "unknown",
-          },
-        ],
-        droppedEchoCount: 32,
-      },
-    ];
-
-    for (const rung of rungs) {
-      expect(
-        assistantUpstreamEnvelopeHeaderDecoderSchema.safeParse(rung).success,
-      ).toBe(true);
+    for (const fixture of backendLadderFixtures) {
+      const decoded = assistantUpstreamEnvelopeHeaderDecoderSchema.safeParse(
+        fixture.header,
+      );
+      expect(decoded.success, fixture.rung).toBe(true);
     }
   });
 

@@ -80,11 +80,9 @@ struct UpstreamEcho {
 
 #[derive(Clone, Copy, Debug, Serialize)]
 #[serde(rename_all = "snake_case")]
-#[allow(dead_code)]
 enum UpstreamOutcome {
     Response,
     NoResponse,
-    Unknown,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -283,9 +281,10 @@ fn encode_header(header: &UpstreamEchoHeader) -> Option<String> {
 fn encoded_header_if_fits(
     header: &UpstreamEchoHeader,
     rung: EchoEncodingRung,
+    max_bytes: usize,
 ) -> Option<(HeaderValue, EchoEncodingRung)> {
     let encoded = encode_header(header)?;
-    if encoded.len() > DEBUG_UPSTREAM_HEADER_MAX_BYTES {
+    if encoded.len() > max_bytes {
         return None;
     }
     Some((HeaderValue::from_str(&encoded).ok()?, rung))
@@ -294,8 +293,16 @@ fn encoded_header_if_fits(
 fn encode_echo_header_with_rung(
     echoes: &[UpstreamEcho],
 ) -> Option<(HeaderValue, EchoEncodingRung)> {
+    encode_echo_header_with_limit(echoes, DEBUG_UPSTREAM_HEADER_MAX_BYTES)
+}
+
+fn encode_echo_header_with_limit(
+    echoes: &[UpstreamEcho],
+    max_bytes: usize,
+) -> Option<(HeaderValue, EchoEncodingRung)> {
     let mut candidates = echoes.to_vec();
-    if let Some(encoded) = encoded_header_if_fits(&full_header(&candidates), EchoEncodingRung::Full)
+    if let Some(encoded) =
+        encoded_header_if_fits(&full_header(&candidates), EchoEncodingRung::Full, max_bytes)
     {
         return Some(encoded);
     }
@@ -314,8 +321,12 @@ fn encode_echo_header_with_rung(
     for (index, body) in bodies {
         candidates[index].body = serde_json::Value::String(String::new());
         candidates[index].truncated = true;
-        if encoded_header_if_fits(&full_header(&candidates), EchoEncodingRung::TruncatedBodies)
-            .is_none()
+        if encoded_header_if_fits(
+            &full_header(&candidates),
+            EchoEncodingRung::TruncatedBodies,
+            max_bytes,
+        )
+        .is_none()
         {
             continue;
         }
@@ -327,8 +338,12 @@ fn encode_echo_header_with_rung(
             let middle = low + (high - low) / 2;
             let (prefix, _) = truncate_utf8(&body, middle);
             candidates[index].body = serde_json::Value::String(prefix);
-            if encoded_header_if_fits(&full_header(&candidates), EchoEncodingRung::TruncatedBodies)
-                .is_some()
+            if encoded_header_if_fits(
+                &full_header(&candidates),
+                EchoEncodingRung::TruncatedBodies,
+                max_bytes,
+            )
+            .is_some()
             {
                 best = candidates[index]
                     .body
@@ -347,10 +362,15 @@ fn encode_echo_header_with_rung(
             return encoded_header_if_fits(
                 &full_header(&candidates),
                 EchoEncodingRung::TruncatedBodies,
+                max_bytes,
             );
         }
     }
 
+    // JSON null is two bytes larger than an empty JSON string, but this rung
+    // remains reachable because the prior rung deliberately refuses prefixes
+    // shorter than 16 bytes. When only a tiny prefix fits, null reports the
+    // body loss honestly instead of retaining a misleading sliver of JSON.
     candidates = echoes.to_vec();
     for echo in &mut candidates {
         if !echo.body.is_null() {
@@ -358,9 +378,11 @@ fn encode_echo_header_with_rung(
             echo.truncated = true;
         }
     }
-    if let Some(encoded) =
-        encoded_header_if_fits(&full_header(&candidates), EchoEncodingRung::DroppedBodies)
-    {
+    if let Some(encoded) = encoded_header_if_fits(
+        &full_header(&candidates),
+        EchoEncodingRung::DroppedBodies,
+        max_bytes,
+    ) {
         return Some(encoded);
     }
 
@@ -371,9 +393,11 @@ fn encode_echo_header_with_rung(
         }
         echo.dropped_headers = Some(true);
     }
-    if let Some(encoded) =
-        encoded_header_if_fits(&full_header(&candidates), EchoEncodingRung::DroppedHeaders)
-    {
+    if let Some(encoded) = encoded_header_if_fits(
+        &full_header(&candidates),
+        EchoEncodingRung::DroppedHeaders,
+        max_bytes,
+    ) {
         return Some(encoded);
     }
 
@@ -386,7 +410,7 @@ fn encode_echo_header_with_rung(
             .collect(),
         dropped_echo_count: 0,
     };
-    if let Some(encoded) = encoded_header_if_fits(&minimal, EchoEncodingRung::Minimal) {
+    if let Some(encoded) = encoded_header_if_fits(&minimal, EchoEncodingRung::Minimal, max_bytes) {
         return Some(encoded);
     }
 
@@ -396,7 +420,7 @@ fn encode_echo_header_with_rung(
         .saturating_sub(DEBUG_UPSTREAM_MAX_ECHOES);
     minimal.echoes.truncate(DEBUG_UPSTREAM_MAX_ECHOES);
     minimal.dropped_echo_count = u32::try_from(dropped).unwrap_or(u32::MAX);
-    encoded_header_if_fits(&minimal, EchoEncodingRung::DroppedEchoes)
+    encoded_header_if_fits(&minimal, EchoEncodingRung::DroppedEchoes, max_bytes)
 }
 
 fn encode_echo_header(echoes: &[UpstreamEcho]) -> Option<HeaderValue> {
@@ -1315,16 +1339,81 @@ mod tests {
         assert_eq!(dropped["echoes"].as_array().unwrap().len(), 8);
         assert_eq!(dropped["droppedEchoCount"], 32);
         assert_eq!(dropped["echoes"][0]["path"], many[0].path);
+
+        let fixture_header = |echoes: &[UpstreamEcho], target| {
+            (128..=4_096)
+                .step_by(4)
+                .find_map(|max_bytes| {
+                    let encoded = encode_echo_header_with_limit(echoes, max_bytes)?;
+                    (encoded.1 == target).then(|| decode_echo_header(&encoded.0))
+                })
+                .unwrap_or_else(|| panic!("fixture rung {target:?} must be reachable"))
+        };
+        let full_fixture = vec![test_echo(serde_json::json!({ "prompt": "short" }))];
+        let truncated_fixture = vec![test_echo(serde_json::json!({
+            "prompt": "x".repeat(500),
+        }))];
+        let mut dropped_body_fixture = test_echo(serde_json::json!({
+            "prompt": "x".repeat(500),
+        }));
+        dropped_body_fixture.identity.mode = "i".repeat(100);
+        let mut minimal_fixture = test_echo(serde_json::Value::Null);
+        minimal_fixture.identity.mode = "identity".repeat(100);
+        let mut dropped_headers_fixture = test_echo(serde_json::Value::Null);
+        dropped_headers_fixture.headers = serde_json::Map::from_iter([
+            ("accept".to_string(), serde_json::json!("a".repeat(100))),
+            (
+                "content-type".to_string(),
+                serde_json::json!("c".repeat(100)),
+            ),
+        ]);
+        dropped_headers_fixture.response = Some(UpstreamResponseEcho {
+            status: 200,
+            headers: serde_json::Map::from_iter([(
+                "x-request-id".to_string(),
+                serde_json::to_value(UpstreamResponseHeaderEcho {
+                    value: "r".repeat(100),
+                    truncated: false,
+                })
+                .unwrap(),
+            )]),
+            sse: false,
+        });
+        dropped_headers_fixture.upstream_outcome = Some(UpstreamOutcome::Response);
+        let many_fixture = (0..12)
+            .map(|index| {
+                let mut echo = test_echo(serde_json::Value::Null);
+                echo.path = format!("api/chat/{index}");
+                echo.identity.mode = "identity".repeat(100);
+                echo
+            })
+            .collect::<Vec<_>>();
+        let fixture = serde_json::json!([
+            { "rung": "full", "header": fixture_header(&full_fixture, EchoEncodingRung::Full) },
+            { "rung": "truncated_bodies", "header": fixture_header(&truncated_fixture, EchoEncodingRung::TruncatedBodies) },
+            { "rung": "dropped_bodies", "header": fixture_header(&[dropped_body_fixture], EchoEncodingRung::DroppedBodies) },
+            { "rung": "dropped_headers", "header": fixture_header(&[dropped_headers_fixture], EchoEncodingRung::DroppedHeaders) },
+            { "rung": "minimal", "header": fixture_header(&[minimal_fixture], EchoEncodingRung::Minimal) },
+            { "rung": "dropped_echoes", "header": fixture_header(&many_fixture, EchoEncodingRung::DroppedEchoes) },
+        ]);
+        let committed_fixture: serde_json::Value = serde_json::from_str(include_str!(
+            "../../../frontend/src/stores/__fixtures__/assistant-upstream-envelope-ladder.json"
+        ))
+        .expect("ladder fixture must be valid JSON");
+        assert_eq!(fixture, committed_fixture, "backend ladder fixture drifted");
     }
 
     #[test]
     fn worst_case_minimal_header_fits_with_total_header_headroom() {
+        // Methods are validated HTTP tokens, paths come from axum URI paths,
+        // and command types are fixed server literals. Raw control characters
+        // that would expand under JSON escaping cannot reach these fields.
         let worst_echo = MinimalUpstreamEcho {
             degraded: true,
             method: "M".repeat(16),
             path: "界".repeat(85),
             command_type: Some("C".repeat(DEBUG_UPSTREAM_COMMAND_TYPE_MAX_BYTES)),
-            upstream_outcome: Some(UpstreamOutcome::Unknown),
+            upstream_outcome: Some(UpstreamOutcome::Response),
             status: Some(u16::MAX),
         };
         assert_eq!(worst_echo.path.len(), 255);

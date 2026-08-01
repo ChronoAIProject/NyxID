@@ -197,6 +197,31 @@ describe("AssistantWireLogPanel", () => {
     expect(screen.queryByText("line-400")).not.toBeInTheDocument();
   });
 
+  it("discloses when response headers were dropped by degradation", () => {
+    const degradedResponse = responseEnvelope();
+    useAssistantWireLogStore.getState().recordExchange(
+      [
+        {
+          ...degradedResponse,
+          droppedHeaders: true,
+          response: { ...degradedResponse.response, headers: {} },
+        },
+      ],
+      "header",
+      200,
+    );
+    renderWithTooltips(<AssistantWireLogPanel />);
+
+    fireEvent.click(screen.getByRole("button", { name: "Aevatar wire log" }));
+    fireEvent.click(screen.getByText("/api/chat").closest("button")!);
+
+    expect(
+      screen.getByText(
+        "Allowlisted response headers were dropped by the wire-header size ladder.",
+      ),
+    ).toBeInTheDocument();
+  });
+
   it("renders text and inert original-frame placeholders without side effects", () => {
     const exchangeId = useAssistantWireLogStore
       .getState()

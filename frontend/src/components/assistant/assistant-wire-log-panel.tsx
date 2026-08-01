@@ -113,6 +113,12 @@ function UpstreamResponse({
               </div>
             ))}
           </dl>
+          {!envelope.degraded && envelope.droppedHeaders ? (
+            <p className="mt-2 text-[10px] text-warning">
+              Allowlisted response headers were dropped by the wire-header size
+              ladder.
+            </p>
+          ) : null}
         </div>
       ) : envelope.degraded && envelope.status ? (
         <p className="text-[11px] text-muted-foreground">
