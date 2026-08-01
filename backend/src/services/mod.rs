@@ -7,6 +7,7 @@ pub mod api_docs_service;
 pub mod api_key_scope_service;
 pub mod approval_policy;
 pub mod approval_service;
+pub mod assistant_readiness_service;
 pub mod assistant_service;
 pub mod audit_chain_service;
 pub mod audit_service;
