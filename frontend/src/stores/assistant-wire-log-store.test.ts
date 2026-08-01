@@ -59,6 +59,7 @@ function encodeHeader(value: unknown): string {
 
 describe("assistant upstream envelope decoder", () => {
   it("accepts every backend degradation rung through the real union decoder", () => {
+    expect(backendLadderFixtures).toHaveLength(6);
     for (const fixture of backendLadderFixtures) {
       const decoded = assistantUpstreamEnvelopeHeaderDecoderSchema.safeParse(
         fixture.header,

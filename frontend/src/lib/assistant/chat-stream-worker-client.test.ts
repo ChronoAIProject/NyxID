@@ -111,6 +111,72 @@ describe("ChatStreamWorkerClient", () => {
     await expect(stream.completion).resolves.toEqual({ kind: "cancelled" });
   });
 
+  it("retains capture-on cancellation until flushed wire data is acknowledged", async () => {
+    const worker = new FakeWorker();
+    const client = new ChatStreamWorkerClient(() => asWorker(worker));
+    const controller = new AbortController();
+    const wireEvents: unknown[] = [];
+    const flushedLine = 'data: {"type":"TEXT_MESSAGE_CONTENT"}';
+    const stream = client.start({
+      url: "/stream",
+      bodyText: "{}",
+      signal: controller.signal,
+      headers: { "X-NyxID-Debug-Upstream": "1" },
+      onFrames: () => {},
+      onWire: (event) => wireEvents.push(event),
+    });
+    const id = requestId(worker);
+    worker.emit({
+      type: "stream.response",
+      requestId: id,
+      status: 200,
+      contentType: "text/event-stream",
+    });
+
+    controller.abort();
+
+    let completionSettled = false;
+    void stream.completion.then(() => {
+      completionSettled = true;
+    });
+    await Promise.resolve();
+    expect(completionSettled).toBe(false);
+
+    worker.emit({
+      type: "stream.wire_batch",
+      requestId: id,
+      fragments: [{ text: flushedLine, ending: "\n", fragment: false }],
+      bytes: 38,
+      truncated: false,
+    });
+    worker.emit({
+      type: "stream.wire_end",
+      requestId: id,
+      outcome: "cancelled",
+    });
+    await Promise.resolve();
+    expect(completionSettled).toBe(false);
+
+    worker.emit({ type: "stream.cancelled", requestId: id });
+
+    await expect(stream.completion).resolves.toEqual({ kind: "cancelled" });
+    expect(wireEvents).toEqual([
+      {
+        type: "lines",
+        requestId: id,
+        lines: [
+          {
+            text: flushedLine,
+            ending: "\n",
+          },
+        ],
+        bytes: 38,
+        truncated: false,
+      },
+      { type: "end", requestId: id, outcome: "cancelled" },
+    ]);
+  });
+
   it("surfaces debug metadata from worker HTTP errors", async () => {
     const worker = new FakeWorker();
     const client = new ChatStreamWorkerClient(() => asWorker(worker));
