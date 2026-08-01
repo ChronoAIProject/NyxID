@@ -51,6 +51,7 @@ function reassembleWireLines(
 }
 
 afterEach(() => {
+  vi.useRealTimers();
   vi.unstubAllGlobals();
   vi.restoreAllMocks();
 });
@@ -287,6 +288,53 @@ describe("chat stream worker", () => {
     });
   });
 
+  it("preserves capture-off character truncation and drops partially read HTTP errors", async () => {
+    const multibyteBody = "界".repeat(40_000);
+    const brokenBody = new ReadableStream<Uint8Array>({
+      start(controller) {
+        controller.enqueue(new TextEncoder().encode("partial"));
+        controller.error(new Error("body read failed"));
+      },
+    });
+    vi.stubGlobal(
+      "fetch",
+      vi
+        .fn()
+        .mockResolvedValueOnce(new Response(multibyteBody, { status: 502 }))
+        .mockResolvedValueOnce(new Response(brokenBody, { status: 503 })),
+    );
+    const scope = await installWorker();
+    send(scope, {
+      type: "stream.start",
+      requestId: "request-multibyte-error",
+      url: "/stream",
+      bodyText: "{}",
+    });
+    send(scope, {
+      type: "stream.start",
+      requestId: "request-broken-error",
+      url: "/stream",
+      bodyText: "{}",
+    });
+
+    await vi.waitFor(() => {
+      expect(messages(scope)).toEqual(
+        expect.arrayContaining([
+          expect.objectContaining({
+            type: "stream.http_error",
+            requestId: "request-multibyte-error",
+            body: multibyteBody,
+          }),
+          expect.objectContaining({
+            type: "stream.http_error",
+            requestId: "request-broken-error",
+            body: "",
+          }),
+        ]),
+      );
+    });
+  });
+
   it("aborts only the matching in-flight request", async () => {
     let capturedSignal: AbortSignal | undefined;
     vi.stubGlobal(
@@ -317,6 +365,72 @@ describe("chat stream worker", () => {
         type: "stream.cancelled",
         requestId: "request-cancel",
       });
+    });
+  });
+
+  it("clears a pending frame batch before acknowledging cancellation", async () => {
+    vi.useFakeTimers();
+    const encoder = new TextEncoder();
+    let push: (value: Uint8Array) => void = () => undefined;
+    let fail: (reason: unknown) => void = () => undefined;
+    const body = new ReadableStream<Uint8Array>({
+      start(controller) {
+        push = (value) => controller.enqueue(value);
+        fail = (reason) => controller.error(reason);
+      },
+    });
+    vi.stubGlobal(
+      "fetch",
+      vi.fn((_url: string, init?: RequestInit) => {
+        init?.signal?.addEventListener("abort", () => {
+          fail(new DOMException("aborted", "AbortError"));
+        });
+        return Promise.resolve(
+          new Response(body, {
+            status: 200,
+            headers: { "Content-Type": "text/event-stream" },
+          }),
+        );
+      }),
+    );
+    const scope = await installWorker();
+    send(scope, {
+      type: "stream.start",
+      requestId: "request-cancel-timer",
+      url: "/stream",
+      bodyText: "{}",
+      headers: { "X-NyxID-Debug-Upstream": "1" },
+    });
+    await Promise.resolve();
+    push(
+      encoder.encode(
+        'data: {"type":"RUN_STARTED","turnId":"turn-cancel"}\n\n',
+      ),
+    );
+    for (let index = 0; index < 5; index += 1) await Promise.resolve();
+    expect(messages(scope)).toContainEqual(
+      expect.objectContaining({
+        type: "stream.wire_batch",
+        requestId: "request-cancel-timer",
+      }),
+    );
+    expect(
+      messages(scope).some((message) => message.type === "stream.batch"),
+    ).toBe(false);
+
+    send(scope, { type: "stream.cancel", requestId: "request-cancel-timer" });
+    await vi.advanceTimersByTimeAsync(100);
+
+    expect(
+      messages(scope).some(
+        (message) =>
+          message.requestId === "request-cancel-timer" &&
+          message.type === "stream.batch",
+      ),
+    ).toBe(false);
+    expect(messages(scope)).toContainEqual({
+      type: "stream.cancelled",
+      requestId: "request-cancel-timer",
     });
   });
 
@@ -441,11 +555,17 @@ describe("chat stream worker", () => {
         },
       ]),
     );
+    expect(messages(scope)).toContainEqual({
+      type: "stream.network_error",
+      requestId: "request-empty",
+      code: "stream_closed",
+      message: "The assistant stream closed before it started.",
+    });
     expect(
       messages(scope).some(
         (message) =>
           message.requestId === "request-empty" &&
-          message.type === "stream.network_error",
+          message.type === "stream.complete",
       ),
     ).toBe(false);
   });

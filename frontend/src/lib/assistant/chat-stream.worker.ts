@@ -3,6 +3,7 @@ import {
   CHAT_STREAM_BATCH_INTERVAL_MS,
   CHAT_STREAM_MAX_BATCH_FRAMES,
   CHAT_STREAM_MAX_BODY_BYTES,
+  CHAT_STREAM_MAX_ERROR_BODY_CHARS,
   CHAT_STREAM_MAX_WIRE_BATCH_BYTES,
   CHAT_STREAM_MAX_WIRE_BYTES,
   isTerminalChatStreamFrame,
@@ -305,28 +306,15 @@ async function runRequest(
             response.headers.get("x-nyxid-debug-upstream-log") ?? undefined,
         });
       } else {
-        const capture = new WireBodyCapture(CHAT_STREAM_MAX_BODY_BYTES);
-        if (response.body) {
-          const reader = response.body.getReader();
-          try {
-            for (;;) {
-              const { done, value } = await reader.read();
-              if (done) break;
-              capture.push(value);
-              if (capture.truncated) {
-                await reader.cancel().catch(() => undefined);
-                break;
-              }
-            }
-          } catch {
-            // Preserve the HTTP status result even when its error body breaks.
-          }
-        }
+        const body = (await response.text().catch(() => "")).slice(
+          0,
+          CHAT_STREAM_MAX_ERROR_BODY_CHARS,
+        );
         post({
           type: "stream.http_error",
           requestId,
           status: response.status,
-          body: capture.finish().text,
+          body,
           debugUpstream:
             response.headers.get("x-nyxid-debug-upstream-log") ?? undefined,
         });
@@ -351,8 +339,13 @@ async function runRequest(
           capture: new WireBodyCapture(CHAT_STREAM_MAX_BODY_BYTES),
         };
       }
-      completeRequest(requestId, request, []);
       finishWire(requestId, request, "complete");
+      post({
+        type: "stream.network_error",
+        requestId,
+        code: "stream_closed",
+        message: "The assistant stream closed before it started.",
+      });
       return;
     }
 
@@ -394,6 +387,7 @@ workerScope.onmessage = (event) => {
   if (command.type === "stream.cancel") {
     const request = activeRequests.get(command.requestId);
     if (request) {
+      clearBatchTimer(request);
       request.cancelOutcome = "cancelled";
       request.controller.abort();
     }

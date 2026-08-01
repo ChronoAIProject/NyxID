@@ -89,7 +89,7 @@ describe("ChatStreamWorkerClient", () => {
     ]);
   });
 
-  it("cancels the matching worker request when its AbortSignal fires", async () => {
+  it("settles capture-off cancellation without waiting for a worker acknowledgement", async () => {
     const worker = new FakeWorker();
     const client = new ChatStreamWorkerClient(() => asWorker(worker));
     const controller = new AbortController();
@@ -107,12 +107,6 @@ describe("ChatStreamWorkerClient", () => {
       type: "stream.cancel",
       requestId: id,
     });
-    worker.emit({
-      type: "stream.wire_end",
-      requestId: id,
-      outcome: "cancelled",
-    });
-    worker.emit({ type: "stream.cancelled", requestId: id });
     await expect(stream.headers).resolves.toEqual({ kind: "cancelled" });
     await expect(stream.completion).resolves.toEqual({ kind: "cancelled" });
   });
@@ -345,6 +339,46 @@ describe("ChatStreamWorkerClient", () => {
     } as const;
     await expect(stream.headers).resolves.toEqual(expected);
     await expect(stream.completion).resolves.toEqual(expected);
+  });
+
+  it("preserves capture-off character truncation and drops partially read HTTP errors inline", async () => {
+    const multibyteBody = "界".repeat(40_000);
+    const brokenBody = new ReadableStream<Uint8Array>({
+      start(controller) {
+        controller.enqueue(new TextEncoder().encode("partial"));
+        controller.error(new Error("body read failed"));
+      },
+    });
+    vi.stubGlobal(
+      "fetch",
+      vi
+        .fn()
+        .mockResolvedValueOnce(new Response(multibyteBody, { status: 502 }))
+        .mockResolvedValueOnce(new Response(brokenBody, { status: 503 })),
+    );
+    const client = new ChatStreamWorkerClient(() => null);
+
+    const multibyte = client.start({
+      url: "/multibyte-error",
+      bodyText: "{}",
+      signal: new AbortController().signal,
+      onFrames: () => {},
+    });
+    await expect(multibyte.completion).resolves.toMatchObject({
+      kind: "http_error",
+      body: multibyteBody,
+    });
+
+    const broken = client.start({
+      url: "/broken-error",
+      bodyText: "{}",
+      signal: new AbortController().signal,
+      onFrames: () => {},
+    });
+    await expect(broken.completion).resolves.toMatchObject({
+      kind: "http_error",
+      body: "",
+    });
   });
 
   it("reassembles wire fragments and waits for wire end before deleting pending state", async () => {
@@ -612,7 +646,10 @@ describe("ChatStreamWorkerClient", () => {
       onFrames: () => {},
       onWire: (event) => emptyWire.push(event),
     });
-    await expect(empty.completion).resolves.toEqual({ kind: "complete" });
+    await expect(empty.completion).resolves.toMatchObject({
+      kind: "network_error",
+      code: "stream_closed",
+    });
     expect(emptyWire).toEqual([
       {
         type: "body",

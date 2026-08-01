@@ -1,6 +1,7 @@
 import { ChatStreamParser } from "@/lib/assistant/chat-stream-parser";
 import {
   CHAT_STREAM_MAX_BODY_BYTES,
+  CHAT_STREAM_MAX_ERROR_BODY_CHARS,
   CHAT_STREAM_MAX_WIRE_BYTES,
   type ChatStreamFrame,
   type ChatStreamWireEvent,
@@ -195,6 +196,10 @@ export class ChatStreamWorkerClient {
           requestId,
           outcome: "cancelled",
         });
+        this.settleRequest(requestId, { kind: "cancelled" });
+        return;
+      }
+      if (!pending.wireExpected) {
         this.settleRequest(requestId, { kind: "cancelled" });
       }
     };
@@ -496,8 +501,8 @@ export class ChatStreamWorkerClient {
         });
         const contentType = response.headers.get("content-type") ?? "";
         if (!response.ok) {
-          const captured = await readBoundedBody(response);
           if (wireEnabled) {
+            const captured = await readBoundedBody(response);
             emitWire({
               type: "body",
               requestId,
@@ -508,11 +513,24 @@ export class ChatStreamWorkerClient {
               requestId,
               outcome: captured.readFailed ? "network_error" : "complete",
             });
+            settle({
+              kind: "http_error",
+              status: response.status,
+              body: captured.result.text,
+              debugUpstream:
+                response.headers.get("x-nyxid-debug-upstream-log") ??
+                undefined,
+            });
+            return;
           }
+          const body = (await response.text().catch(() => "")).slice(
+            0,
+            CHAT_STREAM_MAX_ERROR_BODY_CHARS,
+          );
           settle({
             kind: "http_error",
             status: response.status,
-            body: captured.result.text,
+            body,
             debugUpstream:
               response.headers.get("x-nyxid-debug-upstream-log") ?? undefined,
           });
@@ -545,7 +563,12 @@ export class ChatStreamWorkerClient {
             };
           }
           finishWire("complete");
-          settle({ kind: "complete" });
+          settle(
+            networkFailure(
+              "stream_closed",
+              "The assistant stream closed before it started.",
+            ),
+          );
           return;
         }
 
