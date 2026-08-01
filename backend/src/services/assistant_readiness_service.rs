@@ -268,7 +268,7 @@ async fn load_capability_evidence(
     };
 
     let visible_services =
-        user_service_service::list_user_services_with_sources(db, user_id).await?;
+        user_service_service::list_user_services_with_sources_for_policy(db, user_id).await?;
     let mut personal = Vec::new();
     let mut org = Vec::new();
     for item in visible_services {
@@ -787,7 +787,12 @@ fn derive_status(evidence: CapabilityEvidence) -> (CapabilityStatus, Option<Reas
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::test_utils::test_user_service;
+    use crate::models::org_membership::{
+        COLLECTION_NAME as ORG_MEMBERSHIPS, OrgMembership, OrgRole,
+    };
+    use crate::models::user::{COLLECTION_NAME as USERS, User, UserType};
+    use crate::models::user_service::COLLECTION_NAME as USER_SERVICES;
+    use crate::test_utils::{connect_test_database, test_membership, test_user, test_user_service};
 
     const PROFILE: CapabilityProfile = CapabilityProfile {
         capability_id: "test-capability",
@@ -832,6 +837,72 @@ mod tests {
             select_user_service(vec![service_candidate("only-denied", false)], "api-github")
                 .expect("denied evidence remains reportable");
         assert!(!denied.access_allowed);
+    }
+
+    #[tokio::test]
+    async fn organization_scope_denial_is_preserved_as_cannot_use() {
+        let Some(db) = connect_test_database("assistant_readiness_scope_denial").await else {
+            eprintln!("skipping assistant readiness scope test: no local MongoDB available");
+            return;
+        };
+
+        let actor_id = uuid::Uuid::new_v4().to_string();
+        let org_id = uuid::Uuid::new_v4().to_string();
+        let catalog_id = uuid::Uuid::new_v4().to_string();
+        let service_id = uuid::Uuid::new_v4().to_string();
+
+        db.collection::<User>(USERS)
+            .insert_many([
+                test_user(&actor_id, UserType::Person),
+                test_user(&org_id, UserType::Org),
+            ])
+            .await
+            .expect("insert readiness users");
+
+        let mut catalog = crate::models::downstream_service::test_helpers::dummy_service();
+        catalog.id = catalog_id.clone();
+        catalog.slug = "api-github".to_string();
+        catalog.service_type = "http".to_string();
+        catalog.is_active = true;
+        db.collection::<DownstreamService>(DOWNSTREAM_SERVICES)
+            .insert_one(catalog)
+            .await
+            .expect("insert readiness catalog service");
+
+        db.collection::<UserService>(USER_SERVICES)
+            .insert_one(test_user_service(
+                &service_id,
+                &org_id,
+                "api-github",
+                &uuid::Uuid::new_v4().to_string(),
+                Some(&catalog_id),
+                None,
+            ))
+            .await
+            .expect("insert scope-denied organization service");
+        db.collection::<OrgMembership>(ORG_MEMBERSHIPS)
+            .insert_one(test_membership(
+                &org_id,
+                &actor_id,
+                OrgRole::Member,
+                Some(Vec::new()),
+            ))
+            .await
+            .expect("insert scope-denied membership");
+
+        let visible = user_service_service::list_user_services_with_sources(&db, &actor_id)
+            .await
+            .expect("load public service listing");
+        assert!(
+            visible.is_empty(),
+            "public listing must hide scoped-out rows"
+        );
+
+        let node_ws_manager = NodeWsManager::new(30, 100);
+        let snapshot = evaluate_readiness(&db, &node_ws_manager, &actor_id, Utc::now()).await;
+        let capability = &snapshot.capabilities[0];
+        assert_eq!(capability.status, CapabilityStatus::CannotUse);
+        assert_eq!(capability.reason_code, Some(ReasonCode::AccessDenied));
     }
 
     #[test]
