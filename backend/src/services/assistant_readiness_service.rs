@@ -339,6 +339,11 @@ fn select_user_service(
     mut candidates: Vec<SelectedUserService>,
     capability_id: &str,
 ) -> Option<SelectedUserService> {
+    // Runtime org resolution continues past denied memberships. Keep a denied
+    // candidate only when none are accessible so readiness can report denial.
+    if candidates.iter().any(|candidate| candidate.access_allowed) {
+        candidates.retain(|candidate| candidate.access_allowed);
+    }
     let exact = candidates
         .iter()
         .position(|candidate| candidate.service.slug == capability_id);
@@ -782,6 +787,7 @@ fn derive_status(evidence: CapabilityEvidence) -> (CapabilityStatus, Option<Reas
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::test_utils::test_user_service;
 
     const PROFILE: CapabilityProfile = CapabilityProfile {
         capability_id: "test-capability",
@@ -799,6 +805,33 @@ mod tests {
             grant_state,
             executable: Some(true),
         }
+    }
+
+    fn service_candidate(id: &str, access_allowed: bool) -> SelectedUserService {
+        SelectedUserService {
+            service: test_user_service(id, id, "api-github", id, None, None),
+            effective_owner_id: id.to_string(),
+            access_allowed,
+        }
+    }
+
+    #[test]
+    fn organization_selection_continues_past_denied_candidates() {
+        let selected = select_user_service(
+            vec![
+                service_candidate("denied", false),
+                service_candidate("accessible", true),
+            ],
+            "api-github",
+        )
+        .expect("accessible organization candidate");
+        assert_eq!(selected.service.id, "accessible");
+        assert!(selected.access_allowed);
+
+        let denied =
+            select_user_service(vec![service_candidate("only-denied", false)], "api-github")
+                .expect("denied evidence remains reportable");
+        assert!(!denied.access_allowed);
     }
 
     #[test]
