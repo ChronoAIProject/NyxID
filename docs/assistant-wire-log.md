@@ -154,10 +154,15 @@ Capture terminal outcomes are `complete`, `cancelled`, `network_error`,
 `worker_error`, or `protocol_cancel`. Truncation is independent of the terminal
 outcome: a stream may complete normally after exceeding the capture limit.
 
-The worker and inline fallback use the same independent tee. Live AG-UI frame
-delivery and parsing are unchanged. Wire callbacks are isolated from frame
-callbacks, and cancellation flushes captured data before the worker request is
-retired.
+The worker and inline fallback use the same independent tee. The tee does not
+change the bytes passed to the live AG-UI parser, frame ordering, or frame
+callback behavior. With capture disabled, cancellation still settles locally
+without a worker acknowledgement, HTTP error text still uses the original
+character-bounded `Response.text()` path, and a successful response without a
+body still reports `stream_closed` to live chat. With capture enabled, request
+retirement waits for the diagnostic wire flush acknowledgement so retained
+data is not lost; the live cancellation and bodyless-response results remain
+the same. Wire callbacks are isolated from frame callbacks.
 
 The per-response limits are:
 
