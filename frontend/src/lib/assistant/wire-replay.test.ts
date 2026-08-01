@@ -459,7 +459,7 @@ describe("wire replay projector parity", () => {
         [...startFrames("actor"), ...textFrames],
         { protocol: "actor", captureOutcome, truncated: true },
       );
-      const terminal = projection.events.findLast(
+      const terminal = [...projection.events].reverse().find(
         (event) => event.event === "turn.completed",
       );
 
@@ -477,7 +477,7 @@ describe("wire replay projector parity", () => {
       [...startFrames("actor"), ...textFrames],
       { protocol: "actor", truncated: true },
     );
-    const terminal = projection.events.findLast(
+    const terminal = [...projection.events].reverse().find(
       (event) => event.event === "turn.completed",
     );
 
