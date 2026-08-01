@@ -1,6 +1,6 @@
 # Assistant Chat Architecture
 
-Last verified against `fcb79b18` (2026-08-01).
+Last verified against `f608b33c` (2026-08-01).
 
 ## System boundary
 
@@ -51,7 +51,7 @@ NyxID authenticates the human, selects the platform row, and supplies two differ
 1. An identity assertion proves who the human is. `identity_propagation_mode` must be `jwt` or `both`, and `identity_jwt_audience` must match Aevatar's expected audience, currently `urn:aevatar:api`. NyxID injects this assertion as `X-NyxID-Identity-Token`.
 2. A delegated capability authorizes Aevatar to call back into NyxID tools for that user. `inject_delegation_token` must be `true`. NyxID injects the capability as `X-NyxID-Delegation-Token`.
 
-The delegated capability scope comes from the service row's `delegation_token_scope` when that scope can call the REST proxy. An empty or LLM-only scope that cannot authorize the required REST surface falls back to `proxy` and emits one warning. The live token lifetime is controlled by `MCP_DELEGATION_TOKEN_TTL_SECS`, currently defaulting to 300 seconds.
+The delegated capability scope comes from the service row's `delegation_token_scope` when that scope can call the REST proxy. An empty or LLM-only scope that cannot authorize the required REST surface falls back to `proxy` and emits one warning. The live token lifetime is the compile-time constant `backend/src/crypto/jwt.rs:MCP_DELEGATION_TOKEN_TTL_SECS`, fixed at 300 seconds. It is not an environment variable or an `AppConfig` field; changing it requires a code change.
 
 The stable service-row intent is therefore:
 

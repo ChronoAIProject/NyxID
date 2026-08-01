@@ -1,6 +1,6 @@
 # Assistant Actions Registry
 
-Last verified against `fcb79b18` (2026-08-01).
+Last verified against `f608b33c` (2026-08-01).
 
 `GET /api/v1/assistant/actions` publishes the immutable action vocabulary that Aevatar may compose into typed NyxIdChat turns. It is a public, static JSON endpoint with an exact-path exemption from the global rate limiter. It does not depend on a session, database row, user scope, or model state.
 
@@ -102,6 +102,29 @@ The description is composition guidance. It states the trust boundary: NyxID own
 - `customService`, requiring `name`, `endpointUrl`, and `authMethod`, and optionally carrying `authKeyName`, `viaNodeId`, and `targetOrgId`.
 
 The manifest schema defines structure. Aevatar and the browser apply additional semantic bounds, URL normalization, control-identity checks, exact-one-variant rules, secret rejection, and supported-auth-method checks before a request can execute. Those rules are specified in [Action cards](04-action-cards.md).
+
+## `params_schema` loader grammar
+
+Aevatar accepts this restricted recursive schema grammar:
+
+- a `oneOf` node with a nonempty array whose branches are recursively valid;
+- an `object` node with literal `"additionalProperties": false` and a `properties` object whose values are recursively valid;
+- an `array` node with a recursively valid `items` schema; or
+- a `string` node.
+
+Every node without `oneOf` requires a string `type` of at most 32 characters. Only `object`, `array`, and `string` are supported. `required` arrays are used when validating request parameters. Other keywords such as `format`, `enum`, and `minLength` are ignored rather than rejected, so the manifest must not imply that Aevatar enforces them.
+
+Every property name at every depth is normalized by retaining only ASCII alphanumeric characters and lowercasing. A normalized name is forbidden when it equals one of:
+
+```text
+token tokens accesstoken refreshtoken authorization cookie cookies secret secrets
+clientsecret password passphrase usercode devicecode rawbody rawupstreambody
+credential credentials
+```
+
+Manifest root and descriptor fields use snake_case, including `schema_version`, `params_schema`, and `remember_eligible`. Parameter property names use the typed wire contract's camelCase, including `catalogService` and `serviceSlug`. This asymmetry is deliberate.
+
+Implementation: upstream `agents/Aevatar.GAgents.NyxidChat/NyxIdAssistantActionRegistry.cs:ValidateSchemaNode` and `NyxIdActionSecretPolicy.cs:ValidateFieldName`; NyxID mirrors the grammar and normalized forbidden set in `backend/src/handlers/assistant_actions.rs` tests.
 
 ## Aevatar startup consumption
 

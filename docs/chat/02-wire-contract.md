@@ -1,6 +1,6 @@
 # Assistant Chat Wire Contract
 
-Last verified against `fcb79b18` (2026-08-01).
+Last verified against `f608b33c` (2026-08-01).
 
 This document specifies the browser-to-NyxID contract and the Aevatar request NyxID produces. It is the canonical API reference for the assistant chat surface.
 
@@ -147,7 +147,7 @@ Typed continuation:
 }
 ```
 
-The prompt must be nonblank after trimming and no longer than 32,768 characters. Unlike the Studio builder, the typed parser validates the trimmed condition but preserves the submitted prompt string in the rebuilt body. The current browser starts new conversations through Studio; typed create remains part of the backend contract and upstream actor protocol.
+The prompt must be nonblank after trimming. Its 32,768-character maximum is measured on the original untrimmed string, and the submitted string is preserved in the rebuilt body. The Studio builder instead trims before both length validation and serialization. The current browser starts new conversations through Studio; typed create remains part of the backend contract and upstream actor protocol.
 
 ### `action.continue`
 
@@ -260,7 +260,7 @@ For each page NyxID:
 5. deduplicates by ID, keeping the first occurrence; and
 6. follows a nonblank string `nextCursor`.
 
-The full drain is bounded by 40 pages and an 8 MiB aggregate body budget. A repeated cursor is an internal protocol error. A non-string `nextCursor` is an internal protocol error. Reaching the page or aggregate limit returns the rows already collected; the response does not invent a continuation cursor or a truncation flag.
+The full drain is bounded by 40 pages and an 8 MiB aggregate body budget. A repeated cursor is an internal protocol error. A `nextCursor` that is neither absent, `null`, nor a string is an internal protocol error. Reaching the page or aggregate limit returns the rows already collected; the response does not invent a continuation cursor or a truncation flag.
 
 If a later page has malformed JSON or lacks a `conversations` array, NyxID preserves rows collected from prior pages. The same mixed-deployment posture on the first page returns an empty successful index using the first upstream response metadata. Non-success upstream status is forwarded.
 
@@ -371,7 +371,7 @@ Typed `text` and `action.continue` streams have a maximum of two delivery attemp
 
 The budget is one initial attempt plus one replay. Cancellation or a settled run prevents the replay. Nonretryable HTTP or protocol errors fail immediately. This actor behavior does not apply to Studio continuation, whose request identity and reservation rules are different.
 
-Implementation: `frontend/src/lib/assistant/aevatar-transport.ts:streamTypedTextTurn` and `streamActionContinuation`.
+Implementation: `frontend/src/lib/assistant/aevatar-transport.ts:streamTurn` and `streamActionContinuation`.
 
 ## Create recovery
 
@@ -391,14 +391,16 @@ A successful body must provide a valid workflow conversation ID, a safe nonnegat
 
 ```json
 {
-  "status": "found",
+  "status": "append_committed",
   "conversationId": "chatc-650906f30cc985fa341477281303b6de",
   "stateVersion": 18,
   "turnId": "turn-identity"
 }
 ```
 
-The frontend polls at `0`, `300`, `900`, and `1800` milliseconds. A `404` means not materialized yet and advances to the next delay. Other errors stop recovery.
+The reachable body statuses are `reserved`, `bound`, `append_dispatched`, `abandoned`, `failed`, `append_committed`, and `append_rejected`. Not found is HTTP `404` with no response body. The frontend polls at `0`, `300`, `900`, and `1800` milliseconds; a `404` advances to the next delay, while other errors stop recovery.
+
+The client does not interpret `status`. `frontend/src/lib/assistant/aevatar-transport.ts:decodeCreateRecovery` validates only `conversationId`, `stateVersion`, and `turnId`. A response carrying a terminal-failure status such as `failed`, `abandoned`, or `append_rejected` is therefore still adoptable when those fields are valid and the subsequent transcript reconciliation reaches the required version and contains the recovered assistant turn. Upstream status production is defined by `src/Aevatar.Studio.Hosting/Controllers/ChatHistoryController.cs:ToCreateRecoveryStatusName`.
 
 Recovery starts at these ambiguity points:
 
@@ -419,7 +421,7 @@ A candidate is adopted only when all guards pass:
 
 On success the transport aliases the local placeholder to the durable ID, takes the maximum observed fence, replaces any unrelated run-actor turn ID with the Chat History turn identity, and applies authoritative history. On exhaustion it fails closed. It retains the original create request identity so an explicit same-prompt user retry can recover or replay the same create rather than minting an unrelated duplicate.
 
-Implementation: `backend/src/handlers/assistant.rs:get_create_recovery` and `frontend/src/lib/assistant/aevatar-transport.ts:pollCreateRecovery`, `recoverWorkflowCreate`, and `startCreateRecoveryInBackground`.
+Implementation: `backend/src/handlers/assistant.rs:get_create_recovery` and `frontend/src/lib/assistant/aevatar-transport.ts:decodeCreateRecovery`, `pollCreateRecovery`, `recoverWorkflowCreate`, and `startCreateRecoveryInBackground`.
 
 ## Error and body handling
 

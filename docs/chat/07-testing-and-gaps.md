@@ -1,6 +1,6 @@
 # Assistant Chat Testing and Gaps
 
-Last verified against `fcb79b18` (2026-08-01).
+Last verified against `f608b33c` (2026-08-01).
 
 The assistant surface is covered at four levels: browser flow tests against a deterministic transport, React hook and component probes, transport/protocol unit tests, and Rust handler/service tests against reconstructed upstream calls. Live deployment capture remains a separate operational requirement.
 
@@ -132,7 +132,7 @@ This suite uses the real Aevatar transport with controlled history/stream respon
 - Studio create body, continuation body, stable session ID, and positive fence;
 - reservation-specific 503 refresh and retry;
 - no Studio continuation replay after accepted stream truncation;
-- create recovery entry points, poll validation, history reconciliation, scope guard, alias adoption, and fail-closed exhaustion;
+- create recovery entry points, poll validation, history reconciliation, scope guard, alias adoption, terminal-kind preservation, and fail-closed exhaustion;
 - workflow client-only cancellation and workflow delete; and
 - refusal to send typed actor approval/wake controls to a `chatc-...` identity.
 
@@ -227,5 +227,6 @@ Playwright is available separately through the frontend's `test:e2e` script. The
 - Workflow approval decisions are unsupported in this assistant mount. The client refuses to send the typed actor approval route for a `chatc-...` conversation.
 - Workflow runs have no server-side stop route in this mount. Stop aborts the browser stream; first-turn cancellation also performs background create recovery so an upstream-created conversation is not lost.
 - Aevatar Chat History is text-oriented. Structured action, approval, run, connect, and artifact blocks are retained in the browser mirror and merged around materialized text, but they are not yet a complete durable server transcript.
+- Pending action cards do not survive a full page reload. Durable history is text-only, the history merge can preserve only cards still held in memory, and no state-based card rehydration exists. A reload before the actor re-emits or verifies the action loses the pending card.
 - The frontend accepts the legacy flat transcript array and the wrapped `{messages, stateVersion}` form. This compatibility form remains until every supported Aevatar environment is confirmed on the wrapped contract.
 - The steady-state identity-token service-row cutover is code- and configuration-verified but not live-verified. In particular, no current production capture proves `forward_access_token=false` with both identity assertion and delegated capability present at Aevatar.

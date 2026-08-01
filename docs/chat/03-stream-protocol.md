@@ -1,6 +1,6 @@
 # Assistant Stream Protocol
 
-Last verified against `fcb79b18` (2026-08-01).
+Last verified against `f608b33c` (2026-08-01).
 
 The assistant transport consumes Aevatar's AG-UI events over Server-Sent Events and projects them into NyxID transcript messages and content blocks. The stream is an ordered delivery protocol, not an unstructured token feed: it establishes a turn identity, emits zero or more renderable events, and settles exactly once.
 
@@ -37,6 +37,12 @@ The second record joins its data values with a newline; it is usable only if the
 The conventional OpenAI sentinel `data: [DONE]` is not special-cased. It is not JSON, so the frame parser ignores it. A malformed JSON payload, JSON scalar, or JSON array is also ignored. Only JSON objects become stream frames. One malformed frame does not poison later valid records.
 
 `frontend/src/lib/assistant/sse.ts:drainSseBuffer` and `flushSseBuffer` define framing. `frontend/src/lib/assistant/chat-stream-parser.ts:ChatStreamParser` defines JSON acceptance.
+
+### Anti-buffering
+
+Every reverse proxy or CDN in front of `/api/v1/assistant/**` must pass SSE without response buffering. NyxID's response-header middleware identifies `text/event-stream` case-insensitively and with parameters, then overwrites `X-Accel-Buffering` with `no`. On HTTP/1.1, a healthy live response exposes `x-accel-buffering: no` and `transfer-encoding: chunked`, and each upstream frame is flushed incrementally instead of the response arriving as one blob after the terminal frame. HTTP/2 and HTTP/3 do not use the HTTP/1.1 `Transfer-Encoding` header but must preserve the same incremental delivery.
+
+Implementation: `backend/src/mw/security_headers.rs:security_headers_middleware`; coverage: `duplicate_content_type_with_one_sse_value_is_marked` and `with_response_headers_marks_sse` in that file.
 
 ## Frame type detection
 
@@ -216,9 +222,11 @@ EOF at an approval gate is a successful pause because Aevatar may close an idle 
 
 EOF without a terminal is not success. The UI tells the user the partial answer may be incomplete and that the full reply can appear after history reload. Workflow create may enter bounded create recovery before settling this failure. A Studio continuation is never replayed after such an accepted stream truncation.
 
+For a Studio create still addressed by `workflow-pending-...`, a terminal received without `aevatar.chat.context` is converted to a retryable stream outcome and routed through create recovery rather than settled against the placeholder. Empty recovery fails closed. Successful recovery preserves an observed terminal: `RUN_ERROR` remains failed and blocked `RUN_FINISHED` remains blocked. Only recovery from a header failure or truncated stream with no observed terminal settles `completed` from the reconciled history.
+
 For an action continuation, a terminal error leaves the report batch queued because it does not prove Aevatar admitted the reports. A finished or stopped terminal accepts the batch. Details are in [Action cards](04-action-cards.md).
 
-Implementation: `frontend/src/lib/assistant/aevatar-transport.ts:consumeTurnStream`, `recordDeliveryTerminal`, and `settleDeliveryTerminal`.
+Implementation: `frontend/src/lib/assistant/aevatar-transport.ts:consumeTurnStream`, `recordDeliveryTerminal`, `settleDeliveryTerminal`, and `settleRecoveredWorkflowCreate`.
 
 ## Transcript projection
 
