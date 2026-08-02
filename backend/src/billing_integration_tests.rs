@@ -954,7 +954,7 @@ async fn card_backed_wallet_cannot_reserve_past_the_overdraft_cap() {
 }
 
 #[tokio::test]
-async fn mounted_route_settlement_failure_is_replayed_once_by_reconcile() {
+async fn buffered_route_preserves_success_when_settlement_failure_is_replayed() {
     let Some(db) = connect_test_database("billing_route_settle_recovery").await else {
         return;
     };
@@ -1010,8 +1010,7 @@ async fn mounted_route_settlement_failure_is_replayed_once_by_reconcile() {
         .expect("mounted route reached controlled downstream")
         .expect("controlled downstream reported request");
 
-    let forwarded = usage_row_for_service(&db, &service.slug).await;
-    assert_eq!(forwarded.status, UsageStatus::Forwarded);
+    let forwarded = wait_for_route_usage_status(&db, &service.slug, UsageStatus::Forwarded).await;
     assert!(forwarded.forwarded);
     assert!(!forwarded.released);
     assert_eq!(forwarded.quantity, None);
@@ -1026,10 +1025,13 @@ async fn mounted_route_settlement_failure_is_replayed_once_by_reconcile() {
         .send(())
         .expect("release controlled downstream response");
     let response = route.await.expect("mounted recovery route task");
-    assert!(response.status().is_server_error());
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = to_bytes(response.into_body(), usize::MAX)
+        .await
+        .expect("consume controlled downstream response");
+    assert_eq!(body.as_ref(), br#"{"ok":true}"#);
 
-    let failed = usage_row_for_service(&db, &service.slug).await;
-    assert_eq!(failed.status, UsageStatus::Failed);
+    let failed = wait_for_route_usage_status(&db, &service.slug, UsageStatus::Failed).await;
     assert!(failed.forwarded);
     assert!(!failed.released);
     assert_eq!(failed.quantity, Some(1));
@@ -1055,8 +1057,7 @@ async fn mounted_route_settlement_failure_is_replayed_once_by_reconcile() {
         .await
         .expect("reconcile failed settlement");
     assert_eq!(stats.recovered_settlements, 1);
-    let recovered = usage_row_for_service(&db, &service.slug).await;
-    assert_eq!(recovered.status, UsageStatus::Finalized);
+    let recovered = wait_for_route_usage_status(&db, &service.slug, UsageStatus::Finalized).await;
     assert!(recovered.released);
 
     let replay = state
@@ -2071,6 +2072,21 @@ async fn usage_row_for_service(db: &mongodb::Database, service_slug: &str) -> Us
         .await
         .expect("query route usage row")
         .expect("route usage row exists")
+}
+
+async fn wait_for_route_usage_status(
+    db: &mongodb::Database,
+    service_slug: &str,
+    expected: UsageStatus,
+) -> UsageMeterRow {
+    for _ in 0..100 {
+        let row = usage_row_for_service(db, service_slug).await;
+        if row.status == expected {
+            return row;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+    }
+    panic!("route {service_slug} did not reach {expected:?}");
 }
 
 async fn assert_no_usage_row(db: &mongodb::Database, request_id: &str) {
