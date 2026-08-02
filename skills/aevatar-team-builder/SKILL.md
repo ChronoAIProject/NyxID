@@ -1,7 +1,7 @@
 ---
 name: aevatar-team-builder
 description: Build an Aevatar agent team and its members over the REST API. Use when a user wants to "create a team", "add a member", "make a workflow member / script member / gagent member", "set the team's entry point", or "assemble agents into a team". It creates the team, creates members whose implementation is a workflow (most common), a script, or a hosted gagent, binds each member's concrete implementation (the workflow YAML is attached here), waits for the async binding to succeed, and sets the team entry member. Author the workflow YAML first with the workflow-authoring skill; publish the result as a service with the service-publisher skill.
-version: "1.3"
+version: "1.4"
 metadata:
   category: plain
   tag:
@@ -29,17 +29,16 @@ output is an invocable team. Publishing it as a NyxID service is a separate step
 # token. A raw curl to the aevatar backend with ~/.nyxid/access_token resolves NO scope
 # (scopeResolved:false) and the stored token expires — it is not a usable path.
 # Prerequisite once: the `aevatar` service must be connected — `nyxid service add aevatar`.
-# NyxID treats `-d` as raw bytes, so declare JSON explicitly; Aevatar rejects writes without it.
-aev() { nyxid proxy request aevatar "$@" -H 'Content-Type: application/json'; }   # aev "<path>" [-m POST|PUT|DELETE] [-d '<json>'] [--stream]
+aev() { nyxid proxy request aevatar "$@"; }   # aev "<path>" [-m POST|PUT|DELETE] [-d '<json>'] [--stream]
 scopeId=$(aev "api/studio/context" | jq -r .scopeId)
 ```
 
 > **`jq` is only for convenience** — any JSON reader works (replace `| jq -r .scopeId` with
 > `| python3 -c 'import sys,json;print(json.load(sys.stdin)["scopeId"])'`). All calls go through the
 > NyxID broker (`nyxid proxy request aevatar`), which injects your `scope_id` claim and
-> auto-refreshes the token. And because the create/bind calls are async and can occasionally return
-> a **transient empty body**, always read the response status/JSON back — retry once on an empty
-> body — rather than assuming success.
+> auto-refreshes the token. Create and bind calls are mutations: an empty body or lost response is
+> an uncertain outcome, not permission to retry. Reconcile through the corresponding member/team/
+> binding-run read model or an idempotency key before deciding whether another mutation is safe.
 
 Member implementation kinds are the lowercase strings **`workflow`**, **`script`**,
 **`gagent`**.
@@ -60,7 +59,7 @@ implementation (the workflow + its YAML) is attached in Step 3. Passing a forwar
 `workflowId` that does not exist yet returns **HTTP 500**.
 
 ```bash
-wfId="my-workflow"   # the id you will bind in Step 3 (pick a stable kebab-case id)
+wfId="wf-my-workflow"   # workflow draft identity; it is not the member or published-service id
 memberId=$(aev "api/scopes/$scopeId/members" -m POST -d "{
   \"displayName\": \"My Workflow Member\",
   \"implementationKind\": \"workflow\",
@@ -74,13 +73,21 @@ assigned a `publishedServiceId`; its `implementationRef` stays `null` until Step
 it in. (Verified: omitting `implementationRef` returns 201; sending it with a not-yet-bound
 `workflowId` returns 500.)
 
+Keep all three identities distinct: the response `memberId` owns Team authority, `wfId` names the
+workflow draft/definition, and `publishedServiceId` is the callable runtime identity. Only explicit
+contracts may translate between them; never derive one from another. Use visibly different shapes
+in fixtures and examples.
+
 - **script / gagent members** are created the same way — just set `implementationKind`
   to `"script"` or `"gagent"`. Discover valid gagent kinds with `GET /api/scopes/gagent-types`.
   The concrete `scriptId` / `agentKind` is supplied in the Step 3 binding, not here.
 
 ## Step 3 — Bind the member's implementation (attach the YAML)
 
-This is where the real implementation lands. It starts an **async binding run**.
+This is where the real implementation lands. It starts an **async binding run**. A successful bind
+commits workflow/revision identity and the capability admission plan together; a later run must
+preserve all three. If execution fails, do not create another binding/run until run detail and audit
+identify the first failed boundary.
 
 ```bash
 # Author the YAML first with aevatar-workflow-authoring; pass it inline.

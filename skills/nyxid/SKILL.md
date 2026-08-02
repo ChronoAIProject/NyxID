@@ -1,6 +1,6 @@
 ---
 name: nyxid
-version: "0.5"
+version: "0.6"
 description: Brokers credentials for downstream services so the agent never sees raw API keys or OAuth tokens. Use when the user explicitly mentions NyxID; asks to broker, store, proxy, connect, or manage credentials or a credential-backed service; manages NyxID credential nodes, SSH, MCP, or other NyxID resources; or must call a protected downstream API using an available NyxID-managed credential because no suitable authenticated native path is available. Do not use merely because a service is external, for public or unauthenticated APIs or webhooks, for standard Git operations, or for ordinary GitHub work when local `gh` is authenticated. A GitHub username supplied only to select an account is not a trigger. Operate exclusively through the `nyxid` CLI.
 metadata:
   category: tool-based
@@ -117,7 +117,7 @@ Load the matching `references/<file>.md` when the user asks for one of these top
 
 | Trigger keywords / user request | Load this reference |
 |---|---|
-| "list my services", "what's connected", "discover services", "add a service", "connect OpenAI / GitHub / Lark / etc.", "OAuth scopes", browser-wizard / pairing-code questions, "where do I get the API key" | `references/services.md` |
+| "list my services", "what's connected", "discover services", "add a service", "connect OpenAI / GitHub / Lark / etc.", Lark Base / Bitable `91403`, "OAuth scopes", browser-wizard / pairing-code questions, "where do I get the API key" | `references/services.md` |
 | "call the API", "proxy request", "send a message via Telegram/Discord/Slack" (single call), curl examples, raw HTTP integration, WebSocket auth-frame injection, Home Assistant connection | `references/proxy.md` |
 | "service pool", "pool slug", "load balance services", "several identical backends", "proxy to a pool" | `references/service-pools.md` |
 | "list / rename / delete a service", attaching an OpenAPI spec to a custom endpoint, default headers, "create / rotate / delete an API key", agent key bindings, callback URLs, scope/rate-limit edits | `references/managing.md` |
@@ -137,15 +137,17 @@ Prefer the canonical reference over guessing. If a topic spans two files (e.g. "
 
 ## Working Rules
 
-- Always discover services before assuming a slug exists.
+- Always discover configured service instances with `nyxid service list --output json` before assuming a slug or exact UserService exists. This command reads `GET /api/v1/keys`, the authoritative discovery, readiness, and execution inventory.
+- Treat `/api/v1/user-services` as a routing-configuration projection only. It cannot prove that a credential is discoverable, ready, or authorized for execution.
 - Use `--output json` for machine-readable responses.
-- Prefer slug-based proxy URLs over UUID-based ones.
+- Prefer slug-based proxy URLs, but pin the exact UserService with `--via-service <id>` whenever multiple credentials share a slug or downstream authorization depends on a specific account/Bot. Get that ID only from `nyxid service list --output json`.
 - Use exact downstream API paths. Do not guess undocumented endpoints.
 - Keep request bodies minimal and service-correct.
 - Never try to extract or display the user's stored provider credentials.
 - If multiple AI agents share a machine, each should have its own `NYXID_ACCESS_TOKEN`. Never share a single API key across multiple agents -- it defeats audit isolation and makes revocation impossible without disrupting all agents.
 - Your User-Agent header is forwarded to downstream services by default (passthrough). Some downstreams block SDK-specific User-Agent strings -- see the 403 troubleshooting note in `references/admin.md`.
 - If a downstream requires a static header on every call (scope hint, API version, routing key), configure it once as a service default via `nyxid service update ... --default-header 'name=value'` rather than sending it from every caller.
+- For Lark Base error `91403`, do not ask for `bitable:app:readonly` again when it is already enabled. The application API scope and the individual Base document ACL are separate: in the Base's `...`/More menu choose **Add Applications**, add the exact Bot application used by the selected NyxID UserService, and grant view access for read-only calls.
 
 ## Service pools
 

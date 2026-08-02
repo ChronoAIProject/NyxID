@@ -1,7 +1,7 @@
 ---
 name: aevatar-service-publisher
 description: Publish an Aevatar member, team, or workflow as an invocable service and (host permitting) register it with NyxID, then verify, invoke, or wire external HTTP triggers such as Lark Base automation — all over the REST API. Use when a user wants to "publish/bind a service", "expose my workflow/team as a service", "register it with NyxID", "make it callable", "get the service slug/URL", "invoke my service", "let Lark Base call my workflow", "trigger this workflow from an external webhook", or "version/deploy/roll out a service". It covers the simple scope binding, reading back a member's published service, the full account-level service lifecycle (revision → publish → deploy → rollout), how to confirm the NyxID registration (slug + status), how to invoke an endpoint, and how to distinguish direct NyxID proxy triggering from host-gated externalExposure. Build the team/member first with the team-builder skill.
-version: "1.5"
+version: "1.6"
 metadata:
   category: plain
   tag:
@@ -62,15 +62,13 @@ reusable NyxID connector/slug for other callers."
 
 ## Path A — A member you already bound (from team-builder)
 
-A bound member **already has a published service** — binding it was the publish. The
-`published-service` endpoint only returns ids; the real detail (endpoints, readiness,
-NyxID exposure) lives in the scope services list:
+A bound member **already has an explicit published-service association**. Read it first, then
+use the returned `publishedServiceId` to select the service read model. Never derive a service
+identity from `memberId`, a `member-` prefix, route position, or string equality:
 ```bash
-# minimal: publishedServiceId + key
-aev "api/scopes/$scopeId/members/$memberId/published-service" | jq .
-# full: identity, endpoints, serving revision, invokeReady, externalExposure
-aev "api/scopes/$scopeId/services" \
-  | jq '.[] | select(.serviceId=="member-'"$memberId"'")
+publishedServiceId=$(aev "api/scopes/$scopeId/members/$memberId/published-service" | jq -r .publishedServiceId)
+aev "api/scopes/$scopeId/services" | jq --arg serviceId "$publishedServiceId" '
+      .[] | select(.serviceId==$serviceId)
         | {serviceId, defaultServingRevisionId, invokeReady, invokeReadinessStatus,
            endpoints: [.endpoints[] | {endpointId, requestTypeUrl}], externalExposure}'
 ```
@@ -148,13 +146,14 @@ The endpoint contract tells you the path, readiness, and a ready-to-run curl exa
 aev "api/scopes/$scopeId/members/$memberId/endpoints/chat/contract" \
   | jq '{invokePath, canInvoke:.invocationReadiness.canInvoke, curlExample}'
 ```
-The reliable smoke test is the **streaming** path (`…/invoke/{endpointId}:stream`, SSE),
-which accepts the `{"prompt":"…"}` shorthand and returns workflow-run frames ending in a
-`runFinished` event with the result:
+The streaming path (`…/invoke/{endpointId}:stream`, SSE) accepts the `{"prompt":"…"}` shorthand.
+An opened stream or accepted receipt is not success. Follow the same run to terminal completion,
+then read run detail/audit and require completed status, `lastSuccess=true`, expected non-empty
+step output, non-empty final output, and no failed audit step:
 ```bash
 aev "api/scopes/$scopeId/members/$memberId/invoke/chat:stream" -m POST --stream \
   -d '{"prompt":"smoke test"}'
-# look for:  data: {... "runFinished": { "result": { "output": "..." } } }
+# retain the returned run identity privately, then read its detail and audit
 ```
 The **non-streaming** `…/invoke/{endpointId}` expects the full typed envelope (it rejects a
 bare `{prompt}` with 400 "payloadTypeUrl is required") — prefer `:stream` for a quick check.
@@ -176,8 +175,9 @@ Aevatar inbound chat channel.
 
 ### Direct NyxID proxy trigger
 
-Create a non-expiring NyxID API key with `proxy` scope and store it as the external
-system's secret:
+Create a dedicated NyxID API key with the minimum required proxy authority and store it only in
+the external system's secret manager. Never print, log, paste into workflow YAML, or return the
+secret value in chat:
 
 ```bash
 nyxid api-key create --name "lark-base-aevatar-trigger" --scopes proxy
@@ -187,7 +187,7 @@ Then configure the external HTTP action as:
 
 ```http
 POST https://nyx-api.chrono-ai.fun/api/v1/proxy/s/aevatar/api/scopes/{scopeId}/members/{memberId}/invoke/chat:stream
-Authorization: Bearer <NYXID_API_KEY>
+Authorization: Bearer [secret configured in the external system]
 Content-Type: application/json
 Accept: text/event-stream
 
@@ -210,6 +210,12 @@ Trade-offs:
   serving revision has a descriptor). A bare `{ "prompt": "..." }` is invalid.
 - If the external tool cannot set headers, cannot keep secrets safely, cannot tolerate SSE,
   or cannot build the typed envelope, use an adapter path below instead of forcing it.
+
+For Lark Base, `bitable:app:readonly` is only an application API scope. The exact Base document
+must also grant the selected Bot application access. Error `91403` is a document ACL denial, not
+evidence that the API scope is missing. In the current Base UI, open `...`/More, choose **Add
+Applications**, and add the exact Bot application used by the selected NyxID UserService; view
+access is enough for a read-only workflow.
 
 ### Adapter path
 

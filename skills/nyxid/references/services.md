@@ -3,6 +3,7 @@
 ## Table of contents
 
 - [Discover Services](#discover-services)
+- [Inventory authority and Lark Base access](#inventory-authority-and-lark-base-access)
 - [Slug rules for `service add`](#slug-rules-for-service-add)
 - [OAuth consent service grants and resource URIs](#oauth-consent-service-grants-and-resource-uris)
 - [Requesting additional OAuth scopes](#requesting-additional-oauth-scopes)
@@ -52,6 +53,29 @@ Official catalog services ship NyxID-hosted curated OpenAPI overlays (served at 
 > For API key services, just run `nyxid service add <slug>` without flags. The CLI securely prompts for the key (input hidden). Never ask the user to paste secrets into chat or set environment variables manually.
 > For automation/scripting only: `--credential-env <VAR>` reads from an environment variable.
 > For multi-field credentials such as AWS access-key JSON: `--credential-file <PATH>` reads the credential bytes from a file. Pass `-` to read from stdin.
+
+## Inventory authority and Lark Base access
+
+`nyxid service list --output json` is backed by `GET /api/v1/keys`. Its response is
+`{"keys":[...]}`; an empty account is `{"keys":[]}`. This is the authoritative view for exact
+UserService discovery, connection/readiness checks, proxy selection, and workflow execution.
+Do not substitute `GET /api/v1/user-services`: that endpoint is a routing-configuration projection
+and cannot prove that a service credential is discoverable, ready, or authorized to execute.
+When more than one configured credential shares a slug, keep the slug route but pass
+`--via-service <user-service-id>` to `nyxid proxy request`, using the exact ID returned by this
+inventory. Never select a Bot or account from a label guess or from `/api/v1/user-services`.
+
+Lark Base access has two independent permission layers:
+
+1. The Bot application needs the relevant Lark API scope, such as `bitable:app:readonly`.
+2. The exact Base document must grant that Bot application access.
+
+Lark error `91403` means the Base document ACL denied the application; it is not evidence that the
+API scope is missing. In the current Base UI, open the Base's `...`/More menu, choose **Add
+Applications**, select the exact Bot application used by the chosen NyxID UserService, and grant
+view access for a read-only probe. A Base is Lark's multi-dimensional table product, not a regular
+spreadsheet file. Re-list services after changing credentials or routes, and retry only a safe,
+idempotent read until access is proven.
 
 ## OAuth consent service grants and resource URIs
 
