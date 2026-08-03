@@ -1,8 +1,7 @@
 use axum::{
     Json,
-    extract::{Path, State},
+    extract::{Path, Query, State},
     http::StatusCode,
-    response::IntoResponse,
 };
 use mongodb::bson::doc;
 use serde::{Deserialize, Serialize};
@@ -13,9 +12,10 @@ use crate::errors::{AppError, AppResult};
 use crate::models::user_api_key::{COLLECTION_NAME as USER_API_KEYS, UserApiKey};
 use crate::mw::auth::AuthUser;
 use crate::services::{
-    credential_push_service, gcp_sa_service, org_service, user_api_key_service,
-    user_service_service,
+    credential_push_service, gcp_sa_service, org_service, unified_key_service,
+    user_api_key_service, user_service_service,
 };
+use crate::telemetry::{TelemetryContext, TelemetryEvent, emit_event};
 
 /// Look up the external API key without an ownership filter and check
 /// whether the actor may modify it (directly or as an org admin).
@@ -96,6 +96,21 @@ pub struct ExternalApiKeyResponse {
 #[derive(Debug, Serialize, ToSchema)]
 pub struct ExternalApiKeyListResponse {
     pub api_keys: Vec<ExternalApiKeyResponse>,
+}
+
+#[derive(Debug, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct DeleteExternalApiKeyQuery {
+    #[serde(default)]
+    pub cascade_grant: Option<bool>,
+    #[serde(default)]
+    pub grant_scope: Option<String>,
+}
+
+#[derive(Debug, Serialize, ToSchema)]
+pub struct DeleteExternalApiKeyResponse {
+    pub deleted: bool,
+    pub upstream_revoked: bool,
 }
 
 /// Register a Google Cloud service-account JSON key as a proxy
@@ -422,12 +437,16 @@ pub async fn update_external_api_key(
     delete,
     path = "/api/v1/api-keys/external/{key_id}",
     params(
-        ("key_id" = String, Path, description = "External API key ID")
+        ("key_id" = String, Path, description = "External API key ID"),
+        ("cascade_grant" = Option<bool>, Query, description = "Confirm deletion of all same-owner connections sharing an upstream OAuth grant"),
+        ("grant_scope" = Option<String>, Query, description = "Set to token to delete only this credential without revoking the upstream grant")
     ),
     responses(
-        (status = 204, description = "External API key deleted"),
+        (status = 200, description = "External API key deleted", body = DeleteExternalApiKeyResponse),
+        (status = 400, description = "Invalid or conflicting revocation options", body = crate::errors::ErrorResponse),
         (status = 401, description = "Unauthorized", body = crate::errors::ErrorResponse),
-        (status = 404, description = "Key not found", body = crate::errors::ErrorResponse)
+        (status = 404, description = "Key not found", body = crate::errors::ErrorResponse),
+        (status = 409, description = "OAuth grant cascade confirmation required", body = crate::errors::ErrorResponse)
     ),
     tag = "External API Keys"
 )]
@@ -435,12 +454,42 @@ pub async fn update_external_api_key(
 pub async fn delete_external_api_key(
     State(state): State<AppState>,
     auth_user: AuthUser,
+    tele: TelemetryContext,
     Path(key_id): Path<String>,
-) -> AppResult<impl IntoResponse> {
+    Query(query): Query<DeleteExternalApiKeyQuery>,
+) -> AppResult<Json<DeleteExternalApiKeyResponse>> {
     let actor = auth_user.user_id.to_string();
+    let options = unified_key_service::DisconnectOptions {
+        cascade_grant: query.cascade_grant.unwrap_or(false),
+        grant_scope: query.grant_scope,
+    };
+    options.validate()?;
     let owner_id = resolve_api_key_write_owner(&state, &actor, &key_id).await?;
-    user_api_key_service::delete_api_key(&state.db, &owner_id, &key_id).await?;
-    Ok(StatusCode::NO_CONTENT)
+    let audit_actor = crate::services::audit_service::AuditActor::from_auth_user(&auth_user);
+    let result = unified_key_service::disconnect_credentials(
+        &state.db,
+        &state.encryption_keys,
+        &owner_id,
+        &audit_actor,
+        unified_key_service::DisconnectTarget::UserApiKey(&key_id),
+        options,
+    )
+    .await?;
+    for event in &result.deleted_services {
+        emit_event(
+            state.telemetry.as_deref(),
+            &actor,
+            auth_user.api_key_id.as_deref(),
+            &tele,
+            TelemetryEvent::KeyDeleted {
+                source: event.source.clone(),
+            },
+        );
+    }
+    Ok(Json(DeleteExternalApiKeyResponse {
+        deleted: true,
+        upstream_revoked: result.upstream_revoked,
+    }))
 }
 
 fn external_api_key_response(key: UserApiKey) -> ExternalApiKeyResponse {
@@ -823,7 +872,9 @@ mod tests {
         let resp = delete_external_api_key(
             State(state.clone()),
             test_auth_user(&user_id),
+            TelemetryContext::default(),
             Path(created.id.clone()),
+            Query(DeleteExternalApiKeyQuery::default()),
         )
         .await;
         assert!(resp.is_ok());
@@ -962,18 +1013,111 @@ mod tests {
         seed_service_for_key(&db, &user_id, &service_id, &key_id).await;
 
         let state = test_app_state(db);
-        let err =
-            match delete_external_api_key(State(state), test_auth_user(&user_id), Path(key_id))
-                .await
-            {
-                Ok(_) => panic!("active service reference should prevent credential delete"),
-                Err(err) => err,
-            };
+        let err = match delete_external_api_key(
+            State(state),
+            test_auth_user(&user_id),
+            TelemetryContext::default(),
+            Path(key_id),
+            Query(DeleteExternalApiKeyQuery::default()),
+        )
+        .await
+        {
+            Ok(_) => panic!("active service reference should prevent credential delete"),
+            Err(err) => err,
+        };
 
         assert!(matches!(
             err,
             AppError::Conflict(message) if message == "API key is in use by active services"
         ));
+    }
+
+    #[tokio::test]
+    async fn delete_external_oauth_key_uses_grant_cascade_contract() {
+        let Some(db) = connect_test_database("h_ext_keys_oauth_cascade").await else {
+            return;
+        };
+        let user_id = uuid::Uuid::new_v4().to_string();
+        let provider_id = uuid::Uuid::new_v4().to_string();
+        db.collection::<mongodb::bson::Document>(crate::models::provider_config::COLLECTION_NAME)
+            .insert_one(doc! {
+                "_id": &provider_id,
+                "slug": "github",
+                "name": "GitHub",
+                "provider_type": "oauth2",
+                "revocation": {
+                    "style": "github",
+                    "url": "https://api.github.com/applications",
+                    "auth": "basic",
+                    "revokes_grant": true,
+                },
+                "is_active": true,
+                "created_by": "system",
+                "created_at": mongodb::bson::DateTime::from_chrono(Utc::now()),
+                "updated_at": mongodb::bson::DateTime::from_chrono(Utc::now()),
+            })
+            .await
+            .unwrap();
+        db.collection::<crate::models::user::User>(crate::models::user::COLLECTION_NAME)
+            .insert_one(test_user(&user_id, UserType::Person))
+            .await
+            .unwrap();
+        for suffix in ["primary", "sibling"] {
+            let key_id = format!("key-{suffix}");
+            let service_id = format!("service-{suffix}");
+            let mut key = fixture_external_key(&key_id, &user_id, suffix);
+            key.credential_type = "oauth2".to_string();
+            key.credential_encrypted = None;
+            key.provider_config_id = Some(provider_id.clone());
+            key.connection_id = Some(uuid::Uuid::new_v4().to_string());
+            key.credential_source = Some("platform".to_string());
+            db.collection::<UserApiKey>(USER_API_KEYS)
+                .insert_one(key)
+                .await
+                .unwrap();
+            seed_service_for_key(&db, &user_id, &service_id, &key_id).await;
+        }
+        let state = test_app_state(db.clone());
+
+        let err = delete_external_api_key(
+            State(state.clone()),
+            test_auth_user(&user_id),
+            TelemetryContext::default(),
+            Path("key-primary".to_string()),
+            Query(DeleteExternalApiKeyQuery::default()),
+        )
+        .await
+        .expect_err("external OAuth key must not bypass grant confirmation");
+        assert!(matches!(err, AppError::GrantCascadeConfirmationRequired(_)));
+        assert_eq!(
+            db.collection::<UserApiKey>(USER_API_KEYS)
+                .count_documents(doc! { "user_id": &user_id })
+                .await
+                .unwrap(),
+            2
+        );
+
+        let Json(response) = delete_external_api_key(
+            State(state),
+            test_auth_user(&user_id),
+            TelemetryContext::default(),
+            Path("key-primary".to_string()),
+            Query(DeleteExternalApiKeyQuery {
+                cascade_grant: Some(true),
+                grant_scope: None,
+            }),
+        )
+        .await
+        .unwrap();
+        assert!(response.deleted);
+        assert!(!response.upstream_revoked);
+        assert_eq!(
+            db.collection::<UserApiKey>(USER_API_KEYS)
+                .count_documents(doc! { "user_id": &user_id })
+                .await
+                .unwrap(),
+            0
+        );
     }
 
     #[tokio::test]

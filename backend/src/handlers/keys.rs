@@ -606,6 +606,8 @@ pub struct DeleteKeyResponse {
     /// an active key, so leave it alone".
     #[serde(default)]
     pub deleted: bool,
+    /// Whether an eligible upstream revocation request was handed off.
+    pub upstream_revoked: bool,
 }
 
 /// Extract the Lark / Feishu `app_id` from a plaintext credential string.
@@ -2003,6 +2005,10 @@ pub async fn update_key(
 pub struct DeleteKeyQuery {
     #[serde(default)]
     pub only_if_pending: Option<bool>,
+    #[serde(default)]
+    pub cascade_grant: Option<bool>,
+    #[serde(default)]
+    pub grant_scope: Option<String>,
 }
 
 #[utoipa::path(
@@ -2010,12 +2016,16 @@ pub struct DeleteKeyQuery {
     path = "/api/v1/keys/{key_id}",
     params(
         ("key_id" = String, Path, description = "User service ID or slug"),
-        ("only_if_pending" = Option<bool>, Query, description = "When true, skip the delete if the key is no longer pending_auth")
+        ("only_if_pending" = Option<bool>, Query, description = "When true, skip the delete if the key is no longer pending_auth"),
+        ("cascade_grant" = Option<bool>, Query, description = "Confirm deletion of all same-owner connections sharing an upstream OAuth grant"),
+        ("grant_scope" = Option<String>, Query, description = "Set to token to remove only this service without revoking the upstream grant")
     ),
     responses(
         (status = 200, description = "Key revoked (or skipped when only_if_pending)", body = DeleteKeyResponse),
+        (status = 400, description = "Invalid or conflicting revocation options", body = crate::errors::ErrorResponse),
         (status = 401, description = "Unauthorized", body = crate::errors::ErrorResponse),
-        (status = 404, description = "Key not found", body = crate::errors::ErrorResponse)
+        (status = 404, description = "Key not found", body = crate::errors::ErrorResponse),
+        (status = 409, description = "OAuth grant cascade confirmation required", body = crate::errors::ErrorResponse)
     ),
     tag = "AI Services"
 )]
@@ -2028,6 +2038,11 @@ pub async fn delete_key(
     Query(query): Query<DeleteKeyQuery>,
 ) -> AppResult<Json<DeleteKeyResponse>> {
     let actor = auth_user.user_id.to_string();
+    let options = unified_key_service::DisconnectOptions {
+        cascade_grant: query.cascade_grant.unwrap_or(false),
+        grant_scope: query.grant_scope.clone(),
+    };
+    options.validate()?;
     let access = resolve_key_write_owner(&state, &actor, &key_id).await?;
     let user_id_str = access.owner_id;
     let key_id = access.service_id;
@@ -2060,28 +2075,37 @@ pub async fn delete_key(
                 "Key is no longer pending_auth; delete skipped".to_string()
             },
             deleted: flipped,
+            upstream_revoked: false,
         }));
     }
 
-    unified_key_service::revoke_key(&state.db, &user_id_str, &actor, &key_id).await?;
+    let audit_actor = crate::services::audit_service::AuditActor::from_auth_user(&auth_user);
+    let result = unified_key_service::disconnect_credentials(
+        &state.db,
+        &state.encryption_keys,
+        &user_id_str,
+        &audit_actor,
+        unified_key_service::DisconnectTarget::UserService(&key_id),
+        options,
+    )
+    .await?;
 
-    emit_event(
-        state.telemetry.as_deref(),
-        &auth_user.user_id.to_string(),
-        auth_user.api_key_id.as_deref(),
-        &tele,
-        TelemetryEvent::KeyDeleted {
-            source: if view.catalog_service_slug.is_some() {
-                "catalog".to_string()
-            } else {
-                "custom".to_string()
+    for event in &result.deleted_services {
+        emit_event(
+            state.telemetry.as_deref(),
+            &actor,
+            auth_user.api_key_id.as_deref(),
+            &tele,
+            TelemetryEvent::KeyDeleted {
+                source: event.source.clone(),
             },
-        },
-    );
+        );
+    }
 
     Ok(Json(DeleteKeyResponse {
         message: "Key revoked successfully".to_string(),
         deleted: true,
+        upstream_revoked: result.upstream_revoked,
     }))
 }
 
@@ -3184,6 +3208,7 @@ mod tests {
             Path("nonexistent-id".to_string()),
             axum::extract::Query(super::DeleteKeyQuery {
                 only_if_pending: None,
+                ..Default::default()
             }),
         )
         .await
@@ -3571,6 +3596,7 @@ mod tests {
             Path(created.id.clone()),
             axum::extract::Query(super::DeleteKeyQuery {
                 only_if_pending: None,
+                ..Default::default()
             }),
         )
         .await
@@ -3619,6 +3645,7 @@ mod tests {
             Path("del-by-slug".to_string()),
             axum::extract::Query(super::DeleteKeyQuery {
                 only_if_pending: None,
+                ..Default::default()
             }),
         )
         .await
@@ -3663,6 +3690,7 @@ mod tests {
             Path(created.id),
             axum::extract::Query(super::DeleteKeyQuery {
                 only_if_pending: None,
+                ..Default::default()
             }),
         )
         .await
@@ -4306,6 +4334,7 @@ mod tests {
         let response = super::DeleteKeyResponse {
             message: "Key revoked successfully".to_string(),
             deleted: true,
+            upstream_revoked: false,
         };
         let json = serde_json::to_value(&response).unwrap();
         assert_eq!(json["message"], "Key revoked successfully");
@@ -4317,6 +4346,7 @@ mod tests {
         let response = super::DeleteKeyResponse {
             message: "Key is no longer pending_auth; delete skipped".to_string(),
             deleted: false,
+            upstream_revoked: false,
         };
         let json = serde_json::to_value(&response).unwrap();
         assert_eq!(json["deleted"], false);
@@ -4333,13 +4363,19 @@ mod tests {
     fn delete_key_query_deserializes_defaults() {
         let query: super::DeleteKeyQuery = serde_json::from_str("{}").unwrap();
         assert!(query.only_if_pending.is_none());
+        assert!(query.cascade_grant.is_none());
+        assert!(query.grant_scope.is_none());
     }
 
     #[test]
     fn delete_key_query_deserializes_with_flag() {
-        let query: super::DeleteKeyQuery =
-            serde_json::from_str(r#"{"only_if_pending": true}"#).unwrap();
+        let query: super::DeleteKeyQuery = serde_json::from_str(
+            r#"{"only_if_pending": true, "cascade_grant": false, "grant_scope": "token"}"#,
+        )
+        .unwrap();
         assert_eq!(query.only_if_pending, Some(true));
+        assert_eq!(query.cascade_grant, Some(false));
+        assert_eq!(query.grant_scope.as_deref(), Some("token"));
     }
 
     #[test]

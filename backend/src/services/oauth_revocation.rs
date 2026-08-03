@@ -10,9 +10,8 @@ use zeroize::Zeroizing;
 
 use crate::crypto::aes::EncryptionKeys;
 use crate::models::provider_config::{ProviderConfig, RevocationConfig};
-use crate::models::user_provider_token::UserProviderToken;
 use crate::services::oauth_flow;
-use crate::services::user_credentials_service::{self, ResolvedOAuthCredentials};
+use crate::services::user_credentials_service::ResolvedOAuthCredentials;
 
 const MAX_REVOCATION_RESPONSE_BODY_SIZE: usize = 64 * 1024;
 const REVOCATION_TIMEOUT: Duration = Duration::from_secs(30);
@@ -36,14 +35,6 @@ pub enum RevocationScope {
 }
 
 impl RevocationScope {
-    pub const fn from_grant(revoke_grant: bool) -> Self {
-        if revoke_grant {
-            Self::Grant
-        } else {
-            Self::Token
-        }
-    }
-
     pub fn as_str(self) -> &'static str {
         match self {
             Self::Grant => "grant",
@@ -184,53 +175,7 @@ pub async fn revoke_remote(req: RevocationRequest<'_>) -> RevocationOutcome {
     }
 }
 
-/// Compatibility bridge for the legacy disconnect path. W3 replaces this with
-/// pre-image claims and post-teardown detached execution.
-pub async fn try_revoke_token_remote(
-    db: &mongodb::Database,
-    encryption_keys: &EncryptionKeys,
-    provider: &ProviderConfig,
-    token: &UserProviderToken,
-    scope: RevocationScope,
-) -> RevocationOutcome {
-    let Ok(_permit) = try_acquire_revocation_permit() else {
-        return RevocationOutcome {
-            style: effective_revocation(provider).map(|config| config.style),
-            scope,
-            access: token
-                .access_token_encrypted
-                .as_ref()
-                .map(|_| TokenOutcome::Skipped("saturated")),
-            refresh: token
-                .refresh_token_encrypted
-                .as_ref()
-                .map(|_| TokenOutcome::Skipped("saturated")),
-        };
-    };
-    let creds = user_credentials_service::resolve_token_oauth_credentials(
-        db,
-        encryption_keys,
-        provider,
-        token.credential_user_id.as_deref(),
-    )
-    .await
-    .ok();
-    let access_token =
-        decrypt_token(encryption_keys, token.access_token_encrypted.as_deref()).await;
-    let refresh_token =
-        decrypt_token(encryption_keys, token.refresh_token_encrypted.as_deref()).await;
-
-    revoke_remote(RevocationRequest {
-        provider,
-        scope,
-        creds,
-        access_token,
-        refresh_token,
-    })
-    .await
-}
-
-async fn decrypt_token(
+pub async fn decrypt_token(
     encryption_keys: &EncryptionKeys,
     encrypted: Option<&[u8]>,
 ) -> Option<Zeroizing<String>> {

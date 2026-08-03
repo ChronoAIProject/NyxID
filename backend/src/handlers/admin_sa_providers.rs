@@ -1,6 +1,6 @@
 use axum::{
     Json,
-    extract::{Path, State},
+    extract::{Path, Query, State},
     http::HeaderMap,
 };
 use serde::{Deserialize, Serialize};
@@ -9,7 +9,10 @@ use crate::AppState;
 use crate::errors::{AppError, AppResult};
 use crate::handlers::admin_helpers::{require_admin, require_admin_or_operator};
 use crate::mw::auth::AuthUser;
-use crate::services::{audit_service, service_account_service, user_token_service};
+use crate::services::{
+    audit_service, service_account_service, unified_key_service, user_token_service,
+};
+use crate::telemetry::{TelemetryContext, TelemetryEvent, emit_event};
 
 // --- Request types ---
 
@@ -52,6 +55,22 @@ pub struct AdminSaProviderListResponse {
 pub struct AdminSaProviderActionResponse {
     pub status: String,
     pub message: String,
+}
+
+#[derive(Debug, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct DisconnectSaProviderQuery {
+    #[serde(default)]
+    pub cascade_grant: Option<bool>,
+    #[serde(default)]
+    pub grant_scope: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct DisconnectSaProviderResponse {
+    pub status: String,
+    pub message: String,
+    pub upstream_revoked: bool,
 }
 
 #[derive(Debug, Serialize)]
@@ -175,21 +194,43 @@ pub async fn connect_api_key_for_sa(
 pub async fn disconnect_sa_provider(
     State(state): State<AppState>,
     auth_user: AuthUser,
+    tele: TelemetryContext,
     _headers: HeaderMap,
     Path((sa_id, provider_id)): Path<(String, String)>,
-) -> AppResult<Json<AdminSaProviderActionResponse>> {
+    Query(query): Query<DisconnectSaProviderQuery>,
+) -> AppResult<Json<DisconnectSaProviderResponse>> {
     require_admin(&state, &auth_user).await?;
+
+    let options = unified_key_service::DisconnectOptions {
+        cascade_grant: query.cascade_grant.unwrap_or(false),
+        grant_scope: query.grant_scope,
+    };
+    options.validate()?;
 
     // Verify SA exists
     let _sa = service_account_service::get_service_account(&state.db, &sa_id).await?;
 
-    user_token_service::disconnect_provider(
+    let audit_actor = audit_service::AuditActor::from_auth_user(&auth_user);
+    let result = unified_key_service::disconnect_credentials(
         &state.db,
         &state.encryption_keys,
         &sa_id,
-        &provider_id,
+        &audit_actor,
+        unified_key_service::DisconnectTarget::Provider(&provider_id),
+        options,
     )
     .await?;
+    for event in &result.deleted_services {
+        emit_event(
+            state.telemetry.as_deref(),
+            &auth_user.user_id.to_string(),
+            auth_user.api_key_id.as_deref(),
+            &tele,
+            TelemetryEvent::KeyDeleted {
+                source: event.source.clone(),
+            },
+        );
+    }
 
     audit_service::log_for_user(
         state.db.clone(),
@@ -201,9 +242,10 @@ pub async fn disconnect_sa_provider(
         })),
     );
 
-    Ok(Json(AdminSaProviderActionResponse {
+    Ok(Json(DisconnectSaProviderResponse {
         status: "disconnected".to_string(),
         message: "Provider disconnected from service account".to_string(),
+        upstream_revoked: result.upstream_revoked,
     }))
 }
 
@@ -536,8 +578,10 @@ mod tests {
         let err = disconnect_sa_provider(
             State(state),
             auth,
+            TelemetryContext::default(),
             HeaderMap::new(),
             Path((sa_id, Uuid::new_v4().to_string())),
+            Query(DisconnectSaProviderQuery::default()),
         )
         .await
         .expect_err("disconnect non-existent provider should fail");

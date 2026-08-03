@@ -6,6 +6,7 @@ use zeroize::Zeroizing;
 use crate::crypto::aes::EncryptionKeys;
 use crate::errors::{AppError, AppResult};
 use crate::models::provider_config::ProviderConfig;
+use crate::models::user_api_key::UserApiKey;
 use crate::models::user_provider_credentials::{COLLECTION_NAME, UserProviderCredentials};
 
 /// Upsert per-user OAuth app credentials for a provider.
@@ -290,7 +291,7 @@ async fn resolve_user_credentials_for_owner(
 /// Note: `Zeroizing` is best-effort here — the `String::from_utf8` clone means the
 /// plaintext remains in memory until deallocated. Acceptable for our threat model
 /// (encrypted at rest, decrypted in-memory only when needed).
-async fn decrypt_provider_credentials(
+pub(crate) async fn decrypt_provider_credentials(
     encryption_keys: &EncryptionKeys,
     provider: &ProviderConfig,
 ) -> AppResult<ResolvedOAuthCredentials> {
@@ -316,6 +317,40 @@ async fn decrypt_provider_credentials(
         client_id,
         client_secret,
         credential_user_id: None,
+    })
+}
+
+/// Resolve the OAuth app credentials carried by a claimed modern key. BYO
+/// credentials are decrypted from the pre-image itself; rows without embedded
+/// credentials use the provider-level app and never query the deleted key.
+pub async fn decrypt_claimed_key_oauth_credentials(
+    encryption_keys: &EncryptionKeys,
+    provider: &ProviderConfig,
+    key: &UserApiKey,
+) -> AppResult<ResolvedOAuthCredentials> {
+    let Some(encrypted_client_id) = key.user_oauth_client_id_encrypted.as_ref() else {
+        return decrypt_provider_credentials(encryption_keys, provider).await;
+    };
+
+    let mut client_id_bytes = Zeroizing::new(encryption_keys.decrypt(encrypted_client_id).await?);
+    let client_id = String::from_utf8(std::mem::take(&mut *client_id_bytes))
+        .map_err(|_| AppError::Internal("Failed to decode OAuth client id".to_string()))?;
+    let client_secret =
+        if let Some(encrypted_secret) = key.user_oauth_client_secret_encrypted.as_ref() {
+            let mut secret_bytes = Zeroizing::new(encryption_keys.decrypt(encrypted_secret).await?);
+            Some(
+                String::from_utf8(std::mem::take(&mut *secret_bytes)).map_err(|_| {
+                    AppError::Internal("Failed to decode OAuth client secret".to_string())
+                })?,
+            )
+        } else {
+            None
+        };
+
+    Ok(ResolvedOAuthCredentials {
+        client_id,
+        client_secret,
+        credential_user_id: Some(key.user_id.clone()),
     })
 }
 

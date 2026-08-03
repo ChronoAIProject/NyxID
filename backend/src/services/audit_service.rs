@@ -12,6 +12,27 @@ use crate::services::audit_chain_service;
 
 static AUDIT_CHAIN_HMAC_KEY: OnceLock<Zeroizing<[u8; 32]>> = OnceLock::new();
 
+#[derive(Clone, Debug)]
+pub struct AuditActor {
+    pub user_id: String,
+    pub ip_address: Option<String>,
+    pub user_agent: Option<String>,
+    pub api_key_id: Option<String>,
+    pub api_key_name: Option<String>,
+}
+
+impl AuditActor {
+    pub fn from_auth_user(auth_user: &AuthUser) -> Self {
+        Self {
+            user_id: auth_user.user_id.to_string(),
+            ip_address: auth_user.ip_address.clone(),
+            user_agent: auth_user.user_agent.clone(),
+            api_key_id: auth_user.api_key_id.clone(),
+            api_key_name: auth_user.api_key_name.clone(),
+        }
+    }
+}
+
 pub fn init_audit_chain_hmac_key(key: Zeroizing<[u8; 32]>) {
     if AUDIT_CHAIN_HMAC_KEY.set(key).is_err() {
         tracing::warn!("audit-chain HMAC key was already initialized");
@@ -84,6 +105,28 @@ pub async fn log_system_event(
 ) -> Result<(), mongodb::error::Error> {
     let event_type = event_type.into();
     let entry = build_audit_entry(None, event_type.clone(), event_data, None, None, None, None);
+    write_audit_entry(db, entry, event_type).await
+}
+
+/// Awaitable actor-attributed audit entry. Callers that require ordering may
+/// await this directly; audit persistence remains best-effort to the business
+/// operation and errors must not expose event details to clients.
+pub async fn log_actor_event(
+    db: mongodb::Database,
+    actor: &AuditActor,
+    event_type: impl Into<String>,
+    event_data: Option<serde_json::Value>,
+) -> Result<(), mongodb::error::Error> {
+    let event_type = event_type.into();
+    let entry = build_audit_entry(
+        Some(actor.user_id.clone()),
+        event_type.clone(),
+        event_data,
+        actor.ip_address.clone(),
+        actor.user_agent.clone(),
+        actor.api_key_id.clone(),
+        actor.api_key_name.clone(),
+    );
     write_audit_entry(db, entry, event_type).await
 }
 
