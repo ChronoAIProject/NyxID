@@ -53,6 +53,31 @@ describe("WizardShell", () => {
     expect(screen.queryByText(/Step \d of \d/)).not.toBeInTheDocument()
   })
 
+  // The card has to hug its content. With `flex-1` on <main> (and
+  // `min-h-screen` on the column) a short step stretched the card to the
+  // full viewport height, leaving a large empty panel below the last
+  // control. Pin the two classes that caused it plus the two that keep
+  // tall steps scrolling internally — not the whole class string.
+  it("sizes the card to its content instead of the viewport", () => {
+    render(
+      <WizardShell context="local">
+        <div data-testid="step-body">body</div>
+      </WizardShell>,
+    )
+
+    const main = screen.getByTestId("step-body").closest("main")
+    expect(main).not.toBeNull()
+    expect(main).not.toHaveClass("flex-1")
+    // Floor so a transient state can't collapse the card to a sliver.
+    expect(main).toHaveClass("min-h-[240px]")
+
+    const column = main?.parentElement
+    expect(column).not.toHaveClass("min-h-screen")
+    // Still capped, so content taller than the window scrolls in-card.
+    expect(column).toHaveClass("max-h-screen")
+    expect(main).toHaveClass("overflow-y-auto")
+  })
+
   it("passes context through to the footer (local trust copy)", () => {
     render(
       <WizardShell context="local" localOrigin="127.0.0.1:9000">

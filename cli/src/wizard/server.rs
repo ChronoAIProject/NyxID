@@ -837,6 +837,43 @@ async fn serve_asset(axum::extract::Path(name): axum::extract::Path<String>) -> 
     embedded_asset_response(&name)
 }
 
+/// Brand assets the wizard shell requests from the *root* path rather
+/// than `/assets/`: the `<link rel="icon">` pair and both `NyxidLogo`
+/// theme variants. The handlers are stateless, so this stays generic
+/// over the app state and merges into `run_flow`'s router — one route
+/// table, which tests drive directly instead of restating it.
+fn brand_asset_routes<S>() -> Router<S>
+where
+    S: Clone + Send + Sync + 'static,
+{
+    Router::new()
+        .route(
+            "/nyxid-wordmark.svg",
+            get(|| async { embedded_asset_response("nyxid-wordmark.svg") }),
+        )
+        // Responsive SVG app icon for the wizard's `<link rel="icon">`.
+        // Scales for any DPR and inherits the SVG's own light/dark
+        // behavior. Matches the dashboard's favicon (NyxID#706 follow-up).
+        .route(
+            "/nyxid-app-icon.svg",
+            get(|| async { embedded_asset_response("nyxid-app-icon.svg") }),
+        )
+        // `NyxidLogo` in the wizard shell picks the variant by resolved
+        // theme, so both must exist or the header logo 404s on one theme.
+        .route(
+            "/nyxid-coloured-logo.svg",
+            get(|| async { embedded_asset_response("nyxid-coloured-logo.svg") }),
+        )
+        .route(
+            "/nyxid-coloured-logo-dark.svg",
+            get(|| async { embedded_asset_response("nyxid-coloured-logo-dark.svg") }),
+        )
+        .route(
+            "/favicon.ico",
+            get(|| async { embedded_asset_response("favicon.ico") }),
+        )
+}
+
 /// Validate the `Origin` header. When present it must point at *this*
 /// server's exact loopback origin — not just any `127.0.0.1:*`. A
 /// compromised neighbouring local process on a different port should
@@ -2045,21 +2082,7 @@ pub async fn run_flow(
         .route("/wizard", get(serve_index))
         .route("/", get(serve_index))
         .route("/assets/{*name}", get(serve_asset))
-        .route(
-            "/nyxid-wordmark.svg",
-            get(|| async { embedded_asset_response("nyxid-wordmark.svg") }),
-        )
-        // Responsive SVG app icon for the wizard's `<link rel="icon">`.
-        // Scales for any DPR and inherits the SVG's own light/dark
-        // behavior. Matches the dashboard's favicon (NyxID#706 follow-up).
-        .route(
-            "/nyxid-app-icon.svg",
-            get(|| async { embedded_asset_response("nyxid-app-icon.svg") }),
-        )
-        .route(
-            "/favicon.ico",
-            get(|| async { embedded_asset_response("favicon.ico") }),
-        )
+        .merge(brand_asset_routes())
         .route("/api/proxy/complete", post(handle_complete))
         .route("/api/proxy/cancel", post(handle_cancel))
         .route("/api/proxy/cancel-unload", post(handle_cancel_unload))
@@ -2215,6 +2238,7 @@ mod tests {
         Mutex as StdMutex,
         atomic::{AtomicUsize, Ordering},
     };
+    use tower::ServiceExt;
 
     #[derive(Clone, Default)]
     struct MockBackend {
@@ -2297,41 +2321,44 @@ mod tests {
         }
     }
 
+    /// Drives the same router `run_flow` merges, so a missing or
+    /// misspelled registration fails here instead of 404ing in the
+    /// browser. Every path below is requested by the shipped bundle: a
+    /// 404 on `nyxid-app-icon.svg` silently downgrades the tab icon to
+    /// the .ico (NyxID#706 follow-up), and a 404 on either
+    /// `nyxid-coloured-logo*.svg` renders a broken image in the header.
     #[tokio::test]
-    async fn root_brand_assets_are_embedded_and_typed() {
-        let wordmark = embedded_asset_response("nyxid-wordmark.svg");
-        assert_eq!(wordmark.status(), StatusCode::OK);
-        assert_eq!(
-            wordmark
-                .headers()
-                .get(header::CONTENT_TYPE)
-                .and_then(|value| value.to_str().ok()),
-            Some("image/svg+xml")
-        );
+    async fn root_brand_assets_are_routed_and_typed() {
+        let app: Router = brand_asset_routes();
 
-        let favicon = embedded_asset_response("favicon.ico");
-        assert_eq!(favicon.status(), StatusCode::OK);
-        assert_eq!(
-            favicon
-                .headers()
-                .get(header::CONTENT_TYPE)
-                .and_then(|value| value.to_str().ok()),
-            Some("image/x-icon")
-        );
+        for (path, content_type) in [
+            ("/nyxid-wordmark.svg", "image/svg+xml"),
+            ("/nyxid-app-icon.svg", "image/svg+xml"),
+            ("/nyxid-coloured-logo.svg", "image/svg+xml"),
+            ("/nyxid-coloured-logo-dark.svg", "image/svg+xml"),
+            ("/favicon.ico", "image/x-icon"),
+        ] {
+            let response = app
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .uri(path)
+                        .body(Body::empty())
+                        .expect("build request"),
+                )
+                .await
+                .expect("router response");
 
-        // NyxID#706 follow-up — the SVG app icon referenced by the
-        // wizard HTML's `<link rel="icon" type="image/svg+xml">`.
-        // Without this asset the modern (DPR-aware) favicon path
-        // 404s and browsers silently fall back to the .ico.
-        let app_icon = embedded_asset_response("nyxid-app-icon.svg");
-        assert_eq!(app_icon.status(), StatusCode::OK);
-        assert_eq!(
-            app_icon
-                .headers()
-                .get(header::CONTENT_TYPE)
-                .and_then(|value| value.to_str().ok()),
-            Some("image/svg+xml")
-        );
+            assert_eq!(response.status(), StatusCode::OK, "{path}");
+            assert_eq!(
+                response
+                    .headers()
+                    .get(header::CONTENT_TYPE)
+                    .and_then(|value| value.to_str().ok()),
+                Some(content_type),
+                "{path}"
+            );
+        }
     }
 
     #[test]
