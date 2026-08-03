@@ -400,7 +400,6 @@ pub(crate) fn test_app_config() -> AppConfig {
         billing_default_overdraft_cap_credits: 0,
         billing_fail_closed: false,
         billing_resale_enabled: false,
-        aevatar_chat_wire_log_enabled: false,
         invite_code_required: false,
         email_auth_enabled: false,
         auto_verify_email: false,
