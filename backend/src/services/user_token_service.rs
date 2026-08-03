@@ -13,6 +13,7 @@ use crate::models::provider_config::{COLLECTION_NAME as PROVIDER_CONFIGS, Provid
 use crate::models::user_api_key::{COLLECTION_NAME as USER_API_KEYS, UserApiKey};
 use crate::models::user_provider_token::{COLLECTION_NAME, UserProviderToken};
 use crate::services::oauth_flow;
+use crate::services::oauth_revocation;
 use crate::services::user_credentials_service;
 
 /// Decrypted token ready for injection.
@@ -2660,7 +2661,14 @@ pub async fn disconnect_provider(
         if let Some(ref provider) = provider
             && provider.revocation_url.is_some()
         {
-            let _ = try_revoke_token_remote(db, encryption_keys, provider, tok).await;
+            oauth_revocation::try_revoke_token_remote(
+                db,
+                encryption_keys,
+                provider,
+                tok,
+                oauth_revocation::RevocationScope::from_grant(false),
+            )
+            .await;
         }
     }
 
@@ -2694,106 +2702,6 @@ pub async fn disconnect_provider(
         "Provider disconnected"
     );
 
-    Ok(())
-}
-
-/// Best-effort remote token revocation (RFC 7009).
-///
-/// Resolves OAuth client credentials so the revocation request includes proper
-/// client authentication (`client_secret_basic` or `client_secret_post`).
-/// If credential resolution fails, revocation is silently skipped.
-async fn try_revoke_token_remote(
-    db: &mongodb::Database,
-    encryption_keys: &EncryptionKeys,
-    provider: &ProviderConfig,
-    token: &UserProviderToken,
-) {
-    let revocation_url = match provider.revocation_url.as_deref() {
-        Some(url) => url,
-        None => return,
-    };
-
-    // Resolve the same OAuth credentials that were used to mint this token.
-    // If resolution fails (e.g. credentials deleted), skip revocation silently.
-    let creds = match user_credentials_service::resolve_token_oauth_credentials(
-        db,
-        encryption_keys,
-        provider,
-        token.credential_user_id.as_deref(),
-    )
-    .await
-    {
-        Ok(c) => c,
-        Err(_) => return,
-    };
-
-    let use_basic_auth = provider.token_endpoint_auth_method == "client_secret_basic";
-
-    // Try revoking access token
-    if let Some(ref enc) = token.access_token_encrypted
-        && let Ok(decrypted) = encryption_keys.decrypt(enc).await
-        && let Ok(access_token) = String::from_utf8(decrypted)
-    {
-        let _ = send_revocation_request(
-            revocation_url,
-            &access_token,
-            "access_token",
-            &creds.client_id,
-            creds.client_secret.as_deref(),
-            use_basic_auth,
-            oauth_flow::client_id_param_name(provider),
-        )
-        .await;
-    }
-
-    // Try revoking refresh token
-    if let Some(ref enc) = token.refresh_token_encrypted
-        && let Ok(decrypted) = encryption_keys.decrypt(enc).await
-        && let Ok(refresh_token) = String::from_utf8(decrypted)
-    {
-        let _ = send_revocation_request(
-            revocation_url,
-            &refresh_token,
-            "refresh_token",
-            &creds.client_id,
-            creds.client_secret.as_deref(),
-            use_basic_auth,
-            oauth_flow::client_id_param_name(provider),
-        )
-        .await;
-    }
-}
-
-/// Send a single RFC 7009 revocation request with client authentication.
-async fn send_revocation_request(
-    revocation_url: &str,
-    token_value: &str,
-    token_type_hint: &str,
-    client_id: &str,
-    client_secret: Option<&str>,
-    use_basic_auth: bool,
-    client_id_param_name: &str,
-) -> Result<(), ()> {
-    let client = oauth_flow::token_exchange_client();
-
-    let mut request = client.post(revocation_url);
-
-    if use_basic_auth {
-        request = request.basic_auth(client_id, client_secret);
-        request = request.form(&[("token", token_value), ("token_type_hint", token_type_hint)]);
-    } else {
-        let mut params = vec![
-            ("token".to_string(), token_value.to_string()),
-            ("token_type_hint".to_string(), token_type_hint.to_string()),
-            (client_id_param_name.to_string(), client_id.to_string()),
-        ];
-        if let Some(secret) = client_secret {
-            params.push(("client_secret".to_string(), secret.to_string()));
-        }
-        request = request.form(&params);
-    }
-
-    let _ = request.send().await;
     Ok(())
 }
 

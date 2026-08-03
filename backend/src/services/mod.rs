@@ -58,6 +58,7 @@ pub mod oauth_broker_service;
 pub mod oauth_client_service;
 pub mod oauth_flow;
 pub mod oauth_resource_service;
+pub mod oauth_revocation;
 pub mod oauth_service;
 pub mod openapi_parser;
 pub mod openclaw_channel_service;
