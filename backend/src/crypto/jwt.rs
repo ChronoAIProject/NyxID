@@ -408,9 +408,9 @@ pub fn generate_access_token(
 // delegated token now); kept one deploy for the paired `verify_token`
 // rejection. Deleted together with the marker machinery in the follow-up.
 #[allow(dead_code)]
-/// Generate the outbound-only access token the assistant pass-through
-/// forwarded to Aevatar for cookie-session callers (CHAT_ASSISTANT_SPECS
-/// TD-3 bridge).
+/// Generate the retired outbound-only token previously used by the assistant
+/// pass-through for cookie-session callers. The live authentication chain is
+/// documented in `docs/chat/01-architecture.md`.
 ///
 /// The downstream validates it like any NyxID access token (RS256 via JWKS,
 /// issuer, the fixed NyxID audience, `sub` = the caller). NyxID itself

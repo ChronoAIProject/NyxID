@@ -18,11 +18,12 @@
 use axum::{
     body::{Body, to_bytes},
     extract::{Path, State},
-    http::{HeaderMap, HeaderValue, Method, Request, header},
+    http::{HeaderMap, HeaderValue, Method, Request, StatusCode, header},
     response::Response,
 };
 use base64::Engine as _;
 use serde::Serialize;
+use std::collections::HashSet;
 
 use crate::AppState;
 use crate::crypto::jwt::{
@@ -37,6 +38,14 @@ use crate::services::assistant_service;
 /// Conversation indexes carry titles, timestamps, and counts per row, so the
 /// list route gets its own buffering headroom before any merge/reshape.
 const MAX_CONVERSATION_INDEX_RESPONSE_BYTES: usize = 4 * 1024 * 1024;
+/// Aggregate page-body budget for one cursor drain. This keeps a valid but
+/// adversarial 40-page chain near the pre-drain memory ceiling instead of
+/// allowing up to 160 MiB of history rows to accumulate in one request.
+const MAX_HISTORY_INDEX_AGGREGATE_BYTES: usize = 8 * 1024 * 1024;
+/// Safety ceiling for a corrupt or adversarial upstream cursor chain. The
+/// response intentionally exposes only the rows drained through this page;
+/// there is no synthetic cursor or truncation flag in NyxID's list contract.
+const MAX_HISTORY_INDEX_PAGES: usize = 40;
 
 const DEBUG_UPSTREAM_REQUEST_HEADER: &str = "x-nyxid-debug-upstream";
 const DEBUG_UPSTREAM_RESPONSE_HEADER: &str = "x-nyxid-debug-upstream-log";
@@ -236,6 +245,20 @@ fn response_echo(response: &Response) -> UpstreamResponseEcho {
         status: response.status().as_u16(),
         headers,
         sse,
+    }
+}
+
+fn record_upstream_response(
+    collector: Option<&mut Vec<UpstreamEcho>>,
+    echo_index: Option<usize>,
+    result: &AppResult<Response>,
+) {
+    let (Some(echoes), Some(index), Ok(response)) = (collector, echo_index, result) else {
+        return;
+    };
+    if let Some(echo) = echoes.get_mut(index) {
+        echo.response = Some(response_echo(response));
+        echo.upstream_outcome = Some(UpstreamOutcome::Response);
     }
 }
 
@@ -647,19 +670,13 @@ async fn forward(
         extra_outbound_headers,
         &mut resolved_slug,
     )
-    .await?;
-    if let (Some(echoes), Some(index)) = (collector, echo_index)
-        && let Some(echo) = echoes.get_mut(index)
-    {
-        echo.response = Some(response_echo(&response));
-        echo.upstream_outcome = Some(UpstreamOutcome::Response);
-    }
-    Ok(response)
+    .await;
+    record_upstream_response(collector, echo_index, &response);
+    response
 }
 
-/// `GET /api/v1/assistant/conversations` -- canonical typed list, with a
-/// best-effort legacy workflow (`chatc-…`) merge when the upstream list has
-/// not absorbed those rows yet.
+/// `GET /api/v1/assistant/conversations` -- fully drained shared Chat History
+/// index, filtered to the typed and workflow conversation families.
 pub async fn list_conversations(
     State(state): State<AppState>,
     auth_user: AuthUser,
@@ -668,71 +685,93 @@ pub async fn list_conversations(
     let authorization = request.headers().get(header::AUTHORIZATION).cloned();
     let mut echoes = upstream_echo_collector(&state, request.headers());
     let user_id = auth_user.user_id.to_string();
-    let response = forward(
-        &state,
-        &auth_user,
-        assistant_service::canonical_conversations_path(),
-        request,
-        Vec::new(),
-        ForwardEcho::enabled(None, None, echoes.as_mut()),
-    )
-    .await?;
-    if !response.status().is_success() {
-        return Ok(attach_upstream_echoes(response, echoes.as_deref()));
-    }
-    let (mut parts, body) = response.into_parts();
-    let Ok(bytes) = to_bytes(body, MAX_CONVERSATION_INDEX_RESPONSE_BYTES).await else {
-        return Err(AppError::Internal(
-            "assistant: conversation index exceeded the buffer cap".to_string(),
-        ));
-    };
-    let Ok(mut canonical) = serde_json::from_slice::<serde_json::Value>(&bytes) else {
-        return Ok(attach_upstream_echoes(
-            Response::from_parts(parts, Body::from(bytes)),
-            echoes.as_deref(),
-        ));
-    };
-    let mut changed = assistant_service::filter_addressable_conversation_index(&mut canonical);
-    if !assistant_service::conversation_index_includes_workflow(&canonical) {
-        let legacy_request =
+    let mut response_parts = None;
+    let mut conversations = Vec::new();
+    let mut seen_ids = HashSet::new();
+    let mut seen_cursors = HashSet::new();
+    let mut cursor: Option<String> = None;
+    let mut aggregate_page_bytes = 0usize;
+
+    for _ in 0..MAX_HISTORY_INDEX_PAGES {
+        let mut page_request =
             synthetic_request(Method::GET, authorization.as_ref()).map_err(|_| {
                 AppError::Internal(
-                    "assistant: failed to build the workflow list request".to_string(),
+                    "assistant: failed to build the history list request".to_string(),
                 )
             })?;
-        if let Ok(legacy_response) = forward(
+        page_request
+            .headers_mut()
+            .insert(header::ACCEPT, HeaderValue::from_static("application/json"));
+        if let Some(cursor) = cursor.as_deref() {
+            *page_request.uri_mut() = format!("/?cursor={}", urlencoding::encode(cursor))
+                .parse()
+                .map_err(|_| {
+                    AppError::Internal("assistant: failed to encode the history cursor".to_string())
+                })?;
+        }
+        let response = forward(
             &state,
             &auth_user,
             assistant_service::history_index_path(&user_id),
-            legacy_request,
+            page_request,
             Vec::new(),
             ForwardEcho::enabled(None, None, echoes.as_mut()),
         )
-        .await
-            && legacy_response.status().is_success()
-            && let Ok(legacy_bytes) = to_bytes(
-                legacy_response.into_body(),
-                MAX_CONVERSATION_INDEX_RESPONSE_BYTES,
-            )
-            .await
-            && let Ok(legacy_index) = serde_json::from_slice::<serde_json::Value>(&legacy_bytes)
-        {
-            changed |=
-                assistant_service::merge_workflow_history_rows(&mut canonical, &legacy_index);
+        .await?;
+        if !response.status().is_success() {
+            return Ok(attach_upstream_echoes(response, echoes.as_deref()));
         }
+        let (parts, body) = response.into_parts();
+        if response_parts.is_none() {
+            response_parts = Some(parts);
+        }
+        let bytes = to_bytes(body, MAX_CONVERSATION_INDEX_RESPONSE_BYTES)
+            .await
+            .map_err(|_| {
+                AppError::Internal(
+                    "assistant: conversation index page exceeded the buffer cap".to_string(),
+                )
+            })?;
+        let Some(next_aggregate_bytes) = aggregate_page_bytes.checked_add(bytes.len()) else {
+            break;
+        };
+        if next_aggregate_bytes > MAX_HISTORY_INDEX_AGGREGATE_BYTES {
+            break;
+        }
+        aggregate_page_bytes = next_aggregate_bytes;
+        let Ok(page) = serde_json::from_slice::<serde_json::Value>(&bytes) else {
+            // Preserve already-collected rows across a mixed-version or
+            // partially deployed upstream response shape. On the first page,
+            // the same deploy-independent posture intentionally degrades to an
+            // empty successful index using that upstream response's metadata.
+            break;
+        };
+        let next_cursor = assistant_service::append_addressable_history_page(
+            &page,
+            &mut conversations,
+            &mut seen_ids,
+        )?;
+        let Some(next_cursor) = next_cursor else {
+            break;
+        };
+        if !seen_cursors.insert(next_cursor.clone()) {
+            return Err(AppError::Internal(
+                "assistant: chat history index repeated a cursor".to_string(),
+            ));
+        }
+        cursor = Some(next_cursor);
     }
-    if !changed {
-        return Ok(attach_upstream_echoes(
-            Response::from_parts(parts, Body::from(bytes)),
-            echoes.as_deref(),
-        ));
-    }
-    let Ok(filtered) = serde_json::to_vec(&canonical) else {
-        return Ok(attach_upstream_echoes(
-            Response::from_parts(parts, Body::from(bytes)),
-            echoes.as_deref(),
-        ));
-    };
+
+    assistant_service::sort_conversation_rows_newest_first(&mut conversations);
+    let filtered = serde_json::to_vec(&serde_json::json!({
+        "conversations": conversations,
+    }))
+    .map_err(|_| {
+        AppError::Internal("assistant: failed to encode the conversation index".to_string())
+    })?;
+    let mut parts = response_parts.ok_or_else(|| {
+        AppError::Internal("assistant: conversation index returned no pages".to_string())
+    })?;
     parts.headers.remove(header::CONTENT_LENGTH);
     Ok(attach_upstream_echoes(
         Response::from_parts(parts, Body::from(filtered)),
@@ -740,8 +779,8 @@ pub async fn list_conversations(
     ))
 }
 
-/// `GET /api/v1/assistant/conversations/{id}` -- canonical conversation
-/// transcript/state wrapper.
+/// `GET /api/v1/assistant/conversations/{id}` -- family-aware conversation
+/// transcript wrapper.
 ///
 /// The body is opaque here: NyxID never parses or reshapes it. Aevatar PR
 /// #2923 wrapped the flat `[StoredChatMessage]` array in
@@ -756,7 +795,15 @@ pub async fn get_history(
     request: Request<Body>,
 ) -> AppResult<Response> {
     let mut echoes = upstream_echo_collector(&state, request.headers());
-    let path = assistant_service::canonical_conversation_path(&conversation_id)?;
+    let user_id = auth_user.user_id.to_string();
+    let path = match assistant_service::conversation_resource_family(&conversation_id)? {
+        assistant_service::ConversationResourceFamily::Typed => {
+            assistant_service::canonical_conversation_path(&conversation_id)?
+        }
+        assistant_service::ConversationResourceFamily::Workflow => {
+            assistant_service::history_conversation_path(&user_id, &conversation_id)?
+        }
+    };
     let response = forward(
         &state,
         &auth_user,
@@ -769,7 +816,8 @@ pub async fn get_history(
     Ok(attach_upstream_echoes(response, echoes.as_deref()))
 }
 
-/// `DELETE /api/v1/assistant/conversations/{id}` -- canonical single delete.
+/// `DELETE /api/v1/assistant/conversations/{id}` -- typed composite lifecycle
+/// delete or workflow Chat History delete, selected by id family.
 pub async fn delete_conversation(
     State(state): State<AppState>,
     auth_user: AuthUser,
@@ -777,7 +825,16 @@ pub async fn delete_conversation(
     request: Request<Body>,
 ) -> AppResult<Response> {
     let mut echoes = upstream_echo_collector(&state, request.headers());
-    let path = assistant_service::canonical_conversation_path(&conversation_id)?;
+    let user_id = auth_user.user_id.to_string();
+    let family = assistant_service::conversation_resource_family(&conversation_id)?;
+    let path = match family {
+        assistant_service::ConversationResourceFamily::Typed => {
+            assistant_service::canonical_conversation_path(&conversation_id)?
+        }
+        assistant_service::ConversationResourceFamily::Workflow => {
+            assistant_service::history_conversation_path(&user_id, &conversation_id)?
+        }
+    };
     let response = forward(
         &state,
         &auth_user,
@@ -787,6 +844,18 @@ pub async fn delete_conversation(
         ForwardEcho::enabled(None, None, echoes.as_mut()),
     )
     .await?;
+    if family == assistant_service::ConversationResourceFamily::Workflow
+        && response.status().is_success()
+    {
+        let (mut parts, _) = response.into_parts();
+        parts.status = StatusCode::NO_CONTENT;
+        parts.headers.remove(header::CONTENT_LENGTH);
+        parts.headers.remove(header::CONTENT_TYPE);
+        return Ok(attach_upstream_echoes(
+            Response::from_parts(parts, Body::empty()),
+            echoes.as_deref(),
+        ));
+    }
     Ok(attach_upstream_echoes(response, echoes.as_deref()))
 }
 
@@ -801,8 +870,40 @@ pub async fn get_state(
     Path(conversation_id): Path<String>,
     request: Request<Body>,
 ) -> AppResult<Response> {
+    if assistant_service::conversation_resource_family(&conversation_id)?
+        == assistant_service::ConversationResourceFamily::Workflow
+    {
+        return Err(AppError::NotFound(
+            "Conversation state not found.".to_string(),
+        ));
+    }
     let mut echoes = upstream_echo_collector(&state, request.headers());
     let path = assistant_service::canonical_state_path(&conversation_id)?;
+    let response = forward(
+        &state,
+        &auth_user,
+        path,
+        request,
+        Vec::new(),
+        ForwardEcho::enabled(None, None, echoes.as_mut()),
+    )
+    .await?;
+    Ok(attach_upstream_echoes(response, echoes.as_deref()))
+}
+
+/// `GET /api/v1/assistant/conversations/create-recovery/{commandId}` --
+/// workflow create identity recovery from scoped Chat History.
+pub async fn get_create_recovery(
+    State(state): State<AppState>,
+    auth_user: AuthUser,
+    Path(command_id): Path<String>,
+    request: Request<Body>,
+) -> AppResult<Response> {
+    let mut echoes = upstream_echo_collector(&state, request.headers());
+    let path = assistant_service::history_create_recovery_path(
+        &auth_user.user_id.to_string(),
+        &command_id,
+    )?;
     let response = forward(
         &state,
         &auth_user,
@@ -899,13 +1000,13 @@ pub async fn typed_chat(
 /// `POST /api/v1/assistant/workflow-chat` -- workflow ("studio") chat turn,
 /// answered as the upstream SSE stream.
 ///
-/// The caller body is the typed `WorkflowChatTurnRequest` (prompt +
-/// conversation continuation + idempotency id); the upstream `/api/chat`
-/// body is built server-side with the workflow pinned to `studio` and the
-/// `conversation` object always present, so every turn persists to chat
-/// history and no caller can select another engine or smuggle fields into
-/// Aevatar's strict `HttpChatInput`. Scope comes from the propagated
-/// identity token (Aevatar ignores any body scope).
+/// The caller body is the typed `WorkflowChatTurnRequest`: prompt, session,
+/// create-only command id, or a conversation id plus observed state fence.
+/// The upstream `/api/chat` body is built server-side with the workflow pinned
+/// to `studio` and the `conversation` object always present, so every turn
+/// persists to chat history and no caller can select another engine or smuggle
+/// fields into Aevatar's strict `HttpChatInput`. Scope comes from the
+/// propagated identity token (Aevatar ignores any body scope).
 ///
 /// Streams Aevatar's raw workflow engine events (`aevatar.raw.observed`
 /// envelopes carrying workflow YAML, system prompts, and kernel state) to the
@@ -1131,6 +1232,20 @@ mod tests {
         let response = attach_upstream_echoes(response, None);
 
         assert_eq!(response.headers(), &expected);
+    }
+
+    #[test]
+    fn failed_upstream_attempt_remains_no_response() {
+        let mut echoes = vec![test_echo(serde_json::Value::Null)];
+        let result = Err(AppError::Internal("upstream unavailable".to_string()));
+
+        record_upstream_response(Some(&mut echoes), Some(0), &result);
+
+        assert!(matches!(
+            echoes[0].upstream_outcome,
+            Some(UpstreamOutcome::NoResponse)
+        ));
+        assert!(echoes[0].response.is_none());
     }
 
     #[tokio::test]

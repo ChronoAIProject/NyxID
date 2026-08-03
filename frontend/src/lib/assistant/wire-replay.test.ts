@@ -21,6 +21,7 @@ import type { User } from "@/types/api";
 const ACTOR_ID = "nyxid-chat-wire-replay-actor";
 const TURN_ID = "turn-wire-replay";
 const WORKFLOW_CONVERSATION = "chatc-1234567890abcdef1234567890abcdef";
+const SCOPE_ID = "user-wire-replay";
 
 interface ReplayCase {
   readonly name: string;
@@ -231,6 +232,7 @@ function startFrames(protocol: WireReplayProtocol): ChatStreamFrame[] {
       custom: {
         name: "aevatar.chat.context",
         payload: {
+          scopeId: SCOPE_ID,
           conversationId: WORKFLOW_CONVERSATION,
           turnId: TURN_ID,
           stateVersion: "1",
@@ -356,7 +358,7 @@ async function projectThroughLiveTransport(
 }
 
 beforeEach(() => {
-  useAuthStore.getState().setUser({ id: "user-wire-replay" } as User);
+  useAuthStore.getState().setUser({ id: SCOPE_ID } as User);
 });
 
 afterEach(() => {

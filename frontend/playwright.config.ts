@@ -1,7 +1,7 @@
 import { defineConfig, devices } from "@playwright/test";
 
 /**
- * E2E harness for the assistant chat flows (docs/chat-flow-audit.md).
+ * E2E harness for the assistant chat flows (docs/chat/07-testing-and-gaps.md).
  *
  * Runs the REAL app in Vite dev mode against the scripted MockAssistantTransport
  * (`/assistant?mock` — see src/lib/assistant/transport.ts). No backend and no

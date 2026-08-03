@@ -1818,6 +1818,12 @@ fn is_lark_family_slug(slug: &str) -> bool {
     matches!(slug, "api-lark-bot" | "api-feishu-bot")
 }
 
+const LARK_FAMILY_REQUIRED_PERMISSIONS: &[&str] = &["bitable:app:readonly"];
+
+fn seed_required_permissions(slug: &str) -> Option<&'static [&'static str]> {
+    is_lark_family_slug(slug).then_some(LARK_FAMILY_REQUIRED_PERMISSIONS)
+}
+
 struct DefaultServiceSeed {
     provider_slug: &'static str,
     service_slug: &'static str,
@@ -2856,6 +2862,62 @@ fn reconcile_seeded_headers(
     Some(merged)
 }
 
+fn reconcile_seeded_permissions(stored: Option<&[String]>, seeded: &[&str]) -> Option<Vec<String>> {
+    let mut merged = stored.unwrap_or_default().to_vec();
+    let mut added = false;
+    for permission in seeded {
+        if !merged.iter().any(|existing| existing == permission) {
+            merged.push((*permission).to_string());
+            added = true;
+        }
+    }
+
+    added.then_some(merged)
+}
+
+async fn ensure_seeded_required_permissions(
+    service_col: &mongodb::Collection<DownstreamService>,
+    now: chrono::DateTime<Utc>,
+) -> AppResult<()> {
+    for seed in DEFAULT_SERVICE_SEEDS {
+        let Some(seeded) = seed_required_permissions(seed.service_slug) else {
+            continue;
+        };
+        let Some(service) = service_col
+            .find_one(doc! { "slug": seed.service_slug, "created_by": "system" })
+            .await?
+        else {
+            continue;
+        };
+        let Some(merged) =
+            reconcile_seeded_permissions(service.required_permissions.as_deref(), seeded)
+        else {
+            continue;
+        };
+
+        service_col
+            .update_one(
+                doc! { "_id": &service.id },
+                doc! { "$set": {
+                    "required_permissions": bson::to_bson(&merged).map_err(|error| {
+                        AppError::Internal(format!(
+                            "Failed to serialize required_permissions: {error}"
+                        ))
+                    })?,
+                    "updated_at": bson::DateTime::from_chrono(now),
+                }},
+            )
+            .await?;
+
+        tracing::info!(
+            slug = seed.service_slug,
+            "Reconciled seeded required permissions"
+        );
+    }
+
+    Ok(())
+}
+
 /// Reconcile seeded `default_request_headers` onto every seeded
 /// `DownstreamService` whose seed declares required headers. Runs on every
 /// restart so admins cannot permanently drop a system-required header.
@@ -3099,6 +3161,12 @@ pub async fn seed_default_services(
     // full policy.
     ensure_seeded_default_request_headers(&service_col, now).await?;
 
+    // Keep the least-privilege baseline used by the hosted Lark/Feishu
+    // Bitable read tools present on existing system catalog rows. The
+    // permission setup URL reads this field, so missing seed metadata leaves
+    // users on a generic app page with no actionable permission selected.
+    ensure_seeded_required_permissions(&service_col, now).await?;
+
     for seed in DEFAULT_SERVICE_SEEDS {
         // Find the provider by slug
         let provider = match provider_col
@@ -3208,7 +3276,12 @@ pub async fn seed_default_services(
             billing: None,
             auth_notes: seed.auth_notes.map(String::from),
             known_limitations: seed.known_limitations.map(String::from),
-            required_permissions: None,
+            required_permissions: seed_required_permissions(seed.service_slug).map(|permissions| {
+                permissions
+                    .iter()
+                    .map(|permission| (*permission).to_string())
+                    .collect()
+            }),
             examples_url: None,
             recommended_skills: None,
             custom_user_agent: None,
@@ -4924,6 +4997,40 @@ mod tests {
         assert_eq!(lark_bot.auth_method, "token_exchange");
         assert_eq!(lark_bot.auth_key_name, "");
         assert!(lark_bot.token_exchange_config.is_some());
+        assert_eq!(
+            lark_bot.required_permissions,
+            Some(vec!["bitable:app:readonly".to_string()])
+        );
+    }
+
+    #[tokio::test]
+    async fn seed_default_services_restores_lark_bot_required_permissions() {
+        let Some(db) = seed_default_catalog("prov_seed_lark_bot_permissions").await else {
+            return;
+        };
+        let service_col = db.collection::<DownstreamService>(DOWNSTREAM_SERVICES);
+        service_col
+            .update_one(
+                doc! { "slug": "api-lark-bot" },
+                doc! { "$set": { "required_permissions": bson::Bson::Array(vec![]) } },
+            )
+            .await
+            .expect("clear required permissions");
+
+        let enc = test_encryption_keys();
+        super::seed_default_services(&db, &enc)
+            .await
+            .expect("reconcile default services");
+
+        let lark_bot = service_col
+            .find_one(doc! { "slug": "api-lark-bot" })
+            .await
+            .expect("query lark bot")
+            .expect("lark bot service");
+        assert_eq!(
+            lark_bot.required_permissions,
+            Some(vec!["bitable:app:readonly".to_string()])
+        );
     }
 
     #[tokio::test]
@@ -5375,6 +5482,38 @@ mod tests {
         assert!(super::is_lark_family_slug("api-feishu-bot"));
         assert!(!super::is_lark_family_slug("api-slack-bot"));
         assert!(!super::is_lark_family_slug("api-lark"));
+    }
+
+    #[test]
+    fn lark_family_seed_permissions_are_bitable_read_only() {
+        assert_eq!(
+            super::seed_required_permissions("api-lark-bot"),
+            Some(&["bitable:app:readonly"][..])
+        );
+        assert_eq!(
+            super::seed_required_permissions("api-feishu-bot"),
+            Some(&["bitable:app:readonly"][..])
+        );
+        assert_eq!(super::seed_required_permissions("api-lark"), None);
+    }
+
+    #[test]
+    fn reconcile_seeded_permissions_preserves_existing_entries_and_is_idempotent() {
+        let existing = vec!["docx:document:readonly".to_string()];
+        let merged =
+            super::reconcile_seeded_permissions(Some(&existing), &["bitable:app:readonly"])
+                .expect("missing seeded permission should be added");
+        assert_eq!(
+            merged,
+            vec![
+                "docx:document:readonly".to_string(),
+                "bitable:app:readonly".to_string()
+            ]
+        );
+        assert_eq!(
+            super::reconcile_seeded_permissions(Some(&merged), &["bitable:app:readonly"]),
+            None
+        );
     }
 
     #[test]
