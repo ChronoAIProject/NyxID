@@ -1,6 +1,6 @@
 # Assistant Chat Testing and Gaps
 
-Last verified against `f608b33c` (2026-08-01).
+Last verified against `fix-new-chat-timing` (2026-08-04).
 
 The assistant surface is covered at four levels: browser flow tests against a deterministic transport, React hook and component probes, transport/protocol unit tests, and Rust handler/service tests against reconstructed upstream calls. Live deployment capture remains a separate operational requirement.
 
@@ -85,6 +85,7 @@ This suite covers:
 - cancellation and prevention of late writes;
 - error copy for downstream auth, active turn, history, and generic failures;
 - typed not-found no-retry behavior; and
+- projection reconciliation, canonical-key invalidation, and waiter release;
 - continued streaming when history is missing or fails.
 
 ### `use-assistant.audit.test.tsx`
@@ -133,7 +134,10 @@ This suite uses the real Aevatar transport with controlled history/stream respon
 - reservation-specific 503 refresh and retry;
 - no Studio continuation replay after accepted stream truncation;
 - create recovery entry points, poll validation, history reconciliation, scope guard, alias adoption, terminal-kind preservation, and fail-closed exhaustion;
-- workflow client-only cancellation and workflow delete; and
+- workflow client-only cancellation and workflow delete;
+- account-scope reset and abandoned-retry settlement, receipt-backed cold reads, raw-index evidence, active/pending mirror suppression, projection materialization, and pre-alias deletion intents;
+- new-chat keep-max convergence and retention at current, missing-turn, below-fence, legacy, and live-turn boundaries;
+- receiptless placeholder-alias DELETE, delete-before-context canonical cleanup, and persisted-intent reload sweeping; and
 - refusal to send typed actor approval/wake controls to a `chatc-...` identity.
 
 Captured fixtures in `frontend/src/lib/assistant/__fixtures__/aevatar-nyxid-chat-stream.sse` and `aevatar-chat-history.json` are replayed through awkward byte chunks to exercise incremental parsing and history mapping.
@@ -147,7 +151,9 @@ Supporting unit suites isolate the components:
 - `canonical-command-guard.test.ts`: canonical typed command route/body use;
 - `transport.test.ts` and `mock-data.test.ts`: transport selection and deterministic mock behavior;
 - component tests for thread, composer, sidebar, text, run, approval, connect, action, and artifact rendering;
-- draft, context, and wire-log store tests; and
+- draft, context, and wire-log store tests;
+- `assistant-receipts.test.ts` and `assistant-receipt-store.test.ts`: corrupt entry rejection, positive fences, timestamp skew, per-account namespaces, independent caps, storage fallback, cross-tab rehydration, and materialization-timer deduplication;
+- `backoff.test.ts`: nonzero jitter floor and capped deadline-spanning delays; and
 - `frontend/src/pages/assistant.test.tsx`: page-level selection, send, and state composition.
 
 ## Rust service tests

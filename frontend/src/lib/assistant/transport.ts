@@ -100,6 +100,14 @@ class MockAssistantTransport implements AssistantTransport {
     return assistantMockStore.getHistory(conversationId);
   }
 
+  async reconcileProjection(conversationId: string) {
+    return { status: "materialized" as const, conversationId };
+  }
+
+  releaseProjectionWaiter(conversationId: string): void {
+    void conversationId;
+  }
+
   async deleteConversation(conversationId: string): Promise<void> {
     for (const address of assistantMockStore.conversationAddresses(
       conversationId,

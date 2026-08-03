@@ -133,6 +133,31 @@ async function projectTransportState(
           assistantKeys.history(conversationId),
           () => history.value,
         );
+        const canonicalId = history.value.conversation.id;
+        if (canonicalId !== conversationId) {
+          queryClient.setQueryData<ConversationHistory>(
+            assistantKeys.history(canonicalId),
+            () => history.value,
+          );
+          if (
+            queryClient.getQueryData(assistantKeys.episode(canonicalId)) ===
+            undefined
+          ) {
+            queryClient.setQueryData(
+              assistantKeys.episode(canonicalId),
+              queryClient.getQueryData(assistantKeys.episode(conversationId)),
+            );
+          }
+          if (
+            queryClient.getQueryData(assistantKeys.turn(canonicalId)) ===
+            undefined
+          ) {
+            queryClient.setQueryData(
+              assistantKeys.turn(canonicalId),
+              queryClient.getQueryData(assistantKeys.turn(conversationId)),
+            );
+          }
+        }
       }
       if (conversations.status === "fulfilled") {
         queryClient.setQueryData<Conversation[]>(
@@ -298,7 +323,8 @@ export function useConversations() {
 }
 
 export function useConversation(conversationId: string | undefined) {
-  return useQuery({
+  const queryClient = useQueryClient();
+  const query = useQuery({
     queryKey: assistantKeys.history(conversationId ?? ""),
     queryFn: () => assistantTransport.getHistory(conversationId ?? ""),
     enabled: Boolean(conversationId),
@@ -306,6 +332,60 @@ export function useConversation(conversationId: string | undefined) {
       if (error instanceof AssistantConversationNotFoundError) return false;
       if (error instanceof ApiError && error.status === 404) return false;
       return failureCount < 3;
+    },
+  });
+  useEffect(() => {
+    if (!conversationId || query.data?.awaitingProjection !== true) return;
+    let released = false;
+    assistantTransport
+      .reconcileProjection(conversationId)
+      .then((outcome) => {
+        if (released) return;
+        void queryClient.invalidateQueries({
+          queryKey: assistantKeys.history(conversationId),
+        });
+        if (outcome.conversationId !== conversationId) {
+          void queryClient.invalidateQueries({
+            queryKey: assistantKeys.history(outcome.conversationId),
+          });
+        }
+        void queryClient.invalidateQueries({
+          queryKey: assistantKeys.conversations,
+        });
+      })
+      .catch(() => undefined);
+    return () => {
+      released = true;
+      assistantTransport.releaseProjectionWaiter(conversationId);
+    };
+  }, [conversationId, query.data?.awaitingProjection, queryClient]);
+  return query;
+}
+
+export function useRetryConversationProjection(
+  conversationId: string | undefined,
+) {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: async () => {
+      if (!conversationId) throw new Error("Select a conversation first.");
+      return assistantTransport.reconcileProjection(conversationId);
+    },
+    onSuccess: async (outcome) => {
+      if (!conversationId) return;
+      await Promise.all([
+        queryClient.invalidateQueries({
+          queryKey: assistantKeys.history(conversationId),
+        }),
+        outcome.conversationId === conversationId
+          ? Promise.resolve()
+          : queryClient.invalidateQueries({
+              queryKey: assistantKeys.history(outcome.conversationId),
+            }),
+        queryClient.invalidateQueries({
+          queryKey: assistantKeys.conversations,
+        }),
+      ]);
     },
   });
 }

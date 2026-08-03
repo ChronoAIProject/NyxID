@@ -71,7 +71,7 @@ function serverTurnMessages(
 function serverHistory(messages: readonly ServerHistoryMessage[]) {
   return {
     messages,
-    stateVersion: 4,
+    stateVersion: 100,
   };
 }
 
@@ -226,6 +226,9 @@ interface ProbeSession {
     messages: readonly ServerHistoryMessage[],
   ) => void;
   readonly setServerAssistantText: (text: string) => void;
+  readonly historyIsMaterialized: () => boolean;
+  readonly projectionCanMaterialize: () => boolean;
+  readonly materializeProjection: () => Promise<ConversationHistory>;
   readonly unmount: () => void;
 }
 
@@ -299,6 +302,29 @@ async function startProbe(): Promise<ProbeSession> {
     );
   };
 
+  const materializeProjection = async (): Promise<ConversationHistory> => {
+    const reconciliation = transport.reconcileProjection(conversation.id);
+    const requiredTurnId = observedEvents
+      .filter((event) => event.event === "turn.completed")
+      .at(-1)?.turn_id;
+    const canMaterialize = serverMessages.some(
+      (message) =>
+        message.role === "assistant" && message.turnId === requiredTurnId,
+    );
+    if (canMaterialize) {
+      await reconciliation;
+    } else {
+      await vi.waitFor(async () => {
+        const observed = await transport.getHistory(conversation.id);
+        expect(observed.messages[0]?.id).toBe(serverMessages[0]?.id);
+      });
+      transport.releaseProjectionWaiter(conversation.id);
+    }
+    const history = await transport.getHistory(conversation.id);
+    queryClient.setQueryData(assistantKeys.history(conversation.id), history);
+    return history;
+  };
+
   await send("Connect GitHub");
 
   return {
@@ -325,6 +351,17 @@ async function startProbe(): Promise<ProbeSession> {
           : message,
       );
     },
+    historyIsMaterialized: () => historyMode === "materialized",
+    projectionCanMaterialize: () => {
+      const requiredTurnId = observedEvents
+        .filter((event) => event.event === "turn.completed")
+        .at(-1)?.turn_id;
+      return serverMessages.some(
+        (message) =>
+          message.role === "assistant" && message.turnId === requiredTurnId,
+      );
+    },
+    materializeProjection,
     unmount: () => {
       unsubscribe();
       hook.unmount();
@@ -353,13 +390,21 @@ async function finishAndWait(
     );
     expect(episode?.projecting).toBe(false);
   });
+  if (
+    session.historyIsMaterialized() &&
+    session.projectionCanMaterialize()
+  ) {
+    await session.materializeProjection();
+  }
 }
 
 async function switchRead(session: ProbeSession): Promise<ConversationHistory> {
   session.queryClient.removeQueries({
     queryKey: assistantKeys.history(session.placeholderId),
   });
-  const history = await session.transport.getHistory(session.placeholderId);
+  const history = session.historyIsMaterialized()
+    ? await session.materializeProjection()
+    : await session.transport.getHistory(session.placeholderId);
   session.queryClient.setQueryData(
     assistantKeys.history(session.placeholderId),
     history,

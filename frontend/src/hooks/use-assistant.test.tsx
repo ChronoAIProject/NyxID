@@ -677,22 +677,103 @@ describe("conversation not-found resolution", () => {
     const historySpy = vi
       .spyOn(assistantTransport, "getHistory")
       .mockRejectedValue(new AssistantConversationNotFoundError());
-    const { result, unmount } = renderHook(
+    const { unmount } = renderHook(
       () => useConversation("nyxid-pending-lost-after-reload"),
       { wrapper: Wrapper },
     );
 
+    await vi.waitFor(() => expect(historySpy).toHaveBeenCalledTimes(1));
+
     await act(async () => {
       await vi.advanceTimersByTimeAsync(10_000);
+      await Promise.resolve();
     });
 
-    expect(result.current.error).toBeInstanceOf(
-      AssistantConversationNotFoundError,
-    );
+    await vi.waitFor(() => {
+      expect(
+        queryClient.getQueryState(
+          assistantKeys.history("nyxid-pending-lost-after-reload"),
+        )?.error,
+      ).toBeInstanceOf(
+        AssistantConversationNotFoundError,
+      );
+    });
     expect(historySpy).toHaveBeenCalledTimes(1);
 
     historySpy.mockRestore();
     unmount();
+    queryClient.clear();
+  });
+});
+
+describe("conversation projection reconciliation", () => {
+  const conversationId = "workflow-pending-reconcile";
+  const canonicalId = "chatc-reconciled";
+  const syncingHistory: ConversationHistory = {
+    conversation: {
+      id: conversationId,
+      title: "Syncing",
+      created_at: new Date(TEST_NOW).toISOString(),
+      last_message_at: new Date(TEST_NOW).toISOString(),
+    },
+    messages: [],
+    has_more: false,
+    awaitingProjection: true,
+  };
+
+  it("starts reconciliation and invalidates mounted and canonical keys", async () => {
+    const { queryClient, Wrapper } = createHarness();
+    const historySpy = vi
+      .spyOn(assistantTransport, "getHistory")
+      .mockResolvedValue(syncingHistory);
+    const reconcileSpy = vi
+      .spyOn(assistantTransport, "reconcileProjection")
+      .mockResolvedValue({ status: "materialized", conversationId: canonicalId });
+    const invalidateSpy = vi.spyOn(queryClient, "invalidateQueries");
+    const { unmount } = renderHook(() => useConversation(conversationId), {
+      wrapper: Wrapper,
+    });
+
+    await vi.waitFor(() => expect(reconcileSpy).toHaveBeenCalledOnce());
+    await vi.waitFor(() => {
+      expect(invalidateSpy).toHaveBeenCalledWith({
+        queryKey: assistantKeys.history(canonicalId),
+      });
+      expect(invalidateSpy).toHaveBeenCalledWith({
+        queryKey: assistantKeys.conversations,
+      });
+    });
+
+    historySpy.mockRestore();
+    reconcileSpy.mockRestore();
+    invalidateSpy.mockRestore();
+    unmount();
+    queryClient.clear();
+  });
+
+  it("releases the waiter when the mounted conversation unmounts", async () => {
+    const { queryClient, Wrapper } = createHarness();
+    const historySpy = vi
+      .spyOn(assistantTransport, "getHistory")
+      .mockResolvedValue(syncingHistory);
+    const reconcileSpy = vi
+      .spyOn(assistantTransport, "reconcileProjection")
+      .mockReturnValue(new Promise(() => undefined));
+    const releaseSpy = vi.spyOn(
+      assistantTransport,
+      "releaseProjectionWaiter",
+    );
+    const { unmount } = renderHook(() => useConversation(conversationId), {
+      wrapper: Wrapper,
+    });
+    await vi.waitFor(() => expect(reconcileSpy).toHaveBeenCalledOnce());
+
+    unmount();
+    expect(releaseSpy).toHaveBeenCalledWith(conversationId);
+
+    historySpy.mockRestore();
+    reconcileSpy.mockRestore();
+    releaseSpy.mockRestore();
     queryClient.clear();
   });
 });
