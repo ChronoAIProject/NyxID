@@ -1,4 +1,5 @@
 pub mod lago_client;
+pub mod ledger;
 pub mod meter;
 pub mod owner_resolver;
 pub mod provisioning;

@@ -1160,6 +1160,120 @@ mod tests {
         assert_eq!(final_row.status, UsageStatus::Finalized);
     }
 
+    /// A settlement first-apply appends exactly one tamper-evident ledger
+    /// entry; replays append nothing, and the resulting chain verifies.
+    #[tokio::test]
+    async fn settle_first_apply_appends_exactly_one_ledger_entry() {
+        let Some(db) = connect_test_database("billing_ledger_settle_hook").await else {
+            return;
+        };
+        crate::services::billing::ledger::init_billing_ledger_hmac_key(zeroize::Zeroizing::new(
+            [3u8; 32],
+        ));
+        create_usage_transaction_index(&db).await;
+        insert_rate(&db, "platform_requests", 5).await;
+        let owner_id = "owner-ledger-hook";
+        insert_wallet(&db, owner_id, 10, 0).await;
+        crate::services::billing::reservation::try_reserve_prepaid(&db, owner_id, 5)
+            .await
+            .expect("reserve")
+            .expect("reserved");
+
+        let ctx = platform_context("billing-ledger-hook", owner_id);
+        let reservation = BillingReservation {
+            owner_id: owner_id.to_string(),
+            wallet_id: format!("wallet-{owner_id}"),
+            total_reserved_credits: 5,
+            layers: vec![crate::services::billing::reservation::LayerReservation {
+                layer: BillingLayer::Platform,
+                reserved_credits: 5,
+            }],
+        };
+        let metered = open(&db, &ctx, Some(&reservation)).await.expect("open");
+        mark_forwarded(&db, &metered).await.expect("mark forwarded");
+        settle(
+            &db,
+            &metered,
+            crate::models::service_billing::PlatformUsage::single_request(64),
+            None,
+            None,
+        )
+        .await
+        .expect("settle");
+
+        let row = db
+            .collection::<UsageMeterRow>(crate::models::usage_meter::COLLECTION_NAME)
+            .find_one(doc! { "billing_request_id": "billing-ledger-hook" })
+            .await
+            .expect("find row")
+            .expect("row exists");
+        assert!(row.released);
+
+        // A replay of the settlement claim must not append a second entry.
+        crate::services::billing::reservation::claim_released_and_settle(&db, &row)
+            .await
+            .expect("settle replay");
+
+        // The append is spawned off the settlement path; wait for it.
+        let ledger = db.collection::<crate::models::billing_ledger::BillingLedgerEntry>(
+            crate::models::billing_ledger::COLLECTION_NAME,
+        );
+        let mut entries: Vec<crate::models::billing_ledger::BillingLedgerEntry> = Vec::new();
+        for _ in 0..100 {
+            entries = ledger
+                .find(doc! { "owner_id": owner_id })
+                .await
+                .expect("find ledger entries")
+                .try_collect()
+                .await
+                .expect("collect ledger entries");
+            if !entries.is_empty() {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+        assert_eq!(entries.len(), 1, "one charge, one ledger entry");
+        let entry = &entries[0];
+        assert_eq!(
+            entry.event_type,
+            crate::models::billing_ledger::BillingLedgerEventType::UsageSettled
+        );
+        assert_eq!(entry.reference_id, row.id);
+        assert_eq!(entry.quantity, Some(1));
+        assert_eq!(entry.amount_credits, Some(5));
+
+        // Free metered traffic (no wallet) settles without a ledger entry.
+        let free_ctx = platform_context("billing-ledger-free", "owner-ledger-free");
+        let free_metered = open(&db, &free_ctx, None).await.expect("open free");
+        mark_forwarded(&db, &free_metered)
+            .await
+            .expect("mark free forwarded");
+        settle(
+            &db,
+            &free_metered,
+            crate::models::service_billing::PlatformUsage::single_request(64),
+            None,
+            None,
+        )
+        .await
+        .expect("settle free");
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        let free_entries = ledger
+            .count_documents(doc! { "owner_id": "owner-ledger-free" })
+            .await
+            .expect("count free entries");
+        assert_eq!(free_entries, 0, "free traffic moves no money");
+
+        let report =
+            crate::services::billing::ledger::verify_chain(&db, &[3u8; 32], None, None, None)
+                .await
+                .expect("verify ledger");
+        assert_eq!(
+            report.status,
+            crate::services::billing::ledger::BillingLedgerStatus::Ok
+        );
+    }
+
     #[tokio::test]
     async fn failed_live_settlement_is_durable_and_recovers_without_double_debit() {
         let Some(db) = connect_test_database("billing_settle_outbox_recovery").await else {

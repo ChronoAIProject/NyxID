@@ -18,6 +18,7 @@ use crate::models::downstream_service::{
 };
 use crate::models::user::{COLLECTION_NAME as USERS, PlatformRole, User};
 use crate::mw::auth::AuthUser;
+use crate::services::billing::ledger as billing_ledger;
 use crate::services::{
     admin_audit_service, admin_user_service, audit_chain_service, audit_service, consent_service,
     oauth_client_service, platform_settings_service, role_service,
@@ -192,6 +193,23 @@ pub struct AuditLogVerifyResponse {
     pub head_hash: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub break_info: Option<audit_chain_service::AuditChainBreak>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub next_from_seq: Option<i64>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct BillingLedgerVerifyResponse {
+    pub status: billing_ledger::BillingLedgerStatus,
+    pub checked_count: u64,
+    pub head_seq: Option<i64>,
+    pub head_hash: Option<String>,
+    /// Ledger seq recorded by the newest audit-chain head anchor.
+    pub anchor_seq: Option<i64>,
+    /// False when the newest anchor event fails audit-chain validation.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub anchor_valid: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub break_info: Option<billing_ledger::BillingLedgerBreak>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub next_from_seq: Option<i64>,
 }
@@ -1229,6 +1247,56 @@ pub async fn verify_audit_log(
         head_seq: report.head_seq,
         head_hash: report.head_hash,
         break_info: report.break_info,
+        next_from_seq: report.next_from_seq,
+    }))
+}
+
+/// GET /api/v1/admin/billing-ledger/verify
+///
+/// Verify tamper-evident billing-ledger hash-chain integrity over a
+/// bounded range. Same shape and semantics as the audit-log verify.
+///
+/// The tail-truncation check validates the newest anchor event's own
+/// hash, but the anchor's linkage into an unbroken audit chain is the
+/// audit verifier's job -- run `/admin/audit-log/verify` alongside this
+/// endpoint for the full guarantee.
+pub async fn verify_billing_ledger(
+    State(state): State<AppState>,
+    auth_user: AuthUser,
+    Query(query): Query<AuditLogVerifyQuery>,
+) -> AppResult<Json<BillingLedgerVerifyResponse>> {
+    require_admin_or_operator(&state, &auth_user, "admin.billing_ledger.verify").await?;
+
+    let report = billing_ledger::verify_chain(
+        &state.db,
+        state.billing_ledger_hmac_key.as_slice(),
+        query.from_seq,
+        query.to_seq,
+        query.limit,
+    )
+    .await?;
+
+    // The chain walk cannot see tail truncation (a shortened chain stays
+    // valid), so always cross-check the head against the newest anchor
+    // recorded in the audit chain.
+    let anchor =
+        billing_ledger::check_head_anchor(&state.db, state.audit_chain_hmac_key.as_slice()).await?;
+    let (status, break_info) = match (report.status, report.break_info, anchor.break_info) {
+        (billing_ledger::BillingLedgerStatus::Ok, None, Some(anchor_break)) => (
+            billing_ledger::BillingLedgerStatus::Broken,
+            Some(anchor_break),
+        ),
+        (status, break_info, _) => (status, break_info),
+    };
+
+    Ok(Json(BillingLedgerVerifyResponse {
+        status,
+        checked_count: report.checked_count,
+        head_seq: report.head_seq,
+        head_hash: report.head_hash,
+        anchor_seq: anchor.anchor_seq,
+        anchor_valid: anchor.anchor_valid,
+        break_info,
         next_from_seq: report.next_from_seq,
     }))
 }

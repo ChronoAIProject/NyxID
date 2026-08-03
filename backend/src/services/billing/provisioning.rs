@@ -259,6 +259,17 @@ pub async fn create_topup_checkout(
                         "billing top-up checkout session disappeared after update".to_string(),
                     )
                 })?;
+            // Ledger the top-up only once the provider checkout actually
+            // exists; a pending stub that fails before this point cannot
+            // move money and must not leave a phantom entry.
+            super::ledger::record_topup_created(
+                db,
+                owner_id,
+                &session.id,
+                amount_credits,
+                &lago_wallet_id,
+            )
+            .await;
             Ok(TopUpCheckout {
                 session,
                 reused: false,
@@ -552,6 +563,7 @@ mod tests {
         let Some(db) = connect_test_database("billing_topup_checkout").await else {
             return;
         };
+        super::super::ledger::init_billing_ledger_hmac_key(zeroize::Zeroizing::new([3u8; 32]));
         let owner_id = insert_owner(&db, "topup@example.com").await;
         let lago = FakeLago::default();
 
@@ -585,6 +597,17 @@ mod tests {
             .expect("count top-up sessions");
         assert_eq!(session_count, 1);
         assert_eq!(lago.topup_creates.load(Ordering::SeqCst), 1);
+
+        // Exactly one ledger entry: appended when the provider checkout was
+        // created, not duplicated by the idempotent replay.
+        let ledger_count = db
+            .collection::<crate::models::billing_ledger::BillingLedgerEntry>(
+                crate::models::billing_ledger::COLLECTION_NAME,
+            )
+            .count_documents(doc! { "owner_id": &owner_id, "event_type": "topup_created" })
+            .await
+            .expect("count ledger entries");
+        assert_eq!(ledger_count, 1);
     }
 
     #[tokio::test]

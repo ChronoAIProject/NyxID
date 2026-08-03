@@ -694,6 +694,7 @@ mod tests {
             broker_require_admin_capability: false,
             cli_pairing_hmac_key: None,
             audit_chain_hmac_key: None,
+            billing_ledger_hmac_key: None,
             sa_token_ttl_secs: 3600,
             cookie_domain: None,
             telegram_bot_token: None,

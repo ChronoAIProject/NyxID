@@ -415,6 +415,13 @@ pub async fn apply_settlement_for_row(
     if let Some(wallet_id) = row.wallet_id.as_deref() {
         clear_wallet_settlement_lock(db, wallet_id, &row.billing_owner_id, &row.id).await?;
     }
+    // This is one of the two places the `released` transition commits (the
+    // other is `complete_wallet_settlement_lock`), so the tamper-evident
+    // ledger hook lives here. Only actual charges are ledgered: free
+    // metered traffic (no wallet) and zero-credit settlements move no money.
+    if update.modified_count > 0 && row.wallet_id.is_some() && actual_credits > 0 {
+        super::ledger::record_usage_settled_async(db.clone(), row.clone(), actual_credits);
+    }
     Ok(update.modified_count > 0)
 }
 
@@ -525,6 +532,17 @@ async fn complete_wallet_settlement_lock(
                 lock.row_id
             )));
         }
+    }
+
+    // Crash-bridge counterpart of the ledger hook in
+    // `apply_settlement_for_row`: this path also commits a `released`
+    // transition for a charge, so it must be ledgered too.
+    if update.matched_count == 1 && lock.actual_credits > 0 {
+        super::ledger::record_usage_settled_by_row_id_async(
+            db.clone(),
+            lock.row_id.clone(),
+            lock.actual_credits,
+        );
     }
 
     clear_wallet_settlement_lock(db, wallet_id, owner_id, &lock.row_id).await

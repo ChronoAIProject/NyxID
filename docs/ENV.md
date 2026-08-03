@@ -217,6 +217,18 @@ The backend picks the audit-chain key at startup using the first match:
 
 Legacy rows without `seq` are not backfilled. The verifier reports them as `pre_chain_count` rather than claiming historical integrity. This v1 chain does not detect tail truncation: deleting the newest N rows leaves a valid shorter chain until `(head_seq, head_hash)` is anchored outside MongoDB.
 
+## Billing Ledger Hash Chain (Optional)
+
+Money-moving billing events (charged usage settlements, provider-confirmed top-up checkouts, paid credits landing on a wallet) are journaled to the append-only `billing_ledger` collection with the same hash-chain construction as the audit log. The operational billing rows stay mutable by design; the ledger is what makes their money-moving history tamper-evident. Verify via `GET /api/v1/admin/billing-ledger/verify`.
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `BILLING_LEDGER_HMAC_KEY` | *(derived from `ENCRYPTION_KEY`, then JWT private key)* | Explicit 32-byte HMAC key (64 hex chars) for billing-ledger hash chaining. Same key-selection rules as `AUDIT_CHAIN_HMAC_KEY`, with the domain-separated `billing-ledger` label, so the two chains never share a key even when both derive from `ENCRYPTION_KEY`. |
+
+Ledger appends are best-effort relative to billing itself: a ledger write failure is logged and never fails or rolls back a settlement or top-up.
+
+Unlike the audit chain, the billing ledger detects tail truncation: the reconcile sweep anchors the ledger head `(seq, head_hash)` into the audit chain (event `billing_ledger_head_anchored`) whenever it advances, and the verify endpoint cross-checks the newest anchor against the surviving head. Deleting ledger tail entries past an anchor reports `tail_truncated`; hiding it would additionally require truncating the audit chain back past the anchor, destroying unrelated audit history. Each anchor is also written to the server log (`billing ledger head anchored`), so shipped logs form an external anchor outside MongoDB. Entries newer than the latest anchor (up to one reconcile interval, `BILLING_RECONCILE_INTERVAL_SECS`) remain inside the undetectable window.
+
 ## Social Login (Optional)
 
 | Variable | Description |

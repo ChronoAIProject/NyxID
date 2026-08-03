@@ -752,6 +752,10 @@ pub fn build_router(
         .route("/audit-log", get(handlers::admin::list_audit_log))
         .route("/audit-log/verify", get(handlers::admin::verify_audit_log))
         .route(
+            "/billing-ledger/verify",
+            get(handlers::admin::verify_billing_ledger),
+        )
+        .route(
             "/settings/broker",
             get(handlers::admin::get_broker_settings)
                 .patch(handlers::admin::update_broker_settings),
