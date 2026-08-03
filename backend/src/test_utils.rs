@@ -838,6 +838,7 @@ pub(crate) fn test_user_endpoint(
         url: url.to_string(),
         catalog_service_id: catalog_service_id.map(str::to_string),
         openapi_spec_url: openapi_spec_url.map(str::to_string),
+        recommended_skills: None,
         created_at: chrono::Utc::now(),
         updated_at: chrono::Utc::now(),
     }

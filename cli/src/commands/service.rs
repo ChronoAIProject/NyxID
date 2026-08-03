@@ -1224,6 +1224,8 @@ pub async fn run(command: ServiceCommands) -> Result<()> {
             label,
             endpoint_url,
             openapi_spec_url,
+            recommended_skill,
+            clear_recommended_skills,
             node_id,
             no_node,
             active,
@@ -1248,6 +1250,22 @@ pub async fn run(command: ServiceCommands) -> Result<()> {
             }
             if let Some(url) = endpoint_url {
                 body.insert("endpoint_url".into(), Value::String(url));
+            }
+            // Three-state recommended_skills: absent = leave, [] = clear,
+            // non-empty = replace.
+            if clear_recommended_skills {
+                body.insert("recommended_skills".into(), Value::Array(Vec::new()));
+            } else if !recommended_skill.is_empty() {
+                body.insert(
+                    "recommended_skills".into(),
+                    Value::Array(
+                        recommended_skill
+                            .iter()
+                            .cloned()
+                            .map(Value::String)
+                            .collect(),
+                    ),
+                );
             }
             // PUT /keys/{id} treats empty string as "clear" for openapi_spec_url.
             if let Some(url) = openapi_spec_url {
@@ -3236,6 +3254,8 @@ mod command_tests {
             label: Some("Renamed".to_string()),
             endpoint_url: None,
             openapi_spec_url: None,
+            recommended_skill: Vec::new(),
+            clear_recommended_skills: false,
             node_id: None,
             no_node: false,
             active: false,
@@ -3458,6 +3478,8 @@ mod command_tests {
             label: None,
             endpoint_url: None,
             openapi_spec_url: None,
+            recommended_skill: Vec::new(),
+            clear_recommended_skills: false,
             node_id: None,
             no_node: false,
             active: true,
@@ -3741,6 +3763,8 @@ mod branch_tests {
             label: None,
             endpoint_url: Some("https://new".to_string()),
             openapi_spec_url: Some(String::new()),
+            recommended_skill: Vec::new(),
+            clear_recommended_skills: false,
             node_id: Some(NODE_UUID.to_string()),
             no_node: false,
             active: false,
@@ -3912,6 +3936,8 @@ mod branch_tests {
             label: None,
             endpoint_url: None,
             openapi_spec_url: None,
+            recommended_skill: Vec::new(),
+            clear_recommended_skills: false,
             node_id: None,
             no_node: false,
             active: false,
@@ -3945,6 +3971,8 @@ mod branch_tests {
             label: None,
             endpoint_url: None,
             openapi_spec_url: None,
+            recommended_skill: Vec::new(),
+            clear_recommended_skills: false,
             node_id: None,
             no_node: true,
             active: false,
@@ -3978,6 +4006,8 @@ mod branch_tests {
             label: None,
             endpoint_url: None,
             openapi_spec_url: None,
+            recommended_skill: Vec::new(),
+            clear_recommended_skills: false,
             node_id: None,
             no_node: false,
             active: false,
@@ -4011,6 +4041,8 @@ mod branch_tests {
             label: None,
             endpoint_url: None,
             openapi_spec_url: None,
+            recommended_skill: Vec::new(),
+            clear_recommended_skills: false,
             node_id: None,
             no_node: false,
             active: false,

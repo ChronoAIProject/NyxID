@@ -30,6 +30,18 @@ const REFERENCE_FILES: &[&str] = &[
     "admin",
 ];
 
+/// Claude Code plugin marketplace source: the NyxID repository itself
+/// (`.claude-plugin/marketplace.json` at the repo root).
+const PLUGIN_MARKETPLACE_SOURCE: &str = "ChronoAIProject/NyxID";
+
+/// Marketplace name declared in `.claude-plugin/marketplace.json`.
+const PLUGIN_MARKETPLACE_NAME: &str = "nyxid";
+
+/// `<plugin>@<marketplace>` spec for the bundled NyxID plugin, which ships
+/// every repo skill (nyxid, the aevatar family, github/firecrawl-via-nyxid,
+/// the Ornn manual, ...), not just `skills/nyxid`.
+const PLUGIN_SPEC: &str = "nyxid@nyxid";
+
 /// The default hosted NyxID URL used in the repo's SKILL.md.
 /// Replaced with the user's actual server URL at install time.
 const DEFAULT_HOSTED_URL: &str = "https://nyx-api.chrono-ai.fun";
@@ -287,10 +299,17 @@ fn cargo_setup_rc_snippet(shell_name: &str, cargo_bin: &Path, cargo_env: &Path) 
 fn skill_paths(tool: AiToolTarget) -> Result<Vec<(String, PathBuf)>> {
     let home = home_dir()?;
     match tool {
-        AiToolTarget::ClaudeCode => Ok(vec![(
-            "skill".into(),
-            home.join(".claude/skills/nyxid/SKILL.md"),
-        )]),
+        AiToolTarget::ClaudeCode => Ok(vec![
+            (
+                "plugin (all skills)".into(),
+                home.join(".claude/plugins/marketplaces")
+                    .join(PLUGIN_MARKETPLACE_NAME),
+            ),
+            (
+                "skill (legacy)".into(),
+                home.join(".claude/skills/nyxid/SKILL.md"),
+            ),
+        ]),
         AiToolTarget::Cursor => Ok(vec![(
             "rule".into(),
             PathBuf::from(".cursor/rules/nyxid.mdc"),
@@ -433,10 +452,10 @@ async fn install(tool: AiToolTarget, base_url: &Option<String>) -> Result<()> {
     let content = fetch_skill_content(&base).await?;
 
     let result = match tool {
-        AiToolTarget::ClaudeCode => install_claude_code(&content).await,
+        AiToolTarget::ClaudeCode => install_claude_code(&content, &base).await,
         AiToolTarget::Cursor => install_cursor(&content),
-        AiToolTarget::Codex => install_codex(&content),
-        AiToolTarget::Openclaw => install_openclaw(&content),
+        AiToolTarget::Codex => install_codex(&content, &base).await,
+        AiToolTarget::Openclaw => install_openclaw(&content, &base).await,
         AiToolTarget::Generic => {
             bail!(
                 "Generic tool has no skill files. Use `nyxid ai-setup agent create` to create an agent identity instead."
@@ -461,6 +480,11 @@ fn print_post_install(tool: AiToolTarget, content: &SkillContent) {
             eprintln!(
                 "Use /nyxid in Claude Code, or just ask about NyxID and it activates automatically."
             );
+            if claude_plugin_marketplace_present() {
+                eprintln!(
+                    "Installed via the plugin marketplace: every bundled skill (nyxid, the aevatar family, github-via-nyxid, ...) is available, and `claude plugin update {PLUGIN_SPEC}` keeps them current."
+                );
+            }
         }
         AiToolTarget::Cursor => {
             eprintln!(
@@ -512,7 +536,117 @@ fn print_post_install(tool: AiToolTarget, content: &SkillContent) {
     }
 }
 
-async fn install_claude_code(content: &SkillContent) -> Result<()> {
+/// True when the `claude` CLI is available on PATH.
+fn claude_cli_available() -> bool {
+    std::process::Command::new("claude")
+        .arg("--version")
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status()
+        .is_ok_and(|status| status.success())
+}
+
+/// Run a `claude` subcommand, capturing output. "Already exists/installed"
+/// responses count as success so the flow stays idempotent.
+fn run_claude(args: &[&str]) -> Result<()> {
+    let output = std::process::Command::new("claude")
+        .args(args)
+        .output()
+        .with_context(|| format!("failed to run `claude {}`", args.join(" ")))?;
+    if output.status.success() {
+        return Ok(());
+    }
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let combined = format!("{stdout}{stderr}").to_lowercase();
+    if combined.contains("already") {
+        return Ok(());
+    }
+    bail!(
+        "`claude {}` failed: {}",
+        args.join(" "),
+        stderr.trim().lines().last().unwrap_or("unknown error")
+    );
+}
+
+/// True when the NyxID plugin marketplace has been added to Claude Code.
+fn claude_plugin_marketplace_present() -> bool {
+    home_dir().is_ok_and(|home| {
+        home.join(".claude/plugins/marketplaces")
+            .join(PLUGIN_MARKETPLACE_NAME)
+            .exists()
+    })
+}
+
+/// Install every bundled NyxID skill through the Claude Code plugin
+/// marketplace. Returns Ok(false) when the `claude` CLI is unavailable so
+/// the caller can fall back to the legacy single-skill copy.
+fn try_install_claude_plugin() -> Result<bool> {
+    if !claude_cli_available() {
+        return Ok(false);
+    }
+
+    eprintln!("  Adding NyxID plugin marketplace ({PLUGIN_MARKETPLACE_SOURCE})...");
+    run_claude(&["plugin", "marketplace", "add", PLUGIN_MARKETPLACE_SOURCE])?;
+    eprintln!("  Installing plugin {PLUGIN_SPEC} (all bundled skills)...");
+    run_claude(&["plugin", "install", PLUGIN_SPEC])?;
+
+    // The legacy per-skill copy shadows the plugin's `nyxid` skill (personal
+    // skills take precedence), so a stale copy would pin users to the old
+    // content forever. Remove it once the plugin owns the skill.
+    if let Ok(home) = home_dir() {
+        let legacy = home.join(".claude/skills/nyxid");
+        if legacy.exists() {
+            match std::fs::remove_dir_all(&legacy) {
+                Ok(()) => eprintln!(
+                    "  Removed legacy copy at {} (now managed by the plugin).",
+                    legacy.display()
+                ),
+                Err(error) => eprintln!(
+                    "  Warning: could not remove legacy copy at {} ({error}); it will shadow the plugin's nyxid skill until deleted.",
+                    legacy.display()
+                ),
+            }
+        }
+    }
+    Ok(true)
+}
+
+async fn install_claude_code(content: &SkillContent, base_url: &str) -> Result<()> {
+    // The plugin ships skills with the default hosted URL baked in; the
+    // legacy installer rewrites URLs to the user's own server. Self-hosted
+    // deployments therefore stay on the legacy per-skill install so their
+    // skill content points at the right server.
+    let self_hosted = base_url.trim_end_matches('/') != DEFAULT_HOSTED_URL;
+    if self_hosted {
+        eprintln!(
+            "  Self-hosted NyxID ({base_url}): using the URL-substituted single-skill install (the plugin bundle targets the hosted service)."
+        );
+    }
+    match if self_hosted {
+        Ok(false)
+    } else {
+        try_install_claude_plugin()
+    } {
+        Ok(true) => {
+            eprintln!();
+            print_post_install(AiToolTarget::ClaudeCode, content);
+            return Ok(());
+        }
+        Ok(false) => {
+            if !self_hosted {
+                eprintln!(
+                    "  `claude` CLI not found; falling back to the legacy single-skill install (only the nyxid skill)."
+                );
+            }
+        }
+        Err(error) => {
+            eprintln!(
+                "  Plugin install failed ({error}); falling back to the legacy single-skill install (only the nyxid skill)."
+            );
+        }
+    }
+
     let dir = home_dir()?.join(".claude/skills/nyxid");
 
     write_file(&dir.join("SKILL.md"), &content.skill_md)?;
@@ -537,37 +671,186 @@ fn install_cursor(content: &SkillContent) -> Result<()> {
     Ok(())
 }
 
-fn install_codex(content: &SkillContent) -> Result<()> {
-    let dir = home_dir()?.join(".codex/skills/nyxid");
+/// Marker file written next to installed skills so updates can prune
+/// skills we installed that were later removed from the repo, without ever
+/// touching user-authored skill directories.
+const SKILLS_MANIFEST_FILE: &str = ".nyxid-managed.json";
 
-    write_file(&dir.join("SKILL.md"), &content.skill_md)?;
-    write_file(&dir.join("references/playbook.md"), &content.playbook)?;
-    write_references(&dir, content)?;
-    cleanup_legacy_layout(&dir);
+/// One file inside a repo skill package (path relative to the skill dir).
+struct RepoSkillFile {
+    rel_path: String,
+    content: String,
+}
 
-    eprintln!();
-    print_post_install(AiToolTarget::Codex, content);
+/// A full skill package from the repo's `skills/` tree.
+struct RepoSkill {
+    name: String,
+    files: Vec<RepoSkillFile>,
+}
+
+/// Fetch every skill package under the repo's `skills/` directory: one
+/// git-trees API call for the layout, then raw fetches per file, with the
+/// same URL substitution the single-skill installer applies.
+async fn fetch_all_skills(base_url: &str, dashboard_url: &str) -> Result<Vec<RepoSkill>> {
+    let tree_json =
+        fetch_url("https://api.github.com/repos/ChronoAIProject/NyxID/git/trees/main?recursive=1")
+            .await?;
+    let tree: serde_json::Value =
+        serde_json::from_str(&tree_json).context("Failed to parse GitHub tree response")?;
+
+    let mut by_skill: std::collections::BTreeMap<String, Vec<String>> = Default::default();
+    for entry in tree["tree"].as_array().unwrap_or(&Vec::new()) {
+        if entry["type"].as_str() != Some("blob") {
+            continue;
+        }
+        let Some(path) = entry["path"].as_str() else {
+            continue;
+        };
+        let Some(rest) = path.strip_prefix("skills/") else {
+            continue;
+        };
+        // Skip files directly under skills/ (e.g. INSTALL.md).
+        let Some((skill, rel)) = rest.split_once('/') else {
+            continue;
+        };
+        by_skill
+            .entry(skill.to_string())
+            .or_default()
+            .push(rel.to_string());
+    }
+    if by_skill.is_empty() {
+        bail!("GitHub tree listed no skill packages under skills/");
+    }
+
+    let mut skills = Vec::new();
+    for (name, rel_paths) in by_skill {
+        let mut files = Vec::new();
+        for rel in rel_paths {
+            let raw = fetch_github(&format!("skills/{name}/{rel}")).await?;
+            files.push(RepoSkillFile {
+                rel_path: rel,
+                content: substitute_urls(&raw, base_url, dashboard_url),
+            });
+        }
+        skills.push(RepoSkill { name, files });
+    }
+    Ok(skills)
+}
+
+/// Install every repo skill under `skills_root`, pruning previously managed
+/// skills that disappeared from the repo (per the manifest) and leaving any
+/// user-authored skill directories alone.
+fn install_all_skills(
+    skills_root: &Path,
+    skills: &[RepoSkill],
+    content: &SkillContent,
+) -> Result<()> {
+    let manifest_path = skills_root.join(SKILLS_MANIFEST_FILE);
+    let previous: Vec<String> = std::fs::read_to_string(&manifest_path)
+        .ok()
+        .and_then(|raw| serde_json::from_str::<serde_json::Value>(&raw).ok())
+        .and_then(|value| {
+            value
+                .get("skills")
+                .and_then(|skills| serde_json::from_value(skills.clone()).ok())
+        })
+        .unwrap_or_default();
+    let current: Vec<String> = skills.iter().map(|skill| skill.name.clone()).collect();
+
+    for stale in previous.iter().filter(|name| !current.contains(name)) {
+        let dir = skills_root.join(stale);
+        if dir.exists() {
+            match std::fs::remove_dir_all(&dir) {
+                Ok(()) => eprintln!(
+                    "  Removed managed skill no longer in repo: {}",
+                    dir.display()
+                ),
+                Err(error) => eprintln!(
+                    "  Warning: could not remove stale managed skill {} ({error})",
+                    dir.display()
+                ),
+            }
+        }
+    }
+
+    for skill in skills {
+        let dir = skills_root.join(&skill.name);
+        for file in &skill.files {
+            let path = dir.join(&file.rel_path);
+            write_file(&path, &file.content)?;
+            #[cfg(unix)]
+            if file.rel_path.starts_with("scripts/") && file.rel_path.ends_with(".sh") {
+                make_executable(&path)?;
+            }
+        }
+        if skill.name == "nyxid" {
+            // The playbook reference is generated from the user's server, not
+            // stored in the repo -- keep injecting it like the legacy install.
+            write_file(&dir.join("references/playbook.md"), &content.playbook)?;
+            cleanup_legacy_layout(&dir);
+        }
+    }
+
+    let manifest = serde_json::json!({
+        "skills": current,
+        "installed_at": chrono::Utc::now().to_rfc3339(),
+    });
+    write_file(
+        &manifest_path,
+        &serde_json::to_string_pretty(&manifest).context("serialize skills manifest")?,
+    )?;
     Ok(())
 }
 
-fn install_openclaw(content: &SkillContent) -> Result<()> {
-    let dir = home_dir()?.join(".openclaw/skills/nyxid");
-
-    write_file(&dir.join("SKILL.md"), &content.skill_md)?;
-    write_file(&dir.join("references/playbook.md"), &content.playbook)?;
-    write_references(&dir, content)?;
-    write_file(&dir.join("scripts/install.sh"), &content.install_sh)?;
-
-    #[cfg(unix)]
-    {
-        make_executable(&dir.join("scripts/install.sh"))?;
+/// Install all bundled skills for a `skills/<name>/SKILL.md`-convention tool
+/// (Codex, OpenClaw). Falls back to the legacy single-skill copy when the
+/// multi-skill fetch fails so installs never regress below the old behavior.
+async fn install_skill_dir_tool(
+    tool: AiToolTarget,
+    skills_root: PathBuf,
+    content: &SkillContent,
+    base_url: &str,
+) -> Result<()> {
+    let dashboard_url = resolve_dashboard_url(base_url).await;
+    match fetch_all_skills(base_url, &dashboard_url).await {
+        Ok(skills) => {
+            eprintln!(
+                "  Installing {} bundled skills to {}...",
+                skills.len(),
+                skills_root.display()
+            );
+            install_all_skills(&skills_root, &skills, content)?;
+        }
+        Err(error) => {
+            eprintln!(
+                "  Multi-skill fetch failed ({error}); falling back to the legacy single-skill install (only the nyxid skill)."
+            );
+            let dir = skills_root.join("nyxid");
+            write_file(&dir.join("SKILL.md"), &content.skill_md)?;
+            write_file(&dir.join("references/playbook.md"), &content.playbook)?;
+            write_references(&dir, content)?;
+            if matches!(tool, AiToolTarget::Openclaw) {
+                write_file(&dir.join("scripts/install.sh"), &content.install_sh)?;
+                #[cfg(unix)]
+                make_executable(&dir.join("scripts/install.sh"))?;
+            }
+            cleanup_legacy_layout(&dir);
+        }
     }
 
-    cleanup_legacy_layout(&dir);
-
     eprintln!();
-    print_post_install(AiToolTarget::Openclaw, content);
+    print_post_install(tool, content);
     Ok(())
+}
+
+async fn install_codex(content: &SkillContent, base_url: &str) -> Result<()> {
+    let root = home_dir()?.join(".codex/skills");
+    install_skill_dir_tool(AiToolTarget::Codex, root, content, base_url).await
+}
+
+async fn install_openclaw(content: &SkillContent, base_url: &str) -> Result<()> {
+    let root = home_dir()?.join(".openclaw/skills");
+    install_skill_dir_tool(AiToolTarget::Openclaw, root, content, base_url).await
 }
 
 // ---------------------------------------------------------------------------
@@ -617,10 +900,23 @@ async fn update(tool: Option<AiToolTarget>, base_url: &Option<String>) -> Result
     for t in installed_tools {
         eprintln!("Updating {t}...");
         match t {
-            AiToolTarget::ClaudeCode => install_claude_code(&content).await?,
+            AiToolTarget::ClaudeCode => {
+                let plugin_managed = base.trim_end_matches('/') == DEFAULT_HOSTED_URL
+                    && claude_plugin_marketplace_present()
+                    && claude_cli_available();
+                if plugin_managed {
+                    // Plugin-managed: refresh the marketplace clone and the
+                    // installed plugin instead of rewriting skill files.
+                    run_claude(&["plugin", "marketplace", "update", PLUGIN_MARKETPLACE_NAME])?;
+                    run_claude(&["plugin", "update", PLUGIN_SPEC])?;
+                    eprintln!("  Plugin {PLUGIN_SPEC} updated.");
+                } else {
+                    install_claude_code(&content, &base).await?;
+                }
+            }
             AiToolTarget::Cursor => install_cursor(&content)?,
-            AiToolTarget::Codex => install_codex(&content)?,
-            AiToolTarget::Openclaw => install_openclaw(&content)?,
+            AiToolTarget::Codex => install_codex(&content, &base).await?,
+            AiToolTarget::Openclaw => install_openclaw(&content, &base).await?,
             AiToolTarget::Generic => unreachable!(),
         }
     }

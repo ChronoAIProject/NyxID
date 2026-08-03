@@ -902,6 +902,13 @@ pub enum ServiceCommands {
         /// to clear the existing value.
         #[arg(long, value_name = "URL")]
         openapi_spec_url: Option<String>,
+        /// Recommended skill name for this service (repeat to set several).
+        /// Replaces the whole list.
+        #[arg(long = "recommended-skill", value_name = "NAME")]
+        recommended_skill: Vec<String>,
+        /// Clear the recommended-skills list.
+        #[arg(long, conflicts_with = "recommended_skill")]
+        clear_recommended_skills: bool,
         /// New node ID for routing
         #[arg(long)]
         node_id: Option<String>,

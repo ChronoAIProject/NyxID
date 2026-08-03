@@ -20,6 +20,12 @@ pub struct UserEndpoint {
     /// instead of only the generic proxy tool.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub openapi_spec_url: Option<String>,
+    /// Optional: skill names (Ornn or bundled) that teach an agent how to
+    /// use this endpoint. Instance-level counterpart of the catalog's
+    /// `DownstreamService.recommended_skills`; surfaced through /keys and
+    /// the MCP operation catalog.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub recommended_skills: Option<Vec<String>>,
     #[serde(with = "bson::serde_helpers::chrono_datetime_as_bson_datetime")]
     pub created_at: DateTime<Utc>,
     #[serde(with = "bson::serde_helpers::chrono_datetime_as_bson_datetime")]
@@ -44,6 +50,7 @@ mod tests {
             url: "https://api.openai.com/v1".to_string(),
             catalog_service_id: Some("llm-openai".to_string()),
             openapi_spec_url: Some("https://api.example.com/openapi.json".to_string()),
+            recommended_skills: Some(vec!["nyxid-service-skill-authoring".to_string()]),
             created_at: Utc::now(),
             updated_at: Utc::now(),
         };
@@ -64,6 +71,7 @@ mod tests {
             url: "http://localhost:8080".to_string(),
             catalog_service_id: None,
             openapi_spec_url: None,
+            recommended_skills: None,
             created_at: Utc::now(),
             updated_at: Utc::now(),
         };
