@@ -1,7 +1,7 @@
 ---
 name: aevatar-platform-map
 description: Entry point, panorama, and router for the Aevatar skill family. Use before building, running, publishing, scheduling, externally triggering, or operating Aevatar resources; configuring an Agent Profile; assessing managed/private codex_exec feasibility and setup; running the canonical Codex readiness proof; authoring a workflow with codex_exec; diagnosing a Codex failure; or deciding which companion skill owns a request. It teaches resource and identity boundaries, NyxID-brokered auth, client REST versus in-session tools, deployment gates, and exact handoffs without treating member, workflow, service, profile, schedule, or Codex capabilities as one lifecycle.
-version: "1.10"
+version: "1.11"
 metadata:
   category: plain
   tag:
@@ -124,9 +124,9 @@ by whichever API you already know:
 |---|---|---|---|
 | An already-bound **Studio Team member** workflow | `scope → team → member` | `aevatar_schedule_member_workflow`, or `/api/scopes/{scopeId}/teams/{teamId}/members/{memberId}/automations` | Dedicated **Agent Key** |
 | An independent **scheduled Ornn skill agent** or **one-shot reminder** | Scheduled agent / catalog actors | `scheduled_agent_creator`, then `agent_builder` | Dedicated **Agent Key** |
-| A **raw service invocation or actor envelope** | Generic platform schedule actor | Generic `/api/schedules` | Typed source; may be a NyxID binding exchange |
+| A typed **service invocation** | Generic platform schedule actor | Generic `/api/schedules` | Typed source; may be a NyxID binding exchange |
 
-Generic `/api/schedules` remains supported, but it is **not** the canonical path for a Team member
+Generic `/api/schedules` remains supported for typed service invocation only; external raw actor/envelope targets are retired and fail closed. It is **not** the canonical path for a Team member
 automation and must not be used as a fallback when the owner is a Team member. `aevatar-scheduler`
 owns the member-automation and generic paths; `aevatar-automation` owns the scheduled skill agent.
 
@@ -146,7 +146,7 @@ through the broker:
 - **Prerequisite (once):** the `aevatar` service must be connected in NyxID. Verify with
   `nyxid proxy discover | grep aevatar`; if absent, `nyxid service add aevatar` (no credential —
   it is an admin-mode system service that resolves the caller via NyxID `/me`).
-- **Every call is** `nyxid proxy request aevatar "<path>" [-m POST -H 'Content-Type: application/json' -d '<json>']`. NyxID injects the
+- **Every call is** `nyxid proxy request aevatar "<path>" [-m POST -d '<json>']`. NyxID injects the
   bearer **and** the scope claim; you never read or send the token yourself. (The broker forwards to
   base URL `https://aevatar-console-backend-api.aevatar.ai`; you only ever pass the `<path>`.)
 - **Resolve your scope once** — `scopeId` is your NyxID subject id:
@@ -191,8 +191,9 @@ target contract through the Codex-specific skills below. Do not invent a REST pa
 Keep these modes separate; they share credentials but not caller-owned fields:
 
 - **Raw one-off HTTP:** call `nyxid_proxy` with exact `service_id + slug + path`; optional fields are `method`, `body`, non-sensitive `headers`, and `response_mode`. Example: `{"service_id":"us-gh-7","slug":"api-github","path":"/user","method":"GET"}`.
-- **Interactive operation:** call the request-local `nyxid_service_operation__*` name emitted by the current catalog. Pass the enumerated `user_service_id` and only fields in that dynamic operation schema; never derive the tool name from a slug.
-- **Compiled workflow operation:** the YAML step calls `nyxid_proxy` and carries a copied `capability.nyxid_operation` selector. Its admission proof owns UserService, slug, operation ID, method, path template, digest, schemas, and response policy. Runtime arguments may contain only admitted `path_params`, `query`, `headers`, `body`, and `response_mode`; never repeat route or proof fields.
+- **Current-turn connected-service tools:** use only the typed tools actually present, such as `nyxid_services`, `nyxid_approvals`, `nyxid_require_service`, and `nyxid_service_inventory`. Retired dynamic `nyxid_service_operation__*` and `nyxid_service_request` tools do not exist; never invent their names.
+- **Compiled published operation:** the YAML step calls `nyxid_proxy` and carries an exact copied `capability.nyxid_operation` selector. Its admission proof owns UserService, slug, operation ID, method, path template, digest, schemas, and response policy. Runtime arguments may contain only admitted `path_params`, `query`, `headers`, `body`, and `response_mode`; never repeat route or proof fields.
+- **Compiled authored request:** `capability.nyxid_request` carries a typed HTTP request contract and exact UserService selection from authoritative `/api/v1/keys`. Binding requires authenticated confirmation/grant for the current request-contract digest and risk. `/api/v1/user-services`, draft save, and preview success are not execution authority.
 - **Studio member:** call `aevatar_invoke_member` with `{"member_id":"m-alpha","payload":{"prompt":"hello"}}`; `endpoint_id` is optional and defaults to `chat`. Never substitute a draft `workflowId` or `publishedServiceId` for `member_id`.
 
 For managed `codex_exec`, normal execution is credential-read-only. Explicitly `POST /api/managed-codex/credential` to provision/reconcile, then read `GET /api/managed-codex/credential` and proceed only when `execution_ready=true` and `execution_readiness_reason=ready`; lifecycle `status=active` alone is insufficient. Do not retry the canary expecting normal execution to repair credentials. Preserve the deadline chain: chrono 180s < Aevatar managed request 300s < NyxID/ingress at least 315s < NyxID client 330s < workflow canary at least 360s.
@@ -214,7 +215,7 @@ For managed `codex_exec`, normal execution is credential-read-only. Explicitly `
 | **Publish** a member/team **as a service** and **register it to NyxID**; verify it | `aevatar-service-publisher` | `/api/scopes/{id}/binding`, `/api/services/*`, `/members/{id}/published-service` |
 | Run a **Team member workflow** on a schedule (dedicated Agent Key) | `aevatar-scheduler` | `aevatar_schedule_member_workflow` / `/api/scopes/{id}/teams/{teamId}/members/{memberId}/automations` |
 | Run an independent **scheduled skill agent** or one-shot reminder | `aevatar-automation` | `scheduled_agent_creator`, then `agent_builder` |
-| Run a **raw service invocation** on a cron (generic platform schedule) | `aevatar-scheduler` | `/api/schedules`, `:run-now`, `:enable`, `:disable` |
+| Run a typed **service invocation** on a cron (generic platform schedule) | `aevatar-scheduler` | `/api/schedules`, `:run-now`, `:enable`, `:disable` |
 | Trigger an existing workflow from an external HTTP sender such as **Lark Base** | `aevatar-feasibility-advisor` first, then `aevatar-service-publisher` | NyxID `/api/v1/proxy/s/aevatar/api/scopes/{scopeId}/members/{memberId}/invoke/...`, host-managed `/api/workflow-webhooks/{routeKey}` if configured |
 | **Invoke**, watch **runs**, observe | (this map + service-publisher's invoke section) | `/invoke/{endpointId}`, `/runs/*`, `/api/workflow/observatory/*` |
 

@@ -1,7 +1,7 @@
 ---
 name: aevatar-triage
 description: Use after an Aevatar workflow, codex_exec call, schedule, channel, connector, skill, Agent Profile, or control-plane request fails or behaves unexpectedly. It applies when the agent must attribute the first broken boundary across Aevatar, NyxID, Ornn, chrono-sandbox/gVisor, the managed runner, or private SSH; distinguish credential sources and deployment gaps; preserve sanitized evidence; determine defect versus usage; or draft an issue for explicit user confirmation. Never use it to guess a root cause from one error string or auto-file.
-version: "1.6"
+version: "1.7"
 metadata:
   category: plain
   tag:
@@ -133,8 +133,8 @@ running **image tag / commit**, pod age + `restartCount`, and the **time window*
 (live logs rotate fast, so an old window may already be gone). Missing ids are themselves a finding.
 
 **First, rule out the cheap local causes** before blaming a layer: your own **expired / missing
-credential** (a blanket `401` is often just your own stale token, not a platform bug — refresh it
-and retry) and a **stale local checkout** (the code you're about to read may be behind what's
+credential** (a blanket `401` is often just your own stale token, not a platform bug — refresh it,
+then retry only a safe/idempotent read) and a **stale local checkout** (the code you're about to read may be behind what's
 deployed).
 
 ## Step 2 — Attribute to a layer (trace the request path, eliminate)
@@ -145,8 +145,8 @@ typically flows `your agent -> Aevatar runtime -> NyxID proxy -> third-party`, a
 
 | Symptom | Most likely layer | Disambiguating evidence to gather |
 |---|---|---|
-| `401` / `403` on a connector/tool call | **NyxID** (auth/vault) | is the `slug` in `GET {NYX}/api/v1/services`? token expired? OAuth scope present? |
-| "credential not found" / connector slug missing | **NyxID** (vault / not connected) | catalog vs services; was it ever connected for *this* identity? |
+| `401` / `403` on a connector/tool call | **Aevatar -> NyxID -> provider auth chain** | Did caller credential enter the run, reach the executor, select the exact UserService/route, and remain authorized downstream? Establish the first missing boundary; do not assign the layer from status alone. |
+| "credential not found" / connector slug missing | **NyxID** (vault / not connected) | Compare catalog with authoritative `/api/v1/keys` for this caller. `/api/v1/user-services` is only a route projection and cannot prove execution readiness. |
 | `404` on a thing you reference | **whichever registry owns it** | skill -> Ornn; connector/service -> NyxID; team/member/scope -> Aevatar |
 | `502` / timeout on an external call | **proxy chain** | which hop? Aevatar tool layer vs NyxID proxy vs the target itself |
 | workflow won't validate / run stalls / binding never `succeeded` | **Aevatar** (engine/runtime) | draft-run error body; run timeline / observatory; binding-run status |
@@ -156,6 +156,7 @@ typically flows `your agent -> Aevatar runtime -> NyxID proxy -> third-party`, a
 | **schedule fires (`fireCount` climbs) but the real-world effect never happens** | **Aevatar** (the fired call's path / credential) | dispatch success ≠ effect — check the external side-effect out-of-band; the proxy can hand back `{"error":true}` inside a `200` |
 | **scheduled run starts fine, then late steps hit `token_expired`** | **depends entirely on `credentialSourceKind` — read it before you theorize** | see *Scheduled-run credentials are not one thing* below. `nyxid_binding_exchange` ⇒ the fire-time broker token (`BROKER_ACCESS_TTL_SECS = 300`, NyxID `backend/src/services/oauth_broker_service.rs`) is the right hypothesis. `scheduled_invocation_agent_key` ⇒ it is **not** the 300 s broker TTL and a ~5-6 min correlation is coincidence, not evidence |
 | **inbound bot doesn't reply** (Lark/Telegram) | **cross-layer — walk it** | did NyxID relay webhook fire? is the bot connector connected? did the Aevatar channel run start (observatory)? credential = the *sender's* NyxID, present and live? |
+| Lark Base returns `91403` while `bitable:app:readonly` is enabled | **Lark document ACL / usage configuration** | The API scope and Base document sharing are separate. In the Base `...`/More menu choose **Add Applications** and add the exact Bot application used by the selected NyxID UserService; view access is enough for read-only calls. |
 | **`/whoami` says "bound" but tool calls get `credential_denied`** | **NyxID** (grant revoked — false green) | live token-exchange returns `invalid_grant` while the local readmodel still reads "bound"; whoami checks only the local mirror, not the live grant |
 | approval prompt stuck | **NyxID approvals + Aevatar suspension** | NyxID approval request id; Aevatar workflow wait/suspend state |
 | skill search/pull/upload/generate fails | **Ornn** | which `/api/v1/skill...` route? validator violations? version format? |
@@ -163,6 +164,26 @@ typically flows `your agent -> Aevatar runtime -> NyxID proxy -> third-party`, a
 
 **Do not stop at the first match.** Gather the disambiguating evidence and *eliminate* — a plausible
 first guess that you haven't excluded the alternatives for is not an attribution.
+
+### Workflow execution triage
+
+Preview/readiness and runtime execution are separate proofs. A successful explicit-request preview
+proves the call sites can be admitted for the current workflow/revision; it does not prove that a
+caller credential will propagate into the run or that the downstream service will authorize it.
+
+For one failed run, do not invoke again. Read, in order:
+
+1. the stream terminal frame, if available;
+2. run detail (`completionStatus`, `lastSuccess`, last error, final output);
+3. run audit and its first failed step/tool call;
+4. the binding's exact workflow/revision identity and committed capability admission plan.
+
+For a first NyxID HTTP auth failure, test four hypotheses separately: inbound caller credential
+never entered the run; it entered the run but not the external-capability executor; the executor
+selected the wrong exact UserService/route/credential; or the selected downstream UserService is
+expired/unauthorized. Use distinct `memberId`, `workflowId`, and `publishedServiceId` shapes when
+reproducing identity propagation. Preserve the exact error privately; report only a bounded,
+sanitized classification. A failed mutation or run is never blindly retried.
 
 **Scheduled-run credentials are not one thing.** "It was a scheduled run" tells you nothing about
 its credential. Read `credentialSourceKind` off the run/automation record **first**, then pick the

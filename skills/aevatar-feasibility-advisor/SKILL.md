@@ -1,7 +1,7 @@
 ---
 name: aevatar-feasibility-advisor
 description: Use before building when a user asks whether Aevatar can achieve a goal, what prerequisites it has, or why it is unavailable. Triggers include bots and third-party APIs, inbound channels, external HTTP triggers, schedules, service exposure, Agent Profiles and tool ceilings, and bounded managed or private-host codex_exec work. It distinguishes outbound connectors from inbound channels and separates not connected, host-gated, not deployed, and genuinely unsupported outcomes. It chooses managed_sandbox versus private_ssh without promising repository, model, credential, runtime, or deployment capabilities the caller does not control, then routes feasible work to the owning Aevatar skill.
-version: "1.4"
+version: "1.5"
 metadata:
   category: plain
   tag:
@@ -44,14 +44,11 @@ common wrong answer here.
 docs, so it *sounds* available. **Probe the live surface, never a branch or a memory** —
 `GET /api/openapi.json` and check whether the complete route family is advertised.
 
-**Agent Profile is currently the live example.** Owner Profile management (create, edit draft, bind
-exact Ornn skills, validate, publish) is an **owner-managed** capability — an authenticated user
-manages their *own* profile; it is not host-only configuration. But it is **deployment-gated**, and
-today production advertises **no** `agent-profiles` routes at all. So the honest answer to "can I
-give my agent a fixed persona with pinned skills and a hard tool ceiling?" is: *the product models
-exactly that, it is yours to manage rather than the host's, but this deployment does not currently
-expose the contract — here is the probe, and here is what works today instead.* Do not report it as
-host-owned config, and do not report it as impossible.
+Agent Profile management is an **owner-managed** capability — an authenticated user manages their
+own profile; it is not host-only configuration. It remains deployment-gated, so probe the live
+`GET /api/openapi.json` and require the complete `agent-profiles` route family before mutation.
+Do not preserve a historical claim that production lacks or exposes it; the live OpenAPI is the
+only answer for the current deployment.
 
 ## Choose the `codex_exec` target before workflow authoring
 
@@ -89,7 +86,7 @@ Every external capability is brokered by **NyxID**. That single fact drives ever
 
 | Surface | What it gives you | How it's used | Supported set |
 |---|---|---|---|
-| **Connector** (outbound) | Your workflow/agent **calls** a third-party API (read data, post, act) | Raw `nyxid_proxy` requires exact `service_id + slug + path`; an interactive `nyxid_service_operation__*` requires enumerated `user_service_id` plus its emitted schema; a compiled workflow calls `nyxid_proxy` with a copied `capability.nyxid_operation` selector and only admitted runtime values (`path_params/query/headers/body/response_mode`) | Anything in the NyxID **catalog** (see below) — broad |
+| **Connector** (outbound) | Your workflow/agent **calls** a third-party API (read data, post, act) | Raw `nyxid_proxy` requires exact `service_id + slug + path`; current-turn dynamic `nyxid_service_operation__*` tools are retired; a compiled workflow uses exact `capability.nyxid_operation` or typed `capability.nyxid_request` admission | Anything in the live NyxID catalog/inventory — broad |
 | **Channel** (inbound) | A third-party chat platform **delivers user messages to your agent**, which replies **in that platform** | An Aevatar **channel module** + NyxID relay webhook | **Narrow** — only platforms with a built module |
 
 > **The trap:** "I want a Twitter bot." A Twitter *connector* (`api-twitter`) exists, so your
@@ -100,20 +97,18 @@ Every external capability is brokered by **NyxID**. That single fact drives ever
 
 ## Step 0 — Inspect what is actually connectable (don't guess)
 
-You hold a NyxID bearer (`~/.nyxid/access_token`; base in `~/.nyxid/base_url`, e.g.
-`https://nyx.chrono-ai.fun`). Two read-only calls tell you the ground truth — make them with
-the **`curl` binary** (a WAF may 403 Python HTTP clients):
+Use the authenticated NyxID CLI; never read its stored access token or build an Authorization
+header. Two read-only CLI calls tell you the ground truth:
 
 ```bash
-NYX=$(tr -d '\n' < ~/.nyxid/base_url); TOK=$(tr -d '\n' < ~/.nyxid/access_token)
-# What the user already has wired up (slugs you can nyxid_proxy right now):
-curl -s -H "Authorization: Bearer $TOK" "$NYX/api/v1/services"   # -> [{slug,name,...}]
-# What CAN be connected, and exactly how (auth model + setup instructions):
-curl -s -H "Authorization: Bearer $TOK" "$NYX/api/v1/catalog"    # -> {entries:[{slug,auth_method,credential_mode,requires_credential,api_key_instructions,api_key_url,documentation_url,...}]}
+nyxid service list --output json
+nyxid catalog list --output json
 ```
-(Inside an aevatar session with the nyxid MCP, the equivalent is the `nyxid_services` tool,
-`{"action":"list"}`.) **The live catalog is the source of truth — never assert a connector
+(Inside an Aevatar session, use the typed connected-service inventory/management tool actually
+present.) **The live catalog and authoritative `/api/v1/keys` instance inventory are the source of truth — never assert a connector
 exists or doesn't without checking it.** The examples below are illustrative, not a fixed list.
+`/api/v1/user-services` is only a route projection; it cannot prove discovery, readiness, or
+execution authority.
 
 ### Reading a catalog entry (this is the "what's the prerequisite" answer)
 - `requires_credential: true` → the user must connect it before any call works.
@@ -155,7 +150,7 @@ exists or doesn't without checking it.** The examples below are illustrative, no
 | **Publish** a workflow/team as an **invocable service** in-scope | ✅ Yes | Just bind it (`aevatar-service-publisher`). Usable within the user's scope immediately. |
 | An external automation **triggers an existing Aevatar workflow** (e.g. Lark Base row status changed → HTTP request → run member workflow) | ✅ Usually, without service externalExposure | Use the external system's HTTP action to call the NyxID proxy for the existing `aevatar` service with a NyxID API key (`proxy` scope), targeting an explicit `/api/scopes/{scopeId}/members/{memberId}/invoke/...` or `/teams/{teamId}/invoke/...` path. This is an external trigger, not a NyxID connector registration. See `aevatar-service-publisher`. |
 | Have that service **registered as a NyxID-brokered connector** (callable by others/externally) | ⚠️ Host-gated | The **host** must enable external exposure (`GAgentService:ExternalExposure: Enabled=true` + `RegisterAllPublishedServices` or an opt-in policy). You **cannot** turn this on as a client — verify `externalExposure` on the service and, if empty, tell the user to ask the host. |
-| Give an agent a **fixed persona + pinned Ornn skills + an enforced tool ceiling** (an Agent Profile) | ⚠️ Modelled, owner-managed, but **not deployed today** | Probe `GET /api/openapi.json` for the complete `agent-profiles` route family. Absent ⇒ the deployment does not expose it; say so and offer the workflow-instructions version as the interim. Present ⇒ it is **yours** to create/validate/publish via `aevatar-agent-profile-management`, no host action needed for management itself. |
+| Give an agent a **fixed persona + pinned Ornn skills + an enforced tool ceiling** (an Agent Profile) | ⚠️ Modelled, owner-managed, deployment-dependent | Probe `GET /api/openapi.json` for the complete `agent-profiles` route family. Absent means unavailable in this deployment; present means the owner can manage it through `aevatar-agent-profile-management`. |
 | Have a published Profile actually **drive a running agent** | ⚠️ Host-gated, and narrow | Publication is not runtime binding. Only *newly created* NyxID direct conversations admitted by a **host-owned rollout** consume a Profile; existing conversations never hot-upgrade, and workflows/teams/services/schedules/channels/AgentRuns are not consumers at all. |
 | **Schedule** a recurring run (cron) | ⚠️ Yes, with a binding | The scope owner needs a durable **NyxID broker binding** — i.e. an interactive **console** NyxID login, not just a CLI token. Without it, schedule creation 400s ("Authenticated NyxID owner binding is required"). |
 | A service backed by an **arbitrary custom agent / actor type** | ⚠️ Constrained | Member implementations are `workflow`, `script`, or **registered** `gagent` kinds (`GET /api/scopes/gagent-types`). You can't point a service at an arbitrary actor; wrap custom logic in a workflow or script, or use a registered gagent kind. |
@@ -176,6 +171,12 @@ State these plainly when they bite:
 - **`nyxid_proxy` file artifacts cap at 100 MiB.** Bigger downloads aren't feasible that way.
 - **Async settling.** Bindings/deployments/runs are eventually consistent — never promise a
   result from a 2xx alone.
+- **Lark Base has two permission layers.** `bitable:app:readonly` is an application API scope;
+  it does not grant the Bot access to a specific Base document. Lark error `91403` means the
+  Base document ACL denied that application. In the current Base UI, open the Base's `...`/More
+  menu, choose **Add Applications**, and add the exact Bot application used by the selected NyxID
+  UserService with view access for read-only workflows. Do not ask the user to change API scopes
+  when that scope is already enabled, and do not confuse a Base with a spreadsheet file.
 
 ## How to satisfy each prerequisite (what you tell the user to do)
 
