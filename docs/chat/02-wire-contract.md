@@ -1,6 +1,6 @@
 # Assistant Chat Wire Contract
 
-Last verified against `f608b33c` (2026-08-01).
+Last verified against `fix-new-chat-timing` (2026-08-04).
 
 This document specifies the browser-to-NyxID contract and the Aevatar request NyxID produces. It is the canonical API reference for the assistant chat surface.
 
@@ -306,6 +306,63 @@ The wrapped form supplies the workflow continuation fence. The legacy array does
 
 Aevatar Chat History currently materializes text messages, not every browser-local structured block. While a workflow transcript is catching up, `frontend/src/lib/assistant/aevatar-transport.ts:applyHistoryResponse` merges server text with locally retained structured action and approval messages rather than discarding those cards.
 
+### Browser projection lifecycle
+
+A Studio stream and the browser's local mirror are authoritative through a
+turn terminal. A terminal does not synchronously read transcript detail:
+Aevatar's CQRS read model returns `404` until the first terminal has projected,
+and that response cannot distinguish a pending projection from a deleted or
+unknown conversation.
+
+The transport stores two independent facts. `identityPending` means a create
+command was dispatched but no `chatc-...` identity has been adopted.
+`projectionPending` means a workflow turn reached a local terminal that has not
+been confirmed by a wire transcript. A positive `stateVersion` is a
+materialization criterion, not either fact; a create context with version zero
+therefore remains pending instead of being mistaken for a settled conversation.
+
+While either fact is pending on a terminal local mirror, public history reads
+return that mirror with `awaitingProjection: true` and make no transcript
+request. Live turns omit the projection flag and cannot be rewritten by a
+background transcript observation. A cold canonical record synthesized only
+from a receipt attempts the transcript once before falling back to an empty
+syncing mirror on `404`. A single-flight background reconciler performs later
+wire reads. Materialization requires a
+wrapped positive fence at least as high as the stored fence and, when known,
+the latest local assistant turn. When streamed assistant messages carry no
+turn id, the stored `requiredTurnId` supplies that keep-max predicate. Legacy
+arrays can materialize only when they contain the required turn.
+Reconciliation uses full jitter with a 250 ms floor,
+a 30-second per-delay cap, and a 90-second deadline. Cold create recovery uses
+an 8-second cap and a 60-second deadline. The existing foreground continuation
+preflight schedule remains `0`, `300`, `900`, and `1800` milliseconds.
+
+A deadline with raw index membership present or unavailable produces the
+non-error `projectionStalled` state and an explicit browser retry. Transcript
+`404` plus two raw-index-absent observations at least ten seconds apart, or a
+raw absence at the deadline, tombstones the conversation. Raw membership is
+read from the upstream response before local list rows are merged; the merged
+sidebar list is never existence evidence.
+
+### Persisted create evidence
+
+The browser stores account-scoped create receipts containing only the command
+ID, placeholder ID, optional canonical ID, positive fence, and timestamps. It
+never stores prompts, messages, tokens, or card content. Receipt persistence is
+best effort: disabled storage and quota failures fall back to memory without
+failing a send. Receipts expire after 24 hours and are capped at 20 per user.
+Browser storage events share evidence between tabs, but reconciliation remains
+single-flight per tab and independently jittered.
+
+Deletion intents use a separate per-user namespace, 24-hour expiry, and cap of
+10. They survive account changes without becoming active under the next
+account. Returning to the original account resumes cleanup. A user who deletes
+an unaliased `workflow-pending-...` draft gets immediate local removal and no
+placeholder DELETE. The intent recovers the canonical ID by `commandId`, sends
+DELETE for that `chatc-...` ID, tombstones both addresses, and is removed only
+after DELETE succeeds. A known canonical intent is excluded from index merges
+while cleanup is outstanding.
+
 ## Delete
 
 `DELETE /conversations/{id}` reserves deletion in the browser transport so a concurrent send, action report, approval, or late recovery cannot resurrect the conversation.
@@ -315,7 +372,7 @@ Aevatar Chat History currently materializes text messages, not every browser-loc
 | `nyxid-chat-...` | `DELETE /api/chat/conversations/{id}` | preserve upstream response, including `202` JSON acceptance |
 | `chatc-...` | `DELETE /api/scopes/{verifiedUserId}/chat-history/conversations/{id}` | normalize every upstream success to `204` with an empty body |
 
-Non-success responses are preserved. Workflow normalization removes `Content-Length` and `Content-Type`. The frontend uses a 15-second request deadline, tombstones the identity during deletion, aborts or waits on active work as required, and invalidates list/detail caches after success. A failed delete restores the visible conversation.
+Non-success responses are preserved. Workflow normalization removes `Content-Length` and `Content-Type`. The frontend uses a 15-second request deadline for known durable identities, tombstones the identity during deletion, aborts or waits on active work as required, and invalidates list/detail caches after success. A failed known-ID delete restores the visible conversation. An unaliased local placeholder uses the durable deletion-intent flow above and is never sent on the wire.
 
 Implementation: `backend/src/handlers/assistant.rs:delete_conversation` and `frontend/src/lib/assistant/aevatar-transport.ts:deleteConversation`.
 

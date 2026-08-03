@@ -171,6 +171,15 @@ export interface ConversationHistory {
   readonly conversation: Conversation;
   readonly messages: AssistantMessage[];
   readonly has_more: boolean;
+  /** The local stream mirror is authoritative while identity/history catches up. */
+  readonly awaitingProjection?: boolean;
+  /** Background reconciliation reached its deadline without proving absence. */
+  readonly projectionStalled?: boolean;
+}
+
+export interface ProjectionReconcileOutcome {
+  readonly status: "materialized" | "absent" | "timed_out";
+  readonly conversationId: string;
 }
 
 export type TurnStatus =
@@ -274,6 +283,10 @@ export interface AssistantTransport {
   listConversations(): Promise<Conversation[]>;
   createConversation(): Promise<Conversation>;
   getHistory(conversationId: string): Promise<ConversationHistory>;
+  reconcileProjection(
+    conversationId: string,
+  ): Promise<ProjectionReconcileOutcome>;
+  releaseProjectionWaiter(conversationId: string): void;
   deleteConversation(conversationId: string): Promise<void>;
   sendMessage(
     conversationId: string,

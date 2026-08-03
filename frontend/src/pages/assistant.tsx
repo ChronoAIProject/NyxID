@@ -2,6 +2,7 @@ import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { useQueryClient } from "@tanstack/react-query";
 import { useNavigate, useRouterState } from "@tanstack/react-router";
 import { toast } from "sonner";
+import { RefreshCw } from "lucide-react";
 import { AssistantShell } from "@/components/assistant/assistant-shell";
 import { AssistantSidebar } from "@/components/assistant/assistant-sidebar";
 import { ChatComposer } from "@/components/assistant/chat-composer";
@@ -17,6 +18,7 @@ import {
   useActionCardActions,
   useCancelTurn,
   useConversation,
+  useRetryConversationProjection,
   useConversations,
   useDecideApproval,
   useDeleteConversation,
@@ -140,6 +142,7 @@ export function AssistantPage({
   const selectedId =
     !drafting && selectedFromSearch ? selectedFromSearch : undefined;
   const history = useConversation(selectedId);
+  const retryProjection = useRetryConversationProjection(selectedId);
   const turn = useAssistantTurn(selectedId);
   const episode = useTurnEpisode(selectedId);
   const sendMessage = useSendMessage(selectedId);
@@ -498,6 +501,30 @@ export function AssistantPage({
       headerActions={<AssistantWireLogAction />}
     >
       <div className="relative flex h-full min-h-0 flex-col bg-background">
+        {history.data?.projectionStalled ? (
+          <div
+            role="status"
+            className="flex items-center justify-center gap-2 border-b border-border/60 bg-muted/30 px-6 py-2 text-[12px] text-text-secondary"
+          >
+            <span>History is taking longer than expected.</span>
+            <button
+              type="button"
+              className="inline-flex items-center gap-1 text-foreground underline-offset-2 hover:underline disabled:opacity-50"
+              disabled={retryProjection.isPending}
+              onClick={() => retryProjection.mutate()}
+            >
+              <RefreshCw className="size-3" aria-hidden="true" />
+              Retry
+            </button>
+          </div>
+        ) : history.data?.awaitingProjection ? (
+          <div
+            role="status"
+            className="border-b border-border/60 bg-muted/30 px-6 py-2 text-center text-[12px] text-text-secondary"
+          >
+            Syncing conversation history...
+          </div>
+        ) : null}
         {/* A failed transcript read is REPORTED, never blocking. It used to
             replace the whole thread, which also took the composer's context
             away and made the chat look dead — even though sending still
