@@ -26,6 +26,12 @@ nyxid login --device --base-url <BASE_URL>
 
 Set `NYXID_LOGIN_NO_DEVICE_FALLBACK=1` to opt out of the auto-fallback (you'll get the old "hang on browser callback" behavior instead). For non-interactive CI use, generate an API key with `nyxid api-key create` and authenticate via the `nyxid_ag_…` token — `nyxid login` itself short-circuits with an api-key hint when it detects `CI` / `GITHUB_ACTIONS` / `BUILDKITE` / `CIRCLECI` / `JENKINS_URL` / `GITLAB_CI`.
 
+### Non-interactive credentials
+
+Authenticated commands resolve credentials in this order: `--access-token`, the variable named by `--access-token-env` (default `NYXID_ACCESS_TOKEN`), `NYXID_API_KEY` as a fallback alias for the default selector, then the stored profile session. If both default variables are set, `NYXID_ACCESS_TOKEN` takes precedence. A custom `--access-token-env <VAR>` uses only `<VAR>` before falling back to the stored session.
+
+Caller-selected credentials are fail-closed: if the server rejects one, the CLI exits nonzero and does not refresh or retry with the stored session identity.
+
 ## Check your session
 
 ```bash

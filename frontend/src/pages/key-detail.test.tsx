@@ -424,8 +424,9 @@ describe("KeyDetailPage — edit flows", () => {
     render(<KeyDetailPage />);
     await user.click(screen.getByRole("tab", { name: "Advanced" }));
 
-    // "Not set" badge marks the empty OpenAPI spec section.
-    const notSet = screen.getByText("Not set");
+    // "Not set" badges mark both the empty OpenAPI spec section and the
+    // empty Recommended Skills section; the OpenAPI card renders first.
+    const notSet = screen.getAllByText("Not set")[0]!;
     const pencil = notSet.parentElement?.querySelector("button");
     await user.click(pencil as HTMLElement);
 

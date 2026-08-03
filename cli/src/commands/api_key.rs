@@ -95,15 +95,15 @@ pub async fn run(command: ApiKeyCommands) -> Result<()> {
             if let Some(services) = allowed_services {
                 let ids: Vec<&str> = services.split(',').map(|s| s.trim()).collect();
                 body["allowed_service_ids"] = serde_json::json!(ids);
+                body["allow_all_services"] = Value::Bool(allow_all_services);
+            } else if allow_all_services {
+                body["allow_all_services"] = Value::Bool(true);
             }
             if let Some(nodes) = allowed_nodes {
                 let ids: Vec<&str> = nodes.split(',').map(|s| s.trim()).collect();
                 body["allowed_node_ids"] = serde_json::json!(ids);
-            }
-            if allow_all_services {
-                body["allow_all_services"] = Value::Bool(true);
-            }
-            if allow_all_nodes {
+                body["allow_all_nodes"] = Value::Bool(allow_all_nodes);
+            } else if allow_all_nodes {
                 body["allow_all_nodes"] = Value::Bool(true);
             }
             if let Some(ref platform) = platform {
@@ -810,6 +810,8 @@ mod option_tests {
             .and(body_partial_json(serde_json::json!({
                 "allowed_service_ids": ["svc-a", "svc-b"],
                 "allowed_node_ids": ["node-1"],
+                "allow_all_services": false,
+                "allow_all_nodes": false,
                 "callback_url": "https://cb.example"
             })))
             .respond_with(

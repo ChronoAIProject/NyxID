@@ -28,10 +28,6 @@ use crate::telemetry::{TelemetryContext, TelemetryEvent, emit_event};
 
 // --- Request / Response types ---
 
-fn default_true() -> bool {
-    true
-}
-
 /// Resolve the effective owner for an ApiKey mutation. Returns the owner's
 /// user_id so the caller passes it to `key_service::*` for downstream
 /// filtering. Blocks non-admin org members (who get
@@ -99,28 +95,23 @@ pub struct CreateApiKeyRequest {
     pub expires_at: Option<String>,
     pub description: Option<String>,
     /// UserService IDs this key can access via proxy.
-    /// Only enforced when `allow_all_services` is `false`. Providing values
-    /// without also setting `allow_all_services: false` will silently store
-    /// the list but **not** scope the key.
+    /// A non-empty list implies `allow_all_services: false` when that gate is
+    /// omitted.
     #[serde(default)]
     pub allowed_service_ids: Vec<String>,
     /// Node IDs this key can route through.
-    /// Only enforced when `allow_all_nodes` is `false`. Providing values
-    /// without also setting `allow_all_nodes: false` will silently store
-    /// the list but **not** scope the key.
+    /// A non-empty list implies `allow_all_nodes: false` when that gate is
+    /// omitted.
     #[serde(default)]
     pub allowed_node_ids: Vec<String>,
     /// If true, key can access ALL of the user's external services.
-    /// Default: `true` (backward compatible -- existing keys have no
-    /// restrictions). Set to `false` together with a non-empty
-    /// `allowed_service_ids` to create a scoped key.
-    #[serde(default = "default_true")]
-    pub allow_all_services: bool,
+    /// When omitted, defaults to `true` only if `allowed_service_ids` is empty.
+    /// An explicit `true` conflicts with a non-empty restriction list.
+    pub allow_all_services: Option<bool>,
     /// If true, key can route through ALL of the user's nodes.
-    /// Default: `true` (backward compatible). Set to `false` together with a
-    /// non-empty `allowed_node_ids` to create a node-scoped key.
-    #[serde(default = "default_true")]
-    pub allow_all_nodes: bool,
+    /// When omitted, defaults to `true` only if `allowed_node_ids` is empty.
+    /// An explicit `true` conflicts with a non-empty restriction list.
+    pub allow_all_nodes: Option<bool>,
     pub rate_limit_per_second: Option<u32>,
     pub rate_limit_burst: Option<u32>,
     pub platform: Option<String>,
@@ -1161,6 +1152,21 @@ fn parse_expires_at(s: &str) -> AppResult<DateTime<Utc>> {
     ))
 }
 
+fn resolve_create_allow_all(
+    allowed_ids: &[String],
+    requested_allow_all: Option<bool>,
+    allow_all_field: &str,
+    allowed_ids_field: &str,
+) -> AppResult<bool> {
+    if requested_allow_all == Some(true) && !allowed_ids.is_empty() {
+        return Err(AppError::ValidationError(format!(
+            "{allow_all_field} cannot be true when {allowed_ids_field} is non-empty"
+        )));
+    }
+
+    Ok(requested_allow_all.unwrap_or(allowed_ids.is_empty()))
+}
+
 #[utoipa::path(
     post,
     path = "/api/v1/api-keys",
@@ -1204,6 +1210,19 @@ pub async fn create_key(
         ));
     }
 
+    let allow_all_services = resolve_create_allow_all(
+        &body.allowed_service_ids,
+        body.allow_all_services,
+        "allow_all_services",
+        "allowed_service_ids",
+    )?;
+    let allow_all_nodes = resolve_create_allow_all(
+        &body.allowed_node_ids,
+        body.allow_all_nodes,
+        "allow_all_nodes",
+        "allowed_node_ids",
+    )?;
+
     let actor = auth_user.user_id.to_string();
 
     // Resolve the intended storage owner through the same typed authority as
@@ -1226,8 +1245,8 @@ pub async fn create_key(
         body.description.as_deref(),
         Some(&body.allowed_service_ids),
         Some(&body.allowed_node_ids),
-        Some(body.allow_all_services),
-        Some(body.allow_all_nodes),
+        Some(allow_all_services),
+        Some(allow_all_nodes),
         body.rate_limit_per_second,
         body.rate_limit_burst,
         body.platform.as_deref(),
@@ -1518,6 +1537,186 @@ mod tests {
     fn platform_absent_means_no_change() {
         let req: UpdateApiKeyRequest = serde_json::from_str(r#"{"name": "k"}"#).unwrap();
         assert!(req.platform.is_none());
+    }
+
+    mod create_scope_defaults {
+        use super::super::create_key;
+        use crate::AppState;
+        use crate::models::api_key::{ApiKey, COLLECTION_NAME as API_KEYS};
+        use crate::models::node::{COLLECTION_NAME as NODES, Node, NodeMetrics, NodeStatus};
+        use crate::models::user::{COLLECTION_NAME as USERS, User, UserType};
+        use crate::models::user_service::{COLLECTION_NAME as USER_SERVICES, UserService};
+        use crate::test_utils::{
+            connect_test_database, test_app_state, test_user, test_user_service,
+        };
+        use axum::{
+            Router,
+            body::{Body, to_bytes},
+            http::{Request, StatusCode},
+            routing::post,
+        };
+        use chrono::Utc;
+        use mongodb::bson::doc;
+        use serde_json::{Value, json};
+        use tower::ServiceExt;
+        use uuid::Uuid;
+
+        fn access_token(state: &AppState, user_id: &str) -> String {
+            crate::crypto::jwt::generate_access_token(
+                &state.jwt_keys,
+                &state.config,
+                &Uuid::parse_str(user_id).expect("valid user id"),
+                "",
+                None,
+                None,
+                None,
+                None,
+                None,
+            )
+            .expect("sign test access token")
+        }
+
+        async fn post_create(state: &AppState, user_id: &str, body: Value) -> (StatusCode, Value) {
+            let app = Router::new()
+                .route("/api-keys", post(create_key))
+                .with_state(state.clone());
+            let response = app
+                .oneshot(
+                    Request::post("/api-keys")
+                        .header(
+                            "authorization",
+                            format!("Bearer {}", access_token(state, user_id)),
+                        )
+                        .header("content-type", "application/json")
+                        .body(Body::from(body.to_string()))
+                        .expect("build create request"),
+                )
+                .await
+                .expect("create route response");
+            let status = response.status();
+            let bytes = to_bytes(response.into_body(), usize::MAX)
+                .await
+                .expect("read create response");
+            let body = serde_json::from_slice(&bytes).expect("create response is JSON");
+            (status, body)
+        }
+
+        fn test_node(owner_id: &str) -> Node {
+            let now = Utc::now();
+            Node {
+                id: Uuid::new_v4().to_string(),
+                user_id: owner_id.to_string(),
+                name: "scoped-node".to_string(),
+                status: NodeStatus::Online,
+                auth_token_hash: "auth-hash".to_string(),
+                signing_secret_encrypted: None,
+                signing_secret_hash: "signing-hash".to_string(),
+                last_heartbeat_at: Some(now),
+                connected_at: Some(now),
+                metadata: None,
+                metrics: NodeMetrics::default(),
+                is_active: true,
+                created_at: now,
+                updated_at: now,
+            }
+        }
+
+        #[tokio::test]
+        async fn post_create_derives_fail_closed_scope_gates() {
+            let Some(db) = connect_test_database("api_key_create_scope_defaults").await else {
+                eprintln!("skipping API key handler test: no local MongoDB available");
+                return;
+            };
+
+            let actor_id = Uuid::new_v4().to_string();
+            db.collection::<User>(USERS)
+                .insert_one(test_user(&actor_id, UserType::Person))
+                .await
+                .expect("insert actor");
+
+            let service = test_user_service(
+                &Uuid::new_v4().to_string(),
+                &actor_id,
+                "scoped-service",
+                &Uuid::new_v4().to_string(),
+                None,
+                None,
+            );
+            let node = test_node(&actor_id);
+            db.collection::<UserService>(USER_SERVICES)
+                .insert_one(&service)
+                .await
+                .expect("insert service");
+            db.collection::<Node>(NODES)
+                .insert_one(&node)
+                .await
+                .expect("insert node");
+
+            let state = test_app_state(db.clone());
+            let (status, scoped) = post_create(
+                &state,
+                &actor_id,
+                json!({
+                    "name": "scoped-key",
+                    "scopes": "proxy",
+                    "allowed_service_ids": [&service.id],
+                    "allowed_node_ids": [&node.id]
+                }),
+            )
+            .await;
+            assert_eq!(status, StatusCode::OK, "unexpected response: {scoped}");
+            assert_eq!(scoped["allow_all_services"], false);
+            assert_eq!(scoped["allow_all_nodes"], false);
+            assert_eq!(scoped["allowed_service_ids"], json!([&service.id]));
+            assert_eq!(scoped["allowed_node_ids"], json!([&node.id]));
+
+            let stored = db
+                .collection::<ApiKey>(API_KEYS)
+                .find_one(doc! { "_id": scoped["id"].as_str().expect("created key id") })
+                .await
+                .expect("query created key")
+                .expect("created key is persisted");
+            assert!(!stored.allow_all_services);
+            assert!(!stored.allow_all_nodes);
+            assert_eq!(stored.allowed_service_ids, vec![service.id.clone()]);
+            assert_eq!(stored.allowed_node_ids, vec![node.id.clone()]);
+
+            let (status, unscoped) = post_create(
+                &state,
+                &actor_id,
+                json!({"name": "unscoped-key", "scopes": "proxy"}),
+            )
+            .await;
+            assert_eq!(status, StatusCode::OK, "unexpected response: {unscoped}");
+            assert_eq!(unscoped["allow_all_services"], true);
+            assert_eq!(unscoped["allow_all_nodes"], true);
+
+            let (status, service_conflict) = post_create(
+                &state,
+                &actor_id,
+                json!({
+                    "name": "service-conflict",
+                    "allowed_service_ids": [&service.id],
+                    "allow_all_services": true
+                }),
+            )
+            .await;
+            assert_eq!(status, StatusCode::BAD_REQUEST);
+            assert_eq!(service_conflict["error"], "validation_error");
+
+            let (status, node_conflict) = post_create(
+                &state,
+                &actor_id,
+                json!({
+                    "name": "node-conflict",
+                    "allowed_node_ids": [&node.id],
+                    "allow_all_nodes": true
+                }),
+            )
+            .await;
+            assert_eq!(status, StatusCode::BAD_REQUEST);
+            assert_eq!(node_conflict["error"], "validation_error");
+        }
     }
 
     // Regression tests for ChronoAIProject/NyxID#542: the Usage Dashboard
@@ -1877,11 +2076,6 @@ mod tests {
     #[test]
     fn default_usage_days_is_seven() {
         assert_eq!(super::default_usage_days(), 7);
-    }
-
-    #[test]
-    fn default_true_returns_true() {
-        assert!(super::default_true());
     }
 
     #[test]

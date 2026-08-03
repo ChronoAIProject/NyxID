@@ -3001,15 +3001,14 @@ async fn execute_proxy_inner(
                 request_len + response_len,
             )
         });
-        state
-            .billing
-            .settle(
-                &metered,
-                llm_platform_usage(reported_usage.as_ref(), request_len + response_len),
-                resale,
-                model,
-            )
-            .await?;
+        settle_meter_async(
+            state.billing.clone(),
+            metered,
+            llm_platform_usage(reported_usage.as_ref(), request_len + response_len),
+            resale,
+            model,
+        )
+        .await;
 
         response_builder
             .body(Body::from(response_body))
@@ -6875,7 +6874,7 @@ mod tests {
 
 #[cfg(test)]
 mod proxy_resolution_integration_tests {
-    use super::{proxy_request_by_slug_inner, proxy_request_inner};
+    use super::{enforce_node_route_scope, proxy_request_by_slug_inner, proxy_request_inner};
     use crate::AppState;
     use crate::crypto::token::hash_token;
     use crate::errors::AppError;
@@ -6914,6 +6913,32 @@ mod proxy_resolution_integration_tests {
     use mongodb::bson::doc;
     use tokio::net::TcpListener;
     use tokio::sync::mpsc;
+
+    /// Turn the wire-log diagnostic on platform-wide, the way an operator does
+    /// it at runtime through the admin feature-flag API.
+    async fn enable_wire_log_flag(db: &mongodb::Database) {
+        crate::services::feature_flag_service::set_platform_override(
+            db,
+            crate::services::feature_flag_service::AEVATAR_CHAT_WIRE_LOG_FLAG_KEY,
+            &crate::services::feature_flag_service::FlagTarget::Global,
+            true,
+            "test-admin",
+        )
+        .await
+        .expect("enable the wire-log flag globally");
+    }
+
+    /// Runtime kill switch: drop the global override so resolution falls back
+    /// to the registry default (off).
+    async fn disable_wire_log_flag(db: &mongodb::Database) {
+        crate::services::feature_flag_service::clear_platform_override(
+            db,
+            crate::services::feature_flag_service::AEVATAR_CHAT_WIRE_LOG_FLAG_KEY,
+            &crate::services::feature_flag_service::FlagTarget::Global,
+        )
+        .await
+        .expect("clear the wire-log flag override");
+    }
 
     fn assistant_echoes(response: &Response) -> Vec<serde_json::Value> {
         let Some(value) = response.headers().get("x-nyxid-debug-upstream-log") else {
@@ -7776,6 +7801,113 @@ mod proxy_resolution_integration_tests {
         server.abort();
     }
 
+    #[tokio::test]
+    async fn created_scope_admits_listed_service_and_node_and_rejects_others() {
+        let Some(db) = connect_test_database("proxy_created_scope_enforcement").await else {
+            eprintln!("skipping proxy integration test: no local MongoDB available");
+            return;
+        };
+
+        let (base_url, server) = start_downstream().await;
+        let user_id = Uuid::new_v4().to_string();
+        db.collection::<crate::models::user::User>(USERS)
+            .insert_one(test_user(&user_id, UserType::Person))
+            .await
+            .expect("insert user");
+        let allowed_service =
+            insert_user_service(&db, &user_id, "scope-allowed", &base_url, None).await;
+        let denied_service =
+            insert_user_service(&db, &user_id, "scope-denied", &base_url, None).await;
+
+        let state = test_app_state(db.clone());
+        let allowed_node = insert_online_node(&state, &user_id, "scope-allowed-node").await;
+        let axum::Json(created) = crate::handlers::api_keys::create_key(
+            State(state.clone()),
+            crate::test_utils::test_auth_user(&user_id),
+            crate::telemetry::TelemetryContext::default(),
+            axum::Json(crate::handlers::api_keys::CreateApiKeyRequest {
+                name: "scoped-proxy-key".to_string(),
+                scopes: Some("proxy".to_string()),
+                expires_at: None,
+                description: None,
+                allowed_service_ids: vec![allowed_service.id.clone()],
+                allowed_node_ids: vec![allowed_node.id.clone()],
+                allow_all_services: None,
+                allow_all_nodes: None,
+                rate_limit_per_second: None,
+                rate_limit_burst: None,
+                platform: Some("codex".to_string()),
+                callback_url: None,
+                target_org_id: None,
+                scope_plan_digest: None,
+            }),
+        )
+        .await
+        .expect("create scoped key");
+        assert!(!created.allow_all_services);
+        assert!(!created.allow_all_nodes);
+
+        let (validated_user_id, stored_key) =
+            crate::services::key_service::validate_api_key(&db, &created.full_key)
+                .await
+                .expect("authenticate created key");
+        assert_eq!(validated_user_id, user_id);
+
+        let mut auth = access_token_auth(&user_id);
+        auth.auth_method = AuthMethod::ApiKey;
+        auth.api_key_id = Some(stored_key.id.clone());
+        auth.api_key_name = Some(stored_key.name.clone());
+        auth.allow_all_services = stored_key.allow_all_services;
+        auth.allow_all_nodes = stored_key.allow_all_nodes;
+        auth.allowed_service_ids = stored_key.allowed_service_ids.clone();
+        auth.allowed_node_ids = stored_key.allowed_node_ids.clone();
+
+        let mut allowed_slug = String::new();
+        let response = proxy_request_by_slug_inner(
+            &state,
+            &auth,
+            &allowed_service.slug,
+            "status",
+            proxy_request("/proxy/s/scope-allowed/status"),
+            &mut allowed_slug,
+        )
+        .await
+        .expect("listed service should be permitted");
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(allowed_slug, allowed_service.slug);
+
+        let mut denied_slug = String::new();
+        let error = proxy_request_by_slug_inner(
+            &state,
+            &auth,
+            &denied_service.slug,
+            "status",
+            proxy_request("/proxy/s/scope-denied/status"),
+            &mut denied_slug,
+        )
+        .await
+        .expect_err("service outside the created allowlist must be rejected");
+        assert!(matches!(error, AppError::ApiKeyScopeForbidden(_)));
+
+        let mut allowed_route = crate::services::node_routing_service::NodeRoute {
+            node_id: allowed_node.id.clone(),
+            fallback_node_ids: vec!["unlisted-fallback".to_string()],
+        };
+        enforce_node_route_scope(&mut allowed_route, &stored_key.allowed_node_ids)
+            .expect("listed node should be permitted");
+        assert!(allowed_route.fallback_node_ids.is_empty());
+
+        let mut denied_route = crate::services::node_routing_service::NodeRoute {
+            node_id: Uuid::new_v4().to_string(),
+            fallback_node_ids: Vec::new(),
+        };
+        let error = enforce_node_route_scope(&mut denied_route, &stored_key.allowed_node_ids)
+            .expect_err("node outside the created allowlist must be rejected");
+        assert!(matches!(error, AppError::ApiKeyScopeForbidden(_)));
+
+        server.abort();
+    }
+
     /// Seed an admin-managed platform service (the shape the assistant chat
     /// pass-through targets: internal, no user credential, master/no auth).
     async fn insert_platform_service(
@@ -8128,8 +8260,10 @@ mod proxy_resolution_integration_tests {
         .await
         .unwrap();
 
-        let mut state = test_app_state(db.clone());
-        state.config.aevatar_chat_wire_log_enabled = true;
+        let state = test_app_state(db.clone());
+        // The wire log is gated by a runtime feature flag, not process config:
+        // a platform-global override turns it on for every caller.
+        enable_wire_log_flag(&db).await;
         let auth = access_token_auth(&user_id);
         let billing_policy = crate::services::billing::route_inventory::BillingRoutePolicy::Metered(
             crate::services::billing::BillingIngress::Proxy,
@@ -8675,8 +8809,9 @@ mod proxy_resolution_integration_tests {
                 .is_none()
         );
 
-        let mut flag_off_state = state.clone();
-        flag_off_state.config.aevatar_chat_wire_log_enabled = false;
+        // Turning the runtime flag off must suppress the echo on the very next
+        // request, with no process restart and no other behaviour change.
+        disable_wire_log_flag(&db).await;
         let mut flag_off_request = request(
             Method::POST,
             "/api/v1/assistant/workflow-chat",
@@ -8687,7 +8822,7 @@ mod proxy_resolution_integration_tests {
             HeaderValue::from_static("1"),
         );
         let flag_off_response = crate::handlers::assistant::workflow_chat(
-            axum::extract::State(flag_off_state),
+            axum::extract::State(state.clone()),
             auth.clone(),
             flag_off_request,
         )
@@ -8756,6 +8891,9 @@ mod proxy_resolution_integration_tests {
                 .is_none()
         );
 
+        // Back on: the flag is the sole authorization gate, so a plain
+        // authenticated non-admin caller captures their own exchange too.
+        enable_wire_log_flag(&db).await;
         let non_admin_id = Uuid::new_v4().to_string();
         db.collection::<crate::models::user::User>(USERS)
             .insert_one(test_user(&non_admin_id, UserType::Person))
@@ -8961,8 +9099,8 @@ mod proxy_resolution_integration_tests {
         .await
         .unwrap();
 
-        let mut state = test_app_state(db);
-        state.config.aevatar_chat_wire_log_enabled = true;
+        let state = test_app_state(db.clone());
+        enable_wire_log_flag(&db).await;
         let auth = access_token_auth(&user_id);
         let list_request = || {
             let mut request = Request::builder()
@@ -9023,10 +9161,10 @@ mod proxy_resolution_integration_tests {
         assert_eq!(echoes.len(), 2);
         for (envelope, (method, path, accepts_json)) in echoes.iter().zip(&calls) {
             assert_eq!(envelope["method"], method.as_str());
-            assert_eq!(
-                envelope["path"],
-                path.split('?').next().unwrap().trim_start_matches('/')
-            );
+            // The drained page's cursor rides along in the echo: without it
+            // every page echoes the same path and the wire log hides the
+            // pagination behind what look like duplicate calls.
+            assert_eq!(envelope["path"], path.trim_start_matches('/'));
             assert!(envelope["commandType"].is_null());
             assert!(envelope["body"].is_null());
             assert_eq!(envelope["upstreamOutcome"], "response");

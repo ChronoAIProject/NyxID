@@ -324,7 +324,7 @@ pub struct AuthArgs {
     /// Access token (overrides saved token)
     #[arg(long)]
     pub access_token: Option<String>,
-    /// Environment variable to read the access token from
+    /// Environment variable to read the access token from; the default also falls back to NYXID_API_KEY
     #[arg(long, default_value = "NYXID_ACCESS_TOKEN")]
     pub access_token_env: String,
     /// Agent profile name (isolates tokens and config)
@@ -902,6 +902,13 @@ pub enum ServiceCommands {
         /// to clear the existing value.
         #[arg(long, value_name = "URL")]
         openapi_spec_url: Option<String>,
+        /// Recommended skill name for this service (repeat to set several).
+        /// Replaces the whole list.
+        #[arg(long = "recommended-skill", value_name = "NAME")]
+        recommended_skill: Vec<String>,
+        /// Clear the recommended-skills list.
+        #[arg(long, conflicts_with = "recommended_skill")]
+        clear_recommended_skills: bool,
         /// New node ID for routing
         #[arg(long)]
         node_id: Option<String>,

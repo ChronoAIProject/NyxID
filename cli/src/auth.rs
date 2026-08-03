@@ -253,24 +253,80 @@ fn clear_token_for(profile: Option<&str>) -> Result<()> {
     Ok(())
 }
 
-// ---- Token resolution (same 3-step as ssh_cli.rs) ----
+// ---- Token resolution ----
 
-pub fn resolve_access_token(auth: &AuthArgs) -> Result<String> {
-    // 1. Explicit --access-token flag
+const DEFAULT_ACCESS_TOKEN_ENV: &str = "NYXID_ACCESS_TOKEN";
+const API_KEY_ENV: &str = "NYXID_API_KEY";
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum AccessTokenSource {
+    Explicit,
+    Environment,
+    SavedSession,
+}
+
+impl AccessTokenSource {
+    pub(crate) fn allows_session_refresh(self) -> bool {
+        self == Self::SavedSession
+    }
+}
+
+pub(crate) struct ResolvedAccessToken {
+    pub(crate) token: String,
+    pub(crate) source: AccessTokenSource,
+}
+
+fn nonempty_env(name: &str) -> Option<String> {
+    std::env::var(name).ok().filter(|token| !token.is_empty())
+}
+
+fn resolve_access_token_override(auth: &AuthArgs) -> Option<ResolvedAccessToken> {
     if let Some(token) = &auth.access_token {
-        return Ok(token.clone());
+        return Some(ResolvedAccessToken {
+            token: token.clone(),
+            source: AccessTokenSource::Explicit,
+        });
     }
 
-    // 2. Environment variable (NYXID_ACCESS_TOKEN by default)
-    if let Ok(token) = std::env::var(&auth.access_token_env)
-        && !token.is_empty()
+    if let Some(token) = nonempty_env(&auth.access_token_env) {
+        return Some(ResolvedAccessToken {
+            token,
+            source: AccessTokenSource::Environment,
+        });
+    }
+
+    // Agent setup documents NYXID_API_KEY as the conventional API-key
+    // variable. Treat it as a fallback alias only for the default selector;
+    // an explicit --access-token-env choice remains authoritative.
+    if auth.access_token_env == DEFAULT_ACCESS_TOKEN_ENV
+        && let Some(token) = nonempty_env(API_KEY_ENV)
     {
-        return Ok(token);
+        return Some(ResolvedAccessToken {
+            token,
+            source: AccessTokenSource::Environment,
+        });
     }
 
-    // 3. Saved token from `nyxid login` (profile-aware)
+    None
+}
+
+pub(crate) fn resolve_access_token_with_source(auth: &AuthArgs) -> Result<ResolvedAccessToken> {
+    if let Some(resolved) = resolve_access_token_override(auth) {
+        return Ok(resolved);
+    }
+
     if let Some(token) = read_saved_token_for(auth.profile.as_deref()) {
-        return Ok(token);
+        return Ok(ResolvedAccessToken {
+            token,
+            source: AccessTokenSource::SavedSession,
+        });
+    }
+
+    if auth.access_token_env == DEFAULT_ACCESS_TOKEN_ENV {
+        bail!(
+            "No access token found. Run `nyxid login --base-url <URL>`, \
+             set {DEFAULT_ACCESS_TOKEN_ENV} or {API_KEY_ENV}, or pass --access-token"
+        );
     }
 
     bail!(
@@ -278,6 +334,10 @@ pub fn resolve_access_token(auth: &AuthArgs) -> Result<String> {
          set {}, or pass --access-token",
         auth.access_token_env
     )
+}
+
+pub fn resolve_access_token(auth: &AuthArgs) -> Result<String> {
+    Ok(resolve_access_token_with_source(auth)?.token)
 }
 
 // ---- Session preflight ----
@@ -325,15 +385,12 @@ enum SessionRefresh {
 /// command), while a headless/non-TTY caller gets a clean error and a non-zero
 /// exit -- never a hang.
 ///
-/// A user-supplied token (`--access-token` or `NYXID_ACCESS_TOKEN`) is left
-/// untouched: the caller chose that credential explicitly, so we don't try to
-/// refresh it or judge its expiry -- any 401 surfaces from the real request.
+/// A caller-selected token (`--access-token`, `--access-token-env`, or the
+/// `NYXID_API_KEY` alias) is left untouched: the caller chose that credential,
+/// so we don't try to refresh it or judge its expiry -- any 401 surfaces from
+/// the real request.
 pub async fn ensure_session(auth: &AuthArgs) -> Result<()> {
-    if auth.access_token.is_some()
-        || std::env::var(&auth.access_token_env)
-            .map(|v| !v.is_empty())
-            .unwrap_or(false)
-    {
+    if resolve_access_token_override(auth).is_some() {
         return Ok(());
     }
 

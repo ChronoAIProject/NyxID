@@ -98,6 +98,8 @@ pub struct UpdateEndpointRequest {
     /// Optional OpenAPI spec URL for endpoint discovery. Sending `""`
     /// clears the field; omitting leaves the current value untouched.
     pub openapi_spec_url: Option<String>,
+    /// Absent = leave unchanged; [] = clear; non-empty = replace.
+    pub recommended_skills: Option<Vec<String>>,
 }
 
 #[derive(Debug, Serialize, ToSchema)]
@@ -209,6 +211,13 @@ pub async fn update_endpoint(
         Some(s) if s.trim().is_empty() => user_endpoint_service::OpenApiSpecUrlUpdate::Clear,
         Some(s) => user_endpoint_service::OpenApiSpecUrlUpdate::Set(s),
     };
+    // Three-state like openapi_spec_url: absent = leave, [] = clear,
+    // non-empty list = set.
+    let skills_update = match body.recommended_skills.clone() {
+        None => user_endpoint_service::RecommendedSkillsUpdate::Leave,
+        Some(skills) if skills.is_empty() => user_endpoint_service::RecommendedSkillsUpdate::Clear,
+        Some(skills) => user_endpoint_service::RecommendedSkillsUpdate::Set(skills),
+    };
     user_endpoint_service::update_endpoint(
         &state.db,
         &owner_id,
@@ -216,6 +225,7 @@ pub async fn update_endpoint(
         body.url.as_deref(),
         body.label.as_deref(),
         spec_update,
+        skills_update,
     )
     .await?;
 
@@ -525,6 +535,7 @@ mod tests {
                 url: None,
                 label: Some("New Label".to_string()),
                 openapi_spec_url: None,
+                recommended_skills: None,
             }),
         )
         .await
@@ -556,6 +567,7 @@ mod tests {
                 url: None,
                 label: Some("Nope".to_string()),
                 openapi_spec_url: None,
+                recommended_skills: None,
             }),
         )
         .await;
@@ -618,6 +630,7 @@ mod tests {
             url: "https://api.example.com/v1".into(),
             catalog_service_id: Some("cat-1".into()),
             openapi_spec_url: Some("https://api.example.com/openapi.json".into()),
+            recommended_skills: None,
             created_at: chrono::Utc::now(),
             updated_at: chrono::Utc::now(),
         };
@@ -641,6 +654,7 @@ mod tests {
             url: "https://example.com".into(),
             catalog_service_id: None,
             openapi_spec_url: None,
+            recommended_skills: None,
             created_at: chrono::Utc::now(),
             updated_at: chrono::Utc::now(),
         };
@@ -706,6 +720,7 @@ mod tests {
             url: "https://example.com".into(),
             catalog_service_id: None,
             openapi_spec_url: None,
+            recommended_skills: None,
             created_at: chrono::Utc::now(),
             updated_at: chrono::Utc::now(),
         };

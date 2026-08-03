@@ -57,13 +57,25 @@ pub async fn handle_lago_webhook_event(
         let balance_credits = lago.wallet_balance(&customer_id).await?;
         return Ok(
             match refresh_wallet_balance(db, &customer_id, balance_credits).await? {
-                Some(outcome) => LagoWebhookOutcome {
-                    action: LagoWebhookAction::WalletRefreshed,
-                    owner_id: Some(outcome.owner_id),
-                    customer_id: Some(customer_id),
-                    balance_credits: Some(outcome.balance_credits),
-                    pending_debits_cleared: outcome.pending_debits_cleared,
-                },
+                Some(outcome) => {
+                    if event_type == "invoice.paid_credit_added" {
+                        super::ledger::record_wallet_credited(
+                            db,
+                            &outcome.owner_id,
+                            &customer_id,
+                            outcome.balance_credits,
+                            extract_paid_credit_dedupe_key(payload),
+                        )
+                        .await;
+                    }
+                    LagoWebhookOutcome {
+                        action: LagoWebhookAction::WalletRefreshed,
+                        owner_id: Some(outcome.owner_id),
+                        customer_id: Some(customer_id),
+                        balance_credits: Some(outcome.balance_credits),
+                        pending_debits_cleared: outcome.pending_debits_cleared,
+                    }
+                }
                 None => ignored_for_customer(customer_id),
             },
         );
@@ -225,6 +237,19 @@ async fn invalidate_entitlement_decision(
         .await?;
 
     Ok(updated.map(|wallet| (wallet.owner_id, customer_id)))
+}
+
+/// At-most-once key for `invoice.paid_credit_added` ledger entries: the
+/// Lago invoice id, stable across Lago's webhook delivery retries.
+fn extract_paid_credit_dedupe_key(payload: &Value) -> Option<String> {
+    payload
+        .get("invoice")
+        .and_then(|invoice| invoice.get("lago_id"))
+        .or_else(|| payload.get("lago_id"))
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(|value| format!("lago-invoice:{value}"))
 }
 
 fn extract_external_customer_id(value: &Value) -> Option<String> {

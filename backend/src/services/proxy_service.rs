@@ -4876,6 +4876,7 @@ mod tests {
             url: "https://open.larksuite.com".to_string(),
             catalog_service_id: Some("cat-1".to_string()),
             openapi_spec_url: None,
+            recommended_skills: None,
             created_at: Utc::now(),
             updated_at: Utc::now(),
         }

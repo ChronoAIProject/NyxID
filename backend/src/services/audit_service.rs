@@ -75,6 +75,18 @@ pub fn log_for_user(
     );
 }
 
+/// Awaitable system-attributed audit entry (no acting user). Used where the
+/// caller needs completion ordering, e.g. billing-ledger head anchoring.
+pub async fn log_system_event(
+    db: mongodb::Database,
+    event_type: impl Into<String>,
+    event_data: Option<serde_json::Value>,
+) -> Result<(), mongodb::error::Error> {
+    let event_type = event_type.into();
+    let entry = build_audit_entry(None, event_type.clone(), event_data, None, None, None, None);
+    write_audit_entry(db, entry, event_type).await
+}
+
 #[allow(clippy::too_many_arguments)]
 fn build_audit_entry(
     user_id: Option<String>,

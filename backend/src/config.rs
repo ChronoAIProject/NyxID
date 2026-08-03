@@ -135,6 +135,11 @@ pub struct AppConfig {
     /// `ENCRYPTION_KEY` if configured, otherwise from the JWT private key PEM.
     pub audit_chain_hmac_key: Option<String>,
 
+    /// Explicit HMAC key (64 hex chars = 32 bytes) used for billing-ledger
+    /// hash chaining. Same derivation fallback as the audit chain, with a
+    /// distinct `billing-ledger` domain label.
+    pub billing_ledger_hmac_key: Option<String>,
+
     /// Service account token TTL in seconds (default: 3600 = 1 hour)
     pub sa_token_ttl_secs: i64,
 
@@ -332,10 +337,6 @@ pub struct AppConfig {
     /// platform-only even if legacy catalog records carry resale metadata.
     pub billing_resale_enabled: bool,
 
-    /// Operator kill switch for the assistant Aevatar wire-log diagnostic.
-    /// Defaults to `false`; when disabled, no debug echo work is performed.
-    pub aevatar_chat_wire_log_enabled: bool,
-
     // Registration gate
     /// When `true` (default), new-user registration requires a valid invite
     /// code and first-time social sign-ups are rejected. Set
@@ -443,6 +444,14 @@ impl std::fmt::Debug for AppConfig {
             .field(
                 "audit_chain_hmac_key",
                 if self.audit_chain_hmac_key.is_some() {
+                    &"Some([REDACTED])"
+                } else {
+                    &"None"
+                },
+            )
+            .field(
+                "billing_ledger_hmac_key",
+                if self.billing_ledger_hmac_key.is_some() {
                     &"Some([REDACTED])"
                 } else {
                     &"None"
@@ -598,10 +607,6 @@ impl std::fmt::Debug for AppConfig {
                 &self.oracle_task_retention_days,
             )
             .field("billing_enabled", &self.billing_enabled)
-            .field(
-                "aevatar_chat_wire_log_enabled",
-                &self.aevatar_chat_wire_log_enabled,
-            )
             .field("lago_api_url", &self.lago_api_url)
             .field(
                 "lago_api_key",
@@ -821,6 +826,9 @@ impl AppConfig {
                 .ok()
                 .filter(|s| !s.trim().is_empty()),
             audit_chain_hmac_key: env::var("AUDIT_CHAIN_HMAC_KEY")
+                .ok()
+                .filter(|s| !s.trim().is_empty()),
+            billing_ledger_hmac_key: env::var("BILLING_LEDGER_HMAC_KEY")
                 .ok()
                 .filter(|s| !s.trim().is_empty()),
 
@@ -1072,10 +1080,6 @@ impl AppConfig {
             .unwrap_or(0),
             billing_fail_closed: parse_bool_env("BILLING_FAIL_CLOSED", false),
             billing_resale_enabled: parse_bool_env("BILLING_RESALE_ENABLED", false),
-            aevatar_chat_wire_log_enabled: parse_bool_env(
-                "AEVATAR_CHAT_WIRE_LOG_ENABLED",
-                false,
-            ),
 
             invite_code_required: parse_invite_code_required(env::var("INVITE_CODE_REQUIRED").ok()),
             email_auth_enabled: parse_bool_env("EMAIL_AUTH_ENABLED", false),
@@ -1368,6 +1372,7 @@ mod tests {
             broker_require_admin_capability: false,
             cli_pairing_hmac_key: None,
             audit_chain_hmac_key: None,
+            billing_ledger_hmac_key: None,
             sa_token_ttl_secs: 3600,
             telemetry_dsn: None,
             telemetry_host: None,
@@ -1440,7 +1445,6 @@ mod tests {
             billing_default_overdraft_cap_credits: 0,
             billing_fail_closed: false,
             billing_resale_enabled: false,
-            aevatar_chat_wire_log_enabled: false,
             invite_code_required: true,
             email_auth_enabled: false,
             auto_verify_email: false,
@@ -1687,46 +1691,6 @@ mod tests {
     fn parse_bool_env_defaults() {
         assert!(parse_bool_env("NONEXISTENT_VAR_XYZZY_12345", true));
         assert!(!parse_bool_env("NONEXISTENT_VAR_XYZZY_12345", false));
-    }
-
-    #[test]
-    fn aevatar_chat_wire_log_env_name_and_default_are_pinned() {
-        const PROBE_TEST: &str =
-            "config::tests::aevatar_chat_wire_log_env_name_and_default_are_pinned";
-        const EXPECTED_ENV: &str = "NYXID_TEST_EXPECTED_AEVATAR_WIRE_LOG";
-
-        if let Ok(expected) = std::env::var(EXPECTED_ENV) {
-            assert_eq!(
-                AppConfig::from_env().aevatar_chat_wire_log_enabled,
-                expected
-                    .parse::<bool>()
-                    .expect("probe expected value is boolean")
-            );
-            return;
-        }
-
-        let test_binary = std::env::current_exe().expect("resolve current test binary");
-
-        for (configured_value, expected) in [(None, false), (Some("true"), true)] {
-            let mut command = std::process::Command::new(&test_binary);
-            command
-                .arg(PROBE_TEST)
-                .arg("--exact")
-                .env("DATABASE_URL", "mongodb://unused-for-config-test")
-                .env(EXPECTED_ENV, expected.to_string())
-                .env_remove("AEVATAR_CHAT_WIRE_LOG_ENABLED");
-            if let Some(value) = configured_value {
-                command.env("AEVATAR_CHAT_WIRE_LOG_ENABLED", value);
-            }
-
-            let output = command.output().expect("run isolated config probe");
-            assert!(
-                output.status.success(),
-                "isolated config probe failed for {configured_value:?}:\nstdout:\n{}\nstderr:\n{}",
-                String::from_utf8_lossy(&output.stdout),
-                String::from_utf8_lossy(&output.stderr),
-            );
-        }
     }
 
     #[test]

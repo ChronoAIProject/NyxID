@@ -142,6 +142,9 @@ pub struct AppState {
     /// Server-side HMAC key used for tamper-evident audit-log hash chaining.
     /// Lives in process memory only and is never persisted to MongoDB.
     pub audit_chain_hmac_key: std::sync::Arc<zeroize::Zeroizing<[u8; 32]>>,
+    /// Server-side HMAC key for tamper-evident billing-ledger hash chaining.
+    /// Domain-separated from the audit chain with the `billing-ledger` label.
+    pub billing_ledger_hmac_key: std::sync::Arc<zeroize::Zeroizing<[u8; 32]>>,
     /// Per-channel rate limiter keyed by conversation_id, for the HTTP Event
     /// Gateway (NyxID#221). Distinct from `per_agent_limiter`.
     pub per_channel_event_limiter: mw::rate_limit::SharedPerChannelEventLimiter,
@@ -360,6 +363,13 @@ async fn main() {
     );
     services::audit_service::init_audit_chain_hmac_key(audit_chain_hmac_key.clone());
     let audit_chain_hmac_key = Arc::new(audit_chain_hmac_key);
+    let billing_ledger_hmac_key = services::billing::ledger::derive_billing_ledger_hmac_key(
+        config.billing_ledger_hmac_key.as_deref(),
+        config.encryption_key.as_deref(),
+        Some(&jwt_private_key_pem),
+    );
+    services::billing::ledger::init_billing_ledger_hmac_key(billing_ledger_hmac_key.clone());
+    let billing_ledger_hmac_key = Arc::new(billing_ledger_hmac_key);
     // JWT private key bytes carry no secret beyond what's already in JwtKeys;
     // drop them immediately after derivation.
     drop(jwt_private_key_pem);
@@ -671,6 +681,7 @@ async fn main() {
         cli_pairing_hmac_key,
         auth_device_hmac_key,
         audit_chain_hmac_key,
+        billing_ledger_hmac_key,
         per_channel_event_limiter,
         per_message_edit_limiter,
         event_dedup_cache,

@@ -103,3 +103,17 @@ describe("useFeature (personal / non-org context)", () => {
     expect(result.current).toBe(false);
   });
 });
+
+describe("feature flag catalog", () => {
+  // The catalog keys are a wire contract with
+  // `backend/src/services/feature_flag_service.rs::FEATURE_FLAGS`; a key that
+  // drifts on one side silently disables the surface it gates instead of
+  // failing. Pinning the literals makes a rename a deliberate two-sided edit.
+  it("pins the backend registry key literals", () => {
+    expect(FEATURE_FLAG).toEqual({
+      AI_ASSISTANT: "experimental:ai-assistant",
+      BILLING: "experimental:billing",
+      AEVATAR_CHAT_WIRE_LOG: "experimental:aevatar-chat-wire-log",
+    });
+  });
+});

@@ -60,6 +60,12 @@ impl BillingReconciler {
     pub async fn run_once(&self) -> AppResult<ReconcileStats> {
         let mut stats = ReconcileStats::default();
         stats.abandoned += self.abandon_unforwarded_reserved().await?;
+        // Anchor the billing-ledger head into the audit chain whenever it
+        // advanced, so tail truncation of the ledger is detectable. Best
+        // effort: an anchor failure must not stall the sweep.
+        if let Err(error) = super::ledger::anchor_head(&self.db).await {
+            tracing::warn!(error = %error, "billing ledger head anchoring failed");
+        }
         if !self.config.billing_enabled {
             return Ok(stats);
         }

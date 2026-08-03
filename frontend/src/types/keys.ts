@@ -74,6 +74,7 @@ export interface KeyInfo {
    * generic proxy tool.
    */
   readonly openapi_spec_url?: string | null;
+  readonly recommended_skills?: readonly string[] | null;
   /**
    * Provenance of the credential backing this key. Personal items are owned
    * directly; org items are inherited from an org membership. When undefined
