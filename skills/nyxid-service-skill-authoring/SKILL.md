@@ -1,9 +1,13 @@
 ---
 name: nyxid-service-skill-authoring
-description: Find or author an agent skill for a NyxID proxy service that has no OpenAPI spec or typed operations. Use when a NyxID service only exposes the generic proxy tool, `nyxid catalog endpoints <slug>` returns nothing, or you would otherwise have to guess endpoint paths. Searches Ornn for an existing skill bound to the service; if none exists, creates one — researching the official OpenAPI spec on the web for public services, or collecting the contract from the user for private/custom services (never fabricate endpoints) — then uploads it to Ornn, binds it to the service, and records it locally.
+description: Find or author an agent skill for a NyxID proxy service that has no OpenAPI spec or typed operations. Use when a NyxID service only exposes the generic proxy tool, `nyxid catalog endpoints` returns nothing for the slug, or you would otherwise have to guess endpoint paths. Searches Ornn for an existing skill bound to the service; if none exists, creates one — researching the official OpenAPI spec on the web for public services, or collecting the contract from the user for private/custom services (never fabricate endpoints) — then uploads it to Ornn, binds it to the service, and records it locally.
 version: "1.0"
 metadata:
-  tag: nyxid
+  category: plain
+  tag:
+    - nyxid
+    - proxy
+    - skill-authoring
 ---
 
 # NyxID service skill authoring (via Ornn)
