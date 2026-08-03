@@ -25,6 +25,7 @@ pub struct CreateProviderRequest {
     pub authorization_url: Option<String>,
     pub token_url: Option<String>,
     pub revocation_url: Option<String>,
+    pub revocation: Option<RevocationConfigRequest>,
     pub default_scopes: Option<Vec<String>>,
     pub client_id: Option<String>,
     pub client_secret: Option<String>,
@@ -71,6 +72,11 @@ pub struct UpdateProviderRequest {
     pub authorization_url: Option<String>,
     pub token_url: Option<String>,
     pub revocation_url: Option<String>,
+    #[serde(
+        default,
+        deserialize_with = "crate::models::nullable_field::deserialize"
+    )]
+    pub revocation: Option<Option<RevocationConfigRequest>>,
     pub default_scopes: Option<Vec<String>>,
     pub client_id: Option<String>,
     pub client_secret: Option<String>,
@@ -91,6 +97,26 @@ pub struct UpdateProviderRequest {
     /// Explicitly remove stored platform OAuth client credentials. Cannot be
     /// combined with `client_id`/`client_secret` in the same request.
     pub clear_client_credentials: Option<bool>,
+}
+
+#[derive(Clone, Debug, Deserialize)]
+pub struct RevocationConfigRequest {
+    pub style: String,
+    pub url: String,
+    pub auth: String,
+    #[serde(default)]
+    pub revokes_grant: bool,
+}
+
+impl From<RevocationConfigRequest> for crate::models::provider_config::RevocationConfig {
+    fn from(value: RevocationConfigRequest) -> Self {
+        Self {
+            style: value.style,
+            url: value.url,
+            auth: value.auth,
+            revokes_grant: value.revokes_grant,
+        }
+    }
 }
 
 impl std::fmt::Debug for UpdateProviderRequest {
@@ -137,6 +163,7 @@ pub struct ProviderResponse {
     pub name: String,
     pub description: Option<String>,
     pub provider_type: String,
+    pub revocation: Option<RevocationConfigResponse>,
     pub has_oauth_config: bool,
     pub default_scopes: Option<Vec<String>>,
     pub supports_pkce: bool,
@@ -160,6 +187,14 @@ pub struct ProviderResponse {
 }
 
 #[derive(Debug, Serialize)]
+pub struct RevocationConfigResponse {
+    pub style: String,
+    pub url: String,
+    pub auth: String,
+    pub revokes_grant: bool,
+}
+
+#[derive(Debug, Serialize)]
 pub struct ProviderListResponse {
     pub providers: Vec<ProviderResponse>,
 }
@@ -171,6 +206,7 @@ pub struct DeleteProviderResponse {
 
 fn provider_to_response(p: crate::models::provider_config::ProviderConfig) -> ProviderResponse {
     let has_oauth_config = provider_has_oauth_config(&p);
+    let revocation = crate::services::oauth_revocation::effective_revocation(&p);
 
     ProviderResponse {
         id: p.id,
@@ -178,6 +214,12 @@ fn provider_to_response(p: crate::models::provider_config::ProviderConfig) -> Pr
         name: p.name,
         description: p.description,
         provider_type: p.provider_type,
+        revocation: revocation.map(|revocation| RevocationConfigResponse {
+            style: revocation.style,
+            url: revocation.url,
+            auth: revocation.auth,
+            revokes_grant: revocation.revokes_grant,
+        }),
         has_oauth_config,
         default_scopes: p.default_scopes,
         supports_pkce: p.supports_pkce,
@@ -280,6 +322,19 @@ pub async fn create_provider(
             valid_types.join(", ")
         )));
     }
+    let revocation = body.revocation.clone().map(Into::into).or_else(|| {
+        body.revocation_url
+            .as_ref()
+            .map(|url| crate::models::provider_config::RevocationConfig {
+                style: "rfc7009".to_string(),
+                url: url.clone(),
+                auth: "inherit".to_string(),
+                revokes_grant: false,
+            })
+    });
+    if let Some(config) = revocation.as_ref() {
+        provider_service::validate_revocation_config(&body.provider_type, config).await?;
+    }
     // Defense-in-depth: service layer also validates credential_mode
     let credential_mode = body.credential_mode.as_deref().unwrap_or("admin");
     let valid_credential_modes = ["admin", "user", "both"];
@@ -335,9 +390,6 @@ pub async fn create_provider(
         // SSRF validation on OAuth provider URLs
         validate_base_url(authorization_url)?;
         validate_base_url(token_url)?;
-        if let Some(ref url) = body.revocation_url {
-            validate_base_url(url)?;
-        }
 
         let client_id = body.client_id.clone();
         let client_secret = body.client_secret.clone();
@@ -475,7 +527,7 @@ pub async fn create_provider(
         None
     };
 
-    let provider = provider_service::create_provider(
+    let provider = provider_service::create_provider_with_revocation(
         &state.db,
         &state.encryption_keys,
         &body.name,
@@ -494,6 +546,7 @@ pub async fn create_provider(
         body.extra_auth_params,
         body.device_code_format.as_deref(),
         body.client_id_param_name.as_deref(),
+        revocation,
     )
     .await?;
 
@@ -536,8 +589,10 @@ pub async fn update_provider(
     if let Some(ref url) = body.token_url {
         validate_base_url(url)?;
     }
-    if let Some(ref url) = body.revocation_url {
-        validate_base_url(url)?;
+    if body.revocation.is_none()
+        && let Some(ref url) = body.revocation_url
+    {
+        provider_service::validate_revocation_url(url).await?;
     }
     if let Some(ref url) = body.device_code_url {
         validate_base_url(url)?;
@@ -559,6 +614,7 @@ pub async fn update_provider(
         authorization_url: body.authorization_url,
         token_url: body.token_url,
         revocation_url: body.revocation_url,
+        revocation: body.revocation.map(|revocation| revocation.map(Into::into)),
         default_scopes: body.default_scopes,
         client_id: body.client_id,
         client_secret: body.client_secret,
@@ -623,8 +679,8 @@ pub async fn delete_provider(
 mod tests {
     use chrono::Utc;
 
-    use super::provider_has_oauth_config;
-    use crate::models::provider_config::ProviderConfig;
+    use super::{UpdateProviderRequest, provider_has_oauth_config, provider_to_response};
+    use crate::models::provider_config::{ProviderConfig, RevocationConfig};
 
     fn make_provider(provider_type: &str) -> ProviderConfig {
         ProviderConfig {
@@ -730,5 +786,74 @@ mod tests {
         provider.client_id_param_name = Some("not-a-bot".to_string());
 
         assert!(!provider_has_oauth_config(&provider));
+    }
+
+    #[test]
+    fn update_revocation_distinguishes_omitted_null_and_object() {
+        let omitted: UpdateProviderRequest = serde_json::from_value(serde_json::json!({}))
+            .expect("omitted revocation should deserialize");
+        assert!(omitted.revocation.is_none());
+
+        let cleared: UpdateProviderRequest =
+            serde_json::from_value(serde_json::json!({ "revocation": null }))
+                .expect("null revocation should deserialize");
+        assert!(matches!(cleared.revocation, Some(None)));
+
+        let configured: UpdateProviderRequest = serde_json::from_value(serde_json::json!({
+            "revocation": {
+                "style": "github",
+                "url": "https://api.github.com/applications",
+                "auth": "inherit",
+                "revokes_grant": true
+            }
+        }))
+        .expect("structured revocation should deserialize");
+        let configured = configured
+            .revocation
+            .flatten()
+            .expect("structured revocation should be present");
+        assert_eq!(configured.style, "github");
+        assert!(configured.revokes_grant);
+    }
+
+    #[test]
+    fn provider_response_exposes_dedicated_revocation_shape() {
+        let mut provider = make_provider("oauth2");
+        provider.revocation = Some(RevocationConfig {
+            style: "github".to_string(),
+            url: "https://api.github.com/applications".to_string(),
+            auth: "inherit".to_string(),
+            revokes_grant: true,
+        });
+
+        let response = serde_json::to_value(provider_to_response(provider))
+            .expect("provider response should serialize");
+        assert_eq!(
+            response.get("revocation"),
+            Some(&serde_json::json!({
+                "style": "github",
+                "url": "https://api.github.com/applications",
+                "auth": "inherit",
+                "revokes_grant": true
+            }))
+        );
+    }
+
+    #[test]
+    fn provider_response_lifts_legacy_revocation_alias() {
+        let mut provider = make_provider("oauth2");
+        provider.revocation_url = Some("https://example.com/revoke".to_string());
+
+        let response = serde_json::to_value(provider_to_response(provider))
+            .expect("provider response should serialize");
+        assert_eq!(
+            response.get("revocation"),
+            Some(&serde_json::json!({
+                "style": "rfc7009",
+                "url": "https://example.com/revoke",
+                "auth": "inherit",
+                "revokes_grant": false
+            }))
+        );
     }
 }

@@ -2043,6 +2043,32 @@ pub async fn validate_revocation_url(url: &str) -> AppResult<()> {
     crate::services::url_validation::validate_public_http_url(url, "revocation.url").await
 }
 
+pub async fn validate_revocation_config(
+    provider_type: &str,
+    revocation: &RevocationConfig,
+) -> AppResult<()> {
+    if matches!(provider_type, "api_key" | "telegram_widget") {
+        return Err(AppError::ValidationError(
+            "revocation is only supported for oauth2 and device_code providers".to_string(),
+        ));
+    }
+    const STYLES: &[&str] = &["rfc7009", "github", "self_bearer", "facebook_deauth"];
+    if !STYLES.contains(&revocation.style.as_str()) {
+        return Err(AppError::ValidationError(format!(
+            "revocation.style must be one of: {}",
+            STYLES.join(", ")
+        )));
+    }
+    const AUTH_MODES: &[&str] = &["inherit", "none", "client_id", "basic", "post"];
+    if !AUTH_MODES.contains(&revocation.auth.as_str()) {
+        return Err(AppError::ValidationError(format!(
+            "revocation.auth must be one of: {}",
+            AUTH_MODES.join(", ")
+        )));
+    }
+    validate_revocation_url(&revocation.url).await
+}
+
 async fn validate_seeded_provider_revocation(provider: &ProviderConfig) -> AppResult<()> {
     if let Some(revocation) = provider.revocation.as_ref() {
         validate_revocation_url(&revocation.url).await?;
@@ -4219,6 +4245,7 @@ pub struct ProviderUpdateInput {
     pub authorization_url: Option<String>,
     pub token_url: Option<String>,
     pub revocation_url: Option<String>,
+    pub revocation: Option<Option<RevocationConfig>>,
     pub default_scopes: Option<Vec<String>>,
     pub client_id: Option<String>,
     pub client_secret: Option<String>,
@@ -4246,6 +4273,7 @@ pub struct ProviderUpdateInput {
 
 /// Create a new provider configuration. Admin only.
 #[allow(clippy::too_many_arguments)]
+#[cfg(test)]
 pub async fn create_provider(
     db: &mongodb::Database,
     encryption_keys: &EncryptionKeys,
@@ -4265,6 +4293,52 @@ pub async fn create_provider(
     extra_auth_params: Option<HashMap<String, String>>,
     device_code_format: Option<&str>,
     client_id_param_name: Option<&str>,
+) -> AppResult<ProviderConfig> {
+    create_provider_with_revocation(
+        db,
+        encryption_keys,
+        name,
+        slug,
+        provider_type,
+        credential_mode,
+        token_endpoint_auth_method,
+        oauth_config,
+        api_key_config,
+        device_code_config,
+        telegram_widget_config,
+        description,
+        icon_url,
+        documentation_url,
+        created_by,
+        extra_auth_params,
+        device_code_format,
+        client_id_param_name,
+        None,
+    )
+    .await
+}
+
+#[allow(clippy::too_many_arguments)]
+pub async fn create_provider_with_revocation(
+    db: &mongodb::Database,
+    encryption_keys: &EncryptionKeys,
+    name: &str,
+    slug: &str,
+    provider_type: &str,
+    credential_mode: &str,
+    token_endpoint_auth_method: &str,
+    oauth_config: Option<OAuthProviderInput>,
+    api_key_config: Option<ApiKeyProviderInput>,
+    device_code_config: Option<DeviceCodeProviderInput>,
+    telegram_widget_config: Option<TelegramWidgetProviderInput>,
+    description: Option<&str>,
+    icon_url: Option<&str>,
+    documentation_url: Option<&str>,
+    created_by: &str,
+    extra_auth_params: Option<HashMap<String, String>>,
+    device_code_format: Option<&str>,
+    client_id_param_name: Option<&str>,
+    revocation: Option<RevocationConfig>,
 ) -> AppResult<ProviderConfig> {
     let valid_types = ["oauth2", "api_key", "device_code", "telegram_widget"];
     if !valid_types.contains(&provider_type) {
@@ -4289,6 +4363,19 @@ pub async fn create_provider(
         return Err(AppError::ValidationError(
             "credential_mode only applies to oauth2/device_code providers; omit it or set \"admin\" for api_key providers".to_string(),
         ));
+    }
+    let revocation = match (revocation, oauth_config.as_ref()) {
+        (Some(revocation), _) => Some(revocation),
+        (None, Some(oauth)) => oauth.revocation_url.as_ref().map(|url| RevocationConfig {
+            style: "rfc7009".to_string(),
+            url: url.clone(),
+            auth: "inherit".to_string(),
+            revokes_grant: false,
+        }),
+        (None, None) => None,
+    };
+    if let Some(config) = revocation.as_ref() {
+        validate_revocation_config(provider_type, config).await?;
     }
 
     // Check slug uniqueness
@@ -4353,6 +4440,7 @@ pub async fn create_provider(
         client_id_param_name.map(String::from)
     };
 
+    let has_admin_revocation = revocation.is_some();
     let provider = ProviderConfig {
         id: id.clone(),
         slug: slug.to_string(),
@@ -4371,8 +4459,10 @@ pub async fn create_provider(
             .as_ref()
             .map(|o| o.token_url.clone())
             .or_else(|| device_code_config.as_ref().map(|d| d.token_url.clone())),
-        revocation_url: oauth_config.as_ref().and_then(|o| o.revocation_url.clone()),
-        revocation: None,
+        revocation_url: revocation
+            .as_ref()
+            .and_then(|config| (config.style == "rfc7009").then(|| config.url.clone())),
+        revocation,
         default_scopes: oauth_config
             .as_ref()
             .and_then(|o| o.default_scopes.clone())
@@ -4411,7 +4501,7 @@ pub async fn create_provider(
         client_id_param_name: normalized_client_id_param_name,
         requires_gateway_url: false,
         created_by: created_by.to_string(),
-        revocation_seed_version: 0,
+        revocation_seed_version: i32::from(has_admin_revocation),
         created_at: now,
         updated_at: now,
     };
@@ -4483,6 +4573,29 @@ pub async fn update_provider(
             "credential_mode only applies to oauth2/device_code providers; omit it or set \"admin\" for api_key providers".to_string(),
         ));
     }
+    let revocation_update = match updates.revocation.clone() {
+        Some(explicit) => Some(explicit),
+        None => updates.revocation_url.as_ref().map(|url| {
+            Some(RevocationConfig {
+                style: "rfc7009".to_string(),
+                url: url.clone(),
+                auth: "inherit".to_string(),
+                revokes_grant: false,
+            })
+        }),
+    };
+    if matches!(
+        existing.provider_type.as_str(),
+        "api_key" | "telegram_widget"
+    ) && revocation_update.is_some()
+    {
+        return Err(AppError::ValidationError(
+            "revocation is only supported for oauth2 and device_code providers".to_string(),
+        ));
+    }
+    if let Some(Some(config)) = revocation_update.as_ref() {
+        validate_revocation_config(&existing.provider_type, config).await?;
+    }
 
     // Platform-credential hygiene (spec B5): reject empty values (an
     // accidental "" must not become encrypted emptiness that reads as
@@ -4525,6 +4638,7 @@ pub async fn update_provider(
     let mut set_doc = doc! {
         "updated_at": bson::DateTime::from_chrono(now),
     };
+    let mut unset_doc = doc! {};
 
     if let Some(ref name) = updates.name {
         set_doc.insert("name", name.as_str());
@@ -4541,8 +4655,29 @@ pub async fn update_provider(
     if let Some(ref url) = updates.token_url {
         set_doc.insert("token_url", url.as_str());
     }
-    if let Some(ref url) = updates.revocation_url {
-        set_doc.insert("revocation_url", url.as_str());
+    if let Some(revocation) = revocation_update {
+        set_doc.insert("revocation_seed_version", 1);
+        match revocation {
+            Some(config) => {
+                set_doc.insert(
+                    "revocation",
+                    bson::to_bson(&config).map_err(|_| {
+                        AppError::Internal(
+                            "Failed to serialize provider revocation configuration".to_string(),
+                        )
+                    })?,
+                );
+                if config.style == "rfc7009" {
+                    set_doc.insert("revocation_url", config.url);
+                } else {
+                    unset_doc.insert("revocation_url", "");
+                }
+            }
+            None => {
+                unset_doc.insert("revocation", "");
+                unset_doc.insert("revocation_url", "");
+            }
+        }
     }
     if let Some(ref scopes) = updates.default_scopes {
         set_doc.insert("default_scopes", scopes);
@@ -4647,14 +4782,14 @@ pub async fn update_provider(
 
     use mongodb::options::{FindOneAndUpdateOptions, ReturnDocument};
 
-    let update_doc = if clearing_credentials {
-        doc! {
-            "$set": set_doc,
-            "$unset": { "client_id_encrypted": "", "client_secret_encrypted": "" },
-        }
-    } else {
-        doc! { "$set": set_doc }
-    };
+    if clearing_credentials {
+        unset_doc.insert("client_id_encrypted", "");
+        unset_doc.insert("client_secret_encrypted", "");
+    }
+    let mut update_doc = doc! { "$set": set_doc };
+    if !unset_doc.is_empty() {
+        update_doc.insert("$unset", unset_doc);
+    }
 
     let updated = db
         .collection::<ProviderConfig>(COLLECTION_NAME)
@@ -5078,7 +5213,7 @@ mod tests {
     use crate::models::downstream_service::{
         COLLECTION_NAME as DOWNSTREAM_SERVICES, DownstreamService,
     };
-    use crate::models::provider_config::{COLLECTION_NAME, ProviderConfig};
+    use crate::models::provider_config::{COLLECTION_NAME, ProviderConfig, RevocationConfig};
     use crate::models::service_provider_requirement::{
         COLLECTION_NAME as REQUIREMENTS, ServiceProviderRequirement,
     };
@@ -6070,6 +6205,7 @@ mod tests {
                 authorization_url: None,
                 token_url: None,
                 revocation_url: None,
+                revocation: None,
                 default_scopes: None,
                 client_id: None,
                 client_secret: None,
@@ -6142,6 +6278,7 @@ mod tests {
                 authorization_url: None,
                 token_url: None,
                 revocation_url: None,
+                revocation: None,
                 default_scopes: None,
                 client_id: None,
                 client_secret: None,
@@ -6185,6 +6322,7 @@ mod tests {
                 authorization_url: None,
                 token_url: None,
                 revocation_url: None,
+                revocation: None,
                 default_scopes: None,
                 client_id: None,
                 client_secret: None,
@@ -6260,6 +6398,7 @@ mod tests {
                 authorization_url: None,
                 token_url: None,
                 revocation_url: None,
+                revocation: None,
                 default_scopes: None,
                 client_id: None,
                 client_secret: None,
@@ -6327,6 +6466,7 @@ mod tests {
                 authorization_url: None,
                 token_url: None,
                 revocation_url: None,
+                revocation: None,
                 default_scopes: None,
                 client_id: None,
                 client_secret: None,
@@ -6379,6 +6519,7 @@ mod tests {
                 authorization_url: None,
                 token_url: None,
                 revocation_url: None,
+                revocation: None,
                 default_scopes: None,
                 client_id: None,
                 client_secret: None,
@@ -6446,6 +6587,7 @@ mod tests {
                 authorization_url: None,
                 token_url: None,
                 revocation_url: None,
+                revocation: None,
                 default_scopes: None,
                 client_id: None,
                 client_secret: None,
@@ -6513,6 +6655,7 @@ mod tests {
                 authorization_url: None,
                 token_url: None,
                 revocation_url: None,
+                revocation: None,
                 default_scopes: None,
                 client_id: None,
                 client_secret: None,
@@ -6589,6 +6732,7 @@ mod tests {
                 authorization_url: None,
                 token_url: None,
                 revocation_url: None,
+                revocation: None,
                 default_scopes: None,
                 client_id: Some("my-client-id".to_string()),
                 client_secret: Some("my-secret".to_string()),
@@ -6671,6 +6815,7 @@ mod tests {
                 authorization_url: Some("https://new.example.com/auth".to_string()),
                 token_url: Some("https://new.example.com/token".to_string()),
                 revocation_url: Some("https://new.example.com/revoke".to_string()),
+                revocation: None,
                 default_scopes: Some(vec!["email".to_string()]),
                 client_id: None,
                 client_secret: None,
@@ -6746,6 +6891,251 @@ mod tests {
         assert_eq!(updated.credential_mode, "both");
         assert_eq!(updated.token_endpoint_auth_method, "client_secret_basic");
         assert!(updated.extra_auth_params.is_some());
+    }
+
+    async fn create_oauth_provider_with_revocation(
+        db: &mongodb::Database,
+        legacy_revocation_url: Option<&str>,
+        revocation: Option<RevocationConfig>,
+    ) -> ProviderConfig {
+        let enc = test_encryption_keys();
+        let slug = format!("revocation-admin-{}", Uuid::new_v4());
+        super::create_provider_with_revocation(
+            db,
+            &enc,
+            "Revocation Admin Test",
+            &slug,
+            "oauth2",
+            "user",
+            "client_secret_post",
+            Some(super::OAuthProviderInput {
+                authorization_url: "https://example.com/authorize".to_string(),
+                token_url: "https://example.com/token".to_string(),
+                revocation_url: legacy_revocation_url.map(str::to_string),
+                default_scopes: None,
+                client_id: None,
+                client_secret: None,
+                supports_pkce: true,
+            }),
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            "admin-user",
+            None,
+            None,
+            None,
+            revocation,
+        )
+        .await
+        .expect("provider should be created")
+    }
+
+    #[tokio::test]
+    async fn create_provider_normalizes_structured_and_legacy_revocation() {
+        let Some(db) = connect_test_database("prov_svc_revocation_create").await else {
+            eprintln!("skipping: no MongoDB");
+            return;
+        };
+
+        let rfc7009 = create_oauth_provider_with_revocation(
+            &db,
+            None,
+            Some(RevocationConfig {
+                style: "rfc7009".to_string(),
+                url: "https://example.com/revoke-rfc7009".to_string(),
+                auth: "post".to_string(),
+                revokes_grant: false,
+            }),
+        )
+        .await;
+        assert_eq!(
+            rfc7009.revocation_url.as_deref(),
+            Some("https://example.com/revoke-rfc7009")
+        );
+        assert_eq!(rfc7009.revocation.as_ref().unwrap().auth, "post");
+        assert_eq!(rfc7009.revocation_seed_version, 1);
+
+        let vendor = create_oauth_provider_with_revocation(
+            &db,
+            Some("https://example.com/deprecated-alias"),
+            Some(RevocationConfig {
+                style: "github".to_string(),
+                url: "https://api.github.com/applications".to_string(),
+                auth: "inherit".to_string(),
+                revokes_grant: true,
+            }),
+        )
+        .await;
+        assert_eq!(vendor.revocation.as_ref().unwrap().style, "github");
+        assert!(vendor.revocation_url.is_none());
+        assert_eq!(vendor.revocation_seed_version, 1);
+
+        let legacy = create_oauth_provider_with_revocation(
+            &db,
+            Some("https://example.com/revoke-legacy"),
+            None,
+        )
+        .await;
+        let lifted = legacy.revocation.as_ref().expect("legacy alias is lifted");
+        assert_eq!(lifted.style, "rfc7009");
+        assert_eq!(lifted.auth, "inherit");
+        assert!(!lifted.revokes_grant);
+        assert_eq!(legacy.revocation_url, Some(lifted.url.clone()));
+        assert_eq!(legacy.revocation_seed_version, 1);
+    }
+
+    #[tokio::test]
+    async fn update_provider_keeps_revocation_alias_coherent() {
+        let Some(db) = connect_test_database("prov_svc_revocation_update").await else {
+            eprintln!("skipping: no MongoDB");
+            return;
+        };
+        let enc = test_encryption_keys();
+        let mut provider =
+            make_test_provider(&format!("revocation-update-{}", Uuid::new_v4()), "oauth2");
+        provider.revocation_url = Some("https://example.com/original".to_string());
+        provider.revocation = Some(RevocationConfig {
+            style: "rfc7009".to_string(),
+            url: "https://example.com/original".to_string(),
+            auth: "inherit".to_string(),
+            revokes_grant: false,
+        });
+        db.collection::<ProviderConfig>(COLLECTION_NAME)
+            .insert_one(&provider)
+            .await
+            .unwrap();
+
+        let preserved = super::update_provider(
+            &db,
+            &enc,
+            &provider.id,
+            super::ProviderUpdateInput {
+                name: Some("Preserved".to_string()),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+        assert_eq!(preserved.revocation, provider.revocation);
+        assert_eq!(preserved.revocation_url, provider.revocation_url);
+        assert_eq!(preserved.revocation_seed_version, 0);
+
+        let vendor = super::update_provider(
+            &db,
+            &enc,
+            &provider.id,
+            super::ProviderUpdateInput {
+                revocation: Some(Some(RevocationConfig {
+                    style: "github".to_string(),
+                    url: "https://api.github.com/applications".to_string(),
+                    auth: "basic".to_string(),
+                    revokes_grant: true,
+                })),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+        assert_eq!(vendor.revocation.as_ref().unwrap().style, "github");
+        assert!(vendor.revocation_url.is_none());
+        assert_eq!(vendor.revocation_seed_version, 1);
+
+        let rfc7009 = super::update_provider(
+            &db,
+            &enc,
+            &provider.id,
+            super::ProviderUpdateInput {
+                revocation: Some(Some(RevocationConfig {
+                    style: "rfc7009".to_string(),
+                    url: "https://example.com/new-rfc7009".to_string(),
+                    auth: "none".to_string(),
+                    revokes_grant: false,
+                })),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            rfc7009.revocation_url.as_deref(),
+            Some("https://example.com/new-rfc7009")
+        );
+        assert_eq!(rfc7009.revocation.as_ref().unwrap().auth, "none");
+
+        let cleared = super::update_provider(
+            &db,
+            &enc,
+            &provider.id,
+            super::ProviderUpdateInput {
+                revocation: Some(None),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+        assert!(cleared.revocation.is_none());
+        assert!(cleared.revocation_url.is_none());
+        assert_eq!(cleared.revocation_seed_version, 1);
+
+        let legacy = super::update_provider(
+            &db,
+            &enc,
+            &provider.id,
+            super::ProviderUpdateInput {
+                revocation_url: Some("https://example.com/legacy-update".to_string()),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+        let lifted = legacy.revocation.as_ref().expect("legacy alias is lifted");
+        assert_eq!(lifted.style, "rfc7009");
+        assert_eq!(lifted.auth, "inherit");
+        assert_eq!(legacy.revocation_url, Some(lifted.url.clone()));
+        assert_eq!(legacy.revocation_seed_version, 1);
+    }
+
+    #[tokio::test]
+    async fn validate_revocation_config_rejects_invalid_admin_input() {
+        let valid = RevocationConfig {
+            style: "rfc7009".to_string(),
+            url: "https://example.com/revoke".to_string(),
+            auth: "inherit".to_string(),
+            revokes_grant: false,
+        };
+
+        for provider_type in ["api_key", "telegram_widget"] {
+            let err = super::validate_revocation_config(provider_type, &valid)
+                .await
+                .expect_err("non-OAuth provider type must reject revocation");
+            assert!(matches!(err, AppError::ValidationError(_)));
+        }
+
+        for (style, auth, url) in [
+            ("unknown", "inherit", "https://example.com/revoke"),
+            ("rfc7009", "unknown", "https://example.com/revoke"),
+            ("rfc7009", "inherit", "http://example.com/revoke"),
+            (
+                "rfc7009",
+                "inherit",
+                "https://user:password@example.com/revoke",
+            ),
+            ("rfc7009", "inherit", "https://127.0.0.1/revoke"),
+        ] {
+            let config = RevocationConfig {
+                style: style.to_string(),
+                url: url.to_string(),
+                auth: auth.to_string(),
+                revokes_grant: false,
+            };
+            let err = super::validate_revocation_config("oauth2", &config)
+                .await
+                .expect_err("invalid revocation input must be rejected");
+            assert!(matches!(err, AppError::ValidationError(_)));
+        }
     }
 
     // ── create_provider with device_code config ────────────────────
@@ -7739,6 +8129,7 @@ mod tests {
                 authorization_url: None,
                 token_url: None,
                 revocation_url: None,
+                revocation: None,
                 default_scopes: None,
                 client_id: None,
                 client_secret: None,
@@ -7818,6 +8209,7 @@ mod tests {
                 authorization_url: None,
                 token_url: None,
                 revocation_url: None,
+                revocation: None,
                 default_scopes: None,
                 client_id: None,
                 client_secret: None,
@@ -7854,6 +8246,7 @@ mod tests {
                 authorization_url: None,
                 token_url: None,
                 revocation_url: None,
+                revocation: None,
                 default_scopes: None,
                 client_id: None,
                 client_secret: None,
@@ -7925,6 +8318,7 @@ mod tests {
                     authorization_url: None,
                     token_url: None,
                     revocation_url: None,
+                    revocation: None,
                     default_scopes: None,
                     client_id: None,
                     client_secret: None,
@@ -8104,6 +8498,7 @@ mod tests {
                 authorization_url: None,
                 token_url: None,
                 revocation_url: None,
+                revocation: None,
                 default_scopes: None,
                 client_id: None,
                 client_secret: None,

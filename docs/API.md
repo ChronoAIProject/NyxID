@@ -2253,6 +2253,7 @@ List all active provider configurations.
       "description": "OpenAI API for GPT models",
       "provider_type": "api_key",
       "credential_mode": "admin",
+      "revocation": null,
       "has_oauth_config": false,
       "default_scopes": null,
       "supports_pkce": false,
@@ -2298,7 +2299,8 @@ Register a new provider configuration. OAuth2 providers require additional field
 | `credential_mode`   | string   | No       | `admin` (default), `user`, or `both` -- controls where OAuth client credentials come from during setup. **Only applies to `oauth2` and `device_code` providers.** For `api_key` providers, must be `admin` or omitted (the API rejects other values). Does not affect request-time credential resolution for any provider type. |
 | `authorization_url` | string   | OAuth2   | OAuth2 authorization endpoint (required for `oauth2` type)           |
 | `token_url`         | string   | OAuth2   | OAuth2 token endpoint (required for `oauth2` type)                   |
-| `revocation_url`    | string   | No       | OAuth2 token revocation endpoint (RFC 7009)                          |
+| `revocation`        | object   | No       | Structured upstream revocation configuration for `oauth2`/`device_code`; see below |
+| `revocation_url`    | string   | No       | Deprecated RFC 7009 alias; mapped to `revocation` when the structured field is omitted |
 | `default_scopes`    | string[] | No       | Default OAuth2 scopes to request                                     |
 | `client_id`         | string   | OAuth2   | OAuth2 client ID (required for `oauth2` type, encrypted at rest)     |
 | `client_secret`     | string   | OAuth2   | OAuth2 client secret (required for `oauth2` type, encrypted at rest) |
@@ -2316,6 +2318,8 @@ Register a new provider configuration. OAuth2 providers require additional field
 | `documentation_url` | string   | No       | Provider documentation URL                                           |
 
 **Slug Validation:** Must contain only lowercase letters, digits, and hyphens. No leading, trailing, or consecutive hyphens.
+
+`revocation` contains `style` (`rfc7009`, `github`, `self_bearer`, or `facebook_deauth`), an HTTPS public `url` without userinfo, `auth` (`inherit`, `none`, `client_id`, `basic`, or `post`), and `revokes_grant` (boolean). Structured `revocation` wins if both it and deprecated `revocation_url` are supplied. Revocation configuration is rejected for `api_key` and `telegram_widget` providers.
 
 **Example (API key provider):**
 
@@ -2341,7 +2345,12 @@ Register a new provider configuration. OAuth2 providers require additional field
   "provider_type": "oauth2",
   "authorization_url": "https://accounts.google.com/o/oauth2/v2/auth",
   "token_url": "https://oauth2.googleapis.com/token",
-  "revocation_url": "https://oauth2.googleapis.com/revoke",
+  "revocation": {
+    "style": "rfc7009",
+    "url": "https://oauth2.googleapis.com/revoke",
+    "auth": "none",
+    "revokes_grant": false
+  },
   "default_scopes": ["https://www.googleapis.com/auth/generative-language"],
   "client_id": "your-client-id.apps.googleusercontent.com",
   "client_secret": "your-client-secret",
@@ -2424,7 +2433,8 @@ Update a provider configuration. Only the provided fields are updated (partial u
 | `credential_mode`   | string   | No       | `admin`, `user`, or `both` (oauth2/device_code only; must be `admin` for api_key) |
 | `authorization_url` | string   | No       | OAuth2 authorization endpoint                        |
 | `token_url`         | string   | No       | OAuth2 token endpoint                                |
-| `revocation_url`    | string   | No       | OAuth2 revocation endpoint (RFC 7009)                |
+| `revocation`        | object/null | No    | Structured upstream revocation configuration; `null` explicitly clears it and its legacy alias |
+| `revocation_url`    | string   | No       | Deprecated RFC 7009 alias; mapped to `revocation` when the structured field is omitted |
 | `default_scopes`    | string[] | No       | Default OAuth2 scopes                                |
 | `client_id`         | string   | No       | OAuth2 client ID (encrypted at rest)                 |
 | `client_secret`     | string   | No       | OAuth2 client secret (encrypted at rest)             |
@@ -2444,6 +2454,8 @@ Update a provider configuration. Only the provided fields are updated (partial u
 **Response (200):**
 
 Returns the updated provider object.
+
+Structured `revocation` uses the same fields and validation rules as provider creation. An omitted field preserves the current configuration; explicit `"revocation": null` clears both `revocation` and deprecated `revocation_url`. RFC 7009 configurations keep the alias synchronized, while vendor-specific styles clear the alias.
 
 **Errors:**
 - `1002 forbidden` -- User is not an admin
