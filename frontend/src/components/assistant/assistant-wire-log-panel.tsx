@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { ChevronDown, Copy, Network, Trash2 } from "lucide-react";
 import { AssistantWireReplayView } from "@/components/assistant/assistant-wire-replay-view";
 import { Badge } from "@/components/ui/badge";
@@ -21,8 +21,8 @@ import type {
   AssistantUpstreamEnvelope,
   AssistantWireLogExchange,
 } from "@/schemas/assistant-wire-log";
+import { usePublicConfig } from "@/hooks/use-public-config";
 import { useAssistantWireLogStore } from "@/stores/assistant-wire-log-store";
-import { canAdminWrite, type User } from "@/types/api";
 import { cn } from "@/lib/utils";
 
 const INITIAL_RAW_LINE_WINDOW = 200;
@@ -532,8 +532,9 @@ export function AssistantWireLogPanel() {
 
         <div className="shrink-0 space-y-1 border-t border-border/60 px-5 py-3 text-[11px] leading-4 text-text-tertiary">
           <p>
-            Raw captures are admin-only, session-only, and may contain sensitive
-            payloads verbatim, including in replay placeholders.
+            Raw captures are session-only and may contain sensitive payloads
+            verbatim without the chat renderer's credential redaction,
+            including in replay placeholders.
           </p>
           <p>The WebSocket workflow channel is not captured.</p>
           <p>
@@ -546,11 +547,18 @@ export function AssistantWireLogPanel() {
   );
 }
 
-export function AssistantWireLogAction({
-  user,
-}: {
-  readonly user: User | null;
-}) {
-  if (!canAdminWrite(user)) return null;
+export function AssistantWireLogAction() {
+  const { data: publicConfig } = usePublicConfig();
+  const featureEnabled =
+    publicConfig?.aevatar_chat_wire_log_enabled === true;
+  const setFeatureEnabled = useAssistantWireLogStore(
+    (state) => state.setFeatureEnabled,
+  );
+
+  useEffect(() => {
+    setFeatureEnabled(featureEnabled);
+  }, [featureEnabled, setFeatureEnabled]);
+
+  if (!featureEnabled) return null;
   return <AssistantWireLogPanel />;
 }

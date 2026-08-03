@@ -334,6 +334,10 @@ pub struct AppConfig {
     /// platform-only even if legacy catalog records carry resale metadata.
     pub billing_resale_enabled: bool,
 
+    /// Operator kill switch for the assistant Aevatar wire-log diagnostic.
+    /// Defaults to `false`; when disabled, no debug echo work is performed.
+    pub aevatar_chat_wire_log_enabled: bool,
+
     // Registration gate
     /// When `true` (default), new-user registration requires a valid invite
     /// code and first-time social sign-ups are rejected. Set
@@ -596,6 +600,10 @@ impl std::fmt::Debug for AppConfig {
                 &self.oracle_task_retention_days,
             )
             .field("billing_enabled", &self.billing_enabled)
+            .field(
+                "aevatar_chat_wire_log_enabled",
+                &self.aevatar_chat_wire_log_enabled,
+            )
             .field("lago_api_url", &self.lago_api_url)
             .field(
                 "lago_api_key",
@@ -1066,6 +1074,10 @@ impl AppConfig {
             .unwrap_or(0),
             billing_fail_closed: parse_bool_env("BILLING_FAIL_CLOSED", false),
             billing_resale_enabled: parse_bool_env("BILLING_RESALE_ENABLED", false),
+            aevatar_chat_wire_log_enabled: parse_bool_env(
+                "AEVATAR_CHAT_WIRE_LOG_ENABLED",
+                false,
+            ),
 
             invite_code_required: parse_invite_code_required(env::var("INVITE_CODE_REQUIRED").ok()),
             email_auth_enabled: parse_bool_env("EMAIL_AUTH_ENABLED", false),
@@ -1430,6 +1442,7 @@ mod tests {
             billing_default_overdraft_cap_credits: 0,
             billing_fail_closed: false,
             billing_resale_enabled: false,
+            aevatar_chat_wire_log_enabled: false,
             invite_code_required: true,
             email_auth_enabled: false,
             auto_verify_email: false,

@@ -484,7 +484,7 @@ export function AssistantPage({
       <AssistantShell
         title={title}
         sidebar={sidebar}
-        headerActions={<AssistantWireLogAction user={user} />}
+        headerActions={<AssistantWireLogAction />}
       >
         {view === "plugins" ? <PluginsView /> : <ApprovalsView />}
       </AssistantShell>
@@ -495,7 +495,7 @@ export function AssistantPage({
     <AssistantShell
       title={title}
       sidebar={sidebar}
-      headerActions={<AssistantWireLogAction user={user} />}
+      headerActions={<AssistantWireLogAction />}
     >
       <div className="relative flex h-full min-h-0 flex-col bg-background">
         {/* A failed transcript read is REPORTED, never blocking. It used to

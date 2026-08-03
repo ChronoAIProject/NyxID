@@ -297,6 +297,7 @@ JWT_ASSISTANT_FORWARD_TTL_SECS=300  # Outbound-only bearer the assistant pass-th
                                     # assistant_forward:true, rejected by verify_token on NyxID
                                     # re-entry; minted only while the aevatar row has
                                     # forward_access_token:true (the TD-3 row flip retires it).
+AEVATAR_CHAT_WIRE_LOG_ENABLED=false # Sole operator gate for per-browser assistant wire capture; not admin-restricted when enabled
 SA_TOKEN_TTL_SECS=3600              # Service account tokens
 ENVIRONMENT=development
 RATE_LIMIT_PER_SECOND=10

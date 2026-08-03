@@ -1,15 +1,26 @@
-import { fireEvent, render, screen } from "@testing-library/react";
+import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { TooltipProvider } from "@/components/ui/tooltip";
 import { useAssistantContextStore } from "@/stores/assistant-context-store";
 import { useAssistantDraftStore } from "@/stores/assistant-draft-store";
 import { useAssistantWireLogStore } from "@/stores/assistant-wire-log-store";
+import { useAuthStore } from "@/stores/auth-store";
 import type { User } from "@/types/api";
 import {
   AssistantWireLogAction,
   AssistantWireLogPanel,
 } from "./assistant-wire-log-panel";
+
+const publicConfigState = vi.hoisted(() => ({ wireLogEnabled: false }));
+
+vi.mock("@/hooks/use-public-config", () => ({
+  usePublicConfig: () => ({
+    data: {
+      aevatar_chat_wire_log_enabled: publicConfigState.wireLogEnabled,
+    },
+  }),
+}));
 
 const admin: User = {
   id: "admin-1",
@@ -65,7 +76,9 @@ function sseLines(frames: readonly Record<string, unknown>[]) {
 describe("AssistantWireLogPanel", () => {
   beforeEach(() => {
     localStorage.clear();
+    publicConfigState.wireLogEnabled = false;
     useAssistantWireLogStore.setState({
+      featureEnabled: true,
       captureEnabled: true,
       showResponses: true,
       entries: [],
@@ -119,16 +132,39 @@ describe("AssistantWireLogPanel", () => {
     expect(useAssistantWireLogStore.getState().entries).toHaveLength(0);
   });
 
-  it("hides the icon for a non-admin user", () => {
-    renderWithTooltips(
-      <AssistantWireLogAction
-        user={{ ...admin, is_admin: false, role: "user" }}
-      />,
-    );
+  it("hides the action for everyone while the operator flag is off", async () => {
+    useAuthStore.setState({ user: admin });
+    renderWithTooltips(<AssistantWireLogAction />);
 
     expect(
       screen.queryByRole("button", { name: "Aevatar wire log" }),
     ).not.toBeInTheDocument();
+    await waitFor(() => {
+      expect(useAssistantWireLogStore.getState().featureEnabled).toBe(false);
+    });
+  });
+
+  it("shows the action for authenticated users regardless of role when the flag is on", async () => {
+    publicConfigState.wireLogEnabled = true;
+    useAuthStore.setState({ user: admin });
+    const { unmount } = renderWithTooltips(<AssistantWireLogAction />);
+
+    expect(
+      await screen.findByRole("button", { name: "Aevatar wire log" }),
+    ).toBeInTheDocument();
+    await waitFor(() => {
+      expect(useAssistantWireLogStore.getState().featureEnabled).toBe(true);
+    });
+
+    unmount();
+    useAuthStore.setState({
+      user: { ...admin, is_admin: false, role: "user" },
+    });
+    renderWithTooltips(<AssistantWireLogAction />);
+
+    expect(
+      await screen.findByRole("button", { name: "Aevatar wire log" }),
+    ).toBeInTheDocument();
   });
 
   it("gates every response-derived surface with the top Responses switch", () => {

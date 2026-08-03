@@ -4,7 +4,10 @@ import {
   chatStreamClient,
   type ChatStreamRequestHandle,
 } from "./chat-stream-worker-client";
-import { useAssistantWireLogStore } from "@/stores/assistant-wire-log-store";
+import {
+  ASSISTANT_WIRE_LOG_STORAGE_KEY,
+  useAssistantWireLogStore,
+} from "@/stores/assistant-wire-log-store";
 import type { TurnEvent } from "@/types/assistant";
 
 function encodedEcho(): string {
@@ -35,6 +38,7 @@ describe("assistant wire-log transport", () => {
     vi.restoreAllMocks();
     localStorage.clear();
     useAssistantWireLogStore.setState({
+      featureEnabled: false,
       captureEnabled: false,
       showResponses: true,
       entries: [],
@@ -62,6 +66,7 @@ describe("assistant wire-log transport", () => {
     expect(firstInit.headers).not.toHaveProperty("X-NyxID-Debug-Upstream");
     expect(useAssistantWireLogStore.getState().entries).toHaveLength(0);
 
+    useAssistantWireLogStore.getState().setFeatureEnabled(true);
     useAssistantWireLogStore.getState().setCaptureEnabled(true);
     await new AevatarAssistantTransport().listConversations();
     const secondInit = fetchMock.mock.calls[1]?.[1] as RequestInit;
@@ -96,6 +101,67 @@ describe("assistant wire-log transport", () => {
     });
   });
 
+  it("sends no debug header or stream observer when persisted capture meets a disabled feature", async () => {
+    localStorage.setItem(
+      ASSISTANT_WIRE_LOG_STORAGE_KEY,
+      JSON.stringify({
+        state: { captureEnabled: true, showResponses: true, entries: [] },
+        version: 2,
+      }),
+    );
+    await useAssistantWireLogStore.persist.rehydrate();
+    expect(useAssistantWireLogStore.getState()).toMatchObject({
+      featureEnabled: false,
+      captureEnabled: true,
+    });
+
+    const fetchMock = vi.fn().mockResolvedValue(
+      new Response(JSON.stringify({ conversations: [] }), {
+        status: 200,
+        headers: { "Content-Type": "application/json" },
+      }),
+    );
+    vi.stubGlobal("fetch", fetchMock);
+
+    const transport = new AevatarAssistantTransport();
+    await transport.listConversations();
+    const listInit = fetchMock.mock.calls[0]?.[1] as RequestInit;
+    expect(listInit.headers).not.toHaveProperty("X-NyxID-Debug-Upstream");
+
+    const start = vi.spyOn(chatStreamClient, "start").mockImplementation(
+      (request): ChatStreamRequestHandle => ({
+        headers: Promise.resolve({
+          kind: "response",
+          status: 200,
+          contentType: "text/event-stream",
+        }),
+        completion: Promise.resolve().then(() => {
+          request.onFrames([
+            {
+              type: "RUN_STARTED",
+              actorId: "nyxid-chat-wire-log-disabled",
+              turnId: "turn-wire-log-disabled",
+            },
+            { type: "RUN_FINISHED" },
+          ]);
+          return { kind: "complete" };
+        }),
+        cancel: vi.fn(),
+      }),
+    );
+    const conversation = await transport.createConversation();
+    await new Promise<void>((resolve) => {
+      transport.sendMessage(conversation.id, "hello", (event) => {
+        if (event.event === "turn.completed") resolve();
+      });
+    });
+
+    expect(start).toHaveBeenCalledOnce();
+    expect(start.mock.calls[0]?.[0].headers).toBeUndefined();
+    expect(start.mock.calls[0]?.[0].onWire).toBeUndefined();
+    expect(useAssistantWireLogStore.getState().entries).toEqual([]);
+  });
+
   it("buffers wire data until its backend echo arrives without delivering it as chat content", async () => {
     const debugOnlyMarker = "wire-log-only-prompt";
     const rawWireMarker = "raw-wire-line-only";
@@ -124,6 +190,7 @@ describe("assistant wire-log transport", () => {
         ),
       ),
     );
+    useAssistantWireLogStore.getState().setFeatureEnabled(true);
     useAssistantWireLogStore.getState().setCaptureEnabled(true);
     let resolveHeaders:
       | ((value: Awaited<ChatStreamRequestHandle["headers"]>) => void)
@@ -242,6 +309,7 @@ describe("assistant wire-log transport", () => {
   });
 
   it("discards buffered wire data when the backend returned no echo", async () => {
+    useAssistantWireLogStore.getState().setFeatureEnabled(true);
     useAssistantWireLogStore.getState().setCaptureEnabled(true);
     const start = vi.spyOn(chatStreamClient, "start").mockImplementation(
       (request): ChatStreamRequestHandle => ({

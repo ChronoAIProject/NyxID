@@ -40,8 +40,12 @@ function envelope(index: number): AssistantUpstreamEnvelope {
   };
 }
 
-function resetStore(captureEnabled = false) {
+function resetStore(
+  captureEnabled = false,
+  featureEnabled = captureEnabled,
+) {
   useAssistantWireLogStore.setState({
+    featureEnabled,
     captureEnabled,
     showResponses: true,
     entries: [],
@@ -215,6 +219,16 @@ describe("useAssistantWireLogStore", () => {
     });
   });
 
+  it("never persists the server-driven feature flag", () => {
+    useAssistantWireLogStore.getState().setFeatureEnabled(true);
+
+    const persisted = JSON.parse(
+      localStorage.getItem(ASSISTANT_WIRE_LOG_STORAGE_KEY)!,
+    ) as { state: Record<string, unknown> };
+
+    expect(persisted.state).not.toHaveProperty("featureEnabled");
+  });
+
   it("never creates an exchange without a backend echo", () => {
     expect(
       useAssistantWireLogStore.getState().recordExchange([], "header", 200),
@@ -224,6 +238,17 @@ describe("useAssistantWireLogStore", () => {
 
   it("ignores a backend echo that arrives after capture is disabled", () => {
     useAssistantWireLogStore.getState().setCaptureEnabled(false);
+
+    const id = useAssistantWireLogStore
+      .getState()
+      .recordExchange([envelope(1)], "header", 200);
+
+    expect(id).toBeNull();
+    expect(useAssistantWireLogStore.getState().entries).toEqual([]);
+  });
+
+  it("ignores a backend echo while the server-driven feature is disabled", () => {
+    useAssistantWireLogStore.getState().setFeatureEnabled(false);
 
     const id = useAssistantWireLogStore
       .getState()

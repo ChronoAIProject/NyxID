@@ -8098,7 +8098,8 @@ mod proxy_resolution_integration_tests {
         .await
         .unwrap();
 
-        let state = test_app_state(db.clone());
+        let mut state = test_app_state(db.clone());
+        state.config.aevatar_chat_wire_log_enabled = true;
         let auth = access_token_auth(&user_id);
         let billing_policy = crate::services::billing::route_inventory::BillingRoutePolicy::Metered(
             crate::services::billing::BillingIngress::Proxy,
@@ -8496,6 +8497,75 @@ mod proxy_resolution_integration_tests {
             gate_off_body.as_ref(),
             b"data: {\"type\":\"RUN_FINISHED\"}\n\n"
         );
+        let browser_gate_off_calls = std::mem::take(&mut *captured.lock().unwrap());
+        assert_eq!(browser_gate_off_calls.len(), 1);
+        assert!(
+            browser_gate_off_calls[0]
+                .3
+                .get("x-nyxid-debug-upstream")
+                .is_none()
+        );
+
+        let mut flag_off_state = state.clone();
+        flag_off_state.config.aevatar_chat_wire_log_enabled = false;
+        let mut flag_off_request = request(
+            Method::POST,
+            "/api/v1/assistant/workflow-chat",
+            Some(r#"{"prompt":"hi there"}"#),
+        );
+        flag_off_request.headers_mut().insert(
+            HeaderName::from_static("x-nyxid-debug-upstream"),
+            HeaderValue::from_static("1"),
+        );
+        let flag_off_response = crate::handlers::assistant::workflow_chat(
+            axum::extract::State(flag_off_state),
+            auth.clone(),
+            flag_off_request,
+        )
+        .await
+        .expect("feature-disabled workflow chat must forward unchanged");
+        assert!(
+            flag_off_response
+                .headers()
+                .get("x-nyxid-debug-upstream-log")
+                .is_none()
+        );
+        let flag_off_body = to_bytes(flag_off_response.into_body(), 1024).await.unwrap();
+        assert_eq!(
+            flag_off_body.as_ref(),
+            b"data: {\"type\":\"RUN_FINISHED\"}\n\n"
+        );
+        let flag_off_calls = std::mem::take(&mut *captured.lock().unwrap());
+        assert_eq!(flag_off_calls.len(), 1);
+        assert_eq!(flag_off_calls[0].0, calls[0].0);
+        assert_eq!(flag_off_calls[0].1, calls[0].1);
+        let mut enabled_body: serde_json::Value =
+            serde_json::from_slice(&calls[0].2).expect("enabled request body is JSON");
+        let mut flag_off_upstream_body: serde_json::Value =
+            serde_json::from_slice(&flag_off_calls[0].2).expect("disabled request body is JSON");
+        enabled_body
+            .as_object_mut()
+            .expect("enabled request body is an object")
+            .remove("commandId");
+        flag_off_upstream_body
+            .as_object_mut()
+            .expect("disabled request body is an object")
+            .remove("commandId");
+        assert_eq!(flag_off_upstream_body, enabled_body);
+        assert!(flag_off_calls[0].3.get("x-nyxid-debug-upstream").is_none());
+        assert!(
+            flag_off_calls[0]
+                .3
+                .get(axum::http::header::AUTHORIZATION)
+                .is_none()
+        );
+        assert!(flag_off_calls[0].3.get("x-nyxid-identity-token").is_some());
+        assert!(
+            flag_off_calls[0]
+                .3
+                .get("x-nyxid-delegation-token")
+                .is_some()
+        );
 
         let mut websocket_request =
             request(Method::GET, "/api/v1/assistant/workflow-chat/ws", None);
@@ -8537,14 +8607,11 @@ mod proxy_resolution_integration_tests {
             non_admin_request,
         )
         .await
-        .expect("non-admin debug request must behave like a normal request");
+        .expect("authenticated non-admin debug request must receive its own echo");
         assert_eq!(non_admin_response.status(), StatusCode::OK);
-        assert!(
-            non_admin_response
-                .headers()
-                .get("x-nyxid-debug-upstream-log")
-                .is_none()
-        );
+        let non_admin_echoes = assistant_echoes(&non_admin_response);
+        assert_eq!(non_admin_echoes.len(), 1);
+        assert_eq!(non_admin_echoes[0]["body"]["prompt"], "not an admin");
         let non_admin_body = to_bytes(non_admin_response.into_body(), 1024)
             .await
             .unwrap();
@@ -8641,7 +8708,8 @@ mod proxy_resolution_integration_tests {
         .await
         .unwrap();
 
-        let state = test_app_state(db);
+        let mut state = test_app_state(db);
+        state.config.aevatar_chat_wire_log_enabled = true;
         let auth = access_token_auth(&user_id);
         let mut request = Request::builder()
             .method(Method::GET)
@@ -8756,7 +8824,8 @@ mod proxy_resolution_integration_tests {
         .await
         .unwrap();
 
-        let state = test_app_state(db);
+        let mut state = test_app_state(db);
+        state.config.aevatar_chat_wire_log_enabled = true;
         let auth = access_token_auth(&user_id);
         let mut request = Request::builder()
             .method(Method::GET)

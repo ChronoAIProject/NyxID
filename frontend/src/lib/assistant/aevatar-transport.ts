@@ -73,7 +73,9 @@ function assistantWireLogOptions(): {
   readonly headers?: Record<string, string>;
   readonly onResponse?: (response: Response) => void;
 } {
-  if (!useAssistantWireLogStore.getState().captureEnabled) return {};
+  const { featureEnabled, captureEnabled } =
+    useAssistantWireLogStore.getState();
+  if (!featureEnabled || !captureEnabled) return {};
   return {
     headers: { [DEBUG_UPSTREAM_REQUEST_HEADER]: "1" },
     onResponse: (response) => {
@@ -2697,10 +2699,12 @@ export class AevatarAssistantTransport implements AssistantTransport {
   ): ChatStreamRequestHandle {
     let stream: ChatStreamRequestHandle | null = null;
     run.streamDispatched = true;
-    const captureEnabled = useAssistantWireLogStore.getState().captureEnabled;
+    const { featureEnabled, captureEnabled } =
+      useAssistantWireLogStore.getState();
+    const wireLogEnabled = featureEnabled && captureEnabled;
     const bufferedWireEvents = new Map<string, ChatStreamWireEvent[]>();
     let wireExchangeId: string | null | undefined;
-    const onWire = captureEnabled
+    const onWire = wireLogEnabled
       ? (event: ChatStreamWireEvent) => {
           try {
             if (wireExchangeId === null) return;
@@ -2719,7 +2723,7 @@ export class AevatarAssistantTransport implements AssistantTransport {
       url,
       bodyText,
       signal: run.controller.signal,
-      headers: captureEnabled
+      headers: wireLogEnabled
         ? { [DEBUG_UPSTREAM_REQUEST_HEADER]: "1" }
         : undefined,
       onWire,
@@ -2733,7 +2737,7 @@ export class AevatarAssistantTransport implements AssistantTransport {
         }
       },
     });
-    if (captureEnabled) {
+    if (wireLogEnabled) {
       void stream.headers
         .then((response) => {
           if (response.kind !== "response" && response.kind !== "http_error") {

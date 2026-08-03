@@ -22,11 +22,13 @@ const MAX_CAPTURE_BYTES = 4 * 1024 * 1024;
 const textEncoder = new TextEncoder();
 
 interface AssistantWireLogState {
+  readonly featureEnabled: boolean;
   readonly captureEnabled: boolean;
   readonly showResponses: boolean;
   readonly entries: readonly AssistantWireLogExchange[];
   readonly totalBytes: number;
   readonly captureBytes: number;
+  readonly setFeatureEnabled: (enabled: boolean) => void;
   readonly setCaptureEnabled: (enabled: boolean) => void;
   readonly setShowResponses: (enabled: boolean) => void;
   readonly recordExchange: (
@@ -68,6 +70,7 @@ const EMPTY_PERSISTED_WIRE_LOG: PersistedWireLogState = {
 };
 
 const EMPTY_WIRE_LOG = {
+  featureEnabled: false,
   ...EMPTY_PERSISTED_WIRE_LOG,
   entries: [] as readonly AssistantWireLogExchange[],
   totalBytes: 0,
@@ -238,10 +241,17 @@ export const useAssistantWireLogStore = create<AssistantWireLogState>()(
   persist(
     (set, get) => ({
       ...EMPTY_WIRE_LOG,
+      setFeatureEnabled: (featureEnabled) => set({ featureEnabled }),
       setCaptureEnabled: (captureEnabled) => set({ captureEnabled }),
       setShowResponses: (showResponses) => set({ showResponses }),
       recordExchange: (envelopes, kind, status, droppedEchoCount = 0) => {
-        if (!get().captureEnabled || envelopes.length === 0) return null;
+        if (
+          !get().featureEnabled ||
+          !get().captureEnabled ||
+          envelopes.length === 0
+        ) {
+          return null;
+        }
         const id = crypto.randomUUID();
         const exchange: AssistantWireLogExchange = {
           id,

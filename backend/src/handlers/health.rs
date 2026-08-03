@@ -43,6 +43,7 @@ pub struct PublicConfigResponse {
     pub social_providers: Vec<String>,
     pub invite_code_required: bool,
     pub email_auth_enabled: bool,
+    pub aevatar_chat_wire_log_enabled: bool,
     /// Public PostHog ingest key for the frontend. Non-secret by design
     /// (PostHog ingest keys are write-only and project-scoped). Empty
     /// when telemetry is off. See docs/TELEMETRY.md §3.
@@ -123,6 +124,7 @@ pub async fn public_config(State(state): State<AppState>) -> Json<PublicConfigRe
         social_providers,
         invite_code_required: state.config.invite_code_required,
         email_auth_enabled: state.config.email_auth_enabled,
+        aevatar_chat_wire_log_enabled: state.config.aevatar_chat_wire_log_enabled,
         telemetry_dsn,
         telemetry_host,
         telemetry_share_analytics,
@@ -200,6 +202,7 @@ mod tests {
             social_providers: vec!["github".to_string()],
             invite_code_required: true,
             email_auth_enabled: true,
+            aevatar_chat_wire_log_enabled: true,
             telemetry_dsn: None,
             telemetry_host: None,
             telemetry_share_analytics: false,
@@ -211,6 +214,7 @@ mod tests {
         assert_eq!(json["social_providers"], serde_json::json!(["github"]));
         assert_eq!(json["invite_code_required"], true);
         assert_eq!(json["email_auth_enabled"], true);
+        assert_eq!(json["aevatar_chat_wire_log_enabled"], true);
     }
 
     #[test]
@@ -223,6 +227,7 @@ mod tests {
             social_providers: vec![],
             invite_code_required: false,
             email_auth_enabled: false,
+            aevatar_chat_wire_log_enabled: false,
             telemetry_dsn: None,
             telemetry_host: None,
             telemetry_share_analytics: false,
@@ -245,6 +250,7 @@ mod tests {
             social_providers: vec![],
             invite_code_required: false,
             email_auth_enabled: false,
+            aevatar_chat_wire_log_enabled: false,
             telemetry_dsn: Some("phc_test123".to_string()),
             telemetry_host: Some("https://us.i.posthog.com".to_string()),
             telemetry_share_analytics: true,

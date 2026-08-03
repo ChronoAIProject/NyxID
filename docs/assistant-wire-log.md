@@ -1,8 +1,10 @@
 # Assistant Aevatar Wire Log
 
-The assistant chat exposes an admin-only diagnostic panel for inspecting the
-HTTP exchanges NyxID makes through the managed Aevatar service. The feature is
-disabled by default and must be enabled with the panel's **Capture** switch.
+The assistant chat exposes an operator-gated diagnostic panel for inspecting
+the HTTP exchanges NyxID makes through the managed Aevatar service. The
+fleet-wide feature is disabled by default; when enabled, each authenticated
+assistant caller can opt into capturing their own exchanges with the panel's
+**Capture** switch.
 
 The wire log is diagnostic data, not an audit log. Backend echoes may persist
 in browser storage, while delivered response bodies and SSE captures remain in
@@ -48,10 +50,18 @@ literal upstream-octet capture.
 
 ## Gates And Header Protocol
 
-Both gates must pass before the backend does echo work:
+Both gates must pass, in this precedence order:
 
-1. The authenticated user must pass the existing platform-admin write check.
-2. The request must carry `X-NyxID-Debug-Upstream: 1`.
+1. The operator must set `AEVATAR_CHAT_WIRE_LOG_ENABLED=true`. It defaults to
+   `false` and is evaluated before request-header inspection or any database
+   lookup.
+2. The authenticated caller must enable the per-browser **Capture** switch,
+   which causes the frontend to send `X-NyxID-Debug-Upstream: 1`.
+
+The feature flag is the sole authorization gate for the diagnostic and does
+not require a platform-admin role. The backend echo is constructed only from
+the assistant request currently being handled, so a caller can capture their
+own exchange but can never observe another caller's traffic.
 
 On handler paths that return a final `Response` through the assistant echo
 attachment path, NyxID sends a Base64-encoded UTF-8 JSON value in
@@ -81,13 +91,13 @@ Compatibility is one-directional by design:
   frontend expects a top-level JSON array and rejects the version 2 wrapper, so
   `captureAssistantWireLogHeader` discards the header.
 
-The second case is a transient, admin-only, capture-only diagnostic gap during a
-rolling deploy where the backend ships ahead of the frontend. It clears as soon
-as the browser loads the current frontend bundle. It does not affect chat
-delivery, and no other surface reads this header. The wrapper is deliberately
-*not* emitted conditionally to preserve old-frontend parsing: a dual wire format
-would leave the degraded path exercised only in rare production cases, which is
-worse than a self-healing empty panel.
+The second case is a transient, authenticated-caller, capture-only diagnostic
+gap during a rolling deploy where the backend ships ahead of the frontend. It
+clears as soon as the browser loads the current frontend bundle. It does not
+affect chat delivery, and no other surface reads this header. The wrapper is
+deliberately *not* emitted conditionally to preserve old-frontend parsing: a
+dual wire format would leave the degraded path exercised only in rare
+production cases, which is worse than a self-healing empty panel.
 
 ## Echo Shapes
 
@@ -217,9 +227,13 @@ is explicitly marked "Not replayed." No live controls, queries, navigation, or
 assistant-store writes are mounted by replay.
 
 Raw captures and placeholder JSON may contain sensitive upstream payloads
-verbatim. They are admin-only, session-only, excluded from persistence,
-telemetry, audit logs, and crash reports, and leave the browser only through an
-explicit copy action.
+verbatim. They bypass the chat renderer's credential redaction. When the
+operator flag is enabled, any authenticated assistant caller can capture their
+own exchanges; no caller can observe another user's traffic. Raw captures are
+session-only, excluded from persistence, telemetry, audit logs, and crash
+reports, and leave the browser only through an explicit copy action. Keep the
+operator flag off in environments where browser retention of unredacted raw
+payloads is unacceptable.
 
 ## Deliberate Non-Goals
 

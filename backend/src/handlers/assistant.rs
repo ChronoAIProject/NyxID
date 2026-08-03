@@ -29,7 +29,6 @@ use crate::crypto::jwt::{
     MCP_DELEGATION_TOKEN_TTL_SECS, TokenRestrictionClaims, generate_delegated_access_token,
 };
 use crate::errors::{AppError, AppResult};
-use crate::handlers::admin_helpers;
 use crate::handlers::proxy::execute_admin_proxy;
 use crate::models::downstream_service::DownstreamService;
 use crate::mw::auth::{AuthMethod, AuthUser, PROXY_SCOPE, scope_allows_rest_proxy};
@@ -148,11 +147,13 @@ fn truncate_utf8(value: &str, max_bytes: usize) -> (String, bool) {
     (value[..end].to_string(), true)
 }
 
-async fn upstream_echo_collector(
+fn upstream_echo_collector(
     state: &AppState,
-    auth_user: &AuthUser,
     request_headers: &HeaderMap,
 ) -> Option<Vec<UpstreamEcho>> {
+    if !state.config.aevatar_chat_wire_log_enabled {
+        return None;
+    }
     let requested = request_headers
         .get(DEBUG_UPSTREAM_REQUEST_HEADER)
         .and_then(|value| value.to_str().ok())
@@ -160,11 +161,7 @@ async fn upstream_echo_collector(
     if !requested {
         return None;
     }
-    if admin_helpers::require_admin(state, auth_user).await.is_ok() {
-        Some(Vec::new())
-    } else {
-        None
-    }
+    Some(Vec::new())
 }
 
 fn echoed_headers(
@@ -669,7 +666,7 @@ pub async fn list_conversations(
     request: Request<Body>,
 ) -> AppResult<Response> {
     let authorization = request.headers().get(header::AUTHORIZATION).cloned();
-    let mut echoes = upstream_echo_collector(&state, &auth_user, request.headers()).await;
+    let mut echoes = upstream_echo_collector(&state, request.headers());
     let user_id = auth_user.user_id.to_string();
     let response = forward(
         &state,
@@ -758,7 +755,7 @@ pub async fn get_history(
     Path(conversation_id): Path<String>,
     request: Request<Body>,
 ) -> AppResult<Response> {
-    let mut echoes = upstream_echo_collector(&state, &auth_user, request.headers()).await;
+    let mut echoes = upstream_echo_collector(&state, request.headers());
     let path = assistant_service::canonical_conversation_path(&conversation_id)?;
     let response = forward(
         &state,
@@ -779,7 +776,7 @@ pub async fn delete_conversation(
     Path(conversation_id): Path<String>,
     request: Request<Body>,
 ) -> AppResult<Response> {
-    let mut echoes = upstream_echo_collector(&state, &auth_user, request.headers()).await;
+    let mut echoes = upstream_echo_collector(&state, request.headers());
     let path = assistant_service::canonical_conversation_path(&conversation_id)?;
     let response = forward(
         &state,
@@ -804,7 +801,7 @@ pub async fn get_state(
     Path(conversation_id): Path<String>,
     request: Request<Body>,
 ) -> AppResult<Response> {
-    let mut echoes = upstream_echo_collector(&state, &auth_user, request.headers()).await;
+    let mut echoes = upstream_echo_collector(&state, request.headers());
     let path = assistant_service::canonical_state_path(&conversation_id)?;
     let response = forward(
         &state,
@@ -824,7 +821,7 @@ pub async fn completions(
     auth_user: AuthUser,
     request: Request<Body>,
 ) -> AppResult<Response> {
-    let mut echoes = upstream_echo_collector(&state, &auth_user, request.headers()).await;
+    let mut echoes = upstream_echo_collector(&state, request.headers());
     let response = forward(
         &state,
         &auth_user,
@@ -878,7 +875,7 @@ pub async fn typed_chat(
             prepared.response_kind.accept_header_value().to_string(),
         ),
     ];
-    let mut echoes = upstream_echo_collector(&state, &auth_user, request.headers()).await;
+    let mut echoes = upstream_echo_collector(&state, request.headers());
     let echoed_body = echoes.as_ref().map(|_| prepared.body.clone());
     let response = forward(
         &state,
@@ -939,7 +936,7 @@ pub async fn workflow_chat(
         HeaderValue::from_static("application/json"),
     );
     let request = Request::from_parts(parts, Body::from(payload));
-    let mut echoes = upstream_echo_collector(&state, &auth_user, request.headers()).await;
+    let mut echoes = upstream_echo_collector(&state, request.headers());
     let echoed_body = echoes.as_ref().map(|_| upstream.clone());
     let response = forward(
         &state,
@@ -1086,13 +1083,29 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn absent_echo_gate_returns_before_admin_lookup() {
+    async fn disabled_echo_flag_returns_before_header_or_database_work() {
         let state = crate::test_utils::test_app_state_no_db().await;
-        let auth_user = crate::test_utils::test_auth_user("00000000-0000-4000-8000-000000000001");
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            DEBUG_UPSTREAM_REQUEST_HEADER,
+            HeaderValue::from_bytes(&[0xff]).expect("opaque invalid UTF-8 header"),
+        );
 
-        let echoes = upstream_echo_collector(&state, &auth_user, &HeaderMap::new()).await;
+        let echoes = upstream_echo_collector(&state, &headers);
 
         assert!(echoes.is_none());
+    }
+
+    #[tokio::test]
+    async fn enabled_echo_flag_and_header_do_not_require_a_database_lookup() {
+        let mut state = crate::test_utils::test_app_state_no_db().await;
+        state.config.aevatar_chat_wire_log_enabled = true;
+        let mut headers = HeaderMap::new();
+        headers.insert(DEBUG_UPSTREAM_REQUEST_HEADER, HeaderValue::from_static("1"));
+
+        let echoes = upstream_echo_collector(&state, &headers);
+
+        assert!(matches!(echoes, Some(ref values) if values.is_empty()));
     }
 
     #[test]

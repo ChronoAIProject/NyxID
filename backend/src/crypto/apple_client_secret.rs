@@ -235,6 +235,7 @@ ci0O2dgc19c2/sLtanU7P2KAzhEo8O0tIc0Dwe/nMqKfue82eGVL3DqM\n\
             billing_default_overdraft_cap_credits: 0,
             billing_fail_closed: false,
             billing_resale_enabled: false,
+            aevatar_chat_wire_log_enabled: false,
             invite_code_required: true,
             email_auth_enabled: false,
             auto_verify_email: false,
