@@ -452,7 +452,7 @@ async fn install(tool: AiToolTarget, base_url: &Option<String>) -> Result<()> {
     let content = fetch_skill_content(&base).await?;
 
     let result = match tool {
-        AiToolTarget::ClaudeCode => install_claude_code(&content).await,
+        AiToolTarget::ClaudeCode => install_claude_code(&content, &base).await,
         AiToolTarget::Cursor => install_cursor(&content),
         AiToolTarget::Codex => install_codex(&content),
         AiToolTarget::Openclaw => install_openclaw(&content),
@@ -612,17 +612,33 @@ fn try_install_claude_plugin() -> Result<bool> {
     Ok(true)
 }
 
-async fn install_claude_code(content: &SkillContent) -> Result<()> {
-    match try_install_claude_plugin() {
+async fn install_claude_code(content: &SkillContent, base_url: &str) -> Result<()> {
+    // The plugin ships skills with the default hosted URL baked in; the
+    // legacy installer rewrites URLs to the user's own server. Self-hosted
+    // deployments therefore stay on the legacy per-skill install so their
+    // skill content points at the right server.
+    let self_hosted = base_url.trim_end_matches('/') != DEFAULT_HOSTED_URL;
+    if self_hosted {
+        eprintln!(
+            "  Self-hosted NyxID ({base_url}): using the URL-substituted single-skill install (the plugin bundle targets the hosted service)."
+        );
+    }
+    match if self_hosted {
+        Ok(false)
+    } else {
+        try_install_claude_plugin()
+    } {
         Ok(true) => {
             eprintln!();
             print_post_install(AiToolTarget::ClaudeCode, content);
             return Ok(());
         }
         Ok(false) => {
-            eprintln!(
-                "  `claude` CLI not found; falling back to the legacy single-skill install (only the nyxid skill)."
-            );
+            if !self_hosted {
+                eprintln!(
+                    "  `claude` CLI not found; falling back to the legacy single-skill install (only the nyxid skill)."
+                );
+            }
         }
         Err(error) => {
             eprintln!(
@@ -736,14 +752,17 @@ async fn update(tool: Option<AiToolTarget>, base_url: &Option<String>) -> Result
         eprintln!("Updating {t}...");
         match t {
             AiToolTarget::ClaudeCode => {
-                if claude_plugin_marketplace_present() && claude_cli_available() {
+                let plugin_managed = base.trim_end_matches('/') == DEFAULT_HOSTED_URL
+                    && claude_plugin_marketplace_present()
+                    && claude_cli_available();
+                if plugin_managed {
                     // Plugin-managed: refresh the marketplace clone and the
                     // installed plugin instead of rewriting skill files.
                     run_claude(&["plugin", "marketplace", "update", PLUGIN_MARKETPLACE_NAME])?;
                     run_claude(&["plugin", "update", PLUGIN_SPEC])?;
                     eprintln!("  Plugin {PLUGIN_SPEC} updated.");
                 } else {
-                    install_claude_code(&content).await?;
+                    install_claude_code(&content, &base).await?;
                 }
             }
             AiToolTarget::Cursor => install_cursor(&content)?,
