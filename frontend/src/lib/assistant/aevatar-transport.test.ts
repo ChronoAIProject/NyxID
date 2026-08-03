@@ -7812,7 +7812,7 @@ describe("studio new chats and typed actor compatibility", () => {
     }
   });
 
-  it("keeps a new-chat mirror untouched while a follow-up turn is active", async () => {
+  it("[branch-regression] keeps a new-chat mirror untouched while a follow-up turn is active", async () => {
     let now = 0;
     mockChatStreams((request) =>
       request.url === WORKFLOW_URL
@@ -7934,7 +7934,7 @@ describe("studio new chats and typed actor compatibility", () => {
     ).toBe(true);
   });
 
-  it("keeps a longer new-chat mirror when the current fence omits its required turn", async () => {
+  it("[branch-regression] keeps a longer new-chat mirror when the current fence omits its required turn", async () => {
     let now = 0;
     mockChatStreams((request) =>
       request.url === WORKFLOW_URL
@@ -8060,7 +8060,7 @@ describe("studio new chats and typed actor compatibility", () => {
     ).rejects.toBeInstanceOf(AssistantConversationNotFoundError);
   });
 
-  it("deletes an aliased placeholder through the wire when its receipt is gone", async () => {
+  it("[branch-regression] deletes an aliased placeholder through the wire when its receipt is gone", async () => {
     mockChatStreams((request) =>
       request.url === WORKFLOW_URL
         ? { frames: [...WORKFLOW_PREAMBLE, ...WORKFLOW_TAIL] }
@@ -8286,7 +8286,7 @@ describe("projection lifecycle boundaries", () => {
     });
   });
 
-  it("reads a cold canonical receipt from the transcript before serving pending", async () => {
+  it("[branch-regression] reads a cold canonical receipt from the transcript before serving pending", async () => {
     recordCreateReceipt("cold-command", "workflow-pending-cold");
     adoptReceiptIdentity("cold-command", CHAT_ID, 3);
     const mock = stubFetch((url, init) =>
