@@ -766,7 +766,7 @@ directly (the pattern `aevatar-transport.test.ts` already uses).
 
 Honesty note (review P2.5): tests marked **[guard]** below pass on `main` and
 are kept deliberately as labeled regression guards paired with a falsifiable
-sibling; every unmarked test fails on `main`.
+sibling; every unmarked original-plan test fails on `main`.
 
 ### New files
 
@@ -862,7 +862,7 @@ W5 (evidence):
 W8 (keep-max):
 
 - `a fence-current shorter server transcript containing the latest local turn replaces a longer local mirror after the grace window`
-- `a fence-current shorter read MISSING the latest local turn keeps the local mirror`
+- **[branch-regression]** `a fence-current shorter read MISSING the latest local turn keeps the local mirror`
   (review P2.2's completed predicate)
 - **[guard]** `a below-fence or legacy-array shorter read never replaces a longer local mirror`
   (passes on `main` where keep-max is unconditional; kept as the explicit
@@ -932,6 +932,12 @@ Several design bullets are covered by pre-existing tests rather than counted
 as new coverage: `stateVersion: 0`, context-free terminal recovery, and local
 pending-mirror/no-request behavior. PR #1304's card/order suite remains the
 structured-message guard and its assertions are unchanged.
+
+Follow-up tests marked `[branch-regression]` pass on `main` because `main` has
+the older unconditional keep-max/direct-read/direct-alias behavior, but fail
+against the pre-review implementation (`58ab3594`). They are required guards
+for regressions introduced by this branch's new relaxation and receipt paths,
+not claimed as new `main` coverage.
 
 Deferred from this PR's test diff:
 
