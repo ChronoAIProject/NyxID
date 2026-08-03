@@ -6,26 +6,12 @@ import { useAssistantContextStore } from "@/stores/assistant-context-store";
 import { useAssistantDraftStore } from "@/stores/assistant-draft-store";
 import { useAssistantWireLogStore } from "@/stores/assistant-wire-log-store";
 import { useAuthStore } from "@/stores/auth-store";
+import { FEATURE_FLAG } from "@/lib/feature-flags";
 import type { User } from "@/types/api";
 import {
   AssistantWireLogAction,
   AssistantWireLogPanel,
 } from "./assistant-wire-log-panel";
-
-const publicConfigState = vi.hoisted(() => ({
-  wireLogEnabled: undefined as boolean | undefined,
-}));
-
-vi.mock("@/hooks/use-public-config", () => ({
-  usePublicConfig: () => ({
-    data:
-      publicConfigState.wireLogEnabled === undefined
-        ? {}
-        : {
-            aevatar_chat_wire_log_enabled: publicConfigState.wireLogEnabled,
-          },
-  }),
-}));
 
 const admin: User = {
   id: "admin-1",
@@ -40,8 +26,30 @@ const admin: User = {
   created_at: "2026-07-31T00:00:00.000Z",
 };
 
+/**
+ * The wire-log gate is the `experimental:aevatar-chat-wire-log` runtime
+ * feature flag, resolved server-side and delivered on `/users/me` as
+ * `capabilities.enabled_features`. `undefined` models an older backend that
+ * omits the field entirely.
+ */
+function signIn(enabledFeatures?: readonly string[]) {
+  useAuthStore.setState({
+    user:
+      enabledFeatures === undefined
+        ? admin
+        : { ...admin, capabilities: { enabled_features: enabledFeatures } },
+  });
+}
+
 function renderWithTooltips(node: React.ReactNode) {
-  return render(<TooltipProvider>{node}</TooltipProvider>);
+  const queryClient = new QueryClient({
+    defaultOptions: { queries: { retry: false }, mutations: { retry: false } },
+  });
+  return render(
+    <QueryClientProvider client={queryClient}>
+      <TooltipProvider>{node}</TooltipProvider>
+    </QueryClientProvider>,
+  );
 }
 
 function responseEnvelope() {
@@ -81,7 +89,7 @@ function sseLines(frames: readonly Record<string, unknown>[]) {
 describe("AssistantWireLogPanel", () => {
   beforeEach(() => {
     localStorage.clear();
-    publicConfigState.wireLogEnabled = false;
+    signIn([]);
     useAssistantWireLogStore.setState({
       featureEnabled: true,
       captureEnabled: true,
@@ -138,7 +146,7 @@ describe("AssistantWireLogPanel", () => {
   });
 
   it("hides the action for everyone while the operator flag is off", async () => {
-    useAuthStore.setState({ user: admin });
+    signIn([]);
     renderWithTooltips(<AssistantWireLogAction />);
 
     expect(
@@ -149,8 +157,31 @@ describe("AssistantWireLogPanel", () => {
     });
   });
 
-  it("treats an omitted operator flag as disabled", async () => {
-    publicConfigState.wireLogEnabled = undefined;
+  it("closes the transport gate when a stale persisted capture meets a disabled flag", async () => {
+    // A browser that captured before the flag was turned off keeps
+    // `captureEnabled` in localStorage — it is persisted, `featureEnabled` is
+    // not. Mounting the action must re-derive the feature gate from the
+    // server-resolved flag, leaving the composed transport gate
+    // (`featureEnabled && captureEnabled`) closed.
+    signIn([]);
+    useAssistantWireLogStore.setState({
+      featureEnabled: true,
+      captureEnabled: true,
+    });
+
+    renderWithTooltips(<AssistantWireLogAction />);
+
+    await waitFor(() => {
+      expect(useAssistantWireLogStore.getState().featureEnabled).toBe(false);
+    });
+    const { featureEnabled, captureEnabled } =
+      useAssistantWireLogStore.getState();
+    expect(captureEnabled).toBe(true);
+    expect(featureEnabled && captureEnabled).toBe(false);
+  });
+
+  it("treats an omitted capability set as disabled", async () => {
+    signIn(undefined);
     useAssistantWireLogStore.setState({ featureEnabled: true });
 
     renderWithTooltips(<AssistantWireLogAction />);
@@ -164,8 +195,7 @@ describe("AssistantWireLogPanel", () => {
   });
 
   it("shows the action for authenticated users regardless of role when the flag is on", async () => {
-    publicConfigState.wireLogEnabled = true;
-    useAuthStore.setState({ user: admin });
+    signIn([FEATURE_FLAG.AEVATAR_CHAT_WIRE_LOG]);
     const { unmount } = renderWithTooltips(<AssistantWireLogAction />);
 
     expect(
@@ -177,7 +207,14 @@ describe("AssistantWireLogPanel", () => {
 
     unmount();
     useAuthStore.setState({
-      user: { ...admin, is_admin: false, role: "user" },
+      user: {
+        ...admin,
+        is_admin: false,
+        role: "user",
+        capabilities: {
+          enabled_features: [FEATURE_FLAG.AEVATAR_CHAT_WIRE_LOG],
+        },
+      },
     });
     renderWithTooltips(<AssistantWireLogAction />);
 

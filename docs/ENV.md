@@ -55,9 +55,11 @@ See [KMS_MIGRATION_GUIDE.md](KMS_MIGRATION_GUIDE.md) and [KMS_OPERATIONS_GUIDE.m
 
 ## Assistant Diagnostics
 
-| Variable | Default | Description |
-|----------|---------|-------------|
-| `AEVATAR_CHAT_WIRE_LOG_ENABLED` | `false` | Sole operator gate for the Aevatar assistant chat wire-log diagnostic. When enabled, any authenticated assistant caller can opt in from that browser and capture only their own exchanges; the capability is not restricted to admins. Keep disabled where retaining raw, renderer-unredacted assistant payloads in the browser is unacceptable. |
+The Aevatar assistant chat wire-log diagnostic has no environment variable. It
+is gated by the `experimental:aevatar-chat-wire-log` runtime feature flag
+(default off), toggled platform-wide, per org cohort, or per user through the
+platform-admin feature-flag API with no redeploy. See
+`docs/assistant-wire-log.md`.
 
 The standalone remote credential accept routes are backend-served. In split
 frontend/backend deployments, reverse proxies must route

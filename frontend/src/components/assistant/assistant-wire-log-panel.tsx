@@ -21,7 +21,8 @@ import type {
   AssistantUpstreamEnvelope,
   AssistantWireLogExchange,
 } from "@/schemas/assistant-wire-log";
-import { usePublicConfig } from "@/hooks/use-public-config";
+import { useFeature } from "@/hooks/use-feature-flag";
+import { FEATURE_FLAG } from "@/lib/feature-flags";
 import { useAssistantWireLogStore } from "@/stores/assistant-wire-log-store";
 import { cn } from "@/lib/utils";
 
@@ -548,9 +549,10 @@ export function AssistantWireLogPanel() {
 }
 
 export function AssistantWireLogAction() {
-  const { data: publicConfig } = usePublicConfig();
-  const featureEnabled =
-    publicConfig?.aevatar_chat_wire_log_enabled === true;
+  // Runtime feature flag (`experimental:aevatar-chat-wire-log`), resolved
+  // server-side for this user on the personal surface. Fail-closed: unknown,
+  // loading, or an older backend that omits the key all read as off.
+  const featureEnabled = useFeature(FEATURE_FLAG.AEVATAR_CHAT_WIRE_LOG);
   const setFeatureEnabled = useAssistantWireLogStore(
     (state) => state.setFeatureEnabled,
   );

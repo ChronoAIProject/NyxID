@@ -1,10 +1,10 @@
 # Assistant Aevatar Wire Log
 
-The assistant chat exposes an operator-gated diagnostic panel for inspecting
-the HTTP exchanges NyxID makes through the managed Aevatar service. The
-fleet-wide feature is disabled by default; when enabled, each authenticated
-assistant caller can opt into capturing their own exchanges with the panel's
-**Capture** switch.
+The assistant chat exposes a flag-gated diagnostic panel for inspecting the
+HTTP exchanges NyxID makes through the managed Aevatar service. It is gated by
+the `experimental:aevatar-chat-wire-log` runtime feature flag, which defaults
+to off; where it is enabled, each authenticated assistant caller can opt into
+capturing their own exchanges with the panel's **Capture** switch.
 
 The wire log is diagnostic data, not an audit log. Backend echoes may persist
 in browser storage, while delivered response bodies and SSE captures remain in
@@ -50,18 +50,38 @@ literal upstream-octet capture.
 
 ## Gates And Header Protocol
 
-Both gates must pass, in this precedence order:
+Both gates must pass:
 
-1. The operator must set `AEVATAR_CHAT_WIRE_LOG_ENABLED=true`. It defaults to
-   `false` and is evaluated before request-header inspection or any database
-   lookup.
+1. The `experimental:aevatar-chat-wire-log` feature flag must be enabled for
+   the calling user. It defaults to **off** in the code registry and is
+   toggled at runtime — platform-wide, for a staff-selected org cohort, or per
+   user — through the platform-admin feature-flag API
+   (`PUT /api/v1/admin/feature-flags/{flag_key}`). No redeploy or restart is
+   involved: the next request resolves the new value. Assistant chat is a
+   personal surface, so resolution uses the same grant-union chain as
+   `/users/me` (`personal user override ?? (global ?? default) || any org
+   grant`).
 2. The authenticated caller must enable the per-browser **Capture** switch,
    which causes the frontend to send `X-NyxID-Debug-Upstream: 1`.
 
+The backend evaluates these in the **opposite** order to the list above, and
+that ordering is deliberate. The request-header check is a free in-memory
+lookup; resolving the flag costs a MongoDB read. Normal chat traffic never
+sends the header, so the header is checked first and that traffic performs
+zero additional database work. A flag-resolution failure fails **closed**: no
+echo is emitted.
+
 The feature flag is the sole authorization gate for the diagnostic and does
-not require a platform-admin role. The backend echo is constructed only from
-the assistant request currently being handled, so a caller can capture their
-own exchange but can never observe another caller's traffic.
+not require a platform-admin role — a platform admin decides *who* gets it,
+but an enabled non-admin caller uses it exactly like anyone else. The backend
+echo is constructed only from the assistant request currently being handled,
+so a caller can capture their own exchange but can never observe another
+caller's traffic.
+
+Raw captures and replay placeholder JSON bypass the chat renderer's credential
+redaction and may contain sensitive upstream payloads verbatim. Leave the flag
+off for any user or environment where browser retention of unredacted raw
+payloads is unacceptable.
 
 On handler paths that return a final `Response` through the assistant echo
 attachment path, NyxID sends a Base64-encoded UTF-8 JSON value in
@@ -85,10 +105,12 @@ an attempted request whose proxy call subsequently failed.
 
 Compatibility is one-directional by design:
 
-- **New frontend + backend without the public feature-flag field** — the field
-  is treated as disabled and the panel stays hidden. This is fail-closed and
-  self-heals once the browser reaches a backend that advertises the enabled
-  flag in `/public/config`.
+- **New frontend + backend that does not know the flag key** — the key is
+  absent from `capabilities.enabled_features` on `/users/me`, so the panel
+  treats it as disabled and stays hidden. This is fail-closed and self-heals
+  once the browser reaches a backend whose registry carries the flag. The
+  frontend re-reads `/users/me` on its existing one-minute interval, so a
+  runtime toggle reaches the panel without a hard reload.
 - **New frontend + flag-aware backend with the old echo payload** — supported.
   The decoder accepts the legacy bare array and normalises it, leaving
   `upstreamOutcome` and `response` absent.
@@ -233,13 +255,13 @@ is explicitly marked "Not replayed." No live controls, queries, navigation, or
 assistant-store writes are mounted by replay.
 
 Raw captures and placeholder JSON may contain sensitive upstream payloads
-verbatim. They bypass the chat renderer's credential redaction. When the
-operator flag is enabled, any authenticated assistant caller can capture their
-own exchanges; no caller can observe another user's traffic. Raw captures are
-session-only, excluded from persistence, telemetry, audit logs, and crash
-reports, and leave the browser only through an explicit copy action. Keep the
-operator flag off in environments where browser retention of unredacted raw
-payloads is unacceptable.
+verbatim. They bypass the chat renderer's credential redaction. Where the
+feature flag is enabled, any authenticated assistant caller — admin or not —
+can capture their own exchanges; no caller can observe another user's traffic.
+Raw captures are session-only, excluded from persistence, telemetry, audit
+logs, and crash reports, and leave the browser only through an explicit copy
+action. Leave the flag off for any user or environment where browser retention
+of unredacted raw payloads is unacceptable.
 
 ## Deliberate Non-Goals
 

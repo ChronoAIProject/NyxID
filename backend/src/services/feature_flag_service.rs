@@ -87,8 +87,20 @@ const BILLING_FLAG_TEST: FeatureFlagDef = FeatureFlagDef {
     default_enabled: true,
 };
 
+/// Operator gate for the Aevatar chat wire-log diagnostic. Off by default and
+/// toggled at runtime (platform-global, org cohort, or per user) so enabling a
+/// browser-side capture of raw assistant payloads never needs a redeploy.
+pub const AEVATAR_CHAT_WIRE_LOG_FLAG_KEY: &str = "experimental:aevatar-chat-wire-log";
+
+const AEVATAR_CHAT_WIRE_LOG_FLAG: FeatureFlagDef = FeatureFlagDef {
+    key: AEVATAR_CHAT_WIRE_LOG_FLAG_KEY,
+    description: "Exposes the Aevatar chat wire-log diagnostic (per-browser capture).",
+    default_enabled: false,
+};
+
 #[cfg(not(test))]
-pub const FEATURE_FLAGS: &[FeatureFlagDef] = &[AI_ASSISTANT_FLAG, BILLING_FLAG];
+pub const FEATURE_FLAGS: &[FeatureFlagDef] =
+    &[AI_ASSISTANT_FLAG, BILLING_FLAG, AEVATAR_CHAT_WIRE_LOG_FLAG];
 
 /// Test builds carry a placeholder flag so the resolution / override pipeline
 /// can exercise multiple definitions alongside the production registry entry.
@@ -96,6 +108,7 @@ pub const FEATURE_FLAGS: &[FeatureFlagDef] = &[AI_ASSISTANT_FLAG, BILLING_FLAG];
 pub const FEATURE_FLAGS: &[FeatureFlagDef] = &[
     AI_ASSISTANT_FLAG,
     BILLING_FLAG_TEST,
+    AEVATAR_CHAT_WIRE_LOG_FLAG,
     FeatureFlagDef {
         key: "example_ui",
         description: "Test-only placeholder flag.",
@@ -382,6 +395,26 @@ pub async fn billing_rollout_enabled(
         resolve_from_overrides(&global, &org, actor_user_id, OrgRole::Member)
     };
     Ok(enabled.iter().any(|key| key == BILLING_FLAG_KEY))
+}
+
+/// Whether the Aevatar chat wire-log diagnostic is enabled for the acting user.
+///
+/// Assistant chat is a **personal** surface, so this resolves through the same
+/// grant-union chain as `/users/me`: a platform-global rollout, a grant from
+/// any org the user belongs to, or a personal per-user override all light it
+/// up, and a personal per-user override is the final allow/deny.
+///
+/// Callers gate a diagnostic that exposes raw upstream payloads to the
+/// browser, so a resolution error must be treated as disabled — never as
+/// enabled.
+pub async fn aevatar_chat_wire_log_enabled(
+    db: &mongodb::Database,
+    user_id: &str,
+) -> AppResult<bool> {
+    Ok(resolve_personal_features(db, user_id)
+        .await?
+        .iter()
+        .any(|key| key == AEVATAR_CHAT_WIRE_LOG_FLAG_KEY))
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -1080,6 +1113,38 @@ mod tests {
         assert!(find_flag("does-not-exist").is_none());
         assert!(find_flag("experimental:ai-assistant").is_some());
         assert!(find_flag("example_ui").is_some());
+    }
+
+    /// Registry keys are a wire contract with `frontend/src/lib/feature-flags.ts`
+    /// (`FEATURE_FLAG`). A key that drifts on one side silently disables the
+    /// surface it gates instead of failing, so the literals are pinned on both
+    /// sides and a rename must be a deliberate two-sided edit.
+    #[test]
+    fn shipped_registry_key_literals_are_pinned() {
+        let shipped: Vec<&str> = FEATURE_FLAGS
+            .iter()
+            .map(|def| def.key)
+            // Test-only placeholder; it has no frontend counterpart.
+            .filter(|key| *key != "example_ui")
+            .collect();
+        assert_eq!(
+            shipped,
+            vec![
+                "experimental:ai-assistant",
+                "experimental:billing",
+                "experimental:aevatar-chat-wire-log",
+            ]
+        );
+        assert_eq!(
+            AEVATAR_CHAT_WIRE_LOG_FLAG_KEY,
+            "experimental:aevatar-chat-wire-log"
+        );
+        assert!(
+            !find_flag(AEVATAR_CHAT_WIRE_LOG_FLAG_KEY)
+                .expect("wire-log flag is registered")
+                .default_enabled,
+            "the wire-log diagnostic must default to off"
+        );
     }
 
     #[tokio::test]
