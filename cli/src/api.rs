@@ -35,11 +35,55 @@ pub struct AuthDevicePollResponse {
     pub expires_in: u64,
 }
 
-#[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
 pub struct ErrorEnvelope {
     pub error: String,
     pub error_code: i64,
     pub message: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub details: Option<serde_json::Value>,
+}
+
+#[derive(Debug, thiserror::Error)]
+#[error("{request} failed (HTTP {status}): {body}")]
+pub struct ApiError {
+    request: String,
+    status: reqwest::StatusCode,
+    body: String,
+    response: Option<ErrorEnvelope>,
+    body_json: Option<serde_json::Value>,
+}
+
+impl ApiError {
+    pub(crate) fn new(
+        request: impl Into<String>,
+        status: reqwest::StatusCode,
+        body: String,
+    ) -> Self {
+        let body_json = serde_json::from_str::<serde_json::Value>(&body).ok();
+        let response = body_json
+            .as_ref()
+            .and_then(|value| serde_json::from_value(value.clone()).ok());
+        Self {
+            request: request.into(),
+            status,
+            body,
+            response,
+            body_json,
+        }
+    }
+
+    pub fn status(&self) -> reqwest::StatusCode {
+        self.status
+    }
+
+    pub fn response(&self) -> Option<&ErrorEnvelope> {
+        self.response.as_ref()
+    }
+
+    pub fn body_json(&self) -> Option<&serde_json::Value> {
+        self.body_json.as_ref()
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -468,7 +512,7 @@ impl ApiClient {
             }
             let status = resp.status();
             let body = resp.text().await.unwrap_or_default();
-            bail!("DELETE {path} failed (HTTP {status}): {body}");
+            return Err(ApiError::new(format!("DELETE {path}"), status, body).into());
         }
 
         if resp.status().is_success() {
@@ -476,7 +520,7 @@ impl ApiClient {
         } else {
             let status = resp.status();
             let body = resp.text().await.unwrap_or_default();
-            bail!("DELETE {path} failed (HTTP {status}): {body}");
+            Err(ApiError::new(format!("DELETE {path}"), status, body).into())
         }
     }
 
@@ -530,7 +574,7 @@ impl ApiClient {
             }
             let status = resp.status();
             let body = resp.text().await.unwrap_or_default();
-            bail!("POST {path} failed (HTTP {status}): {body}");
+            return Err(ApiError::new(format!("POST {path}"), status, body).into());
         }
 
         if resp.status().is_success() {
@@ -538,7 +582,7 @@ impl ApiClient {
         } else {
             let status = resp.status();
             let body = resp.text().await.unwrap_or_default();
-            bail!("POST {path} failed (HTTP {status}): {body}");
+            Err(ApiError::new(format!("POST {path}"), status, body).into())
         }
     }
 
@@ -639,7 +683,7 @@ impl ApiClient {
         } else {
             let status = resp.status();
             let body = resp.text().await.unwrap_or_default();
-            bail!("{path} failed (HTTP {status}): {body}");
+            Err(ApiError::new(path, status, body).into())
         }
     }
 }
@@ -669,7 +713,7 @@ pub async fn anonymous_post(
     } else {
         let status = resp.status();
         let body = resp.text().await.unwrap_or_default();
-        bail!("{path} failed (HTTP {status}): {body}");
+        Err(ApiError::new(path, status, body).into())
     }
 }
 
@@ -696,7 +740,7 @@ pub async fn anonymous_post_empty(
     } else {
         let status = resp.status();
         let body = resp.text().await.unwrap_or_default();
-        bail!("{path} failed (HTTP {status}): {body}");
+        Err(ApiError::new(path, status, body).into())
     }
 }
 
@@ -712,7 +756,7 @@ mod tests {
     use wiremock::matchers::{header, method, path};
     use wiremock::{Mock, MockServer, ResponseTemplate};
 
-    use super::ApiClient;
+    use super::{ApiClient, ApiError};
     use crate::cli::{AuthArgs, OutputFormat};
 
     fn env_lock() -> &'static Mutex<()> {
@@ -792,6 +836,48 @@ mod tests {
             profile: None,
             output: OutputFormat::Json,
         }
+    }
+
+    #[tokio::test]
+    async fn non_success_response_preserves_typed_error_details() {
+        let server = MockServer::start().await;
+        let body = serde_json::json!({
+            "error": "grant_cascade_confirmation_required",
+            "error_code": 11500,
+            "message": "Grant cascade confirmation required",
+            "details": {
+                "provider_name": "GitHub",
+                "siblings": [{ "name": "GitHub Issues" }],
+                "unaffected_other_app": [],
+                "token_scope_available": true
+            }
+        });
+        Mock::given(method("DELETE"))
+            .and(path("/api/v1/keys/service-1"))
+            .respond_with(ResponseTemplate::new(409).set_body_json(&body))
+            .mount(&server)
+            .await;
+
+        let mut api = ApiClient::new(&server.uri(), "test-token".to_string()).unwrap();
+        let error = api
+            .delete_empty("/keys/service-1")
+            .await
+            .expect_err("409 should be an error");
+        let api_error = error.downcast_ref::<ApiError>().expect("typed API error");
+
+        assert_eq!(api_error.status(), reqwest::StatusCode::CONFLICT);
+        assert_eq!(
+            api_error.response().map(|response| response.error_code),
+            Some(11500)
+        );
+        assert_eq!(
+            api_error
+                .response()
+                .and_then(|response| response.details.as_ref())
+                .and_then(|details| details["provider_name"].as_str()),
+            Some("GitHub")
+        );
+        assert_eq!(api_error.body_json(), Some(&body));
     }
 
     async fn assert_override_is_fail_closed(auth: &AuthArgs, expected_token: &str) {

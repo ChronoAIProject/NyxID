@@ -1928,6 +1928,7 @@ mod tests {
             error: "contract_error".to_string(),
             error_code: code,
             message: format!("message for {code}"),
+            details: None,
         })
     }
 
