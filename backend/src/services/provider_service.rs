@@ -521,7 +521,7 @@ pub async fn seed_default_providers(
             created_at: now,
             updated_at: now,
         };
-        validate_seeded_provider_revocation(&provider).await?;
+        validate_seeded_provider_revocation(&provider)?;
         collection.insert_one(&provider).await?;
         tracing::info!(slug = "twitter", "Seeded default provider: Twitter / X");
         seeded_count += 1;
@@ -646,7 +646,7 @@ pub async fn seed_default_providers(
             created_at: now,
             updated_at: now,
         };
-        validate_seeded_provider_revocation(&provider).await?;
+        validate_seeded_provider_revocation(&provider)?;
         collection.insert_one(&provider).await?;
         tracing::info!(slug = "google", "Seeded default provider: Google");
         seeded_count += 1;
@@ -696,7 +696,7 @@ pub async fn seed_default_providers(
             created_at: now,
             updated_at: now,
         };
-        validate_seeded_provider_revocation(&provider).await?;
+        validate_seeded_provider_revocation(&provider)?;
         collection.insert_one(&provider).await?;
         tracing::info!(slug = "github", "Seeded default provider: GitHub");
         seeded_count += 1;
@@ -799,7 +799,7 @@ pub async fn seed_default_providers(
             created_at: now,
             updated_at: now,
         };
-        validate_seeded_provider_revocation(&provider).await?;
+        validate_seeded_provider_revocation(&provider)?;
         collection.insert_one(&provider).await?;
         tracing::info!(slug = "facebook", "Seeded default provider: Facebook");
         seeded_count += 1;
@@ -848,7 +848,7 @@ pub async fn seed_default_providers(
             created_at: now,
             updated_at: now,
         };
-        validate_seeded_provider_revocation(&provider).await?;
+        validate_seeded_provider_revocation(&provider)?;
         collection.insert_one(&provider).await?;
         tracing::info!(slug = "discord", "Seeded default provider: Discord");
         seeded_count += 1;
@@ -949,7 +949,7 @@ pub async fn seed_default_providers(
             created_at: now,
             updated_at: now,
         };
-        validate_seeded_provider_revocation(&provider).await?;
+        validate_seeded_provider_revocation(&provider)?;
         collection.insert_one(&provider).await?;
         tracing::info!(slug = "linkedin", "Seeded default provider: LinkedIn");
         seeded_count += 1;
@@ -999,7 +999,7 @@ pub async fn seed_default_providers(
             created_at: now,
             updated_at: now,
         };
-        validate_seeded_provider_revocation(&provider).await?;
+        validate_seeded_provider_revocation(&provider)?;
         collection.insert_one(&provider).await?;
         tracing::info!(slug = "slack", "Seeded default provider: Slack");
         seeded_count += 1;
@@ -1100,7 +1100,7 @@ pub async fn seed_default_providers(
             created_at: now,
             updated_at: now,
         };
-        validate_seeded_provider_revocation(&provider).await?;
+        validate_seeded_provider_revocation(&provider)?;
         collection.insert_one(&provider).await?;
         tracing::info!(slug = "tiktok", "Seeded default provider: TikTok");
         seeded_count += 1;
@@ -1147,7 +1147,7 @@ pub async fn seed_default_providers(
             created_at: now,
             updated_at: now,
         };
-        validate_seeded_provider_revocation(&provider).await?;
+        validate_seeded_provider_revocation(&provider)?;
         collection.insert_one(&provider).await?;
         tracing::info!(slug = "twitch", "Seeded default provider: Twitch");
         seeded_count += 1;
@@ -1197,7 +1197,7 @@ pub async fn seed_default_providers(
             created_at: now,
             updated_at: now,
         };
-        validate_seeded_provider_revocation(&provider).await?;
+        validate_seeded_provider_revocation(&provider)?;
         collection.insert_one(&provider).await?;
         tracing::info!(slug = "reddit", "Seeded default provider: Reddit");
         seeded_count += 1;
@@ -1878,7 +1878,7 @@ pub async fn seed_default_providers(
             created_at: now,
             updated_at: now,
         };
-        validate_seeded_provider_revocation(&provider).await?;
+        validate_seeded_provider_revocation(&provider)?;
         collection.insert_one(&provider).await?;
         tracing::info!(
             slug = "google-cloud",
@@ -2027,7 +2027,10 @@ const REVOCATION_SEED_UPGRADES: &[RevocationSeedUpgrade] = &[
     },
 ];
 
-pub async fn validate_revocation_url(url: &str) -> AppResult<()> {
+/// Deterministic validation shared by trusted seeds and admin input. Keep DNS
+/// resolution out of this helper: startup seed/backfill paths call it offline,
+/// while admin writes separately call `validate_public_http_url` below.
+fn validate_revocation_url_shape(url: &str) -> AppResult<()> {
     let parsed = url::Url::parse(url)
         .map_err(|_| AppError::ValidationError("revocation.url must be a valid URL".to_string()))?;
     if parsed.scheme() != "https" {
@@ -2040,6 +2043,11 @@ pub async fn validate_revocation_url(url: &str) -> AppResult<()> {
             "revocation.url must not include userinfo".to_string(),
         ));
     }
+    Ok(())
+}
+
+pub async fn validate_revocation_url(url: &str) -> AppResult<()> {
+    validate_revocation_url_shape(url)?;
     crate::services::url_validation::validate_public_http_url(url, "revocation.url").await
 }
 
@@ -2069,9 +2077,9 @@ pub async fn validate_revocation_config(
     validate_revocation_url(&revocation.url).await
 }
 
-async fn validate_seeded_provider_revocation(provider: &ProviderConfig) -> AppResult<()> {
+fn validate_seeded_provider_revocation(provider: &ProviderConfig) -> AppResult<()> {
     if let Some(revocation) = provider.revocation.as_ref() {
-        validate_revocation_url(&revocation.url).await?;
+        validate_revocation_url_shape(&revocation.url)?;
     }
     Ok(())
 }
@@ -2121,7 +2129,7 @@ async fn backfill_provider_revocation(
         if collection.find_one(filter.clone()).await?.is_none() {
             continue;
         }
-        validate_revocation_url(upgrade.url).await?;
+        validate_revocation_url_shape(upgrade.url)?;
         let mut set = doc! {
             "revocation": {
                 "style": upgrade.style,
@@ -7136,6 +7144,20 @@ mod tests {
                 .expect_err("invalid revocation input must be rejected");
             assert!(matches!(err, AppError::ValidationError(_)));
         }
+    }
+
+    #[test]
+    fn trusted_seed_revocation_validation_does_not_require_dns() {
+        let mut provider = make_test_provider("offline-revocation-seed", "oauth2");
+        provider.revocation = Some(RevocationConfig {
+            style: "rfc7009".to_string(),
+            url: "https://does-not-resolve.invalid/revoke".to_string(),
+            auth: "none".to_string(),
+            revokes_grant: false,
+        });
+
+        super::validate_seeded_provider_revocation(&provider)
+            .expect("trusted seed validation must be independent of DNS");
     }
 
     // ── create_provider with device_code config ────────────────────
