@@ -26,6 +26,11 @@ interface ScopedProviderMutationInput extends ProviderTokenScopeOptions {
   readonly providerId: string;
 }
 
+export interface DisconnectProviderInput extends ScopedProviderMutationInput {
+  readonly cascadeGrant?: boolean;
+  readonly grantScope?: "token";
+}
+
 function providerTokenQueryKey(targetOrgId: string | null | undefined) {
   return ["provider-tokens", targetOrgId ?? "personal"] as const;
 }
@@ -145,8 +150,7 @@ export function useInitiateOAuth() {
             readonly keyId?: string;
           },
     ): Promise<OAuthInitiateResponse> => {
-      const params =
-        typeof input === "string" ? { providerId: input } : input;
+      const params = typeof input === "string" ? { providerId: input } : input;
       const query = new URLSearchParams();
       if (params.redirectPath) {
         query.set("redirect_path", params.redirectPath);
@@ -157,7 +161,10 @@ export function useInitiateOAuth() {
       // own minimum.
       if (params.scopeOverride !== undefined) {
         query.set("scope_override", params.scopeOverride.join(","));
-      } else if (params.additionalScopes && params.additionalScopes.length > 0) {
+      } else if (
+        params.additionalScopes &&
+        params.additionalScopes.length > 0
+      ) {
         query.set("scope", params.additionalScopes.join(","));
       }
       if (params.targetOrgId) {
@@ -191,12 +198,14 @@ export function useInitiateDeviceCode() {
             readonly keyId?: string;
           },
     ): Promise<DeviceCodeInitiateResponse> => {
-      const params =
-        typeof input === "string" ? { providerId: input } : input;
+      const params = typeof input === "string" ? { providerId: input } : input;
       const query = new URLSearchParams();
       if (params.scopeOverride !== undefined) {
         query.set("scope_override", params.scopeOverride.join(","));
-      } else if (params.additionalScopes && params.additionalScopes.length > 0) {
+      } else if (
+        params.additionalScopes &&
+        params.additionalScopes.length > 0
+      ) {
         query.set("scope", params.additionalScopes.join(","));
       }
       if (params.targetOrgId) {
@@ -252,9 +261,16 @@ export function useDisconnectProvider() {
     mutationFn: async ({
       providerId,
       targetOrgId,
-    }: ScopedProviderMutationInput): Promise<ProviderActionResponse> => {
+      cascadeGrant,
+      grantScope,
+    }: DisconnectProviderInput): Promise<ProviderActionResponse> => {
+      const query = new URLSearchParams();
+      if (targetOrgId) query.set("target_org_id", targetOrgId);
+      if (cascadeGrant) query.set("cascade_grant", "true");
+      if (grantScope) query.set("grant_scope", grantScope);
+      const suffix = query.size > 0 ? `?${query.toString()}` : "";
       return api.delete<ProviderActionResponse>(
-        `/providers/${providerId}/disconnect${targetOrgSuffix(targetOrgId)}`,
+        `/providers/${providerId}/disconnect${suffix}`,
       );
     },
     onSuccess: (_data, variables) => {

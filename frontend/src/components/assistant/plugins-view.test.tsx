@@ -1,12 +1,14 @@
-import { render, screen, within } from "@testing-library/react";
+import { act, render, screen, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import type { ReactNode } from "react";
 import type { CatalogEntry, KeyInfo } from "@/types/keys";
 import { resetSkillCatalog } from "@/lib/assistant/skills";
+import { ApiError } from "@/lib/api-client";
 
 const mocks = vi.hoisted(() => ({
   useCatalog: vi.fn(),
+  useCatalogEntry: vi.fn(),
   useKeys: vi.fn(),
   useKey: vi.fn(),
   useUpdateKey: vi.fn(),
@@ -33,6 +35,7 @@ vi.mock("@/components/dashboard/add-key-dialog", () => ({
 
 vi.mock("@/hooks/use-keys", () => ({
   useCatalog: mocks.useCatalog,
+  useCatalogEntry: mocks.useCatalogEntry,
   useKeys: mocks.useKeys,
   useKey: mocks.useKey,
   useUpdateKey: mocks.useUpdateKey,
@@ -164,6 +167,9 @@ describe("PluginsView", () => {
       },
       isLoading: false,
     });
+    mocks.useCatalogEntry.mockReturnValue({
+      data: catalog.find((entry) => entry.slug === "openai"),
+    });
     mocks.useUpdateKey.mockReturnValue({ mutate: vi.fn(), isPending: false });
     mocks.useDeleteKey.mockReturnValue({ mutate: vi.fn(), isPending: false });
     mocks.useUpdateExternalApiKey.mockReturnValue({
@@ -268,6 +274,71 @@ describe("PluginsView", () => {
       .at(-1) as HTMLElement;
     await user.click(confirm);
     expect(mutate).toHaveBeenCalledWith("key-1", expect.anything());
+  });
+
+  it("surfaces a 11500 payload and retries the assistant delete with token scope", async () => {
+    const mutate = vi.fn();
+    mocks.useDeleteKey.mockReturnValue({ mutate, isPending: false });
+    mocks.useCatalogEntry.mockReturnValue({
+      data: {
+        ...catalog[0],
+        revocation: { revokes_grant: true },
+      },
+    });
+    mocks.useKey.mockReturnValue({
+      data: {
+        ...keys[0],
+        catalog_service_slug: "github",
+        catalog_service_name: "GitHub",
+        status: "active",
+        is_active: true,
+        last_used_at: null,
+        granted_scopes: null,
+        revocation: { revokes_grant: true },
+      },
+      isLoading: false,
+    });
+
+    const user = userEvent.setup();
+    render(<PluginsView />);
+    await user.click(screen.getByRole("button", { name: "Manage OpenAI" }));
+    await user.click(await screen.findByRole("button", { name: "Revoke" }));
+    const confirm = screen
+      .getAllByRole("button", { name: "Revoke" })
+      .at(-1) as HTMLElement;
+    await user.click(confirm);
+
+    act(() => {
+      mutate.mock.calls[0]![1].onError(
+        new ApiError(409, {
+          error: "grant_cascade_confirmation_required",
+          error_code: 11500,
+          message: "Confirmation required",
+          details: {
+            provider_slug: "github",
+            provider_name: "GitHub",
+            revokes_grant: true,
+            siblings: [
+              {
+                user_service_id: "service-2",
+                name: "GitHub Issues",
+                slug: "github-issues",
+              },
+            ],
+            unaffected_other_app: [],
+            token_scope_available: true,
+          },
+        }),
+      );
+    });
+
+    await user.click(
+      await screen.findByRole("button", { name: "Remove only this service" }),
+    );
+    expect(mutate.mock.calls[1]![0]).toEqual({
+      keyId: "key-1",
+      grantScope: "token",
+    });
   });
 
   it("hides mutation controls for an auto-connected (platform-managed) key", async () => {
@@ -386,11 +457,11 @@ describe("PluginsView", () => {
     mockLoaded({ keyRows: [] });
     render(<PluginsView />);
     expect(screen.getByText("Added")).toBeInTheDocument();
-    expect(
-      screen.getByText(/No connected services yet/),
-    ).toBeInTheDocument();
+    expect(screen.getByText(/No connected services yet/)).toBeInTheDocument();
     // All catalog entries are available when nothing is connected.
-    expect(screen.getAllByRole("button", { name: /^Connect / })).toHaveLength(3);
+    expect(screen.getAllByRole("button", { name: /^Connect / })).toHaveLength(
+      3,
+    );
   });
 
   it("filters the catalog by search", async () => {

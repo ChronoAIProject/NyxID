@@ -12,6 +12,7 @@ use crate::errors::{AppError, AppResult};
 use crate::models::downstream_service::{
     COLLECTION_NAME as DOWNSTREAM_SERVICES, DownstreamService,
 };
+use crate::models::provider_config::{COLLECTION_NAME as PROVIDER_CONFIGS, ProviderConfig};
 use crate::models::ssh_auth_mode::SshAuthMode;
 use crate::models::user_api_key::UserApiKey;
 use crate::models::user_endpoint::{COLLECTION_NAME as USER_ENDPOINTS, UserEndpoint};
@@ -407,6 +408,8 @@ pub struct KeyResponse {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub catalog_service_name: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub revocation: Option<KeyRevocationResponse>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub node_id: Option<String>,
     pub node_priority: i32,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -526,6 +529,11 @@ pub struct KeyResponse {
     /// can render the list of scopes that will be granted.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub permission_setup_scopes: Option<Vec<String>>,
+}
+
+#[derive(Debug, Serialize, ToSchema)]
+pub struct KeyRevocationResponse {
+    pub revokes_grant: bool,
 }
 
 #[derive(Debug, Serialize, ToSchema)]
@@ -2146,6 +2154,7 @@ fn key_response_from_result(result: &unified_key_service::CreateKeyResult) -> Ke
         catalog_service_id: result.service.catalog_service_id.clone(),
         catalog_service_slug: None,
         catalog_service_name: None,
+        revocation: None,
         node_id: result.service.node_id.clone(),
         node_priority: result.service.node_priority,
         node_status: None,
@@ -2259,6 +2268,7 @@ fn key_response_from_view(view: unified_key_service::KeyView) -> KeyResponse {
         catalog_service_id: view.catalog_service_id,
         catalog_service_slug: view.catalog_service_slug,
         catalog_service_name: view.catalog_service_name,
+        revocation: None,
         node_id: view.node_id,
         node_priority: view.node_priority,
         node_status: None,
@@ -2435,6 +2445,24 @@ async fn enrich_key_discovery_metadata(
         .map(|service| (service.id.as_str(), service))
         .collect();
 
+    let provider_ids: Vec<&str> = catalog_services
+        .iter()
+        .filter_map(|service| service.provider_config_id.as_deref())
+        .collect();
+    let providers: Vec<ProviderConfig> = if provider_ids.is_empty() {
+        vec![]
+    } else {
+        db.collection::<ProviderConfig>(PROVIDER_CONFIGS)
+            .find(doc! { "_id": { "$in": &provider_ids } })
+            .await?
+            .try_collect()
+            .await?
+    };
+    let provider_by_id: std::collections::HashMap<&str, &ProviderConfig> = providers
+        .iter()
+        .map(|provider| (provider.id.as_str(), provider))
+        .collect();
+
     let key_ids: Vec<&str> = keys.iter().map(|key| key.id.as_str()).collect();
     let services: Vec<UserService> = if key_ids.is_empty() {
         vec![]
@@ -2491,6 +2519,17 @@ async fn enrich_key_discovery_metadata(
                     proxy_discovery_service::project_custom_key(service, endpoint, base_url)
                 })
         };
+
+        key.revocation = key
+            .catalog_service_id
+            .as_deref()
+            .and_then(|catalog_id| catalog_by_id.get(catalog_id))
+            .and_then(|catalog| catalog.provider_config_id.as_deref())
+            .and_then(|provider_id| provider_by_id.get(provider_id))
+            .and_then(|provider| crate::services::oauth_revocation::effective_revocation(provider))
+            .map(|config| KeyRevocationResponse {
+                revokes_grant: config.revokes_grant,
+            });
 
         if let Some(projection) = projection {
             key.name = projection.name;
@@ -4005,12 +4044,33 @@ mod tests {
         catalog.openapi_spec_url = Some("https://example.com/catalog-openapi.json".to_string());
         catalog.asyncapi_spec_url = Some("https://example.com/catalog-asyncapi.json".to_string());
         catalog.streaming_supported = true;
+        let provider_id = uuid::Uuid::new_v4().to_string();
+        catalog.provider_config_id = Some(provider_id.clone());
         catalog.capabilities = Some(crate::models::downstream_service::ServiceCapabilities {
             supports_websocket: true,
             ..Default::default()
         });
         db.collection::<DownstreamService>(DOWNSTREAM_SERVICES)
             .insert_one(catalog)
+            .await
+            .unwrap();
+        db.collection::<mongodb::bson::Document>(crate::models::provider_config::COLLECTION_NAME)
+            .insert_one(doc! {
+                "_id": &provider_id,
+                "slug": "catalog-oauth",
+                "name": "Catalog OAuth",
+                "provider_type": "oauth2",
+                "is_active": true,
+                "created_by": "test",
+                "created_at": mongodb::bson::DateTime::now(),
+                "updated_at": mongodb::bson::DateTime::now(),
+                "revocation": {
+                    "style": "vendor_delete",
+                    "url": "https://oauth.example.com/grant",
+                    "auth": "bearer",
+                    "revokes_grant": true,
+                },
+            })
             .await
             .unwrap();
 
@@ -4120,6 +4180,12 @@ mod tests {
         );
         assert!(catalog_key.streaming_supported);
         assert!(catalog_key.websocket_supported);
+        assert!(
+            catalog_key
+                .revocation
+                .as_ref()
+                .is_some_and(|revocation| revocation.revokes_grant)
+        );
 
         let custom_key = response
             .keys
@@ -4132,6 +4198,7 @@ mod tests {
         assert!(custom_key.connected);
         assert!(!custom_key.requires_connection);
         assert!(!custom_key.has_node_binding);
+        assert!(custom_key.revocation.is_none());
         assert_eq!(custom_key.source, "custom");
         assert_eq!(
             custom_key.proxy_url,

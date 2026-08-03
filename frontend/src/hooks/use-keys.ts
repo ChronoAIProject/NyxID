@@ -139,7 +139,8 @@ export function useExternalApiKeys() {
   return useQuery({
     queryKey: ["external-api-keys"],
     queryFn: async (): Promise<readonly ExternalApiKeyInfo[]> => {
-      const res = await api.get<ExternalApiKeyListResponse>("/api-keys/external");
+      const res =
+        await api.get<ExternalApiKeyListResponse>("/api-keys/external");
       return res.api_keys;
     },
   });
@@ -191,14 +192,33 @@ export function useDeleteKey() {
   const queryClient = useQueryClient();
 
   return useMutation({
-    mutationFn: async (keyId: string): Promise<void> => {
-      return api.delete<void>(`/keys/${keyId}`);
+    mutationFn: async (
+      input: string | DeleteKeyInput,
+    ): Promise<DeleteKeyResponse> => {
+      const params = typeof input === "string" ? { keyId: input } : input;
+      const query = new URLSearchParams();
+      if (params.cascadeGrant) query.set("cascade_grant", "true");
+      if (params.grantScope) query.set("grant_scope", params.grantScope);
+      const suffix = query.size > 0 ? `?${query.toString()}` : "";
+      return api.delete<DeleteKeyResponse>(`/keys/${params.keyId}${suffix}`);
     },
     onSuccess: () => {
       void queryClient.invalidateQueries({ queryKey: ["keys"] });
       void queryClient.invalidateQueries({ queryKey: ["llm-status"] });
     },
   });
+}
+
+export interface DeleteKeyInput {
+  readonly keyId: string;
+  readonly cascadeGrant?: boolean;
+  readonly grantScope?: "token";
+}
+
+export interface DeleteKeyResponse {
+  readonly message: string;
+  readonly deleted: boolean;
+  readonly upstream_revoked: boolean;
 }
 
 interface UpdateKeyParams {
@@ -218,9 +238,7 @@ interface UpdateKeyParams {
    *   `null` clears,
    *   array replaces.
    */
-  readonly default_request_headers?:
-    | null
-    | readonly DefaultRequestHeader[];
+  readonly default_request_headers?: null | readonly DefaultRequestHeader[];
 }
 
 export function useUpdateKey() {
@@ -284,9 +302,7 @@ interface UpdateUserServiceParams {
    *   `null` clears,
    *   array replaces.
    */
-  readonly default_request_headers?:
-    | null
-    | readonly DefaultRequestHeader[];
+  readonly default_request_headers?: null | readonly DefaultRequestHeader[];
   readonly ws_frame_injections?: readonly WsFrameInjection[];
 }
 

@@ -8,6 +8,7 @@ import {
   useDisconnectProvider,
   useRefreshProviderToken,
   useMyProviderCredentials,
+  type DisconnectProviderInput,
 } from "@/hooks/use-providers";
 import { useLlmStatus } from "@/hooks/use-llm-gateway";
 import { useOrgs } from "@/hooks/use-orgs";
@@ -28,6 +29,21 @@ import { DishAntennaIcon } from "@/components/icons/empty-state";
 import { toast } from "sonner";
 import { ApiError } from "@/lib/api-client";
 import { hardRedirect } from "@/lib/navigation";
+import { GrantCascadeDialog } from "@/components/shared/grant-cascade-dialog";
+import { grantRevocationDescription } from "@/schemas/oauth-revocation";
+import {
+  parseGrantCascadeDetails,
+  type GrantCascadeDetails,
+} from "@/schemas/oauth-revocation";
+import { Button } from "@/components/ui/button";
+import {
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogFooter,
+  DialogHeader,
+  DialogTitle,
+} from "@/components/ui/dialog";
 
 export function ProviderGrid() {
   const [targetOrgId, setTargetOrgId] = useState<string | null>(null);
@@ -45,10 +61,15 @@ export function ProviderGrid() {
   const [apiKeyDialog, setApiKeyDialog] = useState<ProviderConfig | null>(null);
   const [deviceCodeDialog, setDeviceCodeDialog] =
     useState<ProviderConfig | null>(null);
-  const [telegramDialog, setTelegramDialog] =
-    useState<ProviderConfig | null>(null);
+  const [telegramDialog, setTelegramDialog] = useState<ProviderConfig | null>(
+    null,
+  );
   const [credentialsDialog, setCredentialsDialog] =
     useState<ProviderConfig | null>(null);
+  const [disconnectDialog, setDisconnectDialog] =
+    useState<ProviderConfig | null>(null);
+  const [cascadeDetails, setCascadeDetails] =
+    useState<GrantCascadeDetails | null>(null);
   // Track which provider is currently being acted upon for per-card disabled state
   const [activeProviderId, setActiveProviderId] = useState<string | null>(null);
 
@@ -117,13 +138,34 @@ export function ProviderGrid() {
     }
   }
 
-  async function handleDisconnect(providerId: string) {
+  async function handleDisconnect(
+    providerId: string,
+    options: Pick<DisconnectProviderInput, "cascadeGrant" | "grantScope"> = {},
+  ) {
     const provider = providers?.find((p) => p.id === providerId);
     setActiveProviderId(providerId);
     try {
-      await disconnectMutation.mutateAsync({ providerId, targetOrgId });
-      toast.success(`Disconnected from ${provider?.name ?? "provider"}`);
+      const response = await disconnectMutation.mutateAsync({
+        providerId,
+        targetOrgId,
+        ...options,
+      });
+      toast.success(
+        response?.upstream_revoked === false
+          ? "Removed from NyxID. Upstream access remains active."
+          : `Disconnected from ${provider?.name ?? "provider"}`,
+      );
+      setDisconnectDialog(null);
+      setCascadeDetails(null);
     } catch (error) {
+      const details =
+        error instanceof ApiError
+          ? parseGrantCascadeDetails(error.errorResponse)
+          : null;
+      if (details) {
+        setCascadeDetails(details);
+        return;
+      }
       if (error instanceof ApiError) {
         toast.error(error.message);
       } else {
@@ -202,7 +244,9 @@ export function ProviderGrid() {
         <div className="flex flex-col items-center justify-center gap-1 py-12 text-center">
           <DishAntennaIcon className="h-64 w-64 text-muted-foreground/30" />
           <div className="space-y-1">
-            <p className="text-[12px] font-medium text-muted-foreground/30">No Provider Tokens</p>
+            <p className="text-[12px] font-medium text-muted-foreground/30">
+              No Provider Tokens
+            </p>
             <p className="text-xs text-muted-foreground/30">
               {targetOrgId
                 ? selectedOrgName
@@ -236,7 +280,11 @@ export function ProviderGrid() {
               llmStatus={llmStatusBySlug.get(provider.slug)}
               gatewayUrl={gatewayUrl}
               onConnect={handleConnect}
-              onDisconnect={(id) => void handleDisconnect(id)}
+              onDisconnect={(id) =>
+                setDisconnectDialog(
+                  providers?.find((candidate) => candidate.id === id) ?? null,
+                )
+              }
               onRefresh={(id) => void handleRefresh(id)}
               onSetupCredentials={setCredentialsDialog}
               isConnecting={
@@ -282,6 +330,62 @@ export function ProviderGrid() {
           onClose={() => setCredentialsDialog(null)}
         />
       )}
+
+      {disconnectDialog !== null &&
+        (cascadeDetails ? (
+          <GrantCascadeDialog
+            details={cascadeDetails}
+            isPending={disconnectMutation.isPending}
+            onCascade={() =>
+              void handleDisconnect(disconnectDialog.id, {
+                cascadeGrant: true,
+              })
+            }
+            onRemoveOnly={() =>
+              void handleDisconnect(disconnectDialog.id, {
+                grantScope: "token",
+              })
+            }
+            onCancel={() => {
+              setCascadeDetails(null);
+              setDisconnectDialog(null);
+            }}
+          />
+        ) : (
+          <Dialog
+            open
+            onOpenChange={(open) => {
+              if (!open) setDisconnectDialog(null);
+            }}
+          >
+            <DialogContent>
+              <DialogHeader>
+                <DialogTitle>Disconnect {disconnectDialog.name}?</DialogTitle>
+                <DialogDescription>
+                  {disconnectDialog.revocation?.revokes_grant
+                    ? grantRevocationDescription(disconnectDialog.name)
+                    : "This removes the stored provider connection from NyxID. Services using it will stop working until you reconnect."}
+                </DialogDescription>
+              </DialogHeader>
+              <DialogFooter>
+                <Button
+                  variant="outline"
+                  disabled={disconnectMutation.isPending}
+                  onClick={() => setDisconnectDialog(null)}
+                >
+                  Cancel
+                </Button>
+                <Button
+                  variant="destructive"
+                  isLoading={disconnectMutation.isPending}
+                  onClick={() => void handleDisconnect(disconnectDialog.id)}
+                >
+                  Disconnect
+                </Button>
+              </DialogFooter>
+            </DialogContent>
+          </Dialog>
+        ))}
     </>
   );
 }

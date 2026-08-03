@@ -7,6 +7,7 @@ import type {
   UserProviderToken,
 } from "@/types/api";
 import { ProviderGrid } from "./provider-grid";
+import { ApiError } from "@/lib/api-client";
 
 const mocks = vi.hoisted(() => ({
   useProviders: vi.fn(),
@@ -280,12 +281,72 @@ describe("ProviderGrid", () => {
       "org-1",
     );
     await user.click(screen.getByRole("button", { name: "Disconnect" }));
+    await user.click(await screen.findByRole("button", { name: "Disconnect" }));
 
     await waitFor(() => {
       expect(disconnect).toHaveBeenCalledWith({
         providerId: provider.id,
         targetOrgId: "org-1",
       });
+    });
+  });
+
+  it("renders a 11500 danger dialog and retries with cascade_grant", async () => {
+    const user = userEvent.setup();
+    const disconnect = vi
+      .fn()
+      .mockRejectedValueOnce(
+        new ApiError(409, {
+          error: "grant_cascade_confirmation_required",
+          error_code: 11500,
+          message: "Confirmation required",
+          details: {
+            provider_slug: "twitter",
+            provider_name: "Twitter",
+            revokes_grant: true,
+            siblings: [
+              {
+                user_service_id: "service-2",
+                name: "Twitter Search",
+                slug: "twitter-search",
+              },
+            ],
+            unaffected_other_app: [],
+            token_scope_available: true,
+          },
+        }),
+      )
+      .mockResolvedValueOnce({
+        status: "disconnected",
+        message: "Provider disconnected",
+        upstream_revoked: true,
+      });
+    mocks.useMyProviderTokens.mockReturnValue({
+      data: [providerToken],
+      isLoading: false,
+    });
+    mocks.useDisconnectProvider.mockReturnValue({
+      mutateAsync: disconnect,
+      isPending: false,
+    });
+
+    render(<ProviderGrid />);
+    await user.click(screen.getByRole("button", { name: "Disconnect" }));
+    await user.click(await screen.findByRole("button", { name: "Disconnect" }));
+    await user.click(
+      await screen.findByRole("button", {
+        name: "Disconnect Twitter everywhere (2 services)",
+      }),
+    );
+
+    expect(disconnect).toHaveBeenNthCalledWith(1, {
+      providerId: provider.id,
+      targetOrgId: null,
+    });
+    expect(disconnect).toHaveBeenNthCalledWith(2, {
+      providerId: provider.id,
+      targetOrgId: null,
+      cascadeGrant: true,
     });
   });
 });

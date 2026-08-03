@@ -16,6 +16,8 @@ import {
 } from "@/hooks/use-keys";
 import { useNodes } from "@/hooks/use-nodes";
 import { DefaultHeadersEditor } from "@/components/shared/default-headers-editor";
+import { GrantCascadeDialog } from "@/components/shared/grant-cascade-dialog";
+import { grantRevocationDescription } from "@/schemas/oauth-revocation";
 import { WsFrameInjectionsEditor } from "@/components/shared/ws-frame-injections-editor";
 import { defaultRequestHeaderListSchema } from "@/schemas/default-request-headers";
 import { zodIssuesToRowFieldErrors } from "@/lib/form-errors";
@@ -26,6 +28,10 @@ import {
   type WsFrameInjection,
 } from "@/schemas/services";
 import { ApiError } from "@/lib/api-client";
+import {
+  parseGrantCascadeDetails,
+  type GrantCascadeDetails,
+} from "@/schemas/oauth-revocation";
 import { copyToClipboard } from "@/lib/utils";
 import { ErrorBanner } from "@/components/shared/error-banner";
 import { PageHeader } from "@/components/shared/page-header";
@@ -59,12 +65,7 @@ import {
   DialogHeader,
   DialogTitle,
 } from "@/components/ui/dialog";
-import {
-  Tabs,
-  TabsContent,
-  TabsList,
-  TabsTrigger,
-} from "@/components/ui/tabs";
+import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import {
   Globe,
   KeyRound,
@@ -120,9 +121,7 @@ const RECONNECTABLE_STATUSES = new Set([
 ]);
 
 function reconnectLabel(status: string): string {
-  return status === "pending_auth"
-    ? "Continue authentication"
-    : "Reconnect";
+  return status === "pending_auth" ? "Continue authentication" : "Reconnect";
 }
 
 /**
@@ -152,15 +151,16 @@ function LarkPermissionSetupCard({
           <Button variant="primary" asChild>
             <a href={url} target="_blank" rel="noopener noreferrer">
               Open Permissions Page
-              <ButtonIcon variant="primary"><ExternalLink className="h-3 w-3" /></ButtonIcon>
+              <ButtonIcon variant="primary">
+                <ExternalLink className="h-3 w-3" />
+              </ButtonIcon>
             </a>
           </Button>
         </div>
         <CardDescription>
           Open this link to grant the scopes this service needs in the Lark /
           Feishu developer console. The required scopes are pre-selected —
-          confirm and bulk-enable them so NyxID can call the API on your
-          behalf.
+          confirm and bulk-enable them so NyxID can call the API on your behalf.
         </CardDescription>
       </CardHeader>
       <CardContent className="space-y-3">
@@ -203,7 +203,9 @@ function EndpointSection({
   function handleSave() {
     if (!url.trim()) return;
     if (!isValidHttpUrl(url.trim())) {
-      toast.error("Must be a full URL with a domain, e.g. https://api.example.com");
+      toast.error(
+        "Must be a full URL with a domain, e.g. https://api.example.com",
+      );
       return;
     }
     updateEndpoint.mutate(
@@ -387,7 +389,12 @@ function OpenApiSpecSection({
               {specUrl}
             </code>
             {!readOnly && (
-              <Button size="icon" variant="ghost" className="h-6 w-6 shrink-0" onClick={handleEdit}>
+              <Button
+                size="icon"
+                variant="ghost"
+                className="h-6 w-6 shrink-0"
+                onClick={handleEdit}
+              >
                 <Pencil className="h-3 w-3" />
               </Button>
             )}
@@ -396,7 +403,12 @@ function OpenApiSpecSection({
           <div className="flex items-center justify-between gap-2">
             <Badge variant="secondary">Not set</Badge>
             {!readOnly && (
-              <Button size="icon" variant="ghost" className="h-6 w-6 shrink-0" onClick={handleEdit}>
+              <Button
+                size="icon"
+                variant="ghost"
+                className="h-6 w-6 shrink-0"
+                onClick={handleEdit}
+              >
                 <Pencil className="h-3 w-3" />
               </Button>
             )}
@@ -494,13 +506,22 @@ function RecommendedSkillsSection({
           <div className="flex items-center justify-between gap-2">
             <div className="flex flex-wrap gap-1">
               {skills.map((skill) => (
-                <Badge key={skill} variant="secondary" className="font-mono text-[11px]">
+                <Badge
+                  key={skill}
+                  variant="secondary"
+                  className="font-mono text-[11px]"
+                >
                   {skill}
                 </Badge>
               ))}
             </div>
             {!readOnly && (
-              <Button size="icon" variant="ghost" className="h-6 w-6 shrink-0" onClick={handleEdit}>
+              <Button
+                size="icon"
+                variant="ghost"
+                className="h-6 w-6 shrink-0"
+                onClick={handleEdit}
+              >
                 <Pencil className="h-3 w-3" />
               </Button>
             )}
@@ -509,7 +530,12 @@ function RecommendedSkillsSection({
           <div className="flex items-center justify-between gap-2">
             <Badge variant="secondary">Not set</Badge>
             {!readOnly && (
-              <Button size="icon" variant="ghost" className="h-6 w-6 shrink-0" onClick={handleEdit}>
+              <Button
+                size="icon"
+                variant="ghost"
+                className="h-6 w-6 shrink-0"
+                onClick={handleEdit}
+              >
                 <Pencil className="h-3 w-3" />
               </Button>
             )}
@@ -581,8 +607,14 @@ function ApiKeySection({
             <CardTitle className="text-[15px]">API Key</CardTitle>
           </div>
           {showRotateInHeader && (
-            <Button variant="outline" className="text-text-tertiary hover:text-muted-foreground" onClick={() => setRotating(true)}>
-              <ButtonIcon><RefreshCw className="h-3 w-3" /></ButtonIcon>
+            <Button
+              variant="outline"
+              className="text-text-tertiary hover:text-muted-foreground"
+              onClick={() => setRotating(true)}
+            >
+              <ButtonIcon>
+                <RefreshCw className="h-3 w-3" />
+              </ButtonIcon>
               Rotate Credentials
             </Button>
           )}
@@ -711,26 +743,33 @@ function ServiceSection({
       case "unknown":
         badgeVariant = "destructive";
         badgeLabel = "Node Deleted";
-        nodeWarning = "Bound node was not found on the server. The binding is broken. Use Routing section to re-bind this service to a valid node.";
+        nodeWarning =
+          "Bound node was not found on the server. The binding is broken. Use Routing section to re-bind this service to a valid node.";
         break;
       case "inaccessible":
         badgeVariant = "secondary";
         badgeLabel = "Inaccessible";
-        nodeHint = "Binding points at a node you do not have permission to introspect. The proxy connection may still function normally.";
+        nodeHint =
+          "Binding points at a node you do not have permission to introspect. The proxy connection may still function normally.";
         break;
       case "offline":
         badgeVariant = "destructive";
         badgeLabel = "Offline";
-        nodeWarning = "Bound node is offline or has a stale heartbeat. Use Routing section to re-bind this service to an online node.";
+        nodeWarning =
+          "Bound node is offline or has a stale heartbeat. Use Routing section to re-bind this service to an online node.";
         break;
       case "draining":
         badgeVariant = "secondary";
         badgeLabel = "Draining";
-        nodeWarning = "Bound node is draining. Use Routing section to re-bind this service to an online node.";
+        nodeWarning =
+          "Bound node is draining. Use Routing section to re-bind this service to an online node.";
         break;
       case "online":
       default:
-        credentialBlocked = hasCredential && credentialStatus !== "" && credentialStatus !== "active";
+        credentialBlocked =
+          hasCredential &&
+          credentialStatus !== "" &&
+          credentialStatus !== "active";
         if (credentialBlocked) {
           badgeVariant = "secondary";
           badgeLabel = "Unavailable";
@@ -741,7 +780,8 @@ function ServiceSection({
         break;
     }
   } else {
-    credentialBlocked = hasCredential && credentialStatus !== "" && credentialStatus !== "active";
+    credentialBlocked =
+      hasCredential && credentialStatus !== "" && credentialStatus !== "active";
     if (credentialBlocked) {
       badgeVariant = "secondary";
       badgeLabel = "Unavailable";
@@ -775,14 +815,16 @@ function ServiceSection({
             <Server className="h-4 w-4 text-primary" />
             <CardTitle className="text-[15px]">Service</CardTitle>
           </div>
-          {!readOnly && (
-            isActive ? (
+          {!readOnly &&
+            (isActive ? (
               <Button
                 variant="destructive"
                 onClick={toggleActive}
                 disabled={updateService.isPending}
               >
-                <ButtonIcon variant="destructive"><Power className="h-3 w-3" /></ButtonIcon>
+                <ButtonIcon variant="destructive">
+                  <Power className="h-3 w-3" />
+                </ButtonIcon>
                 Deactivate
               </Button>
             ) : (
@@ -791,11 +833,12 @@ function ServiceSection({
                 onClick={toggleActive}
                 disabled={updateService.isPending}
               >
-                <ButtonIcon variant="primary"><Power className="h-3 w-3" /></ButtonIcon>
+                <ButtonIcon variant="primary">
+                  <Power className="h-3 w-3" />
+                </ButtonIcon>
                 Activate
               </Button>
-            )
-          )}
+            ))}
         </div>
         <CardDescription>Proxy routing configuration</CardDescription>
       </CardHeader>
@@ -818,9 +861,7 @@ function ServiceSection({
         )}
 
         {nodeWarning && (
-          <p className="text-xs text-destructive font-medium">
-            {nodeWarning}
-          </p>
+          <p className="text-xs text-destructive font-medium">{nodeWarning}</p>
         )}
         {nodeHint && (
           <p className="text-xs text-muted-foreground font-medium">
@@ -1185,9 +1226,7 @@ function SshConnectionInstructionsCard({
     <Card>
       <CardHeader>
         <CardTitle>Connection Instructions</CardTitle>
-        <CardDescription>
-          How to connect to this SSH service
-        </CardDescription>
+        <CardDescription>How to connect to this SSH service</CardDescription>
       </CardHeader>
       <CardContent>
         <SshServiceInstructions
@@ -1411,9 +1450,15 @@ function ApiUsageSection({
             <Button variant="outline" asChild>
               <Link
                 to="/keys"
-                search={{ tab: "nyxid", action: "setup-agent", service: serviceId }}
+                search={{
+                  tab: "nyxid",
+                  action: "setup-agent",
+                  service: serviceId,
+                }}
               >
-                <ButtonIcon><Link2 className="h-3 w-3" /></ButtonIcon>
+                <ButtonIcon>
+                  <Link2 className="h-3 w-3" />
+                </ButtonIcon>
                 Set Up Agent
               </Link>
             </Button>
@@ -1509,8 +1554,8 @@ function ApiUsageSection({
             {modelExample.needsProviderModelNote && requestBody && (
               <p className="mb-1.5 text-[11px] text-muted-foreground">
                 Replace{" "}
-                <code className="rounded bg-background px-1">gpt-4o</code>{" "}
-                with your provider&apos;s model.
+                <code className="rounded bg-background px-1">gpt-4o</code> with
+                your provider&apos;s model.
               </p>
             )}
             <div className="relative">
@@ -1565,21 +1610,49 @@ function DeleteKeyDialog({
   open,
   onOpenChange,
   keyId,
+  providerName,
+  revokesGrant,
 }: {
   readonly open: boolean;
   readonly onOpenChange: (open: boolean) => void;
   readonly keyId: string;
+  readonly providerName: string;
+  readonly revokesGrant: boolean;
 }) {
   const navigate = useNavigate();
   const deleteKey = useDeleteKey();
+  const [cascadeDetails, setCascadeDetails] =
+    useState<GrantCascadeDetails | null>(null);
 
-  function handleDelete() {
-    deleteKey.mutate(keyId, {
-      onSuccess: () => {
-        toast.success("Key deleted");
+  function close() {
+    setCascadeDetails(null);
+    onOpenChange(false);
+  }
+
+  function handleDelete(
+    input:
+      | string
+      | { keyId: string; cascadeGrant?: boolean; grantScope?: "token" },
+  ) {
+    deleteKey.mutate(input, {
+      onSuccess: (response) => {
+        toast.success(
+          response?.upstream_revoked === false
+            ? "Removed from NyxID. Upstream access remains active."
+            : "Service disconnected",
+        );
+        close();
         void navigate({ to: "/keys", search: {} });
       },
       onError: (err) => {
+        const details =
+          err instanceof ApiError
+            ? parseGrantCascadeDetails(err.errorResponse)
+            : null;
+        if (details) {
+          setCascadeDetails(details);
+          return;
+        }
         const message =
           err instanceof ApiError ? err.message : "Failed to delete key";
         toast.error(message);
@@ -1587,15 +1660,33 @@ function DeleteKeyDialog({
     });
   }
 
+  if (cascadeDetails) {
+    return (
+      <GrantCascadeDialog
+        details={cascadeDetails}
+        isPending={deleteKey.isPending}
+        onCascade={() => handleDelete({ keyId, cascadeGrant: true })}
+        onRemoveOnly={() => handleDelete({ keyId, grantScope: "token" })}
+        onCancel={close}
+      />
+    );
+  }
+
   return (
-    <Dialog open={open} onOpenChange={onOpenChange}>
+    <Dialog
+      open={open}
+      onOpenChange={(nextOpen) => {
+        if (!nextOpen) setCascadeDetails(null);
+        onOpenChange(nextOpen);
+      }}
+    >
       <DialogContent>
         <DialogHeader>
           <DialogTitle>Delete Service</DialogTitle>
           <DialogDescription>
-            This will deactivate the service and revoke the API key. Proxied
-            requests using this key will stop working. This action cannot be
-            undone.
+            {revokesGrant
+              ? grantRevocationDescription(providerName)
+              : "This will deactivate the service and revoke the API key. Proxied requests using this key will stop working. This action cannot be undone."}
           </DialogDescription>
         </DialogHeader>
         <DialogFooter>
@@ -1604,7 +1695,7 @@ function DeleteKeyDialog({
           </Button>
           <Button
             variant="destructive"
-            onClick={handleDelete}
+            onClick={() => handleDelete(keyId)}
             disabled={deleteKey.isPending}
           >
             Delete
@@ -1631,7 +1722,10 @@ function LabelEditor({
   // Non-admin org members see the label but cannot edit it.
   if (readOnly) {
     return (
-      <h2 className="text-[28px] font-bold leading-none tracking-tight" style={{ letterSpacing: "-0.03em" }}>
+      <h2
+        className="text-[28px] font-bold leading-none tracking-tight"
+        style={{ letterSpacing: "-0.03em" }}
+      >
         {currentLabel}
       </h2>
     );
@@ -1695,7 +1789,10 @@ function LabelEditor({
 
   return (
     <div className="flex items-center gap-2">
-      <h2 className="text-[28px] font-bold leading-none tracking-tight" style={{ letterSpacing: "-0.03em" }}>
+      <h2
+        className="text-[28px] font-bold leading-none tracking-tight"
+        style={{ letterSpacing: "-0.03em" }}
+      >
         {currentLabel}
       </h2>
       <Button
@@ -1726,7 +1823,9 @@ function AccessPolicySection({
       { serviceId, admin_only: next },
       {
         onSuccess: () => {
-          toast.success(next ? "Service restricted to org admins" : "Member access enabled");
+          toast.success(
+            next ? "Service restricted to org admins" : "Member access enabled",
+          );
         },
         onError: (err) => {
           const message =
@@ -1883,7 +1982,12 @@ function DefaultHeadersSection({
               Your headers
             </p>
             {!readOnly && !editing && (
-              <Button size="icon" variant="ghost" className="h-6 w-6 shrink-0" onClick={handleEdit}>
+              <Button
+                size="icon"
+                variant="ghost"
+                className="h-6 w-6 shrink-0"
+                onClick={handleEdit}
+              >
                 <Pencil className="h-3 w-3" />
               </Button>
             )}
@@ -2007,13 +2111,20 @@ function WsFrameInjectionsSection({
     <div className="rounded-xl border border-border/50 bg-card overflow-hidden">
       <div className="flex items-center justify-between border-b border-border/50 px-5 py-3">
         <div>
-          <h3 className="text-[13px] font-semibold text-foreground">WebSocket auth frames</h3>
+          <h3 className="text-[13px] font-semibold text-foreground">
+            WebSocket auth frames
+          </h3>
           <p className="text-[11px] text-muted-foreground mt-0.5">
             User-owned frame injection rules for post-upgrade auth.
           </p>
         </div>
         {!editing && (
-          <Button size="icon" variant="ghost" className="h-6 w-6 shrink-0" onClick={handleEdit}>
+          <Button
+            size="icon"
+            variant="ghost"
+            className="h-6 w-6 shrink-0"
+            onClick={handleEdit}
+          >
             <Pencil className="h-3 w-3" />
           </Button>
         )}
@@ -2094,9 +2205,7 @@ export function KeyDetailPage() {
   const [deleteOpen, setDeleteOpen] = useState(false);
   const [reconnectOpen, setReconnectOpen] = useState(false);
 
-  const catalogHeaders = useMemo<
-    readonly DefaultRequestHeader[] | null
-  >(() => {
+  const catalogHeaders = useMemo<readonly DefaultRequestHeader[] | null>(() => {
     if (!catalogEntry?.default_request_headers) return null;
     return [...catalogEntry.default_request_headers];
   }, [catalogEntry]);
@@ -2128,9 +2237,7 @@ export function KeyDetailPage() {
   if (error || !keyInfo) {
     return (
       <div className="space-y-8">
-        <PageHeader
-          title="Key Not Found"
-        />
+        <PageHeader title="Key Not Found" />
         <ErrorBanner
           message={
             error instanceof ApiError
@@ -2162,9 +2269,10 @@ export function KeyDetailPage() {
     (keyInfo.credential_type === "oauth2" ||
       catalogEntry?.provider_type === "oauth2" ||
       catalogEntry?.provider_type === "device_code");
-  const autoConnectedAuthLabel = keyInfo.auth_method === "none"
-    ? "None (no credentials required)"
-    : "Platform managed credential";
+  const autoConnectedAuthLabel =
+    keyInfo.auth_method === "none"
+      ? "None (no credentials required)"
+      : "Platform managed credential";
   const autoConnectedDescription = keyInfo.source_app_name
     ? `This service was auto-connected via ${keyInfo.source_app_name}. It is managed by the platform and cannot be modified.`
     : keyInfo.auth_method === "none"
@@ -2207,34 +2315,37 @@ export function KeyDetailPage() {
           <div className="flex items-center gap-3">
             <ServiceIcon slug={keyInfo.catalog_service_slug} size="md" />
             <div className="flex flex-col gap-2">
-            {keyInfo.auto_connected ? (
-              <h2 className="text-[28px] font-bold leading-none tracking-tight" style={{ letterSpacing: "-0.03em" }}>
-                {keyInfo.label}
-              </h2>
-            ) : (
-              <LabelEditor
-                keyId={keyInfo.id}
-                currentLabel={keyInfo.label}
-                readOnly={readOnly}
-              />
-            )}
-            <div className="flex items-center gap-2">
-              <p className="text-[12px] text-muted-foreground">
-                {keyInfo.catalog_service_name
-                  ? `${keyInfo.catalog_service_name} -- /proxy/s/${keyInfo.slug}`
-                  : `/proxy/s/${keyInfo.slug}`}
-              </p>
-              {keyInfo.auto_connected && (
-                <Badge variant="secondary">
-                  {keyInfo.source_app_name
-                    ? `Connected via ${keyInfo.source_app_name}`
-                    : "Auto-connected"}
-                </Badge>
+              {keyInfo.auto_connected ? (
+                <h2
+                  className="text-[28px] font-bold leading-none tracking-tight"
+                  style={{ letterSpacing: "-0.03em" }}
+                >
+                  {keyInfo.label}
+                </h2>
+              ) : (
+                <LabelEditor
+                  keyId={keyInfo.id}
+                  currentLabel={keyInfo.label}
+                  readOnly={readOnly}
+                />
               )}
-              {keyInfo.admin_only && (
-                <Badge variant="secondary">Admin-only</Badge>
-              )}
-            </div>
+              <div className="flex items-center gap-2">
+                <p className="text-[12px] text-muted-foreground">
+                  {keyInfo.catalog_service_name
+                    ? `${keyInfo.catalog_service_name} -- /proxy/s/${keyInfo.slug}`
+                    : `/proxy/s/${keyInfo.slug}`}
+                </p>
+                {keyInfo.auto_connected && (
+                  <Badge variant="secondary">
+                    {keyInfo.source_app_name
+                      ? `Connected via ${keyInfo.source_app_name}`
+                      : "Auto-connected"}
+                  </Badge>
+                )}
+                {keyInfo.admin_only && (
+                  <Badge variant="secondary">Admin-only</Badge>
+                )}
+              </div>
             </div>
           </div>
           <div className="flex items-center gap-2">
@@ -2253,34 +2364,33 @@ export function KeyDetailPage() {
                   })
                 }
               >
-                <ButtonIcon><Terminal className="h-4 w-4" /></ButtonIcon>
+                <ButtonIcon>
+                  <Terminal className="h-4 w-4" />
+                </ButtonIcon>
                 Terminal
               </Button>
             )}
             {canReconnect && (
-              <Button
-                variant="primary"
-                onClick={() => setReconnectOpen(true)}
-              >
-                <ButtonIcon variant="primary"><RefreshCw className="h-4 w-4" /></ButtonIcon>
+              <Button variant="primary" onClick={() => setReconnectOpen(true)}>
+                <ButtonIcon variant="primary">
+                  <RefreshCw className="h-4 w-4" />
+                </ButtonIcon>
                 {reconnectLabel(keyInfo.status)}
               </Button>
             )}
             {canEditScopes && (
-              <Button
-                variant="outline"
-                onClick={() => setReconnectOpen(true)}
-              >
-                <ButtonIcon><SlidersHorizontal className="h-4 w-4" /></ButtonIcon>
+              <Button variant="outline" onClick={() => setReconnectOpen(true)}>
+                <ButtonIcon>
+                  <SlidersHorizontal className="h-4 w-4" />
+                </ButtonIcon>
                 Manage permissions
               </Button>
             )}
             {!keyInfo.auto_connected && !readOnly && (
-              <Button
-                variant="destructive"
-                onClick={() => setDeleteOpen(true)}
-              >
-                <ButtonIcon variant="destructive"><Trash2 className="h-4 w-4 text-destructive" /></ButtonIcon>
+              <Button variant="destructive" onClick={() => setDeleteOpen(true)}>
+                <ButtonIcon variant="destructive">
+                  <Trash2 className="h-4 w-4 text-destructive" />
+                </ButtonIcon>
                 Delete
               </Button>
             )}
@@ -2319,9 +2429,7 @@ export function KeyDetailPage() {
                   <span className="text-xs font-medium text-muted-foreground">
                     Endpoint
                   </span>
-                  <p className="truncate text-xs">
-                    {keyInfo.endpoint_url}
-                  </p>
+                  <p className="truncate text-xs">{keyInfo.endpoint_url}</p>
                 </div>
                 <div>
                   <span className="text-xs font-medium text-muted-foreground">
@@ -2430,7 +2538,10 @@ export function KeyDetailPage() {
                 authKeyName={keyInfo.auth_key_name}
                 isActive={keyInfo.is_active}
                 credentialStatus={keyInfo.status}
-                hasCredential={keyInfo.api_key_id !== null && keyInfo.api_key_id !== undefined}
+                hasCredential={
+                  keyInfo.api_key_id !== null &&
+                  keyInfo.api_key_id !== undefined
+                }
                 serviceId={keyInfo.id}
                 nodeId={keyInfo.node_id}
                 nodeStatus={keyInfo.node_status}
@@ -2537,16 +2648,16 @@ export function KeyDetailPage() {
             )}
 
             {keyInfo.service_type === "ssh" &&
-            keyInfo.ssh_host &&
-            keyInfo.ssh_port !== null && (
-              <SshConnectionSection
-                sshHost={keyInfo.ssh_host}
-                sshPort={keyInfo.ssh_port}
-                caPublicKey={keyInfo.ssh_ca_public_key}
-                principals={keyInfo.ssh_allowed_principals}
-                certTtlMinutes={keyInfo.ssh_certificate_ttl_minutes}
-              />
-            )}
+              keyInfo.ssh_host &&
+              keyInfo.ssh_port !== null && (
+                <SshConnectionSection
+                  sshHost={keyInfo.ssh_host}
+                  sshPort={keyInfo.ssh_port}
+                  caPublicKey={keyInfo.ssh_ca_public_key}
+                  principals={keyInfo.ssh_allowed_principals}
+                  certTtlMinutes={keyInfo.ssh_certificate_ttl_minutes}
+                />
+              )}
           </TabsContent>
         </Tabs>
       )}
@@ -2555,6 +2666,14 @@ export function KeyDetailPage() {
         open={deleteOpen}
         onOpenChange={setDeleteOpen}
         keyId={keyInfo.id}
+        providerName={
+          catalogEntry?.name ?? keyInfo.catalog_service_name ?? "provider"
+        }
+        revokesGrant={
+          keyInfo.revocation?.revokes_grant ??
+          catalogEntry?.revocation?.revokes_grant ??
+          false
+        }
       />
       <AddKeyDialog
         open={reconnectOpen}

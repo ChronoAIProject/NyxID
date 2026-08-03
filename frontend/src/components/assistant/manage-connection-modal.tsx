@@ -16,6 +16,7 @@ import { Input } from "@/components/ui/input";
 import { Switch } from "@/components/ui/switch";
 import {
   useDeleteKey,
+  useCatalogEntry,
   useKey,
   useUpdateExternalApiKey,
   useUpdateKey,
@@ -24,6 +25,12 @@ import { ApiError } from "@/lib/api-client";
 import { formatDate } from "@/lib/utils";
 import { connectorInitial } from "@/lib/assistant/plugins";
 import type { KeyInfo } from "@/types/keys";
+import { GrantCascadeDialog } from "@/components/shared/grant-cascade-dialog";
+import { grantRevocationDescription } from "@/schemas/oauth-revocation";
+import {
+  parseGrantCascadeDetails,
+  type GrantCascadeDetails,
+} from "@/schemas/oauth-revocation";
 
 // Mirrors the Studio key-detail page status vocabulary exactly
 // (key-detail.tsx:92): revoked/failed/refresh_failed are destructive.
@@ -207,9 +214,14 @@ function ConnectionPanel({
   readonly onRevoked: () => void;
 }) {
   const { data: key, isLoading, error, refetch } = useKey(keyId);
+  const { data: catalogEntry } = useCatalogEntry(
+    key?.catalog_service_slug ?? null,
+  );
   const updateKey = useUpdateKey();
   const deleteKey = useDeleteKey();
   const [confirmingRevoke, setConfirmingRevoke] = useState(false);
+  const [cascadeDetails, setCascadeDetails] =
+    useState<GrantCascadeDetails | null>(null);
 
   function toggleActive(nextActive: boolean) {
     if (!key) return;
@@ -217,20 +229,42 @@ function ConnectionPanel({
       { keyId: key.id, is_active: nextActive },
       {
         onSuccess: () =>
-          toast.success(nextActive ? "Connection enabled" : "Connection paused"),
+          toast.success(
+            nextActive ? "Connection enabled" : "Connection paused",
+          ),
         onError: () => toast.error("Could not update the connection."),
       },
     );
   }
 
-  function revoke() {
+  function revoke(
+    input:
+      | string
+      | { keyId: string; cascadeGrant?: boolean; grantScope?: "token" },
+  ) {
     if (!key) return;
-    deleteKey.mutate(key.id, {
-      onSuccess: () => {
-        toast.success("Connection revoked");
+    deleteKey.mutate(input, {
+      onSuccess: (response) => {
+        toast.success(
+          response?.upstream_revoked === false
+            ? "Removed from NyxID. Upstream access remains active."
+            : "Connection revoked",
+        );
+        setCascadeDetails(null);
         onRevoked();
       },
-      onError: () => toast.error("Could not revoke the connection."),
+      onError: (mutationError) => {
+        const details =
+          mutationError instanceof ApiError
+            ? parseGrantCascadeDetails(mutationError.errorResponse)
+            : null;
+        if (details) {
+          setCascadeDetails(details);
+          setConfirmingRevoke(false);
+          return;
+        }
+        toast.error("Could not revoke the connection.");
+      },
     });
   }
 
@@ -262,136 +296,155 @@ function ConnectionPanel({
 
   const grantedScopes = key.granted_scopes ?? null;
   const modifiable = canModifyKey(key);
+  const revokesGrant =
+    key.revocation?.revokes_grant ??
+    catalogEntry?.revocation?.revokes_grant ??
+    false;
+  const providerName =
+    catalogEntry?.name ?? key.catalog_service_name ?? "provider";
 
   return (
-    <section>
-      {showLabel && (
-        <div className="flex items-center justify-between gap-2 pb-1">
-          <p className="min-w-0 truncate text-[12px] font-medium text-foreground">
-            {key.label}
-          </p>
-          <Badge variant={statusVariant(key.status)}>
-            {key.status.replaceAll("_", " ")}
-          </Badge>
-        </div>
-      )}
-
-      <div className="divide-y divide-border/60">
-        {/* Multi-connection panels carry status beside their label; a lone
-            connection has no label row, so it reads as a field instead. */}
-        {!showLabel && (
-          <DetailRow label="Status">
+    <>
+      <section>
+        {showLabel && (
+          <div className="flex items-center justify-between gap-2 pb-1">
+            <p className="min-w-0 truncate text-[12px] font-medium text-foreground">
+              {key.label}
+            </p>
             <Badge variant={statusVariant(key.status)}>
               {key.status.replaceAll("_", " ")}
             </Badge>
-          </DetailRow>
-        )}
-        <DetailRow label="Credential">
-          {key.credential_type.replaceAll("_", " ")}
-        </DetailRow>
-        {grantedScopes && grantedScopes.length > 0 && (
-          <DetailRow label="Scopes">
-            <span className="flex flex-wrap justify-end gap-1">
-              {grantedScopes.map((scope) => (
-                <span
-                  key={scope}
-                  className="rounded bg-overlay-strong px-1.5 py-0.5 font-mono text-[10px] text-muted-foreground"
-                >
-                  {scope}
-                </span>
-              ))}
-            </span>
-          </DetailRow>
-        )}
-        {key.proxy_url && (
-          <DetailRow label="Proxy URL">
-            <button
-              type="button"
-              onClick={() => {
-                void navigator.clipboard?.writeText(key.proxy_url ?? "");
-                toast.success("Proxy URL copied");
-              }}
-              className="inline-flex max-w-full items-center gap-1.5 font-mono text-[11px] text-muted-foreground transition-colors hover:text-foreground"
-            >
-              <span className="truncate">{key.proxy_url}</span>
-              <Copy className="h-3 w-3 shrink-0" />
-            </button>
-          </DetailRow>
-        )}
-        <DetailRow label="Last used">
-          {key.last_used_at ? formatDate(key.last_used_at) : "Never"}
-        </DetailRow>
-        {modifiable ? (
-          <>
-            <div className="flex items-center justify-between gap-4 py-2.5">
-              <div>
-                <p className="text-[12px] font-medium text-foreground">
-                  Enabled
-                </p>
-                <p className="text-[11px] text-text-tertiary">
-                  Pause to block the assistant from using this connection.
-                </p>
-              </div>
-              <Switch
-                checked={key.is_active}
-                disabled={updateKey.isPending}
-                onCheckedChange={toggleActive}
-                aria-label="Toggle connection enabled"
-              />
-            </div>
-            {canReplaceCredential(key) && (
-              <ReplaceCredential apiKeyId={key.api_key_id as string} />
-            )}
-          </>
-        ) : (
-          <div className="flex items-center gap-2 py-2.5 text-[11px] text-text-tertiary">
-            <Lock className="h-3 w-3 shrink-0" />
-            {readOnlyReason(key)}
           </div>
         )}
-      </div>
 
-      <div className="flex flex-wrap items-center justify-between gap-2 pt-2.5">
-        <Button asChild variant="ghost" size="sm">
-          <Link to="/keys/$keyId" params={{ keyId: key.id }}>
-            Advanced settings
-            <ExternalLink />
-          </Link>
-        </Button>
-        {modifiable &&
-          (confirmingRevoke ? (
-            <div className="flex items-center gap-2">
-              <span className="text-[11px] text-text-tertiary">
-                Revoke this connection?
+        <div className="divide-y divide-border/60">
+          {/* Multi-connection panels carry status beside their label; a lone
+            connection has no label row, so it reads as a field instead. */}
+          {!showLabel && (
+            <DetailRow label="Status">
+              <Badge variant={statusVariant(key.status)}>
+                {key.status.replaceAll("_", " ")}
+              </Badge>
+            </DetailRow>
+          )}
+          <DetailRow label="Credential">
+            {key.credential_type.replaceAll("_", " ")}
+          </DetailRow>
+          {grantedScopes && grantedScopes.length > 0 && (
+            <DetailRow label="Scopes">
+              <span className="flex flex-wrap justify-end gap-1">
+                {grantedScopes.map((scope) => (
+                  <span
+                    key={scope}
+                    className="rounded bg-overlay-strong px-1.5 py-0.5 font-mono text-[10px] text-muted-foreground"
+                  >
+                    {scope}
+                  </span>
+                ))}
               </span>
-              <Button
-                variant="ghost"
-                size="sm"
-                onClick={() => setConfirmingRevoke(false)}
+            </DetailRow>
+          )}
+          {key.proxy_url && (
+            <DetailRow label="Proxy URL">
+              <button
+                type="button"
+                onClick={() => {
+                  void navigator.clipboard?.writeText(key.proxy_url ?? "");
+                  toast.success("Proxy URL copied");
+                }}
+                className="inline-flex max-w-full items-center gap-1.5 font-mono text-[11px] text-muted-foreground transition-colors hover:text-foreground"
               >
-                Cancel
-              </Button>
+                <span className="truncate">{key.proxy_url}</span>
+                <Copy className="h-3 w-3 shrink-0" />
+              </button>
+            </DetailRow>
+          )}
+          <DetailRow label="Last used">
+            {key.last_used_at ? formatDate(key.last_used_at) : "Never"}
+          </DetailRow>
+          {modifiable ? (
+            <>
+              <div className="flex items-center justify-between gap-4 py-2.5">
+                <div>
+                  <p className="text-[12px] font-medium text-foreground">
+                    Enabled
+                  </p>
+                  <p className="text-[11px] text-text-tertiary">
+                    Pause to block the assistant from using this connection.
+                  </p>
+                </div>
+                <Switch
+                  checked={key.is_active}
+                  disabled={updateKey.isPending}
+                  onCheckedChange={toggleActive}
+                  aria-label="Toggle connection enabled"
+                />
+              </div>
+              {canReplaceCredential(key) && (
+                <ReplaceCredential apiKeyId={key.api_key_id as string} />
+              )}
+            </>
+          ) : (
+            <div className="flex items-center gap-2 py-2.5 text-[11px] text-text-tertiary">
+              <Lock className="h-3 w-3 shrink-0" />
+              {readOnlyReason(key)}
+            </div>
+          )}
+        </div>
+
+        <div className="flex flex-wrap items-center justify-between gap-2 pt-2.5">
+          <Button asChild variant="ghost" size="sm">
+            <Link to="/keys/$keyId" params={{ keyId: key.id }}>
+              Advanced settings
+              <ExternalLink />
+            </Link>
+          </Button>
+          {modifiable &&
+            (confirmingRevoke ? (
+              <div className="flex items-center gap-2">
+                <span className="text-[11px] text-text-tertiary">
+                  {revokesGrant
+                    ? grantRevocationDescription(providerName)
+                    : "Revoke this connection?"}
+                </span>
+                <Button
+                  variant="ghost"
+                  size="sm"
+                  onClick={() => setConfirmingRevoke(false)}
+                >
+                  Cancel
+                </Button>
+                <Button
+                  variant="destructive"
+                  size="sm"
+                  isLoading={deleteKey.isPending}
+                  onClick={() => revoke(key.id)}
+                >
+                  Revoke
+                </Button>
+              </div>
+            ) : (
               <Button
-                variant="destructive"
+                variant="outline"
                 size="sm"
-                isLoading={deleteKey.isPending}
-                onClick={revoke}
+                className="text-destructive hover:text-destructive"
+                onClick={() => setConfirmingRevoke(true)}
               >
                 Revoke
               </Button>
-            </div>
-          ) : (
-            <Button
-              variant="outline"
-              size="sm"
-              className="text-destructive hover:text-destructive"
-              onClick={() => setConfirmingRevoke(true)}
-            >
-              Revoke
-            </Button>
-          ))}
-      </div>
-    </section>
+            ))}
+        </div>
+      </section>
+      {cascadeDetails && (
+        <GrantCascadeDialog
+          details={cascadeDetails}
+          isPending={deleteKey.isPending}
+          onCascade={() => revoke({ keyId: key.id, cascadeGrant: true })}
+          onRemoveOnly={() => revoke({ keyId: key.id, grantScope: "token" })}
+          onCancel={() => setCascadeDetails(null)}
+        />
+      )}
+    </>
   );
 }
 
