@@ -219,8 +219,11 @@ impl ApiClient {
 
     pub fn from_auth(auth: &crate::cli::AuthArgs) -> Result<Self> {
         let base_url = auth.resolved_base_url()?;
-        let token = crate::auth::resolve_access_token(auth)?;
-        Self::new_with_profile(&base_url, token, auth.profile.clone())
+        let resolved = crate::auth::resolve_access_token_with_source(auth)?;
+        let allow_refresh = resolved.source.allows_session_refresh();
+        let mut client = Self::new_with_profile(&base_url, resolved.token, auth.profile.clone())?;
+        client.refresh_disabled = !allow_refresh;
+        Ok(client)
     }
 
     /// Build a client after validating the saved session up front.
@@ -232,10 +235,8 @@ impl ApiClient {
     /// commands so a dead session is handled before the command does anything
     /// user-visible, instead of surfacing a raw 401 mid-operation.
     ///
-    /// Do NOT use for flows that authenticate with a non-session credential
-    /// (e.g. an agent API key passed via env) -- those should keep
-    /// [`Self::from_auth`] / [`Self::without_token_refresh`], since
-    /// `ensure_session` would have nothing to validate there anyway.
+    /// Caller-selected credentials are recognized by [`Self::from_auth`] and
+    /// are never eligible for saved-session refresh.
     pub async fn from_auth_checked(auth: &crate::cli::AuthArgs) -> Result<Self> {
         crate::auth::ensure_session(auth).await?;
         Self::from_auth(auth)
@@ -604,7 +605,7 @@ impl ApiClient {
             .await
             .with_context(|| format!("Proxy request to {path} failed"))?;
 
-        if resp.status() == reqwest::StatusCode::UNAUTHORIZED {
+        if resp.status() == reqwest::StatusCode::UNAUTHORIZED && !self.refresh_disabled {
             // Drain the auth error body before refreshing so reqwest can reuse
             // the connection for the refresh + retry sequence.
             let _ = resp.bytes().await;
@@ -702,13 +703,17 @@ pub async fn anonymous_post_empty(
 #[cfg(test)]
 mod tests {
     use std::collections::HashMap;
+    use std::ffi::OsString;
     use std::io;
     use std::sync::Mutex;
 
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     use tokio::net::{TcpListener, TcpStream};
+    use wiremock::matchers::{header, method, path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
 
     use super::ApiClient;
+    use crate::cli::{AuthArgs, OutputFormat};
 
     fn env_lock() -> &'static Mutex<()> {
         crate::test_support::env_lock()
@@ -742,6 +747,124 @@ mod tests {
         }
     }
 
+    struct EnvGuard {
+        previous: Vec<(&'static str, Option<OsString>)>,
+    }
+
+    impl EnvGuard {
+        fn set(values: &[(&'static str, Option<&str>)]) -> Self {
+            let previous = values
+                .iter()
+                .map(|(name, _)| (*name, std::env::var_os(name)))
+                .collect();
+            // SAFETY: tests using EnvGuard hold the process-wide env_lock.
+            unsafe {
+                for (name, value) in values {
+                    match value {
+                        Some(value) => std::env::set_var(name, value),
+                        None => std::env::remove_var(name),
+                    }
+                }
+            }
+            Self { previous }
+        }
+    }
+
+    impl Drop for EnvGuard {
+        fn drop(&mut self) {
+            // SAFETY: tests using EnvGuard hold the process-wide env_lock.
+            unsafe {
+                for (name, value) in &self.previous {
+                    match value {
+                        Some(value) => std::env::set_var(name, value),
+                        None => std::env::remove_var(name),
+                    }
+                }
+            }
+        }
+    }
+
+    fn auth_args(base_url: String) -> AuthArgs {
+        AuthArgs {
+            base_url: Some(base_url),
+            access_token: None,
+            access_token_env: "NYXID_ACCESS_TOKEN".to_string(),
+            profile: None,
+            output: OutputFormat::Json,
+        }
+    }
+
+    async fn assert_override_is_fail_closed(auth: &AuthArgs, expected_token: &str) {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/api/v1/proxy/s/test/ping"))
+            .and(header("authorization", format!("Bearer {expected_token}")))
+            .respond_with(ResponseTemplate::new(401).set_body_string("rejected override"))
+            .expect(1)
+            .mount(&server)
+            .await;
+        Mock::given(method("POST"))
+            .and(path("/api/v1/auth/refresh"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "access_token": "stored-session-replacement",
+                "refresh_token": "rotated-refresh-token"
+            })))
+            .expect(0)
+            .mount(&server)
+            .await;
+
+        let mut auth = auth.clone();
+        auth.base_url = Some(server.uri());
+        let mut api = ApiClient::from_auth_checked(&auth)
+            .await
+            .expect("caller-selected credential should build a client");
+        let resp = api
+            .proxy_request("GET", "/proxy/s/test/ping", &[], None)
+            .await
+            .expect("401 response should be returned without identity substitution");
+
+        assert_eq!(resp.status(), reqwest::StatusCode::UNAUTHORIZED);
+        assert_eq!(
+            resp.text().await.expect("response body"),
+            "rejected override"
+        );
+        server.verify().await;
+    }
+
+    #[tokio::test]
+    #[allow(clippy::await_holding_lock)] // intentional: serialises HOME/env mutations across tests
+    async fn caller_selected_credentials_never_refresh_or_switch_identity() {
+        let _env_guard = env_lock().lock().expect("env lock");
+        let temp = tempfile::tempdir().expect("temp dir");
+        let _home = HomeGuard::set(temp.path());
+        let _env = EnvGuard::set(&[
+            ("NYXID_ACCESS_TOKEN", Some("default-env-token")),
+            ("NYXID_API_KEY", Some("api-key-token")),
+            ("NYXID_TEST_SELECTED_TOKEN", Some("named-env-token")),
+        ]);
+
+        crate::auth::save_tokens("stored-access-token", Some("stored-refresh-token"))
+            .expect("save stored session");
+
+        let mut explicit = auth_args(String::new());
+        explicit.access_token = Some("explicit-token".to_string());
+        assert_override_is_fail_closed(&explicit, "explicit-token").await;
+
+        let mut named_env = auth_args(String::new());
+        named_env.access_token_env = "NYXID_TEST_SELECTED_TOKEN".to_string();
+        assert_override_is_fail_closed(&named_env, "named-env-token").await;
+
+        let default_env = auth_args(String::new());
+        assert_override_is_fail_closed(&default_env, "default-env-token").await;
+
+        // SAFETY: serialized by env_lock and restored by EnvGuard.
+        unsafe {
+            std::env::remove_var("NYXID_ACCESS_TOKEN");
+        }
+        let api_key_alias = auth_args(String::new());
+        assert_override_is_fail_closed(&api_key_alias, "api-key-token").await;
+    }
+
     #[tokio::test]
     #[allow(clippy::await_holding_lock)] // intentional: serialises HOME mutations across tests
     async fn proxy_request_refreshes_expired_token_and_retries() {
@@ -755,8 +878,12 @@ mod tests {
         let base_url = start_proxy_refresh_test_server()
             .await
             .expect("test server");
-        let mut api =
-            ApiClient::new(&base_url, "expired-access-token".to_string()).expect("api client");
+        let _env = EnvGuard::set(&[("NYXID_TEST_SAVED_SESSION_TOKEN", None)]);
+        let mut auth = auth_args(base_url);
+        auth.access_token_env = "NYXID_TEST_SAVED_SESSION_TOKEN".to_string();
+        let mut api = ApiClient::from_auth_checked(&auth)
+            .await
+            .expect("saved-session client");
 
         let resp = api
             .proxy_request("GET", "/proxy/s/home-assistant/api/", &[], None)
