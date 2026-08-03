@@ -321,7 +321,7 @@ describe("stream deadlines (NYX-1 / NYX-7)", () => {
 
     await act(async () => {
       await result.current.send.mutateAsync("Wait for the deadline.");
-      await vi.advanceTimersByTimeAsync(8_001);
+      await vi.advanceTimersByTimeAsync(30_001);
     });
 
     expect(result.current.turn.data).toMatchObject({
@@ -369,7 +369,7 @@ describe("stream deadlines (NYX-1 / NYX-7)", () => {
           approved: true,
         })
         .catch((error: unknown) => error);
-      await vi.advanceTimersByTimeAsync(8_001);
+      await vi.advanceTimersByTimeAsync(30_001);
       outcome = await pending;
     });
 
@@ -437,7 +437,8 @@ describe("approval episode cleanup (NYX-5 / hypothesis P2-f)", () => {
     expect(result.current.episode.data).toBeNull();
 
     await act(async () => {
-      await vi.advanceTimersByTimeAsync(10_000);
+      // Past the stream-start deadline: a leaked watchdog would surface here.
+      await vi.advanceTimersByTimeAsync(31_000);
     });
     expect(result.current.episode.data).toBeNull();
   });

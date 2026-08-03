@@ -48,7 +48,11 @@ export const assistantKeys = {
 // simultaneously-pending; the badge uses the server-side total anyway.
 const PENDING_APPROVALS_PAGE_SIZE = 50;
 const APPROVAL_HISTORY_PAGE_SIZE = 20;
-const STREAM_START_DEADLINE_MS = 8_000;
+// A turn that never emits a first event is failed rather than left hanging.
+// The deadline has to tolerate slow first-frame delivery from the upstream
+// workflow engine: at 8s it was cancelling healthy-but-slow SSE turns, so it
+// sits well above the observed worst-case time-to-first-event.
+const STREAM_START_DEADLINE_MS = 30_000;
 const PROJECTION_DEADLINE_MS = 5_000;
 // Streaming events update the transport mirror synchronously. Sparse text can
 // arrive at a relaxed cadence, while a growing backlog needs shorter samples
@@ -766,7 +770,7 @@ export function useActionCardActions(conversationId: string | undefined) {
       // Toggling a card is a local patch, not a stream. The pump is here only
       // to project that patch into the episode cache, so hand ownership back
       // immediately: setActionCardInProgress can return without emitting at
-      // all, and the pump's stream-start watchdog would then fire an 8s
+      // all, and the pump's stream-start watchdog would then fire a delayed
       // "assistant reply failed" toast on what was just a button press.
       const pump = createTurnEventPump(queryClient, conversationId);
       try {
