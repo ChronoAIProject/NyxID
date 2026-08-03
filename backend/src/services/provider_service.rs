@@ -5922,7 +5922,7 @@ mod tests {
             Some(super::OAuthProviderInput {
                 authorization_url: "https://auth.example.com/authorize".to_string(),
                 token_url: "https://auth.example.com/token".to_string(),
-                revocation_url: Some("https://auth.example.com/revoke".to_string()),
+                revocation_url: Some("https://example.com/revoke".to_string()),
                 default_scopes: Some(vec!["openid".to_string(), "profile".to_string()]),
                 client_id: Some("test-client".to_string()),
                 client_secret: Some("test-secret".to_string()),
@@ -6814,7 +6814,7 @@ mod tests {
                 is_active: None,
                 authorization_url: Some("https://new.example.com/auth".to_string()),
                 token_url: Some("https://new.example.com/token".to_string()),
-                revocation_url: Some("https://new.example.com/revoke".to_string()),
+                revocation_url: Some("https://example.com/revoke".to_string()),
                 revocation: None,
                 default_scopes: Some(vec!["email".to_string()]),
                 client_id: None,
@@ -6852,7 +6852,7 @@ mod tests {
         );
         assert_eq!(
             updated.revocation_url.as_deref(),
-            Some("https://new.example.com/revoke")
+            Some("https://example.com/revoke")
         );
         assert_eq!(updated.default_scopes, Some(vec!["email".to_string()]));
         assert!(updated.supports_pkce);
