@@ -30,6 +30,18 @@ const REFERENCE_FILES: &[&str] = &[
     "admin",
 ];
 
+/// Claude Code plugin marketplace source: the NyxID repository itself
+/// (`.claude-plugin/marketplace.json` at the repo root).
+const PLUGIN_MARKETPLACE_SOURCE: &str = "ChronoAIProject/NyxID";
+
+/// Marketplace name declared in `.claude-plugin/marketplace.json`.
+const PLUGIN_MARKETPLACE_NAME: &str = "nyxid";
+
+/// `<plugin>@<marketplace>` spec for the bundled NyxID plugin, which ships
+/// every repo skill (nyxid, the aevatar family, github/firecrawl-via-nyxid,
+/// the Ornn manual, ...), not just `skills/nyxid`.
+const PLUGIN_SPEC: &str = "nyxid@nyxid";
+
 /// The default hosted NyxID URL used in the repo's SKILL.md.
 /// Replaced with the user's actual server URL at install time.
 const DEFAULT_HOSTED_URL: &str = "https://nyx-api.chrono-ai.fun";
@@ -287,10 +299,17 @@ fn cargo_setup_rc_snippet(shell_name: &str, cargo_bin: &Path, cargo_env: &Path) 
 fn skill_paths(tool: AiToolTarget) -> Result<Vec<(String, PathBuf)>> {
     let home = home_dir()?;
     match tool {
-        AiToolTarget::ClaudeCode => Ok(vec![(
-            "skill".into(),
-            home.join(".claude/skills/nyxid/SKILL.md"),
-        )]),
+        AiToolTarget::ClaudeCode => Ok(vec![
+            (
+                "plugin (all skills)".into(),
+                home.join(".claude/plugins/marketplaces")
+                    .join(PLUGIN_MARKETPLACE_NAME),
+            ),
+            (
+                "skill (legacy)".into(),
+                home.join(".claude/skills/nyxid/SKILL.md"),
+            ),
+        ]),
         AiToolTarget::Cursor => Ok(vec![(
             "rule".into(),
             PathBuf::from(".cursor/rules/nyxid.mdc"),
@@ -461,6 +480,11 @@ fn print_post_install(tool: AiToolTarget, content: &SkillContent) {
             eprintln!(
                 "Use /nyxid in Claude Code, or just ask about NyxID and it activates automatically."
             );
+            if claude_plugin_marketplace_present() {
+                eprintln!(
+                    "Installed via the plugin marketplace: every bundled skill (nyxid, the aevatar family, github-via-nyxid, ...) is available, and `claude plugin update {PLUGIN_SPEC}` keeps them current."
+                );
+            }
         }
         AiToolTarget::Cursor => {
             eprintln!(
@@ -512,7 +536,101 @@ fn print_post_install(tool: AiToolTarget, content: &SkillContent) {
     }
 }
 
+/// True when the `claude` CLI is available on PATH.
+fn claude_cli_available() -> bool {
+    std::process::Command::new("claude")
+        .arg("--version")
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status()
+        .is_ok_and(|status| status.success())
+}
+
+/// Run a `claude` subcommand, capturing output. "Already exists/installed"
+/// responses count as success so the flow stays idempotent.
+fn run_claude(args: &[&str]) -> Result<()> {
+    let output = std::process::Command::new("claude")
+        .args(args)
+        .output()
+        .with_context(|| format!("failed to run `claude {}`", args.join(" ")))?;
+    if output.status.success() {
+        return Ok(());
+    }
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let combined = format!("{stdout}{stderr}").to_lowercase();
+    if combined.contains("already") {
+        return Ok(());
+    }
+    bail!(
+        "`claude {}` failed: {}",
+        args.join(" "),
+        stderr.trim().lines().last().unwrap_or("unknown error")
+    );
+}
+
+/// True when the NyxID plugin marketplace has been added to Claude Code.
+fn claude_plugin_marketplace_present() -> bool {
+    home_dir().is_ok_and(|home| {
+        home.join(".claude/plugins/marketplaces")
+            .join(PLUGIN_MARKETPLACE_NAME)
+            .exists()
+    })
+}
+
+/// Install every bundled NyxID skill through the Claude Code plugin
+/// marketplace. Returns Ok(false) when the `claude` CLI is unavailable so
+/// the caller can fall back to the legacy single-skill copy.
+fn try_install_claude_plugin() -> Result<bool> {
+    if !claude_cli_available() {
+        return Ok(false);
+    }
+
+    eprintln!("  Adding NyxID plugin marketplace ({PLUGIN_MARKETPLACE_SOURCE})...");
+    run_claude(&["plugin", "marketplace", "add", PLUGIN_MARKETPLACE_SOURCE])?;
+    eprintln!("  Installing plugin {PLUGIN_SPEC} (all bundled skills)...");
+    run_claude(&["plugin", "install", PLUGIN_SPEC])?;
+
+    // The legacy per-skill copy shadows the plugin's `nyxid` skill (personal
+    // skills take precedence), so a stale copy would pin users to the old
+    // content forever. Remove it once the plugin owns the skill.
+    if let Ok(home) = home_dir() {
+        let legacy = home.join(".claude/skills/nyxid");
+        if legacy.exists() {
+            match std::fs::remove_dir_all(&legacy) {
+                Ok(()) => eprintln!(
+                    "  Removed legacy copy at {} (now managed by the plugin).",
+                    legacy.display()
+                ),
+                Err(error) => eprintln!(
+                    "  Warning: could not remove legacy copy at {} ({error}); it will shadow the plugin's nyxid skill until deleted.",
+                    legacy.display()
+                ),
+            }
+        }
+    }
+    Ok(true)
+}
+
 async fn install_claude_code(content: &SkillContent) -> Result<()> {
+    match try_install_claude_plugin() {
+        Ok(true) => {
+            eprintln!();
+            print_post_install(AiToolTarget::ClaudeCode, content);
+            return Ok(());
+        }
+        Ok(false) => {
+            eprintln!(
+                "  `claude` CLI not found; falling back to the legacy single-skill install (only the nyxid skill)."
+            );
+        }
+        Err(error) => {
+            eprintln!(
+                "  Plugin install failed ({error}); falling back to the legacy single-skill install (only the nyxid skill)."
+            );
+        }
+    }
+
     let dir = home_dir()?.join(".claude/skills/nyxid");
 
     write_file(&dir.join("SKILL.md"), &content.skill_md)?;
@@ -617,7 +735,17 @@ async fn update(tool: Option<AiToolTarget>, base_url: &Option<String>) -> Result
     for t in installed_tools {
         eprintln!("Updating {t}...");
         match t {
-            AiToolTarget::ClaudeCode => install_claude_code(&content).await?,
+            AiToolTarget::ClaudeCode => {
+                if claude_plugin_marketplace_present() && claude_cli_available() {
+                    // Plugin-managed: refresh the marketplace clone and the
+                    // installed plugin instead of rewriting skill files.
+                    run_claude(&["plugin", "marketplace", "update", PLUGIN_MARKETPLACE_NAME])?;
+                    run_claude(&["plugin", "update", PLUGIN_SPEC])?;
+                    eprintln!("  Plugin {PLUGIN_SPEC} updated.");
+                } else {
+                    install_claude_code(&content).await?;
+                }
+            }
             AiToolTarget::Cursor => install_cursor(&content)?,
             AiToolTarget::Codex => install_codex(&content)?,
             AiToolTarget::Openclaw => install_openclaw(&content)?,
