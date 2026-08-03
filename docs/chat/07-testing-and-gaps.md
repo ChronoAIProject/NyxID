@@ -96,7 +96,7 @@ This suite is the focused ownership and timing probe. It covers:
 - stopping through placeholder and canonical aliases;
 - distinct durable IDs for concurrent pending drafts;
 - typed tombstone, unknown, and unrecoverable-placeholder reads;
-- the 8-second first-event deadline;
+- the 30-second first-event deadline;
 - the same start deadline for approval continuation;
 - the 5-second projection deadline;
 - approval episode disowning and rollback; and
