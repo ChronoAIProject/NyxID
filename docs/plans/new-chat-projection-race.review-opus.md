@@ -329,3 +329,231 @@ coverage. Either write the missing tests or amend §4 to state what was deferred
   the auth store's `user` is null. I confirmed the module reads `useAuthStore.getState().user?.id`
   at import and updates via subscription, but did not trace every app-boot ordering to prove the
   transport can never dispatch a create before `user` is populated.
+
+---
+
+# Re-review (round 2)
+
+Reviewer: Opus 5. Head now `73b7bb94`, 5 new commits on top of `58ab3594`
+(the round-1 head). Round-1 findings above are left intact as the record.
+
+VERDICT: REWORK
+
+P1-1 is **not** closed. The guard landed in two of the three places it was needed and the
+one place it is missing is exactly the window the implementer claims to have closed. My
+round-1 reproduction still deletes the user's message, unchanged. The four other findings
+(P2-1, P2-2, P2-3, all P3s) are genuinely fixed and I verified each; the coverage label is
+honest. This is one call-site away from APPROVE.
+
+## Gate results (round 2)
+
+All re-run from a clean worktree at `73b7bb94`. Every reported number reproduced.
+
+```
+$ npm run lint
+✖ 23 problems (0 errors, 23 warnings)
+
+$ npm run test
+ Test Files  199 passed (199)
+      Tests  2446 passed (2446)
+   Duration  46.62s
+
+$ npm run build
+dist/credential-accept/assets/credential-accept-Bk5hKdwf.js  154.03 kB │ gzip: 50.35 kB
+✓ built in 47ms
+
+$ cargo test -p nyxid-cli wizard_bundle_is_fresh
+test wizard_bundle_is_fresh ... ok
+test result: ok. 1 passed; 0 failed
+```
+
+2446 confirmed (up 10 from 2436), 199 files. Diff hygiene re-checked at the full range
+`origin/rollup-chat-2026-08-04...HEAD`: no `package.json`, no lockfile, no `cli/src/wizard/**`,
+no `backend/**`. Round-2 source touches only `aevatar-transport.ts` and
+`assistant-receipt-store.ts`. Worktree clean after every experiment.
+
+## Coverage accounting — the `[branch-regression]` label is honest
+
+Verified directly, as asked. Checked out `58ab3594`'s `aevatar-transport.ts` +
+`assistant-receipt-store.ts` under the round-2 test file and ran the four labelled tests:
+
+```
+ × [branch-regression] keeps a new-chat mirror untouched while a follow-up turn is active
+ × [branch-regression] keeps a longer new-chat mirror when the current fence omits its required turn
+ × [branch-regression] deletes an aliased placeholder through the wire when its receipt is gone
+ × [branch-regression] reads a cold canonical receipt from the transcript before serving pending
+      Tests  4 failed | 179 skipped (183)
+```
+
+All four fail against the pre-review implementation. They are branch regressions, not padding,
+and the label is correctly applied. Plan §4's shipped-vs-deferred accounting is likewise
+accurate against what I counted.
+
+I also confirmed the claim that the W8 tests exercise the `requiredTurnId` fallback rather than
+the seeded shape that hid the round-1 bug — `aevatar-transport.test.ts:7907-7912` asserts every
+local assistant message has `turnId === undefined` and that `stored.requiredTurnId` is the
+fallback source. That claim is true and it is the right assertion.
+
+---
+
+## P1 findings (block the PR)
+
+### P1-1 (SURVIVES) — the active-turn guard misses the window it was added for
+
+`aevatar-transport.ts:3124` (the guard), `:2079-2080` (the unguarded apply),
+`:2032-2045` (the pre-check that does it correctly).
+
+**What landed.** Three interlocks were added. Two are correct and consult the transport's
+running-turn map: `getHistory` (`:1693`, `this.running.has(...) || isTurnActive(...)`) and the
+reconciler's **pre-flight** check (`:2032`, same disjunction). The third —
+`applyHistoryResponse` itself (`:3124`) — checks **only** `isTurnActive(existing.turnState
+.activeTurn?.status)`. It does not consult `this.running`.
+
+**Why that is the wrong predicate.** I measured the reducer's state immediately after a real
+`sendMessage`:
+
+```
+"activeTurnAtSend": "completed"
+```
+
+Between `sendMessage()` and the first delivered frame, `activeTurn` still carries the *previous*
+turn's terminal status. `isTurnActive` is false for the entire duration of the create/continuation
+POST plus SSE header round trip — hundreds of milliseconds on every send. That is precisely the
+"between `sendMessage()` and `RUN_STARTED`" window the implementer says it closed; it is closed in
+`getHistory` and in the reconciler pre-check, and left open at the point where the mirror is
+actually overwritten.
+
+**Reachability.** The reconciler pre-check at `:2032` runs *before* the transcript GET is issued.
+After the `await` at `:2075` the only re-check is scope (`:2079`); `applyHistoryResponse` is then
+called at `:2080`. So: reconciler passes the pre-check (no turn in flight) → issues the GET → the
+user sends a follow-up → the response lands → the guard at `:3124` sees `status: "completed"` →
+replacement proceeds. The reconciler polls on a 250 ms–30 s ladder for up to 90 s while the user
+reads and types, so there is an in-flight window on every poll.
+
+**Reproduced, unchanged from round 1.** Same scratch test against the real transport at
+`73b7bb94` (appended to the suite, run, reverted; `git status` verified clean):
+
+```
+"beforeMirror":     ["user#-", "assistant#-", "assistant#-"]
+"midMirror":        ["user#-", "assistant#-", "assistant#-", "user#-"]   ← optimistic send
+"activeTurnAtSend": "completed"                                          ← guard does not fire
+"afterMidTurnRead": ["user#T1", "assistant#T1", "assistant#-"]           ← user message GONE
+```
+
+**Why the new test does not catch it.** `aevatar-transport.test.ts:7815`
+("[branch-regression] keeps a new-chat mirror untouched while a follow-up turn is active")
+hand-assigns `activeTurn: { turnId: null, status: "running", error: null }` at `:7857` before
+calling `applyHistoryResponse`. That is the one state in which the guard fires, and it is not the
+state a real `sendMessage` produces. The test validates the guard as written rather than the
+behaviour it was written for. It does fail at `58ab3594`, so the label is honest — but it is
+false assurance.
+
+**Fix — at the call site, not in `applyHistoryResponse`.** Do **not** add a blanket
+`this.running` check inside `applyHistoryResponse`: three legitimate in-run callers
+(`:3589`, `:3649` create-recovery, `:3726` reservation-retry fence refresh) must still apply while
+their own run is in `this.running`, and a blanket check would silently break the continuation
+fence refresh. The correct change is at `:2079-2080` — re-evaluate the same `turnInFlight`
+disjunction already computed at `:2032` after the await, and on a hit skip the apply, refresh
+`entry.deadlineAt`, and reschedule, exactly as `:2038-2044` does. Then rewrite the test at
+`:7815` to reach `applyHistoryResponse` through `reconcileProjection` with a real `sendMessage`
+in the in-flight window, rather than hand-setting `activeTurn`.
+
+**Severity note, stated honestly.** This is narrower than round 1: it needs a reconcile GET
+already in flight when the user sends, and it self-heals at the next materialization (the server
+transcript will contain the user message once the turn commits). It is still the silent
+disappearance of the user's own message from the transcript while the assistant answers it — the
+#1304 class — and the fix is a few lines at one call site.
+
+---
+
+## Verified fixed (I re-derived each; do not re-litigate)
+
+- **P2-1 — healthy first turns are clean.** Confirmed by direct measurement, not by reading the
+  summary. During a normal new-chat first turn: `awaitingProjection` is `undefined` and
+  create-recovery request count is **0**. After the terminal, `awaitingProjection` becomes `true`
+  as intended.
+
+  ```
+  "duringFirstTurn": undefined,
+  "createRecoveryCallsDuringHealthyTurn": 0,
+  "awaitingAfterTerminal": true,
+  ```
+
+  Mechanism checks out: `historyFromStored` (`:1823`) suppresses `awaitingProjection` when
+  `turnInFlight || isTurnActive`, so the hook effect never arms during the turn and the syncing
+  strip does not render. `runReconcileObservation` (`:2032-2045`) reschedules locally with a fresh
+  post-terminal deadline and no network when a turn is in flight.
+  `adoptRecoveredReceipt:2199-2201` now updates `activeConversationId` when the placeholder is the
+  active address, matching `recoverWorkflowCreate:3543`.
+
+- **Convergence is not frozen.** The specific risk I flagged — that a guard could trade content
+  loss for a permanently stale mirror. It does not. With no turn in flight, past the grace, a
+  fence-current read containing the required turn wins:
+
+  ```
+  "pendingBefore": true,  "requiredTurnId": "turn-d619…",
+  "beforeMirror":  ["user#-", "assistant#-", "assistant#-"],
+  "afterMirror":   ["user#T1", "assistant#T1", "assistant#-"],
+  "pendingAfter":  false,  "awaitingAfter": undefined,
+  ```
+
+  The `latestAssistantTurnId` fallback to `safeTurnId(stored.requiredTurnId)` (`:3415`) closes the
+  round-1 vacuity: clause 4 is now a real condition for new-chat mirrors. The unlabelled sibling
+  test at `:7882` asserts the same convergence and is genuine net-new coverage.
+
+- **P2-2 — cold receipt-backed load reads the wire first.** The pending short-circuit at
+  `:1707-1715` now additionally requires `messages.length > 0 || requiredTurnId != null ||
+  lastLocalTurnCompletedAt !== undefined`. A record synthesized purely from a receipt has none of
+  those, so it falls through to the transcript GET and renders on success; on 404 it lands in the
+  `existing` branch and serves the syncing mirror. `identityPending` still short-circuits, which is
+  correct — a placeholder has no server address to read.
+
+- **P2-3 — receiptless alias deletion.** `:1436` captures `conversationAliases.get(conversationId)`
+  and `:1438-1441` requires both `!pendingReceipt?.conversationId` **and** `!aliasedConversationId`
+  before taking the local-only branch. An evicted receipt can no longer suppress the canonical
+  wire DELETE.
+
+- **All four P3s landed as described.** `materializedStateVersion` removed from the interface and
+  both spread sites; retirement timers keyed `owner\0commandId`, deduplicated at
+  `retireReceiptAfterMaterialization:208-209`, cancelled in both `deleteReceipt:186-192` and
+  `deleteReceiptForOwner:99-102`, and cleared in the test reset; `resetScope:1313-1320` settles
+  abandoned entries as `timed_out` (over a copied array, so the later `clear()` is safe);
+  deletion-intent ids computed once per index response and passed into `mergeIndexEntry`
+  (`:1374-1381`, `:1879-1886`, `:3053-3059`).
+
+- **Nothing regressed in the round-1 verified-sound areas.** Re-checked: the account-scope reset
+  and post-await scope guards are intact (and now also settle waiters); intent durability still
+  rests on separate keyspace/cap/prune; the `stateVersion: 0` criterion at
+  `applyMaterializationObservation` is unchanged and the `:6806-6849` regression is green in the
+  full 2446-test run; `nextBackoffDelay`'s floor is untouched; the #1304 assertions in
+  `use-assistant.aevatar.test.tsx` are unchanged (file untouched in round 2, still 6 tests).
+
+## The three deferrals — my honest assessment
+
+- **W0 abort-spy test** (assert no further A-id requests after an account switch) —
+  **legitimate hardening deferral.** The abort code exists and I traced it (`resetScope` aborts
+  run controllers, scope controllers, and reconcile timers before clearing state); the shipped
+  test covers the observable outcome (empty list, `getHistory` throws). A spy would be stronger
+  but its absence hides no known defect.
+- **W4 pause/resume, late-wake, remote-delete-mid-loop, recovery-adoption timing** —
+  **legitimate deferral, with residual risk.** I re-derived all four by inspection in round 1 and
+  again here and found them correct: pause aborts and returns from inside `try` so the post-`finally`
+  reschedule is skipped and the entry keeps its attempt/deadline; `finalObservationDue` guarantees
+  one observation after a late wake; the two-observation ≥10 s absent transition is coherent. These
+  are the least-exercised paths in the change and the first place I would look at a future bug
+  report, but nothing here is load-bearing for a defect I can name.
+- **W6 pump-level dual-slot copy test** — **legitimate deferral.** The code
+  (`use-assistant.ts:136-159`) is straightforward `setQueryData` mirroring guarded by
+  `getQueryData(...) === undefined`, and the pre-existing pre-navigation copy in
+  `assistant.tsx:243-254` remains the primary path. Low risk.
+
+None of the three is load-bearing for correctness. The coverage gap that *was* load-bearing —
+W8 — has been filled, and filled with the right assertions.
+
+## Unverified (round 2)
+
+- I did not measure the wall-clock probability of the P1-1 window in production. I established
+  the window exists (`activeTurnAtSend: "completed"`), that the send-to-first-frame gap is a
+  network round trip, and that the reconciler has a GET in flight on a 250 ms–30 s ladder for up
+  to 90 s. I did not instrument a live session to estimate how often those overlap.
+- Multi-tab behaviour remains unexercised, unchanged from round 1.
