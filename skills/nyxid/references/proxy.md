@@ -18,6 +18,7 @@ NyxID is just a proxy. The paths, methods, and request bodies are the same as ca
 the downstream service directly. To figure out what to send:
 
 1. Check catalog for endpoints: `nyxid catalog endpoints <slug>`
+   - If a service has no endpoints and no `openapi_spec_url`, do not guess paths: check `recommended_skills` on the catalog entry and search Ornn for a service-bound skill, or follow the `nyxid-service-skill-authoring` skill to find/create one.
    - If the service has an OpenAPI spec, this returns all available endpoints (method, path, description)
 2. Check the catalog for documentation: `nyxid catalog show <slug> --output json`
    - Look for `homepage_url`, `repository_url`, `documentation_url` -- links to docs and source

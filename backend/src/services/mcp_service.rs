@@ -1376,7 +1376,9 @@ fn build_generic_proxy_endpoint(service_label: &str) -> McpToolEndpoint {
         endpoint_id: GENERIC_PROXY_ENDPOINT_ID.to_string(),
         name: "request".to_string(),
         description: Some(format!(
-            "Make an HTTP request to {service_label}. Specify the method, path, optional raw query string, and optional JSON body."
+            "Make an HTTP request to {service_label}. Specify the method, path, optional raw query string, and optional JSON body. \
+             This service publishes no typed operations -- do not guess endpoint paths: check the service's recommended_skills \
+             and the Ornn skill registry for a skill that documents it, or follow the nyxid-service-skill-authoring skill to create one."
         )),
         method: "POST".to_string(),
         path: String::new(),
