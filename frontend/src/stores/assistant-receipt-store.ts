@@ -14,9 +14,14 @@ const DELETION_INTENT_CAP = 10;
 
 let activeOwnerUserId = useAuthStore.getState().user?.id ?? null;
 const memoryByOwner = new Map<string, AssistantReceiptState>();
+const retirementTimers = new Map<string, ReturnType<typeof setTimeout>>();
 
 function storageKey(ownerUserId: string): string {
   return `${STORAGE_PREFIX}${encodeURIComponent(ownerUserId)}`;
+}
+
+function retirementKey(ownerUserId: string, commandId: string): string {
+  return `${ownerUserId}\0${commandId}`;
 }
 
 function readStorage(ownerUserId: string): AssistantReceiptState | undefined {
@@ -91,6 +96,10 @@ function updateActive(
 }
 
 function deleteReceiptForOwner(ownerUserId: string, commandId: string): void {
+  const timerKey = retirementKey(ownerUserId, commandId);
+  const timer = retirementTimers.get(timerKey);
+  if (timer !== undefined) clearTimeout(timer);
+  retirementTimers.delete(timerKey);
   const state = loadOwner(ownerUserId);
   if (!(commandId in state.receipts)) return;
   const receipts = { ...state.receipts };
@@ -174,6 +183,13 @@ export function advanceReceiptFence(
 }
 
 export function deleteReceipt(commandId: string): void {
+  const ownerUserId = activeOwnerUserId;
+  if (ownerUserId) {
+    const timerKey = retirementKey(ownerUserId, commandId);
+    const timer = retirementTimers.get(timerKey);
+    if (timer !== undefined) clearTimeout(timer);
+    retirementTimers.delete(timerKey);
+  }
   updateActive((state) => {
     if (!(commandId in state.receipts)) return state;
     const receipts = { ...state.receipts };
@@ -189,8 +205,14 @@ export function retireReceiptAfterMaterialization(
   const ownerUserId = activeOwnerUserId;
   const receipt = activeState()?.receipts[commandId];
   if (!ownerUserId || !receipt) return;
+  const timerKey = retirementKey(ownerUserId, commandId);
+  if (retirementTimers.has(timerKey)) return;
   const delayMs = Math.max(0, receipt.createdAt + 60_000 - now);
-  setTimeout(() => deleteReceiptForOwner(ownerUserId, commandId), delayMs);
+  const timer = setTimeout(
+    () => deleteReceiptForOwner(ownerUserId, commandId),
+    delayMs,
+  );
+  retirementTimers.set(timerKey, timer);
 }
 
 export function findReceiptByPlaceholder(
@@ -266,6 +288,8 @@ if (typeof window !== "undefined") {
 }
 
 export function resetAssistantReceiptStoreForTests(): void {
+  for (const timer of retirementTimers.values()) clearTimeout(timer);
+  retirementTimers.clear();
   memoryByOwner.clear();
   activeOwnerUserId = useAuthStore.getState().user?.id ?? null;
 }

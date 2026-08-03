@@ -612,8 +612,6 @@ interface StoredConversation {
   projectionPending?: boolean;
   /** Latest local workflow turn that must appear before materialization. */
   requiredTurnId?: string | null;
-  /** Highest transcript fence confirmed by a wire response. */
-  materializedStateVersion?: number;
   /** Reconciliation deadline, after which the mirror is explicitly stalled. */
   projectionStalledAt?: number;
   /**
@@ -1312,9 +1310,13 @@ export class AevatarAssistantTransport implements AssistantTransport {
       this.clearWatchdog(run);
     }
     for (const controller of this.scopeControllers) controller.abort();
-    for (const entry of this.reconcileEntries.values()) {
+    for (const entry of [...this.reconcileEntries.values()]) {
       if (entry.timer !== undefined) clearTimeout(entry.timer);
       entry.controller?.abort();
+      entry.settle({
+        status: "timed_out",
+        conversationId: entry.conversationId,
+      });
     }
     this.conversations.clear();
     this.running.clear();
@@ -1369,9 +1371,14 @@ export class AevatarAssistantTransport implements AssistantTransport {
         `${ASSISTANT_PREFIX}/conversations`,
       );
       if (scopeId !== this.ensureScope()) return [];
+      const deletionIntentIds = new Set(
+        listDeletionIntents().flatMap((intent) =>
+          intent.conversationId ? [intent.conversationId] : [],
+        ),
+      );
       for (const entry of response.conversations ?? []) {
         const id = entry?.id?.trim();
-        if (id) this.mergeIndexEntry(id, entry);
+        if (id) this.mergeIndexEntry(id, entry, deletionIntentIds);
       }
     }
     // An aliased conversation is stored under both its placeholder key and
@@ -1426,9 +1433,11 @@ export class AevatarAssistantTransport implements AssistantTransport {
     )
       ? findReceiptByPlaceholder(conversationId)
       : undefined;
+    const aliasedConversationId = this.conversationAliases.get(conversationId);
     if (
       conversationId.startsWith(PENDING_WORKFLOW_CONVERSATION_PREFIX) &&
-      !pendingReceipt?.conversationId
+      !pendingReceipt?.conversationId &&
+      !aliasedConversationId
     ) {
       const run = this.running.get(conversationId);
       if (run) this.cancelTurn(conversationId, run);
@@ -1681,16 +1690,25 @@ export class AevatarAssistantTransport implements AssistantTransport {
     ) {
       throw new AssistantConversationNotFoundError();
     }
+    const turnInFlight =
+      this.running.has(requestedId) || this.running.has(conversationId);
     // During a streaming turn the local mirror is ahead of the server;
     // serving it keeps per-event re-projection off the network entirely.
-    if (existing && isTurnActive(existing.turnState.activeTurn?.status)) {
+    if (
+      existing &&
+      (turnInFlight || isTurnActive(existing.turnState.activeTurn?.status))
+    ) {
       this.activateConversation(conversationId, existing);
-      return this.historyFromStored(existing);
+      return this.historyFromStored(existing, true);
     }
     if (
       existing &&
-      (existing.identityPending || existing.projectionPending ||
-        existing.projectionStalledAt !== undefined)
+      (existing.identityPending ||
+        ((existing.projectionPending ||
+          existing.projectionStalledAt !== undefined) &&
+          (existing.turnState.messages.length > 0 ||
+            existing.requiredTurnId != null ||
+            existing.lastLocalTurnCompletedAt !== undefined)))
     ) {
       this.activateConversation(conversationId, existing);
       return this.historyFromStored(existing);
@@ -1802,15 +1820,20 @@ export class AevatarAssistantTransport implements AssistantTransport {
     this.activeConversationId = conversationId;
   }
 
-  private historyFromStored(stored: StoredConversation): ConversationHistory {
+  private historyFromStored(
+    stored: StoredConversation,
+    turnInFlight = false,
+  ): ConversationHistory {
     const stalled = stored.projectionStalledAt !== undefined;
+    const turnActive =
+      turnInFlight || isTurnActive(stored.turnState.activeTurn?.status);
     return {
       conversation: stored.conversation,
       messages: stored.turnState.messages,
       has_more: false,
       ...(stalled
         ? { projectionStalled: true }
-        : stored.identityPending || stored.projectionPending
+        : !turnActive && (stored.identityPending || stored.projectionPending)
           ? { awaitingProjection: true }
           : {}),
     };
@@ -1853,9 +1876,14 @@ export class AevatarAssistantTransport implements AssistantTransport {
       const present = entries.some(
         (entry) => entry?.id?.trim() === conversationId,
       );
+      const deletionIntentIds = new Set(
+        listDeletionIntents().flatMap((intent) =>
+          intent.conversationId ? [intent.conversationId] : [],
+        ),
+      );
       for (const entry of entries) {
         const id = entry?.id?.trim();
-        if (id) this.mergeIndexEntry(id, entry);
+        if (id) this.mergeIndexEntry(id, entry, deletionIntentIds);
       }
       this.listFetchedAt = this.now();
       return present;
@@ -1998,6 +2026,23 @@ export class AevatarAssistantTransport implements AssistantTransport {
       this.deletingConversations.has(entry.conversationId)
     ) {
       this.settleReconcileEntry(entry, "absent");
+      return;
+    }
+    const activeStored = this.conversations.get(entry.conversationId);
+    const turnInFlight =
+      this.running.has(entry.conversationId) ||
+      (entry.placeholderId !== undefined &&
+        this.running.has(entry.placeholderId));
+    if (
+      activeStored &&
+      (turnInFlight || isTurnActive(activeStored.turnState.activeTurn?.status))
+    ) {
+      const policy = activeStored.identityPending
+        ? CREATE_RECOVERY_BACKOFF_POLICY
+        : PROJECTION_BACKOFF_POLICY;
+      entry.deadlineAt = this.now() + policy.deadlineMs;
+      entry.running = false;
+      this.scheduleReconcileEntry(entry);
       return;
     }
 
@@ -2151,6 +2196,9 @@ export class AevatarAssistantTransport implements AssistantTransport {
     this.conversations.set(recovery.conversationId, stored);
     this.conversations.set(placeholderId, stored);
     this.conversationAliases.set(placeholderId, recovery.conversationId);
+    if (this.activeConversationId === placeholderId) {
+      this.activeConversationId = recovery.conversationId;
+    }
     adoptReceiptIdentity(
       entry.commandId ?? "",
       recovery.conversationId,
@@ -3002,15 +3050,13 @@ export class AevatarAssistantTransport implements AssistantTransport {
    * clobber a streaming transcript); everything else adopts the server's
    * title, timestamps, and counts without a per-conversation detail fetch.
    */
-  private mergeIndexEntry(id: string, entry: AevatarHistoryIndexEntry): void {
+  private mergeIndexEntry(
+    id: string,
+    entry: AevatarHistoryIndexEntry,
+    deletionIntentIds: ReadonlySet<string>,
+  ): void {
     if (this.deletedConversationIds.has(id)) return;
-    if (
-      listDeletionIntents().some(
-        (intent) => intent.conversationId === id,
-      )
-    ) {
-      return;
-    }
+    if (deletionIntentIds.has(id)) return;
     const existing = this.conversations.get(id);
     if (existing && isTurnActive(existing.turnState.activeTurn?.status)) {
       return;
@@ -3049,7 +3095,6 @@ export class AevatarAssistantTransport implements AssistantTransport {
       identityPending: existing?.identityPending,
       projectionPending: existing?.projectionPending,
       requiredTurnId: existing?.requiredTurnId,
-      materializedStateVersion: existing?.materializedStateVersion,
       projectionStalledAt: existing?.projectionStalledAt,
       sessionId: existing?.sessionId,
       createRequest: existing?.createRequest,
@@ -3075,8 +3120,11 @@ export class AevatarAssistantTransport implements AssistantTransport {
     if (this.deletedConversationIds.has(conversationId)) {
       throw new AssistantConversationNotFoundError();
     }
-    const entries = readHistoryEntries(body);
     const existing = this.conversations.get(conversationId);
+    if (existing && isTurnActive(existing.turnState.activeTurn?.status)) {
+      return existing;
+    }
+    const entries = readHistoryEntries(body);
     const messages = entries
       .map((entry, index) => historyEntryToMessage(entry, index))
       .filter((message): message is AssistantMessage => message !== null);
@@ -3168,7 +3216,6 @@ export class AevatarAssistantTransport implements AssistantTransport {
       identityPending: existing?.identityPending,
       projectionPending: existing?.projectionPending,
       requiredTurnId: existing?.requiredTurnId,
-      materializedStateVersion: existing?.materializedStateVersion,
       projectionStalledAt: existing?.projectionStalledAt,
       sessionId: existing?.sessionId,
       createRequest: existing?.createRequest,
@@ -3197,12 +3244,6 @@ export class AevatarAssistantTransport implements AssistantTransport {
     stored.identityPending = false;
     stored.projectionPending = false;
     stored.projectionStalledAt = undefined;
-    if (freshStateVersion !== undefined) {
-      stored.materializedStateVersion = Math.max(
-        stored.materializedStateVersion ?? 0,
-        freshStateVersion,
-      );
-    }
     const receipt = findReceiptByConversation(stored.conversation.id);
     if (receipt) retireReceiptAfterMaterialization(receipt.commandId, this.now());
   }
@@ -3371,7 +3412,7 @@ export class AevatarAssistantTransport implements AssistantTransport {
       const turnId = safeTurnId(message.turnId);
       if (turnId) return turnId;
     }
-    return null;
+    return safeTurnId(stored.requiredTurnId);
   }
 
   private async readWorkflowHistory(
