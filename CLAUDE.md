@@ -9,7 +9,7 @@ NyxID is an Auth/SSO platform (similar to Supabase Auth) with a Rust backend, Re
 - **SDK:** TypeScript OAuth 2.0 client (`@nyxids/oauth-core`, `@nyxids/oauth-react`)
 - **Dev tools:** Docker Compose (MongoDB + Mailpit), RSA keys for JWT signing
 
-Deep-dive docs live in `docs/` -- notably ENV.md, ORACLE_RELAY.md, AGENT_ISOLATION.md, CHANNEL_BOT_RELAY.md, CHANNEL_EVENT_GATEWAY.md, NODE_PROXY_ARCHITECTURE.md, OPENCLAW_INTEGRATION.md, API_DISCOVERY.md, SSH_NODE_KEY_AUTH.md. Read the relevant doc before working in that subsystem.
+Deep-dive docs live in `docs/` -- notably chat/README.md, ENV.md, ORACLE_RELAY.md, AGENT_ISOLATION.md, CHANNEL_BOT_RELAY.md, CHANNEL_EVENT_GATEWAY.md, NODE_PROXY_ARCHITECTURE.md, OPENCLAW_INTEGRATION.md, API_DISCOVERY.md, SSH_NODE_KEY_AUTH.md. Read the relevant doc before working in that subsystem.
 
 ## Critical Rules
 
@@ -292,11 +292,9 @@ JWT_RELAY_ACCESS_TTL_SECS=300       # X-NyxID-User-Token relay access token TTL.
                                     # proxy/LLM-only (rejected elsewhere by reject_relay_tokens),
                                     # inherit the agent key's service/node allowlist, and are
                                     # invalidated when that key is revoked (ensure_relay_agent_key_active).
-JWT_ASSISTANT_FORWARD_TTL_SECS=300  # Outbound-only bearer the assistant pass-through mints for
-                                    # cookie sessions and forwards to Aevatar (TD-3 bridge). Carries
-                                    # assistant_forward:true, rejected by verify_token on NyxID
-                                    # re-entry; minted only while the aevatar row has
-                                    # forward_access_token:true (the TD-3 row flip retires it).
+JWT_ASSISTANT_FORWARD_TTL_SECS=300  # Legacy tombstone for the retired assistant_forward token.
+                                    # Live assistant delegation uses the compile-time 300s
+                                    # MCP_DELEGATION_TOKEN_TTL_SECS constant; this env has no effect.
 SA_TOKEN_TTL_SECS=3600              # Service account tokens
 ENVIRONMENT=development
 RATE_LIMIT_PER_SECOND=10
