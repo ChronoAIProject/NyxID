@@ -326,6 +326,33 @@ describe("ScenarioInterceptTransport ownership", () => {
     });
   });
 
+  it("rejects send while a mock turn is running (§6.2)", async () => {
+    const { delegate, transport } = await createTransport();
+
+    transport.sendMessage(CONVERSATION_ID, "simulate an error", () => {});
+
+    expect(() =>
+      transport.sendMessage(CONVERSATION_ID, "another message", () => {}),
+    ).toThrow(AssistantTurnActiveError);
+    expect(delegate.sendCalls).toBe(0);
+  });
+
+  it("rejects resume while a mock continuation is running (§6.2)", async () => {
+    const { delegate, transport } = await createTransport();
+    const { card } = await parkGitHubAction(transport);
+    const failedReport = report(card, "failed");
+    transport.continueActions(CONVERSATION_ID, card.origin_turn_id, [
+      failedReport,
+    ]);
+
+    expect(() =>
+      transport.continueActions(CONVERSATION_ID, card.origin_turn_id, [
+        failedReport,
+      ]),
+    ).toThrow(AssistantTurnActiveError);
+    expect(delegate.continueCalls).toBe(0);
+  });
+
   it("routes Stop, card patches, approval decisions, and action reports after toggle-off (F2)", async () => {
     const { delegate, transport } = await createTransport();
     const runningEvents: TurnEvent[] = [];
@@ -532,6 +559,47 @@ describe("ScenarioInterceptTransport projections", () => {
     expect(projections.length).toBeGreaterThan(20);
     expect(delegate.historyCalls).toBe(initialHistoryCalls);
     expect(useAssistantWireLogStore.getState().entries).toEqual([]);
+  });
+
+  it("refreshes delegated history and list while preserving a parked overlay", async () => {
+    const delegate = new StubTransport();
+    const transport = new ScenarioInterceptTransport(delegate);
+    await parkGitHubAction(transport);
+    const refreshedConversation = baseConversation(CONVERSATION_ID, {
+      title: "Refreshed conversation",
+      last_message_at: "2026-08-04T00:30:00.000Z",
+      message_count: 7,
+    });
+    delegate.histories.set(CONVERSATION_ID, {
+      ...baseHistory(),
+      conversation: refreshedConversation,
+    });
+    delegate.conversations = [refreshedConversation];
+
+    const history = await transport.getHistory(CONVERSATION_ID);
+    const listed = (await transport.listConversations()).find(
+      (conversation) => conversation.id === CONVERSATION_ID,
+    );
+
+    expect(delegate.historyCalls).toBe(1);
+    expect(delegate.listCalls).toBe(1);
+    expect(history.conversation.title).toBe("Refreshed conversation");
+    expect(history.messages).toContainEqual(
+      expect.objectContaining({
+        role: "user",
+        blocks: expect.arrayContaining([
+          expect.objectContaining({
+            type: "text",
+            text: "connect to my github",
+          }),
+        ]),
+      }),
+    );
+    expect(listed).toMatchObject({
+      title: "Refreshed conversation",
+      message_count: history.conversation.message_count,
+    });
+    expect(listed?.message_count).toBeGreaterThan(7);
   });
 
   it("projects claimed title, recency, ordering, and matching history/list counts (F9, P12)", async () => {
@@ -802,6 +870,28 @@ describe("ScenarioInterceptTransport journey verification", () => {
 });
 
 describe("ScenarioInterceptTransport deletion", () => {
+  it("leaves unowned state inert after a rejected delegated delete", async () => {
+    const delegate = new StubTransport();
+    delegate.deleteImpl = async () => {
+      throw new Error("delete failed");
+    };
+    const { transport } = await createTransport(delegate);
+    const historyCalls = delegate.historyCalls;
+    const listCalls = delegate.listCalls;
+
+    await expect(transport.deleteConversation(CONVERSATION_ID)).rejects.toThrow(
+      "delete failed",
+    );
+    const history = await transport.getHistory(CONVERSATION_ID);
+    const conversations = await transport.listConversations();
+
+    expect(delegate.deleteCalls).toBe(1);
+    expect(delegate.historyCalls).toBe(historyCalls + 1);
+    expect(delegate.listCalls).toBe(listCalls + 1);
+    expect(history).toEqual(baseHistory());
+    expect(conversations).toContainEqual(baseConversation());
+  });
+
   it("cancels synchronously before a delayed delegate delete (F13)", async () => {
     let resolveDelete: () => void = () => undefined;
     const delegate = new StubTransport();

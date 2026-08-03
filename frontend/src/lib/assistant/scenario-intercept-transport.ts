@@ -226,7 +226,6 @@ export class ScenarioInterceptTransport implements AssistantTransport {
       const state = this.ownership.get(conversationId);
       if (
         state !== "mock-running" &&
-        state !== "mock-parked" &&
         state !== "verifying"
       ) {
         const delegated = await this.delegate.getHistory(conversationId);
@@ -242,6 +241,15 @@ export class ScenarioInterceptTransport implements AssistantTransport {
 
   async deleteConversation(conversationId: string): Promise<void> {
     if (this.tombstones.has(conversationId)) return;
+    const wrapperOwned =
+      this.overlays.has(conversationId) ||
+      this.claimedConversations.has(conversationId) ||
+      this.ownership.has(conversationId) ||
+      this.verificationRuns.has(conversationId);
+    if (!wrapperOwned) {
+      await this.delegate.deleteConversation(conversationId);
+      return;
+    }
     const verification = this.verificationRuns.get(conversationId);
     if (verification) {
       verification.cancelled = true;
@@ -356,6 +364,7 @@ export class ScenarioInterceptTransport implements AssistantTransport {
         onEvent,
       );
     }
+    const priorOwnership = this.ownership.get(conversationId);
     this.requireMockMutationAllowed(conversationId);
     this.beginContinuationGroup(conversationId);
     this.ownership.set(conversationId, "mock-running");
@@ -374,7 +383,7 @@ export class ScenarioInterceptTransport implements AssistantTransport {
       return handle;
     } catch (error) {
       this.discardEmptyActiveGroup(conversationId);
-      this.ownership.set(conversationId, "mock-parked");
+      this.restoreOwnership(conversationId, priorOwnership);
       throw error;
     }
   }
@@ -436,6 +445,7 @@ export class ScenarioInterceptTransport implements AssistantTransport {
         onEvent,
       );
     }
+    const priorOwnership = this.ownership.get(conversationId);
     this.requireMockMutationAllowed(conversationId);
     this.ownership.set(conversationId, "verifying");
     let prepared: PreparedActionContinuation;
@@ -447,7 +457,7 @@ export class ScenarioInterceptTransport implements AssistantTransport {
         this.eventSink(conversationId, onEvent),
       );
     } catch (error) {
-      this.ownership.set(conversationId, "mock-parked");
+      this.restoreOwnership(conversationId, priorOwnership);
       throw error;
     }
     if (prepared.report.disposition !== "completed") {
@@ -466,6 +476,7 @@ export class ScenarioInterceptTransport implements AssistantTransport {
     if (!isMockId(originTurnId)) {
       return this.delegate.wakeActions(conversationId, originTurnId, onEvent);
     }
+    const priorOwnership = this.ownership.get(conversationId);
     this.requireMockMutationAllowed(conversationId);
     this.beginContinuationGroup(conversationId);
     this.ownership.set(conversationId, "mock-running");
@@ -478,7 +489,7 @@ export class ScenarioInterceptTransport implements AssistantTransport {
       );
     } catch (error) {
       this.discardEmptyActiveGroup(conversationId);
-      this.ownership.set(conversationId, "mock-parked");
+      this.restoreOwnership(conversationId, priorOwnership);
       throw error;
     }
   }
@@ -570,8 +581,24 @@ export class ScenarioInterceptTransport implements AssistantTransport {
 
   private requireMockMutationAllowed(conversationId: string): void {
     this.requireNotDeleted(conversationId);
-    if (this.ownership.get(conversationId) === "delegate-active") {
+    const state = this.ownership.get(conversationId);
+    if (
+      state === "mock-running" ||
+      state === "verifying" ||
+      state === "delegate-active"
+    ) {
       throw new AssistantTurnActiveError();
+    }
+  }
+
+  private restoreOwnership(
+    conversationId: string,
+    ownership: OwnershipState | undefined,
+  ): void {
+    if (ownership) {
+      this.ownership.set(conversationId, ownership);
+    } else {
+      this.ownership.delete(conversationId);
     }
   }
 
@@ -742,9 +769,7 @@ export class ScenarioInterceptTransport implements AssistantTransport {
   private hasMockActivity(): boolean {
     return [...this.ownership.values()].some(
       (state) =>
-        state === "mock-running" ||
-        state === "mock-parked" ||
-        state === "verifying",
+        state === "mock-running" || state === "verifying",
     );
   }
 }

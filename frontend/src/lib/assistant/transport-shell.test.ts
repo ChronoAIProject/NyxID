@@ -121,7 +121,6 @@ describe("DelegatingAssistantTransport dev installation", () => {
 
   it("delegates bare calls before load and intercepts in place after install (P5)", async () => {
     const live = new RecordingTransport("live");
-    const intercepted = new RecordingTransport("intercepted");
     let resolveLoader: (module: AssistantInterceptorModule) => void = () =>
       undefined;
     const loader = vi.fn(
@@ -137,37 +136,61 @@ describe("DelegatingAssistantTransport dev installation", () => {
         createAevatar: () => live,
       },
       loader,
+      (state) =>
+        useAssistantMockScenariosStore.getState().setEngineState(state),
     );
     expect(transport).toBeInstanceOf(DelegatingAssistantTransport);
     const shell = transport as DelegatingAssistantTransport;
+    expect(useAssistantMockScenariosStore.getState().engineState).toBe(
+      "loading",
+    );
 
     await shell.listConversations();
     expect(live.calls).toEqual(["list"]);
-    resolveLoader({
-      installScenarioInterceptor: (target) => {
-        target.install(intercepted);
-      },
-    });
+    resolveLoader({ installScenarioInterceptor });
     await installAssistantTransportInterceptor(shell, loader);
     await shell.listConversations();
 
     expect(loader).toHaveBeenCalledTimes(1);
-    expect(intercepted.calls).toEqual(["list"]);
+    expect(shell.current()).not.toBe(live);
+    expect(live.calls).toEqual(["list", "list"]);
+    expect(useAssistantMockScenariosStore.getState().engineState).toBe("ready");
   });
 
-  it("keeps the live delegate installed when the dynamic import fails (P5)", async () => {
+  it("keeps the live delegate and reports error when dev installation fails (P5, F6)", async () => {
     const live = new RecordingTransport("live");
-    const shell = new DelegatingAssistantTransport(live);
+    let rejectLoader: (reason: Error) => void = () => undefined;
+    const loader = vi.fn(
+      () =>
+        new Promise<AssistantInterceptorModule>((_resolve, reject) => {
+          rejectLoader = reject;
+        }),
+    );
+    const transport = createAssistantTransportForEnvironment(
+      { mode: "development", dev: true, search: "" },
+      {
+        createMock: () => new RecordingTransport("mock"),
+        createAevatar: () => live,
+      },
+      loader,
+      (state) =>
+        useAssistantMockScenariosStore.getState().setEngineState(state),
+    );
+    const shell = transport as DelegatingAssistantTransport;
+
+    expect(useAssistantMockScenariosStore.getState().engineState).toBe(
+      "loading",
+    );
+    rejectLoader(new Error("chunk failed"));
 
     await expect(
-      installAssistantTransportInterceptor(shell, async () => {
-        throw new Error("chunk failed");
-      }),
+      installAssistantTransportInterceptor(shell, loader),
     ).rejects.toThrow("chunk failed");
     await shell.listConversations();
 
     expect(shell.current()).toBe(live);
     expect(live.calls).toEqual(["list"]);
+    expect(useAssistantMockScenariosStore.getState().engineState).toBe("error");
   });
 
   it("loads and installs at most once per shell (P5)", async () => {
@@ -224,8 +247,10 @@ describe("DelegatingAssistantTransport dev installation", () => {
       new RecordingTransport("live"),
     );
     installScenarioInterceptor(shell);
+    expect(useAssistantMockScenariosStore.getState().engineState).toBe("ready");
 
     useAuthStore.setState({ user: user("user-a"), isAuthenticated: true });
+    expect(useAssistantMockScenariosStore.getState().engineState).toBe("ready");
     useAssistantMockScenariosStore.getState().setEnabled(true);
     useAssistantMockScenariosStore.getState().connectService("api-github");
     useAuthStore.setState({ user: null, isAuthenticated: false });
@@ -233,6 +258,7 @@ describe("DelegatingAssistantTransport dev installation", () => {
       userId: "user-a",
       enabled: true,
       world: { connected: ["api-github"] },
+      engineState: "ready",
     });
 
     useAuthStore.setState({ user: user("user-b"), isAuthenticated: true });
@@ -241,6 +267,7 @@ describe("DelegatingAssistantTransport dev installation", () => {
       userId: "user-b",
       enabled: false,
       world: { connected: [] },
+      engineState: "ready",
     });
   });
 });

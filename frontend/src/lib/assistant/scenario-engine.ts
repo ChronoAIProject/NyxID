@@ -1,5 +1,6 @@
 import { composeUnreportedCompletedNote } from "@/lib/assistant/action-notes";
 import { resolveAssistantAction } from "@/lib/assistant/action-registry";
+import { AssistantTurnActiveError } from "@/lib/assistant/errors";
 import { toTerminalBlock } from "@/lib/assistant/stream";
 import {
   ACTION_SCHEMA_VERSION,
@@ -332,7 +333,7 @@ function validateSteps(
   resumableCards = 0,
 ): number {
   let cardCount = resumableCards;
-  for (const step of steps) {
+  for (const [index, step] of steps.entries()) {
     if (step.kind === "action") {
       validateActionStep(step);
       cardCount += 1;
@@ -373,9 +374,11 @@ function validateSteps(
           "A scenario segment cannot park more than one resumable card (F10).",
         );
       }
+      const remaining = steps.slice(index + 1);
       for (const branch of Object.values(step.branches)) {
-        validateSteps(branch ?? [], flows, 0);
+        validateSteps([...(branch ?? []), ...remaining], flows, 0);
       }
+      validateSteps(remaining, flows, 0);
       cardCount = 0;
     }
   }
@@ -913,7 +916,7 @@ export class ScenarioEngine {
     hooks: ScenarioRunHooks,
   ): TurnHandle {
     if (this.running.has(conversationId)) {
-      throw new Error("A mock scenario turn is already active.");
+      throw new AssistantTurnActiveError();
     }
     const turnId = this.nextId("turn");
     const plan = this.buildSegmentPlan(turnId, steps, allowConnect);
@@ -951,11 +954,7 @@ export class ScenarioEngine {
       readonly kind: "action" | "approval";
       readonly expiresAt: number | null;
     } | null = null;
-    let simulatedConnected = new Set(
-      Object.keys(this.compiled.flows).filter((slug) =>
-        this.world.isConnected(slug),
-      ),
-    );
+    let simulatedConnected = new Set<string>();
     const isConnected = (slug: string) =>
       simulatedConnected.has(slug) || this.world.isConnected(slug);
     const addItem = (item: Omit<PlanItem, "delayMs">, immediate = false) => {

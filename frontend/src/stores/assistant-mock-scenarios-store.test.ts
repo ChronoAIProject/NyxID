@@ -112,6 +112,7 @@ describe("useAssistantMockScenariosStore", () => {
       }),
     );
     await useAssistantMockScenariosStore.persist.rehydrate();
+    useAssistantMockScenariosStore.getState().setEngineState("ready");
 
     useAssistantMockScenariosStore.getState().ensureUser("user-b");
 
@@ -120,7 +121,7 @@ describe("useAssistantMockScenariosStore", () => {
       disabledScenarioIds: [],
       world: { connected: [] },
       userId: "user-b",
-      engineState: "idle",
+      engineState: "ready",
       lastActivity: null,
     });
   });

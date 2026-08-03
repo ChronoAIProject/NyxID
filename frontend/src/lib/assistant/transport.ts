@@ -680,6 +680,10 @@ export interface AssistantInterceptorModule {
 export type AssistantInterceptorLoader =
   () => Promise<AssistantInterceptorModule>;
 
+type AssistantInterceptorStateReporter = (
+  state: "loading" | "error",
+) => void;
+
 const interceptorInstallations = new WeakMap<
   DelegatingAssistantTransport,
   Promise<void>
@@ -706,13 +710,15 @@ export function createAssistantTransportForEnvironment(
   },
   factories: AssistantTransportFactories,
   interceptorLoader?: AssistantInterceptorLoader,
+  reportInterceptorState?: AssistantInterceptorStateReporter,
 ): AssistantTransport {
   const kind = selectAssistantTransportKind(env);
   if (kind === "mock") return factories.createMock();
   const shell = new DelegatingAssistantTransport(factories.createAevatar());
   if (env.dev && interceptorLoader) {
+    reportInterceptorState?.("loading");
     void installAssistantTransportInterceptor(shell, interceptorLoader).catch(
-      () => undefined,
+      () => reportInterceptorState?.("error"),
     );
   }
   return shell;
@@ -724,19 +730,27 @@ function createAssistantTransport(): AssistantTransport {
     dev: import.meta.env.DEV,
     search: typeof window === "undefined" ? "" : window.location.search,
   };
-  if (selectAssistantTransportKind(env) === "mock") {
-    return new MockAssistantTransport();
-  }
-  const shell = new DelegatingAssistantTransport(
-    new AevatarAssistantTransport(),
-  );
+  const factories: AssistantTransportFactories = {
+    createMock: () => new MockAssistantTransport(),
+    createAevatar: () => new AevatarAssistantTransport(),
+  };
   if (import.meta.env.DEV) {
-    void installAssistantTransportInterceptor(
-      shell,
+    const setState = (state: "loading" | "error") =>
+      void import("@/stores/assistant-mock-scenarios-store")
+        .then((module) =>
+          module.useAssistantMockScenariosStore
+            .getState()
+            .setEngineState(state),
+        )
+        .catch(() => undefined);
+    return createAssistantTransportForEnvironment(
+      env,
+      factories,
       () => import("@/lib/assistant/scenario-intercept-transport"),
-    ).catch(() => undefined);
+      setState,
+    );
   }
-  return shell;
+  return createAssistantTransportForEnvironment(env, factories);
 }
 
 export const assistantTransport: AssistantTransport =

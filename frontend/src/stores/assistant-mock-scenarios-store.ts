@@ -81,6 +81,7 @@ export const useAssistantMockScenariosStore =
               : {
                   ...DEFAULT_STATE,
                   userId,
+                  engineState: state.engineState,
                 },
           ),
         reset: () => set(DEFAULT_STATE),

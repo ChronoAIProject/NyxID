@@ -215,6 +215,28 @@ describe("ScenarioEngine compilation", () => {
     ).toThrow(/cannot park more than one resumable card \(F10\)/);
   });
 
+  it("rejects a branch card composed with a card after await (F10)", () => {
+    expect(() =>
+      compileScenarioSet(
+        [
+          scenario("two-park", /go/, (script) =>
+            script
+              .action("service.connect", { service: "api-github" })
+              .await({
+                completed: (branch) =>
+                  branch.action("service.connect", {
+                    service: "api-openai",
+                  }),
+              })
+              .action("service.connect", { service: "api-lark" })
+              .await(),
+          ),
+        ],
+        {},
+      ),
+    ).toThrow(/cannot park more than one resumable card \(F10\)/);
+  });
+
   it("validates action params and registry support during config load", () => {
     expect(() =>
       compileScenarioSet(
