@@ -557,3 +557,193 @@ W8 — has been filled, and filled with the right assertions.
   network round trip, and that the reconciler has a GET in flight on a 250 ms–30 s ladder for up
   to 90 s. I did not instrument a live session to estimate how often those overlap.
 - Multi-tab behaviour remains unexercised, unchanged from round 1.
+
+---
+
+# Re-review (round 3 — final)
+
+Reviewer: Opus 5. Head `eb77b3bc`, 2 commits on top of `73b7bb94`. Rounds 1 and 2 left
+intact as the record.
+
+VERDICT: APPROVE
+
+P1-1 is closed on the reachable path, verified by a reproduction I built specifically to
+drive the real reconciler rather than the private method — and confirmed by running that
+same reproduction against the pre-fix source, where it fails. Convergence is not swallowed.
+The double-schedule and livelock hazards I was asked to check are both absent. The rewritten
+test is a genuine behaviour test, not an implementation mirror. All gates reproduce and
+nothing in the round-2 verified-fixed list regressed. This is safe to merge against
+`rollup-chat-2026-08-04`.
+
+## Gate results (round 3)
+
+```
+$ npm run lint
+✖ 23 problems (0 errors, 23 warnings)
+
+$ npm run test
+ Test Files  199 passed (199)
+      Tests  2446 passed (2446)
+   Duration  17.22s
+
+$ npm run build
+dist/credential-accept/assets/credential-accept-Bk5hKdwf.js  154.03 kB │ gzip: 50.35 kB
+✓ built in 47ms
+
+$ cargo test -p nyxid-cli wizard_bundle_is_fresh
+test result: ok. 1 passed; 0 failed
+```
+
+Diff hygiene re-checked across the **full** range `origin/rollup-chat-2026-08-04...HEAD`:
+`*package.json`, `*package-lock.json`, `cli/src/wizard/**`, `backend/**` all empty. Round-3
+source delta is 19 lines in `aevatar-transport.ts` and nothing else, as stated. Worktree clean
+after every experiment.
+
+## P1-1 — CLOSED
+
+### My round-2 reproduction no longer measures anything
+
+Stated plainly because it matters for the record: my round-2 repro called
+`internals.applyHistoryResponse(...)` **directly**. The fix went in at the call site, by my own
+recommendation, so that repro still shows the message being dropped — and now proves nothing,
+because nothing reaches `applyHistoryResponse` that way except the three in-run callers that
+must apply. Running it verbatim would have produced a false REWORK. I rebuilt it.
+
+### Real-path reproduction
+
+New scratch test (appended to the suite, run, reverted; `git status` verified clean) that drives
+the actual sequence: create → turn 1 to terminal → clock +20 s → `reconcileProjection` issues its
+transcript GET against a **gated** fetch → real `sendMessage` for turn 2 whose stream hangs so the
+run stays in `this.running` → the gated transcript response is then released.
+
+HEAD (`eb77b3bc`):
+
+```
+"activeTurnAtSend": "completed",          ← still the same window; isTurnActive alone misses it
+"runningKeys":      ["chatc-8bd999…"],    ← run keyed canonically → arm 1 fires
+"midMirror":        ["user#-","assistant#-","assistant#-","user#-"],
+"afterMirror":      ["user#-","assistant#-","assistant#-","user#-"],
+"keptOptimistic":   true                  ← user's message SURVIVES
+```
+
+Same test, `73b7bb94` source (pre-fix):
+
+```
+"activeTurnAtSend": "completed",
+"afterMirror":      ["user#T1","assistant#T1","assistant#-"],
+"keptOptimistic":   false                 ← user's message wiped
+```
+
+The reproduction still enters the identical window — `activeTurnAtSend` is `"completed"`, so the
+`isTurnActive` arm alone would not have caught it — and the fix catches it there. The window did
+not move; it was closed.
+
+### Convergence is not swallowed
+
+Counter-check through the real reconciler, same harness with turn 2 never sent:
+
+```
+"outcome":     { "status": "materialized", "conversationId": "chatc-8bd999…" },
+"beforeMirror":["user#-","assistant#-","assistant#-"],
+"afterMirror": ["user#T1","assistant#T1","assistant#-"]
+```
+
+A legitimate fence-current read containing the required turn still wins and clears pending. The
+early return costs nothing when no turn is in flight.
+
+### Double-schedule: absent, by construction
+
+`rescheduleAfterTurn = true` is assigned on the single line immediately preceding `return`
+(`:2094-2095`), inside `try`. JS semantics: the `return` runs `finally` — which fires
+`scheduleReconcileEntry` once (`:2167`) — and then exits the function, so the unconditional
+`scheduleReconcileEntry` after the try/finally (`:2170`) is unreachable on that path. There is no
+other assignment to the flag, so the two can never co-execute. No second timer, no doubled request
+rate, no leak. The shipped test corroborates it from the outside by asserting `entry.attempt`
+stays `0` — the guard returns before `entry.attempt += 1`, so the guard path does not consume
+budget either.
+
+### Deadline refresh is not a livelock
+
+Each refresh requires a turn to be in flight, and while a turn is in flight the hook has already
+flipped `awaitingProjection` off (`historyFromStored:1823`), so the effect's cleanup calls
+`releaseProjectionWaiter` → `waiters === 0` → `scheduleReconcileEntry` returns early at `:2176`
+without arming a timer. The entry parks, keeps its refreshed deadline, and resumes when the turn
+ends. Extending the budget across a streaming turn is the correct semantic — streaming time should
+not be charged against the projection deadline — and every extension is bounded by a turn that
+itself sets a fresh `projectionPending`. When sends stop, the deadline expires normally into
+`timed_out` and the stalled UI. Not a livelock.
+
+### The placeholder arm is correct and sufficient
+
+`this.running` is keyed by `canonicalConversationId(sendAddress)` evaluated at send time.
+
+- Continuation on an aliased conversation → keyed canonical → covered by
+  `this.running.has(entry.conversationId)`. My repro confirms it: `runningKeys: ["chatc-…"]`.
+- Create whose run predates aliasing → keyed by the placeholder while `adoptRecoveredReceipt`
+  re-keys `entry.conversationId` to canonical → covered by the new
+  `this.running.has(entry.placeholderId)` arm. `entry.placeholderId` is reliably populated on
+  exactly that path (`reconcileProjection` sets it from `requestedId` when the request came in on
+  a placeholder, which is the only way an entry becomes `identityPending`).
+- Any run that has already announced its turn is caught by the third arm, `isTurnActive`,
+  regardless of keying.
+
+I looked for a run keyed under an address covered by none of the three and could not construct
+one: an entry on a canonical id with `placeholderId === undefined` only arises from a cold load
+with raw-index evidence, where this tab has no local create run to key under a placeholder. The
+arm is a correct addition, not a hole.
+
+### The rewritten test is a real behaviour test
+
+`aevatar-transport.test.ts:7822`. It gates the transcript fetch behind a manually-resolved
+promise, starts reconciliation, waits for the GET to be observed, then issues a **real**
+`sendMessage` whose second stream hangs, and asserts at `:7926`:
+
+```ts
+expect(activeTurnAtSend).toBe("completed");
+```
+
+That is precisely the assertion round 2 found missing — it pins that the test is exercising the
+window where `isTurnActive` is false, so the test cannot pass by accident on the old predicate.
+It then asserts the follow-up survives, the deadline was refreshed, `attempt` stayed `0`, and
+finally that an account reset settles the outcome as `timed_out` (which also exercises the
+round-2 `resetScope` settle P3). Verified it fails against `73b7bb94`:
+
+```
+ × [branch-regression] keeps a new-chat mirror untouched while a follow-up turn is active
+      Tests  1 failed | 3 passed | 179 skipped (183)
+```
+
+(The other three `[branch-regression]` tests pass at `73b7bb94` — correctly, since they are
+regressions of the round-2 fixes, already verified against `58ab3594` in round 2.)
+
+## Round-2 verified-fixed list — no regressions
+
+- **P2-1** re-measured at round-3 head, unchanged: `duringFirstTurn: undefined`,
+  `createRecoveryCallsDuringHealthyTurn: 0`, `awaitingAfterTerminal: true`.
+- **P2-2 / P2-3 / all four P3s** — untouched by round 3 (source delta is confined to
+  `runReconcileObservation`), and their tests are green in the 2446-test run.
+- **Account scope, intent durability, `stateVersion: 0` provenance (`:6806-6849`), backoff
+  floor** — all green in the full run; none of their code paths were modified.
+- **#1304 assertions** — `use-assistant.aevatar.test.tsx` was not touched in round 2 or round 3
+  (confirmed from both diffstats); still 6 tests, assertions unchanged since round 1.
+
+## Residual notes (non-blocking, no action required to merge)
+
+- `scheduleReconcileEntry` would overwrite `entry.timer` if it were ever called twice on a live
+  entry, leaking the first handle. Unreachable today for the reasons above; a defensive
+  `if (entry.timer !== undefined) return;` would make it structurally safe against future edits.
+- The W4 timing probes (pause/resume, late wake, remote-delete-mid-loop, recovery-adoption) remain
+  the least-exercised paths in the change, as recorded in round 2. Still a legitimate deferral —
+  I re-derived them and found no defect — but the first place to look at a future bug report.
+- Multi-tab behaviour remains unexercised across all three rounds.
+
+## Sign-off
+
+I am treating this as a merge sign-off, not a "looks fine". What convinced me: the one defect I
+could reproduce is now closed on the path that actually reaches it, demonstrated by a
+reproduction I wrote myself that fails against the immediately preceding commit and passes here;
+the fix does not trade content loss for stalled convergence, which I checked separately through
+the same real path; the two hazards I was asked to look for in the new control flow (double
+schedule, unbounded deadline extension) are provably absent rather than merely untriggered; and
+the accompanying test asserts the discriminating condition rather than restating the
+implementation. Ship it.
