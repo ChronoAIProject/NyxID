@@ -2050,6 +2050,7 @@ export class AevatarAssistantTransport implements AssistantTransport {
     entry.controller = controller;
     let transcriptWasMissing = false;
     let observedMembership: boolean | "unavailable" | undefined;
+    let rescheduleAfterTurn = false;
     try {
       const stored = this.conversations.get(entry.conversationId);
       if (stored?.identityPending) {
@@ -2077,6 +2078,23 @@ export class AevatarAssistantTransport implements AssistantTransport {
             controller.signal,
           );
           if (entry.scopeId !== this.ownerScopeId) return;
+          const postFetchStored = this.conversations.get(entry.conversationId);
+          const postFetchTurnInFlight =
+            this.running.has(entry.conversationId) ||
+            (entry.placeholderId !== undefined &&
+              this.running.has(entry.placeholderId));
+          if (
+            postFetchStored &&
+            (postFetchTurnInFlight ||
+              isTurnActive(postFetchStored.turnState.activeTurn?.status))
+          ) {
+            const policy = postFetchStored.identityPending
+              ? CREATE_RECOVERY_BACKOFF_POLICY
+              : PROJECTION_BACKOFF_POLICY;
+            entry.deadlineAt = this.now() + policy.deadlineMs;
+            rescheduleAfterTurn = true;
+            return;
+          }
           const projected = this.applyHistoryResponse(entry.conversationId, body);
           if (!projected.identityPending && !projected.projectionPending) {
             this.settleReconcileEntry(entry, "materialized");
@@ -2146,6 +2164,7 @@ export class AevatarAssistantTransport implements AssistantTransport {
       if (entry.controller === controller) entry.controller = undefined;
       this.releaseScopeController(controller);
       entry.running = false;
+      if (rescheduleAfterTurn) this.scheduleReconcileEntry(entry);
     }
     this.scheduleReconcileEntry(entry);
   }

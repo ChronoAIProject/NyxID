@@ -5767,6 +5767,13 @@ describe("studio new chats and typed actor compatibility", () => {
           lastLocalTurnCompletedAt?: number;
         }
       >;
+      reconcileEntries: Map<
+        string,
+        {
+          attempt: number;
+          deadlineAt: number;
+        }
+      >;
       applyHistoryResponse(
         conversationId: string,
         body: unknown,
@@ -7814,69 +7821,143 @@ describe("studio new chats and typed actor compatibility", () => {
 
   it("[branch-regression] keeps a new-chat mirror untouched while a follow-up turn is active", async () => {
     let now = 0;
-    mockChatStreams((request) =>
-      request.url === WORKFLOW_URL
-        ? {
-            frames: [
-              ...WORKFLOW_PREAMBLE,
-              { textMessageStart: { messageId: "live-first" } },
-              { textMessageContent: { delta: "Local first reply" } },
-              { textMessageEnd: {} },
-              ...WORKFLOW_TAIL,
-            ],
-          }
-        : undefined,
+    let streamCount = 0;
+    let cancelFollowUp: (() => void) | undefined;
+    vi.spyOn(chatStreamClient, "start").mockImplementation(
+      (request): ChatStreamRequestHandle => {
+        streamCount += 1;
+        if (streamCount === 1) {
+          const headers = Promise.resolve({
+            kind: "response" as const,
+            status: 200,
+            contentType: "text/event-stream",
+          });
+          return {
+            headers,
+            completion: headers.then(() => {
+              request.onFrames([
+                ...WORKFLOW_PREAMBLE,
+                { textMessageStart: { messageId: "live-first" } },
+                { textMessageContent: { delta: "Local first reply" } },
+                { textMessageEnd: {} },
+                ...WORKFLOW_TAIL,
+              ]);
+              return { kind: "complete" as const };
+            }),
+            cancel: vi.fn(),
+          };
+        }
+
+        let resolveHeaders!: (result: ChatStreamHeadersResult) => void;
+        const headers = new Promise<ChatStreamHeadersResult>((resolve) => {
+          resolveHeaders = resolve;
+        });
+        cancelFollowUp = () => resolveHeaders({ kind: "cancelled" });
+        return {
+          headers,
+          completion: headers.then(
+            (result): ChatStreamCompletionResult =>
+              result.kind === "cancelled"
+                ? result
+                : { kind: "complete" as const },
+          ),
+          cancel: () => cancelFollowUp?.(),
+        };
+      },
     );
-    stubFetch();
+    let resolveTranscript!: (response: Response) => void;
+    const transcript = new Promise<Response>((resolve) => {
+      resolveTranscript = resolve;
+    });
+    const fetchMock = vi.fn(
+      (input: RequestInfo | URL, init?: RequestInit): Promise<Response> => {
+        const url = String(input);
+        if (
+          url === `${ASSISTANT_BASE}/conversations/${WORKFLOW_CONVERSATION}` &&
+          (init?.method ?? "GET") === "GET"
+        ) {
+          return transcript;
+        }
+        return Promise.resolve(
+          jsonResponse(
+            { error: "not_found", error_code: -1, message: "404" },
+            404,
+          ),
+        );
+      },
+    );
+    vi.stubGlobal("fetch", fetchMock);
     const transport = new AevatarAssistantTransport(() => now);
     const placeholder = await transport.createConversation();
     await collectWorkflowTurn(transport, placeholder.id, "first prompt");
-    now = 20_000;
-
     const history = await transport.getHistory(placeholder.id);
     const internals = workflowInternals(transport);
-    const stored = internals.conversations.get(history.conversation.id)!;
-    stored.turnState = {
-      ...stored.turnState,
-      messages: [
-        ...stored.turnState.messages,
-        {
-          id: "optimistic-follow-up",
-          role: "user",
-          schema_version: 1,
-          blocks: [
-            {
-              type: "text",
-              block_id: "optimistic-follow-up-text",
-              text: "follow-up prompt",
-            },
-          ],
-          created_at: new Date(now).toISOString(),
-        },
-      ],
-      activeTurn: { turnId: null, status: "running", error: null },
-    };
-    const before = stored.turnState.messages;
-
-    const observed = internals.applyHistoryResponse(history.conversation.id, {
-      messages: [
-        {
-          id: "server-first-assistant",
-          role: "assistant",
-          content: "Local first reply",
-          timestamp: 1,
-          turnId: WORKFLOW_TURN,
-        },
-      ],
-      stateVersion: 4,
-    });
-
-    expect(observed.turnState.messages).toBe(before);
-    expect(
-      observed.turnState.messages.some(
-        (message) => message.id === "optimistic-follow-up",
+    now = 20_000;
+    const outcome = transport.reconcileProjection(history.conversation.id);
+    await vi.waitFor(() =>
+      expect(fetchMock).toHaveBeenCalledWith(
+        `${ASSISTANT_BASE}/conversations/${history.conversation.id}`,
+        expect.anything(),
       ),
-    ).toBe(true);
+    );
+    const initialDeadline = internals.reconcileEntries.get(
+      history.conversation.id,
+    )!.deadlineAt;
+
+    const followUp = transport.sendMessage(
+      history.conversation.id,
+      "follow-up prompt",
+      () => undefined,
+    );
+    const activeTurnAtSend = internals.conversations.get(
+      history.conversation.id,
+    )!.turnState.activeTurn?.status;
+    const mirrorHasFollowUp = () =>
+      internals.conversations
+        .get(history.conversation.id)!
+        .turnState.messages.some(
+          (message) =>
+            message.role === "user" &&
+            message.blocks.some(
+              (block) =>
+                block.type === "text" && block.text === "follow-up prompt",
+            ),
+        );
+    expect(activeTurnAtSend).toBe("completed");
+    expect(mirrorHasFollowUp()).toBe(true);
+
+    now = 21_000;
+    resolveTranscript(
+      jsonResponse({
+        messages: [
+          {
+            id: "server-first-assistant",
+            role: "assistant",
+            content: "Local first reply",
+            timestamp: 1,
+            turnId: WORKFLOW_TURN,
+          },
+        ],
+        stateVersion: 4,
+      }),
+    );
+    await vi.waitFor(() => {
+      const deadlineWasRefreshed =
+        (internals.reconcileEntries.get(history.conversation.id)?.deadlineAt ??
+          0) > initialDeadline;
+      expect(deadlineWasRefreshed || !mirrorHasFollowUp()).toBe(true);
+    });
+    expect(mirrorHasFollowUp()).toBe(true);
+    expect(
+      internals.reconcileEntries.get(history.conversation.id)?.deadlineAt,
+    ).toBeGreaterThan(initialDeadline);
+    expect(
+      internals.reconcileEntries.get(history.conversation.id)?.attempt,
+    ).toBe(0);
+
+    followUp.cancel();
+    useAuthStore.getState().setUser(null);
+    await expect(outcome).resolves.toMatchObject({ status: "timed_out" });
   });
 
   it("replaces a longer new-chat mirror once the current fence contains its required turn", async () => {
