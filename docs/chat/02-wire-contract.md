@@ -321,12 +321,18 @@ been confirmed by a wire transcript. A positive `stateVersion` is a
 materialization criterion, not either fact; a create context with version zero
 therefore remains pending instead of being mistaken for a settled conversation.
 
-While either fact is pending, public history reads return the local mirror with
-`awaitingProjection: true` and make no transcript request. A single-flight
-background reconciler performs the wire reads. Materialization requires a
+While either fact is pending on a terminal local mirror, public history reads
+return that mirror with `awaitingProjection: true` and make no transcript
+request. Live turns omit the projection flag and cannot be rewritten by a
+background transcript observation. A cold canonical record synthesized only
+from a receipt attempts the transcript once before falling back to an empty
+syncing mirror on `404`. A single-flight background reconciler performs later
+wire reads. Materialization requires a
 wrapped positive fence at least as high as the stored fence and, when known,
-the latest local assistant turn. Legacy arrays can materialize only when they
-contain the required turn. Reconciliation uses full jitter with a 250 ms floor,
+the latest local assistant turn. When streamed assistant messages carry no
+turn id, the stored `requiredTurnId` supplies that keep-max predicate. Legacy
+arrays can materialize only when they contain the required turn.
+Reconciliation uses full jitter with a 250 ms floor,
 a 30-second per-delay cap, and a 90-second deadline. Cold create recovery uses
 an 8-second cap and a 60-second deadline. The existing foreground continuation
 preflight schedule remains `0`, `300`, `900`, and `1800` milliseconds.

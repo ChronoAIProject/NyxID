@@ -245,11 +245,7 @@ New `StoredConversation` fields (`aevatar-transport.ts:571`):
 - `identityPending?: boolean`, `projectionPending?: boolean` (§2.1);
 - `requiredTurnId?: string | null` — the chat-history turn id of the last local
   workflow terminal (from the context frame / recovery), the turn-presence
-  criterion for materialization; null when unknown (criteria degrade to
-  fence-only);
-- `materializedStateVersion?: number` — highest `stateVersion` confirmed by a
-  **wire** transcript read (`applyHistoryResponse` gains a wire-origin flag;
-  mirror serves never set it);
+  criterion for materialization; null when unknown;
 - `projectionStalledAt?: number` — set on reconciler timeout, cleared on
   explicit retry or any later materialization.
 
@@ -259,8 +255,7 @@ a wire read whose `historyStateVersion` is a positive integer
 `requiredTurnId` is set — `historyIncludesAssistantTurn(entries, requiredTurnId)`.
 This is the same double condition create recovery already uses
 (`:2736-2741`). A legacy-array read (no `stateVersion`) that contains
-`requiredTurnId` also materializes (sets `materializedStateVersion` to the
-stored fence, or marks confirmed when the fence is absent). A `stateVersion: 0`
+`requiredTurnId` also materializes. A `stateVersion: 0`
 context therefore parks in PROJECTION_PENDING until a *positive* fence read
 containing the turn arrives — exactly the sequence the existing regression
 locks in.
@@ -400,14 +395,18 @@ invalidate the right cache keys.
   ≥ 10s apart with transcript still 404 → tombstone (`deletedConversationIds`)
   → `absent`. Before every attempt: check `deletedConversationIds` /
   `deletingConversations` (local delete → `absent`) and the owner scope
-  (§2.7 — scope changed → abort without settling; the scope reset clears the
-  entry).
+  (§2.7 — scope change aborts the request and settles the abandoned entry as
+  `timed_out` before clearing it, so a mounted retry mutation cannot remain
+  pending forever).
 - **Loop body (recovery mode, identityPending):** poll
   `create-recovery/{commandId}` (existing `pollCreateRecovery` request logic,
   driven by the recovery policy schedule) with the same adoption guards
   `recoverWorkflowCreate` uses; on adoption, clear `identityPending`, set
   `projectionPending` + `requiredTurnId`, and continue in projection mode under
-  the remaining deadline.
+  the remaining deadline. An active turn never enters this wire loop: public
+  history omits `awaitingProjection` while the turn is live, and the transport
+  defensively reschedules any already-created entry without a network request
+  or consuming its post-terminal deadline.
 - **Deadline transition (review P1.3 — no `gave_up` limbo):** at the deadline,
   run one final raw-index membership check.
   - Membership **absent** → tombstone → `absent` (the hook invalidates; the
@@ -587,8 +586,10 @@ substrate; W3 (provenance) precedes W4–W7.
   (`MockAssistantTransport` no-op impls).
 - **Change:** fields and transitions per §2.1–2.3. In `getHistory`:
   - the wire-read branch (`:1426`) serves the mirror with
-    `awaitingProjection: true` and NO network call while
-    `identityPending || projectionPending`;
+    `awaitingProjection: true` and NO network call while a local pending mirror
+    has content or terminal provenance. A cold canonical record synthesized
+    only from a receipt attempts one transcript read first, then falls back to
+    the syncing mirror on 404;
   - the **locally-held placeholder branch (`:1414-1425`) stamps
     `awaitingProjection: true` when `identityPending`** — the same-tab
     context-free-terminal case the review flagged; the mounted hook then
@@ -707,10 +708,14 @@ substrate; W3 (provenance) precedes W4–W7.
      keep local: mixed deployment);
   2. `freshStateVersion >= preMergeFence`;
   3. NOT `withinMaterializationGrace`;
-  4. the latest local assistant turn, when one exists
-     (`latestAssistantTurnId(stored)`), is present in the server entries
+  4. the latest known local assistant turn
+     (`latestAssistantTurnId(stored)`, falling back to `requiredTurnId` for
+     streamed new-chat messages that carry no per-message turn id), is present
+     in the server entries
      (`historyIncludesAssistantTurn`) — a fence-current read missing the just
      streamed turn must NOT wipe its text (review P2.2's completed predicate).
+  An active turn is an unconditional keep: `applyHistoryResponse` returns its
+  existing mirror before applying any fence or transcript observation.
   Otherwise keep `existing`. Structured-message preservation
   (`preserveLocalStructuredMessages`, `:537-568`) applies after that decision,
   unchanged — the review found no evidence this recreates PR #1304's card
@@ -906,6 +911,45 @@ a signal to re-examine W3/W8, not the test.
 ### Docs (no tests, but part of done)
 
 `docs/chat/02-wire-contract.md` and `docs/chat/07-testing-and-gaps.md` per W9.
+
+### Implementation coverage reconciliation (post-Opus review)
+
+The lists above describe the design-time target, not an assertion that every
+bullet became a new test. The implementation and follow-up contain the
+load-bearing regressions for this change:
+
+- all three W8 predicates against a real new-chat mirror whose streamed
+  assistant messages have no turn ids, plus a live-turn transcript barrier;
+- the W2 delete-before-context resurrection window, persisted-intent reload
+  sweep, and receiptless placeholder-alias DELETE;
+- cold receipt-first transcript loading, active-first-turn recovery
+  suppression, and account-reset settlement of an outstanding retry;
+- W4 single-flight, nonzero-floor timing, deadline-to-stalled behavior, raw
+  membership evidence, and cold absence; W5 and W7 rendered outcomes; and the
+  receipt-store timer deduplication.
+
+Several design bullets are covered by pre-existing tests rather than counted
+as new coverage: `stateVersion: 0`, context-free terminal recovery, and local
+pending-mirror/no-request behavior. PR #1304's card/order suite remains the
+structured-message guard and its assertions are unchanged.
+
+Deferred from this PR's test diff:
+
+- a request-count-specific W0 abort assertion. Account isolation, controller
+  aborts, and post-await scope guards are covered by the existing account
+  switch test plus the new outstanding-promise settlement case; the Opus
+  reproduction independently inspected the abort path. A deterministic fetch
+  abort spy would duplicate those mechanics rather than close a remaining
+  behavior defect;
+- dedicated W4 pause/resume, late-wake, remote-delete-mid-loop, and
+  recovery-adoption timing cases. The single-flight/deadline/evidence tests
+  exercise their shared state machine and Opus independently verified these
+  mechanics. These remain useful hardening work, but are not represented as
+  shipped coverage here;
+- the W6 `projectTransportState` placeholder/canonical dual-slot copy case.
+  The hook suite covers canonical invalidation, while a pump-level cache-copy
+  test needs a separate transport-event harness. It is deferred and is not
+  claimed as current coverage.
 
 ---
 

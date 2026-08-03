@@ -135,7 +135,9 @@ This suite uses the real Aevatar transport with controlled history/stream respon
 - no Studio continuation replay after accepted stream truncation;
 - create recovery entry points, poll validation, history reconciliation, scope guard, alias adoption, terminal-kind preservation, and fail-closed exhaustion;
 - workflow client-only cancellation and workflow delete;
-- account-scope reset, receipt-backed cold reads, raw-index evidence, pending mirror suppression, projection materialization, and pre-alias deletion intents; and
+- account-scope reset and abandoned-retry settlement, receipt-backed cold reads, raw-index evidence, active/pending mirror suppression, projection materialization, and pre-alias deletion intents;
+- new-chat keep-max convergence and retention at current, missing-turn, below-fence, legacy, and live-turn boundaries;
+- receiptless placeholder-alias DELETE, delete-before-context canonical cleanup, and persisted-intent reload sweeping; and
 - refusal to send typed actor approval/wake controls to a `chatc-...` identity.
 
 Captured fixtures in `frontend/src/lib/assistant/__fixtures__/aevatar-nyxid-chat-stream.sse` and `aevatar-chat-history.json` are replayed through awkward byte chunks to exercise incremental parsing and history mapping.
@@ -150,7 +152,7 @@ Supporting unit suites isolate the components:
 - `transport.test.ts` and `mock-data.test.ts`: transport selection and deterministic mock behavior;
 - component tests for thread, composer, sidebar, text, run, approval, connect, action, and artifact rendering;
 - draft, context, and wire-log store tests;
-- `assistant-receipts.test.ts` and `assistant-receipt-store.test.ts`: corrupt entry rejection, positive fences, timestamp skew, per-account namespaces, independent caps, storage fallback, and cross-tab rehydration;
+- `assistant-receipts.test.ts` and `assistant-receipt-store.test.ts`: corrupt entry rejection, positive fences, timestamp skew, per-account namespaces, independent caps, storage fallback, cross-tab rehydration, and materialization-timer deduplication;
 - `backoff.test.ts`: nonzero jitter floor and capped deadline-spanning delays; and
 - `frontend/src/pages/assistant.test.tsx`: page-level selection, send, and state composition.
 
