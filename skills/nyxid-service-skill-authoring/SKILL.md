@@ -1,7 +1,7 @@
 ---
 name: nyxid-service-skill-authoring
 description: Find or author an agent skill for a NyxID proxy service that has no OpenAPI spec or typed operations. Use when a NyxID service only exposes the generic proxy tool, `nyxid catalog endpoints` returns nothing for the slug, or you would otherwise have to guess endpoint paths. Searches Ornn for an existing skill bound to the service; if none exists, creates one — researching the official OpenAPI spec on the web for public services, or collecting the contract from the user for private/custom services (never fabricate endpoints) — then uploads it to Ornn, binds it to the service, and records it locally.
-version: "1.0"
+version: "1.1"
 metadata:
   category: plain
   tag:
@@ -31,6 +31,40 @@ nyxid proxy request ornn-api "/api/v1/skills/ornn-agent-manual-cli/json" \
 
 All Ornn calls below assume that manual is loaded; it defines
 authentication, response shapes, and error handling.
+
+## No shell? Every step works over plain HTTP
+
+Some agent runtimes cannot execute a CLI but can make HTTP requests. Every
+`nyxid` command in this skill has a direct REST equivalent against the
+NyxID API (base URL below is the deployment you authenticate against,
+e.g. `https://nyx-api.chrono-ai.fun`):
+
+- **Auth**: send `Authorization: Bearer <token>` on every request — a
+  NyxID agent API key (`nyxid_ag_...`) or a user access token. Ask the
+  user for a key if you have none; never scrape one from disk.
+- **Ornn calls**: `nyxid proxy request ornn-api "<path>" --method M`
+  is exactly `M {BASE}/api/v1/proxy/s/ornn-api<path>` — same path, same
+  body, same JSON response. This holds for every Ornn endpoint in this
+  skill and in the Ornn manual.
+- **Service inventory** (`nyxid service list`):
+  `GET {BASE}/api/v1/keys` — the authoritative connected-services view.
+- **Catalog metadata** (`nyxid catalog show <slug>`):
+  `GET {BASE}/api/v1/catalog/{slug}`; typed operations
+  (`nyxid catalog endpoints <slug>`):
+  `GET {BASE}/api/v1/catalog/{slug}/endpoints`.
+- **Mount a spec / set skills** (`nyxid service update ...`):
+  `PUT {BASE}/api/v1/keys/{user_service_id}` with a JSON body — e.g.
+  `{"openapi_spec_url": "https://..."}` (empty string clears) or
+  `{"recommended_skills": ["name"]}` (empty list clears). The endpoint
+  document alone can also be updated via
+  `PUT {BASE}/api/v1/endpoints/{endpoint_id}` with the same fields.
+- **Call the target service through the proxy**
+  (`nyxid proxy request <slug> ...`):
+  `M {BASE}/api/v1/proxy/s/{slug}/<path>` — NyxID injects the stored
+  credential; never send the downstream credential yourself.
+
+The remainder of this skill shows CLI forms for brevity; translate with
+the table above when you are HTTP-only.
 
 ## Step 0 — Confirm the service really has no contract
 
