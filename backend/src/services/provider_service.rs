@@ -68,6 +68,7 @@ pub async fn seed_default_providers(
             authorization_url: None,
             token_url: None,
             revocation_url: None,
+            revocation: None,
             default_scopes: None,
             client_id_encrypted: None,
             client_secret_encrypted: None,
@@ -90,6 +91,7 @@ pub async fn seed_default_providers(
             client_id_param_name: None,
             requires_gateway_url: false,
             created_by: "system".to_string(),
+            revocation_seed_version: 0,
             created_at: now,
             updated_at: now,
         };
@@ -159,6 +161,7 @@ pub async fn seed_default_providers(
             authorization_url: Some("https://auth.openai.com/oauth/authorize".to_string()),
             token_url: Some("https://auth.openai.com/oauth/token".to_string()),
             revocation_url: None,
+            revocation: None,
             default_scopes: Some(vec![
                 "openid".to_string(),
                 "profile".to_string(),
@@ -188,6 +191,7 @@ pub async fn seed_default_providers(
             client_id_param_name: None,
             requires_gateway_url: false,
             created_by: "system".to_string(),
+            revocation_seed_version: 0,
             created_at: now,
             updated_at: now,
         };
@@ -210,6 +214,7 @@ pub async fn seed_default_providers(
             authorization_url: None,
             token_url: None,
             revocation_url: None,
+            revocation: None,
             default_scopes: None,
             client_id_encrypted: None,
             client_secret_encrypted: None,
@@ -232,6 +237,7 @@ pub async fn seed_default_providers(
             client_id_param_name: None,
             requires_gateway_url: false,
             created_by: "system".to_string(),
+            revocation_seed_version: 0,
             created_at: now,
             updated_at: now,
         };
@@ -251,6 +257,7 @@ pub async fn seed_default_providers(
             authorization_url: None,
             token_url: None,
             revocation_url: None,
+            revocation: None,
             default_scopes: None,
             client_id_encrypted: None,
             client_secret_encrypted: None,
@@ -273,6 +280,7 @@ pub async fn seed_default_providers(
             client_id_param_name: None,
             requires_gateway_url: false,
             created_by: "system".to_string(),
+            revocation_seed_version: 0,
             created_at: now,
             updated_at: now,
         };
@@ -295,6 +303,7 @@ pub async fn seed_default_providers(
             authorization_url: None,
             token_url: None,
             revocation_url: None,
+            revocation: None,
             default_scopes: None,
             client_id_encrypted: None,
             client_secret_encrypted: None,
@@ -317,6 +326,7 @@ pub async fn seed_default_providers(
             client_id_param_name: None,
             requires_gateway_url: false,
             created_by: "system".to_string(),
+            revocation_seed_version: 0,
             created_at: now,
             updated_at: now,
         };
@@ -336,6 +346,7 @@ pub async fn seed_default_providers(
             authorization_url: None,
             token_url: None,
             revocation_url: None,
+            revocation: None,
             default_scopes: None,
             client_id_encrypted: None,
             client_secret_encrypted: None,
@@ -358,6 +369,7 @@ pub async fn seed_default_providers(
             client_id_param_name: None,
             requires_gateway_url: false,
             created_by: "system".to_string(),
+            revocation_seed_version: 0,
             created_at: now,
             updated_at: now,
         };
@@ -377,6 +389,7 @@ pub async fn seed_default_providers(
             authorization_url: None,
             token_url: None,
             revocation_url: None,
+            revocation: None,
             default_scopes: None,
             client_id_encrypted: None,
             client_secret_encrypted: None,
@@ -399,6 +412,7 @@ pub async fn seed_default_providers(
             client_id_param_name: None,
             requires_gateway_url: false,
             created_by: "system".to_string(),
+            revocation_seed_version: 0,
             created_at: now,
             updated_at: now,
         };
@@ -421,6 +435,7 @@ pub async fn seed_default_providers(
             authorization_url: None,
             token_url: None,
             revocation_url: None,
+            revocation: None,
             default_scopes: None,
             client_id_encrypted: None,
             client_secret_encrypted: None,
@@ -444,6 +459,7 @@ pub async fn seed_default_providers(
             client_id_param_name: None,
             requires_gateway_url: false,
             created_by: "system".to_string(),
+            revocation_seed_version: 0,
             created_at: now,
             updated_at: now,
         };
@@ -463,6 +479,7 @@ pub async fn seed_default_providers(
             authorization_url: Some("https://x.com/i/oauth2/authorize".to_string()),
             token_url: Some("https://api.x.com/2/oauth2/token".to_string()),
             revocation_url: Some("https://api.x.com/2/oauth2/revoke".to_string()),
+            revocation: None,
             // Write access is intentional: NyxID is a credential broker, so delegated
             // clients commonly need to post on behalf of users. Admins can customise
             // scopes per deployment. `media.write` is included so delegated clients can
@@ -495,6 +512,7 @@ pub async fn seed_default_providers(
             client_id_param_name: None,
             requires_gateway_url: false,
             created_by: "system".to_string(),
+            revocation_seed_version: 0,
             created_at: now,
             updated_at: now,
         };
@@ -580,6 +598,7 @@ pub async fn seed_default_providers(
             authorization_url: Some("https://accounts.google.com/o/oauth2/v2/auth".to_string()),
             token_url: Some("https://oauth2.googleapis.com/token".to_string()),
             revocation_url: Some("https://oauth2.googleapis.com/revoke".to_string()),
+            revocation: None,
             default_scopes: Some(vec![
                 "openid".to_string(),
                 "email".to_string(),
@@ -612,6 +631,7 @@ pub async fn seed_default_providers(
             client_id_param_name: None,
             requires_gateway_url: false,
             created_by: "system".to_string(),
+            revocation_seed_version: 0,
             created_at: now,
             updated_at: now,
         };
@@ -631,6 +651,7 @@ pub async fn seed_default_providers(
             authorization_url: Some("https://github.com/login/oauth/authorize".to_string()),
             token_url: Some("https://github.com/login/oauth/access_token".to_string()),
             revocation_url: None,
+            revocation: None,
             default_scopes: Some(vec!["read:user".to_string(), "user:email".to_string()]),
             client_id_encrypted: None,
             client_secret_encrypted: None,
@@ -654,6 +675,7 @@ pub async fn seed_default_providers(
             client_id_param_name: None,
             requires_gateway_url: false,
             created_by: "system".to_string(),
+            revocation_seed_version: 0,
             created_at: now,
             updated_at: now,
         };
@@ -677,6 +699,7 @@ pub async fn seed_default_providers(
             authorization_url: None,
             token_url: None,
             revocation_url: None,
+            revocation: None,
             default_scopes: None,
             client_id_encrypted: None,
             client_secret_encrypted: None,
@@ -706,6 +729,7 @@ pub async fn seed_default_providers(
             client_id_param_name: None,
             requires_gateway_url: false,
             created_by: "system".to_string(),
+            revocation_seed_version: 0,
             created_at: now,
             updated_at: now,
         };
@@ -725,6 +749,7 @@ pub async fn seed_default_providers(
             authorization_url: Some("https://www.facebook.com/v21.0/dialog/oauth".to_string()),
             token_url: Some("https://graph.facebook.com/v21.0/oauth/access_token".to_string()),
             revocation_url: None,
+            revocation: None,
             default_scopes: Some(vec!["email".to_string(), "public_profile".to_string()]),
             client_id_encrypted: None,
             client_secret_encrypted: None,
@@ -747,6 +772,7 @@ pub async fn seed_default_providers(
             client_id_param_name: None,
             requires_gateway_url: false,
             created_by: "system".to_string(),
+            revocation_seed_version: 0,
             created_at: now,
             updated_at: now,
         };
@@ -766,6 +792,7 @@ pub async fn seed_default_providers(
             authorization_url: Some("https://discord.com/oauth2/authorize".to_string()),
             token_url: Some("https://discord.com/api/oauth2/token".to_string()),
             revocation_url: Some("https://discord.com/api/oauth2/token/revoke".to_string()),
+            revocation: None,
             default_scopes: Some(vec!["identify".to_string(), "email".to_string()]),
             client_id_encrypted: None,
             client_secret_encrypted: None,
@@ -788,6 +815,7 @@ pub async fn seed_default_providers(
             client_id_param_name: None,
             requires_gateway_url: false,
             created_by: "system".to_string(),
+            revocation_seed_version: 0,
             created_at: now,
             updated_at: now,
         };
@@ -807,6 +835,7 @@ pub async fn seed_default_providers(
             authorization_url: Some("https://accounts.spotify.com/authorize".to_string()),
             token_url: Some("https://accounts.spotify.com/api/token".to_string()),
             revocation_url: None,
+            revocation: None,
             default_scopes: Some(vec![
                 "user-read-email".to_string(),
                 "user-read-private".to_string(),
@@ -832,6 +861,7 @@ pub async fn seed_default_providers(
             client_id_param_name: None,
             requires_gateway_url: false,
             created_by: "system".to_string(),
+            revocation_seed_version: 0,
             created_at: now,
             updated_at: now,
         };
@@ -853,6 +883,7 @@ pub async fn seed_default_providers(
             ),
             token_url: Some("https://www.linkedin.com/oauth/v2/accessToken".to_string()),
             revocation_url: None,
+            revocation: None,
             default_scopes: Some(vec![
                 "openid".to_string(),
                 "profile".to_string(),
@@ -879,6 +910,7 @@ pub async fn seed_default_providers(
             client_id_param_name: None,
             requires_gateway_url: false,
             created_by: "system".to_string(),
+            revocation_seed_version: 0,
             created_at: now,
             updated_at: now,
         };
@@ -898,6 +930,7 @@ pub async fn seed_default_providers(
             authorization_url: Some("https://slack.com/oauth/v2/authorize".to_string()),
             token_url: Some("https://slack.com/api/oauth.v2.access".to_string()),
             revocation_url: Some("https://slack.com/api/auth.revoke".to_string()),
+            revocation: None,
             default_scopes: Some(vec![
                 "users:read".to_string(),
                 "users:read.email".to_string(),
@@ -921,6 +954,7 @@ pub async fn seed_default_providers(
             client_id_param_name: None,
             requires_gateway_url: false,
             created_by: "system".to_string(),
+            revocation_seed_version: 0,
             created_at: now,
             updated_at: now,
         };
@@ -944,6 +978,7 @@ pub async fn seed_default_providers(
                 "https://login.microsoftonline.com/common/oauth2/v2.0/token".to_string(),
             ),
             revocation_url: None,
+            revocation: None,
             default_scopes: Some(vec![
                 "openid".to_string(),
                 "email".to_string(),
@@ -971,6 +1006,7 @@ pub async fn seed_default_providers(
             client_id_param_name: None,
             requires_gateway_url: false,
             created_by: "system".to_string(),
+            revocation_seed_version: 0,
             created_at: now,
             updated_at: now,
         };
@@ -990,6 +1026,7 @@ pub async fn seed_default_providers(
             authorization_url: Some("https://www.tiktok.com/v2/auth/authorize/".to_string()),
             token_url: Some("https://open.tiktokapis.com/v2/oauth/token/".to_string()),
             revocation_url: Some("https://open.tiktokapis.com/v2/oauth/revoke/".to_string()),
+            revocation: None,
             default_scopes: Some(vec!["user.info.basic".to_string()]),
             client_id_encrypted: None,
             client_secret_encrypted: None,
@@ -1012,6 +1049,7 @@ pub async fn seed_default_providers(
             client_id_param_name: Some("client_key".to_string()),
             requires_gateway_url: false,
             created_by: "system".to_string(),
+            revocation_seed_version: 0,
             created_at: now,
             updated_at: now,
         };
@@ -1031,6 +1069,7 @@ pub async fn seed_default_providers(
             authorization_url: Some("https://id.twitch.tv/oauth2/authorize".to_string()),
             token_url: Some("https://id.twitch.tv/oauth2/token".to_string()),
             revocation_url: Some("https://id.twitch.tv/oauth2/revoke".to_string()),
+            revocation: None,
             default_scopes: Some(vec!["user:read:email".to_string()]),
             client_id_encrypted: None,
             client_secret_encrypted: None,
@@ -1051,6 +1090,7 @@ pub async fn seed_default_providers(
             client_id_param_name: None,
             requires_gateway_url: false,
             created_by: "system".to_string(),
+            revocation_seed_version: 0,
             created_at: now,
             updated_at: now,
         };
@@ -1070,6 +1110,7 @@ pub async fn seed_default_providers(
             authorization_url: Some("https://www.reddit.com/api/v1/authorize".to_string()),
             token_url: Some("https://www.reddit.com/api/v1/access_token".to_string()),
             revocation_url: Some("https://www.reddit.com/api/v1/revoke_token".to_string()),
+            revocation: None,
             default_scopes: Some(vec!["identity".to_string()]),
             client_id_encrypted: None,
             client_secret_encrypted: None,
@@ -1093,6 +1134,7 @@ pub async fn seed_default_providers(
             client_id_param_name: None,
             requires_gateway_url: false,
             created_by: "system".to_string(),
+            revocation_seed_version: 0,
             created_at: now,
             updated_at: now,
         };
@@ -1156,6 +1198,7 @@ pub async fn seed_default_providers(
                 "https://open.larksuite.com/open-apis/authen/v2/oauth/token".to_string(),
             ),
             revocation_url: None,
+            revocation: None,
             default_scopes: Some(vec![
                 "contact:user.base:readonly".to_string(),
                 "offline_access".to_string(),
@@ -1182,6 +1225,7 @@ pub async fn seed_default_providers(
             client_id_param_name: None,
             requires_gateway_url: false,
             created_by: "system".to_string(),
+            revocation_seed_version: 0,
             created_at: now,
             updated_at: now,
         };
@@ -1203,6 +1247,7 @@ pub async fn seed_default_providers(
             authorization_url: Some("https://open.feishu.cn/open-apis/authen/v1/index".to_string()),
             token_url: Some("https://open.feishu.cn/open-apis/authen/v2/oauth/token".to_string()),
             revocation_url: None,
+            revocation: None,
             default_scopes: Some(vec![
                 "contact:user.base:readonly".to_string(),
                 "offline_access".to_string(),
@@ -1229,6 +1274,7 @@ pub async fn seed_default_providers(
             client_id_param_name: None,
             requires_gateway_url: false,
             created_by: "system".to_string(),
+            revocation_seed_version: 0,
             created_at: now,
             updated_at: now,
         };
@@ -1250,6 +1296,7 @@ pub async fn seed_default_providers(
             authorization_url: None,
             token_url: None,
             revocation_url: None,
+            revocation: None,
             default_scopes: None,
             // client_secret_encrypted is reused to store the encrypted bot token
             client_id_encrypted: None,
@@ -1271,6 +1318,7 @@ pub async fn seed_default_providers(
             client_id_param_name: None,
             requires_gateway_url: false,
             created_by: "system".to_string(),
+            revocation_seed_version: 0,
             created_at: now,
             updated_at: now,
         };
@@ -1292,6 +1340,7 @@ pub async fn seed_default_providers(
             authorization_url: None,
             token_url: None,
             revocation_url: None,
+            revocation: None,
             default_scopes: None,
             client_id_encrypted: None,
             client_secret_encrypted: None,
@@ -1315,6 +1364,7 @@ pub async fn seed_default_providers(
             client_id_param_name: None,
             requires_gateway_url: false,
             created_by: "system".to_string(),
+            revocation_seed_version: 0,
             created_at: now,
             updated_at: now,
         };
@@ -1342,6 +1392,7 @@ pub async fn seed_default_providers(
             authorization_url: None,
             token_url: None,
             revocation_url: None,
+            revocation: None,
             default_scopes: None,
             client_id_encrypted: None,
             client_secret_encrypted: None,
@@ -1370,6 +1421,7 @@ pub async fn seed_default_providers(
             client_id_param_name: None,
             requires_gateway_url: false,
             created_by: "system".to_string(),
+            revocation_seed_version: 0,
             created_at: now,
             updated_at: now,
         };
@@ -1394,6 +1446,7 @@ pub async fn seed_default_providers(
             authorization_url: None,
             token_url: None,
             revocation_url: None,
+            revocation: None,
             default_scopes: None,
             client_id_encrypted: None,
             client_secret_encrypted: None,
@@ -1422,6 +1475,7 @@ pub async fn seed_default_providers(
             client_id_param_name: None,
             requires_gateway_url: false,
             created_by: "system".to_string(),
+            revocation_seed_version: 0,
             created_at: now,
             updated_at: now,
         };
@@ -1449,6 +1503,7 @@ pub async fn seed_default_providers(
             authorization_url: None,
             token_url: None,
             revocation_url: None,
+            revocation: None,
             default_scopes: None,
             client_id_encrypted: None,
             client_secret_encrypted: None,
@@ -1476,6 +1531,7 @@ pub async fn seed_default_providers(
             client_id_param_name: None,
             requires_gateway_url: false,
             created_by: "system".to_string(),
+            revocation_seed_version: 0,
             created_at: now,
             updated_at: now,
         };
@@ -1503,6 +1559,7 @@ pub async fn seed_default_providers(
             authorization_url: None,
             token_url: None,
             revocation_url: None,
+            revocation: None,
             default_scopes: None,
             client_id_encrypted: None,
             client_secret_encrypted: None,
@@ -1531,6 +1588,7 @@ pub async fn seed_default_providers(
             client_id_param_name: None,
             requires_gateway_url: false,
             created_by: "system".to_string(),
+            revocation_seed_version: 0,
             created_at: now,
             updated_at: now,
         };
@@ -1553,6 +1611,7 @@ pub async fn seed_default_providers(
             authorization_url: None,
             token_url: None,
             revocation_url: None,
+            revocation: None,
             default_scopes: None,
             client_id_encrypted: None,
             client_secret_encrypted: None,
@@ -1577,6 +1636,7 @@ pub async fn seed_default_providers(
             client_id_param_name: None,
             requires_gateway_url: true,
             created_by: "system".to_string(),
+            revocation_seed_version: 0,
             created_at: now,
             updated_at: now,
         };
@@ -1600,6 +1660,7 @@ pub async fn seed_default_providers(
             authorization_url: None,
             token_url: None,
             revocation_url: None,
+            revocation: None,
             default_scopes: None,
             client_id_encrypted: None,
             client_secret_encrypted: None,
@@ -1622,6 +1683,7 @@ pub async fn seed_default_providers(
             client_id_param_name: None,
             requires_gateway_url: false,
             created_by: "system".to_string(),
+            revocation_seed_version: 0,
             created_at: now,
             updated_at: now,
         };
@@ -1650,6 +1712,7 @@ pub async fn seed_default_providers(
             authorization_url: None,
             token_url: None,
             revocation_url: None,
+            revocation: None,
             default_scopes: None,
             client_id_encrypted: None,
             client_secret_encrypted: None,
@@ -1685,6 +1748,7 @@ pub async fn seed_default_providers(
             client_id_param_name: None,
             requires_gateway_url: false,
             created_by: "system".to_string(),
+            revocation_seed_version: 0,
             created_at: now,
             updated_at: now,
         };
@@ -1715,6 +1779,7 @@ pub async fn seed_default_providers(
             authorization_url: Some("https://accounts.google.com/o/oauth2/v2/auth".to_string()),
             token_url: Some("https://oauth2.googleapis.com/token".to_string()),
             revocation_url: Some("https://oauth2.googleapis.com/revoke".to_string()),
+            revocation: None,
             default_scopes: Some(vec![
                 "https://www.googleapis.com/auth/cloud-platform.read-only".to_string(),
             ]),
@@ -1744,6 +1809,7 @@ pub async fn seed_default_providers(
             client_id_param_name: None,
             requires_gateway_url: false,
             created_by: "system".to_string(),
+            revocation_seed_version: 0,
             created_at: now,
             updated_at: now,
         };
@@ -4059,6 +4125,7 @@ pub async fn create_provider(
             .map(|o| o.token_url.clone())
             .or_else(|| device_code_config.as_ref().map(|d| d.token_url.clone())),
         revocation_url: oauth_config.as_ref().and_then(|o| o.revocation_url.clone()),
+        revocation: None,
         default_scopes: oauth_config
             .as_ref()
             .and_then(|o| o.default_scopes.clone())
@@ -4097,6 +4164,7 @@ pub async fn create_provider(
         client_id_param_name: normalized_client_id_param_name,
         requires_gateway_url: false,
         created_by: created_by.to_string(),
+        revocation_seed_version: 0,
         created_at: now,
         updated_at: now,
     };
@@ -4783,6 +4851,7 @@ mod tests {
             authorization_url: None,
             token_url: None,
             revocation_url: None,
+            revocation: None,
             default_scopes: None,
             client_id_encrypted: None,
             client_secret_encrypted: None,
@@ -4803,6 +4872,7 @@ mod tests {
             client_id_param_name: None,
             requires_gateway_url: false,
             created_by: "system".to_string(),
+            revocation_seed_version: 0,
             created_at: now,
             updated_at: now,
         }

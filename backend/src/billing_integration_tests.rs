@@ -1745,6 +1745,7 @@ async fn insert_llm_route_service(
         authorization_url: None,
         token_url: None,
         revocation_url: None,
+        revocation: None,
         default_scopes: None,
         client_id_encrypted: None,
         client_secret_encrypted: None,
@@ -1765,6 +1766,7 @@ async fn insert_llm_route_service(
         client_id_param_name: None,
         requires_gateway_url: false,
         created_by: "billing-route-test".to_string(),
+        revocation_seed_version: 0,
         created_at: now,
         updated_at: now,
     };

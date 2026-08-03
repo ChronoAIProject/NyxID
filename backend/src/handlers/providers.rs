@@ -636,6 +636,7 @@ mod tests {
             authorization_url: Some("https://auth.example.com/authorize".to_string()),
             token_url: Some("https://auth.example.com/token".to_string()),
             revocation_url: None,
+            revocation: None,
             default_scopes: None,
             client_id_encrypted: Some(vec![1, 2, 3]),
             client_secret_encrypted: Some(vec![4, 5, 6]),
@@ -656,6 +657,7 @@ mod tests {
             client_id_param_name: None,
             requires_gateway_url: false,
             created_by: "system".to_string(),
+            revocation_seed_version: 0,
             created_at: Utc::now(),
             updated_at: Utc::now(),
         }

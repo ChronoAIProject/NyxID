@@ -217,6 +217,7 @@ mod tests {
             authorization_url: Some("https://example.com/oauth/authorize".to_string()),
             token_url: Some("https://example.com/oauth/token".to_string()),
             revocation_url: None,
+            revocation: None,
             default_scopes: None,
             client_id_encrypted: None,
             client_secret_encrypted: None,
@@ -237,6 +238,7 @@ mod tests {
             client_id_param_name: None,
             requires_gateway_url: false,
             created_by: "test".to_string(),
+            revocation_seed_version: 0,
             created_at: Utc::now(),
             updated_at: Utc::now(),
         }

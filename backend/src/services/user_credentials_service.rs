@@ -590,6 +590,7 @@ mod tests {
             authorization_url: None,
             token_url: None,
             revocation_url: None,
+            revocation: None,
             default_scopes: None,
             client_id_encrypted: if has_client_id {
                 Some(vec![1, 2, 3])
@@ -618,6 +619,7 @@ mod tests {
             client_id_param_name: None,
             requires_gateway_url: false,
             created_by: "system".to_string(),
+            revocation_seed_version: 0,
             created_at: now,
             updated_at: now,
         }

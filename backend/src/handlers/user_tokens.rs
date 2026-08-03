@@ -1294,6 +1294,7 @@ mod tests {
             authorization_url: Some("https://github.com/login/oauth/authorize".to_string()),
             token_url: Some("https://github.com/login/oauth/access_token".to_string()),
             revocation_url: None,
+            revocation: None,
             default_scopes: Some(vec!["read:user".to_string()]),
             client_id_encrypted: None,
             client_secret_encrypted: Some(vec![1, 2, 3]),
@@ -1314,6 +1315,7 @@ mod tests {
             client_id_param_name: None,
             requires_gateway_url: false,
             created_by: "system".to_string(),
+            revocation_seed_version: 0,
             created_at: now,
             updated_at: now,
         }
