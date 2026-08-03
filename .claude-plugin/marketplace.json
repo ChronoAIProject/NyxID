@@ -8,7 +8,7 @@
     {
       "name": "nyxid",
       "description": "Brokers downstream credentials through the nyxid CLI and bundles synchronized Aevatar platform skills for workflows, teams, services, schedules, channels, and managed Codex.",
-      "version": "0.8.0",
+      "version": "0.8.1",
       "source": "./",
       "author": {
         "name": "ChronoAIProject"
