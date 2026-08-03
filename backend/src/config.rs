@@ -1692,6 +1692,46 @@ mod tests {
     }
 
     #[test]
+    fn aevatar_chat_wire_log_env_name_and_default_are_pinned() {
+        const PROBE_TEST: &str =
+            "config::tests::aevatar_chat_wire_log_env_name_and_default_are_pinned";
+        const EXPECTED_ENV: &str = "NYXID_TEST_EXPECTED_AEVATAR_WIRE_LOG";
+
+        if let Ok(expected) = std::env::var(EXPECTED_ENV) {
+            assert_eq!(
+                AppConfig::from_env().aevatar_chat_wire_log_enabled,
+                expected
+                    .parse::<bool>()
+                    .expect("probe expected value is boolean")
+            );
+            return;
+        }
+
+        let test_binary = std::env::current_exe().expect("resolve current test binary");
+
+        for (configured_value, expected) in [(None, false), (Some("true"), true)] {
+            let mut command = std::process::Command::new(&test_binary);
+            command
+                .arg(PROBE_TEST)
+                .arg("--exact")
+                .env("DATABASE_URL", "mongodb://unused-for-config-test")
+                .env(EXPECTED_ENV, expected.to_string())
+                .env_remove("AEVATAR_CHAT_WIRE_LOG_ENABLED");
+            if let Some(value) = configured_value {
+                command.env("AEVATAR_CHAT_WIRE_LOG_ENABLED", value);
+            }
+
+            let output = command.output().expect("run isolated config probe");
+            assert!(
+                output.status.success(),
+                "isolated config probe failed for {configured_value:?}:\nstdout:\n{}\nstderr:\n{}",
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr),
+            );
+        }
+    }
+
+    #[test]
     fn cookie_domain_returns_configured_value() {
         let mut cfg = make_config("http://localhost:3001", "dev", &"ab".repeat(32));
         assert!(cfg.cookie_domain().is_none());

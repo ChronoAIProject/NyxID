@@ -1083,8 +1083,20 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn disabled_echo_flag_returns_before_header_or_database_work() {
+    async fn disabled_echo_flag_suppresses_an_explicit_capture_request() {
         let state = crate::test_utils::test_app_state_no_db().await;
+        let mut headers = HeaderMap::new();
+        headers.insert(DEBUG_UPSTREAM_REQUEST_HEADER, HeaderValue::from_static("1"));
+
+        let echoes = upstream_echo_collector(&state, &headers);
+
+        assert!(echoes.is_none());
+    }
+
+    #[tokio::test]
+    async fn malformed_debug_header_is_not_a_capture_request() {
+        let mut state = crate::test_utils::test_app_state_no_db().await;
+        state.config.aevatar_chat_wire_log_enabled = true;
         let mut headers = HeaderMap::new();
         headers.insert(
             DEBUG_UPSTREAM_REQUEST_HEADER,
@@ -1097,7 +1109,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn enabled_echo_flag_and_header_do_not_require_a_database_lookup() {
+    async fn enabled_echo_flag_accepts_an_explicit_capture_request() {
         let mut state = crate::test_utils::test_app_state_no_db().await;
         state.config.aevatar_chat_wire_log_enabled = true;
         let mut headers = HeaderMap::new();
