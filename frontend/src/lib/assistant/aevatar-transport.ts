@@ -12,6 +12,11 @@ import {
 } from "@/lib/assistant/errors";
 import { resolveAssistantAction } from "@/lib/assistant/action-registry";
 import {
+  CREATE_RECOVERY_BACKOFF_POLICY,
+  PROJECTION_BACKOFF_POLICY,
+  nextBackoffDelay,
+} from "@/lib/assistant/backoff";
+import {
   chatStreamClient,
   type ChatStreamCompletionResult,
   type ChatStreamRequestHandle,
@@ -53,6 +58,7 @@ import type {
   TurnHandle,
   TurnReducerState,
   TurnStatus,
+  ProjectionReconcileOutcome,
 } from "@/types/assistant";
 import { isTurnActive } from "@/types/assistant";
 import {
@@ -60,6 +66,18 @@ import {
   useAssistantWireLogStore,
 } from "@/stores/assistant-wire-log-store";
 import { useAuthStore } from "@/stores/auth-store";
+import {
+  adoptReceiptIdentity,
+  advanceReceiptFence,
+  deleteReceipt,
+  findReceiptByConversation,
+  findReceiptByPlaceholder,
+  listDeletionIntents,
+  recordCreateReceipt,
+  recordDeletionIntent,
+  retireReceiptAfterMaterialization,
+  resolveDeletionIntent,
+} from "@/stores/assistant-receipt-store";
 
 // NyxID's own assistant pass-through (PRD decision 4). NyxID resolves the
 // admin-managed aevatar service and derives the aevatar scope from the
@@ -213,9 +231,10 @@ const assistantApi = {
 // network round-trip per streamed token.
 const CONVERSATION_LIST_TTL_MS = 5_000;
 
-// Chat History materializes after the stream terminal. Keep the exact live
-// transcript briefly so an equal-length stale read cannot replace optimistic
-// identities before the authoritative turn is visible.
+// Chat History materializes after the stream terminal. Equal-length structured
+// mirrors keep their exact identities during this grace. Longer local mirrors
+// converge only on wrapped, fence-current responses containing the latest
+// assistant turn; legacy arrays retain the conservative keep-max behavior.
 const HISTORY_MATERIALIZATION_GRACE_MS = 15_000;
 
 // New chats run on Aevatar's Workflow Studio chat engine: the turn body
@@ -587,6 +606,16 @@ interface StoredConversation {
    * turn's `aevatar.chat.context` frame.
    */
   stateVersion?: number;
+  /** A create command was dispatched but no canonical conversation is known. */
+  identityPending?: boolean;
+  /** A locally terminal workflow turn is not yet confirmed in wire history. */
+  projectionPending?: boolean;
+  /** Latest local workflow turn that must appear before materialization. */
+  requiredTurnId?: string | null;
+  /** Highest transcript fence confirmed by a wire response. */
+  materializedStateVersion?: number;
+  /** Reconciliation deadline, after which the mirror is explicitly stalled. */
+  projectionStalledAt?: number;
   /**
    * Client session correlation handle sent on every workflow turn of this
    * conversation. Minted once and reused so the whole conversation shares
@@ -707,6 +736,24 @@ interface RunningTurn {
   actionContinuation: ActionContinuationState | null;
   optimisticMessageAppended: boolean;
   createRecoveryStarted: boolean;
+}
+
+interface ReconcileEntry {
+  readonly promise: Promise<ProjectionReconcileOutcome>;
+  readonly settle: (outcome: ProjectionReconcileOutcome) => void;
+  readonly scopeId: string | null;
+  readonly placeholderId?: string;
+  conversationId: string;
+  commandId?: string;
+  attempt: number;
+  startedAt: number;
+  deadlineAt: number;
+  waiters: number;
+  timer?: ReturnType<typeof setTimeout>;
+  controller?: AbortController;
+  running: boolean;
+  finalObservationDue: boolean;
+  firstAbsentAt?: number;
 }
 
 type StreamConsumptionResult =
@@ -1230,10 +1277,75 @@ export class AevatarAssistantTransport implements AssistantTransport {
   /** Conversation currently materialized in the chat view. */
   private activeConversationId: string | null = null;
   private readonly now: () => number;
+  private readonly random: () => number;
+  private ownerScopeId: string | null;
+  private readonly scopeControllers = new Set<AbortController>();
+  private readonly reconcileEntries = new Map<string, ReconcileEntry>();
+  private readonly deletionCleanup = new Map<string, Promise<void>>();
+  private deletionSweepStarted = false;
   private listFetchedAt = 0;
 
-  constructor(now: () => number = Date.now) {
+  constructor(
+    now: () => number = Date.now,
+    random: () => number = Math.random,
+  ) {
     this.now = now;
+    this.random = random;
+    this.ownerScopeId = useAuthStore.getState().user?.id ?? null;
+    useAuthStore.subscribe((state, previousState) => {
+      const nextScope = state.user?.id ?? null;
+      if (nextScope !== (previousState.user?.id ?? null)) {
+        this.resetScope(nextScope);
+      }
+    });
+  }
+
+  private ensureScope(): string | null {
+    const nextScope = useAuthStore.getState().user?.id ?? null;
+    if (nextScope !== this.ownerScopeId) this.resetScope(nextScope);
+    return this.ownerScopeId;
+  }
+
+  private resetScope(nextScope: string | null): void {
+    for (const run of this.running.values()) {
+      run.controller.abort();
+      this.clearWatchdog(run);
+    }
+    for (const controller of this.scopeControllers) controller.abort();
+    for (const entry of this.reconcileEntries.values()) {
+      if (entry.timer !== undefined) clearTimeout(entry.timer);
+      entry.controller?.abort();
+    }
+    this.conversations.clear();
+    this.running.clear();
+    this.pendingStops.clear();
+    this.pendingActionBatches.clear();
+    this.actionDrainBlocked.clear();
+    this.deletedConversationIds.clear();
+    this.deletingConversations.clear();
+    this.conversationAliases.clear();
+    this.scopeControllers.clear();
+    this.reconcileEntries.clear();
+    this.deletionCleanup.clear();
+    this.activeConversationId = null;
+    this.listFetchedAt = 0;
+    this.deletionSweepStarted = false;
+    this.ownerScopeId = nextScope;
+  }
+
+  private scopeController(): AbortController {
+    const controller = new AbortController();
+    this.scopeControllers.add(controller);
+    controller.signal.addEventListener(
+      "abort",
+      () => this.scopeControllers.delete(controller),
+      { once: true },
+    );
+    return controller;
+  }
+
+  private releaseScopeController(controller: AbortController): void {
+    this.scopeControllers.delete(controller);
   }
 
   /** Follow a placeholder alias to the server conversation id, if any. */
@@ -1242,6 +1354,11 @@ export class AevatarAssistantTransport implements AssistantTransport {
   }
 
   async listConversations(): Promise<Conversation[]> {
+    const scopeId = this.ensureScope();
+    if (!this.deletionSweepStarted) {
+      this.deletionSweepStarted = true;
+      void this.sweepDeletionIntents(scopeId);
+    }
     const now = Date.now();
     if (
       this.running.size === 0 &&
@@ -1251,6 +1368,7 @@ export class AevatarAssistantTransport implements AssistantTransport {
       const response = await assistantApi.get<AevatarConversationListResponse>(
         `${ASSISTANT_PREFIX}/conversations`,
       );
+      if (scopeId !== this.ensureScope()) return [];
       for (const entry of response.conversations ?? []) {
         const id = entry?.id?.trim();
         if (id) this.mergeIndexEntry(id, entry);
@@ -1276,6 +1394,7 @@ export class AevatarAssistantTransport implements AssistantTransport {
   }
 
   async createConversation(): Promise<Conversation> {
+    this.ensureScope();
     // New chats run on the workflow (studio) surface, where the conversation
     // is created server-side by the FIRST turn's chat-history reservation
     // (`conversation.conversationId: null` in the turn body) — there is no
@@ -1300,7 +1419,40 @@ export class AevatarAssistantTransport implements AssistantTransport {
   }
 
   async deleteConversation(conversationId: string): Promise<void> {
+    this.ensureScope();
     const requestedId = conversationId;
+    const pendingReceipt = conversationId.startsWith(
+      PENDING_WORKFLOW_CONVERSATION_PREFIX,
+    )
+      ? findReceiptByPlaceholder(conversationId)
+      : undefined;
+    if (
+      conversationId.startsWith(PENDING_WORKFLOW_CONVERSATION_PREFIX) &&
+      !pendingReceipt?.conversationId
+    ) {
+      const run = this.running.get(conversationId);
+      if (run) this.cancelTurn(conversationId, run);
+      if (pendingReceipt) {
+        recordDeletionIntent(
+          pendingReceipt.commandId,
+          pendingReceipt.placeholderId,
+          undefined,
+          this.now(),
+        );
+        deleteReceipt(pendingReceipt.commandId);
+      }
+      this.tombstoneConversation(conversationId);
+      if (pendingReceipt) {
+        void this.startDeletionIntentCleanup(
+          pendingReceipt.commandId,
+          this.ownerScopeId,
+        );
+      }
+      return;
+    }
+    if (pendingReceipt?.conversationId) {
+      this.conversationAliases.set(conversationId, pendingReceipt.conversationId);
+    }
     conversationId = this.canonicalConversationId(conversationId);
     // A turn still streaming into the conversation must not keep painting
     // a transcript that is about to disappear: cancel first, matching the
@@ -1337,7 +1489,7 @@ export class AevatarAssistantTransport implements AssistantTransport {
       await this.awaitPendingStop(conversationId);
       // Own deadline: the reservation rejects sends while it holds, so an
       // accepted-but-never-answered DELETE must not lock the conversation.
-      const deadline = new AbortController();
+      const deadline = this.scopeController();
       const deadlineTimer = setTimeout(
         () => deadline.abort(),
         DELETE_REQUEST_DEADLINE_MS,
@@ -1354,6 +1506,7 @@ export class AevatarAssistantTransport implements AssistantTransport {
         );
       } finally {
         clearTimeout(deadlineTimer);
+        this.releaseScopeController(deadline);
       }
       // Local removal only after the server accepted: a failed delete keeps
       // the conversation listed and retryable. A placeholder that aliased
@@ -1363,6 +1516,8 @@ export class AevatarAssistantTransport implements AssistantTransport {
       this.deletedConversationIds.add(conversationId);
       this.pendingActionBatches.delete(conversationId);
       this.actionDrainBlocked.delete(conversationId);
+      const receipt = findReceiptByConversation(conversationId);
+      if (receipt) deleteReceipt(receipt.commandId);
       for (const [placeholder, target] of this.conversationAliases) {
         if (target === conversationId) {
           this.conversations.delete(placeholder);
@@ -1385,12 +1540,140 @@ export class AevatarAssistantTransport implements AssistantTransport {
     }
   }
 
+  private async sweepDeletionIntents(scopeId: string | null): Promise<void> {
+    await Promise.allSettled(
+      listDeletionIntents().map((intent) =>
+        this.startDeletionIntentCleanup(intent.commandId, scopeId),
+      ),
+    );
+  }
+
+  private startDeletionIntentCleanup(
+    commandId: string,
+    scopeId: string | null,
+  ): Promise<void> {
+    const existing = this.deletionCleanup.get(commandId);
+    if (existing) return existing;
+    const operation = this.cleanupDeletionIntent(commandId, scopeId).finally(
+      () => {
+        if (this.deletionCleanup.get(commandId) === operation) {
+          this.deletionCleanup.delete(commandId);
+        }
+      },
+    );
+    this.deletionCleanup.set(commandId, operation);
+    return operation;
+  }
+
+  private async cleanupDeletionIntent(
+    commandId: string,
+    scopeId: string | null,
+  ): Promise<void> {
+    if (!scopeId || scopeId !== this.ownerScopeId) return;
+    let intent = listDeletionIntents().find(
+      (candidate) => candidate.commandId === commandId,
+    );
+    if (!intent) return;
+    const controller = this.scopeController();
+    const deadlineAt = this.now() + CREATE_RECOVERY_BACKOFF_POLICY.deadlineMs;
+    try {
+      let conversationId = intent.conversationId;
+      for (let attempt = 0; !conversationId; attempt += 1) {
+        if (controller.signal.aborted || scopeId !== this.ownerScopeId) return;
+        try {
+          const response = await assistantApi.get<AevatarCreateRecoveryResponse>(
+            `${ASSISTANT_PREFIX}/conversations/create-recovery/${encodeURIComponent(commandId)}`,
+            controller.signal,
+          );
+          const recovered = this.decodeCreateRecovery(response);
+          conversationId = recovered.conversationId;
+          recordDeletionIntent(
+            commandId,
+            intent.placeholderId,
+            conversationId,
+            intent.createdAt,
+          );
+          intent = { ...intent, conversationId };
+        } catch (error) {
+          if (controller.signal.aborted || scopeId !== this.ownerScopeId) return;
+          if (!(error instanceof ApiError && error.status === 404)) return;
+          if (this.now() >= deadlineAt) return;
+          await abortableDelay(
+            nextBackoffDelay(
+              CREATE_RECOVERY_BACKOFF_POLICY,
+              attempt,
+              this.random,
+            ),
+            controller.signal,
+          );
+        }
+      }
+      if (!conversationId || scopeId !== this.ownerScopeId) return;
+      const deleteTimer = setTimeout(
+        () => controller.abort(),
+        DELETE_REQUEST_DEADLINE_MS,
+      );
+      try {
+        await apiClient<unknown>(
+          `${ASSISTANT_PREFIX}/conversations/${conversationId}`,
+          {
+            method: "DELETE",
+            preserveSessionOn401: true,
+            signal: controller.signal,
+            ...assistantWireLogOptions(),
+          },
+        );
+      } finally {
+        clearTimeout(deleteTimer);
+      }
+      if (scopeId !== this.ownerScopeId) return;
+      this.tombstoneConversation(intent.placeholderId);
+      this.tombstoneConversation(conversationId);
+      resolveDeletionIntent(commandId);
+    } catch {
+      // The persisted intent is retried on the next per-scope sweep.
+    } finally {
+      controller.abort();
+      this.releaseScopeController(controller);
+    }
+  }
+
   async getHistory(conversationId: string): Promise<ConversationHistory> {
+    const scopeId = this.ensureScope();
+    const requestedId = conversationId;
+    if (
+      conversationId.startsWith(PENDING_WORKFLOW_CONVERSATION_PREFIX) &&
+      !this.conversations.has(conversationId)
+    ) {
+      const receipt = findReceiptByPlaceholder(conversationId);
+      if (!receipt) throw new AssistantConversationNotFoundError();
+      if (receipt.conversationId) {
+        this.conversationAliases.set(conversationId, receipt.conversationId);
+        conversationId = receipt.conversationId;
+      } else {
+        const stored = this.syntheticPendingConversation(conversationId, {
+          identityPending: true,
+          stateVersion: receipt.stateVersion,
+        });
+        this.conversations.set(conversationId, stored);
+      }
+    }
     conversationId = this.canonicalConversationId(conversationId);
     if (this.deletedConversationIds.has(conversationId)) {
       throw new AssistantConversationNotFoundError();
     }
-    const existing = this.conversations.get(conversationId);
+    let existing = this.conversations.get(conversationId);
+    const canonicalReceipt = findReceiptByConversation(conversationId);
+    if (!existing && canonicalReceipt) {
+      existing = this.syntheticPendingConversation(conversationId, {
+        projectionPending: true,
+        stateVersion: canonicalReceipt.stateVersion,
+      });
+      this.conversations.set(conversationId, existing);
+      if (requestedId !== conversationId) {
+        this.conversations.set(requestedId, existing);
+      }
+    }
     if (
       !existing &&
       (conversationId.startsWith(LEGACY_PENDING_TYPED_CONVERSATION_PREFIX) ||
@@ -1401,11 +1684,16 @@ export class AevatarAssistantTransport implements AssistantTransport {
     // During a streaming turn the local mirror is ahead of the server;
     // serving it keeps per-event re-projection off the network entirely.
     if (existing && isTurnActive(existing.turnState.activeTurn?.status)) {
-      return {
-        conversation: existing.conversation,
-        messages: existing.turnState.messages,
-        has_more: false,
-      };
+      this.activateConversation(conversationId, existing);
+      return this.historyFromStored(existing);
+    }
+    if (
+      existing &&
+      (existing.identityPending || existing.projectionPending ||
+        existing.projectionStalledAt !== undefined)
+    ) {
+      this.activateConversation(conversationId, existing);
+      return this.historyFromStored(existing);
     }
     // A pending placeholder exists nowhere server-side — the id never left
     // this client — so the read can only 404 and land in the
@@ -1416,12 +1704,8 @@ export class AevatarAssistantTransport implements AssistantTransport {
       (conversationId.startsWith(LEGACY_PENDING_TYPED_CONVERSATION_PREFIX) ||
         conversationId.startsWith(PENDING_WORKFLOW_CONVERSATION_PREFIX))
     ) {
-      this.activeConversationId = conversationId;
-      return {
-        conversation: existing.conversation,
-        messages: existing.turnState.messages,
-        has_more: false,
-      };
+      this.activateConversation(conversationId, existing);
+      return this.historyFromStored(existing);
     }
     let stored: StoredConversation;
     try {
@@ -1441,37 +1725,74 @@ export class AevatarAssistantTransport implements AssistantTransport {
       // transient and protocol failures retain their original type.
       if (!existing) {
         if (error instanceof ApiError && error.status === 404) {
-          throw new AssistantConversationNotFoundError();
+          if (!conversationId.startsWith(WORKFLOW_CONVERSATION_PREFIX)) {
+            throw new AssistantConversationNotFoundError();
+          }
+          const membership = await this.fetchRawIndexMembership(conversationId);
+          if (scopeId !== this.ensureScope()) {
+            throw new AssistantConversationNotFoundError();
+          }
+          if (membership === "unavailable" && !canonicalReceipt) throw error;
+          if (membership !== true && !canonicalReceipt) {
+            throw new AssistantConversationNotFoundError();
+          }
+          stored =
+            this.conversations.get(conversationId) ??
+            this.syntheticPendingConversation(conversationId, {
+              projectionPending: true,
+              stateVersion: canonicalReceipt?.stateVersion,
+            });
+          stored.projectionPending = true;
+          stored.stateVersion =
+            canonicalReceipt?.stateVersion ?? stored.stateVersion;
+          this.conversations.set(conversationId, stored);
+        } else {
+          throw error;
         }
-        throw error;
+      } else {
+        const noServerTranscriptYet =
+          error instanceof ApiError && error.status === 404;
+        if (
+          noServerTranscriptYet &&
+          conversationId.startsWith(WORKFLOW_CONVERSATION_PREFIX) &&
+          existing.turnState.messages.length === 0 &&
+          !existing.identityPending &&
+          !existing.projectionPending
+        ) {
+          const membership = await this.fetchRawIndexMembership(conversationId);
+          if (scopeId !== this.ensureScope() || membership === false) {
+            this.tombstoneConversation(conversationId);
+            throw new AssistantConversationNotFoundError();
+          }
+          if (membership === true) existing.projectionPending = true;
+          if (membership === "unavailable") throw error;
+        }
+        if (
+          !noServerTranscriptYet &&
+          existing.turnState.messages.length === 0
+        ) {
+          throw error;
+        }
+        stored = existing;
       }
-      // 404 is the EXPECTED answer for a conversation that has not yet
-      // completed a turn. The two upstream halves materialize at different
-      // times: `nyxid-chat` mints the actor at create, while the
-      // `chat-history` row is only written when a turn reaches a terminal.
-      // Aevatar's `HandleGetConversation` maps a missing read-model document
-      // to 404 — NOT to an empty array — so every brand-new conversation
-      // 404s here, as does the window between a turn's terminal frame and
-      // its history materialization. For a conversation we already hold,
-      // that is "no server transcript yet", and the local mirror is the
-      // truthful answer rather than a failure.
-      const noServerTranscriptYet =
-        error instanceof ApiError && error.status === 404;
-      // Transient failures (network, 5xx) may serve the local mirror — but
-      // only when it holds a real transcript. A conversation the index
-      // merged in carries `EMPTY_TURN_STATE`, and answering with that would
-      // dress a failed read as a legitimately empty chat.
-      if (!noServerTranscriptYet && existing.turnState.messages.length === 0) {
-        throw error;
-      }
-      stored = existing;
     }
     // Re-check AFTER the await: a delete completing while the history
     // request was in flight must not be answered with the pre-delete
     // snapshot captured above (the fallback `existing`).
-    if (this.deletedConversationIds.has(conversationId)) {
+    if (
+      scopeId !== this.ensureScope() ||
+      this.deletedConversationIds.has(conversationId)
+    ) {
       throw new AssistantConversationNotFoundError();
     }
+    this.activateConversation(conversationId, stored);
+    return this.historyFromStored(stored);
+  }
+
+  private activateConversation(
+    conversationId: string,
+    stored: StoredConversation,
+  ): void {
     if (
       conversationId.startsWith(WORKFLOW_CONVERSATION_PREFIX) &&
       this.activeConversationId !== conversationId
@@ -1479,11 +1800,381 @@ export class AevatarAssistantTransport implements AssistantTransport {
       stored.sessionId = crypto.randomUUID();
     }
     this.activeConversationId = conversationId;
+  }
+
+  private historyFromStored(stored: StoredConversation): ConversationHistory {
+    const stalled = stored.projectionStalledAt !== undefined;
     return {
       conversation: stored.conversation,
       messages: stored.turnState.messages,
       has_more: false,
+      ...(stalled
+        ? { projectionStalled: true }
+        : stored.identityPending || stored.projectionPending
+          ? { awaitingProjection: true }
+          : {}),
     };
+  }
+
+  private syntheticPendingConversation(
+    conversationId: string,
+    facts: Pick<
+      StoredConversation,
+      "identityPending" | "projectionPending" | "stateVersion"
+    >,
+  ): StoredConversation {
+    const nowIso = new Date(this.now()).toISOString();
+    return {
+      conversation: {
+        id: conversationId,
+        title: "Conversation",
+        created_at: nowIso,
+        last_message_at: nowIso,
+      },
+      turnState: EMPTY_TURN_STATE,
+      actionRequestFingerprints: new Map(),
+      activityMessageTurnIds: new Map(),
+      ...facts,
+    };
+  }
+
+  private async fetchRawIndexMembership(
+    conversationId: string,
+    signal?: AbortSignal,
+  ): Promise<boolean | "unavailable"> {
+    const scopeId = this.ownerScopeId;
+    try {
+      const response = await assistantApi.get<AevatarConversationListResponse>(
+        `${ASSISTANT_PREFIX}/conversations`,
+        signal,
+      );
+      if (scopeId !== this.ownerScopeId) return "unavailable";
+      const entries = response.conversations ?? [];
+      const present = entries.some(
+        (entry) => entry?.id?.trim() === conversationId,
+      );
+      for (const entry of entries) {
+        const id = entry?.id?.trim();
+        if (id) this.mergeIndexEntry(id, entry);
+      }
+      this.listFetchedAt = this.now();
+      return present;
+    } catch (error) {
+      if (signal?.aborted) throw error;
+      return "unavailable";
+    }
+  }
+
+  private tombstoneConversation(conversationId: string): void {
+    const canonicalId = this.canonicalConversationId(conversationId);
+    this.conversations.delete(conversationId);
+    this.conversations.delete(canonicalId);
+    this.deletedConversationIds.add(conversationId);
+    this.deletedConversationIds.add(canonicalId);
+    const entry = this.reconcileEntries.get(canonicalId);
+    if (entry?.timer !== undefined) clearTimeout(entry.timer);
+    entry?.controller?.abort();
+  }
+
+  reconcileProjection(
+    requestedId: string,
+  ): Promise<ProjectionReconcileOutcome> {
+    const scopeId = this.ensureScope();
+    const placeholderReceipt = requestedId.startsWith(
+      PENDING_WORKFLOW_CONVERSATION_PREFIX,
+    )
+      ? findReceiptByPlaceholder(requestedId)
+      : undefined;
+    if (placeholderReceipt?.conversationId) {
+      this.conversationAliases.set(requestedId, placeholderReceipt.conversationId);
+    }
+    let conversationId = this.canonicalConversationId(requestedId);
+    let stored = this.conversations.get(conversationId);
+    if (!stored && placeholderReceipt && !placeholderReceipt.conversationId) {
+      stored = this.syntheticPendingConversation(requestedId, {
+        identityPending: true,
+        stateVersion: placeholderReceipt.stateVersion,
+      });
+      this.conversations.set(requestedId, stored);
+      conversationId = requestedId;
+    }
+    if (!stored) {
+      const receipt = findReceiptByConversation(conversationId);
+      if (receipt) {
+        stored = this.syntheticPendingConversation(conversationId, {
+          projectionPending: true,
+          stateVersion: receipt.stateVersion,
+        });
+        this.conversations.set(conversationId, stored);
+      }
+    }
+
+    const existing = this.reconcileEntries.get(conversationId);
+    if (existing) {
+      existing.waiters += 1;
+      this.resumeReconcileEntry(existing);
+      return existing.promise;
+    }
+
+    if (stored?.projectionStalledAt !== undefined) {
+      stored.projectionStalledAt = undefined;
+      if (!stored.identityPending) stored.projectionPending = true;
+    }
+    const commandId =
+      placeholderReceipt?.commandId ??
+      findReceiptByConversation(conversationId)?.commandId;
+    const policy = stored?.identityPending
+      ? CREATE_RECOVERY_BACKOFF_POLICY
+      : PROJECTION_BACKOFF_POLICY;
+    let settle!: (outcome: ProjectionReconcileOutcome) => void;
+    const promise = new Promise<ProjectionReconcileOutcome>((resolve) => {
+      settle = resolve;
+    });
+    const entry: ReconcileEntry = {
+      promise,
+      settle,
+      scopeId,
+      placeholderId:
+        requestedId.startsWith(PENDING_WORKFLOW_CONVERSATION_PREFIX)
+          ? requestedId
+          : placeholderReceipt?.placeholderId,
+      conversationId,
+      commandId,
+      attempt: 0,
+      startedAt: this.now(),
+      deadlineAt: this.now() + policy.deadlineMs,
+      waiters: 1,
+      running: false,
+      finalObservationDue: false,
+    };
+    this.reconcileEntries.set(conversationId, entry);
+    this.resumeReconcileEntry(entry);
+    return promise;
+  }
+
+  releaseProjectionWaiter(requestedId: string): void {
+    this.ensureScope();
+    const conversationId = this.canonicalConversationId(requestedId);
+    const entry =
+      this.reconcileEntries.get(conversationId) ??
+      this.reconcileEntries.get(requestedId);
+    if (!entry) return;
+    entry.waiters = Math.max(0, entry.waiters - 1);
+    if (entry.waiters > 0) return;
+    if (entry.timer !== undefined) {
+      clearTimeout(entry.timer);
+      entry.timer = undefined;
+    }
+    if (entry.controller) {
+      entry.controller.abort();
+    } else {
+      entry.running = false;
+    }
+  }
+
+  private resumeReconcileEntry(entry: ReconcileEntry): void {
+    if (
+      entry.running ||
+      entry.timer !== undefined ||
+      entry.waiters === 0 ||
+      entry.scopeId !== this.ownerScopeId
+    ) {
+      return;
+    }
+    entry.running = true;
+    void this.runReconcileObservation(entry).catch(() => {
+      if (entry.scopeId !== this.ownerScopeId || entry.waiters === 0) return;
+      this.scheduleReconcileEntry(entry);
+    });
+  }
+
+  private async runReconcileObservation(entry: ReconcileEntry): Promise<void> {
+    if (entry.scopeId !== this.ownerScopeId || entry.waiters === 0) {
+      entry.running = false;
+      return;
+    }
+    if (
+      this.deletedConversationIds.has(entry.conversationId) ||
+      this.deletingConversations.has(entry.conversationId)
+    ) {
+      this.settleReconcileEntry(entry, "absent");
+      return;
+    }
+
+    const controller = this.scopeController();
+    entry.controller = controller;
+    let transcriptWasMissing = false;
+    let observedMembership: boolean | "unavailable" | undefined;
+    try {
+      const stored = this.conversations.get(entry.conversationId);
+      if (stored?.identityPending) {
+        if (!entry.commandId) {
+          this.settleReconcileEntry(entry, "timed_out");
+          return;
+        }
+        try {
+          const response = await assistantApi.get<AevatarCreateRecoveryResponse>(
+            `${ASSISTANT_PREFIX}/conversations/create-recovery/${encodeURIComponent(entry.commandId)}`,
+            controller.signal,
+          );
+          if (entry.scopeId !== this.ownerScopeId) return;
+          const recovered = this.decodeCreateRecovery(response);
+          this.adoptRecoveredReceipt(entry, stored, recovered);
+        } catch (error) {
+          if (controller.signal.aborted) return;
+          if (!(error instanceof ApiError && error.status === 404)) throw error;
+          transcriptWasMissing = true;
+        }
+      } else {
+        try {
+          const body = await assistantApi.get<AevatarHistoryResponse>(
+            `${ASSISTANT_PREFIX}/conversations/${entry.conversationId}`,
+            controller.signal,
+          );
+          if (entry.scopeId !== this.ownerScopeId) return;
+          const projected = this.applyHistoryResponse(entry.conversationId, body);
+          if (!projected.identityPending && !projected.projectionPending) {
+            this.settleReconcileEntry(entry, "materialized");
+            return;
+          }
+        } catch (error) {
+          if (controller.signal.aborted) return;
+          if (!(error instanceof ApiError && error.status === 404)) throw error;
+          transcriptWasMissing = true;
+        }
+      }
+
+      entry.attempt += 1;
+      const deadlineReached =
+        entry.finalObservationDue || this.now() >= entry.deadlineAt;
+      entry.finalObservationDue = false;
+      if (
+        !this.conversations.get(entry.conversationId)?.identityPending &&
+        transcriptWasMissing &&
+        (entry.attempt % 2 === 0 || deadlineReached)
+      ) {
+        const membership = await this.fetchRawIndexMembership(
+          entry.conversationId,
+          controller.signal,
+        );
+        observedMembership = membership;
+        if (entry.scopeId !== this.ownerScopeId) return;
+        if (membership === false) {
+          if (deadlineReached) {
+            this.tombstoneConversation(entry.conversationId);
+            this.settleReconcileEntry(entry, "absent");
+            return;
+          }
+          if (
+            entry.firstAbsentAt !== undefined &&
+            this.now() - entry.firstAbsentAt >= 10_000
+          ) {
+            this.tombstoneConversation(entry.conversationId);
+            this.settleReconcileEntry(entry, "absent");
+            return;
+          }
+          entry.firstAbsentAt ??= this.now();
+        } else if (membership === true) {
+          entry.firstAbsentAt = undefined;
+        }
+      }
+
+      if (deadlineReached) {
+        const identityPending =
+          this.conversations.get(entry.conversationId)?.identityPending === true;
+        const membership = identityPending
+          ? "unavailable"
+          : observedMembership ??
+            (await this.fetchRawIndexMembership(
+              entry.conversationId,
+              controller.signal,
+            ));
+        if (membership === false) {
+          this.tombstoneConversation(entry.conversationId);
+          this.settleReconcileEntry(entry, "absent");
+        } else {
+          this.settleReconcileEntry(entry, "timed_out");
+        }
+        return;
+      }
+    } finally {
+      if (entry.controller === controller) entry.controller = undefined;
+      this.releaseScopeController(controller);
+      entry.running = false;
+    }
+    this.scheduleReconcileEntry(entry);
+  }
+
+  private scheduleReconcileEntry(entry: ReconcileEntry): void {
+    if (
+      entry.scopeId !== this.ownerScopeId ||
+      entry.waiters === 0 ||
+      !this.reconcileEntries.has(entry.conversationId)
+    ) {
+      return;
+    }
+    const identityPending =
+      this.conversations.get(entry.conversationId)?.identityPending === true;
+    const policy = identityPending
+      ? CREATE_RECOVERY_BACKOFF_POLICY
+      : PROJECTION_BACKOFF_POLICY;
+    const delay = nextBackoffDelay(
+      policy,
+      Math.max(0, entry.attempt - 1),
+      this.random,
+    );
+    entry.timer = setTimeout(() => {
+      entry.timer = undefined;
+      entry.finalObservationDue = this.now() >= entry.deadlineAt;
+      this.resumeReconcileEntry(entry);
+    }, delay);
+  }
+
+  private adoptRecoveredReceipt(
+    entry: ReconcileEntry,
+    stored: StoredConversation,
+    recovery: ReturnType<AevatarAssistantTransport["decodeCreateRecovery"]>,
+  ): void {
+    const placeholderId = entry.placeholderId ?? entry.conversationId;
+    stored.conversation = {
+      ...stored.conversation,
+      id: recovery.conversationId,
+    };
+    stored.identityPending = false;
+    stored.projectionPending = true;
+    stored.requiredTurnId = recovery.turnId;
+    stored.stateVersion = Math.max(
+      stored.stateVersion ?? 0,
+      recovery.stateVersion,
+    );
+    stored.createRequest = undefined;
+    this.conversations.set(recovery.conversationId, stored);
+    this.conversations.set(placeholderId, stored);
+    this.conversationAliases.set(placeholderId, recovery.conversationId);
+    adoptReceiptIdentity(
+      entry.commandId ?? "",
+      recovery.conversationId,
+      recovery.stateVersion,
+      this.now(),
+    );
+    this.reconcileEntries.delete(entry.conversationId);
+    entry.conversationId = recovery.conversationId;
+    this.reconcileEntries.set(entry.conversationId, entry);
+  }
+
+  private settleReconcileEntry(
+    entry: ReconcileEntry,
+    status: ProjectionReconcileOutcome["status"],
+  ): void {
+    if (entry.timer !== undefined) clearTimeout(entry.timer);
+    entry.controller?.abort();
+    const stored = this.conversations.get(entry.conversationId);
+    if (status === "timed_out" && stored) {
+      stored.projectionStalledAt = this.now();
+    }
+    this.reconcileEntries.delete(entry.conversationId);
+    if (entry.placeholderId) this.reconcileEntries.delete(entry.placeholderId);
+    entry.settle({ status, conversationId: entry.conversationId });
   }
 
   private appendOptimisticUserMessage(
@@ -1530,6 +2221,7 @@ export class AevatarAssistantTransport implements AssistantTransport {
     content: string,
     onEvent: (event: TurnEvent) => void,
   ): TurnHandle {
+    this.ensureScope();
     const requestedId = conversationId;
     conversationId = this.canonicalConversationId(conversationId);
     const stored = this.conversations.get(conversationId);
@@ -1564,6 +2256,9 @@ export class AevatarAssistantTransport implements AssistantTransport {
           ? stored.createRequest.commandId
           : crypto.randomUUID();
       stored.createRequest = { prompt: normalized, commandId: clientRequestId };
+      stored.identityPending = true;
+      stored.projectionStalledAt = undefined;
+      recordCreateReceipt(clientRequestId, requestedId, this.now());
     }
     const run = this.newRun(onEvent, null, protocol, clientRequestId);
     this.running.set(conversationId, run);
@@ -1592,6 +2287,7 @@ export class AevatarAssistantTransport implements AssistantTransport {
    * Stop needs a transport-level lookup to abort a hung request).
    */
   cancelActiveTurn(conversationId: string): void {
+    this.ensureScope();
     // A create-and-first-turn run is keyed under the placeholder id the send
     // used. Resolve forward and reverse so either the placeholder or the
     // canonical address can stop it, then cancel under the run's own key.
@@ -1623,6 +2319,7 @@ export class AevatarAssistantTransport implements AssistantTransport {
     approved: boolean,
     onEvent?: (event: TurnEvent) => void,
   ): Promise<TurnHandle | null> {
+    this.ensureScope();
     conversationId = this.canonicalConversationId(conversationId);
     if (this.deletingConversations.has(conversationId)) {
       throw new Error("This conversation is being deleted.");
@@ -1811,6 +2508,7 @@ export class AevatarAssistantTransport implements AssistantTransport {
     inProgress: boolean,
     onEvent: (event: TurnEvent) => void = noopEvent,
   ): void {
+    this.ensureScope();
     if (
       this.deletingConversations.has(
         this.canonicalConversationId(conversationId),
@@ -1847,6 +2545,7 @@ export class AevatarAssistantTransport implements AssistantTransport {
     note: string,
     onEvent: (event: TurnEvent) => void = noopEvent,
   ): void {
+    this.ensureScope();
     if (!this.conversations.has(conversationId)) {
       throw new Error("Conversation was not found.");
     }
@@ -1884,6 +2583,7 @@ export class AevatarAssistantTransport implements AssistantTransport {
     reports: readonly ActionReport[],
     onEvent: (event: TurnEvent) => void = noopEvent,
   ): TurnHandle | null {
+    this.ensureScope();
     if (!this.conversations.has(conversationId)) {
       throw new AssistantConversationNotFoundError();
     }
@@ -2020,6 +2720,7 @@ export class AevatarAssistantTransport implements AssistantTransport {
     originTurnId: string,
     onEvent: (event: TurnEvent) => void = noopEvent,
   ): TurnHandle {
+    this.ensureScope();
     const requestedId = conversationId;
     const actorId = this.canonicalConversationId(conversationId);
     const stored =
@@ -2303,6 +3004,13 @@ export class AevatarAssistantTransport implements AssistantTransport {
    */
   private mergeIndexEntry(id: string, entry: AevatarHistoryIndexEntry): void {
     if (this.deletedConversationIds.has(id)) return;
+    if (
+      listDeletionIntents().some(
+        (intent) => intent.conversationId === id,
+      )
+    ) {
+      return;
+    }
     const existing = this.conversations.get(id);
     if (existing && isTurnActive(existing.turnState.activeTurn?.status)) {
       return;
@@ -2338,6 +3046,11 @@ export class AevatarAssistantTransport implements AssistantTransport {
       activityMessageTurnIds: existing?.activityMessageTurnIds ?? new Map(),
       lastLocalTurnCompletedAt: existing?.lastLocalTurnCompletedAt,
       stateVersion: existing?.stateVersion,
+      identityPending: existing?.identityPending,
+      projectionPending: existing?.projectionPending,
+      requiredTurnId: existing?.requiredTurnId,
+      materializedStateVersion: existing?.materializedStateVersion,
+      projectionStalledAt: existing?.projectionStalledAt,
       sessionId: existing?.sessionId,
       createRequest: existing?.createRequest,
     });
@@ -2370,11 +3083,16 @@ export class AevatarAssistantTransport implements AssistantTransport {
     // The watermark is fresher than any stored one even when the transcript
     // below keeps the local mirror (keep-max), so capture it first.
     const freshStateVersion = historyStateVersion(body);
+    const preMergeFence = Math.max(
+      1,
+      positiveStateVersion(existing?.stateVersion) ?? 1,
+    );
     if (existing && freshStateVersion !== undefined) {
       existing.stateVersion = Math.max(
         existing.stateVersion ?? 0,
         freshStateVersion,
       );
+      advanceReceiptFence(conversationId, freshStateVersion, this.now());
     }
     const localMessages = existing?.turnState.messages ?? [];
     const localStructuredBlocks = structuredBlockCount(localMessages);
@@ -2387,19 +3105,29 @@ export class AevatarAssistantTransport implements AssistantTransport {
     const comparableLocalMessageCount = serverLacksLocalStructure
       ? localMessages.filter((message) => !hasStructuredBlocks(message)).length
       : localMessages.length;
-    if (existing && comparableLocalMessageCount > messages.length) {
-      return existing;
-    }
     const withinMaterializationGrace =
       existing?.lastLocalTurnCompletedAt !== undefined &&
       this.now() - existing.lastLocalTurnCompletedAt <=
         HISTORY_MATERIALIZATION_GRACE_MS;
+    if (existing && comparableLocalMessageCount > messages.length) {
+      const latestTurnId = this.latestAssistantTurnId(existing);
+      const canReplaceLongerLocal =
+        freshStateVersion !== undefined &&
+        freshStateVersion >= preMergeFence &&
+        !withinMaterializationGrace &&
+        historyIncludesAssistantTurn(entries, latestTurnId);
+      if (!canReplaceLongerLocal) {
+        this.applyMaterializationObservation(existing, body, entries);
+        return existing;
+      }
+    }
     if (
       existing &&
       serverLacksLocalStructure &&
       comparableLocalMessageCount === messages.length &&
       withinMaterializationGrace
     ) {
+      this.applyMaterializationObservation(existing, body, entries);
       return existing;
     }
     const projectedMessages =
@@ -2437,11 +3165,46 @@ export class AevatarAssistantTransport implements AssistantTransport {
         freshStateVersion === undefined
           ? existing?.stateVersion
           : Math.max(existing?.stateVersion ?? 0, freshStateVersion),
+      identityPending: existing?.identityPending,
+      projectionPending: existing?.projectionPending,
+      requiredTurnId: existing?.requiredTurnId,
+      materializedStateVersion: existing?.materializedStateVersion,
+      projectionStalledAt: existing?.projectionStalledAt,
       sessionId: existing?.sessionId,
       createRequest: existing?.createRequest,
     };
+    this.applyMaterializationObservation(stored, body, entries);
     this.conversations.set(conversationId, stored);
     return stored;
+  }
+
+  private applyMaterializationObservation(
+    stored: StoredConversation,
+    body: AevatarHistoryResponse,
+    entries: readonly AevatarHistoryEntry[],
+  ): void {
+    const freshStateVersion = historyStateVersion(body);
+    const containsRequiredTurn = historyIncludesAssistantTurn(
+      entries,
+      stored.requiredTurnId ?? null,
+    );
+    const fenceSatisfied =
+      freshStateVersion === undefined
+        ? Array.isArray(body) && containsRequiredTurn
+        : freshStateVersion >=
+          Math.max(1, positiveStateVersion(stored.stateVersion) ?? 1);
+    if (!fenceSatisfied || !containsRequiredTurn) return;
+    stored.identityPending = false;
+    stored.projectionPending = false;
+    stored.projectionStalledAt = undefined;
+    if (freshStateVersion !== undefined) {
+      stored.materializedStateVersion = Math.max(
+        stored.materializedStateVersion ?? 0,
+        freshStateVersion,
+      );
+    }
+    const receipt = findReceiptByConversation(stored.conversation.id);
+    if (receipt) retireReceiptAfterMaterialization(receipt.commandId, this.now());
   }
 
   private newRun(
@@ -2509,6 +3272,15 @@ export class AevatarAssistantTransport implements AssistantTransport {
         run.streamDispatched
       ) {
         stored.lastLocalTurnCompletedAt = this.now();
+        if (
+          run.protocol === "workflow" &&
+          (stored.identityPending === true ||
+            stored.conversation.id.startsWith(WORKFLOW_CONVERSATION_PREFIX))
+        ) {
+          stored.projectionPending = true;
+          stored.requiredTurnId = run.turnId;
+          stored.projectionStalledAt = undefined;
+        }
       }
       stored.conversation = {
         ...stored.conversation,
@@ -2750,12 +3522,21 @@ export class AevatarAssistantTransport implements AssistantTransport {
       ...stored.conversation,
       id: recovery.conversationId,
     };
+    stored.identityPending = false;
+    stored.projectionPending = true;
+    stored.requiredTurnId = recovery.turnId;
     stored.stateVersion = Math.max(
       stored.stateVersion ?? 0,
       recovery.stateVersion,
       reconciled.stateVersion,
     );
     stored.createRequest = undefined;
+    adoptReceiptIdentity(
+      run.clientRequestId,
+      recovery.conversationId,
+      recovery.stateVersion,
+      this.now(),
+    );
     this.conversations.set(recovery.conversationId, stored);
     this.conversationAliases.set(conversationId, recovery.conversationId);
     if (this.activeConversationId === conversationId) {
@@ -2779,12 +3560,14 @@ export class AevatarAssistantTransport implements AssistantTransport {
     if (run.createRecoveryStarted || run.protocol !== "workflow") return;
     if (!this.workflowCreateNeedsRecovery(conversationId)) return;
     run.createRecoveryStarted = true;
-    const recoveryController = new AbortController();
+    const recoveryController = this.scopeController();
     void this.recoverWorkflowCreate(
       conversationId,
       run,
       recoveryController.signal,
-    ).catch(() => undefined);
+    )
+      .catch(() => undefined)
+      .finally(() => this.releaseScopeController(recoveryController));
   }
 
   private workflowCreateNeedsRecovery(conversationId: string): boolean {
@@ -2848,7 +3631,7 @@ export class AevatarAssistantTransport implements AssistantTransport {
         finalFailure = { code: response.code, message: response.message };
         if (isCreate && this.workflowCreateNeedsRecovery(conversationId)) {
           run.createRecoveryStarted = true;
-          const recoveryController = new AbortController();
+          const recoveryController = this.scopeController();
           try {
             if (
               await this.recoverWorkflowCreate(
@@ -2867,6 +3650,8 @@ export class AevatarAssistantTransport implements AssistantTransport {
                 message: error.message,
               };
             }
+          } finally {
+            this.releaseScopeController(recoveryController);
           }
         }
         break;
@@ -2922,6 +3707,17 @@ export class AevatarAssistantTransport implements AssistantTransport {
           if (refreshed) continue;
           if (refreshFailed) break;
         }
+        if (
+          isCreate &&
+          (response.status === 400 ||
+            response.status === 401 ||
+            response.status === 403 ||
+            response.status === 422)
+        ) {
+          stored.identityPending = false;
+          stored.projectionPending = false;
+          deleteReceipt(run.clientRequestId);
+        }
         finalFailure = error;
         break;
       }
@@ -2935,7 +3731,7 @@ export class AevatarAssistantTransport implements AssistantTransport {
         result.kind === "retryable"
       ) {
         run.createRecoveryStarted = true;
-        const recoveryController = new AbortController();
+        const recoveryController = this.scopeController();
         try {
           if (
             await this.recoverWorkflowCreate(
@@ -2954,6 +3750,8 @@ export class AevatarAssistantTransport implements AssistantTransport {
               message: error.message,
             };
           }
+        } finally {
+          this.releaseScopeController(recoveryController);
         }
       }
       break;
@@ -3862,10 +4660,13 @@ export class AevatarAssistantTransport implements AssistantTransport {
       return;
     }
     if (stored && serverId && stored.conversation.id !== serverId) {
+      const commandId = stored.createRequest?.commandId ?? run.clientRequestId;
       stored.conversation = { ...stored.conversation, id: serverId };
+      stored.identityPending = false;
       stored.createRequest = undefined;
       this.conversations.set(serverId, stored);
       this.conversationAliases.set(conversationId, serverId);
+      adoptReceiptIdentity(commandId, serverId, undefined, this.now());
       if (this.activeConversationId === conversationId) {
         this.activeConversationId = serverId;
       }
@@ -3883,6 +4684,7 @@ export class AevatarAssistantTransport implements AssistantTransport {
     }
     if (stored && stateVersion > 0) {
       stored.stateVersion = Math.max(stored.stateVersion ?? 0, stateVersion);
+      advanceReceiptFence(serverId ?? stored.conversation.id, stateVersion);
     }
 
     if (run.deliveryStarted) return;
@@ -3904,6 +4706,7 @@ export class AevatarAssistantTransport implements AssistantTransport {
       };
       return;
     }
+    if (stored) stored.requiredTurnId = turnId;
     run.deliveryStarted = true;
     run.turnId ??= turnId;
     if (!run.turnAnnounced) {
@@ -4751,6 +5554,12 @@ export class AevatarAssistantTransport implements AssistantTransport {
       // a run-actor id; cancellation cannot prove the create was rejected.
       if (run.streamDispatched) {
         this.startCreateRecoveryInBackground(conversationId, run);
+      } else {
+        const stored = this.conversations.get(conversationId);
+        if (stored?.identityPending) {
+          stored.identityPending = false;
+          deleteReceipt(run.clientRequestId);
+        }
       }
       run.controller.abort();
     } else if (run.turnId) {
@@ -4857,7 +5666,7 @@ export class AevatarAssistantTransport implements AssistantTransport {
     // wait). A manual controller instead of AbortSignal.timeout so this
     // never throws on an environment that lacks the static — the deferred
     // placeholder release depends on this call not throwing.
-    const deadline = new AbortController();
+    const deadline = this.scopeController();
     const deadlineTimer = setTimeout(
       () => deadline.abort(),
       STOP_REQUEST_DEADLINE_MS,
@@ -4876,8 +5685,14 @@ export class AevatarAssistantTransport implements AssistantTransport {
       signal: deadline.signal,
       ...assistantWireLogOptions(),
     }).then(
-      () => clearTimeout(deadlineTimer),
-      () => clearTimeout(deadlineTimer),
+      () => {
+        clearTimeout(deadlineTimer);
+        this.releaseScopeController(deadline);
+      },
+      () => {
+        clearTimeout(deadlineTimer);
+        this.releaseScopeController(deadline);
+      },
     );
     this.trackFence(actorConversationId, pending);
     return pending;
