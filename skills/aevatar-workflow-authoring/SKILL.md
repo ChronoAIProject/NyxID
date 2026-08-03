@@ -1,7 +1,7 @@
 ---
 name: aevatar-workflow-authoring
-description: Author, validate, and persist an executable aevatar workflow from a natural-language request — use it when the user wants to create, build, set up, or automate a multi-step task as a runnable aevatar workflow (make a workflow that…, automate…, build a pipeline…, set up a recurring…). It generates workflow YAML, dispatch-validates it, then saves it as a reusable workflow that can be re-run and watched in the observatory. Not for running an existing workflow — search for that and start it instead.
-version: "2.1"
+description: Author, preview, validate, and persist an executable aevatar workflow from a natural-language request. Use it when the user wants to create, build, set up, or automate a multi-step task as a runnable Aevatar workflow. It covers exact NyxID operation and authored-request admission, bounded YAML, file inputs, terminal run verification, and reusable publication. Not for blindly rerunning an existing failed workflow.
+version: "2.2"
 metadata:
   category: tool-based
   tool-list:
@@ -33,14 +33,15 @@ Everything you need is in this document — the DSL, the engine rules, the tools
 
 1. **Confirm the intent is authoring.** The user wants a *new* runnable workflow. If they want to run something that already exists, stop and search for it instead.
 2. **Clarify just enough.** Pin down: the trigger/input, the ordered steps, the desired output, and which external services (if any) are involved. Ask only what you cannot reasonably infer; do not over-interrogate.
-3. **Discover the exact external operation (only if external calls are needed).** Call `list_external_workflow_capabilities` with `{}` (or `max_results`) and copy one descriptor's exact `selector`. Then call `inspect_external_workflow_capability_readiness` with that `selector` plus `execution_mode: "interactive"` for a current user run or `"durable"` for a scheduled/background run. If readiness is blocked, report its typed blocker; never reconstruct a selector from a display slug or author a route that was not listed.
+3. **Select the exact external capability (only if external calls are needed).** Prefer a published operation: call `list_external_workflow_capabilities`, copy its exact selector, then inspect readiness for `interactive` or `durable`. Use typed `capability.nyxid_request` only when no published operation represents a required HTTP request; it needs an exact UserService selected from authoritative `/api/v1/keys`, a typed method/path/body contract, and bind-time authenticated confirmation/grant. `/api/v1/user-services` is only a routing projection and is never execution authority.
 4. **Author the YAML.** Apply the DSL below and obey every rule in **Engine rules (must obey)**. Prefer the reliable-core primitives; use advanced primitives only when the task truly needs them.
-5. **Validate by dispatching one test run — fire-and-observe, do NOT wait for completion.** Call `aevatar_start_workflow` **once** with the draft inline (`workflow_yamls`). It returns in a second or two with a `run_id` and a status like `accepted`/`streaming` — **that return is your structural pass** (the YAML parsed and dispatched). If instead it returns a parse/validation/4xx error, fix the YAML and retry (cap **2**). **Never poll or wait for `run_finished`, and never re-invoke `aevatar_start_workflow` to "check status"** — the run continues asynchronously and is watchable in the observatory; looping on it stalls the turn.
-6. **Persist as a reusable workflow.** Once the draft dispatches without a parse error, call `ornn_publish_skill` with the final workflow in `workflow_yamls` (see **Persisting**). This creates a private skill in the user's account containing the workflow.
-7. **Report.** Tell the user what was created, the test `run_id` and that they can watch it in the observatory, and how to re-run it ("next time just ask to run *\<name\>*"). Be explicit: you verified it **structurally** (it parsed and dispatched) and reviewed the logic on a best-effort basis — you did **not** wait for the run to finish, so point them to the observatory for the result. Do not claim a guarantee you cannot make.
-8. **Iterate on request.** To change an existing workflow: load it with `use_skill`, edit the YAML, re-validate (step 5), and re-publish as a new version.
+5. **Preview before execution.** Use the explicit-request preview or draft-run readiness surface. Confirm unique call sites, read/write classification, approval requirements, exact workflow/revision identity, and every blocker. Preview/readiness proves admission readiness only; it does not prove runtime credential propagation or downstream authorization.
+6. **Run once when authorized, then observe the same run.** Never use another mutation as a status check. For a real acceptance run, require terminal completion, `lastSuccess=true`, non-empty required step outputs, and non-empty final output. On failure, read run detail and audit, find the first failed step, and diagnose before any rerun. Do not blindly retry a mutation or a failed workflow.
+7. **Persist as a reusable workflow.** After structural validation and any required execution proof, call `ornn_publish_skill` with the final workflow in `workflow_yamls` (see **Persisting**). This creates a private skill in the user's account containing the workflow.
+8. **Report evidence honestly.** Separate preview-ready, accepted, completed, business-verified, blocked by policy, and failed. Do not call `accepted` or an opened SSE stream a successful run.
+9. **Iterate on request.** To change an existing workflow: load it with `use_skill`, edit the YAML, repeat preview and validation, and publish a new version.
 
-> **Turn budget (important).** Your whole turn has a ~60s gateway limit, and tool rounds emit no visible text. So: lead with a one-line text preamble (e.g. "Authoring your workflow…") so output starts streaming immediately; keep tool rounds minimal (skip step 3 when the workflow needs no external service); author in one pass; and **never loop waiting on a run** (step 5 is fire-and-observe). A turn that spends ~60s in silent tool rounds is cut off with no output at all.
+> Keep tool rounds bounded, but do not trade away terminal evidence. Start one authorized run, record its identity privately, and observe that same run through the run/read-model surfaces.
 
 ---
 
@@ -49,6 +50,7 @@ Everything you need is in this document — the DSL, the engine rules, the tools
 These are the failure modes that break generated workflows. Check every one before validating.
 
 - **Single terminal step.** A run ends at the step that has no `next` **and is last in document order**. Make the final step the last line of the document.
+- **Bounded YAML.** Each YAML document is limited to 1 MiB UTF-8, 10,000 parsed nodes, and collection nesting depth 64. Aliases do not bypass these limits. Treat a resource-limit rejection as a document defect; reduce the document instead of retrying it.
 - **Fall-through is by document order, not id order.** A step with no `next` falls through to the *next step written in the file*. So every branch must reach the terminal step via an explicit `next`, and nothing should sit after the terminal step. Getting this wrong silently overwrites your output.
 - **No clock.** The engine has no time source. If the workflow needs "today", a date, or a window, the caller must inject it via the run input (e.g. an early `assign`). Never assume the engine knows the date.
 - **Role is not model.** `target_role` selects the actor, not a model — never put a model name in `target_role`. A role *may* carry `provider`/`model`, but set them only when the user explicitly wants a specific model; otherwise omit and let the session default apply.
@@ -292,7 +294,7 @@ Advanced notes: `human_approval`/`wait_signal` suspend the run until a resume/si
 
 ## Accessing external services
 
-There are three NyxID invocation modes plus a separate host-connector subsystem. Do not mix their fields.
+There is a raw current-turn proxy surface, two compiled workflow capability shapes, and a separate host-connector subsystem. Do not mix their fields.
 
 - **Raw current-turn `nyxid_proxy`.** First select an exact UserService instance. The call requires `service_id + slug + path`; method defaults to GET. Optional fields are `body`, non-sensitive `headers`, and `response_mode`:
   ```json
@@ -305,8 +307,8 @@ There are three NyxID invocation modes plus a separate host-connector subsystem.
   }
   ```
   This is a direct current-turn tool call, not workflow YAML.
-- **Interactive connected-service operation.** Use the request-local `nyxid_service_operation__*` tool name emitted in the current tool catalog. Supply the enumerated `user_service_id` plus only fields present in that operation's dynamic schema. Never derive the tool name from a slug or reuse a tool name from another request.
-- **Compiled workflow operation.** Call `list_external_workflow_capabilities`, copy the exact descriptor `selector`, inspect it for the required execution mode, and persist it beside the step as `capability.nyxid_operation`:
+- **No dynamic current-turn operation tools.** `nyxid_service_operation__*` and `nyxid_service_request` are retired. Never invent or cache one of those tool names. Current-turn management uses the typed connected-service tools; raw one-off HTTP uses `nyxid_proxy` only where that surface is explicitly available.
+- **Compiled published operation.** Call `list_external_workflow_capabilities`, copy the exact descriptor `selector`, inspect it for the required execution mode, and persist it beside the step as `capability.nyxid_operation`:
   ```json
   {
     "selector": {
@@ -331,6 +333,7 @@ There are three NyxID invocation modes plus a separate host-connector subsystem.
       arguments: '{"path_params":{"message_id":"m-42"}}'
   ```
   The compiler's admission proof owns UserService identity, slug, operation ID, method, path template, digest, schemas, and response policy. Runtime `arguments` may contain only admitted `path_params`, `query`, `headers`, `body`, and `response_mode`. Do not send `service_id`, `user_service_id`, `slug`, `path`, `method`, `operation_id`, or a contract digest in `arguments`.
+- **Compiled authored HTTP request.** Use `capability.nyxid_request` only for an exact request contract that cannot be selected as a published operation. Author the typed method, relative path template, allowed request fields, and response policy; select one exact UserService from `/api/v1/keys`. Binding must preview the current request-contract digest and risk, then obtain the authenticated binder's explicit confirmation/grant. Saving a draft, preview success, or `/api/v1/user-services` cannot grant execution. Authored requests never rediscover inventory or OpenAPI at runtime; they execute only the committed proof and matching grant.
 - **Registered workflow connectors.** If the capability is a connector registered in the workflow connector registry, call it with `connector_call` and authorize it on the role:
   ```yaml
   roles:
@@ -349,7 +352,7 @@ There are three NyxID invocation modes plus a separate host-connector subsystem.
 
 ---
 
-## Validating (fire-and-observe — do not wait)
+## Validating and proving a run
 
 Dispatch **one** test run with `aevatar_start_workflow`, passing the draft inline:
 
@@ -357,13 +360,14 @@ Dispatch **one** test run with `aevatar_start_workflow`, passing the draft inlin
 { "workflow_id": "<name>", "workflow_yamls": ["<full yaml>"], "inputs": { "prompt": "<test input>" } }
 ```
 
-`workflow_id` is required; `inputs` is an object (typically `{ "prompt": "..." }`, optionally `input_parts` / `headers`). `aevatar_start_workflow` is **fire-and-return**: it replies in a second or two with a `run_id` and a status like `accepted`/`streaming`, then the run executes **asynchronously**.
+`workflow_id` is required; `inputs` is an object (typically `{ "prompt": "..." }`, optionally `input_parts` / `headers`). File-bearing calls may carry normalized `inlineFile` or `fileRef` parts; member stream invocation and draft-run share the same ingress normalization, so preserve the typed file part instead of flattening it into prompt text.
 
-Judge the *immediate return only*:
-- A `run_id` + `accepted`/`streaming` → the YAML **parsed and dispatched**. That is your structural pass — move on to publish.
-- A parse/validation/4xx error in the return → structural failure (bad YAML, unbound role, bad reference). Fix and retry (cap **2**).
-
-**Do not wait for or poll `run_finished`, and do not re-invoke `aevatar_start_workflow` to "check status."** The run finishes asynchronously; the user watches it in the observatory via the `run_id`. (Waiting or looping is exactly what blows the ~60s turn budget and gets the whole turn cut off.) This confirms the workflow is **structurally** sound (it parsed and dispatched) — not that its business logic is correct. Say so when you report.
+Interpret evidence in order:
+- `accepted`/`streaming` means only that dispatch started.
+- A typed parse, admission, identity, or resource-limit error is a structural failure; fix the document before another run.
+- For the same run, inspect terminal completion, run detail, and audit. Success requires completed terminal state, `lastSuccess=true`, expected non-empty step output, and non-empty final output.
+- On failure, locate the first failed audit step and classify it before retrying. For NyxID HTTP auth failures, distinguish missing caller credential propagation, missing executor propagation, wrong exact route/credential selection, and downstream UserService authorization.
+- Never start another run merely to check whether the previous run finished.
 
 ---
 
@@ -402,20 +406,17 @@ source.)
 # auto-refreshes your token. A raw curl with ~/.nyxid/access_token resolves NO scope
 # (scopeResolved:false) and the stored token expires — it is not a usable path.
 # Prerequisite once: the `aevatar` service must be connected — `nyxid service add aevatar`.
-# NyxID treats `-d` as raw bytes, so declare JSON explicitly; Aevatar rejects writes without it.
-aev() { nyxid proxy request aevatar "$@" -H 'Content-Type: application/json'; }   # aev "<path>" [-m POST|PUT|DELETE] [-d '<json>'] [--stream]
-NYX=$(tr -d '\n' < ~/.nyxid/base_url)               # e.g. https://nyx.chrono-ai.fun
+aev() { nyxid proxy request aevatar "$@"; }   # aev "<path>" [-m POST|PUT|DELETE] [-d '<json>'] [--stream]
 scopeId=$(aev "api/studio/context" | jq -r .scopeId)
 ```
 No `jq`? Any JSON reader works, e.g.
 `... | python3 -c 'import sys,json;print(json.load(sys.stdin)["scopeId"])'`.
-(WAF can 403 Python's `urllib` — drive these calls with the `curl` binary, not a Python HTTP client.)
 
 ### Connectors
-The `nyxid_services` inventory tool is server-side. As a client you must know any external
-connector **slugs** out-of-band (nyxid CLI / console); the dry-run path below assumes a
-workflow with **no** external connectors (pure `llm_call`/`transform`), which is the most
-reliable thing to validate. Never invent a slug.
+The `nyxid_services` inventory tool is server-side. As a client, discover exact connected-service
+instances through the NyxID CLI or the authenticated Aevatar preview surface. `/api/v1/keys` is the
+authoritative instance/readiness inventory; `/api/v1/user-services` is not. Never invent a slug,
+UserService identity, endpoint, method, or path.
 
 ### Dry-run (the client replacement for `aevatar_start_workflow`) — `draft-run`
 `aevatar_start_workflow` is a **server-side agent tool dispatched through the engine, not a REST
@@ -428,7 +429,7 @@ aev "api/scopes/$scopeId/workflow/draft-run" -m POST --stream \
 Body (JSON, **camelCase**): `prompt` (string) + `workflowYamls` (array of YAML strings,
 **required** — omitting it returns 400). The response is an **SSE stream** and the run executes
 synchronously through the connection. Judge it like the server-side validate step:
-- **HTTP 200 + the stream opens with lifecycle/observation frames, no parse/4xx error → structural pass.** You can stop reading there; you do not need to wait for the end.
+- **HTTP 200 + lifecycle frames** proves only dispatch. For execution acceptance, continue to the terminal frame and read the resulting run detail/audit.
 - A parse/validation/4xx error → fix the YAML and retry (cap **2**).
 
 **Reading the SSE frames** (so a naive parser doesn't see "nothing"): each `data:` line is JSON,
@@ -477,16 +478,15 @@ metadata:
 Then **validate first** (the format oracle — read every `violations[].rule`/`message` and fix),
 then **upload** (re-uploading the **same `name`** later creates a **new version**):
 ```bash
-TOK=$(tr -d '\n' < ~/.nyxid/access_token)                     # raw NyxID bearer for the ornn-api proxy
 cd <parent>; zip -r demo-skill.zip demo-skill                 # root folder MUST be included
 # 1) validate → {"data":{"valid":bool,"violations":[{"rule","message"}]}}
-curl -s -X POST -H "Authorization: Bearer $TOK" -H "Content-Type: application/zip" \
-  --data-binary @demo-skill.zip "$NYX/api/v1/proxy/s/ornn-api/api/v1/skill-format/validate"
+nyxid proxy request ornn-api /api/v1/skill-format/validate -m POST \
+  -H 'Content-Type:application/zip' -d @demo-skill.zip
 # 2) publish (private by default; promote to public separately)
-curl -s -X POST -H "Authorization: Bearer $TOK" -H "Content-Type: application/zip" \
-  --data-binary @demo-skill.zip "$NYX/api/v1/proxy/s/ornn-api/api/v1/skills"
+nyxid proxy request ornn-api /api/v1/skills -m POST \
+  -H 'Content-Type:application/zip' -d @demo-skill.zip
 # verify
-curl -s -H "Authorization: Bearer $TOK" "$NYX/api/v1/proxy/s/ornn-api/api/v1/skills/demo-skill"
+nyxid proxy request ornn-api /api/v1/skills/demo-skill
 ```
 The server normalizes the kebab frontmatter into its stored model
 (`runtimes:[{runtime,dependencies,envs}]`, `tools:[{tool,type:mcp}]`, `outputType`).
