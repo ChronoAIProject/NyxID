@@ -402,10 +402,8 @@ describe("ScenarioEngine continuations and world", () => {
     await finishTimers();
     const card = completedBlock(parked, "action_card");
 
-    const handle = engine.wake(
-      "conversation",
-      card.origin_turn_id,
-      (event) => resumed.push(event),
+    const handle = engine.wake("conversation", card.origin_turn_id, (event) =>
+      resumed.push(event),
     );
     await finishTimers();
 
@@ -422,13 +420,10 @@ describe("ScenarioEngine continuations and world", () => {
             ? event.block.text
             : null,
         ),
-    ).toEqual([
-      "The assistant resumed the blocked turn.",
-      "After wake",
-    ]);
-    expect(() =>
-      engine.wake("conversation", card.origin_turn_id),
-    ).toThrow("Action continuation was not found.");
+    ).toEqual(["The assistant resumed the blocked turn.", "After wake"]);
+    expect(() => engine.wake("conversation", card.origin_turn_id)).toThrow(
+      "Action continuation was not found.",
+    );
   });
 
   it("splices a need flow only while the world is cold", async () => {

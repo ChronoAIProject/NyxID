@@ -224,10 +224,7 @@ export class ScenarioInterceptTransport implements AssistantTransport {
     this.requireNotDeleted(conversationId);
     if (!this.claimedConversations.has(conversationId)) {
       const state = this.ownership.get(conversationId);
-      if (
-        state !== "mock-running" &&
-        state !== "verifying"
-      ) {
+      if (state !== "mock-running" && state !== "verifying") {
         const delegated = await this.delegate.getHistory(conversationId);
         if (!this.tombstones.has(conversationId)) {
           this.baseHistories.set(conversationId, delegated);
@@ -768,8 +765,7 @@ export class ScenarioInterceptTransport implements AssistantTransport {
 
   private hasMockActivity(): boolean {
     return [...this.ownership.values()].some(
-      (state) =>
-        state === "mock-running" || state === "verifying",
+      (state) => state === "mock-running" || state === "verifying",
     );
   }
 }

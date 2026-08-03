@@ -387,7 +387,8 @@ describe("ScenarioInterceptTransport ownership", () => {
     expect(events[parkedEventCount]?.cursor).toBeGreaterThan(parkedCursor);
     expect(
       events.every(
-        (event, index) => index === 0 || event.cursor > events[index - 1]!.cursor,
+        (event, index) =>
+          index === 0 || event.cursor > events[index - 1]!.cursor,
       ),
     ).toBe(true);
     expect(events).toContainEqual(

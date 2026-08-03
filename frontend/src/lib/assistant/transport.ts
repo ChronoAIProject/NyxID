@@ -680,9 +680,7 @@ export interface AssistantInterceptorModule {
 export type AssistantInterceptorLoader =
   () => Promise<AssistantInterceptorModule>;
 
-type AssistantInterceptorStateReporter = (
-  state: "loading" | "error",
-) => void;
+type AssistantInterceptorStateReporter = (state: "loading" | "error") => void;
 
 const interceptorInstallations = new WeakMap<
   DelegatingAssistantTransport,
