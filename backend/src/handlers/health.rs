@@ -43,6 +43,7 @@ pub struct PublicConfigResponse {
     pub social_providers: Vec<String>,
     pub invite_code_required: bool,
     pub email_auth_enabled: bool,
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
     pub aevatar_chat_wire_log_enabled: bool,
     /// Public PostHog ingest key for the frontend. Non-secret by design
     /// (PostHog ingest keys are write-only and project-scoped). Empty
@@ -238,6 +239,8 @@ mod tests {
         assert!(json.get("telemetry_host").is_none());
         // telemetry_share_analytics false => skipped (Not::not)
         assert!(json.get("telemetry_share_analytics").is_none());
+        // Disabled diagnostics must not change or advertise the public shape.
+        assert!(json.get("aevatar_chat_wire_log_enabled").is_none());
     }
 
     #[test]

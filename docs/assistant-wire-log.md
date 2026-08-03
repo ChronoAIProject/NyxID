@@ -85,19 +85,25 @@ an attempted request whose proxy call subsequently failed.
 
 Compatibility is one-directional by design:
 
-- **New frontend + old backend** — supported. The decoder accepts the legacy
-  bare array and normalises it, leaving `upstreamOutcome` and `response` absent.
+- **New frontend + backend without the public feature-flag field** — the field
+  is treated as disabled and the panel stays hidden. This is fail-closed and
+  self-heals once the browser reaches a backend that advertises the enabled
+  flag in `/public/config`.
+- **New frontend + flag-aware backend with the old echo payload** — supported.
+  The decoder accepts the legacy bare array and normalises it, leaving
+  `upstreamOutcome` and `response` absent.
 - **Old frontend + new backend** — the panel shows no entries. A pre-version-2
   frontend expects a top-level JSON array and rejects the version 2 wrapper, so
   `captureAssistantWireLogHeader` discards the header.
 
-The second case is a transient, authenticated-caller, capture-only diagnostic
-gap during a rolling deploy where the backend ships ahead of the frontend. It
-clears as soon as the browser loads the current frontend bundle. It does not
-affect chat delivery, and no other surface reads this header. The wrapper is
-deliberately *not* emitted conditionally to preserve old-frontend parsing: a
-dual wire format would leave the degraded path exercised only in rare
-production cases, which is worse than a self-healing empty panel.
+The panel-hidden and header-format cases are transient,
+authenticated-caller, capture-only diagnostic gaps during a rolling deploy.
+They clear once the browser reaches the matching backend and frontend bundle.
+They do not affect chat delivery, and no other surface reads the debug header.
+The wrapper is deliberately *not* emitted conditionally to preserve
+old-frontend parsing: a dual wire format would leave the degraded path
+exercised only in rare production cases, which is worse than a self-healing
+empty panel.
 
 ## Echo Shapes
 

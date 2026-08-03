@@ -12,13 +12,18 @@ import {
   AssistantWireLogPanel,
 } from "./assistant-wire-log-panel";
 
-const publicConfigState = vi.hoisted(() => ({ wireLogEnabled: false }));
+const publicConfigState = vi.hoisted(() => ({
+  wireLogEnabled: undefined as boolean | undefined,
+}));
 
 vi.mock("@/hooks/use-public-config", () => ({
   usePublicConfig: () => ({
-    data: {
-      aevatar_chat_wire_log_enabled: publicConfigState.wireLogEnabled,
-    },
+    data:
+      publicConfigState.wireLogEnabled === undefined
+        ? {}
+        : {
+            aevatar_chat_wire_log_enabled: publicConfigState.wireLogEnabled,
+          },
   }),
 }));
 
@@ -134,6 +139,20 @@ describe("AssistantWireLogPanel", () => {
 
   it("hides the action for everyone while the operator flag is off", async () => {
     useAuthStore.setState({ user: admin });
+    renderWithTooltips(<AssistantWireLogAction />);
+
+    expect(
+      screen.queryByRole("button", { name: "Aevatar wire log" }),
+    ).not.toBeInTheDocument();
+    await waitFor(() => {
+      expect(useAssistantWireLogStore.getState().featureEnabled).toBe(false);
+    });
+  });
+
+  it("treats an omitted operator flag as disabled", async () => {
+    publicConfigState.wireLogEnabled = undefined;
+    useAssistantWireLogStore.setState({ featureEnabled: true });
+
     renderWithTooltips(<AssistantWireLogAction />);
 
     expect(
