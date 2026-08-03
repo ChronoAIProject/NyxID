@@ -159,11 +159,6 @@ pub fn sort_conversation_rows_newest_first(conversations: &mut [serde_json::Valu
     });
 }
 
-/// `api/chat/conversations` -- canonical conversation list.
-pub fn canonical_conversations_path() -> String {
-    "api/chat/conversations".to_string()
-}
-
 /// `api/chat/conversations/{id}` -- canonical conversation detail/delete.
 pub fn canonical_conversation_path(conversation_id: &str) -> AppResult<String> {
     validate_conversation_id(conversation_id)?;
@@ -1310,7 +1305,6 @@ mod tests {
             history_index_path(USER),
             format!("api/scopes/{USER}/chat-history")
         );
-        assert_eq!(canonical_conversations_path(), "api/chat/conversations");
         assert_eq!(
             canonical_conversation_path(CONV).unwrap(),
             format!("api/chat/conversations/{CONV}")
