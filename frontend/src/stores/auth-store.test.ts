@@ -42,8 +42,10 @@ beforeEach(() => {
   useAssistantDraftStore.setState({ ownerUserId: null, drafts: {} });
   useAssistantWireLogStore.setState({
     captureEnabled: false,
+    showResponses: true,
     entries: [],
     totalBytes: 0,
+    captureBytes: 0,
   });
   useAuthStore.setState({
     user: null,
@@ -173,21 +175,26 @@ describe("logout", () => {
       .getState()
       .saveDraft("u1", "conv:conversation-private", "Private draft");
     useAssistantWireLogStore.getState().setCaptureEnabled(true);
-    useAssistantWireLogStore.getState().record(
-      {
-        method: "POST",
-        path: "api/chat",
-        commandType: "text",
-        body: { prompt: "Private prompt" },
-        headers: {},
-        identity: {
-          mode: "jwt",
-          forward_access_token: false,
-          inject_delegation_token: true,
-          bridge_minted: false,
+    useAssistantWireLogStore.getState().recordExchange(
+      [
+        {
+          degraded: false,
+          method: "POST",
+          path: "api/chat",
+          commandType: "text",
+          body: { prompt: "Private prompt" },
+          headers: {},
+          identity: {
+            mode: "jwt",
+            forward_access_token: false,
+            inject_delegation_token: true,
+            bridge_minted: false,
+          },
+          truncated: false,
+          response: null,
+          upstreamOutcome: "no_response",
         },
-        truncated: false,
-      },
+      ],
       "sse",
       200,
     );
@@ -204,6 +211,7 @@ describe("logout", () => {
     expect(useAssistantDraftStore.getState().drafts).toEqual({});
     expect(useAssistantWireLogStore.getState().entries).toEqual([]);
     expect(useAssistantWireLogStore.getState().totalBytes).toBe(0);
+    expect(useAssistantWireLogStore.getState().captureBytes).toBe(0);
     expect(useAssistantWireLogStore.getState().captureEnabled).toBe(false);
     expect(localStorage.getItem("nyxid.assistant_context")).toBeNull();
     expect(localStorage.getItem("nyxid.assistant_drafts")).toBeNull();

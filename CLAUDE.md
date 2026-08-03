@@ -295,6 +295,7 @@ JWT_RELAY_ACCESS_TTL_SECS=300       # X-NyxID-User-Token relay access token TTL.
 JWT_ASSISTANT_FORWARD_TTL_SECS=300  # Legacy tombstone for the retired assistant_forward token.
                                     # Live assistant delegation uses the compile-time 300s
                                     # MCP_DELEGATION_TOKEN_TTL_SECS constant; this env has no effect.
+AEVATAR_CHAT_WIRE_LOG_ENABLED=false # Sole operator gate for per-browser assistant wire capture; not admin-restricted when enabled
 SA_TOKEN_TTL_SECS=3600              # Service account tokens
 ENVIRONMENT=development
 RATE_LIMIT_PER_SECOND=10

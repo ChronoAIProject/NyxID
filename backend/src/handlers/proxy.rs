@@ -6922,7 +6922,14 @@ mod proxy_resolution_integration_tests {
         let decoded = base64::engine::general_purpose::STANDARD
             .decode(value.as_bytes())
             .expect("assistant echo header is base64");
-        serde_json::from_slice(&decoded).expect("assistant echo header is a JSON array")
+        let wrapper: serde_json::Value =
+            serde_json::from_slice(&decoded).expect("assistant echo header is JSON");
+        assert_eq!(wrapper["version"], 2);
+        assert_eq!(wrapper["droppedEchoCount"], 0);
+        wrapper["echoes"]
+            .as_array()
+            .expect("assistant echo wrapper has an echoes array")
+            .clone()
     }
     use tower::ServiceExt;
     use uuid::Uuid;
@@ -8067,6 +8074,8 @@ mod proxy_resolution_integration_tests {
                         (_, "/api/chat") => Response::builder()
                             .status(StatusCode::OK)
                             .header(axum::http::header::CONTENT_TYPE, "text/event-stream")
+                            .header("x-request-id", "aevatar-request-1")
+                            .header(axum::http::header::SET_COOKIE, "upstream=secret")
                             .body(Body::from("data: {\"type\":\"RUN_FINISHED\"}\n\n"))
                             .unwrap(),
                         _ => axum::Json(serde_json::json!({ "ok": true })).into_response(),
@@ -8119,7 +8128,8 @@ mod proxy_resolution_integration_tests {
         .await
         .unwrap();
 
-        let state = test_app_state(db.clone());
+        let mut state = test_app_state(db.clone());
+        state.config.aevatar_chat_wire_log_enabled = true;
         let auth = access_token_auth(&user_id);
         let billing_policy = crate::services::billing::route_inventory::BillingRoutePolicy::Metered(
             crate::services::billing::BillingIngress::Proxy,
@@ -8582,6 +8592,21 @@ mod proxy_resolution_integration_tests {
             assert_eq!(envelope["identity"]["forward_access_token"], false);
             assert_eq!(envelope["identity"]["inject_delegation_token"], true);
             assert_eq!(envelope["identity"]["bridge_minted"], false);
+            assert_eq!(envelope["upstreamOutcome"], "response");
+            assert_eq!(envelope["response"]["status"], 200);
+            let expected_sse = call_index == 0
+                || (call_index > 0 && expected_accepts[call_index - 1] == "text/event-stream");
+            assert_eq!(envelope["response"]["sse"], expected_sse);
+            if expected_sse {
+                assert_eq!(
+                    envelope["response"]["headers"]["content-type"]["value"],
+                    "text/event-stream"
+                );
+                assert_eq!(
+                    envelope["response"]["headers"]["x-request-id"]["value"],
+                    "aevatar-request-1"
+                );
+            }
         }
 
         let list_echoes = &debug_echoes[10];
@@ -8592,6 +8617,9 @@ mod proxy_resolution_integration_tests {
             assert!(envelope["commandType"].is_null());
             assert!(envelope["body"].is_null());
             assert_eq!(envelope["truncated"], false);
+            assert_eq!(envelope["upstreamOutcome"], "response");
+            assert_eq!(envelope["response"]["status"], 200);
+            assert_eq!(envelope["response"]["sse"], false);
         }
         let serialized_echoes = serde_json::to_string(&debug_echoes).unwrap();
         for forbidden in [
@@ -8601,6 +8629,8 @@ mod proxy_resolution_integration_tests {
             "x-nyxid-identity-token",
             "x-nyxid-delegation-token",
             "cookie",
+            "set-cookie",
+            "upstream=secret",
         ] {
             assert!(
                 !serialized_echoes.to_ascii_lowercase().contains(forbidden),
@@ -8635,6 +8665,75 @@ mod proxy_resolution_integration_tests {
         assert_eq!(
             gate_off_body.as_ref(),
             b"data: {\"type\":\"RUN_FINISHED\"}\n\n"
+        );
+        let browser_gate_off_calls = std::mem::take(&mut *captured.lock().unwrap());
+        assert_eq!(browser_gate_off_calls.len(), 1);
+        assert!(
+            browser_gate_off_calls[0]
+                .3
+                .get("x-nyxid-debug-upstream")
+                .is_none()
+        );
+
+        let mut flag_off_state = state.clone();
+        flag_off_state.config.aevatar_chat_wire_log_enabled = false;
+        let mut flag_off_request = request(
+            Method::POST,
+            "/api/v1/assistant/workflow-chat",
+            Some(r#"{"prompt":"hi there"}"#),
+        );
+        flag_off_request.headers_mut().insert(
+            HeaderName::from_static("x-nyxid-debug-upstream"),
+            HeaderValue::from_static("1"),
+        );
+        let flag_off_response = crate::handlers::assistant::workflow_chat(
+            axum::extract::State(flag_off_state),
+            auth.clone(),
+            flag_off_request,
+        )
+        .await
+        .expect("feature-disabled workflow chat must forward unchanged");
+        assert!(
+            flag_off_response
+                .headers()
+                .get("x-nyxid-debug-upstream-log")
+                .is_none()
+        );
+        let flag_off_body = to_bytes(flag_off_response.into_body(), 1024).await.unwrap();
+        assert_eq!(
+            flag_off_body.as_ref(),
+            b"data: {\"type\":\"RUN_FINISHED\"}\n\n"
+        );
+        let flag_off_calls = std::mem::take(&mut *captured.lock().unwrap());
+        assert_eq!(flag_off_calls.len(), 1);
+        assert_eq!(flag_off_calls[0].0, calls[0].0);
+        assert_eq!(flag_off_calls[0].1, calls[0].1);
+        let mut enabled_body: serde_json::Value =
+            serde_json::from_slice(&calls[0].2).expect("enabled request body is JSON");
+        let mut flag_off_upstream_body: serde_json::Value =
+            serde_json::from_slice(&flag_off_calls[0].2).expect("disabled request body is JSON");
+        enabled_body
+            .as_object_mut()
+            .expect("enabled request body is an object")
+            .remove("commandId");
+        flag_off_upstream_body
+            .as_object_mut()
+            .expect("disabled request body is an object")
+            .remove("commandId");
+        assert_eq!(flag_off_upstream_body, enabled_body);
+        assert!(flag_off_calls[0].3.get("x-nyxid-debug-upstream").is_none());
+        assert!(
+            flag_off_calls[0]
+                .3
+                .get(axum::http::header::AUTHORIZATION)
+                .is_none()
+        );
+        assert!(flag_off_calls[0].3.get("x-nyxid-identity-token").is_some());
+        assert!(
+            flag_off_calls[0]
+                .3
+                .get("x-nyxid-delegation-token")
+                .is_some()
         );
 
         let mut websocket_request =
@@ -8677,14 +8776,11 @@ mod proxy_resolution_integration_tests {
             non_admin_request,
         )
         .await
-        .expect("non-admin debug request must behave like a normal request");
+        .expect("authenticated non-admin debug request must receive its own echo");
         assert_eq!(non_admin_response.status(), StatusCode::OK);
-        assert!(
-            non_admin_response
-                .headers()
-                .get("x-nyxid-debug-upstream-log")
-                .is_none()
-        );
+        let non_admin_echoes = assistant_echoes(&non_admin_response);
+        assert_eq!(non_admin_echoes.len(), 1);
+        assert_eq!(non_admin_echoes[0]["body"]["prompt"], "not an admin");
         let non_admin_body = to_bytes(non_admin_response.into_body(), 1024)
             .await
             .unwrap();
@@ -8865,7 +8961,8 @@ mod proxy_resolution_integration_tests {
         .await
         .unwrap();
 
-        let state = test_app_state(db);
+        let mut state = test_app_state(db);
+        state.config.aevatar_chat_wire_log_enabled = true;
         let auth = access_token_auth(&user_id);
         let list_request = || {
             let mut request = Request::builder()
@@ -8932,6 +9029,9 @@ mod proxy_resolution_integration_tests {
             );
             assert!(envelope["commandType"].is_null());
             assert!(envelope["body"].is_null());
+            assert_eq!(envelope["upstreamOutcome"], "response");
+            assert_eq!(envelope["response"]["status"], 200);
+            assert_eq!(envelope["response"]["sse"], false);
             assert!(*accepts_json, "every drained page must request JSON");
         }
 

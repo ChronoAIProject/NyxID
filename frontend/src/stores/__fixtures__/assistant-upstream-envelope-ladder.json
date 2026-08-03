@@ -1,0 +1,197 @@
+[
+  {
+    "rung": "full",
+    "header": {
+      "version": 2,
+      "echoes": [
+        {
+          "degraded": false,
+          "method": "POST",
+          "path": "api/chat",
+          "commandType": "task.steer",
+          "body": { "prompt": "short" },
+          "headers": {
+            "accept": "application/json",
+            "content-type": "application/json"
+          },
+          "identity": {
+            "mode": "jwt",
+            "forward_access_token": false,
+            "inject_delegation_token": true,
+            "bridge_minted": false
+          },
+          "truncated": false,
+          "response": null,
+          "upstreamOutcome": "no_response"
+        }
+      ],
+      "droppedEchoCount": 0
+    }
+  },
+  {
+    "rung": "truncated_bodies",
+    "header": {
+      "version": 2,
+      "echoes": [
+        {
+          "degraded": false,
+          "method": "POST",
+          "path": "api/chat",
+          "commandType": "task.steer",
+          "body": "{\"prompt\":\"xxxxxx",
+          "headers": {
+            "accept": "application/json",
+            "content-type": "application/json"
+          },
+          "identity": {
+            "mode": "jwt",
+            "forward_access_token": false,
+            "inject_delegation_token": true,
+            "bridge_minted": false
+          },
+          "truncated": true,
+          "response": null,
+          "upstreamOutcome": "no_response"
+        }
+      ],
+      "droppedEchoCount": 0
+    }
+  },
+  {
+    "rung": "dropped_bodies",
+    "header": {
+      "version": 2,
+      "echoes": [
+        {
+          "degraded": false,
+          "method": "POST",
+          "path": "api/chat",
+          "commandType": "task.steer",
+          "body": null,
+          "headers": {
+            "accept": "application/json",
+            "content-type": "application/json"
+          },
+          "identity": {
+            "mode": "iiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiii",
+            "forward_access_token": false,
+            "inject_delegation_token": true,
+            "bridge_minted": false
+          },
+          "truncated": true,
+          "response": null,
+          "upstreamOutcome": "no_response"
+        }
+      ],
+      "droppedEchoCount": 0
+    }
+  },
+  {
+    "rung": "dropped_headers",
+    "header": {
+      "version": 2,
+      "echoes": [
+        {
+          "degraded": false,
+          "method": "POST",
+          "path": "api/chat",
+          "commandType": "task.steer",
+          "body": null,
+          "headers": {},
+          "identity": {
+            "mode": "jwt",
+            "forward_access_token": false,
+            "inject_delegation_token": true,
+            "bridge_minted": false
+          },
+          "truncated": false,
+          "response": { "status": 200, "headers": {}, "sse": false },
+          "upstreamOutcome": "response",
+          "droppedHeaders": true
+        }
+      ],
+      "droppedEchoCount": 0
+    }
+  },
+  {
+    "rung": "minimal",
+    "header": {
+      "version": 2,
+      "echoes": [
+        {
+          "degraded": true,
+          "method": "POST",
+          "path": "api/chat",
+          "commandType": "task.steer",
+          "upstreamOutcome": "no_response"
+        }
+      ],
+      "droppedEchoCount": 0
+    }
+  },
+  {
+    "rung": "dropped_echoes",
+    "header": {
+      "version": 2,
+      "echoes": [
+        {
+          "degraded": true,
+          "method": "POST",
+          "path": "api/chat/0",
+          "commandType": "task.steer",
+          "upstreamOutcome": "no_response"
+        },
+        {
+          "degraded": true,
+          "method": "POST",
+          "path": "api/chat/1",
+          "commandType": "task.steer",
+          "upstreamOutcome": "no_response"
+        },
+        {
+          "degraded": true,
+          "method": "POST",
+          "path": "api/chat/2",
+          "commandType": "task.steer",
+          "upstreamOutcome": "no_response"
+        },
+        {
+          "degraded": true,
+          "method": "POST",
+          "path": "api/chat/3",
+          "commandType": "task.steer",
+          "upstreamOutcome": "no_response"
+        },
+        {
+          "degraded": true,
+          "method": "POST",
+          "path": "api/chat/4",
+          "commandType": "task.steer",
+          "upstreamOutcome": "no_response"
+        },
+        {
+          "degraded": true,
+          "method": "POST",
+          "path": "api/chat/5",
+          "commandType": "task.steer",
+          "upstreamOutcome": "no_response"
+        },
+        {
+          "degraded": true,
+          "method": "POST",
+          "path": "api/chat/6",
+          "commandType": "task.steer",
+          "upstreamOutcome": "no_response"
+        },
+        {
+          "degraded": true,
+          "method": "POST",
+          "path": "api/chat/7",
+          "commandType": "task.steer",
+          "upstreamOutcome": "no_response"
+        }
+      ],
+      "droppedEchoCount": 4
+    }
+  }
+]

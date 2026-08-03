@@ -127,7 +127,11 @@ export async function apiClient<T>(
   const url = `${BASE_URL}${endpoint}`;
 
   const response = await fetch(url, config);
-  options.onResponse?.(response);
+  try {
+    options.onResponse?.(response);
+  } catch {
+    // Response observers are diagnostic-only and must not affect the request.
+  }
 
   if (
     response.status === 401 &&

@@ -979,6 +979,7 @@ const MOCK_PUBLIC_CONFIG = {
   social_providers: ["github"],
   invite_code_required: false,
   email_auth_enabled: true,
+  aevatar_chat_wire_log_enabled: true,
 };
 
 // ── MCP config ──

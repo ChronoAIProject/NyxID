@@ -1,10 +1,19 @@
 import { ChatStreamParser } from "@/lib/assistant/chat-stream-parser";
 import {
+  CHAT_STREAM_MAX_BODY_BYTES,
   CHAT_STREAM_MAX_ERROR_BODY_CHARS,
+  CHAT_STREAM_MAX_WIRE_BYTES,
   type ChatStreamFrame,
+  type ChatStreamWireEvent,
+  type ChatStreamWireOutcome,
   type ChatStreamWorkerCommand,
   type ChatStreamWorkerMessage,
 } from "@/lib/assistant/chat-stream-worker-protocol";
+import {
+  isSseMediaType,
+  WireBodyCapture,
+} from "@/lib/assistant/wire-body-capture";
+import { WireLineFramer } from "@/lib/assistant/wire-line-framer";
 
 export type ChatStreamHeadersResult =
   | {
@@ -36,6 +45,7 @@ export interface ChatStreamRequest {
   readonly signal: AbortSignal;
   readonly headers?: Readonly<Record<string, string>>;
   readonly onFrames: (frames: readonly ChatStreamFrame[]) => void;
+  readonly onWire?: (event: ChatStreamWireEvent) => void;
 }
 
 export interface ChatStreamRequestHandle {
@@ -53,7 +63,12 @@ interface PendingRequest {
   readonly headers: Deferred<ChatStreamHeadersResult>;
   readonly completion: Deferred<ChatStreamCompletionResult>;
   readonly onFrames: (frames: readonly ChatStreamFrame[]) => void;
+  readonly onWire?: (event: ChatStreamWireEvent) => void;
   readonly removeAbortListener: () => void;
+  readonly wireExpected: boolean;
+  wireFragment: string;
+  wireEnded: boolean;
+  completionReceived: boolean;
   settled: boolean;
 }
 
@@ -88,6 +103,37 @@ function networkFailure(
   return { kind: "network_error", code, message };
 }
 
+function hasWireGate(headers: Readonly<Record<string, string>> | undefined) {
+  return Object.entries(headers ?? {}).some(
+    ([name, value]) =>
+      name.toLowerCase() === "x-nyxid-debug-upstream" && value === "1",
+  );
+}
+
+async function readBoundedBody(response: Response): Promise<{
+  readonly result: ReturnType<WireBodyCapture["finish"]>;
+  readonly readFailed: boolean;
+}> {
+  const capture = new WireBodyCapture(CHAT_STREAM_MAX_BODY_BYTES);
+  if (!response.body) return { result: capture.finish(), readFailed: false };
+  const reader = response.body.getReader();
+  let readFailed = false;
+  try {
+    for (;;) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      capture.push(value);
+      if (capture.truncated) {
+        await reader.cancel().catch(() => undefined);
+        break;
+      }
+    }
+  } catch {
+    readFailed = true;
+  }
+  return { result: capture.finish(), readFailed };
+}
+
 export class ChatStreamWorkerClient {
   private worker: Worker | null = null;
   private workerReady = false;
@@ -100,10 +146,11 @@ export class ChatStreamWorkerClient {
   }
 
   start(request: ChatStreamRequest): ChatStreamRequestHandle {
+    const requestId = crypto.randomUUID();
     const worker = this.getWorker();
     return worker
-      ? this.startWorkerRequest(worker, request)
-      : this.startInline(request);
+      ? this.startWorkerRequest(worker, requestId, request)
+      : this.startInline(requestId, request);
   }
 
   private getWorker(): Worker | null {
@@ -130,9 +177,9 @@ export class ChatStreamWorkerClient {
 
   private startWorkerRequest(
     worker: Worker,
+    requestId: string,
     request: ChatStreamRequest,
   ): ChatStreamRequestHandle {
-    const requestId = crypto.randomUUID();
     const headers = deferred<ChatStreamHeadersResult>();
     const completion = deferred<ChatStreamCompletionResult>();
     const cancel = () => {
@@ -144,10 +191,17 @@ export class ChatStreamWorkerClient {
           requestId,
         } satisfies ChatStreamWorkerCommand);
       } catch {
-        // The local request still settles below. A failed/terminated worker
-        // will be replaced on the next stream start.
+        this.deliverWire(requestId, pending, {
+          type: "end",
+          requestId,
+          outcome: "cancelled",
+        });
+        this.settleRequest(requestId, { kind: "cancelled" });
+        return;
       }
-      this.settleRequest(requestId, { kind: "cancelled" });
+      if (!pending.wireExpected) {
+        this.settleRequest(requestId, { kind: "cancelled" });
+      }
     };
     const onAbort = () => cancel();
     request.signal.addEventListener("abort", onAbort, { once: true });
@@ -155,13 +209,18 @@ export class ChatStreamWorkerClient {
       headers,
       completion,
       onFrames: request.onFrames,
+      onWire: request.onWire,
       removeAbortListener: () =>
         request.signal.removeEventListener("abort", onAbort),
+      wireExpected: hasWireGate(request.headers),
+      wireFragment: "",
+      wireEnded: false,
+      completionReceived: false,
       settled: false,
     });
 
     if (request.signal.aborted) {
-      cancel();
+      this.settleRequest(requestId, { kind: "cancelled" });
     } else {
       try {
         worker.postMessage({
@@ -175,7 +234,11 @@ export class ChatStreamWorkerClient {
         this.failWorker(worker);
       }
     }
-    return { headers: headers.promise, completion: completion.promise, cancel };
+    return {
+      headers: headers.promise,
+      completion: completion.promise,
+      cancel,
+    };
   }
 
   private handleWorkerMessage(message: ChatStreamWorkerMessage): void {
@@ -193,10 +256,37 @@ export class ChatStreamWorkerClient {
       case "stream.batch":
         this.deliverFrames(message.requestId, request, message.frames);
         return;
+      case "stream.wire_batch":
+        this.deliverWireBatch(message.requestId, request, message);
+        return;
+      case "stream.wire_body":
+        this.deliverWire(message.requestId, request, {
+          type: "body",
+          requestId: message.requestId,
+          text: message.text,
+          bytes: message.bytes,
+          truncated: message.truncated,
+        });
+        return;
+      case "stream.wire_end":
+        request.wireFragment = "";
+        request.wireEnded = true;
+        this.deliverWire(message.requestId, request, {
+          type: "end",
+          requestId: message.requestId,
+          outcome: message.outcome,
+        });
+        if (request.completionReceived) {
+          this.settleRequest(message.requestId, { kind: "complete" });
+        }
+        return;
       case "stream.complete":
         if (!this.deliverFrames(message.requestId, request, message.frames))
           return;
-        this.settleRequest(message.requestId, { kind: "complete" });
+        request.completionReceived = true;
+        if (!request.wireExpected || request.wireEnded) {
+          this.settleRequest(message.requestId, { kind: "complete" });
+        }
         return;
       case "stream.http_error":
         this.settleRequest(message.requestId, {
@@ -217,6 +307,45 @@ export class ChatStreamWorkerClient {
     }
   }
 
+  private deliverWireBatch(
+    requestId: string,
+    request: PendingRequest,
+    message: Extract<ChatStreamWorkerMessage, { type: "stream.wire_batch" }>,
+  ): void {
+    const lines: Array<{
+      text: string;
+      ending: "\n" | "\r\n" | "\r" | "";
+    }> = [];
+    for (const fragment of message.fragments) {
+      request.wireFragment += fragment.text;
+      if (fragment.fragment) continue;
+      lines.push({
+        text: request.wireFragment,
+        ending: fragment.ending ?? "",
+      });
+      request.wireFragment = "";
+    }
+    this.deliverWire(requestId, request, {
+      type: "lines",
+      requestId,
+      lines,
+      bytes: message.bytes,
+      truncated: message.truncated,
+    });
+  }
+
+  private deliverWire(
+    _requestId: string,
+    request: PendingRequest,
+    event: ChatStreamWireEvent,
+  ): void {
+    try {
+      request.onWire?.(event);
+    } catch {
+      // Capture is diagnostic-only and cannot affect the live stream.
+    }
+  }
+
   private deliverFrames(
     requestId: string,
     request: PendingRequest,
@@ -231,6 +360,11 @@ export class ChatStreamWorkerClient {
         type: "stream.cancel",
         requestId,
       } satisfies ChatStreamWorkerCommand);
+      this.deliverWire(requestId, request, {
+        type: "end",
+        requestId,
+        outcome: "worker_error",
+      });
       this.settleRequest(
         requestId,
         networkFailure(
@@ -265,15 +399,31 @@ export class ChatStreamWorkerClient {
       "worker_error",
       "The assistant stream worker stopped unexpectedly. Try again.",
     );
-    for (const requestId of [...this.pending.keys()]) {
+    for (const [requestId, request] of [...this.pending.entries()]) {
+      this.deliverWire(requestId, request, {
+        type: "end",
+        requestId,
+        outcome: "worker_error",
+      });
       this.settleRequest(requestId, failure);
     }
   }
 
-  private startInline(request: ChatStreamRequest): ChatStreamRequestHandle {
+  private startInline(
+    requestId: string,
+    request: ChatStreamRequest,
+  ): ChatStreamRequestHandle {
     const headers = deferred<ChatStreamHeadersResult>();
     const completion = deferred<ChatStreamCompletionResult>();
     const controller = new AbortController();
+    const wireEnabled = hasWireGate(request.headers);
+    const emitWire = (event: ChatStreamWireEvent) => {
+      try {
+        request.onWire?.(event);
+      } catch {
+        // Capture is diagnostic-only and cannot affect the live stream.
+      }
+    };
     const cancel = () => controller.abort();
     const onAbort = () => cancel();
     request.signal.addEventListener("abort", onAbort, { once: true });
@@ -282,11 +432,41 @@ export class ChatStreamWorkerClient {
     void (async () => {
       let headersSettled = false;
       let reader: ReadableStreamDefaultReader<Uint8Array> | null = null;
+      let wireCapture:
+        | { readonly kind: "sse"; readonly framer: WireLineFramer }
+        | { readonly kind: "body"; readonly capture: WireBodyCapture }
+        | null = null;
+      let wireEnded = false;
       const settle = (result: ChatStreamCompletionResult) => {
         request.signal.removeEventListener("abort", onAbort);
-        if (!headersSettled && result.kind !== "complete")
+        if (!headersSettled && result.kind !== "complete") {
           headers.resolve(result);
+        }
         completion.resolve(result);
+      };
+      const emitLines = (result: ReturnType<WireLineFramer["push"]>): void => {
+        if (result.lines.length === 0 && result.bytes === 0) return;
+        emitWire({
+          type: "lines",
+          requestId,
+          lines: result.lines,
+          bytes: result.bytes,
+          truncated: result.truncated,
+        });
+      };
+      const finishWire = (outcome: ChatStreamWireOutcome) => {
+        if (wireEnded || !wireCapture) return;
+        wireEnded = true;
+        if (wireCapture.kind === "sse") {
+          emitLines(wireCapture.framer.finish());
+        } else {
+          emitWire({
+            type: "body",
+            requestId,
+            ...wireCapture.capture.finish(),
+          });
+        }
+        emitWire({ type: "end", requestId, outcome });
       };
       const deliverFrames = async (
         frames: readonly ChatStreamFrame[],
@@ -297,6 +477,7 @@ export class ChatStreamWorkerClient {
           return true;
         } catch {
           await reader?.cancel().catch(() => undefined);
+          finishWire("worker_error");
           settle(
             networkFailure(
               "worker_error",
@@ -318,7 +499,30 @@ export class ChatStreamWorkerClient {
           body: request.bodyText,
           signal: controller.signal,
         });
+        const contentType = response.headers.get("content-type") ?? "";
         if (!response.ok) {
+          if (wireEnabled) {
+            const captured = await readBoundedBody(response);
+            emitWire({
+              type: "body",
+              requestId,
+              ...captured.result,
+            });
+            emitWire({
+              type: "end",
+              requestId,
+              outcome: captured.readFailed ? "network_error" : "complete",
+            });
+            settle({
+              kind: "http_error",
+              status: response.status,
+              body: captured.result.text,
+              debugUpstream:
+                response.headers.get("x-nyxid-debug-upstream-log") ??
+                undefined,
+            });
+            return;
+          }
           const body = (await response.text().catch(() => "")).slice(
             0,
             CHAT_STREAM_MAX_ERROR_BODY_CHARS,
@@ -336,11 +540,29 @@ export class ChatStreamWorkerClient {
         headers.resolve({
           kind: "response",
           status: response.status,
-          contentType: response.headers.get("content-type") ?? "",
+          contentType,
           debugUpstream:
             response.headers.get("x-nyxid-debug-upstream-log") ?? undefined,
         });
+        if (wireEnabled) {
+          wireCapture = isSseMediaType(contentType)
+            ? {
+                kind: "sse",
+                framer: new WireLineFramer(CHAT_STREAM_MAX_WIRE_BYTES),
+              }
+            : {
+                kind: "body",
+                capture: new WireBodyCapture(CHAT_STREAM_MAX_BODY_BYTES),
+              };
+        }
         if (!response.body) {
+          if (wireEnabled && !wireCapture) {
+            wireCapture = {
+              kind: "body",
+              capture: new WireBodyCapture(CHAT_STREAM_MAX_BODY_BYTES),
+            };
+          }
+          finishWire("complete");
           settle(
             networkFailure(
               "stream_closed",
@@ -357,11 +579,18 @@ export class ChatStreamWorkerClient {
           if (done) break;
           const frames = parser.push(value);
           if (!(await deliverFrames(frames))) return;
+          if (wireCapture?.kind === "sse") {
+            emitLines(wireCapture.framer.push(value));
+          } else if (wireCapture?.kind === "body") {
+            wireCapture.capture.push(value);
+          }
         }
         const finalFrames = parser.finish();
         if (!(await deliverFrames(finalFrames))) return;
+        finishWire("complete");
         settle({ kind: "complete" });
       } catch {
+        finishWire(controller.signal.aborted ? "cancelled" : "network_error");
         settle(
           controller.signal.aborted
             ? { kind: "cancelled" }
@@ -373,7 +602,11 @@ export class ChatStreamWorkerClient {
       }
     })();
 
-    return { headers: headers.promise, completion: completion.promise, cancel };
+    return {
+      headers: headers.promise,
+      completion: completion.promise,
+      cancel,
+    };
   }
 }
 

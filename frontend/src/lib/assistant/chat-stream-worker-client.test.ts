@@ -89,7 +89,7 @@ describe("ChatStreamWorkerClient", () => {
     ]);
   });
 
-  it("cancels the matching worker request when its AbortSignal fires", async () => {
+  it("settles capture-off cancellation without waiting for a worker acknowledgement", async () => {
     const worker = new FakeWorker();
     const client = new ChatStreamWorkerClient(() => asWorker(worker));
     const controller = new AbortController();
@@ -109,6 +109,72 @@ describe("ChatStreamWorkerClient", () => {
     });
     await expect(stream.headers).resolves.toEqual({ kind: "cancelled" });
     await expect(stream.completion).resolves.toEqual({ kind: "cancelled" });
+  });
+
+  it("retains capture-on cancellation until flushed wire data is acknowledged", async () => {
+    const worker = new FakeWorker();
+    const client = new ChatStreamWorkerClient(() => asWorker(worker));
+    const controller = new AbortController();
+    const wireEvents: unknown[] = [];
+    const flushedLine = 'data: {"type":"TEXT_MESSAGE_CONTENT"}';
+    const stream = client.start({
+      url: "/stream",
+      bodyText: "{}",
+      signal: controller.signal,
+      headers: { "X-NyxID-Debug-Upstream": "1" },
+      onFrames: () => {},
+      onWire: (event) => wireEvents.push(event),
+    });
+    const id = requestId(worker);
+    worker.emit({
+      type: "stream.response",
+      requestId: id,
+      status: 200,
+      contentType: "text/event-stream",
+    });
+
+    controller.abort();
+
+    let completionSettled = false;
+    void stream.completion.then(() => {
+      completionSettled = true;
+    });
+    await Promise.resolve();
+    expect(completionSettled).toBe(false);
+
+    worker.emit({
+      type: "stream.wire_batch",
+      requestId: id,
+      fragments: [{ text: flushedLine, ending: "\n", fragment: false }],
+      bytes: 38,
+      truncated: false,
+    });
+    worker.emit({
+      type: "stream.wire_end",
+      requestId: id,
+      outcome: "cancelled",
+    });
+    await Promise.resolve();
+    expect(completionSettled).toBe(false);
+
+    worker.emit({ type: "stream.cancelled", requestId: id });
+
+    await expect(stream.completion).resolves.toEqual({ kind: "cancelled" });
+    expect(wireEvents).toEqual([
+      {
+        type: "lines",
+        requestId: id,
+        lines: [
+          {
+            text: flushedLine,
+            ending: "\n",
+          },
+        ],
+        bytes: 38,
+        truncated: false,
+      },
+      { type: "end", requestId: id, outcome: "cancelled" },
+    ]);
   });
 
   it("surfaces debug metadata from worker HTTP errors", async () => {
@@ -229,6 +295,13 @@ describe("ChatStreamWorkerClient", () => {
     first.crash();
     expect(second.terminate).not.toHaveBeenCalled();
     secondController.abort();
+    const secondId = requestId(second);
+    second.emit({
+      type: "stream.wire_end",
+      requestId: secondId,
+      outcome: "cancelled",
+    });
+    second.emit({ type: "stream.cancelled", requestId: secondId });
     await expect(secondStream.completion).resolves.toEqual({
       kind: "cancelled",
     });
@@ -332,5 +405,330 @@ describe("ChatStreamWorkerClient", () => {
     } as const;
     await expect(stream.headers).resolves.toEqual(expected);
     await expect(stream.completion).resolves.toEqual(expected);
+  });
+
+  it("preserves capture-off character truncation and drops partially read HTTP errors inline", async () => {
+    const multibyteBody = "界".repeat(40_000);
+    const brokenBody = new ReadableStream<Uint8Array>({
+      start(controller) {
+        controller.enqueue(new TextEncoder().encode("partial"));
+        controller.error(new Error("body read failed"));
+      },
+    });
+    vi.stubGlobal(
+      "fetch",
+      vi
+        .fn()
+        .mockResolvedValueOnce(new Response(multibyteBody, { status: 502 }))
+        .mockResolvedValueOnce(new Response(brokenBody, { status: 503 })),
+    );
+    const client = new ChatStreamWorkerClient(() => null);
+
+    const multibyte = client.start({
+      url: "/multibyte-error",
+      bodyText: "{}",
+      signal: new AbortController().signal,
+      onFrames: () => {},
+    });
+    await expect(multibyte.completion).resolves.toMatchObject({
+      kind: "http_error",
+      body: multibyteBody,
+    });
+
+    const broken = client.start({
+      url: "/broken-error",
+      bodyText: "{}",
+      signal: new AbortController().signal,
+      onFrames: () => {},
+    });
+    await expect(broken.completion).resolves.toMatchObject({
+      kind: "http_error",
+      body: "",
+    });
+  });
+
+  it("reassembles wire fragments and waits for wire end before deleting pending state", async () => {
+    const worker = new FakeWorker();
+    const client = new ChatStreamWorkerClient(() => asWorker(worker));
+    const wireEvents: unknown[] = [];
+    const stream = client.start({
+      url: "/stream",
+      bodyText: "{}",
+      signal: new AbortController().signal,
+      headers: { "X-NyxID-Debug-Upstream": "1" },
+      onFrames: () => {},
+      onWire: (event) => wireEvents.push(event),
+    });
+    const id = requestId(worker);
+    worker.emit({
+      type: "stream.response",
+      requestId: id,
+      status: 200,
+      contentType: "text/event-stream",
+    });
+    worker.emit({
+      type: "stream.wire_batch",
+      requestId: id,
+      fragments: [{ text: "data: long-", fragment: true }],
+      bytes: 12,
+      truncated: false,
+    });
+    worker.emit({
+      type: "stream.wire_batch",
+      requestId: id,
+      fragments: [{ text: "line", ending: "\r\n", fragment: false }],
+      bytes: 4,
+      truncated: false,
+    });
+    worker.emit({ type: "stream.complete", requestId: id, frames: [] });
+    let completionSettled = false;
+    void stream.completion.then(() => {
+      completionSettled = true;
+    });
+    await Promise.resolve();
+    expect(completionSettled).toBe(false);
+
+    worker.emit({
+      type: "stream.wire_end",
+      requestId: id,
+      outcome: "complete",
+    });
+
+    await expect(stream.completion).resolves.toEqual({ kind: "complete" });
+    expect(wireEvents).toEqual([
+      {
+        type: "lines",
+        requestId: id,
+        lines: [],
+        bytes: 12,
+        truncated: false,
+      },
+      {
+        type: "lines",
+        requestId: id,
+        lines: [{ text: "data: long-line", ending: "\r\n" }],
+        bytes: 4,
+        truncated: false,
+      },
+      { type: "end", requestId: id, outcome: "complete" },
+    ]);
+  });
+
+  it("isolates a throwing wire consumer from worker frame delivery", async () => {
+    const worker = new FakeWorker();
+    const client = new ChatStreamWorkerClient(() => asWorker(worker));
+    const delivered: unknown[] = [];
+    const stream = client.start({
+      url: "/stream",
+      bodyText: "{}",
+      signal: new AbortController().signal,
+      headers: { "X-NyxID-Debug-Upstream": "1" },
+      onFrames: (frames) => delivered.push(...frames),
+      onWire: () => {
+        throw new Error("diagnostic consumer failed");
+      },
+    });
+    const id = requestId(worker);
+    worker.emit({
+      type: "stream.response",
+      requestId: id,
+      status: 200,
+      contentType: "text/event-stream",
+    });
+    worker.emit({
+      type: "stream.wire_batch",
+      requestId: id,
+      fragments: [{ text: "data: raw", ending: "\n", fragment: false }],
+      bytes: 10,
+      truncated: false,
+    });
+    worker.emit({
+      type: "stream.batch",
+      requestId: id,
+      frames: [{ type: "RUN_STARTED" }],
+    });
+    worker.emit({ type: "stream.complete", requestId: id, frames: [] });
+    worker.emit({
+      type: "stream.wire_end",
+      requestId: id,
+      outcome: "complete",
+    });
+
+    await expect(stream.completion).resolves.toEqual({ kind: "complete" });
+    expect(delivered).toEqual([{ type: "RUN_STARTED" }]);
+  });
+
+  it("settles open wire captures as worker_error when the worker crashes", async () => {
+    const worker = new FakeWorker();
+    const client = new ChatStreamWorkerClient(() => asWorker(worker));
+    const wireEvents: unknown[] = [];
+    const stream = client.start({
+      url: "/stream",
+      bodyText: "{}",
+      signal: new AbortController().signal,
+      headers: { "X-NyxID-Debug-Upstream": "1" },
+      onFrames: () => {},
+      onWire: (event) => wireEvents.push(event),
+    });
+    const id = requestId(worker);
+    worker.emit({
+      type: "stream.response",
+      requestId: id,
+      status: 200,
+      contentType: "text/event-stream",
+    });
+
+    worker.crash();
+
+    await expect(stream.completion).resolves.toMatchObject({
+      kind: "network_error",
+      code: "worker_error",
+    });
+    expect(wireEvents.at(-1)).toEqual({
+      type: "end",
+      requestId: id,
+      outcome: "worker_error",
+    });
+  });
+
+  it("mirrors SSE and non-SSE wire capture in the inline fallback", async () => {
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValueOnce(
+        new Response(': ping\ndata: {"type":"RUN_FINISHED"}\n\n', {
+          status: 200,
+          headers: { "Content-Type": "text/event-stream" },
+        }),
+      )
+      .mockResolvedValueOnce(
+        new Response('{"ok":true}', {
+          status: 200,
+          headers: { "Content-Type": "application/json" },
+        }),
+      );
+    vi.stubGlobal("fetch", fetchMock);
+    const client = new ChatStreamWorkerClient(() => null);
+    const sseWire: unknown[] = [];
+    const sse = client.start({
+      url: "/sse",
+      bodyText: "{}",
+      signal: new AbortController().signal,
+      headers: { "X-NyxID-Debug-Upstream": "1" },
+      onFrames: () => {},
+      onWire: (event) => sseWire.push(event),
+    });
+    await expect(sse.completion).resolves.toEqual({ kind: "complete" });
+    expect(sseWire).toEqual([
+      {
+        type: "lines",
+        requestId: expect.any(String),
+        lines: [
+          { text: ": ping", ending: "\n" },
+          { text: 'data: {"type":"RUN_FINISHED"}', ending: "\n" },
+          { text: "", ending: "\n" },
+        ],
+        bytes: 38,
+        truncated: false,
+      },
+      {
+        type: "end",
+        requestId: expect.any(String),
+        outcome: "complete",
+      },
+    ]);
+
+    const bodyWire: unknown[] = [];
+    const json = client.start({
+      url: "/json",
+      bodyText: "{}",
+      signal: new AbortController().signal,
+      headers: { "X-NyxID-Debug-Upstream": "1" },
+      onFrames: () => {},
+      onWire: (event) => bodyWire.push(event),
+    });
+    await expect(json.completion).resolves.toEqual({ kind: "complete" });
+    expect(bodyWire).toEqual([
+      {
+        type: "body",
+        requestId: expect.any(String),
+        text: '{"ok":true}',
+        bytes: 11,
+        truncated: false,
+      },
+      {
+        type: "end",
+        requestId: expect.any(String),
+        outcome: "complete",
+      },
+    ]);
+  });
+
+  it("captures inline HTTP errors and 204 responses without double-reading", async () => {
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValueOnce(
+        new Response("failure", {
+          status: 500,
+          headers: { "X-NyxID-Debug-Upstream-Log": "encoded" },
+        }),
+      )
+      .mockResolvedValueOnce(new Response(null, { status: 204 }));
+    vi.stubGlobal("fetch", fetchMock);
+    const client = new ChatStreamWorkerClient(() => null);
+    const errorWire: unknown[] = [];
+    const error = client.start({
+      url: "/error",
+      bodyText: "{}",
+      signal: new AbortController().signal,
+      headers: { "X-NyxID-Debug-Upstream": "1" },
+      onFrames: () => {},
+      onWire: (event) => errorWire.push(event),
+    });
+    await expect(error.completion).resolves.toMatchObject({
+      kind: "http_error",
+      body: "failure",
+    });
+    expect(errorWire).toEqual([
+      {
+        type: "body",
+        requestId: expect.any(String),
+        text: "failure",
+        bytes: 7,
+        truncated: false,
+      },
+      {
+        type: "end",
+        requestId: expect.any(String),
+        outcome: "complete",
+      },
+    ]);
+
+    const emptyWire: unknown[] = [];
+    const empty = client.start({
+      url: "/empty",
+      bodyText: "{}",
+      signal: new AbortController().signal,
+      headers: { "X-NyxID-Debug-Upstream": "1" },
+      onFrames: () => {},
+      onWire: (event) => emptyWire.push(event),
+    });
+    await expect(empty.completion).resolves.toMatchObject({
+      kind: "network_error",
+      code: "stream_closed",
+    });
+    expect(emptyWire).toEqual([
+      {
+        type: "body",
+        requestId: expect.any(String),
+        text: "",
+        bytes: 0,
+        truncated: false,
+      },
+      {
+        type: "end",
+        requestId: expect.any(String),
+        outcome: "complete",
+      },
+    ]);
   });
 });
