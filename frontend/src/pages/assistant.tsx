@@ -1,4 +1,14 @@
-import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
+import {
+  lazy,
+  Suspense,
+  useEffect,
+  useLayoutEffect,
+  useMemo,
+  useRef,
+  useState,
+  type ComponentType,
+  type LazyExoticComponent,
+} from "react";
 import { useQueryClient } from "@tanstack/react-query";
 import { useNavigate, useRouterState } from "@tanstack/react-router";
 import { toast } from "sonner";
@@ -31,6 +41,36 @@ import { useAssistantContextStore } from "@/stores/assistant-context-store";
 import { useAssistantDraftStore } from "@/stores/assistant-draft-store";
 import { useAuthStore } from "@/stores/auth-store";
 import { isTurnActive, type AssistantMessage } from "@/types/assistant";
+
+const MockScenariosAction = import.meta.env.DEV
+  ? lazy(() =>
+      import("@/components/assistant/mock-scenarios-action").then((module) => ({
+        default: module.MockScenariosAction,
+      })),
+    )
+  : null;
+
+type ScenarioActionComponent =
+  | ComponentType
+  | LazyExoticComponent<ComponentType>;
+
+export function AssistantHeaderActions({
+  scenarioAction = MockScenariosAction,
+}: {
+  readonly scenarioAction?: ScenarioActionComponent | null;
+} = {}) {
+  const ScenarioAction = scenarioAction;
+  return (
+    <>
+      {ScenarioAction ? (
+        <Suspense fallback={null}>
+          <ScenarioAction />
+        </Suspense>
+      ) : null}
+      <AssistantWireLogAction />
+    </>
+  );
+}
 
 /** Text of a user message's first text block, for the optimistic-echo check. */
 function userMessageText(
@@ -484,7 +524,7 @@ export function AssistantPage({
       <AssistantShell
         title={title}
         sidebar={sidebar}
-        headerActions={<AssistantWireLogAction />}
+        headerActions={<AssistantHeaderActions />}
       >
         {view === "plugins" ? <PluginsView /> : <ApprovalsView />}
       </AssistantShell>
@@ -495,7 +535,7 @@ export function AssistantPage({
     <AssistantShell
       title={title}
       sidebar={sidebar}
-      headerActions={<AssistantWireLogAction />}
+      headerActions={<AssistantHeaderActions />}
     >
       <div className="relative flex h-full min-h-0 flex-col bg-background">
         {/* A failed transcript read is REPORTED, never blocking. It used to
