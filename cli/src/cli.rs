@@ -324,7 +324,7 @@ pub struct AuthArgs {
     /// Access token (overrides saved token)
     #[arg(long)]
     pub access_token: Option<String>,
-    /// Environment variable to read the access token from
+    /// Environment variable to read the access token from; the default also falls back to NYXID_API_KEY
     #[arg(long, default_value = "NYXID_ACCESS_TOKEN")]
     pub access_token_env: String,
     /// Agent profile name (isolates tokens and config)

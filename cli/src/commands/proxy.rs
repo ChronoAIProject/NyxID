@@ -1,4 +1,4 @@
-use anyhow::{Context, Result};
+use anyhow::{Context, Result, bail};
 use comfy_table::{Table, presets::UTF8_FULL_CONDENSED};
 use serde_json::Value;
 use tokio::io::AsyncWriteExt;
@@ -124,9 +124,10 @@ pub async fn run(command: ProxyCommands) -> Result<()> {
             let status = resp.status();
             if !status.is_success() {
                 let body = resp.text().await.unwrap_or_default();
-                eprintln!("Proxy request failed (HTTP {status})");
-                println!("{body}");
-                return Ok(());
+                if body.is_empty() {
+                    bail!("Proxy request failed (HTTP {status})");
+                }
+                bail!("Proxy request failed (HTTP {status}): {body}");
             }
 
             if stream {
@@ -329,7 +330,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn request_error_status_prints_body() {
+    async fn request_error_status_returns_error() {
         let server = MockServer::start().await;
         Mock::given(method("GET"))
             .and(path("/api/v1/proxy/s/openai/v1/models"))
@@ -337,7 +338,7 @@ mod tests {
             .mount(&server)
             .await;
 
-        run(req(
+        let error = run(req(
             server.uri(),
             "openai",
             "/v1/models",
@@ -347,7 +348,12 @@ mod tests {
             None,
         ))
         .await
-        .expect("error status should still return Ok");
+        .expect_err("HTTP failures must produce a nonzero CLI exit");
+
+        assert_eq!(
+            error.to_string(),
+            "Proxy request failed (HTTP 403 Forbidden): denied"
+        );
     }
 
     #[tokio::test]
