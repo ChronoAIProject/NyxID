@@ -41,6 +41,11 @@ const STATIC_ASSETS = [
   // copying it here the wizard would fall back to the static .ico only
   // (NyxID#706 follow-up).
   ["frontend/public/nyxid-app-icon.svg", "nyxid-app-icon.svg"],
+  // The wizard shell's `NyxidLogo` requests one of these two at the root
+  // path, picked by resolved theme, so both must be embedded or the
+  // header logo 404s.
+  ["frontend/public/nyxid-coloured-logo.svg", "nyxid-coloured-logo.svg"],
+  ["frontend/public/nyxid-coloured-logo-dark.svg", "nyxid-coloured-logo-dark.svg"],
 ]
 
 const EXTRAS = [

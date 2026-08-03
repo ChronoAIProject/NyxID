@@ -232,6 +232,14 @@ fn build_upstream_echo(
     extra_outbound_headers: &[(String, String)],
     identity: UpstreamIdentityEcho,
 ) -> UpstreamEcho {
+    // The query string is part of what went on the wire. `list_conversations`
+    // drains cursor pages by rewriting only the request URI's query, so
+    // without it every drained page echoes an identical path and pagination
+    // reads as duplicate calls in the wire-log panel.
+    let path = match request.uri().query() {
+        Some(query) if !query.is_empty() => format!("{path}?{query}"),
+        _ => path,
+    };
     let (path, _) = truncate_utf8(&path, DEBUG_UPSTREAM_PATH_MAX_BYTES);
     UpstreamEcho {
         degraded: false,
@@ -1210,6 +1218,60 @@ mod tests {
         ] {
             assert!(!serialized.contains(secret), "echo leaked {secret}");
         }
+    }
+
+    #[test]
+    fn echo_path_carries_the_request_query_string() {
+        // `list_conversations` drains the history index by setting the cursor
+        // on the synthetic request URI while passing the same bare index path
+        // for every page. Without the query, each drained page echoes an
+        // identical path and pagination reads as duplicate calls.
+        let request = Request::builder()
+            .method(Method::GET)
+            .uri("/?cursor=abc")
+            .body(Body::empty())
+            .unwrap();
+
+        let echo = build_upstream_echo(
+            &request,
+            "api/scopes/user-1/chat-history".to_string(),
+            None,
+            None,
+            &[],
+            UpstreamIdentityEcho {
+                mode: "jwt".to_string(),
+                forward_access_token: false,
+                inject_delegation_token: true,
+                bridge_minted: false,
+            },
+        );
+
+        assert_eq!(echo.path, "api/scopes/user-1/chat-history?cursor=abc");
+    }
+
+    #[test]
+    fn echo_path_has_no_trailing_separator_without_a_query() {
+        let request = Request::builder()
+            .method(Method::GET)
+            .uri("/")
+            .body(Body::empty())
+            .unwrap();
+
+        let echo = build_upstream_echo(
+            &request,
+            "api/scopes/user-1/chat-history".to_string(),
+            None,
+            None,
+            &[],
+            UpstreamIdentityEcho {
+                mode: "jwt".to_string(),
+                forward_access_token: false,
+                inject_delegation_token: true,
+                bridge_minted: false,
+            },
+        );
+
+        assert_eq!(echo.path, "api/scopes/user-1/chat-history");
     }
 
     /// A valid, well-formed capture request. Deliberately *not* an

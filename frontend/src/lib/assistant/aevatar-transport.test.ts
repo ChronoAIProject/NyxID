@@ -6942,6 +6942,68 @@ describe("studio new chats and typed actor compatibility", () => {
     }
   });
 
+  it("reads a pending placeholder from the local mirror without a doomed request", async () => {
+    // A `workflow-pending-` id exists nowhere server-side, so the transcript
+    // read could only 404 and fall back to the mirror it already holds. The
+    // request is pure waste on every new chat.
+    vi.useFakeTimers();
+    try {
+      mockChatStreams((request) =>
+        request.url === WORKFLOW_URL
+          ? {
+              frames: [
+                { runStarted: { threadId: RUN_ACTOR, runId: RUN_ACTOR } },
+                {
+                  runError: {
+                    code: "WORKFLOW_FAILED",
+                    message: "The upstream workflow failed permanently.",
+                  },
+                },
+              ],
+            }
+          : undefined,
+      );
+      const mock = stubFetch((url) =>
+        url.includes("/conversations/create-recovery/")
+          ? jsonResponse(
+              { code: "CREATE_NOT_FOUND", message: "Not ready." },
+              404,
+            )
+          : undefined,
+      );
+      const transport = new AevatarAssistantTransport();
+      const conversation = await transport.createConversation();
+      expect(conversation.id).toMatch(/^workflow-pending-/);
+
+      const turn = collectWorkflowTurn(
+        transport,
+        conversation.id,
+        "keep this turn local",
+      );
+      await vi.advanceTimersByTimeAsync(3_000);
+      await turn;
+
+      mock.mockClear();
+      const history = await transport.getHistory(conversation.id);
+
+      const mirror = (
+        transport as unknown as {
+          conversations: Map<
+            string,
+            { turnState: { messages: readonly AssistantMessage[] } }
+          >;
+        }
+      ).conversations.get(conversation.id);
+      expect(history.conversation.id).toBe(conversation.id);
+      expect(history.messages.length).toBeGreaterThan(0);
+      expect(history.messages).toBe(mirror?.turnState.messages);
+      expect(history.has_more).toBe(false);
+      expect(mock).not.toHaveBeenCalled();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it("preserves an error terminal after context-free create recovery", async () => {
     const streams = mockChatStreams((request) =>
       request.url === WORKFLOW_URL

@@ -1407,6 +1407,22 @@ export class AevatarAssistantTransport implements AssistantTransport {
         has_more: false,
       };
     }
+    // A pending placeholder exists nowhere server-side — the id never left
+    // this client — so the read can only 404 and land in the
+    // `noServerTranscriptYet` fallback below. Serve the local mirror without
+    // the round trip.
+    if (
+      existing &&
+      (conversationId.startsWith(LEGACY_PENDING_TYPED_CONVERSATION_PREFIX) ||
+        conversationId.startsWith(PENDING_WORKFLOW_CONVERSATION_PREFIX))
+    ) {
+      this.activeConversationId = conversationId;
+      return {
+        conversation: existing.conversation,
+        messages: existing.turnState.messages,
+        has_more: false,
+      };
+    }
     let stored: StoredConversation;
     try {
       stored = await this.loadHistory(conversationId);

@@ -9054,10 +9054,10 @@ mod proxy_resolution_integration_tests {
         assert_eq!(echoes.len(), 2);
         for (envelope, (method, path, accepts_json)) in echoes.iter().zip(&calls) {
             assert_eq!(envelope["method"], method.as_str());
-            assert_eq!(
-                envelope["path"],
-                path.split('?').next().unwrap().trim_start_matches('/')
-            );
+            // The drained page's cursor rides along in the echo: without it
+            // every page echoes the same path and the wire log hides the
+            // pagination behind what look like duplicate calls.
+            assert_eq!(envelope["path"], path.trim_start_matches('/'));
             assert!(envelope["commandType"].is_null());
             assert!(envelope["body"].is_null());
             assert_eq!(envelope["upstreamOutcome"], "response");
