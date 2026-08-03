@@ -385,6 +385,52 @@ describe("ScenarioEngine continuations and world", () => {
     }
   });
 
+  it("wakes through the default branch and consumes the continuation", async () => {
+    const { engine } = createEngine([
+      scenario("wake", /go/, (script) =>
+        script
+          .action("service.connect", { service: "api-github" })
+          .await()
+          .say("After wake"),
+      ),
+    ]);
+    const parked: TurnEvent[] = [];
+    const resumed: TurnEvent[] = [];
+    engine.play("conversation", matchOrThrow(engine), (event) =>
+      parked.push(event),
+    );
+    await finishTimers();
+    const card = completedBlock(parked, "action_card");
+
+    const handle = engine.wake(
+      "conversation",
+      card.origin_turn_id,
+      (event) => resumed.push(event),
+    );
+    await finishTimers();
+
+    expect(handle.turnId).not.toBe(card.origin_turn_id);
+    expect(engine.hasContinuation("conversation")).toBe(false);
+    expect(
+      resumed
+        .filter(
+          (event) =>
+            event.event === "block.completed" && event.block.type === "text",
+        )
+        .map((event) =>
+          event.event === "block.completed" && event.block.type === "text"
+            ? event.block.text
+            : null,
+        ),
+    ).toEqual([
+      "The assistant resumed the blocked turn.",
+      "After wake",
+    ]);
+    expect(() =>
+      engine.wake("conversation", card.origin_turn_id),
+    ).toThrow("Action continuation was not found.");
+  });
+
   it("splices a need flow only while the world is cold", async () => {
     const flows = {
       connect: flow((script) => script.say("Connecting").connect("api-github")),
@@ -594,7 +640,7 @@ describe("ScenarioEngine lifecycle guards", () => {
     ]);
   });
 
-  it("expires approvals lazily only after expires_at, independent of toggle state (F11)", async () => {
+  it("expires approvals lazily only after expires_at (F11)", async () => {
     let now = 1_000;
     const definition = scenario("expiry", /go/, (script) =>
       script

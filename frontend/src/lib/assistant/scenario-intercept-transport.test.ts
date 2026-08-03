@@ -10,7 +10,6 @@ import {
   ScenarioInterceptTransport,
 } from "@/lib/assistant/scenario-intercept-transport";
 import { useAssistantMockScenariosStore } from "@/stores/assistant-mock-scenarios-store";
-import { useAssistantWireLogStore } from "@/stores/assistant-wire-log-store";
 import type { ActionReport } from "@/schemas/assistant-actions";
 import type {
   ActionCardContentBlock,
@@ -353,6 +352,55 @@ describe("ScenarioInterceptTransport ownership", () => {
     expect(delegate.continueCalls).toBe(0);
   });
 
+  it("routes mock wakeActions and keeps cursors monotonic across resume (F1)", async () => {
+    const delegate = new StubTransport();
+    const compiled = compileScenarioSet(
+      [
+        scenario("wake", /wake/, (script) =>
+          script
+            .action("service.connect", { service: "api-github" })
+            .await({ wake: (branch) => branch.say("Explicit wake branch") })
+            .say("After wake"),
+        ),
+      ],
+      {},
+    );
+    const { transport } = await createTransport(delegate, { compiled });
+    const events: TurnEvent[] = [];
+    transport.sendMessage(CONVERSATION_ID, "wake", (event) =>
+      events.push(event),
+    );
+    await vi.runAllTimersAsync();
+    const card = findActionCard(events);
+    const parkedEventCount = events.length;
+    const parkedCursor = events.at(-1)?.cursor ?? 0;
+
+    const handle = transport.wakeActions(
+      CONVERSATION_ID,
+      card.origin_turn_id,
+      (event) => events.push(event),
+    );
+    await vi.runAllTimersAsync();
+
+    expect(handle.turnId).not.toBe(card.origin_turn_id);
+    expect(delegate.wakeCalls).toBe(0);
+    expect(events[parkedEventCount]?.cursor).toBeGreaterThan(parkedCursor);
+    expect(
+      events.every(
+        (event, index) => index === 0 || event.cursor > events[index - 1]!.cursor,
+      ),
+    ).toBe(true);
+    expect(events).toContainEqual(
+      expect.objectContaining({
+        event: "block.completed",
+        block: expect.objectContaining({
+          type: "text",
+          text: "Explicit wake branch",
+        }),
+      }),
+    );
+  });
+
   it("routes Stop, card patches, approval decisions, and action reports after toggle-off (F2)", async () => {
     const { delegate, transport } = await createTransport();
     const runningEvents: TurnEvent[] = [];
@@ -531,7 +579,7 @@ describe("ScenarioInterceptTransport projections", () => {
     ]);
   });
 
-  it("serves history snapshots for every scripted event without delegate reads or wire-log writes (F8)", async () => {
+  it("serves history snapshots for every scripted event without delegate reads (F8)", async () => {
     const compiled = compileScenarioSet(
       [scenario("long", /long/, (script) => script.say("x".repeat(720)))],
       {},
@@ -542,13 +590,6 @@ describe("ScenarioInterceptTransport projections", () => {
     });
     const initialHistoryCalls = delegate.historyCalls;
     const projections: Promise<ConversationHistory>[] = [];
-    useAssistantWireLogStore.setState({
-      featureEnabled: true,
-      captureEnabled: true,
-      entries: [],
-      totalBytes: 0,
-      captureBytes: 0,
-    });
 
     transport.sendMessage(CONVERSATION_ID, "long", () => {
       projections.push(transport.getHistory(CONVERSATION_ID));
@@ -558,7 +599,6 @@ describe("ScenarioInterceptTransport projections", () => {
 
     expect(projections.length).toBeGreaterThan(20);
     expect(delegate.historyCalls).toBe(initialHistoryCalls);
-    expect(useAssistantWireLogStore.getState().entries).toEqual([]);
   });
 
   it("refreshes delegated history and list while preserving a parked overlay", async () => {
@@ -967,14 +1007,6 @@ beforeEach(() => {
   vi.unstubAllGlobals();
   localStorage.clear();
   resetScenarioStore();
-  useAssistantWireLogStore.setState({
-    featureEnabled: false,
-    captureEnabled: false,
-    showResponses: true,
-    entries: [],
-    totalBytes: 0,
-    captureBytes: 0,
-  });
 });
 
 afterEach(() => {
