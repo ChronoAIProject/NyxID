@@ -46,13 +46,11 @@ pub struct AppConfig {
     /// trust boundary, so it is kept far shorter than the general access token
     /// TTL to bound the replay window if the callback surface is observed.
     pub jwt_relay_access_ttl_secs: i64,
-    /// LEGACY / TOMBSTONE (cut 4, superseded cut 5): TTL of the retired
-    /// `assistant_forward` marker token. The assistant bridge now forwards a
-    /// standard delegated access token whose lifetime is
-    /// `MCP_DELEGATION_TOKEN_TTL_SECS`, so changing this env var no longer
-    /// affects any live assistant token. Retained only until the marker
-    /// machinery is deleted (one deploy after the delegation-token migration
-    /// drains). See CHAT_ASSISTANT_SPECS cut 5.
+    /// LEGACY / TOMBSTONE: TTL of the retired `assistant_forward` marker
+    /// token. Live assistant capability uses a standard delegated token whose
+    /// 300-second lifetime is the compile-time constant
+    /// `crypto::jwt::MCP_DELEGATION_TOKEN_TTL_SECS`, so this value affects no
+    /// live assistant token. See `docs/chat/01-architecture.md`.
     pub jwt_assistant_forward_ttl_secs: i64,
     /// Refresh token TTL in seconds (default: 604800 = 7 days)
     pub jwt_refresh_ttl_secs: i64,

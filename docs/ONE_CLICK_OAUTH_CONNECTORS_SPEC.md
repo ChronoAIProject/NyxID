@@ -6,7 +6,7 @@ below, tagged `[v2]`. Code changes: B1-B6 (backend), F1-F4 (frontend), with
 B7/F4 test coverage. Remaining before prod one-click: the ops runbook in §5
 (app registration + staged provisioning) and Phase 2 Google verification.
 Branch: `avatar-connector-specs`
-Related: NyxID#1211 (assistant authorization blockers), NyxID#917 (OAuth scopes), `docs/CHAT_ASSISTANT_SPECS.md`
+Related: NyxID#1211 (assistant authorization blockers), NyxID#917 (OAuth scopes), [assistant action cards](chat/04-action-cards.md)
 
 ## 1. Goal
 

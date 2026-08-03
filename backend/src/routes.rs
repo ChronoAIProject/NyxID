@@ -1304,6 +1304,10 @@ pub fn build_router(
             get(handlers::assistant::get_history).delete(handlers::assistant::delete_conversation),
         )
         .route(
+            "/conversations/create-recovery/{command_id}",
+            get(handlers::assistant::get_create_recovery),
+        )
+        .route(
             "/conversations/{conversation_id}/state",
             get(handlers::assistant::get_state),
         )

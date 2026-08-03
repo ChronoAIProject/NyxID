@@ -23,6 +23,7 @@ import { useAuthStore } from "@/stores/auth-store";
 import type { User } from "@/types/api";
 import type {
   ActionCardContentBlock,
+  AssistantMessage,
   ContentBlock,
   Conversation,
   TurnEvent,
@@ -137,9 +138,7 @@ function legacyTypedCommandUrl(
   if (url !== TYPED_COMMAND_URL || init?.method !== "POST") return null;
   const body = jsonRequestBody(init);
   const conversationId =
-    typeof body["conversationId"] === "string"
-      ? body["conversationId"]
-      : null;
+    typeof body["conversationId"] === "string" ? body["conversationId"] : null;
   const turnId = typeof body["turnId"] === "string" ? body["turnId"] : null;
   const taskId = typeof body["taskId"] === "string" ? body["taskId"] : null;
   const stepId = typeof body["stepId"] === "string" ? body["stepId"] : null;
@@ -189,7 +188,8 @@ function stubFetch(...routes: FetchRoute[]): ReturnType<typeof vi.fn> {
     const url = String(input);
     const legacyUrl = legacyTypedCommandUrl(url, init);
     for (const route of routes) {
-      const response = route(url, init) ?? (legacyUrl ? route(legacyUrl, init) : undefined);
+      const response =
+        route(url, init) ?? (legacyUrl ? route(legacyUrl, init) : undefined);
       if (response) return Promise.resolve(response);
     }
     return Promise.resolve(
@@ -200,7 +200,9 @@ function stubFetch(...routes: FetchRoute[]): ReturnType<typeof vi.fn> {
   return mock;
 }
 
-function jsonRequestBody(init: RequestInit | undefined): Record<string, unknown> {
+function jsonRequestBody(
+  init: RequestInit | undefined,
+): Record<string, unknown> {
   return JSON.parse(String(init?.body ?? "{}")) as Record<string, unknown>;
 }
 
@@ -214,9 +216,7 @@ function isTypedCommandRequest(
   return jsonRequestBody(init)["type"] === type;
 }
 
-type ChatStreamRoute = (
-  request: ChatStreamRequest,
-) =>
+type ChatStreamRoute = (request: ChatStreamRequest) =>
   | {
       readonly headers?: ChatStreamHeadersResult;
       readonly frames?: readonly ChatStreamFrame[];
@@ -233,14 +233,11 @@ function mockChatStreams(...routes: readonly ChatStreamRoute[]) {
         method: "POST",
         body: request.bodyText,
       });
-      const legacyRequest = legacyUrl
-        ? { ...request, url: legacyUrl }
-        : null;
-      let matched:
-        | ReturnType<ChatStreamRoute>
-        | undefined;
+      const legacyRequest = legacyUrl ? { ...request, url: legacyUrl } : null;
+      let matched: ReturnType<ChatStreamRoute> | undefined;
       for (const route of routes) {
-        matched = route(request) ?? (legacyRequest ? route(legacyRequest) : undefined);
+        matched =
+          route(request) ?? (legacyRequest ? route(legacyRequest) : undefined);
         if (matched) break;
       }
       if (!matched) {
@@ -249,19 +246,17 @@ function mockChatStreams(...routes: readonly ChatStreamRoute[]) {
 
       let cancelled = false;
       const headerResult: ChatStreamHeadersResult = matched.headers ?? {
-          kind: "response",
-          status: 200,
-          contentType: "text/event-stream",
-        };
+        kind: "response",
+        status: 200,
+        contentType: "text/event-stream",
+      };
       const headers = Promise.resolve(headerResult);
       const completion = Promise.resolve().then(async () => {
         const headerResult = await headers;
         if (cancelled) return { kind: "cancelled" } as const;
         if (headerResult.kind !== "response") {
-          return (
-            matched.completion ??
-            headerResult
-          ) as ChatStreamCompletionResult;
+          return (matched.completion ??
+            headerResult) as ChatStreamCompletionResult;
         }
         if (matched.frames && matched.frames.length > 0) {
           request.onFrames(matched.frames);
@@ -372,7 +367,9 @@ async function actionCardsOf(
     );
 }
 
-function twoTurnStub(second: Record<string, unknown>): ReturnType<typeof vi.fn> {
+function twoTurnStub(
+  second: Record<string, unknown>,
+): ReturnType<typeof vi.fn> {
   let textTurns = 0;
   return stubFetch((url, init) => {
     if (!url.endsWith("/stream") || init?.method !== "POST") return undefined;
@@ -642,6 +639,29 @@ describe("AevatarAssistantTransport", () => {
     expect(conversations[0]?.llm_model).toBe("gpt-5.5");
     expect(conversations[0]?.last_message_at).toBe("2026-07-17T03:05:00+00:00");
     expect(detailFetch).not.toHaveBeenCalled();
+  });
+
+  it("requests assistant resources as JSON", async () => {
+    const fetchMock = stubFetch(
+      (url, init) =>
+        url === `${ASSISTANT_BASE}/conversations` &&
+        (init?.method ?? "GET") === "GET"
+          ? jsonResponse({ conversations: [] })
+          : undefined,
+      routeHistory([]),
+    );
+    const transport = new AevatarAssistantTransport();
+
+    await transport.listConversations();
+    await transport.getHistory(CONVERSATION_ID);
+
+    const getCalls = fetchMock.mock.calls.filter(
+      ([, init]) => (init?.method ?? "GET") === "GET",
+    );
+    expect(getCalls).toHaveLength(2);
+    for (const [, init] of getCalls) {
+      expect(init?.headers).toMatchObject({ Accept: "application/json" });
+    }
   });
 
   it("keeps a streaming conversation's live title over stale index metadata", async () => {
@@ -1967,7 +1987,7 @@ describe("AevatarAssistantTransport", () => {
     }
   });
 
-  it("deletes a conversation upstream and drops it from the local list", async () => {
+  it("accepts a bodyless 204 delete and drops the conversation locally", async () => {
     const routeIndex: FetchRoute = (url, init) =>
       url === `${ASSISTANT_BASE}/conversations` &&
       (init?.method ?? "GET") === "GET"
@@ -1976,7 +1996,7 @@ describe("AevatarAssistantTransport", () => {
     const routeDelete: FetchRoute = (url, init) =>
       url === `${ASSISTANT_BASE}/conversations/${CONVERSATION_ID}` &&
       init?.method === "DELETE"
-        ? jsonResponse({})
+        ? new Response(null, { status: 204 })
         : undefined;
     const fetchMock = stubFetch(routeIndex, routeDelete);
     const transport = new AevatarAssistantTransport();
@@ -3018,13 +3038,7 @@ describe("live AG-UI frame taxonomy", () => {
     vi.stubGlobal(
       "fetch",
       vi.fn((input: RequestInfo | URL, init?: RequestInit) => {
-        if (
-          isTypedCommandRequest(
-            String(input),
-            init,
-            "approval.resolve",
-          )
-        ) {
+        if (isTypedCommandRequest(String(input), init, "approval.resolve")) {
           approveSignal = init?.signal;
           return new Promise<Response>((resolve) => {
             releaseApprove = () => {
@@ -3478,13 +3492,7 @@ describe("live AG-UI frame taxonomy", () => {
     vi.stubGlobal(
       "fetch",
       vi.fn((input: RequestInfo | URL, init?: RequestInit) => {
-        if (
-          isTypedCommandRequest(
-            String(input),
-            init,
-            "approval.resolve",
-          )
-        ) {
+        if (isTypedCommandRequest(String(input), init, "approval.resolve")) {
           // Hang until aborted.
           return new Promise<Response>((_resolve, reject) => {
             init?.signal?.addEventListener("abort", () => {
@@ -3924,9 +3932,7 @@ describe("chat action cards", () => {
 
     const events = await collectTurn(transport, "Read my repositories");
     const starts = events.filter(
-      (
-        event,
-      ): event is Extract<TurnEvent, { event: "block.started" }> =>
+      (event): event is Extract<TurnEvent, { event: "block.started" }> =>
         event.event === "block.started" && event.block.type === "action_card",
     );
     expect(starts).toHaveLength(1);
@@ -5491,9 +5497,9 @@ describe("assistant prose fences stay inert", () => {
 
     const history = await transport.getHistory(CONVERSATION_ID);
 
-    expect(history.messages.find((message) => message.id === "w1")?.blocks).toEqual([
-      { type: "text", block_id: "w1-text", text: CONTENT },
-    ]);
+    expect(
+      history.messages.find((message) => message.id === "w1")?.blocks,
+    ).toEqual([{ type: "text", block_id: "w1-text", text: CONTENT }]);
   });
 });
 
@@ -5517,8 +5523,23 @@ describe("a conversation with no committed turn has no server transcript", () =>
     expect(history.conversation.id).toBe(CONVERSATION_ID);
   });
 
-  it("types a 404 for a conversation it has never seen as not-found", async () => {
-    stubFetch();
+  it.each([
+    [
+      "an Aevatar error envelope",
+      () =>
+        jsonResponse(
+          { code: "CONVERSATION_NOT_FOUND", message: "Missing." },
+          404,
+        ),
+    ],
+    ["an empty body", () => new Response(null, { status: 404 })],
+  ])("types a 404 with %s as not-found", async (_label, response) => {
+    stubFetch((url, init) =>
+      url.endsWith("/nyxid-chat-never-created") &&
+      (init?.method ?? "GET") === "GET"
+        ? response()
+        : undefined,
+    );
     const transport = new AevatarAssistantTransport();
 
     await expect(
@@ -5646,6 +5667,25 @@ describe("studio new chats and typed actor compatibility", () => {
             }),
           );
         }
+        if (
+          url === `${ASSISTANT_BASE}/conversations/${WORKFLOW_CONVERSATION}` &&
+          (init?.method ?? "GET") === "GET"
+        ) {
+          return Promise.resolve(
+            jsonResponse({
+              messages: [
+                {
+                  id: "workflow-seed-assistant",
+                  role: "assistant",
+                  content: "Earlier reply",
+                  timestamp: 1785297100000,
+                  turnId: "turn-workflow-seed",
+                },
+              ],
+              stateVersion: 2,
+            }),
+          );
+        }
         return active(input, init);
       }),
     );
@@ -5656,6 +5696,7 @@ describe("studio new chats and typed actor compatibility", () => {
         (conversation) => conversation.id === WORKFLOW_CONVERSATION,
       );
       if (!seeded) throw new Error("workflow conversation did not merge");
+      await transport.getHistory(WORKFLOW_CONVERSATION);
       return seeded;
     } finally {
       vi.stubGlobal("fetch", active);
@@ -5679,6 +5720,38 @@ describe("studio new chats and typed actor compatibility", () => {
         reject(error instanceof Error ? error : new Error(String(error)));
       }
     });
+  }
+
+  function workflowHistory(
+    stateVersion: number,
+    turnId = "turn-workflow-seed",
+  ): {
+    readonly messages: readonly Record<string, unknown>[];
+    readonly stateVersion: number;
+  } {
+    return {
+      messages: [
+        {
+          id: `assistant-${turnId}`,
+          role: "assistant",
+          content: "Persisted reply",
+          timestamp: 1785297100000,
+          turnId,
+        },
+      ],
+      stateVersion,
+    };
+  }
+
+  function reservationUnavailable(): ChatStreamHeadersResult {
+    return {
+      kind: "http_error",
+      status: 503,
+      body: JSON.stringify({
+        code: "CHAT_HISTORY_RESERVATION_UNAVAILABLE",
+        message: "Conversation history is still materializing.",
+      }),
+    };
   }
 
   it("cancels a studio first turn before its placeholder is canonicalized", async () => {
@@ -5992,7 +6065,8 @@ describe("studio new chats and typed actor compatibility", () => {
     const cards = history.messages
       .flatMap((message) => message.blocks)
       .filter(
-        (block): block is ActionCardContentBlock => block.type === "action_card",
+        (block): block is ActionCardContentBlock =>
+          block.type === "action_card",
       );
     expect(cards).toHaveLength(1);
     expect(cards[0]).toMatchObject({
@@ -6220,7 +6294,7 @@ describe("studio new chats and typed actor compatibility", () => {
     expect(events[events.length - 1]?.event).toBe("turn.completed");
   });
 
-  it("continues the conversation with the observed stateVersion and a fresh commandId", async () => {
+  it("continues with the observed stateVersion and no client commandId", async () => {
     const mock = stubFetch(
       routeWorkflow([
         ...WORKFLOW_PREAMBLE,
@@ -6241,14 +6315,21 @@ describe("studio new chats and typed actor compatibility", () => {
         ([, init]) => JSON.parse(String(init?.body)) as Record<string, unknown>,
       );
     expect(turnBodies).toHaveLength(2);
-    // Existing chatc rows stay on the workflow route. Before a stream supplies
-    // a newer watermark, the compatibility floor is 1.
+    // Existing chatc rows stay on the workflow route and use the transcript
+    // watermark hydrated by the seed helper. No watermark is fabricated.
     expect(turnBodies[0]?.["conversationId"]).toBe(WORKFLOW_CONVERSATION);
-    expect(turnBodies[0]?.["minimumStateVersion"]).toBe(1);
+    expect(turnBodies[0]?.["minimumStateVersion"]).toBe(2);
+    expect(Object.keys(turnBodies[0] ?? {})).toEqual([
+      "prompt",
+      "conversationId",
+      "minimumStateVersion",
+      "sessionId",
+    ]);
     // The follow-up uses the watermark from the first turn's chat.context.
     expect(turnBodies[1]?.["conversationId"]).toBe(WORKFLOW_CONVERSATION);
     expect(turnBodies[1]?.["minimumStateVersion"]).toBe(3);
-    expect(turnBodies[1]?.["commandId"]).not.toBe(turnBodies[0]?.["commandId"]);
+    expect(turnBodies[0]).not.toHaveProperty("commandId");
+    expect(turnBodies[1]).not.toHaveProperty("commandId");
   });
 
   it("reuses one sessionId for every turn of a conversation", async () => {
@@ -6266,6 +6347,7 @@ describe("studio new chats and typed actor compatibility", () => {
     // turn's chat.context: the session must survive that re-key.
     const conversation = await transport.createConversation();
     await collectWorkflowTurn(transport, conversation.id, "first");
+    await transport.getHistory(conversation.id);
     await collectWorkflowTurn(transport, conversation.id, "second");
 
     const bodies = mock.mock.calls
@@ -6276,13 +6358,1151 @@ describe("studio new chats and typed actor compatibility", () => {
     expect(bodies).toHaveLength(2);
     const sessionId = bodies[0]?.["sessionId"];
     expect(sessionId).toMatch(/^[0-9a-f-]{36}$/);
-    // Same session across turns; the commandId still rotates per turn.
+    // A same-conversation history re-read must not count as a reopen or remint.
     expect(bodies[1]?.["sessionId"]).toBe(sessionId);
-    expect(bodies[1]?.["commandId"]).not.toBe(bodies[0]?.["commandId"]);
+    expect(bodies[1]).not.toHaveProperty("commandId");
     // The create turn carries no conversationId, so it stays on the studio
     // branch of the upstream dispatcher.
     expect(bodies[0]?.["conversationId"]).toBeUndefined();
     expect(bodies[1]?.["conversationId"]).toBe(WORKFLOW_CONVERSATION);
+  });
+
+  it("refreshes and raises the fence only for the named reservation 503", async () => {
+    vi.useFakeTimers();
+    try {
+      let streamAttempt = 0;
+      const streams = mockChatStreams((request) => {
+        if (request.url !== WORKFLOW_URL) return undefined;
+        streamAttempt += 1;
+        if (streamAttempt === 1) return { headers: reservationUnavailable() };
+        return {
+          frames: [
+            workflowContextFrame("5"),
+            { runStarted: { threadId: RUN_ACTOR, runId: RUN_ACTOR } },
+            ...WORKFLOW_TAIL,
+          ],
+        };
+      });
+      stubFetch((url, init) =>
+        url === `${ASSISTANT_BASE}/conversations/${WORKFLOW_CONVERSATION}` &&
+        (init?.method ?? "GET") === "GET"
+          ? jsonResponse(workflowHistory(5))
+          : undefined,
+      );
+      const transport = new AevatarAssistantTransport();
+      const conversation = await seedWorkflowConversation(transport);
+
+      const turn = collectWorkflowTurn(transport, conversation.id, "continue");
+      await vi.advanceTimersByTimeAsync(300);
+      const events = await turn;
+
+      expect(events.at(-1)).toMatchObject({
+        event: "turn.completed",
+        status: "completed",
+      });
+      const bodies = streams.mock.calls.map(
+        ([request]) => JSON.parse(request.bodyText) as Record<string, unknown>,
+      );
+      expect(bodies).toHaveLength(2);
+      expect(bodies[0]?.["minimumStateVersion"]).toBe(2);
+      expect(bodies[1]?.["minimumStateVersion"]).toBe(5);
+      expect(bodies[1]?.["sessionId"]).toBe(bodies[0]?.["sessionId"]);
+      expect(bodies[0]).not.toHaveProperty("commandId");
+      expect(bodies[1]).not.toHaveProperty("commandId");
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("waits for a below-fence refresh before retrying the continuation", async () => {
+    vi.useFakeTimers();
+    try {
+      let streamAttempt = 0;
+      let historyAttempt = 0;
+      const streams = mockChatStreams((request) => {
+        if (request.url !== WORKFLOW_URL) return undefined;
+        streamAttempt += 1;
+        return streamAttempt === 1
+          ? { headers: reservationUnavailable() }
+          : {
+              frames: [
+                workflowContextFrame("4"),
+                { runStarted: { threadId: RUN_ACTOR, runId: RUN_ACTOR } },
+                ...WORKFLOW_TAIL,
+              ],
+            };
+      });
+      stubFetch((url, init) => {
+        if (
+          url !== `${ASSISTANT_BASE}/conversations/${WORKFLOW_CONVERSATION}` ||
+          (init?.method ?? "GET") !== "GET"
+        ) {
+          return undefined;
+        }
+        historyAttempt += 1;
+        return jsonResponse(workflowHistory(historyAttempt === 1 ? 1 : 4));
+      });
+      const transport = new AevatarAssistantTransport();
+      const conversation = await seedWorkflowConversation(transport);
+
+      const turn = collectWorkflowTurn(transport, conversation.id, "continue");
+      await vi.advanceTimersByTimeAsync(1_200);
+      await turn;
+
+      expect(historyAttempt).toBe(2);
+      expect(streams).toHaveBeenCalledTimes(2);
+      expect(JSON.parse(streams.mock.calls[1]![0].bodyText)).toMatchObject({
+        minimumStateVersion: 4,
+      });
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it.each([
+    [
+      "an unrelated 503",
+      {
+        kind: "http_error",
+        status: 503,
+        body: JSON.stringify({ code: "OTHER_UNAVAILABLE", message: "No." }),
+      } satisfies ChatStreamHeadersResult,
+    ],
+    [
+      "a 500",
+      {
+        kind: "http_error",
+        status: 500,
+        body: JSON.stringify({ code: "ENGINE_FAILED", message: "Failed." }),
+      } satisfies ChatStreamHeadersResult,
+    ],
+    [
+      "an empty 503 body",
+      {
+        kind: "http_error",
+        status: 503,
+        body: "",
+      } satisfies ChatStreamHeadersResult,
+    ],
+    [
+      "a malformed 503 body",
+      {
+        kind: "http_error",
+        status: 503,
+        body: "{not-json",
+      } satisfies ChatStreamHeadersResult,
+    ],
+    [
+      "a network error",
+      {
+        kind: "network_error",
+        code: "network_error",
+        message: "offline",
+      } satisfies ChatStreamHeadersResult,
+    ],
+  ])(
+    "does not replay a workflow continuation after %s",
+    async (_label, headers) => {
+      const streams = mockChatStreams((request) =>
+        request.url === WORKFLOW_URL ? { headers } : undefined,
+      );
+      stubFetch();
+      const transport = new AevatarAssistantTransport();
+      const conversation = await seedWorkflowConversation(transport);
+
+      const events = await collectWorkflowTurn(
+        transport,
+        conversation.id,
+        "continue",
+      );
+
+      expect(events.at(-1)).toMatchObject({
+        event: "turn.completed",
+        status: "failed",
+      });
+      expect(streams).toHaveBeenCalledTimes(1);
+    },
+  );
+
+  it.each([404, 500])(
+    "does not replay when reservation refresh remains HTTP %i",
+    async (status) => {
+      vi.useFakeTimers();
+      try {
+        const streams = mockChatStreams((request) =>
+          request.url === WORKFLOW_URL
+            ? { headers: reservationUnavailable() }
+            : undefined,
+        );
+        stubFetch((url, init) =>
+          url === `${ASSISTANT_BASE}/conversations/${WORKFLOW_CONVERSATION}` &&
+          (init?.method ?? "GET") === "GET"
+            ? jsonResponse(
+                { code: "HISTORY_UNAVAILABLE", message: "Not ready." },
+                status,
+              )
+            : undefined,
+        );
+        const transport = new AevatarAssistantTransport();
+        const conversation = await seedWorkflowConversation(transport);
+
+        const turn = collectWorkflowTurn(
+          transport,
+          conversation.id,
+          "continue",
+        );
+        await vi.advanceTimersByTimeAsync(status === 500 ? 1_200 : 300);
+        const events = await turn;
+
+        expect(events.at(-1)).toMatchObject({
+          event: "turn.completed",
+          status: "failed",
+          error: {
+            code:
+              status === 404
+                ? "history_refresh_failed"
+                : "CHAT_HISTORY_RESERVATION_UNAVAILABLE",
+          },
+        });
+        expect(streams).toHaveBeenCalledTimes(1);
+      } finally {
+        vi.useRealTimers();
+      }
+    },
+  );
+
+  it("retries a status-less reservation refresh failure", async () => {
+    vi.useFakeTimers();
+    try {
+      let streamAttempt = 0;
+      let historyAttempt = 0;
+      const streams = mockChatStreams((request) => {
+        if (request.url !== WORKFLOW_URL) return undefined;
+        streamAttempt += 1;
+        return streamAttempt === 1
+          ? { headers: reservationUnavailable() }
+          : {
+              frames: [
+                workflowContextFrame("5"),
+                { runStarted: { threadId: RUN_ACTOR, runId: RUN_ACTOR } },
+                ...WORKFLOW_TAIL,
+              ],
+            };
+      });
+      stubFetch((url, init) => {
+        if (
+          url !== `${ASSISTANT_BASE}/conversations/${WORKFLOW_CONVERSATION}` ||
+          (init?.method ?? "GET") !== "GET"
+        ) {
+          return undefined;
+        }
+        historyAttempt += 1;
+        if (historyAttempt === 1) throw new TypeError("network disconnected");
+        return jsonResponse(workflowHistory(5));
+      });
+      const transport = new AevatarAssistantTransport();
+      const conversation = await seedWorkflowConversation(transport);
+
+      const turn = collectWorkflowTurn(transport, conversation.id, "continue");
+      await vi.advanceTimersByTimeAsync(1_200);
+      const events = await turn;
+
+      expect(events.at(-1)).toMatchObject({
+        event: "turn.completed",
+        status: "completed",
+      });
+      expect(historyAttempt).toBe(2);
+      expect(streams).toHaveBeenCalledTimes(2);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("fails reservation refresh immediately when the conversation is tombstoned", async () => {
+    vi.useFakeTimers();
+    try {
+      const streams = mockChatStreams((request) =>
+        request.url === WORKFLOW_URL
+          ? { headers: reservationUnavailable() }
+          : undefined,
+      );
+      let historyAttempt = 0;
+      const transport = new AevatarAssistantTransport();
+      const deletedConversationIds = (
+        transport as unknown as { deletedConversationIds: Set<string> }
+      ).deletedConversationIds;
+      stubFetch((url, init) => {
+        if (
+          url !== `${ASSISTANT_BASE}/conversations/${WORKFLOW_CONVERSATION}` ||
+          (init?.method ?? "GET") !== "GET"
+        ) {
+          return undefined;
+        }
+        historyAttempt += 1;
+        deletedConversationIds.add(WORKFLOW_CONVERSATION);
+        return jsonResponse(workflowHistory(5));
+      });
+      const conversation = await seedWorkflowConversation(transport);
+
+      const turn = collectWorkflowTurn(transport, conversation.id, "continue");
+      await vi.advanceTimersByTimeAsync(300);
+      const events = await turn;
+
+      expect(events.at(-1)).toMatchObject({
+        event: "turn.completed",
+        status: "failed",
+        error: {
+          code: "history_refresh_failed",
+          message: "Conversation was not found.",
+        },
+      });
+      expect(historyAttempt).toBe(1);
+      expect(streams).toHaveBeenCalledTimes(1);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("does not dispatch a retry when cancellation lands during the reservation wait", async () => {
+    vi.useFakeTimers();
+    try {
+      const streams = mockChatStreams((request) =>
+        request.url === WORKFLOW_URL
+          ? { headers: reservationUnavailable() }
+          : undefined,
+      );
+      stubFetch();
+      const transport = new AevatarAssistantTransport();
+      const conversation = await seedWorkflowConversation(transport);
+      const events: TurnEvent[] = [];
+      const handle = transport.sendMessage(
+        conversation.id,
+        "continue",
+        (event) => {
+          events.push(event);
+        },
+      );
+      await Promise.resolve();
+      await Promise.resolve();
+      handle.cancel();
+      await vi.runAllTimersAsync();
+
+      expect(events.at(-1)).toMatchObject({
+        event: "turn.completed",
+        status: "cancelled",
+      });
+      expect(streams).toHaveBeenCalledTimes(1);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("preflights a missing watermark before one optimistic append", async () => {
+    vi.useFakeTimers();
+    try {
+      let historyReady = false;
+      let readyHistoryAttempt = 0;
+      const streams = mockChatStreams((request) =>
+        request.url === WORKFLOW_URL
+          ? { frames: [...WORKFLOW_PREAMBLE, ...WORKFLOW_TAIL] }
+          : undefined,
+      );
+      stubFetch((url, init) =>
+        url === `${ASSISTANT_BASE}/conversations/${WORKFLOW_CONVERSATION}` &&
+        (init?.method ?? "GET") === "GET"
+          ? jsonResponse(
+              historyReady
+                ? ++readyHistoryAttempt === 1
+                  ? { messages: [], stateVersion: 4 }
+                  : workflowHistory(4)
+                : { messages: [], stateVersion: 0 },
+            )
+          : undefined,
+      );
+      const transport = new AevatarAssistantTransport();
+      const conversation = await seedWorkflowConversation(transport);
+      const internals = transport as unknown as {
+        conversations: Map<
+          string,
+          { stateVersion?: number; turnState: { messages: AssistantMessage[] } }
+        >;
+      };
+      const stored = internals.conversations.get(conversation.id)!;
+      stored.stateVersion = undefined;
+      const originalCount = stored.turnState.messages.length;
+
+      const failedTurn = collectWorkflowTurn(
+        transport,
+        conversation.id,
+        "continue",
+      );
+      expect(stored.turnState.messages).toHaveLength(originalCount);
+      await vi.advanceTimersByTimeAsync(3_000);
+      const failedEvents = await failedTurn;
+      expect(failedEvents.at(-1)).toMatchObject({
+        event: "turn.completed",
+        status: "failed",
+        error: { code: "history_synchronizing" },
+      });
+      expect(stored.turnState.messages).toHaveLength(originalCount);
+      expect(streams).not.toHaveBeenCalled();
+
+      historyReady = true;
+      const successfulTurn = collectWorkflowTurn(
+        transport,
+        conversation.id,
+        "continue",
+      );
+      await vi.advanceTimersByTimeAsync(300);
+      const successfulEvents = await successfulTurn;
+      expect(successfulEvents.at(-1)).toMatchObject({
+        event: "turn.completed",
+        status: "completed",
+      });
+      const current = internals.conversations.get(conversation.id)!;
+      expect(
+        current.turnState.messages.filter((message) => message.role === "user"),
+      ).toHaveLength(1);
+      expect(streams).toHaveBeenCalledTimes(1);
+      expect(readyHistoryAttempt).toBe(2);
+      expect(JSON.parse(streams.mock.calls[0]![0].bodyText)).toMatchObject({
+        minimumStateVersion: 4,
+      });
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("does not replay a continuation after an accepted stream truncates", async () => {
+    const streams = mockChatStreams((request) =>
+      request.url === WORKFLOW_URL
+        ? {
+            completion: {
+              kind: "network_error",
+              code: "stream_closed",
+              message: "truncated",
+            },
+          }
+        : undefined,
+    );
+    stubFetch();
+    const transport = new AevatarAssistantTransport();
+    const conversation = await seedWorkflowConversation(transport);
+
+    const events = await collectWorkflowTurn(
+      transport,
+      conversation.id,
+      "continue",
+    );
+
+    expect(events.at(-1)).toMatchObject({
+      event: "turn.completed",
+      status: "failed",
+      error: { code: "stream_closed" },
+    });
+    expect(streams).toHaveBeenCalledTimes(1);
+  });
+
+  it("reconciles a create context at stateVersion zero before its first continuation", async () => {
+    let streamAttempt = 0;
+    const streams = mockChatStreams((request) => {
+      if (request.url !== WORKFLOW_URL) return undefined;
+      streamAttempt += 1;
+      return streamAttempt === 1
+        ? {
+            frames: [
+              workflowContextFrame("0"),
+              { runStarted: { threadId: RUN_ACTOR, runId: RUN_ACTOR } },
+              ...WORKFLOW_TAIL,
+            ],
+          }
+        : {
+            frames: [
+              workflowContextFrame("3"),
+              { runStarted: { threadId: RUN_ACTOR, runId: RUN_ACTOR } },
+              ...WORKFLOW_TAIL,
+            ],
+          };
+    });
+    stubFetch((url, init) =>
+      url === `${ASSISTANT_BASE}/conversations/${WORKFLOW_CONVERSATION}` &&
+      (init?.method ?? "GET") === "GET"
+        ? jsonResponse(workflowHistory(2, WORKFLOW_TURN))
+        : undefined,
+    );
+    const transport = new AevatarAssistantTransport();
+    const conversation = await transport.createConversation();
+
+    await collectWorkflowTurn(transport, conversation.id, "create");
+    await collectWorkflowTurn(transport, conversation.id, "continue");
+
+    const bodies = streams.mock.calls.map(
+      ([request]) => JSON.parse(request.bodyText) as Record<string, unknown>,
+    );
+    expect(bodies).toHaveLength(2);
+    expect(bodies[0]).toHaveProperty("commandId");
+    expect(bodies[1]).toEqual({
+      prompt: "continue",
+      conversationId: WORKFLOW_CONVERSATION,
+      minimumStateVersion: 2,
+      sessionId: bodies[0]?.["sessionId"],
+    });
+  });
+
+  it("recovers after a context-free terminal and fails closed when recovery stays empty", async () => {
+    vi.useFakeTimers();
+    try {
+      const streams = mockChatStreams((request) =>
+        request.url === WORKFLOW_URL
+          ? {
+              frames: [
+                { runStarted: { threadId: RUN_ACTOR, runId: RUN_ACTOR } },
+                ...WORKFLOW_TAIL,
+              ],
+            }
+          : undefined,
+      );
+      let recoveryAttempts = 0;
+      stubFetch((url) => {
+        if (!url.includes("/conversations/create-recovery/")) return undefined;
+        recoveryAttempts += 1;
+        return jsonResponse(
+          { code: "CREATE_NOT_FOUND", message: "Not ready." },
+          404,
+        );
+      });
+      const transport = new AevatarAssistantTransport();
+      const conversation = await transport.createConversation();
+
+      const turn = collectWorkflowTurn(transport, conversation.id, "create");
+      await vi.advanceTimersByTimeAsync(3_000);
+      const events = await turn;
+
+      expect(events.at(-1)).toMatchObject({
+        event: "turn.completed",
+        status: "failed",
+        error: { code: "stream_protocol_error" },
+      });
+      expect(recoveryAttempts).toBe(4);
+      expect(streams).toHaveBeenCalledTimes(1);
+      expect(
+        (await transport.getHistory(conversation.id)).conversation.id,
+      ).toMatch(/^workflow-pending-/);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("retains a context-free error terminal when recovery stays empty", async () => {
+    vi.useFakeTimers();
+    try {
+      mockChatStreams((request) =>
+        request.url === WORKFLOW_URL
+          ? {
+              frames: [
+                { runStarted: { threadId: RUN_ACTOR, runId: RUN_ACTOR } },
+                {
+                  runError: {
+                    code: "WORKFLOW_FAILED",
+                    message: "The upstream workflow failed permanently.",
+                  },
+                },
+              ],
+            }
+          : undefined,
+      );
+      stubFetch((url) =>
+        url.includes("/conversations/create-recovery/")
+          ? jsonResponse(
+              { code: "CREATE_NOT_FOUND", message: "Not ready." },
+              404,
+            )
+          : undefined,
+      );
+      const transport = new AevatarAssistantTransport();
+      const conversation = await transport.createConversation();
+
+      const turn = collectWorkflowTurn(transport, conversation.id, "create");
+      await vi.advanceTimersByTimeAsync(3_000);
+      const events = await turn;
+
+      expect(events.at(-1)).toMatchObject({
+        event: "turn.completed",
+        status: "failed",
+        error: {
+          code: "WORKFLOW_FAILED",
+          message: "The upstream workflow failed permanently.",
+        },
+      });
+      expect(
+        (await transport.getHistory(conversation.id)).conversation.id,
+      ).toMatch(/^workflow-pending-/);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("preserves an error terminal after context-free create recovery", async () => {
+    const streams = mockChatStreams((request) =>
+      request.url === WORKFLOW_URL
+        ? {
+            frames: [
+              { runStarted: { threadId: RUN_ACTOR, runId: RUN_ACTOR } },
+              {
+                runError: {
+                  code: "WORKFLOW_FAILED",
+                  message: "The workflow engine rejected this turn.",
+                },
+              },
+            ],
+          }
+        : undefined,
+    );
+    stubFetch((url, init) => {
+      if (url.includes("/conversations/create-recovery/")) {
+        return jsonResponse({
+          status: "append_committed",
+          conversationId: WORKFLOW_CONVERSATION,
+          stateVersion: 3,
+          turnId: WORKFLOW_TURN,
+        });
+      }
+      if (
+        url === `${ASSISTANT_BASE}/conversations/${WORKFLOW_CONVERSATION}` &&
+        (init?.method ?? "GET") === "GET"
+      ) {
+        return jsonResponse(workflowHistory(3, WORKFLOW_TURN));
+      }
+      return undefined;
+    });
+    const transport = new AevatarAssistantTransport();
+    const conversation = await transport.createConversation();
+
+    const events = await collectWorkflowTurn(
+      transport,
+      conversation.id,
+      "create",
+    );
+
+    expect(events.at(-1)).toMatchObject({
+      event: "turn.completed",
+      status: "failed",
+      error: {
+        code: "WORKFLOW_FAILED",
+        message: "The workflow engine rejected this turn.",
+      },
+    });
+    expect(streams).toHaveBeenCalledTimes(1);
+  });
+
+  it("preserves a blocked terminal after context-free create recovery", async () => {
+    mockChatStreams((request) =>
+      request.url === WORKFLOW_URL
+        ? {
+            frames: [
+              { runStarted: { threadId: RUN_ACTOR, runId: RUN_ACTOR } },
+              { runFinished: { status: "blocked" } },
+            ],
+          }
+        : undefined,
+    );
+    stubFetch((url, init) => {
+      if (url.includes("/conversations/create-recovery/")) {
+        return jsonResponse({
+          status: "append_committed",
+          conversationId: WORKFLOW_CONVERSATION,
+          stateVersion: 3,
+          turnId: WORKFLOW_TURN,
+        });
+      }
+      if (
+        url === `${ASSISTANT_BASE}/conversations/${WORKFLOW_CONVERSATION}` &&
+        (init?.method ?? "GET") === "GET"
+      ) {
+        return jsonResponse(workflowHistory(3, WORKFLOW_TURN));
+      }
+      return undefined;
+    });
+    const transport = new AevatarAssistantTransport();
+    const conversation = await transport.createConversation();
+
+    const events = await collectWorkflowTurn(
+      transport,
+      conversation.id,
+      "create",
+    );
+
+    expect(events.at(-1)).toMatchObject({
+      event: "turn.completed",
+      status: "blocked",
+    });
+  });
+
+  it("recovers a create truncated after RUN_STARTED", async () => {
+    const streams = mockChatStreams((request) =>
+      request.url === WORKFLOW_URL
+        ? {
+            frames: [{ runStarted: { threadId: RUN_ACTOR, runId: RUN_ACTOR } }],
+            completion: {
+              kind: "network_error",
+              code: "stream_closed",
+              message: "truncated",
+            },
+          }
+        : undefined,
+    );
+    const fetchMock = stubFetch((url, init) => {
+      if (url.includes("/conversations/create-recovery/")) {
+        return jsonResponse({
+          status: "append_committed",
+          conversationId: WORKFLOW_CONVERSATION,
+          stateVersion: 3,
+          turnId: WORKFLOW_TURN,
+        });
+      }
+      if (
+        url === `${ASSISTANT_BASE}/conversations/${WORKFLOW_CONVERSATION}` &&
+        (init?.method ?? "GET") === "GET"
+      ) {
+        return jsonResponse(workflowHistory(3, WORKFLOW_TURN));
+      }
+      return undefined;
+    });
+    const transport = new AevatarAssistantTransport();
+    const conversation = await transport.createConversation();
+
+    const events = await collectWorkflowTurn(
+      transport,
+      conversation.id,
+      "create",
+    );
+
+    expect(events.at(-1)).toMatchObject({
+      event: "turn.completed",
+      status: "completed",
+    });
+    expect(streams).toHaveBeenCalledTimes(1);
+    expect(
+      fetchMock.mock.calls.some(([input]) =>
+        String(input).includes("/conversations/create-recovery/"),
+      ),
+    ).toBe(true);
+    expect((await transport.getHistory(conversation.id)).conversation.id).toBe(
+      WORKFLOW_CONVERSATION,
+    );
+  });
+
+  it("recovers a context-free create and waits for its assistant transcript", async () => {
+    vi.useFakeTimers();
+    try {
+      const streams = mockChatStreams((request) =>
+        request.url === WORKFLOW_URL ? {} : undefined,
+      );
+      let recoveryAttempt = 0;
+      let historyAttempt = 0;
+      const fetchMock = stubFetch((url, init) => {
+        if (
+          url.includes("/conversations/create-recovery/") &&
+          (init?.method ?? "GET") === "GET"
+        ) {
+          recoveryAttempt += 1;
+          return recoveryAttempt === 1
+            ? jsonResponse(
+                { code: "CREATE_NOT_FOUND", message: "Not ready." },
+                404,
+              )
+            : jsonResponse({
+                status: "append_committed",
+                conversationId: WORKFLOW_CONVERSATION,
+                stateVersion: 4,
+                turnId: WORKFLOW_TURN,
+              });
+        }
+        if (
+          url === `${ASSISTANT_BASE}/conversations/${WORKFLOW_CONVERSATION}` &&
+          (init?.method ?? "GET") === "GET"
+        ) {
+          historyAttempt += 1;
+          return jsonResponse(
+            historyAttempt === 1
+              ? { messages: [], stateVersion: 4 }
+              : workflowHistory(4, WORKFLOW_TURN),
+          );
+        }
+        return undefined;
+      });
+      const transport = new AevatarAssistantTransport();
+      const conversation = await transport.createConversation();
+
+      const turn = collectWorkflowTurn(transport, conversation.id, "create");
+      await vi.advanceTimersByTimeAsync(600);
+      const events = await turn;
+
+      expect(events.at(-1)).toMatchObject({
+        event: "turn.completed",
+        status: "completed",
+      });
+      expect(recoveryAttempt).toBe(2);
+      expect(historyAttempt).toBe(2);
+      expect(streams).toHaveBeenCalledTimes(1);
+      expect(
+        fetchMock.mock.calls.some(([input]) =>
+          String(input).includes("/conversations/create-recovery/"),
+        ),
+      ).toBe(true);
+      expect(
+        (await transport.getHistory(conversation.id)).conversation.id,
+      ).toBe(WORKFLOW_CONVERSATION);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it.each([
+    [
+      "a truncated response",
+      {
+        completion: {
+          kind: "network_error",
+          code: "stream_closed",
+          message: "truncated",
+        } satisfies ChatStreamCompletionResult,
+      },
+    ],
+    [
+      "a network failure",
+      {
+        headers: {
+          kind: "network_error",
+          code: "network_error",
+          message: "offline",
+        } satisfies ChatStreamHeadersResult,
+      },
+    ],
+  ])(
+    "uses create recovery after %s without replaying the POST",
+    async (_label, result) => {
+      const streams = mockChatStreams((request) =>
+        request.url === WORKFLOW_URL ? result : undefined,
+      );
+      stubFetch((url, init) => {
+        if (url.includes("/conversations/create-recovery/")) {
+          return jsonResponse({
+            status: "append_committed",
+            conversationId: WORKFLOW_CONVERSATION,
+            stateVersion: 3,
+            turnId: WORKFLOW_TURN,
+          });
+        }
+        if (
+          url === `${ASSISTANT_BASE}/conversations/${WORKFLOW_CONVERSATION}` &&
+          (init?.method ?? "GET") === "GET"
+        ) {
+          return jsonResponse(workflowHistory(3, WORKFLOW_TURN));
+        }
+        return undefined;
+      });
+      const transport = new AevatarAssistantTransport();
+      const conversation = await transport.createConversation();
+
+      const events = await collectWorkflowTurn(
+        transport,
+        conversation.id,
+        "create",
+      );
+
+      expect(events.at(-1)).toMatchObject({
+        event: "turn.completed",
+        status: "completed",
+      });
+      expect(streams).toHaveBeenCalledTimes(1);
+    },
+  );
+
+  it("adopts abort-path recovery after RUN_STARTED supplied a run actor id", async () => {
+    let markRunStartedDelivered: (() => void) | undefined;
+    const runStartedDelivered = new Promise<void>((resolve) => {
+      markRunStartedDelivered = resolve;
+    });
+    const streamSpy = vi
+      .spyOn(chatStreamClient, "start")
+      .mockImplementation((request): ChatStreamRequestHandle => {
+        queueMicrotask(() => {
+          request.onFrames([
+            { runStarted: { threadId: RUN_ACTOR, runId: RUN_ACTOR } },
+          ]);
+          markRunStartedDelivered?.();
+        });
+        return {
+          headers: Promise.resolve({
+            kind: "response",
+            status: 200,
+            contentType: "text/event-stream",
+          }),
+          completion: new Promise<ChatStreamCompletionResult>(() => undefined),
+          cancel() {
+            // The production client settles this through the abort signal. The
+            // transport's independent recovery must not share that signal.
+          },
+        };
+      });
+    const fetchMock = stubFetch((url, init) => {
+      if (url.includes("/conversations/create-recovery/")) {
+        return jsonResponse({
+          status: "append_committed",
+          conversationId: WORKFLOW_CONVERSATION,
+          stateVersion: 3,
+          turnId: WORKFLOW_TURN,
+        });
+      }
+      if (
+        url === `${ASSISTANT_BASE}/conversations/${WORKFLOW_CONVERSATION}` &&
+        (init?.method ?? "GET") === "GET"
+      ) {
+        return jsonResponse(workflowHistory(3, WORKFLOW_TURN));
+      }
+      return undefined;
+    });
+    const transport = new AevatarAssistantTransport();
+    const conversation = await transport.createConversation();
+    const events: TurnEvent[] = [];
+    const handle = transport.sendMessage(conversation.id, "create", (event) => {
+      events.push(event);
+    });
+    await vi.waitFor(() => expect(streamSpy).toHaveBeenCalledTimes(1));
+    await runStartedDelivered;
+
+    handle.cancel();
+
+    expect(events.at(-1)).toMatchObject({
+      event: "turn.completed",
+      status: "cancelled",
+    });
+    await vi.waitFor(() =>
+      expect(
+        fetchMock.mock.calls.some(([input]) =>
+          String(input).includes("/conversations/create-recovery/"),
+        ),
+      ).toBe(true),
+    );
+    await vi.waitFor(async () => {
+      expect(
+        (await transport.getHistory(conversation.id)).conversation.id,
+      ).toBe(WORKFLOW_CONVERSATION);
+    });
+    expect(
+      fetchMock.mock.calls.some(([input, init]) =>
+        isTypedCommandRequest(
+          String(input),
+          init as RequestInit | undefined,
+          "task.stop",
+        ),
+      ),
+    ).toBe(false);
+  });
+
+  it("rejects a create recovery identity outside the chatc family", async () => {
+    mockChatStreams((request) =>
+      request.url === WORKFLOW_URL ? {} : undefined,
+    );
+    stubFetch((url) =>
+      url.includes("/conversations/create-recovery/")
+        ? jsonResponse({
+            status: "append_committed",
+            conversationId: CONVERSATION_ID,
+            stateVersion: 3,
+            turnId: WORKFLOW_TURN,
+          })
+        : undefined,
+    );
+    const transport = new AevatarAssistantTransport();
+    const conversation = await transport.createConversation();
+
+    const events = await collectWorkflowTurn(
+      transport,
+      conversation.id,
+      "create",
+    );
+
+    expect(events.at(-1)).toMatchObject({
+      event: "turn.completed",
+      status: "failed",
+      error: { code: "stream_protocol_error" },
+    });
+  });
+
+  it("rejects workflow context from a different authenticated scope", async () => {
+    const fetchMock = stubFetch(
+      routeWorkflow([
+        {
+          custom: {
+            name: "aevatar.chat.context",
+            payload: {
+              scopeId: "another-user",
+              conversationId: WORKFLOW_CONVERSATION,
+              turnId: WORKFLOW_TURN,
+              stateVersion: "0",
+            },
+          },
+        },
+        ...WORKFLOW_TAIL,
+      ]),
+    );
+    const transport = new AevatarAssistantTransport();
+    const conversation = await transport.createConversation();
+
+    const events = await collectWorkflowTurn(
+      transport,
+      conversation.id,
+      "create",
+    );
+
+    expect(events.at(-1)).toMatchObject({
+      event: "turn.completed",
+      status: "failed",
+      error: { code: "stream_protocol_error" },
+    });
+    expect(
+      fetchMock.mock.calls.some(([input]) =>
+        String(input).includes("/conversations/create-recovery/"),
+      ),
+    ).toBe(false);
+  });
+
+  it("accepts workflow context when the local auth user is not hydrated", async () => {
+    useAuthStore.getState().setUser(null);
+    const fetchMock = stubFetch(
+      routeWorkflow([...WORKFLOW_PREAMBLE, ...WORKFLOW_TAIL]),
+    );
+    const transport = new AevatarAssistantTransport();
+    const conversation = await transport.createConversation();
+
+    const events = await collectWorkflowTurn(
+      transport,
+      conversation.id,
+      "create",
+    );
+
+    expect(events.at(-1)).toMatchObject({
+      event: "turn.completed",
+      status: "completed",
+    });
+    expect(
+      fetchMock.mock.calls.some(([input]) =>
+        String(input).includes("/conversations/create-recovery/"),
+      ),
+    ).toBe(false);
+  });
+
+  it("fails closed after recovery exhaustion and reuses the command for the same prompt", async () => {
+    vi.useFakeTimers();
+    try {
+      let streamAttempt = 0;
+      const streams = mockChatStreams((request) => {
+        if (request.url !== WORKFLOW_URL) return undefined;
+        streamAttempt += 1;
+        return streamAttempt === 1
+          ? {}
+          : {
+              headers: {
+                kind: "http_error",
+                status: 400,
+                body: JSON.stringify({ code: "INVALID", message: "Rejected." }),
+              },
+            };
+      });
+      stubFetch((url) =>
+        url.includes("/conversations/create-recovery/")
+          ? jsonResponse(
+              { code: "CREATE_NOT_FOUND", message: "Not ready." },
+              404,
+            )
+          : undefined,
+      );
+      const transport = new AevatarAssistantTransport();
+      const conversation = await transport.createConversation();
+
+      const first = collectWorkflowTurn(
+        transport,
+        conversation.id,
+        "same prompt",
+      );
+      await vi.advanceTimersByTimeAsync(3_000);
+      const firstEvents = await first;
+      expect(firstEvents.at(-1)).toMatchObject({
+        event: "turn.completed",
+        status: "failed",
+      });
+
+      const secondEvents = await collectWorkflowTurn(
+        transport,
+        conversation.id,
+        "same prompt",
+      );
+      expect(secondEvents.at(-1)).toMatchObject({
+        event: "turn.completed",
+        status: "failed",
+      });
+      const bodies = streams.mock.calls.map(
+        ([request]) => JSON.parse(request.bodyText) as Record<string, unknown>,
+      );
+      expect(bodies).toHaveLength(2);
+      expect(bodies[1]?.["commandId"]).toBe(bodies[0]?.["commandId"]);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("remints a workflow session when server history is restored", async () => {
+    const SECOND_CONVERSATION = "chatc-11111111111111111111111111111111";
+    const sessionIds: string[] = [];
+    mockChatStreams((request) => {
+      if (request.url !== WORKFLOW_URL) return undefined;
+      sessionIds.push(
+        String(
+          (JSON.parse(request.bodyText) as Record<string, unknown>)[
+            "sessionId"
+          ],
+        ),
+      );
+      return { frames: [...WORKFLOW_PREAMBLE, ...WORKFLOW_TAIL] };
+    });
+    stubFetch((url, init) => {
+      if (
+        url === `${ASSISTANT_BASE}/conversations` &&
+        (init?.method ?? "GET") === "GET"
+      ) {
+        return jsonResponse({
+          conversations: [
+            { id: WORKFLOW_CONVERSATION, title: "First" },
+            { id: SECOND_CONVERSATION, title: "Second" },
+          ],
+        });
+      }
+      if (
+        url === `${ASSISTANT_BASE}/conversations/${WORKFLOW_CONVERSATION}` &&
+        (init?.method ?? "GET") === "GET"
+      ) {
+        return jsonResponse(workflowHistory(3));
+      }
+      if (
+        url === `${ASSISTANT_BASE}/conversations/${SECOND_CONVERSATION}` &&
+        (init?.method ?? "GET") === "GET"
+      ) {
+        return jsonResponse(workflowHistory(3, "turn-second-seed"));
+      }
+      return undefined;
+    });
+    const transport = new AevatarAssistantTransport();
+    await transport.listConversations();
+    await transport.getHistory(WORKFLOW_CONVERSATION);
+    await collectWorkflowTurn(transport, WORKFLOW_CONVERSATION, "first");
+    await transport.getHistory(SECOND_CONVERSATION);
+    await transport.getHistory(WORKFLOW_CONVERSATION);
+    await collectWorkflowTurn(transport, WORKFLOW_CONVERSATION, "second");
+
+    expect(sessionIds).toHaveLength(2);
+    expect(sessionIds[1]).not.toBe(sessionIds[0]);
   });
 
   it("fails closed when a create turn never names its server conversation", async () => {

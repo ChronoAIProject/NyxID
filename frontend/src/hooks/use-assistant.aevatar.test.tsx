@@ -11,6 +11,8 @@ import {
 } from "@/lib/assistant/chat-stream-worker-client";
 import type { ChatStreamFrame } from "@/lib/assistant/chat-stream-worker-protocol";
 import { assistantTransport } from "@/lib/assistant/transport";
+import { useAuthStore } from "@/stores/auth-store";
+import type { User } from "@/types/api";
 import type {
   ConversationHistory,
   TurnEpisode,
@@ -228,6 +230,7 @@ interface ProbeSession {
 }
 
 async function startProbe(): Promise<ProbeSession> {
+  useAuthStore.getState().setUser({ id: "user-probe" } as User);
   let historyMode: HistoryMode = "missing";
   let serverMessages = serverTurnMessages(
     TURN_ID,
@@ -400,6 +403,7 @@ function onlyActionActivityMessageId(events: readonly TurnEvent[]): string {
 afterEach(() => {
   vi.restoreAllMocks();
   vi.unstubAllGlobals();
+  useAuthStore.getState().setUser(null);
 });
 
 describe("workflow action-card projection probes", () => {
