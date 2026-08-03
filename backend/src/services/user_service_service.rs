@@ -242,6 +242,25 @@ pub async fn list_user_services_with_sources(
     db: &mongodb::Database,
     user_id: &str,
 ) -> AppResult<Vec<UserServiceWithSource>> {
+    list_user_services_with_sources_impl(db, user_id, false).await
+}
+
+/// List services for an internal policy projection, retaining scope-denied
+/// organization rows as `allowed = false` evidence. This must not back an API
+/// response because those rows contain service metadata hidden by the normal
+/// listing contract.
+pub(crate) async fn list_user_services_with_sources_for_policy(
+    db: &mongodb::Database,
+    user_id: &str,
+) -> AppResult<Vec<UserServiceWithSource>> {
+    list_user_services_with_sources_impl(db, user_id, true).await
+}
+
+async fn list_user_services_with_sources_impl(
+    db: &mongodb::Database,
+    user_id: &str,
+    include_scope_denied: bool,
+) -> AppResult<Vec<UserServiceWithSource>> {
     let mut out: Vec<UserServiceWithSource> = list_user_services(db, user_id)
         .await?
         .into_iter()
@@ -280,21 +299,23 @@ pub async fn list_user_services_with_sources(
 
         let org_services = list_user_services(db, &m.org_user_id).await?;
         for svc in org_services {
-            // Scope filter: drop services outside the effective member scope
-            // entirely. We do NOT return them with
-            // `allowed: false` because the response payload still contains
-            // endpoint_id, api_key_id, auth metadata, etc. -- a member
-            // scoped to service A must not see metadata for service B.
+            // The normal listing drops services outside the effective member
+            // scope because its response contains endpoint, key, and auth
+            // metadata. Internal policy projections retain them only so a
+            // known denial is not misreported as absence.
             //
             // Role-based "can see but not proxy" (viewer) remains visible
             // with `allowed: false` because viewers are explicitly entitled
             // to see the listing of services their org has.
-            if !crate::services::org_role_scope_service::scope_allows(&effective_scope, &svc.id) {
+            let scope_allowed =
+                crate::services::org_role_scope_service::scope_allows(&effective_scope, &svc.id);
+            if !scope_allowed && !include_scope_denied {
                 continue;
             }
             // Viewer can see but not proxy. Admin-only services are also
             // visible to members, but not executable by them.
-            let allowed = m.role.can_proxy() && (!svc.admin_only || m.role.can_admin());
+            let allowed =
+                scope_allowed && m.role.can_proxy() && (!svc.admin_only || m.role.can_admin());
 
             out.push(UserServiceWithSource {
                 service: svc,

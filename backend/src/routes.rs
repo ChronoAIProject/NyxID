@@ -1294,7 +1294,7 @@ pub fn build_router(
     // the human-only router below: the chat surface -- approvals above all --
     // is a human session surface, so API-key, service-account, delegated, and
     // relay callers are rejected by that router's layers.
-    let assistant_routes = Router::new()
+    let assistant_proxy_routes = Router::new()
         .route(
             "/conversations",
             get(handlers::assistant::list_conversations),
@@ -1323,6 +1323,12 @@ pub fn build_router(
                 crate::services::billing::BillingIngress::Proxy,
             ),
         ));
+    let assistant_routes = Router::new()
+        .route(
+            "/readiness",
+            get(handlers::assistant_readiness::get_readiness),
+        )
+        .merge(assistant_proxy_routes);
 
     let ssh_billing_routes = ssh_billing_routes!(register_billing_routes, Router::new());
 
