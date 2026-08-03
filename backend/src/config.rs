@@ -135,6 +135,11 @@ pub struct AppConfig {
     /// `ENCRYPTION_KEY` if configured, otherwise from the JWT private key PEM.
     pub audit_chain_hmac_key: Option<String>,
 
+    /// Explicit HMAC key (64 hex chars = 32 bytes) used for billing-ledger
+    /// hash chaining. Same derivation fallback as the audit chain, with a
+    /// distinct `billing-ledger` domain label.
+    pub billing_ledger_hmac_key: Option<String>,
+
     /// Service account token TTL in seconds (default: 3600 = 1 hour)
     pub sa_token_ttl_secs: i64,
 
@@ -443,6 +448,14 @@ impl std::fmt::Debug for AppConfig {
             .field(
                 "audit_chain_hmac_key",
                 if self.audit_chain_hmac_key.is_some() {
+                    &"Some([REDACTED])"
+                } else {
+                    &"None"
+                },
+            )
+            .field(
+                "billing_ledger_hmac_key",
+                if self.billing_ledger_hmac_key.is_some() {
                     &"Some([REDACTED])"
                 } else {
                     &"None"
@@ -821,6 +834,9 @@ impl AppConfig {
                 .ok()
                 .filter(|s| !s.trim().is_empty()),
             audit_chain_hmac_key: env::var("AUDIT_CHAIN_HMAC_KEY")
+                .ok()
+                .filter(|s| !s.trim().is_empty()),
+            billing_ledger_hmac_key: env::var("BILLING_LEDGER_HMAC_KEY")
                 .ok()
                 .filter(|s| !s.trim().is_empty()),
 
@@ -1368,6 +1384,7 @@ mod tests {
             broker_require_admin_capability: false,
             cli_pairing_hmac_key: None,
             audit_chain_hmac_key: None,
+            billing_ledger_hmac_key: None,
             sa_token_ttl_secs: 3600,
             telemetry_dsn: None,
             telemetry_host: None,

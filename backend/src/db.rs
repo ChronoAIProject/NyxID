@@ -2037,6 +2037,31 @@ pub async fn ensure_indexes(db: &Database) -> Result<(), mongodb::error::Error> 
         )
         .await?;
 
+    // ── billing_ledger ──
+    // The unique seq index is what turns concurrent chain appends into a
+    // detectable retry (duplicate key) instead of a fork.
+    let billing_ledger = db.collection::<Document>(crate::models::billing_ledger::COLLECTION_NAME);
+    billing_ledger
+        .create_index(
+            IndexModel::builder()
+                .keys(doc! { "seq": 1 })
+                .options(
+                    IndexOptions::builder()
+                        .name("billing_ledger_seq_unique".to_string())
+                        .unique(true)
+                        .build(),
+                )
+                .build(),
+        )
+        .await?;
+    billing_ledger
+        .create_index(
+            IndexModel::builder()
+                .keys(doc! { "owner_id": 1, "created_at": -1 })
+                .build(),
+        )
+        .await?;
+
     // ── billing_rate_cache ──
     let billing_rate_cache =
         db.collection::<Document>(crate::models::billing_rate_cache::COLLECTION_NAME);
