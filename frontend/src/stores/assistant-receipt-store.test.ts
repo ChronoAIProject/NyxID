@@ -55,6 +55,8 @@ describe("assistant receipt store", () => {
       const now = Date.now();
       recordCreateReceipt("command-a", "workflow-pending-a", now);
       retireReceiptAfterMaterialization("command-a", now);
+      retireReceiptAfterMaterialization("command-a", now);
+      expect(vi.getTimerCount()).toBe(1);
 
       await vi.advanceTimersByTimeAsync(59_999);
       expect(findReceiptByPlaceholder("workflow-pending-a")).toBeDefined();

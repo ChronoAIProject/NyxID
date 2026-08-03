@@ -21,7 +21,12 @@ import capturedHistory from "@/lib/assistant/__fixtures__/aevatar-chat-history.j
 import capturedStream from "@/lib/assistant/__fixtures__/aevatar-nyxid-chat-stream.sse?raw";
 import { useAuthStore } from "@/stores/auth-store";
 import {
+  adoptReceiptIdentity,
+  deleteReceipt,
+  findReceiptByPlaceholder,
   listDeletionIntents,
+  recordCreateReceipt,
+  recordDeletionIntent,
   resetAssistantReceiptStoreForTests,
 } from "@/stores/assistant-receipt-store";
 import type { User } from "@/types/api";
@@ -31,6 +36,7 @@ import type {
   ContentBlock,
   Conversation,
   TurnEvent,
+  TurnReducerState,
 } from "@/types/assistant";
 
 const USER_ID = "add69059-bece-4f0e-9559-99cfd10b47eb";
@@ -5749,6 +5755,25 @@ describe("studio new chats and typed actor compatibility", () => {
     };
   }
 
+  function workflowInternals(transport: AevatarAssistantTransport) {
+    return transport as unknown as {
+      activeConversationId: string | null;
+      conversations: Map<
+        string,
+        {
+          turnState: TurnReducerState;
+          requiredTurnId?: string | null;
+          stateVersion?: number;
+          lastLocalTurnCompletedAt?: number;
+        }
+      >;
+      applyHistoryResponse(
+        conversationId: string,
+        body: unknown,
+      ): { turnState: TurnReducerState };
+    };
+  }
+
   function reservationUnavailable(): ChatStreamHeadersResult {
     return {
       kind: "http_error",
@@ -7734,6 +7759,273 @@ describe("studio new chats and typed actor compatibility", () => {
     ).toBe(false);
   });
 
+  it("does not expose syncing or poll create recovery during an active first turn", async () => {
+    vi.useFakeTimers();
+    try {
+      vi.spyOn(chatStreamClient, "start").mockImplementation(
+        (request): ChatStreamRequestHandle => {
+          const headers = Promise.resolve({
+            kind: "response" as const,
+            status: 200,
+            contentType: "text/event-stream",
+          });
+          const completion = headers.then(() => {
+            request.onFrames([
+              { runStarted: { threadId: RUN_ACTOR, runId: RUN_ACTOR } },
+            ]);
+            return new Promise<ChatStreamCompletionResult>(() => undefined);
+          });
+          return { headers, completion, cancel: vi.fn() };
+        },
+      );
+      const mock = stubFetch();
+      const transport = new AevatarAssistantTransport();
+      const placeholder = await transport.createConversation();
+      transport.sendMessage(placeholder.id, "healthy create", () => undefined);
+      expect(
+        (await transport.getHistory(placeholder.id)).awaitingProjection,
+      ).toBeUndefined();
+      const internals = workflowInternals(transport);
+      await vi.waitFor(() =>
+        expect(
+          internals.conversations.get(placeholder.id)?.turnState.activeTurn
+            ?.status,
+        ).toBe("running"),
+      );
+
+      const activeHistory = await transport.getHistory(placeholder.id);
+      expect(activeHistory.awaitingProjection).toBeUndefined();
+      const pendingOutcome = transport.reconcileProjection(placeholder.id);
+      await vi.advanceTimersByTimeAsync(2_000);
+      expect(
+        mock.mock.calls.some(([input]) =>
+          String(input).includes("/conversations/create-recovery/"),
+        ),
+      ).toBe(false);
+
+      useAuthStore.getState().setUser(null);
+      await expect(pendingOutcome).resolves.toMatchObject({
+        status: "timed_out",
+      });
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("keeps a new-chat mirror untouched while a follow-up turn is active", async () => {
+    let now = 0;
+    mockChatStreams((request) =>
+      request.url === WORKFLOW_URL
+        ? {
+            frames: [
+              ...WORKFLOW_PREAMBLE,
+              { textMessageStart: { messageId: "live-first" } },
+              { textMessageContent: { delta: "Local first reply" } },
+              { textMessageEnd: {} },
+              ...WORKFLOW_TAIL,
+            ],
+          }
+        : undefined,
+    );
+    stubFetch();
+    const transport = new AevatarAssistantTransport(() => now);
+    const placeholder = await transport.createConversation();
+    await collectWorkflowTurn(transport, placeholder.id, "first prompt");
+    now = 20_000;
+
+    const history = await transport.getHistory(placeholder.id);
+    const internals = workflowInternals(transport);
+    const stored = internals.conversations.get(history.conversation.id)!;
+    stored.turnState = {
+      ...stored.turnState,
+      messages: [
+        ...stored.turnState.messages,
+        {
+          id: "optimistic-follow-up",
+          role: "user",
+          schema_version: 1,
+          blocks: [
+            {
+              type: "text",
+              block_id: "optimistic-follow-up-text",
+              text: "follow-up prompt",
+            },
+          ],
+          created_at: new Date(now).toISOString(),
+        },
+      ],
+      activeTurn: { turnId: null, status: "running", error: null },
+    };
+    const before = stored.turnState.messages;
+
+    const observed = internals.applyHistoryResponse(history.conversation.id, {
+      messages: [
+        {
+          id: "server-first-assistant",
+          role: "assistant",
+          content: "Local first reply",
+          timestamp: 1,
+          turnId: WORKFLOW_TURN,
+        },
+      ],
+      stateVersion: 4,
+    });
+
+    expect(observed.turnState.messages).toBe(before);
+    expect(
+      observed.turnState.messages.some(
+        (message) => message.id === "optimistic-follow-up",
+      ),
+    ).toBe(true);
+  });
+
+  it("replaces a longer new-chat mirror once the current fence contains its required turn", async () => {
+    let now = 0;
+    mockChatStreams((request) =>
+      request.url === WORKFLOW_URL
+        ? {
+            frames: [
+              ...WORKFLOW_PREAMBLE,
+              { textMessageStart: { messageId: "replace-first" } },
+              { textMessageContent: { delta: "Local first reply" } },
+              { textMessageEnd: {} },
+              ...WORKFLOW_TAIL,
+            ],
+          }
+        : undefined,
+    );
+    stubFetch();
+    const transport = new AevatarAssistantTransport(() => now);
+    const placeholder = await transport.createConversation();
+    await collectWorkflowTurn(transport, placeholder.id, "first prompt");
+    now = 20_000;
+
+    const history = await transport.getHistory(placeholder.id);
+    const internals = workflowInternals(transport);
+    const stored = internals.conversations.get(history.conversation.id)!;
+    const before = stored.turnState.messages;
+    expect(
+      before
+        .filter((message) => message.role === "assistant")
+        .every((message) => message.turnId === undefined),
+    ).toBe(true);
+    expect(stored.requiredTurnId).toBe(WORKFLOW_TURN);
+
+    const observed = internals.applyHistoryResponse(history.conversation.id, {
+      messages: [
+        {
+          id: "server-first-assistant",
+          role: "assistant",
+          content: "Persisted first reply",
+          timestamp: 1,
+          turnId: WORKFLOW_TURN,
+        },
+      ],
+      stateVersion: 4,
+    });
+
+    expect(observed.turnState.messages).not.toBe(before);
+    expect(observed.turnState.messages.length).toBeLessThan(before.length);
+    expect(observed.turnState.messages[0]?.id).toBe("server-first-assistant");
+    expect(
+      observed.turnState.messages.some((message) =>
+        message.id.startsWith("assistant-activity-"),
+      ),
+    ).toBe(true);
+  });
+
+  it("keeps a longer new-chat mirror when the current fence omits its required turn", async () => {
+    let now = 0;
+    mockChatStreams((request) =>
+      request.url === WORKFLOW_URL
+        ? {
+            frames: [
+              ...WORKFLOW_PREAMBLE,
+              { textMessageStart: { messageId: "missing-first" } },
+              { textMessageContent: { delta: "Local first reply" } },
+              { textMessageEnd: {} },
+              ...WORKFLOW_TAIL,
+            ],
+          }
+        : undefined,
+    );
+    stubFetch();
+    const transport = new AevatarAssistantTransport(() => now);
+    const placeholder = await transport.createConversation();
+    await collectWorkflowTurn(transport, placeholder.id, "first prompt");
+    now = 20_000;
+
+    const history = await transport.getHistory(placeholder.id);
+    const internals = workflowInternals(transport);
+    const stored = internals.conversations.get(history.conversation.id)!;
+    const before = stored.turnState.messages;
+    expect(
+      before
+        .filter((message) => message.role === "assistant")
+        .every((message) => message.turnId === undefined),
+    ).toBe(true);
+
+    const observed = internals.applyHistoryResponse(history.conversation.id, {
+      messages: [
+        {
+          id: "older-assistant",
+          role: "assistant",
+          content: "Older reply",
+          timestamp: 1,
+          turnId: "turn-before-the-new-chat",
+        },
+      ],
+      stateVersion: 4,
+    });
+
+    expect(observed.turnState.messages).toBe(before);
+  });
+
+  it("[guard] keeps below-fence and legacy shorter reads from replacing local", async () => {
+    let now = 0;
+    mockChatStreams((request) =>
+      request.url === WORKFLOW_URL
+        ? {
+            frames: [
+              ...WORKFLOW_PREAMBLE,
+              { textMessageStart: { messageId: "guard-first" } },
+              { textMessageContent: { delta: "Local first reply" } },
+              { textMessageEnd: {} },
+              ...WORKFLOW_TAIL,
+            ],
+          }
+        : undefined,
+    );
+    stubFetch();
+    const transport = new AevatarAssistantTransport(() => now);
+    const placeholder = await transport.createConversation();
+    await collectWorkflowTurn(transport, placeholder.id, "first prompt");
+    now = 20_000;
+
+    const history = await transport.getHistory(placeholder.id);
+    const internals = workflowInternals(transport);
+    const stored = internals.conversations.get(history.conversation.id)!;
+    const before = stored.turnState.messages;
+    const entry = {
+      id: "server-first-assistant",
+      role: "assistant",
+      content: "Persisted first reply",
+      timestamp: 1,
+      turnId: WORKFLOW_TURN,
+    };
+
+    expect(
+      internals.applyHistoryResponse(history.conversation.id, {
+        messages: [entry],
+        stateVersion: 2,
+      }).turnState.messages,
+    ).toBe(before);
+    expect(
+      internals.applyHistoryResponse(history.conversation.id, [entry]).turnState
+        .messages,
+    ).toBe(before);
+  });
+
   it("deletes a legacy workflow conversation through its server id", async () => {
     const mock = stubFetch(
       routeWorkflow([
@@ -7766,6 +8058,85 @@ describe("studio new chats and typed actor compatibility", () => {
     await expect(
       transport.getHistory(WORKFLOW_CONVERSATION),
     ).rejects.toBeInstanceOf(AssistantConversationNotFoundError);
+  });
+
+  it("deletes an aliased placeholder through the wire when its receipt is gone", async () => {
+    mockChatStreams((request) =>
+      request.url === WORKFLOW_URL
+        ? { frames: [...WORKFLOW_PREAMBLE, ...WORKFLOW_TAIL] }
+        : undefined,
+    );
+    const mock = stubFetch((_url, init) =>
+      init?.method === "DELETE" ? jsonResponse({}) : undefined,
+    );
+    const transport = new AevatarAssistantTransport();
+    const placeholder = await transport.createConversation();
+    await collectWorkflowTurn(transport, placeholder.id, "create");
+    const receipt = findReceiptByPlaceholder(placeholder.id);
+    expect(receipt?.conversationId).toBe(WORKFLOW_CONVERSATION);
+    deleteReceipt(receipt!.commandId);
+
+    await transport.deleteConversation(placeholder.id);
+
+    expect(
+      mock.mock.calls.some(
+        ([input, init]) =>
+          String(input) ===
+            `${ASSISTANT_BASE}/conversations/${WORKFLOW_CONVERSATION}` &&
+          init?.method === "DELETE",
+      ),
+    ).toBe(true);
+  });
+
+  it("recovers and deletes a create removed before its context can arrive", async () => {
+    const headers = new Promise<ChatStreamHeadersResult>(() => undefined);
+    const completion = new Promise<ChatStreamCompletionResult>(() => undefined);
+    vi.spyOn(chatStreamClient, "start").mockReturnValue({
+      headers,
+      completion,
+      cancel: vi.fn(),
+    });
+    const mock = stubFetch((url, init) => {
+      if (url.includes("/conversations/create-recovery/")) {
+        return jsonResponse({
+          status: "append_committed",
+          conversationId: WORKFLOW_CONVERSATION,
+          stateVersion: 3,
+          turnId: WORKFLOW_TURN,
+        });
+      }
+      if (
+        url === `${ASSISTANT_BASE}/conversations/${WORKFLOW_CONVERSATION}` &&
+        init?.method === "DELETE"
+      ) {
+        return jsonResponse({});
+      }
+      if (url === `${ASSISTANT_BASE}/conversations`) {
+        return jsonResponse({
+          conversations: [{ id: WORKFLOW_CONVERSATION, title: "Stale row" }],
+        });
+      }
+      return undefined;
+    });
+    const transport = new AevatarAssistantTransport();
+    const placeholder = await transport.createConversation();
+    transport.sendMessage(placeholder.id, "create then delete", () => undefined);
+    await vi.waitFor(() => expect(chatStreamClient.start).toHaveBeenCalledOnce());
+
+    await transport.deleteConversation(placeholder.id);
+    await vi.waitFor(() =>
+      expect(
+        mock.mock.calls.some(
+          ([input, init]) =>
+            String(input) ===
+              `${ASSISTANT_BASE}/conversations/${WORKFLOW_CONVERSATION}` &&
+            init?.method === "DELETE",
+        ),
+      ).toBe(true),
+    );
+
+    expect(await transport.listConversations()).toEqual([]);
+    expect(listDeletionIntents()).toEqual([]);
   });
 
   it("posts a workflow action continuation to the actor named by its frame", async () => {
@@ -7895,6 +8266,98 @@ describe("projection lifecycle boundaries", () => {
     await expect(transport.getHistory(conversation.id)).rejects.toBeInstanceOf(
       AssistantConversationNotFoundError,
     );
+  });
+
+  it("settles an abandoned reconciliation when the account scope changes", async () => {
+    stubFetch((url) =>
+      url === `${ASSISTANT_BASE}/conversations`
+        ? jsonResponse({ conversations: [{ id: CHAT_ID }] })
+        : undefined,
+    );
+    const transport = new AevatarAssistantTransport();
+    await transport.getHistory(CHAT_ID);
+    const outcome = transport.reconcileProjection(CHAT_ID);
+
+    useAuthStore.getState().setUser({ id: "another-user" } as User);
+
+    await expect(outcome).resolves.toEqual({
+      status: "timed_out",
+      conversationId: CHAT_ID,
+    });
+  });
+
+  it("reads a cold canonical receipt from the transcript before serving pending", async () => {
+    recordCreateReceipt("cold-command", "workflow-pending-cold");
+    adoptReceiptIdentity("cold-command", CHAT_ID, 3);
+    const mock = stubFetch((url, init) =>
+      url === `${ASSISTANT_BASE}/conversations/${CHAT_ID}` &&
+      (init?.method ?? "GET") === "GET"
+        ? jsonResponse({
+            messages: [
+              {
+                id: "cold-assistant",
+                role: "assistant",
+                content: "Already materialized",
+                timestamp: 1,
+                turnId: "cold-turn",
+              },
+            ],
+            stateVersion: 3,
+          })
+        : undefined,
+    );
+    const transport = new AevatarAssistantTransport();
+
+    const history = await transport.getHistory(CHAT_ID);
+
+    expect(history.messages[0]?.id).toBe("cold-assistant");
+    expect(history.awaitingProjection).toBeUndefined();
+    expect(
+      mock.mock.calls.filter(
+        ([input]) =>
+          String(input) === `${ASSISTANT_BASE}/conversations/${CHAT_ID}`,
+      ),
+    ).toHaveLength(1);
+  });
+
+  it("sweeps a persisted deletion intent after a transport reload", async () => {
+    recordDeletionIntent(
+      "reload-delete-command",
+      "workflow-pending-reload-delete",
+    );
+    const mock = stubFetch((url, init) => {
+      if (url.includes("/conversations/create-recovery/")) {
+        return jsonResponse({
+          status: "append_committed",
+          conversationId: CHAT_ID,
+          stateVersion: 3,
+          turnId: "reload-delete-turn",
+        });
+      }
+      if (
+        url === `${ASSISTANT_BASE}/conversations/${CHAT_ID}` &&
+        init?.method === "DELETE"
+      ) {
+        return jsonResponse({});
+      }
+      if (url === `${ASSISTANT_BASE}/conversations`) {
+        return jsonResponse({ conversations: [{ id: CHAT_ID }] });
+      }
+      return undefined;
+    });
+    const reloadedTransport = new AevatarAssistantTransport();
+
+    await reloadedTransport.listConversations();
+    await vi.waitFor(() => expect(listDeletionIntents()).toEqual([]));
+
+    expect(
+      mock.mock.calls.some(
+        ([input, init]) =>
+          String(input) === `${ASSISTANT_BASE}/conversations/${CHAT_ID}` &&
+          init?.method === "DELETE",
+      ),
+    ).toBe(true);
+    expect(await reloadedTransport.listConversations()).toEqual([]);
   });
 
   it("uses raw index membership as cold 404 evidence and then materializes", async () => {
