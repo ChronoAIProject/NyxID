@@ -2979,15 +2979,14 @@ pub async fn disconnect_credentials(
 
     let cascade_record_count = claimed_keys.len() + usize::from(claimed_provider_token.is_some());
     let remote_source = if let Some(initiating_key_id) = plan.initiating_key_id.as_deref() {
-        claimed_keys
-            .iter()
-            .find(|key| key.id == initiating_key_id)
-            .map(RemoteCredentialSource::Key)
-            .or_else(|| {
-                claimed_provider_token
-                    .as_ref()
-                    .map(RemoteCredentialSource::ProviderToken)
-            })
+        let initiating_key = claimed_keys.iter().find(|key| key.id == initiating_key_id);
+        match initiating_key {
+            Some(key) if key.connection_id.is_some() => Some(RemoteCredentialSource::Key(key)),
+            Some(_) => claimed_provider_token
+                .as_ref()
+                .map(RemoteCredentialSource::ProviderToken),
+            None => None,
+        }
     } else {
         claimed_provider_token
             .as_ref()
@@ -3845,10 +3844,18 @@ mod tests {
     };
     use std::time::Duration;
 
-    use axum::{Router, http::StatusCode, routing::delete};
+    use axum::{
+        Json, Router,
+        http::StatusCode,
+        routing::{delete, post},
+    };
     use chrono::Utc;
     use futures::TryStreamExt;
-    use mongodb::{IndexModel, bson::doc, options::IndexOptions};
+    use mongodb::{
+        IndexModel,
+        bson::{self, doc},
+        options::IndexOptions,
+    };
 
     use super::{
         AUTO_PROVISION_SOURCE, MAX_SERVICE_SLUG_LEN, OauthClientCredentialsInput,
@@ -6100,6 +6107,121 @@ mod tests {
                 .unwrap()
                 .is_some()
         );
+    }
+
+    #[tokio::test]
+    async fn legacy_copy_revokes_shared_token_only_after_last_key_is_deleted() {
+        let Some(db) = connect_test_database("unified_revocation_legacy_last_key").await else {
+            return;
+        };
+        let encryption_keys = test_encryption_keys();
+        let user_id = uuid::Uuid::new_v4().to_string();
+        let calls = Arc::new(AtomicUsize::new(0));
+        let callback_calls = Arc::clone(&calls);
+        let app = Router::new().route(
+            "/revoke",
+            post(move || {
+                let calls = Arc::clone(&callback_calls);
+                async move {
+                    calls.fetch_add(1, Ordering::SeqCst);
+                    Json(serde_json::json!({ "ok": true }))
+                }
+            }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+
+        let mut provider = multi_conn_provider("oauth2");
+        provider.revocation = Some(RevocationConfig {
+            style: "self_bearer".to_string(),
+            url: format!("http://{address}/revoke"),
+            auth: "none".to_string(),
+            revokes_grant: false,
+        });
+        db.collection::<ProviderConfig>(PROVIDER_CONFIGS)
+            .insert_one(&provider)
+            .await
+            .unwrap();
+        let shared_ciphertext = encryption_keys
+            .encrypt(b"shared-access-token")
+            .await
+            .unwrap();
+        let token_id = insert_provider_token(&db, &user_id, &provider.id).await;
+        db.collection::<UserProviderToken>(USER_PROVIDER_TOKENS)
+            .update_one(
+                doc! { "_id": &token_id },
+                doc! {
+                    "$set": { "access_token_encrypted": bson::Binary {
+                        subtype: bson::spec::BinarySubtype::Generic,
+                        bytes: shared_ciphertext.clone(),
+                    } },
+                    "$unset": { "refresh_token_encrypted": "" },
+                },
+            )
+            .await
+            .unwrap();
+        for service_id in ["legacy-one", "legacy-two"] {
+            insert_provider_backed_service(&db, &user_id, &provider.id, service_id, "oauth2").await;
+            db.collection::<UserApiKey>(USER_API_KEYS)
+                .update_one(
+                    doc! { "_id": format!("key-{service_id}") },
+                    doc! { "$set": { "access_token_encrypted": bson::Binary {
+                        subtype: bson::spec::BinarySubtype::Generic,
+                        bytes: shared_ciphertext.clone(),
+                    } } },
+                )
+                .await
+                .unwrap();
+        }
+
+        let first = super::disconnect_credentials(
+            &db,
+            &encryption_keys,
+            &user_id,
+            &test_audit_actor(&user_id),
+            super::DisconnectTarget::UserService("legacy-one"),
+            super::DisconnectOptions::default(),
+        )
+        .await
+        .unwrap();
+        assert!(!first.upstream_revoked);
+        assert_eq!(calls.load(Ordering::SeqCst), 0);
+        assert!(
+            db.collection::<UserProviderToken>(USER_PROVIDER_TOKENS)
+                .find_one(doc! { "_id": &token_id, "status": "active" })
+                .await
+                .unwrap()
+                .is_some()
+        );
+
+        let last = super::disconnect_credentials(
+            &db,
+            &encryption_keys,
+            &user_id,
+            &test_audit_actor(&user_id),
+            super::DisconnectTarget::UserService("legacy-two"),
+            super::DisconnectOptions::default(),
+        )
+        .await
+        .unwrap();
+        assert!(last.upstream_revoked);
+        tokio::time::timeout(std::time::Duration::from_secs(2), async {
+            while calls.load(Ordering::SeqCst) == 0 {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("last legacy copy should schedule shared-token revocation");
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+        let revoked_token = db
+            .collection::<UserProviderToken>(USER_PROVIDER_TOKENS)
+            .find_one(doc! { "_id": &token_id })
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(revoked_token.status, "revoked");
+        assert!(revoked_token.access_token_encrypted.is_none());
     }
 
     #[tokio::test]
