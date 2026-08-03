@@ -133,9 +133,16 @@ class MockAssistantTransport implements AssistantTransport {
     const messageId = assistantMockStore.nextId("assistant-message");
     const blockId = assistantMockStore.nextId("assistant-block");
     const events = createScriptedTurn(turnId, messageId, blockId);
-    return this.startScript(conversationId, turnId, messageId, events, onEvent, {
-      silent: mockFaults().sendSilent,
-    });
+    return this.startScript(
+      conversationId,
+      turnId,
+      messageId,
+      events,
+      onEvent,
+      {
+        silent: mockFaults().sendSilent,
+      },
+    );
   }
 
   cancelActiveTurn(conversationId: string): void {
@@ -552,15 +559,184 @@ export function selectAssistantTransportKind(env: {
   return "aevatar";
 }
 
+export class DelegatingAssistantTransport implements AssistantTransport {
+  private transport: AssistantTransport;
+  private interceptorInstalled = false;
+
+  constructor(delegate: AssistantTransport) {
+    this.transport = delegate;
+  }
+
+  current(): AssistantTransport {
+    return this.transport;
+  }
+
+  install(transport: AssistantTransport): boolean {
+    if (this.interceptorInstalled) return false;
+    this.transport = transport;
+    this.interceptorInstalled = true;
+    return true;
+  }
+
+  listConversations(): Promise<Conversation[]> {
+    return this.transport.listConversations();
+  }
+
+  createConversation(): Promise<Conversation> {
+    return this.transport.createConversation();
+  }
+
+  getHistory(conversationId: string): Promise<ConversationHistory> {
+    return this.transport.getHistory(conversationId);
+  }
+
+  deleteConversation(conversationId: string): Promise<void> {
+    return this.transport.deleteConversation(conversationId);
+  }
+
+  sendMessage(
+    conversationId: string,
+    content: string,
+    onEvent: (event: TurnEvent) => void,
+  ): TurnHandle {
+    return this.transport.sendMessage(conversationId, content, onEvent);
+  }
+
+  cancelActiveTurn(conversationId: string): void {
+    this.transport.cancelActiveTurn(conversationId);
+  }
+
+  decideApproval(
+    conversationId: string,
+    blockId: string,
+    approved: boolean,
+    onEvent?: (event: TurnEvent) => void,
+  ): Promise<TurnHandle | null> {
+    return this.transport.decideApproval(
+      conversationId,
+      blockId,
+      approved,
+      onEvent,
+    );
+  }
+
+  setActionCardInProgress(
+    conversationId: string,
+    blockId: string,
+    inProgress: boolean,
+    onEvent?: (event: TurnEvent) => void,
+  ): void {
+    this.transport.setActionCardInProgress(
+      conversationId,
+      blockId,
+      inProgress,
+      onEvent,
+    );
+  }
+
+  blockActionCard(
+    conversationId: string,
+    blockId: string,
+    note: string,
+    onEvent?: (event: TurnEvent) => void,
+  ): void {
+    this.transport.blockActionCard(conversationId, blockId, note, onEvent);
+  }
+
+  continueActions(
+    conversationId: string,
+    originTurnId: string,
+    reports: readonly ActionReport[],
+    onEvent?: (event: TurnEvent) => void,
+  ): TurnHandle | null {
+    return this.transport.continueActions(
+      conversationId,
+      originTurnId,
+      reports,
+      onEvent,
+    );
+  }
+
+  wakeActions(
+    conversationId: string,
+    originTurnId: string,
+    onEvent?: (event: TurnEvent) => void,
+  ): TurnHandle {
+    return this.transport.wakeActions(conversationId, originTurnId, onEvent);
+  }
+}
+
+export interface AssistantTransportFactories {
+  readonly createMock: () => AssistantTransport;
+  readonly createAevatar: () => AssistantTransport;
+}
+
+export interface AssistantInterceptorModule {
+  readonly installScenarioInterceptor: (
+    shell: DelegatingAssistantTransport,
+  ) => void;
+}
+
+export type AssistantInterceptorLoader =
+  () => Promise<AssistantInterceptorModule>;
+
+const interceptorInstallations = new WeakMap<
+  DelegatingAssistantTransport,
+  Promise<void>
+>();
+
+export function installAssistantTransportInterceptor(
+  shell: DelegatingAssistantTransport,
+  loader: AssistantInterceptorLoader,
+): Promise<void> {
+  const existing = interceptorInstallations.get(shell);
+  if (existing) return existing;
+  const installation = loader().then((module) => {
+    module.installScenarioInterceptor(shell);
+  });
+  interceptorInstallations.set(shell, installation);
+  return installation;
+}
+
+export function createAssistantTransportForEnvironment(
+  env: {
+    readonly mode: string;
+    readonly dev: boolean;
+    readonly search: string;
+  },
+  factories: AssistantTransportFactories,
+  interceptorLoader?: AssistantInterceptorLoader,
+): AssistantTransport {
+  const kind = selectAssistantTransportKind(env);
+  if (kind === "mock") return factories.createMock();
+  const shell = new DelegatingAssistantTransport(factories.createAevatar());
+  if (env.dev && interceptorLoader) {
+    void installAssistantTransportInterceptor(shell, interceptorLoader).catch(
+      () => undefined,
+    );
+  }
+  return shell;
+}
+
 function createAssistantTransport(): AssistantTransport {
-  const kind = selectAssistantTransportKind({
+  const env = {
     mode: import.meta.env.MODE,
     dev: import.meta.env.DEV,
     search: typeof window === "undefined" ? "" : window.location.search,
-  });
-  return kind === "mock"
-    ? new MockAssistantTransport()
-    : new AevatarAssistantTransport();
+  };
+  if (selectAssistantTransportKind(env) === "mock") {
+    return new MockAssistantTransport();
+  }
+  const shell = new DelegatingAssistantTransport(
+    new AevatarAssistantTransport(),
+  );
+  if (import.meta.env.DEV) {
+    void installAssistantTransportInterceptor(
+      shell,
+      () => import("@/lib/assistant/scenario-intercept-transport"),
+    ).catch(() => undefined);
+  }
+  return shell;
 }
 
 export const assistantTransport: AssistantTransport =

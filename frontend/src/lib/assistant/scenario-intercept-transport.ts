@@ -16,6 +16,7 @@ import {
 import { compiledScenarios } from "@/lib/assistant/scenarios.config";
 import { applyTurnEvent, EMPTY_TURN_STATE } from "@/lib/assistant/stream";
 import { useAssistantMockScenariosStore } from "@/stores/assistant-mock-scenarios-store";
+import { useAuthStore } from "@/stores/auth-store";
 import type { ActionReport } from "@/schemas/assistant-actions";
 import type {
   AssistantMessage,
@@ -754,4 +755,40 @@ export function createScenarioInterceptTransport(
   const transport = new ScenarioInterceptTransport(delegate);
   useAssistantMockScenariosStore.getState().setEngineState("ready");
   return transport;
+}
+
+export interface ScenarioInterceptorShell {
+  current(): AssistantTransport;
+  install(transport: AssistantTransport): boolean;
+}
+
+const installedShells = new WeakSet<object>();
+let authSubscriptionInstalled = false;
+
+function ensureCurrentMockScenarioUser(): void {
+  const userId = useAuthStore.getState().user?.id;
+  if (userId) {
+    useAssistantMockScenariosStore.getState().ensureUser(userId);
+  }
+}
+
+function installAuthSubscription(): void {
+  if (authSubscriptionInstalled) return;
+  authSubscriptionInstalled = true;
+  ensureCurrentMockScenarioUser();
+  useAuthStore.subscribe((state, previous) => {
+    const userId = state.user?.id;
+    if (userId && userId !== previous.user?.id) {
+      useAssistantMockScenariosStore.getState().ensureUser(userId);
+    }
+  });
+}
+
+export function installScenarioInterceptor(
+  shell: ScenarioInterceptorShell,
+): void {
+  if (installedShells.has(shell)) return;
+  installedShells.add(shell);
+  shell.install(createScenarioInterceptTransport(shell.current()));
+  installAuthSubscription();
 }
