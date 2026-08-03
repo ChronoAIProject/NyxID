@@ -12,7 +12,7 @@ use crate::models::default_request_header::DefaultRequestHeader;
 use crate::models::downstream_service::{
     COLLECTION_NAME as DOWNSTREAM_SERVICES, DownstreamService, ServiceCapabilities,
 };
-use crate::models::provider_config::{COLLECTION_NAME, ProviderConfig};
+use crate::models::provider_config::{COLLECTION_NAME, ProviderConfig, RevocationConfig};
 use crate::models::service_provider_requirement::{
     COLLECTION_NAME as REQUIREMENTS, ServiceProviderRequirement,
 };
@@ -479,7 +479,12 @@ pub async fn seed_default_providers(
             authorization_url: Some("https://x.com/i/oauth2/authorize".to_string()),
             token_url: Some("https://api.x.com/2/oauth2/token".to_string()),
             revocation_url: Some("https://api.x.com/2/oauth2/revoke".to_string()),
-            revocation: None,
+            revocation: Some(RevocationConfig {
+                style: "rfc7009".to_string(),
+                url: "https://api.x.com/2/oauth2/revoke".to_string(),
+                auth: "inherit".to_string(),
+                revokes_grant: false,
+            }),
             // Write access is intentional: NyxID is a credential broker, so delegated
             // clients commonly need to post on behalf of users. Admins can customise
             // scopes per deployment. `media.write` is included so delegated clients can
@@ -512,10 +517,11 @@ pub async fn seed_default_providers(
             client_id_param_name: None,
             requires_gateway_url: false,
             created_by: "system".to_string(),
-            revocation_seed_version: 0,
+            revocation_seed_version: 1,
             created_at: now,
             updated_at: now,
         };
+        validate_seeded_provider_revocation(&provider).await?;
         collection.insert_one(&provider).await?;
         tracing::info!(slug = "twitter", "Seeded default provider: Twitter / X");
         seeded_count += 1;
@@ -598,7 +604,12 @@ pub async fn seed_default_providers(
             authorization_url: Some("https://accounts.google.com/o/oauth2/v2/auth".to_string()),
             token_url: Some("https://oauth2.googleapis.com/token".to_string()),
             revocation_url: Some("https://oauth2.googleapis.com/revoke".to_string()),
-            revocation: None,
+            revocation: Some(RevocationConfig {
+                style: "rfc7009".to_string(),
+                url: "https://oauth2.googleapis.com/revoke".to_string(),
+                auth: "none".to_string(),
+                revokes_grant: false,
+            }),
             default_scopes: Some(vec![
                 "openid".to_string(),
                 "email".to_string(),
@@ -631,10 +642,11 @@ pub async fn seed_default_providers(
             client_id_param_name: None,
             requires_gateway_url: false,
             created_by: "system".to_string(),
-            revocation_seed_version: 0,
+            revocation_seed_version: 1,
             created_at: now,
             updated_at: now,
         };
+        validate_seeded_provider_revocation(&provider).await?;
         collection.insert_one(&provider).await?;
         tracing::info!(slug = "google", "Seeded default provider: Google");
         seeded_count += 1;
@@ -651,7 +663,12 @@ pub async fn seed_default_providers(
             authorization_url: Some("https://github.com/login/oauth/authorize".to_string()),
             token_url: Some("https://github.com/login/oauth/access_token".to_string()),
             revocation_url: None,
-            revocation: None,
+            revocation: Some(RevocationConfig {
+                style: "github".to_string(),
+                url: "https://api.github.com/applications".to_string(),
+                auth: "inherit".to_string(),
+                revokes_grant: true,
+            }),
             default_scopes: Some(vec!["read:user".to_string(), "user:email".to_string()]),
             client_id_encrypted: None,
             client_secret_encrypted: None,
@@ -675,10 +692,11 @@ pub async fn seed_default_providers(
             client_id_param_name: None,
             requires_gateway_url: false,
             created_by: "system".to_string(),
-            revocation_seed_version: 0,
+            revocation_seed_version: 1,
             created_at: now,
             updated_at: now,
         };
+        validate_seeded_provider_revocation(&provider).await?;
         collection.insert_one(&provider).await?;
         tracing::info!(slug = "github", "Seeded default provider: GitHub");
         seeded_count += 1;
@@ -749,7 +767,12 @@ pub async fn seed_default_providers(
             authorization_url: Some("https://www.facebook.com/v21.0/dialog/oauth".to_string()),
             token_url: Some("https://graph.facebook.com/v21.0/oauth/access_token".to_string()),
             revocation_url: None,
-            revocation: None,
+            revocation: Some(RevocationConfig {
+                style: "facebook_deauth".to_string(),
+                url: "https://graph.facebook.com/v21.0/me/permissions".to_string(),
+                auth: "inherit".to_string(),
+                revokes_grant: true,
+            }),
             default_scopes: Some(vec!["email".to_string(), "public_profile".to_string()]),
             client_id_encrypted: None,
             client_secret_encrypted: None,
@@ -772,10 +795,11 @@ pub async fn seed_default_providers(
             client_id_param_name: None,
             requires_gateway_url: false,
             created_by: "system".to_string(),
-            revocation_seed_version: 0,
+            revocation_seed_version: 1,
             created_at: now,
             updated_at: now,
         };
+        validate_seeded_provider_revocation(&provider).await?;
         collection.insert_one(&provider).await?;
         tracing::info!(slug = "facebook", "Seeded default provider: Facebook");
         seeded_count += 1;
@@ -792,7 +816,12 @@ pub async fn seed_default_providers(
             authorization_url: Some("https://discord.com/oauth2/authorize".to_string()),
             token_url: Some("https://discord.com/api/oauth2/token".to_string()),
             revocation_url: Some("https://discord.com/api/oauth2/token/revoke".to_string()),
-            revocation: None,
+            revocation: Some(RevocationConfig {
+                style: "rfc7009".to_string(),
+                url: "https://discord.com/api/oauth2/token/revoke".to_string(),
+                auth: "inherit".to_string(),
+                revokes_grant: false,
+            }),
             default_scopes: Some(vec!["identify".to_string(), "email".to_string()]),
             client_id_encrypted: None,
             client_secret_encrypted: None,
@@ -815,10 +844,11 @@ pub async fn seed_default_providers(
             client_id_param_name: None,
             requires_gateway_url: false,
             created_by: "system".to_string(),
-            revocation_seed_version: 0,
+            revocation_seed_version: 1,
             created_at: now,
             updated_at: now,
         };
+        validate_seeded_provider_revocation(&provider).await?;
         collection.insert_one(&provider).await?;
         tracing::info!(slug = "discord", "Seeded default provider: Discord");
         seeded_count += 1;
@@ -882,8 +912,13 @@ pub async fn seed_default_providers(
                 "https://www.linkedin.com/oauth/v2/authorization".to_string(),
             ),
             token_url: Some("https://www.linkedin.com/oauth/v2/accessToken".to_string()),
-            revocation_url: None,
-            revocation: None,
+            revocation_url: Some("https://www.linkedin.com/oauth/v2/revoke".to_string()),
+            revocation: Some(RevocationConfig {
+                style: "rfc7009".to_string(),
+                url: "https://www.linkedin.com/oauth/v2/revoke".to_string(),
+                auth: "inherit".to_string(),
+                revokes_grant: false,
+            }),
             default_scopes: Some(vec![
                 "openid".to_string(),
                 "profile".to_string(),
@@ -910,10 +945,11 @@ pub async fn seed_default_providers(
             client_id_param_name: None,
             requires_gateway_url: false,
             created_by: "system".to_string(),
-            revocation_seed_version: 0,
+            revocation_seed_version: 1,
             created_at: now,
             updated_at: now,
         };
+        validate_seeded_provider_revocation(&provider).await?;
         collection.insert_one(&provider).await?;
         tracing::info!(slug = "linkedin", "Seeded default provider: LinkedIn");
         seeded_count += 1;
@@ -930,7 +966,12 @@ pub async fn seed_default_providers(
             authorization_url: Some("https://slack.com/oauth/v2/authorize".to_string()),
             token_url: Some("https://slack.com/api/oauth.v2.access".to_string()),
             revocation_url: Some("https://slack.com/api/auth.revoke".to_string()),
-            revocation: None,
+            revocation: Some(RevocationConfig {
+                style: "self_bearer".to_string(),
+                url: "https://slack.com/api/auth.revoke".to_string(),
+                auth: "inherit".to_string(),
+                revokes_grant: false,
+            }),
             default_scopes: Some(vec![
                 "users:read".to_string(),
                 "users:read.email".to_string(),
@@ -954,10 +995,11 @@ pub async fn seed_default_providers(
             client_id_param_name: None,
             requires_gateway_url: false,
             created_by: "system".to_string(),
-            revocation_seed_version: 0,
+            revocation_seed_version: 1,
             created_at: now,
             updated_at: now,
         };
+        validate_seeded_provider_revocation(&provider).await?;
         collection.insert_one(&provider).await?;
         tracing::info!(slug = "slack", "Seeded default provider: Slack");
         seeded_count += 1;
@@ -1026,7 +1068,12 @@ pub async fn seed_default_providers(
             authorization_url: Some("https://www.tiktok.com/v2/auth/authorize/".to_string()),
             token_url: Some("https://open.tiktokapis.com/v2/oauth/token/".to_string()),
             revocation_url: Some("https://open.tiktokapis.com/v2/oauth/revoke/".to_string()),
-            revocation: None,
+            revocation: Some(RevocationConfig {
+                style: "rfc7009".to_string(),
+                url: "https://open.tiktokapis.com/v2/oauth/revoke/".to_string(),
+                auth: "inherit".to_string(),
+                revokes_grant: false,
+            }),
             default_scopes: Some(vec!["user.info.basic".to_string()]),
             client_id_encrypted: None,
             client_secret_encrypted: None,
@@ -1049,10 +1096,11 @@ pub async fn seed_default_providers(
             client_id_param_name: Some("client_key".to_string()),
             requires_gateway_url: false,
             created_by: "system".to_string(),
-            revocation_seed_version: 0,
+            revocation_seed_version: 1,
             created_at: now,
             updated_at: now,
         };
+        validate_seeded_provider_revocation(&provider).await?;
         collection.insert_one(&provider).await?;
         tracing::info!(slug = "tiktok", "Seeded default provider: TikTok");
         seeded_count += 1;
@@ -1069,7 +1117,12 @@ pub async fn seed_default_providers(
             authorization_url: Some("https://id.twitch.tv/oauth2/authorize".to_string()),
             token_url: Some("https://id.twitch.tv/oauth2/token".to_string()),
             revocation_url: Some("https://id.twitch.tv/oauth2/revoke".to_string()),
-            revocation: None,
+            revocation: Some(RevocationConfig {
+                style: "rfc7009".to_string(),
+                url: "https://id.twitch.tv/oauth2/revoke".to_string(),
+                auth: "client_id".to_string(),
+                revokes_grant: false,
+            }),
             default_scopes: Some(vec!["user:read:email".to_string()]),
             client_id_encrypted: None,
             client_secret_encrypted: None,
@@ -1090,10 +1143,11 @@ pub async fn seed_default_providers(
             client_id_param_name: None,
             requires_gateway_url: false,
             created_by: "system".to_string(),
-            revocation_seed_version: 0,
+            revocation_seed_version: 1,
             created_at: now,
             updated_at: now,
         };
+        validate_seeded_provider_revocation(&provider).await?;
         collection.insert_one(&provider).await?;
         tracing::info!(slug = "twitch", "Seeded default provider: Twitch");
         seeded_count += 1;
@@ -1110,7 +1164,12 @@ pub async fn seed_default_providers(
             authorization_url: Some("https://www.reddit.com/api/v1/authorize".to_string()),
             token_url: Some("https://www.reddit.com/api/v1/access_token".to_string()),
             revocation_url: Some("https://www.reddit.com/api/v1/revoke_token".to_string()),
-            revocation: None,
+            revocation: Some(RevocationConfig {
+                style: "rfc7009".to_string(),
+                url: "https://www.reddit.com/api/v1/revoke_token".to_string(),
+                auth: "inherit".to_string(),
+                revokes_grant: false,
+            }),
             default_scopes: Some(vec!["identity".to_string()]),
             client_id_encrypted: None,
             client_secret_encrypted: None,
@@ -1134,10 +1193,11 @@ pub async fn seed_default_providers(
             client_id_param_name: None,
             requires_gateway_url: false,
             created_by: "system".to_string(),
-            revocation_seed_version: 0,
+            revocation_seed_version: 1,
             created_at: now,
             updated_at: now,
         };
+        validate_seeded_provider_revocation(&provider).await?;
         collection.insert_one(&provider).await?;
         tracing::info!(slug = "reddit", "Seeded default provider: Reddit");
         seeded_count += 1;
@@ -1779,7 +1839,12 @@ pub async fn seed_default_providers(
             authorization_url: Some("https://accounts.google.com/o/oauth2/v2/auth".to_string()),
             token_url: Some("https://oauth2.googleapis.com/token".to_string()),
             revocation_url: Some("https://oauth2.googleapis.com/revoke".to_string()),
-            revocation: None,
+            revocation: Some(RevocationConfig {
+                style: "rfc7009".to_string(),
+                url: "https://oauth2.googleapis.com/revoke".to_string(),
+                auth: "none".to_string(),
+                revokes_grant: false,
+            }),
             default_scopes: Some(vec![
                 "https://www.googleapis.com/auth/cloud-platform.read-only".to_string(),
             ]),
@@ -1809,10 +1874,11 @@ pub async fn seed_default_providers(
             client_id_param_name: None,
             requires_gateway_url: false,
             created_by: "system".to_string(),
-            revocation_seed_version: 0,
+            revocation_seed_version: 1,
             created_at: now,
             updated_at: now,
         };
+        validate_seeded_provider_revocation(&provider).await?;
         collection.insert_one(&provider).await?;
         tracing::info!(
             slug = "google-cloud",
@@ -1843,6 +1909,8 @@ pub async fn seed_default_providers(
         );
     }
 
+    backfill_provider_revocation(&collection).await?;
+
     if seeded_count > 0 {
         tracing::info!(count = seeded_count, "Default provider seeding complete");
     }
@@ -1870,6 +1938,185 @@ pub async fn seed_default_providers(
             count = api_key_mode_migration.modified_count,
             "Normalized credential_mode=admin on existing api_key providers (NyxID#238)"
         );
+    }
+
+    Ok(())
+}
+
+struct RevocationSeedUpgrade {
+    slug: &'static str,
+    authorization_url: &'static str,
+    token_url: &'static str,
+    style: &'static str,
+    url: &'static str,
+    auth: &'static str,
+    revokes_grant: bool,
+    revocation_url: Option<&'static str>,
+}
+
+const REVOCATION_SEED_UPGRADES: &[RevocationSeedUpgrade] = &[
+    RevocationSeedUpgrade {
+        slug: "github",
+        authorization_url: "https://github.com/login/oauth/authorize",
+        token_url: "https://github.com/login/oauth/access_token",
+        style: "github",
+        url: "https://api.github.com/applications",
+        auth: "inherit",
+        revokes_grant: true,
+        revocation_url: None,
+    },
+    RevocationSeedUpgrade {
+        slug: "facebook",
+        authorization_url: "https://www.facebook.com/v21.0/dialog/oauth",
+        token_url: "https://graph.facebook.com/v21.0/oauth/access_token",
+        style: "facebook_deauth",
+        url: "https://graph.facebook.com/v21.0/me/permissions",
+        auth: "inherit",
+        revokes_grant: true,
+        revocation_url: None,
+    },
+    RevocationSeedUpgrade {
+        slug: "slack",
+        authorization_url: "https://slack.com/oauth/v2/authorize",
+        token_url: "https://slack.com/api/oauth.v2.access",
+        style: "self_bearer",
+        url: "https://slack.com/api/auth.revoke",
+        auth: "inherit",
+        revokes_grant: false,
+        revocation_url: None,
+    },
+    RevocationSeedUpgrade {
+        slug: "google",
+        authorization_url: "https://accounts.google.com/o/oauth2/v2/auth",
+        token_url: "https://oauth2.googleapis.com/token",
+        style: "rfc7009",
+        url: "https://oauth2.googleapis.com/revoke",
+        auth: "none",
+        revokes_grant: false,
+        revocation_url: Some("https://oauth2.googleapis.com/revoke"),
+    },
+    RevocationSeedUpgrade {
+        slug: "google-cloud",
+        authorization_url: "https://accounts.google.com/o/oauth2/v2/auth",
+        token_url: "https://oauth2.googleapis.com/token",
+        style: "rfc7009",
+        url: "https://oauth2.googleapis.com/revoke",
+        auth: "none",
+        revokes_grant: false,
+        revocation_url: Some("https://oauth2.googleapis.com/revoke"),
+    },
+    RevocationSeedUpgrade {
+        slug: "twitch",
+        authorization_url: "https://id.twitch.tv/oauth2/authorize",
+        token_url: "https://id.twitch.tv/oauth2/token",
+        style: "rfc7009",
+        url: "https://id.twitch.tv/oauth2/revoke",
+        auth: "client_id",
+        revokes_grant: false,
+        revocation_url: Some("https://id.twitch.tv/oauth2/revoke"),
+    },
+    RevocationSeedUpgrade {
+        slug: "linkedin",
+        authorization_url: "https://www.linkedin.com/oauth/v2/authorization",
+        token_url: "https://www.linkedin.com/oauth/v2/accessToken",
+        style: "rfc7009",
+        url: "https://www.linkedin.com/oauth/v2/revoke",
+        auth: "inherit",
+        revokes_grant: false,
+        revocation_url: Some("https://www.linkedin.com/oauth/v2/revoke"),
+    },
+];
+
+pub async fn validate_revocation_url(url: &str) -> AppResult<()> {
+    let parsed = url::Url::parse(url)
+        .map_err(|_| AppError::ValidationError("revocation.url must be a valid URL".to_string()))?;
+    if parsed.scheme() != "https" {
+        return Err(AppError::ValidationError(
+            "revocation.url must use https".to_string(),
+        ));
+    }
+    if !parsed.username().is_empty() || parsed.password().is_some() {
+        return Err(AppError::ValidationError(
+            "revocation.url must not include userinfo".to_string(),
+        ));
+    }
+    crate::services::url_validation::validate_public_http_url(url, "revocation.url").await
+}
+
+async fn validate_seeded_provider_revocation(provider: &ProviderConfig) -> AppResult<()> {
+    if let Some(revocation) = provider.revocation.as_ref() {
+        validate_revocation_url(&revocation.url).await?;
+    }
+    Ok(())
+}
+
+async fn backfill_provider_revocation(
+    collection: &mongodb::Collection<ProviderConfig>,
+) -> AppResult<()> {
+    let now = bson::DateTime::from_chrono(Utc::now());
+    let lifted = collection
+        .update_many(
+            doc! {
+                "revocation_url": { "$type": "string" },
+                "$or": [
+                    { "revocation": { "$exists": false } },
+                    { "revocation": null },
+                ],
+            },
+            vec![doc! { "$set": {
+                "revocation": {
+                    "style": "rfc7009",
+                    "url": "$revocation_url",
+                    "auth": "inherit",
+                    "revokes_grant": false,
+                },
+                "updated_at": &now,
+            }}],
+        )
+        .await?;
+    if lifted.modified_count > 0 {
+        tracing::info!(
+            count = lifted.modified_count,
+            "Lifted legacy provider revocation URLs into structured configuration"
+        );
+    }
+
+    for upgrade in REVOCATION_SEED_UPGRADES {
+        let filter = doc! {
+            "slug": upgrade.slug,
+            "created_by": "system",
+            "$or": [
+                { "revocation_seed_version": { "$exists": false } },
+                { "revocation_seed_version": { "$lt": 1 } },
+            ],
+            "authorization_url": upgrade.authorization_url,
+            "token_url": upgrade.token_url,
+        };
+        if collection.find_one(filter.clone()).await?.is_none() {
+            continue;
+        }
+        validate_revocation_url(upgrade.url).await?;
+        let mut set = doc! {
+            "revocation": {
+                "style": upgrade.style,
+                "url": upgrade.url,
+                "auth": upgrade.auth,
+                "revokes_grant": upgrade.revokes_grant,
+            },
+            "revocation_seed_version": 1,
+            "updated_at": &now,
+        };
+        if let Some(url) = upgrade.revocation_url {
+            set.insert("revocation_url", url);
+        }
+        let result = collection.update_one(filter, doc! { "$set": set }).await?;
+        if result.modified_count > 0 {
+            tracing::info!(
+                slug = upgrade.slug,
+                version = 1,
+                "Applied provider revocation seed upgrade"
+            );
+        }
     }
 
     Ok(())
@@ -6773,6 +7020,223 @@ mod tests {
                 .unwrap();
             assert!(found.is_some(), "expected seeded provider slug: {slug}");
         }
+    }
+
+    #[tokio::test]
+    async fn fresh_oauth_seeds_have_structured_revocation_contracts() {
+        let Some(db) = connect_test_database("prov_svc_revocation_fresh_seeds").await else {
+            return;
+        };
+        let enc = test_encryption_keys();
+        super::seed_default_providers(&db, &enc).await.unwrap();
+        let collection = db.collection::<ProviderConfig>(COLLECTION_NAME);
+        let expected = [
+            ("twitter", "rfc7009", "inherit", false),
+            ("google", "rfc7009", "none", false),
+            ("github", "github", "inherit", true),
+            ("facebook", "facebook_deauth", "inherit", true),
+            ("discord", "rfc7009", "inherit", false),
+            ("linkedin", "rfc7009", "inherit", false),
+            ("slack", "self_bearer", "inherit", false),
+            ("tiktok", "rfc7009", "inherit", false),
+            ("twitch", "rfc7009", "client_id", false),
+            ("reddit", "rfc7009", "inherit", false),
+            ("google-cloud", "rfc7009", "none", false),
+        ];
+
+        for (slug, style, auth, revokes_grant) in expected {
+            let provider = collection
+                .find_one(doc! { "slug": slug })
+                .await
+                .unwrap()
+                .unwrap_or_else(|| panic!("missing provider seed {slug}"));
+            let revocation = provider
+                .revocation
+                .unwrap_or_else(|| panic!("missing revocation seed for {slug}"));
+            assert_eq!(revocation.style, style, "unexpected style for {slug}");
+            assert_eq!(revocation.auth, auth, "unexpected auth for {slug}");
+            assert_eq!(
+                revocation.revokes_grant, revokes_grant,
+                "unexpected grant behavior for {slug}"
+            );
+            assert_eq!(provider.revocation_seed_version, 1, "version for {slug}");
+            if style == "rfc7009" {
+                assert_eq!(
+                    provider.revocation_url.as_deref(),
+                    Some(revocation.url.as_str()),
+                    "RFC 7009 alias must remain coherent for {slug}"
+                );
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn revocation_backfill_lifts_legacy_alias_idempotently() {
+        let Some(db) = connect_test_database("prov_svc_revocation_legacy_lift").await else {
+            return;
+        };
+        let collection = db.collection::<ProviderConfig>(COLLECTION_NAME);
+        let raw = db.collection::<mongodb::bson::Document>(COLLECTION_NAME);
+        raw.insert_one(doc! {
+            "_id": "legacy-custom",
+            "slug": "custom-oauth",
+            "name": "Custom OAuth",
+            "provider_type": "oauth2",
+            "revocation_url": "https://example.com/oauth/revoke",
+            "created_by": "admin-user",
+            "revocation_seed_version": 0,
+            "created_at": bson::DateTime::from_chrono(Utc::now()),
+            "updated_at": bson::DateTime::from_chrono(Utc::now()),
+        })
+        .await
+        .unwrap();
+
+        super::backfill_provider_revocation(&collection)
+            .await
+            .unwrap();
+        super::backfill_provider_revocation(&collection)
+            .await
+            .unwrap();
+
+        let stored = raw
+            .find_one(doc! { "_id": "legacy-custom" })
+            .await
+            .unwrap()
+            .unwrap();
+        let revocation = stored.get_document("revocation").unwrap();
+        assert_eq!(revocation.get_str("style").unwrap(), "rfc7009");
+        assert_eq!(
+            revocation.get_str("url").unwrap(),
+            "https://example.com/oauth/revoke"
+        );
+        assert_eq!(revocation.get_str("auth").unwrap(), "inherit");
+        assert!(!revocation.get_bool("revokes_grant").unwrap());
+        assert_eq!(
+            stored.get_str("revocation_url").unwrap(),
+            "https://example.com/oauth/revoke"
+        );
+    }
+
+    #[tokio::test]
+    async fn revocation_upgrade_respects_canonical_guard_and_version_marker() {
+        let Some(db) = connect_test_database("prov_svc_revocation_guards").await else {
+            return;
+        };
+        let collection = db.collection::<ProviderConfig>(COLLECTION_NAME);
+        let raw = db.collection::<mongodb::bson::Document>(COLLECTION_NAME);
+        raw.insert_many([
+            doc! {
+                "_id": "github-enterprise",
+                "slug": "github",
+                "name": "GitHub Enterprise",
+                "provider_type": "oauth2",
+                "authorization_url": "https://github.example.test/login/oauth/authorize",
+                "token_url": "https://github.example.test/login/oauth/access_token",
+                "created_by": "system",
+                "revocation_seed_version": 0,
+                "created_at": bson::DateTime::from_chrono(Utc::now()),
+                "updated_at": bson::DateTime::from_chrono(Utc::now()),
+            },
+            doc! {
+                "_id": "github-admin-edited",
+                "slug": "github",
+                "name": "GitHub",
+                "provider_type": "oauth2",
+                "authorization_url": "https://github.com/login/oauth/authorize",
+                "token_url": "https://github.com/login/oauth/access_token",
+                "revocation": {
+                    "style": "github",
+                    "url": "https://github.example.test/custom-revoke",
+                    "auth": "inherit",
+                    "revokes_grant": false,
+                },
+                "created_by": "system",
+                "revocation_seed_version": 1,
+                "created_at": bson::DateTime::from_chrono(Utc::now()),
+                "updated_at": bson::DateTime::from_chrono(Utc::now()),
+            },
+        ])
+        .await
+        .unwrap();
+
+        super::backfill_provider_revocation(&collection)
+            .await
+            .unwrap();
+
+        let enterprise = raw
+            .find_one(doc! { "_id": "github-enterprise" })
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(!enterprise.contains_key("revocation"));
+        let edited = raw
+            .find_one(doc! { "_id": "github-admin-edited" })
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            edited
+                .get_document("revocation")
+                .unwrap()
+                .get_str("url")
+                .unwrap(),
+            "https://github.example.test/custom-revoke"
+        );
+    }
+
+    #[tokio::test]
+    async fn slack_upgrade_is_one_shot_and_retains_legacy_url() {
+        let Some(db) = connect_test_database("prov_svc_revocation_slack_upgrade").await else {
+            return;
+        };
+        let collection = db.collection::<ProviderConfig>(COLLECTION_NAME);
+        let raw = db.collection::<mongodb::bson::Document>(COLLECTION_NAME);
+        raw.insert_one(doc! {
+            "_id": "legacy-slack",
+            "slug": "slack",
+            "name": "Slack",
+            "provider_type": "oauth2",
+            "authorization_url": "https://slack.com/oauth/v2/authorize",
+            "token_url": "https://slack.com/api/oauth.v2.access",
+            "revocation_url": "https://slack.com/api/auth.revoke",
+            "is_active": true,
+            "created_by": "system",
+            "revocation_seed_version": 0,
+            "created_at": bson::DateTime::from_chrono(Utc::now()),
+            "updated_at": bson::DateTime::from_chrono(Utc::now()),
+        })
+        .await
+        .unwrap();
+
+        super::backfill_provider_revocation(&collection)
+            .await
+            .unwrap();
+        raw.update_one(
+            doc! { "_id": "legacy-slack" },
+            doc! { "$set": { "revocation.revokes_grant": true } },
+        )
+        .await
+        .unwrap();
+        super::backfill_provider_revocation(&collection)
+            .await
+            .unwrap();
+
+        let stored = raw
+            .find_one(doc! { "_id": "legacy-slack" })
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(stored.get_i32("revocation_seed_version").unwrap(), 1);
+        assert_eq!(
+            stored.get_str("revocation_url").unwrap(),
+            "https://slack.com/api/auth.revoke"
+        );
+        let revocation = stored.get_document("revocation").unwrap();
+        assert_eq!(revocation.get_str("style").unwrap(), "self_bearer");
+        assert!(
+            revocation.get_bool("revokes_grant").unwrap(),
+            "version marker must preserve the post-upgrade admin edit"
+        );
     }
 
     // ── credential_mode "both" survives restarts (one-click connectors) ──
