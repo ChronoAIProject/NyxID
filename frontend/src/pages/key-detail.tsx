@@ -1637,9 +1637,9 @@ function DeleteKeyDialog({
     deleteKey.mutate(input, {
       onSuccess: (response) => {
         toast.success(
-          response?.upstream_revoked === false
-            ? "Removed from NyxID. Upstream access remains active."
-            : "Service disconnected",
+          response?.upstream_revocation_scheduled === true
+            ? "Removed from NyxID. Upstream revocation scheduled."
+            : "Removed from NyxID. Upstream access remains active.",
         );
         close();
         void navigate({ to: "/keys", search: {} });

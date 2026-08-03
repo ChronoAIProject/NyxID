@@ -2,17 +2,18 @@ import { z } from "zod";
 
 export const GRANT_CASCADE_ERROR_CODE = 11500;
 
-export const GRANT_CASCADE_CAVEAT =
-  "If this GitHub account is also connected under another NyxID account or organization, those connections will lose access too. If any listed service uses a different GitHub account, it will be removed from NyxID but keep its GitHub-side access.";
+export function grantCascadeCaveat(providerName: string): string {
+  return `If this ${providerName} account is also connected under another NyxID account or organization, those connections will lose access too. If any listed service uses a different ${providerName} account, it will be removed from NyxID but keep its ${providerName}-side access.`;
+}
 
 export function grantRevocationDescription(providerName: string): string {
   return `This de-authorizes NyxID from your ${providerName} account; you'll see the consent screen if you reconnect.`;
 }
 
 export const grantCascadeSiblingSchema = z.object({
-  user_service_id: z.string().min(1),
+  user_service_id: z.string(),
   name: z.string().min(1),
-  slug: z.string().min(1),
+  slug: z.string(),
 });
 
 export const grantCascadeDetailsSchema = z.object({

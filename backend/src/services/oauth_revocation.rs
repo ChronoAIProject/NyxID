@@ -128,12 +128,7 @@ pub async fn revoke_remote(req: RevocationRequest<'_>) -> RevocationOutcome {
         "github" => {
             let access =
                 revoke_github_token(&config, req.scope, req.creds.as_ref(), access_token).await;
-            let refresh = if req.scope == RevocationScope::Token {
-                revoke_github_token(&config, req.scope, req.creds.as_ref(), refresh_token).await
-            } else {
-                None
-            };
-            (access, refresh)
+            (access, None)
         }
         "self_bearer" => {
             let access = revoke_self_bearer(&config, access_token).await;
@@ -805,13 +800,20 @@ mod tests {
             &provider,
             RevocationScope::Token,
             Some(credentials()),
-            Some("github-token-only"),
-            None,
+            Some("github-access"),
+            Some("github-refresh"),
         ))
         .await;
         assert_eq!(token.access, Some(TokenOutcome::Delivered));
+        assert_eq!(token.refresh, None);
         let captured = server.receiver.recv().await.expect("token request");
         assert_eq!(captured.uri, "/applications/client-id/token");
+        assert_eq!(
+            serde_json::from_slice::<serde_json::Value>(&captured.body)
+                .expect("github request json")["access_token"],
+            "github-access"
+        );
+        assert!(server.receiver.try_recv().is_err());
     }
 
     #[tokio::test]

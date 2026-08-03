@@ -142,7 +142,6 @@ export function ProviderGrid() {
     providerId: string,
     options: Pick<DisconnectProviderInput, "cascadeGrant" | "grantScope"> = {},
   ) {
-    const provider = providers?.find((p) => p.id === providerId);
     setActiveProviderId(providerId);
     try {
       const response = await disconnectMutation.mutateAsync({
@@ -151,9 +150,9 @@ export function ProviderGrid() {
         ...options,
       });
       toast.success(
-        response?.upstream_revoked === false
-          ? "Removed from NyxID. Upstream access remains active."
-          : `Disconnected from ${provider?.name ?? "provider"}`,
+        response?.upstream_revocation_scheduled === true
+          ? "Removed from NyxID. Upstream revocation scheduled."
+          : "Removed from NyxID. Upstream access remains active.",
       );
       setDisconnectDialog(null);
       setCascadeDetails(null);

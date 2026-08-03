@@ -70,7 +70,7 @@ pub struct DisconnectSaProviderQuery {
 pub struct DisconnectSaProviderResponse {
     pub status: String,
     pub message: String,
-    pub upstream_revoked: bool,
+    pub upstream_revocation_scheduled: bool,
 }
 
 #[derive(Debug, Serialize)]
@@ -245,7 +245,7 @@ pub async fn disconnect_sa_provider(
     Ok(Json(DisconnectSaProviderResponse {
         status: "disconnected".to_string(),
         message: "Provider disconnected from service account".to_string(),
-        upstream_revoked: result.upstream_revoked,
+        upstream_revocation_scheduled: result.upstream_revocation_scheduled,
     }))
 }
 

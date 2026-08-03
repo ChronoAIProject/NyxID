@@ -139,8 +139,7 @@ export function useExternalApiKeys() {
   return useQuery({
     queryKey: ["external-api-keys"],
     queryFn: async (): Promise<readonly ExternalApiKeyInfo[]> => {
-      const res =
-        await api.get<ExternalApiKeyListResponse>("/api-keys/external");
+      const res = await api.get<ExternalApiKeyListResponse>("/api-keys/external");
       return res.api_keys;
     },
   });
@@ -218,7 +217,7 @@ export interface DeleteKeyInput {
 export interface DeleteKeyResponse {
   readonly message: string;
   readonly deleted: boolean;
-  readonly upstream_revoked: boolean;
+  readonly upstream_revocation_scheduled: boolean;
 }
 
 interface UpdateKeyParams {
@@ -238,7 +237,9 @@ interface UpdateKeyParams {
    *   `null` clears,
    *   array replaces.
    */
-  readonly default_request_headers?: null | readonly DefaultRequestHeader[];
+  readonly default_request_headers?:
+    | null
+    | readonly DefaultRequestHeader[];
 }
 
 export function useUpdateKey() {
@@ -302,7 +303,9 @@ interface UpdateUserServiceParams {
    *   `null` clears,
    *   array replaces.
    */
-  readonly default_request_headers?: null | readonly DefaultRequestHeader[];
+  readonly default_request_headers?:
+    | null
+    | readonly DefaultRequestHeader[];
   readonly ws_frame_injections?: readonly WsFrameInjection[];
 }
 

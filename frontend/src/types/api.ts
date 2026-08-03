@@ -682,7 +682,7 @@ export interface MessageResponse {
 export interface ProviderActionResponse {
   readonly status: string;
   readonly message: string;
-  readonly upstream_revoked?: boolean;
+  readonly upstream_revocation_scheduled?: boolean;
 }
 
 export interface LlmProviderStatus {

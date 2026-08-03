@@ -32,6 +32,25 @@ describe("grantCascadeErrorResponseSchema", () => {
     expect(parseGrantCascadeDetails(payload)?.provider_name).toBe("GitHub");
   });
 
+  it("parses non-service siblings with empty service identifiers", () => {
+    const details = grantCascadeErrorResponseSchema.parse({
+      ...payload,
+      details: {
+        ...payload.details,
+        siblings: [
+          {
+            user_service_id: "",
+            name: "GitHub provider connection",
+            slug: "",
+          },
+        ],
+      },
+    }).details;
+
+    expect(details.siblings[0]?.user_service_id).toBe("");
+    expect(details.siblings[0]?.slug).toBe("");
+  });
+
   it("rejects another error code or malformed details", () => {
     expect(
       parseGrantCascadeDetails({ ...payload, error_code: 1008 }),

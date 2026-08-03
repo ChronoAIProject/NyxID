@@ -1,6 +1,6 @@
 import { AlertTriangle } from "lucide-react";
 import {
-  GRANT_CASCADE_CAVEAT,
+  grantCascadeCaveat,
   type GrantCascadeDetails,
 } from "@/schemas/oauth-revocation";
 import { Button } from "@/components/ui/button";
@@ -54,8 +54,11 @@ export function GrantCascadeDialog({
               Also using this {details.provider_name} authorization
             </p>
             <ul className="mt-2 space-y-1.5 text-muted-foreground">
-              {details.siblings.map((sibling) => (
-                <li key={sibling.user_service_id} className="flex gap-2">
+              {details.siblings.map((sibling, index) => (
+                <li
+                  key={`${sibling.user_service_id}:${sibling.slug}:${sibling.name}:${index}`}
+                  className="flex gap-2"
+                >
                   <span aria-hidden="true">-</span>
                   <span>{sibling.name}</span>
                 </li>
@@ -65,8 +68,10 @@ export function GrantCascadeDialog({
 
           {details.unaffected_other_app.length > 0 && (
             <div className="space-y-1.5 text-muted-foreground">
-              {details.unaffected_other_app.map((service) => (
-                <p key={service.user_service_id}>
+              {details.unaffected_other_app.map((service, index) => (
+                <p
+                  key={`${service.user_service_id}:${service.slug}:${service.name}:${index}`}
+                >
                   not affected (different OAuth app): {service.name}
                 </p>
               ))}
@@ -81,7 +86,7 @@ export function GrantCascadeDialog({
           )}
 
           <p className="text-[11px] leading-relaxed text-text-tertiary">
-            {GRANT_CASCADE_CAVEAT}
+            {grantCascadeCaveat(details.provider_name)}
           </p>
         </div>
 

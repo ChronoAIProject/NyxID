@@ -547,10 +547,12 @@ describe("KeyDetailPage — delete flow", () => {
       hooks.deleteKey.mock.calls[0]![1].onSuccess({
         message: "Deleted",
         deleted: true,
-        upstream_revoked: true,
+        upstream_revocation_scheduled: true,
       });
     });
-    expect(mockToastSuccess).toHaveBeenCalledWith("Service disconnected");
+    expect(mockToastSuccess).toHaveBeenCalledWith(
+      "Removed from NyxID. Upstream revocation scheduled.",
+    );
     expect(mockNavigate).toHaveBeenCalledWith({ to: "/keys", search: {} });
   });
 

@@ -110,7 +110,7 @@ pub struct DeleteExternalApiKeyQuery {
 #[derive(Debug, Serialize, ToSchema)]
 pub struct DeleteExternalApiKeyResponse {
     pub deleted: bool,
-    pub upstream_revoked: bool,
+    pub upstream_revocation_scheduled: bool,
 }
 
 /// Register a Google Cloud service-account JSON key as a proxy
@@ -488,7 +488,7 @@ pub async fn delete_external_api_key(
     }
     Ok(Json(DeleteExternalApiKeyResponse {
         deleted: true,
-        upstream_revoked: result.upstream_revoked,
+        upstream_revocation_scheduled: result.upstream_revocation_scheduled,
     }))
 }
 
@@ -1110,7 +1110,7 @@ mod tests {
         .await
         .unwrap();
         assert!(response.deleted);
-        assert!(!response.upstream_revoked);
+        assert!(!response.upstream_revocation_scheduled);
         assert_eq!(
             db.collection::<UserApiKey>(USER_API_KEYS)
                 .count_documents(doc! { "user_id": &user_id })

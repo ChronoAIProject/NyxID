@@ -319,7 +319,7 @@ describe("ProviderGrid", () => {
       .mockResolvedValueOnce({
         status: "disconnected",
         message: "Provider disconnected",
-        upstream_revoked: true,
+        upstream_revocation_scheduled: true,
       });
     mocks.useMyProviderTokens.mockReturnValue({
       data: [providerToken],

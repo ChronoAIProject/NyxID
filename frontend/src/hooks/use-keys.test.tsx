@@ -160,7 +160,10 @@ describe("mutation hooks pin their request contracts", () => {
   });
 
   it("useDeleteKey encodes grant cascade retry options", async () => {
-    mockDelete.mockResolvedValue({ deleted: true, upstream_revoked: true });
+    mockDelete.mockResolvedValue({
+      deleted: true,
+      upstream_revocation_scheduled: true,
+    });
     const { result } = renderHook(() => useDeleteKey(), {
       wrapper: wrapperFactory(),
     });

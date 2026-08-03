@@ -150,7 +150,8 @@ export function useInitiateOAuth() {
             readonly keyId?: string;
           },
     ): Promise<OAuthInitiateResponse> => {
-      const params = typeof input === "string" ? { providerId: input } : input;
+      const params =
+        typeof input === "string" ? { providerId: input } : input;
       const query = new URLSearchParams();
       if (params.redirectPath) {
         query.set("redirect_path", params.redirectPath);
@@ -161,10 +162,7 @@ export function useInitiateOAuth() {
       // own minimum.
       if (params.scopeOverride !== undefined) {
         query.set("scope_override", params.scopeOverride.join(","));
-      } else if (
-        params.additionalScopes &&
-        params.additionalScopes.length > 0
-      ) {
+      } else if (params.additionalScopes && params.additionalScopes.length > 0) {
         query.set("scope", params.additionalScopes.join(","));
       }
       if (params.targetOrgId) {
@@ -198,14 +196,12 @@ export function useInitiateDeviceCode() {
             readonly keyId?: string;
           },
     ): Promise<DeviceCodeInitiateResponse> => {
-      const params = typeof input === "string" ? { providerId: input } : input;
+      const params =
+        typeof input === "string" ? { providerId: input } : input;
       const query = new URLSearchParams();
       if (params.scopeOverride !== undefined) {
         query.set("scope_override", params.scopeOverride.join(","));
-      } else if (
-        params.additionalScopes &&
-        params.additionalScopes.length > 0
-      ) {
+      } else if (params.additionalScopes && params.additionalScopes.length > 0) {
         query.set("scope", params.additionalScopes.join(","));
       }
       if (params.targetOrgId) {

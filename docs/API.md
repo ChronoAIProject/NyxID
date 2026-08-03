@@ -2829,11 +2829,11 @@ Disconnect from a provider. Local credentials are atomically claimed and cleared
 {
   "status": "disconnected",
   "message": "Provider disconnected and credentials removed",
-  "upstream_revoked": true
+  "upstream_revocation_scheduled": true
 }
 ```
 
-`upstream_revoked` is `true` when an eligible upstream request was successfully scheduled after local teardown. It does not assert that the detached upstream request was delivered. `false` means no upstream request was scheduled, such as an unconfigured provider or Facebook token-scope removal.
+`upstream_revocation_scheduled` is `true` when an eligible upstream request was successfully scheduled after local teardown. It does not assert that the detached upstream request was delivered. `false` means no upstream request was scheduled, such as an unconfigured provider or Facebook token-scope removal.
 
 **Errors:**
 - `1003 not_found` -- No token found for this provider
@@ -2942,11 +2942,11 @@ Revoke a key (deactivates the service and credential), then schedule configured 
 {
   "message": "Key revoked successfully",
   "deleted": true,
-  "upstream_revoked": true
+  "upstream_revocation_scheduled": true
 }
 ```
 
-For `only_if_pending=true`, `deleted` is `false` if authorization already completed and `upstream_revoked` is always `false`.
+For `only_if_pending=true`, `deleted` is `false` if authorization already completed and `upstream_revocation_scheduled` is always `false`.
 
 ---
 
@@ -3010,7 +3010,7 @@ Revoke an external credential. OAuth-backed rows use the same grant-cascade and 
 ```json
 {
   "deleted": true,
-  "upstream_revoked": true
+  "upstream_revocation_scheduled": true
 }
 ```
 
@@ -3042,7 +3042,7 @@ The three delete endpoints above return HTTP 409 with error code `11500` when gr
 }
 ```
 
-Clients may retry with `cascade_grant=true`, or with `grant_scope=token` when `token_scope_available` is `true`. A successful response's `upstream_revoked` field means an eligible detached request was scheduled, not that the upstream provider confirmed delivery.
+Clients may retry with `cascade_grant=true`, or with `grant_scope=token` when `token_scope_available` is `true`. A successful response's `upstream_revocation_scheduled` field means an eligible detached request was scheduled, not that the upstream provider confirmed delivery.
 
 ---
 

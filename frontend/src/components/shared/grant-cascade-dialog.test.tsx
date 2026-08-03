@@ -1,7 +1,7 @@
 import { render, screen } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { describe, expect, it, vi } from "vitest";
-import { GRANT_CASCADE_CAVEAT } from "@/schemas/oauth-revocation";
+import { grantCascadeCaveat } from "@/schemas/oauth-revocation";
 import { GrantCascadeDialog } from "./grant-cascade-dialog";
 
 const details = {
@@ -44,7 +44,7 @@ describe("GrantCascadeDialog", () => {
     expect(
       screen.getByText("not affected (different OAuth app): Enterprise GitHub"),
     ).toBeInTheDocument();
-    expect(screen.getByText(GRANT_CASCADE_CAVEAT)).toBeInTheDocument();
+    expect(screen.getByText(grantCascadeCaveat("GitHub"))).toBeInTheDocument();
 
     await user.click(
       screen.getByRole("button", { name: "Remove only this service" }),
@@ -78,5 +78,32 @@ describe("GrantCascadeDialog", () => {
     expect(
       screen.getByText(/authorization will remain active at GitHub/i),
     ).toBeInTheDocument();
+  });
+
+  it("uses the provider name in the cross-owner warning", () => {
+    render(
+      <GrantCascadeDialog
+        details={{
+          ...details,
+          provider_slug: "facebook",
+          provider_name: "Facebook",
+          siblings: [
+            {
+              user_service_id: "",
+              name: "Facebook provider connection",
+              slug: "",
+            },
+          ],
+          unaffected_other_app: [],
+        }}
+        isPending={false}
+        onCascade={vi.fn()}
+        onRemoveOnly={vi.fn()}
+        onCancel={vi.fn()}
+      />,
+    );
+
+    expect(screen.getByText(grantCascadeCaveat("Facebook"))).toBeInTheDocument();
+    expect(screen.queryByText(/GitHub account/)).not.toBeInTheDocument();
   });
 });

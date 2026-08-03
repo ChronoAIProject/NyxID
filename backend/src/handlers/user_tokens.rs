@@ -145,7 +145,7 @@ pub struct ConnectResponse {
 pub struct DisconnectProviderResponse {
     pub status: String,
     pub message: String,
-    pub upstream_revoked: bool,
+    pub upstream_revocation_scheduled: bool,
 }
 
 #[derive(Debug, Deserialize)]
@@ -930,7 +930,7 @@ pub async fn disconnect_provider(
     Ok(Json(DisconnectProviderResponse {
         status: "disconnected".to_string(),
         message: "Provider disconnected and credentials removed".to_string(),
-        upstream_revoked: result.upstream_revoked,
+        upstream_revocation_scheduled: result.upstream_revocation_scheduled,
     }))
 }
 
@@ -2435,7 +2435,7 @@ mod tests {
         .await
         .unwrap();
         assert_eq!(response.status, "disconnected");
-        assert!(!response.upstream_revoked);
+        assert!(!response.upstream_revocation_scheduled);
         assert!(
             db.collection::<UserApiKey>(USER_API_KEYS)
                 .find_one(doc! { "_id": key_id })

@@ -2825,7 +2825,7 @@ pub struct DeletedKeyEvent {
 
 #[derive(Clone, Debug)]
 pub struct DisconnectResult {
-    pub upstream_revoked: bool,
+    pub upstream_revocation_scheduled: bool,
     pub deleted_services: Vec<DeletedKeyEvent>,
 }
 
@@ -2992,24 +2992,25 @@ pub async fn disconnect_credentials(
             .as_ref()
             .map(RemoteCredentialSource::ProviderToken)
     };
-    let upstream_revoked = if let (Some(provider), Some(source)) = (plan.provider, remote_source) {
-        hand_off_remote_revocation(
-            db,
-            encryption_keys,
-            owner_id,
-            actor,
-            provider,
-            plan.scope,
-            source,
-            cascade_record_count,
-        )
-        .await
-    } else {
-        false
-    };
+    let upstream_revocation_scheduled =
+        if let (Some(provider), Some(source)) = (plan.provider, remote_source) {
+            hand_off_remote_revocation(
+                db,
+                encryption_keys,
+                owner_id,
+                actor,
+                provider,
+                plan.scope,
+                source,
+                cascade_record_count,
+            )
+            .await
+        } else {
+            false
+        };
 
     Ok(DisconnectResult {
-        upstream_revoked,
+        upstream_revocation_scheduled,
         deleted_services,
     })
 }
@@ -3161,9 +3162,9 @@ async fn build_disconnect_plan(
             continue;
         }
         siblings.push(GrantCascadeSibling {
-            user_service_id: key.id.clone(),
+            user_service_id: String::new(),
             name: key.label.clone(),
-            slug: key.id.clone(),
+            slug: String::new(),
         });
     }
     let provider_token_lineage = match active_provider_token.as_ref() {
@@ -3176,12 +3177,9 @@ async fn build_disconnect_plan(
     let provider_token_is_sibling = provider_token_affected && initiating_token.is_none();
     if provider_token_is_sibling {
         siblings.push(GrantCascadeSibling {
-            user_service_id: active_provider_token
-                .as_ref()
-                .map(|token| token.id.clone())
-                .unwrap_or_default(),
+            user_service_id: String::new(),
             name: format!("{} provider connection", provider.name),
-            slug: provider.slug.clone(),
+            slug: String::new(),
         });
     }
     let mut unaffected_other_app: Vec<GrantCascadeSibling> = unaffected_services
@@ -3196,9 +3194,9 @@ async fn build_disconnect_plan(
             continue;
         }
         unaffected_other_app.push(GrantCascadeSibling {
-            user_service_id: key.id.clone(),
+            user_service_id: String::new(),
             name: key.label.clone(),
-            slug: key.id.clone(),
+            slug: String::new(),
         });
     }
 
@@ -6015,6 +6013,18 @@ mod tests {
             None,
         )
         .await;
+        let mut orphan_key = sample_api_key("oauth2");
+        orphan_key.id = "orphan-key".to_string();
+        orphan_key.user_id = user_id.clone();
+        orphan_key.label = "Orphan OAuth credential".to_string();
+        orphan_key.provider_config_id = Some(provider.id.clone());
+        orphan_key.connection_id = Some(uuid::Uuid::new_v4().to_string());
+        orphan_key.credential_source = Some("platform".to_string());
+        db.collection::<UserApiKey>(USER_API_KEYS)
+            .insert_one(orphan_key)
+            .await
+            .unwrap();
+        insert_provider_token(&db, &user_id, &provider.id).await;
 
         let err = super::disconnect_credentials(
             &db,
@@ -6029,14 +6039,28 @@ mod tests {
         let AppError::GrantCascadeConfirmationRequired(payload) = err else {
             panic!("unexpected error: {err:?}");
         };
-        assert_eq!(payload.siblings.len(), 1);
-        assert_eq!(payload.siblings[0].user_service_id, "svc-sibling");
+        assert_eq!(payload.siblings.len(), 3);
+        let service_sibling = payload
+            .siblings
+            .iter()
+            .find(|sibling| sibling.name == "svc-sibling")
+            .expect("service sibling");
+        assert_eq!(service_sibling.user_service_id, "svc-sibling");
+        assert_eq!(service_sibling.slug, "svc-sibling");
+        for non_service in payload
+            .siblings
+            .iter()
+            .filter(|sibling| sibling.name != "svc-sibling")
+        {
+            assert!(non_service.user_service_id.is_empty());
+            assert!(non_service.slug.is_empty());
+        }
         assert_eq!(
             db.collection::<UserApiKey>(USER_API_KEYS)
                 .count_documents(doc! { "user_id": &user_id })
                 .await
                 .unwrap(),
-            2
+            3
         );
         assert_eq!(
             db.collection::<UserService>(USER_SERVICES)
@@ -6185,7 +6209,7 @@ mod tests {
         )
         .await
         .unwrap();
-        assert!(!first.upstream_revoked);
+        assert!(!first.upstream_revocation_scheduled);
         assert_eq!(calls.load(Ordering::SeqCst), 0);
         assert!(
             db.collection::<UserProviderToken>(USER_PROVIDER_TOKENS)
@@ -6205,7 +6229,7 @@ mod tests {
         )
         .await
         .unwrap();
-        assert!(last.upstream_revoked);
+        assert!(last.upstream_revocation_scheduled);
         tokio::time::timeout(std::time::Duration::from_secs(2), async {
             while calls.load(Ordering::SeqCst) == 0 {
                 tokio::task::yield_now().await;
@@ -6269,7 +6293,7 @@ mod tests {
         .await
         .unwrap();
 
-        assert!(!result.upstream_revoked);
+        assert!(!result.upstream_revocation_scheduled);
         assert_eq!(result.deleted_services.len(), 1);
     }
 
@@ -6300,6 +6324,23 @@ mod tests {
             )
             .await;
         }
+        let mut orphan_other_app = sample_api_key("oauth2");
+        orphan_other_app.id = "orphan-other-app".to_string();
+        orphan_other_app.user_id = user_id.clone();
+        orphan_other_app.label = "Orphan other-app credential".to_string();
+        orphan_other_app.provider_config_id = Some(provider.id.clone());
+        orphan_other_app.connection_id = Some(uuid::Uuid::new_v4().to_string());
+        orphan_other_app.credential_source = Some("byo".to_string());
+        orphan_other_app.user_oauth_client_id_encrypted = Some(
+            encryption_keys
+                .encrypt(b"client-b")
+                .await
+                .expect("encrypt orphan client id"),
+        );
+        db.collection::<UserApiKey>(USER_API_KEYS)
+            .insert_one(orphan_other_app)
+            .await
+            .unwrap();
 
         let err = super::disconnect_credentials(
             &db,
@@ -6316,11 +6357,21 @@ mod tests {
         };
         assert_eq!(payload.siblings.len(), 1);
         assert_eq!(payload.siblings[0].user_service_id, "svc-sibling");
-        assert_eq!(payload.unaffected_other_app.len(), 1);
-        assert_eq!(
-            payload.unaffected_other_app[0].user_service_id,
-            "svc-other-app"
-        );
+        assert_eq!(payload.unaffected_other_app.len(), 2);
+        let other_service = payload
+            .unaffected_other_app
+            .iter()
+            .find(|sibling| sibling.name == "svc-other-app")
+            .expect("other-app service");
+        assert_eq!(other_service.user_service_id, "svc-other-app");
+        assert_eq!(other_service.slug, "svc-other-app");
+        let orphan = payload
+            .unaffected_other_app
+            .iter()
+            .find(|sibling| sibling.name == "Orphan other-app credential")
+            .expect("other-app orphan key");
+        assert!(orphan.user_service_id.is_empty());
+        assert!(orphan.slug.is_empty());
     }
 
     #[tokio::test]
@@ -6399,7 +6450,7 @@ mod tests {
         )
         .await
         .unwrap();
-        assert!(result.upstream_revoked);
+        assert!(result.upstream_revocation_scheduled);
         assert_eq!(result.deleted_services.len(), 2);
 
         for _ in 0..50 {

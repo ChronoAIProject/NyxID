@@ -615,7 +615,7 @@ pub struct DeleteKeyResponse {
     #[serde(default)]
     pub deleted: bool,
     /// Whether an eligible upstream revocation request was handed off.
-    pub upstream_revoked: bool,
+    pub upstream_revocation_scheduled: bool,
 }
 
 /// Extract the Lark / Feishu `app_id` from a plaintext credential string.
@@ -2083,7 +2083,7 @@ pub async fn delete_key(
                 "Key is no longer pending_auth; delete skipped".to_string()
             },
             deleted: flipped,
-            upstream_revoked: false,
+            upstream_revocation_scheduled: false,
         }));
     }
 
@@ -2113,7 +2113,7 @@ pub async fn delete_key(
     Ok(Json(DeleteKeyResponse {
         message: "Key revoked successfully".to_string(),
         deleted: true,
-        upstream_revoked: result.upstream_revoked,
+        upstream_revocation_scheduled: result.upstream_revocation_scheduled,
     }))
 }
 
@@ -4401,11 +4401,13 @@ mod tests {
         let response = super::DeleteKeyResponse {
             message: "Key revoked successfully".to_string(),
             deleted: true,
-            upstream_revoked: false,
+            upstream_revocation_scheduled: false,
         };
         let json = serde_json::to_value(&response).unwrap();
         assert_eq!(json["message"], "Key revoked successfully");
         assert_eq!(json["deleted"], true);
+        assert_eq!(json["upstream_revocation_scheduled"], false);
+        assert!(json.get("upstream_revoked").is_none());
     }
 
     #[test]
@@ -4413,7 +4415,7 @@ mod tests {
         let response = super::DeleteKeyResponse {
             message: "Key is no longer pending_auth; delete skipped".to_string(),
             deleted: false,
-            upstream_revoked: false,
+            upstream_revocation_scheduled: false,
         };
         let json = serde_json::to_value(&response).unwrap();
         assert_eq!(json["deleted"], false);
