@@ -368,14 +368,15 @@ async fn unified_service_evidence(
     };
 
     let Some(api_key_id) = selected.service.api_key_id.as_deref() else {
-        let connection_state = if selected.service.auth_method == "none" {
-            ConnectionState::Connected
-        } else if selected
-            .service
-            .node_id
-            .as_deref()
-            .is_some_and(|node_id| !node_id.is_empty())
-            && executable == Some(true)
+        // Connected either because no auth is needed, or because the service
+        // is node-routed and the node proved executable.
+        let connection_state = if selected.service.auth_method == "none"
+            || (selected
+                .service
+                .node_id
+                .as_deref()
+                .is_some_and(|node_id| !node_id.is_empty())
+                && executable == Some(true))
         {
             ConnectionState::Connected
         } else {
@@ -573,9 +574,11 @@ fn connection_state_for_key(
                 .node_id
                 .as_deref()
                 .is_some_and(|node_id| !node_id.is_empty());
-            if node_routed && executable == Some(true) {
-                ConnectionState::Connected
-            } else if crate::services::user_api_key_service::has_server_credential(key) {
+            // Connected via a proven-executable node route, or via a
+            // server-held credential.
+            if (node_routed && executable == Some(true))
+                || crate::services::user_api_key_service::has_server_credential(key)
+            {
                 ConnectionState::Connected
             } else {
                 ConnectionState::Verifying
