@@ -35,7 +35,7 @@ export function WizardShell({ step, context, localOrigin, children }: WizardShel
   useApplyTheme()
   return (
     <div className="min-h-screen bg-background text-foreground">
-    <div className="mx-auto flex min-h-screen max-h-screen w-full max-w-[1040px] flex-col px-6 pt-10 pb-6">
+    <div className="mx-auto flex max-h-screen w-full max-w-[1040px] flex-col px-6 pt-10 pb-6">
       <header className="mb-6 flex items-center justify-between">
         <div className="flex items-center">
           <NyxidLogo className="h-9 w-auto" />
@@ -44,7 +44,17 @@ export function WizardShell({ step, context, localOrigin, children }: WizardShel
           <div className="text-[12px] text-muted-foreground">{formatStepLabel(step)}</div>
         ) : null}
       </header>
-      <main className="flex-1 min-h-0 overflow-y-auto overscroll-contain rounded-xl border border-border bg-card p-8">
+      {/*
+        No `flex-1` — main hugs its content, so a short step ends the card
+        at the content instead of stretching it to the viewport bottom.
+        `min-h-[240px]` floors transient states (a "Loading catalog…" step
+        must not render as a sliver that then jumps), and it also serves as
+        the flex-shrink override `min-h-0` used to provide — they set the
+        same property, so only one can win. 240px still lets main shrink
+        far below its content height, so a tall step scrolls internally
+        inside the column's `max-h-screen`.
+      */}
+      <main className="min-h-[240px] overflow-y-auto overscroll-contain rounded-xl border border-border bg-card p-8">
         {children}
       </main>
       <WizardFooter context={context} localOrigin={localOrigin} />

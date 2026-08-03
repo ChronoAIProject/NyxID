@@ -78,7 +78,9 @@ nyxid-crypto = { path = "../nyxid-crypto", features = ["decrypt"] }
 
 # Wizard v2 (CLI-served local browser UI). See docs/CLI_WIZARD_V2.md
 axum = { workspace = true }
-tower = "0.5"
+# `util` for ServiceExt::oneshot, used to drive routers in tests. Axum
+# happens to enable it too, but don't rely on its feature selection.
+tower = { version = "0.5", features = ["util"] }
 tower-http = { version = "0.6", features = ["set-header", "cors"] }
 rust-embed = { version = "8", features = ["include-exclude"] }
 constant_time_eq = "=0.4.2"

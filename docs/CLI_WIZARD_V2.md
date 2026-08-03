@@ -224,19 +224,21 @@ SSH / no-display invocations fall through the §3.1 gate and run the scripted pa
 
 ```
 cli/src/wizard/
-├── mod.rs                    entry: run_ai_key_wizard(auth, prefill)
-├── server.rs                 axum server (bind, proxy, lifecycle, refresh)
-└── assets/                   embedded via rust-embed, served from 127.0.0.1
-    ├── wizard.html           single-page shell + all overlays
-    ├── wizard.js             ~1500 lines of hand-rolled vanilla JS
-    ├── wizard.css            design-token-driven CSS
-    ├── nyxid-logo.svg        brand mark (2.8 KB)
+├── mod.rs                            entry: run_ai_key_wizard(auth, prefill)
+├── server.rs                         axum server (bind, proxy, lifecycle, refresh)
+└── assets/                           embedded via rust-embed, served from 127.0.0.1
+    ├── index.html                    single-file React bundle: shell + all overlays (989 KB)
+    ├── favicon.ico                   tab icon, legacy fallback (4.3 KB)
+    ├── nyxid-app-icon.svg            tab icon, DPR-independent (5.2 KB)
+    ├── nyxid-wordmark.svg            wordmark (4.3 KB)
+    ├── nyxid-coloured-logo.svg       header logo, white-text variant → dark theme (4.3 KB)
+    ├── nyxid-coloured-logo-dark.svg  header logo, dark-text variant → light theme (4.3 KB)
     └── fonts/
         ├── dm-serif-display-400.woff2  wordmark / titles (17 KB)
         └── OFL.txt                     license attribution
 ```
 
-No separate runtime / renderer / flows crates. The whole flow is one `async fn` in `mod.rs` that builds a `ProxyContext`, hands it to `server::run_flow`, and waits on a `WizardOutcome` channel. `server.rs` is the entire server + proxy + refresh logic. `wizard.js` is the entire UI.
+No separate runtime / renderer / flows crates. The whole flow is one `async fn` in `mod.rs` that builds a `ProxyContext`, hands it to `server::run_flow`, and waits on a `WizardOutcome` channel. `server.rs` is the entire server + proxy + refresh logic. `index.html` — the inlined single-file React bundle built from `frontend/` — is the entire UI.
 
 **Trade-off:** deliberately *not* the declarative step-engine described in earlier drafts. The ai-key flow is intricate enough (seven shape branches, two OAuth sub-steps, device-code refresh, overlay state machine) that a declarative engine would have been all abstraction, no leverage. Adding the next wizard flow will require duplicating some JS / adding new allowlist routes — accepted cost.
 
