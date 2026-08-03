@@ -3001,15 +3001,14 @@ async fn execute_proxy_inner(
                 request_len + response_len,
             )
         });
-        state
-            .billing
-            .settle(
-                &metered,
-                llm_platform_usage(reported_usage.as_ref(), request_len + response_len),
-                resale,
-                model,
-            )
-            .await?;
+        settle_meter_async(
+            state.billing.clone(),
+            metered,
+            llm_platform_usage(reported_usage.as_ref(), request_len + response_len),
+            resale,
+            model,
+        )
+        .await;
 
         response_builder
             .body(Body::from(response_body))
