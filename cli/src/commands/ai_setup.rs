@@ -454,8 +454,8 @@ async fn install(tool: AiToolTarget, base_url: &Option<String>) -> Result<()> {
     let result = match tool {
         AiToolTarget::ClaudeCode => install_claude_code(&content, &base).await,
         AiToolTarget::Cursor => install_cursor(&content),
-        AiToolTarget::Codex => install_codex(&content),
-        AiToolTarget::Openclaw => install_openclaw(&content),
+        AiToolTarget::Codex => install_codex(&content, &base).await,
+        AiToolTarget::Openclaw => install_openclaw(&content, &base).await,
         AiToolTarget::Generic => {
             bail!(
                 "Generic tool has no skill files. Use `nyxid ai-setup agent create` to create an agent identity instead."
@@ -671,37 +671,186 @@ fn install_cursor(content: &SkillContent) -> Result<()> {
     Ok(())
 }
 
-fn install_codex(content: &SkillContent) -> Result<()> {
-    let dir = home_dir()?.join(".codex/skills/nyxid");
+/// Marker file written next to installed skills so updates can prune
+/// skills we installed that were later removed from the repo, without ever
+/// touching user-authored skill directories.
+const SKILLS_MANIFEST_FILE: &str = ".nyxid-managed.json";
 
-    write_file(&dir.join("SKILL.md"), &content.skill_md)?;
-    write_file(&dir.join("references/playbook.md"), &content.playbook)?;
-    write_references(&dir, content)?;
-    cleanup_legacy_layout(&dir);
+/// One file inside a repo skill package (path relative to the skill dir).
+struct RepoSkillFile {
+    rel_path: String,
+    content: String,
+}
 
-    eprintln!();
-    print_post_install(AiToolTarget::Codex, content);
+/// A full skill package from the repo's `skills/` tree.
+struct RepoSkill {
+    name: String,
+    files: Vec<RepoSkillFile>,
+}
+
+/// Fetch every skill package under the repo's `skills/` directory: one
+/// git-trees API call for the layout, then raw fetches per file, with the
+/// same URL substitution the single-skill installer applies.
+async fn fetch_all_skills(base_url: &str, dashboard_url: &str) -> Result<Vec<RepoSkill>> {
+    let tree_json =
+        fetch_url("https://api.github.com/repos/ChronoAIProject/NyxID/git/trees/main?recursive=1")
+            .await?;
+    let tree: serde_json::Value =
+        serde_json::from_str(&tree_json).context("Failed to parse GitHub tree response")?;
+
+    let mut by_skill: std::collections::BTreeMap<String, Vec<String>> = Default::default();
+    for entry in tree["tree"].as_array().unwrap_or(&Vec::new()) {
+        if entry["type"].as_str() != Some("blob") {
+            continue;
+        }
+        let Some(path) = entry["path"].as_str() else {
+            continue;
+        };
+        let Some(rest) = path.strip_prefix("skills/") else {
+            continue;
+        };
+        // Skip files directly under skills/ (e.g. INSTALL.md).
+        let Some((skill, rel)) = rest.split_once('/') else {
+            continue;
+        };
+        by_skill
+            .entry(skill.to_string())
+            .or_default()
+            .push(rel.to_string());
+    }
+    if by_skill.is_empty() {
+        bail!("GitHub tree listed no skill packages under skills/");
+    }
+
+    let mut skills = Vec::new();
+    for (name, rel_paths) in by_skill {
+        let mut files = Vec::new();
+        for rel in rel_paths {
+            let raw = fetch_github(&format!("skills/{name}/{rel}")).await?;
+            files.push(RepoSkillFile {
+                rel_path: rel,
+                content: substitute_urls(&raw, base_url, dashboard_url),
+            });
+        }
+        skills.push(RepoSkill { name, files });
+    }
+    Ok(skills)
+}
+
+/// Install every repo skill under `skills_root`, pruning previously managed
+/// skills that disappeared from the repo (per the manifest) and leaving any
+/// user-authored skill directories alone.
+fn install_all_skills(
+    skills_root: &Path,
+    skills: &[RepoSkill],
+    content: &SkillContent,
+) -> Result<()> {
+    let manifest_path = skills_root.join(SKILLS_MANIFEST_FILE);
+    let previous: Vec<String> = std::fs::read_to_string(&manifest_path)
+        .ok()
+        .and_then(|raw| serde_json::from_str::<serde_json::Value>(&raw).ok())
+        .and_then(|value| {
+            value
+                .get("skills")
+                .and_then(|skills| serde_json::from_value(skills.clone()).ok())
+        })
+        .unwrap_or_default();
+    let current: Vec<String> = skills.iter().map(|skill| skill.name.clone()).collect();
+
+    for stale in previous.iter().filter(|name| !current.contains(name)) {
+        let dir = skills_root.join(stale);
+        if dir.exists() {
+            match std::fs::remove_dir_all(&dir) {
+                Ok(()) => eprintln!(
+                    "  Removed managed skill no longer in repo: {}",
+                    dir.display()
+                ),
+                Err(error) => eprintln!(
+                    "  Warning: could not remove stale managed skill {} ({error})",
+                    dir.display()
+                ),
+            }
+        }
+    }
+
+    for skill in skills {
+        let dir = skills_root.join(&skill.name);
+        for file in &skill.files {
+            let path = dir.join(&file.rel_path);
+            write_file(&path, &file.content)?;
+            #[cfg(unix)]
+            if file.rel_path.starts_with("scripts/") && file.rel_path.ends_with(".sh") {
+                make_executable(&path)?;
+            }
+        }
+        if skill.name == "nyxid" {
+            // The playbook reference is generated from the user's server, not
+            // stored in the repo -- keep injecting it like the legacy install.
+            write_file(&dir.join("references/playbook.md"), &content.playbook)?;
+            cleanup_legacy_layout(&dir);
+        }
+    }
+
+    let manifest = serde_json::json!({
+        "skills": current,
+        "installed_at": chrono::Utc::now().to_rfc3339(),
+    });
+    write_file(
+        &manifest_path,
+        &serde_json::to_string_pretty(&manifest).context("serialize skills manifest")?,
+    )?;
     Ok(())
 }
 
-fn install_openclaw(content: &SkillContent) -> Result<()> {
-    let dir = home_dir()?.join(".openclaw/skills/nyxid");
-
-    write_file(&dir.join("SKILL.md"), &content.skill_md)?;
-    write_file(&dir.join("references/playbook.md"), &content.playbook)?;
-    write_references(&dir, content)?;
-    write_file(&dir.join("scripts/install.sh"), &content.install_sh)?;
-
-    #[cfg(unix)]
-    {
-        make_executable(&dir.join("scripts/install.sh"))?;
+/// Install all bundled skills for a `skills/<name>/SKILL.md`-convention tool
+/// (Codex, OpenClaw). Falls back to the legacy single-skill copy when the
+/// multi-skill fetch fails so installs never regress below the old behavior.
+async fn install_skill_dir_tool(
+    tool: AiToolTarget,
+    skills_root: PathBuf,
+    content: &SkillContent,
+    base_url: &str,
+) -> Result<()> {
+    let dashboard_url = resolve_dashboard_url(base_url).await;
+    match fetch_all_skills(base_url, &dashboard_url).await {
+        Ok(skills) => {
+            eprintln!(
+                "  Installing {} bundled skills to {}...",
+                skills.len(),
+                skills_root.display()
+            );
+            install_all_skills(&skills_root, &skills, content)?;
+        }
+        Err(error) => {
+            eprintln!(
+                "  Multi-skill fetch failed ({error}); falling back to the legacy single-skill install (only the nyxid skill)."
+            );
+            let dir = skills_root.join("nyxid");
+            write_file(&dir.join("SKILL.md"), &content.skill_md)?;
+            write_file(&dir.join("references/playbook.md"), &content.playbook)?;
+            write_references(&dir, content)?;
+            if matches!(tool, AiToolTarget::Openclaw) {
+                write_file(&dir.join("scripts/install.sh"), &content.install_sh)?;
+                #[cfg(unix)]
+                make_executable(&dir.join("scripts/install.sh"))?;
+            }
+            cleanup_legacy_layout(&dir);
+        }
     }
 
-    cleanup_legacy_layout(&dir);
-
     eprintln!();
-    print_post_install(AiToolTarget::Openclaw, content);
+    print_post_install(tool, content);
     Ok(())
+}
+
+async fn install_codex(content: &SkillContent, base_url: &str) -> Result<()> {
+    let root = home_dir()?.join(".codex/skills");
+    install_skill_dir_tool(AiToolTarget::Codex, root, content, base_url).await
+}
+
+async fn install_openclaw(content: &SkillContent, base_url: &str) -> Result<()> {
+    let root = home_dir()?.join(".openclaw/skills");
+    install_skill_dir_tool(AiToolTarget::Openclaw, root, content, base_url).await
 }
 
 // ---------------------------------------------------------------------------
@@ -766,8 +915,8 @@ async fn update(tool: Option<AiToolTarget>, base_url: &Option<String>) -> Result
                 }
             }
             AiToolTarget::Cursor => install_cursor(&content)?,
-            AiToolTarget::Codex => install_codex(&content)?,
-            AiToolTarget::Openclaw => install_openclaw(&content)?,
+            AiToolTarget::Codex => install_codex(&content, &base).await?,
+            AiToolTarget::Openclaw => install_openclaw(&content, &base).await?,
             AiToolTarget::Generic => unreachable!(),
         }
     }
