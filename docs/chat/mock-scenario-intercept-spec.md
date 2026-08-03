@@ -80,10 +80,14 @@ lib/assistant/transport.ts
                 └─ scenarios from lib/assistant/scenarios.config.ts (new; authored file)
 ```
 
-The engine + config are loaded via dynamic `import()` triggered by the store
-(on rehydrate-with-enabled and on toggle-on), never statically from the
-transport. `MockScenariosAction` is the only static importer of the store; the
-component itself is gated (§8) so prod chunks carry none of this.
+The interceptor, engine, and config load via a dev-only boot-time dynamic
+`import()` per §8.3 — `transport.ts` keeps zero static mock references, and
+the boot path reports `loading`/`error` engine states to the store so a
+failed install is visible rather than silently passing through (drafted
+differently in v1 as a store-triggered load; the implementation follows §8.3,
+deviation declared and accepted). `MockScenariosAction` is the only static
+importer of the store; the component is gated (§8) so prod chunks carry none
+of this.
 
 ---
 
