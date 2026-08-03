@@ -3001,15 +3001,14 @@ async fn execute_proxy_inner(
                 request_len + response_len,
             )
         });
-        state
-            .billing
-            .settle(
-                &metered,
-                llm_platform_usage(reported_usage.as_ref(), request_len + response_len),
-                resale,
-                model,
-            )
-            .await?;
+        settle_meter_async(
+            state.billing.clone(),
+            metered,
+            llm_platform_usage(reported_usage.as_ref(), request_len + response_len),
+            resale,
+            model,
+        )
+        .await;
 
         response_builder
             .body(Body::from(response_body))
@@ -6915,6 +6914,32 @@ mod proxy_resolution_integration_tests {
     use tokio::net::TcpListener;
     use tokio::sync::mpsc;
 
+    /// Turn the wire-log diagnostic on platform-wide, the way an operator does
+    /// it at runtime through the admin feature-flag API.
+    async fn enable_wire_log_flag(db: &mongodb::Database) {
+        crate::services::feature_flag_service::set_platform_override(
+            db,
+            crate::services::feature_flag_service::AEVATAR_CHAT_WIRE_LOG_FLAG_KEY,
+            &crate::services::feature_flag_service::FlagTarget::Global,
+            true,
+            "test-admin",
+        )
+        .await
+        .expect("enable the wire-log flag globally");
+    }
+
+    /// Runtime kill switch: drop the global override so resolution falls back
+    /// to the registry default (off).
+    async fn disable_wire_log_flag(db: &mongodb::Database) {
+        crate::services::feature_flag_service::clear_platform_override(
+            db,
+            crate::services::feature_flag_service::AEVATAR_CHAT_WIRE_LOG_FLAG_KEY,
+            &crate::services::feature_flag_service::FlagTarget::Global,
+        )
+        .await
+        .expect("clear the wire-log flag override");
+    }
+
     fn assistant_echoes(response: &Response) -> Vec<serde_json::Value> {
         let Some(value) = response.headers().get("x-nyxid-debug-upstream-log") else {
             return Vec::new();
@@ -8128,8 +8153,10 @@ mod proxy_resolution_integration_tests {
         .await
         .unwrap();
 
-        let mut state = test_app_state(db.clone());
-        state.config.aevatar_chat_wire_log_enabled = true;
+        let state = test_app_state(db.clone());
+        // The wire log is gated by a runtime feature flag, not process config:
+        // a platform-global override turns it on for every caller.
+        enable_wire_log_flag(&db).await;
         let auth = access_token_auth(&user_id);
         let billing_policy = crate::services::billing::route_inventory::BillingRoutePolicy::Metered(
             crate::services::billing::BillingIngress::Proxy,
@@ -8675,8 +8702,9 @@ mod proxy_resolution_integration_tests {
                 .is_none()
         );
 
-        let mut flag_off_state = state.clone();
-        flag_off_state.config.aevatar_chat_wire_log_enabled = false;
+        // Turning the runtime flag off must suppress the echo on the very next
+        // request, with no process restart and no other behaviour change.
+        disable_wire_log_flag(&db).await;
         let mut flag_off_request = request(
             Method::POST,
             "/api/v1/assistant/workflow-chat",
@@ -8687,7 +8715,7 @@ mod proxy_resolution_integration_tests {
             HeaderValue::from_static("1"),
         );
         let flag_off_response = crate::handlers::assistant::workflow_chat(
-            axum::extract::State(flag_off_state),
+            axum::extract::State(state.clone()),
             auth.clone(),
             flag_off_request,
         )
@@ -8756,6 +8784,9 @@ mod proxy_resolution_integration_tests {
                 .is_none()
         );
 
+        // Back on: the flag is the sole authorization gate, so a plain
+        // authenticated non-admin caller captures their own exchange too.
+        enable_wire_log_flag(&db).await;
         let non_admin_id = Uuid::new_v4().to_string();
         db.collection::<crate::models::user::User>(USERS)
             .insert_one(test_user(&non_admin_id, UserType::Person))
@@ -8961,8 +8992,8 @@ mod proxy_resolution_integration_tests {
         .await
         .unwrap();
 
-        let mut state = test_app_state(db);
-        state.config.aevatar_chat_wire_log_enabled = true;
+        let state = test_app_state(db.clone());
+        enable_wire_log_flag(&db).await;
         let auth = access_token_auth(&user_id);
         let list_request = || {
             let mut request = Request::builder()

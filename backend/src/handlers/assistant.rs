@@ -33,7 +33,7 @@ use crate::errors::{AppError, AppResult};
 use crate::handlers::proxy::execute_admin_proxy;
 use crate::models::downstream_service::DownstreamService;
 use crate::mw::auth::{AuthMethod, AuthUser, PROXY_SCOPE, scope_allows_rest_proxy};
-use crate::services::assistant_service;
+use crate::services::{assistant_service, feature_flag_service};
 
 /// Conversation indexes carry titles, timestamps, and counts per row, so the
 /// list route gets its own buffering headroom before any merge/reshape.
@@ -156,18 +156,47 @@ fn truncate_utf8(value: &str, max_bytes: usize) -> (String, bool) {
     (value[..end].to_string(), true)
 }
 
-fn upstream_echo_collector(
+/// Decide whether this request captures a wire-log echo, and start an empty
+/// collector when it does.
+///
+/// **Gate order is load-bearing for latency.** The `X-NyxID-Debug-Upstream: 1`
+/// request header is a free in-memory lookup; the feature flag is resolved
+/// from MongoDB. Normal chat traffic — the overwhelming majority — never sends
+/// the header, so the header is checked first and that traffic performs zero
+/// additional database work. This deliberately inverts the previous
+/// flag-then-header order, which was only correct while the gate was static
+/// process config with no I/O cost.
+///
+/// Fails **closed**: a flag-resolution error suppresses the echo rather than
+/// exposing raw upstream payloads to the browser.
+async fn upstream_echo_collector(
     state: &AppState,
+    auth_user: &AuthUser,
     request_headers: &HeaderMap,
 ) -> Option<Vec<UpstreamEcho>> {
-    if !state.config.aevatar_chat_wire_log_enabled {
-        return None;
-    }
     let requested = request_headers
         .get(DEBUG_UPSTREAM_REQUEST_HEADER)
         .and_then(|value| value.to_str().ok())
         == Some("1");
     if !requested {
+        return None;
+    }
+    let enabled = match feature_flag_service::aevatar_chat_wire_log_enabled(
+        &state.db,
+        &auth_user.user_id.to_string(),
+    )
+    .await
+    {
+        Ok(enabled) => enabled,
+        Err(_) => {
+            // Metadata only — never the request body or any echo content.
+            tracing::warn!(
+                "assistant: wire-log flag resolution failed; suppressing the debug echo"
+            );
+            false
+        }
+    };
+    if !enabled {
         return None;
     }
     Some(Vec::new())
@@ -691,7 +720,7 @@ pub async fn list_conversations(
     request: Request<Body>,
 ) -> AppResult<Response> {
     let authorization = request.headers().get(header::AUTHORIZATION).cloned();
-    let mut echoes = upstream_echo_collector(&state, request.headers());
+    let mut echoes = upstream_echo_collector(&state, &auth_user, request.headers()).await;
     let user_id = auth_user.user_id.to_string();
     let mut response_parts = None;
     let mut conversations = Vec::new();
@@ -802,7 +831,7 @@ pub async fn get_history(
     Path(conversation_id): Path<String>,
     request: Request<Body>,
 ) -> AppResult<Response> {
-    let mut echoes = upstream_echo_collector(&state, request.headers());
+    let mut echoes = upstream_echo_collector(&state, &auth_user, request.headers()).await;
     let user_id = auth_user.user_id.to_string();
     let path = match assistant_service::conversation_resource_family(&conversation_id)? {
         assistant_service::ConversationResourceFamily::Typed => {
@@ -832,7 +861,7 @@ pub async fn delete_conversation(
     Path(conversation_id): Path<String>,
     request: Request<Body>,
 ) -> AppResult<Response> {
-    let mut echoes = upstream_echo_collector(&state, request.headers());
+    let mut echoes = upstream_echo_collector(&state, &auth_user, request.headers()).await;
     let user_id = auth_user.user_id.to_string();
     let family = assistant_service::conversation_resource_family(&conversation_id)?;
     let path = match family {
@@ -885,7 +914,7 @@ pub async fn get_state(
             "Conversation state not found.".to_string(),
         ));
     }
-    let mut echoes = upstream_echo_collector(&state, request.headers());
+    let mut echoes = upstream_echo_collector(&state, &auth_user, request.headers()).await;
     let path = assistant_service::canonical_state_path(&conversation_id)?;
     let response = forward(
         &state,
@@ -907,7 +936,7 @@ pub async fn get_create_recovery(
     Path(command_id): Path<String>,
     request: Request<Body>,
 ) -> AppResult<Response> {
-    let mut echoes = upstream_echo_collector(&state, request.headers());
+    let mut echoes = upstream_echo_collector(&state, &auth_user, request.headers()).await;
     let path = assistant_service::history_create_recovery_path(
         &auth_user.user_id.to_string(),
         &command_id,
@@ -930,7 +959,7 @@ pub async fn completions(
     auth_user: AuthUser,
     request: Request<Body>,
 ) -> AppResult<Response> {
-    let mut echoes = upstream_echo_collector(&state, request.headers());
+    let mut echoes = upstream_echo_collector(&state, &auth_user, request.headers()).await;
     let response = forward(
         &state,
         &auth_user,
@@ -984,7 +1013,7 @@ pub async fn typed_chat(
             prepared.response_kind.accept_header_value().to_string(),
         ),
     ];
-    let mut echoes = upstream_echo_collector(&state, request.headers());
+    let mut echoes = upstream_echo_collector(&state, &auth_user, request.headers()).await;
     let echoed_body = echoes.as_ref().map(|_| prepared.body.clone());
     let response = forward(
         &state,
@@ -1045,7 +1074,7 @@ pub async fn workflow_chat(
         HeaderValue::from_static("application/json"),
     );
     let request = Request::from_parts(parts, Body::from(payload));
-    let mut echoes = upstream_echo_collector(&state, request.headers());
+    let mut echoes = upstream_echo_collector(&state, &auth_user, request.headers()).await;
     let echoed_body = echoes.as_ref().map(|_| upstream.clone());
     let response = forward(
         &state,
@@ -1245,42 +1274,210 @@ mod tests {
         assert_eq!(echo.path, "api/scopes/user-1/chat-history");
     }
 
-    #[tokio::test]
-    async fn disabled_echo_flag_suppresses_an_explicit_capture_request() {
-        let state = crate::test_utils::test_app_state_no_db().await;
+    /// A valid, well-formed capture request. Deliberately *not* an
+    /// invalid-UTF-8 header value: that would trip the header parse gate and
+    /// make a flag assertion vacuous.
+    fn capture_request_headers() -> HeaderMap {
         let mut headers = HeaderMap::new();
         headers.insert(DEBUG_UPSTREAM_REQUEST_HEADER, HeaderValue::from_static("1"));
+        headers
+    }
 
-        let echoes = upstream_echo_collector(&state, &headers);
+    /// Register a person account so per-user platform overrides can target it.
+    async fn seed_flag_user(db: &mongodb::Database) -> String {
+        use crate::models::user::{COLLECTION_NAME as USERS, User, UserType};
+        let user_id = uuid::Uuid::new_v4().to_string();
+        db.collection::<User>(USERS)
+            .insert_one(crate::test_utils::test_user(&user_id, UserType::Person))
+            .await
+            .expect("insert wire-log flag test user");
+        user_id
+    }
+
+    #[tokio::test]
+    async fn code_default_suppresses_a_valid_capture_request() {
+        let Some(db) = crate::test_utils::connect_test_database("assistant_wire_log_default").await
+        else {
+            eprintln!("skipping assistant wire-log flag test: no local MongoDB available");
+            return;
+        };
+        let user_id = seed_flag_user(&db).await;
+        let state = crate::test_utils::test_app_state(db);
+        let auth_user = crate::test_utils::test_auth_user(&user_id);
+
+        // No override rows at all: the registry default (off) must win even
+        // though the caller asked for a capture with a valid header.
+        let echoes = upstream_echo_collector(&state, &auth_user, &capture_request_headers()).await;
 
         assert!(echoes.is_none());
     }
 
     #[tokio::test]
+    async fn global_override_enables_the_capture_request() {
+        use crate::services::feature_flag_service::{
+            AEVATAR_CHAT_WIRE_LOG_FLAG_KEY, FlagTarget, clear_platform_override,
+            set_platform_override,
+        };
+
+        let Some(db) = crate::test_utils::connect_test_database("assistant_wire_log_global").await
+        else {
+            eprintln!("skipping assistant wire-log flag test: no local MongoDB available");
+            return;
+        };
+        let user_id = seed_flag_user(&db).await;
+        let state = crate::test_utils::test_app_state(db.clone());
+        let auth_user = crate::test_utils::test_auth_user(&user_id);
+
+        set_platform_override(
+            &db,
+            AEVATAR_CHAT_WIRE_LOG_FLAG_KEY,
+            &FlagTarget::Global,
+            true,
+            "admin",
+        )
+        .await
+        .expect("enable the wire-log flag globally");
+
+        let echoes = upstream_echo_collector(&state, &auth_user, &capture_request_headers()).await;
+        assert!(matches!(echoes, Some(ref values) if values.is_empty()));
+
+        // Clearing the override at runtime takes effect on the next request
+        // with no redeploy — the whole point of the DB-backed gate.
+        clear_platform_override(&db, AEVATAR_CHAT_WIRE_LOG_FLAG_KEY, &FlagTarget::Global)
+            .await
+            .expect("clear the global override");
+        assert!(
+            upstream_echo_collector(&state, &auth_user, &capture_request_headers())
+                .await
+                .is_none()
+        );
+    }
+
+    #[tokio::test]
+    async fn per_user_override_enables_only_that_user() {
+        use crate::services::feature_flag_service::{
+            AEVATAR_CHAT_WIRE_LOG_FLAG_KEY, FlagTarget, set_platform_override,
+        };
+
+        let Some(db) = crate::test_utils::connect_test_database("assistant_wire_log_user").await
+        else {
+            eprintln!("skipping assistant wire-log flag test: no local MongoDB available");
+            return;
+        };
+        let flagged_id = seed_flag_user(&db).await;
+        let other_id = seed_flag_user(&db).await;
+        let state = crate::test_utils::test_app_state(db.clone());
+
+        set_platform_override(
+            &db,
+            AEVATAR_CHAT_WIRE_LOG_FLAG_KEY,
+            &FlagTarget::User(flagged_id.clone()),
+            true,
+            "admin",
+        )
+        .await
+        .expect("enable the wire-log flag for one user");
+
+        let flagged = crate::test_utils::test_auth_user(&flagged_id);
+        assert!(
+            upstream_echo_collector(&state, &flagged, &capture_request_headers())
+                .await
+                .is_some(),
+            "the targeted user must get the echo"
+        );
+
+        let other = crate::test_utils::test_auth_user(&other_id);
+        assert!(
+            upstream_echo_collector(&state, &other, &capture_request_headers())
+                .await
+                .is_none(),
+            "a per-user override must not leak to another caller"
+        );
+    }
+
+    /// An `AppState` whose MongoDB handle points at a closed loopback port, so
+    /// any database access costs at least the server-selection timeout and
+    /// then fails.
+    async fn unreachable_db_state() -> AppState {
+        let mut options = mongodb::options::ClientOptions::parse(UNREACHABLE_MONGO_URI)
+            .await
+            .expect("parse unreachable mongo uri");
+        options.server_selection_timeout = Some(std::time::Duration::from_millis(
+            UNREACHABLE_MONGO_SELECTION_TIMEOUT_MS,
+        ));
+        options.connect_timeout = Some(std::time::Duration::from_millis(
+            UNREACHABLE_MONGO_SELECTION_TIMEOUT_MS,
+        ));
+        let client =
+            mongodb::Client::with_options(options).expect("build unreachable mongo client");
+        crate::test_utils::test_app_state(client.database("nyxid_unreachable"))
+    }
+
+    // Port 1 has no listener on any sane host, so every connection attempt is
+    // refused immediately and server selection burns the full timeout.
+    const UNREACHABLE_MONGO_URI: &str =
+        "mongodb://127.0.0.1:1/nyxid_unreachable?directConnection=true";
+    const UNREACHABLE_MONGO_SELECTION_TIMEOUT_MS: u64 = 750;
+
+    #[tokio::test]
+    async fn absent_debug_header_performs_no_flag_resolution() {
+        // Latency guarantee: normal chat traffic never sends the debug header
+        // and must therefore never touch the database. With an unreachable
+        // MongoDB, any flag resolution would cost the full 750 ms selection
+        // timeout; the header-first ordering keeps this in the microseconds.
+        let state = unreachable_db_state().await;
+        let auth_user = crate::test_utils::test_auth_user(&uuid::Uuid::new_v4().to_string());
+
+        let started = std::time::Instant::now();
+        let echoes = upstream_echo_collector(&state, &auth_user, &HeaderMap::new()).await;
+        let elapsed = started.elapsed();
+
+        assert!(echoes.is_none());
+        assert!(
+            elapsed < std::time::Duration::from_millis(250),
+            "no-header path did database work ({elapsed:?}); the flag must be resolved \
+             only after the header check"
+        );
+    }
+
+    #[tokio::test]
+    async fn flag_resolution_failure_fails_closed() {
+        let state = unreachable_db_state().await;
+        let auth_user = crate::test_utils::test_auth_user(&uuid::Uuid::new_v4().to_string());
+
+        let started = std::time::Instant::now();
+        let echoes = upstream_echo_collector(&state, &auth_user, &capture_request_headers()).await;
+        let elapsed = started.elapsed();
+
+        assert!(
+            echoes.is_none(),
+            "an unresolvable flag must never open the gate"
+        );
+        // Proves the failure really came from an attempted resolution rather
+        // than from an earlier gate short-circuiting the call.
+        assert!(
+            elapsed >= std::time::Duration::from_millis(UNREACHABLE_MONGO_SELECTION_TIMEOUT_MS / 2),
+            "expected a real resolution attempt against the unreachable database, took {elapsed:?}"
+        );
+    }
+
+    #[tokio::test]
     async fn malformed_debug_header_is_not_a_capture_request() {
-        let mut state = crate::test_utils::test_app_state_no_db().await;
-        state.config.aevatar_chat_wire_log_enabled = true;
+        // The header gate rejects this before any flag resolution, so an
+        // unreachable database is also proof that no lookup was attempted.
+        let state = unreachable_db_state().await;
+        let auth_user = crate::test_utils::test_auth_user(&uuid::Uuid::new_v4().to_string());
         let mut headers = HeaderMap::new();
         headers.insert(
             DEBUG_UPSTREAM_REQUEST_HEADER,
             HeaderValue::from_bytes(&[0xff]).expect("opaque invalid UTF-8 header"),
         );
 
-        let echoes = upstream_echo_collector(&state, &headers);
+        let started = std::time::Instant::now();
+        let echoes = upstream_echo_collector(&state, &auth_user, &headers).await;
 
         assert!(echoes.is_none());
-    }
-
-    #[tokio::test]
-    async fn enabled_echo_flag_accepts_an_explicit_capture_request() {
-        let mut state = crate::test_utils::test_app_state_no_db().await;
-        state.config.aevatar_chat_wire_log_enabled = true;
-        let mut headers = HeaderMap::new();
-        headers.insert(DEBUG_UPSTREAM_REQUEST_HEADER, HeaderValue::from_static("1"));
-
-        let echoes = upstream_echo_collector(&state, &headers);
-
-        assert!(matches!(echoes, Some(ref values) if values.is_empty()));
+        assert!(started.elapsed() < std::time::Duration::from_millis(250));
     }
 
     #[test]

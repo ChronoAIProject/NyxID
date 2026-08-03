@@ -56,6 +56,7 @@ Strict separation: `handlers/` -> `services/` -> `models/`
 - All key material in `Zeroizing` wrappers; all Debug impls redact secrets and key identifiers; `MAX_WRAPPED_DEK_SIZE = 1024` enforced on encrypt and decrypt paths
 - Middleware: rate limiting (`mw/rate_limit.rs`), security headers (`mw/security_headers.rs`), JWT auth (`mw/auth.rs`)
 - Audit logs are tamper-evident for new rows via HMAC-SHA256 hash chaining (`services/audit_chain_service.rs`): new `AuditLog` rows must set `seq`, `prev_hash`, `entry_hash` through the audit service append path; legacy rows without `seq` count as pre-chain, not backfilled. `AUDIT_CHAIN_HMAC_KEY` is an optional 64-hex override; otherwise the key is domain-derived from `ENCRYPTION_KEY` or the JWT private key. v1 does not detect tail truncation without external head anchoring.
+- Billing transactions are tamper-evident via the append-only `billing_ledger` collection (`services/billing/ledger.rs`): charged usage settlements (first-apply only, including the wallet-lock crash bridge), provider-confirmed top-up checkouts, and paid wallet credits (deduped by Lago invoice id) append hash-chained entries with the same `seq`/`prev_hash`/`entry_hash` construction, keyed by `BILLING_LEDGER_HMAC_KEY` or the `billing-ledger` domain derivation. Appends are best-effort (never fail billing); verify via `GET /api/v1/admin/billing-ledger/verify`. Tail truncation is detected: the reconcile sweep anchors the ledger head into the audit chain (`billing_ledger_head_anchored`) and the server log, and verify cross-checks the newest anchor (`tail_truncated` break); entries newer than the last anchor (<= one reconcile interval) are the remaining window.
 - Anonymous catalog endpoints may be enabled only when the service has `identity_propagation_mode = "none"`, `forward_access_token = false`, and `inject_delegation_token = false` (disabled draft rules may be stored on any service); violating admin writes return `AppError::AnonymousIncompatibleService` (400, code 11100). Public execution still force-strips identity propagation, access-token forwarding, delegation-token injection, and downstream auth defaults as defense in depth.
 - Delegated management parity requires the exact `account:read` scope, `GET`, a non-WebSocket request, and a route outside the deny classes in `mw/auth.rs`; the verified `AuthUser` extractor is authoritative. New secret-delivering, execution-shaped, streaming, upgrade, or authentication/provisioning protocol GET routes MUST be added to `delegated_read_denied_path` before mounting.
 
@@ -295,7 +296,6 @@ JWT_RELAY_ACCESS_TTL_SECS=300       # X-NyxID-User-Token relay access token TTL.
 JWT_ASSISTANT_FORWARD_TTL_SECS=300  # Legacy tombstone for the retired assistant_forward token.
                                     # Live assistant delegation uses the compile-time 300s
                                     # MCP_DELEGATION_TOKEN_TTL_SECS constant; this env has no effect.
-AEVATAR_CHAT_WIRE_LOG_ENABLED=false # Sole operator gate for per-browser assistant wire capture; not admin-restricted when enabled
 SA_TOKEN_TTL_SECS=3600              # Service account tokens
 ENVIRONMENT=development
 RATE_LIMIT_PER_SECOND=10
@@ -319,6 +319,7 @@ CLI_PAIRING_HMAC_KEY=               # Optional 64 hex; keys CliPairing.code_hash
                                     # brute force. Unset = derived from ENCRYPTION_KEY or the JWT key
                                     # (stable per-worker, multi-instance safe).
 AUDIT_CHAIN_HMAC_KEY=               # Optional 64 hex; keys audit-log HMAC chaining; same derivation fallback
+BILLING_LEDGER_HMAC_KEY=            # Optional 64 hex; keys billing-ledger HMAC chaining; same derivation fallback
 
 CHANNEL_RELAY_CALLBACK_TIMEOUT_SECS=30
 CHANNEL_RELAY_MAX_BOTS_PER_USER=5

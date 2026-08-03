@@ -2926,6 +2926,7 @@ mod tests {
             service_slug: id.into(),
             description: None,
             service_category: "user_service".into(),
+            recommended_skills: Vec::new(),
             endpoints: Vec::new(),
             source: McpToolSource::UserManaged {
                 user_service_id: id.into(),
@@ -2946,6 +2947,7 @@ mod tests {
             service_slug: id.into(),
             description: None,
             service_category: "http".into(),
+            recommended_skills: Vec::new(),
             endpoints: Vec::new(),
             source: McpToolSource::Platform {
                 downstream_service_id: id.into(),

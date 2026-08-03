@@ -168,6 +168,10 @@ pub struct McpToolService {
     /// The custom OpenAPI document was present but could not produce a valid
     /// declared operation set, so only the explicitly-marked generic proxy is published.
     pub invalid_openapi_contract: bool,
+    /// Skill names (Ornn or bundled) that teach an agent how to use this
+    /// service: the instance's `UserEndpoint.recommended_skills` when set,
+    /// else the catalog template's `DownstreamService.recommended_skills`.
+    pub recommended_skills: Vec<String>,
 }
 
 fn mcp_credential_class(
@@ -822,6 +826,16 @@ async fn load_user_tools_inner(
 
     let mut result: Vec<McpToolService> = Vec::new();
 
+    // Catalog recommended_skills by service id, for instance fallback.
+    let catalog_skills_by_id: HashMap<&str, &Vec<String>> = valid_platform_services
+        .iter()
+        .filter_map(|(svc, _)| {
+            svc.recommended_skills
+                .as_ref()
+                .map(|skills| (svc.id.as_str(), skills))
+        })
+        .collect();
+
     // 4a. User-managed services
     for r in &all_user_services {
         let us = &r.service;
@@ -876,6 +890,15 @@ async fn load_user_tools_inner(
             (vec![generic_ep], true, false)
         };
 
+        let recommended_skills = user_endpoint
+            .and_then(|ep| ep.recommended_skills.clone())
+            .or_else(|| {
+                us.catalog_service_id.as_deref().and_then(|catalog_id| {
+                    catalog_skills_by_id.get(catalog_id).map(|s| (*s).clone())
+                })
+            })
+            .unwrap_or_default();
+
         result.push(McpToolService {
             service_id: us.id.clone(),
             service_name: endpoint_label.to_string(),
@@ -883,6 +906,7 @@ async fn load_user_tools_inner(
             description: None,
             service_category: "user_service".to_string(),
             endpoints,
+            recommended_skills,
             source: McpToolSource::UserManaged {
                 user_service_id: us.id.clone(),
                 effective_owner_id: r.effective_owner_id.clone(),
@@ -917,6 +941,7 @@ async fn load_user_tools_inner(
             description: svc.description.clone(),
             service_category: svc.service_category.clone(),
             endpoints,
+            recommended_skills: svc.recommended_skills.clone().unwrap_or_default(),
             source: McpToolSource::Platform {
                 downstream_service_id: svc.id.clone(),
             },
@@ -1376,7 +1401,9 @@ fn build_generic_proxy_endpoint(service_label: &str) -> McpToolEndpoint {
         endpoint_id: GENERIC_PROXY_ENDPOINT_ID.to_string(),
         name: "request".to_string(),
         description: Some(format!(
-            "Make an HTTP request to {service_label}. Specify the method, path, optional raw query string, and optional JSON body."
+            "Make an HTTP request to {service_label}. Specify the method, path, optional raw query string, and optional JSON body. \
+             This service publishes no typed operations -- do not guess endpoint paths: check the service's recommended_skills \
+             and the Ornn skill registry for a skill that documents it, or follow the nyxid-service-skill-authoring skill to create one."
         )),
         method: "POST".to_string(),
         path: String::new(),
@@ -1822,6 +1849,7 @@ pub async fn load_public_tools(db: &mongodb::Database) -> AppResult<Vec<McpToolS
             service_slug: format!("public__{}", sanitize_tool_segment(&svc.slug)),
             description: svc.description.clone(),
             service_category: "public".to_string(),
+            recommended_skills: Vec::new(),
             endpoints,
             source: McpToolSource::Platform {
                 downstream_service_id: svc.id,
@@ -3702,6 +3730,7 @@ mod tests {
             service_slug: slug.to_string(),
             description: None,
             service_category: "connection".to_string(),
+            recommended_skills: Vec::new(),
             endpoints,
             source: McpToolSource::Platform {
                 downstream_service_id: id.to_string(),

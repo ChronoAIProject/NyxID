@@ -80,6 +80,7 @@ pub async fn create_endpoint(
         url: url.to_string(),
         catalog_service_id: catalog_service_id.map(|s| s.to_string()),
         openapi_spec_url,
+        recommended_skills: None,
         created_at: now,
         updated_at: now,
     };
@@ -89,6 +90,40 @@ pub async fn create_endpoint(
         .await?;
 
     Ok(endpoint)
+}
+
+/// Instance-level recommended-skill list limits (mirrors the catalog's
+/// `required_permissions`-style caps).
+const MAX_RECOMMENDED_SKILLS: usize = 20;
+const MAX_RECOMMENDED_SKILL_LEN: usize = 128;
+
+fn validate_recommended_skills(skills: &[String]) -> AppResult<()> {
+    if skills.len() > MAX_RECOMMENDED_SKILLS {
+        return Err(AppError::ValidationError(format!(
+            "recommended_skills accepts at most {MAX_RECOMMENDED_SKILLS} entries"
+        )));
+    }
+    for skill in skills {
+        let trimmed = skill.trim();
+        if trimmed.is_empty() || trimmed.len() > MAX_RECOMMENDED_SKILL_LEN {
+            return Err(AppError::ValidationError(format!(
+                "recommended_skills entries must be 1-{MAX_RECOMMENDED_SKILL_LEN} characters"
+            )));
+        }
+    }
+    Ok(())
+}
+
+/// How the caller wants to treat `recommended_skills` on update.
+#[derive(Debug, Default)]
+pub enum RecommendedSkillsUpdate {
+    /// Leave existing value untouched.
+    #[default]
+    Leave,
+    /// Replace with a new list.
+    Set(Vec<String>),
+    /// Remove the field (an empty list from the client maps here).
+    Clear,
 }
 
 /// How the caller wants to treat the `openapi_spec_url` field on update.
@@ -111,6 +146,7 @@ pub async fn update_endpoint(
     url: Option<&str>,
     label: Option<&str>,
     openapi_spec_url: OpenApiSpecUrlUpdate<'_>,
+    recommended_skills: RecommendedSkillsUpdate,
 ) -> AppResult<()> {
     let spec_update = match openapi_spec_url {
         OpenApiSpecUrlUpdate::Leave => None,
@@ -126,7 +162,25 @@ pub async fn update_endpoint(
         }
     };
 
-    if url.is_none() && label.is_none() && spec_update.is_none() {
+    let skills_update = match recommended_skills {
+        RecommendedSkillsUpdate::Leave => None,
+        RecommendedSkillsUpdate::Clear => Some(None),
+        RecommendedSkillsUpdate::Set(skills) => {
+            let trimmed: Vec<String> = skills
+                .iter()
+                .map(|skill| skill.trim().to_string())
+                .filter(|skill| !skill.is_empty())
+                .collect();
+            if trimmed.is_empty() {
+                Some(None)
+            } else {
+                validate_recommended_skills(&trimmed)?;
+                Some(Some(trimmed))
+            }
+        }
+    };
+
+    if url.is_none() && label.is_none() && spec_update.is_none() && skills_update.is_none() {
         return Err(AppError::BadRequest(
             "At least one field must be provided".to_string(),
         ));
@@ -156,6 +210,15 @@ pub async fn update_endpoint(
         }
         Some(None) => {
             unset_doc.insert("openapi_spec_url", "");
+        }
+    }
+    match skills_update {
+        None => {}
+        Some(Some(skills)) => {
+            set_doc.insert("recommended_skills", skills);
+        }
+        Some(None) => {
+            unset_doc.insert("recommended_skills", "");
         }
     }
 

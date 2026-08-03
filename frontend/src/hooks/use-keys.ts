@@ -246,6 +246,8 @@ interface UpdateEndpointParams {
   readonly label?: string;
   /** Empty string clears the existing value. */
   readonly openapi_spec_url?: string;
+  /** Empty array clears the existing list. */
+  readonly recommended_skills?: readonly string[];
 }
 
 export function useUpdateEndpoint() {
@@ -257,6 +259,7 @@ export function useUpdateEndpoint() {
         url: params.url,
         label: params.label,
         openapi_spec_url: params.openapi_spec_url,
+        recommended_skills: params.recommended_skills,
       });
     },
     onSuccess: () => {

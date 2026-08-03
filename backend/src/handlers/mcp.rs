@@ -56,6 +56,10 @@ pub struct McpServiceConfig {
     pub is_user_service: bool,
     /// true if this is a custom endpoint with only a generic proxy tool
     pub is_generic_proxy: bool,
+    /// Skill names (Ornn or bundled) that teach an agent how to use this
+    /// service. Empty when none are recorded.
+    #[serde(skip_serializing_if = "Vec::is_empty", default)]
+    pub recommended_skills: Vec<String>,
     pub endpoints: Vec<McpEndpointConfig>,
 }
 
@@ -197,6 +201,7 @@ fn config_services(tool_services: &[mcp_service::McpToolService]) -> Vec<McpServ
                 service_category: svc.service_category.clone(),
                 is_user_service: svc.source.is_user_service(),
                 is_generic_proxy: svc.is_generic_proxy,
+                recommended_skills: svc.recommended_skills.clone(),
                 endpoints,
             }
         })
@@ -270,6 +275,7 @@ mod tests {
             service_category: "user_service".to_string(),
             is_user_service: true,
             is_generic_proxy: false,
+            recommended_skills: Vec::new(),
             endpoints: vec![McpEndpointConfig {
                 endpoint_id: "endpoint-1".to_string(),
                 name: "get_item".to_string(),
@@ -311,6 +317,7 @@ mod tests {
             service_slug: "example".to_string(),
             description: None,
             service_category: "user_service".to_string(),
+            recommended_skills: Vec::new(),
             endpoints: vec![McpToolEndpoint {
                 endpoint_id: "endpoint-1".to_string(),
                 name: "get_item".to_string(),

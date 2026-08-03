@@ -2791,6 +2791,46 @@ fn seeded_header_to_model(seed: &SeededHeader) -> DefaultRequestHeader {
     }
 }
 
+/// Seeded services with no hosted overlay and no machine-readable spec:
+/// point agents at the find-or-author meta-skill so the catalog entry
+/// itself says what to do instead of leaving a dead end. Null-guarded --
+/// an admin-curated `recommended_skills` list is never overwritten.
+const SPEC_LESS_SEED_RECOMMENDED_SKILLS: &[&str] = &[
+    "llm-openclaw",
+    "llm-openai-codex",
+    "aws-cost-explorer",
+    "api-google-cloud",
+    "api-tiktok",
+];
+
+async fn backfill_seeded_recommended_skills(
+    service_col: &mongodb::Collection<DownstreamService>,
+    now: chrono::DateTime<Utc>,
+) -> AppResult<()> {
+    for slug in SPEC_LESS_SEED_RECOMMENDED_SKILLS {
+        let updated = service_col
+            .update_one(
+                doc! {
+                    "slug": slug,
+                    "created_by": "system",
+                    "recommended_skills": bson::Bson::Null,
+                },
+                doc! { "$set": {
+                    "recommended_skills": ["nyxid-service-skill-authoring"],
+                    "updated_at": bson::DateTime::from_chrono(now),
+                }},
+            )
+            .await?;
+        if updated.modified_count > 0 {
+            tracing::info!(
+                slug,
+                "Backfilled recommended_skills on spec-less seeded service"
+            );
+        }
+    }
+    Ok(())
+}
+
 /// Set `openapi_spec_url` on seeded catalog rows whose slug has a hosted
 /// overlay but whose stored URL is missing or null. Only rows created by
 /// the seed (`created_by: "system"`) are touched, and an admin-set URL is
@@ -3150,6 +3190,7 @@ pub async fn seed_default_services(
     // discovery surfaces would miss the spec URL). Null-guarded: an
     // admin-configured `openapi_spec_url` is never overwritten.
     backfill_seeded_openapi_spec_urls(&service_col, now).await?;
+    backfill_seeded_recommended_skills(&service_col, now).await?;
 
     // Reconcile seeded `default_request_headers` on every restart so a
     // system-required header (e.g. `anthropic-version`, required by the

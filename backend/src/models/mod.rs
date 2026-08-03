@@ -6,6 +6,7 @@ pub mod approval_request;
 pub mod audit_log;
 pub mod auth_device_code;
 pub mod authorization_code;
+pub mod billing_ledger;
 pub mod billing_rate_cache;
 pub mod billing_topup_session;
 pub mod billing_wallet;

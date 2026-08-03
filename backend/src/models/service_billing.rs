@@ -10,6 +10,18 @@ pub enum BillingMetric {
     Bytes,
 }
 
+impl BillingMetric {
+    /// Stable serde-matching name; used in ledger canonical encoding, so
+    /// variant renames must not change these strings.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Tokens => "tokens",
+            Self::Requests => "requests",
+            Self::Bytes => "bytes",
+        }
+    }
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize, ToSchema, PartialEq, Eq)]
 pub struct ServiceBilling {
     /// Opt-in platform-layer charging. Services default to free (metered

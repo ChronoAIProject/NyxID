@@ -407,6 +407,119 @@ function OpenApiSpecSection({
   );
 }
 
+function RecommendedSkillsSection({
+  endpointId,
+  skills,
+  readOnly = false,
+}: {
+  readonly endpointId: string;
+  readonly skills: readonly string[];
+  readonly readOnly?: boolean;
+}) {
+  const [editing, setEditing] = useState(false);
+  // Seeded only when entering edit mode, mirroring OpenApiSpecSection.
+  const [draft, setDraft] = useState("");
+  const updateEndpoint = useUpdateEndpoint();
+
+  function handleEdit() {
+    setDraft(skills.join(", "));
+    setEditing(true);
+  }
+
+  function handleSave() {
+    const list = draft
+      .split(",")
+      .map((entry) => entry.trim())
+      .filter((entry) => entry.length > 0);
+    updateEndpoint.mutate(
+      { endpointId, recommended_skills: list },
+      {
+        onSuccess: () => {
+          toast.success(
+            list.length > 0
+              ? "Recommended skills saved"
+              : "Recommended skills cleared",
+          );
+          setEditing(false);
+        },
+        onError: (err) => {
+          const message =
+            err instanceof ApiError
+              ? err.message
+              : "Failed to update recommended skills";
+          toast.error(message);
+        },
+      },
+    );
+  }
+
+  function handleCancel() {
+    setEditing(false);
+  }
+
+  return (
+    <Card className="h-full">
+      <CardHeader className="pb-3">
+        <div className="flex items-center gap-2">
+          <FileJson className="h-4 w-4 text-primary" />
+          <CardTitle className="text-[15px]">Recommended Skills</CardTitle>
+        </div>
+        <CardDescription>
+          Optional — skill names (Ornn or bundled) agents should load to use
+          this service, especially when no OpenAPI spec exists. Comma-separated.
+        </CardDescription>
+      </CardHeader>
+      <CardContent>
+        {editing ? (
+          <div className="flex items-center gap-2">
+            <Input
+              value={draft}
+              onChange={(e) => setDraft(e.target.value)}
+              placeholder="nyxid-service-skill-authoring, my-service-skill"
+              className="flex-1 text-[12px]"
+            />
+            <Button size="icon" variant="ghost" onClick={handleCancel}>
+              <X className="h-4 w-4" />
+            </Button>
+            <Button
+              size="icon"
+              variant="ghost"
+              onClick={handleSave}
+              disabled={updateEndpoint.isPending}
+            >
+              <Check className="h-4 w-4" />
+            </Button>
+          </div>
+        ) : skills.length > 0 ? (
+          <div className="flex items-center justify-between gap-2">
+            <div className="flex flex-wrap gap-1">
+              {skills.map((skill) => (
+                <Badge key={skill} variant="secondary" className="font-mono text-[11px]">
+                  {skill}
+                </Badge>
+              ))}
+            </div>
+            {!readOnly && (
+              <Button size="icon" variant="ghost" className="h-6 w-6 shrink-0" onClick={handleEdit}>
+                <Pencil className="h-3 w-3" />
+              </Button>
+            )}
+          </div>
+        ) : (
+          <div className="flex items-center justify-between gap-2">
+            <Badge variant="secondary">Not set</Badge>
+            {!readOnly && (
+              <Button size="icon" variant="ghost" className="h-6 w-6 shrink-0" onClick={handleEdit}>
+                <Pencil className="h-3 w-3" />
+              </Button>
+            )}
+          </div>
+        )}
+      </CardContent>
+    </Card>
+  );
+}
+
 function ApiKeySection({
   apiKeyId,
   credentialType,
@@ -2375,6 +2488,11 @@ export function KeyDetailPage() {
                   <OpenApiSpecSection
                     endpointId={keyInfo.endpoint_id}
                     specUrl={keyInfo.openapi_spec_url ?? null}
+                    readOnly={readOnly}
+                  />
+                  <RecommendedSkillsSection
+                    endpointId={keyInfo.endpoint_id}
+                    skills={keyInfo.recommended_skills ?? []}
                     readOnly={readOnly}
                   />
                   <UserAgentOverrideSection

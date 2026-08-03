@@ -333,6 +333,7 @@ pub(crate) fn test_app_config() -> AppConfig {
         broker_require_admin_capability: false,
         cli_pairing_hmac_key: None,
         audit_chain_hmac_key: None,
+        billing_ledger_hmac_key: None,
         sa_token_ttl_secs: 3600,
         cookie_domain: None,
         telegram_bot_token: None,
@@ -400,7 +401,6 @@ pub(crate) fn test_app_config() -> AppConfig {
         billing_default_overdraft_cap_credits: 0,
         billing_fail_closed: false,
         billing_resale_enabled: false,
-        aevatar_chat_wire_log_enabled: false,
         invite_code_required: false,
         email_auth_enabled: false,
         auto_verify_email: false,
@@ -559,6 +559,7 @@ pub(crate) fn test_app_state_with_config(db: mongodb::Database, config: AppConfi
         // service-level tests pass their own explicit HMAC key.
         auth_device_hmac_key: Arc::new(zeroize::Zeroizing::new([1u8; 32])),
         audit_chain_hmac_key: Arc::new(zeroize::Zeroizing::new([2u8; 32])),
+        billing_ledger_hmac_key: Arc::new(zeroize::Zeroizing::new([3u8; 32])),
         per_channel_event_limiter: Arc::new(crate::mw::rate_limit::PerChannelEventLimiter::new(
             config.channel_event_rate_limit_per_second,
             config.channel_event_rate_limit_burst,
@@ -838,6 +839,7 @@ pub(crate) fn test_user_endpoint(
         url: url.to_string(),
         catalog_service_id: catalog_service_id.map(str::to_string),
         openapi_spec_url: openapi_spec_url.map(str::to_string),
+        recommended_skills: None,
         created_at: chrono::Utc::now(),
         updated_at: chrono::Utc::now(),
     }

@@ -488,6 +488,8 @@ pub struct KeyView {
     /// User-supplied (or catalog-inherited) OpenAPI spec URL for endpoint
     /// discovery, lifted from `UserEndpoint.openapi_spec_url`.
     pub openapi_spec_url: Option<String>,
+    /// Skill names lifted from `UserEndpoint.recommended_skills`.
+    pub recommended_skills: Option<Vec<String>>,
     /// Provenance: personal credentials, or inherited from an org membership.
     /// Defaults to `Personal` for backward compatibility with single-key paths
     /// (`get_key`, post-create) which always operate on personally-owned keys.
@@ -3043,6 +3045,7 @@ fn build_key_view(
         ssh_allowed_principals,
         ssh_certificate_ttl_minutes,
         openapi_spec_url: ep.openapi_spec_url.clone(),
+        recommended_skills: ep.recommended_skills.clone(),
         credential_source,
     }
 }
@@ -3209,6 +3212,7 @@ mod tests {
             url: "https://example.com".to_string(),
             catalog_service_id: None,
             openapi_spec_url: None,
+            recommended_skills: None,
             created_at: Utc::now(),
             updated_at: Utc::now(),
         }
@@ -4546,6 +4550,7 @@ mod tests {
             url: "https://new.example.com/v2".to_string(),
             catalog_service_id: None,
             openapi_spec_url: None,
+            recommended_skills: None,
             created_at: Utc::now(),
             updated_at: Utc::now(),
         };
@@ -4596,6 +4601,7 @@ mod tests {
             url: "https://svc.example.com".to_string(),
             catalog_service_id: None,
             openapi_spec_url: None,
+            recommended_skills: None,
             created_at: Utc::now(),
             updated_at: Utc::now(),
         };
@@ -4635,6 +4641,7 @@ mod tests {
             url: "https://example.com".to_string(),
             catalog_service_id: Some("cat-1".to_string()),
             openapi_spec_url: None,
+            recommended_skills: None,
             created_at: Utc::now(),
             updated_at: Utc::now(),
         };

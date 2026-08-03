@@ -506,6 +506,11 @@ pub struct KeyResponse {
     /// to discover the concrete operations this service exposes.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub openapi_spec_url: Option<String>,
+    /// Skill names (Ornn or bundled) that teach an agent how to use this
+    /// service. Instance-level list; falls back to the catalog template's
+    /// `recommended_skills` when unset.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub recommended_skills: Option<Vec<String>>,
     /// Provenance: personal credentials, or inherited from an org membership.
     /// Mirrors the same field on the `/user-services` response so the
     /// frontend can group AI Services by personal vs each org section.
@@ -578,6 +583,9 @@ pub struct UpdateKeyRequest {
     /// OpenAPI spec URL for endpoint discovery. Set to "" to clear,
     /// Some(value) to set.
     pub openapi_spec_url: Option<String>,
+    /// Recommended skill names for this service. Absent = leave unchanged;
+    /// [] = clear; non-empty list = replace.
+    pub recommended_skills: Option<Vec<String>>,
     /// BYO OAuth Custom App `client_id` used when this PUT upgrades a
     /// `auth_method: "none"` service to OAuth on a
     /// `credential_mode: "user"` provider. Same semantics as on POST
@@ -1717,6 +1725,7 @@ pub async fn update_key(
                 None,
                 Some(label.as_str()),
                 user_endpoint_service::OpenApiSpecUrlUpdate::Leave,
+                user_endpoint_service::RecommendedSkillsUpdate::Leave,
             )
             .await?;
         }
@@ -1735,11 +1744,20 @@ pub async fn update_key(
         Some(s) => user_endpoint_service::OpenApiSpecUrlUpdate::Set(s),
         None => user_endpoint_service::OpenApiSpecUrlUpdate::Leave,
     };
+    let skills_update = match body.recommended_skills.clone() {
+        None => user_endpoint_service::RecommendedSkillsUpdate::Leave,
+        Some(skills) if skills.is_empty() => user_endpoint_service::RecommendedSkillsUpdate::Clear,
+        Some(skills) => user_endpoint_service::RecommendedSkillsUpdate::Set(skills),
+    };
     let url_update = body.endpoint_url.as_deref();
     if url_update.is_some()
         || !matches!(
             spec_url_update,
             user_endpoint_service::OpenApiSpecUrlUpdate::Leave
+        )
+        || !matches!(
+            skills_update,
+            user_endpoint_service::RecommendedSkillsUpdate::Leave
         )
     {
         user_endpoint_service::update_endpoint(
@@ -1749,6 +1767,7 @@ pub async fn update_key(
             url_update,
             None,
             spec_url_update,
+            skills_update,
         )
         .await?;
     }
@@ -2172,6 +2191,7 @@ fn key_response_from_result(result: &unified_key_service::CreateKeyResult) -> Ke
         ssh_allowed_principals: result.ssh_allowed_principals.clone(),
         ssh_certificate_ttl_minutes: result.ssh_certificate_ttl_minutes,
         openapi_spec_url: result.endpoint.openapi_spec_url.clone(),
+        recommended_skills: result.endpoint.recommended_skills.clone(),
         // Newly created keys are always personal -- create_key only inserts
         // into the actor's own user_id, not into an org.
         credential_source:
@@ -2265,6 +2285,7 @@ fn key_response_from_view(view: unified_key_service::KeyView) -> KeyResponse {
         ssh_allowed_principals: view.ssh_allowed_principals,
         ssh_certificate_ttl_minutes: view.ssh_certificate_ttl_minutes,
         openapi_spec_url: view.openapi_spec_url,
+        recommended_skills: view.recommended_skills,
         credential_source: view.credential_source.into(),
         permission_setup_url: None,
         permission_setup_scopes: None,
@@ -2603,6 +2624,7 @@ mod tests {
             custom_user_agent: None,
             default_request_headers: None,
             openapi_spec_url: None,
+            recommended_skills: None,
             oauth_client_id: None,
             oauth_client_secret: None,
             copy_oauth_client_from: None,
