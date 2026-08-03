@@ -21,6 +21,7 @@ const {
   mockContinueAction,
   mockDeleteMutateAsync,
   mockSendMutateAsync,
+  mockRetryProjection,
   mockToastError,
   state,
 } = vi.hoisted(() => ({
@@ -31,6 +32,7 @@ const {
   mockContinueAction: vi.fn(),
   mockDeleteMutateAsync: vi.fn(),
   mockSendMutateAsync: vi.fn(),
+  mockRetryProjection: vi.fn(),
   mockToastError: vi.fn(),
   state: {
     pathname: "/assistant",
@@ -39,6 +41,8 @@ const {
     conversationsResolved: true,
     historyError: undefined as unknown,
     historyCanonicalId: undefined as string | undefined,
+    historyAwaitingProjection: false,
+    historyProjectionStalled: false,
     turnStatus: null as
       | "queued"
       | "running"
@@ -138,12 +142,18 @@ vi.mock("@/hooks/use-assistant", () => ({
           },
           messages: state.historyMessages,
           has_more: false,
+          awaitingProjection: state.historyAwaitingProjection,
+          projectionStalled: state.historyProjectionStalled,
         }
       : undefined,
     isLoading: false,
     isFetching: false,
     isError: state.historyError !== undefined,
     error: state.historyError,
+  }),
+  useRetryConversationProjection: () => ({
+    mutate: mockRetryProjection,
+    isPending: false,
   }),
   useAssistantTurn: () => ({
     data:
@@ -269,6 +279,8 @@ beforeEach(() => {
   state.conversationsResolved = true;
   state.historyError = undefined;
   state.historyCanonicalId = undefined;
+  state.historyAwaitingProjection = false;
+  state.historyProjectionStalled = false;
   state.turnStatus = null;
   state.sendPending = undefined;
   state.cancelPending = false;
@@ -286,6 +298,38 @@ beforeEach(() => {
     lastScreen: null,
   });
   useAssistantDraftStore.setState({ ownerUserId: user.id, drafts: {} });
+});
+
+describe("AssistantPage projection status", () => {
+  it("renders a syncing notice instead of a transcript error", () => {
+    state.search = { c: existingConversation.id };
+    state.historyAwaitingProjection = true;
+
+    renderPage();
+
+    expect(
+      screen.getByText("Syncing conversation history..."),
+    ).toBeInTheDocument();
+    expect(screen.queryByText(/You can keep chatting/)).not.toBeInTheDocument();
+    expect(mockNavigate).not.toHaveBeenCalled();
+  });
+
+  it("renders a stalled notice whose retry action restarts reconciliation", async () => {
+    const event = userEvent.setup();
+    state.search = { c: existingConversation.id };
+    state.historyProjectionStalled = true;
+
+    renderPage();
+    await event.click(screen.getByRole("button", { name: "Retry" }));
+
+    expect(
+      screen.getByText("History is taking longer than expected."),
+    ).toBeInTheDocument();
+    expect(
+      screen.queryByText("Syncing conversation history..."),
+    ).not.toBeInTheDocument();
+    expect(mockRetryProjection).toHaveBeenCalledOnce();
+  });
 });
 
 describe("AssistantPage new chat", () => {

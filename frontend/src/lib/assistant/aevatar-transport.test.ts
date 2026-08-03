@@ -20,6 +20,10 @@ import { selectAssistantTransportKind } from "@/lib/assistant/transport";
 import capturedHistory from "@/lib/assistant/__fixtures__/aevatar-chat-history.json";
 import capturedStream from "@/lib/assistant/__fixtures__/aevatar-nyxid-chat-stream.sse?raw";
 import { useAuthStore } from "@/stores/auth-store";
+import {
+  listDeletionIntents,
+  resetAssistantReceiptStoreForTests,
+} from "@/stores/assistant-receipt-store";
 import type { User } from "@/types/api";
 import type {
   ActionCardContentBlock,
@@ -413,6 +417,8 @@ function perTurnStub(
 }
 
 beforeEach(() => {
+  localStorage.clear();
+  resetAssistantReceiptStoreForTests();
   useAuthStore.getState().setUser({ id: USER_ID } as User);
 });
 
@@ -6998,6 +7004,7 @@ describe("studio new chats and typed actor compatibility", () => {
       expect(history.messages.length).toBeGreaterThan(0);
       expect(history.messages).toBe(mirror?.turnState.messages);
       expect(history.has_more).toBe(false);
+      expect(history.awaitingProjection).toBe(true);
       expect(mock).not.toHaveBeenCalled();
     } finally {
       vi.useRealTimers();
@@ -7863,6 +7870,172 @@ describe("studio new chats and typed actor compatibility", () => {
             "Reported — awaiting assistant verification.",
       ),
     ).toBe(true);
+  });
+});
+
+describe("projection lifecycle boundaries", () => {
+  const CHAT_ID = "chatc-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+
+  it("clears local mirrors on account switch but preserves same-user refreshes", async () => {
+    stubFetch((url) =>
+      url === `${ASSISTANT_BASE}/conversations`
+        ? jsonResponse({ conversations: [] })
+        : undefined,
+    );
+    const transport = new AevatarAssistantTransport();
+    const conversation = await transport.createConversation();
+
+    useAuthStore.getState().setUser({ id: USER_ID } as User);
+    expect((await transport.listConversations()).map(({ id }) => id)).toContain(
+      conversation.id,
+    );
+
+    useAuthStore.getState().setUser({ id: "another-user" } as User);
+    expect(await transport.listConversations()).toEqual([]);
+    await expect(transport.getHistory(conversation.id)).rejects.toBeInstanceOf(
+      AssistantConversationNotFoundError,
+    );
+  });
+
+  it("uses raw index membership as cold 404 evidence and then materializes", async () => {
+    let projected = false;
+    const mock = stubFetch((url, init) => {
+      if (url === `${ASSISTANT_BASE}/conversations`) {
+        return jsonResponse({ conversations: [{ id: CHAT_ID, title: "New" }] });
+      }
+      if (
+        url === `${ASSISTANT_BASE}/conversations/${CHAT_ID}` &&
+        (init?.method ?? "GET") === "GET"
+      ) {
+        return projected
+          ? jsonResponse({
+              messages: [
+                {
+                  id: "assistant-turn-a",
+                  role: "assistant",
+                  content: "Ready",
+                  timestamp: 1,
+                  turnId: "turn-a",
+                },
+              ],
+              stateVersion: 1,
+            })
+          : jsonResponse({ message: "not ready" }, 404);
+      }
+      return undefined;
+    });
+    const transport = new AevatarAssistantTransport();
+
+    const pending = await transport.getHistory(CHAT_ID);
+    expect(pending.awaitingProjection).toBe(true);
+    projected = true;
+    await expect(transport.reconcileProjection(CHAT_ID)).resolves.toEqual({
+      status: "materialized",
+      conversationId: CHAT_ID,
+    });
+    expect((await transport.getHistory(CHAT_ID)).messages[0]?.id).toBe(
+      "assistant-turn-a",
+    );
+    expect(
+      mock.mock.calls.filter(
+        ([input]) => String(input) === `${ASSISTANT_BASE}/conversations`,
+      ),
+    ).toHaveLength(1);
+  });
+
+  it("single-flights concurrent projection waiters", async () => {
+    let projected = false;
+    stubFetch((url) => {
+      if (url === `${ASSISTANT_BASE}/conversations`) {
+        return jsonResponse({ conversations: [{ id: CHAT_ID }] });
+      }
+      if (url === `${ASSISTANT_BASE}/conversations/${CHAT_ID}`) {
+        return projected
+          ? jsonResponse({ messages: [], stateVersion: 1 })
+          : jsonResponse({ message: "not ready" }, 404);
+      }
+      return undefined;
+    });
+    const transport = new AevatarAssistantTransport();
+    await transport.getHistory(CHAT_ID);
+    projected = true;
+
+    const first = transport.reconcileProjection(CHAT_ID);
+    const second = transport.reconcileProjection(CHAT_ID);
+
+    expect(second).toBe(first);
+    await expect(first).resolves.toMatchObject({ status: "materialized" });
+  });
+
+  it("turns a deadline with continuing index membership into stalled provenance", async () => {
+    vi.useFakeTimers();
+    let now = 0;
+    try {
+      stubFetch((url) =>
+        url === `${ASSISTANT_BASE}/conversations`
+          ? jsonResponse({ conversations: [{ id: CHAT_ID }] })
+          : undefined,
+      );
+      const transport = new AevatarAssistantTransport(() => now, () => 0);
+      const pending = await transport.getHistory(CHAT_ID);
+      expect(pending.awaitingProjection).toBe(true);
+
+      const outcome = transport.reconcileProjection(CHAT_ID);
+      await vi.advanceTimersByTimeAsync(0);
+      now = 90_000;
+      await vi.advanceTimersByTimeAsync(250);
+
+      await expect(outcome).resolves.toMatchObject({ status: "timed_out" });
+      expect((await transport.getHistory(CHAT_ID)).projectionStalled).toBe(true);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("rejects a cold 404 after one raw absent confirmation", async () => {
+    const mock = stubFetch((url) =>
+      url === `${ASSISTANT_BASE}/conversations`
+        ? jsonResponse({ conversations: [] })
+        : undefined,
+    );
+    const transport = new AevatarAssistantTransport();
+
+    await expect(transport.getHistory(CHAT_ID)).rejects.toBeInstanceOf(
+      AssistantConversationNotFoundError,
+    );
+    expect(mock).toHaveBeenCalledTimes(2);
+  });
+
+  it("deletes a dispatched unaliased create locally without a placeholder DELETE", async () => {
+    const headers = new Promise<ChatStreamHeadersResult>(() => undefined);
+    const completion = new Promise<ChatStreamCompletionResult>(() => undefined);
+    const start = vi.spyOn(chatStreamClient, "start").mockReturnValue({
+      headers,
+      completion,
+      cancel: vi.fn(),
+    });
+    const mock = stubFetch((url) =>
+      url.includes("/conversations/create-recovery/")
+        ? jsonResponse({ message: "not ready" }, 404)
+        : undefined,
+    );
+    const transport = new AevatarAssistantTransport();
+    const conversation = await transport.createConversation();
+    transport.sendMessage(conversation.id, "Create then delete", () => undefined);
+    await vi.waitFor(() => expect(start).toHaveBeenCalledOnce());
+
+    await transport.deleteConversation(conversation.id);
+
+    expect(listDeletionIntents()).toHaveLength(1);
+    expect(
+      mock.mock.calls.some(
+        ([input, init]) =>
+          String(input).includes(conversation.id) && init?.method === "DELETE",
+      ),
+    ).toBe(false);
+    await expect(
+      transport.getHistory(conversation.id),
+    ).rejects.toBeInstanceOf(AssistantConversationNotFoundError);
   });
 });
 
