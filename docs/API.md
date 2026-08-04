@@ -3994,6 +3994,10 @@ This allows the downstream service to use the token as a Bearer token when calli
 | `inject_delegation_token`  | boolean | `false`      | Whether to inject delegation tokens          |
 | `delegation_token_scope`   | string  | `"llm:proxy"`| Space-separated scopes for the injected token|
 
+Service-issued delegation scopes may include `llm:proxy`, `proxy:*`, `llm:status`,
+`account:read`, and `sandbox:execute`. OAuth-client token exchange intentionally
+uses a narrower allowlist and does not gain `account:read` or `sandbox:execute`.
+
 **Downstream Service Usage Example (Python):**
 
 ```python

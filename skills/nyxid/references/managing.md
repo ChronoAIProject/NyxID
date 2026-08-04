@@ -29,10 +29,14 @@ nyxid service update <id> --default-header 'x-openclaw-scopes=operator.read,oper
 nyxid service update <id> --default-header 'x-api-version=v2:overridable'
 nyxid service update <id> --default-header 'x-secret-token=abc123:sensitive'   # redact value in audit logs / API responses
 nyxid service update <id> --clear-default-headers
+nyxid service update <id> --forward-access-token true
+nyxid service update <id> --inject-delegation-token true --delegation-token-scope 'proxy:* sandbox:execute'
 nyxid service delete <id> --yes                                # remove service (no prompt)
 ```
 
 > Default request header precedence is `catalog defaults -> UserService defaults -> caller`. The default is non-overridable unless `:overridable` is set on the value.
+
+> Identity and delegation flags update the resolved UserService route. Use `forward_access_token` only when the downstream validates the caller's NyxID bearer; keep `delegation_token_scope` to the minimum scopes that downstream requires.
 
 > Node commands accept names (e.g., `--via-node test-server`) in addition to UUIDs.
 > For org-owned node operations, the two-machine VM playbook, and transfer cleanup behavior, see [`nodes.md`](nodes.md#two-machine-org-node-setup).

@@ -263,6 +263,7 @@ pub const SERVICE_DELEGATION_SCOPES: &[&str] = &[
     WIDE_PROXY_SCOPE,
     "llm:status",
     ACCOUNT_READ_SCOPE,
+    "sandbox:execute",
 ];
 
 const DELEGATED_ENDPOINT_FORBIDDEN: &str = "Delegated tokens cannot access this endpoint";
