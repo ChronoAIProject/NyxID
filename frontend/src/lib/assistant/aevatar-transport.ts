@@ -1774,11 +1774,18 @@ export class AevatarAssistantTransport implements AssistantTransport {
       this.activateConversation(conversationId, existing);
       return this.historyFromStored(existing, true);
     }
+    // Only an ACTIVE reconciliation owns the wire: while it polls, every
+    // other read serves the mirror. A STALLED record (the reconciler's
+    // bounded wait expired) must not — the deadline ends aggressive polling,
+    // not observation. Falling through here makes every later read (mount,
+    // window focus, list navigation) one low-frequency wire observation, so
+    // a reply that materializes after the deadline still renders; a 404
+    // keeps serving the stalled mirror via the fallback below.
     if (
       existing &&
       (existing.identityPending ||
-        ((existing.projectionPending ||
-          existing.projectionStalledAt !== undefined) &&
+        (existing.projectionPending &&
+          existing.projectionStalledAt === undefined &&
           (existing.turnState.messages.length > 0 ||
             existing.requiredTurnId != null ||
             existing.lastLocalTurnCompletedAt !== undefined)))
@@ -3389,7 +3396,14 @@ export class AevatarAssistantTransport implements AssistantTransport {
       identityPending: existing?.identityPending,
       projectionPending: existing?.projectionPending,
       requiredTurnId: existing?.requiredTurnId,
+      // The baseline fence must survive transcript application: an
+      // equal-length fence-current read that carries the newly committed
+      // user row but not yet the assistant row would otherwise present no
+      // fence at all and settle materialization prematurely — nothing would
+      // ever schedule the read that renders the reply.
+      requiredAssistantBaselineIds: existing?.requiredAssistantBaselineIds,
       projectionStalledAt: existing?.projectionStalledAt,
+      lastWireObservationAt: existing?.lastWireObservationAt,
       sessionId: existing?.sessionId,
       createRequest: existing?.createRequest,
     };

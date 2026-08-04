@@ -8512,12 +8512,24 @@ describe("studio new chats and typed actor compatibility", () => {
         return jsonResponse({
           messages:
             observation === 1
-              ? [
+              ? // Equal in length to the local mirror and fence-current, with
+                // the newly committed user row but NOT yet the assistant
+                // reply: the hardest shape, because it takes the replacement
+                // path in applyHistoryResponse — the baseline fence must
+                // survive that replacement or this read settles materialized
+                // and the late reply below is never fetched.
+                [
                   {
                     id: "workflow-seed-assistant",
                     role: "assistant",
                     content: "Earlier reply",
                     timestamp: 1,
+                  },
+                  {
+                    id: "zero-frame-user",
+                    role: "user",
+                    content: "zero frame delivery",
+                    timestamp: 2,
                   },
                 ]
               : [
@@ -8576,7 +8588,105 @@ describe("studio new chats and typed actor compatibility", () => {
     }
   });
 
-  it("L24 retains the announced workflow turn fence after browser cancellation", async () => {
+  it("a stalled conversation observes the wire on the next read and renders a late reply", async () => {
+    // The 90s deadline ends aggressive polling — it must not make the mirror
+    // authoritative. After timed_out, every ordinary read (mount, window
+    // focus) is one wire observation, so a reply that materializes at 91
+    // seconds still renders without a refresh.
+    vi.useFakeTimers();
+    let now = 0;
+    try {
+      mockChatStreams((request) =>
+        request.url === WORKFLOW_URL ? { frames: [] } : undefined,
+      );
+      let lateReplyAvailable = false;
+      let transcriptReadsSinceReply = 0;
+      stubFetch((url) => {
+        if (url === `${ASSISTANT_BASE}/conversations`) {
+          return jsonResponse({
+            conversations: [{ id: WORKFLOW_CONVERSATION }],
+          });
+        }
+        if (
+          url !== `${ASSISTANT_BASE}/conversations/${WORKFLOW_CONVERSATION}`
+        ) {
+          return undefined;
+        }
+        if (!lateReplyAvailable) {
+          return jsonResponse(
+            { error: "not_found", error_code: -1, message: "404" },
+            404,
+          );
+        }
+        transcriptReadsSinceReply += 1;
+        return jsonResponse({
+          messages: [
+            {
+              id: "workflow-seed-assistant",
+              role: "assistant",
+              content: "Earlier reply",
+              timestamp: 1,
+            },
+            {
+              id: "zero-frame-user",
+              role: "user",
+              content: "zero frame delivery",
+              timestamp: 2,
+            },
+            {
+              id: "post-deadline-assistant",
+              role: "assistant",
+              content: "Reply after the deadline",
+              timestamp: 3,
+            },
+          ],
+          stateVersion: 3,
+        });
+      });
+      const transport = new AevatarAssistantTransport(
+        () => now,
+        () => 0,
+      );
+      const conversation = await seedWorkflowConversation(transport);
+      const events = await collectWorkflowTurn(
+        transport,
+        conversation.id,
+        "zero frame delivery",
+      );
+      expect(events.at(-1)).toMatchObject({
+        event: "turn.completed",
+        error: { code: "stream_closed" },
+      });
+
+      const outcome = transport.reconcileProjection(conversation.id);
+      now = 45_000;
+      await vi.advanceTimersByTimeAsync(45_000);
+      now = 91_000;
+      await vi.advanceTimersByTimeAsync(31_000);
+      await expect(outcome).resolves.toMatchObject({ status: "timed_out" });
+
+      // The reply materializes after the deadline; the next ordinary read
+      // must fetch it — not serve the stalled mirror off the local cache.
+      lateReplyAvailable = true;
+      const history = await transport.getHistory(conversation.id);
+      expect(transcriptReadsSinceReply).toBe(1);
+      expect(history.projectionStalled).toBeUndefined();
+      expect(history.awaitingProjection).toBeUndefined();
+      expect(
+        history.messages.some((message) =>
+          message.blocks.some(
+            (block) =>
+              block.type === "text" &&
+              block.text === "Reply after the deadline",
+          ),
+        ),
+      ).toBe(true);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("L24 retains the announced workflow turn fence after browser cancellation [guard]", async () => {
     let request!: ChatStreamRequest;
     vi.spyOn(chatStreamClient, "start").mockImplementation((nextRequest) => {
       request = nextRequest;
@@ -8646,7 +8756,7 @@ describe("studio new chats and typed actor compatibility", () => {
     ).toBeNull();
   });
 
-  it("L27 retains the turn fence for structured-only assistant output", async () => {
+  it("L27 retains the turn fence for structured-only assistant output [guard]", async () => {
     mockChatStreams((request) =>
       request.url === WORKFLOW_URL
         ? {
