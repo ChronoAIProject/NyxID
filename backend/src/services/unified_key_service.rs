@@ -671,7 +671,16 @@ pub async fn create_key(
     }
 
     if let Some(node_id) = node_id {
-        node_service::ensure_node_writable_by_actor(db, actor_user_id, node_id).await?;
+        node_service::ensure_node_writable_by_actor(db, actor_user_id, node_id)
+            .await
+            .map_err(|error| match error {
+                AppError::NodeNotFound(_) => AppError::NodeNotFound(format!(
+                    "{node_id}; the stored node ID may be stale if the node was deleted or \
+                     re-registered (for example, after a restore). Re-run node registration or \
+                     pass the current node ID from 'nyxid node list'."
+                )),
+                other => other,
+            })?;
     }
 
     // BYO OAuth Custom App credentials. Resolved once up front so the
@@ -3844,7 +3853,9 @@ mod tests {
 
     use axum::{
         Json, Router,
+        body::to_bytes,
         http::StatusCode,
+        response::IntoResponse,
         routing::{delete, post},
     };
     use chrono::Utc;
@@ -4876,9 +4887,27 @@ mod tests {
         .err()
         .expect("missing node should fail");
 
-        assert!(
-            matches!(err, AppError::NodeNotFound(ref message) if message == "Node not found"),
-            "expected NodeNotFound, got {err}"
+        let AppError::NodeNotFound(message) = &err else {
+            panic!("expected NodeNotFound, got {err}");
+        };
+        assert!(message.contains("stored node ID may be stale"));
+        assert!(message.contains("re-registered"));
+        assert!(message.contains("nyxid node list"));
+
+        let response = err.into_response();
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
+        let body = to_bytes(response.into_body(), 64 * 1024)
+            .await
+            .expect("read error response body");
+        let json: serde_json::Value =
+            serde_json::from_slice(&body).expect("deserialize error response body");
+        assert_eq!(json["error"], "node_not_found");
+        assert_eq!(json["error_code"], 8000);
+        assert_eq!(
+            json["message"],
+            "Node not found: missing-node; the stored node ID may be stale if the node was \
+             deleted or re-registered (for example, after a restore). Re-run node registration \
+             or pass the current node ID from 'nyxid node list'."
         );
 
         let endpoint_count = db
