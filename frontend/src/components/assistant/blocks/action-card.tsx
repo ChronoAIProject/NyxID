@@ -11,11 +11,18 @@ import { AddKeyDialog } from "@/components/dashboard/add-key-dialog";
 import { ServiceIcon } from "@/components/service-icon";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
+import { useChatPresence } from "@/hooks/use-chat-presence";
+import {
+  KEY_AUTH_ACTIVE,
+  KEY_AUTH_FAILED,
+  useKeyAuthorizationWatch,
+} from "@/hooks/use-keys";
 import {
   actionServiceLabel,
   clampServiceLabel,
   descriptorForAction,
 } from "@/lib/assistant/action-registry";
+import { connectWatchDeadline } from "@/lib/assistant/connect-watch";
 import type { ActionReport } from "@/schemas/assistant-actions";
 import type { ActionCardContentBlock } from "@/types/assistant";
 
@@ -28,6 +35,16 @@ interface ActionCardProps {
 
 const VERIFICATION_BLOCKED_NOTE =
   "Connected, but NyxID could not verify which service was created. Manage it in AI Services, then ask the assistant to request it again.";
+
+const AUTHORIZATION_TIMEOUT_NOTE =
+  "NyxID stopped waiting for this connection to finish authorizing. If you did complete it, find it in AI Services — otherwise ask the assistant to request it again.";
+
+function authorizationFailedNote(reason: string | undefined): string {
+  const detail = reason?.trim();
+  return detail
+    ? `Authorization did not complete: ${detail}`
+    : "Authorization did not complete. Ask the assistant to request this service again.";
+}
 
 function ParameterSummary({
   block,
@@ -177,6 +194,19 @@ export function ActionCard({
 }: ActionCardProps) {
   const [dialogOpen, setDialogOpen] = useState(false);
   const resolvingRef = useRef(false);
+  /**
+   * An out-of-band authorization handed to a provider, still settling. Held on
+   * the card rather than in the dialog because the dialog is the short-lived
+   * surface: the user goes to GitHub, comes back to the chat, and never
+   * reopens it. `startedAt` anchors both the poll cadence and the deadline.
+   */
+  const [pendingAuth, setPendingAuth] = useState<{
+    readonly keyId: string;
+    readonly startedAt: number;
+  } | null>(null);
+  /** Guards one auto-settlement per watched key against effect re-entry. */
+  const watchSettledRef = useRef<string | null>(null);
+  const { visible, lastActivityAt } = useChatPresence();
 
   useEffect(() => {
     if (block.status === "pending") {
@@ -184,17 +214,83 @@ export function ActionCard({
     }
   }, [block.status]);
 
+  const settled =
+    block.status === "completed" ||
+    block.status === "declined" ||
+    block.status === "failed";
+
+  const watch = useKeyAuthorizationWatch(pendingAuth?.keyId ?? null, {
+    // Presence gate: a hidden tab stops polling and resumes on focus.
+    enabled: pendingAuth !== null && !settled && visible,
+    deadlineAt: pendingAuth
+      ? connectWatchDeadline(pendingAuth.startedAt, lastActivityAt)
+      : 0,
+  });
+
+  // The card's own `wait_for_authorized_key`. `active` is the same verdict the
+  // user would have produced by clicking through Continue and Done, so take it
+  // directly instead of requiring those clicks; `failed` and the deadline both
+  // surface on the card rather than leaving it waiting in silence.
+  useEffect(() => {
+    const keyId = pendingAuth?.keyId;
+    if (!keyId || settled || watchSettledRef.current === keyId) return;
+
+    // The ref is the synchronous re-entry guard; the state clear rides the
+    // microtask so this effect never sets the state it depends on inline.
+    if (watch.status === KEY_AUTH_ACTIVE) {
+      watchSettledRef.current = keyId;
+      resolvingRef.current = true;
+      void Promise.resolve()
+        .then(() => {
+          setPendingAuth(null);
+          return onResolve({
+            actionRequestId: block.action_request_id,
+            originTurnId: block.origin_turn_id,
+            disposition: "completed",
+            resource: { userService: { userServiceId: keyId } },
+          });
+        })
+        .catch(() => {
+          resolvingRef.current = false;
+          onProgress(block.block_id, false);
+        });
+      return;
+    }
+
+    if (watch.status === KEY_AUTH_FAILED || watch.timedOut) {
+      watchSettledRef.current = keyId;
+      const note =
+        watch.status === KEY_AUTH_FAILED
+          ? authorizationFailedNote(watch.errorMessage)
+          : AUTHORIZATION_TIMEOUT_NOTE;
+      void Promise.resolve()
+        .then(() => {
+          setPendingAuth(null);
+          return onBlock(block.block_id, note);
+        })
+        .catch(() => undefined);
+    }
+  }, [
+    pendingAuth,
+    settled,
+    watch.status,
+    watch.timedOut,
+    watch.errorMessage,
+    block.block_id,
+    block.action_request_id,
+    block.origin_turn_id,
+    onResolve,
+    onBlock,
+    onProgress,
+  ]);
+
   const descriptor = descriptorForAction(
     block.action,
     block.params,
     block.status !== "unsupported",
   );
 
-  if (
-    block.status === "completed" ||
-    block.status === "declined" ||
-    block.status === "failed"
-  ) {
+  if (settled) {
     return <Receipt block={block} />;
   }
 
@@ -203,6 +299,8 @@ export function ActionCard({
   const unsupported =
     block.status === "unsupported" || descriptor.risk === "unsupported";
   const busy = block.status === "in_progress";
+  /** Dialog dismissed, provider not finished: the watch is carrying this. */
+  const awaitingAuthorization = pendingAuth !== null && !dialogOpen;
   const blocked = block.status === "blocked";
   const conflicted = block.status === "conflicted";
   const primaryDisabled = busy || blocked || conflicted;
@@ -211,7 +309,16 @@ export function ActionCard({
 
   function setOpen(next: boolean) {
     setDialogOpen(next);
-    if (!next && !resolvingRef.current && block.status === "in_progress") {
+    // Closing the dialog on a still-settling authorization is NOT abandonment:
+    // the provider tab is open, the watch is running, and the card resolves
+    // itself. Rolling back to `pending` here is what used to lose a connection
+    // the user had actually completed — and invite a duplicate on the retry.
+    if (
+      !next &&
+      !resolvingRef.current &&
+      !pendingAuth &&
+      block.status === "in_progress"
+    ) {
       onProgress(block.block_id, false);
     }
   }
@@ -220,6 +327,11 @@ export function ActionCard({
     disposition: "completed" | "declined" | "failed",
     userServiceId?: string,
   ) {
+    // A manual outcome supersedes any watch still running for this card.
+    if (pendingAuth) {
+      watchSettledRef.current = pendingAuth.keyId;
+      setPendingAuth(null);
+    }
     if (disposition === "completed" && !userServiceId?.trim()) {
       resolvingRef.current = true;
       void Promise.resolve()
@@ -296,9 +408,11 @@ export function ActionCard({
                   ? "Conflict"
                   : blocked
                     ? "Blocked"
-                    : busy
-                      ? "In progress"
-                      : "Action required"}
+                    : awaitingAuthorization
+                      ? "Authorizing"
+                      : busy
+                        ? "In progress"
+                        : "Action required"}
             </Badge>
           </div>
           <p className="mt-1.5 text-[12px] leading-relaxed text-muted-foreground">
@@ -333,7 +447,11 @@ export function ActionCard({
             }}
           >
             {busy ? <Loader2 className="animate-spin" /> : <ShieldCheck />}
-            {busy ? "Connecting" : descriptor.cta(params)}
+            {awaitingAuthorization
+              ? "Waiting for authorization"
+              : busy
+                ? "Connecting"
+                : descriptor.cta(params)}
           </Button>
         ) : null}
         <Button
@@ -392,6 +510,10 @@ export function ActionCard({
               : undefined
           }
           onSuccess={({ userServiceId }) => report("completed", userServiceId)}
+          onAuthorizationPending={(keyId) => {
+            watchSettledRef.current = null;
+            setPendingAuth({ keyId, startedAt: Date.now() });
+          }}
         />
       ) : null}
     </section>

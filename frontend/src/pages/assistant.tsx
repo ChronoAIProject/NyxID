@@ -38,6 +38,7 @@ import {
   AssistantTurnActiveError,
   AssistantTurnCancelledError,
 } from "@/lib/assistant/errors";
+import { markChatActivity } from "@/lib/assistant/connect-watch";
 import { parseAssistantSearch } from "@/lib/assistant/search";
 import type { ActionReport } from "@/schemas/assistant-actions";
 import { useAssistantContextStore } from "@/stores/assistant-context-store";
@@ -211,6 +212,12 @@ export function AssistantPage({
     reactiveTurnLive || synchronousContinuationsRef.current > 0;
 
   function beginContinuation() {
+    // Every user-initiated turn funnels through here — send, approval
+    // decision, action report. That makes it the natural liveness signal for
+    // background work the chat owns: a card waiting on an out-of-band
+    // authorization treats "still using the chat" as "still here", so moving
+    // on to something else extends its window instead of ending it.
+    markChatActivity();
     synchronousContinuationsRef.current += 1;
     turnLiveRef.current = true;
   }
