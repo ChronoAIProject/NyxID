@@ -21,7 +21,6 @@ const {
   mockContinueAction,
   mockDeleteMutateAsync,
   mockSendMutateAsync,
-  mockRetryProjection,
   mockToastError,
   state,
 } = vi.hoisted(() => ({
@@ -32,7 +31,6 @@ const {
   mockContinueAction: vi.fn(),
   mockDeleteMutateAsync: vi.fn(),
   mockSendMutateAsync: vi.fn(),
-  mockRetryProjection: vi.fn(),
   mockToastError: vi.fn(),
   state: {
     pathname: "/assistant",
@@ -150,10 +148,6 @@ vi.mock("@/hooks/use-assistant", () => ({
     isFetching: false,
     isError: state.historyError !== undefined,
     error: state.historyError,
-  }),
-  useRetryConversationProjection: () => ({
-    mutate: mockRetryProjection,
-    isPending: false,
   }),
   useAssistantTurn: () => ({
     data:
@@ -301,34 +295,83 @@ beforeEach(() => {
 });
 
 describe("AssistantPage projection status", () => {
-  it("renders a syncing notice instead of a transcript error", () => {
+  // Projection provenance is background reconciliation: the transcript
+  // demonstrably materializes into the open thread on its own, so narrating
+  // it as page chrome claimed more than the client knew. The provenance
+  // still drives the reconciler; it must never render status furniture.
+  it("renders no status strip for a transcript awaiting projection", () => {
     state.search = { c: existingConversation.id };
     state.historyAwaitingProjection = true;
 
     renderPage();
 
     expect(
-      screen.getByText("Syncing conversation history..."),
-    ).toBeInTheDocument();
+      screen.queryByText("Syncing conversation history..."),
+    ).not.toBeInTheDocument();
     expect(screen.queryByText(/You can keep chatting/)).not.toBeInTheDocument();
     expect(mockNavigate).not.toHaveBeenCalled();
   });
 
-  it("renders a stalled notice whose retry action restarts reconciliation", async () => {
-    const event = userEvent.setup();
+  it("renders no stalled notice or retry for a stalled projection", () => {
     state.search = { c: existingConversation.id };
     state.historyProjectionStalled = true;
 
     renderPage();
-    await event.click(screen.getByRole("button", { name: "Retry" }));
 
     expect(
-      screen.getByText("History is taking longer than expected."),
-    ).toBeInTheDocument();
+      screen.queryByText("History is taking longer than expected."),
+    ).not.toBeInTheDocument();
+    expect(
+      screen.queryByRole("button", { name: "Retry" }),
+    ).not.toBeInTheDocument();
     expect(
       screen.queryByText("Syncing conversation history..."),
     ).not.toBeInTheDocument();
-    expect(mockRetryProjection).toHaveBeenCalledOnce();
+  });
+
+  it("keeps a cold awaiting-projection conversation fully usable", () => {
+    // Cold reload during the projection window: no episode this session, no
+    // transcript yet. The never-block contract — nothing announced, nothing
+    // disabled; the reconciler fills the thread in when the transcript lands.
+    state.search = { c: existingConversation.id };
+    state.historyAwaitingProjection = true;
+    state.historyMessages = [];
+    state.episode = null;
+
+    renderPage();
+
+    expect(
+      screen.queryByText("Syncing conversation history..."),
+    ).not.toBeInTheDocument();
+    expect(screen.queryByRole("status")).not.toBeInTheDocument();
+    expect(screen.queryByRole("alert")).not.toBeInTheDocument();
+    expect(screen.getByRole("textbox")).toBeEnabled();
+  });
+
+  it("renders available content unannounced while projection is pending", () => {
+    // Whatever content we legitimately have renders; the pending projection
+    // is not narrated on top of it.
+    state.search = { c: existingConversation.id };
+    state.historyAwaitingProjection = true;
+    state.historyMessages = [
+      userTranscriptMessage("user-1", "hi"),
+      {
+        id: "assistant-1",
+        role: "assistant",
+        schema_version: 1,
+        blocks: [{ type: "text", block_id: "b1", text: "Partial answer" }],
+        created_at: "2026-07-29T00:00:01.000Z",
+      },
+    ];
+
+    renderPage();
+
+    expect(screen.getByText("Partial answer")).toBeInTheDocument();
+    expect(
+      screen.queryByText("Syncing conversation history..."),
+    ).not.toBeInTheDocument();
+    expect(screen.queryByRole("status")).not.toBeInTheDocument();
+    expect(screen.getByRole("textbox")).toBeEnabled();
   });
 });
 

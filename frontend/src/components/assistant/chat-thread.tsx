@@ -339,24 +339,6 @@ function StreamingDots({
   );
 }
 
-/**
- * A turn that closed having printed nothing. The stream is over, so neither
- * the halo nor the dots are still honest, and an empty gutter reads as the
- * chat having died silently.
- */
-function EmptyTurnError() {
-  return (
-    <p
-      role="alert"
-      data-empty-turn-error
-      className="flex items-start gap-1.5 text-[13px] text-destructive"
-    >
-      <AlertCircle className="mt-[3px] h-3.5 w-3.5 shrink-0" />
-      <span>Sorry, there seems to be an error with the request for now.</span>
-    </p>
-  );
-}
-
 function ThinkingRow({
   loading,
   overlay,
@@ -525,29 +507,40 @@ export function ChatThread({
   // assistant message at all (tail is still the reader's own), or it produced
   // one that never got past empty blocks. Settled over a beat so the two
   // out-of-order arrivals — turn status and transcript projection — cannot
-  // flash an error onto a turn that did answer.
+  // flag a turn that did answer.
+  //
+  // DETECTION ONLY — deliberately not rendered. Production traces showed the
+  // reply regularly exists upstream and materializes into the transcript
+  // moments later (the reconciler projects it in with no reload), so an
+  // on-screen "didn't reply" here is a false negative more often than not.
+  // The durable record of the empty stream is the transport's wire-log
+  // telemetry (transportOutcome + printable-event counts); this attribute
+  // keeps the condition observable for tests and DOM inspection until the
+  // refined failure presentation ships (docs/plans/newchat-followup-fix.md,
+  // deferred W4).
   const tail = groups.at(-1);
   // `turnPrinted` when the pump can tell us; the transcript only as the
   // after-a-reload fallback, where it is the sole record that exists.
   const tailAnswered =
     turnPrinted ??
     (tail?.role === "assistant" && hasPrintableContent(tail.messages));
-  const showEmptyTurnError = useSettled(
+  const emptyTurnDetected = useSettled(
     turnEnded &&
       !thinking &&
       !streaming &&
       !tailAnswered &&
       // A read still in flight is the case the grace period is guessing at.
       // When the caller can tell us outright, don't guess: an answer that is
-      // simply slow to project must never be reported as an error.
+      // simply slow to project must never be flagged.
       !transcriptSettling,
     EMPTY_TURN_GRACE_MS,
   );
 
-  // Deliberately the RAW terminal state, not the settled error. A turn that has
-  // closed is never "no conversation yet", and gating the screen on the delayed
-  // error would show "start a new conversation" all through the grace period —
-  // or forever, if something keeps the settle condition suppressed.
+  // Deliberately the RAW terminal state, not the settled detection. A turn
+  // that has closed is never "no conversation yet", and gating the screen on
+  // the delayed detection would show "start a new conversation" all through
+  // the grace period — or forever, if something keeps the settle condition
+  // suppressed.
   const turnHasRun = thinking || streaming || turnEnded;
 
   // Opaque down to the top of the composer, then dissolved to nothing by the
@@ -581,7 +574,11 @@ export function ChatThread({
   }
 
   return (
-    <div ref={rootRef} className="relative flex min-h-0 flex-1 flex-col">
+    <div
+      ref={rootRef}
+      className="relative flex min-h-0 flex-1 flex-col"
+      data-empty-turn-detected={emptyTurnDetected || undefined}
+    >
       <div
         ref={scrollRef}
         onScroll={(event) => syncScrollPosition(event.currentTarget)}
@@ -687,24 +684,12 @@ export function ChatThread({
                     );
                   })}
                   <StreamingDots visible={awaitingFirstBlock} live />
-                  {/* This group IS the tail, so its own answer never arrived. */}
-                  {isLastGroup && showEmptyTurnError ? <EmptyTurnError /> : null}
                 </div>
               </article>
             );
           })}
           {thinkingPresence.present ? (
             <ThinkingRow loading={thinking} overlay={streaming} />
-          ) : null}
-          {/* The turn closed before it ever spoke, so there is no assistant
-              group to carry the message — give it its own row under a mark. */}
-          {showEmptyTurnError && tail?.role !== "assistant" ? (
-            <article className={ASSISTANT_ROW}>
-              <AssistantIdentity time="" />
-              <div className="min-w-0 flex-1">
-                <EmptyTurnError />
-              </div>
-            </article>
           ) : null}
         </div>
       </div>
