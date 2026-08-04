@@ -1,6 +1,13 @@
 import { useState } from "react";
 import { Link } from "@tanstack/react-router";
-import { Copy, ExternalLink, Loader2, Lock } from "lucide-react";
+import {
+  AlertTriangle,
+  Copy,
+  ExternalLink,
+  Loader2,
+  Lock,
+  RefreshCw,
+} from "lucide-react";
 import { toast } from "sonner";
 import { ServiceIcon } from "@/components/service-icon";
 import { Badge } from "@/components/ui/badge";
@@ -24,30 +31,20 @@ import {
 import { ApiError } from "@/lib/api-client";
 import { formatDate } from "@/lib/utils";
 import { connectorInitial } from "@/lib/assistant/plugins";
-import type { KeyInfo } from "@/types/keys";
+import {
+  credentialStatusMeta,
+  isProblemStatus,
+  isReconnectableStatus,
+  reconnectLabel,
+} from "@/lib/credential-status";
+import type { CatalogEntry, KeyInfo } from "@/types/keys";
+import { AddKeyDialog } from "@/components/dashboard/add-key-dialog";
 import { GrantCascadeDialog } from "@/components/shared/grant-cascade-dialog";
-import { grantRevocationDescription } from "@/schemas/oauth-revocation";
+import { RevokeConnectionDialog } from "@/components/shared/revoke-connection-dialog";
 import {
   parseGrantCascadeDetails,
   type GrantCascadeDetails,
 } from "@/schemas/oauth-revocation";
-
-// Mirrors the Studio key-detail page status vocabulary exactly
-// (key-detail.tsx:92): revoked/failed/refresh_failed are destructive.
-function statusVariant(
-  status: string,
-): "success" | "destructive" | "secondary" {
-  switch (status) {
-    case "active":
-      return "success";
-    case "revoked":
-    case "failed":
-    case "refresh_failed":
-      return "destructive";
-    default:
-      return "secondary";
-  }
-}
 
 /**
  * Whether the current user may mutate this connection — the same rule the
@@ -81,6 +78,98 @@ function canReplaceCredential(key: KeyInfo): boolean {
     key.credential_type !== "oauth2" &&
     key.credential_type !== "node_managed" &&
     key.status !== "pending_auth"
+  );
+}
+
+/**
+ * Whether a fresh authorization can repair this connection — the same gate
+ * the Studio page applies before offering its Reconnect button
+ * (key-detail.tsx `canReconnect`). Only OAuth-shaped credentials can be
+ * repaired this way; a pasted API key is fixed by replacing the secret.
+ */
+function canReconnect(
+  key: KeyInfo,
+  catalogEntry: CatalogEntry | undefined,
+): boolean {
+  return (
+    canModifyKey(key) &&
+    isReconnectableStatus(key.status) &&
+    (key.credential_type === "oauth2" ||
+      catalogEntry?.provider_type === "oauth2" ||
+      catalogEntry?.provider_type === "device_code")
+  );
+}
+
+/**
+ * Explains a connection that isn't working, and offers the way out.
+ *
+ * Without this the modal showed a lone red `failed` pill: a status the user
+ * has no way to interpret (it covers both "the authorization never came
+ * back" and "the provider rejected our stored grant"), no sight of the
+ * `error_message` the backend already recorded on the row, and no action
+ * other than leaving for the Studio page. `tooltip` from the status registry
+ * is the general meaning; `errorMessage` is the provider's specific reason,
+ * so both are shown when both exist.
+ */
+function ConnectionStatusNotice({
+  status,
+  errorMessage,
+  onReconnect,
+}: {
+  readonly status: string;
+  readonly errorMessage: string | null;
+  /** Omitted when this status isn't repairable by re-authorizing. */
+  readonly onReconnect?: () => void;
+}) {
+  const meta = credentialStatusMeta(status);
+  const destructive = meta.variant === "destructive";
+
+  return (
+    <div
+      className={
+        destructive
+          ? "flex items-start gap-3 rounded-xl border border-destructive/15 bg-destructive/[0.04] px-4 py-3"
+          : "flex items-start gap-3 rounded-xl border border-warning/15 bg-warning/[0.04] px-4 py-3"
+      }
+    >
+      <span
+        className={
+          destructive
+            ? "flex h-9 w-9 shrink-0 items-center justify-center rounded-lg bg-destructive/10 text-destructive"
+            : "flex h-9 w-9 shrink-0 items-center justify-center rounded-lg bg-warning/10 text-warning"
+        }
+      >
+        <AlertTriangle className="h-4 w-4" />
+      </span>
+      <div className="min-w-0 flex-1 space-y-1.5">
+        <p
+          className={
+            destructive
+              ? "text-[12px] text-destructive"
+              : "text-[12px] text-warning"
+          }
+        >
+          {meta.tooltip}
+        </p>
+        {errorMessage && (
+          <p className="break-words font-mono text-[11px] text-muted-foreground">
+            {errorMessage}
+          </p>
+        )}
+        {onReconnect && (
+          <Button
+            type="button"
+            variant="outline"
+            size="sm"
+            className="mt-0.5"
+            onClick={onReconnect}
+          >
+            <RefreshCw />
+            {reconnectLabel(status)}
+          </Button>
+        )}
+      </div>
+    </div>
   );
 }
 
@@ -220,6 +309,7 @@ function ConnectionPanel({
   const updateKey = useUpdateKey();
   const deleteKey = useDeleteKey();
   const [confirmingRevoke, setConfirmingRevoke] = useState(false);
+  const [reconnectOpen, setReconnectOpen] = useState(false);
   const [cascadeDetails, setCascadeDetails] =
     useState<GrantCascadeDetails | null>(null);
 
@@ -251,6 +341,10 @@ function ConnectionPanel({
             : "Removed from NyxID. Upstream access remains active.",
         );
         setCascadeDetails(null);
+        // A service with other connections keeps the modal open on what's
+        // left, so the confirmation has to be disarmed explicitly — otherwise
+        // it lingers over a connection that no longer exists.
+        setConfirmingRevoke(false);
         onRevoked();
       },
       onError: (mutationError) => {
@@ -296,12 +390,14 @@ function ConnectionPanel({
 
   const grantedScopes = key.granted_scopes ?? null;
   const modifiable = canModifyKey(key);
+  const statusMeta = credentialStatusMeta(key.status);
   const revokesGrant =
     key.revocation?.revokes_grant ??
     catalogEntry?.revocation?.revokes_grant ??
     false;
   const providerName =
     catalogEntry?.name ?? key.catalog_service_name ?? "provider";
+  const reconnectable = canReconnect(key, catalogEntry);
 
   return (
     <>
@@ -311,9 +407,21 @@ function ConnectionPanel({
             <p className="min-w-0 truncate text-[12px] font-medium text-foreground">
               {key.label}
             </p>
-            <Badge variant={statusVariant(key.status)}>
-              {key.status.replaceAll("_", " ")}
-            </Badge>
+            <Badge variant={statusMeta.variant}>{statusMeta.label}</Badge>
+          </div>
+        )}
+
+        {/* A broken connection is the reason this modal gets opened, so the
+            explanation leads rather than sitting under the detail rows. */}
+        {isProblemStatus(key.status) && (
+          <div className="pb-3">
+            <ConnectionStatusNotice
+              status={key.status}
+              errorMessage={key.error_message}
+              onReconnect={
+                reconnectable ? () => setReconnectOpen(true) : undefined
+              }
+            />
           </div>
         )}
 
@@ -322,9 +430,7 @@ function ConnectionPanel({
             connection has no label row, so it reads as a field instead. */}
           {!showLabel && (
             <DetailRow label="Status">
-              <Badge variant={statusVariant(key.status)}>
-                {key.status.replaceAll("_", " ")}
-              </Badge>
+              <Badge variant={statusMeta.variant}>{statusMeta.label}</Badge>
             </DetailRow>
           )}
           <DetailRow label="Credential">
@@ -399,42 +505,32 @@ function ConnectionPanel({
               <ExternalLink />
             </Link>
           </Button>
-          {modifiable &&
-            (confirmingRevoke ? (
-              <div className="flex items-center gap-2">
-                <span className="text-[11px] text-text-tertiary">
-                  {revokesGrant
-                    ? grantRevocationDescription(providerName)
-                    : "Revoke this connection?"}
-                </span>
-                <Button
-                  variant="ghost"
-                  size="sm"
-                  onClick={() => setConfirmingRevoke(false)}
-                >
-                  Cancel
-                </Button>
-                <Button
-                  variant="destructive"
-                  size="sm"
-                  isLoading={deleteKey.isPending}
-                  onClick={() => revoke(key.id)}
-                >
-                  Revoke
-                </Button>
-              </div>
-            ) : (
-              <Button
-                variant="outline"
-                size="sm"
-                className="text-destructive hover:text-destructive"
-                onClick={() => setConfirmingRevoke(true)}
-              >
-                Revoke
-              </Button>
-            ))}
+          {modifiable && (
+            <Button
+              variant="outline"
+              size="sm"
+              className="text-destructive hover:text-destructive"
+              onClick={() => setConfirmingRevoke(true)}
+            >
+              Revoke
+            </Button>
+          )}
         </div>
       </section>
+      {/* Confirmation is a modal, not an inline swap in the footer: the
+          grant-revoking copy is a full sentence about de-authorizing an
+          upstream account, and rendered in-card it read as an error the app
+          had raised rather than a step the user had just triggered. */}
+      {confirmingRevoke && (
+        <RevokeConnectionDialog
+          providerName={providerName}
+          connectionLabel={showLabel ? key.label : null}
+          revokesGrant={revokesGrant}
+          isPending={deleteKey.isPending}
+          onConfirm={() => revoke(key.id)}
+          onCancel={() => setConfirmingRevoke(false)}
+        />
+      )}
       {cascadeDetails && (
         <GrantCascadeDialog
           details={cascadeDetails}
@@ -443,6 +539,14 @@ function ConnectionPanel({
           onRemoveOnly={() => revoke({ keyId: key.id, grantScope: "token" })}
           onCancel={() => setCascadeDetails(null)}
         />
+      )}
+      {/* The same dialog the Studio page and assistant connect cards use for
+          re-authorization, so every reconnect entry point runs one flow.
+          Mounted only while open: a service with several connections renders
+          one panel each, and an idle wizard per panel would run its hooks for
+          a flow the user never started. */}
+      {reconnectOpen && (
+        <AddKeyDialog open onOpenChange={setReconnectOpen} reconnectKey={key} />
       )}
     </>
   );

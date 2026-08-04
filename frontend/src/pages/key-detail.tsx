@@ -89,40 +89,15 @@ import {
 import { toast } from "sonner";
 import type { SshServiceConfig } from "@/types/api";
 import type { CatalogEntry } from "@/types/keys";
+import {
+  credentialStatusMeta,
+  isReconnectableStatus,
+  reconnectLabel,
+} from "@/lib/credential-status";
 
-function statusVariant(
-  status: string,
-): "success" | "secondary" | "destructive" {
-  switch (status) {
-    case "active":
-      return "success";
-    case "expired":
-      return "secondary";
-    case "revoked":
-    case "failed":
-    case "refresh_failed":
-      return "destructive";
-    default:
-      return "secondary";
-  }
-}
-
-function titleCase(s: string): string {
-  return s
-    .split("_")
-    .map((w) => w.charAt(0).toUpperCase() + w.slice(1))
-    .join(" ");
-}
-
-const RECONNECTABLE_STATUSES = new Set([
-  "pending_auth",
-  "refresh_failed",
-  "failed",
-]);
-
-function reconnectLabel(status: string): string {
-  return status === "pending_auth" ? "Continue authentication" : "Reconnect";
-}
+// Credential status vocabulary is shared with the assistant's connection
+// modal via `@/lib/credential-status` — the two surfaces previously kept
+// private copies that drifted apart.
 
 /**
  * Renders the Lark / Feishu developer-console permission deep link the
@@ -623,7 +598,9 @@ function ApiKeySection({
       </CardHeader>
       <CardContent className="space-y-3">
         <div className="flex items-center gap-3">
-          <Badge variant={statusVariant(status)}>{titleCase(status)}</Badge>
+          <Badge variant={credentialStatusMeta(status).variant}>
+            {credentialStatusMeta(status).label}
+          </Badge>
           <span className="text-xs text-muted-foreground">
             Type: {credentialType}
           </span>
@@ -2265,7 +2242,7 @@ export function KeyDetailPage() {
   const canReconnect =
     !readOnly &&
     !keyInfo.auto_connected &&
-    RECONNECTABLE_STATUSES.has(keyInfo.status) &&
+    isReconnectableStatus(keyInfo.status) &&
     (keyInfo.credential_type === "oauth2" ||
       catalogEntry?.provider_type === "oauth2" ||
       catalogEntry?.provider_type === "device_code");
