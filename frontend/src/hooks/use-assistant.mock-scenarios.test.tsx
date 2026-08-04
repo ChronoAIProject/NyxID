@@ -86,10 +86,17 @@ describe("assistant mock-scenario hook integration", () => {
     expect(transportModule.assistantTransport).toBeInstanceOf(
       transportModule.DelegatingAssistantTransport,
     );
+    // Importing the transport installs nothing on its own; the platform flag
+    // is what arms the singleton, exactly as `MockScenariosGate` does it.
+    expect(
+      storeModule.useAssistantMockScenariosStore.getState().engineState,
+    ).toBe("idle");
+    await transportModule.applyAssistantScenarioFeature(true);
     expect(
       storeModule.useAssistantMockScenariosStore.getState().engineState,
     ).toBe("ready");
     storeModule.useAssistantMockScenariosStore.setState({
+      featureEnabled: true,
       enabled: true,
       disabledScenarioIds: [],
       world: { connected: [] },

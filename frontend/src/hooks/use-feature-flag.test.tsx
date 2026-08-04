@@ -114,6 +114,7 @@ describe("feature flag catalog", () => {
       AI_ASSISTANT: "experimental:ai-assistant",
       BILLING: "experimental:billing",
       AEVATAR_CHAT_WIRE_LOG: "experimental:aevatar-chat-wire-log",
+      ASSISTANT_MOCK_SCENARIOS: "experimental:assistant-mock-scenarios",
     });
   });
 });

@@ -699,7 +699,11 @@ export interface AssistantInterceptorModule {
 export type AssistantInterceptorLoader =
   () => Promise<AssistantInterceptorModule>;
 
-type AssistantInterceptorStateReporter = (state: "loading" | "error") => void;
+export type AssistantMockScenariosStoreModule =
+  typeof import("@/stores/assistant-mock-scenarios-store");
+
+export type AssistantMockScenariosStoreLoader =
+  () => Promise<AssistantMockScenariosStoreModule>;
 
 const interceptorInstallations = new WeakMap<
   DelegatingAssistantTransport,
@@ -715,6 +719,14 @@ export function installAssistantTransportInterceptor(
   const installation = loader().then((module) => {
     module.installScenarioInterceptor(shell);
   });
+  // A failed chunk load must not poison the shell for the rest of the tab:
+  // drop the rejected entry so a later flag resolution can retry. The returned
+  // promise still rejects for this caller.
+  installation.catch(() => {
+    if (interceptorInstallations.get(shell) === installation) {
+      interceptorInstallations.delete(shell);
+    }
+  });
   interceptorInstallations.set(shell, installation);
   return installation;
 }
@@ -726,48 +738,80 @@ export function createAssistantTransportForEnvironment(
     readonly search: string;
   },
   factories: AssistantTransportFactories,
-  interceptorLoader?: AssistantInterceptorLoader,
-  reportInterceptorState?: AssistantInterceptorStateReporter,
 ): AssistantTransport {
   const kind = selectAssistantTransportKind(env);
   if (kind === "mock") return factories.createMock();
-  const shell = new DelegatingAssistantTransport(factories.createAevatar());
-  if (env.dev && interceptorLoader) {
-    reportInterceptorState?.("loading");
-    void installAssistantTransportInterceptor(shell, interceptorLoader).catch(
-      () => reportInterceptorState?.("error"),
-    );
+  return new DelegatingAssistantTransport(factories.createAevatar());
+}
+
+export interface AssistantScenarioFeatureLoaders {
+  readonly loadInterceptor: AssistantInterceptorLoader;
+  readonly loadStore: AssistantMockScenariosStoreLoader;
+}
+
+const defaultScenarioFeatureLoaders: AssistantScenarioFeatureLoaders = {
+  loadInterceptor: () => import("@/lib/assistant/scenario-intercept-transport"),
+  loadStore: () => import("@/stores/assistant-mock-scenarios-store"),
+};
+
+/**
+ * Apply the resolved `experimental:assistant-mock-scenarios` value to the live
+ * transport. Called by the React gate on the assistant page; this is the only
+ * path that installs the scenario interceptor.
+ *
+ * Off (the default for every user) is a hard no-op the first time through: the
+ * interceptor, engine, scenario config, and persisted store all stay in unloaded
+ * async chunks, so a flagless session never fetches them and the live transport
+ * is untouched. Once a tab has armed the interceptor, flipping the flag off
+ * still has to reach it, so from then on the off path loads the store to clear
+ * `featureEnabled` — the second gate `ScenarioInterceptTransport.sendMessage`
+ * checks alongside the user's own toggle.
+ *
+ * Never rejects: a chunk that fails to load reports through `engineState` (the
+ * popover surfaces it) rather than throwing into a `useEffect`.
+ */
+export async function applyAssistantScenarioFeature(
+  featureEnabled: boolean,
+  transport: AssistantTransport = assistantTransport,
+  loaders: AssistantScenarioFeatureLoaders = defaultScenarioFeatureLoaders,
+): Promise<void> {
+  // Full-mock selection (`?mock=1` / test mode) has no shell to wrap.
+  if (!(transport instanceof DelegatingAssistantTransport)) return;
+  const armed = interceptorInstallations.has(transport);
+  if (!featureEnabled && !armed) return;
+
+  let store: AssistantMockScenariosStoreModule;
+  try {
+    store = await loaders.loadStore();
+  } catch {
+    return;
   }
-  return shell;
+  const state = () => store.useAssistantMockScenariosStore.getState();
+  state().setFeatureEnabled(featureEnabled);
+  if (!featureEnabled) return;
+  if (!armed) state().setEngineState("loading");
+  try {
+    await installAssistantTransportInterceptor(
+      transport,
+      loaders.loadInterceptor,
+    );
+  } catch {
+    state().setEngineState("error");
+  }
 }
 
 function createAssistantTransport(): AssistantTransport {
-  const env = {
-    mode: import.meta.env.MODE,
-    dev: import.meta.env.DEV,
-    search: typeof window === "undefined" ? "" : window.location.search,
-  };
-  const factories: AssistantTransportFactories = {
-    createMock: () => new MockAssistantTransport(),
-    createAevatar: () => new AevatarAssistantTransport(),
-  };
-  if (import.meta.env.DEV) {
-    const setState = (state: "loading" | "error") =>
-      void import("@/stores/assistant-mock-scenarios-store")
-        .then((module) =>
-          module.useAssistantMockScenariosStore
-            .getState()
-            .setEngineState(state),
-        )
-        .catch(() => undefined);
-    return createAssistantTransportForEnvironment(
-      env,
-      factories,
-      () => import("@/lib/assistant/scenario-intercept-transport"),
-      setState,
-    );
-  }
-  return createAssistantTransportForEnvironment(env, factories);
+  return createAssistantTransportForEnvironment(
+    {
+      mode: import.meta.env.MODE,
+      dev: import.meta.env.DEV,
+      search: typeof window === "undefined" ? "" : window.location.search,
+    },
+    {
+      createMock: () => new MockAssistantTransport(),
+      createAevatar: () => new AevatarAssistantTransport(),
+    },
+  );
 }
 
 export const assistantTransport: AssistantTransport =

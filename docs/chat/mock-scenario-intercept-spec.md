@@ -31,7 +31,9 @@ continue → resume UI path end to end, deterministically, without Aevatar.
   auth, real connect journeys — only the assistant's replies are scripted.
 - G5: World state (`connected` services) so `need`-gated flows branch like
   reality and feel alive across repeated asks.
-- G6: Zero footprint when off; zero scenario code in the prod entry chunk.
+- G6: Zero footprint when off — a session without the
+  `experimental:assistant-mock-scenarios` flag fetches no scenario chunk, and
+  no scenario code reaches the entry graph or the assistant page chunk.
 
 ### Non-goals (v1)
 - N1: No changes to the existing full-mock transport (`?mock` /
@@ -80,14 +82,14 @@ lib/assistant/transport.ts
                 └─ scenarios from lib/assistant/scenarios.config.ts (new; authored file)
 ```
 
-The interceptor, engine, and config load via a dev-only boot-time dynamic
-`import()` per §8.3 — `transport.ts` keeps zero static mock references, and
-the boot path reports `loading`/`error` engine states to the store so a
-failed install is visible rather than silently passing through (drafted
-differently in v1 as a store-triggered load; the implementation follows §8.3,
-deviation declared and accepted). `MockScenariosAction` is the only static
-importer of the store; the component is gated (§8) so prod chunks carry none
-of this.
+The interceptor, engine, config, and store load via flag-gated dynamic
+`import()`s per §8.3 — `transport.ts` keeps zero static mock references, and
+the install path reports `loading`/`error` engine states to the store so a
+failed install is visible rather than silently passing through (drafted in v1
+as a store-triggered load, shipped as a dev-only boot install, and now driven
+by the platform feature flag; deviations declared and accepted).
+`MockScenariosAction` is the only static importer of the store, and nothing
+statically imports either.
 
 ---
 
@@ -468,38 +470,92 @@ against DESIGN.md before implementation):
 No API calls from the popover. All state is the store.
 
 ### 8.3 Gating
-v1: dev-only, enforced at a **module boundary**, not a render branch (CodexSol
-F12 — a static `pages/assistant.tsx → action component → store` import chain
-keeps the side-effectful `create(persist(...))` store module in the prod
-graph even when the render branch folds away; "tree-shaking will get it" is
-not a plan). Two boundaries:
+**Platform feature flag** `experimental:assistant-mock-scenarios`, declared in
+`backend/src/services/feature_flag_service.rs::FEATURE_FLAGS` with
+`default_enabled: false` and mirrored in `frontend/src/lib/feature-flags.ts`.
+Platform admins toggle it globally, per org cohort, or per user from Admin →
+Feature Flags; no redeploy, and a deployed preview can be armed for one person.
+This supersedes the v1 dev-only (`import.meta.env.DEV`) gate — §14.1 answered.
+
+Enforced at a **module boundary**, not a render branch (CodexSol F12 — a static
+`pages/assistant.tsx → action component → store` import chain keeps the
+side-effectful `create(persist(...))` store module in the eager graph even when
+the render branch folds away; "tree-shaking will get it" is not a plan). Three
+boundaries:
 
 - **Transport**: `transport.ts` keeps zero static references to any mock
-  module. The `"aevatar"` branch returns a ~15-line
-  `DelegatingAssistantTransport` shell around the real transport; dev-only
-  boot code (`if (import.meta.env.DEV)` guarding a **dynamic** `import()`)
-  loads the interceptor module, which wraps the delegate in place. In prod
-  the dead branch is eliminated and no interceptor/engine/store/config chunk
-  exists in the artifact.
-- **UI**: the header action mounts via a dev-gated
-  `lazy(() => import(...))`; in prod the expression is `null` and the
-  component + store modules are unreachable.
+  module. The `"aevatar"` branch always returns a `DelegatingAssistantTransport`
+  shell around the real transport, and installs nothing on its own.
+  `applyAssistantScenarioFeature(featureEnabled)` is the sole install path: on
+  a flag-off session it returns before loading anything, so the
+  interceptor/engine/config/store chunks are never fetched and no localStorage
+  is read.
+- **UI**: the header action mounts through `MockScenariosGate`, which reads
+  `useFeature(FEATURE_FLAG.ASSISTANT_MOCK_SCENARIOS)` and renders `null` —
+  never requesting the lazy chunk — while the flag is off. Fail-closed:
+  loading, unknown, and an older backend that omits the key all read as off.
+- **Runtime**: `ScenarioInterceptTransport.sendMessage` requires
+  `featureEnabled && enabled`. `featureEnabled` is the flag mirrored into the
+  store by the gate (the same bridge `AssistantWireLogAction` uses) and is
+  never persisted, so a flag revoked mid-session disarms an already-installed
+  tab and every send falls back to the live delegate. The user's own popover
+  toggle is left untouched.
 
-Build assertion, run in CI tests: the production `dist/` contains no
-`mockchat-`, `scenario-engine`, or `mockscenarios` symbols (grep over built
-assets). `npm run build` succeeding is not a footprint test.
+#### Operator runbook — turning it on
 
-A follow-up may add a capability-flag gate (e.g. `experimental:assistant-mock`)
-for preview deployments — §14.1, not in v1.
+Requires the platform-admin role. The flag itself never appears to ordinary
+users, and it is a QA tool that **intercepts real sends**, so scope it as
+narrowly as the situation allows.
+
+1. Sign in as a platform admin and open **Admin → Feature Flags**
+   (`/admin/feature-flags`). `experimental:assistant-mock-scenarios` is listed
+   from the backend registry with its code default (off).
+2. Add an override at the narrowest scope that works:
+   - **User** — one person, on any deployment. The default choice: this is a
+     rehearsal tool, not a rollout.
+   - **Org** — everyone in one org cohort. Reaches members' personal surfaces
+     too (the resolver unions org grants into `/users/me`).
+   - **Global** — everyone on the deployment. Preview/staging only; a global
+     enable arms the send interceptor for every user who then flips their own
+     popover toggle.
+3. The target picks it up within about a minute — the flag ships in
+   `/users/me` capabilities, which `useUser` refetches on a 60 s interval for
+   visible tabs; a reload is immediate. A flask icon appears in the assistant
+   header, with the popover's master switch still off: the flag only *offers*
+   the tool, it does not start intercepting.
+4. To revoke, clear the override. Already-open tabs disarm on that same
+   refetch without a reload — the gate clears the store mirror and every send
+   goes straight back to the live Aevatar transport, whatever the user's own
+   toggle says.
+
+Local development is the same path — there is no longer a dev-only bypass, so
+a local backend needs the override too.
+
+Build assertion, run as the last step of `npm run build`
+(`frontend/scripts/assert-mock-footprint.mjs`): the mock modules must remain
+**dynamic-import only**. Read from vite's `dist/.vite/manifest.json`, it fails
+if any chunk statically reaches an entry point, if the entry graph or the
+assistant page chunk carries `mockchat-` / `mockscenarios`, or if the
+credential-accept entry does. "Absent from `dist/`" is no longer the invariant
+— the code has to ship for an operator to switch it on; "nobody without the
+flag downloads it" is.
 
 ---
 
 ## 9. transport.ts changes (complete list)
 
 1. `createAssistantTransport()`: `"aevatar"` branch returns the
-   `DelegatingAssistantTransport` shell; a dev-only dynamic import installs
-   `ScenarioInterceptTransport` around the delegate at boot (§8.3).
-2. Nothing else. `selectAssistantTransportKind`, `MockAssistantTransport`, the
+   `DelegatingAssistantTransport` shell and installs nothing.
+2. `applyAssistantScenarioFeature(featureEnabled, transport?, loaders?)`: the
+   sole install path, called by `MockScenariosGate` with the resolved flag
+   (§8.3). Off-and-never-armed returns before loading any chunk; on, it mirrors
+   the flag into the store and dynamically imports the interceptor; off after
+   arming clears the mirror. Never rejects — a failed chunk surfaces through
+   `engineState: "error"`. A full-mock transport is left alone.
+3. `installAssistantTransportInterceptor` evicts a rejected installation from
+   its `WeakMap` so a transient chunk failure can be retried on the next flag
+   resolution rather than poisoning the shell for the tab's lifetime.
+4. Nothing else. `selectAssistantTransportKind`, `MockAssistantTransport`, the
    fault hooks, and `resetAssistantTransport` are untouched.
 
 ---
@@ -624,8 +680,10 @@ final gate — WP7/WP8 files included by construction.
 
 ## 14. Open questions for Calvin
 
-1. **Prod/preview access** — is DEV-only right for v1, or do you want the
-   capability-flag gate now so deployed previews can use it?
+1. ~~**Prod/preview access** — is DEV-only right for v1, or do you want the
+   capability-flag gate now so deployed previews can use it?~~ **Answered
+   (2026-08-04):** flag gate. Shipped as `experimental:assistant-mock-scenarios`,
+   default off, admin-toggled — see §8.3.
 2. **Fallback scenario** — in *real* conversations an unmatched message
    passes through to Aevatar (specced). Claimed mock-only chats (§6.5)
    already give you a fully offline surface. Do you additionally want a

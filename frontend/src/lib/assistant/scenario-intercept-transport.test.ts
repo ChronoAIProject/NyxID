@@ -232,6 +232,9 @@ class StubTransport implements AssistantTransport {
 
 function resetScenarioStore(): void {
   useAssistantMockScenariosStore.setState({
+    // Armed: these suites cover behaviour once the platform flag has resolved
+    // on. The flag-off path is covered separately below.
+    featureEnabled: true,
     enabled: true,
     disabledScenarioIds: [],
     world: { connected: [] },
@@ -367,6 +370,35 @@ describe("ScenarioInterceptTransport ownership", () => {
       matched: false,
       scenarioId: null,
     });
+  });
+
+  it("passes matching messages through when the platform flag is off", async () => {
+    const { delegate, transport } = await createTransport();
+    useAssistantMockScenariosStore.setState({ featureEnabled: false });
+
+    // "simulate an error" matches a scenario and the user's own toggle is on;
+    // only the revoked platform flag stops the intercept.
+    transport.sendMessage(CONVERSATION_ID, "simulate an error", () => {});
+
+    expect(useAssistantMockScenariosStore.getState().enabled).toBe(true);
+    expect(delegate.sendCalls).toBe(1);
+    // No match was even attempted, so nothing is recorded as scenario activity.
+    expect(useAssistantMockScenariosStore.getState().lastActivity).toBeNull();
+  });
+
+  it("does not report the engine as loading when the platform flag is off", async () => {
+    const { delegate, transport } = await createTransport();
+    useAssistantMockScenariosStore.setState({
+      featureEnabled: false,
+      engineState: "loading",
+    });
+
+    // With the flag on this would throw MockScenariosLoadingError; flag-off
+    // must reach the live delegate instead of blocking the send.
+    expect(() =>
+      transport.sendMessage(CONVERSATION_ID, "simulate an error", () => {}),
+    ).not.toThrow();
+    expect(delegate.sendCalls).toBe(1);
   });
 
   it("rejects send while a mock turn is running (§6.2)", async () => {

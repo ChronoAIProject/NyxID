@@ -98,9 +98,26 @@ const AEVATAR_CHAT_WIRE_LOG_FLAG: FeatureFlagDef = FeatureFlagDef {
     default_enabled: false,
 };
 
+/// Operator gate for the scripted mock chat scenarios in the assistant. Off by
+/// default: when enabled the browser intercepts matching messages and plays a
+/// scripted turn instead of calling Aevatar, so this is a QA/demo rehearsal
+/// tool that must never be on for ordinary users. Runtime-toggled so a preview
+/// deployment can be armed for one person without a redeploy.
+pub const ASSISTANT_MOCK_SCENARIOS_FLAG_KEY: &str = "experimental:assistant-mock-scenarios";
+
+const ASSISTANT_MOCK_SCENARIOS_FLAG: FeatureFlagDef = FeatureFlagDef {
+    key: ASSISTANT_MOCK_SCENARIOS_FLAG_KEY,
+    description: "Scripted mock chat scenarios in the assistant (QA rehearsal; intercepts sends).",
+    default_enabled: false,
+};
+
 #[cfg(not(test))]
-pub const FEATURE_FLAGS: &[FeatureFlagDef] =
-    &[AI_ASSISTANT_FLAG, BILLING_FLAG, AEVATAR_CHAT_WIRE_LOG_FLAG];
+pub const FEATURE_FLAGS: &[FeatureFlagDef] = &[
+    AI_ASSISTANT_FLAG,
+    BILLING_FLAG,
+    AEVATAR_CHAT_WIRE_LOG_FLAG,
+    ASSISTANT_MOCK_SCENARIOS_FLAG,
+];
 
 /// Test builds carry a placeholder flag so the resolution / override pipeline
 /// can exercise multiple definitions alongside the production registry entry.
@@ -109,6 +126,7 @@ pub const FEATURE_FLAGS: &[FeatureFlagDef] = &[
     AI_ASSISTANT_FLAG,
     BILLING_FLAG_TEST,
     AEVATAR_CHAT_WIRE_LOG_FLAG,
+    ASSISTANT_MOCK_SCENARIOS_FLAG,
     FeatureFlagDef {
         key: "example_ui",
         description: "Test-only placeholder flag.",
@@ -1115,6 +1133,25 @@ mod tests {
         assert!(find_flag("example_ui").is_some());
     }
 
+    /// The mock-scenario gate replaces a build-time `import.meta.env.DEV`
+    /// boundary, so a stray `default_enabled: true` would arm a send-intercepting
+    /// QA tool for every production user. (The key literal itself is pinned by
+    /// `shipped_registry_key_literals_are_pinned`.)
+    #[test]
+    fn assistant_mock_scenarios_flag_is_registered_and_off_by_default() {
+        let def = find_flag(ASSISTANT_MOCK_SCENARIOS_FLAG_KEY).expect("flag registered");
+        assert!(!def.default_enabled);
+        // No override rows anywhere => the flag stays out of both resolutions.
+        assert!(
+            !resolve_from_overrides(&[], &[], "user-1", OrgRole::Member)
+                .contains(&ASSISTANT_MOCK_SCENARIOS_FLAG_KEY.to_string())
+        );
+        assert!(
+            !resolve_personal_from_overrides(&[], &[], &[], "user-1")
+                .contains(&ASSISTANT_MOCK_SCENARIOS_FLAG_KEY.to_string())
+        );
+    }
+
     /// Registry keys are a wire contract with `frontend/src/lib/feature-flags.ts`
     /// (`FEATURE_FLAG`). A key that drifts on one side silently disables the
     /// surface it gates instead of failing, so the literals are pinned on both
@@ -1133,6 +1170,7 @@ mod tests {
                 "experimental:ai-assistant",
                 "experimental:billing",
                 "experimental:aevatar-chat-wire-log",
+                "experimental:assistant-mock-scenarios",
             ]
         );
         assert_eq!(
