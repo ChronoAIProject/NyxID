@@ -30,8 +30,10 @@ corrections supersede any older wording later in this document:
    and falls back to the existing `noopener noreferrer` anchor.
 3. Provider URL validation deliberately permits cross-origin HTTP(S) URLs but
    requires their `state` query parameter to equal `1cc_<attempt_nonce>`.
-   Retry transfers the next nonce and URL over the capability-scoped channel
-   and applies the same validation before the popup self-navigates.
+   The trusted interstitial also records the initial provider origin in the
+   popup's NyxID session storage. Retry transfers the next nonce and URL over
+   the capability-scoped channel and requires both the state binding and that
+   recorded origin before the popup self-navigates.
 4. D-2 remains outside this branch for non-`cc` flows. Instead, a `cc`
    attempt-generation guard is stored on its target `UserApiKey`. Pending,
    denial/failure, and success writes match the current `attempt_nonce`
@@ -158,15 +160,17 @@ popup-blocked, and the opener's retained handle may be unusable post-COOP.
 Instead the existing popup relaunches itself: opener re-runs initiate and
 transfers the fresh authorize URL over the old attempt's capability-scoped
 channel; the popup validates HTTP(S) plus `state=1cc_<nextNonce>` before
-setting its own `location.href`, which needs no gesture and no handle.
+requiring the provider origin recorded by the trusted interstitial and setting
+its own `location.href`, which needs no gesture and no handle.
 
 **Correction C8 — do not touch `hooks/use-keys.ts`.** It is in the CLI
 wizard bundle source closure (`cli/src/wizard/bundle-meta/index.manifest`
 line 67); editing it fails the Wizard Bundle Freshness job. All new frontend
-logic goes in new files. None of the other files this pilot touches
-(`add-key-dialog.tsx`, `use-providers.ts`, `router.tsx`, `connect-card.tsx`,
-`vite.config.ts`… — verified against the manifest) are in the closure.
-`vite.config.ts` is not `vite.wizard.config.ts` and is not hashed. Still run
+logic goes in new files. `add-key-dialog.tsx`, `use-providers.ts`, `router.tsx`,
+`connect-card.tsx`, and `vite.config.ts` are outside the closure, but the
+review-required telemetry suppression touches `lib/telemetry.ts`, which is
+manifest entry 75. The final freshness gate therefore requires a generated
+wizard rebuild even though the wizard flow itself is unchanged. Still run
 `cargo test -p nyxid-cli --test wizard_bundle_freshness` before pushing; only
 if red, `npm --prefix frontend run build:wizard` and commit `cli/src/wizard/`.
 
@@ -347,16 +351,18 @@ See §5.1.
 - Zod schema `oauthCompletionSearchSchema` parsing the `/oauth` search:
   `status` ∈ {complete,error}; unknown/absent `flow` → `undefined` (generic
   copy — never an error, per design §3); unknown/absent `code` →
-  `undefined`; `nonce` optional string (bounded length, e.g. ≤ 64).
+  `undefined`; `nonce` is an optional canonical UUID-v4.
 - Broadcast message types + type guards (the current nonce is the channel name
   capability and is not repeated in messages):
   `OAuthResultMessage {type:"oauth_result", status, flow?, code?}`,
   `OAuthActionMessage {type:"oauth_action", action:"view_result"|"retry"|"dismiss"}`,
   `OAuthAckMessage {type:"oauth_ack"}`,
   `OAuthRetryMessage {type:"oauth_retry", nextNonce, url}`. The retry guard
-  requires a UUID-v4 `nextNonce`, HTTP(S), no URL credentials, and
-  `url.searchParams.get("state") === "1cc_" + nextNonce`. Cross-origin provider
-  origins are expected and allowed.
+  requires a UUID-v4 `nextNonce`, HTTP(S), no URL credentials,
+  `url.searchParams.get("state") === "1cc_" + nextNonce`, and the provider
+  origin recorded by the trusted launch interstitial. Cross-origin provider
+  origins such as GitHub and Google are expected and allowed; an unrelated
+  channel-supplied origin is not.
 - Vitest: `schemas/oauth-popup.test.ts` (§5.2).
 
 ### F2 — `frontend/src/lib/oauth-popup.ts` (new)
@@ -408,8 +414,10 @@ closing/aborting the launch.
   `postMessage`, install the navigation listener, set `window.opener = null`,
   then post `{type:"oauth_launch_ready", launchId}` to the captured opener.
   Navigation messages must match origin, source relationship, and launch id;
-  the URL must pass `validateAuthorizationUrl(url, nonce)`. Only this page sets
-  its own `location.href`, after opener severance.
+  the URL must pass `validateAuthorizationUrl(url, nonce)`. Before navigation,
+  it records that authenticated URL's provider origin in the popup's
+  origin-scoped session storage. Only this page sets its own `location.href`,
+  after opener severance.
 - Renders a minimal spinner card, "Connecting…" (no auth guard, no data
   fetching, no telemetry).
 
@@ -453,11 +461,13 @@ CTA protocol (design §4.1, with C7 retry):
 - `retry` ("Try again" / "Start over" on retryable codes): opener re-runs
   the connect (F8) and answers `oauth_retry {nextNonce, url}` over the current
   capability-scoped channel; the
-  popup validates HTTP(S)+state binding (F1 guard), adopts `nextNonce`, and
+  popup validates HTTP(S)+state+recorded-provider-origin binding (F1 guard),
+  adopts `nextNonce`, and
   `location.href = url` — self-navigation, no gesture needed (C7). Timeout
-  (2s): render "Couldn't restart from here — go back to your chat and click
+  (10s): render "Couldn't restart from here — go back to your chat and click
   Connect again." (no auto-close).
-- `dismiss`: `postAction` then close after ack-or-400ms regardless. It is
+- `dismiss`: `postAction`, close after ack, and show neutral manual-return copy
+  if no ack arrives. It is
   labelled "Close" rather than "Cancel" because durable OAuth-state
   cancellation remains out of this pilot.
 
@@ -492,8 +502,8 @@ useOAuthPopupReceiver({
   transition; the DB row stays the source of truth (FI-004).
 - On `oauth_action view_result`: call `onViewResult`; if it returns true,
   `postAck()`.
-- On `oauth_action retry`: run `onRetry`; on success `postAck` +
-  `postRetry({nonce, nextNonce, url})`, and the hook's owner swaps its
+- On `oauth_action retry`: run one retry at a time; on success
+  `postRetry({nextNonce, url})`, and the hook's owner swaps its
   active nonce to `nextNonce`.
 - On `oauth_action dismiss`: `postAck`, release local popup ownership without
   claiming server-side cancellation.
@@ -515,11 +525,11 @@ useOAuthPopupReceiver({
   touch the new code).
 - `OAuthStep` popup branch in `handleConnect` (only when
   `launch === "popup"`):
-  1. `begin()` on the single-flow store; refused → show "a connection is
-     already in progress — cancel it first?" affordance, return.
-  2. **Synchronously** `openOAuthPopup()` — before any await (Codex 5).
-     `null` (blocked) → `end()` the lock and fall through to the existing
-     anchor flow unchanged (design §5 fallback).
+  1. **Synchronously** `openOAuthPopup()` — before any await (Codex 5), then
+     `begin()` with its client launch id. If the lock is already held, close
+     the new window, show "a connection is already in progress", and return.
+     `null` (blocked) falls through to the existing anchor flow unchanged
+     without acquiring the lock (design §5 fallback).
   3. Start/await the interstitial `ready` handshake while running
      `ensureKey()` and initiate. `await initiateOAuth.mutateAsync({...,
      flow: "cc", keyId: key.id})` — **without `redirectPath`** (meaningless
@@ -528,8 +538,9 @@ useOAuthPopupReceiver({
      still resolves — mixed-version safe).
   4. Require a valid `attempt_nonce`; store nonce/keyId on the attempt; validate
      and send `handle.navigate(authorization_url, attempt_nonce)` to the ready
-     interstitial. Missing nonce (old backend) closes the placeholder and falls
-     back to the existing safe anchor flow.
+     interstitial. Missing nonce (old backend) or a failed ready handshake
+     closes the placeholder window, releases popup ownership, and falls back
+     to the existing safe anchor flow.
   5. On throw: close the popup, `end()` the lock, existing `setError` +
      `cleanupPendingAuthKey` path unchanged (C9).
   - The "authorizing" UI keeps the poll (`useKeyAuthorizationStatus` —
@@ -747,8 +758,8 @@ provider COOP anyway).
 3. Missing `status` → direct-open shape.
 4. `OAUTH_FLOW_TOKENS` pinned to `["cc","kc","pc","sa","wz","sl"]` (Rust-parity anchor).
 5. Authorization/retry URL guard: accepts a cross-origin HTTP(S) provider URL
-   only when `state=1cc_<nonce>` matches; rejects credentials, non-HTTP(S), and
-   mismatched/missing state.
+   only when `state=1cc_<nonce>` and the recorded provider origin match;
+   rejects credentials, non-HTTP(S), unrelated origins, and mismatched state.
 
 `lib/oauth-popup.test.ts`:
 6. `openOAuthPopup` calls `window.open` with `/oauth-launching`, a
@@ -772,8 +783,8 @@ provider COOP anyway).
     nonce-scoped channel; ack within 400ms → `window.close`; no ack → neutral
     manual-return copy and no navigation.
 14. Retry path: `oauth_retry` with a next nonce and matching cross-origin
-    HTTP(S) provider URL → `location.href` set; mismatched state/non-HTTP URL →
-    ignored + error copy.
+    HTTP(S) provider URL → `location.href` set; mismatched state, provider
+    origin, or non-HTTP URL → ignored + error copy.
 15. Direct open (no params): generic page, no broadcast posted.
 
 `hooks/use-oauth-popup.test.ts` (renderHook):
@@ -843,15 +854,16 @@ Additional accepted-review tests:
    open a known channel, so the high-entropy attempt nonce is used in the
    channel name and never broadcast on the global bus (there is no global
    bus). Results only trigger query invalidation (DB is truth); provider
-   navigation additionally requires HTTP(S)+state binding (tests 5/14/29).
+   navigation additionally requires HTTP(S)+state+recorded-origin binding
+   (tests 5/14/29).
 6. **Chat tab navigated away / conversation destroyed** — the failure this
    design exists to prevent. Prevention: cc `view_result` opens
-   `ManageConnectionModal` in place (test 25); the popup self-navigates only
-   on ack timeout (original tab gone).
+   `ManageConnectionModal` in place (test 25); no-ack paths show neutral
+   manual-return copy and never navigate into a second NyxID dashboard.
 7. **Dialog closed while the popup is mid-consent.** Receiver unmounts →
-   CTAs fall back to self-navigation; the card still flips because the keys
-   list refetches on window focus when the popup closes and the DB row is
-   authoritative. No placeholder cleanup runs on dialog-close during
+   CTAs fall back to neutral manual-return copy; the card still flips because
+   the keys list refetches on window focus when the popup closes and the DB row
+   is authoritative. No placeholder cleanup runs on dialog-close during
    authorizing (unchanged from today).
 8. **Wizard bundle freshness CI red on an unrelated-looking PR.** C8:
    `use-keys.ts` untouched; freshness test run locally before push; rebuild

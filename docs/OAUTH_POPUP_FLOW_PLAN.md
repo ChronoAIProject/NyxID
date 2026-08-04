@@ -5,6 +5,12 @@ cross-origin external host; the host page is NyxID itself, so the cross-origin
 machinery is gone. Codex's adversarial findings that still apply are folded in
 (full text: `docs/OAUTH_POPUP_FLOW_CODEX_REVIEW.md`).
 
+Chat-only pilot implementation note (2026-08): the implemented `cc` flow is
+governed by `docs/OAUTH_CHAT_POPUP_IMPL_PLAN.md`, including accepted
+corrections C1-C9 and the attempt-generation/state-prefix hardening added by
+the SOL review. The remaining surfaces in this universal design are still
+unimplemented.
+
 ## 1. What we're building
 
 **Every OAuth flow in NyxID runs in a popup window and completes on one shared
