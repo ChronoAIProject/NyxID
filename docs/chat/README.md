@@ -1,6 +1,6 @@
 # Assistant Chat
 
-Last verified against `fcb79b18` (2026-08-01).
+Last verified against `1a7f6f6b` (2026-08-04).
 
 This directory is the canonical specification for the browser assistant chat surface. It describes the contract implemented by NyxID's `/api/v1/assistant/**` routes, the React assistant client, and the Aevatar chat endpoints those routes call.
 
@@ -15,6 +15,8 @@ The live Aevatar contract wins over prose. If the deployed or pinned upstream co
 5. [Frontend UI](05-frontend-ui.md) specifies rendering, composer, navigation, loading, error, and accessibility behavior.
 6. [Actions registry](06-actions-registry.md) specifies the public action manifest consumed by Aevatar composition.
 7. [Testing and gaps](07-testing-and-gaps.md) identifies executable coverage, fault-injection controls, and current operational gaps.
+8. [Mock scenario interception](mock-scenario-intercept-spec.md) specifies the implemented developer-only scripted-flow interceptor; its accepted adversarial findings are preserved in the [spec review](mock-scenario-intercept-spec.review.md).
+9. [Mock scenario implementation plan](mock-scenario-intercept-plan.md) records the ordered work packages and verification gates; its accepted planning findings are preserved in the [plan review](mock-scenario-intercept-plan.review.md).
 
 ## Scope
 
