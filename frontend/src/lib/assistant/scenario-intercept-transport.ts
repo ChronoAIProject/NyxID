@@ -319,7 +319,11 @@ export class ScenarioInterceptTransport implements AssistantTransport {
 
     const store = useAssistantMockScenariosStore.getState();
     let match: ScenarioMatch | null = null;
-    if (store.enabled) {
+    // Two gates: the platform-admin flag (`featureEnabled`, mirrored from
+    // `useFeature`) and the user's own popover toggle. A flag revoked mid-session
+    // reaches an already-armed tab through the first one, and every send falls
+    // straight back to the live delegate.
+    if (store.featureEnabled && store.enabled) {
       if (store.engineState !== "ready") {
         throw new MockScenariosLoadingError(store.engineState);
       }

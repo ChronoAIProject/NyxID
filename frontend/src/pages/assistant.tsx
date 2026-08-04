@@ -35,40 +35,60 @@ import {
   useSendMessage,
   useTurnEpisode,
 } from "@/hooks/use-assistant";
+import { useFeature } from "@/hooks/use-feature-flag";
 import { ApiError } from "@/lib/api-client";
+import { applyAssistantScenarioFeature } from "@/lib/assistant/transport";
 import { AssistantConversationNotFoundError } from "@/lib/assistant/errors";
 import { parseAssistantSearch } from "@/lib/assistant/search";
+import { FEATURE_FLAG } from "@/lib/feature-flags";
 import type { ActionReport } from "@/schemas/assistant-actions";
 import { useAssistantContextStore } from "@/stores/assistant-context-store";
 import { useAssistantDraftStore } from "@/stores/assistant-draft-store";
 import { useAuthStore } from "@/stores/auth-store";
 import { isTurnActive, type AssistantMessage } from "@/types/assistant";
 
-const MockScenariosAction = import.meta.env.DEV
-  ? lazy(() =>
-      import("@/components/assistant/mock-scenarios-action").then((module) => ({
-        default: module.MockScenariosAction,
-      })),
-    )
-  : null;
+const MockScenariosAction = lazy(() =>
+  import("@/components/assistant/mock-scenarios-action").then((module) => ({
+    default: module.MockScenariosAction,
+  })),
+);
 
 type ScenarioActionComponent =
   | ComponentType
   | LazyExoticComponent<ComponentType>;
+
+function MockScenariosGate({
+  scenarioAction,
+}: {
+  readonly scenarioAction: ScenarioActionComponent | null;
+}) {
+  // Runtime feature flag (`experimental:assistant-mock-scenarios`), resolved
+  // server-side for this user. Fail-closed: unknown, loading, or an older
+  // backend that omits the key all read as off, and off means the scenario
+  // chunks are never fetched and the live transport is never wrapped.
+  const featureEnabled = useFeature(FEATURE_FLAG.ASSISTANT_MOCK_SCENARIOS);
+
+  useEffect(() => {
+    void applyAssistantScenarioFeature(featureEnabled);
+  }, [featureEnabled]);
+
+  if (!featureEnabled || !scenarioAction) return null;
+  const ScenarioAction = scenarioAction;
+  return (
+    <Suspense fallback={null}>
+      <ScenarioAction />
+    </Suspense>
+  );
+}
 
 export function AssistantHeaderActions({
   scenarioAction = MockScenariosAction,
 }: {
   readonly scenarioAction?: ScenarioActionComponent | null;
 } = {}) {
-  const ScenarioAction = scenarioAction;
   return (
     <>
-      {ScenarioAction ? (
-        <Suspense fallback={null}>
-          <ScenarioAction />
-        </Suspense>
-      ) : null}
+      <MockScenariosGate scenarioAction={scenarioAction} />
       <AssistantWireLogAction />
     </>
   );

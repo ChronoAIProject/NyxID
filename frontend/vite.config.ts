@@ -219,6 +219,11 @@ export default defineConfig({
     },
   },
   build: {
+    // Emits dist/.vite/manifest.json. Not used at runtime (the SPA loads
+    // hashed assets straight from index.html) — it is the input to
+    // scripts/assert-mock-footprint.mjs, which needs rollup's static-vs-dynamic
+    // import graph to prove the mock scenario chunks stay lazily loaded.
+    manifest: true,
     rollupOptions: {
       output: {
         manualChunks(id) {

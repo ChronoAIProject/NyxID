@@ -349,6 +349,67 @@ mod tests {
         ));
     }
 
+    /// The assistant mock-scenario gate replaced a build-time `DEV` boundary,
+    /// so the admin console is now the *only* way to turn it on. Pin the
+    /// end-to-end surface: it reaches the list response with no override rows,
+    /// off by default, and takes a per-user override like any other flag.
+    #[tokio::test]
+    async fn assistant_mock_scenarios_flag_is_admin_configurable() {
+        let Some((state, admin_id, _operator_id, target_id)) =
+            setup("admin_feature_flags_mock_scenarios").await
+        else {
+            eprintln!("skipping admin feature flag handler test: no local MongoDB available");
+            return;
+        };
+        let auth = test_auth_user(&admin_id);
+        let flag_key =
+            crate::services::feature_flag_service::ASSISTANT_MOCK_SCENARIOS_FLAG_KEY.to_string();
+
+        let Json(list) = list_feature_flags(State(state.clone()), auth.clone())
+            .await
+            .expect("list flags");
+        let item = list
+            .flags
+            .iter()
+            .find(|flag| flag.key == flag_key)
+            .expect("mock-scenario flag is listed in the admin console");
+        assert!(!item.default_enabled, "the QA interceptor must default off");
+        assert!(item.global_override.is_none());
+        assert!(item.org_overrides.is_empty());
+        assert!(item.user_overrides.is_empty());
+
+        set_feature_flag(
+            State(state.clone()),
+            auth.clone(),
+            Path(flag_key.clone()),
+            Json(SetAdminFeatureFlagRequest {
+                target_kind: AdminFlagTargetKind::User,
+                target_key: Some(target_id.clone()),
+                enabled: true,
+            }),
+        )
+        .await
+        .expect("admin enables the flag for one user");
+
+        // The targeted user now resolves it on their personal surface (what
+        // `/users/me` capabilities and therefore `useFeature` read)...
+        let enabled = crate::services::feature_flag_service::resolve_personal_features(
+            &state.db,
+            &target_id,
+        )
+        .await
+        .expect("resolve target");
+        assert!(enabled.contains(&flag_key));
+
+        // ...and nobody else does.
+        let others = crate::services::feature_flag_service::resolve_personal_features(
+            &state.db, &admin_id,
+        )
+        .await
+        .expect("resolve admin");
+        assert!(!others.contains(&flag_key));
+    }
+
     #[tokio::test]
     async fn set_list_clear_round_trip_and_unknown_rejection() {
         let Some((state, admin_id, _operator_id, target_id)) =

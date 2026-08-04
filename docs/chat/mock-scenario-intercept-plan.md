@@ -13,6 +13,13 @@ Open-question defaults locked: dev-only gating (§14.1), pass-through kept /
 no strict toggle (§14.2), no world seeding (§14.3), scenario set per WP3
 (§14.4), post-hoc verification only — no AddKeyDialog change (§14.5).
 
+> **Superseded (2026-08-04):** §14.1 was answered after the fact — gating moved
+> from the `import.meta.env.DEV` boundary this plan describes (WP5, WP6) to the
+> platform feature flag `experimental:assistant-mock-scenarios`, default off.
+> Everything else below still describes what shipped. The current gate is
+> specified in [the spec](mock-scenario-intercept-spec.md) §8.3; this document
+> is kept as the record of the original plan.
+
 ## Ground rules for the implementer
 
 - Branch: `mock-github-chat-calls` in this worktree. Commit after each work

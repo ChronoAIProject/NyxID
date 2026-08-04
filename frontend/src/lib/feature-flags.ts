@@ -19,6 +19,7 @@ export const FEATURE_FLAG = {
   AI_ASSISTANT: "experimental:ai-assistant",
   BILLING: "experimental:billing",
   AEVATAR_CHAT_WIRE_LOG: "experimental:aevatar-chat-wire-log",
+  ASSISTANT_MOCK_SCENARIOS: "experimental:assistant-mock-scenarios",
 } as const;
 
 type FeatureFlagKey = (typeof FEATURE_FLAG)[keyof typeof FEATURE_FLAG];

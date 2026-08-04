@@ -17,12 +17,21 @@ export interface MockScenarioActivity {
 }
 
 interface AssistantMockScenariosState {
+  /**
+   * Server-resolved `experimental:assistant-mock-scenarios` value, mirrored
+   * here by the React gate so the non-React interceptor can read it
+   * synchronously (same bridge the wire-log panel uses). Never persisted —
+   * it is platform-admin state, not a browser preference — and fail-closed at
+   * `false` so a tab that has not yet resolved the flag cannot intercept.
+   */
+  readonly featureEnabled: boolean;
   readonly enabled: boolean;
   readonly disabledScenarioIds: readonly string[];
   readonly world: MockScenarioWorld;
   readonly userId: string | null;
   readonly engineState: MockScenarioEngineState;
   readonly lastActivity: MockScenarioActivity | null;
+  readonly setFeatureEnabled: (featureEnabled: boolean) => void;
   readonly setEnabled: (enabled: boolean) => void;
   readonly setScenarioEnabled: (scenarioId: string, enabled: boolean) => void;
   readonly setEngineState: (engineState: MockScenarioEngineState) => void;
@@ -35,6 +44,7 @@ interface AssistantMockScenariosState {
 }
 
 const DEFAULT_STATE = {
+  featureEnabled: false,
   enabled: false,
   disabledScenarioIds: [] as readonly string[],
   world: { connected: [] as readonly string[] },
@@ -48,6 +58,7 @@ export const useAssistantMockScenariosStore =
     persist(
       (set) => ({
         ...DEFAULT_STATE,
+        setFeatureEnabled: (featureEnabled) => set({ featureEnabled }),
         setEnabled: (enabled) => set({ enabled }),
         setScenarioEnabled: (scenarioId, enabled) =>
           set((state) => ({
@@ -81,7 +92,11 @@ export const useAssistantMockScenariosStore =
               : {
                   ...DEFAULT_STATE,
                   userId,
+                  // Session-scoped, not user-scoped: the engine chunk stays
+                  // loaded and the flag stays as the gate last resolved it
+                  // across a rescope.
                   engineState: state.engineState,
+                  featureEnabled: state.featureEnabled,
                 },
           ),
         reset: () => set(DEFAULT_STATE),

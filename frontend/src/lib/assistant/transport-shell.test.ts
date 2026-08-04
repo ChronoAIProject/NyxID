@@ -2,10 +2,13 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 import { installScenarioInterceptor } from "@/lib/assistant/scenario-intercept-transport";
 import {
   DelegatingAssistantTransport,
+  applyAssistantScenarioFeature,
   createAssistantTransportForEnvironment,
   installAssistantTransportInterceptor,
+  type AssistantInterceptorLoader,
   type AssistantInterceptorModule,
 } from "@/lib/assistant/transport";
+import * as storeModule from "@/stores/assistant-mock-scenarios-store";
 import { useAssistantMockScenariosStore } from "@/stores/assistant-mock-scenarios-store";
 import { useAuthStore } from "@/stores/auth-store";
 import type { User } from "@/types/api";
@@ -109,7 +112,13 @@ function user(id: string): User {
   };
 }
 
-describe("DelegatingAssistantTransport dev installation", () => {
+/** Loader pair standing in for the two real async chunks. */
+function testLoaders(interceptor: AssistantInterceptorLoader) {
+  const loadStore = vi.fn(async () => storeModule);
+  return { loaders: { loadInterceptor: interceptor, loadStore }, loadStore };
+}
+
+describe("DelegatingAssistantTransport flag-gated installation", () => {
   beforeEach(() => {
     localStorage.clear();
     useAuthStore.setState({
@@ -120,6 +129,7 @@ describe("DelegatingAssistantTransport dev installation", () => {
       mfaToken: null,
     });
     useAssistantMockScenariosStore.setState({
+      featureEnabled: false,
       enabled: false,
       disabledScenarioIds: [],
       world: { connected: [] },
@@ -129,78 +139,124 @@ describe("DelegatingAssistantTransport dev installation", () => {
     });
   });
 
-  it("delegates bare calls before load and intercepts in place after install (P5)", async () => {
+  it("loads nothing at all while the flag is off (never-armed tab)", async () => {
     const live = new RecordingTransport("live");
+    const shell = new DelegatingAssistantTransport(live);
+    const loadInterceptor = vi.fn(
+      async (): Promise<AssistantInterceptorModule> => ({
+        installScenarioInterceptor: () => undefined,
+      }),
+    );
+    const { loaders, loadStore } = testLoaders(loadInterceptor);
+
+    await applyAssistantScenarioFeature(false, shell, loaders);
+
+    // Neither chunk is fetched: no interceptor, no persisted store, no
+    // localStorage read — a flagless session pays nothing.
+    expect(loadInterceptor).not.toHaveBeenCalled();
+    expect(loadStore).not.toHaveBeenCalled();
+    expect(shell.current()).toBe(live);
+    expect(useAssistantMockScenariosStore.getState().engineState).toBe("idle");
+  });
+
+  it("delegates bare calls before load and intercepts in place after the flag arms it (P5)", async () => {
+    const live = new RecordingTransport("live");
+    const shell = new DelegatingAssistantTransport(live);
     let resolveLoader: (module: AssistantInterceptorModule) => void = () =>
       undefined;
-    const loader = vi.fn(
+    const loadInterceptor = vi.fn(
       () =>
         new Promise<AssistantInterceptorModule>((resolve) => {
           resolveLoader = resolve;
         }),
     );
-    const transport = createAssistantTransportForEnvironment(
-      { mode: "development", dev: true, search: "" },
-      {
-        createMock: () => new RecordingTransport("mock"),
-        createAevatar: () => live,
-      },
-      loader,
-      (state) =>
-        useAssistantMockScenariosStore.getState().setEngineState(state),
+    const { loaders } = testLoaders(loadInterceptor);
+
+    const applied = applyAssistantScenarioFeature(true, shell, loaders);
+    await vi.waitFor(() =>
+      expect(useAssistantMockScenariosStore.getState().engineState).toBe(
+        "loading",
+      ),
     );
-    expect(transport).toBeInstanceOf(DelegatingAssistantTransport);
-    const shell = transport as DelegatingAssistantTransport;
-    expect(useAssistantMockScenariosStore.getState().engineState).toBe(
-      "loading",
-    );
+    expect(useAssistantMockScenariosStore.getState().featureEnabled).toBe(true);
 
     await shell.listConversations();
     expect(live.calls).toEqual(["list"]);
     resolveLoader({ installScenarioInterceptor });
-    await installAssistantTransportInterceptor(shell, loader);
+    await applied;
     await shell.listConversations();
 
-    expect(loader).toHaveBeenCalledTimes(1);
+    expect(loadInterceptor).toHaveBeenCalledTimes(1);
     expect(shell.current()).not.toBe(live);
     expect(live.calls).toEqual(["list", "list"]);
     expect(useAssistantMockScenariosStore.getState().engineState).toBe("ready");
   });
 
-  it("keeps the live delegate and reports error when dev installation fails (P5, F6)", async () => {
+  it("clears featureEnabled on an armed tab when the flag is revoked mid-session", async () => {
     const live = new RecordingTransport("live");
-    let rejectLoader: (reason: Error) => void = () => undefined;
-    const loader = vi.fn(
-      () =>
-        new Promise<AssistantInterceptorModule>((_resolve, reject) => {
-          rejectLoader = reject;
-        }),
-    );
-    const transport = createAssistantTransportForEnvironment(
-      { mode: "development", dev: true, search: "" },
-      {
-        createMock: () => new RecordingTransport("mock"),
-        createAevatar: () => live,
-      },
-      loader,
-      (state) =>
-        useAssistantMockScenariosStore.getState().setEngineState(state),
-    );
-    const shell = transport as DelegatingAssistantTransport;
+    const shell = new DelegatingAssistantTransport(live);
+    const { loaders } = testLoaders(async () => ({
+      installScenarioInterceptor,
+    }));
 
-    expect(useAssistantMockScenariosStore.getState().engineState).toBe(
-      "loading",
-    );
-    rejectLoader(new Error("chunk failed"));
+    await applyAssistantScenarioFeature(true, shell, loaders);
+    useAssistantMockScenariosStore.getState().setEnabled(true);
+    expect(useAssistantMockScenariosStore.getState().featureEnabled).toBe(true);
 
-    await expect(
-      installAssistantTransportInterceptor(shell, loader),
-    ).rejects.toThrow("chunk failed");
+    await applyAssistantScenarioFeature(false, shell, loaders);
+
+    // The interceptor stays wrapped (nothing can unwrap it), so the revoked
+    // flag has to reach it through the store — the user's own toggle is left
+    // alone and is no longer sufficient to intercept.
+    expect(shell.current()).not.toBe(live);
+    expect(useAssistantMockScenariosStore.getState()).toMatchObject({
+      featureEnabled: false,
+      enabled: true,
+    });
+  });
+
+  it("keeps the live delegate, reports error, and allows a retry when the chunk fails (P5, F6)", async () => {
+    const live = new RecordingTransport("live");
+    const shell = new DelegatingAssistantTransport(live);
+    const loadInterceptor = vi
+      .fn<AssistantInterceptorLoader>()
+      .mockRejectedValueOnce(new Error("chunk failed"))
+      .mockResolvedValueOnce({ installScenarioInterceptor });
+    const { loaders } = testLoaders(loadInterceptor);
+
+    await applyAssistantScenarioFeature(true, shell, loaders);
     await shell.listConversations();
 
     expect(shell.current()).toBe(live);
     expect(live.calls).toEqual(["list"]);
     expect(useAssistantMockScenariosStore.getState().engineState).toBe("error");
+
+    // A failed load must not poison the shell for the rest of the tab.
+    await applyAssistantScenarioFeature(true, shell, loaders);
+    expect(loadInterceptor).toHaveBeenCalledTimes(2);
+    expect(shell.current()).not.toBe(live);
+    expect(useAssistantMockScenariosStore.getState().engineState).toBe("ready");
+  });
+
+  it("never throws into the caller when the store chunk fails to load", async () => {
+    const shell = new DelegatingAssistantTransport(
+      new RecordingTransport("live"),
+    );
+    const loadInterceptor = vi.fn(
+      async (): Promise<AssistantInterceptorModule> => ({
+        installScenarioInterceptor: () => undefined,
+      }),
+    );
+
+    await expect(
+      applyAssistantScenarioFeature(true, shell, {
+        loadInterceptor,
+        loadStore: async () => {
+          throw new Error("store chunk failed");
+        },
+      }),
+    ).resolves.toBeUndefined();
+    expect(loadInterceptor).not.toHaveBeenCalled();
   });
 
   it("loads and installs at most once per shell (P5)", async () => {
@@ -225,13 +281,14 @@ describe("DelegatingAssistantTransport dev installation", () => {
     expect(shell.current()).toBe(intercepted);
   });
 
-  it("never loads the interceptor for full-mock or production selection (P5)", () => {
+  it("never wraps a full-mock transport, flag on or off (P5)", async () => {
     const mock = new RecordingTransport("mock");
-    const loader = vi.fn(
+    const loadInterceptor = vi.fn(
       async (): Promise<AssistantInterceptorModule> => ({
         installScenarioInterceptor: () => undefined,
       }),
     );
+    const { loaders, loadStore } = testLoaders(loadInterceptor);
     const factories = {
       createMock: () => mock,
       createAevatar: () => new RecordingTransport("live"),
@@ -240,16 +297,28 @@ describe("DelegatingAssistantTransport dev installation", () => {
     const fullMock = createAssistantTransportForEnvironment(
       { mode: "test", dev: false, search: "" },
       factories,
-      loader,
     );
-    createAssistantTransportForEnvironment(
-      { mode: "production", dev: false, search: "" },
-      factories,
-      loader,
-    );
-
     expect(fullMock).toBe(mock);
-    expect(loader).not.toHaveBeenCalled();
+
+    await applyAssistantScenarioFeature(true, fullMock, loaders);
+
+    expect(loadInterceptor).not.toHaveBeenCalled();
+    expect(loadStore).not.toHaveBeenCalled();
+  });
+
+  it("returns a bare shell for every environment — dev no longer installs (P5)", () => {
+    const factories = {
+      createMock: () => new RecordingTransport("mock"),
+      createAevatar: () => new RecordingTransport("live"),
+    };
+    for (const env of [
+      { mode: "development", dev: true, search: "" },
+      { mode: "production", dev: false, search: "" },
+    ]) {
+      const transport = createAssistantTransportForEnvironment(env, factories);
+      expect(transport).toBeInstanceOf(DelegatingAssistantTransport);
+    }
+    expect(useAssistantMockScenariosStore.getState().engineState).toBe("idle");
   });
 
   it("rescopes null -> A -> logout -> B in one module lifetime (P6, F14)", () => {
