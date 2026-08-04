@@ -21,7 +21,6 @@ import { PluginsView } from "@/components/assistant/plugins-view";
 import { AssistantWireLogAction } from "@/components/assistant/assistant-wire-log-panel";
 import {
   assistantKeys,
-  describeHistoryError,
   describeSendFailure,
   useAssistantTurn,
   useActionCardActions,
@@ -547,21 +546,10 @@ export function AssistantPage({
             upstream). The provenance still drives the background reconciler
             via `useConversation`; only the furniture is gone. Refined
             surfaces are deferred W4/W5 in docs/plans/newchat-followup-fix.md. */}
-        {/* A failed transcript read is REPORTED, never blocking. It used to
-            replace the whole thread, which also took the composer's context
-            away and made the chat look dead — even though sending still
-            works: the turn streams into the conversation actor, which is a
-            different upstream surface from the chat-history transcript.
-            The notice sits above a still-usable thread and composer. */}
-        {history.isError ? (
-          <div
-            role="status"
-            className="border-b border-border/60 bg-destructive/5 px-6 py-2 text-center text-[12px] text-destructive"
-          >
-            {describeHistoryError(history.error)} You can keep chatting — new
-            messages are unaffected.
-          </div>
-        ) : null}
+        {/* A failed transcript read is toast-only (`useHistoryErrorToast`,
+            fired from `useConversation`): every stream/turn error on this
+            surface goes through toasts, and none of them blocks the thread
+            or the composer. */}
         {history.isLoading && messages.length === 0 ? (
           <div className="flex flex-1 items-center justify-center text-[12px] text-text-tertiary">
             Loading conversation...

@@ -313,6 +313,34 @@ function useTransportErrorToast(isError: boolean, error: unknown): void {
   }, [isError, error]);
 }
 
+// Stable id: retry/refetch churn on the same broken read updates one toast in
+// place instead of stacking a duplicate per attempt.
+const HISTORY_TOAST_ID = "assistant-history-unavailable";
+
+/**
+ * A failed transcript read is REPORTED, never blocking — and reported as a
+ * toast, not chrome: every stream/turn error on this surface is toast-only,
+ * and a page strip for this one read gave a background hiccup a page-wide
+ * voice. Sending still works when the transcript read fails (the turn streams
+ * into the conversation actor, a different upstream surface from the
+ * chat-history transcript), which is what the description says.
+ *
+ * A confirmed-absent conversation is deliberately NOT toasted: its surface is
+ * the stale-route repair navigation back to a fresh chat, and a toast would
+ * outlive that navigation just to describe a conversation that no longer
+ * exists.
+ */
+function useHistoryErrorToast(isError: boolean, error: unknown): void {
+  useEffect(() => {
+    if (!isError) return;
+    if (error instanceof AssistantConversationNotFoundError) return;
+    toast.error(describeHistoryError(error), {
+      id: HISTORY_TOAST_ID,
+      description: "You can keep chatting — new messages are unaffected.",
+    });
+  }, [isError, error]);
+}
+
 export function useConversations() {
   const query = useQuery({
     queryKey: assistantKeys.conversations,
@@ -334,6 +362,7 @@ export function useConversation(conversationId: string | undefined) {
       return failureCount < 3;
     },
   });
+  useHistoryErrorToast(query.isError, query.error);
   useEffect(() => {
     if (!conversationId || query.data?.awaitingProjection !== true) return;
     let released = false;

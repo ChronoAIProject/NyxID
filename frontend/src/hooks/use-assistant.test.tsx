@@ -778,6 +778,68 @@ describe("conversation projection reconciliation", () => {
   });
 });
 
+describe("history read failures surface as toasts", () => {
+  it("surfaces a failed transcript read as one stable toast", async () => {
+    const { queryClient, Wrapper } = createHarness();
+    const toastSpy = vi.spyOn(toast, "error");
+    const historySpy = vi
+      .spyOn(assistantTransport, "getHistory")
+      .mockRejectedValue(
+        new ApiError(404, {
+          error: "not_found",
+          error_code: 404,
+          message: "missing",
+        }),
+      );
+    const { result, unmount } = renderHook(
+      () => useConversation("chatc-toast-probe"),
+      { wrapper: Wrapper },
+    );
+
+    await vi.waitFor(() => {
+      expect(result.current.isError).toBe(true);
+    });
+    // The stable id is the anti-stacking mechanism: refetch churn on the same
+    // broken read updates this toast in place.
+    expect(toastSpy).toHaveBeenCalledWith(
+      "This conversation has no saved transcript yet.",
+      {
+        id: "assistant-history-unavailable",
+        description: "You can keep chatting — new messages are unaffected.",
+      },
+    );
+
+    toastSpy.mockRestore();
+    historySpy.mockRestore();
+    unmount();
+    queryClient.clear();
+  });
+
+  it("does not toast a confirmed-absent conversation [guard]", async () => {
+    // Absence surfaces as the stale-route repair navigation; a toast would
+    // outlive that navigation to describe a chat that no longer exists.
+    const { queryClient, Wrapper } = createHarness();
+    const toastSpy = vi.spyOn(toast, "error");
+    const historySpy = vi
+      .spyOn(assistantTransport, "getHistory")
+      .mockRejectedValue(new AssistantConversationNotFoundError());
+    const { result, unmount } = renderHook(
+      () => useConversation("chatc-absent-probe"),
+      { wrapper: Wrapper },
+    );
+
+    await vi.waitFor(() => {
+      expect(result.current.isError).toBe(true);
+    });
+    expect(toastSpy).not.toHaveBeenCalled();
+
+    toastSpy.mockRestore();
+    historySpy.mockRestore();
+    unmount();
+    queryClient.clear();
+  });
+});
+
 describe("a failed transcript read never blocks the send", () => {
   // The send path warms the cache before and after the stream starts. Those
   // two reads used to share one `Promise.all`, so a rejected transcript read

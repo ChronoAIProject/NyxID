@@ -38,6 +38,7 @@ const {
     conversations: [] as Conversation[] | undefined,
     conversationsResolved: true,
     historyError: undefined as unknown,
+    historyLoading: false,
     historyCanonicalId: undefined as string | undefined,
     historyAwaitingProjection: false,
     historyProjectionStalled: false,
@@ -125,8 +126,9 @@ vi.mock("@/hooks/use-assistant", () => ({
     isSuccess: state.conversationsResolved,
   }),
   useConversation: (conversationId: string | undefined) => ({
-    data: conversationId
-      ? {
+    data:
+      conversationId && !state.historyLoading
+        ? {
           conversation: {
             ...(state.conversations?.find(
               (conversation) => conversation.id === conversationId,
@@ -140,12 +142,12 @@ vi.mock("@/hooks/use-assistant", () => ({
           },
           messages: state.historyMessages,
           has_more: false,
-          awaitingProjection: state.historyAwaitingProjection,
-          projectionStalled: state.historyProjectionStalled,
-        }
-      : undefined,
-    isLoading: false,
-    isFetching: false,
+            awaitingProjection: state.historyAwaitingProjection,
+            projectionStalled: state.historyProjectionStalled,
+          }
+        : undefined,
+    isLoading: state.historyLoading,
+    isFetching: state.historyLoading,
     isError: state.historyError !== undefined,
     error: state.historyError,
   }),
@@ -188,7 +190,6 @@ vi.mock("@/hooks/use-assistant", () => ({
     message: "Message not sent",
     description: "",
   }),
-  describeHistoryError: () => "This conversation has no saved transcript yet.",
 }));
 
 vi.mock("sonner", () => ({
@@ -272,6 +273,7 @@ beforeEach(() => {
   state.conversations = [existingConversation];
   state.conversationsResolved = true;
   state.historyError = undefined;
+  state.historyLoading = false;
   state.historyCanonicalId = undefined;
   state.historyAwaitingProjection = false;
   state.historyProjectionStalled = false;
@@ -345,6 +347,20 @@ describe("AssistantPage projection status", () => {
     ).not.toBeInTheDocument();
     expect(screen.queryByRole("status")).not.toBeInTheDocument();
     expect(screen.queryByRole("alert")).not.toBeInTheDocument();
+    expect(screen.getByRole("textbox")).toBeEnabled();
+  });
+
+  it("keeps the composer usable while a cold transcript is loading [guard]", () => {
+    // "Loading conversation..." replaces only the thread area, never the
+    // composer or sidebar — a read that never resolves still leaves the page
+    // fully operable.
+    state.search = { c: existingConversation.id };
+    state.historyLoading = true;
+    state.historyMessages = [];
+
+    renderPage();
+
+    expect(screen.getByText("Loading conversation...")).toBeInTheDocument();
     expect(screen.getByRole("textbox")).toBeEnabled();
   });
 
@@ -512,15 +528,23 @@ describe("AssistantPage new chat", () => {
     ).toBeInTheDocument();
   });
 
-  it("reports a failed transcript read without taking the chat away", () => {
+  it("keeps the chat fully usable with no chrome when a transcript read fails", () => {
+    // The failure itself is toast-only (`useHistoryErrorToast` inside
+    // `useConversation`, covered in the hook suite). The page's contract is
+    // silence: no strip, nothing disabled, existing content untouched.
     state.historyError = new Error("Network unavailable");
     state.search = { c: existingConversation.id };
+    state.historyMessages = [userTranscriptMessage("user-kept", "still here")];
     renderPage();
 
-    expect(screen.getByRole("status")).toHaveTextContent(
-      /no saved transcript yet/i,
-    );
-    expect(screen.getByRole("textbox")).toBeInTheDocument();
+    expect(
+      screen.queryByText(/no saved transcript yet/i),
+    ).not.toBeInTheDocument();
+    expect(
+      screen.queryByText(/You can keep chatting/),
+    ).not.toBeInTheDocument();
+    expect(screen.getByText("still here")).toBeInTheDocument();
+    expect(screen.getByRole("textbox")).toBeEnabled();
   });
 
   it("keeps bare /assistant as a new-chat draft when chats exist", () => {
@@ -663,9 +687,12 @@ describe("AssistantPage conversation resolution", () => {
     renderPage();
 
     expect(mockNavigate).not.toHaveBeenCalled();
-    expect(screen.getByRole("status")).toHaveTextContent(
-      /You can keep chatting/i,
-    );
+    // Failure reporting is toast-only; the page renders no error chrome and
+    // stays usable on the same route.
+    expect(
+      screen.queryByText(/You can keep chatting/i),
+    ).not.toBeInTheDocument();
+    expect(screen.getByRole("textbox")).toBeEnabled();
   });
 
   it("retains an unlisted explicit id while history is still resolving", () => {
