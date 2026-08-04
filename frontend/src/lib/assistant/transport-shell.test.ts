@@ -39,6 +39,16 @@ class RecordingTransport implements AssistantTransport {
     };
   }
 
+  async reconcileProjection(conversationId: string) {
+    this.calls.push("reconcile");
+    return { status: "materialized" as const, conversationId };
+  }
+
+  releaseProjectionWaiter(conversationId: string): void {
+    void conversationId;
+    this.calls.push("release");
+  }
+
   async getHistory(): Promise<ConversationHistory> {
     this.calls.push("history");
     return {

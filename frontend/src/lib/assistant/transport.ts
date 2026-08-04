@@ -18,6 +18,7 @@ import type {
   AssistantTransport,
   Conversation,
   ConversationHistory,
+  ProjectionReconcileOutcome,
   TurnEvent,
   TurnHandle,
 } from "@/types/assistant";
@@ -596,6 +597,16 @@ export class DelegatingAssistantTransport implements AssistantTransport {
 
   getHistory(conversationId: string): Promise<ConversationHistory> {
     return this.transport.getHistory(conversationId);
+  }
+
+  reconcileProjection(
+    conversationId: string,
+  ): Promise<ProjectionReconcileOutcome> {
+    return this.transport.reconcileProjection(conversationId);
+  }
+
+  releaseProjectionWaiter(conversationId: string): void {
+    this.transport.releaseProjectionWaiter(conversationId);
   }
 
   deleteConversation(conversationId: string): Promise<void> {

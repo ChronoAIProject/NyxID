@@ -115,6 +115,19 @@ class StubTransport implements AssistantTransport {
     return structuredClone(history);
   }
 
+  reconcileCalls = 0;
+  releaseCalls = 0;
+
+  async reconcileProjection(conversationId: string) {
+    this.reconcileCalls += 1;
+    return { status: "materialized" as const, conversationId };
+  }
+
+  releaseProjectionWaiter(conversationId: string): void {
+    void conversationId;
+    this.releaseCalls += 1;
+  }
+
   async deleteConversation(conversationId: string): Promise<void> {
     this.deleteCalls += 1;
     await this.deleteImpl(conversationId);
@@ -308,6 +321,37 @@ async function flushAsync(): Promise<void> {
   await Promise.resolve();
   await Promise.resolve();
 }
+
+describe("ScenarioInterceptTransport projection reconcile", () => {
+  it("delegates projection reconcile for conversations the mock does not own", async () => {
+    const { delegate, transport } = await createTransport();
+
+    const outcome = await transport.reconcileProjection(CONVERSATION_ID);
+    transport.releaseProjectionWaiter(CONVERSATION_ID);
+
+    expect(outcome).toEqual({
+      status: "materialized",
+      conversationId: CONVERSATION_ID,
+    });
+    expect(delegate.reconcileCalls).toBe(1);
+    expect(delegate.releaseCalls).toBe(1);
+  });
+
+  it("resolves locally without touching the delegate while a mock turn owns the conversation", async () => {
+    const { delegate, transport } = await createTransport();
+
+    transport.sendMessage(CONVERSATION_ID, "simulate an error", () => {});
+    const outcome = await transport.reconcileProjection(CONVERSATION_ID);
+    transport.releaseProjectionWaiter(CONVERSATION_ID);
+
+    expect(outcome).toEqual({
+      status: "materialized",
+      conversationId: CONVERSATION_ID,
+    });
+    expect(delegate.reconcileCalls).toBe(0);
+    expect(delegate.releaseCalls).toBe(0);
+  });
+});
 
 describe("ScenarioInterceptTransport ownership", () => {
   it("passes unmatched messages through and tracks delegate completion", async () => {

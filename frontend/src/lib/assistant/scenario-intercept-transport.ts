@@ -23,6 +23,7 @@ import type {
   AssistantTransport,
   Conversation,
   ConversationHistory,
+  ProjectionReconcileOutcome,
   TurnEvent,
   TurnHandle,
   TurnReducerState,
@@ -234,6 +235,34 @@ export class ScenarioInterceptTransport implements AssistantTransport {
     const base = this.baseHistories.get(conversationId);
     if (!base) throw new AssistantConversationNotFoundError();
     return this.projectHistory(conversationId, base);
+  }
+
+  /**
+   * Mock-owned conversations exist only in the wrapper, so there is no
+   * server-side projection to wait on -- they are materialized by
+   * definition. Anything the wrapper does not own is reconciled by the
+   * real transport. Ownership matches `getHistory`'s read-path rule so a
+   * claimed or mock-running conversation never reaches the backend.
+   */
+  async reconcileProjection(
+    conversationId: string,
+  ): Promise<ProjectionReconcileOutcome> {
+    if (!this.mockOwnsProjection(conversationId)) {
+      return this.delegate.reconcileProjection(conversationId);
+    }
+    return { status: "materialized", conversationId };
+  }
+
+  releaseProjectionWaiter(conversationId: string): void {
+    if (!this.mockOwnsProjection(conversationId)) {
+      this.delegate.releaseProjectionWaiter(conversationId);
+    }
+  }
+
+  private mockOwnsProjection(conversationId: string): boolean {
+    if (this.claimedConversations.has(conversationId)) return true;
+    const state = this.ownership.get(conversationId);
+    return state === "mock-running" || state === "verifying";
   }
 
   async deleteConversation(conversationId: string): Promise<void> {
