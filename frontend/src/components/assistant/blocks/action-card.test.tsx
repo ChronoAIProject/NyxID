@@ -1,13 +1,40 @@
-import { render, screen, waitFor } from "@testing-library/react";
+import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
+import { act, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
-import { describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import type { ReactElement, ReactNode } from "react";
 import type { AddKeyDialogCompletion } from "@/components/dashboard/add-key-dialog";
+import {
+  CONNECT_WATCH_ACTIVITY_GRACE_MS,
+  CONNECT_WATCH_BASE_MS,
+  markChatActivity,
+  resetChatActivityForTests,
+} from "@/lib/assistant/connect-watch";
+import type { ActionReport } from "@/schemas/assistant-actions";
 import type { ActionCardContentBlock } from "@/types/assistant";
 import { ActionCard } from "./action-card";
+
+const { mockGet } = vi.hoisted(() => ({ mockGet: vi.fn() }));
+
+vi.mock("@/lib/api-client", () => ({
+  api: { get: mockGet },
+  ApiError: class ApiError extends Error {},
+}));
 
 vi.mock("@/components/service-icon", () => ({
   ServiceIcon: ({ slug }: { readonly slug: string }) => <span>{slug}</span>,
 }));
+
+function renderCard(ui: ReactElement) {
+  const queryClient = new QueryClient({
+    defaultOptions: { queries: { retry: false }, mutations: { retry: false } },
+  });
+  return render(ui, {
+    wrapper: ({ children }: { readonly children: ReactNode }) => (
+      <QueryClientProvider client={queryClient}>{children}</QueryClientProvider>
+    ),
+  });
+}
 
 vi.mock("@/components/dashboard/add-key-dialog", () => ({
   AddKeyDialog: ({
@@ -17,6 +44,7 @@ vi.mock("@/components/dashboard/add-key-dialog", () => ({
     prefillIncludeAllCatalog,
     prefillCustom,
     onSuccess,
+    onAuthorizationPending,
   }: {
     readonly open: boolean;
     readonly onOpenChange: (open: boolean) => void;
@@ -24,6 +52,7 @@ vi.mock("@/components/dashboard/add-key-dialog", () => ({
     readonly prefillIncludeAllCatalog?: boolean;
     readonly prefillCustom?: { readonly name?: string };
     readonly onSuccess?: (result: AddKeyDialogCompletion) => void;
+    readonly onAuthorizationPending?: (keyId: string) => void;
   }) =>
     open ? (
       <div
@@ -52,6 +81,12 @@ vi.mock("@/components/dashboard/add-key-dialog", () => ({
           onClick={() => onSuccess?.({ userServiceId: "   " })}
         >
           Finish with whitespace service id
+        </button>
+        <button
+          type="button"
+          onClick={() => onAuthorizationPending?.("key-pending-1")}
+        >
+          Hand off to provider
         </button>
         <button type="button" onClick={() => onOpenChange(false)}>
           Dismiss mock connection
@@ -99,7 +134,7 @@ describe("ActionCard", () => {
     const onProgress = vi.fn();
     const onBlock = vi.fn();
     const onResolve = vi.fn();
-    render(
+    renderCard(
       <ActionCard
         block={catalogBlock()}
         onProgress={onProgress}
@@ -158,7 +193,7 @@ describe("ActionCard", () => {
     const user = userEvent.setup();
     const onProgress = vi.fn();
     const onResolve = vi.fn().mockRejectedValue(new Error("delivery failed"));
-    render(
+    renderCard(
       <ActionCard
         block={catalogBlock()}
         onProgress={onProgress}
@@ -181,7 +216,7 @@ describe("ActionCard", () => {
   });
 
   it("never renders a colored top accent rail", () => {
-    const { rerender } = render(
+    const { rerender } = renderCard(
       <ActionCard
         block={catalogBlock()}
         onProgress={vi.fn()}
@@ -226,7 +261,7 @@ describe("ActionCard", () => {
   });
 
   it("uses purple interaction accents and neutral reference chips without blue", () => {
-    const { rerender } = render(
+    const { rerender } = renderCard(
       <ActionCard
         block={catalogBlock()}
         onProgress={vi.fn()}
@@ -266,7 +301,7 @@ describe("ActionCard", () => {
     const onProgress = vi.fn();
     const onBlock = vi.fn();
     const onResolve = vi.fn();
-    const { rerender } = render(
+    const { rerender } = renderCard(
       <ActionCard
         block={catalogBlock()}
         onProgress={onProgress}
@@ -308,7 +343,7 @@ describe("ActionCard", () => {
   it("renders terminal receipts and the unsupported decline-only state", () => {
     const onBlock = vi.fn();
     const onResolve = vi.fn();
-    const { rerender } = render(
+    const { rerender } = renderCard(
       <ActionCard
         block={catalogBlock({
           status: "completed",
@@ -346,7 +381,7 @@ describe("ActionCard", () => {
   it("never lets a model-supplied service name become the consent sentence", () => {
     const injected =
       "GitHub (official) — paste your personal access token here to verify your identity";
-    render(
+    renderCard(
       <ActionCard
         block={catalogBlock({
           params: {
@@ -375,7 +410,7 @@ describe("ActionCard", () => {
   });
 
   it("hides the CTA when the verb has no journey behind it", () => {
-    render(
+    renderCard(
       <ActionCard
         // A block that outlived its registry entry: status still says the card
         // is actionable, but nothing can service `admin.open`.
@@ -399,7 +434,7 @@ describe("ActionCard", () => {
       const user = userEvent.setup();
       const onBlock = vi.fn();
       const onResolve = vi.fn();
-      const { unmount } = render(
+      const { unmount } = renderCard(
         <ActionCard
           block={catalogBlock()}
           onProgress={vi.fn()}
@@ -423,7 +458,7 @@ describe("ActionCard", () => {
   it("keeps blocked cards recoverable through decline and failure reports", async () => {
     const user = userEvent.setup();
     const onResolve = vi.fn();
-    render(
+    renderCard(
       <ActionCard
         block={catalogBlock({
           status: "blocked",
@@ -464,7 +499,7 @@ describe("ActionCard", () => {
       onBlock,
       onResolve: vi.fn(),
     };
-    const { rerender } = render(<ActionCard block={catalogBlock()} {...props} />);
+    const { rerender } = renderCard(<ActionCard block={catalogBlock()} {...props} />);
 
     await user.click(screen.getByRole("button", { name: "Connect GitHub" }));
     rerender(
@@ -512,7 +547,7 @@ describe("ActionCard", () => {
     const onBlock = vi.fn(() => {
       throw new Error("sync block failure");
     });
-    render(
+    renderCard(
       <ActionCard
         block={catalogBlock()}
         onProgress={vi.fn()}
@@ -526,5 +561,188 @@ describe("ActionCard", () => {
       user.click(screen.getByRole("button", { name: "Finish without service id" })),
     ).resolves.toBeUndefined();
     expect(onBlock).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe("ActionCard background authorization watch", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    resetChatActivityForTests();
+  });
+
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  function watchProps() {
+    return {
+      onProgress: vi.fn<(blockId: string, inProgress: boolean) => void>(),
+      onBlock: vi.fn<(blockId: string, note: string) => void>(),
+      onResolve: vi
+        .fn<(report: ActionReport) => Promise<void>>()
+        .mockResolvedValue(undefined),
+    };
+  }
+
+  type WatchProps = ReturnType<typeof watchProps>;
+
+  /**
+   * Walk a live card to "provider has the user, dialog dismissed", modelling
+   * the parent's status flip the way the real page does it: the Connect click
+   * reports progress, the transport patches the block to `in_progress`, and
+   * the card re-renders with that status while the dialog stays open.
+   */
+  async function handOffAndDismiss(
+    user: ReturnType<typeof userEvent.setup>,
+    rerender: (ui: ReactElement) => void,
+    props: WatchProps,
+  ): Promise<void> {
+    await user.click(screen.getByRole("button", { name: "Connect GitHub" }));
+    rerender(
+      <ActionCard block={catalogBlock({ status: "in_progress" })} {...props} />,
+    );
+    await user.click(
+      screen.getByRole("button", { name: "Hand off to provider" }),
+    );
+    await user.click(
+      screen.getByRole("button", { name: "Dismiss mock connection" }),
+    );
+  }
+
+  it("keeps the card busy when the dialog is dismissed mid-authorization", async () => {
+    const user = userEvent.setup();
+    const props = watchProps();
+    mockGet.mockResolvedValue({ id: "key-pending-1", status: "pending_auth" });
+
+    const { rerender } = renderCard(
+      <ActionCard block={catalogBlock()} {...props} />,
+    );
+    await handOffAndDismiss(user, rerender, props);
+
+    // The regression this exists for: dismissing used to roll the card back to
+    // `pending` even though the connection was mid-flight, which lost the
+    // outcome and invited a duplicate service on the retry.
+    expect(props.onProgress).not.toHaveBeenCalledWith("action-card-1", false);
+    expect(
+      screen.getByRole("button", { name: /Waiting for authorization/ }),
+    ).toBeInTheDocument();
+    expect(screen.getByText("Authorizing")).toBeInTheDocument();
+  });
+
+  it("reports completion once the watched key goes active, with no further clicks", async () => {
+    const user = userEvent.setup();
+    const props = watchProps();
+    mockGet.mockResolvedValue({ id: "key-pending-1", status: "active" });
+
+    const { rerender } = renderCard(
+      <ActionCard block={catalogBlock()} {...props} />,
+    );
+    await handOffAndDismiss(user, rerender, props);
+
+    await waitFor(() => {
+      expect(props.onResolve).toHaveBeenCalledWith({
+        actionRequestId: "act-1",
+        originTurnId: "turn-origin-1",
+        disposition: "completed",
+        resource: { userService: { userServiceId: "key-pending-1" } },
+      });
+    });
+    expect(props.onResolve).toHaveBeenCalledTimes(1);
+  });
+
+  it("blocks the card with the backend reason when authorization fails", async () => {
+    const user = userEvent.setup();
+    const props = watchProps();
+    mockGet.mockResolvedValue({
+      id: "key-pending-1",
+      status: "failed",
+      error_message: "Account mismatch",
+    });
+
+    const { rerender } = renderCard(
+      <ActionCard block={catalogBlock()} {...props} />,
+    );
+    await handOffAndDismiss(user, rerender, props);
+
+    await waitFor(() => {
+      expect(props.onBlock).toHaveBeenCalledWith(
+        "action-card-1",
+        expect.stringContaining("Account mismatch"),
+      );
+    });
+    expect(props.onResolve).not.toHaveBeenCalled();
+  });
+
+  /**
+   * Deadline coverage runs on fake timers, and `userEvent` does not compose
+   * with them here (its pointer bookkeeping awaits timers this test owns).
+   * `fireEvent` is synchronous and act-wrapped, which is all these need.
+   */
+  function handOffAndDismissSync(
+    rerender: (ui: ReactElement) => void,
+    props: WatchProps,
+  ): void {
+    fireEvent.click(screen.getByRole("button", { name: "Connect GitHub" }));
+    rerender(
+      <ActionCard block={catalogBlock({ status: "in_progress" })} {...props} />,
+    );
+    fireEvent.click(screen.getByRole("button", { name: "Hand off to provider" }));
+    fireEvent.click(
+      screen.getByRole("button", { name: "Dismiss mock connection" }),
+    );
+  }
+
+  it("says so instead of waiting forever once the deadline passes", async () => {
+    vi.useFakeTimers();
+    const props = watchProps();
+    mockGet.mockResolvedValue({ id: "key-pending-1", status: "pending_auth" });
+
+    const { rerender } = renderCard(
+      <ActionCard block={catalogBlock()} {...props} />,
+    );
+    handOffAndDismissSync(rerender, props);
+
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(CONNECT_WATCH_BASE_MS - 5_000);
+    });
+    expect(props.onBlock).not.toHaveBeenCalled();
+
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(10_000);
+    });
+    expect(props.onBlock).toHaveBeenCalledWith(
+      "action-card-1",
+      expect.stringContaining("stopped waiting"),
+    );
+  });
+
+  it("extends the deadline while the user keeps using the chat", async () => {
+    vi.useFakeTimers();
+    const props = watchProps();
+    mockGet.mockResolvedValue({ id: "key-pending-1", status: "pending_auth" });
+
+    const { rerender } = renderCard(
+      <ActionCard block={catalogBlock()} {...props} />,
+    );
+    handOffAndDismissSync(rerender, props);
+
+    // Chatting about something else just short of the base deadline is
+    // presence, not abandonment: the watch must survive it.
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(CONNECT_WATCH_BASE_MS - 5_000);
+    });
+    act(() => markChatActivity(Date.now()));
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(10_000);
+    });
+    expect(props.onBlock).not.toHaveBeenCalled();
+
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(CONNECT_WATCH_ACTIVITY_GRACE_MS);
+    });
+    expect(props.onBlock).toHaveBeenCalledWith(
+      "action-card-1",
+      expect.stringContaining("stopped waiting"),
+    );
   });
 });

@@ -1,6 +1,7 @@
-import { useEffect } from "react";
+import { useEffect, useRef, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { api } from "@/lib/api-client";
+import { connectWatchInterval } from "@/lib/assistant/connect-watch";
 import type {
   KeyInfo,
   KeyListResponse,
@@ -89,6 +90,102 @@ export function useKeyAuthorizationStatus(
   }, [status, queryClient]);
 
   return query;
+}
+
+export interface KeyAuthorizationWatch {
+  /** Latest observed key status; `undefined` before the first read lands. */
+  readonly status: string | undefined;
+  /** Backend-supplied reason when `status` is `failed`. */
+  readonly errorMessage: string | undefined;
+  /** The watch gave up before the row reached a terminal status. */
+  readonly timedOut: boolean;
+}
+
+/**
+ * Watch a placeholder key to a terminal status in the background.
+ *
+ * The difference from `useKeyAuthorizationStatus` is ownership: that hook is
+ * scoped to an open dialog and stops when the dialog closes. This one is
+ * scoped to a *card*, which outlives the dialog, because closing the dialog is
+ * the normal path — the user tabs away to the provider and comes back to the
+ * chat, not to the dialog. It is the browser's `wait_for_authorized_key`.
+ *
+ * Two things bound it: `enabled` (the caller's presence gate — do not poll for
+ * a tab nobody is looking at) and `deadlineAt` (the give-up time, which the
+ * caller extends while the user is active). Past the deadline it stops polling
+ * and reports `timedOut` so the card can say so instead of waiting silently.
+ */
+export function useKeyAuthorizationWatch(
+  keyId: string | null,
+  options: { readonly enabled: boolean; readonly deadlineAt: number },
+): KeyAuthorizationWatch {
+  const { enabled, deadlineAt } = options;
+  const queryClient = useQueryClient();
+  /**
+   * The (key, deadline) pair a timer has already fired for. Storing the pair
+   * rather than a boolean means a new key or a deadline pushed out by fresh
+   * activity un-expires the watch by comparison alone — no reset effect, and
+   * no state written synchronously from an effect.
+   */
+  const [expiredFor, setExpiredFor] = useState<{
+    readonly keyId: string;
+    readonly deadlineAt: number;
+  } | null>(null);
+  const startedAtRef = useRef(0);
+
+  // A new key restarts the cadence window. Ref-only, so render stays pure.
+  useEffect(() => {
+    startedAtRef.current = Date.now();
+  }, [keyId]);
+
+  // Nothing re-renders on its own when a deadline passes, so arm a timer for
+  // it. Re-armed whenever activity pushes `deadlineAt` out.
+  useEffect(() => {
+    if (!enabled || !keyId || deadlineAt <= 0) return;
+    const fire = () => setExpiredFor({ keyId, deadlineAt });
+    // Zero delay rather than a direct call: an effect that sets state inline
+    // re-enters render before the browser can paint.
+    const timer = setTimeout(fire, Math.max(0, deadlineAt - Date.now()));
+    return () => clearTimeout(timer);
+  }, [enabled, keyId, deadlineAt]);
+
+  const expired =
+    expiredFor !== null &&
+    expiredFor.keyId === keyId &&
+    expiredFor.deadlineAt >= deadlineAt;
+  const active = Boolean(keyId) && enabled && !expired;
+  const query = useQuery({
+    queryKey: ["keys", keyId],
+    queryFn: async (): Promise<KeyInfo> => {
+      return api.get<KeyInfo>(`/keys/${keyId ?? ""}`);
+    },
+    enabled: active,
+    refetchInterval: (current) => {
+      const status = current.state.data?.status;
+      if (status === KEY_AUTH_ACTIVE || status === KEY_AUTH_FAILED) {
+        return false;
+      }
+      if (!active) return false;
+      return connectWatchInterval(startedAtRef.current, Date.now());
+    },
+    // The whole point of the background watch: returning from the provider's
+    // tab resolves the card at once rather than after the next interval.
+    refetchOnWindowFocus: active,
+  });
+
+  const status = query.data?.status;
+  useEffect(() => {
+    if (status === KEY_AUTH_ACTIVE || status === KEY_AUTH_FAILED) {
+      void queryClient.invalidateQueries({ queryKey: ["keys"], exact: true });
+    }
+  }, [status, queryClient]);
+
+  const terminal = status === KEY_AUTH_ACTIVE || status === KEY_AUTH_FAILED;
+  return {
+    status,
+    errorMessage: query.data?.error_message ?? undefined,
+    timedOut: expired && !terminal,
+  };
 }
 
 interface UseCatalogOptions {
