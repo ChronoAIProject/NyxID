@@ -266,7 +266,9 @@ describe("PluginsView", () => {
     const user = userEvent.setup();
     render(<PluginsView />);
     await user.click(screen.getByRole("button", { name: "Manage OpenAI" }));
-    // First Revoke click only arms the inline confirmation — no delete yet.
+    // First Revoke click only opens the confirmation dialog — no delete yet.
+    // (Dialog copy and cancel behaviour are covered in
+    // manage-connection-modal.test.tsx.)
     await user.click(await screen.findByRole("button", { name: "Revoke" }));
     expect(mutate).not.toHaveBeenCalled();
     // The confirm click sends the delete with the key id.
