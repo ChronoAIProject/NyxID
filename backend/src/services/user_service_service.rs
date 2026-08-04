@@ -2585,7 +2585,13 @@ mod tests {
 
     #[test]
     fn validate_identity_config_accepts_all_valid_scopes() {
-        for scope in ["llm:proxy", "proxy:*", "llm:status", "account:read"] {
+        for scope in [
+            "llm:proxy",
+            "proxy:*",
+            "llm:status",
+            "account:read",
+            "sandbox:execute",
+        ] {
             let config = IdentityConfig {
                 delegation_token_scope: scope.to_string(),
                 ..IdentityConfig::none()

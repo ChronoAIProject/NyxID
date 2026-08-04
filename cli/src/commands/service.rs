@@ -1249,6 +1249,9 @@ pub async fn run(command: ServiceCommands) -> Result<()> {
             inactive,
             admin_only,
             member_access,
+            forward_access_token,
+            inject_delegation_token,
+            delegation_token_scope,
             default_header,
             clear_default_headers,
             ws_frame_preset,
@@ -1258,9 +1261,9 @@ pub async fn run(command: ServiceCommands) -> Result<()> {
             let mut api = ApiClient::from_auth_checked(&auth).await?;
 
             let mut body = serde_json::Map::new();
+            let mut user_service_body = serde_json::Map::new();
             let ws_frame_injections =
                 build_ws_frame_injections_body(ws_frame_preset.as_deref(), ws_frame_clear)?;
-            let has_ws_frame_update = ws_frame_injections.is_some();
 
             if let Some(l) = label {
                 body.insert("label".into(), Value::String(l));
@@ -1307,6 +1310,15 @@ pub async fn run(command: ServiceCommands) -> Result<()> {
             } else if member_access {
                 body.insert("admin_only".into(), Value::Bool(false));
             }
+            if let Some(value) = forward_access_token {
+                user_service_body.insert("forward_access_token".into(), Value::Bool(value));
+            }
+            if let Some(value) = inject_delegation_token {
+                user_service_body.insert("inject_delegation_token".into(), Value::Bool(value));
+            }
+            if let Some(value) = delegation_token_scope {
+                user_service_body.insert("delegation_token_scope".into(), Value::String(value));
+            }
 
             // NyxID#356: default_request_headers.
             //   --clear-default-headers     -> null (clears)
@@ -1322,23 +1334,29 @@ pub async fn run(command: ServiceCommands) -> Result<()> {
                 );
             }
 
-            let mut result: Value = if body.is_empty() && has_ws_frame_update {
+            if let Some(rules) = ws_frame_injections {
+                user_service_body
+                    .insert("ws_frame_injections".into(), serde_json::to_value(rules)?);
+            }
+
+            let has_user_service_update = !user_service_body.is_empty();
+            let mut result: Value = if body.is_empty() && has_user_service_update {
                 api.get(&format!("/keys/{id}")).await?
             } else {
                 api.put(&format!("/keys/{id}"), &Value::Object(body))
                     .await?
             };
 
-            if let Some(rules) = ws_frame_injections {
-                let service_id = result["user_service_id"]
+            if has_user_service_update {
+                let service_id = result["id"]
                     .as_str()
-                    .or(result["id"].as_str())
-                    .or(result["_id"].as_str())
                     .ok_or_else(|| anyhow::anyhow!("Could not resolve user_service_id"))?
                     .to_string();
-                let body = serde_json::json!({ "ws_frame_injections": rules });
                 let _: Value = api
-                    .put(&format!("/user-services/{service_id}"), &body)
+                    .put(
+                        &format!("/user-services/{service_id}"),
+                        &Value::Object(user_service_body),
+                    )
                     .await?;
                 result = api.get(&format!("/keys/{id}")).await?;
             }
@@ -3303,6 +3321,9 @@ mod command_tests {
             inactive: false,
             admin_only: false,
             member_access: false,
+            forward_access_token: None,
+            inject_delegation_token: None,
+            delegation_token_scope: None,
             default_header: vec![],
             clear_default_headers: false,
             ws_frame_preset: None,
@@ -3311,6 +3332,57 @@ mod command_tests {
         })
         .await
         .expect("update should succeed");
+    }
+
+    #[tokio::test]
+    async fn identity_only_update_resolves_and_updates_user_service() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/api/v1/keys/key-alpha"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "id": "user-service-bravo"
+            })))
+            .expect(2)
+            .mount(&server)
+            .await;
+        Mock::given(method("PUT"))
+            .and(path("/api/v1/user-services/user-service-bravo"))
+            .and(body_json(serde_json::json!({
+                "forward_access_token": true,
+                "inject_delegation_token": true,
+                "delegation_token_scope": "proxy:* sandbox:execute"
+            })))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "id": "user-service-bravo"
+            })))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        run(ServiceCommands::Update {
+            id: "key-alpha".to_string(),
+            label: None,
+            endpoint_url: None,
+            openapi_spec_url: None,
+            recommended_skill: Vec::new(),
+            clear_recommended_skills: false,
+            node_id: None,
+            no_node: false,
+            active: false,
+            inactive: false,
+            admin_only: false,
+            member_access: false,
+            forward_access_token: Some(true),
+            inject_delegation_token: Some(true),
+            delegation_token_scope: Some("proxy:* sandbox:execute".to_string()),
+            default_header: vec![],
+            clear_default_headers: false,
+            ws_frame_preset: None,
+            ws_frame_clear: false,
+            auth: mock_auth(server.uri()),
+        })
+        .await
+        .expect("identity update should succeed");
     }
 
     #[tokio::test]
@@ -3527,6 +3599,9 @@ mod command_tests {
             inactive: false,
             admin_only: false,
             member_access: false,
+            forward_access_token: None,
+            inject_delegation_token: None,
+            delegation_token_scope: None,
             default_header: vec!["x-api-version=v2".to_string()],
             clear_default_headers: false,
             ws_frame_preset: None,
@@ -3812,6 +3887,9 @@ mod branch_tests {
             inactive: false,
             admin_only: false,
             member_access: false,
+            forward_access_token: None,
+            inject_delegation_token: None,
+            delegation_token_scope: None,
             default_header: vec![],
             clear_default_headers: false,
             ws_frame_preset: None,
@@ -3985,6 +4063,9 @@ mod branch_tests {
             inactive: false,
             admin_only: false,
             member_access: false,
+            forward_access_token: None,
+            inject_delegation_token: None,
+            delegation_token_scope: None,
             default_header: vec![],
             clear_default_headers: true,
             ws_frame_preset: None,
@@ -4020,6 +4101,9 @@ mod branch_tests {
             inactive: false,
             admin_only: false,
             member_access: false,
+            forward_access_token: None,
+            inject_delegation_token: None,
+            delegation_token_scope: None,
             default_header: vec![],
             clear_default_headers: false,
             ws_frame_preset: None,
@@ -4055,6 +4139,9 @@ mod branch_tests {
             inactive: true,
             admin_only: false,
             member_access: false,
+            forward_access_token: None,
+            inject_delegation_token: None,
+            delegation_token_scope: None,
             default_header: vec![],
             clear_default_headers: false,
             ws_frame_preset: None,
@@ -4090,6 +4177,9 @@ mod branch_tests {
             inactive: false,
             admin_only: true,
             member_access: false,
+            forward_access_token: None,
+            inject_delegation_token: None,
+            delegation_token_scope: None,
             default_header: vec![],
             clear_default_headers: false,
             ws_frame_preset: None,

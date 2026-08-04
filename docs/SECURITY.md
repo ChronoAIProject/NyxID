@@ -499,6 +499,9 @@ When NyxID proxies MCP tool calls, delegation tokens are only injected for servi
 | **Single use window** | 5-minute TTL; token is generated per tool call; refreshable for long-running workflows |
 | **Service identity** | `act.sub` claim identifies the downstream service for audit purposes |
 
+The service-issued `sandbox:execute` scope is limited to configured downstream
+and user-service rows. It is not available through OAuth-client token exchange.
+
 ### Threat Mitigations
 
 | Threat | Mitigation |

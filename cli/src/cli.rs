@@ -939,6 +939,15 @@ pub enum ServiceCommands {
         /// Allow org members with proxy scope to execute this service.
         #[arg(long, conflicts_with = "admin_only")]
         member_access: bool,
+        /// Forward the caller's bearer token to the downstream service.
+        #[arg(long, value_name = "BOOL")]
+        forward_access_token: Option<bool>,
+        /// Inject a short-lived NyxID delegation token for the downstream service.
+        #[arg(long, value_name = "BOOL")]
+        inject_delegation_token: Option<bool>,
+        /// Space-separated scopes carried by the injected delegation token.
+        #[arg(long, value_name = "SCOPES")]
+        delegation_token_scope: Option<String>,
         /// Set or replace a default HTTP header injected on every proxied
         /// request. Format: `name=value`, optionally suffixed with
         /// `:overridable` to let a caller-supplied value win. Repeat the
@@ -2400,6 +2409,43 @@ mod tests {
             } => {
                 assert!(!admin_only);
                 assert!(member_access);
+            }
+            _ => panic!("unexpected parse result"),
+        }
+    }
+
+    #[test]
+    fn service_update_accepts_identity_delegation_flags() {
+        let cli = Cli::try_parse_from([
+            "nyxid",
+            "service",
+            "update",
+            "key-alpha",
+            "--forward-access-token",
+            "true",
+            "--inject-delegation-token",
+            "true",
+            "--delegation-token-scope",
+            "proxy:* sandbox:execute",
+        ])
+        .expect("service update should accept identity delegation flags");
+
+        match cli.command {
+            Commands::Service {
+                command:
+                    ServiceCommands::Update {
+                        forward_access_token,
+                        inject_delegation_token,
+                        delegation_token_scope,
+                        ..
+                    },
+            } => {
+                assert_eq!(forward_access_token, Some(true));
+                assert_eq!(inject_delegation_token, Some(true));
+                assert_eq!(
+                    delegation_token_scope.as_deref(),
+                    Some("proxy:* sandbox:execute")
+                );
             }
             _ => panic!("unexpected parse result"),
         }
