@@ -1,7 +1,7 @@
 ---
 name: aevatar-agent-profile-management
 description: Use when a user wants to create, edit, validate, publish, or explain an Aevatar Agent Profile; set purpose or instructions; bind exact Ornn skills and activation modes; restrict tool authority; or diagnose ETag, validation, publication, deployment exposure, or runtime binding. Agent Profile is a separate resource, not a workflow, member, team, service, or schedule. Use the opaque profileId, exact `{skillGuid, literalVersion, expectedName, expectedPublisherId}` references, strong ETags, accepted-vs-committed semantics, and capability detection before mutation.
-version: "1.0"
+version: "1.1"
 metadata:
   category: plain
   tag:

@@ -1,7 +1,7 @@
 ---
 name: aevatar-scheduler
 description: Create and manage recurring Aevatar runs and route to the correct scheduling resource. Use for cron, recurring Team member workflows, scheduled skill agents, typed service invocations, pause/resume, run-now, reauthorization, deletion, or credential triage. Team member automation uses its dedicated route and Agent Key; generic schedules accept typed service invocation only. External raw actor/envelope schedules are retired and must fail closed.
-version: "1.9"
+version: "1.10"
 metadata:
   category: plain
   tag:

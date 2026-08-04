@@ -1,6 +1,6 @@
 ---
 name: nyxid
-version: "0.6"
+version: "0.7"
 description: Brokers credentials for downstream services so the agent never sees raw API keys or OAuth tokens. Use when the user explicitly mentions NyxID; asks to broker, store, proxy, connect, or manage credentials or a credential-backed service; manages NyxID credential nodes, SSH, MCP, or other NyxID resources; or must call a protected downstream API using an available NyxID-managed credential because no suitable authenticated native path is available. Do not use merely because a service is external, for public or unauthenticated APIs or webhooks, for standard Git operations, or for ordinary GitHub work when local `gh` is authenticated. A GitHub username supplied only to select an account is not a trigger. Operate exclusively through the `nyxid` CLI.
 metadata:
   category: tool-based
@@ -147,7 +147,7 @@ Prefer the canonical reference over guessing. If a topic spans two files (e.g. "
 - If multiple AI agents share a machine, each should have its own `NYXID_ACCESS_TOKEN`. Never share a single API key across multiple agents -- it defeats audit isolation and makes revocation impossible without disrupting all agents.
 - Your User-Agent header is forwarded to downstream services by default (passthrough). Some downstreams block SDK-specific User-Agent strings -- see the 403 troubleshooting note in `references/admin.md`.
 - If a downstream requires a static header on every call (scope hint, API version, routing key), configure it once as a service default via `nyxid service update ... --default-header 'name=value'` rather than sending it from every caller.
-- For Lark Base error `91403`, do not ask for `bitable:app:readonly` again when it is already enabled. The application API scope and the individual Base document ACL are separate: in the Base's `...`/More menu choose **Add Applications**, add the exact Bot application used by the selected NyxID UserService, and grant view access for read-only calls.
+- For Lark Base error `91403`, do not ask for `bitable:app:readonly` again when it is already enabled. The application API scope and the individual Base document ACL are separate: in the Base's `...`/More menu choose **Add Applications**, add the exact Bot application used by the selected NyxID UserService, and grant view access for read-only calls. Rebinding an Aevatar workflow cannot change that document ACL.
 
 ## Service pools
 

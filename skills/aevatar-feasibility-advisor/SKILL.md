@@ -1,7 +1,7 @@
 ---
 name: aevatar-feasibility-advisor
 description: Use before building when a user asks whether Aevatar can achieve a goal, what prerequisites it has, or why it is unavailable. Triggers include bots and third-party APIs, inbound channels, external HTTP triggers, schedules, service exposure, Agent Profiles and tool ceilings, and bounded managed or private-host codex_exec work. It distinguishes outbound connectors from inbound channels and separates not connected, host-gated, not deployed, and genuinely unsupported outcomes. It chooses managed_sandbox versus private_ssh without promising repository, model, credential, runtime, or deployment capabilities the caller does not control, then routes feasible work to the owning Aevatar skill.
-version: "1.6"
+version: "1.7"
 metadata:
   category: plain
   tag:
@@ -36,7 +36,7 @@ common wrong answer here.
 
 | Reason | What it looks like | Who fixes it |
 |---|---|---|
-| **Not connected** | The connector is in `/api/v1/catalog` but missing from `/api/v1/services` | **The user**, self-serve |
+| **Not connected** | The connector is in `/api/v1/catalog` but missing from authoritative `/api/v1/keys` | **The user**, self-serve |
 | **Host-gated** | The capability is deployed and works, but a host policy governs one aspect (NyxID external exposure; Agent Profile *rollout admission*) | **The host** — not you, not the user |
 | **Not deployed** | The capability's whole API surface is absent from the running build | **The host**, by deploying a build that exposes it |
 
@@ -160,7 +160,9 @@ not a fixed list.
 | Have that service **registered as a NyxID-brokered connector** (callable by others/externally) | ⚠️ Host-gated | The **host** must enable external exposure (`GAgentService:ExternalExposure: Enabled=true` + `RegisterAllPublishedServices` or an opt-in policy). You **cannot** turn this on as a client — verify `externalExposure` on the service and, if empty, tell the user to ask the host. |
 | Give an agent a **fixed persona + pinned Ornn skills + an enforced tool ceiling** (an Agent Profile) | ⚠️ Modelled, owner-managed, deployment-dependent | Probe `GET /api/openapi.json` for the complete `agent-profiles` route family. Absent means unavailable in this deployment; present means the owner can manage it through `aevatar-agent-profile-management`. |
 | Have a published Profile actually **drive a running agent** | ⚠️ Host-gated, and narrow | Publication is not runtime binding. Only *newly created* NyxID direct conversations admitted by a **host-owned rollout** consume a Profile; existing conversations never hot-upgrade, and workflows/teams/services/schedules/channels/AgentRuns are not consumers at all. |
-| **Schedule** a recurring run (cron) | ⚠️ Yes, with a binding | The scope owner needs a durable **NyxID broker binding** — i.e. an interactive **console** NyxID login, not just a CLI token. Without it, schedule creation 400s ("Authenticated NyxID owner binding is required"). |
+| Schedule an already-bound **Studio Team member** workflow | ✅ Yes | Use `aevatar_schedule_member_workflow` or the member automation route. It provisions a dedicated restricted Agent Key; do not route it through generic `/api/schedules`. |
+| Create an independent recurring **Ornn skill agent** | ✅ Yes | Use `scheduled_agent_creator`, then `agent_builder`. It has its own dedicated Agent Key and is not a Team member automation alias. |
+| Schedule a generic typed **service invocation** | ⚠️ Yes, with its declared credential source | Use generic `/api/schedules`. A `scopeOwnerNyxId` or `senderNyxId` source needs the corresponding durable NyxID broker binding; this requirement does not apply to the two dedicated-Agent-Key resources above. |
 | A service backed by an **arbitrary custom agent / actor type** | ⚠️ Constrained | Member implementations are `workflow`, `script`, or **registered** `gagent` kinds (`GET /api/scopes/gagent-types`). You can't point a service at an arbitrary actor; wrap custom logic in a workflow or script, or use a registered gagent kind. |
 | A genuinely **new service *shape*** (e.g. streaming/WebSocket/gRPC endpoint, a runtime kind beyond workflow/script/gagent) | ❌ Not currently | Service endpoints are unary **HTTP** over the fixed implementation kinds. A new shape needs Aevatar platform work. |
 | **Exactly-once** external side effects (e.g. "charge exactly once") | ❌ Not guaranteed | The workflow saga is **at-least-once** with idempotency keys. Require an idempotent connector endpoint, or do the exactly-once elsewhere. |
@@ -203,8 +205,10 @@ State these plainly when they bite:
   adapter/custom NyxID service or ask the host to configure Aevatar's webhook ingress.
 - **NyxID service registration** → ask the **host** to enable external exposure for the service;
   you can only drive publish + verify the `externalExposure` block.
-- **Scheduling** → "Do an interactive NyxID login in the Aevatar console once (establishes the
-  scope-owner broker binding); then I can create the cron schedule."
+- **Scheduling** → choose the resource first. An already-bound Team member uses its owner-scoped
+  automation route; an independent Ornn skill agent uses `scheduled_agent_creator`; only a generic
+  `/api/schedules` request using a NyxID owner/sender binding needs the corresponding interactive
+  broker authorization.
 - **Missing connector / new shape / new channel** → this is NyxID/Aevatar **platform work**;
   it's a request to the platform team, not something you or the user can self-serve. Say so and
   offer the closest feasible alternative.
@@ -238,7 +242,7 @@ alternative when you say no.
 
 ## Honesty rules
 
-- **Check the live catalog/services** before claiming a connector exists or not. Examples in
+- **Check the live catalog and `/api/v1/keys` inventory** before claiming a connector exists or not. Examples in
   this doc are illustrative and can drift.
 - **Connector ≠ channel.** Outbound API access never implies an inbound bot.
 - **Never promise host-gated outcomes** (NyxID registration, Agent Profile rollout admission,

@@ -1,7 +1,7 @@
 ---
 name: aevatar-triage
 description: Use after an Aevatar workflow, codex_exec call, schedule, channel, connector, skill, Agent Profile, or control-plane request fails or behaves unexpectedly. It applies when the agent must attribute the first broken boundary across Aevatar, NyxID, Ornn, chrono-sandbox/gVisor, the managed runner, or private SSH; distinguish credential sources and deployment gaps; preserve sanitized evidence; determine defect versus usage; or draft an issue for explicit user confirmation. Never use it to guess a root cause from one error string or auto-file.
-version: "1.8"
+version: "1.9"
 metadata:
   category: plain
   tag:
@@ -192,6 +192,13 @@ selected the wrong exact UserService/route/credential; or the selected downstrea
 expired/unauthorized. Use distinct `memberId`, `workflowId`, and `publishedServiceId` shapes when
 reproducing identity propagation. Preserve the exact error privately; report only a bounded,
 sanitized classification. A failed mutation or run is never blindly retried.
+
+If the original definition targets a stale or inaccessible external resource, a separately
+authorized feature-equivalent control may substitute an accessible sanitized resource while
+preserving the relevant step types, admitted operation classes, transforms, file handling, and
+fan-out shape. A green control proves those platform features only. Keep the original workflow's
+status as blocked, failed, or unproven until that exact definition runs successfully. Do not add
+sends, approvals, external mutations, or schedules merely to make the control more comprehensive.
 
 **Recovery never replays uncertain provider/effectful I/O.** Activation recovery may resume typed
 continuations and redispatch an exact safe postcondition, but it must not repeat an interrupted LLM
@@ -409,7 +416,7 @@ dispatch**. Remove those fields from `nyxid_proxy.arguments`; do not move or for
 **Credential reality — be honest about it.** Under a relayed/in-session call, every tool runs on the
 **sender's own NyxID identity**, not the bot owner's. So filing an issue operates the **sender's**
 GitHub, and it requires: the sender has connected **`api-github`** in their own NyxID (check
-`GET {NYX}/api/v1/services`) with an OAuth scope that allows writing issues (`repo` / `public_repo`).
+authoritative `GET {NYX}/api/v1/keys`) with an OAuth scope that allows writing issues (`repo` / `public_repo`).
 **Writes have no owner fallback** — without a live sender token you get `credential_denied`. Deep
 multi-file reading over the API is clunky; prefer the local path for RCA and use this to fetch
 specific files, search code, and de-dup/file.
@@ -442,7 +449,7 @@ own local tools.
 
 End with a straight, evidence-bearing summary:
 
-> **Layer:** NyxID — *evidence: 403 from `nyxid_proxy`, slug present in `/services`, OAuth scope
+> **Layer:** NyxID — *evidence: 403 from `nyxid_proxy`, exact UserService present in `/api/v1/keys`, OAuth scope
 > missing.* **Root cause:** `backend/src/handlers/proxy.rs:NN` rejects when the granted scope lacks
 > `repo` (commit `abc123`, **matches deployed image**). **Verdict:** usage. **Action:** guidance —
 > reconnect `api-github` with the `repo` scope; no issue filed.

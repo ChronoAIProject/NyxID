@@ -74,7 +74,9 @@ Lark error `91403` means the Base document ACL denied the application; it is not
 API scope is missing. In the current Base UI, open the Base's `...`/More menu, choose **Add
 Applications**, select the exact Bot application used by the chosen NyxID UserService, and grant
 view access for a read-only probe. A Base is Lark's multi-dimensional table product, not a regular
-spreadsheet file. Re-list services after changing credentials or routes, and retry only a safe,
+spreadsheet file. Rebinding an Aevatar workflow cannot grant this document access. Either add the
+exact Bot application to the original Base or deliberately remap the workflow to an accessible Base
+with the same schema. Re-list services after changing credentials or routes, and retry only a safe,
 idempotent read until access is proven.
 
 ## OAuth consent service grants and resource URIs
