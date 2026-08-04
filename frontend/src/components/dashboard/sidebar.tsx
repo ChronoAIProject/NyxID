@@ -73,6 +73,7 @@ export const ADMIN_NAV = [
   { to: "/admin/invite-codes", icon: Ticket, label: "Invite Codes" },
   { to: "/admin/feature-flags", icon: Flag, label: "Feature Flags" },
   { to: "/admin/audit-log", icon: ClipboardList, label: "Audit Log" },
+  { to: "/admin/integrity", icon: ShieldCheck, label: "Integrity" },
   { to: "/admin/service-accounts", icon: Bot, label: "Service Accounts" },
   { to: "/admin/oauth-clients", icon: KeyRound, label: "OAuth Clients" },
   { to: "/admin/roles", icon: ShieldCheck, label: "Roles" },

@@ -695,6 +695,7 @@ mod tests {
             cli_pairing_hmac_key: None,
             audit_chain_hmac_key: None,
             billing_ledger_hmac_key: None,
+            chain_verify_interval_secs: 0,
             sa_token_ttl_secs: 3600,
             cookie_domain: None,
             telegram_bot_token: None,

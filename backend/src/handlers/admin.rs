@@ -20,8 +20,9 @@ use crate::models::user::{COLLECTION_NAME as USERS, PlatformRole, User};
 use crate::mw::auth::AuthUser;
 use crate::services::billing::ledger as billing_ledger;
 use crate::services::{
-    admin_audit_service, admin_user_service, audit_chain_service, audit_service, consent_service,
-    oauth_client_service, platform_settings_service, role_service,
+    admin_audit_service, admin_user_service, audit_chain_service, audit_service,
+    chain_verify_service, consent_service, oauth_client_service, platform_settings_service,
+    role_service,
 };
 use crate::telemetry::{TelemetryContext, TelemetryEvent, emit_event};
 
@@ -1298,6 +1299,96 @@ pub async fn verify_billing_ledger(
         anchor_valid: anchor.anchor_valid,
         break_info,
         next_from_seq: report.next_from_seq,
+    }))
+}
+
+#[derive(Debug, Serialize)]
+pub struct ChainVerifyStatusItem {
+    pub chain: String,
+    pub outcome: crate::models::chain_verify_status::ChainVerifyOutcome,
+    pub cursor_seq: i64,
+    pub head_seq: Option<i64>,
+    pub checked_entries: i64,
+    pub last_full_pass_at: Option<chrono::DateTime<chrono::Utc>>,
+    pub break_seq: Option<i64>,
+    pub break_kind: Option<String>,
+    pub break_detail: Option<String>,
+    pub anchor_seq: Option<i64>,
+    pub anchor_valid: Option<bool>,
+    pub pre_chain_count: Option<i64>,
+    pub last_run_at: chrono::DateTime<chrono::Utc>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct ChainVerificationResponse {
+    pub chains: Vec<ChainVerifyStatusItem>,
+}
+
+fn chain_status_item(
+    status: crate::models::chain_verify_status::ChainVerifyStatus,
+) -> ChainVerifyStatusItem {
+    ChainVerifyStatusItem {
+        chain: status.id,
+        outcome: status.outcome,
+        cursor_seq: status.cursor_seq,
+        head_seq: status.head_seq,
+        checked_entries: status.checked_entries,
+        last_full_pass_at: status.last_full_pass_at,
+        break_seq: status.break_seq,
+        break_kind: status.break_kind,
+        break_detail: status.break_detail,
+        anchor_seq: status.anchor_seq,
+        anchor_valid: status.anchor_valid,
+        pre_chain_count: status.pre_chain_count,
+        last_run_at: status.last_run_at,
+    }
+}
+
+/// GET /api/v1/admin/chain-verification
+///
+/// Latest automatic verification state for both hash chains, as written
+/// by the background sweep. Chains the sweep has never covered yet are
+/// simply absent from the list.
+pub async fn get_chain_verification(
+    State(state): State<AppState>,
+    auth_user: AuthUser,
+) -> AppResult<Json<ChainVerificationResponse>> {
+    require_admin_or_operator(&state, &auth_user, "admin.chain_verification.read").await?;
+
+    let chains = [
+        crate::models::chain_verify_status::CHAIN_AUDIT_LOG,
+        crate::models::chain_verify_status::CHAIN_BILLING_LEDGER,
+    ];
+    let mut items = Vec::new();
+    for chain in chains {
+        if let Some(status) = chain_verify_service::load_status(&state.db, chain).await? {
+            items.push(chain_status_item(status));
+        }
+    }
+    Ok(Json(ChainVerificationResponse { chains: items }))
+}
+
+/// POST /api/v1/admin/chain-verification/run
+///
+/// Run one verification chunk for both chains immediately and return the
+/// refreshed statuses. Same rolling semantics as the background sweep.
+pub async fn run_chain_verification(
+    State(state): State<AppState>,
+    auth_user: AuthUser,
+) -> AppResult<Json<ChainVerificationResponse>> {
+    require_admin(&state, &auth_user).await?;
+
+    let report = chain_verify_service::run_once(
+        &state.db,
+        state.audit_chain_hmac_key.as_slice(),
+        state.billing_ledger_hmac_key.as_slice(),
+    )
+    .await?;
+    Ok(Json(ChainVerificationResponse {
+        chains: vec![
+            chain_status_item(report.audit),
+            chain_status_item(report.billing_ledger),
+        ],
     }))
 }
 

@@ -370,6 +370,12 @@ async fn main() {
     );
     services::billing::ledger::init_billing_ledger_hmac_key(billing_ledger_hmac_key.clone());
     let billing_ledger_hmac_key = Arc::new(billing_ledger_hmac_key);
+    services::chain_verify_service::spawn_chain_verify_worker(
+        db.clone(),
+        audit_chain_hmac_key.clone(),
+        billing_ledger_hmac_key.clone(),
+        config.chain_verify_interval_secs,
+    );
     // JWT private key bytes carry no secret beyond what's already in JwtKeys;
     // drop them immediately after derivation.
     drop(jwt_private_key_pem);
