@@ -1,0 +1,28 @@
+# Docker Compose for NyxID Node Agents
+#
+# Option A: Auto-register and start (no host setup needed):
+#   NYXID_NODE_TOKEN=nyx_nreg_... NYXID_NODE_URL=wss://... \
+#     docker compose -f docker-compose.node.yml up -d
+#
+# Option B: Mount existing config (registered on host):
+#   docker compose -f docker-compose.node.yml up -d
+#
+# Each profile gets its own container with isolated credentials.
+
+services:
+  node:
+    build:
+      context: .
+      dockerfile: cli/Dockerfile.node
+    image: nyxid-node:latest
+    container_name: nyxid-node
+    restart: unless-stopped
+    user: "${UID:-1000}:${GID:-1000}"
+    volumes:
+      - ${NYXID_NODE_CONFIG:-~/.nyxid-node}:/app/config:rw
+    environment:
+      - NYXID_NODE_TOKEN=${NYXID_NODE_TOKEN:-}
+      - NYXID_NODE_URL=${NYXID_NODE_URL:-}
+    # No ports needed -- agent initiates outbound WebSocket connections.
+    # For local dev, use host networking so the agent can reach localhost:3001:
+    # network_mode: host

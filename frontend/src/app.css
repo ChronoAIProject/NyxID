@@ -1,0 +1,324 @@
+@import "tailwindcss";
+@import "tw-animate-css";
+
+@theme {
+  /* ── NyxID Brand Primary ── */
+  --color-nyx-50: #EDE5FE;
+  --color-nyx-100: #D9C7FD;
+  --color-nyx-200: #B894FB;
+  --color-nyx-300: #9761F8;
+  --color-nyx-400: #7845F5;
+  --color-nyx-500: #5A2AF1;
+  --color-nyx-600: #4A1FD4;
+  --color-nyx-700: #3A16B0;
+  --color-nyx-800: #2B0F8C;
+  --color-nyx-900: #1E0A68;
+  --color-nyx-950: #120545;
+
+  /* ── NyxID Brand Secondary ── */
+  --color-nyx-secondary-50: #F3EAFE;
+  --color-nyx-secondary-100: #E4D2FD;
+  --color-nyx-secondary-200: #CDA9FC;
+  --color-nyx-secondary-300: #B98DFB;
+  --color-nyx-secondary-400: #A672FB;
+  --color-nyx-secondary-500: #9555F5;
+  --color-nyx-secondary-600: #7D3EDB;
+  --color-nyx-secondary-700: #642CB7;
+  --color-nyx-secondary-800: #4C1E93;
+  --color-nyx-secondary-900: #36136F;
+  --color-nyx-secondary-950: #220B4B;
+
+  /* ── Semantic Surfaces (dark mode – default) ── */
+  --color-background: #0D0D0D;
+  --color-foreground: #FAFAFA;
+  --color-card: #171717;
+  --color-card-foreground: #FAFAFA;
+  --color-popover: #171717;
+  --color-popover-foreground: #FAFAFA;
+  --color-sidebar: #0D0D0D;
+  --color-surface: #171717;
+
+  /* ── Primary / Accent ── */
+  --color-primary: #5A2AF1;
+  --color-primary-foreground: #FFFFFF;
+  --color-secondary: #A672FB10;
+  --color-secondary-foreground: #A3A3A3;
+  --color-accent: #A672FB15;
+  --color-accent-foreground: #FAFAFA;
+
+  /* ── Muted ── */
+  --color-muted: #262626;
+  --color-muted-foreground: #A3A3A3;
+
+  /* ── Destructive ── */
+  --color-destructive: #EF4444;
+  --color-destructive-foreground: #FFFFFF;
+
+  /* ── Borders & Input ── */
+  --color-border: #262626;
+  --color-input: #262626;
+  --color-ring: #5A2AF1;
+
+  /* ── Status (Brand Spec) ── */
+  --color-success: #10B981;
+  --color-warning: #F59E0B;
+  --color-error: #EF4444;
+  --color-info: #3B82F6;
+  --color-text-tertiary: #525252;
+
+  /* ── Accent (NyxID Orange) ── */
+  --color-nyx-orange: #F0924C;
+
+  /* ── Radius ── */
+  --radius-sm: 0.375rem;
+  --radius-md: 0.625rem;
+  --radius-lg: 0.75rem;
+  --radius-xl: 0.875rem;
+
+  /* ── Typography (Mona Sans — closest to brand "Mono Sans") ── */
+  --font-sans: "Mona Sans", system-ui, -apple-system, sans-serif;
+  --font-display: "Mona Sans", system-ui, -apple-system, sans-serif;
+  --font-mono: "JetBrains Mono", ui-monospace, monospace;
+
+  /* ── Chart Colors ── */
+  --chart-1: #A672FB;
+  --chart-2: #5A2AF1;
+  --chart-3: #7C4DFF;
+  --chart-4: #B388FF;
+  --chart-5: #6200EA;
+
+  /* ── Landing Page Surfaces ── */
+  --color-landing-bg: #0D0D0D;
+  --color-landing-surface: #171717;
+  --color-landing-surface-raised: #262626;
+  --color-landing-border-subtle: rgba(90, 42, 241, 0.15);
+}
+
+@layer base {
+  * {
+    border-color: var(--color-border);
+    -webkit-tap-highlight-color: transparent;
+  }
+}
+
+html,
+body {
+  height: 100%;
+}
+
+body {
+  font-family: var(--font-sans);
+  line-height: 1.4;
+}
+
+/* Label-to-input spacing */
+label + input,
+label + textarea,
+label + select,
+label + [role="combobox"],
+label + button,
+label + div {
+  margin-top: 0.75rem;
+}
+
+/* ── Safe area CSS vars for layout components ── */
+:root {
+  --sat: env(safe-area-inset-top);
+  --sab: env(safe-area-inset-bottom);
+  --sal: env(safe-area-inset-left);
+  --sar: env(safe-area-inset-right);
+}
+
+/* ── Scrollbar ── */
+::-webkit-scrollbar {
+  width: 8px;
+  height: 8px;
+}
+
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+::-webkit-scrollbar-thumb {
+  background: var(--color-muted);
+  border-radius: 4px;
+}
+
+::-webkit-scrollbar-thumb:hover {
+  background: var(--color-muted-foreground);
+}
+
+/* Hide scrollbar on elements with .scrollbar-none */
+.scrollbar-none::-webkit-scrollbar {
+  display: none;
+}
+.scrollbar-none {
+  -ms-overflow-style: none;
+  scrollbar-width: none;
+}
+
+/* ── Touch-friendly: ensure hover-only elements are visible on touch ── */
+@media (hover: none) {
+  .group-hover\:opacity-100 {
+    opacity: 1 !important;
+  }
+}
+
+/* ── Hide native number spinner ── */
+input[type="number"]::-webkit-inner-spin-button,
+input[type="number"]::-webkit-outer-spin-button {
+  -webkit-appearance: none;
+  margin: 0;
+}
+
+input[type="number"] {
+  -moz-appearance: textfield;
+}
+
+/* ── iOS zoom prevention: force 16px on inputs to prevent auto-zoom ── */
+@supports (-webkit-touch-callout: none) {
+  input,
+  select,
+  textarea {
+    font-size: 16px !important;
+  }
+}
+
+/* ── Brand gradient utilities ── */
+.nyx-gradient-vivid {
+  background: linear-gradient(to right, #A672FB 0%, #5E00F5 100%);
+}
+
+.nyx-gradient-sunset {
+  background: linear-gradient(to right, #A672FB 0%, #F0924C 100%);
+}
+
+.nyx-gradient-text {
+  background: linear-gradient(to right, #A672FB 0%, #5E00F5 100%);
+  -webkit-background-clip: text;
+  -webkit-text-fill-color: transparent;
+  background-clip: text;
+}
+
+.nyx-gradient-text-sunset {
+  background: linear-gradient(to right, #A672FB 0%, #F0924C 100%);
+  -webkit-background-clip: text;
+  -webkit-text-fill-color: transparent;
+  background-clip: text;
+}
+
+/* ── Glassmorphism surfaces ── */
+.glass-surface {
+  background: rgba(23, 23, 23, 0.6);
+  backdrop-filter: blur(20px);
+  -webkit-backdrop-filter: blur(20px);
+  border: 1px solid rgba(38, 38, 38, 0.8);
+}
+
+.glass-elevated {
+  background: rgba(23, 23, 23, 0.9);
+  backdrop-filter: blur(40px);
+  -webkit-backdrop-filter: blur(40px);
+  border: 1px solid rgba(166, 114, 251, 0.1);
+  box-shadow:
+    0 8px 32px rgba(0, 0, 0, 0.3),
+    inset 0 1px 0 rgba(255, 255, 255, 0.03);
+}
+
+/* ── Rim-light borders ── */
+.rim-light-top {
+  border-top: 1px solid rgba(166, 114, 251, 0.25);
+}
+
+.rim-light-left {
+  border-left: 2px solid rgba(90, 42, 241, 0.3);
+}
+
+/* ── Ambient glow backgrounds ── */
+.ambient-glow {
+  background: radial-gradient(
+    ellipse at 50% 80%,
+    rgba(90, 42, 241, 0.05) 0%,
+    transparent 60%
+  );
+}
+
+.ambient-glow-success {
+  background: radial-gradient(
+    ellipse at 50% 80%,
+    rgba(16, 185, 129, 0.04) 0%,
+    transparent 60%
+  );
+}
+
+.ambient-glow-warning {
+  background: radial-gradient(
+    ellipse at 50% 80%,
+    rgba(245, 158, 11, 0.04) 0%,
+    transparent 60%
+  );
+}
+
+.ambient-glow-critical {
+  background: radial-gradient(
+    ellipse at 50% 80%,
+    rgba(239, 68, 68, 0.04) 0%,
+    transparent 60%
+  );
+}
+
+/* ── Animations ── */
+@keyframes pulse-subtle {
+  0%,
+  100% {
+    opacity: 1;
+  }
+  50% {
+    opacity: 0.5;
+  }
+}
+
+.animate-pulse-subtle {
+  animation: pulse-subtle 3s ease-in-out infinite;
+}
+
+@keyframes score-draw {
+  from {
+    stroke-dashoffset: var(--circumference);
+  }
+  to {
+    stroke-dashoffset: var(--target-offset);
+  }
+}
+
+.animate-score-draw {
+  animation: score-draw 1.5s cubic-bezier(0.4, 0, 0.2, 1) forwards;
+}
+
+@keyframes fade-up {
+  from {
+    opacity: 0;
+    transform: translateY(8px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+.animate-fade-up {
+  animation: fade-up 0.4s ease-out forwards;
+  opacity: 0;
+}
+
+/* ── Card hover glow ── */
+.hover-glow {
+  transition:
+    border-color 200ms ease-out,
+    box-shadow 200ms ease-out;
+}
+
+.hover-glow:hover {
+  border-color: rgba(255, 255, 255, 0.15);
+  box-shadow: 0 0 24px rgba(255, 255, 255, 0.03);
+}

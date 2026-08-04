@@ -1,0 +1,41 @@
+#!/usr/bin/env bash
+# Pre-commit hook: runs fmt, clippy, and frontend lint before each commit.
+# Install: cp scripts/pre-commit .git/hooks/pre-commit && chmod +x .git/hooks/pre-commit
+# Or: ln -sf ../../scripts/pre-commit .git/hooks/pre-commit
+
+set -euo pipefail
+
+RED='\033[0;31m'
+GREEN='\033[0;32m'
+NC='\033[0m'
+
+fail() { echo -e "${RED}FAIL${NC} $1"; exit 1; }
+pass() { echo -e "${GREEN}PASS${NC} $1"; }
+
+# Only check files that are staged
+RUST_STAGED=$(git diff --cached --name-only --diff-filter=ACMR -- '*.rs' | head -1)
+FRONTEND_STAGED=$(git diff --cached --name-only --diff-filter=ACMR -- 'frontend/src/**' | head -1)
+
+# Rust checks (only if .rs files are staged)
+if [ -n "$RUST_STAGED" ]; then
+    echo "Running Rust checks..."
+
+    cargo fmt --all -- --check 2>/dev/null \
+        || fail "cargo fmt -- run 'cargo fmt --all' to fix"
+    pass "cargo fmt"
+
+    cargo clippy --workspace --all-targets -- -D warnings 2>/dev/null \
+        || fail "cargo clippy -- fix warnings before committing"
+    pass "cargo clippy"
+fi
+
+# Frontend checks (only if frontend files are staged)
+if [ -n "$FRONTEND_STAGED" ]; then
+    echo "Running frontend checks..."
+
+    (cd frontend && npm run lint 2>/dev/null) \
+        || fail "eslint -- fix lint errors before committing"
+    pass "eslint"
+fi
+
+echo -e "${GREEN}All checks passed.${NC}"

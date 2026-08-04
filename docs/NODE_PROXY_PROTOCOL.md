@@ -1,0 +1,704 @@
+# Node Proxy WebSocket Protocol
+
+This document describes the WebSocket protocol used for communication between NyxID and credential node agents. Control messages are JSON with a `type` field discriminator. Streaming proxy data chunks may also be sent as raw WebSocket binary frames when negotiated during authentication.
+
+---
+
+## Table of Contents
+
+- [Connection Lifecycle](#connection-lifecycle)
+- [Authentication Flow](#authentication-flow)
+- [Heartbeat Protocol](#heartbeat-protocol)
+- [Request/Response Routing](#requestresponse-routing)
+- [Streaming Responses](#streaming-responses)
+- [SSH Tunnel Transport](#ssh-tunnel-transport)
+- [HMAC Request Signing](#hmac-request-signing)
+- [Message Reference: Node to NyxID](#message-reference-node-to-nyxid)
+- [Message Reference: NyxID to Node](#message-reference-nyxid-to-node)
+- [Error Handling](#error-handling)
+- [Connection Recovery](#connection-recovery)
+- [Error Codes](#error-codes)
+
+---
+
+## Connection Lifecycle
+
+```
+Node Agent                              NyxID Server
+    |                                        |
+    |  GET /api/v1/nodes/ws (WS upgrade)     |
+    | ──────────────────────────────────────> |
+    |                                        |  Check max connections
+    |  101 Switching Protocols               |
+    | <────────────────────────────────────── |
+    |                                        |
+    |  { type: "register" } or               |
+    |  { type: "auth" }                      |
+    | ──────────────────────────────────────> |  10s auth timeout starts
+    |                                        |  Validate token
+    |  { type: "register_ok" } or            |
+    |  { type: "auth_ok" }                   |
+    | <────────────────────────────────────── |
+    |                                        |  Register in NodeWsManager
+    |                                        |  Set status = "online"
+    |                                        |
+    |  <<< Authenticated session >>>         |
+    |  heartbeat_ping / heartbeat_pong       |
+    |  proxy_request / proxy_response        |
+    |  ssh_tunnel_open / ssh_tunnel_data     |
+    |                                        |
+    |  WebSocket close                       |
+    | ──────────────────────────────────────> |
+    |                                        |  Unregister from NodeWsManager
+    |                                        |  Set status = "offline"
+```
+
+### Connection Limits
+
+NyxID enforces a maximum concurrent WebSocket connections limit (default: 100, configurable via `NODE_MAX_WS_CONNECTIONS`). This includes both authenticated connections and those still in the authentication handshake. If the limit is reached, the WebSocket upgrade request receives HTTP 503 Service Unavailable.
+
+---
+
+## Authentication Flow
+
+The first message on a new WebSocket connection **must** be either `register` (first-time setup) or `auth` (reconnection). NyxID enforces a 10-second timeout for this initial message. Connections that fail to authenticate within the timeout are closed with close code `4001`.
+
+### First-Time Registration
+
+The node sends a `register` message with the one-time registration token:
+
+```json
+{
+  "type": "register",
+  "token": "nyx_nreg_<64_hex_chars>",
+  "metadata": {
+    "agent_version": "0.5.0",
+    "os": "linux",
+    "arch": "x86_64"
+  }
+}
+```
+
+NyxID validates the token (hash lookup, checks `used: false`, checks `expires_at`), atomically marks it as used, creates a `Node` record, and returns:
+
+```json
+{
+  "type": "register_ok",
+  "node_id": "<uuid>",
+  "auth_token": "nyx_nauth_<64_hex_chars>",
+  "signing_secret": "<64_hex_chars>"
+}
+```
+
+The `auth_token` is the node's long-lived credential for reconnections. The `signing_secret` is the HMAC shared secret for request integrity verification (see [HMAC Request Signing](#hmac-request-signing)). Both must be stored securely.
+
+### Reconnection
+
+For subsequent connections, the node authenticates with its auth token:
+
+```json
+{
+  "type": "auth",
+  "node_id": "<uuid>",
+  "token": "nyx_nauth_<64_hex_chars>"
+}
+```
+
+NyxID validates the token hash and verifies it matches the provided `node_id`. On success:
+
+```json
+{
+  "type": "auth_ok",
+  "node_id": "<uuid>",
+  "capabilities": {
+    "proxy_binary_chunks": true
+  }
+}
+```
+
+If `capabilities.proxy_binary_chunks` is `true`, the node may send streaming proxy chunks as WebSocket binary frames instead of legacy JSON/base64 `proxy_response_chunk` messages. Nodes that do not see this capability must continue using the legacy JSON chunk format.
+
+### Authentication Failure
+
+On any authentication failure (invalid token, expired registration token, node_id mismatch), NyxID sends:
+
+```json
+{
+  "type": "auth_error",
+  "message": "Authentication failed"
+}
+```
+
+The connection is then closed. Error messages are generic to prevent information leakage.
+
+---
+
+## Heartbeat Protocol
+
+NyxID runs a background task that periodically sweeps all connected nodes (configurable interval, default: 30 seconds).
+
+### Ping
+
+NyxID sends to each connected node:
+
+```json
+{
+  "type": "heartbeat_ping",
+  "timestamp": "2026-03-12T10:30:00.000Z"
+}
+```
+
+### Pong
+
+The node responds with:
+
+```json
+{
+  "type": "heartbeat_pong",
+  "timestamp": "2026-03-12T10:30:00.100Z"
+}
+```
+
+On receiving a pong, NyxID updates `last_heartbeat_at` in the database for the node.
+
+### Timeout Detection
+
+During each sweep, NyxID checks each node's `last_heartbeat_at`. If the elapsed time exceeds the timeout threshold (default: 90 seconds), the node is considered stale:
+
+1. The WebSocket connection is unregistered from `NodeWsManager`
+2. The node status is set to `offline` in the database
+3. Any pending proxy requests to the node will receive a `NodeOffline` error
+
+### Ping Failure
+
+If sending a heartbeat ping fails (e.g., the channel is closed), the node is immediately unregistered and marked offline.
+
+---
+
+## Request/Response Routing
+
+When NyxID receives an HTTP proxy request for a service that has a node binding:
+
+1. `node_routing_service::resolve_node_route()` finds an active binding and verifies the bound node is active and online
+2. `NodeWsManager::is_connected()` confirms the node has a live WebSocket connection
+3. `NodeWsManager::send_proxy_request()` serializes the request as a `proxy_request` message, sends it over the WebSocket, and waits for the correlated response
+
+### Request Correlation
+
+Each proxy request includes a unique `request_id` (UUID v4). The node must include the same `request_id` in its response. NyxID uses oneshot channels internally for request/response correlation with a configurable timeout (default: 30 seconds).
+
+### Proxy Request
+
+NyxID sends to the node:
+
+```json
+{
+  "type": "proxy_request",
+  "request_id": "<uuid>",
+  "service_id": "<uuid>",
+  "service_slug": "my-api",
+  "method": "POST",
+  "path": "/v1/chat/completions",
+  "query": "stream=true",
+  "headers": {
+    "content-type": "application/json",
+    "accept": "application/json"
+  },
+  "body": "<base64_encoded_request_body>",
+  "timestamp": "2026-03-12T10:30:00.000Z",
+  "nonce": "<uuid>",
+  "signature": "<hex_encoded_hmac_sha256>"
+}
+```
+
+- `headers` is a JSON object of allowed request headers (same allowlist as the standard proxy)
+- `body` is base64-encoded. Omitted if the request has no body.
+- `timestamp`, `nonce`, and `signature` are present when HMAC signing is enabled (see [HMAC Request Signing](#hmac-request-signing)). Omitted when signing is disabled.
+- The request does **not** include credentials. The node is responsible for injecting them.
+
+### Proxy Response
+
+The node returns:
+
+```json
+{
+  "type": "proxy_response",
+  "request_id": "<uuid>",
+  "status": 200,
+  "headers": {
+    "content-type": "application/json",
+    "x-request-id": "abc123"
+  },
+  "body": "<base64_encoded_response_body>"
+}
+```
+
+- `headers` is a JSON object. NyxID filters these through the response header allowlist before returning to the client.
+- `body` is base64-encoded. If absent or null, an empty body is returned.
+
+### Proxy Error
+
+If the node encounters an error executing the request:
+
+```json
+{
+  "type": "proxy_error",
+  "request_id": "<uuid>",
+  "error": "Connection refused",
+  "status": 502
+}
+```
+
+- `status` defaults to 502 if omitted
+- The `error` field is returned as a JSON error body to the client
+
+---
+
+## Streaming Responses
+
+For responses that NyxID chooses to stream, the node sends a streaming sequence instead of a single `proxy_response` message. This includes SSE and other large or range-based responses.
+
+### proxy_response_start
+
+Sent by the node when the downstream service begins a streaming response:
+
+```json
+{
+  "type": "proxy_response_start",
+  "request_id": "<uuid>",
+  "status": 200,
+  "headers": {
+    "content-type": "text/event-stream",
+    "cache-control": "no-cache"
+  }
+}
+```
+
+On the server side, NyxID upgrades the pending request from a oneshot channel to a streaming `mpsc` channel. The `content-length` header is stripped since the total size is unknown.
+
+### Streaming Data Chunks
+
+Preferred format when `auth_ok.capabilities.proxy_binary_chunks == true`:
+
+- WebSocket binary frame
+- First 36 bytes: ASCII `request_id` UUID
+- Remaining bytes: raw chunk payload
+
+Legacy fallback when the capability is absent or `false`:
+
+```json
+{
+  "type": "proxy_response_chunk",
+  "request_id": "<uuid>",
+  "data": "<base64_encoded_chunk>"
+}
+```
+
+Each chunk carries at most 64KB of raw payload. Larger downstream chunks are split into multiple frames/messages.
+
+NyxID converts these chunks into an `axum::body::Body::from_stream()` for real-time forwarding to the client.
+
+### proxy_response_end
+
+Sent when the stream completes:
+
+```json
+{
+  "type": "proxy_response_end",
+  "request_id": "<uuid>"
+}
+```
+
+### Stream Error
+
+If the downstream stream encounters an error mid-stream, the node sends a `proxy_error`:
+
+```json
+{
+  "type": "proxy_error",
+  "request_id": "<uuid>",
+  "error": "Stream error: connection reset",
+  "status": 502
+}
+```
+
+### Server-Side State Machine
+
+```
+PendingRequest::OneShot  ──[proxy_response_start]──>  PendingRequest::Streaming
+                                                          |
+                                         [binary chunk frame or proxy_response_chunk]*
+                                                          |
+                                                  [proxy_response_end]──> removed
+```
+
+If the node sends a standard `proxy_response` instead of the streaming sequence, NyxID handles it as a complete response regardless of the pending request type.
+
+---
+
+## SSH Tunnel Transport
+
+SSH tunneling reuses the authenticated node WebSocket but carries raw SSH TCP bytes instead of HTTP metadata. NyxID uses this path when a service has SSH tunneling enabled and the user has a healthy node binding for that service.
+
+### ssh_tunnel_open
+
+Sent by NyxID when it wants the node to open a TCP connection to the downstream SSH target:
+
+```json
+{
+  "type": "ssh_tunnel_open",
+  "session_id": "<uuid>",
+  "service_id": "<service_uuid>",
+  "host": "ssh.internal.example",
+  "port": 22,
+  "timestamp": "2026-03-12T10:30:00.000Z",
+  "nonce": "<uuid>",
+  "signature": "<hex_encoded_hmac_sha256>"
+}
+```
+
+- `timestamp`, `nonce`, and `signature` are present when HMAC signing is enabled. Omitted when signing is disabled.
+
+### ssh_tunnel_opened
+
+Sent by the node after the TCP connection succeeds:
+
+```json
+{
+  "type": "ssh_tunnel_opened",
+  "session_id": "<uuid>"
+}
+```
+
+### ssh_tunnel_data
+
+Sent by either side to move SSH payload bytes:
+
+```json
+{
+  "type": "ssh_tunnel_data",
+  "session_id": "<uuid>",
+  "data": "<base64_encoded_chunk>"
+}
+```
+
+`data` contains arbitrary SSH bytes encoded as base64 because node control-plane messages remain JSON.
+
+### ssh_tunnel_close
+
+Sent by NyxID when the client disconnects or the server wants to terminate the session:
+
+```json
+{
+  "type": "ssh_tunnel_close",
+  "session_id": "<uuid>"
+}
+```
+
+### ssh_tunnel_closed
+
+Sent by the node when the TCP connection closes or fails to open:
+
+```json
+{
+  "type": "ssh_tunnel_closed",
+  "session_id": "<uuid>",
+  "error": "connect_failed:Connection refused"
+}
+```
+
+`error` is optional and is present when the node could not establish or keep the TCP stream open.
+
+### ssh_exec
+
+Sent by NyxID when an SSH service uses `ssh_auth_mode: "cert"` and the node should execute a command using the short-lived private key and OpenSSH user certificate carried in the frame:
+
+```json
+{
+  "type": "ssh_exec",
+  "request_id": "<uuid>",
+  "host": "ssh.internal.example",
+  "port": 22,
+  "principal": "ubuntu",
+  "auth_mode": "cert",
+  "private_key_pem": "<pem_private_key>",
+  "certificate_openssh": "<openssh_user_certificate>",
+  "command": "uptime",
+  "timeout_secs": 30,
+  "timestamp": "2026-03-12T10:30:00.000Z",
+  "nonce": "<uuid>",
+  "hmac": "<hex_encoded_hmac_sha256>"
+}
+```
+
+For signed frames, the HMAC covers `timestamp`, `nonce`, and the cert exec request envelope: `request_id\nhost\nport\nprincipal\nauth_mode\nsha256(command)\nsha256(certificate_openssh)`. `auth_mode` is the literal string `cert`.
+
+Breaking change: this v2 HMAC envelope widens the previous cert exec signature, which covered only `request_id`, `host`, `port`, and `principal` after `timestamp` and `nonce`. Nodes built for the previous envelope reject frames from backends that send this v2 envelope and must be upgraded.
+
+### ssh_node_exec_open
+
+Sent by NyxID when an SSH service uses `ssh_auth_mode: "node_key"` and the node should authenticate with a node-local private key keyed by `(service_slug, principal)`:
+
+```json
+{
+  "type": "ssh_node_exec_open",
+  "request_id": "<uuid>",
+  "service_slug": "routeros",
+  "principal": "nyxid-ro",
+  "auth_mode": "node_key",
+  "command": "/system/resource/print",
+  "timeout_secs": 30,
+  "target_host": "10.0.0.1",
+  "target_port": 22,
+  "host_key_sha256": "SHA256:...",
+  "timestamp": "2026-03-12T10:30:00.000Z",
+  "nonce": "<uuid>",
+  "hmac": "<hex_encoded_hmac_sha256>"
+}
+```
+
+`principal` is required. The node MUST look up the exact `(service_slug, principal)` pair in its local SSH credential store. `target_host`, `target_port`, and `host_key_sha256` are hints from the backend; the node-local credential entry remains authoritative for the actual connection target and host-key pin.
+
+For signed frames, the HMAC covers `timestamp`, `nonce`, and the node-key request envelope: `request_id\nservice_slug\nprincipal\nauth_mode\nsha256(command)`. `auth_mode` is the literal string `node_key`.
+
+### ssh_node_exec_data / ssh_node_exec_close / ssh_node_exec_error
+
+Node-key command output is streamed back to NyxID:
+
+```json
+{ "type": "ssh_node_exec_data", "request_id": "<uuid>", "stream": "stdout", "data": "<base64>" }
+{ "type": "ssh_node_exec_close", "request_id": "<uuid>", "exit_code": 0, "duration_ms": 42, "timed_out": false }
+{ "type": "ssh_node_exec_error", "request_id": "<uuid>", "error": "SSH host key mismatch", "error_code": 1012, "duration_ms": 0 }
+```
+
+The node also emits a compatibility `ssh_exec_result` for older backend receivers.
+
+### web_terminal_open for node-key
+
+The browser terminal reuses the web terminal frame for cert and node-key sessions. For node-key sessions, NyxID sends `auth_mode: "node_key"`, omits private key material, and includes `service_slug` so the node can load the local key:
+
+```json
+{
+  "type": "web_terminal_open",
+  "session_id": "<uuid>",
+  "service_id": "<service_uuid>",
+  "service_slug": "routeros",
+  "auth_mode": "node_key",
+  "host": "10.0.0.1",
+  "port": 22,
+  "principal": "nyxid-ro",
+  "cols": 80,
+  "rows": 24,
+  "term": "xterm-256color",
+  "timestamp": "2026-03-12T10:30:00.000Z",
+  "nonce": "<uuid>",
+  "hmac": "<hex_encoded_hmac_sha256>"
+}
+```
+
+For signed frames, the HMAC covers `timestamp`, `nonce`, and the web terminal request envelope: `session_id\nhost\nport\nprincipal\nauth_mode\nservice_slug\nsha256(auth_material)`. For cert terminals, `auth_material` is `certificate_openssh`. For node-key terminals, the frame carries no private key, certificate, or host key pin, so `auth_material` is the empty string.
+
+Breaking change: this v2 HMAC envelope widens the previous web terminal signature, which covered only `session_id`, `host`, `port`, and `principal` after `timestamp` and `nonce`. Nodes built for the previous envelope reject frames from backends that send this v2 envelope and must be upgraded.
+
+Data, resize, and close frames remain `web_terminal_data`, `web_terminal_resize`, and `web_terminal_closed`.
+
+---
+
+## HMAC Request Signing
+
+When HMAC signing is enabled on the server (`NODE_HMAC_SIGNING_ENABLED=true`, default), `proxy_request` and `ssh_tunnel_open` messages include a cryptographic signature that the node must verify before executing the request.
+
+### Signing Protocol
+
+1. The server generates a timestamp (RFC 3339) and nonce (UUID v4)
+2. The server computes an HMAC-SHA256 signature over the canonicalized request
+3. The `timestamp`, `nonce`, and `signature` fields are included in the signed message
+4. The node verifies the signature using the shared secret from registration
+
+### Canonical Message Formats
+
+`proxy_request` uses a newline-delimited string of the following fields:
+
+```
+{timestamp}\n{nonce}\n{method}\n{path}\n{query}\n{body_base64}
+```
+
+`ssh_tunnel_open` uses:
+
+```
+{timestamp}\n{nonce}\n{session_id}\n{service_id}\n{host}\n{port}
+```
+
+| Field | Source | Empty Value |
+|-------|--------|-------------|
+| `timestamp` | RFC 3339 datetime | (never empty) |
+| `nonce` | UUID v4 | (never empty) |
+| `method` | HTTP method (e.g., `POST`) | `""` |
+| `path` | Request path (e.g., `/v1/chat/completions`) | `""` |
+| `query` | Query string without `?` | `""` |
+| `body_base64` | Base64-encoded request body | `""` |
+| `session_id` | SSH tunnel session UUID | `""` |
+| `service_id` | SSH service UUID | `""` |
+| `host` | Downstream SSH host | `""` |
+| `port` | Downstream SSH port | `""` |
+
+### Verification
+
+```
+HMAC-SHA256(shared_secret_bytes, canonical_message) == hex_decode(signature)
+```
+
+The node performs constant-time comparison to prevent timing attacks.
+
+### Replay Protection
+
+The node maintains a replay guard with the following rules:
+
+| Rule | Value |
+|------|-------|
+| Maximum timestamp skew | 300 seconds (5 minutes) |
+| Maximum nonce set size | 10,000 entries |
+| Eviction policy | Time-based first (remove expired), then oldest-first if over cap |
+
+Requests that fail replay checks are rejected with HTTP 403 and the error message "Request rejected: replay or expired timestamp".
+
+---
+
+## Message Reference: Node to NyxID
+
+| Type | When | Fields |
+|------|------|--------|
+| `register` | First message on first-time connection | `token` (required), `metadata` (optional: `agent_version`, `os`, `arch`) |
+| `auth` | First message on reconnection | `node_id` (required), `token` (required) |
+| `heartbeat_pong` | In response to `heartbeat_ping` | `timestamp` (optional) |
+| `proxy_response` | After executing a proxied request (non-streaming) | `request_id`, `status`, `headers`, `body` (base64) |
+| `proxy_response_start` | Beginning of a streaming response | `request_id`, `status`, `headers` |
+| Binary WS frame | Preferred chunk of streaming data | First 36 bytes = `request_id` UUID, remaining bytes = raw payload (max 64KB) |
+| `proxy_response_chunk` | Legacy JSON fallback for streaming data | `request_id`, `data` (base64, max 64KB decoded) |
+| `proxy_response_end` | End of streaming response | `request_id` |
+| `ssh_tunnel_opened` | SSH target TCP connection established | `session_id` |
+| `ssh_tunnel_data` | SSH payload bytes flowing back to NyxID | `session_id`, `data` (base64) |
+| `ssh_tunnel_closed` | SSH tunnel closed or failed | `session_id`, `error` (optional) |
+| `ssh_node_exec_data` | Node-key SSH command output chunk | `request_id`, `stream`, `data` (base64) |
+| `ssh_node_exec_close` | Node-key SSH command completed | `request_id`, `exit_code`, `duration_ms`, `timed_out` |
+| `ssh_node_exec_error` | Node-key SSH command failed before completion | `request_id`, `error`, `error_code`, `duration_ms` |
+| `proxy_error` | If a proxied request fails | `request_id`, `error`, `status` (optional, default 502) |
+| `status_update` | Voluntary health/capability update | `agent_version` (optional), `services_ready` (optional) |
+
+---
+
+## Message Reference: NyxID to Node
+
+| Type | When | Fields |
+|------|------|--------|
+| `register_ok` | After successful registration | `node_id`, `auth_token`, `signing_secret` |
+| `auth_ok` | After successful authentication | `node_id`, `capabilities.proxy_binary_chunks` (optional boolean) |
+| `auth_error` | On authentication failure (connection closes) | `message` |
+| `heartbeat_ping` | Periodic keepalive | `timestamp` |
+| `proxy_request` | HTTP request to route through the node | `request_id`, `service_id`, `service_slug`, `method`, `path`, `query`, `headers`, `body` (base64), `timestamp`, `nonce`, `signature` (when HMAC enabled) |
+| `ssh_tunnel_open` | Open a downstream SSH TCP connection on the node | `session_id`, `service_id`, `host`, `port`, `timestamp`, `nonce`, `signature` (when HMAC enabled) |
+| `ssh_tunnel_data` | SSH payload bytes flowing from NyxID to the node | `session_id`, `data` (base64) |
+| `ssh_tunnel_close` | Close an active SSH tunnel on the node | `session_id` |
+| `ssh_exec` | Execute a command with a short-lived SSH certificate | `request_id`, `host`, `port`, `principal`, `auth_mode`, `private_key_pem`, `certificate_openssh`, `command`, `timeout_secs`, `timestamp`, `nonce`, `hmac` (when HMAC enabled) |
+| `ssh_node_exec_open` | Execute a command with a node-local SSH private key | `request_id`, `service_slug`, `principal`, `auth_mode`, `command`, `timeout_secs`, `timestamp`, `nonce`, `hmac` (when HMAC enabled) |
+| `web_terminal_open` | Open a cert or node-key browser SSH terminal | `session_id`, `service_id`, `service_slug`, `auth_mode`, `host`, `port`, `principal`, `private_key_pem`/`certificate_openssh` (cert only), `cols`, `rows`, `term`, `timestamp`, `nonce`, `hmac` (when HMAC enabled) |
+| `web_terminal_data` | Terminal payload bytes flowing from NyxID to the node | `session_id`, `data` (base64) |
+| `web_terminal_resize` | Resize an active browser terminal | `session_id`, `cols`, `rows` |
+| `web_terminal_close` | Close an active browser terminal | `session_id` |
+| `error` | Server-side error | `message` |
+
+---
+
+## Error Handling
+
+### Authentication Errors
+
+| Scenario | NyxID Behavior |
+|----------|----------------|
+| No message within 10 seconds | Close with code 4001 |
+| Invalid JSON | Send `auth_error`, close connection |
+| First message is not `register` or `auth` | Send `auth_error`, close connection |
+| Invalid/expired registration token | Send `auth_error`, close connection |
+| Invalid auth token | Send `auth_error`, close connection |
+| `node_id` does not match token | Send `auth_error`, close connection |
+
+### Proxy Errors
+
+| Scenario | HTTP Status | Error Code |
+|----------|-------------|------------|
+| Node not found | 404 | 8000 (`node_not_found`) |
+| Node not connected | 503 | 8001 (`node_offline`) |
+| Proxy request timeout | 504 | 8002 (`node_proxy_timeout`) |
+| Node registration failed | 400 | 8003 (`node_registration_failed`) |
+
+### Runtime Errors
+
+- If the node sends an invalid JSON message during an authenticated session, the message is logged and skipped (connection stays open)
+- If a WebSocket read error occurs, the connection is closed and the node is marked offline
+- If sending a message to the node fails (channel closed), the node is treated as disconnected
+
+---
+
+## Connection Recovery
+
+### Node Reconnection
+
+When a node disconnects (network failure, restart, etc.):
+
+1. NyxID detects the disconnect via WebSocket close or read error
+2. The node is unregistered from `NodeWsManager` and marked `offline` in the database
+3. Any in-flight proxy requests receive a `NodeOffline` error
+4. Proxy requests for the node's bound services fall back to the standard proxy (NyxID-stored credentials)
+
+The node can reconnect at any time by establishing a new WebSocket connection and sending an `auth` message with its stored `node_id` and `auth_token`. NyxID will:
+
+1. Validate the auth token
+2. Register the new connection in `NodeWsManager`
+3. Update the node status to `online` in the database
+4. Resume routing proxy requests through the node
+
+### Graceful Fallback
+
+The node proxy system is designed for graceful degradation:
+
+- If a node is offline, proxy requests automatically use NyxID-stored credentials (if available)
+- If no stored credentials exist and no node is available, the proxy returns an appropriate error
+- This happens transparently to the client -- no client-side changes are needed
+
+### Token Rotation Recovery
+
+If a node's auth token is rotated via the management API:
+
+1. The old token is immediately invalidated
+2. The node's WebSocket connection is closed server-side
+3. The node must obtain the new token and reconnect
+
+---
+
+## Implementation Notes
+
+### Dependencies
+
+- `axum` with `ws` feature for WebSocket support
+- `dashmap` for concurrent connection tracking
+- `tokio::sync::oneshot` for request/response correlation (non-streaming)
+- `tokio::sync::mpsc` (bounded) for WS write channels; (unbounded) for streaming chunk delivery
+- `base64` for body encoding/decoding
+- `hmac` + `sha2` for HMAC-SHA256 request signing
+- `async_stream` for converting streaming chunks into `Body::from_stream()`
+
+### Threading Model
+
+Each WebSocket connection has:
+- A **reader task** that processes incoming messages (runs on the main connection future)
+- A **writer task** (spawned via `tokio::spawn`) that forwards messages from the bounded internal channel (capacity: 256) to the WebSocket sink
+
+The `NodeWsManager` is shared across all connections via `Arc` and uses `DashMap` for lock-free concurrent access.
+
+### Pending Request Types
+
+Each pending proxy request is tracked as one of:
+- `PendingRequest::OneShot` -- standard request/response (initial state)
+- `PendingRequest::Streaming` -- streaming response (upgraded on `proxy_response_start`)
+
+When a `proxy_response_start` arrives, the oneshot sender is dropped and replaced with an `mpsc::unbounded_channel` for streaming chunks. The proxy handler in `proxy.rs` receives `ProxyResponseType::Complete` or `ProxyResponseType::Streaming` based on which path the response takes.

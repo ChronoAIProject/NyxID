@@ -1,0 +1,880 @@
+use chrono::{Duration, Utc};
+use mongodb::bson::{self, doc};
+use uuid::Uuid;
+
+use crate::config::AppConfig;
+use crate::crypto::jwt::{self, JwtKeys};
+use crate::crypto::token::{generate_random_token, hash_token};
+use crate::errors::{AppError, AppResult};
+use crate::models::mcp_session::McpSessionStore;
+use crate::models::oauth_client::{COLLECTION_NAME as OAUTH_CLIENTS, OauthClient};
+use crate::models::refresh_token::{COLLECTION_NAME as REFRESH_TOKENS, RefreshToken};
+use crate::models::session::{COLLECTION_NAME as SESSIONS, Session};
+
+/// Grace period (in seconds) after refresh token rotation during which
+/// reuse of the old token is treated as a legitimate retry rather than theft.
+///
+/// **Security trade-off**: A longer window gives clients more time to recover
+/// from network failures during rotation (e.g., the response with the new
+/// token was lost), but also gives an attacker who stole the old token a
+/// window to use it before it is flagged as theft.
+///
+/// 120 seconds was chosen because:
+/// - Network retries typically happen within seconds, not minutes.
+/// - It covers slow mobile connections and client-side retry back-off.
+/// - It is short enough that a stolen token has minimal usable window
+///   (the attacker must also have the JWT, which has its own short TTL).
+const REUSE_GRACE_PERIOD_SECS: i64 = 120;
+
+/// Maximum depth when following a replacement chain.
+/// Prevents infinite loops if the database has a cycle, and bounds the
+/// number of DB round-trips for concurrent-rotation scenarios.
+const MAX_REPLACEMENT_CHAIN_DEPTH: usize = 5;
+
+/// Session lifetime for first-party sessions.
+pub const SESSION_TTL_SECS: i64 = 30 * 24 * 3600;
+
+/// Default bearer-token scopes for first-party NyxID clients.
+///
+/// Includes `proxy` so first-party token clients retain access to NyxID's
+/// proxy, LLM gateway, and MCP surfaces after route-level scope enforcement.
+pub const FIRST_PARTY_ACCESS_SCOPES: &str = "openid profile email proxy";
+
+/// Tokens issued after successful authentication.
+pub struct IssuedTokens {
+    pub access_token: String,
+    pub refresh_token: String,
+    pub session_id: String,
+    pub access_expires_in: i64,
+}
+
+/// Session issued for browser-based authentication flows.
+pub struct IssuedSession {
+    pub session_token: String,
+    pub session_id: String,
+}
+
+enum RefreshTokenDisposition {
+    Rotate(RefreshToken),
+    Reuse(RefreshToken),
+}
+
+async fn follow_active_replacement_chain(
+    db: &mongodb::Database,
+    first_replacement_id: &str,
+    user_id: &str,
+    request_jti: &str,
+) -> AppResult<Option<RefreshToken>> {
+    let mut current_id = first_replacement_id.to_string();
+
+    for depth in 0..MAX_REPLACEMENT_CHAIN_DEPTH {
+        let candidate = db
+            .collection::<RefreshToken>(REFRESH_TOKENS)
+            .find_one(doc! { "_id": &current_id })
+            .await?;
+
+        match candidate {
+            Some(r) if !r.revoked && r.expires_at > Utc::now() => {
+                tracing::info!(
+                    user_id = %user_id,
+                    jti = %request_jti,
+                    replacement_id = %current_id,
+                    chain_depth = depth,
+                    "Refresh token retry resolved to active replacement token"
+                );
+                return Ok(Some(r));
+            }
+            Some(RefreshToken {
+                replaced_by: Some(next_id),
+                ..
+            }) => {
+                tracing::debug!(
+                    user_id = %user_id,
+                    replacement_id = %current_id,
+                    chain_depth = depth,
+                    "Following replacement chain (concurrent rotation)"
+                );
+                current_id = next_id;
+            }
+            _ => return Ok(None),
+        }
+    }
+
+    Ok(None)
+}
+
+async fn touch_session_last_active(
+    db: &mongodb::Database,
+    session_id: Option<&str>,
+    now: chrono::DateTime<Utc>,
+) -> AppResult<()> {
+    if let Some(sid) = session_id {
+        db.collection::<Session>(SESSIONS)
+            .update_one(
+                doc! { "_id": sid },
+                doc! { "$set": {
+                    "last_active_at": bson::DateTime::from_chrono(now),
+                }},
+            )
+            .await?;
+    }
+
+    Ok(())
+}
+
+fn build_reused_refresh_response(
+    jwt_keys: &JwtKeys,
+    config: &AppConfig,
+    user_id: &Uuid,
+    active_token: &RefreshToken,
+    access_token: String,
+) -> AppResult<IssuedTokens> {
+    let refresh_token = jwt::reissue_refresh_token(
+        jwt_keys,
+        config,
+        user_id,
+        &active_token.jti,
+        active_token.created_at.timestamp(),
+        active_token.expires_at.timestamp(),
+    )?;
+
+    Ok(IssuedTokens {
+        access_token,
+        refresh_token,
+        session_id: active_token
+            .session_id
+            .clone()
+            .unwrap_or_else(|| Uuid::nil().to_string()),
+        access_expires_in: config.jwt_access_ttl_secs,
+    })
+}
+
+/// Create a new session and issue JWT tokens.
+pub async fn create_session(
+    db: &mongodb::Database,
+    user_id: &str,
+    ip_address: Option<&str>,
+    user_agent: Option<&str>,
+) -> AppResult<IssuedSession> {
+    Uuid::parse_str(user_id).map_err(|e| AppError::Internal(format!("Invalid user_id: {e}")))?;
+
+    let session_token = generate_random_token();
+    let session_token_hash = hash_token(&session_token);
+    let session_id = Uuid::new_v4().to_string();
+    let now = Utc::now();
+    let session_expires = now + Duration::seconds(SESSION_TTL_SECS);
+
+    // Create session record
+    let new_session = Session {
+        id: session_id.clone(),
+        user_id: user_id.to_string(),
+        token_hash: session_token_hash,
+        ip_address: ip_address.map(String::from),
+        user_agent: user_agent.map(String::from),
+        expires_at: session_expires,
+        revoked: false,
+        created_at: now,
+        last_active_at: now,
+    };
+
+    db.collection::<Session>(SESSIONS)
+        .insert_one(&new_session)
+        .await?;
+
+    Ok(IssuedSession {
+        session_token,
+        session_id,
+    })
+}
+
+/// Create a new session and issue JWT tokens.
+pub async fn create_session_and_issue_tokens(
+    db: &mongodb::Database,
+    config: &AppConfig,
+    jwt_keys: &JwtKeys,
+    user_id: &str,
+    ip_address: Option<&str>,
+    user_agent: Option<&str>,
+) -> AppResult<IssuedTokens> {
+    let user_uuid = Uuid::parse_str(user_id)
+        .map_err(|e| AppError::Internal(format!("Invalid user_id: {e}")))?;
+
+    let session = create_session(db, user_id, ip_address, user_agent).await?;
+    let now = Utc::now();
+
+    // Resolve RBAC data and inject into the access token based on scope
+    let scope = FIRST_PARTY_ACCESS_SCOPES;
+    let rbac_data =
+        crate::services::rbac_helpers::build_rbac_claim_data(db, user_id, scope).await?;
+    let access_token = jwt::generate_access_token(
+        jwt_keys,
+        config,
+        &user_uuid,
+        scope,
+        Some(&rbac_data),
+        None,
+        None,
+        None,
+    )?;
+
+    // Generate refresh token
+    let (refresh_token_jwt, refresh_jti) =
+        jwt::generate_refresh_token(jwt_keys, config, &user_uuid)?;
+
+    let refresh_id = Uuid::new_v4().to_string();
+    let refresh_expires = now + Duration::seconds(config.jwt_refresh_ttl_secs);
+
+    // Persist refresh token metadata
+    let new_refresh = RefreshToken {
+        id: refresh_id,
+        jti: refresh_jti,
+        client_id: Uuid::nil().to_string(), // first-party client
+        user_id: user_id.to_string(),
+        session_id: Some(session.session_id.clone()),
+        expires_at: refresh_expires,
+        revoked: false,
+        replaced_by: None,
+        revoked_at: None,
+        created_at: now,
+    };
+
+    db.collection::<RefreshToken>(REFRESH_TOKENS)
+        .insert_one(&new_refresh)
+        .await?;
+
+    Ok(IssuedTokens {
+        access_token,
+        refresh_token: refresh_token_jwt,
+        session_id: session.session_id,
+        access_expires_in: config.jwt_access_ttl_secs,
+    })
+}
+
+/// Create a short-lived pending MFA session.
+///
+/// This binds a temporary token hash to the user_id so the MFA verification
+/// step can validate that the user already passed password authentication.
+/// The session expires in 5 minutes and is marked with a specific user_agent
+/// to distinguish it from real sessions.
+pub async fn create_mfa_pending_session(
+    db: &mongodb::Database,
+    user_id: &str,
+    temp_token_hash: &str,
+) -> AppResult<String> {
+    let session_id = Uuid::new_v4().to_string();
+    let now = Utc::now();
+    let expires = now + Duration::minutes(5);
+
+    let pending_session = Session {
+        id: session_id.clone(),
+        user_id: user_id.to_string(),
+        token_hash: temp_token_hash.to_string(),
+        ip_address: None,
+        user_agent: Some("mfa_pending".to_string()),
+        expires_at: expires,
+        revoked: false,
+        created_at: now,
+        last_active_at: now,
+    };
+
+    db.collection::<Session>(SESSIONS)
+        .insert_one(&pending_session)
+        .await?;
+
+    Ok(session_id)
+}
+
+/// Refresh an expired access token using a valid refresh token.
+///
+/// Implements refresh token rotation: the old token is revoked and
+/// a new refresh token is issued alongside the new access token.
+/// Does NOT generate a new session token (reuses the existing session).
+///
+/// When `mcp_sessions` is provided, session revocations also cascade
+/// to MCP sessions for the affected user.
+pub async fn refresh_tokens(
+    db: &mongodb::Database,
+    config: &AppConfig,
+    jwt_keys: &JwtKeys,
+    refresh_token_str: &str,
+    mcp_sessions: Option<&McpSessionStore>,
+) -> AppResult<IssuedTokens> {
+    // Verify the refresh JWT
+    let claims = jwt::verify_token(jwt_keys, config, refresh_token_str)?;
+
+    if claims.token_type != "refresh" {
+        return Err(AppError::Unauthorized("Expected refresh token".to_string()));
+    }
+
+    // Look up the refresh token record by JTI
+    let stored = db
+        .collection::<RefreshToken>(REFRESH_TOKENS)
+        .find_one(doc! { "jti": &claims.jti })
+        .await?
+        .ok_or_else(|| AppError::Unauthorized("Refresh token not found".to_string()))?;
+
+    // Re-validate the issuing OAuth client. First-party login flows
+    // (`auth_service::login_with_password`, `refresh_session_with_token`)
+    // store `client_id = Uuid::nil()` as a sentinel and have no
+    // `OauthClient` row -- skip the lookup for those. Real OAuth clients
+    // must still exist AND be active; without this check, a refresh
+    // token minted by a developer app would remain usable forever after
+    // the app (or its owning org) is deleted, because the standard
+    // delete path is a soft-delete that leaves the row in the
+    // collection. The auth-code path already filters by `is_active`
+    // (see `oauth_service::exchange_authorization_code`), so this is
+    // the matching gate on the refresh side.
+    if stored.client_id != Uuid::nil().to_string() {
+        let client_active = db
+            .collection::<OauthClient>(OAUTH_CLIENTS)
+            .find_one(doc! { "_id": &stored.client_id, "is_active": true })
+            .await?
+            .is_some();
+        if !client_active {
+            tracing::warn!(
+                jti = %claims.jti,
+                client_id = %stored.client_id,
+                "Refresh attempt against deactivated OAuth client; revoking"
+            );
+            // Revoke the token in place so subsequent retries follow
+            // the existing reuse-detection path instead of leaking the
+            // window between deletion and the next refresh attempt.
+            db.collection::<RefreshToken>(REFRESH_TOKENS)
+                .update_one(
+                    doc! { "_id": &stored.id, "revoked": false },
+                    doc! { "$set": {
+                        "revoked": true,
+                        "revoked_at": bson::DateTime::from_chrono(Utc::now()),
+                    }},
+                )
+                .await?;
+            return Err(AppError::Unauthorized(
+                "Issuing OAuth client is no longer active".to_string(),
+            ));
+        }
+    }
+
+    // If the token is revoked, check if this is a post-rotation retry
+    // (client retried with old token after restart) vs actual token reuse.
+    //
+    // The primary indicator of rotation is `replaced_by` being set -- batch
+    // revocations (revoke_session, explicit revoke) never set `replaced_by`.
+    // The time-based grace period is a secondary constraint: if `revoked_at`
+    // is present, we only allow retries within REUSE_GRACE_PERIOD_SECS.
+    // If `revoked_at` is `None` (tokens rotated before this field was added),
+    // we still check the replacement chain for a valid unused token.
+    //
+    // When multiple concurrent requests use the same old token, the first
+    // succeeds and rotates the replacement. Subsequent requests must converge
+    // on the already-active replacement token rather than rotate the chain
+    // again, otherwise stale responses can overwrite the browser cookie with
+    // an older token and eventually trigger false theft detection.
+    let disposition = if stored.revoked {
+        let within_grace = stored
+            .revoked_at
+            .map(|ra| (Utc::now() - ra).num_seconds() <= REUSE_GRACE_PERIOD_SECS)
+            .unwrap_or(true); // None means pre-migration token; allow chain check
+
+        match (&stored.replaced_by, within_grace) {
+            (Some(first_replacement_id), true) => {
+                match follow_active_replacement_chain(
+                    db,
+                    first_replacement_id,
+                    &stored.user_id,
+                    &claims.jti,
+                )
+                .await?
+                {
+                    Some(token) => RefreshTokenDisposition::Reuse(token),
+                    None => {
+                        // Chain exhausted without finding a valid token.
+                        // This is actual token reuse -- revoke the session.
+                        tracing::warn!(
+                            user_id = %stored.user_id,
+                            jti = %claims.jti,
+                            "Refresh token reuse detected, revoking session"
+                        );
+                        if let Some(ref session_id) = stored.session_id {
+                            revoke_session(db, session_id, mcp_sessions).await?;
+                        }
+                        return Err(AppError::Unauthorized(
+                            "Refresh token has been revoked".to_string(),
+                        ));
+                    }
+                }
+            }
+            (None, _) => {
+                // No replacement -- this was a batch/explicit revocation, not rotation.
+                tracing::warn!(
+                    user_id = %stored.user_id,
+                    jti = %claims.jti,
+                    "Refresh token reuse detected (explicitly revoked), revoking session"
+                );
+                if let Some(ref session_id) = stored.session_id {
+                    revoke_session(db, session_id, mcp_sessions).await?;
+                }
+                return Err(AppError::Unauthorized(
+                    "Refresh token has been revoked".to_string(),
+                ));
+            }
+            (Some(_), false) => {
+                // Outside grace period -- too old to be a legitimate retry.
+                tracing::warn!(
+                    user_id = %stored.user_id,
+                    jti = %claims.jti,
+                    "Refresh token reuse detected (outside grace period), revoking session"
+                );
+                if let Some(ref session_id) = stored.session_id {
+                    revoke_session(db, session_id, mcp_sessions).await?;
+                }
+                return Err(AppError::Unauthorized(
+                    "Refresh token has been revoked".to_string(),
+                ));
+            }
+        }
+    } else {
+        RefreshTokenDisposition::Rotate(stored)
+    };
+
+    let (active_token, reuse_existing_refresh_token) = match disposition {
+        RefreshTokenDisposition::Rotate(token) => (token, false),
+        RefreshTokenDisposition::Reuse(token) => (token, true),
+    };
+    let user_id_str = active_token.user_id.clone();
+    let user_id = Uuid::parse_str(&user_id_str)
+        .map_err(|e| AppError::Internal(format!("Invalid user_id in refresh token: {e}")))?;
+    let session_id = active_token.session_id.clone();
+    let now = Utc::now();
+
+    // Resolve RBAC data and inject into the refreshed access token
+    let scope = FIRST_PARTY_ACCESS_SCOPES;
+    let rbac_data =
+        crate::services::rbac_helpers::build_rbac_claim_data(db, &user_id_str, scope).await?;
+    let new_access = jwt::generate_access_token(
+        jwt_keys,
+        config,
+        &user_id,
+        scope,
+        Some(&rbac_data),
+        None,
+        None,
+        None,
+    )?;
+
+    if reuse_existing_refresh_token {
+        touch_session_last_active(db, session_id.as_deref(), now).await?;
+        return build_reused_refresh_response(
+            jwt_keys,
+            config,
+            &user_id,
+            &active_token,
+            new_access,
+        );
+    }
+
+    // Issue new refresh token (rotation)
+    let (new_refresh_jwt, new_jti) = jwt::generate_refresh_token(jwt_keys, config, &user_id)?;
+    let new_refresh_id = Uuid::new_v4().to_string();
+    let refresh_expires = now + Duration::seconds(config.jwt_refresh_ttl_secs);
+
+    // Atomically revoke the active refresh token using find_one_and_update
+    // with a "revoked: false" guard. This prevents two concurrent rotation
+    // requests from both succeeding (only the first CAS wins).
+    let revoked = db
+        .collection::<RefreshToken>(REFRESH_TOKENS)
+        .find_one_and_update(
+            doc! { "_id": &active_token.id, "revoked": false },
+            doc! { "$set": {
+                "revoked": true,
+                "revoked_at": bson::DateTime::from_chrono(now),
+                "replaced_by": &new_refresh_id,
+            }},
+        )
+        .await?;
+
+    if revoked.is_none() {
+        // Another concurrent request rotated this token after we loaded it.
+        // Recover the new active replacement token and return it so clients
+        // converge on the same cookie value instead of logging out.
+        let current = db
+            .collection::<RefreshToken>(REFRESH_TOKENS)
+            .find_one(doc! { "_id": &active_token.id })
+            .await?;
+
+        if let Some(current_token) = current
+            && let Some(first_replacement_id) = current_token.replaced_by.as_deref()
+            && let Some(recovered) = follow_active_replacement_chain(
+                db,
+                first_replacement_id,
+                &active_token.user_id,
+                &active_token.jti,
+            )
+            .await?
+        {
+            tracing::info!(
+                user_id = %active_token.user_id,
+                jti = %active_token.jti,
+                replacement_id = %recovered.id,
+                "Concurrent refresh rotation resolved to active replacement token"
+            );
+            touch_session_last_active(db, session_id.as_deref(), now).await?;
+            return build_reused_refresh_response(
+                jwt_keys, config, &user_id, &recovered, new_access,
+            );
+        }
+
+        return Err(AppError::Conflict(
+            "Refresh token was concurrently rotated, please retry".to_string(),
+        ));
+    }
+
+    // Persist new refresh token
+    let new_refresh = RefreshToken {
+        id: new_refresh_id,
+        jti: new_jti,
+        client_id: Uuid::nil().to_string(),
+        user_id: user_id_str,
+        session_id: session_id.clone(),
+        expires_at: refresh_expires,
+        revoked: false,
+        replaced_by: None,
+        revoked_at: None,
+        created_at: now,
+    };
+
+    db.collection::<RefreshToken>(REFRESH_TOKENS)
+        .insert_one(&new_refresh)
+        .await?;
+
+    touch_session_last_active(db, session_id.as_deref(), now).await?;
+
+    // Reuse the existing session token rather than generating a new orphan token.
+    // The session cookie does not need to change on token refresh.
+    // Return an empty session_token since the cookie should not be updated.
+    Ok(IssuedTokens {
+        access_token: new_access,
+        refresh_token: new_refresh_jwt,
+        session_id: session_id.unwrap_or_else(|| Uuid::nil().to_string()),
+        access_expires_in: config.jwt_access_ttl_secs,
+    })
+}
+
+/// Revoke a session and all its associated refresh tokens.
+///
+/// Uses batch update where possible to avoid N+1 queries.
+/// When `mcp_sessions` is provided, also cascades to MCP sessions for the user.
+pub async fn revoke_session(
+    db: &mongodb::Database,
+    session_id: &str,
+    mcp_sessions: Option<&McpSessionStore>,
+) -> AppResult<()> {
+    // Look up the session to get the user_id for MCP cascade
+    let session_doc = db
+        .collection::<Session>(SESSIONS)
+        .find_one(doc! { "_id": session_id })
+        .await?;
+
+    // Revoke the session
+    db.collection::<Session>(SESSIONS)
+        .update_one(
+            doc! { "_id": session_id },
+            doc! { "$set": { "revoked": true } },
+        )
+        .await?;
+
+    // Revoke all refresh tokens for this session in a batch
+    db.collection::<RefreshToken>(REFRESH_TOKENS)
+        .update_many(
+            doc! { "session_id": session_id, "revoked": false },
+            doc! { "$set": { "revoked": true } },
+        )
+        .await?;
+
+    // Cascade: remove MCP sessions for the affected user
+    if let (Some(mcp), Some(session)) = (mcp_sessions, &session_doc) {
+        mcp.remove_by_user_id(&session.user_id);
+    }
+
+    tracing::info!(session_id = %session_id, "Session revoked");
+
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::test_utils::*;
+
+    async fn seed_user(db: &mongodb::Database, user_id: &str) {
+        let user = test_user(user_id, crate::models::user::UserType::Person);
+        db.collection::<crate::models::user::User>(crate::models::user::COLLECTION_NAME)
+            .insert_one(&user)
+            .await
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_create_session_inserts_record() {
+        let Some(db) = connect_test_database("token_svc").await else {
+            return;
+        };
+        let user_id = Uuid::new_v4().to_string();
+        seed_user(&db, &user_id).await;
+
+        let result = create_session(&db, &user_id, Some("127.0.0.1"), Some("test-agent")).await;
+        assert!(result.is_ok());
+
+        let issued = result.unwrap();
+        assert!(!issued.session_token.is_empty());
+        assert!(!issued.session_id.is_empty());
+
+        let stored = db
+            .collection::<Session>(SESSIONS)
+            .find_one(doc! { "_id": &issued.session_id })
+            .await
+            .unwrap();
+        assert!(stored.is_some());
+        let stored = stored.unwrap();
+        assert_eq!(stored.user_id, user_id);
+        assert!(!stored.revoked);
+        assert_eq!(stored.ip_address.as_deref(), Some("127.0.0.1"));
+        assert_eq!(stored.user_agent.as_deref(), Some("test-agent"));
+    }
+
+    #[tokio::test]
+    async fn test_create_session_rejects_invalid_uuid() {
+        let Some(db) = connect_test_database("token_svc").await else {
+            return;
+        };
+        let result = create_session(&db, "not-a-uuid", None, None).await;
+        assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn test_create_session_with_none_optional_fields() {
+        let Some(db) = connect_test_database("token_svc").await else {
+            return;
+        };
+        let user_id = Uuid::new_v4().to_string();
+        seed_user(&db, &user_id).await;
+
+        let issued = create_session(&db, &user_id, None, None).await.unwrap();
+        let stored = db
+            .collection::<Session>(SESSIONS)
+            .find_one(doc! { "_id": &issued.session_id })
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(stored.ip_address.is_none());
+        assert!(stored.user_agent.is_none());
+    }
+
+    #[tokio::test]
+    async fn test_create_session_and_issue_tokens_returns_valid_tokens() {
+        let Some(db) = connect_test_database("token_svc").await else {
+            return;
+        };
+        let config = test_app_config();
+        let jwt_keys = cached_test_jwt_keys();
+        let user_id = Uuid::new_v4().to_string();
+        seed_user(&db, &user_id).await;
+
+        let result = create_session_and_issue_tokens(
+            &db,
+            &config,
+            &jwt_keys,
+            &user_id,
+            Some("10.0.0.1"),
+            Some("browser/1.0"),
+        )
+        .await;
+        assert!(result.is_ok());
+
+        let issued = result.unwrap();
+        assert!(!issued.access_token.is_empty());
+        assert!(!issued.refresh_token.is_empty());
+        assert!(!issued.session_id.is_empty());
+        assert_eq!(issued.access_expires_in, config.jwt_access_ttl_secs);
+
+        let access_claims =
+            crate::crypto::jwt::verify_token(&jwt_keys, &config, &issued.access_token).unwrap();
+        assert_eq!(access_claims.sub, user_id);
+        assert_eq!(access_claims.token_type, "access");
+
+        let refresh_claims =
+            crate::crypto::jwt::verify_token(&jwt_keys, &config, &issued.refresh_token).unwrap();
+        assert_eq!(refresh_claims.sub, user_id);
+        assert_eq!(refresh_claims.token_type, "refresh");
+    }
+
+    #[tokio::test]
+    async fn test_create_session_and_issue_tokens_persists_refresh_token() {
+        let Some(db) = connect_test_database("token_svc").await else {
+            return;
+        };
+        let config = test_app_config();
+        let jwt_keys = cached_test_jwt_keys();
+        let user_id = Uuid::new_v4().to_string();
+        seed_user(&db, &user_id).await;
+
+        let issued = create_session_and_issue_tokens(&db, &config, &jwt_keys, &user_id, None, None)
+            .await
+            .unwrap();
+
+        let refresh_claims =
+            crate::crypto::jwt::verify_token(&jwt_keys, &config, &issued.refresh_token).unwrap();
+        let stored = db
+            .collection::<RefreshToken>(REFRESH_TOKENS)
+            .find_one(doc! { "jti": &refresh_claims.jti })
+            .await
+            .unwrap();
+        assert!(stored.is_some());
+        let stored = stored.unwrap();
+        assert_eq!(stored.user_id, user_id);
+        assert!(!stored.revoked);
+        assert_eq!(
+            stored.session_id.as_deref(),
+            Some(issued.session_id.as_str())
+        );
+    }
+
+    #[tokio::test]
+    async fn test_refresh_tokens_rotates_refresh_token() {
+        let Some(db) = connect_test_database("token_svc").await else {
+            return;
+        };
+        let config = test_app_config();
+        let jwt_keys = cached_test_jwt_keys();
+        let user_id = Uuid::new_v4().to_string();
+        seed_user(&db, &user_id).await;
+
+        let issued = create_session_and_issue_tokens(&db, &config, &jwt_keys, &user_id, None, None)
+            .await
+            .unwrap();
+
+        let refreshed = refresh_tokens(&db, &config, &jwt_keys, &issued.refresh_token, None)
+            .await
+            .unwrap();
+
+        assert!(!refreshed.access_token.is_empty());
+        assert!(!refreshed.refresh_token.is_empty());
+        assert_ne!(refreshed.refresh_token, issued.refresh_token);
+
+        let old_claims =
+            crate::crypto::jwt::verify_token(&jwt_keys, &config, &issued.refresh_token).unwrap();
+        let old_stored = db
+            .collection::<RefreshToken>(REFRESH_TOKENS)
+            .find_one(doc! { "jti": &old_claims.jti })
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(old_stored.revoked);
+        assert!(old_stored.replaced_by.is_some());
+    }
+
+    #[tokio::test]
+    async fn test_refresh_tokens_rejects_non_refresh_token() {
+        let Some(db) = connect_test_database("token_svc").await else {
+            return;
+        };
+        let config = test_app_config();
+        let jwt_keys = cached_test_jwt_keys();
+        let user_id = Uuid::new_v4();
+
+        let access_token = crate::crypto::jwt::generate_access_token(
+            &jwt_keys, &config, &user_id, "openid", None, None, None, None,
+        )
+        .unwrap();
+
+        let result = refresh_tokens(&db, &config, &jwt_keys, &access_token, None).await;
+        assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn test_refresh_tokens_rejects_revoked_token_no_replacement() {
+        let Some(db) = connect_test_database("token_svc").await else {
+            return;
+        };
+        let config = test_app_config();
+        let jwt_keys = cached_test_jwt_keys();
+        let user_id = Uuid::new_v4().to_string();
+        seed_user(&db, &user_id).await;
+
+        let issued = create_session_and_issue_tokens(&db, &config, &jwt_keys, &user_id, None, None)
+            .await
+            .unwrap();
+
+        let claims =
+            crate::crypto::jwt::verify_token(&jwt_keys, &config, &issued.refresh_token).unwrap();
+        db.collection::<RefreshToken>(REFRESH_TOKENS)
+            .update_one(
+                doc! { "jti": &claims.jti },
+                doc! { "$set": { "revoked": true } },
+            )
+            .await
+            .unwrap();
+
+        let result = refresh_tokens(&db, &config, &jwt_keys, &issued.refresh_token, None).await;
+        assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn test_revoke_session_marks_session_and_tokens() {
+        let Some(db) = connect_test_database("token_svc").await else {
+            return;
+        };
+        let config = test_app_config();
+        let jwt_keys = cached_test_jwt_keys();
+        let user_id = Uuid::new_v4().to_string();
+        seed_user(&db, &user_id).await;
+
+        let issued = create_session_and_issue_tokens(&db, &config, &jwt_keys, &user_id, None, None)
+            .await
+            .unwrap();
+
+        revoke_session(&db, &issued.session_id, None).await.unwrap();
+
+        let session = db
+            .collection::<Session>(SESSIONS)
+            .find_one(doc! { "_id": &issued.session_id })
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(session.revoked);
+
+        let refresh_claims =
+            crate::crypto::jwt::verify_token(&jwt_keys, &config, &issued.refresh_token).unwrap();
+        let refresh = db
+            .collection::<RefreshToken>(REFRESH_TOKENS)
+            .find_one(doc! { "jti": &refresh_claims.jti })
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(refresh.revoked);
+    }
+
+    #[tokio::test]
+    async fn test_create_mfa_pending_session() {
+        let Some(db) = connect_test_database("token_svc").await else {
+            return;
+        };
+        let user_id = Uuid::new_v4().to_string();
+        seed_user(&db, &user_id).await;
+
+        let temp_hash = "abc123hash";
+        let session_id = create_mfa_pending_session(&db, &user_id, temp_hash)
+            .await
+            .unwrap();
+
+        let session = db
+            .collection::<Session>(SESSIONS)
+            .find_one(doc! { "_id": &session_id })
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(session.user_id, user_id);
+        assert_eq!(session.token_hash, temp_hash);
+        assert_eq!(session.user_agent.as_deref(), Some("mfa_pending"));
+        assert!(!session.revoked);
+    }
+}

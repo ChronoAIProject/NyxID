@@ -1,0 +1,756 @@
+name: CI
+
+on:
+  pull_request:
+    branches: [main, dev]
+  push:
+    # `main` is intentionally not listed here -- pushes to main are gated
+    # through publish-images.yml, which calls this workflow via workflow_call.
+    # Listing main twice would cause CI to run on every merge commit twice.
+    branches: [dev]
+  # Allow other workflows (publish-images, release) to reuse this one as a
+  # gate via `uses: ./.github/workflows/ci.yml`. Callers should pass
+  # `force-all: true` to skip path filtering and run the full suite as a
+  # release/publish gate.
+  workflow_call:
+    inputs:
+      force-all:
+        description: >-
+          When true, run every job regardless of which paths changed.
+          Used by publish-images.yml so a release-gate run is always a
+          full validation.
+        type: boolean
+        default: false
+        required: false
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+  RUSTFLAGS: -Dwarnings
+
+jobs:
+  # ---------------------------------------------------------------------------
+  # Detect which areas of the monorepo changed so downstream jobs can skip
+  # work that isn't relevant to this PR. Always runs first; outputs feed the
+  # `if:` guards on every other job.
+  #
+  # Filter conventions:
+  #   - `backend`    = backend crate OR shared workspace files (root
+  #                    Cargo.toml/Cargo.lock/nextest config) OR
+  #                    `cloud-auth` (depended on by backend, NyxID#716)
+  #   - `cli`        = cli crate OR shared workspace files OR `cloud-auth`
+  #                    (also depended on by the CLI's node agent)
+  #     => a Cargo.lock or cloud-auth change fires BOTH `backend` and
+  #        `cli`, since they are members of the same `[workspace]` and
+  #        share the lock file + the cloud-auth dependency.
+  #   - `rust`       = backend OR cli OR shared workspace files (workspace-wide
+  #                    fmt + clippy)
+  #   - `wizard`  = anything that could change the committed wizard bundle
+  #                 hash (frontend sources, .node-version, cli wizard glue)
+  #   - `ci`      = this workflow itself; forces a full run when changed
+  # ---------------------------------------------------------------------------
+  changes:
+    name: Detect Changes
+    runs-on: ubuntu-latest
+    outputs:
+      backend: ${{ steps.filter.outputs.backend }}
+      cli: ${{ steps.filter.outputs.cli }}
+      rust: ${{ steps.filter.outputs.rust }}
+      frontend: ${{ steps.filter.outputs.frontend }}
+      sdk: ${{ steps.filter.outputs.sdk }}
+      wizard: ${{ steps.filter.outputs.wizard }}
+      ci: ${{ steps.filter.outputs.ci }}
+    steps:
+      - uses: actions/checkout@v6
+      - uses: dorny/paths-filter@v4
+        id: filter
+        with:
+          # Shared workspace files (Cargo.toml / Cargo.lock / nextest config)
+          # are duplicated into both `backend` and `cli` filters by design:
+          # any change to the shared lock file must retest both crates,
+          # since they are members of the same `[workspace]`.
+          # YAML anchors aren't used here -- aliased sequences expand to
+          # nested lists in js-yaml, which paths-filter does not flatten.
+          filters: |
+            backend:
+              - 'backend/**'
+              - 'cloud-auth/**'
+              - 'nyxid-crypto/**'
+              - 'scripts/check-rci-backend-boundary.sh'
+              - 'Cargo.toml'
+              - 'Cargo.lock'
+              - 'rust-toolchain.toml'
+              - '.cargo/**'
+              - '.config/nextest.toml'
+            cli:
+              - 'cli/**'
+              - 'cloud-auth/**'
+              - 'nyxid-crypto/**'
+              - 'Cargo.toml'
+              - 'Cargo.lock'
+              - 'rust-toolchain.toml'
+              - '.cargo/**'
+              - '.config/nextest.toml'
+            rust:
+              # `mcp-demo` is the fourth workspace member; workspace-wide
+              # fmt + clippy must re-run on changes there even though no
+              # job currently builds or tests it directly. `cloud-auth`
+              # is depended on by backend + cli (NyxID#716) so it also
+              # needs to trigger workspace-wide checks.
+              - 'backend/**'
+              - 'cli/**'
+              - 'cloud-auth/**'
+              - 'nyxid-crypto/**'
+              - 'mcp-demo/**'
+              - 'scripts/check-rci-backend-boundary.sh'
+              - 'Cargo.toml'
+              - 'Cargo.lock'
+              - 'rust-toolchain.toml'
+              - '.cargo/**'
+              - '.config/nextest.toml'
+            frontend:
+              - 'frontend/**'
+              - '.node-version'
+            sdk:
+              - 'sdk/**'
+              - '.node-version'
+            # Inputs hashed by `cli/tests/wizard_bundle_freshness.rs`:
+            #   - every file listed in `cli/src/wizard/bundle-meta/index.manifest`
+            #     (always under `frontend/`).
+            #   - EXTRAS: `frontend/package-lock.json`,
+            #     `frontend/vite.wizard.config.ts`, `frontend/wizard.html`,
+            #     `frontend/vite-plugins/wizard-manifest.ts`, `.node-version`.
+            #   - the committed manifest + hash files themselves.
+            #   - the test source file.
+            # Keep this filter a superset of the EXTRAS list in that test.
+            wizard:
+              - 'frontend/**'
+              - '.node-version'
+              - 'cli/src/wizard/**'
+              - 'cli/tests/wizard_bundle_freshness.rs'
+            # Any workflow change forces a full run -- stops a broken
+            # publish-gate or release pipeline from sneaking through under
+            # path filtering.
+            ci:
+              - '.github/workflows/**'
+              - '.github/actions/**'
+
+  # ---------------------------------------------------------------------------
+  # Rust: format check
+  # ---------------------------------------------------------------------------
+  rust-fmt:
+    name: Rust Format
+    needs: changes
+    if: inputs.force-all || needs.changes.outputs.ci == 'true' || needs.changes.outputs.rust == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt
+      - run: cargo fmt --all -- --check
+
+  # ---------------------------------------------------------------------------
+  # Rust: clippy lint
+  # ---------------------------------------------------------------------------
+  rust-clippy:
+    name: Rust Clippy
+    needs: changes
+    if: inputs.force-all || needs.changes.outputs.ci == 'true' || needs.changes.outputs.rust == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - name: Install system dependencies
+        run: sudo apt-get update && sudo apt-get install -y libdbus-1-dev pkg-config
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo clippy --workspace --all-targets -- -D warnings
+
+  # ---------------------------------------------------------------------------
+  # Rust: backend build + test
+  # Handler + service tests call `connect_test_database`, which probes the dev
+  # docker-compose mongod on 27018 first, then this CI service container on 27017,
+  # and skips when neither is reachable. A fast TCP pre-check in the harness skips
+  # the absent 27018 port (no dev override in CI) in milliseconds instead of
+  # stalling ~10s on the mongo server-selection timeout per test. The 27017
+  # service container below satisfies the probe so those tests actually run
+  # instead of silently skipping.
+  # ---------------------------------------------------------------------------
+  backend-test:
+    name: Backend Test
+    needs: changes
+    if: inputs.force-all || needs.changes.outputs.ci == 'true' || needs.changes.outputs.backend == 'true'
+    runs-on: ubuntu-latest
+    services:
+      mongodb:
+        image: mongo:8.0
+        ports:
+          - 27017:27017
+        options: >-
+          --health-cmd "mongosh --quiet --eval 'db.adminCommand({ ping: 1 })'"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+    steps:
+      - uses: actions/checkout@v6
+      - name: Install system dependencies
+        run: sudo apt-get update && sudo apt-get install -y libdbus-1-dev pkg-config
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: backend
+      - uses: taiki-e/install-action@nextest
+
+      - name: Check RCI backend boundary
+        run: bash scripts/check-rci-backend-boundary.sh
+
+      - name: Build backend
+        run: cargo build -p nyxid
+
+      - name: Run backend tests
+        run: cargo nextest run -p nyxid --profile ci
+
+      - name: Publish test summary
+        if: always()
+        uses: test-summary/action@v2.6
+        with:
+          paths: target/nextest/ci/junit.xml
+          show: all
+
+  # ---------------------------------------------------------------------------
+  # Rust: CLI / node-agent build + test (no DB required)
+  # ---------------------------------------------------------------------------
+  cli-test:
+    name: CLI Test
+    needs: changes
+    if: inputs.force-all || needs.changes.outputs.ci == 'true' || needs.changes.outputs.cli == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - name: Install system dependencies
+        run: sudo apt-get update && sudo apt-get install -y libdbus-1-dev pkg-config
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: cli
+      - uses: taiki-e/install-action@nextest
+
+      - name: Build CLI
+        run: cargo build -p nyxid-cli
+
+      - name: Run CLI tests
+        run: cargo nextest run -p nyxid-cli --profile ci
+
+      - name: Publish test summary
+        if: always()
+        uses: test-summary/action@v2.6
+        with:
+          paths: target/nextest/ci/junit.xml
+          show: all
+
+  # ---------------------------------------------------------------------------
+  # Rust: build with feature flags (KMS providers). Backend-only build.
+  # ---------------------------------------------------------------------------
+  rust-features:
+    name: Rust Features (${{ matrix.features }})
+    needs: changes
+    if: inputs.force-all || needs.changes.outputs.ci == 'true' || needs.changes.outputs.backend == 'true'
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - features: aws-kms
+            cache-suffix: aws-kms
+          - features: gcp-kms
+            cache-suffix: gcp-kms
+          - features: aws-kms,gcp-kms
+            cache-suffix: aws-and-gcp-kms
+    steps:
+      - uses: actions/checkout@v6
+      - name: Install system dependencies
+        run: sudo apt-get update && sudo apt-get install -y libdbus-1-dev pkg-config
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: features-${{ matrix.cache-suffix }}
+      - name: Build with --features ${{ matrix.features }}
+        run: cargo build -p nyxid --features ${{ matrix.features }}
+
+  # ---------------------------------------------------------------------------
+  # Frontend: lint, type-check, test, build
+  # ---------------------------------------------------------------------------
+  frontend:
+    name: Frontend
+    needs: changes
+    if: inputs.force-all || needs.changes.outputs.ci == 'true' || needs.changes.outputs.frontend == 'true'
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: frontend
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-node@v6
+        with:
+          node-version-file: .node-version
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+      - run: npm ci
+      - run: npm run lint
+      - run: npm run test
+      - run: npm run build
+
+  # ---------------------------------------------------------------------------
+  # CLI wizard bundle: source-closure freshness check.
+  #
+  # The CLI embeds the React wizard bundle at `cli/src/wizard/assets/index.html`
+  # via `rust_embed`. We commit the prebuilt artifact so `cargo build -p
+  # nyxid-cli` doesn't need a Node toolchain. To detect drift, `build:wizard`
+  # also writes the wizard's full module graph to
+  # `cli/src/wizard/bundle-meta/index.manifest` and a SHA-256 over every
+  # source file in that graph (+ package-lock, vite config, node-version) to
+  # `cli/src/wizard/bundle-meta/index.hash`.
+  #
+  # This job recomputes the hash from sources and fails if it no longer
+  # matches the committed hash -- i.e. someone edited wizard source without
+  # running `npm --prefix frontend run build:wizard`. Because the check is
+  # source-only, it is immune to byte-level non-determinism between Vite /
+  # esbuild versions that previously caused spurious failures on unrelated
+  # PRs. Runs in parallel with `cli-test`; overall pipeline wall-clock is
+  # unchanged. See CONTRIBUTING.md § CLI Wizard Bundle for the rebuild
+  # workflow.
+  # ---------------------------------------------------------------------------
+  wizard-bundle-freshness:
+    name: CLI Wizard Bundle Freshness
+    needs: changes
+    if: inputs.force-all || needs.changes.outputs.ci == 'true' || needs.changes.outputs.wizard == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - name: Install system dependencies
+        run: sudo apt-get update && sudo apt-get install -y libdbus-1-dev pkg-config
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: wizard-freshness
+      - name: Verify wizard bundle freshness
+        run: cargo test -p nyxid-cli --test wizard_bundle_freshness
+
+  # ---------------------------------------------------------------------------
+  # SDK: build all packages
+  # ---------------------------------------------------------------------------
+  sdk:
+    name: SDK Build
+    needs: changes
+    if: inputs.force-all || needs.changes.outputs.ci == 'true' || needs.changes.outputs.sdk == 'true'
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: sdk
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-node@v6
+        with:
+          node-version-file: .node-version
+          cache: npm
+          cache-dependency-path: sdk/package-lock.json
+      - run: npm ci
+      - run: npm run build
+
+  # ===========================================================================
+  # Code coverage gates (issue #785).
+  #
+  # Three measurement jobs (Backend / CLI / Frontend) each:
+  #   1. Measure line coverage on the PR head and FAIL if it drops below the
+  #      enforced threshold (Rust: `cargo llvm-cov --fail-under-lines`;
+  #      Frontend: vitest `coverage.thresholds.lines` in vite.config.ts).
+  #   2. Emit a machine-readable line-% number + an lcov report.
+  #   3. On pull_request events, also measure the BASE branch so the comment
+  #      job can show a per-component line-% delta (AC #4). The base measurement
+  #      is best-effort (`continue-on-error`): if it can't be produced the head
+  #      gate still runs and the delta simply renders as "n/a". It never blocks.
+  #   4. Upload the report + a tiny `coverage-<component>.json` summary as a CI
+  #      artifact (AC #6). The summary files feed the PR-comment job.
+  #
+  # Enforced thresholds (fail the PR if line % drops below):
+  #   Backend (nyxid)      >= 73%   (currently ~74.8%)
+  #   CLI (nyxid-cli)      >= 64%   (currently ~65.5%)
+  #   Frontend (vitest)    >= 15%   (currently ~41%)
+  #
+  # RATCHET PLAN: Future ratchets must only move thresholds UP. Raise each Rust
+  # `--fail-under-lines` gate and matching `coverage_summary.py` summary
+  # threshold together when coverage rises; never lower a threshold to make a
+  # failing run pass. Keep the frontend summary threshold in sync with
+  # `coverage.thresholds.lines` in frontend/vite.config.ts.
+  # ===========================================================================
+
+  # ---------------------------------------------------------------------------
+  # Backend (nyxid) line coverage. Mirrors `backend-test`: needs MongoDB on
+  # 27017 so DB-gated handler/service tests run instead of skipping (otherwise
+  # coverage would be understated). The instrumented run is slow (~15 min); the
+  # base-branch comparison adds a second run, so it is gated to pull_request
+  # only and allowed to fail without blocking the gate.
+  # ---------------------------------------------------------------------------
+  coverage-backend:
+    name: Coverage (Backend)
+    needs: changes
+    if: inputs.force-all || needs.changes.outputs.ci == 'true' || needs.changes.outputs.backend == 'true'
+    runs-on: ubuntu-latest
+    services:
+      mongodb:
+        image: mongo:8.0
+        ports:
+          - 27017:27017
+        options: >-
+          --health-cmd "mongosh --quiet --eval 'db.adminCommand({ ping: 1 })'"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+      - name: Install system dependencies
+        run: sudo apt-get update && sudo apt-get install -y libdbus-1-dev pkg-config
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: llvm-tools-preview
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: coverage-backend
+      - uses: taiki-e/install-action@cargo-llvm-cov
+
+      # Head: instrument + measure WITHOUT the gate, emitting an lcov report and
+      # a one-line summary JSON. The threshold is enforced as the final step in
+      # this job (below) so the report, summary, and base delta are always
+      # produced — even on a regression — and surface in the PR comment.
+      # `report` is package-scoped so the % isn't diluted by the rest of the
+      # workspace (whose tests this job does not run).
+      - name: Measure (head)
+        run: |
+          cargo llvm-cov --package nyxid --summary-only
+          cargo llvm-cov report --package nyxid --lcov --output-path coverage-backend.lcov
+          cargo llvm-cov report --package nyxid --json --summary-only --output-path coverage-backend.raw.json
+
+      - name: Build head summary JSON
+        run: |
+          python3 .github/scripts/coverage_summary.py \
+            backend "Backend (nyxid)" 73 \
+            coverage-backend.raw.json coverage-backend.json
+
+      # Base: best-effort second run for the delta. Never blocks the gate.
+      - name: Measure base branch
+        if: github.event_name == 'pull_request'
+        continue-on-error: true
+        env:
+          BASE_REF: ${{ github.event.pull_request.base.sha }}
+        run: |
+          git worktree add ../base-coverage "$BASE_REF"
+          ( cd ../base-coverage && cargo llvm-cov --package nyxid --summary-only \
+              && cargo llvm-cov report --package nyxid --json --summary-only \
+                 --output-path "$GITHUB_WORKSPACE/coverage-backend.base.json" )
+
+      - name: Merge base line % into summary
+        if: github.event_name == 'pull_request'
+        run: |
+          python3 .github/scripts/coverage_merge_base.py \
+            coverage-backend.json coverage-backend.base.json
+
+      # Enforce the threshold LAST, after the report + summary + delta are built,
+      # so a regression fails the job *and* still surfaces the failing number in
+      # the PR comment. Re-reads the existing profdata (no re-run).
+      - name: Enforce coverage gate (head)
+        run: cargo llvm-cov report --package nyxid --fail-under-lines 73
+
+      - name: Upload coverage artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: coverage-backend
+          path: |
+            coverage-backend.lcov
+            coverage-backend.json
+          if-no-files-found: warn
+
+  # ---------------------------------------------------------------------------
+  # CLI (nyxid-cli) line coverage. No DB needed (mirrors `cli-test`).
+  # ---------------------------------------------------------------------------
+  coverage-cli:
+    name: Coverage (CLI)
+    needs: changes
+    if: inputs.force-all || needs.changes.outputs.ci == 'true' || needs.changes.outputs.cli == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+      - name: Install system dependencies
+        run: sudo apt-get update && sudo apt-get install -y libdbus-1-dev pkg-config
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: llvm-tools-preview
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: coverage-cli
+      - uses: taiki-e/install-action@cargo-llvm-cov
+
+      # Measure WITHOUT the gate (enforced as the final step below). `report` is
+      # package-scoped so the % isn't diluted by the rest of the workspace.
+      - name: Measure (head)
+        run: |
+          cargo llvm-cov --package nyxid-cli --summary-only
+          cargo llvm-cov report --package nyxid-cli --lcov --output-path coverage-cli.lcov
+          cargo llvm-cov report --package nyxid-cli --json --summary-only --output-path coverage-cli.raw.json
+
+      - name: Build head summary JSON
+        run: |
+          python3 .github/scripts/coverage_summary.py \
+            cli "CLI (nyxid-cli)" 64 \
+            coverage-cli.raw.json coverage-cli.json
+
+      - name: Measure base branch
+        if: github.event_name == 'pull_request'
+        continue-on-error: true
+        env:
+          BASE_REF: ${{ github.event.pull_request.base.sha }}
+        run: |
+          git worktree add ../base-coverage "$BASE_REF"
+          ( cd ../base-coverage && cargo llvm-cov --package nyxid-cli --summary-only \
+              && cargo llvm-cov report --package nyxid-cli --json --summary-only \
+                 --output-path "$GITHUB_WORKSPACE/coverage-cli.base.json" )
+
+      - name: Merge base line % into summary
+        if: github.event_name == 'pull_request'
+        run: |
+          python3 .github/scripts/coverage_merge_base.py \
+            coverage-cli.json coverage-cli.base.json
+
+      # Enforce the threshold LAST (see backend job for rationale).
+      - name: Enforce coverage gate (head)
+        run: cargo llvm-cov report --package nyxid-cli --fail-under-lines 64
+
+      - name: Upload coverage artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: coverage-cli
+          path: |
+            coverage-cli.lcov
+            coverage-cli.json
+          if-no-files-found: warn
+
+  # ---------------------------------------------------------------------------
+  # Frontend (vitest --coverage). The line threshold is enforced by
+  # `coverage.thresholds.lines` in frontend/vite.config.ts, so `test:coverage`
+  # exits non-zero on a regression. We read the line % from the v8
+  # json-summary reporter (coverage/coverage-summary.json).
+  # ---------------------------------------------------------------------------
+  coverage-frontend:
+    name: Coverage (Frontend)
+    needs: changes
+    if: inputs.force-all || needs.changes.outputs.ci == 'true' || needs.changes.outputs.frontend == 'true'
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: frontend
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-node@v6
+        with:
+          node-version-file: .node-version
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+      - run: npm ci
+
+      # Head: measure WITHOUT the gate (override the line threshold to 0) so the
+      # coverage summary is always produced; the threshold is enforced as the
+      # final step below — mirroring the Rust jobs — so a regression still
+      # surfaces the failing number in the PR comment.
+      - name: Measure (head)
+        run: npm run test:coverage -- --coverage.thresholds.lines=0
+
+      - name: Build head summary JSON
+        working-directory: ${{ github.workspace }}
+        run: |
+          python3 .github/scripts/coverage_summary.py \
+            frontend "Frontend (vitest)" 15 \
+            frontend/coverage/coverage-summary.json coverage-frontend.json
+
+      # Base: best-effort. Check out the base tree, install, run coverage
+      # WITHOUT the threshold gate (--coverage.thresholds.lines=0) so a low base
+      # never errors here.
+      - name: Measure base branch
+        if: github.event_name == 'pull_request'
+        continue-on-error: true
+        working-directory: ${{ github.workspace }}
+        env:
+          BASE_REF: ${{ github.event.pull_request.base.sha }}
+        run: |
+          git worktree add ../base-coverage "$BASE_REF"
+          ( cd ../base-coverage/frontend \
+              && npm ci \
+              && env NODE_ENV=test npx vitest run --coverage --coverage.thresholds.lines=0 )
+          cp ../base-coverage/frontend/coverage/coverage-summary.json \
+             frontend-coverage-base.json
+
+      - name: Merge base line % into summary
+        if: github.event_name == 'pull_request'
+        working-directory: ${{ github.workspace }}
+        run: |
+          python3 .github/scripts/coverage_merge_base.py \
+            coverage-frontend.json frontend-coverage-base.json
+
+      # Enforce the FE threshold LAST, reading the already-produced summary (no
+      # re-run) so a regression fails the job *and* still surfaces in the PR
+      # comment. Keep this threshold in sync with vite.config.ts (lines: 15).
+      - name: Enforce coverage gate (head)
+        working-directory: ${{ github.workspace }}
+        run: |
+          python3 - <<'PY'
+          import json, sys
+          total = json.load(open("frontend/coverage/coverage-summary.json"))["total"]
+          pct = float(total["lines"]["pct"])
+          threshold = 15.0
+          print(f"Frontend line coverage: {pct}% (threshold {threshold}%)")
+          sys.exit(0 if pct >= threshold else 1)
+          PY
+
+      - name: Upload coverage artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: coverage-frontend
+          path: |
+            frontend/coverage/lcov.info
+            frontend/coverage/coverage-summary.json
+            coverage-frontend.json
+          if-no-files-found: warn
+
+  # ---------------------------------------------------------------------------
+  # PR comment payload: aggregate the three coverage summaries into one sticky
+  # comment body showing each component's line %, its enforced threshold, and
+  # the delta vs. the base branch (AC #4). Runs only on pull_request, after the
+  # measurement jobs, and tolerates skipped components (docs-only PR -> some
+  # jobs skip).
+  #
+  # This job only BUILDS the comment body and uploads it as an artifact; the
+  # actual posting happens in coverage-comment.yml. Posting needs a
+  # write-scoped token, but `pull_request` runs from forks get a read-only
+  # GITHUB_TOKEN (the job's `permissions:` block is capped, not honored), so an
+  # in-line `issues.createComment` 403s on every fork PR. The companion
+  # `workflow_run` workflow runs from the default branch with the base repo's
+  # token and never executes PR/fork code, so it can post safely.
+  # ---------------------------------------------------------------------------
+  coverage-comment:
+    name: Coverage Comment Payload
+    if: always() && github.event_name == 'pull_request'
+    needs:
+      - coverage-backend
+      - coverage-cli
+      - coverage-frontend
+    runs-on: ubuntu-latest
+    permissions:
+      # `actions/checkout` needs contents:read; declaring any permissions block
+      # otherwise drops all unlisted scopes to none and the checkout 403s. No
+      # write scopes here -- this job never touches the PR conversation.
+      contents: read
+    steps:
+      - uses: actions/checkout@v6
+      - name: Download coverage summaries
+        uses: actions/download-artifact@v4
+        with:
+          pattern: coverage-*
+          path: coverage-artifacts
+          merge-multiple: true
+      - name: Build comment body
+        run: |
+          python3 .github/scripts/coverage_comment.py \
+            coverage-artifacts > coverage-comment.md
+          cat coverage-comment.md
+      - name: Record PR number
+        env:
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+        run: echo "$PR_NUMBER" > pr-number.txt
+      - name: Upload coverage comment payload
+        uses: actions/upload-artifact@v4
+        with:
+          # Deliberately NOT matching `coverage-*` so the pattern download
+          # above never picks this payload up on a re-run.
+          name: pr-coverage-comment
+          path: |
+            coverage-comment.md
+            pr-number.txt
+          if-no-files-found: error
+
+  # ---------------------------------------------------------------------------
+  # Aggregator: a single status check that summarises the whole pipeline.
+  #
+  # Branch protection / required-checks rules should require ONLY this job by
+  # name (`CI Pipeline`). Conditional jobs above may legitimately be skipped
+  # (e.g. a docs-only PR), and listing them individually as required would
+  # leave PRs stuck pending. This job runs unconditionally (`if: always()`)
+  # and treats `success` and `skipped` as OK; `failure` or `cancelled` in
+  # any upstream job fails the gate.
+  #
+  # Reference: https://devopsdirective.com/posts/2025/08/github-actions-required-checks-for-conditional-jobs/
+  # ---------------------------------------------------------------------------
+  ci-pass:
+    name: CI Pipeline
+    if: always()
+    needs:
+      - changes
+      - rust-fmt
+      - rust-clippy
+      - backend-test
+      - cli-test
+      - rust-features
+      - frontend
+      - wizard-bundle-freshness
+      - sdk
+      - coverage-backend
+      - coverage-cli
+      - coverage-frontend
+    runs-on: ubuntu-latest
+    steps:
+      - name: Verify all jobs succeeded or were skipped intentionally
+        env:
+          # NOTE: `coverage-comment` is intentionally NOT gated here -- it is an
+          # informational PR comment, not a correctness check. The three
+          # `coverage-*` measurement jobs ARE gated: they fail when line
+          # coverage drops below the enforced threshold.
+          RESULTS: |
+            changes=${{ needs.changes.result }}
+            rust-fmt=${{ needs.rust-fmt.result }}
+            rust-clippy=${{ needs.rust-clippy.result }}
+            backend-test=${{ needs.backend-test.result }}
+            cli-test=${{ needs.cli-test.result }}
+            rust-features=${{ needs.rust-features.result }}
+            frontend=${{ needs.frontend.result }}
+            wizard-bundle-freshness=${{ needs.wizard-bundle-freshness.result }}
+            sdk=${{ needs.sdk.result }}
+            coverage-backend=${{ needs.coverage-backend.result }}
+            coverage-cli=${{ needs.coverage-cli.result }}
+            coverage-frontend=${{ needs.coverage-frontend.result }}
+        run: |
+          set -eu
+          echo "Job results:"
+          echo "$RESULTS" | sed 's/^/  /'
+          failed=0
+          while IFS='=' read -r job result; do
+            [ -z "$job" ] && continue
+            case "$result" in
+              success|skipped) ;;
+              *)
+                echo "::error::Job '$job' did not pass (result=$result)"
+                failed=1
+                ;;
+            esac
+          done <<< "$RESULTS"
+          exit "$failed"

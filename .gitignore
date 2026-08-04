@@ -1,0 +1,64 @@
+# ─── Rust ───
+/target/
+**/target/
+
+# ─── Node.js ───
+node_modules/
+.next/
+dist/
+build/
+*.tsbuildinfo
+.npm-cache/
+.cargo-home/
+
+# ─── Environment ───
+.env
+.env.*
+!.env.example
+!.env.production.example
+!**/.env.example
+
+# ─── Keys ───
+keys/
+*.pem
+*.key
+
+# ─── IDE ───
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+.DS_Store
+
+# ─── Logs ───
+*.log
+logs/
+
+# ─── Docker ───
+# docker-compose.override.yml is intentionally tracked: it is the project's
+# shared dev override (auto-loaded by `docker compose up`). Personal overrides
+# go in docker-compose.local.yml and must be passed explicitly with -f.
+docker-compose.local.yml
+
+# ─── Deployment ───
+k8s/
+
+
+.claude
+.playwright-mcp
+
+mobile/screenshots
+
+# Internal working documents
+docs/IMPLEMENTATION_SPEC*.md
+docs/CLI_AUDIT_GAPS.md
+docs/STREAMLINE_SERVICES_PROPOSAL.md
+.gstack/
+.context/
+.antigravitycli/
+
+# consensus-rnd codex-refactor-loop runtime (machine-specific, do not commit)
+/.refactor-loop/
+/.worktrees/
+/.config/consensus-rnd/host.env

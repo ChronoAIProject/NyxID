@@ -1,0 +1,97 @@
+[package]
+name = "nyxid-cli"
+version = "0.7.0"
+edition = "2024"
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[[bin]]
+name = "nyxid"
+path = "src/main.rs"
+
+[package.metadata.dist]
+dist = true
+
+[dependencies]
+tokio = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+chrono = { workspace = true }
+futures = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+uuid = { workspace = true }
+
+anyhow = "1"
+clap = { version = "4.6", features = ["derive", "env"] }
+reqwest = { version = "0.12", features = ["json", "rustls-tls", "stream"], default-features = false }
+dirs = "6"
+open = "5"
+rpassword = "7.5.1"
+urlencoding = "2.1"
+rand = "0.8"
+hex = "0.4"
+ed25519-dalek = { version = "2", features = ["alloc", "rand_core"] }
+comfy-table = "7"
+url = "2"
+
+# SSH subcommand + node agent WebSocket
+tokio-tungstenite = { version = "0.29", features = ["rustls-tls-native-roots"] }
+russh = "0.58.0"
+
+# Node agent dependencies
+toml = "1.0"
+base64 = "0.22"
+sha2 = "0.10"
+hmac = "0.12"
+aes-gcm = "0.10"
+zeroize = { version = "1", features = ["derive"] }
+
+# Telemetry (first-run consent TTY detection)
+is-terminal = "0.4"
+directories = "6"
+keyring = { version = "3", features = ["apple-native", "windows-native", "sync-secret-service"] }
+thiserror = "2"
+pty-process = { version = "0.5.3", features = ["async"] }
+libc = "0.2"
+nix = { version = "0.31.2", features = ["term", "process", "signal"] }
+tempfile = "3"
+const-oid = { version = "0.9", features = ["db"] }
+# Direct rustls dep so we can install a default CryptoProvider at startup.
+# Transitive deps (sigstore -> aws-lc-rs, quinn/ring -> ring) enable BOTH
+# rustls crypto providers via feature unification on Linux release builds,
+# which leaves auto-detection ambiguous and panics on first TLS use
+# (rustls/src/crypto/mod.rs:249). See issue #696.
+rustls = { version = "0.23", default-features = false, features = ["std", "tls12", "logging", "aws_lc_rs"] }
+pki-types = { package = "rustls-pki-types", version = "1.11" }
+self-replace = "1.5"
+self_update = { version = "0.44", default-features = false, features = ["reqwest", "rustls", "compression-flate2", "archive-tar", "archive-zip"] }
+sigstore = { version = "0.13", default-features = false, features = ["bundle", "cosign", "sigstore-trust-root", "rustls-tls"] }
+webpki = { package = "rustls-webpki", version = "0.103", default-features = false, features = ["std"] }
+x509-cert = "0.2"
+
+# Shared cloud-billing signing primitives (NyxID#716). Used by the node
+# agent's proxy executor to sign requests with AWS SigV4 / GCP service-
+# account JWT when credentials live on the node rather than NyxID.
+nyxid-cloud-auth = { path = "../cloud-auth" }
+nyxid-crypto = { path = "../nyxid-crypto", features = ["decrypt"] }
+
+# Wizard v2 (CLI-served local browser UI). See docs/CLI_WIZARD_V2.md
+axum = { workspace = true }
+tower = "0.5"
+tower-http = { version = "0.6", features = ["set-header", "cors"] }
+rust-embed = { version = "8", features = ["include-exclude"] }
+constant_time_eq = "=0.4.2"
+
+[dev-dependencies]
+tempfile = "3"
+# Used by the update::extracts_nested_binary_from_dist_tarball test to
+# build a fixture tarball matching cargo-dist's release layout. These
+# crates are already in the dependency graph transitively via self_update.
+tar = "0.4"
+flate2 = "1"
+# HTTP mock server for command-level integration tests: point an
+# ApiClient (via AuthArgs.base_url) at a MockServer and assert on the
+# requests commands issue. Test-only; never ships in the release binary.
+wiremock = "0.6"

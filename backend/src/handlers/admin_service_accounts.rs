@@ -1,0 +1,806 @@
+use axum::{
+    Json,
+    extract::{Path, Query, State},
+    http::HeaderMap,
+};
+use serde::{Deserialize, Serialize};
+
+use crate::AppState;
+use crate::errors::{AppError, AppResult};
+use crate::handlers::admin::AdminActionResponse;
+use crate::handlers::admin_helpers::{require_admin, require_admin_or_operator};
+use crate::models::service_account::ServiceAccount;
+use crate::mw::auth::AuthUser;
+use crate::services::{audit_service, org_service, service_account_service};
+use crate::telemetry::{TelemetryContext, TelemetryEvent, emit_event};
+
+/// Gate access to a service account by either global admin OR admin of
+/// the SA's owning org. Org-owned SAs (`owner_user_id` points at a
+/// `user_type = org` user) can be managed by any admin of that org;
+/// admin-created personal SAs still require global admin.
+///
+/// Returns the effective `created_by` value to pass through to the
+/// service layer for downstream queries that filter by creator.
+async fn require_admin_or_owning_org_admin(
+    state: &AppState,
+    auth_user: &AuthUser,
+    sa: &ServiceAccount,
+) -> AppResult<()> {
+    // Global admin always allowed.
+    if require_admin(state, auth_user).await.is_ok() {
+        return Ok(());
+    }
+
+    // Otherwise the SA must be org-owned and the caller must be admin of
+    // that org. `effective_owner_user_id` falls back to created_by for
+    // pre-owner-field records.
+    let owner = sa.effective_owner_user_id();
+    let actor = auth_user.user_id.to_string();
+    let access = org_service::resolve_owner_access(&state.db, &actor, owner).await?;
+    if access.can_write() {
+        return Ok(());
+    }
+
+    Err(AppError::Forbidden(
+        "admin access required (global or owning org)".to_string(),
+    ))
+}
+
+/// Read-only variant of [`require_admin_or_owning_org_admin`]. Allows the
+/// platform `operator` role through the global path so strategy /
+/// share-ops accounts can inspect service accounts without write
+/// privileges.
+async fn require_admin_read_or_owning_org_admin(
+    state: &AppState,
+    auth_user: &AuthUser,
+    sa: &ServiceAccount,
+) -> AppResult<()> {
+    if require_admin_or_operator(state, auth_user, "admin.service_accounts.get")
+        .await
+        .is_ok()
+    {
+        return Ok(());
+    }
+
+    let owner = sa.effective_owner_user_id();
+    let actor = auth_user.user_id.to_string();
+    let access = org_service::resolve_owner_access(&state.db, &actor, owner).await?;
+    if access.can_write() {
+        return Ok(());
+    }
+
+    Err(AppError::Forbidden(
+        "admin access required (global or owning org)".to_string(),
+    ))
+}
+
+// --- Request types ---
+
+#[derive(Debug, Deserialize)]
+pub struct CreateServiceAccountRequest {
+    pub name: String,
+    pub description: Option<String>,
+    pub allowed_scopes: String,
+    pub role_ids: Option<Vec<String>>,
+    pub rate_limit_override: Option<u64>,
+    /// When set, create this service account under the given org. The
+    /// SA's `created_by` and `owner_user_id` are both set to the org's
+    /// user_id, making the SA manageable by every admin of that org.
+    /// Caller must be an admin of the target org. When omitted, falls
+    /// back to the legacy global-admin path (caller must be a NyxID admin).
+    pub target_org_id: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct ServiceAccountListQuery {
+    pub page: Option<u64>,
+    pub per_page: Option<u64>,
+    pub search: Option<String>,
+    /// When set, list service accounts owned by the given org instead of
+    /// the global list. The caller must be an admin of that org. Without
+    /// this filter the endpoint requires global admin and returns every
+    /// service account in the system.
+    pub org_id: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct UpdateServiceAccountRequest {
+    pub name: Option<String>,
+    pub description: Option<String>,
+    pub allowed_scopes: Option<String>,
+    pub role_ids: Option<Vec<String>>,
+    pub rate_limit_override: Option<Option<u64>>,
+    pub is_active: Option<bool>,
+}
+
+// --- Response types ---
+
+#[derive(Debug, Serialize)]
+pub struct CreateServiceAccountResponse {
+    pub id: String,
+    pub name: String,
+    pub client_id: String,
+    pub client_secret: String,
+    pub allowed_scopes: String,
+    pub role_ids: Vec<String>,
+    pub is_active: bool,
+    pub created_at: String,
+    pub message: String,
+}
+
+#[derive(Debug, Serialize)]
+pub struct ServiceAccountItem {
+    pub id: String,
+    pub name: String,
+    pub description: Option<String>,
+    pub client_id: String,
+    pub secret_prefix: String,
+    pub allowed_scopes: String,
+    pub role_ids: Vec<String>,
+    pub is_active: bool,
+    pub rate_limit_override: Option<u64>,
+    pub created_by: String,
+    pub created_at: String,
+    pub updated_at: String,
+    pub last_authenticated_at: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct ServiceAccountListResponse {
+    pub service_accounts: Vec<ServiceAccountItem>,
+    pub total: u64,
+    pub page: u64,
+    pub per_page: u64,
+}
+
+#[derive(Debug, Serialize)]
+pub struct RotateSecretResponse {
+    pub client_id: String,
+    pub client_secret: String,
+    pub secret_prefix: String,
+    pub message: String,
+}
+
+#[derive(Debug, Serialize)]
+pub struct RevokeTokensResponse {
+    pub revoked_count: u64,
+    pub message: String,
+}
+
+// --- Helpers ---
+
+fn sa_to_item(sa: ServiceAccount) -> ServiceAccountItem {
+    ServiceAccountItem {
+        id: sa.id,
+        name: sa.name,
+        description: sa.description,
+        client_id: sa.client_id,
+        secret_prefix: sa.secret_prefix,
+        allowed_scopes: sa.allowed_scopes,
+        role_ids: sa.role_ids,
+        is_active: sa.is_active,
+        rate_limit_override: sa.rate_limit_override,
+        created_by: sa.created_by,
+        created_at: sa.created_at.to_rfc3339(),
+        updated_at: sa.updated_at.to_rfc3339(),
+        last_authenticated_at: sa.last_authenticated_at.map(|t| t.to_rfc3339()),
+    }
+}
+
+// --- Handlers ---
+
+/// POST /api/v1/admin/service-accounts
+pub async fn create_service_account(
+    State(state): State<AppState>,
+    auth_user: AuthUser,
+    tele: TelemetryContext,
+    _headers: HeaderMap,
+    Json(body): Json<CreateServiceAccountRequest>,
+) -> AppResult<Json<CreateServiceAccountResponse>> {
+    let actor = auth_user.user_id.to_string();
+
+    // Determine the effective owner. Two paths:
+    // - target_org_id set: caller must be an admin of that org. The SA is
+    //   created with owner = org user_id, so every admin of that org can
+    //   manage it via the same endpoints (gated by
+    //   `require_admin_or_owning_org_admin`).
+    // - target_org_id not set: legacy admin-created SA, caller must be a
+    //   global NyxID admin.
+    let effective_owner = if let Some(target_org_id) = body.target_org_id.as_deref() {
+        let access = org_service::resolve_owner_access(&state.db, &actor, target_org_id).await?;
+        if !access.can_write() {
+            return Err(AppError::OrgRoleInsufficient(
+                "you must be an admin of the target org to create service accounts under it"
+                    .to_string(),
+            ));
+        }
+        target_org_id.to_string()
+    } else {
+        require_admin(&state, &auth_user).await?;
+        actor
+    };
+
+    let role_ids = body.role_ids.unwrap_or_default();
+
+    let (sa, raw_secret) = service_account_service::create_service_account(
+        &state.db,
+        &body.name,
+        body.description.as_deref(),
+        &body.allowed_scopes,
+        &role_ids,
+        body.rate_limit_override,
+        &effective_owner,
+    )
+    .await?;
+
+    audit_service::log_for_user(
+        state.db.clone(),
+        &auth_user,
+        "admin.sa.created",
+        Some(serde_json::json!({
+            "target_sa_id": &sa.id,
+            "client_id": &sa.client_id,
+            "name": &sa.name,
+        })),
+    );
+
+    emit_event(
+        state.telemetry.as_deref(),
+        &auth_user.user_id.to_string(),
+        auth_user.api_key_id.as_deref(),
+        &tele,
+        TelemetryEvent::AdminServiceAccountCreated,
+    );
+
+    Ok(Json(CreateServiceAccountResponse {
+        id: sa.id,
+        name: sa.name,
+        client_id: sa.client_id,
+        client_secret: raw_secret,
+        allowed_scopes: sa.allowed_scopes,
+        role_ids: sa.role_ids,
+        is_active: sa.is_active,
+        created_at: sa.created_at.to_rfc3339(),
+        message:
+            "Service account created. Save the client_secret now -- it cannot be retrieved later."
+                .to_string(),
+    }))
+}
+
+/// GET /api/v1/admin/service-accounts
+pub async fn list_service_accounts(
+    State(state): State<AppState>,
+    auth_user: AuthUser,
+    Query(query): Query<ServiceAccountListQuery>,
+) -> AppResult<Json<ServiceAccountListResponse>> {
+    let actor = auth_user.user_id.to_string();
+
+    // Two listing modes:
+    // - org_id unset: legacy global listing. Requires global admin or
+    //   operator (read-only). Audited via the helper.
+    // - org_id set: org-scoped listing. Allow global admin/operator
+    //   through first (otherwise an operator can list every SA but gets
+    //   denied when narrowing to one org — backwards). Then fall back to
+    //   org-admin write access for the target org.
+    let owner_filter = if let Some(target_org_id) = query.org_id.as_deref() {
+        if require_admin_or_operator(&state, &auth_user, "admin.service_accounts.list.org")
+            .await
+            .is_err()
+        {
+            let access =
+                org_service::resolve_owner_access(&state.db, &actor, target_org_id).await?;
+            if !access.can_write() {
+                return Err(AppError::OrgRoleInsufficient(
+                    "admin access to the target org is required to list its service accounts"
+                        .to_string(),
+                ));
+            }
+        }
+        Some(target_org_id.to_string())
+    } else {
+        require_admin_or_operator(&state, &auth_user, "admin.service_accounts.list").await?;
+        None
+    };
+
+    let page = query.page.unwrap_or(1).max(1);
+    let per_page = query.per_page.unwrap_or(50).min(100);
+
+    let (accounts, total) = service_account_service::list_service_accounts(
+        &state.db,
+        page,
+        per_page,
+        query.search.as_deref(),
+        owner_filter.as_deref(),
+    )
+    .await?;
+
+    let items: Vec<ServiceAccountItem> = accounts.into_iter().map(sa_to_item).collect();
+
+    Ok(Json(ServiceAccountListResponse {
+        service_accounts: items,
+        total,
+        page,
+        per_page,
+    }))
+}
+
+/// GET /api/v1/admin/service-accounts/:sa_id
+pub async fn get_service_account(
+    State(state): State<AppState>,
+    auth_user: AuthUser,
+    Path(sa_id): Path<String>,
+) -> AppResult<Json<ServiceAccountItem>> {
+    let sa = service_account_service::get_service_account(&state.db, &sa_id).await?;
+    require_admin_read_or_owning_org_admin(&state, &auth_user, &sa).await?;
+
+    Ok(Json(sa_to_item(sa)))
+}
+
+/// PUT /api/v1/admin/service-accounts/:sa_id
+pub async fn update_service_account(
+    State(state): State<AppState>,
+    auth_user: AuthUser,
+    _headers: HeaderMap,
+    Path(sa_id): Path<String>,
+    Json(body): Json<UpdateServiceAccountRequest>,
+) -> AppResult<Json<ServiceAccountItem>> {
+    let existing = service_account_service::get_service_account(&state.db, &sa_id).await?;
+    require_admin_or_owning_org_admin(&state, &auth_user, &existing).await?;
+
+    let updated = service_account_service::update_service_account(
+        &state.db,
+        &sa_id,
+        body.name.as_deref(),
+        body.description.as_deref(),
+        body.allowed_scopes.as_deref(),
+        body.role_ids.as_deref(),
+        body.rate_limit_override,
+        body.is_active,
+    )
+    .await?;
+
+    audit_service::log_for_user(
+        state.db.clone(),
+        &auth_user,
+        "admin.sa.updated",
+        Some(serde_json::json!({
+            "target_sa_id": &sa_id,
+        })),
+    );
+
+    Ok(Json(sa_to_item(updated)))
+}
+
+/// DELETE /api/v1/admin/service-accounts/:sa_id
+pub async fn delete_service_account(
+    State(state): State<AppState>,
+    auth_user: AuthUser,
+    tele: TelemetryContext,
+    _headers: HeaderMap,
+    Path(sa_id): Path<String>,
+) -> AppResult<Json<AdminActionResponse>> {
+    let existing = service_account_service::get_service_account(&state.db, &sa_id).await?;
+    require_admin_or_owning_org_admin(&state, &auth_user, &existing).await?;
+
+    service_account_service::delete_service_account(&state.db, &sa_id).await?;
+
+    audit_service::log_for_user(
+        state.db.clone(),
+        &auth_user,
+        "admin.sa.deleted",
+        Some(serde_json::json!({
+            "target_sa_id": &sa_id,
+        })),
+    );
+
+    emit_event(
+        state.telemetry.as_deref(),
+        &auth_user.user_id.to_string(),
+        auth_user.api_key_id.as_deref(),
+        &tele,
+        TelemetryEvent::AdminServiceAccountDeleted,
+    );
+
+    Ok(Json(AdminActionResponse {
+        message: "Service account deactivated".to_string(),
+    }))
+}
+
+/// POST /api/v1/admin/service-accounts/:sa_id/rotate-secret
+pub async fn rotate_secret(
+    State(state): State<AppState>,
+    auth_user: AuthUser,
+    tele: TelemetryContext,
+    _headers: HeaderMap,
+    Path(sa_id): Path<String>,
+) -> AppResult<Json<RotateSecretResponse>> {
+    let existing = service_account_service::get_service_account(&state.db, &sa_id).await?;
+    require_admin_or_owning_org_admin(&state, &auth_user, &existing).await?;
+
+    let (updated, raw_secret) = service_account_service::rotate_secret(&state.db, &sa_id).await?;
+
+    audit_service::log_for_user(
+        state.db.clone(),
+        &auth_user,
+        "admin.sa.secret_rotated",
+        Some(serde_json::json!({
+            "target_sa_id": &sa_id,
+            "client_id": &updated.client_id,
+        })),
+    );
+
+    emit_event(
+        state.telemetry.as_deref(),
+        &auth_user.user_id.to_string(),
+        auth_user.api_key_id.as_deref(),
+        &tele,
+        TelemetryEvent::AdminServiceAccountRotated,
+    );
+
+    Ok(Json(RotateSecretResponse {
+        client_id: updated.client_id,
+        client_secret: raw_secret,
+        secret_prefix: updated.secret_prefix,
+        message: "Secret rotated. All existing tokens have been revoked. Save the new secret now."
+            .to_string(),
+    }))
+}
+
+/// POST /api/v1/admin/service-accounts/:sa_id/revoke-tokens
+pub async fn revoke_tokens(
+    State(state): State<AppState>,
+    auth_user: AuthUser,
+    _headers: HeaderMap,
+    Path(sa_id): Path<String>,
+) -> AppResult<Json<RevokeTokensResponse>> {
+    let _sa = service_account_service::get_service_account(&state.db, &sa_id).await?;
+    require_admin_or_owning_org_admin(&state, &auth_user, &_sa).await?;
+
+    let revoked_count = service_account_service::revoke_all_tokens(&state.db, &sa_id).await?;
+
+    audit_service::log_for_user(
+        state.db.clone(),
+        &auth_user,
+        "admin.sa.tokens_revoked",
+        Some(serde_json::json!({
+            "target_sa_id": &sa_id,
+            "revoked_count": revoked_count,
+        })),
+    );
+
+    Ok(Json(RevokeTokensResponse {
+        revoked_count,
+        message: "All active tokens revoked".to_string(),
+    }))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::models::user::{COLLECTION_NAME as USERS, User, UserType};
+    use crate::services::role_service;
+    use crate::test_utils::{connect_test_database, test_app_state, test_auth_user, test_user};
+    use axum::extract::{Path, Query, State};
+    use axum::http::HeaderMap;
+    use uuid::Uuid;
+
+    async fn seed_admin(db: &mongodb::Database) -> String {
+        role_service::seed_system_roles(db)
+            .await
+            .expect("seed roles");
+        let ids = role_service::get_platform_role_ids(db)
+            .await
+            .expect("role ids");
+        let id = Uuid::new_v4().to_string();
+        let mut user = test_user(&id, UserType::Person);
+        user.role_ids.push(ids.admin);
+        db.collection::<User>(USERS)
+            .insert_one(&user)
+            .await
+            .expect("insert admin");
+        id
+    }
+
+    async fn seed_non_admin(db: &mongodb::Database) -> String {
+        role_service::seed_system_roles(db)
+            .await
+            .expect("seed roles");
+        let id = Uuid::new_v4().to_string();
+        let user = test_user(&id, UserType::Person);
+        db.collection::<User>(USERS)
+            .insert_one(&user)
+            .await
+            .expect("insert user");
+        id
+    }
+
+    #[tokio::test]
+    async fn test_create_service_account_success() {
+        let Some(db) = connect_test_database("h_admin_sa_create").await else {
+            return;
+        };
+        let admin_id = seed_admin(&db).await;
+        let state = test_app_state(db);
+        let auth = test_auth_user(&admin_id);
+
+        let body = CreateServiceAccountRequest {
+            name: "CI Pipeline".to_string(),
+            description: Some("Runs CI".to_string()),
+            allowed_scopes: "proxy:*".to_string(),
+            role_ids: None,
+            rate_limit_override: None,
+            target_org_id: None,
+        };
+
+        let Json(resp) = create_service_account(
+            State(state),
+            auth,
+            TelemetryContext::default(),
+            HeaderMap::new(),
+            Json(body),
+        )
+        .await
+        .expect("create should succeed");
+
+        assert_eq!(resp.name, "CI Pipeline");
+        assert!(!resp.client_id.is_empty());
+        assert!(!resp.client_secret.is_empty());
+        assert!(resp.is_active);
+    }
+
+    #[tokio::test]
+    async fn test_create_service_account_non_admin_rejected() {
+        let Some(db) = connect_test_database("h_admin_sa_create_reject").await else {
+            return;
+        };
+        let user_id = seed_non_admin(&db).await;
+        let state = test_app_state(db);
+        let auth = test_auth_user(&user_id);
+
+        let body = CreateServiceAccountRequest {
+            name: "Should Fail".to_string(),
+            description: None,
+            allowed_scopes: "proxy:*".to_string(),
+            role_ids: None,
+            rate_limit_override: None,
+            target_org_id: None,
+        };
+
+        let err = create_service_account(
+            State(state),
+            auth,
+            TelemetryContext::default(),
+            HeaderMap::new(),
+            Json(body),
+        )
+        .await
+        .expect_err("non-admin should be rejected");
+
+        assert!(matches!(err, AppError::Forbidden(_)));
+    }
+
+    #[tokio::test]
+    async fn test_list_service_accounts_empty() {
+        let Some(db) = connect_test_database("h_admin_sa_list").await else {
+            return;
+        };
+        let admin_id = seed_admin(&db).await;
+        let state = test_app_state(db);
+        let auth = test_auth_user(&admin_id);
+
+        let Json(resp) = list_service_accounts(
+            State(state),
+            auth,
+            Query(ServiceAccountListQuery {
+                page: None,
+                per_page: None,
+                search: None,
+                org_id: None,
+            }),
+        )
+        .await
+        .expect("list should succeed");
+
+        assert_eq!(resp.total, 0);
+        assert!(resp.service_accounts.is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_get_service_account_success() {
+        let Some(db) = connect_test_database("h_admin_sa_get").await else {
+            return;
+        };
+        let admin_id = seed_admin(&db).await;
+        let state = test_app_state(db);
+        let auth = test_auth_user(&admin_id);
+
+        let body = CreateServiceAccountRequest {
+            name: "Getter SA".to_string(),
+            description: None,
+            allowed_scopes: "proxy:*".to_string(),
+            role_ids: None,
+            rate_limit_override: None,
+            target_org_id: None,
+        };
+        let Json(created) = create_service_account(
+            State(state.clone()),
+            auth.clone(),
+            TelemetryContext::default(),
+            HeaderMap::new(),
+            Json(body),
+        )
+        .await
+        .expect("create");
+
+        let Json(fetched) = get_service_account(State(state), auth, Path(created.id.clone()))
+            .await
+            .expect("get should succeed");
+
+        assert_eq!(fetched.id, created.id);
+        assert_eq!(fetched.name, "Getter SA");
+    }
+
+    #[tokio::test]
+    async fn test_update_service_account_success() {
+        let Some(db) = connect_test_database("h_admin_sa_update").await else {
+            return;
+        };
+        let admin_id = seed_admin(&db).await;
+        let state = test_app_state(db);
+        let auth = test_auth_user(&admin_id);
+
+        let body = CreateServiceAccountRequest {
+            name: "Before Update".to_string(),
+            description: None,
+            allowed_scopes: "proxy:*".to_string(),
+            role_ids: None,
+            rate_limit_override: None,
+            target_org_id: None,
+        };
+        let Json(created) = create_service_account(
+            State(state.clone()),
+            auth.clone(),
+            TelemetryContext::default(),
+            HeaderMap::new(),
+            Json(body),
+        )
+        .await
+        .expect("create");
+
+        let update_body = UpdateServiceAccountRequest {
+            name: Some("After Update".to_string()),
+            description: Some("updated desc".to_string()),
+            allowed_scopes: None,
+            role_ids: None,
+            rate_limit_override: None,
+            is_active: None,
+        };
+        let Json(updated) = update_service_account(
+            State(state),
+            auth,
+            HeaderMap::new(),
+            Path(created.id.clone()),
+            Json(update_body),
+        )
+        .await
+        .expect("update should succeed");
+
+        assert_eq!(updated.name, "After Update");
+    }
+
+    #[tokio::test]
+    async fn test_delete_service_account_success() {
+        let Some(db) = connect_test_database("h_admin_sa_delete").await else {
+            return;
+        };
+        let admin_id = seed_admin(&db).await;
+        let state = test_app_state(db);
+        let auth = test_auth_user(&admin_id);
+
+        let body = CreateServiceAccountRequest {
+            name: "To Delete".to_string(),
+            description: None,
+            allowed_scopes: "proxy:*".to_string(),
+            role_ids: None,
+            rate_limit_override: None,
+            target_org_id: None,
+        };
+        let Json(created) = create_service_account(
+            State(state.clone()),
+            auth.clone(),
+            TelemetryContext::default(),
+            HeaderMap::new(),
+            Json(body),
+        )
+        .await
+        .expect("create");
+
+        let Json(resp) = delete_service_account(
+            State(state),
+            auth,
+            TelemetryContext::default(),
+            HeaderMap::new(),
+            Path(created.id),
+        )
+        .await
+        .expect("delete should succeed");
+
+        assert!(resp.message.contains("deactivated"));
+    }
+
+    #[tokio::test]
+    async fn test_rotate_secret_success() {
+        let Some(db) = connect_test_database("h_admin_sa_rotate").await else {
+            return;
+        };
+        let admin_id = seed_admin(&db).await;
+        let state = test_app_state(db);
+        let auth = test_auth_user(&admin_id);
+
+        let body = CreateServiceAccountRequest {
+            name: "Rotate SA".to_string(),
+            description: None,
+            allowed_scopes: "proxy:*".to_string(),
+            role_ids: None,
+            rate_limit_override: None,
+            target_org_id: None,
+        };
+        let Json(created) = create_service_account(
+            State(state.clone()),
+            auth.clone(),
+            TelemetryContext::default(),
+            HeaderMap::new(),
+            Json(body),
+        )
+        .await
+        .expect("create");
+
+        let Json(rotated) = rotate_secret(
+            State(state),
+            auth,
+            TelemetryContext::default(),
+            HeaderMap::new(),
+            Path(created.id),
+        )
+        .await
+        .expect("rotate should succeed");
+
+        assert!(!rotated.client_secret.is_empty());
+        assert_ne!(rotated.client_secret, created.client_secret);
+    }
+
+    #[tokio::test]
+    async fn test_revoke_tokens_success() {
+        let Some(db) = connect_test_database("h_admin_sa_revoke").await else {
+            return;
+        };
+        let admin_id = seed_admin(&db).await;
+        let state = test_app_state(db);
+        let auth = test_auth_user(&admin_id);
+
+        let body = CreateServiceAccountRequest {
+            name: "Revoke SA".to_string(),
+            description: None,
+            allowed_scopes: "proxy:*".to_string(),
+            role_ids: None,
+            rate_limit_override: None,
+            target_org_id: None,
+        };
+        let Json(created) = create_service_account(
+            State(state.clone()),
+            auth.clone(),
+            TelemetryContext::default(),
+            HeaderMap::new(),
+            Json(body),
+        )
+        .await
+        .expect("create");
+
+        let Json(resp) = revoke_tokens(State(state), auth, HeaderMap::new(), Path(created.id))
+            .await
+            .expect("revoke should succeed");
+
+        assert_eq!(resp.revoked_count, 0);
+        assert!(resp.message.contains("revoked"));
+    }
+}

@@ -1,0 +1,1571 @@
+use std::net::{Ipv4Addr, SocketAddr};
+use std::sync::{Arc, LazyLock};
+use std::time::{Duration, Instant};
+
+use bytes::BytesMut;
+use dashmap::DashMap;
+use serde::{Deserialize, Serialize};
+
+use crate::errors::{AppError, AppResult};
+use crate::models::downstream_service::DownstreamService;
+
+const OPENAPI_PROBE_PATHS: &[&str] = &[
+    "/openapi.json",
+    "/swagger.json",
+    "/docs/openapi.json",
+    "/.well-known/openapi",
+];
+
+const ASYNCAPI_PROBE_PATHS: &[&str] = &["/asyncapi.json", "/.well-known/asyncapi"];
+const SCALAR_SCRIPT_SRC: &str = "https://cdn.jsdelivr.net";
+const SPEC_FETCH_TIMEOUT: Duration = Duration::from_secs(5);
+const SPEC_CACHE_TTL: Duration = Duration::from_secs(60);
+const MAX_SPEC_RESPONSE_BYTES: usize = 5 * 1024 * 1024;
+const MAX_SPEC_CACHE_ENTRIES: usize = 128;
+
+static SPEC_CACHE: LazyLock<DashMap<String, CachedSpecEntry>> = LazyLock::new(DashMap::new);
+static SPEC_FETCH_CLIENT: LazyLock<reqwest::Client> = LazyLock::new(|| {
+    reqwest::Client::builder()
+        .connect_timeout(Duration::from_secs(10))
+        .pool_idle_timeout(Duration::from_secs(90))
+        .redirect(reqwest::redirect::Policy::none())
+        .build()
+        .expect("Failed to create hardened spec fetch client")
+});
+
+#[derive(Clone)]
+struct CachedSpecEntry {
+    spec: Arc<serde_json::Value>,
+    expires_at: Instant,
+}
+
+impl CachedSpecEntry {
+    fn is_fresh(&self, now: Instant) -> bool {
+        self.expires_at > now
+    }
+}
+
+struct ValidatedSpecFetchTarget {
+    url: url::Url,
+    host: String,
+    resolved_addrs: Vec<SocketAddr>,
+    requires_dns_pinning: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ServiceDocumentationMetadata {
+    pub openapi_spec_url: Option<String>,
+    pub asyncapi_spec_url: Option<String>,
+    pub streaming_supported: bool,
+}
+
+pub async fn discover_service_docs(
+    base_url: &str,
+    explicit_openapi_spec_url: Option<String>,
+    explicit_asyncapi_spec_url: Option<String>,
+) -> ServiceDocumentationMetadata {
+    let openapi_spec_url = match explicit_openapi_spec_url {
+        Some(url) if !url.trim().is_empty() => {
+            if fetch_json_spec(&url).await.is_ok() {
+                Some(url)
+            } else {
+                None
+            }
+        }
+        _ => discover_spec_url(base_url, OPENAPI_PROBE_PATHS).await,
+    };
+
+    let asyncapi_spec_url = match explicit_asyncapi_spec_url {
+        Some(url) if !url.trim().is_empty() => {
+            if fetch_json_spec(&url).await.is_ok() {
+                Some(url)
+            } else {
+                None
+            }
+        }
+        _ => discover_spec_url(base_url, ASYNCAPI_PROBE_PATHS).await,
+    };
+
+    let streaming_supported = if let Some(ref openapi_url) = openapi_spec_url {
+        fetch_json_spec(openapi_url)
+            .await
+            .ok()
+            .is_some_and(|spec| detect_streaming_from_openapi(spec.as_ref()))
+    } else {
+        false
+    } || asyncapi_spec_url.is_some();
+
+    ServiceDocumentationMetadata {
+        openapi_spec_url,
+        asyncapi_spec_url,
+        streaming_supported,
+    }
+}
+
+pub fn is_auto_discovered_openapi_spec_url(base_url: &str, spec_url: &str) -> bool {
+    is_probe_url(base_url, spec_url, OPENAPI_PROBE_PATHS)
+}
+
+pub fn is_auto_discovered_asyncapi_spec_url(base_url: &str, spec_url: &str) -> bool {
+    is_probe_url(base_url, spec_url, ASYNCAPI_PROBE_PATHS)
+}
+
+/// Fetch a JSON spec from a URL using the hardened fetch path (DNS pinning,
+/// response-size limit, redirect policy, 60s cache). Returns the cached Arc.
+pub async fn fetch_spec_json(url: &str) -> AppResult<Arc<serde_json::Value>> {
+    fetch_json_spec_internal(url, None).await
+}
+
+/// Like [`fetch_spec_json`] but partitions the cache by `scope` (e.g. the
+/// owning `user_id`). Use this for user-supplied spec URLs so two users
+/// pointing at the same private URL don't share a cached payload.
+pub async fn fetch_spec_json_scoped(url: &str, scope: &str) -> AppResult<Arc<serde_json::Value>> {
+    fetch_json_spec_internal(url, Some(scope)).await
+}
+
+/// Render a URL for logs without leaking userinfo or query parameters.
+/// User-supplied spec URLs can be signed URLs or include bearer tokens in
+/// the query string, so we only emit scheme + host (+ port) + path. Parse
+/// failures collapse to `<invalid-url>` rather than the raw input.
+pub fn redact_url_for_logs(url: &str) -> String {
+    match url::Url::parse(url) {
+        Ok(parsed) => {
+            let scheme = parsed.scheme();
+            let host = parsed.host_str().unwrap_or("");
+            let port = parsed.port().map(|p| format!(":{p}")).unwrap_or_default();
+            let path = parsed.path();
+            format!("{scheme}://{host}{port}{path}")
+        }
+        Err(_) => "<invalid-url>".to_string(),
+    }
+}
+
+pub async fn fetch_downstream_openapi_spec(
+    service: &DownstreamService,
+    proxy_base_url: &str,
+) -> AppResult<serde_json::Value> {
+    let spec_url = service
+        .openapi_spec_url
+        .as_deref()
+        .ok_or_else(|| AppError::NotFound("Service has no OpenAPI spec configured".to_string()))?;
+
+    let cached = fetch_json_spec(spec_url).await?;
+    if cached.get("openapi").is_none() && cached.get("swagger").is_none() {
+        return Err(AppError::BadRequest(
+            "Downstream spec is not an OpenAPI or Swagger document".to_string(),
+        ));
+    }
+
+    // Clone only when we need to mutate (add proxy metadata)
+    let mut spec = Arc::unwrap_or_clone(cached);
+    let base = proxy_base_url.trim_end_matches('/');
+    let proxy_url = format!("{base}/api/v1/proxy/{}/", service.id);
+    spec["servers"] = serde_json::json!([{
+        "url": proxy_url,
+        "description": "NyxID authenticated proxy"
+    }]);
+    spec["x-nyxid-service-id"] = serde_json::Value::String(service.id.clone());
+    spec["x-nyxid-service-slug"] = serde_json::Value::String(service.slug.clone());
+
+    Ok(spec)
+}
+
+pub async fn fetch_downstream_asyncapi_spec(
+    service: &DownstreamService,
+    proxy_base_url: &str,
+) -> AppResult<serde_json::Value> {
+    let spec_url = service
+        .asyncapi_spec_url
+        .as_deref()
+        .ok_or_else(|| AppError::NotFound("Service has no AsyncAPI spec configured".to_string()))?;
+
+    let cached = fetch_json_spec(spec_url).await?;
+    if cached.get("asyncapi").is_none() {
+        return Err(AppError::BadRequest(
+            "Downstream spec is not an AsyncAPI document".to_string(),
+        ));
+    }
+
+    let mut spec = Arc::unwrap_or_clone(cached);
+    spec["x-nyxid-service-id"] = serde_json::Value::String(service.id.clone());
+    spec["x-nyxid-service-slug"] = serde_json::Value::String(service.slug.clone());
+    spec["x-nyxid-proxy-base-url"] = serde_json::Value::String(format!(
+        "{}/api/v1/proxy/{}/",
+        proxy_base_url.trim_end_matches('/'),
+        service.id
+    ));
+
+    Ok(spec)
+}
+
+pub fn render_scalar_html(title: &str, spec_url: &str) -> String {
+    let escaped_title = escape_html(title);
+    let escaped_spec_url = escape_html(spec_url);
+    format!(
+        r#"<!doctype html>
+<html>
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>{escaped_title}</title>
+    <style>
+      html, body, #app {{ height: 100%; margin: 0; }}
+      body {{ background: #0f172a; }}
+    </style>
+  </head>
+  <body>
+    <script
+      id="api-reference"
+      data-url="{escaped_spec_url}"
+      data-layout="modern"
+      data-proxy-url=""
+    ></script>
+    <script src="https://cdn.jsdelivr.net/npm/@scalar/api-reference"></script>
+  </body>
+</html>"#
+    )
+}
+
+pub fn render_catalog_html() -> &'static str {
+    r#"<!doctype html>
+<html>
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>NyxID API Catalog</title>
+    <style>
+      :root {
+        color-scheme: light;
+        --bg: #f6efe2;
+        --panel: rgba(255, 255, 255, 0.82);
+        --ink: #18212f;
+        --muted: #556070;
+        --line: rgba(24, 33, 47, 0.12);
+        --accent: #c76a34;
+        --accent-soft: rgba(199, 106, 52, 0.12);
+      }
+      * { box-sizing: border-box; }
+      body {
+        margin: 0;
+        font-family: "IBM Plex Sans", "Avenir Next", sans-serif;
+        color: var(--ink);
+        background:
+          radial-gradient(circle at top left, rgba(199, 106, 52, 0.22), transparent 28%),
+          radial-gradient(circle at top right, rgba(30, 97, 110, 0.18), transparent 24%),
+          linear-gradient(160deg, #f7f0e4, #e6ecef);
+      }
+      main {
+        max-width: 1100px;
+        margin: 0 auto;
+        padding: 40px 20px 64px;
+      }
+      h1 {
+        margin: 0 0 8px;
+        font-size: clamp(2rem, 4vw, 3rem);
+        letter-spacing: -0.04em;
+      }
+      p {
+        margin: 0;
+        color: var(--muted);
+        line-height: 1.6;
+      }
+      .panel {
+        margin-top: 28px;
+        background: var(--panel);
+        border: 1px solid var(--line);
+        border-radius: 20px;
+        backdrop-filter: blur(16px);
+        overflow: hidden;
+        box-shadow: 0 20px 80px rgba(24, 33, 47, 0.08);
+      }
+      table {
+        width: 100%;
+        border-collapse: collapse;
+      }
+      th, td {
+        padding: 16px 18px;
+        text-align: left;
+        border-bottom: 1px solid var(--line);
+        vertical-align: top;
+      }
+      th {
+        font-size: 0.78rem;
+        letter-spacing: 0.08em;
+        text-transform: uppercase;
+        color: var(--muted);
+      }
+      td small {
+        display: block;
+        color: var(--muted);
+        margin-top: 4px;
+      }
+      .badge {
+        display: inline-flex;
+        padding: 4px 10px;
+        border-radius: 999px;
+        background: var(--accent-soft);
+        color: var(--accent);
+        font-size: 0.78rem;
+        font-weight: 600;
+      }
+      a {
+        color: var(--ink);
+        text-underline-offset: 0.16em;
+      }
+      #status {
+        margin-top: 18px;
+        font-size: 0.92rem;
+      }
+      @media (max-width: 720px) {
+        th:nth-child(3), td:nth-child(3) { display: none; }
+      }
+    </style>
+  </head>
+  <body>
+    <main>
+      <h1>NyxID API Catalog</h1>
+      <p>Discover NyxID proxy services, documentation status, and streaming capabilities from one place.</p>
+      <p id="status">Loading catalog…</p>
+      <div class="panel">
+        <table>
+          <thead>
+            <tr>
+              <th>Service</th>
+              <th>Docs</th>
+              <th>Streaming</th>
+              <th>Proxy</th>
+            </tr>
+          </thead>
+          <tbody id="catalog-body"></tbody>
+        </table>
+      </div>
+    </main>
+    <script>
+      const body = document.getElementById('catalog-body');
+      const status = document.getElementById('status');
+      const createMessageRow = (message) => {
+        const row = document.createElement('tr');
+        const cell = document.createElement('td');
+        cell.colSpan = 4;
+        cell.textContent = message;
+        row.appendChild(cell);
+        return row;
+      };
+      const createLink = (href, label) => {
+        const link = document.createElement('a');
+        link.href = href;
+        link.textContent = label;
+        return link;
+      };
+      fetch('/api/v1/proxy/services', { credentials: 'include' })
+        .then(async (response) => {
+          if (!response.ok) {
+            throw new Error(`Catalog request failed with ${response.status}`);
+          }
+          return response.json();
+        })
+        .then((payload) => {
+          status.textContent = `${payload.total} services available`;
+          if (!payload.services.length) {
+            body.replaceChildren(createMessageRow('No proxyable services found.'));
+            return;
+          }
+          const rows = payload.services.map((service) => {
+            const row = document.createElement('tr');
+
+            const serviceCell = document.createElement('td');
+            const serviceName = document.createElement('strong');
+            serviceName.textContent = service.name;
+            const serviceSlug = document.createElement('small');
+            serviceSlug.textContent = service.slug;
+            serviceCell.append(serviceName, serviceSlug);
+
+            const docsCell = document.createElement('td');
+            if (service.docs_url) {
+              docsCell.appendChild(createLink(service.docs_url, 'Scalar UI'));
+            } else {
+              docsCell.textContent = 'Unavailable';
+            }
+            if (service.openapi_url) {
+              const openapi = document.createElement('small');
+              openapi.appendChild(createLink(service.openapi_url, 'OpenAPI'));
+              docsCell.appendChild(openapi);
+            }
+            if (service.asyncapi_url) {
+              const asyncapi = document.createElement('small');
+              asyncapi.appendChild(createLink(service.asyncapi_url, 'AsyncAPI'));
+              docsCell.appendChild(asyncapi);
+            }
+
+            const streamingCell = document.createElement('td');
+            if (service.streaming_supported) {
+              const badge = document.createElement('span');
+              badge.className = 'badge';
+              badge.textContent = 'Streaming';
+              streamingCell.appendChild(badge);
+            } else {
+              streamingCell.textContent = 'No';
+            }
+
+            const proxyCell = document.createElement('td');
+            proxyCell.appendChild(
+              createLink(
+                service.proxy_url_slug.replace('{path}', ''),
+                service.proxy_url_slug
+              )
+            );
+
+            row.append(serviceCell, docsCell, streamingCell, proxyCell);
+            return row;
+          });
+          body.replaceChildren(...rows);
+        })
+        .catch((error) => {
+          status.textContent = error.message;
+          body.replaceChildren(createMessageRow('Failed to load catalog.'));
+        });
+    </script>
+  </body>
+</html>"#
+}
+
+pub fn scalar_docs_csp() -> String {
+    format!(
+        "default-src 'none'; script-src {}; style-src 'unsafe-inline'; img-src 'self' data: https:; font-src 'self' data: https:; connect-src 'self'; frame-ancestors 'none'",
+        SCALAR_SCRIPT_SRC
+    )
+}
+
+pub fn catalog_csp() -> &'static str {
+    "default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; img-src 'self' data: https:; font-src 'self' data: https:; connect-src 'self'; frame-ancestors 'none'"
+}
+
+pub fn build_asyncapi_document(base_url: &str) -> serde_json::Value {
+    let base = base_url.trim_end_matches('/');
+    serde_json::json!({
+        "asyncapi": "3.0.0",
+        "info": {
+            "title": "NyxID Streaming and WebSocket API",
+            "version": env!("CARGO_PKG_VERSION"),
+            "description": "AsyncAPI document for NyxID streaming protocols, including node agent WebSockets, SSH tunnels, MCP SSE transport, and downstream proxy streaming."
+        },
+        "servers": {
+            "nyxid": {
+                "host": base,
+                "protocol": "https"
+            }
+        },
+        "channels": {
+                "nodeAgent": {
+                    "address": "/api/v1/nodes/ws",
+                    "messages": {
+                        "register": { "$ref": "#/components/messages/Register" },
+                        "auth": { "$ref": "#/components/messages/Auth" },
+                        "authOk": { "$ref": "#/components/messages/AuthOk" },
+                        "proxyRequest": { "$ref": "#/components/messages/ProxyRequest" },
+                        "proxyResponseStart": { "$ref": "#/components/messages/ProxyResponseStart" },
+                        "proxyResponseChunk": { "$ref": "#/components/messages/ProxyResponseChunk" },
+                        "proxyBinaryChunkFrame": { "$ref": "#/components/messages/ProxyBinaryChunkFrame" },
+                        "proxyResponseEnd": { "$ref": "#/components/messages/ProxyResponseEnd" }
+                    }
+                },
+            "sshTunnel": {
+                "address": "/api/v1/ssh/{service_id}",
+                "messages": {
+                    "sshBinaryFrame": { "$ref": "#/components/messages/SshBinaryFrame" }
+                }
+            },
+            "mcpHttp": {
+                "address": "/mcp",
+                "messages": {
+                    "streamableHttp": { "$ref": "#/components/messages/McpSseStream" }
+                }
+            },
+            "proxySse": {
+                "address": "/api/v1/proxy/{service_id}/{path}",
+                "messages": {
+                    "sseEvent": { "$ref": "#/components/messages/SseEvent" }
+                }
+            },
+            "llmSse": {
+                "address": "/api/v1/llm/{provider_slug}/v1/{path}",
+                "messages": {
+                    "sseEvent": { "$ref": "#/components/messages/SseEvent" }
+                }
+            }
+        },
+        "operations": {
+            "connectNodeAgent": {
+                "action": "send",
+                "channel": { "$ref": "#/channels/nodeAgent" },
+                "summary": "Register or authenticate a credential node over WebSocket"
+            },
+            "consumeNodeProxyStream": {
+                "action": "receive",
+                "channel": { "$ref": "#/channels/nodeAgent" },
+                "summary": "Receive streaming proxy chunks from the node agent"
+            },
+            "openSshTunnel": {
+                "action": "send",
+                "channel": { "$ref": "#/channels/sshTunnel" },
+                "summary": "Open an authenticated SSH-over-WebSocket tunnel"
+            },
+            "consumeSshTunnel": {
+                "action": "receive",
+                "channel": { "$ref": "#/channels/sshTunnel" },
+                "summary": "Exchange raw SSH bytes over WebSocket binary frames"
+            },
+            "consumeMcpSse": {
+                "action": "receive",
+                "channel": { "$ref": "#/channels/mcpHttp" },
+                "summary": "Consume MCP streamable HTTP events"
+            },
+            "consumeProxySse": {
+                "action": "receive",
+                "channel": { "$ref": "#/channels/proxySse" },
+                "summary": "Consume downstream SSE through the authenticated proxy"
+            }
+        },
+        "components": {
+            "messages": {
+                "Register": {
+                    "name": "register",
+                    "payload": {
+                        "type": "object",
+                        "required": ["type", "registration_token"],
+                        "properties": {
+                            "type": { "type": "string", "const": "register" },
+                            "registration_token": { "type": "string" }
+                        }
+                    }
+                },
+                "Auth": {
+                    "name": "auth",
+                    "payload": {
+                        "type": "object",
+                        "required": ["type", "node_id", "auth_token"],
+                        "properties": {
+                            "type": { "type": "string", "const": "auth" },
+                            "node_id": { "type": "string" },
+                            "auth_token": { "type": "string" }
+                        }
+                    }
+                },
+                "AuthOk": {
+                    "name": "auth_ok",
+                    "payload": {
+                        "type": "object",
+                        "required": ["type", "node_id"],
+                        "properties": {
+                            "type": { "type": "string", "const": "auth_ok" },
+                            "node_id": { "type": "string" },
+                            "capabilities": {
+                                "type": "object",
+                                "properties": {
+                                    "proxy_binary_chunks": {
+                                        "type": "boolean",
+                                        "description": "When true, the node may send streaming proxy chunks as WebSocket binary frames with a 36-byte ASCII request_id prefix."
+                                    }
+                                }
+                            }
+                        }
+                    }
+                },
+                "ProxyRequest": {
+                    "name": "proxy_request",
+                    "payload": {
+                        "type": "object",
+                        "required": ["type", "request_id", "service_id", "path", "method"],
+                        "properties": {
+                            "type": { "type": "string", "const": "proxy_request" },
+                            "request_id": { "type": "string" },
+                            "service_id": { "type": "string" },
+                            "path": { "type": "string" },
+                            "method": { "type": "string" }
+                        }
+                    }
+                },
+                "ProxyResponseStart": {
+                    "name": "proxy_response_start",
+                    "payload": {
+                        "type": "object",
+                        "required": ["type", "request_id", "status"],
+                        "properties": {
+                            "type": { "type": "string", "const": "proxy_response_start" },
+                            "request_id": { "type": "string" },
+                            "status": { "type": "integer" }
+                        }
+                    }
+                },
+                "ProxyResponseChunk": {
+                    "name": "proxy_response_chunk",
+                    "payload": {
+                        "type": "object",
+                        "required": ["type", "request_id", "data"],
+                        "properties": {
+                            "type": { "type": "string", "const": "proxy_response_chunk" },
+                            "request_id": { "type": "string" },
+                            "data": {
+                                "type": "string",
+                                "description": "Legacy fallback: base64-encoded chunk payload used when `auth_ok.capabilities.proxy_binary_chunks` is absent or false."
+                            }
+                        }
+                    }
+                },
+                "ProxyBinaryChunkFrame": {
+                    "name": "proxy_binary_chunk_frame",
+                    "payload": {
+                        "type": "string",
+                        "format": "binary",
+                        "description": "Preferred streaming proxy chunk transport. WebSocket binary frame where the first 36 bytes are the ASCII request_id UUID and the remaining bytes are raw chunk data."
+                    }
+                },
+                "ProxyResponseEnd": {
+                    "name": "proxy_response_end",
+                    "payload": {
+                        "type": "object",
+                        "required": ["type", "request_id"],
+                        "properties": {
+                            "type": { "type": "string", "const": "proxy_response_end" },
+                            "request_id": { "type": "string" }
+                        }
+                    }
+                },
+                "SshBinaryFrame": {
+                    "name": "ssh_binary_frame",
+                    "payload": {
+                        "type": "string",
+                        "format": "binary",
+                        "description": "Raw SSH TCP payload encoded as a WebSocket binary frame"
+                    }
+                },
+                "McpSseStream": {
+                    "name": "mcp_stream",
+                    "payload": {
+                        "type": "string",
+                        "description": "Streamable HTTP payload encoded as Server-Sent Events"
+                    }
+                },
+                "SseEvent": {
+                    "name": "sse_event",
+                    "payload": {
+                        "type": "string",
+                        "description": "UTF-8 SSE event frame"
+                    }
+                }
+            }
+        }
+    })
+}
+
+async fn discover_spec_url(base_url: &str, candidate_paths: &[&str]) -> Option<String> {
+    let base = base_url.trim_end_matches('/');
+    for path in candidate_paths {
+        let candidate = format!("{base}{path}");
+        if fetch_json_spec(&candidate).await.is_ok() {
+            return Some(candidate);
+        }
+    }
+    None
+}
+
+fn is_probe_url(base_url: &str, spec_url: &str, candidate_paths: &[&str]) -> bool {
+    let base = base_url.trim_end_matches('/');
+    candidate_paths
+        .iter()
+        .any(|path| format!("{base}{path}") == spec_url)
+}
+
+async fn fetch_json_spec(url: &str) -> AppResult<Arc<serde_json::Value>> {
+    fetch_json_spec_internal(url, None).await
+}
+
+/// Build the DashMap cache key. Unscoped callers share the global URL-keyed
+/// cache (legacy behaviour). Scoped callers prepend a namespace so private
+/// user specs don't leak between users.
+fn build_cache_key(url: &str, scope: Option<&str>) -> String {
+    match scope {
+        Some(s) => format!("scope:{s}|{url}"),
+        None => url.to_string(),
+    }
+}
+
+async fn fetch_json_spec_internal(
+    url: &str,
+    scope: Option<&str>,
+) -> AppResult<Arc<serde_json::Value>> {
+    let target = validate_spec_fetch_target(url).await?;
+    let cache_key = build_cache_key(target.url.as_ref(), scope);
+    if let Some(spec) = get_cached_spec(&cache_key) {
+        return Ok(spec);
+    }
+
+    // Pre-compute the redacted URL once -- validated targets strip userinfo
+    // but query strings may still carry signed-URL secrets.
+    let log_url = redact_url_for_logs(target.url.as_ref());
+
+    let response = if target.requires_dns_pinning {
+        build_pinned_spec_fetch_client(&target)?
+            .get(target.url.clone())
+            .timeout(SPEC_FETCH_TIMEOUT)
+            .send()
+            .await
+    } else {
+        SPEC_FETCH_CLIENT
+            .get(target.url.clone())
+            .timeout(SPEC_FETCH_TIMEOUT)
+            .send()
+            .await
+    }
+    .map_err(|error| {
+        tracing::warn!(url = %log_url, %error, "Failed to fetch downstream API spec");
+        AppError::BadRequest("Failed to fetch spec".to_string())
+    })?;
+
+    if !response.status().is_success() {
+        return Err(AppError::BadRequest(format!(
+            "Spec returned HTTP {}",
+            response.status()
+        )));
+    }
+
+    let mut response = response;
+    let mut body = BytesMut::new();
+    while let Some(chunk) = response.chunk().await.map_err(|error| {
+        tracing::warn!(url = %log_url, %error, "Failed to read downstream API spec body");
+        AppError::BadRequest("Failed to read spec body".to_string())
+    })? {
+        if body.len() + chunk.len() > MAX_SPEC_RESPONSE_BYTES {
+            tracing::warn!(
+                url = %log_url,
+                limit_bytes = MAX_SPEC_RESPONSE_BYTES,
+                "Downstream API spec exceeded size limit"
+            );
+            return Err(AppError::BadRequest(format!(
+                "Spec response exceeded the {} byte limit",
+                MAX_SPEC_RESPONSE_BYTES
+            )));
+        }
+        body.extend_from_slice(&chunk);
+    }
+
+    let spec = Arc::new(
+        serde_json::from_slice::<serde_json::Value>(&body)
+            .map_err(|e| AppError::BadRequest(format!("Spec was not valid JSON: {e}")))?,
+    );
+    cache_spec(&cache_key, spec.clone());
+    Ok(spec)
+}
+
+fn detect_streaming_from_openapi(spec: &serde_json::Value) -> bool {
+    let Some(paths) = spec.get("paths").and_then(|value| value.as_object()) else {
+        return false;
+    };
+
+    for path_item in paths.values() {
+        let Some(path_object) = path_item.as_object() else {
+            continue;
+        };
+
+        for method in ["get", "post", "put", "patch", "delete"] {
+            let Some(operation) = path_object.get(method).and_then(|value| value.as_object())
+            else {
+                continue;
+            };
+
+            let Some(responses) = operation
+                .get("responses")
+                .and_then(|value| value.as_object())
+            else {
+                continue;
+            };
+
+            for response in responses.values() {
+                let Some(content) = response.get("content").and_then(|value| value.as_object())
+                else {
+                    continue;
+                };
+
+                if content.contains_key("text/event-stream") {
+                    return true;
+                }
+            }
+        }
+    }
+
+    false
+}
+
+fn escape_html(value: &str) -> String {
+    let mut escaped = String::with_capacity(value.len());
+    for ch in value.chars() {
+        match ch {
+            '&' => escaped.push_str("&amp;"),
+            '<' => escaped.push_str("&lt;"),
+            '>' => escaped.push_str("&gt;"),
+            '"' => escaped.push_str("&quot;"),
+            '\'' => escaped.push_str("&#x27;"),
+            _ => escaped.push(ch),
+        }
+    }
+    escaped
+}
+
+async fn validate_spec_fetch_target(url: &str) -> AppResult<ValidatedSpecFetchTarget> {
+    let parsed = url::Url::parse(url)
+        .map_err(|_| AppError::BadRequest("Spec URL is invalid".to_string()))?;
+    if !matches!(parsed.scheme(), "http" | "https") {
+        return Err(AppError::BadRequest(
+            "Spec URL must use http or https".to_string(),
+        ));
+    }
+
+    // Reject embedded credentials. Storage-time validation
+    // (`url_validation::validate_optional_spec_url`) already rejects these
+    // before they land in MongoDB, but keep this belt-and-suspenders: a
+    // legacy row predating that check should still be blocked from being
+    // fetched.
+    crate::services::url_validation::reject_url_userinfo(&parsed)?;
+
+    let host = parsed
+        .host_str()
+        .ok_or_else(|| AppError::BadRequest("Spec URL must include a hostname".to_string()))?;
+    let normalized_host = normalize_fetch_host(host);
+    if is_blocked_fetch_hostname(&normalized_host) {
+        return Err(AppError::BadRequest(
+            "Spec URL must not target a private or internal hostname".to_string(),
+        ));
+    }
+
+    let port = parsed
+        .port_or_known_default()
+        .ok_or_else(|| AppError::BadRequest("Spec URL must include a valid port".to_string()))?;
+    let (resolved_addrs, requires_dns_pinning) =
+        resolve_fetch_host_socket_addrs(&normalized_host, port).await?;
+    if resolved_addrs.is_empty() {
+        return Err(AppError::BadRequest(
+            "Spec URL host did not resolve to any IP addresses".to_string(),
+        ));
+    }
+    if resolved_addrs
+        .iter()
+        .map(SocketAddr::ip)
+        .any(is_private_or_internal_ip)
+    {
+        return Err(AppError::BadRequest(
+            "Spec URL must not resolve to private or internal IP addresses".to_string(),
+        ));
+    }
+
+    let mut url = parsed;
+    url.set_host(Some(&normalized_host))
+        .map_err(|_| AppError::BadRequest("Spec URL hostname is invalid".to_string()))?;
+
+    Ok(ValidatedSpecFetchTarget {
+        url,
+        host: normalized_host,
+        resolved_addrs,
+        requires_dns_pinning,
+    })
+}
+
+async fn resolve_fetch_host_socket_addrs(
+    host: &str,
+    port: u16,
+) -> AppResult<(Vec<SocketAddr>, bool)> {
+    if let Ok(ip) = parse_fetch_host_ip(host) {
+        return Ok((vec![SocketAddr::new(ip, port)], false));
+    }
+
+    let resolved = tokio::net::lookup_host((host, port))
+        .await
+        .map_err(|e| AppError::BadRequest(format!("Failed to resolve spec host: {e}")))?;
+    Ok((resolved.collect(), true))
+}
+
+fn parse_fetch_host_ip(host: &str) -> Result<std::net::IpAddr, std::net::AddrParseError> {
+    normalize_fetch_host(host).parse()
+}
+
+fn is_blocked_fetch_hostname(host: &str) -> bool {
+    matches!(
+        normalize_fetch_host(host).as_str(),
+        "localhost" | "metadata.google.internal"
+    )
+}
+
+fn normalize_fetch_host(host: &str) -> String {
+    host.trim()
+        .trim_start_matches('[')
+        .trim_end_matches(']')
+        .trim_end_matches('.')
+        .to_ascii_lowercase()
+}
+
+fn get_cached_spec(url: &str) -> Option<Arc<serde_json::Value>> {
+    let now = Instant::now();
+    let entry = SPEC_CACHE.get(url)?;
+    if entry.is_fresh(now) {
+        return Some(entry.spec.clone());
+    }
+
+    drop(entry);
+    SPEC_CACHE.remove(url);
+    None
+}
+
+fn cache_spec(url: &str, spec: Arc<serde_json::Value>) {
+    prune_stale_cache_entries(Instant::now());
+    if !SPEC_CACHE.contains_key(url) {
+        while SPEC_CACHE.len() >= MAX_SPEC_CACHE_ENTRIES && evict_oldest_cache_entry() {}
+    }
+
+    SPEC_CACHE.insert(
+        url.to_string(),
+        CachedSpecEntry {
+            spec,
+            expires_at: Instant::now() + SPEC_CACHE_TTL,
+        },
+    );
+}
+
+#[cfg(test)]
+pub(crate) fn cache_test_spec(url: &str, scope: Option<&str>, spec: serde_json::Value) {
+    let cache_key = build_cache_key(url, scope);
+    cache_spec(&cache_key, Arc::new(spec));
+}
+
+/// Serializes test access to the process-wide `SPEC_CACHE`. Tests that
+/// mutate the cache or assert on its contents must acquire this guard;
+/// without it, the global static races across `cargo test`'s parallel
+/// runner (e.g. one test counts entries while another clears them).
+#[cfg(test)]
+static SPEC_CACHE_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+/// RAII guard giving a single test exclusive access to `SPEC_CACHE`.
+///
+/// The cache is cleared on acquire (so the test starts clean) and on drop
+/// (so the next test isn't poisoned by leftover entries). Hold the guard
+/// for the full duration of any cache interaction — including helpers like
+/// `cache_test_spec` and production code paths that touch the cache.
+#[cfg(test)]
+pub(crate) struct SpecCacheTestGuard {
+    _lock: std::sync::MutexGuard<'static, ()>,
+}
+
+#[cfg(test)]
+impl SpecCacheTestGuard {
+    pub(crate) fn acquire() -> Self {
+        let lock = SPEC_CACHE_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        SPEC_CACHE.clear();
+        Self { _lock: lock }
+    }
+}
+
+#[cfg(test)]
+impl Drop for SpecCacheTestGuard {
+    fn drop(&mut self) {
+        SPEC_CACHE.clear();
+    }
+}
+
+fn prune_stale_cache_entries(now: Instant) {
+    SPEC_CACHE.retain(|_, entry| entry.is_fresh(now));
+}
+
+fn evict_oldest_cache_entry() -> bool {
+    let oldest_key = SPEC_CACHE
+        .iter()
+        .map(|entry| (entry.key().clone(), entry.expires_at))
+        .min_by_key(|(_, expires_at)| *expires_at)
+        .map(|(key, _)| key);
+    if let Some(oldest_key) = oldest_key {
+        SPEC_CACHE.remove(&oldest_key);
+        return true;
+    }
+
+    false
+}
+
+fn build_pinned_spec_fetch_client(target: &ValidatedSpecFetchTarget) -> AppResult<reqwest::Client> {
+    reqwest::Client::builder()
+        .connect_timeout(Duration::from_secs(10))
+        .pool_idle_timeout(Duration::from_secs(90))
+        .redirect(reqwest::redirect::Policy::none())
+        .resolve_to_addrs(&target.host, &target.resolved_addrs)
+        .build()
+        .map_err(|e| AppError::Internal(format!("Failed to build pinned spec fetch client: {e}")))
+}
+
+fn is_private_or_internal_ip(ip: std::net::IpAddr) -> bool {
+    match ip {
+        std::net::IpAddr::V4(ipv4) => {
+            ipv4.is_loopback()
+                || ipv4.is_private()
+                || ipv4.is_link_local()
+                || ipv4.is_unspecified()
+                || ipv4.is_broadcast()
+                || is_rfc6598_cgnat(ipv4)
+        }
+        std::net::IpAddr::V6(ipv6) => {
+            ipv6.is_loopback()
+                || ipv6.is_unspecified()
+                || (ipv6.segments()[0] & 0xfe00) == 0xfc00
+                || (ipv6.segments()[0] & 0xffc0) == 0xfe80
+                || ipv6
+                    .to_ipv4_mapped()
+                    .is_some_and(|mapped| is_private_or_internal_ip(mapped.into()))
+        }
+    }
+}
+
+fn is_rfc6598_cgnat(ipv4: Ipv4Addr) -> bool {
+    ipv4.octets()[0] == 100 && (64..=127).contains(&ipv4.octets()[1])
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{
+        CachedSpecEntry, MAX_SPEC_CACHE_ENTRIES, ServiceDocumentationMetadata,
+        build_asyncapi_document, cache_spec, catalog_csp, detect_streaming_from_openapi,
+        get_cached_spec, render_scalar_html, scalar_docs_csp, validate_spec_fetch_target,
+    };
+    use std::sync::Arc;
+    use std::time::{Duration, Instant};
+
+    #[test]
+    fn detects_streaming_media_type_in_openapi() {
+        let spec = serde_json::json!({
+            "openapi": "3.1.0",
+            "paths": {
+                "/stream": {
+                    "get": {
+                        "responses": {
+                            "200": {
+                                "content": {
+                                    "text/event-stream": {
+                                        "schema": { "type": "string" }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        });
+
+        assert!(detect_streaming_from_openapi(&spec));
+    }
+
+    #[test]
+    fn ignores_non_streaming_openapi_specs() {
+        let spec = serde_json::json!({
+            "openapi": "3.1.0",
+            "paths": {
+                "/users": {
+                    "get": {
+                        "responses": {
+                            "200": {
+                                "content": {
+                                    "application/json": {
+                                        "schema": { "type": "object" }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        });
+
+        assert!(!detect_streaming_from_openapi(&spec));
+    }
+
+    #[test]
+    fn asyncapi_document_uses_requested_base_url() {
+        let doc = build_asyncapi_document("https://nyxid.example.com");
+        assert_eq!(doc["servers"]["nyxid"]["host"], "https://nyxid.example.com");
+        assert_eq!(
+            doc["channels"]["sshTunnel"]["address"],
+            "/api/v1/ssh/{service_id}"
+        );
+    }
+
+    #[test]
+    fn scalar_html_embeds_spec_url() {
+        let html = render_scalar_html("Docs", "/api/v1/docs/openapi.json");
+        assert!(html.contains("/api/v1/docs/openapi.json"));
+        assert!(html.contains("@scalar/api-reference"));
+    }
+
+    #[test]
+    fn scalar_html_escapes_untrusted_values() {
+        let html = render_scalar_html("<Docs>", "\"/api/v1/docs/openapi.json\"");
+        assert!(html.contains("&lt;Docs&gt;"));
+        assert!(html.contains("&quot;/api/v1/docs/openapi.json&quot;"));
+        assert!(!html.contains("<title><Docs></title>"));
+    }
+
+    #[test]
+    fn documentation_metadata_serializes() {
+        let metadata = ServiceDocumentationMetadata {
+            openapi_spec_url: Some("https://example.com/openapi.json".to_string()),
+            asyncapi_spec_url: None,
+            streaming_supported: true,
+        };
+        let json = serde_json::to_value(metadata).expect("serialize metadata");
+        assert_eq!(json["streaming_supported"], true);
+    }
+
+    #[test]
+    fn scalar_docs_csp_allows_scalar_script_source() {
+        let csp = scalar_docs_csp();
+        assert!(csp.contains("https://cdn.jsdelivr.net"));
+        assert!(csp.contains("connect-src 'self'"));
+    }
+
+    #[test]
+    fn catalog_csp_allows_inline_script_for_embedded_catalog_page() {
+        let csp = catalog_csp();
+        assert!(csp.contains("script-src 'unsafe-inline'"));
+    }
+
+    #[tokio::test]
+    async fn spec_fetch_validation_rejects_private_targets() {
+        assert!(
+            validate_spec_fetch_target("http://100.64.0.1/openapi.json")
+                .await
+                .is_err()
+        );
+        assert!(
+            validate_spec_fetch_target("http://127.0.0.1/openapi.json")
+                .await
+                .is_err()
+        );
+        assert!(
+            validate_spec_fetch_target("https://[::1]/openapi.json")
+                .await
+                .is_err()
+        );
+        assert!(
+            validate_spec_fetch_target("http://metadata.google.internal/openapi.json")
+                .await
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn cached_specs_are_returned_while_fresh() {
+        let _cache_guard = super::SpecCacheTestGuard::acquire();
+        let url = "https://example.com/openapi.json";
+        let spec = serde_json::json!({ "openapi": "3.1.0" });
+        cache_spec(url, Arc::new(spec.clone()));
+
+        assert_eq!(get_cached_spec(url).as_deref(), Some(&spec));
+    }
+
+    #[test]
+    fn stale_cache_entries_are_evicted() {
+        let _cache_guard = super::SpecCacheTestGuard::acquire();
+        let url = "https://example.com/stale-openapi.json";
+        super::SPEC_CACHE.insert(
+            url.to_string(),
+            CachedSpecEntry {
+                spec: Arc::new(serde_json::json!({ "openapi": "3.1.0" })),
+                expires_at: Instant::now() - Duration::from_secs(1),
+            },
+        );
+
+        assert!(get_cached_spec(url).is_none());
+        assert!(!super::SPEC_CACHE.contains_key(url));
+    }
+
+    #[test]
+    fn cache_spec_evicts_oldest_entry_when_capacity_is_reached() {
+        let _cache_guard = super::SpecCacheTestGuard::acquire();
+
+        for idx in 0..MAX_SPEC_CACHE_ENTRIES {
+            super::SPEC_CACHE.insert(
+                format!("https://example.com/spec-{idx}.json"),
+                CachedSpecEntry {
+                    spec: Arc::new(serde_json::json!({ "openapi": "3.1.0", "idx": idx })),
+                    expires_at: Instant::now() + Duration::from_secs(120 + idx as u64),
+                },
+            );
+        }
+
+        cache_spec(
+            "https://example.com/spec-new.json",
+            Arc::new(serde_json::json!({ "openapi": "3.1.0", "idx": "new" })),
+        );
+
+        assert_eq!(super::SPEC_CACHE.len(), MAX_SPEC_CACHE_ENTRIES);
+        assert!(!super::SPEC_CACHE.contains_key("https://example.com/spec-0.json"));
+        assert!(super::SPEC_CACHE.contains_key("https://example.com/spec-new.json"));
+    }
+
+    #[test]
+    fn cache_key_is_partitioned_by_scope() {
+        // Two users pointing at the same URL must not share a cached entry,
+        // so their cache keys have to differ.
+        let unscoped = super::build_cache_key("https://example.com/openapi.json", None);
+        let user_a = super::build_cache_key("https://example.com/openapi.json", Some("user-a"));
+        let user_b = super::build_cache_key("https://example.com/openapi.json", Some("user-b"));
+
+        assert_ne!(unscoped, user_a);
+        assert_ne!(user_a, user_b);
+    }
+
+    #[test]
+    fn redact_url_strips_userinfo_and_query() {
+        // Signed URL: the query carries the token and must never appear in logs.
+        let redacted = super::redact_url_for_logs(
+            "https://user:secret@host.example.com:8443/specs/openapi.json?sig=DEADBEEF&exp=12345",
+        );
+        assert_eq!(redacted, "https://host.example.com:8443/specs/openapi.json");
+    }
+
+    #[test]
+    fn redact_url_preserves_default_port() {
+        let redacted = super::redact_url_for_logs("https://host.example.com/openapi.json");
+        assert_eq!(redacted, "https://host.example.com/openapi.json");
+    }
+
+    #[test]
+    fn redact_url_collapses_invalid_input() {
+        assert_eq!(super::redact_url_for_logs("not a url"), "<invalid-url>");
+    }
+
+    #[tokio::test]
+    async fn validate_rejects_urls_with_embedded_credentials() {
+        assert!(
+            validate_spec_fetch_target("https://user:pass@example.com/openapi.json")
+                .await
+                .is_err()
+        );
+        assert!(
+            validate_spec_fetch_target("https://user@example.com/openapi.json")
+                .await
+                .is_err()
+        );
+    }
+
+    // ---- is_auto_discovered_openapi_spec_url ----
+
+    #[test]
+    fn auto_discovered_openapi_matches_probe_paths() {
+        assert!(super::is_auto_discovered_openapi_spec_url(
+            "https://api.example.com",
+            "https://api.example.com/openapi.json"
+        ));
+        assert!(super::is_auto_discovered_openapi_spec_url(
+            "https://api.example.com",
+            "https://api.example.com/swagger.json"
+        ));
+        assert!(super::is_auto_discovered_openapi_spec_url(
+            "https://api.example.com",
+            "https://api.example.com/docs/openapi.json"
+        ));
+        assert!(super::is_auto_discovered_openapi_spec_url(
+            "https://api.example.com",
+            "https://api.example.com/.well-known/openapi"
+        ));
+    }
+
+    #[test]
+    fn auto_discovered_openapi_rejects_non_probe_urls() {
+        assert!(!super::is_auto_discovered_openapi_spec_url(
+            "https://api.example.com",
+            "https://api.example.com/custom/spec.json"
+        ));
+        assert!(!super::is_auto_discovered_openapi_spec_url(
+            "https://api.example.com",
+            "https://other.example.com/openapi.json"
+        ));
+    }
+
+    #[test]
+    fn auto_discovered_openapi_strips_trailing_slash_from_base() {
+        assert!(super::is_auto_discovered_openapi_spec_url(
+            "https://api.example.com/",
+            "https://api.example.com/openapi.json"
+        ));
+    }
+
+    // ---- is_auto_discovered_asyncapi_spec_url ----
+
+    #[test]
+    fn auto_discovered_asyncapi_matches_probe_paths() {
+        assert!(super::is_auto_discovered_asyncapi_spec_url(
+            "https://api.example.com",
+            "https://api.example.com/asyncapi.json"
+        ));
+        assert!(super::is_auto_discovered_asyncapi_spec_url(
+            "https://api.example.com",
+            "https://api.example.com/.well-known/asyncapi"
+        ));
+    }
+
+    #[test]
+    fn auto_discovered_asyncapi_rejects_openapi_paths() {
+        assert!(!super::is_auto_discovered_asyncapi_spec_url(
+            "https://api.example.com",
+            "https://api.example.com/openapi.json"
+        ));
+    }
+
+    // ---- escape_html ----
+
+    #[test]
+    fn escape_html_handles_all_special_chars() {
+        assert_eq!(super::escape_html("&<>\"'"), "&amp;&lt;&gt;&quot;&#x27;");
+    }
+
+    #[test]
+    fn escape_html_passes_through_safe_text() {
+        assert_eq!(super::escape_html("hello world 123"), "hello world 123");
+    }
+
+    #[test]
+    fn escape_html_handles_empty_string() {
+        assert_eq!(super::escape_html(""), "");
+    }
+
+    #[test]
+    fn escape_html_handles_mixed_content() {
+        assert_eq!(
+            super::escape_html("user <script>alert('xss')</script>"),
+            "user &lt;script&gt;alert(&#x27;xss&#x27;)&lt;/script&gt;"
+        );
+    }
+
+    // ---- is_blocked_fetch_hostname ----
+
+    #[test]
+    fn blocked_fetch_hostname_rejects_localhost() {
+        assert!(super::is_blocked_fetch_hostname("localhost"));
+        assert!(super::is_blocked_fetch_hostname("LOCALHOST"));
+        assert!(super::is_blocked_fetch_hostname("LocalHost."));
+    }
+
+    #[test]
+    fn blocked_fetch_hostname_rejects_cloud_metadata() {
+        assert!(super::is_blocked_fetch_hostname("metadata.google.internal"));
+        assert!(super::is_blocked_fetch_hostname(
+            "metadata.google.internal."
+        ));
+    }
+
+    #[test]
+    fn blocked_fetch_hostname_allows_public_hosts() {
+        assert!(!super::is_blocked_fetch_hostname("api.example.com"));
+        assert!(!super::is_blocked_fetch_hostname("example.com"));
+    }
+
+    // ---- normalize_fetch_host ----
+
+    #[test]
+    fn normalize_fetch_host_lowercases() {
+        assert_eq!(
+            super::normalize_fetch_host("API.Example.COM"),
+            "api.example.com"
+        );
+    }
+
+    #[test]
+    fn normalize_fetch_host_strips_brackets() {
+        assert_eq!(super::normalize_fetch_host("[::1]"), "::1");
+    }
+
+    #[test]
+    fn normalize_fetch_host_strips_trailing_dot() {
+        assert_eq!(super::normalize_fetch_host("example.com."), "example.com");
+    }
+
+    #[test]
+    fn normalize_fetch_host_trims_whitespace() {
+        assert_eq!(
+            super::normalize_fetch_host("  example.com  "),
+            "example.com"
+        );
+    }
+
+    #[test]
+    fn normalize_fetch_host_all_normalizations_combined() {
+        assert_eq!(
+            super::normalize_fetch_host("  [API.Example.COM.]  "),
+            "api.example.com"
+        );
+    }
+
+    // ---- is_private_or_internal_ip ----
+
+    #[test]
+    fn private_ip_detects_loopback_v4() {
+        let ip: std::net::IpAddr = "127.0.0.1".parse().unwrap();
+        assert!(super::is_private_or_internal_ip(ip));
+    }
+
+    #[test]
+    fn private_ip_detects_rfc1918_ranges() {
+        let ip_10: std::net::IpAddr = "10.0.0.1".parse().unwrap();
+        let ip_172: std::net::IpAddr = "172.16.0.1".parse().unwrap();
+        let ip_192: std::net::IpAddr = "192.168.1.1".parse().unwrap();
+        assert!(super::is_private_or_internal_ip(ip_10));
+        assert!(super::is_private_or_internal_ip(ip_172));
+        assert!(super::is_private_or_internal_ip(ip_192));
+    }
+
+    #[test]
+    fn private_ip_detects_link_local_v4() {
+        let ip: std::net::IpAddr = "169.254.1.1".parse().unwrap();
+        assert!(super::is_private_or_internal_ip(ip));
+    }
+
+    #[test]
+    fn private_ip_detects_loopback_v6() {
+        let ip: std::net::IpAddr = "::1".parse().unwrap();
+        assert!(super::is_private_or_internal_ip(ip));
+    }
+
+    #[test]
+    fn private_ip_detects_ula_v6() {
+        let ip: std::net::IpAddr = "fd00::1".parse().unwrap();
+        assert!(super::is_private_or_internal_ip(ip));
+    }
+
+    #[test]
+    fn private_ip_detects_link_local_v6() {
+        let ip: std::net::IpAddr = "fe80::1".parse().unwrap();
+        assert!(super::is_private_or_internal_ip(ip));
+    }
+
+    #[test]
+    fn private_ip_detects_mapped_v4_in_v6() {
+        // ::ffff:127.0.0.1 is an IPv4-mapped IPv6 address for loopback
+        let ip: std::net::IpAddr = "::ffff:127.0.0.1".parse().unwrap();
+        assert!(super::is_private_or_internal_ip(ip));
+    }
+
+    #[test]
+    fn private_ip_allows_public_addresses() {
+        let ip: std::net::IpAddr = "8.8.8.8".parse().unwrap();
+        assert!(!super::is_private_or_internal_ip(ip));
+        let ip6: std::net::IpAddr = "2001:db8::1".parse().unwrap();
+        assert!(!super::is_private_or_internal_ip(ip6));
+    }
+
+    #[test]
+    fn private_ip_detects_unspecified() {
+        let v4: std::net::IpAddr = "0.0.0.0".parse().unwrap();
+        let v6: std::net::IpAddr = "::".parse().unwrap();
+        assert!(super::is_private_or_internal_ip(v4));
+        assert!(super::is_private_or_internal_ip(v6));
+    }
+
+    #[test]
+    fn private_ip_detects_broadcast() {
+        let ip: std::net::IpAddr = "255.255.255.255".parse().unwrap();
+        assert!(super::is_private_or_internal_ip(ip));
+    }
+
+    // ---- is_rfc6598_cgnat ----
+
+    #[test]
+    fn rfc6598_cgnat_detects_range_boundaries() {
+        assert!(super::is_rfc6598_cgnat("100.64.0.0".parse().unwrap()));
+        assert!(super::is_rfc6598_cgnat("100.127.255.255".parse().unwrap()));
+        assert!(super::is_rfc6598_cgnat("100.100.50.25".parse().unwrap()));
+    }
+
+    #[test]
+    fn rfc6598_cgnat_rejects_outside_range() {
+        assert!(!super::is_rfc6598_cgnat("100.63.255.255".parse().unwrap()));
+        assert!(!super::is_rfc6598_cgnat("100.128.0.0".parse().unwrap()));
+        assert!(!super::is_rfc6598_cgnat("8.8.8.8".parse().unwrap()));
+    }
+
+    // ---- detect_streaming_from_openapi (edge cases) ----
+
+    #[test]
+    fn detect_streaming_returns_false_for_empty_paths() {
+        let spec = serde_json::json!({"openapi": "3.1.0", "paths": {}});
+        assert!(!detect_streaming_from_openapi(&spec));
+    }
+
+    #[test]
+    fn detect_streaming_returns_false_without_paths_key() {
+        let spec = serde_json::json!({"openapi": "3.1.0"});
+        assert!(!detect_streaming_from_openapi(&spec));
+    }
+
+    #[test]
+    fn detect_streaming_finds_sse_in_post_method() {
+        let spec = serde_json::json!({
+            "openapi": "3.1.0",
+            "paths": {
+                "/chat/completions": {
+                    "post": {
+                        "responses": {
+                            "200": {
+                                "content": {
+                                    "text/event-stream": {}
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        });
+        assert!(detect_streaming_from_openapi(&spec));
+    }
+
+    // ---- build_cache_key ----
+
+    #[test]
+    fn build_cache_key_unscoped_is_raw_url() {
+        let key = super::build_cache_key("https://example.com/spec.json", None);
+        assert_eq!(key, "https://example.com/spec.json");
+    }
+
+    #[test]
+    fn build_cache_key_scoped_includes_prefix() {
+        let key = super::build_cache_key("https://example.com/spec.json", Some("user-abc"));
+        assert_eq!(key, "scope:user-abc|https://example.com/spec.json");
+    }
+
+    // ---- redact_url_for_logs (additional edge cases) ----
+
+    #[test]
+    fn redact_url_handles_http_scheme() {
+        let redacted = super::redact_url_for_logs("http://example.com/api/v1");
+        assert_eq!(redacted, "http://example.com/api/v1");
+    }
+
+    #[test]
+    fn redact_url_strips_fragment() {
+        let redacted = super::redact_url_for_logs("https://example.com/docs#section");
+        assert_eq!(redacted, "https://example.com/docs");
+    }
+
+    // ---- build_asyncapi_document ----
+
+    #[test]
+    fn asyncapi_document_strips_trailing_slash_from_base_url() {
+        let doc = build_asyncapi_document("https://nyxid.example.com/");
+        assert_eq!(doc["servers"]["nyxid"]["host"], "https://nyxid.example.com");
+    }
+
+    #[test]
+    fn asyncapi_document_contains_all_expected_channels() {
+        let doc = build_asyncapi_document("https://nyxid.example.com");
+        let channels = doc["channels"].as_object().unwrap();
+        assert!(channels.contains_key("nodeAgent"));
+        assert!(channels.contains_key("sshTunnel"));
+        assert!(channels.contains_key("mcpHttp"));
+        assert!(channels.contains_key("proxySse"));
+        assert!(channels.contains_key("llmSse"));
+    }
+}

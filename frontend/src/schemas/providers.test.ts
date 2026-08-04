@@ -1,0 +1,530 @@
+import { describe, it, expect } from "vitest";
+import {
+  connectApiKeySchema,
+  createProviderSchema,
+  telegramLoginDataSchema,
+  updateProviderSchema,
+  userCredentialsSchema,
+  PROVIDER_TYPES,
+  CREDENTIAL_MODES,
+} from "./providers";
+
+describe("PROVIDER_TYPES", () => {
+  it("contains expected types", () => {
+    expect(PROVIDER_TYPES).toEqual([
+      "oauth2",
+      "api_key",
+      "device_code",
+      "telegram_widget",
+    ]);
+  });
+});
+
+describe("CREDENTIAL_MODES", () => {
+  it("contains expected modes", () => {
+    expect(CREDENTIAL_MODES).toEqual(["admin", "user", "both"]);
+  });
+});
+
+describe("userCredentialsSchema", () => {
+  it("accepts valid credentials", () => {
+    const result = userCredentialsSchema.safeParse({
+      client_id: "my-client-id",
+      client_secret: "my-client-secret",
+    });
+    expect(result.success).toBe(true);
+  });
+
+  it("accepts credentials with optional label", () => {
+    const result = userCredentialsSchema.safeParse({
+      client_id: "my-client-id",
+      client_secret: "my-client-secret",
+      label: "My Dev App",
+    });
+    expect(result.success).toBe(true);
+  });
+
+  it("rejects empty client_id", () => {
+    const result = userCredentialsSchema.safeParse({
+      client_id: "",
+      client_secret: "secret",
+    });
+    expect(result.success).toBe(false);
+  });
+
+  it("accepts empty client_secret for public clients", () => {
+    const result = userCredentialsSchema.safeParse({
+      client_id: "id",
+      client_secret: "",
+    });
+    expect(result.success).toBe(true);
+  });
+
+  it("rejects client_id over 500 characters", () => {
+    const result = userCredentialsSchema.safeParse({
+      client_id: "a".repeat(501),
+      client_secret: "secret",
+    });
+    expect(result.success).toBe(false);
+  });
+
+  it("rejects client_secret over 2000 characters", () => {
+    const result = userCredentialsSchema.safeParse({
+      client_id: "id",
+      client_secret: "a".repeat(2001),
+    });
+    expect(result.success).toBe(false);
+  });
+
+  it("rejects label over 200 characters", () => {
+    const result = userCredentialsSchema.safeParse({
+      client_id: "id",
+      client_secret: "secret",
+      label: "a".repeat(201),
+    });
+    expect(result.success).toBe(false);
+  });
+});
+
+describe("connectApiKeySchema", () => {
+  it("accepts valid API key", () => {
+    const result = connectApiKeySchema.safeParse({
+      api_key: "sk-1234567890abcdef",
+    });
+    expect(result.success).toBe(true);
+  });
+
+  it("accepts API key with optional label", () => {
+    const result = connectApiKeySchema.safeParse({
+      api_key: "sk-1234567890abcdef",
+      label: "Production key",
+    });
+    expect(result.success).toBe(true);
+  });
+
+  it("rejects empty API key", () => {
+    const result = connectApiKeySchema.safeParse({ api_key: "" });
+    expect(result.success).toBe(false);
+  });
+
+  it("rejects API key over 8192 characters", () => {
+    const result = connectApiKeySchema.safeParse({
+      api_key: "a".repeat(8193),
+    });
+    expect(result.success).toBe(false);
+  });
+
+  it("rejects label over 200 characters", () => {
+    const result = connectApiKeySchema.safeParse({
+      api_key: "sk-valid",
+      label: "a".repeat(201),
+    });
+    expect(result.success).toBe(false);
+  });
+
+  it("accepts API key with valid gateway_url", () => {
+    const result = connectApiKeySchema.safeParse({
+      api_key: "sk-valid",
+      gateway_url: "http://localhost:18789",
+    });
+    expect(result.success).toBe(true);
+  });
+
+  it("accepts API key without gateway_url", () => {
+    const result = connectApiKeySchema.safeParse({
+      api_key: "sk-valid",
+    });
+    expect(result.success).toBe(true);
+  });
+
+  it("accepts API key with empty gateway_url", () => {
+    const result = connectApiKeySchema.safeParse({
+      api_key: "sk-valid",
+      gateway_url: "",
+    });
+    expect(result.success).toBe(true);
+  });
+
+  it("rejects invalid gateway_url", () => {
+    const result = connectApiKeySchema.safeParse({
+      api_key: "sk-valid",
+      gateway_url: "not-a-url",
+    });
+    expect(result.success).toBe(false);
+  });
+});
+
+describe("telegramLoginDataSchema", () => {
+  it("accepts valid Telegram login data", () => {
+    const result = telegramLoginDataSchema.safeParse({
+      id: 12345,
+      first_name: "Nyx",
+      username: "nyx_user",
+      photo_url: "https://t.me/i/userpic/photo.jpg",
+      auth_date: 1_742_518_400,
+      hash: "a".repeat(64),
+    });
+
+    expect(result.success).toBe(true);
+  });
+
+  it("coerces numeric string fields from the widget payload", () => {
+    const result = telegramLoginDataSchema.safeParse({
+      id: "12345",
+      first_name: "Nyx",
+      auth_date: "1742518400",
+      hash: "b".repeat(64),
+    });
+
+    expect(result.success).toBe(true);
+    expect(result.data?.id).toBe(12345);
+    expect(result.data?.auth_date).toBe(1742518400);
+  });
+
+  it("rejects malformed Telegram login hashes", () => {
+    const result = telegramLoginDataSchema.safeParse({
+      id: 12345,
+      first_name: "Nyx",
+      auth_date: 1_742_518_400,
+      hash: "deadbeef",
+    });
+
+    expect(result.success).toBe(false);
+  });
+});
+
+describe("createProviderSchema", () => {
+  const baseValid = {
+    name: "Test Provider",
+    slug: "test-provider",
+    provider_type: "api_key" as const,
+  };
+
+  it("accepts valid api_key provider", () => {
+    const result = createProviderSchema.safeParse(baseValid);
+    expect(result.success).toBe(true);
+  });
+
+  it("accepts valid oauth2 provider with required fields", () => {
+    const result = createProviderSchema.safeParse({
+      ...baseValid,
+      provider_type: "oauth2",
+      authorization_url: "https://auth.example.com/authorize",
+      token_url: "https://auth.example.com/token",
+      client_id: "my-client-id",
+      client_secret: "my-secret",
+    });
+    expect(result.success).toBe(true);
+  });
+
+  it("accepts user-mode oauth2 provider without admin credentials", () => {
+    const result = createProviderSchema.safeParse({
+      ...baseValid,
+      provider_type: "oauth2",
+      credential_mode: "user",
+      authorization_url: "https://auth.example.com/authorize",
+      token_url: "https://auth.example.com/token",
+    });
+    expect(result.success).toBe(true);
+  });
+
+  it("rejects oauth2 provider without authorization_url", () => {
+    const result = createProviderSchema.safeParse({
+      ...baseValid,
+      provider_type: "oauth2",
+      token_url: "https://auth.example.com/token",
+      client_id: "my-client-id",
+      client_secret: "my-secret",
+    });
+    expect(result.success).toBe(false);
+  });
+
+  it("rejects oauth2 provider without token_url", () => {
+    const result = createProviderSchema.safeParse({
+      ...baseValid,
+      provider_type: "oauth2",
+      authorization_url: "https://auth.example.com/authorize",
+      client_id: "my-client-id",
+      client_secret: "my-secret",
+    });
+    expect(result.success).toBe(false);
+  });
+
+  it("rejects oauth2 provider without client_id", () => {
+    const result = createProviderSchema.safeParse({
+      ...baseValid,
+      provider_type: "oauth2",
+      authorization_url: "https://auth.example.com/authorize",
+      token_url: "https://auth.example.com/token",
+      client_secret: "my-secret",
+    });
+    expect(result.success).toBe(false);
+  });
+
+  it("rejects oauth2 provider without client_secret", () => {
+    const result = createProviderSchema.safeParse({
+      ...baseValid,
+      provider_type: "oauth2",
+      authorization_url: "https://auth.example.com/authorize",
+      token_url: "https://auth.example.com/token",
+      client_id: "my-client-id",
+    });
+    expect(result.success).toBe(false);
+  });
+
+  it("rejects both-mode oauth2 provider with only one fallback credential", () => {
+    const result = createProviderSchema.safeParse({
+      ...baseValid,
+      provider_type: "oauth2",
+      credential_mode: "both",
+      authorization_url: "https://auth.example.com/authorize",
+      token_url: "https://auth.example.com/token",
+      client_id: "my-client-id",
+    });
+    expect(result.success).toBe(false);
+  });
+
+  it("accepts valid device_code provider", () => {
+    const result = createProviderSchema.safeParse({
+      ...baseValid,
+      provider_type: "device_code",
+      authorization_url: "https://auth.example.com/authorize",
+      token_url: "https://auth.example.com/token",
+      client_id: "my-client-id",
+      device_code_url: "https://auth.example.com/device/code",
+      device_token_url: "https://auth.example.com/device/token",
+    });
+    expect(result.success).toBe(true);
+  });
+
+  it("accepts user-mode device_code provider without admin client_id", () => {
+    const result = createProviderSchema.safeParse({
+      ...baseValid,
+      provider_type: "device_code",
+      credential_mode: "user",
+      authorization_url: "https://auth.example.com/authorize",
+      token_url: "https://auth.example.com/token",
+      device_code_url: "https://auth.example.com/device/code",
+      device_token_url: "https://auth.example.com/device/token",
+    });
+    expect(result.success).toBe(true);
+  });
+
+  it("rejects device_code provider without device_code_url", () => {
+    const result = createProviderSchema.safeParse({
+      ...baseValid,
+      provider_type: "device_code",
+      authorization_url: "https://auth.example.com/authorize",
+      token_url: "https://auth.example.com/token",
+      client_id: "my-client-id",
+      device_token_url: "https://auth.example.com/device/token",
+    });
+    expect(result.success).toBe(false);
+  });
+
+  it("rejects device_code provider without device_token_url", () => {
+    const result = createProviderSchema.safeParse({
+      ...baseValid,
+      provider_type: "device_code",
+      authorization_url: "https://auth.example.com/authorize",
+      token_url: "https://auth.example.com/token",
+      client_id: "my-client-id",
+      device_code_url: "https://auth.example.com/device/code",
+    });
+    expect(result.success).toBe(false);
+  });
+
+  it("accepts valid telegram_widget provider", () => {
+    const result = createProviderSchema.safeParse({
+      ...baseValid,
+      provider_type: "telegram_widget",
+      client_id_param_name: "NyxIdBot",
+      client_secret: "123456:ABC-DEF1234567890",
+    });
+    expect(result.success).toBe(true);
+  });
+
+  it("accepts valid telegram_widget provider with a leading @ in the bot username", () => {
+    const result = createProviderSchema.safeParse({
+      ...baseValid,
+      provider_type: "telegram_widget",
+      client_id_param_name: "@NyxIdBot",
+      client_secret: "123456:ABC-DEF1234567890",
+    });
+    expect(result.success).toBe(true);
+  });
+
+  it("rejects telegram_widget provider without bot username", () => {
+    const result = createProviderSchema.safeParse({
+      ...baseValid,
+      provider_type: "telegram_widget",
+      client_secret: "123456:ABC-DEF1234567890",
+    });
+    expect(result.success).toBe(false);
+  });
+
+  it("rejects telegram_widget provider without bot token", () => {
+    const result = createProviderSchema.safeParse({
+      ...baseValid,
+      provider_type: "telegram_widget",
+      client_id_param_name: "NyxIdBot",
+    });
+    expect(result.success).toBe(false);
+  });
+
+  it("rejects telegram_widget provider with blank bot username", () => {
+    const result = createProviderSchema.safeParse({
+      ...baseValid,
+      provider_type: "telegram_widget",
+      client_id_param_name: "   ",
+      client_secret: "123456:ABC-DEF1234567890",
+    });
+    expect(result.success).toBe(false);
+  });
+
+  it("rejects telegram_widget provider with an invalid bot username format", () => {
+    const result = createProviderSchema.safeParse({
+      ...baseValid,
+      provider_type: "telegram_widget",
+      client_id_param_name: "not-a-bot",
+      client_secret: "123456:ABC-DEF1234567890",
+    });
+    expect(result.success).toBe(false);
+  });
+
+  it("rejects telegram_widget provider with blank bot token", () => {
+    const result = createProviderSchema.safeParse({
+      ...baseValid,
+      provider_type: "telegram_widget",
+      client_id_param_name: "NyxIdBot",
+      client_secret: "   ",
+    });
+    expect(result.success).toBe(false);
+  });
+
+  it("rejects telegram_widget provider in non-admin mode", () => {
+    const result = createProviderSchema.safeParse({
+      ...baseValid,
+      provider_type: "telegram_widget",
+      credential_mode: "user",
+      client_id_param_name: "NyxIdBot",
+      client_secret: "123456:ABC-DEF1234567890",
+    });
+    expect(result.success).toBe(false);
+  });
+
+  it("rejects slug with uppercase letters", () => {
+    const result = createProviderSchema.safeParse({
+      ...baseValid,
+      slug: "Test-Provider",
+    });
+    expect(result.success).toBe(false);
+  });
+
+  it("rejects slug with leading hyphen", () => {
+    const result = createProviderSchema.safeParse({
+      ...baseValid,
+      slug: "-test-provider",
+    });
+    expect(result.success).toBe(false);
+  });
+
+  it("rejects slug with trailing hyphen", () => {
+    const result = createProviderSchema.safeParse({
+      ...baseValid,
+      slug: "test-provider-",
+    });
+    expect(result.success).toBe(false);
+  });
+
+  it("rejects slug shorter than 2 characters", () => {
+    const result = createProviderSchema.safeParse({
+      ...baseValid,
+      slug: "a",
+    });
+    expect(result.success).toBe(false);
+  });
+
+  it("rejects name shorter than 2 characters", () => {
+    const result = createProviderSchema.safeParse({
+      ...baseValid,
+      name: "A",
+    });
+    expect(result.success).toBe(false);
+  });
+
+  it("rejects name over 100 characters", () => {
+    const result = createProviderSchema.safeParse({
+      ...baseValid,
+      name: "a".repeat(101),
+    });
+    expect(result.success).toBe(false);
+  });
+});
+
+describe("updateProviderSchema", () => {
+  const baseValid = {
+    name: "Updated Provider",
+    slug: "updated-provider",
+    provider_type: "api_key" as const,
+  };
+
+  it("accepts valid update data", () => {
+    const result = updateProviderSchema.safeParse(baseValid);
+    expect(result.success).toBe(true);
+  });
+
+  it("accepts update with is_active", () => {
+    const result = updateProviderSchema.safeParse({
+      ...baseValid,
+      is_active: false,
+    });
+    expect(result.success).toBe(true);
+  });
+
+  it("rejects oauth2 update without authorization_url", () => {
+    const result = updateProviderSchema.safeParse({
+      ...baseValid,
+      provider_type: "oauth2",
+      token_url: "https://auth.example.com/token",
+    });
+    expect(result.success).toBe(false);
+  });
+
+  it("accepts device_code update without device_code_url (optional on update)", () => {
+    const result = updateProviderSchema.safeParse({
+      ...baseValid,
+      provider_type: "device_code",
+      authorization_url: "https://auth.example.com/authorize",
+      token_url: "https://auth.example.com/token",
+    });
+    expect(result.success).toBe(true);
+  });
+
+  it("rejects telegram_widget update with blank bot username", () => {
+    const result = updateProviderSchema.safeParse({
+      ...baseValid,
+      provider_type: "telegram_widget",
+      client_id_param_name: "   ",
+    });
+    expect(result.success).toBe(false);
+  });
+
+  it("rejects telegram_widget update with an invalid bot username format", () => {
+    const result = updateProviderSchema.safeParse({
+      ...baseValid,
+      provider_type: "telegram_widget",
+      client_id_param_name: "abc",
+    });
+    expect(result.success).toBe(false);
+  });
+
+  it("rejects telegram_widget update with blank bot token", () => {
+    const result = updateProviderSchema.safeParse({
+      ...baseValid,
+      provider_type: "telegram_widget",
+      client_secret: "   ",
+    });
+    expect(result.success).toBe(false);
+  });
+});

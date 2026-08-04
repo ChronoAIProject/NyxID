@@ -1,0 +1,21 @@
+{
+  "_type": "https://in-toto.io/Statement/v1",
+  "predicateType": "https://slsa.dev/provenance/v1",
+  "subject": [
+    {
+      "name": "nyxid-cli-x86_64-unknown-linux-gnu.tar.gz",
+      "digest": {
+        "sha256": "8c5b8a213a6d3d0c74a1f3a1c9dbd9ed93094b2b2ca8c7a4d00365bd7a9a6a6b"
+      }
+    }
+  ],
+  "predicate": {
+    "buildDefinition": {
+      "externalParameters": {
+        "workflow": {
+          "path": ".github/workflows/release.yml"
+        }
+      }
+    }
+  }
+}

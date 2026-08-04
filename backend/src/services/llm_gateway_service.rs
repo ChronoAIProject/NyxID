@@ -1,0 +1,1444 @@
+use futures::TryStreamExt;
+use mongodb::bson::{Bson, doc};
+use serde::Serialize;
+
+use crate::errors::{AppError, AppResult};
+use crate::models::downstream_service::{
+    COLLECTION_NAME as DOWNSTREAM_SERVICES, DownstreamService,
+};
+use crate::models::provider_config::{COLLECTION_NAME as PROVIDER_CONFIGS, ProviderConfig};
+use crate::models::user_api_key::{COLLECTION_NAME as USER_API_KEYS, UserApiKey};
+use crate::models::user_provider_token::{
+    COLLECTION_NAME as USER_PROVIDER_TOKENS, UserProviderToken,
+};
+use crate::services::{org_service, user_service_service};
+
+// ---------------------------------------------------------------------------
+// Response types
+// ---------------------------------------------------------------------------
+
+const LLM_SERVICE_SLUG_PREFIX: &str = "llm-";
+
+#[derive(Debug, Serialize)]
+pub struct LlmProviderStatus {
+    pub provider_slug: String,
+    pub provider_name: String,
+    pub status: String,
+    pub proxy_url: String,
+}
+
+#[derive(Debug, Serialize)]
+pub struct LlmStatusResponse {
+    pub providers: Vec<LlmProviderStatus>,
+    pub gateway_url: String,
+    pub supported_models: Vec<String>,
+}
+
+// ---------------------------------------------------------------------------
+// Slug resolution (Phase 2)
+// ---------------------------------------------------------------------------
+
+/// Resolve a downstream service by provider slug.
+/// Returns `(DownstreamService, ProviderConfig)` or an error.
+pub async fn resolve_llm_service_by_slug(
+    db: &mongodb::Database,
+    provider_slug: &str,
+) -> AppResult<(DownstreamService, ProviderConfig)> {
+    let provider = db
+        .collection::<ProviderConfig>(PROVIDER_CONFIGS)
+        .find_one(doc! { "slug": provider_slug, "is_active": true })
+        .await?
+        .ok_or_else(|| AppError::NotFound(format!("LLM provider '{provider_slug}' not found")))?;
+
+    let service = db
+        .collection::<DownstreamService>(DOWNSTREAM_SERVICES)
+        .find_one(build_llm_service_filter(Some(&provider.id)))
+        .await?
+        .ok_or_else(|| {
+            AppError::NotFound(format!("LLM provider '{provider_slug}' is not available"))
+        })?;
+
+    Ok((service, provider))
+}
+
+/// Get the LLM gateway status for a user.
+///
+/// Reports per-provider availability across **every credential the actor
+/// can reach**:
+///
+/// - Personal `UserService` + `UserApiKey` (the new path)
+/// - Org-shared `UserService` + `UserApiKey` for any org the actor is a
+///   non-viewer member of, subject to the effective member scope
+///   (mirrors the proxy resolver's role + scope filters)
+/// - Personal legacy `UserProviderToken` (pre-migration users)
+///
+/// The reported status is the *best* across all reachable credentials --
+/// `ready` > `expired` > `not_connected`. The org-membership lookup is
+/// silently degraded to "personal only" on `OrgQueryTimeout` because this
+/// is an informational endpoint and shouldn't 503 the dashboard.
+pub async fn get_llm_status(
+    db: &mongodb::Database,
+    user_id: &str,
+    base_url: &str,
+) -> AppResult<LlmStatusResponse> {
+    // Get all auto-seeded LLM downstream services.
+    let services: Vec<DownstreamService> = db
+        .collection::<DownstreamService>(DOWNSTREAM_SERVICES)
+        .find(build_llm_service_filter(None))
+        .await?
+        .try_collect()
+        .await?;
+
+    // Build the list of (user_id, optional membership) tuples whose
+    // credentials this actor can use. The actor's own user_id has no
+    // membership (unrestricted personal access). Org user_ids carry the
+    // effective scope so we can apply role + service filters.
+    let mut credential_owners: Vec<CredentialOwner> =
+        vec![CredentialOwner::Personal(user_id.to_string())];
+    match org_service::find_active_memberships_with_timeout(db, user_id).await {
+        Ok(memberships) => {
+            for m in memberships {
+                if !m.role.can_proxy() {
+                    continue; // viewers cannot use org credentials
+                }
+                let effective_scope =
+                    crate::services::org_role_scope_service::effective_scope_for_membership(db, &m)
+                        .await?;
+                credential_owners.push(CredentialOwner::Org {
+                    org_user_id: m.org_user_id,
+                    effective_scope,
+                });
+            }
+        }
+        Err(AppError::OrgQueryTimeout) => {
+            // Degrade gracefully: an informational endpoint should not 503
+            // because the org-fallback query was slow. Personal credentials
+            // are still reported.
+            tracing::warn!(
+                user_id = %user_id,
+                "Org membership query timed out while computing LLM status; \
+                 reporting personal credentials only"
+            );
+        }
+        Err(e) => return Err(e),
+    }
+
+    // Pre-fetch the legacy provider tokens for the actor in one round-trip.
+    // The new (UserService) path is queried per credential owner below;
+    // legacy tokens are only owned by the actor.
+    let legacy_tokens: Vec<UserProviderToken> = db
+        .collection::<UserProviderToken>(USER_PROVIDER_TOKENS)
+        .find(doc! { "user_id": user_id, "status": { "$in": ["active", "expired"] } })
+        .await?
+        .try_collect()
+        .await?;
+
+    // Get all providers in a single query
+    let provider_ids: Vec<&str> = services
+        .iter()
+        .filter_map(|s| s.provider_config_id.as_deref())
+        .collect();
+
+    let providers: Vec<ProviderConfig> = if provider_ids.is_empty() {
+        vec![]
+    } else {
+        db.collection::<ProviderConfig>(PROVIDER_CONFIGS)
+            .find(doc! { "_id": { "$in": &provider_ids } })
+            .await?
+            .try_collect()
+            .await?
+    };
+
+    let base = base_url.trim_end_matches('/');
+    let mut statuses = Vec::new();
+
+    for service in &services {
+        let provider_config_id = match &service.provider_config_id {
+            Some(id) => id,
+            None => continue,
+        };
+
+        let provider = match providers.iter().find(|p| &p.id == provider_config_id) {
+            Some(p) => p,
+            None => continue,
+        };
+
+        // Walk every credential owner the actor can use, then fall back
+        // to the legacy provider token. Stop at the first `Ready`.
+        let mut best = LlmStatusRank::NotConnected;
+        for owner in &credential_owners {
+            let candidate = lookup_user_service_status(db, owner, &service.id).await?;
+            if candidate > best {
+                best = candidate;
+            }
+            if matches!(best, LlmStatusRank::Ready) {
+                break;
+            }
+        }
+        if !matches!(best, LlmStatusRank::Ready) {
+            // Legacy fallback: actor's own UserProviderToken.
+            if let Some(token) = legacy_tokens
+                .iter()
+                .find(|t| t.provider_config_id == *provider_config_id)
+            {
+                let legacy = match token.status.as_str() {
+                    "active" => LlmStatusRank::Ready,
+                    "expired" => LlmStatusRank::Expired,
+                    _ => LlmStatusRank::NotConnected,
+                };
+                if legacy > best {
+                    best = legacy;
+                }
+            }
+        }
+
+        statuses.push(LlmProviderStatus {
+            provider_slug: provider.slug.clone(),
+            provider_name: provider.name.clone(),
+            status: best.as_api_str().to_string(),
+            proxy_url: format!("{base}/api/v1/llm/{}/v1", provider.slug),
+        });
+    }
+
+    Ok(LlmStatusResponse {
+        providers: statuses,
+        gateway_url: format!("{base}/api/v1/llm/gateway/v1"),
+        // L-3: This list is derived from resolve_provider_for_model() above.
+        // Update both when adding new providers or model families.
+        supported_models: vec![
+            "gpt-*".to_string(),
+            "o1-*".to_string(),
+            "o3-*".to_string(),
+            "o4-*".to_string(),
+            "chatgpt-*".to_string(),
+            "claude-*".to_string(),
+            "gemini-*".to_string(),
+            "mistral-*".to_string(),
+            "codestral-*".to_string(),
+            "pixtral-*".to_string(),
+            "ministral-*".to_string(),
+            "open-mistral-*".to_string(),
+            "devstral-*".to_string(),
+            "magistral-*".to_string(),
+            "command-*".to_string(),
+            "embed-*".to_string(),
+            "rerank-*".to_string(),
+            "deepseek-*".to_string(),
+        ],
+    })
+}
+
+/// A potential source of LLM credentials reachable by the caller.
+enum CredentialOwner {
+    /// The caller's own user_id. No scope filter.
+    Personal(String),
+    /// An org the caller belongs to as a non-viewer. `effective_scope = None`
+    /// means unrestricted.
+    Org {
+        org_user_id: String,
+        effective_scope: Option<Vec<String>>,
+    },
+}
+
+impl CredentialOwner {
+    fn user_id(&self) -> &str {
+        match self {
+            CredentialOwner::Personal(id) => id,
+            CredentialOwner::Org { org_user_id, .. } => org_user_id,
+        }
+    }
+
+    fn allows(&self, user_service_id: &str) -> bool {
+        match self {
+            CredentialOwner::Personal(_) => true,
+            CredentialOwner::Org {
+                effective_scope, ..
+            } => crate::services::org_role_scope_service::scope_allows(
+                effective_scope,
+                user_service_id,
+            ),
+        }
+    }
+}
+
+/// Internal status rank used to pick the *best* available credential
+/// across personal + org sources. Higher = better.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+enum LlmStatusRank {
+    NotConnected,
+    Expired,
+    Ready,
+}
+
+impl LlmStatusRank {
+    fn as_api_str(self) -> &'static str {
+        match self {
+            LlmStatusRank::Ready => "ready",
+            LlmStatusRank::Expired => "expired",
+            LlmStatusRank::NotConnected => "not_connected",
+        }
+    }
+}
+
+/// Resolve the best `LlmStatusRank` for one credential owner against one
+/// catalog service id. Returns `NotConnected` when the owner has no
+/// matching `UserService`, the service is out of scope, or the linked
+/// `UserApiKey` is in a non-usable state.
+async fn lookup_user_service_status(
+    db: &mongodb::Database,
+    owner: &CredentialOwner,
+    catalog_service_id: &str,
+) -> AppResult<LlmStatusRank> {
+    let Some(us) =
+        user_service_service::find_by_catalog_service_id(db, owner.user_id(), catalog_service_id)
+            .await?
+    else {
+        return Ok(LlmStatusRank::NotConnected);
+    };
+    if !owner.allows(&us.id) {
+        return Ok(LlmStatusRank::NotConnected);
+    }
+    let Some(api_key_id) = us.api_key_id.as_deref() else {
+        // No-auth services have no api_key but are always reachable.
+        return Ok(LlmStatusRank::Ready);
+    };
+    let Some(ak) = db
+        .collection::<UserApiKey>(USER_API_KEYS)
+        .find_one(doc! { "_id": api_key_id, "user_id": owner.user_id() })
+        .await?
+    else {
+        return Ok(LlmStatusRank::NotConnected);
+    };
+    Ok(match ak.status.as_str() {
+        "active" => LlmStatusRank::Ready,
+        "expired" | "refresh_failed" => LlmStatusRank::Expired,
+        _ => LlmStatusRank::NotConnected,
+    })
+}
+
+fn build_llm_service_filter(provider_config_id: Option<&str>) -> mongodb::bson::Document {
+    let mut filter = doc! {
+        "slug": { "$regex": format!("^{}", LLM_SERVICE_SLUG_PREFIX) },
+        "is_active": true,
+    };
+
+    match provider_config_id {
+        Some(id) => {
+            filter.insert("provider_config_id", id);
+        }
+        None => {
+            filter.insert("provider_config_id", doc! { "$ne": Bson::Null });
+        }
+    }
+
+    filter
+}
+
+// ---------------------------------------------------------------------------
+// Model-to-provider resolution (Phase 3)
+// ---------------------------------------------------------------------------
+
+/// Determine which provider to route to based on the model name.
+///
+/// L-5: This uses hardcoded prefix matching. Adding a new provider requires
+/// modifying this function. A future improvement could store model prefixes
+/// in the database alongside provider configs for a data-driven approach.
+pub fn resolve_provider_for_model(model: &str) -> Option<&'static str> {
+    let model_lower = model.to_lowercase();
+
+    if model_lower.starts_with("gpt-")
+        || model_lower.starts_with("o1-")
+        || model_lower.starts_with("o3-")
+        || model_lower.starts_with("o4-")
+        || model_lower.starts_with("chatgpt-")
+    {
+        Some("openai")
+    } else if model_lower.starts_with("claude-") {
+        Some("anthropic")
+    } else if model_lower.starts_with("gemini-") {
+        Some("google-ai")
+    } else if model_lower.starts_with("mistral-")
+        || model_lower.starts_with("codestral-")
+        || model_lower.starts_with("pixtral-")
+        || model_lower.starts_with("ministral-")
+        || model_lower.starts_with("open-mistral-")
+        || model_lower.starts_with("devstral-")
+        || model_lower.starts_with("magistral-")
+    {
+        Some("mistral")
+    } else if model_lower.starts_with("command-")
+        || model_lower.starts_with("embed-")
+        || model_lower.starts_with("rerank-")
+    {
+        Some("cohere")
+    } else if model_lower.starts_with("deepseek-") {
+        Some("deepseek")
+    } else {
+        None
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Translation layer (Phase 3)
+// ---------------------------------------------------------------------------
+
+/// Result of translating a request to a provider's native format.
+pub struct TranslatedRequest {
+    pub path: String,
+    pub body: serde_json::Value,
+    pub extra_headers: Vec<(String, String)>,
+}
+
+/// Re-export the shared SSE event type so existing callers that import
+/// `llm_gateway_service::SseEvent` continue to compile.
+pub use super::sse_parser::SseEvent;
+
+/// Mutable state carried across SSE events during stream translation.
+pub struct StreamTranslationState {
+    pub id: String,
+    pub model: String,
+    pub created: i64,
+    pub input_tokens: u64,
+    /// Maps content_block index to tool_call index.
+    pub tool_call_indices: Vec<(usize, usize)>,
+    pub next_tool_index: usize,
+}
+
+impl Default for StreamTranslationState {
+    fn default() -> Self {
+        Self {
+            id: String::new(),
+            model: String::new(),
+            created: chrono::Utc::now().timestamp(),
+            input_tokens: 0,
+            tool_call_indices: Vec::new(),
+            next_tool_index: 0,
+        }
+    }
+}
+
+/// Trait for translating between OpenAI format and provider-native format.
+pub trait LlmTranslator: Send + Sync {
+    fn translate_request(
+        &self,
+        path: &str,
+        body: &serde_json::Value,
+    ) -> AppResult<TranslatedRequest>;
+
+    fn translate_response(&self, body: serde_json::Value) -> AppResult<serde_json::Value>;
+
+    fn needs_translation(&self) -> bool;
+
+    fn gateway_base_url(&self) -> Option<&str> {
+        None
+    }
+
+    /// Translate a single SSE event from provider format to OpenAI chunk format.
+    /// Returns the SSE text to emit (e.g. `"data: {...}\n\n"`), or `None` to skip.
+    fn translate_stream_event(
+        &self,
+        _event: &SseEvent,
+        _state: &mut StreamTranslationState,
+    ) -> Option<String> {
+        None
+    }
+}
+
+/// Get the appropriate translator for a provider slug.
+pub fn get_translator(provider_slug: &str) -> Box<dyn LlmTranslator> {
+    match provider_slug {
+        "anthropic" => Box::new(AnthropicTranslator),
+        "google-ai" => Box::new(GoogleAiTranslator),
+        "openai-codex" => Box::new(super::chatgpt_translator::ChatgptTranslator),
+        _ => Box::new(PassthroughTranslator),
+    }
+}
+
+// ---------------------------------------------------------------------------
+// PassthroughTranslator (OpenAI, OpenAI Codex, Mistral, Cohere, DeepSeek)
+// ---------------------------------------------------------------------------
+
+pub struct PassthroughTranslator;
+
+impl LlmTranslator for PassthroughTranslator {
+    fn translate_request(
+        &self,
+        path: &str,
+        body: &serde_json::Value,
+    ) -> AppResult<TranslatedRequest> {
+        Ok(TranslatedRequest {
+            path: path.to_string(),
+            body: body.clone(),
+            extra_headers: vec![],
+        })
+    }
+
+    fn translate_response(&self, body: serde_json::Value) -> AppResult<serde_json::Value> {
+        Ok(body)
+    }
+
+    fn needs_translation(&self) -> bool {
+        false
+    }
+}
+
+// ---------------------------------------------------------------------------
+// AnthropicTranslator
+// ---------------------------------------------------------------------------
+
+pub struct AnthropicTranslator;
+
+impl LlmTranslator for AnthropicTranslator {
+    fn needs_translation(&self) -> bool {
+        true
+    }
+
+    fn translate_request(
+        &self,
+        path: &str,
+        body: &serde_json::Value,
+    ) -> AppResult<TranslatedRequest> {
+        let mut translated = body.clone();
+
+        // Extract system messages from messages array
+        if let Some(messages) = translated.get("messages").and_then(|m| m.as_array()) {
+            let mut system_parts = Vec::new();
+            let mut non_system = Vec::new();
+
+            for msg in messages {
+                if msg.get("role").and_then(|r| r.as_str()) == Some("system") {
+                    if let Some(content) = msg.get("content").and_then(|c| c.as_str()) {
+                        system_parts.push(content.to_string());
+                    }
+                } else {
+                    non_system.push(msg.clone());
+                }
+            }
+
+            if !system_parts.is_empty() {
+                translated["system"] = serde_json::Value::String(system_parts.join("\n"));
+            }
+            translated["messages"] = serde_json::Value::Array(non_system);
+        }
+
+        // Default max_tokens if not specified (Anthropic requires it)
+        if translated.get("max_tokens").is_none() {
+            translated["max_tokens"] = serde_json::json!(4096);
+        }
+
+        // Map stop -> stop_sequences
+        if let Some(stop) = translated.get("stop").cloned() {
+            translated.as_object_mut().map(|o| o.remove("stop"));
+            translated["stop_sequences"] = stop;
+        }
+
+        // Change path: chat/completions -> messages
+        let translated_path = path.replace("chat/completions", "messages");
+
+        Ok(TranslatedRequest {
+            path: translated_path,
+            body: translated,
+            extra_headers: vec![("anthropic-version".to_string(), "2023-06-01".to_string())],
+        })
+    }
+
+    fn translate_response(&self, body: serde_json::Value) -> AppResult<serde_json::Value> {
+        let content_blocks = body
+            .get("content")
+            .and_then(|c| c.as_array())
+            .cloned()
+            .unwrap_or_default();
+
+        // H-2: Collect ALL text blocks (not just the first one)
+        let text_parts: Vec<String> = content_blocks
+            .iter()
+            .filter_map(|block| {
+                if block.get("type").and_then(|t| t.as_str()) == Some("text") {
+                    block.get("text").and_then(|t| t.as_str()).map(String::from)
+                } else {
+                    None
+                }
+            })
+            .collect();
+        let content_text = text_parts.join("");
+
+        // H-2: Map tool_use blocks to OpenAI tool_calls format
+        let tool_calls: Vec<serde_json::Value> = content_blocks
+            .iter()
+            .filter_map(|block| {
+                if block.get("type").and_then(|t| t.as_str()) == Some("tool_use") {
+                    let id = block
+                        .get("id")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("unknown");
+                    let name = block
+                        .get("name")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("unknown");
+                    let input = block.get("input").cloned().unwrap_or(serde_json::json!({}));
+                    let arguments = serde_json::to_string(&input).unwrap_or_default();
+                    Some(serde_json::json!({
+                        "id": id,
+                        "type": "function",
+                        "function": {
+                            "name": name,
+                            "arguments": arguments,
+                        }
+                    }))
+                } else {
+                    None
+                }
+            })
+            .collect();
+
+        // Map stop_reason
+        let finish_reason = match body.get("stop_reason").and_then(|r| r.as_str()) {
+            Some("end_turn") => "stop",
+            Some("max_tokens") => "length",
+            Some("stop_sequence") => "stop",
+            Some("tool_use") => "tool_calls",
+            _ => "stop",
+        };
+
+        // Map usage
+        let input_tokens = body
+            .pointer("/usage/input_tokens")
+            .and_then(|v| v.as_u64())
+            .unwrap_or(0);
+        let output_tokens = body
+            .pointer("/usage/output_tokens")
+            .and_then(|v| v.as_u64())
+            .unwrap_or(0);
+
+        let id = body.get("id").and_then(|v| v.as_str()).unwrap_or("unknown");
+
+        let model = body
+            .get("model")
+            .and_then(|v| v.as_str())
+            .unwrap_or("unknown");
+
+        let created = chrono::Utc::now().timestamp();
+
+        // Build the message object, including tool_calls only when present
+        let mut message = serde_json::json!({
+            "role": "assistant",
+            "content": if content_text.is_empty() { serde_json::Value::Null } else { serde_json::Value::String(content_text) },
+        });
+        if !tool_calls.is_empty() {
+            message["tool_calls"] = serde_json::Value::Array(tool_calls);
+        }
+
+        Ok(serde_json::json!({
+            "id": format!("chatcmpl-{id}"),
+            "object": "chat.completion",
+            "created": created,
+            "model": model,
+            "choices": [{
+                "index": 0,
+                "message": message,
+                "finish_reason": finish_reason,
+            }],
+            "usage": {
+                "prompt_tokens": input_tokens,
+                "completion_tokens": output_tokens,
+                "total_tokens": input_tokens + output_tokens,
+            },
+        }))
+    }
+
+    fn translate_stream_event(
+        &self,
+        event: &SseEvent,
+        state: &mut StreamTranslationState,
+    ) -> Option<String> {
+        let data: serde_json::Value = serde_json::from_str(&event.data).ok()?;
+
+        match event.event_type.as_deref() {
+            Some("message_start") => {
+                state.id = data
+                    .pointer("/message/id")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("unknown")
+                    .to_string();
+                state.model = data
+                    .pointer("/message/model")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("unknown")
+                    .to_string();
+                state.input_tokens = data
+                    .pointer("/message/usage/input_tokens")
+                    .and_then(|v| v.as_u64())
+                    .unwrap_or(0);
+
+                let chunk = serde_json::json!({
+                    "id": format!("chatcmpl-{}", state.id),
+                    "object": "chat.completion.chunk",
+                    "created": state.created,
+                    "model": &state.model,
+                    "choices": [{
+                        "index": 0,
+                        "delta": { "role": "assistant", "content": "" },
+                        "finish_reason": serde_json::Value::Null,
+                    }]
+                });
+                Some(format!("data: {}\n\n", chunk))
+            }
+
+            Some("content_block_start") => {
+                let block_type = data.pointer("/content_block/type").and_then(|v| v.as_str());
+
+                if block_type == Some("tool_use") {
+                    let tool_index = state.next_tool_index;
+                    state.next_tool_index += 1;
+
+                    let block_index =
+                        data.get("index").and_then(|v| v.as_u64()).unwrap_or(0) as usize;
+                    state.tool_call_indices.push((block_index, tool_index));
+
+                    let tool_id = data
+                        .pointer("/content_block/id")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("unknown");
+                    let tool_name = data
+                        .pointer("/content_block/name")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("unknown");
+
+                    let chunk = serde_json::json!({
+                        "id": format!("chatcmpl-{}", state.id),
+                        "object": "chat.completion.chunk",
+                        "created": state.created,
+                        "model": &state.model,
+                        "choices": [{
+                            "index": 0,
+                            "delta": {
+                                "tool_calls": [{
+                                    "index": tool_index,
+                                    "id": tool_id,
+                                    "type": "function",
+                                    "function": {
+                                        "name": tool_name,
+                                        "arguments": "",
+                                    }
+                                }]
+                            },
+                            "finish_reason": serde_json::Value::Null,
+                        }]
+                    });
+                    Some(format!("data: {}\n\n", chunk))
+                } else {
+                    None
+                }
+            }
+
+            Some("content_block_delta") => {
+                let delta_type = data.pointer("/delta/type").and_then(|v| v.as_str());
+
+                match delta_type {
+                    Some("text_delta") => {
+                        let text = data
+                            .pointer("/delta/text")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("");
+
+                        let chunk = serde_json::json!({
+                            "id": format!("chatcmpl-{}", state.id),
+                            "object": "chat.completion.chunk",
+                            "created": state.created,
+                            "model": &state.model,
+                            "choices": [{
+                                "index": 0,
+                                "delta": { "content": text },
+                                "finish_reason": serde_json::Value::Null,
+                            }]
+                        });
+                        Some(format!("data: {}\n\n", chunk))
+                    }
+                    Some("input_json_delta") => {
+                        let partial_json = data
+                            .pointer("/delta/partial_json")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("");
+
+                        let block_index =
+                            data.get("index").and_then(|v| v.as_u64()).unwrap_or(0) as usize;
+
+                        let tool_index = state
+                            .tool_call_indices
+                            .iter()
+                            .find(|(bi, _)| *bi == block_index)
+                            .map(|(_, ti)| *ti)
+                            .unwrap_or(0);
+
+                        let chunk = serde_json::json!({
+                            "id": format!("chatcmpl-{}", state.id),
+                            "object": "chat.completion.chunk",
+                            "created": state.created,
+                            "model": &state.model,
+                            "choices": [{
+                                "index": 0,
+                                "delta": {
+                                    "tool_calls": [{
+                                        "index": tool_index,
+                                        "function": {
+                                            "arguments": partial_json,
+                                        }
+                                    }]
+                                },
+                                "finish_reason": serde_json::Value::Null,
+                            }]
+                        });
+                        Some(format!("data: {}\n\n", chunk))
+                    }
+                    _ => None,
+                }
+            }
+
+            Some("message_delta") => {
+                let stop_reason = data.pointer("/delta/stop_reason").and_then(|v| v.as_str());
+                let output_tokens = data
+                    .pointer("/usage/output_tokens")
+                    .and_then(|v| v.as_u64())
+                    .unwrap_or(0);
+
+                let finish_reason = match stop_reason {
+                    Some("end_turn") => "stop",
+                    Some("max_tokens") => "length",
+                    Some("stop_sequence") => "stop",
+                    Some("tool_use") => "tool_calls",
+                    _ => "stop",
+                };
+
+                let chunk = serde_json::json!({
+                    "id": format!("chatcmpl-{}", state.id),
+                    "object": "chat.completion.chunk",
+                    "created": state.created,
+                    "model": &state.model,
+                    "choices": [{
+                        "index": 0,
+                        "delta": {},
+                        "finish_reason": finish_reason,
+                    }],
+                    "usage": {
+                        "prompt_tokens": state.input_tokens,
+                        "completion_tokens": output_tokens,
+                        "total_tokens": state.input_tokens + output_tokens,
+                    }
+                });
+                Some(format!("data: {}\n\n", chunk))
+            }
+
+            Some("message_stop") => Some("data: [DONE]\n\n".to_string()),
+
+            // Skip: ping, content_block_stop, etc.
+            _ => None,
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// GoogleAiTranslator
+//
+// M-5: Google AI uses an OpenAI-compatible API format, so no request/response
+// body translation is needed (needs_translation() returns false). However, its
+// base URL differs from the service's configured URL, so gateway_base_url()
+// returns a custom URL. The handler applies this override for both translated
+// and non-translated paths.
+// ---------------------------------------------------------------------------
+
+pub struct GoogleAiTranslator;
+
+impl LlmTranslator for GoogleAiTranslator {
+    fn needs_translation(&self) -> bool {
+        false
+    }
+
+    fn gateway_base_url(&self) -> Option<&str> {
+        Some("https://generativelanguage.googleapis.com/v1beta/openai")
+    }
+
+    fn translate_request(
+        &self,
+        path: &str,
+        body: &serde_json::Value,
+    ) -> AppResult<TranslatedRequest> {
+        Ok(TranslatedRequest {
+            path: path.to_string(),
+            body: body.clone(),
+            extra_headers: vec![],
+        })
+    }
+
+    fn translate_response(&self, body: serde_json::Value) -> AppResult<serde_json::Value> {
+        Ok(body)
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Unit tests
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use mongodb::bson::Bson;
+
+    #[test]
+    fn build_llm_service_filter_targets_llm_service_slugs() {
+        let filter = build_llm_service_filter(None);
+        let slug_filter = filter.get_document("slug").expect("slug filter");
+        let provider_filter = filter
+            .get_document("provider_config_id")
+            .expect("provider_config_id filter");
+
+        assert_eq!(slug_filter.get_str("$regex").unwrap(), "^llm-");
+        assert!(filter.get_bool("is_active").unwrap());
+        assert_eq!(provider_filter.get("$ne"), Some(&Bson::Null));
+    }
+
+    #[test]
+    fn build_llm_service_filter_can_target_a_specific_provider() {
+        let filter = build_llm_service_filter(Some("provider-123"));
+
+        assert_eq!(
+            filter.get_str("provider_config_id").unwrap(),
+            "provider-123"
+        );
+    }
+
+    // --- resolve_provider_for_model tests ---
+
+    #[test]
+    fn resolve_openai_models() {
+        assert_eq!(resolve_provider_for_model("gpt-4o"), Some("openai"));
+        assert_eq!(resolve_provider_for_model("gpt-4o-mini"), Some("openai"));
+        assert_eq!(resolve_provider_for_model("GPT-4"), Some("openai"));
+        assert_eq!(resolve_provider_for_model("o1-preview"), Some("openai"));
+        assert_eq!(resolve_provider_for_model("o3-mini"), Some("openai"));
+        assert_eq!(resolve_provider_for_model("o4-mini"), Some("openai"));
+        assert_eq!(
+            resolve_provider_for_model("chatgpt-4o-latest"),
+            Some("openai")
+        );
+    }
+
+    #[test]
+    fn resolve_anthropic_models() {
+        assert_eq!(
+            resolve_provider_for_model("claude-sonnet-4-5-20250929"),
+            Some("anthropic")
+        );
+        assert_eq!(
+            resolve_provider_for_model("claude-3-haiku"),
+            Some("anthropic")
+        );
+        assert_eq!(resolve_provider_for_model("CLAUDE-opus"), Some("anthropic"));
+    }
+
+    #[test]
+    fn resolve_google_models() {
+        assert_eq!(
+            resolve_provider_for_model("gemini-1.5-pro"),
+            Some("google-ai")
+        );
+        assert_eq!(
+            resolve_provider_for_model("gemini-2.0-flash"),
+            Some("google-ai")
+        );
+    }
+
+    #[test]
+    fn resolve_mistral_models() {
+        assert_eq!(resolve_provider_for_model("mistral-large"), Some("mistral"));
+        assert_eq!(
+            resolve_provider_for_model("codestral-latest"),
+            Some("mistral")
+        );
+        assert_eq!(resolve_provider_for_model("pixtral-large"), Some("mistral"));
+        assert_eq!(resolve_provider_for_model("ministral-8b"), Some("mistral"));
+        assert_eq!(
+            resolve_provider_for_model("open-mistral-nemo"),
+            Some("mistral")
+        );
+        assert_eq!(
+            resolve_provider_for_model("devstral-2-25-12"),
+            Some("mistral")
+        );
+        assert_eq!(
+            resolve_provider_for_model("magistral-medium-1-2-25-09"),
+            Some("mistral")
+        );
+    }
+
+    #[test]
+    fn resolve_cohere_models() {
+        assert_eq!(resolve_provider_for_model("command-r-plus"), Some("cohere"));
+        assert_eq!(
+            resolve_provider_for_model("embed-english-v3.0"),
+            Some("cohere")
+        );
+        assert_eq!(
+            resolve_provider_for_model("rerank-english-v3.0"),
+            Some("cohere")
+        );
+    }
+
+    #[test]
+    fn resolve_deepseek_models() {
+        assert_eq!(
+            resolve_provider_for_model("deepseek-chat"),
+            Some("deepseek")
+        );
+        assert_eq!(
+            resolve_provider_for_model("deepseek-reasoner"),
+            Some("deepseek")
+        );
+        assert_eq!(
+            resolve_provider_for_model("DEEPSEEK-chat"),
+            Some("deepseek")
+        );
+    }
+
+    #[test]
+    fn resolve_unknown_model() {
+        assert_eq!(resolve_provider_for_model("unknown-model"), None);
+        assert_eq!(resolve_provider_for_model(""), None);
+        assert_eq!(resolve_provider_for_model("llama-3"), None);
+    }
+
+    #[test]
+    fn resolve_case_insensitive() {
+        assert_eq!(resolve_provider_for_model("GPT-4o"), Some("openai"));
+        assert_eq!(resolve_provider_for_model("CLAUDE-3"), Some("anthropic"));
+        assert_eq!(resolve_provider_for_model("GEMINI-pro"), Some("google-ai"));
+    }
+
+    // --- AnthropicTranslator tests ---
+
+    #[test]
+    fn anthropic_translate_request_extracts_system() {
+        let translator = AnthropicTranslator;
+        let body = serde_json::json!({
+            "model": "claude-sonnet-4-5-20250929",
+            "messages": [
+                {"role": "system", "content": "You are helpful."},
+                {"role": "user", "content": "Hello"}
+            ],
+            "max_tokens": 1024,
+            "temperature": 0.7
+        });
+
+        let result = translator
+            .translate_request("chat/completions", &body)
+            .unwrap();
+
+        assert_eq!(result.path, "messages");
+        assert_eq!(result.body["system"], "You are helpful.");
+        let messages = result.body["messages"].as_array().unwrap();
+        assert_eq!(messages.len(), 1);
+        assert_eq!(messages[0]["role"], "user");
+        assert_eq!(result.body["max_tokens"], 1024);
+        assert_eq!(result.extra_headers.len(), 1);
+        assert_eq!(result.extra_headers[0].0, "anthropic-version");
+    }
+
+    #[test]
+    fn anthropic_translate_request_defaults_max_tokens() {
+        let translator = AnthropicTranslator;
+        let body = serde_json::json!({
+            "model": "claude-3-haiku",
+            "messages": [{"role": "user", "content": "Hi"}]
+        });
+
+        let result = translator
+            .translate_request("chat/completions", &body)
+            .unwrap();
+        assert_eq!(result.body["max_tokens"], 4096);
+    }
+
+    #[test]
+    fn anthropic_translate_request_maps_stop() {
+        let translator = AnthropicTranslator;
+        let body = serde_json::json!({
+            "model": "claude-3-haiku",
+            "messages": [{"role": "user", "content": "Hi"}],
+            "stop": ["\n"]
+        });
+
+        let result = translator
+            .translate_request("chat/completions", &body)
+            .unwrap();
+        assert!(result.body.get("stop").is_none());
+        assert_eq!(result.body["stop_sequences"], serde_json::json!(["\n"]));
+    }
+
+    #[test]
+    fn anthropic_translate_response() {
+        let translator = AnthropicTranslator;
+        let anthropic_resp = serde_json::json!({
+            "id": "msg_01XFDUDYJgAACzvnptvVoYEL",
+            "type": "message",
+            "role": "assistant",
+            "content": [{"type": "text", "text": "Hello! How can I help?"}],
+            "model": "claude-sonnet-4-5-20250929",
+            "stop_reason": "end_turn",
+            "usage": {"input_tokens": 25, "output_tokens": 10}
+        });
+
+        let result = translator.translate_response(anthropic_resp).unwrap();
+
+        assert_eq!(result["object"], "chat.completion");
+        assert_eq!(result["id"], "chatcmpl-msg_01XFDUDYJgAACzvnptvVoYEL");
+        assert_eq!(
+            result["choices"][0]["message"]["content"],
+            "Hello! How can I help?"
+        );
+        assert_eq!(result["choices"][0]["finish_reason"], "stop");
+        assert_eq!(result["usage"]["prompt_tokens"], 25);
+        assert_eq!(result["usage"]["completion_tokens"], 10);
+        assert_eq!(result["usage"]["total_tokens"], 35);
+    }
+
+    #[test]
+    fn anthropic_translate_response_max_tokens() {
+        let translator = AnthropicTranslator;
+        let anthropic_resp = serde_json::json!({
+            "id": "msg_test",
+            "content": [{"type": "text", "text": "truncated"}],
+            "model": "claude-3-haiku",
+            "stop_reason": "max_tokens",
+            "usage": {"input_tokens": 10, "output_tokens": 100}
+        });
+
+        let result = translator.translate_response(anthropic_resp).unwrap();
+        assert_eq!(result["choices"][0]["finish_reason"], "length");
+    }
+
+    #[test]
+    fn anthropic_translate_response_multiple_text_blocks() {
+        let translator = AnthropicTranslator;
+        let anthropic_resp = serde_json::json!({
+            "id": "msg_multi",
+            "content": [
+                {"type": "text", "text": "Hello "},
+                {"type": "text", "text": "World!"}
+            ],
+            "model": "claude-sonnet-4-5-20250929",
+            "stop_reason": "end_turn",
+            "usage": {"input_tokens": 10, "output_tokens": 5}
+        });
+
+        let result = translator.translate_response(anthropic_resp).unwrap();
+        assert_eq!(result["choices"][0]["message"]["content"], "Hello World!");
+    }
+
+    #[test]
+    fn anthropic_translate_response_tool_use() {
+        let translator = AnthropicTranslator;
+        let anthropic_resp = serde_json::json!({
+            "id": "msg_tool",
+            "content": [
+                {"type": "text", "text": "Let me check."},
+                {
+                    "type": "tool_use",
+                    "id": "toolu_01",
+                    "name": "get_weather",
+                    "input": {"location": "London"}
+                }
+            ],
+            "model": "claude-sonnet-4-5-20250929",
+            "stop_reason": "tool_use",
+            "usage": {"input_tokens": 20, "output_tokens": 30}
+        });
+
+        let result = translator.translate_response(anthropic_resp).unwrap();
+        assert_eq!(result["choices"][0]["message"]["content"], "Let me check.");
+        assert_eq!(result["choices"][0]["finish_reason"], "tool_calls");
+
+        let tool_calls = result["choices"][0]["message"]["tool_calls"]
+            .as_array()
+            .unwrap();
+        assert_eq!(tool_calls.len(), 1);
+        assert_eq!(tool_calls[0]["id"], "toolu_01");
+        assert_eq!(tool_calls[0]["type"], "function");
+        assert_eq!(tool_calls[0]["function"]["name"], "get_weather");
+        let args: serde_json::Value =
+            serde_json::from_str(tool_calls[0]["function"]["arguments"].as_str().unwrap()).unwrap();
+        assert_eq!(args["location"], "London");
+    }
+
+    #[test]
+    fn anthropic_translate_response_tool_use_only() {
+        let translator = AnthropicTranslator;
+        let anthropic_resp = serde_json::json!({
+            "id": "msg_tool_only",
+            "content": [
+                {
+                    "type": "tool_use",
+                    "id": "toolu_02",
+                    "name": "search",
+                    "input": {"query": "test"}
+                }
+            ],
+            "model": "claude-3-haiku",
+            "stop_reason": "tool_use",
+            "usage": {"input_tokens": 5, "output_tokens": 10}
+        });
+
+        let result = translator.translate_response(anthropic_resp).unwrap();
+        // When there's no text content, content should be null
+        assert!(result["choices"][0]["message"]["content"].is_null());
+        assert_eq!(result["choices"][0]["finish_reason"], "tool_calls");
+        assert_eq!(
+            result["choices"][0]["message"]["tool_calls"]
+                .as_array()
+                .unwrap()
+                .len(),
+            1
+        );
+    }
+
+    // --- GoogleAiTranslator tests ---
+
+    #[test]
+    fn google_ai_gateway_base_url() {
+        let translator = GoogleAiTranslator;
+        assert_eq!(
+            translator.gateway_base_url(),
+            Some("https://generativelanguage.googleapis.com/v1beta/openai")
+        );
+        assert!(!translator.needs_translation());
+    }
+
+    // --- PassthroughTranslator tests ---
+
+    #[test]
+    fn passthrough_no_translation() {
+        let translator = PassthroughTranslator;
+        assert!(!translator.needs_translation());
+        assert!(translator.gateway_base_url().is_none());
+
+        let body = serde_json::json!({"model": "gpt-4", "messages": []});
+        let result = translator
+            .translate_request("chat/completions", &body)
+            .unwrap();
+        assert_eq!(result.path, "chat/completions");
+        assert_eq!(result.body, body);
+        assert!(result.extra_headers.is_empty());
+    }
+
+    // --- AnthropicTranslator streaming tests ---
+
+    fn make_event(event_type: &str, data: &str) -> SseEvent {
+        SseEvent {
+            event_type: Some(event_type.to_string()),
+            data: data.to_string(),
+        }
+    }
+
+    fn parse_chunk_json(sse_line: &str) -> serde_json::Value {
+        let json_str = sse_line.strip_prefix("data: ").unwrap().trim();
+        serde_json::from_str(json_str).unwrap()
+    }
+
+    #[test]
+    fn anthropic_stream_message_start() {
+        let translator = AnthropicTranslator;
+        let mut state = StreamTranslationState::default();
+
+        let event = make_event(
+            "message_start",
+            r#"{"type":"message_start","message":{"id":"msg_abc","type":"message","role":"assistant","content":[],"model":"claude-sonnet-4-20250514","stop_reason":null,"usage":{"input_tokens":25,"output_tokens":1}}}"#,
+        );
+
+        let result = translator
+            .translate_stream_event(&event, &mut state)
+            .unwrap();
+        let chunk = parse_chunk_json(&result);
+
+        assert_eq!(chunk["id"], "chatcmpl-msg_abc");
+        assert_eq!(chunk["object"], "chat.completion.chunk");
+        assert_eq!(chunk["model"], "claude-sonnet-4-20250514");
+        assert_eq!(chunk["choices"][0]["delta"]["role"], "assistant");
+        assert!(chunk["choices"][0]["finish_reason"].is_null());
+        assert_eq!(state.id, "msg_abc");
+        assert_eq!(state.input_tokens, 25);
+    }
+
+    #[test]
+    fn anthropic_stream_text_delta() {
+        let translator = AnthropicTranslator;
+        let mut state = StreamTranslationState {
+            id: "msg_abc".to_string(),
+            model: "claude-sonnet-4-20250514".to_string(),
+            ..Default::default()
+        };
+
+        let event = make_event(
+            "content_block_delta",
+            r#"{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"Hello world"}}"#,
+        );
+
+        let result = translator
+            .translate_stream_event(&event, &mut state)
+            .unwrap();
+        let chunk = parse_chunk_json(&result);
+
+        assert_eq!(chunk["choices"][0]["delta"]["content"], "Hello world");
+        assert!(chunk["choices"][0]["finish_reason"].is_null());
+    }
+
+    #[test]
+    fn anthropic_stream_message_delta_stop() {
+        let translator = AnthropicTranslator;
+        let mut state = StreamTranslationState {
+            id: "msg_abc".to_string(),
+            model: "claude-sonnet-4-20250514".to_string(),
+            input_tokens: 25,
+            ..Default::default()
+        };
+
+        let event = make_event(
+            "message_delta",
+            r#"{"type":"message_delta","delta":{"stop_reason":"end_turn","stop_sequence":null},"usage":{"output_tokens":15}}"#,
+        );
+
+        let result = translator
+            .translate_stream_event(&event, &mut state)
+            .unwrap();
+        let chunk = parse_chunk_json(&result);
+
+        assert_eq!(chunk["choices"][0]["finish_reason"], "stop");
+        assert_eq!(chunk["usage"]["prompt_tokens"], 25);
+        assert_eq!(chunk["usage"]["completion_tokens"], 15);
+        assert_eq!(chunk["usage"]["total_tokens"], 40);
+    }
+
+    #[test]
+    fn anthropic_stream_message_stop_emits_done() {
+        let translator = AnthropicTranslator;
+        let mut state = StreamTranslationState::default();
+
+        let event = make_event("message_stop", r#"{"type":"message_stop"}"#);
+        let result = translator
+            .translate_stream_event(&event, &mut state)
+            .unwrap();
+
+        assert_eq!(result, "data: [DONE]\n\n");
+    }
+
+    #[test]
+    fn anthropic_stream_ping_skipped() {
+        let translator = AnthropicTranslator;
+        let mut state = StreamTranslationState::default();
+
+        let event = make_event("ping", r#"{"type":"ping"}"#);
+        assert!(
+            translator
+                .translate_stream_event(&event, &mut state)
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn anthropic_stream_tool_use() {
+        let translator = AnthropicTranslator;
+        let mut state = StreamTranslationState {
+            id: "msg_abc".to_string(),
+            model: "claude-sonnet-4-20250514".to_string(),
+            ..Default::default()
+        };
+
+        // content_block_start for tool_use
+        let start_event = make_event(
+            "content_block_start",
+            r#"{"type":"content_block_start","index":1,"content_block":{"type":"tool_use","id":"toolu_123","name":"get_weather","input":{}}}"#,
+        );
+
+        let result = translator
+            .translate_stream_event(&start_event, &mut state)
+            .unwrap();
+        let chunk = parse_chunk_json(&result);
+
+        assert_eq!(chunk["choices"][0]["delta"]["tool_calls"][0]["index"], 0);
+        assert_eq!(
+            chunk["choices"][0]["delta"]["tool_calls"][0]["id"],
+            "toolu_123"
+        );
+        assert_eq!(
+            chunk["choices"][0]["delta"]["tool_calls"][0]["function"]["name"],
+            "get_weather"
+        );
+        assert_eq!(state.next_tool_index, 1);
+
+        // content_block_delta for tool input
+        let delta_event = make_event(
+            "content_block_delta",
+            r#"{"type":"content_block_delta","index":1,"delta":{"type":"input_json_delta","partial_json":"{\"location\":"}}"#,
+        );
+
+        let result = translator
+            .translate_stream_event(&delta_event, &mut state)
+            .unwrap();
+        let chunk = parse_chunk_json(&result);
+
+        assert_eq!(chunk["choices"][0]["delta"]["tool_calls"][0]["index"], 0);
+        assert_eq!(
+            chunk["choices"][0]["delta"]["tool_calls"][0]["function"]["arguments"],
+            "{\"location\":"
+        );
+    }
+
+    #[test]
+    fn anthropic_stream_content_block_start_text_skipped() {
+        let translator = AnthropicTranslator;
+        let mut state = StreamTranslationState::default();
+
+        let event = make_event(
+            "content_block_start",
+            r#"{"type":"content_block_start","index":0,"content_block":{"type":"text","text":""}}"#,
+        );
+
+        assert!(
+            translator
+                .translate_stream_event(&event, &mut state)
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn anthropic_stream_max_tokens_finish_reason() {
+        let translator = AnthropicTranslator;
+        let mut state = StreamTranslationState::default();
+
+        let event = make_event(
+            "message_delta",
+            r#"{"type":"message_delta","delta":{"stop_reason":"max_tokens","stop_sequence":null},"usage":{"output_tokens":100}}"#,
+        );
+
+        let result = translator
+            .translate_stream_event(&event, &mut state)
+            .unwrap();
+        let chunk = parse_chunk_json(&result);
+
+        assert_eq!(chunk["choices"][0]["finish_reason"], "length");
+    }
+
+    #[test]
+    fn anthropic_stream_tool_use_finish_reason() {
+        let translator = AnthropicTranslator;
+        let mut state = StreamTranslationState::default();
+
+        let event = make_event(
+            "message_delta",
+            r#"{"type":"message_delta","delta":{"stop_reason":"tool_use","stop_sequence":null},"usage":{"output_tokens":50}}"#,
+        );
+
+        let result = translator
+            .translate_stream_event(&event, &mut state)
+            .unwrap();
+        let chunk = parse_chunk_json(&result);
+
+        assert_eq!(chunk["choices"][0]["finish_reason"], "tool_calls");
+    }
+}

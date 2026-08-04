@@ -1,0 +1,22 @@
+{
+  "node_private_key": "BwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwc",
+  "node_public_key": "E75P6uryBMf9M1j8nAByGIHRdCeBKCJ-xnTzf3_pe20",
+  "admin_private_key": "CQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQk",
+  "nonce": "CwsLCwsLCwsLCwsLCwsLCwsLCwsLCwsL",
+  "plaintext": "Bearer sk-rci-fixture",
+  "context": {
+    "node_id": "node-123",
+    "pending_credential_id": "pending-456",
+    "service_slug": "openai",
+    "injection_method": "header",
+    "field_name": "Authorization",
+    "target_url": "https://api.openai.com/v1",
+    "version": "v1"
+  },
+  "envelope": {
+    "version": "v1",
+    "admin_pubkey": "V9tLNZ8jrl4Ubk4lEgVnBHIlBjSMFQwUdT0Mkz0E1CE",
+    "nonce": "CwsLCwsLCwsLCwsLCwsLCwsLCwsLCwsL",
+    "ciphertext": "9sHPUj2M3V_cDMib_f3PdlJK8RDep08jkBha8pBhLhP0b2SOHg"
+  }
+}

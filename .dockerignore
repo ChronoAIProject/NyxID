@@ -1,0 +1,23 @@
+target/
+frontend/node_modules/
+frontend/dist/
+.git/
+.env
+.env.*
+!.env.example
+keys/
+docs/
+!docs/AI_AGENT_PLAYBOOK.md
+# The public docs site (docs/site/**) is the build-time source for the
+# frontend image's docs pages: the vite `nyxid-docs-sync` plugin reads it
+# via ../docs/site and its publish-gate fails the build if absent. The
+# frontend image uses the repo root as its context (see publish-images.yml),
+# so re-include the docs tree here. Backend/node-agent images only COPY
+# docs/AI_AGENT_PLAYBOOK.md, so this does not change those images.
+!docs/site
+!docs/site/**
+k8s/
+node_modules/
+SERVICES_OVERHAUL_PLAN.md
+CODE_REVIEW_FINDINGS.md
+SECURITY_REVIEW_FINDINGS.md

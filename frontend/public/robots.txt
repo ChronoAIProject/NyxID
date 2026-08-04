@@ -1,0 +1,17 @@
+User-agent: *
+Allow: /
+Disallow: /dashboard
+Disallow: /settings
+Disallow: /admin
+Disallow: /api-keys
+Disallow: /keys
+Disallow: /nodes
+Disallow: /services
+Disallow: /providers
+Disallow: /developer
+Disallow: /approvals
+Disallow: /cli-auth
+Disallow: /oauth-consent
+Disallow: /ssh
+
+Sitemap: https://nyx.chrono-ai.fun/sitemap.xml

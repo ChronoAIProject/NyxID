@@ -1,0 +1,130 @@
+import { useNavigate } from "@tanstack/react-router";
+import type { DownstreamService } from "@/types/api";
+import {
+  getAuthTypeLabel,
+  isOidcService,
+  SERVICE_TYPE_LABELS,
+} from "@/lib/constants";
+import { useNodes } from "@/hooks/use-nodes";
+import { Badge } from "@/components/ui/badge";
+import { Button } from "@/components/ui/button";
+import {
+  Tooltip,
+  TooltipContent,
+  TooltipTrigger,
+} from "@/components/ui/tooltip";
+import { Lock, Router, Trash2 } from "lucide-react";
+
+interface ServiceCardProps {
+  readonly service: DownstreamService;
+  readonly onDelete: (id: string) => void;
+  readonly isDeleting: boolean;
+}
+
+/* ── Service Card (NyxID) ── */
+export function ServiceCard({
+  service,
+  onDelete,
+  isDeleting,
+}: ServiceCardProps) {
+  const navigate = useNavigate();
+  // Issue #416: surface the viewer's node binding for this catalog row
+  // so admins can see at a glance which service routes through which
+  // node without opening each detail page. Multiple cards on one page
+  // share a single `useNodes()` query via TanStack Query's dedupe.
+  const { data: nodes } = useNodes();
+  const node = service.node_id
+    ? nodes?.find((n) => n.id === service.node_id)
+    : undefined;
+  const nodeLabel = service.node_id
+    ? (node?.name ?? service.node_id.slice(0, 8))
+    : null;
+
+  const secondaryLabel =
+    service.service_type === "ssh"
+      ? `${service.ssh_config?.host ?? "ssh"}:${String(service.ssh_config?.port ?? 22)}`
+      : service.base_url;
+
+  return (
+    <div
+      className="group relative flex cursor-pointer flex-col gap-4 rounded-xl border border-border/50 bg-transparent p-4 transition-colors duration-300 hover:border-white/[0.15]"
+      onClick={() =>
+        void navigate({
+          to: "/services/$serviceId",
+          params: { serviceId: service.id },
+        })
+      }
+    >
+      {/* Delete button (show on hover) */}
+      <Button
+        variant="ghost"
+        size="icon"
+        className="absolute right-2 top-2 h-7 w-7 opacity-0 transition-opacity group-hover:opacity-100 text-muted-foreground hover:text-destructive"
+        onClick={(e) => {
+          e.stopPropagation();
+          onDelete(service.id);
+        }}
+        disabled={isDeleting}
+      >
+        <Trash2 className="h-3.5 w-3.5 text-destructive" />
+        <span className="sr-only">Delete service</span>
+      </Button>
+
+      {/* Title + Badges row */}
+      <div className="flex items-start justify-between gap-3">
+        <h3 className="text-lg font-normal text-foreground">
+          {service.name}
+        </h3>
+        <div className="flex shrink-0 items-center gap-1.5">
+          <Badge variant="secondary">
+            {SERVICE_TYPE_LABELS[service.service_type] ?? service.service_type}
+          </Badge>
+          {service.visibility === "private" && (
+            <Badge variant="secondary">
+              <Lock className="mr-1 h-2.5 w-2.5" />
+              Private
+            </Badge>
+          )}
+          {isOidcService(service) && <Badge variant="accent">OIDC</Badge>}
+          {service.service_type === "http" && (
+            <Badge variant="info">{getAuthTypeLabel(service)}</Badge>
+          )}
+        </div>
+      </div>
+
+      {/* Description (if exists) */}
+      {service.description && (
+        <p className="text-[12px] text-muted-foreground line-clamp-2">
+          {service.description}
+        </p>
+      )}
+
+      {/* Target + Routing */}
+      <div className="flex flex-wrap items-center gap-2">
+        <span className="text-xs text-text-tertiary">{secondaryLabel}</span>
+        {nodeLabel && (
+          <Tooltip>
+            <TooltipTrigger asChild>
+              {/* asChild + span keeps Radix happy without nesting buttons. */}
+              <span className="inline-flex">
+                <Badge
+                  variant={node?.status === "online" ? "default" : "secondary"}
+                  className="gap-1"
+                >
+                  <Router className="h-2.5 w-2.5" />
+                  <span>&rarr; {nodeLabel}</span>
+                </Badge>
+              </span>
+            </TooltipTrigger>
+            <TooltipContent>
+              <p className="text-xs">
+                Your routing: {node?.name ?? service.node_id}
+                {node?.status ? ` (${node.status})` : ""}
+              </p>
+            </TooltipContent>
+          </Tooltip>
+        )}
+      </div>
+    </div>
+  );
+}
