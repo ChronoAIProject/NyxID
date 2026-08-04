@@ -70,6 +70,7 @@ frontend/src/hooks/use-orgs.ts
 frontend/src/hooks/use-runtime-config.ts
 frontend/src/hooks/use-theme.ts
 frontend/src/lib/api-client.ts
+frontend/src/lib/assistant/connect-watch.ts
 frontend/src/lib/navigation.ts
 frontend/src/lib/parse-additional-scopes.ts
 frontend/src/lib/telemetry.ts
