@@ -1,9 +1,10 @@
-import { ShieldCheck } from "lucide-react";
+import { useEffect } from "react";
+import { RefreshCw, ShieldCheck } from "lucide-react";
 import { toast } from "sonner";
 import { ApprovalCard } from "@/components/assistant/blocks/approval-card";
 import { ServiceIcon } from "@/components/service-icon";
-import { ErrorBanner } from "@/components/shared/error-banner";
 import { Badge } from "@/components/ui/badge";
+import { Button } from "@/components/ui/button";
 import { Skeleton } from "@/components/ui/skeleton";
 import {
   Table,
@@ -224,6 +225,17 @@ function HistorySection({
 
 export function ApprovalsView() {
   const approvals = useAssistantApprovals();
+  // A dead backend must not take the view away: the failure is a toast, the
+  // sections render whatever is cached (or their own empty states), and the
+  // retry affordance lives inside the working view.
+  useEffect(() => {
+    if (!approvals.isError) return;
+    toast.error("Could not load approvals", {
+      id: "assistant-approvals-load-failed",
+      description:
+        "The assistant backend did not respond. Deciding from Telegram or mobile still works — retry below.",
+    });
+  }, [approvals.isError]);
   const decide = useDecideApproval();
 
   // Pending: most urgent (soonest expiry) first. History: newest first.
@@ -279,13 +291,24 @@ export function ApprovalsView() {
               />
             ))}
           </div>
-        ) : approvals.isError ? (
-          <ErrorBanner
-            message="Failed to load approvals. Please try again."
-            onRetry={approvals.refetch}
-          />
         ) : (
           <>
+            {approvals.isError ? (
+              <div className="mb-4 flex items-center justify-between gap-3 rounded-xl border border-dashed border-border px-4 py-2.5">
+                <p className="text-[12px] text-muted-foreground">
+                  Approvals may be out of date until the backend responds.
+                </p>
+                <Button
+                  type="button"
+                  variant="outline"
+                  size="sm"
+                  onClick={approvals.refetch}
+                >
+                  <RefreshCw />
+                  Retry
+                </Button>
+              </div>
+            ) : null}
             <PendingSection entries={pending} onDecide={handleDecide} />
 
             <p className="mb-2.5 mt-8 text-[10px] font-semibold uppercase tracking-[1.5px] text-text-tertiary">

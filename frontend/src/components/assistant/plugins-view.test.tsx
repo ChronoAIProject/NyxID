@@ -1,6 +1,7 @@
 import { act, render, screen, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { beforeEach, describe, expect, it, vi } from "vitest";
+import { toast } from "sonner";
 import type { ReactNode } from "react";
 import type { CatalogEntry, KeyInfo } from "@/types/keys";
 import { resetSkillCatalog } from "@/lib/assistant/skills";
@@ -428,8 +429,12 @@ describe("PluginsView", () => {
     expect(screen.queryByText("Added")).not.toBeInTheDocument();
   });
 
-  it("shows an error banner and retries both queries", async () => {
+  it("stays usable when the catalog fails: toast, rendered view, inline retry", async () => {
+    // "FE do not block any error": the failure is a toast, never a view
+    // replacement. The view keeps its search box and sections, and the retry
+    // affordance lives inside the working view.
     const user = userEvent.setup();
+    const toastSpy = vi.spyOn(toast, "error");
     const refetchKeys = vi.fn();
     const refetchCatalog = vi.fn();
     mocks.useKeys.mockReturnValue({
@@ -445,12 +450,25 @@ describe("PluginsView", () => {
       refetch: refetchCatalog,
     });
     render(<PluginsView />);
+
     expect(
-      screen.getByText("Failed to load the plugin catalog. Please try again."),
+      screen.queryByText("Failed to load the plugin catalog. Please try again."),
+    ).not.toBeInTheDocument();
+    expect(toastSpy).toHaveBeenCalledWith(
+      "Could not load plugins",
+      expect.objectContaining({ id: "assistant-plugins-load-failed" }),
+    );
+    // The view is still standing: heading, search, and the honest empty copy.
+    expect(screen.getByText("Added")).toBeInTheDocument();
+    expect(screen.getByRole("textbox")).toBeEnabled();
+    expect(
+      screen.getByText("Connected services could not be loaded right now."),
     ).toBeInTheDocument();
+
     await user.click(screen.getByRole("button", { name: "Retry" }));
     expect(refetchKeys).toHaveBeenCalled();
     expect(refetchCatalog).toHaveBeenCalled();
+    toastSpy.mockRestore();
   });
 
   it("keeps the Added section with an empty state when nothing is connected", () => {
