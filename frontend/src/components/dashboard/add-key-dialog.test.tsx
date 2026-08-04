@@ -1,9 +1,10 @@
 import { render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { CatalogEntry, KeyInfo } from "@/types/keys";
 import { ApiError } from "@/lib/api-client";
 import { SPEC_CATALOG_SLUGS } from "@/components/service-icons";
+import { useOAuthPopupStore } from "@/stores/oauth-popup-store";
 import { AddKeyDialog } from "./add-key-dialog";
 
 const {
@@ -91,6 +92,12 @@ vi.mock("@/hooks/use-providers", () => ({
     mutate: pollDeviceCodeMutate,
     isPending: false,
   }),
+}));
+
+// Popup protocol behavior has focused hook/page coverage. These legacy dialog
+// tests intentionally render without a QueryClientProvider.
+vi.mock("@/hooks/use-oauth-popup", () => ({
+  useOAuthPopupReceiver: () => undefined,
 }));
 
 vi.mock("@/lib/api-client", async () => {
@@ -218,6 +225,11 @@ beforeEach(() => {
     interval: 5,
   });
   mockApiDelete.mockResolvedValue(undefined);
+  useOAuthPopupStore.setState({ attempt: null });
+});
+
+afterEach(() => {
+  vi.restoreAllMocks();
 });
 
 /**
@@ -898,6 +910,155 @@ describe("AddKeyDialog — reconnect path", () => {
     second.unmount();
 
     expect(mockApiDelete).not.toHaveBeenCalled();
+  });
+});
+
+describe("AddKeyDialog — managed OAuth popup", () => {
+  const nonce = "8e1fcf2a-e679-4da2-9f54-2d90cd5f0085";
+  const authorizationUrl =
+    `https://github.com/login/oauth/authorize?state=1cc_${nonce}`;
+
+  function popupWindow() {
+    return {
+      closed: false,
+      close: vi.fn(),
+      postMessage: vi.fn(),
+    } as unknown as Window;
+  }
+
+  it("opens synchronously and sends only the chat flow contract", async () => {
+    catalog.entries = [OAUTH_ENTRY];
+    const popup = popupWindow();
+    const open = vi.spyOn(window, "open").mockReturnValue(popup);
+    initiateOAuthMutateAsync.mockResolvedValue({
+      authorization_url: authorizationUrl,
+      attempt_nonce: nonce,
+    });
+    const user = userEvent.setup();
+    const { unmount } = render(
+      <AddKeyDialog
+        open
+        onOpenChange={vi.fn()}
+        reconnectKey={makeReconnectKey()}
+        launch="popup"
+        flow="cc"
+      />,
+    );
+
+    await user.click(
+      screen.getByRole("button", { name: /Connect with GitHub/i }),
+    );
+    await waitFor(() =>
+      expect(initiateOAuthMutateAsync).toHaveBeenCalledTimes(1),
+    );
+
+    expect(open).toHaveBeenCalledTimes(1);
+    expect(open.mock.invocationCallOrder[0]).toBeLessThan(
+      initiateOAuthMutateAsync.mock.invocationCallOrder[0] ?? Infinity,
+    );
+    expect(initiateOAuthMutateAsync).toHaveBeenCalledWith({
+      providerId: "provider-oauth",
+      scopeOverride: [],
+      keyId: "existing-service-1",
+      flow: "cc",
+    });
+    expect(initiateOAuthMutateAsync.mock.calls[0]?.[0]).not.toHaveProperty(
+      "redirectPath",
+    );
+    expect(useOAuthPopupStore.getState().attempt).toMatchObject({
+      nonce,
+      keyId: "existing-service-1",
+    });
+    unmount();
+    expect(popup.close).toHaveBeenCalled();
+    expect(useOAuthPopupStore.getState().attempt).toBeNull();
+  });
+
+  it("falls back to the existing anchor when the popup is blocked", async () => {
+    catalog.entries = [OAUTH_ENTRY];
+    vi.spyOn(window, "open").mockReturnValue(null);
+    initiateOAuthMutateAsync.mockResolvedValue({
+      authorization_url: authorizationUrl,
+      attempt_nonce: nonce,
+    });
+    const user = userEvent.setup();
+    render(
+      <AddKeyDialog
+        open
+        onOpenChange={vi.fn()}
+        reconnectKey={makeReconnectKey()}
+        launch="popup"
+        flow="cc"
+      />,
+    );
+
+    await user.click(
+      screen.getByRole("button", { name: /Connect with GitHub/i }),
+    );
+
+    expect(await screen.findByRole("link", { name: /Open GitHub/i })).toHaveAttribute(
+      "href",
+      authorizationUrl,
+    );
+    expect(useOAuthPopupStore.getState().attempt).toBeNull();
+  });
+
+  it("closes the placeholder and releases ownership when initiation fails", async () => {
+    catalog.entries = [OAUTH_ENTRY];
+    const popup = popupWindow();
+    vi.spyOn(window, "open").mockReturnValue(popup);
+    initiateOAuthMutateAsync.mockRejectedValue(new Error("network down"));
+    const user = userEvent.setup();
+    render(
+      <AddKeyDialog
+        open
+        onOpenChange={vi.fn()}
+        reconnectKey={makeReconnectKey()}
+        launch="popup"
+        flow="cc"
+      />,
+    );
+
+    await user.click(
+      screen.getByRole("button", { name: /Connect with GitHub/i }),
+    );
+
+    expect(
+      await screen.findByText("Failed to start OAuth flow"),
+    ).toBeInTheDocument();
+    expect(popup.close).toHaveBeenCalled();
+    expect(useOAuthPopupStore.getState().attempt).toBeNull();
+  });
+
+  it("keeps the legacy caller free of popup and flow parameters", async () => {
+    catalog.entries = [OAUTH_ENTRY];
+    const open = vi.spyOn(window, "open");
+    const user = userEvent.setup();
+    render(
+      <AddKeyDialog
+        open
+        onOpenChange={vi.fn()}
+        reconnectKey={makeReconnectKey()}
+      />,
+    );
+
+    await user.click(
+      screen.getByRole("button", { name: /Connect with GitHub/i }),
+    );
+    await waitFor(() =>
+      expect(initiateOAuthMutateAsync).toHaveBeenCalledTimes(1),
+    );
+
+    expect(open).not.toHaveBeenCalled();
+    expect(initiateOAuthMutateAsync).toHaveBeenCalledWith({
+      providerId: "provider-oauth",
+      redirectPath: "/keys/existing-service-1",
+      scopeOverride: [],
+      keyId: "existing-service-1",
+    });
+    expect(initiateOAuthMutateAsync.mock.calls[0]?.[0]).not.toHaveProperty(
+      "flow",
+    );
   });
 });
 

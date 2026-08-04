@@ -280,12 +280,13 @@ describe("before_send privacy hook", () => {
     expect(result?.properties?.$referrer).toBe("https://app.nyxid.dev/login");
   });
 
-  it("drops pageviews on sensitive paths (reset-password, verify-email, oauth callback, approve)", () => {
+  it("drops pageviews on sensitive paths (reset-password, verify-email, oauth completion, approve)", () => {
     const beforeSend = getBeforeSend();
     for (const pathname of [
       "/reset-password/abc-token",
       "/verify-email/xyz",
       "/oauth/callback",
+      "/oauth",
       "/approve/req-1",
     ]) {
       expect(beforeSend({ properties: { $pathname: pathname } })).toBeNull();
