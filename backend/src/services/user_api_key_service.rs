@@ -201,6 +201,7 @@ pub async fn create_api_key(
         expires_at: params.expires_at,
         provider_config_id: params.provider_config_id.map(str::to_string),
         connection_id: params.connection_id.map(str::to_string),
+        oauth_attempt_nonce: None,
         user_oauth_client_id_encrypted,
         user_oauth_client_secret_encrypted,
         status: params.status.to_string(),
@@ -271,6 +272,7 @@ pub async fn create_api_key_from_provider_token(
         expires_at: provider_token.expires_at,
         provider_config_id: Some(provider_config_id.to_string()),
         connection_id: provider_token.connection_id.clone(),
+        oauth_attempt_nonce: None,
         user_oauth_client_id_encrypted: None,
         user_oauth_client_secret_encrypted: None,
         status: provider_token.status.clone(),
@@ -523,6 +525,63 @@ pub async fn write_oauth_tokens_to_key(
     Ok(())
 }
 
+/// Chat-only token write. The attempt nonce is part of the mutation filter,
+/// so a callback from an older popup cannot activate a retried connection.
+#[allow(clippy::too_many_arguments)]
+pub async fn write_chat_oauth_tokens_to_key(
+    db: &mongodb::Database,
+    encryption_keys: &EncryptionKeys,
+    connection_id: &str,
+    attempt_nonce: &str,
+    access_token: &str,
+    refresh_token: Option<&str>,
+    token_scopes: Option<&str>,
+    expires_at: Option<chrono::DateTime<chrono::Utc>>,
+) -> AppResult<bool> {
+    let access_enc = encryption_keys.encrypt(access_token.as_bytes()).await?;
+    let refresh_enc = match refresh_token {
+        Some(rt) if !rt.is_empty() => Some(encryption_keys.encrypt(rt.as_bytes()).await?),
+        _ => None,
+    };
+    let now = bson::DateTime::from_chrono(Utc::now());
+    let mut set_doc = doc! {
+        "credential_type": "oauth2",
+        "access_token_encrypted": optional_binary_bson(Some(&access_enc)),
+        "expires_at": optional_datetime_bson(expires_at),
+        "status": "active",
+        "error_message": bson::Bson::Null,
+        "last_authorized_at": &now,
+        "updated_at": &now,
+    };
+    if let Some(refresh) = refresh_enc.as_ref() {
+        set_doc.insert(
+            "refresh_token_encrypted",
+            optional_binary_bson(Some(refresh)),
+        );
+    }
+    if let Some(scopes) = token_scopes {
+        set_doc.insert("token_scopes", optional_string_bson(Some(scopes)));
+    }
+    set_doc.insert("credential_encrypted", bson::Bson::Null);
+
+    let result = db
+        .collection::<UserApiKey>(COLLECTION_NAME)
+        .update_one(
+            doc! {
+                "connection_id": connection_id,
+                "oauth_attempt_nonce": attempt_nonce,
+                "status": { "$nin": ["revoked", "failed"] },
+            },
+            doc! {
+                "$set": set_doc,
+                "$unset": { "oauth_attempt_nonce": "" },
+            },
+        )
+        .await?;
+
+    Ok(result.matched_count == 1)
+}
+
 /// Mark placeholder UserApiKey rows tied to a denied or failed OAuth
 /// flow so the wizard's polling can exit immediately instead of waiting for
 /// the 5-minute deadline.
@@ -612,6 +671,80 @@ pub async fn fail_connection_placeholder(
         .await?;
 
     Ok(result.modified_count)
+}
+
+/// Chat-only failure write guarded by the active OAuth generation.
+pub async fn fail_chat_oauth_placeholder(
+    db: &mongodb::Database,
+    connection_id: &str,
+    attempt_nonce: &str,
+    error_message: &str,
+) -> AppResult<u64> {
+    let message = normalize_error_message(error_message);
+    let result = db
+        .collection::<UserApiKey>(COLLECTION_NAME)
+        .update_one(
+            doc! {
+                "connection_id": connection_id,
+                "oauth_attempt_nonce": attempt_nonce,
+                "status": { "$in": ["pending_auth"] },
+                "credential_type": { "$ne": "node_managed" },
+            },
+            doc! {
+                "$set": {
+                    "status": "failed",
+                    "error_message": message,
+                    "credential_encrypted": bson::Bson::Null,
+                    "access_token_encrypted": bson::Bson::Null,
+                    "refresh_token_encrypted": bson::Bson::Null,
+                    "token_scopes": bson::Bson::Null,
+                    "expires_at": bson::Bson::Null,
+                    "updated_at": bson::DateTime::from_chrono(Utc::now()),
+                }
+            },
+        )
+        .await?;
+
+    Ok(result.modified_count)
+}
+
+/// Start or retry a chat OAuth attempt on one connection. The nonce and
+/// pending reset are written together, which closes the stale-callback race.
+pub async fn begin_chat_oauth_attempt(
+    db: &mongodb::Database,
+    connection_id: &str,
+    attempt_nonce: &str,
+) -> AppResult<()> {
+    let result = db
+        .collection::<UserApiKey>(COLLECTION_NAME)
+        .update_one(
+            doc! {
+                "connection_id": connection_id,
+                "credential_type": { "$ne": "node_managed" },
+            },
+            doc! {
+                "$set": {
+                    "credential_type": "oauth2",
+                    "credential_encrypted": bson::Bson::Null,
+                    "access_token_encrypted": bson::Bson::Null,
+                    "refresh_token_encrypted": bson::Bson::Null,
+                    "token_scopes": bson::Bson::Null,
+                    "expires_at": bson::Bson::Null,
+                    "status": "pending_auth",
+                    "error_message": bson::Bson::Null,
+                    "oauth_attempt_nonce": attempt_nonce,
+                    "updated_at": bson::DateTime::from_chrono(Utc::now()),
+                }
+            },
+        )
+        .await?;
+
+    if result.matched_count == 0 {
+        return Err(AppError::NotFound(
+            "OAuth connection key not found".to_string(),
+        ));
+    }
+    Ok(())
 }
 
 /// Fail the OAuth placeholder(s) for a denied/failed callback, routing to the
@@ -1343,6 +1476,7 @@ mod tests {
             expires_at: None,
             provider_config_id: Some("provider-1".to_string()),
             connection_id: None,
+            oauth_attempt_nonce: None,
             user_oauth_client_id_encrypted: None,
             user_oauth_client_secret_encrypted: None,
             status: "active".to_string(),
@@ -1422,6 +1556,7 @@ mod tests {
                 expires_at: None,
                 provider_config_id: Some(provider_id.clone()),
                 connection_id: None,
+                oauth_attempt_nonce: None,
                 user_oauth_client_id_encrypted: None,
                 user_oauth_client_secret_encrypted: None,
                 status: "pending_auth".to_string(),
@@ -2075,6 +2210,8 @@ mod tests {
             target_user_id: target_user_id.map(str::to_string),
             credential_user_id: None,
             redirect_path: None,
+            flow_kind: None,
+            attempt_nonce: None,
             connection_id: None,
             consumed: false,
             expires_at: now + Duration::minutes(10),
@@ -2524,6 +2661,7 @@ mod tests {
                 expires_at: None,
                 provider_config_id: Some(provider_id.clone()),
                 connection_id: Some(connection_id.clone()),
+                oauth_attempt_nonce: None,
                 user_oauth_client_id_encrypted: None,
                 user_oauth_client_secret_encrypted: None,
                 status: "pending_auth".to_string(),
@@ -3062,6 +3200,7 @@ mod tests {
                 expires_at: None,
                 provider_config_id: Some(uuid::Uuid::new_v4().to_string()),
                 connection_id: Some(connection_id.clone()),
+                oauth_attempt_nonce: None,
                 user_oauth_client_id_encrypted: None,
                 user_oauth_client_secret_encrypted: None,
                 status: "pending_auth".to_string(),
@@ -3134,6 +3273,7 @@ mod tests {
                 expires_at: None,
                 provider_config_id: Some(uuid::Uuid::new_v4().to_string()),
                 connection_id: Some(connection_id.clone()),
+                oauth_attempt_nonce: None,
                 user_oauth_client_id_encrypted: None,
                 user_oauth_client_secret_encrypted: None,
                 status: "active".to_string(),
@@ -3377,6 +3517,7 @@ mod tests {
                 expires_at: None,
                 provider_config_id: Some(uuid::Uuid::new_v4().to_string()),
                 connection_id: Some(connection_id.clone()),
+                oauth_attempt_nonce: None,
                 user_oauth_client_id_encrypted: None,
                 user_oauth_client_secret_encrypted: None,
                 status: "revoked".to_string(),
@@ -3449,6 +3590,7 @@ mod tests {
                     expires_at: None,
                     provider_config_id: Some(provider_id.clone()),
                     connection_id: Some(conn_id.clone()),
+                    oauth_attempt_nonce: None,
                     user_oauth_client_id_encrypted: None,
                     user_oauth_client_secret_encrypted: None,
                     status: "pending_auth".to_string(),
@@ -4874,6 +5016,100 @@ mod tests {
             .await
             .expect_err("missing key should 404");
         assert!(matches!(err, crate::errors::AppError::NotFound(_)));
+    }
+
+    #[tokio::test]
+    async fn chat_attempt_generation_rejects_stale_success_and_failure() {
+        let Some(db) = connect_test_database("chat_oauth_attempt_generation").await else {
+            return;
+        };
+        let encryption_keys = test_encryption_keys();
+        let user_id = uuid::Uuid::new_v4().to_string();
+        let provider_id = uuid::Uuid::new_v4().to_string();
+        let connection_id = uuid::Uuid::new_v4().to_string();
+        let key = super::create_api_key(
+            &db,
+            &encryption_keys,
+            &user_id,
+            super::CreateApiKeyParams {
+                label: "Chat OAuth",
+                credential_type: "oauth2",
+                credential: "",
+                access_token: None,
+                refresh_token: None,
+                token_scopes: None,
+                expires_at: None,
+                provider_config_id: Some(&provider_id),
+                connection_id: Some(&connection_id),
+                oauth_client_id: None,
+                oauth_client_secret: None,
+                status: "pending_auth",
+                source: None,
+                source_id: None,
+            },
+        )
+        .await
+        .unwrap();
+        let attempt_a = uuid::Uuid::new_v4().to_string();
+        let attempt_b = uuid::Uuid::new_v4().to_string();
+        super::begin_chat_oauth_attempt(&db, &connection_id, &attempt_a)
+            .await
+            .unwrap();
+        super::begin_chat_oauth_attempt(&db, &connection_id, &attempt_b)
+            .await
+            .unwrap();
+
+        assert_eq!(
+            super::fail_chat_oauth_placeholder(&db, &connection_id, &attempt_a, "late denial")
+                .await
+                .unwrap(),
+            0
+        );
+        assert!(
+            !super::write_chat_oauth_tokens_to_key(
+                &db,
+                &encryption_keys,
+                &connection_id,
+                &attempt_a,
+                "stale-token",
+                None,
+                None,
+                None,
+            )
+            .await
+            .unwrap()
+        );
+
+        let pending = super::get_api_key(&db, &user_id, &key.id).await.unwrap();
+        assert_eq!(pending.status, "pending_auth");
+        assert_eq!(
+            pending.oauth_attempt_nonce.as_deref(),
+            Some(attempt_b.as_str())
+        );
+
+        assert!(
+            super::write_chat_oauth_tokens_to_key(
+                &db,
+                &encryption_keys,
+                &connection_id,
+                &attempt_b,
+                "fresh-token",
+                None,
+                Some("read:user"),
+                None,
+            )
+            .await
+            .unwrap()
+        );
+        let active = super::get_api_key(&db, &user_id, &key.id).await.unwrap();
+        assert_eq!(active.status, "active");
+        assert!(active.oauth_attempt_nonce.is_none());
+        assert_eq!(
+            super::fail_chat_oauth_placeholder(&db, &connection_id, &attempt_a, "late denial")
+                .await
+                .unwrap(),
+            0
+        );
     }
 
     #[tokio::test]

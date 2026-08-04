@@ -7219,6 +7219,7 @@ mod proxy_resolution_integration_tests {
                 expires_at: Some(now + chrono::Duration::hours(1)),
                 provider_config_id: None,
                 connection_id: None,
+                oauth_attempt_nonce: None,
                 user_oauth_client_id_encrypted: None,
                 user_oauth_client_secret_encrypted: None,
                 status: "active".to_string(),
