@@ -7139,7 +7139,7 @@ describe("studio new chats and typed actor compatibility", () => {
     });
   });
 
-  it("recovers a create truncated after RUN_STARTED", async () => {
+  it("[guard] L25 keeps the recovered History turn fence through terminal emission", async () => {
     const streams = mockChatStreams((request) =>
       request.url === WORKFLOW_URL
         ? {
@@ -7182,6 +7182,10 @@ describe("studio new chats and typed actor compatibility", () => {
       event: "turn.completed",
       status: "completed",
     });
+    expect(
+      workflowInternals(transport).conversations.get(WORKFLOW_CONVERSATION)
+        ?.requiredTurnId,
+    ).toBe(WORKFLOW_TURN);
     expect(streams).toHaveBeenCalledTimes(1);
     expect(
       fetchMock.mock.calls.some(([input]) =>
@@ -8201,8 +8205,14 @@ describe("studio new chats and typed actor compatibility", () => {
     });
     const transport = new AevatarAssistantTransport();
     const placeholder = await transport.createConversation();
-    transport.sendMessage(placeholder.id, "create then delete", () => undefined);
-    await vi.waitFor(() => expect(chatStreamClient.start).toHaveBeenCalledOnce());
+    transport.sendMessage(
+      placeholder.id,
+      "create then delete",
+      () => undefined,
+    );
+    await vi.waitFor(() =>
+      expect(chatStreamClient.start).toHaveBeenCalledOnce(),
+    );
 
     await transport.deleteConversation(placeholder.id);
     await vi.waitFor(() =>
@@ -8322,6 +8332,664 @@ describe("studio new chats and typed actor compatibility", () => {
             "Reported — awaiting assistant verification.",
       ),
     ).toBe(true);
+  });
+  it("L22 clears an authoritative empty terminal on the first fence-current read", async () => {
+    vi.useFakeTimers();
+    let now = 0;
+    try {
+      mockChatStreams((request) =>
+        request.url === WORKFLOW_URL
+          ? {
+              frames: [
+                workflowContextFrame("3"),
+                { runStarted: { threadId: RUN_ACTOR, runId: RUN_ACTOR } },
+                { runFinished: { status: "completed" } },
+              ],
+            }
+          : undefined,
+      );
+      const mock = stubFetch((url) =>
+        url === `${ASSISTANT_BASE}/conversations/${WORKFLOW_CONVERSATION}`
+          ? jsonResponse({
+              messages: [
+                {
+                  id: "older-assistant",
+                  role: "assistant",
+                  content: "Earlier reply",
+                  timestamp: 1,
+                  turnId: "turn-workflow-seed",
+                },
+              ],
+              stateVersion: 3,
+            })
+          : undefined,
+      );
+      const transport = new AevatarAssistantTransport(
+        () => now,
+        () => 0,
+      );
+      const conversation = await seedWorkflowConversation(transport);
+      await collectWorkflowTurn(transport, conversation.id, "empty terminal");
+      expect(
+        workflowInternals(transport).conversations.get(conversation.id)
+          ?.requiredTurnId,
+      ).toBeNull();
+      mock.mockClear();
+
+      const outcome = transport.reconcileProjection(conversation.id);
+      now = 250;
+      await vi.advanceTimersByTimeAsync(250);
+
+      await expect(outcome).resolves.toMatchObject({ status: "materialized" });
+      expect(mock).toHaveBeenCalledTimes(1);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("L23 retains the stream-closed turn fence until a delayed answer materializes", async () => {
+    vi.useFakeTimers();
+    let now = 0;
+    try {
+      mockChatStreams((request) =>
+        request.url === WORKFLOW_URL
+          ? {
+              frames: [
+                workflowContextFrame("3"),
+                { runStarted: { threadId: RUN_ACTOR, runId: RUN_ACTOR } },
+              ],
+            }
+          : undefined,
+      );
+      let observation = 0;
+      const mock = stubFetch((url) => {
+        if (
+          url !== `${ASSISTANT_BASE}/conversations/${WORKFLOW_CONVERSATION}`
+        ) {
+          return undefined;
+        }
+        observation += 1;
+        return jsonResponse({
+          messages:
+            observation === 1
+              ? [
+                  {
+                    id: "workflow-seed-assistant",
+                    role: "assistant",
+                    content: "Earlier reply",
+                    timestamp: 1,
+                    turnId: "turn-workflow-seed",
+                  },
+                ]
+              : [
+                  {
+                    id: "workflow-seed-assistant",
+                    role: "assistant",
+                    content: "Earlier reply",
+                    timestamp: 1,
+                    turnId: "turn-workflow-seed",
+                  },
+                  {
+                    id: "late-user",
+                    role: "user",
+                    content: "truncated delivery",
+                    timestamp: 2,
+                  },
+                  {
+                    id: "late-assistant",
+                    role: "assistant",
+                    content: "Late materialized reply",
+                    timestamp: 3,
+                    turnId: WORKFLOW_TURN,
+                  },
+                ],
+          stateVersion: 3,
+        });
+      });
+      const transport = new AevatarAssistantTransport(
+        () => now,
+        () => 0,
+      );
+      const conversation = await seedWorkflowConversation(transport);
+      const events = await collectWorkflowTurn(
+        transport,
+        conversation.id,
+        "truncated delivery",
+      );
+      expect(events.at(-1)).toMatchObject({
+        event: "turn.completed",
+        status: "failed",
+        error: { code: "stream_closed" },
+      });
+      expect(
+        workflowInternals(transport).conversations.get(conversation.id)
+          ?.requiredTurnId,
+      ).toBe(WORKFLOW_TURN);
+      observation = 0;
+      mock.mockClear();
+
+      let settled = false;
+      const outcome = transport.reconcileProjection(conversation.id);
+      void outcome.then(() => {
+        settled = true;
+      });
+      now = 250;
+      await vi.advanceTimersByTimeAsync(250);
+      expect(settled).toBe(false);
+      expect(mock).toHaveBeenCalledTimes(1);
+      now = 500;
+      await vi.advanceTimersByTimeAsync(250);
+
+      await expect(outcome).resolves.toMatchObject({ status: "materialized" });
+      expect(mock).toHaveBeenCalledTimes(2);
+      expect(
+        workflowInternals(transport)
+          .conversations.get(conversation.id)
+          ?.turnState.messages.some(
+            (message) => message.id === "late-assistant",
+          ),
+      ).toBe(true);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("L23 fallback waits for a new assistant row when zero frames announce no turn id", async () => {
+    vi.useFakeTimers();
+    let now = 0;
+    try {
+      mockChatStreams((request) =>
+        request.url === WORKFLOW_URL ? { frames: [] } : undefined,
+      );
+      let observation = 0;
+      stubFetch((url) => {
+        if (
+          url !== `${ASSISTANT_BASE}/conversations/${WORKFLOW_CONVERSATION}`
+        ) {
+          return undefined;
+        }
+        observation += 1;
+        return jsonResponse({
+          messages:
+            observation === 1
+              ? [
+                  {
+                    id: "workflow-seed-assistant",
+                    role: "assistant",
+                    content: "Earlier reply",
+                    timestamp: 1,
+                  },
+                ]
+              : [
+                  {
+                    id: "workflow-seed-assistant",
+                    role: "assistant",
+                    content: "Earlier reply",
+                    timestamp: 1,
+                  },
+                  {
+                    id: "zero-frame-user",
+                    role: "user",
+                    content: "zero frame delivery",
+                    timestamp: 2,
+                  },
+                  {
+                    id: "zero-frame-late-assistant",
+                    role: "assistant",
+                    content: "Late server reply",
+                    timestamp: 3,
+                  },
+                ],
+          stateVersion: 3,
+        });
+      });
+      const transport = new AevatarAssistantTransport(
+        () => now,
+        () => 0,
+      );
+      const conversation = await seedWorkflowConversation(transport);
+      const events = await collectWorkflowTurn(
+        transport,
+        conversation.id,
+        "zero frame delivery",
+      );
+      expect(events.at(-1)).toMatchObject({
+        event: "turn.completed",
+        error: { code: "stream_closed" },
+      });
+      observation = 0;
+
+      let settled = false;
+      const outcome = transport.reconcileProjection(conversation.id);
+      void outcome.then(() => {
+        settled = true;
+      });
+      now = 250;
+      await vi.advanceTimersByTimeAsync(250);
+      expect(settled).toBe(false);
+      now = 500;
+      await vi.advanceTimersByTimeAsync(250);
+
+      await expect(outcome).resolves.toMatchObject({ status: "materialized" });
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("L24 retains the announced workflow turn fence after browser cancellation", async () => {
+    let request!: ChatStreamRequest;
+    vi.spyOn(chatStreamClient, "start").mockImplementation((nextRequest) => {
+      request = nextRequest;
+      queueMicrotask(() => {
+        request.onFrames([
+          workflowContextFrame("3"),
+          { runStarted: { threadId: RUN_ACTOR, runId: RUN_ACTOR } },
+        ]);
+      });
+      return {
+        headers: Promise.resolve({
+          kind: "response",
+          status: 200,
+          contentType: "text/event-stream",
+        }),
+        completion: new Promise<ChatStreamCompletionResult>(() => undefined),
+        cancel: vi.fn(),
+      };
+    });
+    stubFetch();
+    const transport = new AevatarAssistantTransport();
+    const conversation = await seedWorkflowConversation(transport);
+    const events: TurnEvent[] = [];
+    transport.sendMessage(conversation.id, "cancel this", (event) => {
+      events.push(event);
+    });
+    await vi.waitFor(() => {
+      expect(events.some((event) => event.event === "turn.status")).toBe(true);
+    });
+
+    transport.cancelActiveTurn(conversation.id);
+
+    expect(events.at(-1)).toMatchObject({
+      event: "turn.completed",
+      status: "cancelled",
+    });
+    expect(
+      workflowInternals(transport).conversations.get(WORKFLOW_CONVERSATION)
+        ?.requiredTurnId,
+    ).toBe(WORKFLOW_TURN);
+  });
+
+  it("L26 treats whitespace-only text as authoritative empty content", async () => {
+    mockChatStreams((request) =>
+      request.url === WORKFLOW_URL
+        ? {
+            frames: [
+              workflowContextFrame("3"),
+              { runStarted: { threadId: RUN_ACTOR, runId: RUN_ACTOR } },
+              { textMessageStart: { messageId: "whitespace-message" } },
+              { textMessageContent: { delta: "   \n" } },
+              { textMessageEnd: { messageId: "whitespace-message" } },
+              { runFinished: { status: "completed" } },
+            ],
+          }
+        : undefined,
+    );
+    stubFetch();
+    const transport = new AevatarAssistantTransport();
+    const conversation = await seedWorkflowConversation(transport);
+
+    await collectWorkflowTurn(transport, conversation.id, "whitespace");
+
+    expect(
+      workflowInternals(transport).conversations.get(conversation.id)
+        ?.requiredTurnId,
+    ).toBeNull();
+  });
+
+  it("L27 retains the turn fence for structured-only assistant output", async () => {
+    mockChatStreams((request) =>
+      request.url === WORKFLOW_URL
+        ? {
+            frames: [
+              workflowContextFrame("3"),
+              { runStarted: { threadId: RUN_ACTOR, runId: RUN_ACTOR } },
+              { stepStarted: { stepName: "structured-step" } },
+              { stepFinished: { stepName: "structured-step" } },
+              { runFinished: { status: "completed" } },
+            ],
+          }
+        : undefined,
+    );
+    stubFetch();
+    const transport = new AevatarAssistantTransport();
+    const conversation = await seedWorkflowConversation(transport);
+
+    await collectWorkflowTurn(transport, conversation.id, "structured only");
+
+    expect(
+      workflowInternals(transport).conversations.get(conversation.id)
+        ?.requiredTurnId,
+    ).toBe(WORKFLOW_TURN);
+  });
+
+  it("L1 defers a post-terminal transcript observation through the projection policy", async () => {
+    vi.useFakeTimers();
+    let now = 0;
+    try {
+      mockChatStreams((request) =>
+        request.url === WORKFLOW_URL
+          ? { frames: [...WORKFLOW_PREAMBLE, ...WORKFLOW_TAIL] }
+          : undefined,
+      );
+      const mock = stubFetch((url) =>
+        url === `${ASSISTANT_BASE}/conversations/${WORKFLOW_CONVERSATION}`
+          ? jsonResponse(workflowHistory(4, WORKFLOW_TURN))
+          : undefined,
+      );
+      const transport = new AevatarAssistantTransport(
+        () => now,
+        () => 0,
+      );
+      const conversation = await seedWorkflowConversation(transport);
+      await collectWorkflowTurn(transport, conversation.id, "defer projection");
+      mock.mockClear();
+
+      const outcome = transport.reconcileProjection(conversation.id);
+      await Promise.resolve();
+      expect(mock).not.toHaveBeenCalled();
+
+      now = 249;
+      await vi.advanceTimersByTimeAsync(249);
+      expect(mock).not.toHaveBeenCalled();
+      now = 250;
+      await vi.advanceTimersByTimeAsync(1);
+
+      await expect(outcome).resolves.toMatchObject({ status: "materialized" });
+      expect(mock).toHaveBeenCalledTimes(1);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("L2 restores the remaining timer delay after same-commit release and re-acquire", async () => {
+    vi.useFakeTimers();
+    let now = 0;
+    try {
+      mockChatStreams((request) =>
+        request.url === WORKFLOW_URL
+          ? { frames: [...WORKFLOW_PREAMBLE, ...WORKFLOW_TAIL] }
+          : undefined,
+      );
+      const mock = stubFetch((url) =>
+        url === `${ASSISTANT_BASE}/conversations/${WORKFLOW_CONVERSATION}`
+          ? jsonResponse(workflowHistory(4, WORKFLOW_TURN))
+          : undefined,
+      );
+      const transport = new AevatarAssistantTransport(
+        () => now,
+        () => 0,
+      );
+      const conversation = await seedWorkflowConversation(transport);
+      await collectWorkflowTurn(transport, conversation.id, "pause projection");
+      mock.mockClear();
+
+      const first = transport.reconcileProjection(conversation.id);
+      now = 100;
+      await vi.advanceTimersByTimeAsync(100);
+      transport.releaseProjectionWaiter(conversation.id);
+      const resumed = transport.reconcileProjection(conversation.id);
+
+      expect(resumed).toBe(first);
+      expect(mock).not.toHaveBeenCalled();
+      expect(vi.getTimerCount()).toBe(1);
+      now = 249;
+      await vi.advanceTimersByTimeAsync(149);
+      expect(mock).not.toHaveBeenCalled();
+      now = 250;
+      await vi.advanceTimersByTimeAsync(1);
+
+      await expect(first).resolves.toMatchObject({ status: "materialized" });
+      expect(mock).toHaveBeenCalledTimes(1);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("L3 reschedules exactly once when an in-flight abort is re-acquired in the same tick", async () => {
+    vi.useFakeTimers();
+    let now = 0;
+    try {
+      mockChatStreams((request) =>
+        request.url === WORKFLOW_URL
+          ? { frames: [...WORKFLOW_PREAMBLE, ...WORKFLOW_TAIL] }
+          : undefined,
+      );
+      let transcriptAttempts = 0;
+      const mock = vi.fn((input: RequestInfo | URL, init?: RequestInit) => {
+        const url = String(input);
+        if (
+          url !== `${ASSISTANT_BASE}/conversations/${WORKFLOW_CONVERSATION}`
+        ) {
+          return Promise.resolve(jsonResponse({}, 404));
+        }
+        transcriptAttempts += 1;
+        if (transcriptAttempts > 1) {
+          return Promise.resolve(
+            jsonResponse(workflowHistory(4, WORKFLOW_TURN)),
+          );
+        }
+        return new Promise<Response>((_resolve, reject) => {
+          init?.signal?.addEventListener(
+            "abort",
+            () => reject(new DOMException("Aborted", "AbortError")),
+            { once: true },
+          );
+        });
+      });
+      vi.stubGlobal("fetch", mock);
+      const transport = new AevatarAssistantTransport(
+        () => now,
+        () => 0,
+      );
+      const conversation = await seedWorkflowConversation(transport);
+      await collectWorkflowTurn(transport, conversation.id, "abort projection");
+      const stored = workflowInternals(transport).conversations.get(
+        conversation.id,
+      ) as { projectionStalledAt?: number };
+      stored.projectionStalledAt = now;
+
+      const first = transport.reconcileProjection(conversation.id);
+      await vi.waitFor(() => expect(transcriptAttempts).toBe(1));
+      transport.releaseProjectionWaiter(conversation.id);
+      const resumed = transport.reconcileProjection(conversation.id);
+      expect(resumed).toBe(first);
+      await Promise.resolve();
+      await Promise.resolve();
+
+      expect(vi.getTimerCount()).toBe(1);
+      now = 250;
+      await vi.advanceTimersByTimeAsync(250);
+      await expect(first).resolves.toMatchObject({ status: "materialized" });
+      expect(transcriptAttempts).toBe(2);
+      expect(vi.getTimerCount()).toBe(0);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("L4 settles absent when a still-observed conversation is tombstoned mid-observation", async () => {
+    vi.useFakeTimers();
+    let now = 0;
+    try {
+      mockChatStreams((request) =>
+        request.url === WORKFLOW_URL
+          ? { frames: [...WORKFLOW_PREAMBLE, ...WORKFLOW_TAIL] }
+          : undefined,
+      );
+      let transcriptAttempts = 0;
+      vi.stubGlobal("fetch", (input: RequestInfo | URL, init?: RequestInit) => {
+        if (
+          String(input) !==
+          `${ASSISTANT_BASE}/conversations/${WORKFLOW_CONVERSATION}`
+        ) {
+          return Promise.resolve(jsonResponse({}, 404));
+        }
+        transcriptAttempts += 1;
+        return new Promise<Response>((_resolve, reject) => {
+          init?.signal?.addEventListener(
+            "abort",
+            () => reject(new DOMException("Aborted", "AbortError")),
+            { once: true },
+          );
+        });
+      });
+      const transport = new AevatarAssistantTransport(
+        () => now,
+        () => 0,
+      );
+      const conversation = await seedWorkflowConversation(transport);
+      await collectWorkflowTurn(
+        transport,
+        conversation.id,
+        "delete projection",
+      );
+      const internals = workflowInternals(transport) as ReturnType<
+        typeof workflowInternals
+      > & {
+        tombstoneConversation(conversationId: string): void;
+      };
+      (
+        internals.conversations.get(conversation.id) as {
+          projectionStalledAt?: number;
+        }
+      ).projectionStalledAt = now;
+
+      const outcome = transport.reconcileProjection(conversation.id);
+      await vi.waitFor(() => expect(transcriptAttempts).toBe(1));
+      internals.tombstoneConversation(conversation.id);
+      await Promise.resolve();
+      await Promise.resolve();
+      now = 250;
+      await vi.advanceTimersByTimeAsync(250);
+
+      await expect(outcome).resolves.toEqual({
+        status: "absent",
+        conversationId: conversation.id,
+      });
+      expect(transcriptAttempts).toBe(1);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("[guard] L5 parks the last-waiter abort and resumes the stored entry later", async () => {
+    let transcriptAttempts = 0;
+    mockChatStreams((request) =>
+      request.url === WORKFLOW_URL
+        ? { frames: [...WORKFLOW_PREAMBLE, ...WORKFLOW_TAIL] }
+        : undefined,
+    );
+    vi.stubGlobal("fetch", (input: RequestInfo | URL, init?: RequestInit) => {
+      if (
+        String(input) !==
+        `${ASSISTANT_BASE}/conversations/${WORKFLOW_CONVERSATION}`
+      ) {
+        return Promise.resolve(jsonResponse({}, 404));
+      }
+      transcriptAttempts += 1;
+      if (transcriptAttempts > 1) {
+        return Promise.resolve(jsonResponse(workflowHistory(4, WORKFLOW_TURN)));
+      }
+      return new Promise<Response>((_resolve, reject) => {
+        init?.signal?.addEventListener(
+          "abort",
+          () => reject(new DOMException("Aborted", "AbortError")),
+          { once: true },
+        );
+      });
+    });
+    const transport = new AevatarAssistantTransport();
+    const conversation = await seedWorkflowConversation(transport);
+    await collectWorkflowTurn(transport, conversation.id, "park projection");
+    const internals = workflowInternals(transport);
+    (
+      internals.conversations.get(conversation.id) as {
+        projectionStalledAt?: number;
+      }
+    ).projectionStalledAt = Date.now();
+
+    const first = transport.reconcileProjection(conversation.id);
+    const deadline = internals.reconcileEntries.get(
+      conversation.id,
+    )?.deadlineAt;
+    await vi.waitFor(() => expect(transcriptAttempts).toBe(1));
+    transport.releaseProjectionWaiter(conversation.id);
+    await Promise.resolve();
+    await Promise.resolve();
+    expect(transcriptAttempts).toBe(1);
+
+    const resumed = transport.reconcileProjection(conversation.id);
+    expect(resumed).toBe(first);
+    await expect(first).resolves.toMatchObject({ status: "materialized" });
+    expect(transcriptAttempts).toBe(2);
+    expect(deadline).toBeDefined();
+  });
+
+  it("[guard] L20 observes an explicit stalled-state Retry immediately", async () => {
+    mockChatStreams((request) =>
+      request.url === WORKFLOW_URL
+        ? { frames: [...WORKFLOW_PREAMBLE, ...WORKFLOW_TAIL] }
+        : undefined,
+    );
+    const mock = stubFetch((url) =>
+      url === `${ASSISTANT_BASE}/conversations/${WORKFLOW_CONVERSATION}`
+        ? jsonResponse(workflowHistory(4, WORKFLOW_TURN))
+        : undefined,
+    );
+    const transport = new AevatarAssistantTransport();
+    const conversation = await seedWorkflowConversation(transport);
+    await collectWorkflowTurn(transport, conversation.id, "retry projection");
+    (
+      workflowInternals(transport).conversations.get(conversation.id) as {
+        projectionStalledAt?: number;
+      }
+    ).projectionStalledAt = Date.now();
+    mock.mockClear();
+
+    const outcome = transport.reconcileProjection(conversation.id);
+
+    await vi.waitFor(() => expect(mock).toHaveBeenCalledTimes(1));
+    await expect(outcome).resolves.toMatchObject({ status: "materialized" });
+  });
+
+  it("L21 never fires a deferred observation after an account scope change", async () => {
+    vi.useFakeTimers();
+    let now = 0;
+    try {
+      mockChatStreams((request) =>
+        request.url === WORKFLOW_URL
+          ? { frames: [...WORKFLOW_PREAMBLE, ...WORKFLOW_TAIL] }
+          : undefined,
+      );
+      const mock = stubFetch();
+      const transport = new AevatarAssistantTransport(
+        () => now,
+        () => 0,
+      );
+      const conversation = await seedWorkflowConversation(transport);
+      await collectWorkflowTurn(transport, conversation.id, "switch scope");
+      mock.mockClear();
+
+      const outcome = transport.reconcileProjection(conversation.id);
+      useAuthStore.getState().setUser({ id: "another-user" } as User);
+      now = 1_000;
+      await vi.advanceTimersByTimeAsync(1_000);
+
+      await expect(outcome).resolves.toMatchObject({ status: "timed_out" });
+      expect(mock).not.toHaveBeenCalled();
+    } finally {
+      vi.useRealTimers();
+    }
   });
 });
 
@@ -8487,6 +9155,86 @@ describe("projection lifecycle boundaries", () => {
     ).toHaveLength(1);
   });
 
+  it("L6 treats the cold 404 as attempt zero instead of duplicating it immediately", async () => {
+    vi.useFakeTimers();
+    let now = 0;
+    let projected = false;
+    try {
+      const mock = stubFetch((url) => {
+        if (url === `${ASSISTANT_BASE}/conversations`) {
+          return jsonResponse({ conversations: [{ id: CHAT_ID }] });
+        }
+        if (url === `${ASSISTANT_BASE}/conversations/${CHAT_ID}`) {
+          return projected
+            ? jsonResponse({ messages: [], stateVersion: 1 })
+            : jsonResponse({ message: "not ready" }, 404);
+        }
+        return undefined;
+      });
+      const transport = new AevatarAssistantTransport(
+        () => now,
+        () => 0,
+      );
+
+      const pending = await transport.getHistory(CHAT_ID);
+      expect(pending.awaitingProjection).toBe(true);
+      const transcriptCalls = () =>
+        mock.mock.calls.filter(
+          ([input]) =>
+            String(input) === `${ASSISTANT_BASE}/conversations/${CHAT_ID}`,
+        ).length;
+      expect(transcriptCalls()).toBe(1);
+
+      const outcome = transport.reconcileProjection(CHAT_ID);
+      await Promise.resolve();
+      expect(transcriptCalls()).toBe(1);
+      projected = true;
+      now = 249;
+      await vi.advanceTimersByTimeAsync(249);
+      expect(transcriptCalls()).toBe(1);
+      now = 250;
+      await vi.advanceTimersByTimeAsync(1);
+
+      await expect(outcome).resolves.toMatchObject({ status: "materialized" });
+      expect(transcriptCalls()).toBe(2);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("[guard] L19 polls create recovery immediately for identity-pending receipts", async () => {
+    vi.useFakeTimers();
+    try {
+      const placeholderId = "workflow-pending-identity-recovery";
+      recordCreateReceipt("identity-recovery-command", placeholderId);
+      const mock = stubFetch((url) =>
+        url.includes("/conversations/create-recovery/")
+          ? jsonResponse({ message: "not ready" }, 404)
+          : undefined,
+      );
+      const transport = new AevatarAssistantTransport(
+        () => 0,
+        () => 0,
+      );
+      expect(
+        (await transport.getHistory(placeholderId)).awaitingProjection,
+      ).toBe(true);
+      mock.mockClear();
+
+      const outcome = transport.reconcileProjection(placeholderId);
+      await vi.waitFor(() => expect(mock).toHaveBeenCalledTimes(1));
+      expect(String(mock.mock.calls[0]?.[0])).toContain(
+        "/conversations/create-recovery/identity-recovery-command",
+      );
+      expect(String(mock.mock.calls[0]?.[0])).not.toContain(placeholderId);
+      transport.releaseProjectionWaiter(placeholderId);
+      useAuthStore.getState().setUser({ id: "another-user" } as User);
+      await expect(outcome).resolves.toMatchObject({ status: "timed_out" });
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it("single-flights concurrent projection waiters", async () => {
     let projected = false;
     stubFetch((url) => {
@@ -8520,7 +9268,10 @@ describe("projection lifecycle boundaries", () => {
           ? jsonResponse({ conversations: [{ id: CHAT_ID }] })
           : undefined,
       );
-      const transport = new AevatarAssistantTransport(() => now, () => 0);
+      const transport = new AevatarAssistantTransport(
+        () => now,
+        () => 0,
+      );
       const pending = await transport.getHistory(CHAT_ID);
       expect(pending.awaitingProjection).toBe(true);
 
@@ -8530,7 +9281,9 @@ describe("projection lifecycle boundaries", () => {
       await vi.advanceTimersByTimeAsync(250);
 
       await expect(outcome).resolves.toMatchObject({ status: "timed_out" });
-      expect((await transport.getHistory(CHAT_ID)).projectionStalled).toBe(true);
+      expect((await transport.getHistory(CHAT_ID)).projectionStalled).toBe(
+        true,
+      );
     } finally {
       vi.useRealTimers();
     }
@@ -8565,7 +9318,11 @@ describe("projection lifecycle boundaries", () => {
     );
     const transport = new AevatarAssistantTransport();
     const conversation = await transport.createConversation();
-    transport.sendMessage(conversation.id, "Create then delete", () => undefined);
+    transport.sendMessage(
+      conversation.id,
+      "Create then delete",
+      () => undefined,
+    );
     await vi.waitFor(() => expect(start).toHaveBeenCalledOnce());
 
     await transport.deleteConversation(conversation.id);
@@ -8577,9 +9334,9 @@ describe("projection lifecycle boundaries", () => {
           String(input).includes(conversation.id) && init?.method === "DELETE",
       ),
     ).toBe(false);
-    await expect(
-      transport.getHistory(conversation.id),
-    ).rejects.toBeInstanceOf(AssistantConversationNotFoundError);
+    await expect(transport.getHistory(conversation.id)).rejects.toBeInstanceOf(
+      AssistantConversationNotFoundError,
+    );
   });
 });
 
