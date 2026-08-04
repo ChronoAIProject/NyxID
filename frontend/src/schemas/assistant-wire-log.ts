@@ -110,6 +110,24 @@ export const assistantWireCaptureOutcomeSchema = z.enum([
   "protocol_cancel",
 ]);
 
+export const assistantTransportOutcomeSchema = z
+  .string()
+  .trim()
+  .min(1)
+  .max(128)
+  .regex(/^[A-Za-z0-9._:-]+$/);
+
+const assistantTransportTelemetryShape = {
+  transportOutcome: assistantTransportOutcomeSchema.optional(),
+  framesSeen: z.number().int().nonnegative().optional(),
+  printableFramesSeen: z.number().int().nonnegative().optional(),
+  printableTurnEvents: z.number().int().nonnegative().optional(),
+  wireBytes: z.number().int().nonnegative().optional(),
+  terminalReceived: z.boolean().optional(),
+  firstFrameMs: z.number().finite().nonnegative().nullable().optional(),
+  lastFrameMs: z.number().finite().nonnegative().nullable().optional(),
+} as const;
+
 const assistantWireSseCaptureSchema = z
   .object({
     lines: z.array(assistantWireLineSchema),
@@ -132,15 +150,19 @@ const assistantWireOpenCaptureSchema = z
     state: z.literal("open"),
     sse: assistantWireSseCaptureSchema.optional(),
     body: assistantWireBodyCaptureSchema.optional(),
+    ...assistantTransportTelemetryShape,
   })
   .strict();
 
 const assistantWireSettledCaptureSchema = z
   .object({
     state: z.literal("settled"),
+    /** Compatibility alias for consumers predating transport telemetry. */
     outcome: assistantWireCaptureOutcomeSchema,
+    wireOutcome: assistantWireCaptureOutcomeSchema,
     sse: assistantWireSseCaptureSchema.optional(),
     body: assistantWireBodyCaptureSchema.optional(),
+    ...assistantTransportTelemetryShape,
   })
   .strict();
 
@@ -185,6 +207,9 @@ export type AssistantUpstreamEnvelopeHeader = z.infer<
 export type AssistantWireLine = z.infer<typeof assistantWireLineSchema>;
 export type AssistantWireCaptureOutcome = z.infer<
   typeof assistantWireCaptureOutcomeSchema
+>;
+export type AssistantTransportOutcome = z.infer<
+  typeof assistantTransportOutcomeSchema
 >;
 export type AssistantWireCapture = z.infer<typeof assistantWireCaptureSchema>;
 export type AssistantWireLogExchange = z.infer<

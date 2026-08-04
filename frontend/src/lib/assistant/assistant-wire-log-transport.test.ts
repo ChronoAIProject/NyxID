@@ -92,6 +92,7 @@ describe("assistant wire-log transport", () => {
       expect(useAssistantWireLogStore.getState().entries[0]?.capture).toEqual({
         state: "settled",
         outcome: "complete",
+        wireOutcome: "complete",
         body: {
           text: JSON.stringify({ conversations: [] }),
           bytes: 20,
@@ -292,6 +293,15 @@ describe("assistant wire-log transport", () => {
       expect(useAssistantWireLogStore.getState().entries[0]?.capture).toEqual({
         state: "settled",
         outcome: "complete",
+        wireOutcome: "complete",
+        transportOutcome: "stream_protocol_error",
+        framesSeen: 5,
+        printableFramesSeen: 2,
+        printableTurnEvents: 2,
+        wireBytes: 48,
+        terminalReceived: true,
+        firstFrameMs: expect.any(Number),
+        lastFrameMs: expect.any(Number),
         sse: {
           lines: [
             {
@@ -355,5 +365,151 @@ describe("assistant wire-log transport", () => {
 
     expect(start).toHaveBeenCalledOnce();
     expect(useAssistantWireLogStore.getState().entries).toEqual([]);
+  });
+
+  async function seedActorConversation(
+    transport: AevatarAssistantTransport,
+    conversationId: string,
+  ): Promise<void> {
+    useAssistantWireLogStore.getState().setCaptureEnabled(false);
+    const fetchMock = vi.fn().mockResolvedValue(
+      new Response(
+        JSON.stringify({ conversations: [{ id: conversationId }] }),
+        {
+          status: 200,
+          headers: { "Content-Type": "application/json" },
+        },
+      ),
+    );
+    vi.stubGlobal("fetch", fetchMock);
+    await transport.listConversations();
+    useAssistantWireLogStore.getState().setCaptureEnabled(true);
+  }
+
+  it("L28 records clean EOF separately from stream-closed settlement", async () => {
+    const conversationId = "nyxid-chat-wire-clean-eof";
+    useAssistantWireLogStore.getState().setFeatureEnabled(true);
+    useAssistantWireLogStore.getState().setCaptureEnabled(true);
+    const start = vi.spyOn(chatStreamClient, "start").mockImplementation(
+      (request): ChatStreamRequestHandle => ({
+        headers: Promise.resolve({
+          kind: "response",
+          status: 200,
+          contentType: "text/event-stream",
+          debugUpstream: encodedEcho(),
+        }),
+        completion: Promise.resolve().then(() => {
+          request.onWire?.({
+            type: "end",
+            requestId: "clean-eof",
+            outcome: "complete",
+          });
+          return { kind: "complete" };
+        }),
+        cancel: vi.fn(),
+      }),
+    );
+    const transport = new AevatarAssistantTransport(() => 1_000);
+    await seedActorConversation(transport, conversationId);
+
+    const terminal = await new Promise<TurnEvent>((resolve) => {
+      transport.sendMessage(conversationId, "hello", (event) => {
+        if (event.event === "turn.completed") resolve(event);
+      });
+    });
+
+    expect(terminal).toMatchObject({
+      event: "turn.completed",
+      status: "failed",
+      error: { code: "stream_closed" },
+    });
+    expect(start).toHaveBeenCalledTimes(2);
+    await vi.waitFor(() => {
+      expect(
+        useAssistantWireLogStore.getState().entries.at(-1)?.capture,
+      ).toMatchObject({
+        state: "settled",
+        outcome: "complete",
+        wireOutcome: "complete",
+        transportOutcome: "stream_closed",
+        framesSeen: 0,
+        printableFramesSeen: 0,
+        printableTurnEvents: 0,
+        wireBytes: 0,
+        terminalReceived: false,
+        firstFrameMs: null,
+        lastFrameMs: null,
+      });
+    });
+  });
+
+  it("L29 records a dying body as network error at both wire and transport layers", async () => {
+    const conversationId = "nyxid-chat-wire-network-error";
+    useAssistantWireLogStore.getState().setFeatureEnabled(true);
+    useAssistantWireLogStore.getState().setCaptureEnabled(true);
+    vi.spyOn(chatStreamClient, "start").mockImplementation(
+      (request): ChatStreamRequestHandle => ({
+        headers: Promise.resolve({
+          kind: "response",
+          status: 200,
+          contentType: "text/event-stream",
+          debugUpstream: encodedEcho(),
+        }),
+        completion: Promise.resolve().then(() => {
+          request.onWire?.({
+            type: "lines",
+            requestId: "dying-body",
+            lines: [{ text: "data:", ending: "\n" }],
+            bytes: 6,
+            truncated: false,
+          });
+          request.onWire?.({
+            type: "end",
+            requestId: "dying-body",
+            outcome: "network_error",
+          });
+          request.onFrames([
+            { type: "RUN_STARTED", turnId: "turn-dying-body" },
+          ]);
+          return {
+            kind: "network_error",
+            code: "network_error",
+            message: "body read failed",
+          };
+        }),
+        cancel: vi.fn(),
+      }),
+    );
+    const transport = new AevatarAssistantTransport(() => 1_025);
+    await seedActorConversation(transport, conversationId);
+
+    const terminal = await new Promise<TurnEvent>((resolve) => {
+      transport.sendMessage(conversationId, "hello", (event) => {
+        if (event.event === "turn.completed") resolve(event);
+      });
+    });
+
+    expect(terminal).toMatchObject({
+      event: "turn.completed",
+      status: "failed",
+      error: { code: "network_error" },
+    });
+    await vi.waitFor(() => {
+      expect(
+        useAssistantWireLogStore.getState().entries.at(-1)?.capture,
+      ).toMatchObject({
+        state: "settled",
+        outcome: "network_error",
+        wireOutcome: "network_error",
+        transportOutcome: "network_error",
+        framesSeen: 1,
+        printableFramesSeen: 0,
+        printableTurnEvents: 0,
+        wireBytes: 6,
+        terminalReceived: false,
+        firstFrameMs: 0,
+        lastFrameMs: 0,
+      });
+    });
   });
 });
