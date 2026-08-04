@@ -29,6 +29,7 @@ pub struct CatalogEntry {
     pub auth_key_name: String,
     pub provider_config_id: Option<String>,
     pub provider_type: Option<String>,
+    pub revokes_grant: Option<bool>,
     pub requires_gateway_url: bool,
     pub api_key_instructions: Option<String>,
     pub api_key_url: Option<String>,
@@ -154,6 +155,9 @@ fn build_catalog_entry(
         },
         provider_config_id: provider.map(|p| p.id.clone()),
         provider_type: provider.map(|p| p.provider_type.clone()),
+        revokes_grant: provider
+            .and_then(crate::services::oauth_revocation::effective_revocation)
+            .map(|config| config.revokes_grant),
         requires_gateway_url: provider.is_some_and(|p| p.requires_gateway_url),
         api_key_instructions: provider.and_then(|p| p.api_key_instructions.clone()),
         api_key_url: provider.and_then(|p| p.api_key_url.clone()),

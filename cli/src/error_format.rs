@@ -16,6 +16,15 @@ pub fn render_error(err: &anyhow::Error, json: bool) -> String {
         return format!("Error: {message}");
     }
 
+    if let Some(api_error) = err.downcast_ref::<crate::api::ApiError>()
+        && api_error.response().map(|response| response.error_code) == Some(11500)
+        && let Some(body) = api_error.body_json()
+    {
+        return serde_json::to_string(body).unwrap_or_else(|_| {
+            "{\"error\":\"cli_error\",\"message\":\"failed to render error\"}".to_owned()
+        });
+    }
+
     let payload = if let Some(http_error) = parse_http_error(&message) {
         let body = serde_json::from_str::<Value>(http_error.body)
             .unwrap_or_else(|_| Value::String(http_error.body.to_owned()));
@@ -143,6 +152,43 @@ mod tests {
         assert_eq!(value["path"].as_str(), Some("/keys"));
         assert!(value["body"].is_object());
         assert_eq!(value["body"]["error"].as_str(), Some("validation_error"));
+    }
+
+    #[test]
+    fn preserves_grant_cascade_payload_in_json_mode() {
+        let body = json!({
+            "error": "grant_cascade_confirmation_required",
+            "error_code": 11500,
+            "message": "Grant cascade confirmation required",
+            "details": {
+                "provider_name": "GitHub",
+                "siblings": [{ "name": "GitHub Issues" }]
+            }
+        });
+        let err: anyhow::Error = crate::api::ApiError::new(
+            "/keys/service-1",
+            reqwest::StatusCode::CONFLICT,
+            serde_json::to_string(&body).unwrap(),
+        )
+        .into();
+
+        let rendered: Value = serde_json::from_str(&render_error(&err, true)).unwrap();
+        assert_eq!(rendered, body);
+    }
+
+    #[test]
+    fn keeps_existing_json_wrapper_for_other_typed_api_errors() {
+        let err: anyhow::Error = crate::api::ApiError::new(
+            "/keys/service-1",
+            reqwest::StatusCode::NOT_FOUND,
+            r#"{"error":"not_found","error_code":1004,"message":"missing"}"#.to_string(),
+        )
+        .into();
+
+        let rendered: Value = serde_json::from_str(&render_error(&err, true)).unwrap();
+        assert_eq!(rendered["error"], "http_error");
+        assert_eq!(rendered["status"], 404);
+        assert_eq!(rendered["body"]["error_code"], 1004);
     }
 
     #[test]

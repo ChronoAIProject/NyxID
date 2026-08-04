@@ -17,6 +17,25 @@ fn default_device_code_format() -> String {
     "rfc8628".to_string()
 }
 
+fn default_revocation_style() -> String {
+    "rfc7009".to_string()
+}
+
+fn default_revocation_auth() -> String {
+    "inherit".to_string()
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RevocationConfig {
+    #[serde(default = "default_revocation_style")]
+    pub style: String,
+    pub url: String,
+    #[serde(default = "default_revocation_auth")]
+    pub auth: String,
+    #[serde(default)]
+    pub revokes_grant: bool,
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct ProviderConfig {
     #[serde(rename = "_id")]
@@ -32,6 +51,8 @@ pub struct ProviderConfig {
     pub authorization_url: Option<String>,
     pub token_url: Option<String>,
     pub revocation_url: Option<String>,
+    #[serde(default)]
+    pub revocation: Option<RevocationConfig>,
     pub default_scopes: Option<Vec<String>>,
     /// NyxID's OAuth client_id for this provider (encrypted)
     #[serde(default, with = "crate::models::bson_bytes::optional")]
@@ -106,6 +127,8 @@ pub struct ProviderConfig {
     pub requires_gateway_url: bool,
 
     pub created_by: String,
+    #[serde(default)]
+    pub revocation_seed_version: i32,
     #[serde(with = "bson::serde_helpers::chrono_datetime_as_bson_datetime")]
     pub created_at: DateTime<Utc>,
     #[serde(with = "bson::serde_helpers::chrono_datetime_as_bson_datetime")]
@@ -132,6 +155,12 @@ mod tests {
             authorization_url: Some("https://accounts.google.com/o/oauth2/v2/auth".to_string()),
             token_url: Some("https://oauth2.googleapis.com/token".to_string()),
             revocation_url: None,
+            revocation: Some(RevocationConfig {
+                style: "rfc7009".to_string(),
+                url: "https://oauth2.googleapis.com/revoke".to_string(),
+                auth: "none".to_string(),
+                revokes_grant: false,
+            }),
             default_scopes: Some(vec!["openid".to_string(), "email".to_string()]),
             client_id_encrypted: Some(vec![1, 2, 3]),
             client_secret_encrypted: Some(vec![4, 5, 6]),
@@ -152,6 +181,7 @@ mod tests {
             client_id_param_name: None,
             requires_gateway_url: false,
             created_by: "admin".to_string(),
+            revocation_seed_version: 1,
             created_at: Utc::now(),
             updated_at: Utc::now(),
         };
@@ -162,6 +192,8 @@ mod tests {
         assert!(restored.supports_pkce);
         assert_eq!(restored.credential_mode, "admin");
         assert!(!restored.requires_gateway_url);
+        assert_eq!(config.revocation, restored.revocation);
+        assert_eq!(restored.revocation_seed_version, 1);
     }
 
     #[test]
@@ -175,6 +207,7 @@ mod tests {
             authorization_url: None,
             token_url: None,
             revocation_url: None,
+            revocation: None,
             default_scopes: None,
             client_id_encrypted: None,
             client_secret_encrypted: None,
@@ -195,6 +228,7 @@ mod tests {
             client_id_param_name: None,
             requires_gateway_url: false,
             created_by: "admin".to_string(),
+            revocation_seed_version: 0,
             created_at: Utc::now(),
             updated_at: Utc::now(),
         };
@@ -220,5 +254,30 @@ mod tests {
         };
         let restored: ProviderConfig = bson::from_document(doc).expect("deserialize");
         assert_eq!(restored.credential_mode, "admin");
+        assert!(restored.revocation.is_none());
+        assert_eq!(restored.revocation_seed_version, 0);
+    }
+
+    #[test]
+    fn revocation_defaults_preserve_unknown_values() {
+        let revocation: RevocationConfig = bson::from_document(bson::doc! {
+            "url": "https://example.com/revoke",
+        })
+        .expect("deserialize defaults");
+        assert_eq!(revocation.style, "rfc7009");
+        assert_eq!(revocation.auth, "inherit");
+        assert!(!revocation.revokes_grant);
+
+        let unknown = RevocationConfig {
+            style: "future_style".to_string(),
+            url: "https://example.com/future-revoke".to_string(),
+            auth: "future_auth".to_string(),
+            revokes_grant: true,
+        };
+        let restored: RevocationConfig = bson::from_document(
+            bson::to_document(&unknown).expect("serialize unknown revocation config"),
+        )
+        .expect("deserialize unknown revocation config");
+        assert_eq!(restored, unknown);
     }
 }

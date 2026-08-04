@@ -26,6 +26,11 @@ interface ScopedProviderMutationInput extends ProviderTokenScopeOptions {
   readonly providerId: string;
 }
 
+export interface DisconnectProviderInput extends ScopedProviderMutationInput {
+  readonly cascadeGrant?: boolean;
+  readonly grantScope?: "token";
+}
+
 function providerTokenQueryKey(targetOrgId: string | null | undefined) {
   return ["provider-tokens", targetOrgId ?? "personal"] as const;
 }
@@ -252,9 +257,16 @@ export function useDisconnectProvider() {
     mutationFn: async ({
       providerId,
       targetOrgId,
-    }: ScopedProviderMutationInput): Promise<ProviderActionResponse> => {
+      cascadeGrant,
+      grantScope,
+    }: DisconnectProviderInput): Promise<ProviderActionResponse> => {
+      const query = new URLSearchParams();
+      if (targetOrgId) query.set("target_org_id", targetOrgId);
+      if (cascadeGrant) query.set("cascade_grant", "true");
+      if (grantScope) query.set("grant_scope", grantScope);
+      const suffix = query.size > 0 ? `?${query.toString()}` : "";
       return api.delete<ProviderActionResponse>(
-        `/providers/${providerId}/disconnect${targetOrgSuffix(targetOrgId)}`,
+        `/providers/${providerId}/disconnect${suffix}`,
       );
     },
     onSuccess: (_data, variables) => {

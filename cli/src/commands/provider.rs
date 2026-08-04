@@ -3,6 +3,7 @@ use serde_json::Value;
 
 use crate::api::ApiClient;
 use crate::cli::{OutputFormat, ProviderCommands};
+use crate::commands::grant_cascade::{append_revocation_query, report_if_confirmation_required};
 use crate::org_resolver::resolve_org_id;
 
 pub async fn run(command: ProviderCommands) -> Result<()> {
@@ -10,6 +11,8 @@ pub async fn run(command: ProviderCommands) -> Result<()> {
         ProviderCommands::Disconnect {
             provider_id,
             org,
+            cascade_grant,
+            keep_upstream,
             auth,
         } => {
             let mut api = ApiClient::from_auth_checked(&auth).await?;
@@ -17,8 +20,14 @@ pub async fn run(command: ProviderCommands) -> Result<()> {
                 Some(raw) => Some(resolve_org_id(&mut api, &raw).await?),
                 None => None,
             };
-            let path = disconnect_path(&provider_id, org.as_deref());
-            let result: Value = api.delete(&path).await?;
+            let path = disconnect_path(&provider_id, org.as_deref(), cascade_grant, keep_upstream);
+            let result: Value = match api.delete(&path).await {
+                Ok(result) => result,
+                Err(error) => {
+                    report_if_confirmation_required(&error, auth.output);
+                    return Err(error);
+                }
+            };
 
             match auth.output {
                 OutputFormat::Json => {
@@ -42,13 +51,18 @@ pub async fn run(command: ProviderCommands) -> Result<()> {
     }
 }
 
-fn disconnect_path(provider_id: &str, target_org_id: Option<&str>) -> String {
+fn disconnect_path(
+    provider_id: &str,
+    target_org_id: Option<&str>,
+    cascade_grant: bool,
+    keep_upstream: bool,
+) -> String {
     let mut path = format!("/providers/{provider_id}/disconnect");
     if let Some(org_id) = target_org_id {
         path.push_str("?target_org_id=");
         path.push_str(&urlencoding::encode(org_id));
     }
-    path
+    append_revocation_query(path, cascade_grant, keep_upstream)
 }
 
 #[cfg(test)]
@@ -58,7 +72,7 @@ mod tests {
     #[test]
     fn disconnect_path_omits_target_org_when_absent() {
         assert_eq!(
-            disconnect_path("provider-1", None),
+            disconnect_path("provider-1", None, false, false),
             "/providers/provider-1/disconnect"
         );
     }
@@ -66,8 +80,20 @@ mod tests {
     #[test]
     fn disconnect_path_appends_encoded_target_org() {
         assert_eq!(
-            disconnect_path("provider-1", Some("org 1&2")),
+            disconnect_path("provider-1", Some("org 1&2"), false, false),
             "/providers/provider-1/disconnect?target_org_id=org%201%262"
+        );
+    }
+
+    #[test]
+    fn disconnect_path_appends_revocation_flags() {
+        assert_eq!(
+            disconnect_path("provider-1", None, true, false),
+            "/providers/provider-1/disconnect?cascade_grant=true"
+        );
+        assert_eq!(
+            disconnect_path("provider-1", Some("org-1"), false, true),
+            "/providers/provider-1/disconnect?target_org_id=org-1&grant_scope=token"
         );
     }
 }
@@ -103,6 +129,8 @@ mod command_tests {
         run(ProviderCommands::Disconnect {
             provider_id: "prov-1".to_string(),
             org: None,
+            cascade_grant: false,
+            keep_upstream: false,
             auth: mock_auth(server.uri()),
         })
         .await
@@ -126,10 +154,38 @@ mod command_tests {
         run(ProviderCommands::Disconnect {
             provider_id: "prov-1".to_string(),
             org: Some(ORG_UUID.to_string()),
+            cascade_grant: false,
+            keep_upstream: false,
             auth: mock_auth(server.uri()),
         })
         .await
         .expect("org disconnect should succeed");
+    }
+
+    #[tokio::test]
+    async fn disconnect_with_org_and_keep_upstream_preserves_both_queries() {
+        let server = MockServer::start().await;
+        Mock::given(method("DELETE"))
+            .and(path("/api/v1/providers/prov-1/disconnect"))
+            .and(query_param("target_org_id", ORG_UUID))
+            .and(query_param("grant_scope", "token"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .set_body_json(serde_json::json!({ "status": "disconnected" })),
+            )
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        run(ProviderCommands::Disconnect {
+            provider_id: "prov-1".to_string(),
+            org: Some(ORG_UUID.to_string()),
+            cascade_grant: false,
+            keep_upstream: true,
+            auth: mock_auth(server.uri()),
+        })
+        .await
+        .expect("token-scope org disconnect should succeed");
     }
 
     #[tokio::test]
@@ -144,6 +200,8 @@ mod command_tests {
         let result = run(ProviderCommands::Disconnect {
             provider_id: "prov-1".to_string(),
             org: None,
+            cascade_grant: false,
+            keep_upstream: false,
             auth: mock_auth(server.uri()),
         })
         .await;

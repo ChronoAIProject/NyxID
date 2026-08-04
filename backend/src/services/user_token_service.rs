@@ -3,6 +3,7 @@ use std::collections::HashMap;
 use chrono::{Duration, Utc};
 use futures::TryStreamExt;
 use mongodb::bson::{self, doc};
+use mongodb::options::ReturnDocument;
 use uuid::Uuid;
 use zeroize::Zeroizing;
 
@@ -2628,48 +2629,20 @@ pub async fn get_active_token(
     }
 }
 
-/// Revoke and delete a user's stored token for a provider.
-///
-/// Attempts best-effort remote token revocation before clearing local state.
-pub async fn disconnect_provider(
+/// Atomically claim the currently active provider token by its observed `_id`.
+/// A callback replacement receives a new `_id` and cannot be captured by this claim.
+pub async fn claim_provider_token_by_id(
     db: &mongodb::Database,
-    encryption_keys: &EncryptionKeys,
     user_id: &str,
-    provider_id: &str,
-) -> AppResult<()> {
+    token_id: &str,
+) -> AppResult<Option<UserProviderToken>> {
     let now = Utc::now();
-
-    // Load the token before marking as revoked (for remote revocation)
-    let token = db
+    Ok(db
         .collection::<UserProviderToken>(COLLECTION_NAME)
-        .find_one(doc! {
-            "user_id": user_id,
-            "provider_config_id": provider_id,
-            "status": { "$ne": "revoked" },
-        })
-        .await?;
-
-    // Best-effort remote revocation for OAuth2 tokens
-    if let Some(ref tok) = token
-        && tok.token_type == "oauth2"
-    {
-        let provider = db
-            .collection::<ProviderConfig>(PROVIDER_CONFIGS)
-            .find_one(doc! { "_id": provider_id })
-            .await?;
-        if let Some(ref provider) = provider
-            && provider.revocation_url.is_some()
-        {
-            let _ = try_revoke_token_remote(db, encryption_keys, provider, tok).await;
-        }
-    }
-
-    let result = db
-        .collection::<UserProviderToken>(COLLECTION_NAME)
-        .update_one(
+        .find_one_and_update(
             doc! {
+                "_id": token_id,
                 "user_id": user_id,
-                "provider_config_id": provider_id,
                 "status": { "$ne": "revoked" },
             },
             doc! { "$set": {
@@ -2680,121 +2653,8 @@ pub async fn disconnect_provider(
                 "updated_at": bson::DateTime::from_chrono(now),
             }},
         )
-        .await?;
-
-    if result.matched_count == 0 {
-        return Err(AppError::NotFound(
-            "No active token found for this provider".to_string(),
-        ));
-    }
-
-    tracing::info!(
-        user_id = %user_id,
-        provider_id = %provider_id,
-        "Provider disconnected"
-    );
-
-    Ok(())
-}
-
-/// Best-effort remote token revocation (RFC 7009).
-///
-/// Resolves OAuth client credentials so the revocation request includes proper
-/// client authentication (`client_secret_basic` or `client_secret_post`).
-/// If credential resolution fails, revocation is silently skipped.
-async fn try_revoke_token_remote(
-    db: &mongodb::Database,
-    encryption_keys: &EncryptionKeys,
-    provider: &ProviderConfig,
-    token: &UserProviderToken,
-) {
-    let revocation_url = match provider.revocation_url.as_deref() {
-        Some(url) => url,
-        None => return,
-    };
-
-    // Resolve the same OAuth credentials that were used to mint this token.
-    // If resolution fails (e.g. credentials deleted), skip revocation silently.
-    let creds = match user_credentials_service::resolve_token_oauth_credentials(
-        db,
-        encryption_keys,
-        provider,
-        token.credential_user_id.as_deref(),
-    )
-    .await
-    {
-        Ok(c) => c,
-        Err(_) => return,
-    };
-
-    let use_basic_auth = provider.token_endpoint_auth_method == "client_secret_basic";
-
-    // Try revoking access token
-    if let Some(ref enc) = token.access_token_encrypted
-        && let Ok(decrypted) = encryption_keys.decrypt(enc).await
-        && let Ok(access_token) = String::from_utf8(decrypted)
-    {
-        let _ = send_revocation_request(
-            revocation_url,
-            &access_token,
-            "access_token",
-            &creds.client_id,
-            creds.client_secret.as_deref(),
-            use_basic_auth,
-            oauth_flow::client_id_param_name(provider),
-        )
-        .await;
-    }
-
-    // Try revoking refresh token
-    if let Some(ref enc) = token.refresh_token_encrypted
-        && let Ok(decrypted) = encryption_keys.decrypt(enc).await
-        && let Ok(refresh_token) = String::from_utf8(decrypted)
-    {
-        let _ = send_revocation_request(
-            revocation_url,
-            &refresh_token,
-            "refresh_token",
-            &creds.client_id,
-            creds.client_secret.as_deref(),
-            use_basic_auth,
-            oauth_flow::client_id_param_name(provider),
-        )
-        .await;
-    }
-}
-
-/// Send a single RFC 7009 revocation request with client authentication.
-async fn send_revocation_request(
-    revocation_url: &str,
-    token_value: &str,
-    token_type_hint: &str,
-    client_id: &str,
-    client_secret: Option<&str>,
-    use_basic_auth: bool,
-    client_id_param_name: &str,
-) -> Result<(), ()> {
-    let client = oauth_flow::token_exchange_client();
-
-    let mut request = client.post(revocation_url);
-
-    if use_basic_auth {
-        request = request.basic_auth(client_id, client_secret);
-        request = request.form(&[("token", token_value), ("token_type_hint", token_type_hint)]);
-    } else {
-        let mut params = vec![
-            ("token".to_string(), token_value.to_string()),
-            ("token_type_hint".to_string(), token_type_hint.to_string()),
-            (client_id_param_name.to_string(), client_id.to_string()),
-        ];
-        if let Some(secret) = client_secret {
-            params.push(("client_secret".to_string(), secret.to_string()));
-        }
-        request = request.form(&params);
-    }
-
-    let _ = request.send().await;
-    Ok(())
+        .return_document(ReturnDocument::Before)
+        .await?)
 }
 
 fn build_user_token_summary(
@@ -2898,6 +2758,7 @@ mod tests {
             authorization_url: None,
             token_url: None,
             revocation_url: None,
+            revocation: None,
             default_scopes: None,
             client_id_encrypted: None,
             client_secret_encrypted: Some(vec![1, 2, 3]),
@@ -2918,6 +2779,7 @@ mod tests {
             client_id_param_name: Some("NyxIdBot".to_string()),
             requires_gateway_url: false,
             created_by: "system".to_string(),
+            revocation_seed_version: 0,
             created_at: Utc::now(),
             updated_at: Utc::now(),
         }
@@ -3499,6 +3361,7 @@ mod tests {
             authorization_url: Some("https://example.com/authorize".to_string()),
             token_url: Some(token_url.to_string()),
             revocation_url: None,
+            revocation: None,
             default_scopes: None,
             client_id_encrypted,
             client_secret_encrypted,
@@ -3519,6 +3382,7 @@ mod tests {
             client_id_param_name: None,
             requires_gateway_url: false,
             created_by: "system".to_string(),
+            revocation_seed_version: 0,
             created_at: Utc::now(),
             updated_at: Utc::now(),
         }
@@ -4777,10 +4641,10 @@ mod tests {
         assert!(slugs.contains(&"provider-beta"));
     }
 
-    // --- disconnect_provider tests ---
+    // --- provider-token claim tests ---
 
     #[tokio::test]
-    async fn disconnect_provider_marks_token_as_revoked() {
+    async fn claim_provider_token_returns_preimage_and_clears_stored_secrets() {
         let Some(db) = connect_test_database("ut_svc_disconnect_revoke").await else {
             eprintln!("skipping: no MongoDB");
             return;
@@ -4794,9 +4658,11 @@ mod tests {
         let token_id = token.id.clone();
         insert_test_token(&db, &token).await;
 
-        super::disconnect_provider(&db, &enc, &user_id, &provider_id)
+        let claimed = super::claim_provider_token_by_id(&db, &user_id, &token_id)
             .await
-            .expect("disconnect should succeed");
+            .expect("claim should succeed")
+            .expect("token should be claimable");
+        assert!(claimed.api_key_encrypted.is_some());
 
         // Verify token status is now "revoked" and credentials are cleared
         let updated = db
@@ -4815,7 +4681,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn disconnect_provider_not_found_when_no_token() {
+    async fn claim_provider_token_is_single_use() {
         let Some(db) = connect_test_database("ut_svc_disconnect_not_found").await else {
             eprintln!("skipping: no MongoDB");
             return;
@@ -4823,85 +4689,58 @@ mod tests {
         let enc = test_encryption_keys();
         let user_id = Uuid::new_v4().to_string();
         let provider_id = Uuid::new_v4().to_string();
-
-        let err = super::disconnect_provider(&db, &enc, &user_id, &provider_id)
-            .await
-            .expect_err("should return NotFound");
-        assert!(matches!(err, AppError::NotFound(_)));
-    }
-
-    #[tokio::test]
-    async fn disconnect_provider_not_found_when_already_revoked() {
-        let Some(db) = connect_test_database("ut_svc_disconnect_already_revoked").await else {
-            eprintln!("skipping: no MongoDB");
-            return;
-        };
-        let enc = test_encryption_keys();
-        let user_id = Uuid::new_v4().to_string();
-        let provider_id = Uuid::new_v4().to_string();
-
-        let token = make_api_key_token(&enc, &user_id, &provider_id, "key", "revoked").await;
+        let token = make_api_key_token(&enc, &user_id, &provider_id, "key", "active").await;
+        let token_id = token.id.clone();
         insert_test_token(&db, &token).await;
 
-        let err = super::disconnect_provider(&db, &enc, &user_id, &provider_id)
-            .await
-            .expect_err("should return NotFound for already-revoked token");
-        assert!(matches!(err, AppError::NotFound(_)));
-    }
-
-    #[tokio::test]
-    async fn disconnect_provider_then_get_active_returns_not_found() {
-        // End-to-end: disconnect, then verify get_active_token fails
-        let Some(db) = connect_test_database("ut_svc_disconnect_then_get").await else {
-            eprintln!("skipping: no MongoDB");
-            return;
-        };
-        let enc = test_encryption_keys();
-        let user_id = Uuid::new_v4().to_string();
-        let provider_id = Uuid::new_v4().to_string();
-
-        let token = make_api_key_token(&enc, &user_id, &provider_id, "key-e2e", "active").await;
-        insert_test_token(&db, &token).await;
-
-        // Confirm we can get it
-        let result = super::get_active_token(&db, &enc, &user_id, &provider_id).await;
-        assert!(result.is_ok());
-
-        // Disconnect
-        super::disconnect_provider(&db, &enc, &user_id, &provider_id)
-            .await
-            .unwrap();
-
-        // Now get_active_token should fail
-        let result = super::get_active_token(&db, &enc, &user_id, &provider_id).await;
-        assert!(result.is_err(), "should not find token after disconnect");
-        assert!(matches!(result.unwrap_err(), AppError::NotFound(_)));
-    }
-
-    #[tokio::test]
-    async fn disconnect_provider_then_list_excludes_it() {
-        let Some(db) = connect_test_database("ut_svc_disconnect_then_list").await else {
-            eprintln!("skipping: no MongoDB");
-            return;
-        };
-        let enc = test_encryption_keys();
-        let user_id = Uuid::new_v4().to_string();
-        let provider_id = Uuid::new_v4().to_string();
-
-        let token = make_api_key_token(&enc, &user_id, &provider_id, "listed-key", "active").await;
-        insert_test_token(&db, &token).await;
-
-        assert_eq!(
-            super::list_user_tokens(&db, &user_id).await.unwrap().len(),
-            1
+        assert!(
+            super::claim_provider_token_by_id(&db, &user_id, &token_id)
+                .await
+                .unwrap()
+                .is_some()
         );
+        assert!(
+            super::claim_provider_token_by_id(&db, &user_id, &token_id)
+                .await
+                .unwrap()
+                .is_none()
+        );
+    }
 
-        super::disconnect_provider(&db, &enc, &user_id, &provider_id)
+    #[tokio::test]
+    async fn claim_provider_token_does_not_claim_callback_replacement() {
+        let Some(db) = connect_test_database("ut_svc_disconnect_callback_replacement").await else {
+            eprintln!("skipping: no MongoDB");
+            return;
+        };
+        let enc = test_encryption_keys();
+        let user_id = Uuid::new_v4().to_string();
+        let provider_id = Uuid::new_v4().to_string();
+        let observed = make_api_key_token(&enc, &user_id, &provider_id, "old", "active").await;
+        let observed_id = observed.id.clone();
+        insert_test_token(&db, &observed).await;
+        db.collection::<UserProviderToken>(USER_PROVIDER_TOKENS)
+            .delete_one(doc! { "_id": &observed_id })
             .await
             .unwrap();
+        let replacement = make_api_key_token(&enc, &user_id, &provider_id, "fresh", "active").await;
+        let replacement_id = replacement.id.clone();
+        insert_test_token(&db, &replacement).await;
 
-        let after = super::list_user_tokens(&db, &user_id).await.unwrap();
-        assert!(after.is_empty(), "revoked token should not appear in list");
+        assert!(
+            super::claim_provider_token_by_id(&db, &user_id, &observed_id)
+                .await
+                .unwrap()
+                .is_none()
+        );
+        let stored = db
+            .collection::<UserProviderToken>(USER_PROVIDER_TOKENS)
+            .find_one(doc! { "_id": replacement_id })
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(stored.status, "active");
+        assert!(stored.api_key_encrypted.is_some());
     }
 
     // --- store_api_key + get_active_token round-trip ---

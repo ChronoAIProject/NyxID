@@ -12,6 +12,7 @@ use crate::errors::{AppError, AppResult};
 use crate::models::downstream_service::{
     COLLECTION_NAME as DOWNSTREAM_SERVICES, DownstreamService,
 };
+use crate::models::provider_config::{COLLECTION_NAME as PROVIDER_CONFIGS, ProviderConfig};
 use crate::models::ssh_auth_mode::SshAuthMode;
 use crate::models::user_api_key::UserApiKey;
 use crate::models::user_endpoint::{COLLECTION_NAME as USER_ENDPOINTS, UserEndpoint};
@@ -407,6 +408,8 @@ pub struct KeyResponse {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub catalog_service_name: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub revocation: Option<KeyRevocationResponse>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub node_id: Option<String>,
     pub node_priority: i32,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -529,6 +532,11 @@ pub struct KeyResponse {
 }
 
 #[derive(Debug, Serialize, ToSchema)]
+pub struct KeyRevocationResponse {
+    pub revokes_grant: bool,
+}
+
+#[derive(Debug, Serialize, ToSchema)]
 pub struct KeyListResponse {
     pub keys: Vec<KeyResponse>,
 }
@@ -606,6 +614,8 @@ pub struct DeleteKeyResponse {
     /// an active key, so leave it alone".
     #[serde(default)]
     pub deleted: bool,
+    /// Whether an eligible upstream revocation request was handed off.
+    pub upstream_revocation_scheduled: bool,
 }
 
 /// Extract the Lark / Feishu `app_id` from a plaintext credential string.
@@ -2003,6 +2013,10 @@ pub async fn update_key(
 pub struct DeleteKeyQuery {
     #[serde(default)]
     pub only_if_pending: Option<bool>,
+    #[serde(default)]
+    pub cascade_grant: Option<bool>,
+    #[serde(default)]
+    pub grant_scope: Option<String>,
 }
 
 #[utoipa::path(
@@ -2010,12 +2024,16 @@ pub struct DeleteKeyQuery {
     path = "/api/v1/keys/{key_id}",
     params(
         ("key_id" = String, Path, description = "User service ID or slug"),
-        ("only_if_pending" = Option<bool>, Query, description = "When true, skip the delete if the key is no longer pending_auth")
+        ("only_if_pending" = Option<bool>, Query, description = "When true, skip the delete if the key is no longer pending_auth"),
+        ("cascade_grant" = Option<bool>, Query, description = "Confirm deletion of all same-owner connections sharing an upstream OAuth grant"),
+        ("grant_scope" = Option<String>, Query, description = "Set to token to remove only this service without revoking the upstream grant")
     ),
     responses(
         (status = 200, description = "Key revoked (or skipped when only_if_pending)", body = DeleteKeyResponse),
+        (status = 400, description = "Invalid or conflicting revocation options", body = crate::errors::ErrorResponse),
         (status = 401, description = "Unauthorized", body = crate::errors::ErrorResponse),
-        (status = 404, description = "Key not found", body = crate::errors::ErrorResponse)
+        (status = 404, description = "Key not found", body = crate::errors::ErrorResponse),
+        (status = 409, description = "OAuth grant cascade confirmation required", body = crate::errors::ErrorResponse)
     ),
     tag = "AI Services"
 )]
@@ -2028,6 +2046,11 @@ pub async fn delete_key(
     Query(query): Query<DeleteKeyQuery>,
 ) -> AppResult<Json<DeleteKeyResponse>> {
     let actor = auth_user.user_id.to_string();
+    let options = unified_key_service::DisconnectOptions {
+        cascade_grant: query.cascade_grant.unwrap_or(false),
+        grant_scope: query.grant_scope.clone(),
+    };
+    options.validate()?;
     let access = resolve_key_write_owner(&state, &actor, &key_id).await?;
     let user_id_str = access.owner_id;
     let key_id = access.service_id;
@@ -2060,28 +2083,37 @@ pub async fn delete_key(
                 "Key is no longer pending_auth; delete skipped".to_string()
             },
             deleted: flipped,
+            upstream_revocation_scheduled: false,
         }));
     }
 
-    unified_key_service::revoke_key(&state.db, &user_id_str, &actor, &key_id).await?;
+    let audit_actor = crate::services::audit_service::AuditActor::from_auth_user(&auth_user);
+    let result = unified_key_service::disconnect_credentials(
+        &state.db,
+        &state.encryption_keys,
+        &user_id_str,
+        &audit_actor,
+        unified_key_service::DisconnectTarget::UserService(&key_id),
+        options,
+    )
+    .await?;
 
-    emit_event(
-        state.telemetry.as_deref(),
-        &auth_user.user_id.to_string(),
-        auth_user.api_key_id.as_deref(),
-        &tele,
-        TelemetryEvent::KeyDeleted {
-            source: if view.catalog_service_slug.is_some() {
-                "catalog".to_string()
-            } else {
-                "custom".to_string()
+    for event in &result.deleted_services {
+        emit_event(
+            state.telemetry.as_deref(),
+            &actor,
+            auth_user.api_key_id.as_deref(),
+            &tele,
+            TelemetryEvent::KeyDeleted {
+                source: event.source.clone(),
             },
-        },
-    );
+        );
+    }
 
     Ok(Json(DeleteKeyResponse {
         message: "Key revoked successfully".to_string(),
         deleted: true,
+        upstream_revocation_scheduled: result.upstream_revocation_scheduled,
     }))
 }
 
@@ -2122,6 +2154,7 @@ fn key_response_from_result(result: &unified_key_service::CreateKeyResult) -> Ke
         catalog_service_id: result.service.catalog_service_id.clone(),
         catalog_service_slug: None,
         catalog_service_name: None,
+        revocation: None,
         node_id: result.service.node_id.clone(),
         node_priority: result.service.node_priority,
         node_status: None,
@@ -2235,6 +2268,7 @@ fn key_response_from_view(view: unified_key_service::KeyView) -> KeyResponse {
         catalog_service_id: view.catalog_service_id,
         catalog_service_slug: view.catalog_service_slug,
         catalog_service_name: view.catalog_service_name,
+        revocation: None,
         node_id: view.node_id,
         node_priority: view.node_priority,
         node_status: None,
@@ -2411,6 +2445,24 @@ async fn enrich_key_discovery_metadata(
         .map(|service| (service.id.as_str(), service))
         .collect();
 
+    let provider_ids: Vec<&str> = catalog_services
+        .iter()
+        .filter_map(|service| service.provider_config_id.as_deref())
+        .collect();
+    let providers: Vec<ProviderConfig> = if provider_ids.is_empty() {
+        vec![]
+    } else {
+        db.collection::<ProviderConfig>(PROVIDER_CONFIGS)
+            .find(doc! { "_id": { "$in": &provider_ids } })
+            .await?
+            .try_collect()
+            .await?
+    };
+    let provider_by_id: std::collections::HashMap<&str, &ProviderConfig> = providers
+        .iter()
+        .map(|provider| (provider.id.as_str(), provider))
+        .collect();
+
     let key_ids: Vec<&str> = keys.iter().map(|key| key.id.as_str()).collect();
     let services: Vec<UserService> = if key_ids.is_empty() {
         vec![]
@@ -2467,6 +2519,17 @@ async fn enrich_key_discovery_metadata(
                     proxy_discovery_service::project_custom_key(service, endpoint, base_url)
                 })
         };
+
+        key.revocation = key
+            .catalog_service_id
+            .as_deref()
+            .and_then(|catalog_id| catalog_by_id.get(catalog_id))
+            .and_then(|catalog| catalog.provider_config_id.as_deref())
+            .and_then(|provider_id| provider_by_id.get(provider_id))
+            .and_then(|provider| crate::services::oauth_revocation::effective_revocation(provider))
+            .map(|config| KeyRevocationResponse {
+                revokes_grant: config.revokes_grant,
+            });
 
         if let Some(projection) = projection {
             key.name = projection.name;
@@ -3184,6 +3247,7 @@ mod tests {
             Path("nonexistent-id".to_string()),
             axum::extract::Query(super::DeleteKeyQuery {
                 only_if_pending: None,
+                ..Default::default()
             }),
         )
         .await
@@ -3571,6 +3635,7 @@ mod tests {
             Path(created.id.clone()),
             axum::extract::Query(super::DeleteKeyQuery {
                 only_if_pending: None,
+                ..Default::default()
             }),
         )
         .await
@@ -3619,6 +3684,7 @@ mod tests {
             Path("del-by-slug".to_string()),
             axum::extract::Query(super::DeleteKeyQuery {
                 only_if_pending: None,
+                ..Default::default()
             }),
         )
         .await
@@ -3663,6 +3729,7 @@ mod tests {
             Path(created.id),
             axum::extract::Query(super::DeleteKeyQuery {
                 only_if_pending: None,
+                ..Default::default()
             }),
         )
         .await
@@ -3977,12 +4044,33 @@ mod tests {
         catalog.openapi_spec_url = Some("https://example.com/catalog-openapi.json".to_string());
         catalog.asyncapi_spec_url = Some("https://example.com/catalog-asyncapi.json".to_string());
         catalog.streaming_supported = true;
+        let provider_id = uuid::Uuid::new_v4().to_string();
+        catalog.provider_config_id = Some(provider_id.clone());
         catalog.capabilities = Some(crate::models::downstream_service::ServiceCapabilities {
             supports_websocket: true,
             ..Default::default()
         });
         db.collection::<DownstreamService>(DOWNSTREAM_SERVICES)
             .insert_one(catalog)
+            .await
+            .unwrap();
+        db.collection::<mongodb::bson::Document>(crate::models::provider_config::COLLECTION_NAME)
+            .insert_one(doc! {
+                "_id": &provider_id,
+                "slug": "catalog-oauth",
+                "name": "Catalog OAuth",
+                "provider_type": "oauth2",
+                "is_active": true,
+                "created_by": "test",
+                "created_at": mongodb::bson::DateTime::now(),
+                "updated_at": mongodb::bson::DateTime::now(),
+                "revocation": {
+                    "style": "vendor_delete",
+                    "url": "https://oauth.example.com/grant",
+                    "auth": "bearer",
+                    "revokes_grant": true,
+                },
+            })
             .await
             .unwrap();
 
@@ -4092,6 +4180,12 @@ mod tests {
         );
         assert!(catalog_key.streaming_supported);
         assert!(catalog_key.websocket_supported);
+        assert!(
+            catalog_key
+                .revocation
+                .as_ref()
+                .is_some_and(|revocation| revocation.revokes_grant)
+        );
 
         let custom_key = response
             .keys
@@ -4104,6 +4198,7 @@ mod tests {
         assert!(custom_key.connected);
         assert!(!custom_key.requires_connection);
         assert!(!custom_key.has_node_binding);
+        assert!(custom_key.revocation.is_none());
         assert_eq!(custom_key.source, "custom");
         assert_eq!(
             custom_key.proxy_url,
@@ -4306,10 +4401,13 @@ mod tests {
         let response = super::DeleteKeyResponse {
             message: "Key revoked successfully".to_string(),
             deleted: true,
+            upstream_revocation_scheduled: false,
         };
         let json = serde_json::to_value(&response).unwrap();
         assert_eq!(json["message"], "Key revoked successfully");
         assert_eq!(json["deleted"], true);
+        assert_eq!(json["upstream_revocation_scheduled"], false);
+        assert!(json.get("upstream_revoked").is_none());
     }
 
     #[test]
@@ -4317,6 +4415,7 @@ mod tests {
         let response = super::DeleteKeyResponse {
             message: "Key is no longer pending_auth; delete skipped".to_string(),
             deleted: false,
+            upstream_revocation_scheduled: false,
         };
         let json = serde_json::to_value(&response).unwrap();
         assert_eq!(json["deleted"], false);
@@ -4333,13 +4432,19 @@ mod tests {
     fn delete_key_query_deserializes_defaults() {
         let query: super::DeleteKeyQuery = serde_json::from_str("{}").unwrap();
         assert!(query.only_if_pending.is_none());
+        assert!(query.cascade_grant.is_none());
+        assert!(query.grant_scope.is_none());
     }
 
     #[test]
     fn delete_key_query_deserializes_with_flag() {
-        let query: super::DeleteKeyQuery =
-            serde_json::from_str(r#"{"only_if_pending": true}"#).unwrap();
+        let query: super::DeleteKeyQuery = serde_json::from_str(
+            r#"{"only_if_pending": true, "cascade_grant": false, "grant_scope": "token"}"#,
+        )
+        .unwrap();
         assert_eq!(query.only_if_pending, Some(true));
+        assert_eq!(query.cascade_grant, Some(false));
+        assert_eq!(query.grant_scope.as_deref(), Some("token"));
     }
 
     #[test]

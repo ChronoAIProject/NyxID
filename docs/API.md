@@ -2253,6 +2253,7 @@ List all active provider configurations.
       "description": "OpenAI API for GPT models",
       "provider_type": "api_key",
       "credential_mode": "admin",
+      "revocation": null,
       "has_oauth_config": false,
       "default_scopes": null,
       "supports_pkce": false,
@@ -2298,7 +2299,8 @@ Register a new provider configuration. OAuth2 providers require additional field
 | `credential_mode`   | string   | No       | `admin` (default), `user`, or `both` -- controls where OAuth client credentials come from during setup. **Only applies to `oauth2` and `device_code` providers.** For `api_key` providers, must be `admin` or omitted (the API rejects other values). Does not affect request-time credential resolution for any provider type. |
 | `authorization_url` | string   | OAuth2   | OAuth2 authorization endpoint (required for `oauth2` type)           |
 | `token_url`         | string   | OAuth2   | OAuth2 token endpoint (required for `oauth2` type)                   |
-| `revocation_url`    | string   | No       | OAuth2 token revocation endpoint (RFC 7009)                          |
+| `revocation`        | object   | No       | Structured upstream revocation configuration for `oauth2`/`device_code`; see below |
+| `revocation_url`    | string   | No       | Deprecated RFC 7009 alias; mapped to `revocation` when the structured field is omitted |
 | `default_scopes`    | string[] | No       | Default OAuth2 scopes to request                                     |
 | `client_id`         | string   | OAuth2   | OAuth2 client ID (required for `oauth2` type, encrypted at rest)     |
 | `client_secret`     | string   | OAuth2   | OAuth2 client secret (required for `oauth2` type, encrypted at rest) |
@@ -2316,6 +2318,8 @@ Register a new provider configuration. OAuth2 providers require additional field
 | `documentation_url` | string   | No       | Provider documentation URL                                           |
 
 **Slug Validation:** Must contain only lowercase letters, digits, and hyphens. No leading, trailing, or consecutive hyphens.
+
+`revocation` contains `style` (`rfc7009`, `github`, `self_bearer`, or `facebook_deauth`), an HTTPS public `url` without userinfo, `auth` (`inherit`, `none`, `client_id`, `basic`, or `post`), and `revokes_grant` (boolean). Structured `revocation` wins if both it and deprecated `revocation_url` are supplied. Revocation configuration is rejected for `api_key` and `telegram_widget` providers.
 
 **Example (API key provider):**
 
@@ -2341,7 +2345,12 @@ Register a new provider configuration. OAuth2 providers require additional field
   "provider_type": "oauth2",
   "authorization_url": "https://accounts.google.com/o/oauth2/v2/auth",
   "token_url": "https://oauth2.googleapis.com/token",
-  "revocation_url": "https://oauth2.googleapis.com/revoke",
+  "revocation": {
+    "style": "rfc7009",
+    "url": "https://oauth2.googleapis.com/revoke",
+    "auth": "none",
+    "revokes_grant": false
+  },
   "default_scopes": ["https://www.googleapis.com/auth/generative-language"],
   "client_id": "your-client-id.apps.googleusercontent.com",
   "client_secret": "your-client-secret",
@@ -2424,7 +2433,8 @@ Update a provider configuration. Only the provided fields are updated (partial u
 | `credential_mode`   | string   | No       | `admin`, `user`, or `both` (oauth2/device_code only; must be `admin` for api_key) |
 | `authorization_url` | string   | No       | OAuth2 authorization endpoint                        |
 | `token_url`         | string   | No       | OAuth2 token endpoint                                |
-| `revocation_url`    | string   | No       | OAuth2 revocation endpoint (RFC 7009)                |
+| `revocation`        | object/null | No    | Structured upstream revocation configuration; `null` explicitly clears it and its legacy alias |
+| `revocation_url`    | string   | No       | Deprecated RFC 7009 alias; mapped to `revocation` when the structured field is omitted |
 | `default_scopes`    | string[] | No       | Default OAuth2 scopes                                |
 | `client_id`         | string   | No       | OAuth2 client ID (encrypted at rest)                 |
 | `client_secret`     | string   | No       | OAuth2 client secret (encrypted at rest)             |
@@ -2444,6 +2454,8 @@ Update a provider configuration. Only the provided fields are updated (partial u
 **Response (200):**
 
 Returns the updated provider object.
+
+Structured `revocation` uses the same fields and validation rules as provider creation. An omitted field preserves the current configuration; explicit `"revocation": null` clears both `revocation` and deprecated `revocation_url`. RFC 7009 configurations keep the alias synchronized, while vendor-specific styles clear the alias.
 
 **Errors:**
 - `1002 forbidden` -- User is not an admin
@@ -2791,7 +2803,7 @@ OAuth callback endpoint for providers that use `response_mode=form_post` (e.g., 
 
 #### DELETE /api/v1/providers/{provider_id}/disconnect
 
-Disconnect from a provider. Sets the token status to "revoked", clears encrypted credential data, and performs best-effort remote token revocation via the provider's revocation endpoint (RFC 7009) if configured.
+Disconnect from a provider. Local credentials are atomically claimed and cleared before NyxID schedules any configured, best-effort upstream OAuth revocation.
 
 **Auth:** Required
 
@@ -2801,17 +2813,31 @@ Disconnect from a provider. Sets the token status to "revoked", clears encrypted
 |---------------|------|-----------------|
 | `provider_id` | UUID | The provider ID |
 
+**Query Parameters:**
+
+| Parameter        | Type    | Required | Description |
+|------------------|---------|----------|-------------|
+| `target_org_id`  | UUID    | No       | Disconnect an organization-owned provider token; requires organization admin access |
+| `cascade_grant`  | boolean | No       | Confirm deletion of every same-owner NyxID connection sharing a grant-level upstream authorization |
+| `grant_scope`    | string  | No       | Set to `token` to remove only this connection without revoking the upstream grant |
+
+`cascade_grant=true` and `grant_scope=token` are mutually exclusive and return HTTP 400 when combined. Grant-level providers require explicit cascade confirmation whenever sibling connections exist; NyxID never performs an implicit cascade.
+
 **Response (200):**
 
 ```json
 {
   "status": "disconnected",
-  "message": "Provider disconnected and credentials removed"
+  "message": "Provider disconnected and credentials removed",
+  "upstream_revocation_scheduled": true
 }
 ```
 
+`upstream_revocation_scheduled` is `true` when an eligible upstream request was successfully scheduled after local teardown. It does not assert that the detached upstream request was delivered. `false` means no upstream request was scheduled, such as an unconfigured provider or Facebook token-scope removal.
+
 **Errors:**
 - `1003 not_found` -- No token found for this provider
+- `11500 grant_cascade_confirmation_required` (HTTP 409) -- Explicit cascade or token-scope selection is required; see the structured response below
 
 **Example:**
 
@@ -2896,9 +2922,31 @@ Get a single key's combined view.
 
 #### DELETE /api/v1/keys/{id}
 
-Revoke a key (deactivates the service and credential).
+Revoke a key (deactivates the service and credential), then schedule configured best-effort upstream OAuth revocation after local teardown.
 
 **Auth:** Required
+
+**Query Parameters:**
+
+| Parameter          | Type    | Required | Description |
+|--------------------|---------|----------|-------------|
+| `only_if_pending`  | boolean | No       | Delete only a `pending_auth` placeholder; always local-only and never enters grant cascade handling |
+| `cascade_grant`    | boolean | No       | Confirm deletion of every same-owner NyxID connection sharing a grant-level upstream authorization |
+| `grant_scope`      | string  | No       | Set to `token` to remove only this service without revoking the upstream grant |
+
+`cascade_grant=true` and `grant_scope=token` are mutually exclusive and return HTTP 400 when combined.
+
+**Response (200):**
+
+```json
+{
+  "message": "Key revoked successfully",
+  "deleted": true,
+  "upstream_revocation_scheduled": true
+}
+```
+
+For `only_if_pending=true`, `deleted` is `false` if authorization already completed and `upstream_revocation_scheduled` is always `false`.
 
 ---
 
@@ -2944,9 +2992,57 @@ Update label or rotate credential.
 
 #### DELETE /api/v1/api-keys/external/{id}
 
-Revoke an external credential.
+Revoke an external credential. OAuth-backed rows use the same grant-cascade and upstream-revocation contract as unified keys.
 
 **Auth:** Required
+
+**Query Parameters:**
+
+| Parameter        | Type    | Required | Description |
+|------------------|---------|----------|-------------|
+| `cascade_grant`  | boolean | No       | Confirm deletion of every same-owner NyxID connection sharing a grant-level upstream authorization |
+| `grant_scope`    | string  | No       | Set to `token` to delete only this credential without revoking the upstream grant |
+
+`cascade_grant=true` and `grant_scope=token` are mutually exclusive and return HTTP 400 when combined.
+
+**Response (200):**
+
+```json
+{
+  "deleted": true,
+  "upstream_revocation_scheduled": true
+}
+```
+
+This endpoint previously returned HTTP 204. It now returns the JSON response above so clients can distinguish local deletion from an eligible upstream handoff.
+
+#### OAuth grant cascade conflict
+
+The three delete endpoints above return HTTP 409 with error code `11500` when grant revocation would also affect sibling NyxID connections and `cascade_grant=true` was not provided. Nothing is deleted on this response.
+
+```json
+{
+  "error": "grant_cascade_confirmation_required",
+  "error_code": 11500,
+  "message": "Grant cascade confirmation required",
+  "details": {
+    "provider_slug": "github",
+    "provider_name": "GitHub",
+    "revokes_grant": true,
+    "siblings": [
+      {
+        "user_service_id": "service-id",
+        "name": "github-issues",
+        "slug": "github-issues"
+      }
+    ],
+    "unaffected_other_app": [],
+    "token_scope_available": true
+  }
+}
+```
+
+Clients may retry with `cascade_grant=true`, or with `grant_scope=token` when `token_scope_available` is `true`. A successful response's `upstream_revocation_scheduled` field means an eligible detached request was scheduled, not that the upstream provider confirmed delivery.
 
 ---
 

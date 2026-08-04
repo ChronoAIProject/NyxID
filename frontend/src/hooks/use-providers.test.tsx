@@ -171,6 +171,30 @@ describe("provider token scope hooks", () => {
     await refresh.result.current.mutateAsync({ providerId: "p1" });
     expect(mockPost).toHaveBeenCalledWith("/providers/p1/refresh");
   });
+
+  it("encodes provider grant cascade retry options with owner scope", async () => {
+    mockDelete.mockResolvedValue({ status: "disconnected" });
+    const { result } = renderHook(() => useDisconnectProvider(), {
+      wrapper: createWrapper(),
+    });
+
+    await result.current.mutateAsync({
+      providerId: "p1",
+      targetOrgId: "org-1",
+      cascadeGrant: true,
+    });
+    expect(mockDelete).toHaveBeenLastCalledWith(
+      "/providers/p1/disconnect?target_org_id=org-1&cascade_grant=true",
+    );
+
+    await result.current.mutateAsync({
+      providerId: "p1",
+      grantScope: "token",
+    });
+    expect(mockDelete).toHaveBeenLastCalledWith(
+      "/providers/p1/disconnect?grant_scope=token",
+    );
+  });
 });
 
 describe("list + detail queries", () => {
@@ -230,11 +254,14 @@ describe("useConnectApiKey", () => {
       label: "My Gateway",
       gatewayUrl: "https://gw.example.com",
     });
-    expect(mockPost).toHaveBeenCalledWith("/providers/openclaw/connect/api-key", {
-      api_key: "sk-x",
-      label: "My Gateway",
-      gateway_url: "https://gw.example.com",
-    });
+    expect(mockPost).toHaveBeenCalledWith(
+      "/providers/openclaw/connect/api-key",
+      {
+        api_key: "sk-x",
+        label: "My Gateway",
+        gateway_url: "https://gw.example.com",
+      },
+    );
   });
 
   it("coerces an empty gateway URL to undefined", async () => {

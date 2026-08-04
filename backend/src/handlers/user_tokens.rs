@@ -6,6 +6,7 @@ use axum::{
     http::HeaderMap,
 };
 use serde::{Deserialize, Serialize};
+use utoipa::ToSchema;
 
 use crate::AppState;
 use crate::errors::{AppError, AppResult};
@@ -13,8 +14,9 @@ use crate::mw::auth::{AuthUser, OptionalAuthUser};
 use crate::services::url_validation::validate_base_url;
 use crate::services::{
     admin_user_service, audit_service, credential_push_service, org_service, provider_service,
-    user_api_key_service, user_service_service, user_token_service,
+    unified_key_service, user_api_key_service, user_service_service, user_token_service,
 };
+use crate::telemetry::{TelemetryContext, TelemetryEvent, emit_event};
 
 // TODO(SEC-9): Apply stricter per-endpoint rate limiting to OAuth callback and
 // initiate endpoints (e.g. 10 requests/minute per user) instead of relying
@@ -123,10 +125,27 @@ pub struct ProviderTokenTargetQuery {
     pub target_org_id: Option<String>,
 }
 
+#[derive(Debug, Deserialize, Default)]
+#[serde(deny_unknown_fields)]
+pub struct DisconnectProviderQuery {
+    pub target_org_id: Option<String>,
+    #[serde(default)]
+    pub cascade_grant: Option<bool>,
+    #[serde(default)]
+    pub grant_scope: Option<String>,
+}
+
 #[derive(Debug, Serialize)]
 pub struct ConnectResponse {
     pub status: String,
     pub message: String,
+}
+
+#[derive(Debug, Serialize, ToSchema)]
+pub struct DisconnectProviderResponse {
+    pub status: String,
+    pub message: String,
+    pub upstream_revocation_scheduled: bool,
 }
 
 #[derive(Debug, Deserialize)]
@@ -839,32 +858,62 @@ fn redirect_to_path(
 ///
 /// Audit primary `user_id` is the affected token owner (`effective_user_id`);
 /// org-targeted calls add `on_behalf_of` when the caller differs, matching OAuth callback events.
+#[utoipa::path(
+    delete,
+    path = "/api/v1/providers/{provider_id}/disconnect",
+    params(
+        ("provider_id" = String, Path, description = "Provider configuration ID"),
+        ("target_org_id" = Option<String>, Query, description = "Operate on an organization-owned provider token"),
+        ("cascade_grant" = Option<bool>, Query, description = "Confirm deletion of all same-owner connections sharing an upstream OAuth grant"),
+        ("grant_scope" = Option<String>, Query, description = "Set to token to remove the provider connection without revoking the upstream grant")
+    ),
+    responses(
+        (status = 200, description = "Provider disconnected", body = DisconnectProviderResponse),
+        (status = 400, description = "Invalid or conflicting revocation options", body = crate::errors::ErrorResponse),
+        (status = 401, description = "Unauthorized", body = crate::errors::ErrorResponse),
+        (status = 404, description = "Provider token not found", body = crate::errors::ErrorResponse),
+        (status = 409, description = "OAuth grant cascade confirmation required", body = crate::errors::ErrorResponse)
+    ),
+    tag = "Providers"
+)]
 pub async fn disconnect_provider(
     State(state): State<AppState>,
     auth_user: AuthUser,
+    tele: TelemetryContext,
     Path(provider_id): Path<String>,
-    Query(query): Query<ProviderTokenTargetQuery>,
-) -> AppResult<Json<ConnectResponse>> {
+    Query(query): Query<DisconnectProviderQuery>,
+) -> AppResult<Json<DisconnectProviderResponse>> {
     let user_id_str = auth_user.user_id.to_string();
+    let options = unified_key_service::DisconnectOptions {
+        cascade_grant: query.cascade_grant.unwrap_or(false),
+        grant_scope: query.grant_scope,
+    };
+    options.validate()?;
     let target_org_user_id =
         resolve_oauth_target_org(&state, &user_id_str, query.target_org_id.as_deref()).await?;
     let effective_user_id = target_org_user_id.as_deref().unwrap_or(&user_id_str);
 
-    user_token_service::disconnect_provider(
+    let audit_actor = audit_service::AuditActor::from_auth_user(&auth_user);
+    let result = unified_key_service::disconnect_credentials(
         &state.db,
         &state.encryption_keys,
         effective_user_id,
-        &provider_id,
+        &audit_actor,
+        unified_key_service::DisconnectTarget::Provider(&provider_id),
+        options,
     )
     .await?;
-    sync_provider_credentials_to_unified_keys(
-        &state,
-        effective_user_id,
-        &provider_id,
-        false,
-        false,
-    )
-    .await?;
+    for event in &result.deleted_services {
+        emit_event(
+            state.telemetry.as_deref(),
+            &user_id_str,
+            auth_user.api_key_id.as_deref(),
+            &tele,
+            TelemetryEvent::KeyDeleted {
+                source: event.source.clone(),
+            },
+        );
+    }
 
     let mut event_data = serde_json::json!({ "provider_id": &provider_id });
     if effective_user_id != user_id_str {
@@ -878,9 +927,10 @@ pub async fn disconnect_provider(
         Some(event_data),
     );
 
-    Ok(Json(ConnectResponse {
+    Ok(Json(DisconnectProviderResponse {
         status: "disconnected".to_string(),
         message: "Provider disconnected and credentials removed".to_string(),
+        upstream_revocation_scheduled: result.upstream_revocation_scheduled,
     }))
 }
 
@@ -1245,7 +1295,9 @@ mod tests {
     use crate::models::audit_log::{AuditLog, COLLECTION_NAME as AUDIT_LOG};
     use crate::models::oauth_state::{COLLECTION_NAME as OAUTH_STATES, OAuthState};
     use crate::models::org_membership::COLLECTION_NAME as ORG_MEMBERSHIPS;
-    use crate::models::provider_config::{COLLECTION_NAME as PROVIDER_CONFIGS, ProviderConfig};
+    use crate::models::provider_config::{
+        COLLECTION_NAME as PROVIDER_CONFIGS, ProviderConfig, RevocationConfig,
+    };
     use crate::models::user::{COLLECTION_NAME as USERS, UserType};
     use crate::models::user_api_key::{COLLECTION_NAME as USER_API_KEYS, UserApiKey};
     use crate::models::user_endpoint::COLLECTION_NAME as USER_ENDPOINTS;
@@ -1254,7 +1306,10 @@ mod tests {
     };
     use crate::models::user_service::COLLECTION_NAME as USER_SERVICES;
     use crate::mw::auth::AuthMethod;
-    use crate::test_utils::{connect_test_database, test_app_state, test_membership, test_user};
+    use crate::test_utils::{
+        connect_test_database, test_app_state, test_membership, test_user, test_user_endpoint,
+        test_user_service,
+    };
     use axum::http::header::LOCATION;
     use axum::response::IntoResponse;
     use chrono::{Duration, Utc};
@@ -1294,6 +1349,7 @@ mod tests {
             authorization_url: Some("https://github.com/login/oauth/authorize".to_string()),
             token_url: Some("https://github.com/login/oauth/access_token".to_string()),
             revocation_url: None,
+            revocation: None,
             default_scopes: Some(vec!["read:user".to_string()]),
             client_id_encrypted: None,
             client_secret_encrypted: Some(vec![1, 2, 3]),
@@ -1314,6 +1370,7 @@ mod tests {
             client_id_param_name: None,
             requires_gateway_url: false,
             created_by: "system".to_string(),
+            revocation_seed_version: 0,
             created_at: now,
             updated_at: now,
         }
@@ -2277,15 +2334,115 @@ mod tests {
         let err = disconnect_provider(
             State(state),
             crate::test_utils::test_auth_user(&member_id),
+            TelemetryContext::default(),
             Path(Uuid::new_v4().to_string()),
-            Query(ProviderTokenTargetQuery {
+            Query(DisconnectProviderQuery {
                 target_org_id: Some(org_id),
+                ..Default::default()
             }),
         )
         .await
         .expect_err("member should not disconnect org tokens");
 
         assert!(matches!(err, AppError::OrgRoleInsufficient(_)));
+    }
+
+    #[tokio::test]
+    async fn disconnect_provider_uses_grant_cascade_contract() {
+        let Some(db) = connect_test_database("user_tokens_disconnect_cascade").await else {
+            return;
+        };
+        let auth_user = test_auth_user();
+        let user_id = auth_user.user_id.to_string();
+        let provider_id = Uuid::new_v4().to_string();
+        let token_id = Uuid::new_v4().to_string();
+        let key_id = Uuid::new_v4().to_string();
+        let service_id = Uuid::new_v4().to_string();
+        let endpoint_id = Uuid::new_v4().to_string();
+        let mut provider = test_provider_config(&provider_id);
+        provider.revocation = Some(RevocationConfig {
+            style: "github".to_string(),
+            url: "https://api.github.com/applications".to_string(),
+            auth: "basic".to_string(),
+            revokes_grant: true,
+        });
+        db.collection::<ProviderConfig>(PROVIDER_CONFIGS)
+            .insert_one(provider)
+            .await
+            .unwrap();
+        db.collection::<UserProviderToken>(USER_PROVIDER_TOKENS)
+            .insert_one(test_provider_token(&token_id, &user_id, &provider_id))
+            .await
+            .unwrap();
+        let mut key = test_pending_oauth_api_key(&key_id, &user_id, &provider_id);
+        key.status = "active".to_string();
+        key.connection_id = Some(Uuid::new_v4().to_string());
+        key.credential_source = Some("platform".to_string());
+        db.collection::<UserApiKey>(USER_API_KEYS)
+            .insert_one(key)
+            .await
+            .unwrap();
+        db.collection::<crate::models::user_endpoint::UserEndpoint>(USER_ENDPOINTS)
+            .insert_one(test_user_endpoint(
+                &endpoint_id,
+                &user_id,
+                "GitHub",
+                "https://api.github.com",
+                None,
+                None,
+            ))
+            .await
+            .unwrap();
+        let mut service =
+            test_user_service(&service_id, &user_id, "github", &endpoint_id, None, None);
+        service.api_key_id = Some(key_id.clone());
+        service.auth_method = "bearer".to_string();
+        db.collection::<crate::models::user_service::UserService>(USER_SERVICES)
+            .insert_one(service)
+            .await
+            .unwrap();
+        let state = test_app_state(db.clone());
+
+        let err = disconnect_provider(
+            State(state.clone()),
+            auth_user.clone(),
+            TelemetryContext::default(),
+            Path(provider_id.clone()),
+            Query(DisconnectProviderQuery::default()),
+        )
+        .await
+        .expect_err("legacy provider disconnect must require cascade confirmation");
+        assert!(matches!(err, AppError::GrantCascadeConfirmationRequired(_)));
+        assert!(
+            db.collection::<UserProviderToken>(USER_PROVIDER_TOKENS)
+                .find_one(doc! { "_id": &token_id, "status": "active" })
+                .await
+                .unwrap()
+                .is_some()
+        );
+
+        let Json(response) = disconnect_provider(
+            State(state),
+            auth_user,
+            TelemetryContext::default(),
+            Path(provider_id),
+            Query(DisconnectProviderQuery {
+                target_org_id: None,
+                cascade_grant: Some(true),
+                grant_scope: None,
+            }),
+        )
+        .await
+        .unwrap();
+        assert_eq!(response.status, "disconnected");
+        assert!(!response.upstream_revocation_scheduled);
+        assert!(
+            db.collection::<UserApiKey>(USER_API_KEYS)
+                .find_one(doc! { "_id": key_id })
+                .await
+                .unwrap()
+                .is_none()
+        );
     }
 
     #[test]

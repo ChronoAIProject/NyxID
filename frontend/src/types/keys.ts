@@ -28,6 +28,7 @@ export interface KeyInfo {
    */
   readonly catalog_service_slug: string | null;
   readonly catalog_service_name: string | null;
+  readonly revocation?: RevocationCapability | null;
   readonly node_id: string | null;
   readonly node_priority: number;
   readonly node_status?: string | null;
@@ -152,6 +153,7 @@ export interface CatalogEntry {
   readonly auth_key_name: string;
   readonly provider_config_id: string | null;
   readonly provider_type: string | null;
+  readonly revocation?: RevocationCapability | null;
   readonly requires_gateway_url: boolean;
   readonly credential_mode: string | null;
   readonly api_key_instructions: string | null;
@@ -217,6 +219,10 @@ export interface CatalogEntry {
    * read-only section.
    */
   readonly default_request_headers?: readonly DefaultRequestHeader[] | null;
+}
+
+export interface RevocationCapability {
+  readonly revokes_grant: boolean;
 }
 
 export interface CatalogListResponse {

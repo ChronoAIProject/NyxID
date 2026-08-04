@@ -42,6 +42,8 @@
         crate::handlers::user_api_keys_external::list_external_api_keys,
         crate::handlers::user_api_keys_external::update_external_api_key,
         crate::handlers::user_api_keys_external::delete_external_api_key,
+        // Provider connections
+        crate::handlers::user_tokens::disconnect_provider,
         // User Services
         crate::handlers::user_services_handler::list_user_services,
         crate::handlers::user_services_handler::update_user_service,
@@ -104,6 +106,9 @@
             crate::handlers::user_api_keys_external::UpdateExternalApiKeyRequest,
             crate::handlers::user_api_keys_external::ExternalApiKeyResponse,
             crate::handlers::user_api_keys_external::ExternalApiKeyListResponse,
+            crate::handlers::user_api_keys_external::DeleteExternalApiKeyResponse,
+            // Provider connections
+            crate::handlers::user_tokens::DisconnectProviderResponse,
             // User Services
             crate::handlers::user_services_handler::UpdateUserServiceRequest,
             crate::handlers::user_services_handler::UserServiceResponse,
