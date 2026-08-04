@@ -28,6 +28,11 @@
 //! and consume its key on the frontend. Toggling an existing flag globally /
 //! per org / per user is a runtime write, no deploy. Mirror new keys in
 //! `frontend/src/lib/feature-flags.ts`.
+//!
+//! Each definition ships a code-declared `description`. Platform admins can
+//! replace that text and record an owner at runtime (`feature_flag_metadata`,
+//! see [`set_metadata`]) so a growing flag list stays legible without a deploy;
+//! the registry still owns which flags exist and what they default to.
 
 use std::collections::{HashMap, HashSet};
 
@@ -38,6 +43,9 @@ use mongodb::options::{FindOneAndUpdateOptions, ReturnDocument};
 use uuid::Uuid;
 
 use crate::errors::{AppError, AppResult};
+use crate::models::feature_flag_metadata::{
+    COLLECTION_NAME as METADATA_COLLECTION, FeatureFlagMetadata,
+};
 use crate::models::feature_flag_override::{COLLECTION_NAME, FeatureFlagOverride, FlagTargetKind};
 use crate::models::org_membership::OrgRole;
 use crate::models::user::{COLLECTION_NAME as USERS, User};
@@ -743,6 +751,109 @@ pub async fn fetch_override_org_display(
         .collect())
 }
 
+// ─────────────────────────────────────────────────────────────────────────────
+// Metadata (admin-authored documentation)
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// Upper bound on an admin-written flag description.
+pub const MAX_FLAG_DESCRIPTION_LEN: usize = 512;
+/// Upper bound on an admin-written flag owner (a person, team, or contact).
+pub const MAX_FLAG_OWNER_LEN: usize = 128;
+
+/// Trim a free-text metadata field, treating blank input as "cleared", and
+/// enforce its length budget.
+fn normalize_metadata_field(
+    value: Option<&str>,
+    max_len: usize,
+    field: &str,
+) -> AppResult<Option<String>> {
+    let Some(trimmed) = value.map(str::trim).filter(|s| !s.is_empty()) else {
+        return Ok(None);
+    };
+    if trimmed.chars().count() > max_len {
+        return Err(AppError::BadRequest(format!(
+            "{field} must be at most {max_len} characters"
+        )));
+    }
+    Ok(Some(trimmed.to_string()))
+}
+
+/// Every metadata row, keyed by flag key. Rows for flags that have since left
+/// the registry are dropped so a stale row can never resurrect a retired flag.
+pub async fn list_metadata(
+    db: &mongodb::Database,
+) -> AppResult<HashMap<String, FeatureFlagMetadata>> {
+    let rows: Vec<FeatureFlagMetadata> = db
+        .collection::<FeatureFlagMetadata>(METADATA_COLLECTION)
+        .find(doc! {})
+        .await?
+        .try_collect()
+        .await?;
+    Ok(rows
+        .into_iter()
+        .filter(|row| find_flag(&row.flag_key).is_some())
+        .map(|row| (row.flag_key.clone(), row))
+        .collect())
+}
+
+/// Replace the admin-authored description and owner for one flag.
+///
+/// Full-replace semantics: whatever is passed becomes the stored state, and a
+/// blank or absent value clears that field. Clearing both fields deletes the
+/// row entirely (the flag falls back to its code-declared description with no
+/// owner) and returns `None`.
+pub async fn set_metadata(
+    db: &mongodb::Database,
+    flag_key: &str,
+    description: Option<&str>,
+    owner: Option<&str>,
+    actor_id: &str,
+) -> AppResult<Option<FeatureFlagMetadata>> {
+    find_flag(flag_key)
+        .ok_or_else(|| AppError::BadRequest(format!("unknown feature flag '{flag_key}'")))?;
+    let description =
+        normalize_metadata_field(description, MAX_FLAG_DESCRIPTION_LEN, "description")?;
+    let owner = normalize_metadata_field(owner, MAX_FLAG_OWNER_LEN, "owner")?;
+
+    let collection = db.collection::<FeatureFlagMetadata>(METADATA_COLLECTION);
+    if description.is_none() && owner.is_none() {
+        collection
+            .find_one_and_delete(doc! { "flag_key": flag_key })
+            .await?;
+        return Ok(None);
+    }
+
+    let now = bson::DateTime::from_chrono(Utc::now());
+    let row = collection
+        .find_one_and_update(
+            doc! { "flag_key": flag_key },
+            doc! {
+                "$set": {
+                    "description": description.clone().map(bson::Bson::String).unwrap_or(bson::Bson::Null),
+                    "owner": owner.clone().map(bson::Bson::String).unwrap_or(bson::Bson::Null),
+                    "updated_at": now,
+                    "updated_by": actor_id,
+                },
+                "$setOnInsert": {
+                    "_id": Uuid::new_v4().to_string(),
+                    "flag_key": flag_key,
+                    "created_at": now,
+                },
+            },
+        )
+        .with_options(
+            FindOneAndUpdateOptions::builder()
+                .upsert(true)
+                .return_document(ReturnDocument::After)
+                .build(),
+        )
+        .await?
+        .ok_or_else(|| {
+            AppError::Internal("feature flag metadata upsert did not return the row".to_string())
+        })?;
+    Ok(Some(row))
+}
+
 /// Cascade helper: drop every override for an org (used when the org is deleted).
 pub async fn delete_all_for_org(db: &mongodb::Database, org_user_id: &str) -> AppResult<()> {
     db.collection::<FeatureFlagOverride>(COLLECTION_NAME)
@@ -1317,6 +1428,153 @@ mod tests {
                 .await
                 .expect("resolve after clear")
                 .contains(&"example_ui".to_string())
+        );
+    }
+
+    #[test]
+    fn metadata_fields_normalize_and_bound() {
+        assert_eq!(normalize_metadata_field(None, 10, "owner").unwrap(), None);
+        assert_eq!(
+            normalize_metadata_field(Some("   "), 10, "owner").unwrap(),
+            None
+        );
+        assert_eq!(
+            normalize_metadata_field(Some("  team  "), 10, "owner").unwrap(),
+            Some("team".to_string())
+        );
+        // The budget counts characters, not bytes, so multi-byte owners get
+        // the same allowance as ASCII ones.
+        assert_eq!(
+            normalize_metadata_field(Some("平台团队"), 4, "owner").unwrap(),
+            Some("平台团队".to_string())
+        );
+        assert!(matches!(
+            normalize_metadata_field(Some("平台团队五"), 4, "owner"),
+            Err(AppError::BadRequest(_))
+        ));
+    }
+
+    #[tokio::test]
+    async fn metadata_crud_round_trip() {
+        let Some(db) = connect_test_database("feature_flag_metadata").await else {
+            eprintln!("skipping feature flag metadata test: no local MongoDB available");
+            return;
+        };
+        let actor = Uuid::new_v4().to_string();
+
+        // No row until an admin writes one.
+        assert!(list_metadata(&db).await.expect("empty list").is_empty());
+
+        let stored = set_metadata(
+            &db,
+            "example_ui",
+            Some("  Gates the redesigned panel.  "),
+            Some("  Platform team  "),
+            &actor,
+        )
+        .await
+        .expect("set metadata")
+        .expect("row present");
+        assert_eq!(
+            stored.description.as_deref(),
+            Some("Gates the redesigned panel.")
+        );
+        assert_eq!(stored.owner.as_deref(), Some("Platform team"));
+        assert_eq!(stored.updated_by, actor);
+
+        // Full-replace: an omitted field is cleared, and the row keeps its id.
+        let updated = set_metadata(&db, "example_ui", None, Some("Growth team"), &actor)
+            .await
+            .expect("update metadata")
+            .expect("row present");
+        assert_eq!(updated.id, stored.id);
+        assert!(updated.description.is_none());
+        assert_eq!(updated.owner.as_deref(), Some("Growth team"));
+
+        let listed = list_metadata(&db).await.expect("list metadata");
+        assert_eq!(
+            listed
+                .get("example_ui")
+                .and_then(|row| row.owner.as_deref()),
+            Some("Growth team")
+        );
+
+        // Clearing every field deletes the row rather than leaving a husk.
+        assert!(
+            set_metadata(&db, "example_ui", Some("  "), None, &actor)
+                .await
+                .expect("clear metadata")
+                .is_none()
+        );
+        assert!(
+            list_metadata(&db)
+                .await
+                .expect("list after clear")
+                .is_empty()
+        );
+    }
+
+    #[tokio::test]
+    async fn metadata_rejects_unknown_flag_and_overlong_fields() {
+        let Some(db) = connect_test_database("feature_flag_metadata_validation").await else {
+            eprintln!("skipping feature flag metadata validation test: no local MongoDB available");
+            return;
+        };
+        let actor = Uuid::new_v4().to_string();
+
+        assert!(matches!(
+            set_metadata(&db, "nope", Some("x"), None, &actor).await,
+            Err(AppError::BadRequest(_))
+        ));
+        assert!(matches!(
+            set_metadata(
+                &db,
+                "example_ui",
+                Some(&"x".repeat(MAX_FLAG_DESCRIPTION_LEN + 1)),
+                None,
+                &actor,
+            )
+            .await,
+            Err(AppError::BadRequest(_))
+        ));
+        assert!(matches!(
+            set_metadata(
+                &db,
+                "example_ui",
+                None,
+                Some(&"x".repeat(MAX_FLAG_OWNER_LEN + 1)),
+                &actor,
+            )
+            .await,
+            Err(AppError::BadRequest(_))
+        ));
+    }
+
+    #[tokio::test]
+    async fn metadata_for_retired_flags_is_not_listed() {
+        let Some(db) = connect_test_database("feature_flag_metadata_retired").await else {
+            eprintln!("skipping feature flag retired metadata test: no local MongoDB available");
+            return;
+        };
+        // A row left behind by a flag that has since been deleted from the
+        // registry must never surface as if the flag still existed.
+        db.collection::<FeatureFlagMetadata>(METADATA_COLLECTION)
+            .insert_one(FeatureFlagMetadata {
+                id: Uuid::new_v4().to_string(),
+                flag_key: "retired_flag".to_string(),
+                description: Some("Long gone.".to_string()),
+                owner: None,
+                created_at: Utc::now(),
+                updated_at: Utc::now(),
+                updated_by: "actor".to_string(),
+            })
+            .await
+            .expect("insert stale row");
+        assert!(
+            !list_metadata(&db)
+                .await
+                .expect("list metadata")
+                .contains_key("retired_flag")
         );
     }
 

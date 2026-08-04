@@ -6,6 +6,7 @@ import {
   useAdminFeatureFlags,
   useClearAdminFeatureFlag,
   useSetAdminFeatureFlag,
+  useUpdateAdminFeatureFlagMetadata,
 } from "./use-admin-feature-flags";
 
 const { mockGet, mockPut, mockDelete } = vi.hoisted(() => ({
@@ -53,6 +54,21 @@ describe("admin feature-flag hooks", () => {
     expect(mockPut).toHaveBeenCalledWith(
       "/admin/feature-flags/experimental%3Aai-assistant",
       { target_kind: "global", target_key: null, enabled: true },
+    );
+  });
+
+  it("writes flag metadata to the encoded metadata sub-route", async () => {
+    mockPut.mockResolvedValue({});
+    const { result } = renderHook(() => useUpdateAdminFeatureFlagMetadata(), {
+      wrapper: createWrapper(),
+    });
+    await result.current.mutateAsync({
+      flagKey: "experimental:ai-assistant",
+      body: { description: "What it gates.", owner: "Platform team" },
+    });
+    expect(mockPut).toHaveBeenCalledWith(
+      "/admin/feature-flags/experimental%3Aai-assistant/metadata",
+      { description: "What it gates.", owner: "Platform team" },
     );
   });
 

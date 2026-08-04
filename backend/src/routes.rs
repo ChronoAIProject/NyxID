@@ -666,6 +666,10 @@ pub fn build_router(
                 .delete(handlers::admin_feature_flags::clear_feature_flag),
         )
         .route(
+            "/feature-flags/{flag_key}/metadata",
+            put(handlers::admin_feature_flags::update_feature_flag_metadata),
+        )
+        .route(
             "/users",
             get(handlers::admin::list_users).post(handlers::admin::create_user),
         )

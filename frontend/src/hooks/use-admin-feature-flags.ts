@@ -4,6 +4,7 @@ import type {
   AdminFeatureFlagListResponse,
   AdminFeatureFlagTargetKind,
   SetAdminFeatureFlagRequest,
+  UpdateAdminFeatureFlagMetadataRequest,
 } from "@/schemas/admin-feature-flags";
 
 const QUERY_KEY = ["admin", "feature-flags"] as const;
@@ -31,6 +32,30 @@ export function useSetAdminFeatureFlag() {
       void queryClient.invalidateQueries({ queryKey: QUERY_KEY });
       void queryClient.invalidateQueries({ queryKey: ["orgs"] });
       void queryClient.invalidateQueries({ queryKey: ["user"] });
+    },
+  });
+}
+
+/**
+ * Edit a flag's admin-authored description and owner. Documentation only — it
+ * never changes rollout, so it only invalidates the admin list.
+ */
+export function useUpdateAdminFeatureFlagMetadata() {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: ({
+      flagKey,
+      body,
+    }: {
+      flagKey: string;
+      body: UpdateAdminFeatureFlagMetadataRequest;
+    }): Promise<unknown> =>
+      api.put(
+        `/admin/feature-flags/${encodeURIComponent(flagKey)}/metadata`,
+        body,
+      ),
+    onSuccess: () => {
+      void queryClient.invalidateQueries({ queryKey: QUERY_KEY });
     },
   });
 }
