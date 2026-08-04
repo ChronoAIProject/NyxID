@@ -1,7 +1,7 @@
 ---
 name: aevatar-service-publisher
 description: Publish an Aevatar member, team, or workflow as an invocable service and (host permitting) register it with NyxID, then verify, invoke, or wire external HTTP triggers such as Lark Base automation — all over the REST API. Use when a user wants to "publish/bind a service", "expose my workflow/team as a service", "register it with NyxID", "make it callable", "get the service slug/URL", "invoke my service", "let Lark Base call my workflow", "trigger this workflow from an external webhook", or "version/deploy/roll out a service". It covers the simple scope binding, reading back a member's published service, the full account-level service lifecycle (revision → publish → deploy → rollout), how to confirm the NyxID registration (slug + status), how to invoke an endpoint, and how to distinguish direct NyxID proxy triggering from host-gated externalExposure. Build the team/member first with the team-builder skill.
-version: "1.6"
+version: "1.7"
 metadata:
   category: plain
   tag:
@@ -123,6 +123,11 @@ Optional staged rollout: `POST …/rollouts` then `:advance` / `:pause` / `:resu
 and access policies: `POST …/bindings`, `POST …/policies`. The service self-describes at
 `GET /api/services/{serviceId}/openapi.json`.
 
+Prepare and publish are idempotent for an existing prepared/published revision. A published
+revision remains published through replay and duplicate prepare/publish commands; do not mint a
+replacement revision or demote it because invocation readiness is temporarily behind. Reconcile
+the existing revision and its projection/catalog state.
+
 ## Verify (always)
 
 ```bash
@@ -146,6 +151,13 @@ The endpoint contract tells you the path, readiness, and a ready-to-run curl exa
 aev "api/scopes/$scopeId/members/$memberId/endpoints/chat/contract" \
   | jq '{invokePath, canInvoke:.invocationReadiness.canInvoke, curlExample}'
 ```
+Invocation readiness is exact, not a generic "deployed" flag. Require the invocation catalog to
+contain the selected revision **and deployment** and to report every selected endpoint ready. The
+contract must show `invocationReadiness.canInvoke:true`, `status:"ready"`, the expected
+`revisionId`, and a non-empty matching deployment identity. `invocation_catalog_not_ready` is a
+materialization lag and means **not invocable yet**; reread the same contract/read model instead of
+republishing, creating another revision, or claiming readiness.
+
 The streaming path (`…/invoke/{endpointId}:stream`, SSE) accepts the `{"prompt":"…"}` shorthand.
 An opened stream or accepted receipt is not success. Follow the same run to terminal completion,
 then read run detail/audit and require completed status, `lastSuccess=true`, expected non-empty
@@ -155,6 +167,14 @@ aev "api/scopes/$scopeId/members/$memberId/invoke/chat:stream" -m POST --stream 
   -d '{"prompt":"smoke test"}'
 # retain the returned run identity privately, then read its detail and audit
 ```
+After acceptance, the stream must emit its first projection-backed business frame within 30
+seconds. SSE `: keepalive` is transport-only and does not extend that deadline. Only root
+`RUN_FINISHED` and root `RUN_ERROR` terminate observation; role text, reasoning, tool-call,
+tool-result, and role terminal frames are progress. Root
+`RUN_ERROR(code=RUN_OBSERVATION_TIMEOUT)` closes the stream because observation stalled and is not
+proof that the whole run failed. Query the same `actorId + commandId`; never invoke again just to
+check status.
+
 The **non-streaming** `…/invoke/{endpointId}` expects the full typed envelope (it rejects a
 bare `{prompt}` with 400 "payloadTypeUrl is required") — prefer `:stream` for a quick check.
 Teams and account-level services invoke the same way:

@@ -1,7 +1,7 @@
 ---
 name: aevatar-platform-map
 description: Entry point, panorama, and router for the Aevatar skill family. Use before building, running, publishing, scheduling, externally triggering, or operating Aevatar resources; configuring an Agent Profile; assessing managed/private codex_exec feasibility and setup; running the canonical Codex readiness proof; authoring a workflow with codex_exec; diagnosing a Codex failure; or deciding which companion skill owns a request. It teaches resource and identity boundaries, NyxID-brokered auth, client REST versus in-session tools, deployment gates, and exact handoffs without treating member, workflow, service, profile, schedule, or Codex capabilities as one lifecycle.
-version: "1.11"
+version: "1.12"
 metadata:
   category: plain
   tag:
@@ -191,7 +191,7 @@ target contract through the Codex-specific skills below. Do not invent a REST pa
 Keep these modes separate; they share credentials but not caller-owned fields:
 
 - **Raw one-off HTTP:** call `nyxid_proxy` with exact `service_id + slug + path`; optional fields are `method`, `body`, non-sensitive `headers`, and `response_mode`. Example: `{"service_id":"us-gh-7","slug":"api-github","path":"/user","method":"GET"}`.
-- **Current-turn connected-service tools:** use only the typed tools actually present, such as `nyxid_services`, `nyxid_approvals`, `nyxid_require_service`, and `nyxid_service_inventory`. Retired dynamic `nyxid_service_operation__*` and `nyxid_service_request` tools do not exist; never invent their names.
+- **Current-turn connected-service tools:** use only the typed tools actually present, such as `nyxid_services`, `nyxid_approvals`, `nyxid_require_service`, `nyxid_catalog`, and `nyxid_service_inventory`. `nyxid_catalog` is discovery only. For a connect, add, or authorize request, use it only to resolve the exact catalog slug, then always finish through `nyxid_require_service`; its typed readiness result is the authority for any `service.connect` handoff. Never finish such a request with catalog prose. Retired dynamic `nyxid_service_operation__*` and `nyxid_service_request` tools do not exist; never invent their names.
 - **Compiled published operation:** the YAML step calls `nyxid_proxy` and carries an exact copied `capability.nyxid_operation` selector. Its admission proof owns UserService, slug, operation ID, method, path template, digest, schemas, and response policy. Runtime arguments may contain only admitted `path_params`, `query`, `headers`, `body`, and `response_mode`; never repeat route or proof fields.
 - **Compiled authored request:** `capability.nyxid_request` carries a typed HTTP request contract and exact UserService selection from authoritative `/api/v1/keys`. Binding requires authenticated confirmation/grant for the current request-contract digest and risk. `/api/v1/user-services`, draft save, and preview success are not execution authority.
 - **Studio member:** call `aevatar_invoke_member` with `{"member_id":"m-alpha","payload":{"prompt":"hello"}}`; `endpoint_id` is optional and defaults to `chat`. Never substitute a draft `workflowId` or `publishedServiceId` for `member_id`.
@@ -219,10 +219,11 @@ For managed `codex_exec`, normal execution is credential-read-only. Explicitly `
 | Trigger an existing workflow from an external HTTP sender such as **Lark Base** | `aevatar-feasibility-advisor` first, then `aevatar-service-publisher` | NyxID `/api/v1/proxy/s/aevatar/api/scopes/{scopeId}/members/{memberId}/invoke/...`, host-managed `/api/workflow-webhooks/{routeKey}` if configured |
 | **Invoke**, watch **runs**, observe | (this map + service-publisher's invoke section) | `/invoke/{endpointId}`, `/runs/*`, `/api/workflow/observatory/*` |
 
-If a companion skill is not already loaded, find it with an ornn skill search for the
-capability (e.g. "aevatar team builder", "aevatar service publisher", "aevatar
-scheduler"), then load it. None of them depend on this map at run time — they restate the
-minimal bootstrap above.
+If a companion skill is not already loaded, find it with `ornn_search_skills` for the capability
+(e.g. "aevatar team builder", "aevatar service publisher", "aevatar scheduler"), then load it.
+Search uses the caller-scoped remote skill authority. It must not fall back to a generic platform
+token, and an authorization/token-resolution failure is an error rather than an empty catalog.
+None of the companion skills depend on this map at run time; they restate the minimal bootstrap.
 
 ## The full aevatar skill collection
 
@@ -236,8 +237,8 @@ server-side at publish time.)
 
 **Scope first — feasibility** (`category: plain`, public)
 - `aevatar-feasibility-advisor` — *use before building*: is the goal possible, what are its
-  prerequisites (which NyxID connector to configure, what's host-gated), and what's impossible
-  + the alternative. Teaches the connector-vs-channel split and the prerequisite matrix.
+  prerequisites (which NyxID connector to configure and what's host-gated), and which constraints
+  require a different design. Teaches the connector-vs-channel split and the prerequisite matrix.
 
 **Define the agent — Agent Profile** (`category: plain`, public)
 - `aevatar-agent-profile-management` — the profile resource surface: purpose, instructions,
@@ -322,6 +323,12 @@ lifecycle, and none of its IDs are aliases. Agent Profile work is not part of th
   credential issuance, vault write, projection visibility, publication, cron fire, or success —
   read state back (binding run status, a newer authoritative `stateVersion`, invocation readiness,
   run timeline) instead of trusting a bare 2xx.
+- **Observe the accepted run, not role-local completion.** A workflow stream must emit its first
+  projection-backed business frame within 30 seconds; SSE keepalive does not count. Only root
+  `RUN_FINISHED` and root `RUN_ERROR` are terminal. Role text, reasoning, tool-call, tool-result,
+  and role terminal frames are progress. `RUN_OBSERVATION_TIMEOUT` closes a stalled observation
+  stream but does not by itself prove whole-run failure; query the same `actorId + commandId` and
+  never create another run as a status probe.
 - **Detect deployment-gated capabilities.** Agent Profile management exists in the codebase but
   may not be exposed by the running deployment. Probe the surface (tool list, or the complete
   route family in `GET /api/openapi.json`) before promising it — and report its absence honestly

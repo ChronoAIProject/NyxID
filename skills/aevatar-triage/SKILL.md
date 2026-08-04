@@ -1,7 +1,7 @@
 ---
 name: aevatar-triage
 description: Use after an Aevatar workflow, codex_exec call, schedule, channel, connector, skill, Agent Profile, or control-plane request fails or behaves unexpectedly. It applies when the agent must attribute the first broken boundary across Aevatar, NyxID, Ornn, chrono-sandbox/gVisor, the managed runner, or private SSH; distinguish credential sources and deployment gaps; preserve sanitized evidence; determine defect versus usage; or draft an issue for explicit user confirmation. Never use it to guess a root cause from one error string or auto-file.
-version: "1.7"
+version: "1.8"
 metadata:
   category: plain
   tag:
@@ -146,6 +146,7 @@ typically flows `your agent -> Aevatar runtime -> NyxID proxy -> third-party`, a
 | Symptom | Most likely layer | Disambiguating evidence to gather |
 |---|---|---|
 | `401` / `403` on a connector/tool call | **Aevatar -> NyxID -> provider auth chain** | Did caller credential enter the run, reach the executor, select the exact UserService/route, and remain authorized downstream? Establish the first missing boundary; do not assign the layer from status alone. |
+| `NYXID_PROXY_SERVICE_SCOPE_FORBIDDEN` | **Aevatar caller-authority admission** | The caller credential lacks authority for the exact selected service scope. Preserve the selected UserService/service identity and caller scope; do not collapse this into "not connected", provider rejection, or a generic 403. |
 | "credential not found" / connector slug missing | **NyxID** (vault / not connected) | Compare catalog with authoritative `/api/v1/keys` for this caller. `/api/v1/user-services` is only a route projection and cannot prove execution readiness. |
 | `404` on a thing you reference | **whichever registry owns it** | skill -> Ornn; connector/service -> NyxID; team/member/scope -> Aevatar |
 | `502` / timeout on an external call | **proxy chain** | which hop? Aevatar tool layer vs NyxID proxy vs the target itself |
@@ -158,8 +159,8 @@ typically flows `your agent -> Aevatar runtime -> NyxID proxy -> third-party`, a
 | **inbound bot doesn't reply** (Lark/Telegram) | **cross-layer — walk it** | did NyxID relay webhook fire? is the bot connector connected? did the Aevatar channel run start (observatory)? credential = the *sender's* NyxID, present and live? |
 | Lark Base returns `91403` while `bitable:app:readonly` is enabled | **Lark document ACL / usage configuration** | The API scope and Base document sharing are separate. In the Base `...`/More menu choose **Add Applications** and add the exact Bot application used by the selected NyxID UserService; view access is enough for read-only calls. |
 | **`/whoami` says "bound" but tool calls get `credential_denied`** | **NyxID** (grant revoked — false green) | live token-exchange returns `invalid_grant` while the local readmodel still reads "bound"; whoami checks only the local mirror, not the live grant |
-| approval prompt stuck | **NyxID approvals + Aevatar suspension** | NyxID approval request id; Aevatar workflow wait/suspend state |
-| skill search/pull/upload/generate fails | **Ornn** | which `/api/v1/skill...` route? validator violations? version format? |
+| approval prompt stuck | **NyxID approvals + Aevatar suspension** | Read the typed run step. Tool approval identity is `executionId + toolName + toolCallId + approvalRequestId`; never infer it from prompt text or a generic bag. Check the matching NyxID request and Aevatar suspend/resume state. |
+| skill search/pull/upload/generate fails | **Ornn** | Which `/api/v1/skill...` route? For search, did caller-scoped remote token resolution/authorization fail? That is an error, not an empty catalog, and must never fall back to a generic platform token. Also inspect validator violations and exact version format. |
 | **`404` on a control-plane route you believe exists** (e.g. `…/agent-profiles`) | **could be "resource missing" OR "capability not deployed" — these are different verdicts** | probe the *surface*, not the resource: `GET /api/openapi.json` and check whether the **complete** route family is advertised. Family absent ⇒ the deployment does not expose that contract; a single 404 proves nothing either way. See *Deployment-gated capabilities* below |
 
 **Do not stop at the first match.** Gather the disambiguating evidence and *eliminate* — a plausible
@@ -173,10 +174,17 @@ caller credential will propagate into the run or that the downstream service wil
 
 For one failed run, do not invoke again. Read, in order:
 
-1. the stream terminal frame, if available;
+1. the root stream terminal frame, if available (`RUN_FINISHED` or `RUN_ERROR` only; role text,
+   reasoning, tool-call, tool-result, and role terminal frames are progress);
 2. run detail (`completionStatus`, `lastSuccess`, last error, final output);
 3. run audit and its first failed step/tool call;
 4. the binding's exact workflow/revision identity and committed capability admission plan.
+
+Accepted-to-first-observation has a separate 30-second deadline. SSE keepalive does not count as a
+projection-backed business frame. `RUN_OBSERVATION_TIMEOUT` closes the current stream because
+observation stalled; it is **not** a whole-run failure classification. Query the same
+`actorId + commandId` for later committed/read-model state. Do not create another run as a status
+probe.
 
 For a first NyxID HTTP auth failure, test four hypotheses separately: inbound caller credential
 never entered the run; it entered the run but not the external-capability executor; the executor
@@ -184,6 +192,14 @@ selected the wrong exact UserService/route/credential; or the selected downstrea
 expired/unauthorized. Use distinct `memberId`, `workflowId`, and `publishedServiceId` shapes when
 reproducing identity propagation. Preserve the exact error privately; report only a bounded,
 sanitized classification. A failed mutation or run is never blindly retried.
+
+**Recovery never replays uncertain provider/effectful I/O.** Activation recovery may resume typed
+continuations and redispatch an exact safe postcondition, but it must not repeat an interrupted LLM
+request or potentially effectful tool call. If the external operation may have completed before its
+callback/result delivery was lost, keep the outcome uncertain; a committed result lost before
+delivery is an explicit delivery-loss failure with its stable operation lineage. Do not turn either
+case into a silent retry or claim that the real-world effect did/did not happen without external
+evidence.
 
 **Scheduled-run credentials are not one thing.** "It was a scheduled run" tells you nothing about
 its credential. Read `credentialSourceKind` off the run/automation record **first**, then pick the
@@ -247,8 +263,8 @@ failure: **(1)** confirm the code you read **matches the deployed commit/image**
 image tag; if you have a candidate fix, prove it shipped with `git merge-base --is-ancestor <fix>
 <deployed-sha>`); **(2)** confirm the symptom **reproduces on fresh live evidence**, not an old log
 window; **(3)** remember **auto-deploy branches roll forward under you** — re-check the image tag
-mid-investigation. If code and deployment diverge, the bug may already be fixed (an unmerged branch
-or a follow-up commit) or the running build is simply different.
+mid-investigation. If code and deployment diverge, downgrade the source reading to a hypothesis and
+check the commits newer than the deployed image before attributing the live symptom.
 
 Then get the suspected layer's real source (paths below) and read until you can point at the code
 that produces the behavior. **Anchors are subsystem/directory altitude — confirm exact files by
