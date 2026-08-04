@@ -1195,7 +1195,13 @@ pub async fn run(command: ServiceCommands) -> Result<()> {
             return crate::wizard::run_ai_key_wizard(&auth, prefill, no_wait).await;
         }
 
-        ServiceCommands::Delete { id, yes, auth } => {
+        ServiceCommands::Delete {
+            id,
+            yes,
+            cascade_grant,
+            keep_upstream,
+            auth,
+        } => {
             if !yes {
                 eprint!("Delete service {id}? [y/N] ");
                 std::io::stderr().flush()?;
@@ -1208,7 +1214,18 @@ pub async fn run(command: ServiceCommands) -> Result<()> {
             }
 
             let mut api = ApiClient::from_auth_checked(&auth).await?;
-            api.delete_empty(&format!("/keys/{id}")).await?;
+            let path = crate::commands::grant_cascade::append_revocation_query(
+                format!("/keys/{id}"),
+                cascade_grant,
+                keep_upstream,
+            );
+            if let Err(error) = api.delete_empty(&path).await {
+                crate::commands::grant_cascade::report_if_confirmation_required(
+                    &error,
+                    auth.output,
+                );
+                return Err(error);
+            }
             match auth.output {
                 OutputFormat::Json => println!(
                     "{}",
@@ -3154,7 +3171,7 @@ mod tests {
 mod command_tests {
     use super::*;
     use crate::test_support::{mock_auth, mock_auth_with_output};
-    use wiremock::matchers::{body_json, method, path};
+    use wiremock::matchers::{body_json, method, path, query_param};
     use wiremock::{Mock, MockServer, ResponseTemplate};
 
     #[tokio::test]
@@ -3230,10 +3247,34 @@ mod command_tests {
         run(ServiceCommands::Delete {
             id: "svc-1".to_string(),
             yes: true,
+            cascade_grant: false,
+            keep_upstream: false,
             auth: mock_auth(server.uri()),
         })
         .await
         .expect("delete should succeed");
+    }
+
+    #[tokio::test]
+    async fn delete_with_cascade_grant_sets_query_param() {
+        let server = MockServer::start().await;
+        Mock::given(method("DELETE"))
+            .and(path("/api/v1/keys/svc-1"))
+            .and(query_param("cascade_grant", "true"))
+            .respond_with(ResponseTemplate::new(204))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        run(ServiceCommands::Delete {
+            id: "svc-1".to_string(),
+            yes: true,
+            cascade_grant: true,
+            keep_upstream: false,
+            auth: mock_auth(server.uri()),
+        })
+        .await
+        .expect("cascade delete should succeed");
     }
 
     #[tokio::test]

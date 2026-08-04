@@ -17,6 +17,23 @@ pub const PENDING_CREDENTIAL_PUBKEY_AWAITING_CODE: u32 = 8009;
 pub const PENDING_CREDENTIAL_NODE_OFFLINE_CODE: u32 = 8010;
 pub const PENDING_CREDENTIAL_QUEUE_FULL_CODE: u32 = 8011;
 
+#[derive(Clone, Debug, Serialize, ToSchema)]
+pub struct GrantCascadeSibling {
+    pub user_service_id: String,
+    pub name: String,
+    pub slug: String,
+}
+
+#[derive(Clone, Debug, Serialize, ToSchema)]
+pub struct GrantCascadePayload {
+    pub provider_slug: String,
+    pub provider_name: String,
+    pub revokes_grant: bool,
+    pub siblings: Vec<GrantCascadeSibling>,
+    pub unaffected_other_app: Vec<GrantCascadeSibling>,
+    pub token_scope_available: bool,
+}
+
 /// Structured JSON error response returned by all API error paths.
 #[derive(Debug, Serialize, ToSchema)]
 pub struct ErrorResponse {
@@ -38,6 +55,9 @@ pub struct ErrorResponse {
     /// URL where the user can review pending approvals (approval_failed only).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub approve_url: Option<String>,
+    /// Structured error-specific context for clients that can recover interactively.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub details: Option<serde_json::Value>,
 }
 
 /// Application-level error variants.
@@ -58,6 +78,9 @@ pub enum AppError {
 
     #[error("Conflict: {0}")]
     Conflict(String),
+
+    #[error("Grant cascade confirmation required")]
+    GrantCascadeConfirmationRequired(Box<GrantCascadePayload>),
 
     #[error("Rate limited")]
     RateLimited,
@@ -439,7 +462,7 @@ impl AppError {
             }
             Self::Forbidden(_) => StatusCode::FORBIDDEN,
             Self::NotFound(_) => StatusCode::NOT_FOUND,
-            Self::Conflict(_) => StatusCode::CONFLICT,
+            Self::Conflict(_) | Self::GrantCascadeConfirmationRequired(_) => StatusCode::CONFLICT,
             Self::RateLimited => StatusCode::TOO_MANY_REQUESTS,
             Self::MfaRequired { .. } => StatusCode::FORBIDDEN,
             Self::PkceVerificationFailed
@@ -691,6 +714,7 @@ impl AppError {
             Self::PlanEntitlementRequired(_) => 11303,
             Self::AnonymousIncompatibleBilling(_) => 11304,
             Self::WalletSuspended => 11307,
+            Self::GrantCascadeConfirmationRequired(_) => 11500,
         }
     }
 
@@ -734,6 +758,7 @@ impl AppError {
             Self::Forbidden(_) => "forbidden",
             Self::NotFound(_) => "not_found",
             Self::Conflict(_) => "conflict",
+            Self::GrantCascadeConfirmationRequired(_) => "grant_cascade_confirmation_required",
             Self::RateLimited => "rate_limited",
             Self::Internal(_) => "internal_error",
             Self::DatabaseError(_) => "database_error",
@@ -893,6 +918,13 @@ impl IntoResponse for AppError {
             AppError::ApprovalFailed { approve_url, .. } => Some(approve_url.clone()),
             _ => None,
         };
+        let details = match &self {
+            AppError::GrantCascadeConfirmationRequired(payload) => Some(
+                serde_json::to_value(payload.as_ref())
+                    .expect("grant cascade payload must be serializable"),
+            ),
+            _ => None,
+        };
 
         let body = ErrorResponse {
             error: self.error_key().to_string(),
@@ -923,6 +955,7 @@ impl IntoResponse for AppError {
             consent_url,
             request_id: approval_request_id,
             approve_url,
+            details,
         };
 
         (status, axum::Json(body)).into_response()
@@ -1315,6 +1348,15 @@ mod tests {
             AppError::OracleSessionClosed("".into()).error_code(),
             AppError::OraclePayloadTooLarge("".into()).error_code(),
             AppError::OracleExtractDisabled("".into()).error_code(),
+            AppError::GrantCascadeConfirmationRequired(Box::new(GrantCascadePayload {
+                provider_slug: "github".into(),
+                provider_name: "GitHub".into(),
+                revokes_grant: true,
+                siblings: vec![],
+                unaffected_other_app: vec![],
+                token_scope_available: true,
+            }))
+            .error_code(),
         ];
         let unique: std::collections::HashSet<u32> = codes.iter().copied().collect();
         assert_eq!(
@@ -1908,6 +1950,7 @@ mod tests {
             consent_url: None,
             request_id: None,
             approve_url: None,
+            details: None,
         };
         let json = serde_json::to_value(&resp).expect("serialize");
         assert_eq!(json["error"], "bad_request");
@@ -1915,6 +1958,7 @@ mod tests {
         assert!(json.get("session_token").is_none());
         assert!(json.get("consent_url").is_none());
         assert!(json.get("request_id").is_none());
+        assert!(json.get("details").is_none());
     }
 
     #[test]
@@ -1927,6 +1971,7 @@ mod tests {
             consent_url: None,
             request_id: None,
             approve_url: None,
+            details: None,
         };
         let json = serde_json::to_value(&resp).expect("serialize");
         assert_eq!(json["session_token"], "mfa-session-tok");
@@ -2154,5 +2199,46 @@ mod tests {
             json["message"],
             "Approval failed: rejected. Review pending approvals at https://app.example.com/approvals"
         );
+    }
+
+    #[tokio::test]
+    async fn grant_cascade_response_includes_typed_details() {
+        let payload = GrantCascadePayload {
+            provider_slug: "github".into(),
+            provider_name: "GitHub".into(),
+            revokes_grant: true,
+            siblings: vec![GrantCascadeSibling {
+                user_service_id: "service-1".into(),
+                name: "GitHub Issues".into(),
+                slug: "github-issues".into(),
+            }],
+            unaffected_other_app: vec![GrantCascadeSibling {
+                user_service_id: "service-2".into(),
+                name: "Enterprise GitHub".into(),
+                slug: "github-enterprise".into(),
+            }],
+            token_scope_available: true,
+        };
+
+        let (status, json) = response_json(AppError::GrantCascadeConfirmationRequired(Box::new(
+            payload,
+        )))
+        .await;
+
+        assert_eq!(status, StatusCode::CONFLICT);
+        assert_eq!(json["error"], "grant_cascade_confirmation_required");
+        assert_eq!(json["error_code"], 11500);
+        assert_eq!(json["details"]["provider_slug"], "github");
+        assert_eq!(json["details"]["provider_name"], "GitHub");
+        assert_eq!(json["details"]["revokes_grant"], true);
+        assert_eq!(
+            json["details"]["siblings"][0]["user_service_id"],
+            "service-1"
+        );
+        assert_eq!(
+            json["details"]["unaffected_other_app"][0]["slug"],
+            "github-enterprise"
+        );
+        assert_eq!(json["details"]["token_scope_available"], true);
     }
 }

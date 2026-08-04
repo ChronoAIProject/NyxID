@@ -35,6 +35,8 @@ pub struct CatalogEntryResponse {
     pub provider_config_id: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub provider_type: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub revocation: Option<CatalogRevocationResponse>,
     pub requires_gateway_url: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub api_key_instructions: Option<String>,
@@ -140,6 +142,11 @@ pub struct CatalogEntryResponse {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub default_request_headers:
         Option<Vec<crate::models::default_request_header::DefaultRequestHeader>>,
+}
+
+#[derive(Debug, Serialize, ToSchema)]
+pub struct CatalogRevocationResponse {
+    pub revokes_grant: bool,
 }
 
 #[derive(Debug, Serialize, ToSchema)]
@@ -295,6 +302,9 @@ fn catalog_entry_response(
         auth_key_name: entry.auth_key_name,
         provider_config_id: entry.provider_config_id,
         provider_type: entry.provider_type,
+        revocation: entry
+            .revokes_grant
+            .map(|revokes_grant| CatalogRevocationResponse { revokes_grant }),
         requires_gateway_url: entry.requires_gateway_url,
         api_key_instructions: entry.api_key_instructions,
         api_key_url: entry.api_key_url,
@@ -856,6 +866,7 @@ mod tests {
             auth_key_name: "Authorization".to_string(),
             provider_config_id: None,
             provider_type: None,
+            revokes_grant: None,
             requires_gateway_url: false,
             api_key_instructions: None,
             api_key_url: None,
@@ -918,6 +929,16 @@ mod tests {
         assert_eq!(resp.auth_key_name, "Authorization");
         assert_eq!(resp.service_type, "http");
         assert!(resp.requires_credential);
+    }
+
+    #[test]
+    fn catalog_entry_response_maps_revocation_capability() {
+        let mut entry = minimal_catalog_entry();
+        entry.revokes_grant = Some(true);
+
+        let resp = super::catalog_entry_response(&crate::test_utils::test_app_config(), entry);
+        let revocation = resp.revocation.expect("revocation capability");
+        assert!(revocation.revokes_grant);
     }
 
     #[test]
@@ -1120,6 +1141,7 @@ mod tests {
         // Fields that are None should not appear in JSON due to skip_serializing_if
         assert!(json.get("description").is_some()); // "AI API" is Some
         assert!(json.get("provider_config_id").is_none()); // None field omitted
+        assert!(json.get("revocation").is_none());
         assert!(json.get("ssh_host").is_none());
         assert!(json.get("ssh_port").is_none());
         assert!(json.get("authorization_url").is_none());
@@ -1138,11 +1160,13 @@ mod tests {
         let mut entry = minimal_catalog_entry();
         entry.homepage_url = Some("https://example.com".to_string());
         entry.supports_pkce = true;
+        entry.revokes_grant = Some(true);
 
         let resp = super::catalog_entry_response(&crate::test_utils::test_app_config(), entry);
         let json = serde_json::to_value(&resp).unwrap();
         assert_eq!(json["homepage_url"], "https://example.com");
         assert_eq!(json["supports_pkce"], true);
+        assert_eq!(json["revocation"]["revokes_grant"], true);
     }
 
     // ── CatalogListQuery deserialization ─────────────────────────────────

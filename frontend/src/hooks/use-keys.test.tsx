@@ -46,7 +46,9 @@ beforeEach(() => {
 describe("query hooks unwrap their list envelopes", () => {
   it("useKeys returns the `keys` array from /keys", async () => {
     mockGet.mockResolvedValue({ keys: [{ id: "k1" }] });
-    const { result } = renderHook(() => useKeys(), { wrapper: wrapperFactory() });
+    const { result } = renderHook(() => useKeys(), {
+      wrapper: wrapperFactory(),
+    });
 
     await waitFor(() => expect(result.current.isSuccess).toBe(true));
     expect(mockGet).toHaveBeenCalledWith("/keys");
@@ -136,7 +138,11 @@ describe("mutation hooks pin their request contracts", () => {
       wrapper: wrapperFactory(),
     });
 
-    const params = { label: "My OpenAI", service_slug: "openai", credential: "sk-x" };
+    const params = {
+      label: "My OpenAI",
+      service_slug: "openai",
+      credential: "sk-x",
+    };
     await result.current.mutateAsync(params);
 
     expect(mockPost).toHaveBeenCalledWith("/keys", params);
@@ -151,6 +157,22 @@ describe("mutation hooks pin their request contracts", () => {
     await result.current.mutateAsync("k1");
 
     expect(mockDelete).toHaveBeenCalledWith("/keys/k1");
+  });
+
+  it("useDeleteKey encodes grant cascade retry options", async () => {
+    mockDelete.mockResolvedValue({
+      deleted: true,
+      upstream_revocation_scheduled: true,
+    });
+    const { result } = renderHook(() => useDeleteKey(), {
+      wrapper: wrapperFactory(),
+    });
+
+    await result.current.mutateAsync({ keyId: "k1", cascadeGrant: true });
+    expect(mockDelete).toHaveBeenLastCalledWith("/keys/k1?cascade_grant=true");
+
+    await result.current.mutateAsync({ keyId: "k1", grantScope: "token" });
+    expect(mockDelete).toHaveBeenLastCalledWith("/keys/k1?grant_scope=token");
   });
 
   it("useUpdateKey strips keyId from the body and PUTs to /keys/{id}", async () => {

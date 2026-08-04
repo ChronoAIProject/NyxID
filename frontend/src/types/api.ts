@@ -520,6 +520,7 @@ export interface ApiErrorResponse {
   readonly consent_url?: string;
   readonly request_id?: string;
   readonly approve_url?: string;
+  readonly details?: unknown;
 }
 
 export interface LoginCredentials {
@@ -581,6 +582,7 @@ export interface ProviderConfig {
     | "api_key"
     | "device_code"
     | "telegram_widget";
+  readonly revocation?: ProviderRevocationConfig | null;
   readonly has_oauth_config: boolean;
   readonly credential_mode: CredentialMode;
   readonly default_scopes: readonly string[] | null;
@@ -601,6 +603,13 @@ export interface ProviderConfig {
   readonly is_active: boolean;
   readonly created_at: string;
   readonly updated_at: string;
+}
+
+export interface ProviderRevocationConfig {
+  readonly style: "rfc7009" | "github" | "self_bearer" | "facebook_deauth";
+  readonly url: string;
+  readonly auth: "inherit" | "none" | "client_id" | "basic" | "post";
+  readonly revokes_grant: boolean;
 }
 
 export interface UserProviderCredentials {
@@ -673,6 +682,7 @@ export interface MessageResponse {
 export interface ProviderActionResponse {
   readonly status: string;
   readonly message: string;
+  readonly upstream_revocation_scheduled?: boolean;
 }
 
 export interface LlmProviderStatus {

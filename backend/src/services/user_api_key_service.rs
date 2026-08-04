@@ -1,6 +1,7 @@
 use chrono::Utc;
 use futures::TryStreamExt;
 use mongodb::bson::{self, doc};
+use mongodb::options::ReturnDocument;
 use uuid::Uuid;
 
 use crate::crypto::aes::EncryptionKeys;
@@ -1174,6 +1175,16 @@ pub async fn revoke_api_key_if_pending(
     user_id: &str,
     key_id: &str,
 ) -> AppResult<bool> {
+    Ok(claim_api_key_if_pending(db, user_id, key_id)
+        .await?
+        .is_some())
+}
+
+pub async fn claim_api_key_if_pending(
+    db: &mongodb::Database,
+    user_id: &str,
+    key_id: &str,
+) -> AppResult<Option<UserApiKey>> {
     // Verify the key exists and belongs to this user before the
     // conditional update, so `matched_count == 0` on the main
     // update can be unambiguously interpreted as "status already
@@ -1186,9 +1197,9 @@ pub async fn revoke_api_key_if_pending(
         return Err(AppError::NotFound("API key not found".to_string()));
     }
 
-    let result = db
+    let claimed = db
         .collection::<UserApiKey>(COLLECTION_NAME)
-        .update_one(
+        .find_one_and_update(
             doc! {
                 "_id": key_id,
                 "user_id": user_id,
@@ -1214,9 +1225,58 @@ pub async fn revoke_api_key_if_pending(
                 }
             },
         )
+        .return_document(ReturnDocument::Before)
         .await?;
 
-    Ok(result.matched_count > 0)
+    Ok(claimed)
+}
+
+/// Verify that no active service outside `excluded_service_ids` references a key.
+pub async fn ensure_api_key_not_in_use(
+    db: &mongodb::Database,
+    user_id: &str,
+    key_id: &str,
+    excluded_service_ids: &[String],
+) -> AppResult<()> {
+    let mut filter = doc! {
+        "user_id": user_id,
+        "api_key_id": key_id,
+        "is_active": true,
+    };
+    if !excluded_service_ids.is_empty() {
+        filter.insert("_id", doc! { "$nin": excluded_service_ids });
+    }
+    let ref_count = db
+        .collection::<mongodb::bson::Document>(USER_SERVICES)
+        .count_documents(filter)
+        .await?;
+    if ref_count > 0 {
+        return Err(AppError::Conflict(
+            "API key is in use by active services".to_string(),
+        ));
+    }
+    Ok(())
+}
+
+/// Atomically claim a key for deletion and return its exact pre-image.
+pub async fn claim_api_key(
+    db: &mongodb::Database,
+    user_id: &str,
+    key_id: &str,
+) -> AppResult<Option<UserApiKey>> {
+    Ok(db
+        .collection::<UserApiKey>(COLLECTION_NAME)
+        .find_one_and_delete(doc! { "_id": key_id, "user_id": user_id })
+        .await?)
+}
+
+pub async fn cleanup_claimed_api_key(
+    db: &mongodb::Database,
+    user_id: &str,
+    key_id: &str,
+) -> AppResult<()> {
+    agent_binding_service::cleanup_bindings_for_credential(db, user_id, key_id).await?;
+    Ok(())
 }
 
 /// Delete an API key. Fails if any active UserService references it.
@@ -1224,30 +1284,17 @@ pub async fn delete_api_key(db: &mongodb::Database, user_id: &str, key_id: &str)
     // Verify ownership
     let _ = get_api_key(db, user_id, key_id).await?;
 
-    let ref_count = db
-        .collection::<mongodb::bson::Document>(USER_SERVICES)
-        .count_documents(doc! {
-            "api_key_id": key_id,
-            "is_active": true,
-        })
-        .await?;
-
-    if ref_count > 0 {
-        return Err(AppError::Conflict(
-            "API key is in use by active services".to_string(),
-        ));
-    }
-
-    db.collection::<UserApiKey>(COLLECTION_NAME)
-        .delete_one(doc! { "_id": key_id, "user_id": user_id })
-        .await?;
+    ensure_api_key_not_in_use(db, user_id, key_id, &[]).await?;
+    claim_api_key(db, user_id, key_id)
+        .await?
+        .ok_or_else(|| AppError::NotFound("API key not found".to_string()))?;
 
     // Cascade-clean any agent service bindings that used this credential
     // as an override. Without this, the Agent Key detail page keeps the
     // row around with the credential label degraded to a raw UUID
     // (issue #324). Safe to run after delete because bindings are keyed
     // by `user_api_key_id` and don't need the credential row to exist.
-    agent_binding_service::cleanup_bindings_for_credential(db, user_id, key_id).await?;
+    cleanup_claimed_api_key(db, user_id, key_id).await?;
 
     Ok(())
 }

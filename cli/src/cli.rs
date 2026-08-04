@@ -214,6 +214,12 @@ pub enum ProviderCommands {
             help = "Organization to act on (UUID, slug, or display name)"
         )]
         org: Option<String>,
+        /// Confirm disconnecting every NyxID service that shares this upstream grant
+        #[arg(long, conflicts_with = "keep_upstream")]
+        cascade_grant: bool,
+        /// Remove only this NyxID connection while keeping the upstream app grant
+        #[arg(long, conflicts_with = "cascade_grant")]
+        keep_upstream: bool,
         #[command(flatten)]
         auth: AuthArgs,
     },
@@ -885,6 +891,12 @@ pub enum ServiceCommands {
         /// Skip confirmation prompt
         #[arg(long)]
         yes: bool,
+        /// Confirm deleting every NyxID service that shares this upstream grant
+        #[arg(long, conflicts_with = "keep_upstream")]
+        cascade_grant: bool,
+        /// Remove only this NyxID service while keeping the upstream app grant
+        #[arg(long, conflicts_with = "cascade_grant")]
+        keep_upstream: bool,
         #[command(flatten)]
         auth: AuthArgs,
     },
@@ -2420,6 +2432,97 @@ mod tests {
     }
 
     #[test]
+    fn revocation_flags_conflict_on_all_oauth_delete_commands() {
+        for args in [
+            vec![
+                "nyxid",
+                "service",
+                "delete",
+                "service-1",
+                "--cascade-grant",
+                "--keep-upstream",
+            ],
+            vec![
+                "nyxid",
+                "provider",
+                "disconnect",
+                "github",
+                "--cascade-grant",
+                "--keep-upstream",
+            ],
+            vec![
+                "nyxid",
+                "external-key",
+                "delete",
+                "key-1",
+                "--cascade-grant",
+                "--keep-upstream",
+            ],
+        ] {
+            let error = match Cli::try_parse_from(args) {
+                Ok(_) => panic!("flags must conflict"),
+                Err(error) => error,
+            };
+            assert_eq!(error.kind(), clap::error::ErrorKind::ArgumentConflict);
+        }
+    }
+
+    #[test]
+    fn revocation_flags_parse_on_delete_commands() {
+        let service =
+            Cli::try_parse_from(["nyxid", "service", "delete", "service-1", "--cascade-grant"])
+                .expect("service delete should accept --cascade-grant");
+        assert!(matches!(
+            service.command,
+            Commands::Service {
+                command: ServiceCommands::Delete {
+                    cascade_grant: true,
+                    keep_upstream: false,
+                    ..
+                }
+            }
+        ));
+
+        let provider = Cli::try_parse_from([
+            "nyxid",
+            "provider",
+            "disconnect",
+            "github",
+            "--keep-upstream",
+        ])
+        .expect("provider disconnect should accept --keep-upstream");
+        assert!(matches!(
+            provider.command,
+            Commands::Provider {
+                command: ProviderCommands::Disconnect {
+                    cascade_grant: false,
+                    keep_upstream: true,
+                    ..
+                }
+            }
+        ));
+
+        let external = Cli::try_parse_from([
+            "nyxid",
+            "external-key",
+            "delete",
+            "key-1",
+            "--keep-upstream",
+        ])
+        .expect("external-key delete should accept --keep-upstream");
+        assert!(matches!(
+            external.command,
+            Commands::ExternalKey {
+                command: ExternalKeyCommands::Delete {
+                    cascade_grant: false,
+                    keep_upstream: true,
+                    ..
+                }
+            }
+        ));
+    }
+
+    #[test]
     fn node_register_token_accepts_org_flag() {
         let cli = Cli::try_parse_from([
             "nyxid",
@@ -3548,6 +3651,12 @@ pub enum ExternalKeyCommands {
         /// Skip confirmation
         #[arg(long)]
         yes: bool,
+        /// Confirm deleting every NyxID service that shares this upstream grant
+        #[arg(long, conflicts_with = "keep_upstream")]
+        cascade_grant: bool,
+        /// Remove only this NyxID credential while keeping the upstream app grant
+        #[arg(long, conflicts_with = "cascade_grant")]
+        keep_upstream: bool,
         #[command(flatten)]
         auth: AuthArgs,
     },

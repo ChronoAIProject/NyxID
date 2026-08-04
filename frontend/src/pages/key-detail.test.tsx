@@ -1,5 +1,5 @@
 import type { ReactNode } from "react";
-import { render, screen, waitFor, within } from "@testing-library/react";
+import { act, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { ApiError } from "@/lib/api-client";
@@ -97,7 +97,10 @@ vi.mock("@/components/layout/dashboard-layout", () => ({
 // tests exercise the page's own logic, not these widgets' internals.
 vi.mock("@/components/dashboard/routing-section", () => ({
   RoutingSection: ({ readOnly }: { readonly readOnly?: boolean }) => (
-    <div data-testid="routing-section" data-readonly={String(Boolean(readOnly))}>
+    <div
+      data-testid="routing-section"
+      data-readonly={String(Boolean(readOnly))}
+    >
       Routing
     </div>
   ),
@@ -120,7 +123,10 @@ vi.mock("@/components/dashboard/add-key-dialog", () => ({
     readonly reconnectKey?: KeyInfo | null;
   }) =>
     open ? (
-      <div data-testid="add-key-dialog" data-reconnect={reconnectKey?.id ?? ""} />
+      <div
+        data-testid="add-key-dialog"
+        data-reconnect={reconnectKey?.id ?? ""}
+      />
     ) : null,
 }));
 
@@ -229,7 +235,9 @@ describe("KeyDetailPage — load states", () => {
     ).toBeInTheDocument();
     expect(screen.getByText("Key does not exist")).toBeInTheDocument();
 
-    await userEvent.setup().click(screen.getByRole("button", { name: "Retry" }));
+    await userEvent
+      .setup()
+      .click(screen.getByRole("button", { name: "Retry" }));
     expect(refetch).toHaveBeenCalledTimes(1);
   });
 });
@@ -241,14 +249,10 @@ describe("KeyDetailPage — core rendering", () => {
 
     // Label heading + catalog-name/proxy-path subtitle.
     expect(screen.getByText("My OpenAI")).toBeInTheDocument();
-    expect(
-      screen.getByText("OpenAI -- /proxy/s/openai-x"),
-    ).toBeInTheDocument();
+    expect(screen.getByText("OpenAI -- /proxy/s/openai-x")).toBeInTheDocument();
 
     // Endpoint card shows the target URL.
-    expect(
-      screen.getByText("https://api.openai.com/v1"),
-    ).toBeInTheDocument();
+    expect(screen.getByText("https://api.openai.com/v1")).toBeInTheDocument();
 
     // API Key card: credential type. Both the credential status badge and the
     // service-availability badge read "Active", so just assert the pair exists.
@@ -284,7 +288,9 @@ describe("KeyDetailPage — core rendering", () => {
     // deriveServiceBadge → active service + non-active credential = Unavailable.
     expect(screen.getByText("Unavailable")).toBeInTheDocument();
     expect(
-      screen.getByText(/Real requests will fail until the credential is restored/),
+      screen.getByText(
+        /Real requests will fail until the credential is restored/,
+      ),
     ).toBeInTheDocument();
   });
 
@@ -430,11 +436,12 @@ describe("KeyDetailPage — edit flows", () => {
     const pencil = notSet.parentElement?.querySelector("button");
     await user.click(pencil as HTMLElement);
 
-    const input = document.querySelector<HTMLInputElement>(
-      'input[type="url"]',
-    );
+    const input = document.querySelector<HTMLInputElement>('input[type="url"]');
     expect(input).toBeTruthy();
-    await user.type(input as HTMLInputElement, "https://api.openai.com/openapi.json");
+    await user.type(
+      input as HTMLInputElement,
+      "https://api.openai.com/openapi.json",
+    );
     const iconButtons = within(
       (input as HTMLInputElement).closest("div") as HTMLElement,
     ).getAllByRole("button");
@@ -529,18 +536,73 @@ describe("KeyDetailPage — delete flow", () => {
 
     // Dialog renders in a portal under document.body.
     const dialog = await screen.findByRole("dialog");
-    expect(
-      within(dialog).getByText("Delete Service"),
-    ).toBeInTheDocument();
+    expect(within(dialog).getByText("Delete Service")).toBeInTheDocument();
 
     await user.click(within(dialog).getByRole("button", { name: "Delete" }));
 
     expect(hooks.deleteKey).toHaveBeenCalledTimes(1);
     expect(hooks.deleteKey.mock.calls[0]![0]).toBe("key-1");
     // Drive success → toast + navigation back to the keys list.
-    hooks.deleteKey.mock.calls[0]![1].onSuccess();
-    expect(mockToastSuccess).toHaveBeenCalledWith("Key deleted");
+    act(() => {
+      hooks.deleteKey.mock.calls[0]![1].onSuccess({
+        message: "Deleted",
+        deleted: true,
+        upstream_revocation_scheduled: true,
+      });
+    });
+    expect(mockToastSuccess).toHaveBeenCalledWith(
+      "Removed from NyxID. Upstream revocation scheduled.",
+    );
     expect(mockNavigate).toHaveBeenCalledWith({ to: "/keys", search: {} });
+  });
+
+  it("renders the 11500 payload and retries with token scope", async () => {
+    hooks.key.data = makeKey({
+      revocation: { revokes_grant: true },
+      catalog_service_name: "GitHub",
+    });
+    const user = userEvent.setup();
+    render(<KeyDetailPage />);
+
+    await user.click(screen.getByRole("button", { name: /^Delete$/i }));
+    expect(
+      screen.getByText(
+        "This de-authorizes NyxID from your GitHub account; you'll see the consent screen if you reconnect.",
+      ),
+    ).toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: "Delete" }));
+
+    act(() => {
+      hooks.deleteKey.mock.calls[0]![1].onError(
+        new ApiError(409, {
+          error: "grant_cascade_confirmation_required",
+          error_code: 11500,
+          message: "Confirmation required",
+          details: {
+            provider_slug: "github",
+            provider_name: "GitHub",
+            revokes_grant: true,
+            siblings: [
+              {
+                user_service_id: "service-2",
+                name: "GitHub Issues",
+                slug: "github-issues",
+              },
+            ],
+            unaffected_other_app: [],
+            token_scope_available: true,
+          },
+        }),
+      );
+    });
+
+    await user.click(
+      await screen.findByRole("button", { name: "Remove only this service" }),
+    );
+    expect(hooks.deleteKey.mock.calls[1]![0]).toEqual({
+      keyId: "key-1",
+      grantScope: "token",
+    });
   });
 });
 

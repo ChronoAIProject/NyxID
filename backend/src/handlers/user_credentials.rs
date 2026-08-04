@@ -210,6 +210,7 @@ mod tests {
             authorization_url: Some("https://auth.example.com/authorize".to_string()),
             token_url: Some("https://auth.example.com/token".to_string()),
             revocation_url: None,
+            revocation: None,
             default_scopes: None,
             client_id_encrypted: None,
             client_secret_encrypted: None,
@@ -230,6 +231,7 @@ mod tests {
             client_id_param_name: None,
             requires_gateway_url: false,
             created_by: "admin".to_string(),
+            revocation_seed_version: 0,
             created_at: now,
             updated_at: now,
         }

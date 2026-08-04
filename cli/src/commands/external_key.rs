@@ -86,7 +86,13 @@ pub async fn run(command: ExternalKeyCommands) -> Result<()> {
             Ok(())
         }
 
-        ExternalKeyCommands::Delete { id, yes, auth } => {
+        ExternalKeyCommands::Delete {
+            id,
+            yes,
+            cascade_grant,
+            keep_upstream,
+            auth,
+        } => {
             if !yes {
                 eprint!("Delete external key {id}? [y/N] ");
                 std::io::stderr().flush()?;
@@ -99,8 +105,18 @@ pub async fn run(command: ExternalKeyCommands) -> Result<()> {
             }
 
             let mut api = ApiClient::from_auth_checked(&auth).await?;
-            api.delete_empty(&format!("/api-keys/external/{id}"))
-                .await?;
+            let path = crate::commands::grant_cascade::append_revocation_query(
+                format!("/api-keys/external/{id}"),
+                cascade_grant,
+                keep_upstream,
+            );
+            if let Err(error) = api.delete_empty(&path).await {
+                crate::commands::grant_cascade::report_if_confirmation_required(
+                    &error,
+                    auth.output,
+                );
+                return Err(error);
+            }
             match auth.output {
                 OutputFormat::Json => println!(
                     "{}",
@@ -180,7 +196,7 @@ pub async fn run(command: ExternalKeyCommands) -> Result<()> {
 mod tests {
     use super::*;
     use crate::test_support::mock_auth;
-    use wiremock::matchers::{body_json, method, path};
+    use wiremock::matchers::{body_json, method, path, query_param};
     use wiremock::{Mock, MockServer, ResponseTemplate};
 
     const ORG_UUID: &str = "11111111-1111-4111-8111-111111111111";
@@ -331,10 +347,34 @@ mod tests {
         run(ExternalKeyCommands::Delete {
             id: "key-1".to_string(),
             yes: true,
+            cascade_grant: false,
+            keep_upstream: false,
             auth: mock_auth(server.uri()),
         })
         .await
         .expect("delete should succeed");
+    }
+
+    #[tokio::test]
+    async fn delete_with_keep_upstream_sets_token_scope() {
+        let server = MockServer::start().await;
+        Mock::given(method("DELETE"))
+            .and(path("/api/v1/api-keys/external/key-1"))
+            .and(query_param("grant_scope", "token"))
+            .respond_with(ResponseTemplate::new(204))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        run(ExternalKeyCommands::Delete {
+            id: "key-1".to_string(),
+            yes: true,
+            cascade_grant: false,
+            keep_upstream: true,
+            auth: mock_auth(server.uri()),
+        })
+        .await
+        .expect("token-scope delete should succeed");
     }
 
     #[tokio::test]
