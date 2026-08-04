@@ -756,6 +756,14 @@ pub fn build_router(
             get(handlers::admin::verify_billing_ledger),
         )
         .route(
+            "/chain-verification",
+            get(handlers::admin::get_chain_verification),
+        )
+        .route(
+            "/chain-verification/run",
+            post(handlers::admin::run_chain_verification),
+        )
+        .route(
             "/settings/broker",
             get(handlers::admin::get_broker_settings)
                 .patch(handlers::admin::update_broker_settings),

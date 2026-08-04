@@ -67,6 +67,7 @@ import {
   AdminNodesPage,
   AdminAuditLogPage,
   AdminFeatureFlagsPage,
+  AdminIntegrityPage,
   AdminInviteCodesPage,
   CliAuthPage,
   CliPairPage,
@@ -808,6 +809,12 @@ const adminAuditLogRoute = createRoute({
   validateSearch: normalizeAdminAuditLogSearch,
 });
 
+const adminIntegrityRoute = createRoute({
+  path: "integrity",
+  getParentRoute: () => adminLayout,
+  component: AdminIntegrityPage,
+});
+
 const adminInviteCodesRoute = createRoute({
   path: "invite-codes",
   getParentRoute: () => adminLayout,
@@ -899,6 +906,7 @@ const routeTree = rootRoute.addChildren([
       adminOAuthClientsRoute,
       adminNodesRoute,
       adminAuditLogRoute,
+      adminIntegrityRoute,
       adminInviteCodesRoute,
       adminFeatureFlagsRoute,
     ]),

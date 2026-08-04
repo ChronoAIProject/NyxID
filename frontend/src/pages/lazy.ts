@@ -205,6 +205,11 @@ export const AdminFeatureFlagsPage = lazy(() =>
     default: m.AdminFeatureFlagsPage,
   })),
 );
+export const AdminIntegrityPage = lazy(() =>
+  import("@/pages/admin-integrity").then((m) => ({
+    default: m.AdminIntegrityPage,
+  })),
+);
 export const SshTerminalPage = lazy(() =>
   import("@/pages/ssh-terminal").then((m) => ({
     default: m.SshTerminalPage,

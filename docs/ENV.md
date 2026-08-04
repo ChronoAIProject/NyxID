@@ -227,6 +227,15 @@ Money-moving billing events (charged usage settlements, provider-confirmed top-u
 
 Ledger appends are best-effort relative to billing itself: a ledger write failure is logged and never fails or rolls back a settlement or top-up.
 
+### Automatic verification
+
+Both chains are re-verified automatically by a background sweep that walks the chain in rolling 10,000-entry chunks from a persisted cursor, wrapping back to seq 1 after passing the head so old regions are continuously re-covered. Any break is written to the per-chain `chain_verify_status` document (shown on the admin Integrity page), logged at error level every run until it clears, and the billing sweep additionally cross-checks the head anchor. `GET /api/v1/admin/chain-verification` returns the latest state; `POST /api/v1/admin/chain-verification/run` runs one chunk immediately.
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `CHAIN_VERIFY_INTERVAL_SECS` | `3600` | Interval between automatic verification chunks for both chains. `0` disables the sweep (manual verify endpoints still work). |
+
+
 Unlike the audit chain, the billing ledger detects tail truncation: the reconcile sweep anchors the ledger head `(seq, head_hash)` into the audit chain (event `billing_ledger_head_anchored`) whenever it advances, and the verify endpoint cross-checks the newest anchor against the surviving head. Deleting ledger tail entries past an anchor reports `tail_truncated`; hiding it would additionally require truncating the audit chain back past the anchor, destroying unrelated audit history. Each anchor is also written to the server log (`billing ledger head anchored`), so shipped logs form an external anchor outside MongoDB. Entries newer than the latest anchor (up to one reconcile interval, `BILLING_RECONCILE_INTERVAL_SECS`) remain inside the undetectable window.
 
 ## Social Login (Optional)

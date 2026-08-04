@@ -140,6 +140,10 @@ pub struct AppConfig {
     /// distinct `billing-ledger` domain label.
     pub billing_ledger_hmac_key: Option<String>,
 
+    /// Interval for the automatic hash-chain verification sweep (audit log
+    /// and billing ledger, rolling chunks). 0 disables. Default: 3600.
+    pub chain_verify_interval_secs: u64,
+
     /// Service account token TTL in seconds (default: 3600 = 1 hour)
     pub sa_token_ttl_secs: i64,
 
@@ -831,6 +835,10 @@ impl AppConfig {
             billing_ledger_hmac_key: env::var("BILLING_LEDGER_HMAC_KEY")
                 .ok()
                 .filter(|s| !s.trim().is_empty()),
+            chain_verify_interval_secs: env::var("CHAIN_VERIFY_INTERVAL_SECS")
+                .ok()
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(3600),
 
             sa_token_ttl_secs: env::var("SA_TOKEN_TTL_SECS")
                 .ok()
@@ -1373,6 +1381,7 @@ mod tests {
             cli_pairing_hmac_key: None,
             audit_chain_hmac_key: None,
             billing_ledger_hmac_key: None,
+            chain_verify_interval_secs: 3600,
             sa_token_ttl_secs: 3600,
             telemetry_dsn: None,
             telemetry_host: None,
