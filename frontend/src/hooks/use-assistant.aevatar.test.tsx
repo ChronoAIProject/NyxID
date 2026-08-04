@@ -2,7 +2,11 @@ import { act, renderHook } from "@testing-library/react";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import type { PropsWithChildren } from "react";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { useSendMessage, assistantKeys } from "@/hooks/use-assistant";
+import {
+  useConversation,
+  useSendMessage,
+  assistantKeys,
+} from "@/hooks/use-assistant";
 import { AevatarAssistantTransport } from "@/lib/assistant/aevatar-transport";
 import {
   chatStreamClient,
@@ -304,6 +308,13 @@ async function startProbe(): Promise<ProbeSession> {
 
   const materializeProjection = async (): Promise<ConversationHistory> => {
     const reconciliation = transport.reconcileProjection(conversation.id);
+    // The reconciler defers a post-terminal first observation through its
+    // jittered backoff policy, and its due time is computed against the
+    // injected (frozen) clock. Advance past any such deferral so the real
+    // timer's first fire observes instead of rescheduling forever. Well
+    // inside the 15s materialization grace, so grace-sensitive probes are
+    // unaffected.
+    now += 2_000;
     const requiredTurnId = observedEvents
       .filter((event) => event.event === "turn.completed")
       .at(-1)?.turn_id;
@@ -779,5 +790,168 @@ describe("workflow action-card projection probes", () => {
     ).toBe(true);
     expect(hasActionCard(await switchRead(session))).toBe(true);
     session.unmount();
+  });
+});
+
+describe("empty-stream late materialization", () => {
+  it("renders a late-materializing answer into the open thread with no refresh", async () => {
+    // The production trace this pins: POST /workflow-chat answers 200, the
+    // stream adopts the durable chatc- id and then closes without a single
+    // printable frame — yet the reply exists upstream and the transcript
+    // materializes moments later. The mounted conversation must receive that
+    // answer through the reconciler's own invalidation: no reload, no manual
+    // refetch, no navigation. The canonical-id swap mid-flight (release the
+    // placeholder waiter, re-acquire under the canonical key in the same
+    // commit) is included deliberately — it is the interleaving that used to
+    // orphan the reconciler and force the refresh.
+    useAuthStore.getState().setUser({ id: "user-probe" } as User);
+    const ANSWER = "Here is the answer that materialized late.";
+
+    type HistoryFetchMode = "missing" | "hanging" | "materialized";
+    let historyFetchMode: HistoryFetchMode = "missing";
+    let hangingStarted = false;
+    const serverMessages = serverTurnMessages(
+      TURN_ID,
+      "hi",
+      ANSWER,
+      1785297207000,
+    );
+    vi.stubGlobal(
+      "fetch",
+      vi.fn((input: RequestInfo | URL, init?: RequestInit) => {
+        const url = String(input);
+        if (
+          url === "/api/v1/assistant/conversations" &&
+          (init?.method ?? "GET") === "GET"
+        ) {
+          return Promise.resolve(jsonResponse({ conversations: [] }));
+        }
+        if (url === HISTORY_URL && (init?.method ?? "GET") === "GET") {
+          if (historyFetchMode === "hanging") {
+            hangingStarted = true;
+            // Pends until aborted, like a slow real request: the abort must
+            // reject asynchronously so the release/re-acquire race is real.
+            return new Promise<Response>((_resolve, reject) => {
+              const abort = () => {
+                reject(new DOMException("aborted", "AbortError"));
+              };
+              if (init?.signal?.aborted) {
+                abort();
+                return;
+              }
+              init?.signal?.addEventListener("abort", abort);
+            });
+          }
+          return Promise.resolve(
+            historyFetchMode === "missing"
+              ? jsonResponse(
+                  { error: "not_found", error_code: -1, message: "404" },
+                  404,
+                )
+              : jsonResponse(serverHistory(serverMessages)),
+          );
+        }
+        return Promise.resolve(
+          jsonResponse(
+            { error: "not_found", error_code: -1, message: "404" },
+            404,
+          ),
+        );
+      }),
+    );
+
+    const transport = new AevatarAssistantTransport();
+    const conversation = await transport.createConversation();
+    const observedEvents: TurnEvent[] = [];
+    bindHookTransport(transport, observedEvents);
+    vi.spyOn(assistantTransport, "reconcileProjection").mockImplementation(
+      (id) => transport.reconcileProjection(id),
+    );
+    vi.spyOn(assistantTransport, "releaseProjectionWaiter").mockImplementation(
+      (id) => {
+        transport.releaseProjectionWaiter(id);
+      },
+    );
+    const stream = installManualStream();
+    const { queryClient, Wrapper } = createHarness();
+
+    const hook = renderHook(
+      ({ conversationId }: { readonly conversationId: string }) => ({
+        send: useSendMessage(conversationId),
+        history: useConversation(conversationId),
+      }),
+      {
+        wrapper: Wrapper,
+        initialProps: { conversationId: conversation.id },
+      },
+    );
+
+    await act(async () => {
+      await hook.result.current.send.mutateAsync("hi");
+    });
+    await vi.waitFor(() => {
+      expect(stream.startCount).toBe(1);
+    });
+
+    // Durable id adopted, then the stream dies with zero printable frames.
+    await act(async () => {
+      stream.emit([workflowContextFrame()]);
+    });
+    historyFetchMode = "hanging";
+    await act(async () => {
+      stream.finish();
+    });
+    await vi.waitFor(() => {
+      expect(
+        observedEvents.filter((event) => event.event === "turn.completed"),
+      ).toHaveLength(1);
+    });
+
+    // The post-terminal projection marks the mirror awaiting projection and
+    // the mounted hook starts the reconciler; wait for its transcript GET to
+    // be genuinely in flight before swapping keys.
+    await vi.waitFor(
+      () => {
+        expect(hangingStarted).toBe(true);
+      },
+      { timeout: 5_000 },
+    );
+
+    // The page's canonical-id swap: copy the cache under the canonical key
+    // (assistant.tsx does this before navigating), then remount the hooks on
+    // the canonical id. Cleanup releases the placeholder waiter — aborting
+    // the in-flight GET — and the new effect re-acquires in the same commit.
+    const placeholderData = queryClient.getQueryData<ConversationHistory>(
+      assistantKeys.history(conversation.id),
+    );
+    expect(placeholderData?.awaitingProjection).toBe(true);
+    queryClient.setQueryData(
+      assistantKeys.history(SERVER_CONVERSATION),
+      placeholderData,
+    );
+    historyFetchMode = "materialized";
+    hook.rerender({ conversationId: SERVER_CONVERSATION });
+
+    // No cache writes and no manual refetch past this point: the reconciler
+    // must survive the swap, materialize the transcript, and its invalidation
+    // must repopulate the mounted query on its own.
+    await vi.waitFor(
+      () => {
+        const messages = hook.result.current.history.data?.messages ?? [];
+        expect(
+          messages.some(
+            (message) =>
+              message.role === "assistant" &&
+              message.blocks.some(
+                (block) => block.type === "text" && block.text === ANSWER,
+              ),
+          ),
+        ).toBe(true);
+      },
+      { timeout: 10_000 },
+    );
+
+    hook.unmount();
+    queryClient.clear();
   });
 });

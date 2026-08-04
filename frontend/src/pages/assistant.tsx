@@ -12,7 +12,6 @@ import {
 import { useQueryClient } from "@tanstack/react-query";
 import { useNavigate, useRouterState } from "@tanstack/react-router";
 import { toast } from "sonner";
-import { RefreshCw } from "lucide-react";
 import { AssistantShell } from "@/components/assistant/assistant-shell";
 import { AssistantSidebar } from "@/components/assistant/assistant-sidebar";
 import { ChatComposer } from "@/components/assistant/chat-composer";
@@ -22,13 +21,11 @@ import { PluginsView } from "@/components/assistant/plugins-view";
 import { AssistantWireLogAction } from "@/components/assistant/assistant-wire-log-panel";
 import {
   assistantKeys,
-  describeHistoryError,
   describeSendFailure,
   useAssistantTurn,
   useActionCardActions,
   useCancelTurn,
   useConversation,
-  useRetryConversationProjection,
   useConversations,
   useDecideApproval,
   useDeleteConversation,
@@ -36,7 +33,11 @@ import {
   useTurnEpisode,
 } from "@/hooks/use-assistant";
 import { ApiError } from "@/lib/api-client";
-import { AssistantConversationNotFoundError } from "@/lib/assistant/errors";
+import {
+  AssistantConversationNotFoundError,
+  AssistantTurnActiveError,
+  AssistantTurnCancelledError,
+} from "@/lib/assistant/errors";
 import { parseAssistantSearch } from "@/lib/assistant/search";
 import type { ActionReport } from "@/schemas/assistant-actions";
 import { useAssistantContextStore } from "@/stores/assistant-context-store";
@@ -182,7 +183,6 @@ export function AssistantPage({
   const selectedId =
     !drafting && selectedFromSearch ? selectedFromSearch : undefined;
   const history = useConversation(selectedId);
-  const retryProjection = useRetryConversationProjection(selectedId);
   const turn = useAssistantTurn(selectedId);
   const episode = useTurnEpisode(selectedId);
   const sendMessage = useSendMessage(selectedId);
@@ -421,6 +421,24 @@ export function AssistantPage({
     beginContinuation();
     try {
       await actionCards.continueAction(report);
+    } catch (error) {
+      // A continuation that dies before any stream event is otherwise
+      // invisible: the card's own catch only unlocks dismissal. Same
+      // contract as approval delivery — toast, stable id, and a user Stop
+      // is an expected outcome, not a delivery failure. Rethrown so the
+      // card rolls itself out of its busy state.
+      if (!(error instanceof AssistantTurnCancelledError)) {
+        toast.error("The action response was not delivered", {
+          id: "assistant-action-failed",
+          description:
+            error instanceof AssistantTurnActiveError
+              ? "Wait for the current reply to finish, then try again."
+              : error instanceof Error && error.message
+                ? error.message
+                : "The assistant backend did not respond. Try again.",
+        });
+      }
+      throw error;
     } finally {
       endContinuation();
     }
@@ -541,45 +559,19 @@ export function AssistantPage({
       headerActions={<AssistantHeaderActions />}
     >
       <div className="relative flex h-full min-h-0 flex-col bg-background">
-        {history.data?.projectionStalled ? (
-          <div
-            role="status"
-            className="flex items-center justify-center gap-2 border-b border-border/60 bg-muted/30 px-6 py-2 text-[12px] text-text-secondary"
-          >
-            <span>History is taking longer than expected.</span>
-            <button
-              type="button"
-              className="inline-flex items-center gap-1 text-foreground underline-offset-2 hover:underline disabled:opacity-50"
-              disabled={retryProjection.isPending}
-              onClick={() => retryProjection.mutate()}
-            >
-              <RefreshCw className="size-3" aria-hidden="true" />
-              Retry
-            </button>
-          </div>
-        ) : history.data?.awaitingProjection ? (
-          <div
-            role="status"
-            className="border-b border-border/60 bg-muted/30 px-6 py-2 text-center text-[12px] text-text-secondary"
-          >
-            Syncing conversation history...
-          </div>
-        ) : null}
-        {/* A failed transcript read is REPORTED, never blocking. It used to
-            replace the whole thread, which also took the composer's context
-            away and made the chat look dead — even though sending still
-            works: the turn streams into the conversation actor, which is a
-            different upstream surface from the chat-history transcript.
-            The notice sits above a still-usable thread and composer. */}
-        {history.isError ? (
-          <div
-            role="status"
-            className="border-b border-border/60 bg-destructive/5 px-6 py-2 text-center text-[12px] text-destructive"
-          >
-            {describeHistoryError(history.error)} You can keep chatting — new
-            messages are unaffected.
-          </div>
-        ) : null}
+        {/* Projection provenance (`awaitingProjection` / `projectionStalled`)
+            deliberately renders NOTHING here. The transcript demonstrably
+            materializes on its own — the reconciler projects it into the
+            thread below with no reload — and a status strip narrating that
+            plumbing claimed more than it knew (it stood beside a false
+            "didn't reply" error for turns whose answer was already committed
+            upstream). The provenance still drives the background reconciler
+            via `useConversation`; only the furniture is gone. Refined
+            surfaces are deferred W4/W5 in docs/plans/newchat-followup-fix.md. */}
+        {/* A failed transcript read is toast-only (`useHistoryErrorToast`,
+            fired from `useConversation`): every stream/turn error on this
+            surface goes through toasts, and none of them blocks the thread
+            or the composer. */}
         {history.isLoading && messages.length === 0 ? (
           <div className="flex flex-1 items-center justify-center text-[12px] text-text-tertiary">
             Loading conversation...

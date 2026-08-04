@@ -751,6 +751,37 @@ describe("conversation projection reconciliation", () => {
     queryClient.clear();
   });
 
+  it("raises one stable toast when reconciliation times out", async () => {
+    const { queryClient, Wrapper } = createHarness();
+    const toastSpy = vi.spyOn(toast, "error");
+    const historySpy = vi
+      .spyOn(assistantTransport, "getHistory")
+      .mockResolvedValue(syncingHistory);
+    const reconcileSpy = vi
+      .spyOn(assistantTransport, "reconcileProjection")
+      .mockResolvedValue({ status: "timed_out", conversationId: canonicalId });
+    const { unmount } = renderHook(() => useConversation(conversationId), {
+      wrapper: Wrapper,
+    });
+
+    await vi.waitFor(() => {
+      expect(toastSpy).toHaveBeenCalledWith(
+        "History is taking longer than expected",
+        {
+          id: "assistant-history-stalled",
+          description:
+            "NyxID keeps checking when you return to this conversation. You can keep chatting — new messages are unaffected.",
+        },
+      );
+    });
+
+    toastSpy.mockRestore();
+    historySpy.mockRestore();
+    reconcileSpy.mockRestore();
+    unmount();
+    queryClient.clear();
+  });
+
   it("releases the waiter when the mounted conversation unmounts", async () => {
     const { queryClient, Wrapper } = createHarness();
     const historySpy = vi
@@ -774,6 +805,68 @@ describe("conversation projection reconciliation", () => {
     historySpy.mockRestore();
     reconcileSpy.mockRestore();
     releaseSpy.mockRestore();
+    queryClient.clear();
+  });
+});
+
+describe("history read failures surface as toasts", () => {
+  it("surfaces a failed transcript read as one stable toast", async () => {
+    const { queryClient, Wrapper } = createHarness();
+    const toastSpy = vi.spyOn(toast, "error");
+    const historySpy = vi
+      .spyOn(assistantTransport, "getHistory")
+      .mockRejectedValue(
+        new ApiError(404, {
+          error: "not_found",
+          error_code: 404,
+          message: "missing",
+        }),
+      );
+    const { result, unmount } = renderHook(
+      () => useConversation("chatc-toast-probe"),
+      { wrapper: Wrapper },
+    );
+
+    await vi.waitFor(() => {
+      expect(result.current.isError).toBe(true);
+    });
+    // The stable id is the anti-stacking mechanism: refetch churn on the same
+    // broken read updates this toast in place.
+    expect(toastSpy).toHaveBeenCalledWith(
+      "This conversation has no saved transcript yet.",
+      {
+        id: "assistant-history-unavailable",
+        description: "You can keep chatting — new messages are unaffected.",
+      },
+    );
+
+    toastSpy.mockRestore();
+    historySpy.mockRestore();
+    unmount();
+    queryClient.clear();
+  });
+
+  it("does not toast a confirmed-absent conversation [guard]", async () => {
+    // Absence surfaces as the stale-route repair navigation; a toast would
+    // outlive that navigation to describe a chat that no longer exists.
+    const { queryClient, Wrapper } = createHarness();
+    const toastSpy = vi.spyOn(toast, "error");
+    const historySpy = vi
+      .spyOn(assistantTransport, "getHistory")
+      .mockRejectedValue(new AssistantConversationNotFoundError());
+    const { result, unmount } = renderHook(
+      () => useConversation("chatc-absent-probe"),
+      { wrapper: Wrapper },
+    );
+
+    await vi.waitFor(() => {
+      expect(result.current.isError).toBe(true);
+    });
+    expect(toastSpy).not.toHaveBeenCalled();
+
+    toastSpy.mockRestore();
+    historySpy.mockRestore();
+    unmount();
     queryClient.clear();
   });
 });

@@ -2,6 +2,7 @@ import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { beforeEach, describe, expect, it, vi } from "vitest";
+import { toast } from "sonner";
 import type { ReactNode } from "react";
 import type { ApprovalRequestItem } from "@/types/approvals";
 import { ApprovalsView } from "./approvals-view";
@@ -196,5 +197,36 @@ describe("ApprovalsView", () => {
     const historyRows = within(screen.getByRole("table")).getAllByRole("row");
     expect(historyRows[1]).toHaveTextContent("Rotate the deploy key");
     expect(historyRows[2]).toHaveTextContent("Decided at an unknown time");
+  });
+
+  it("stays usable when the listing fails: toast, rendered sections, inline retry", async () => {
+    // "FE do not block any error": a dead backend must not take the view
+    // away. The failure is a toast; the sections render their empty states
+    // and the retry affordance lives inside the working view.
+    const user = userEvent.setup();
+    const toastSpy = vi.spyOn(toast, "error");
+    mockGet.mockImplementation((url: string) =>
+      url.startsWith("/notifications/settings")
+        ? Promise.resolve({ grant_expiry_days: 7 })
+        : Promise.reject(new Error("backend down")),
+    );
+    render(<ApprovalsView />, { wrapper: createWrapper() });
+
+    expect(await screen.findByText("Nothing waiting on you")).toBeInTheDocument();
+    expect(screen.getByText("History")).toBeInTheDocument();
+    expect(
+      screen.queryByText("Failed to load approvals. Please try again."),
+    ).not.toBeInTheDocument();
+    await waitFor(() => {
+      expect(toastSpy).toHaveBeenCalledWith(
+        "Could not load approvals",
+        expect.objectContaining({ id: "assistant-approvals-load-failed" }),
+      );
+    });
+
+    mockApi({ pending: [PENDING] });
+    await user.click(screen.getByRole("button", { name: "Retry" }));
+    expect(await screen.findByText("Waiting on you")).toBeInTheDocument();
+    toastSpy.mockRestore();
   });
 });

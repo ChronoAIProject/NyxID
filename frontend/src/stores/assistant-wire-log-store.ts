@@ -8,6 +8,7 @@ import {
   assistantUpstreamEnvelopeHeaderDecoderSchema,
   assistantWireLogPersistedSchema,
   type AssistantUpstreamEnvelope,
+  type AssistantTransportOutcome,
   type AssistantWireCapture,
   type AssistantWireCaptureOutcome,
   type AssistantWireLine,
@@ -52,6 +53,19 @@ interface AssistantWireLogState {
   readonly finalizeCapture: (
     exchangeId: string,
     outcome: AssistantWireCaptureOutcome,
+  ) => void;
+  readonly attachTransportTelemetry: (
+    exchangeId: string,
+    telemetry: {
+      readonly transportOutcome: AssistantTransportOutcome;
+      readonly framesSeen: number;
+      readonly printableFramesSeen: number;
+      readonly printableTurnEvents: number;
+      readonly wireBytes: number;
+      readonly terminalReceived: boolean;
+      readonly firstFrameMs: number | null;
+      readonly lastFrameMs: number | null;
+    },
   ) => void;
   readonly clear: () => void;
   readonly reset: () => void;
@@ -320,7 +334,22 @@ export const useAssistantWireLogStore = create<AssistantWireLogState>()(
           const entries = updateCapture(
             state.entries,
             exchangeId,
-            (capture) => ({ ...capture, state: "settled", outcome }),
+            (capture) => ({
+              ...capture,
+              state: "settled",
+              outcome,
+              wireOutcome: outcome,
+            }),
+          );
+          return entries ? { entries } : state;
+        });
+      },
+      attachTransportTelemetry: (exchangeId, telemetry) => {
+        set((state) => {
+          const entries = updateCapture(
+            state.entries,
+            exchangeId,
+            (capture) => ({ ...capture, ...telemetry }),
           );
           return entries ? { entries } : state;
         });

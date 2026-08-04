@@ -1,9 +1,9 @@
-import { useMemo, useState } from "react";
-import { ArrowRight, Plus, Search } from "lucide-react";
+import { useEffect, useMemo, useState } from "react";
+import { ArrowRight, Plus, RefreshCw, Search } from "lucide-react";
+import { toast } from "sonner";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Skeleton } from "@/components/ui/skeleton";
-import { ErrorBanner } from "@/components/shared/error-banner";
 import { AddKeyDialog } from "@/components/dashboard/add-key-dialog";
 import { ManageConnectionModal } from "@/components/assistant/manage-connection-modal";
 import { ServiceIcon } from "@/components/service-icon";
@@ -263,19 +263,20 @@ function ConnectorsTab({ query }: { readonly query: string }) {
   // revoking the last one unmounts it.
   const manageItem = items.added.find((item) => item.id === manageCardId);
 
-  if (keysQuery.isLoading || catalogQuery.isLoading) return <LoadingGrid />;
+  // A dead backend must not take the view away: report the failure as a
+  // toast, render whatever data exists (or the normal empty states), and keep
+  // the retry affordance inside the working view.
+  const loadFailed = Boolean(keysQuery.error ?? catalogQuery.error);
+  useEffect(() => {
+    if (!loadFailed) return;
+    toast.error("Could not load plugins", {
+      id: "assistant-plugins-load-failed",
+      description:
+        "The assistant backend did not respond. Showing what has already loaded — retry below.",
+    });
+  }, [loadFailed]);
 
-  if (keysQuery.error || catalogQuery.error) {
-    return (
-      <ErrorBanner
-        message="Failed to load the plugin catalog. Please try again."
-        onRetry={() => {
-          void keysQuery.refetch();
-          void catalogQuery.refetch();
-        }}
-      />
-    );
-  }
+  if (keysQuery.isLoading || catalogQuery.isLoading) return <LoadingGrid />;
 
   const searching = Boolean(query.trim());
   const added = items.added.filter((item) => matchesPluginQuery(item, query));
@@ -293,6 +294,25 @@ function ConnectorsTab({ query }: { readonly query: string }) {
 
   return (
     <>
+      {loadFailed ? (
+        <div className="mb-4 flex items-center justify-between gap-3 rounded-xl border border-dashed border-border px-4 py-2.5">
+          <p className="text-[12px] text-muted-foreground">
+            Some plugins may be missing until the catalog loads.
+          </p>
+          <Button
+            type="button"
+            variant="outline"
+            size="sm"
+            onClick={() => {
+              void keysQuery.refetch();
+              void catalogQuery.refetch();
+            }}
+          >
+            <RefreshCw />
+            Retry
+          </Button>
+        </div>
+      ) : null}
       {(added.length > 0 || !searching) && (
         <>
           <SectionHeading>Added</SectionHeading>
@@ -311,8 +331,9 @@ function ConnectorsTab({ query }: { readonly query: string }) {
             </div>
           ) : (
             <p className="mb-7 rounded-xl border border-dashed border-border px-4 py-6 text-center text-[12px] text-muted-foreground">
-              No connected services yet. Connect one below and your assistant
-              can call it through the NyxID proxy.
+              {loadFailed
+                ? "Connected services could not be loaded right now."
+                : "No connected services yet. Connect one below and your assistant can call it through the NyxID proxy."}
             </p>
           )}
         </>

@@ -11,6 +11,10 @@ vi.mock("@/components/assistant/blocks/action-card", () => ({
   }) => <div data-testid="action-card-dispatch">{block.action_request_id}</div>,
 }));
 
+function emptyTurnDetected(): boolean {
+  return document.querySelector("[data-empty-turn-detected]") !== null;
+}
+
 function message(overrides: Partial<AssistantMessage>): AssistantMessage {
   return {
     id: "message-1",
@@ -396,7 +400,11 @@ describe("ChatThread", () => {
     expect(document.querySelector("[data-streaming-dots]")).toBeInTheDocument();
   });
 
-  it("reports an error when a turn closes having printed nothing", () => {
+  it("flags — but never renders — a turn that closes having printed nothing", () => {
+    // The reply regularly exists upstream and materializes into the transcript
+    // moments later, so an on-screen error here is a false negative. The
+    // condition is kept as an invisible detection attribute for telemetry and
+    // the deferred failure presentation.
     vi.useFakeTimers();
     render(
       <ChatThread
@@ -413,16 +421,20 @@ describe("ChatThread", () => {
 
     // Held back briefly: turn status and transcript projection race, so a turn
     // that did answer can look empty for a frame.
-    expect(screen.queryByRole("alert")).not.toBeInTheDocument();
+    expect(emptyTurnDetected()).toBe(false);
 
     act(() => vi.advanceTimersByTime(700));
 
+    expect(emptyTurnDetected()).toBe(true);
+    expect(screen.queryByRole("alert")).not.toBeInTheDocument();
     expect(
-      screen.getByText("Sorry, there seems to be an error with the request for now."),
-    ).toBeInTheDocument();
+      screen.queryByText(
+        "Sorry, there seems to be an error with the request for now.",
+      ),
+    ).not.toBeInTheDocument();
   });
 
-  it("reports an error for a closed turn whose only block stayed blank", () => {
+  it("flags a closed turn whose only block stayed blank without rendering an error", () => {
     vi.useFakeTimers();
     render(
       <ChatThread
@@ -439,10 +451,9 @@ describe("ChatThread", () => {
     );
     act(() => vi.advanceTimersByTime(700));
 
-    // Carried inside the existing assistant group — a second identity mark for
-    // a group that is already there would read as two separate turns.
-    expect(screen.getAllByRole("alert")).toHaveLength(1);
-    expect(document.querySelectorAll("[data-empty-turn-error]")).toHaveLength(1);
+    expect(emptyTurnDetected()).toBe(true);
+    expect(screen.queryByRole("alert")).not.toBeInTheDocument();
+    expect(document.querySelectorAll("[data-empty-turn-error]")).toHaveLength(0);
   });
 
   it("does not let the empty-conversation screen bury a live turn", () => {
@@ -469,7 +480,8 @@ describe("ChatThread", () => {
     render(<ChatThread messages={[]} turnEnded onDecideApproval={vi.fn()} />);
     act(() => vi.advanceTimersByTime(700));
 
-    expect(screen.getByRole("alert")).toBeInTheDocument();
+    expect(emptyTurnDetected()).toBe(true);
+    expect(screen.queryByRole("alert")).not.toBeInTheDocument();
     expect(
       screen.queryByText("Start a new conversation"),
     ).not.toBeInTheDocument();
@@ -491,15 +503,16 @@ describe("ChatThread", () => {
         onDecideApproval={vi.fn()}
       />,
     );
-    // However slow the read is, a pending one is never called an error.
+    // However slow the read is, a pending one is never flagged.
     act(() => vi.advanceTimersByTime(10_000));
-    expect(screen.queryByRole("alert")).not.toBeInTheDocument();
+    expect(emptyTurnDetected()).toBe(false);
 
     rerender(
       <ChatThread messages={messages} turnEnded onDecideApproval={vi.fn()} />,
     );
     act(() => vi.advanceTimersByTime(700));
-    expect(screen.getByRole("alert")).toBeInTheDocument();
+    expect(emptyTurnDetected()).toBe(true);
+    expect(screen.queryByRole("alert")).not.toBeInTheDocument();
   });
 
   it("makes a new settle episode wait even if the last one had settled", () => {
@@ -516,7 +529,7 @@ describe("ChatThread", () => {
       />,
     );
     act(() => vi.advanceTimersByTime(700));
-    expect(screen.getByRole("alert")).toBeInTheDocument();
+    expect(emptyTurnDetected()).toBe(true);
 
     // Condition drops and returns within one macrotask: the second episode must
     // re-serve its own grace period, not inherit the first one's verdict.
@@ -535,10 +548,10 @@ describe("ChatThread", () => {
         onDecideApproval={vi.fn()}
       />,
     );
-    expect(screen.queryByRole("alert")).not.toBeInTheDocument();
+    expect(emptyTurnDetected()).toBe(false);
 
     act(() => vi.advanceTimersByTime(700));
-    expect(screen.getByRole("alert")).toBeInTheDocument();
+    expect(emptyTurnDetected()).toBe(true);
   });
 
   it("keeps the dots up for a continuation appended to an answered turn", () => {
@@ -569,7 +582,7 @@ describe("ChatThread", () => {
     ).toBeInTheDocument();
   });
 
-  it("reports a continuation that closed empty behind an answered turn", () => {
+  it("flags a continuation that closed empty behind an answered turn without an error row", () => {
     vi.useFakeTimers();
     render(
       <ChatThread
@@ -590,10 +603,14 @@ describe("ChatThread", () => {
     );
     act(() => vi.advanceTimersByTime(700));
 
-    expect(screen.getByRole("alert")).toBeInTheDocument();
+    // The earlier answer stays untouched; the empty continuation is recorded,
+    // not announced beneath content the reader can already see.
+    expect(emptyTurnDetected()).toBe(true);
+    expect(screen.queryByRole("alert")).not.toBeInTheDocument();
+    expect(screen.getByText("Earlier answer")).toBeInTheDocument();
   });
 
-  it("trusts the episode over the transcript when it says content printed", () => {
+  it("trusts the episode over the transcript when it says content printed [guard]", () => {
     vi.useFakeTimers();
     render(
       <ChatThread
@@ -612,10 +629,10 @@ describe("ChatThread", () => {
     );
     act(() => vi.advanceTimersByTime(5000));
 
-    expect(screen.queryByRole("alert")).not.toBeInTheDocument();
+    expect(emptyTurnDetected()).toBe(false);
   });
 
-  it("stays quiet when a closed turn did print an answer", () => {
+  it("stays quiet when a closed turn did print an answer [guard]", () => {
     vi.useFakeTimers();
     render(
       <ChatThread
@@ -632,10 +649,10 @@ describe("ChatThread", () => {
     );
     act(() => vi.advanceTimersByTime(5000));
 
-    expect(screen.queryByRole("alert")).not.toBeInTheDocument();
+    expect(emptyTurnDetected()).toBe(false);
   });
 
-  it("withdraws the pending error if content lands inside the grace window", () => {
+  it("withdraws a pending detection if content lands inside the grace window [guard]", () => {
     vi.useFakeTimers();
     const userMessage = message({
       role: "user",
@@ -663,7 +680,7 @@ describe("ChatThread", () => {
     act(() => vi.advanceTimersByTime(5000));
 
     expect(screen.getByText("Late")).toBeInTheDocument();
-    expect(screen.queryByRole("alert")).not.toBeInTheDocument();
+    expect(emptyTurnDetected()).toBe(false);
   });
 
   it("removes live-region semantics during the thinking exit fade", () => {

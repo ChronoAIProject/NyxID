@@ -77,6 +77,26 @@ describe("ChatComposer drafts", () => {
     expect(screen.getByRole("textbox")).toHaveValue("");
   });
 
+  it("restores the typed text and draft when the send rejects [guard]", async () => {
+    // A dead backend must not eat the message: a rejected send puts the text
+    // back in the field and re-saves the draft, so retry is one keypress.
+    const onSend = vi.fn().mockRejectedValue(new Error("backend down"));
+    render(
+      <ChatComposer {...baseProps} onSend={onSend} draftKey="conv:one" />,
+    );
+    fireEvent.change(screen.getByRole("textbox"), {
+      target: { value: "Keep me" },
+    });
+
+    await act(async () => {
+      fireEvent.click(screen.getByRole("button", { name: "Send message" }));
+    });
+
+    expect(onSend).toHaveBeenCalledWith("Keep me");
+    expect(screen.getByRole("textbox")).toHaveValue("Keep me");
+    expect(screen.getByRole("textbox")).toBeEnabled();
+  });
+
   it("flushes immediately on unmount", () => {
     const { unmount } = render(
       <ChatComposer {...baseProps} draftKey="screen:/keys" />,
