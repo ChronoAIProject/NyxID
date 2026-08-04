@@ -33,6 +33,7 @@ export type StatusDomain =
   | "node"
   | "channel_bot"
   | "provider"
+  | "credential"
   | "user_service_credential";
 
 /**
@@ -135,6 +136,57 @@ export const STATUS_REGISTRY: StatusRegistry = {
       tooltip:
         "NyxID could not refresh this token automatically. Reconnect to restore access.",
       remediation: { label: "Reconnect provider", href: "/providers" },
+    },
+  },
+  credential: {
+    // Raw `UserApiKey.status` strings, as written by the backend. Distinct
+    // from `user_service_credential` below, which holds the *derived*
+    // availability of a service (a composition of `UserService.is_active`
+    // and the status keys here).
+    //
+    // The tooltips are the user-facing answer to "what does this status
+    // even mean?" — before this domain existed the assistant's connection
+    // modal rendered the bare status string with nothing to explain it.
+    // Variants deliberately match what those surfaces already rendered.
+    active: {
+      label: "Active",
+      variant: "success",
+      tooltip: "The stored credential is working.",
+    },
+    pending_auth: {
+      label: "Pending Auth",
+      variant: "secondary",
+      tooltip:
+        "Authorization has started but the provider hasn't sent NyxID a credential yet. Finish it in the provider's tab.",
+    },
+    expired: {
+      label: "Expired",
+      variant: "secondary",
+      tooltip:
+        "The stored credential is past its expiry. Reconnect to issue a fresh one.",
+    },
+    revoked: {
+      label: "Revoked",
+      variant: "destructive",
+      tooltip: "This credential was revoked and can no longer be used.",
+    },
+    failed: {
+      // Written by `user_api_key_service::fail_*_placeholder*` when an
+      // authorization never completed (denied or errored callback), and by
+      // `user_token_service::refresh_user_api_key_in_place` when a token
+      // refresh is terminally rejected (4xx invalid_grant / invalid_client).
+      // Transient 5xx / 429 refresh errors deliberately leave the row active,
+      // so this status always means user action is required.
+      label: "Failed",
+      variant: "destructive",
+      tooltip:
+        "Authorization never completed, or the provider rejected the stored credential. Reconnect to restore access.",
+    },
+    refresh_failed: {
+      label: "Refresh Failed",
+      variant: "destructive",
+      tooltip:
+        "NyxID could not renew this credential automatically. Reconnect to restore access.",
     },
   },
   user_service_credential: {
