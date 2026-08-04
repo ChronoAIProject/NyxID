@@ -378,7 +378,7 @@ mod tests {
         assert!(item.org_overrides.is_empty());
         assert!(item.user_overrides.is_empty());
 
-        set_feature_flag(
+        let Json(stored) = set_feature_flag(
             State(state.clone()),
             auth.clone(),
             Path(flag_key.clone()),
@@ -390,6 +390,9 @@ mod tests {
         )
         .await
         .expect("admin enables the flag for one user");
+        assert_eq!(stored.target_kind, FlagTargetKind::User.as_str());
+        assert_eq!(stored.target_key.as_deref(), Some(target_id.as_str()));
+        assert!(stored.enabled);
 
         // The targeted user now resolves it on their personal surface (what
         // `/users/me` capabilities and therefore `useFeature` read)...
