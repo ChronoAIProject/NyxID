@@ -1,7 +1,7 @@
 ---
 name: aevatar-team-builder
 description: Build an Aevatar agent team and its members over the REST API. Use when a user wants to "create a team", "add a member", "make a workflow member / script member / gagent member", "set the team's entry point", or "assemble agents into a team". It creates the team, creates members whose implementation is a workflow (most common), a script, or a hosted gagent, binds each member's concrete implementation (the workflow YAML is attached here), waits for the async binding to succeed, and sets the team entry member. Author the workflow YAML first with the workflow-authoring skill; publish the result as a service with the service-publisher skill.
-version: "1.4"
+version: "1.5"
 metadata:
   category: plain
   tag:
@@ -43,6 +43,10 @@ scopeId=$(aev "api/studio/context" | jq -r .scopeId)
 Member implementation kinds are the lowercase strings **`workflow`**, **`script`**,
 **`gagent`**.
 
+Member routes authorize the authenticated caller against the route `scopeId`. They do not require
+the caller subject, `memberId`, or any other resource ID to be equal. Keep scope authority and
+resource identity separate; never rewrite an ID to make those strings match.
+
 ## Step 1 — Create the team
 
 ```bash
@@ -55,8 +59,7 @@ let the server mint one). Read the returned id back — do not invent it.
 ## Step 2 — Create the member shell
 
 Create the member as a **shell**. Do **not** pass `implementationRef` here — the concrete
-implementation (the workflow + its YAML) is attached in Step 3. Passing a forward
-`workflowId` that does not exist yet returns **HTTP 500**.
+implementation (the workflow + its YAML) is attached in Step 3.
 
 ```bash
 wfId="wf-my-workflow"   # workflow draft identity; it is not the member or published-service id
@@ -70,8 +73,12 @@ memberId=$(aev "api/scopes/$scopeId/members" -m POST -d "{
 `workflow|script|gagent`); `description?`, `memberId?`, `teamId?` (attach now, or add
 later via PATCH). The new member returns at `lifecycleStage:"created"` and is already
 assigned a `publishedServiceId`; its `implementationRef` stays `null` until Step 3 fills
-it in. (Verified: omitting `implementationRef` returns 201; sending it with a not-yet-bound
-`workflowId` returns 500.)
+it in.
+
+If the requested team does not exist, member creation and provisioning return typed HTTP 404:
+`{"code":"STUDIO_TEAM_NOT_FOUND","scopeId":"<scope>","teamId":"<team>"}` (plus a
+message). Treat this as a missing Team resource in the stated scope; do not retry, invent another
+team ID, or reinterpret `teamId` as a member/workflow/service identity.
 
 Keep all three identities distinct: the response `memberId` owns Team authority, `wfId` names the
 workflow draft/definition, and `publishedServiceId` is the callable runtime identity. Only explicit
@@ -120,6 +127,18 @@ aev "api/scopes/$scopeId/members/$memberId" \
 ```
 Do not report success on the 2xx from the PUT alone — that is only `accepted`; wait for the
 run to reach `succeeded`.
+
+Binding success is not yet invocation readiness. Read the selected endpoint contract and require
+the exact bound revision, deployment, and endpoint to be visible in the invocation catalog:
+```bash
+aev "api/scopes/$scopeId/members/$memberId/endpoints/chat/contract" \
+  | jq '{revisionId, deploymentStatus, readiness:.invocationReadiness}'
+```
+Proceed only when `invocationReadiness.canInvoke == true`, `status == "ready"`, and the returned
+`revisionId` matches the binding result. `invocation_catalog_not_ready` means projection/catalog
+materialization has not observed that endpoint revision; the member is **not invocable yet** even
+though the binding run succeeded. Continue reading the same contract until it changes or report
+the lag honestly; do not create a new binding to force readiness.
 
 ## Step 4 — Set the team entry member
 

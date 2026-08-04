@@ -1,7 +1,7 @@
 ---
 name: aevatar-feasibility-advisor
 description: Use before building when a user asks whether Aevatar can achieve a goal, what prerequisites it has, or why it is unavailable. Triggers include bots and third-party APIs, inbound channels, external HTTP triggers, schedules, service exposure, Agent Profiles and tool ceilings, and bounded managed or private-host codex_exec work. It distinguishes outbound connectors from inbound channels and separates not connected, host-gated, not deployed, and genuinely unsupported outcomes. It chooses managed_sandbox versus private_ssh without promising repository, model, credential, runtime, or deployment capabilities the caller does not control, then routes feasible work to the owning Aevatar skill.
-version: "1.5"
+version: "1.6"
 metadata:
   category: plain
   tag:
@@ -104,11 +104,17 @@ header. Two read-only CLI calls tell you the ground truth:
 nyxid service list --output json
 nyxid catalog list --output json
 ```
-(Inside an Aevatar session, use the typed connected-service inventory/management tool actually
-present.) **The live catalog and authoritative `/api/v1/keys` instance inventory are the source of truth — never assert a connector
-exists or doesn't without checking it.** The examples below are illustrative, not a fixed list.
-`/api/v1/user-services` is only a route projection; it cannot prove discovery, readiness, or
-execution authority.
+(Inside an Aevatar session, use the typed connected-service tools actually present.) For a request
+to connect, add, or authorize a named service, `nyxid_catalog` is discovery only: use it to resolve
+the exact catalog slug when necessary, then **always** call `nyxid_require_service`. Finish from
+that typed readiness result; it is the authority for a missing-service blocker and interactive
+`service.connect` handoff. Never stop at catalog prose.
+
+**The live catalog and authoritative `/api/v1/keys` instance inventory are the source of truth —
+never assert a connector exists or does not without checking them.** `/api/v1/keys` is the exact
+UserService authority for execution. `/api/v1/user-services` is only a routing projection; it
+cannot prove discovery, readiness, or execution authority. The examples below are illustrative,
+not a fixed list.
 
 ### Reading a catalog entry (this is the "what's the prerequisite" answer)
 - `requires_credential: true` → the user must connect it before any call works.
@@ -131,6 +137,8 @@ execution authority.
    connector `api-twitter`) + *(c)* run **daily** (schedule). Decompose into capability
    classes before judging.
 2. **Classify each piece** against the matrix below and collect its prerequisite.
+   In-session connect/add/authorize requests must resolve the catalog slug, then pass it to
+   `nyxid_require_service`; do not substitute prose or `/api/v1/user-services` for typed readiness.
 3. **Find the gating piece** — the answer to the whole request is the *weakest* piece (a
    single host-gated or impossible piece caps the whole thing).
 4. **Report honestly** with the template at the end: possible + prereqs, or host-action-needed,
@@ -182,7 +190,9 @@ State these plainly when they bite:
 
 - **Connect a connector** → "In the NyxID console, connect **`<slug>`**. <`credential_mode:user`:
   it's a one-click OAuth to your own account.> <`admin`: you'll paste a token — `<api_key_instructions>`;
-  get it at `<api_key_url>`.>" Then confirm with `GET /api/v1/services` that the slug appears.
+  get it at `<api_key_url>`.>" In-session, finish through `nyxid_require_service`; for REST/CLI
+  verification, confirm the exact UserService and readiness through `/api/v1/keys`, not merely the
+  `/api/v1/user-services` projection.
 - **Register an inbound channel** (Lark/Telegram) → connect the bot connector, then register the
   channel via the channel-admin tool so NyxID wires the webhook to Aevatar's relay.
 - **External HTTP trigger** (Lark Base / webhook sender / external cron) → do **not** ask for
