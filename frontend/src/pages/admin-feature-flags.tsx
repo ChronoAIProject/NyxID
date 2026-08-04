@@ -1,5 +1,5 @@
 import { type ReactNode, useEffect, useState } from "react";
-import { ChevronDown, Search } from "lucide-react";
+import { ChevronDown, Search, User } from "lucide-react";
 import { toast } from "sonner";
 import { PageHeader } from "@/components/shared/page-header";
 import { PowerButtonIcon } from "@/components/icons/empty-state";
@@ -7,6 +7,7 @@ import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
+import { Label } from "@/components/ui/label";
 import { Skeleton } from "@/components/ui/skeleton";
 import {
   Select,
@@ -15,14 +16,19 @@ import {
   SelectTrigger,
   SelectValue,
 } from "@/components/ui/select";
-import { cn } from "@/lib/utils";
+import { cn, formatRelativeTime } from "@/lib/utils";
 import { useAdminUsers } from "@/hooks/use-admin";
 import type { AdminUser } from "@/types/admin";
 import {
   useAdminFeatureFlags,
   useClearAdminFeatureFlag,
   useSetAdminFeatureFlag,
+  useUpdateAdminFeatureFlagMetadata,
 } from "@/hooks/use-admin-feature-flags";
+import {
+  MAX_FEATURE_FLAG_DESCRIPTION_LENGTH,
+  MAX_FEATURE_FLAG_OWNER_LENGTH,
+} from "@/schemas/admin-feature-flags";
 import { useAuthStore } from "@/stores/auth-store";
 import { canAdminWrite } from "@/types/api";
 
@@ -38,7 +44,14 @@ interface Assignment {
 }
 interface FlagRow {
   readonly key: string;
+  /** Effective description: the admin-authored one when set, else the code one. */
   readonly description: string;
+  /** The code-declared description — what a reset falls back to. */
+  readonly codeDescription: string;
+  /** The admin-authored description, when one exists. */
+  readonly customDescription: string | null;
+  readonly owner: string | null;
+  readonly metadataUpdatedAt: string | null;
   readonly kind: FlagKind;
   readonly defaultEnabled: boolean;
   global: ScopeState;
@@ -64,6 +77,10 @@ export function AdminFeatureFlagsPage() {
   const flags: FlagRow[] = (data?.flags ?? []).map((flag) => ({
     key: flag.key,
     description: flag.description,
+    codeDescription: flag.code_description ?? flag.description,
+    customDescription: flag.custom_description ?? null,
+    owner: flag.owner ?? null,
+    metadataUpdatedAt: flag.metadata_updated_at ?? null,
     kind: flag.key.startsWith("experimental:") ? "experiment" : "ops",
     defaultEnabled: flag.default_enabled,
     global:
@@ -143,7 +160,8 @@ export function AdminFeatureFlagsPage() {
     ? flags.filter(
         (f) =>
           f.key.toLowerCase().includes(q) ||
-          f.description.toLowerCase().includes(q),
+          f.description.toLowerCase().includes(q) ||
+          (f.owner?.toLowerCase().includes(q) ?? false),
       )
     : flags;
   const isOpen = (key: string) => (q ? true : openKeys.includes(key));
@@ -325,6 +343,16 @@ function FlagCard({
             <Badge variant={kindVariant(flag.kind)} className="text-[11px]">
               {flag.kind}
             </Badge>
+            {flag.owner && (
+              <Badge
+                variant="secondary"
+                className="max-w-[200px] gap-1 text-[11px] font-normal"
+                title={`Owner: ${flag.owner}`}
+              >
+                <User className="h-3 w-3 shrink-0" aria-hidden />
+                <span className="min-w-0 truncate">{flag.owner}</span>
+              </Badge>
+            )}
           </div>
           <p className="truncate text-xs text-muted-foreground">
             {flag.description}
@@ -360,6 +388,10 @@ function FlagCard({
 
       {open && (
         <div className="space-y-4 border-t border-border/60 bg-muted/20 px-3 py-3">
+          <Group label="Documentation">
+            <FlagMetadataEditor flag={flag} canWrite={canWrite} />
+          </Group>
+
           <Group label="Global">
             <ScopeRow
               label="All users (rollout / killswitch)"
@@ -439,6 +471,130 @@ function FlagCard({
         </div>
       )}
     </Card>
+  );
+}
+
+/**
+ * Inline editor for a flag's admin-authored description and owner.
+ *
+ * Seeded once when the card opens: a background list refetch must never
+ * overwrite what an admin is mid-way through typing. Saving is a full replace,
+ * so a blank field clears that side of the metadata (description falls back to
+ * the code-declared text).
+ */
+function FlagMetadataEditor({
+  flag,
+  canWrite,
+}: {
+  readonly flag: FlagRow;
+  readonly canWrite: boolean;
+}) {
+  const update = useUpdateAdminFeatureFlagMetadata();
+  const [description, setDescription] = useState(flag.customDescription ?? "");
+  const [owner, setOwner] = useState(flag.owner ?? "");
+
+  const trimmedDescription = description.trim();
+  const trimmedOwner = owner.trim();
+  const dirty =
+    trimmedDescription !== (flag.customDescription ?? "") ||
+    trimmedOwner !== (flag.owner ?? "");
+
+  async function save() {
+    try {
+      await update.mutateAsync({
+        flagKey: flag.key,
+        body: {
+          description: trimmedDescription || null,
+          owner: trimmedOwner || null,
+        },
+      });
+      toast.success("Flag details saved");
+    } catch {
+      toast.error("Failed to save flag details");
+    }
+  }
+
+  if (!canWrite) {
+    return (
+      <dl className="space-y-2 px-3 py-2.5 text-[12px]">
+        <div className="space-y-0.5">
+          <dt className="text-[11px] text-muted-foreground">Description</dt>
+          <dd className="text-foreground">{flag.description}</dd>
+        </div>
+        <div className="space-y-0.5">
+          <dt className="text-[11px] text-muted-foreground">Owner</dt>
+          <dd className={cn(!flag.owner && "text-muted-foreground")}>
+            {flag.owner ?? "Unassigned"}
+          </dd>
+        </div>
+      </dl>
+    );
+  }
+
+  return (
+    <div className="space-y-2.5 px-3 py-2.5">
+      <div className="space-y-1">
+        <Label
+          htmlFor={`flag-description-${flag.key}`}
+          className="text-[11px] font-normal"
+        >
+          Description — what this flag controls
+        </Label>
+        <Input
+          id={`flag-description-${flag.key}`}
+          value={description}
+          maxLength={MAX_FEATURE_FLAG_DESCRIPTION_LENGTH}
+          onChange={(event) => setDescription(event.target.value)}
+          placeholder={flag.codeDescription}
+          className="h-8 text-[12px]"
+        />
+      </div>
+      <div className="space-y-1">
+        <Label
+          htmlFor={`flag-owner-${flag.key}`}
+          className="text-[11px] font-normal"
+        >
+          Owner — who to ask about it
+        </Label>
+        <Input
+          id={`flag-owner-${flag.key}`}
+          value={owner}
+          maxLength={MAX_FEATURE_FLAG_OWNER_LENGTH}
+          onChange={(event) => setOwner(event.target.value)}
+          placeholder="Unassigned — e.g. Platform team"
+          className="h-8 text-[12px]"
+        />
+      </div>
+      <div className="flex flex-wrap items-center justify-between gap-2">
+        <p className="text-[11px] text-muted-foreground">
+          {flag.customDescription == null
+            ? "Using the description declared in code."
+            : flag.metadataUpdatedAt
+              ? `Edited ${formatRelativeTime(flag.metadataUpdatedAt)}.`
+              : "Edited by an admin."}
+        </p>
+        <div className="flex items-center gap-2">
+          {description !== "" && (
+            <Button
+              variant="ghost"
+              size="sm"
+              onClick={() => setDescription("")}
+              disabled={update.isPending}
+            >
+              Use code default
+            </Button>
+          )}
+          <Button
+            variant="primary"
+            size="sm"
+            onClick={save}
+            disabled={!dirty || update.isPending}
+          >
+            {update.isPending ? "Saving…" : "Save details"}
+          </Button>
+        </div>
+      </div>
+    </div>
   );
 }
 

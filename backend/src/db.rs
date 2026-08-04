@@ -1803,6 +1803,19 @@ pub async fn ensure_indexes(db: &Database) -> Result<(), mongodb::error::Error> 
         )
         .await?;
 
+    // ── feature_flag_metadata ──
+    // At most one admin-authored description/owner row per registry flag key.
+    let feature_flag_metadata =
+        db.collection::<Document>(crate::models::feature_flag_metadata::COLLECTION_NAME);
+    feature_flag_metadata
+        .create_index(
+            IndexModel::builder()
+                .keys(doc! { "flag_key": 1 })
+                .options(IndexOptions::builder().unique(true).build())
+                .build(),
+        )
+        .await?;
+
     // ── org_invites ──
     let org_invites = db.collection::<Document>("org_invites");
     org_invites
