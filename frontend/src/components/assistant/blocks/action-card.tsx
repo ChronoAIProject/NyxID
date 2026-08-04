@@ -248,9 +248,13 @@ export function ActionCard({
         ),
       )
       .catch(() => {
-        // The transport retains failed/rejected reports for retry. This guard
-        // only prevents a synchronous validation failure from locking dismissal.
+        // The transport retains failed/rejected reports for retry, and the
+        // page has already toasted the delivery failure. Unlock dismissal AND
+        // roll the card out of any busy projection: a completed-connection
+        // report that dies must not strand the card at "Connecting" with its
+        // controls disabled — back to actionable is what makes retry possible.
         resolvingRef.current = false;
+        onProgress(block.block_id, false);
       });
   }
 

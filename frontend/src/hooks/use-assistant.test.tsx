@@ -751,6 +751,37 @@ describe("conversation projection reconciliation", () => {
     queryClient.clear();
   });
 
+  it("raises one stable toast when reconciliation times out", async () => {
+    const { queryClient, Wrapper } = createHarness();
+    const toastSpy = vi.spyOn(toast, "error");
+    const historySpy = vi
+      .spyOn(assistantTransport, "getHistory")
+      .mockResolvedValue(syncingHistory);
+    const reconcileSpy = vi
+      .spyOn(assistantTransport, "reconcileProjection")
+      .mockResolvedValue({ status: "timed_out", conversationId: canonicalId });
+    const { unmount } = renderHook(() => useConversation(conversationId), {
+      wrapper: Wrapper,
+    });
+
+    await vi.waitFor(() => {
+      expect(toastSpy).toHaveBeenCalledWith(
+        "History is taking longer than expected",
+        {
+          id: "assistant-history-stalled",
+          description:
+            "NyxID keeps checking when you return to this conversation. You can keep chatting — new messages are unaffected.",
+        },
+      );
+    });
+
+    toastSpy.mockRestore();
+    historySpy.mockRestore();
+    reconcileSpy.mockRestore();
+    unmount();
+    queryClient.clear();
+  });
+
   it("releases the waiter when the mounted conversation unmounts", async () => {
     const { queryClient, Wrapper } = createHarness();
     const historySpy = vi

@@ -370,6 +370,18 @@ export function useConversation(conversationId: string | undefined) {
       .reconcileProjection(conversationId)
       .then((outcome) => {
         if (released) return;
+        // The bounded wait expiring must not be silent — this is the
+        // cold-reload / no-materialization case where no stream toast ever
+        // fired. One stable toast, no page chrome; the transport keeps
+        // observing on later reads (mount/focus), which is what the
+        // description promises.
+        if (outcome.status === "timed_out") {
+          toast.error("History is taking longer than expected", {
+            id: "assistant-history-stalled",
+            description:
+              "NyxID keeps checking when you return to this conversation. You can keep chatting — new messages are unaffected.",
+          });
+        }
         void queryClient.invalidateQueries({
           queryKey: assistantKeys.history(conversationId),
         });

@@ -391,6 +391,57 @@ describe("AssistantPage projection status", () => {
   });
 });
 
+describe("AssistantPage action continuation", () => {
+  it("toasts a failed action continuation and keeps the chat usable", async () => {
+    const event = userEvent.setup();
+    state.search = { c: existingConversation.id };
+    state.historyMessages = [
+      {
+        id: "assistant-action",
+        role: "assistant",
+        schema_version: 1,
+        blocks: [
+          {
+            type: "action_card",
+            block_id: "action-card-1",
+            action: "service.connect",
+            action_request_id: "act-1",
+            origin_turn_id: "turn-origin-1",
+            task_id: "task-1",
+            step_id: "step-1",
+            params: {
+              variant: "catalog",
+              service_slug: "api-github",
+              requested_scopes: ["repo"],
+            },
+            status: "pending",
+            outcome_note: "",
+          },
+        ],
+        created_at: "2026-07-29T00:00:01.000Z",
+      },
+    ];
+    mockContinueAction.mockRejectedValueOnce(new Error("delivery failed"));
+
+    renderPage();
+    await event.click(screen.getByRole("button", { name: "Decline" }));
+
+    await waitFor(() => {
+      expect(mockToastError).toHaveBeenCalledWith(
+        "The action response was not delivered",
+        expect.objectContaining({
+          id: "assistant-action-failed",
+          description: "delivery failed",
+        }),
+      );
+    });
+    // Non-blocking: the card is still on screen and retryable, the composer
+    // still takes input.
+    expect(screen.getByRole("button", { name: "Decline" })).toBeEnabled();
+    expect(screen.getByRole("textbox")).toBeEnabled();
+  });
+});
+
 describe("AssistantPage new chat", () => {
   it("navigates to the draft thread", async () => {
     const event = userEvent.setup();

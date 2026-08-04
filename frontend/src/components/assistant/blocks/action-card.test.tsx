@@ -1,4 +1,4 @@
-import { render, screen } from "@testing-library/react";
+import { render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { describe, expect, it, vi } from "vitest";
 import type { AddKeyDialogCompletion } from "@/components/dashboard/add-key-dialog";
@@ -147,6 +147,37 @@ describe("ActionCard", () => {
         },
       },
     });
+  });
+
+  it("rolls a rejected completed report out of its busy projection", async () => {
+    // The connect journey projects the card to in-progress before the report
+    // is delivered. If delivery dies, the card must return to its actionable
+    // state — not sit at "Connecting" with every control disabled and no
+    // visible recovery. (The page toasts the failure; this is the card's
+    // half of the contract.)
+    const user = userEvent.setup();
+    const onProgress = vi.fn();
+    const onResolve = vi.fn().mockRejectedValue(new Error("delivery failed"));
+    render(
+      <ActionCard
+        block={catalogBlock()}
+        onProgress={onProgress}
+        onBlock={vi.fn()}
+        onResolve={onResolve}
+      />,
+    );
+
+    await user.click(screen.getByRole("button", { name: "Connect GitHub" }));
+    expect(onProgress).toHaveBeenCalledWith("action-card-1", true);
+    await user.click(
+      screen.getByRole("button", { name: "Finish mock connection" }),
+    );
+
+    await waitFor(() => {
+      expect(onProgress).toHaveBeenCalledWith("action-card-1", false);
+    });
+    // Retryable: the card's own controls are live again.
+    expect(screen.getByRole("button", { name: "Decline" })).toBeEnabled();
   });
 
   it("never renders a colored top accent rail", () => {

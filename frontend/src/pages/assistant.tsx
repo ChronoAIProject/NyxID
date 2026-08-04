@@ -33,7 +33,11 @@ import {
   useTurnEpisode,
 } from "@/hooks/use-assistant";
 import { ApiError } from "@/lib/api-client";
-import { AssistantConversationNotFoundError } from "@/lib/assistant/errors";
+import {
+  AssistantConversationNotFoundError,
+  AssistantTurnActiveError,
+  AssistantTurnCancelledError,
+} from "@/lib/assistant/errors";
 import { parseAssistantSearch } from "@/lib/assistant/search";
 import type { ActionReport } from "@/schemas/assistant-actions";
 import { useAssistantContextStore } from "@/stores/assistant-context-store";
@@ -417,6 +421,24 @@ export function AssistantPage({
     beginContinuation();
     try {
       await actionCards.continueAction(report);
+    } catch (error) {
+      // A continuation that dies before any stream event is otherwise
+      // invisible: the card's own catch only unlocks dismissal. Same
+      // contract as approval delivery — toast, stable id, and a user Stop
+      // is an expected outcome, not a delivery failure. Rethrown so the
+      // card rolls itself out of its busy state.
+      if (!(error instanceof AssistantTurnCancelledError)) {
+        toast.error("The action response was not delivered", {
+          id: "assistant-action-failed",
+          description:
+            error instanceof AssistantTurnActiveError
+              ? "Wait for the current reply to finish, then try again."
+              : error instanceof Error && error.message
+                ? error.message
+                : "The assistant backend did not respond. Try again.",
+        });
+      }
+      throw error;
     } finally {
       endContinuation();
     }
