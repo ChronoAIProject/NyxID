@@ -23,6 +23,16 @@ export const LoginDevicePage = lazy(() =>
     default: m.LoginDevicePage,
   })),
 );
+export const OAuthLaunchingPage = lazy(() =>
+  import("@/pages/oauth-launching").then((m) => ({
+    default: m.OAuthLaunchingPage,
+  })),
+);
+export const OAuthCompletePage = lazy(() =>
+  import("@/pages/oauth-complete").then((m) => ({
+    default: m.OAuthCompletePage,
+  })),
+);
 export const DashboardPage = lazy(() =>
   import("@/pages/dashboard").then((m) => ({ default: m.DashboardPage })),
 );
