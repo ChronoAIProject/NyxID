@@ -156,6 +156,83 @@ Supporting unit suites isolate the components:
 - `backoff.test.ts`: nonzero jitter floor and capped deadline-spanning delays; and
 - `frontend/src/pages/assistant.test.tsx`: page-level selection, send, and state composition.
 
+## Aevatar wire-capture runbook
+
+Use this runbook for a turn that stops rendering, closes without printable
+content, or appears only after a browser refresh. A Network-panel request list
+is not sufficient: HTTP 200 proves that response headers arrived, not that the
+event-stream body completed or contained a printable assistant event.
+
+### Enable and capture
+
+1. Add `experimental:aevatar-chat-wire-log` to the authenticated account's
+   `capabilities.enabled_features`. The capability is server-driven and may be
+   enabled for an ordinary user; a role or local-storage override does not
+   enable the panel.
+2. Reload the Assistant page and open the `Aevatar wire log` action.
+3. Enable capture and Responses before sending. Capture exactly one failing
+   turn so the exchange, terminal, and first History observation remain easy
+   to correlate.
+4. Leave the conversation open until projection either materializes the reply
+   or reaches its bounded stalled state. Then export the wire log. If a refresh
+   is needed to reveal the reply, export before and after the refresh and note
+   the approximate refresh time.
+5. Send the export to the Aevatar team with the matching NyxID request time,
+   conversation id, and turn id when one was announced. Never paste prompts,
+   replies, credentials, authorization headers, or raw payloads into tickets.
+
+### Required evidence
+
+The evidence package must include:
+
+- response `Content-Type` and the raw SSE record capture in the protected
+  export;
+- captured body byte count and truncation state;
+- `wireOutcome` (`complete`, `cancelled`, `network_error`, `worker_error`, or
+  `protocol_cancel`) separately from `transportOutcome` (`completed`,
+  `stream_closed`, `network_error`, a sanitized RUN_ERROR code, or
+  `cancelled`);
+- `framesSeen`, `printableFramesSeen`, `printableTurnEvents`, `wireBytes`,
+  `terminalReceived`, `firstFrameMs`, and `lastFrameMs`;
+- whether `aevatar.chat.context`, `TEXT_MESSAGE_*`,
+  `RUN_FINISHED.result.output`, `RUN_ERROR`, or no terminal arrived;
+- the sanitized client `turn.completed` status and error code; and
+- the first fence-current History response for the same turn, including
+  whether and when its assistant row appeared.
+
+The numeric transport telemetry is metadata only. It never contains frame
+bodies, prompt text, assistant output, or credentials. Raw SSE/body capture is
+already a separate, explicitly enabled, session-only diagnostic surface and
+must be handled as sensitive data.
+
+### Classification
+
+- Printable, contract-valid wire content that produced no corresponding turn
+  event is a NyxID client/parser regression.
+- Clean EOF with no AG-UI terminal is `wireOutcome=complete` plus
+  `transportOutcome=stream_closed`; it does not mean the server-side run
+  failed. If History later contains the exact turn, delivery was interrupted
+  while Aevatar still completed and materialized the run.
+- A dying response body is `network_error` at both layers. A later exact-turn
+  History row still proves server-side completion despite browser delivery
+  failure.
+- A valid content-free `RUN_FINISHED` is an authoritative empty terminal. A
+  `RUN_ERROR` uses its sanitized error code. No assistant row before the
+  projection deadline remains a bounded, inconclusive materialization
+  failure rather than proof that no row will ever appear.
+
+The incident that motivated this runbook now has one decisive observation:
+refreshing reveals the assistant message. The run therefore completed and
+materialized upstream; the unresolved issue is why browser stream delivery
+stopped. That cause belongs with the Aevatar team. It is unverified and needs a
+live stack plus the capture above; Aevatar services are currently unavailable,
+so local stubbed SSE/History tests are the only pre-ship verification.
+
+`transcriptSettling` remains a separate follow-up. Its projection counter
+currently treats fulfilled, rejected, aborted, and deadline-elapsed reads as
+equivalent, and it does not observe the background reconciler. Do not wire the
+reconciler into that flag without making the accounting outcome-aware.
+
 ## Rust service tests
 
 `backend/src/services/assistant_service.rs` tests pure path, family, index, body, and validation logic. Its coverage includes:
