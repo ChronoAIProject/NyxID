@@ -1448,6 +1448,7 @@ function OAuthStep({
   onKeyCleared,
   onBack,
   onComplete,
+  onAuthorizationPending,
   platformScopeAllowlist,
   targetOrgId,
   reconnectMode,
@@ -1459,6 +1460,8 @@ function OAuthStep({
   readonly onKeyCleared: () => void;
   readonly onBack: () => void;
   readonly onComplete: (keyId: string) => void;
+  /** See `AddKeyDialog`'s prop of the same name. */
+  readonly onAuthorizationPending?: (keyId: string) => void;
   /**
    * When this connection rides the shared platform app, the scopes it may
    * request (`platform_scope_allowlist`). Passed only on the platform path so
@@ -1542,6 +1545,9 @@ function OAuthStep({
       });
       setPendingKeyId(key.id);
       setAuthorizationUrl(response.authorization_url);
+      // The handoff to the provider is the point of no return for this
+      // dialog's callbacks: from here the user may never come back to it.
+      onAuthorizationPending?.(key.id);
     } catch (err) {
       await cleanupPendingAuthKey(key, { protectExistingKey: reconnectMode });
       if (!reconnectMode) {
@@ -1704,6 +1710,7 @@ function DeviceCodeStep({
   // below now goes through the wrapper without further changes (NyxID#706).
   onBack: parentOnBack,
   onComplete,
+  onAuthorizationPending,
   targetOrgId,
   reconnectMode,
   lockedScopes = [],
@@ -1714,6 +1721,8 @@ function DeviceCodeStep({
   readonly onKeyCleared: () => void;
   readonly onBack: () => void;
   readonly onComplete: (keyId: string) => void;
+  /** See `AddKeyDialog`'s prop of the same name. */
+  readonly onAuthorizationPending?: (keyId: string) => void;
   /** When set, initiate the device-code flow under this org's scope. */
   readonly targetOrgId: string | null;
   readonly reconnectMode: boolean;
@@ -1943,6 +1952,9 @@ function DeviceCodeStep({
       key = await ensureKey();
       if (!isMountedRef.current) return;
       setCreatedKeyId(key.id);
+      // Same rationale as the OAuth step: the user is about to leave for the
+      // provider's verification page and may never return to this dialog.
+      onAuthorizationPending?.(key.id);
       // Only forward scopes for formats that accept them. OpenAI device-code
       // providers reject a `scope` parameter at the backend, so omit the
       // override there entirely. Otherwise send the picker's complete set.
@@ -2456,6 +2468,7 @@ export function AddKeyDialog({
   prefillCustom,
   reconnectKey,
   onSuccess,
+  onAuthorizationPending,
 }: {
   readonly open: boolean;
   readonly onOpenChange: (open: boolean) => void;
@@ -2477,6 +2490,17 @@ export function AddKeyDialog({
   readonly reconnectKey?: KeyInfo | null;
   /** Fires only when the user finishes the post-connect success step. */
   readonly onSuccess?: (result: AddKeyDialogCompletion) => void;
+  /**
+   * Fires as soon as an out-of-band authorization (OAuth / device code) is
+   * handed to the provider, with the placeholder key that will settle it.
+   *
+   * `onSuccess` is not enough on its own for a caller that must survive the
+   * dialog: it only fires if the user walks back through Continue and Done.
+   * A caller that owns a longer-lived surface (the assistant's connect card)
+   * takes this id and watches the key to its terminal status itself, so a
+   * dismissed dialog stops meaning a lost outcome.
+   */
+  readonly onAuthorizationPending?: (keyId: string) => void;
 }) {
   const createKey = useCreateKey();
   const { data: catalogEntries } = useCatalog({
@@ -3061,6 +3085,7 @@ export function AddKeyDialog({
             ensureKey={ensureAuthKey}
             onKeyCleared={() => setAuthKey(null)}
             onComplete={handleAuthComplete}
+            onAuthorizationPending={onAuthorizationPending}
             targetOrgId={targetOrgId}
             reconnectMode={isReconnect}
             grantedScopes={
@@ -3123,6 +3148,7 @@ export function AddKeyDialog({
               setStep(form.nodeId.trim() ? "node_setup" : "routing");
             }}
             onComplete={handleAuthComplete}
+            onAuthorizationPending={onAuthorizationPending}
           />
         )}
 
