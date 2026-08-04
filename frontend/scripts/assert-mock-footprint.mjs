@@ -22,7 +22,7 @@
  *   R3 nothing `dist/index.html` references at boot is a mock chunk;
  *   R4 the separate credential-accept entry carries none of it.
  */
-import { readFile, readdir, stat } from "node:fs/promises";
+import { readFile, readdir, rm, stat } from "node:fs/promises";
 import { fileURLToPath } from "node:url";
 import path from "node:path";
 
@@ -176,6 +176,11 @@ if (violations.length > 0) {
     `Mock scenario code escaped its lazy boundary:\n${violations.join("\n")}`,
   );
 }
+
+// The manifest exists for this script and nothing else — no runtime code reads
+// it. Drop it so enabling `build.manifest` does not add a file to what gets
+// deployed. Left in place on failure so the violation can be inspected.
+await rm(path.dirname(manifestPath), { recursive: true, force: true });
 
 process.stdout.write(
   `Mock scenario footprint assertion passed; ${requiredLazyModules.length} flag-gated ` +

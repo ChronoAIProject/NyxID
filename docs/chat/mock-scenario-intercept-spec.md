@@ -533,7 +533,9 @@ a local backend needs the override too.
 
 Build assertion, run as the last step of `npm run build`
 (`frontend/scripts/assert-mock-footprint.mjs`): the mock modules must remain
-**dynamic-import only**. Read from vite's `dist/.vite/manifest.json`, it fails
+**dynamic-import only**. It reads vite's `dist/.vite/manifest.json`
+(`build.manifest` is enabled for this purpose alone, and the script deletes the
+manifest once it passes so the deployed artifact gains no new file) and fails
 if any chunk statically reaches an entry point, if the entry graph or the
 assistant page chunk carries `mockchat-` / `mockscenarios`, or if the
 credential-accept entry does. "Absent from `dist/`" is no longer the invariant

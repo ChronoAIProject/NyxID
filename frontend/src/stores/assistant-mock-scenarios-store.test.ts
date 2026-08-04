@@ -165,6 +165,37 @@ describe("useAssistantMockScenariosStore", () => {
     });
   });
 
+  it("rehydrates a pre-flag v1 entry fail-closed", async () => {
+    // Written by a dev user back when the layer was gated by
+    // `import.meta.env.DEV`, so the payload predates `featureEnabled`.
+    localStorage.setItem(
+      ASSISTANT_MOCK_SCENARIOS_STORAGE_KEY,
+      JSON.stringify({
+        version: 1,
+        state: {
+          enabled: true,
+          disabledScenarioIds: ["github-issues"],
+          world: { connected: ["api-github"] },
+          userId: "user-a",
+        },
+      }),
+    );
+
+    await useAssistantMockScenariosStore.persist.rehydrate();
+
+    // Their own settings survive untouched — no migration needed...
+    expect(useAssistantMockScenariosStore.getState()).toMatchObject({
+      enabled: true,
+      disabledScenarioIds: ["github-issues"],
+      world: { connected: ["api-github"] },
+      userId: "user-a",
+    });
+    // ...but a stale `enabled: true` cannot re-arm the tab on its own.
+    expect(useAssistantMockScenariosStore.getState().featureEnabled).toBe(
+      false,
+    );
+  });
+
   it("keeps state when ensureUser receives the current owner", () => {
     const store = useAssistantMockScenariosStore.getState();
     store.ensureUser("user-a");
