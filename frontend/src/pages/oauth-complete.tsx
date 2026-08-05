@@ -12,6 +12,7 @@ import {
   isOAuthAckMessage,
   isOAuthRetryMessage,
   oauthCompletionSearchSchema,
+  validateAuthorizationUrl,
 } from "@/schemas/oauth-popup";
 import type { OAuthActionMessage } from "@/types/oauth-popup";
 
@@ -132,10 +133,16 @@ export function OAuthCompletePage() {
           expectedProviderOrigin !== null &&
           isOAuthRetryMessage(event.data, expectedProviderOrigin)
         ) {
+          const authorizationUrl = validateAuthorizationUrl(
+            event.data.url,
+            event.data.nextNonce,
+            expectedProviderOrigin,
+          );
+          if (authorizationUrl === null) return;
           window.clearTimeout(timeout);
           channel.removeEventListener("message", onMessage);
           channel.close();
-          window.location.assign(event.data.url);
+          window.location.assign(authorizationUrl.href);
         } else if (action !== "retry" && isOAuthAckMessage(event.data)) {
           window.clearTimeout(timeout);
           channel.removeEventListener("message", onMessage);

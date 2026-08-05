@@ -40,7 +40,7 @@ describe("OAuth popup schemas", () => {
 
   it("accepts real cross-origin providers only with exact state binding", () => {
     const valid = `https://github.com/login/oauth/authorize?client_id=x&state=1cc_${NONCE}`;
-    expect(validateAuthorizationUrl(valid, NONCE)).toBe(true);
+    expect(validateAuthorizationUrl(valid, NONCE)?.href).toBe(valid);
     expect(
       isOAuthRetryMessage({
         type: "oauth_retry",
@@ -55,15 +55,15 @@ describe("OAuth popup schemas", () => {
       "https://github.com/login/oauth/authorize",
       `https://github.com/login/oauth/authorize?state=1cc_00000000-0000-4000-8000-000000000000`,
     ]) {
-      expect(validateAuthorizationUrl(url, NONCE)).toBe(false);
+      expect(validateAuthorizationUrl(url, NONCE)).toBeNull();
     }
   });
 
   it("binds retry navigation to the interstitial's provider origin", () => {
     const githubUrl = `https://github.com/login/oauth/authorize?state=1cc_${NONCE}`;
     expect(
-      validateAuthorizationUrl(githubUrl, NONCE, "https://github.com"),
-    ).toBe(true);
+      validateAuthorizationUrl(githubUrl, NONCE, "https://github.com")?.href,
+    ).toBe(githubUrl);
     expect(
       isOAuthRetryMessage(
         { type: "oauth_retry", nextNonce: NONCE, url: githubUrl },
@@ -76,6 +76,6 @@ describe("OAuth popup schemas", () => {
         NONCE,
         "https://github.com",
       ),
-    ).toBe(false);
+    ).toBeNull();
   });
 });

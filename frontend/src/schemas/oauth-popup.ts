@@ -65,7 +65,11 @@ export function isOAuthRetryMessage(
     typeof value.nextNonce === "string" &&
     oauthAttemptNonceSchema.safeParse(value.nextNonce).success &&
     typeof value.url === "string" &&
-    validateAuthorizationUrl(value.url, value.nextNonce, expectedProviderOrigin)
+    validateAuthorizationUrl(
+      value.url,
+      value.nextNonce,
+      expectedProviderOrigin,
+    ) !== null
   );
 }
 
@@ -73,19 +77,22 @@ export function validateAuthorizationUrl(
   rawUrl: string,
   nonce: string,
   expectedProviderOrigin?: string,
-): boolean {
-  if (!oauthAttemptNonceSchema.safeParse(nonce).success) return false;
+): URL | null {
+  if (!oauthAttemptNonceSchema.safeParse(nonce).success) return null;
   try {
     const url = new URL(rawUrl, window.location.origin);
-    return (
-      (url.protocol === "https:" || url.protocol === "http:") &&
-      url.username === "" &&
-      url.password === "" &&
-      (expectedProviderOrigin === undefined ||
-        url.origin === expectedProviderOrigin) &&
-      url.searchParams.get("state") === `1cc_${nonce}`
-    );
+    if (
+      (url.protocol !== "https:" && url.protocol !== "http:") ||
+      url.username !== "" ||
+      url.password !== "" ||
+      (expectedProviderOrigin !== undefined &&
+        url.origin !== expectedProviderOrigin) ||
+      url.searchParams.get("state") !== `1cc_${nonce}`
+    ) {
+      return null;
+    }
+    return url;
   } catch {
-    return false;
+    return null;
   }
 }

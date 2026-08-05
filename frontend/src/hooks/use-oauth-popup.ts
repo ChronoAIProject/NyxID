@@ -69,11 +69,15 @@ export function useOAuthPopupReceiver({
           const current = useOAuthPopupStore.getState().attempt;
           if (current?.launchId !== launchId || current.nonce !== currentNonce)
             return;
-          if (!validateAuthorizationUrl(retry.url, retry.nextNonce)) return;
+          const authorizationUrl = validateAuthorizationUrl(
+            retry.url,
+            retry.nextNonce,
+          );
+          if (authorizationUrl === null) return;
           postOAuthRetry(channel, {
             type: "oauth_retry",
             nextNonce: retry.nextNonce,
-            url: retry.url,
+            url: authorizationUrl.href,
           });
           useOAuthPopupStore.getState().setNonce(launchId, retry.nextNonce);
         })

@@ -1569,7 +1569,7 @@ function OAuthStep({
       if (
         !nextNonce ||
         !oauthAttemptNonceSchema.safeParse(nextNonce).success ||
-        !validateAuthorizationUrl(response.authorization_url, nextNonce)
+        validateAuthorizationUrl(response.authorization_url, nextNonce) === null
       ) {
         throw new Error("OAuth retry returned an invalid authorization URL");
       }
@@ -1734,7 +1734,9 @@ function OAuthStep({
         if (!oauthAttemptNonceSchema.safeParse(nonce).success) {
           throw new Error("OAuth provider returned an invalid attempt nonce");
         }
-        if (!validateAuthorizationUrl(response.authorization_url, nonce)) {
+        if (
+          validateAuthorizationUrl(response.authorization_url, nonce) === null
+        ) {
           throw new Error("OAuth provider returned an invalid authorization URL");
         }
         if (popup) {

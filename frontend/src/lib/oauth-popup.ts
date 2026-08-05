@@ -78,12 +78,18 @@ export function openOAuthPopup(): OAuthPopupHandle | null {
     launchId,
     ready,
     async navigate(url, nonce) {
-      if (!validateAuthorizationUrl(url, nonce)) {
+      const authorizationUrl = validateAuthorizationUrl(url, nonce);
+      if (authorizationUrl === null) {
         throw new Error("Invalid OAuth authorization URL");
       }
       await ready;
       popup.postMessage(
-        { type: "oauth_launch_navigate", launchId, nonce, url },
+        {
+          type: "oauth_launch_navigate",
+          launchId,
+          nonce,
+          url: authorizationUrl.href,
+        },
         window.location.origin,
       );
     },

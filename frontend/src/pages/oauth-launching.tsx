@@ -38,17 +38,21 @@ export function OAuthLaunchingPage() {
         message?.type !== "oauth_launch_navigate" ||
         message.launchId !== launchId ||
         typeof message.url !== "string" ||
-        typeof message.nonce !== "string" ||
-        !validateAuthorizationUrl(message.url, message.nonce)
+        typeof message.nonce !== "string"
       ) {
         return;
       }
+      const authorizationUrl = validateAuthorizationUrl(
+        message.url,
+        message.nonce,
+      );
+      if (authorizationUrl === null) return;
       window.removeEventListener("message", onMessage);
       sessionStorage.setItem(
         OAUTH_PROVIDER_ORIGIN_KEY,
-        new URL(message.url, window.location.origin).origin,
+        authorizationUrl.origin,
       );
-      window.location.assign(message.url);
+      window.location.assign(authorizationUrl.href);
     };
     window.addEventListener("message", onMessage);
 
