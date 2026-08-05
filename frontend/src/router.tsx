@@ -72,6 +72,8 @@ import {
   CliAuthPage,
   CliPairPage,
   LoginDevicePage,
+  ConnectLinkPage,
+  ConnectLinkReturnPage,
   SshTerminalPage,
   KeysPage,
   BillingPage,
@@ -244,6 +246,19 @@ const loginDeviceRoute = createRoute({
   getParentRoute: () => rootRoute,
   validateSearch: (): Record<string, never> => ({}),
   component: LoginDevicePage,
+});
+
+const connectLinkRoute = createRoute({
+  path: "/connect/$token",
+  getParentRoute: () => rootRoute,
+  validateSearch: (): Record<string, never> => ({}),
+  component: ConnectLinkPage,
+});
+
+const connectLinkReturnRoute = createRoute({
+  path: "/connect/return/$linkId",
+  getParentRoute: () => rootRoute,
+  component: ConnectLinkReturnPage,
 });
 
 const sshTerminalRoute = createRoute({
@@ -845,6 +860,8 @@ const routeTree = rootRoute.addChildren([
   cliAuthRoute,
   cliPairRoute,
   loginDeviceRoute,
+  connectLinkRoute,
+  connectLinkReturnRoute,
   sshTerminalRoute,
   assistantRoute,
   assistantPluginsRoute,

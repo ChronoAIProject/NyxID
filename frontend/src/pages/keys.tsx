@@ -85,6 +85,7 @@ const RECONNECTABLE_STATUSES = new Set([
   "pending_auth",
   "refresh_failed",
   "failed",
+  "expired",
 ]);
 
 function isNonAdminOrgSource(source: CredentialSource | undefined): boolean {
@@ -96,7 +97,8 @@ function isReconnectableKey(
   source: CredentialSource | undefined,
 ): boolean {
   if (keyInfo.auto_connected || isNonAdminOrgSource(source)) return false;
-  if (!RECONNECTABLE_STATUSES.has(keyInfo.status)) return false;
+  const effectiveStatus = keyInfo.connection_status ?? keyInfo.status;
+  if (!RECONNECTABLE_STATUSES.has(effectiveStatus)) return false;
   return (
     keyInfo.credential_type === "oauth2" ||
     keyInfo.auth_method === "oauth2" ||
@@ -142,7 +144,9 @@ function KeyCardContent({
   const isReadOnly =
     source?.type === "org" && source.allowed && source.role !== "admin";
 
-  const displayStatus = keyInfo.node_id && keyInfo.node_status
+  const displayStatus = keyInfo.connection_status === "expired"
+    ? "expired"
+    : keyInfo.node_id && keyInfo.node_status
     ? (keyInfo.node_status === "unknown" ? "node_deleted" : keyInfo.node_status)
     : keyInfo.status;
 
@@ -323,7 +327,9 @@ function ServiceTableRow({
   const isReadOnly =
     source?.type === "org" && source.allowed && source.role !== "admin";
 
-  const displayStatus = keyInfo.node_id && keyInfo.node_status
+  const displayStatus = keyInfo.connection_status === "expired"
+    ? "expired"
+    : keyInfo.node_id && keyInfo.node_status
     ? (keyInfo.node_status === "unknown" ? "node_deleted" : keyInfo.node_status)
     : keyInfo.status;
 

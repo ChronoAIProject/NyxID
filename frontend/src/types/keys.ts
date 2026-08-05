@@ -18,6 +18,7 @@ export interface KeyInfo {
   readonly auth_method: string;
   readonly auth_key_name: string;
   readonly status: string;
+  readonly connection_status?: "active" | "expired" | null;
   readonly catalog_service_id: string | null;
   /**
    * Slug of the catalog `DownstreamService` this key was provisioned
