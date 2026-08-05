@@ -26,6 +26,11 @@ export const billingUsageRowSchema = z.object({
   metric: billingMetricSchema,
   lago_metric_code: z.string(),
   layer: z.string(),
+  // Optional so an older backend without the model/agent breakdown still
+  // parses; the UI degrades to a service-level row.
+  model: z.string().nullable().optional(),
+  api_key_id: z.string().nullable().optional(),
+  api_key_name: z.string().nullable().optional(),
   quantity: z.number().int(),
   requests: z.number().int(),
   bytes: z.number().int(),
