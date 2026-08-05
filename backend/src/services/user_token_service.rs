@@ -788,6 +788,7 @@ pub async fn initiate_oauth_connect(
     if let (Some(connection_id), Some(nonce)) = (connection_id, attempt_nonce.as_deref())
         && let Err(error) = crate::services::user_api_key_service::begin_chat_oauth_attempt(
             db,
+            on_behalf_of.unwrap_or(user_id),
             connection_id,
             nonce,
         )

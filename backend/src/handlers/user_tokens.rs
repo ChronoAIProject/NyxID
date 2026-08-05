@@ -543,7 +543,15 @@ async fn generic_oauth_callback_impl(
                         Err(e) => state_lookup_error = Some(e.to_string()),
                     }
                 }
-                Err(e) => state_lookup_error = Some(e.to_string()),
+                Err(e) => {
+                    state_lookup_error = Some(e.to_string());
+                    if let Some(nonce) =
+                        user_token_service::chat_attempt_nonce_from_state(state_param)
+                    {
+                        chat_completion = true;
+                        chat_nonce = Some(nonce.to_string());
+                    }
+                }
             }
         }
 
@@ -2287,6 +2295,57 @@ mod tests {
             redirect_query_param(&location, "nonce").as_deref(),
             Some(nonce.as_str())
         );
+    }
+
+    #[tokio::test]
+    async fn generic_oauth_callback_denial_chat_with_reaped_state_stays_popup_routed() {
+        let Some(db) = connect_test_database("oauth_callback_chat_denial_reaped_state").await
+        else {
+            return;
+        };
+        let frontend_url = test_app_state(db.clone()).config.frontend_url.clone();
+        let nonce = Uuid::new_v4().to_string();
+        let state_id = format!("{}{}", user_token_service::CHAT_CONNECT_STATE_PREFIX, nonce);
+        assert!(
+            db.collection::<OAuthState>(OAUTH_STATES)
+                .find_one(doc! { "_id": &state_id })
+                .await
+                .unwrap()
+                .is_none()
+        );
+
+        let location = redirect_location(
+            generic_oauth_callback_impl(
+                test_app_state(db),
+                None,
+                GenericOAuthCallbackQuery {
+                    code: None,
+                    state: Some(state_id),
+                    error: Some("access_denied".to_string()),
+                    error_description: None,
+                },
+            )
+            .await,
+        );
+
+        assert!(location.starts_with(&format!("{}/oauth?", frontend_url.trim_end_matches('/'))));
+        assert_eq!(
+            redirect_query_param(&location, "status").as_deref(),
+            Some("error")
+        );
+        assert_eq!(
+            redirect_query_param(&location, "flow").as_deref(),
+            Some("cc")
+        );
+        assert_eq!(
+            redirect_query_param(&location, "code").as_deref(),
+            Some("access_denied")
+        );
+        assert_eq!(
+            redirect_query_param(&location, "nonce").as_deref(),
+            Some(nonce.as_str())
+        );
+        assert!(!location.contains("/providers/callback"));
     }
 
     #[tokio::test]
