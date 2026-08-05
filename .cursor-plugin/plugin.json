@@ -2,7 +2,7 @@
   "name": "nyxid",
   "displayName": "NyxID",
   "description": "Brokers credentials for downstream services so agents never see raw keys or tokens, and bundles the synchronized Aevatar platform skill family. Operates through the nyxid CLI.",
-  "version": "0.7.5",
+  "version": "0.7.6",
   "author": {
     "name": "ChronoAIProject",
     "url": "https://github.com/ChronoAIProject"

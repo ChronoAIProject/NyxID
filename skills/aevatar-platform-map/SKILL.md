@@ -1,7 +1,7 @@
 ---
 name: aevatar-platform-map
 description: Entry point, panorama, and router for the Aevatar skill family. Use before building, running, publishing, scheduling, externally triggering, or operating Aevatar resources; configuring an Agent Profile; assessing managed/private codex_exec feasibility and setup; running the canonical Codex readiness proof; authoring a workflow with codex_exec; diagnosing a Codex failure; or deciding which companion skill owns a request. It teaches resource and identity boundaries, NyxID-brokered auth, client REST versus in-session tools, deployment gates, and exact handoffs without treating member, workflow, service, profile, schedule, or Codex capabilities as one lifecycle.
-version: "1.13"
+version: "1.14"
 metadata:
   category: plain
   tag:
@@ -192,8 +192,8 @@ Keep these modes separate; they share credentials but not caller-owned fields:
 
 - **Raw one-off HTTP:** call `nyxid_proxy` with exact `service_id + slug + path`; optional fields are `method`, `body`, non-sensitive `headers`, and `response_mode`. Example: `{"service_id":"us-gh-7","slug":"api-github","path":"/user","method":"GET"}`.
 - **Current-turn connected-service tools:** use only the typed tools actually present, such as `nyxid_services`, `nyxid_approvals`, `nyxid_require_service`, `nyxid_catalog`, and `nyxid_service_inventory`. `nyxid_catalog` is discovery only. For a connect, add, or authorize request, use it only to resolve the exact catalog slug, then always finish through `nyxid_require_service`; its typed readiness result is the authority for any `service.connect` handoff. Never finish such a request with catalog prose. Retired dynamic `nyxid_service_operation__*` and `nyxid_service_request` tools do not exist; never invent their names.
-- **Compiled published operation:** the YAML step calls `nyxid_proxy` and carries an exact copied `capability.nyxid_operation` selector. Its admission proof owns UserService, slug, operation ID, method, path template, digest, schemas, and response policy. Runtime arguments may contain only admitted `path_params`, `query`, `headers`, `body`, and `response_mode`; never repeat route or proof fields.
-- **Compiled authored request:** `capability.nyxid_request` carries a typed HTTP request contract and exact UserService selection from authoritative `/api/v1/keys`. Binding requires authenticated confirmation/grant for the current request-contract digest and risk. `/api/v1/user-services`, draft save, and preview success are not execution authority.
+- **Compiled published operation:** the YAML step calls `nyxid_proxy` and carries an exact copied `capability.nyxid_operation` selector: `user_service_id + endpoint_id`. `operation_id` is not an authored selector field. Its admission proof owns UserService, slug, internal operation identity, method, path template, digest, schemas, and response policy. Runtime arguments may contain only admitted `path_params`, `query`, `headers`, `body`, and `response_mode`; never repeat route or proof fields. The in-session list tool is not a REST endpoint; if a client has no supported picker, stop instead of guessing.
+- **Compiled authored request:** `capability.nyxid_request` carries a typed HTTP request contract and exact UserService selection from authoritative `/api/v1/keys`. Binding requires authenticated confirmation/grant for the current request-contract digest and risk. `/api/v1/user-services`, draft save, and preview success are not execution authority. It is a oneof alternative to `nyxid_operation`, not a companion block on the same step.
 - **Studio member:** call `aevatar_invoke_member` with `{"member_id":"m-alpha","payload":{"prompt":"hello"}}`; `endpoint_id` is optional and defaults to `chat`. Never substitute a draft `workflowId` or `publishedServiceId` for `member_id`.
 
 For managed `codex_exec`, normal execution is credential-read-only. Explicitly `POST /api/managed-codex/credential` to provision/reconcile, then read `GET /api/managed-codex/credential` and proceed only when `execution_ready=true` and `execution_readiness_reason=ready`; lifecycle `status=active` alone is insufficient. Do not retry the canary expecting normal execution to repair credentials. Preserve the deadline chain: chrono 180s < Aevatar managed request 300s < NyxID/ingress at least 315s < NyxID client 330s < workflow canary at least 360s.
@@ -318,6 +318,14 @@ lifecycle, and none of its IDs are aliases. Agent Profile work is not part of th
   webhook senders can often trigger an existing member/team by calling the NyxID proxy for
   `aevatar` with a NyxID API key and an explicit scope path. Host externalExposure is only
   for turning the Aevatar service itself into a reusable NyxID connector/slug.
+- **Remediation labels are not automatically self-serve actions.** `select_operation` needs a real
+  supported picker/list; `register_service` must resolve through the NyxID connect/authorize flow.
+  Catalog refresh only reconciles. On `api_key_scope_plan_route_unresolved`, stop and surface the
+  blocker instead of guessing a route, deleting a service, or retrying binding.
+- **Lark connection proof is separate from binding.** Before side effects, use the same UserService
+  and Base/table contract to read one known `record_id`. `91403` means document-application access;
+  `1254302 RolePermNotAllow` means advanced-role coverage. There is no implied generic connection
+  preflight in a successful bind or publish.
 - **Many steps are async, and `202` is admission only.** Bindings, deployments, runs, Agent Key
   provisioning, and Profile mutations all settle over time. A `202 Accepted` never proves commit,
   credential issuance, vault write, projection visibility, publication, cron fire, or success —
