@@ -434,6 +434,18 @@ pub fn build_router(
         .route("/{key_id}/usage", get(handlers::api_keys::get_key_usage))
         .route("/{key_id}/rotate", post(handlers::api_keys::rotate_key))
         .route(
+            "/{key_id}/durable-grants",
+            get(handlers::api_keys::list_durable_grants),
+        )
+        .route(
+            "/{key_id}/durable-grants/reauthorize",
+            post(handlers::api_keys::reauthorize_durable_grants),
+        )
+        .route(
+            "/{key_id}/durable-grants/{grant_id}/revoke",
+            post(handlers::api_keys::revoke_durable_grant),
+        )
+        .route(
             "/{key_id}/bindings",
             get(handlers::agent_bindings::list_bindings)
                 .post(handlers::agent_bindings::create_binding),

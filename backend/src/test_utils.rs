@@ -611,6 +611,7 @@ pub(crate) fn test_auth_user(user_id: &str) -> AuthUser {
         allowed_node_ids: vec![],
         api_key_id: None,
         api_key_name: None,
+        api_key_purpose: crate::models::api_key::ApiKeyPurpose::General,
         rate_limit_per_second: None,
         rate_limit_burst: None,
         ip_address: None,

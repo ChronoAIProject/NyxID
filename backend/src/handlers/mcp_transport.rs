@@ -3119,6 +3119,7 @@ mod tests {
             allowed_node_ids: vec![],
             api_key_id: Some(uuid::Uuid::new_v4().to_string()),
             api_key_name: Some("approval-parity-agent".to_string()),
+            api_key_purpose: crate::models::api_key::ApiKeyPurpose::General,
             rate_limit_per_second: None,
             rate_limit_burst: None,
             ip_address: None,

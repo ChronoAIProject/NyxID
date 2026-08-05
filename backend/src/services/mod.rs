@@ -36,6 +36,7 @@ pub mod credential_push_service;
 pub mod delegation_service;
 pub mod device_code_service;
 pub mod dpop_jti_cache;
+pub mod durable_operation_grant_service;
 pub mod event_dedup_cache;
 pub mod feature_flag_service;
 pub mod gcp_sa_service;

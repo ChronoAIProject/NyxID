@@ -14,7 +14,7 @@ use crate::AppState;
 use crate::crypto::jwt;
 use crate::crypto::token::hash_token;
 use crate::errors::AppError;
-use crate::models::api_key::{ApiKey, COLLECTION_NAME as API_KEYS};
+use crate::models::api_key::{ApiKey, ApiKeyPurpose, COLLECTION_NAME as API_KEYS};
 use crate::models::service_account::{COLLECTION_NAME as SERVICE_ACCOUNTS, ServiceAccount};
 use crate::models::service_account_token::{COLLECTION_NAME as SA_TOKENS, ServiceAccountToken};
 use crate::models::session::{COLLECTION_NAME as SESSIONS, Session};
@@ -71,6 +71,9 @@ pub struct AuthUser {
     pub api_key_id: Option<String>,
     /// Human-readable API key name (for audit logs)
     pub api_key_name: Option<String>,
+    /// Immutable security class copied from the verified API key. Non-API-key
+    /// authentication contexts use `general`.
+    pub api_key_purpose: ApiKeyPurpose,
     /// Per-agent rate limit (from ApiKey), None = use user-level defaults
     pub rate_limit_per_second: Option<u32>,
     pub rate_limit_burst: Option<u32>,
@@ -278,6 +281,21 @@ pub fn scope_allows_rest_proxy(scopes: &str) -> bool {
 
 pub fn scope_allows_llm_proxy(scopes: &str) -> bool {
     scope_allows_rest_proxy(scopes) || scope_contains(scopes, LLM_PROXY_SCOPE)
+}
+
+fn ensure_api_key_purpose_route(api_key: &ApiKey, path: &str) -> Result<(), AppError> {
+    if api_key.purpose != ApiKeyPurpose::ScheduledInvocation {
+        return Ok(());
+    }
+    let concrete_proxy_route =
+        path_matches_prefix(path, "/api/v1/proxy") && path != "/api/v1/proxy/services";
+    if concrete_proxy_route {
+        return Ok(());
+    }
+    Err(AppError::DurableGrantMismatch(
+        "scheduled_invocation API keys are restricted to durable proxy execution routes"
+            .to_string(),
+    ))
 }
 
 fn api_key_management_write_requires_scope(method: &Method, path: &str) -> bool {
@@ -563,6 +581,7 @@ impl FromRequestParts<AppState> for AuthUser {
                                 .await
                             {
                                 Ok((api_user_id_str, api_key)) => {
+                                    ensure_api_key_purpose_route(&api_key, parts.uri.path())?;
                                     let user_id =
                                         Uuid::parse_str(&api_user_id_str).map_err(|_| {
                                             AppError::Internal(
@@ -602,6 +621,7 @@ impl FromRequestParts<AppState> for AuthUser {
                                         allowed_node_ids: api_key.allowed_node_ids.clone(),
                                         api_key_id: Some(api_key.id.clone()),
                                         api_key_name: Some(api_key.name.clone()),
+                                        api_key_purpose: api_key.purpose,
                                         rate_limit_per_second: api_key.rate_limit_per_second,
                                         rate_limit_burst: api_key.rate_limit_burst,
                                         ip_address: request_ip.clone(),
@@ -691,6 +711,7 @@ impl FromRequestParts<AppState> for AuthUser {
                             allowed_node_ids: vec![],
                             api_key_id: None,
                             api_key_name: None,
+                            api_key_purpose: ApiKeyPurpose::General,
                             rate_limit_per_second: None,
                             rate_limit_burst: None,
                             ip_address: request_ip.clone(),
@@ -814,6 +835,7 @@ impl FromRequestParts<AppState> for AuthUser {
                         allowed_node_ids,
                         api_key_id,
                         api_key_name,
+                        api_key_purpose: ApiKeyPurpose::General,
                         rate_limit_per_second: None,
                         rate_limit_burst: None,
                         ip_address: request_ip.clone(),
@@ -882,6 +904,7 @@ impl FromRequestParts<AppState> for AuthUser {
                                     allowed_node_ids: vec![],
                                     api_key_id: None,
                                     api_key_name: None,
+                                    api_key_purpose: ApiKeyPurpose::General,
                                     rate_limit_per_second: None,
                                     rate_limit_burst: None,
                                     ip_address: request_ip.clone(),
@@ -922,6 +945,7 @@ impl FromRequestParts<AppState> for AuthUser {
 
                 let (user_id_str, key) =
                     crate::services::key_service::validate_api_key(&state.db, api_key).await?;
+                ensure_api_key_purpose_route(&key, parts.uri.path())?;
 
                 let user_id = Uuid::parse_str(&user_id_str)
                     .map_err(|_| AppError::Internal("Invalid user_id in API key".to_string()))?;
@@ -957,6 +981,7 @@ impl FromRequestParts<AppState> for AuthUser {
                     allowed_node_ids: key.allowed_node_ids.clone(),
                     api_key_id: Some(key.id.clone()),
                     api_key_name: Some(key.name.clone()),
+                    api_key_purpose: key.purpose,
                     rate_limit_per_second: key.rate_limit_per_second,
                     rate_limit_burst: key.rate_limit_burst,
                     ip_address: request_ip,
@@ -1357,6 +1382,7 @@ mod tests {
             allowed_node_ids: vec![],
             api_key_id: None,
             api_key_name: None,
+            api_key_purpose: ApiKeyPurpose::General,
             rate_limit_per_second: None,
             rate_limit_burst: None,
             ip_address: None,
@@ -1926,6 +1952,8 @@ mod tests {
             rate_limit_burst: None,
             platform: Some("aevatar".to_string()),
             callback_url: None,
+            purpose: Default::default(),
+            scheduled_write_enabled: false,
         }
     }
 
@@ -2692,6 +2720,7 @@ mod tests {
             allowed_node_ids: vec![],
             api_key_id: Some("key-uuid-123".to_string()),
             api_key_name: Some("coding-agent".to_string()),
+            api_key_purpose: ApiKeyPurpose::General,
             rate_limit_per_second: None,
             rate_limit_burst: None,
             ip_address: None,
@@ -3112,6 +3141,22 @@ mod tests {
     #[test]
     fn path_matches_prefix_rejects_unrelated() {
         assert!(!path_matches_prefix("/other/path", "/api/v1"));
+    }
+
+    #[test]
+    fn scheduled_keys_are_confined_to_concrete_proxy_execution_routes() {
+        let mut key = delegated_fixture_api_key("key-1", "user-1", "hash-1");
+        key.purpose = crate::models::api_key::ApiKeyPurpose::ScheduledInvocation;
+        key.scheduled_write_enabled = true;
+
+        assert!(ensure_api_key_purpose_route(&key, "/api/v1/proxy/s/service/items").is_ok());
+        assert!(ensure_api_key_purpose_route(&key, "/api/v1/proxy/service-id/items").is_ok());
+        assert!(ensure_api_key_purpose_route(&key, "/api/v1/proxy/services").is_err());
+        assert!(ensure_api_key_purpose_route(&key, "/api/v1/llm/chat/completions").is_err());
+        assert!(ensure_api_key_purpose_route(&key, "/api/v1/mcp").is_err());
+
+        key.purpose = crate::models::api_key::ApiKeyPurpose::General;
+        assert!(ensure_api_key_purpose_route(&key, "/api/v1/llm/chat/completions").is_ok());
     }
 
     // -- approval_requester_type --

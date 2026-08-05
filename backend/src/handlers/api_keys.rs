@@ -7,23 +7,29 @@ use futures::TryStreamExt;
 use mongodb::bson::{DateTime as BsonDateTime, doc};
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, HashMap, HashSet};
-use utoipa::ToSchema;
+use utoipa::{IntoParams, ToSchema};
 
 use crate::AppState;
 use crate::errors::{AppError, AppResult};
 use crate::models::agent_service_binding::{
     AgentServiceBinding, COLLECTION_NAME as AGENT_SERVICE_BINDINGS,
 };
-use crate::models::api_key::{ApiKey, COLLECTION_NAME as API_KEYS};
+use crate::models::api_key::{ApiKey, ApiKeyPurpose, COLLECTION_NAME as API_KEYS};
 use crate::models::audit_log::{AuditLog, COLLECTION_NAME as AUDIT_LOG};
 use crate::models::downstream_service::{
     COLLECTION_NAME as DOWNSTREAM_SERVICES, DownstreamService,
+};
+use crate::models::durable_operation_grant::{
+    DurableClientAuditBinding, DurableOperationConstraints, DurableOperationGrant,
+    DurableOperationSelection, DurableReplayPolicy, DurableUsageWindow,
 };
 use crate::models::node::{COLLECTION_NAME as NODES, Node};
 use crate::models::user_endpoint::{COLLECTION_NAME as USER_ENDPOINTS, UserEndpoint};
 use crate::models::user_service::{COLLECTION_NAME as USER_SERVICES, UserService};
 use crate::mw::auth::AuthUser;
-use crate::services::{api_key_scope_service, key_service, org_service};
+use crate::services::{
+    api_key_scope_service, audit_service, durable_operation_grant_service, key_service, org_service,
+};
 use crate::telemetry::{TelemetryContext, TelemetryEvent, emit_event};
 
 // --- Request / Response types ---
@@ -127,6 +133,11 @@ pub struct CreateApiKeyRequest {
     /// When present, the grants must exactly match the current plan and both
     /// `allow_all_*` flags must be false.
     pub scope_plan_digest: Option<String>,
+    /// Exact PublishedEndpoint operations for a `scheduled_invocation` key.
+    /// Non-empty input selects scope-plan v2 and the fail-closed provisioning
+    /// path; ordinary key creation must leave this empty.
+    #[serde(default)]
+    pub selected_operations: Vec<DurableOperationSelection>,
 }
 
 #[derive(Debug, Deserialize, ToSchema)]
@@ -170,6 +181,11 @@ pub struct ApiKeyScopePlanRequest {
     /// Intended organization key owner. Omit for a personal key owned by the
     /// authenticated actor. The actor must be an admin of this exact org.
     pub target_org_id: Option<String>,
+    /// Exact durable operations to preview. Non-empty input returns a v2 plan.
+    #[serde(default)]
+    pub selected_operations: Vec<DurableOperationSelection>,
+    /// Finite key expiry bound by the v2 plan. Required with operations.
+    pub key_expires_at: Option<String>,
 }
 
 #[derive(Debug, Serialize, ToSchema)]
@@ -192,6 +208,82 @@ pub struct CreateApiKeyResponse {
     pub rate_limit_burst: Option<u32>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub platform: Option<String>,
+    pub purpose: ApiKeyPurpose,
+    pub scheduled_write_enabled: bool,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub durable_grants: Vec<DurableGrantReceipt>,
+}
+
+#[derive(Debug, Clone, Serialize, ToSchema)]
+pub struct DurableGrantReceipt {
+    pub id: String,
+    pub api_key_id: String,
+    pub user_service_id: String,
+    pub endpoint_id: String,
+    pub method: String,
+    pub normalized_path_template: String,
+    pub contract_digest: String,
+    pub constraints: DurableOperationConstraints,
+    pub valid_from: String,
+    pub expires_at: String,
+    pub total_limit: i64,
+    pub total_used: i64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub window: Option<DurableUsageWindow>,
+    pub window_used: i64,
+    pub replay_policy: DurableReplayPolicy,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub client_audit_binding: Option<DurableClientAuditBinding>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub revoked_at: Option<String>,
+    pub state_version: i64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reauthorized_from: Option<String>,
+    pub created_at: String,
+}
+
+impl From<DurableOperationGrant> for DurableGrantReceipt {
+    fn from(grant: DurableOperationGrant) -> Self {
+        Self {
+            id: grant.id,
+            api_key_id: grant.api_key_id,
+            user_service_id: grant.user_service_id,
+            endpoint_id: grant.endpoint_id,
+            method: grant.method,
+            normalized_path_template: grant.normalized_path_template,
+            contract_digest: grant.contract_digest,
+            constraints: grant.constraints,
+            valid_from: grant.valid_from.to_rfc3339(),
+            expires_at: grant.expires_at.to_rfc3339(),
+            total_limit: grant.total_limit,
+            total_used: grant.total_used,
+            window: grant.window,
+            window_used: grant.window_used,
+            replay_policy: grant.replay_policy,
+            client_audit_binding: grant.client_audit_binding,
+            revoked_at: grant.revoked_at.map(|value| value.to_rfc3339()),
+            state_version: grant.state_version,
+            reauthorized_from: grant.reauthorized_from,
+            created_at: grant.created_at.to_rfc3339(),
+        }
+    }
+}
+
+#[derive(Debug, Deserialize, IntoParams, ToSchema, Default)]
+pub struct DurableGrantListQuery {
+    #[serde(default)]
+    pub include_revoked: bool,
+}
+
+#[derive(Debug, Serialize, ToSchema)]
+pub struct DurableGrantListResponse {
+    pub grants: Vec<DurableGrantReceipt>,
+}
+
+#[derive(Debug, Deserialize, ToSchema)]
+pub struct ReauthorizeDurableGrantsRequest {
+    pub selected_operations: Vec<DurableOperationSelection>,
+    pub scope_plan_digest: String,
 }
 
 #[derive(Debug, Serialize, ToSchema)]
@@ -237,6 +329,8 @@ pub struct ApiKeyResponse {
     pub platform: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub callback_url: Option<String>,
+    pub purpose: ApiKeyPurpose,
+    pub scheduled_write_enabled: bool,
     #[serde(default, skip_serializing_if = "is_zero")]
     pub bindings_count: u64,
     /// Provenance: whether this key is owned directly by the caller or
@@ -533,6 +627,8 @@ async fn enrich_api_keys_batch(
                 rate_limit_burst: key.rate_limit_burst,
                 platform: key.platform.clone(),
                 callback_url: key.callback_url.clone(),
+                purpose: key.purpose,
+                scheduled_write_enabled: key.scheduled_write_enabled,
                 bindings_count: binding_counts.get(&key.id).copied().unwrap_or(0),
                 credential_source: source_cache
                     .get(&key.user_id)
@@ -1117,20 +1213,44 @@ pub async fn get_key_usage(
 /// service and node sets. The snapshot includes every active configured node
 /// candidate, regardless of current online or WebSocket state. Pass its
 /// `normalized_grant_digest` as `scope_plan_digest` when creating or updating
-/// the key so NyxID revalidates authorization and route configuration.
+/// the key so NyxID revalidates authorization and route configuration. When
+/// `selected_operations` is non-empty, the response is a v2 durable plan and
+/// also binds endpoint contracts, constraints, key purpose, and finite expiry.
 pub async fn plan_key_scope(
     State(state): State<AppState>,
     auth_user: AuthUser,
     Json(body): Json<ApiKeyScopePlanRequest>,
 ) -> AppResult<Json<api_key_scope_service::EffectiveScopePlan>> {
     let actor = auth_user.user_id.to_string();
-    let plan = api_key_scope_service::build_scope_plan(
-        &state.db,
-        &actor,
-        body.target_org_id.as_deref(),
-        &body.selected_service_ids,
-    )
-    .await?;
+    let key_expires_at = body
+        .key_expires_at
+        .as_deref()
+        .map(parse_expires_at)
+        .transpose()?;
+    let plan = if body.selected_operations.is_empty() {
+        if key_expires_at.is_some() {
+            return Err(AppError::ValidationError(
+                "key_expires_at is only valid with selected_operations".to_string(),
+            ));
+        }
+        api_key_scope_service::build_scope_plan(
+            &state.db,
+            &actor,
+            body.target_org_id.as_deref(),
+            &body.selected_service_ids,
+        )
+        .await?
+    } else {
+        api_key_scope_service::build_scope_plan_with_operations(
+            &state.db,
+            &actor,
+            body.target_org_id.as_deref(),
+            &body.selected_service_ids,
+            &body.selected_operations,
+            key_expires_at,
+        )
+        .await?
+    };
     Ok(Json(plan))
 }
 
@@ -1193,7 +1313,22 @@ pub async fn create_key(
         ));
     }
 
-    let scopes = body.scopes.as_deref().unwrap_or("read");
+    let scheduled = !body.selected_operations.is_empty();
+    let scopes = if scheduled {
+        if body.scopes.as_deref().is_some_and(|value| value != "proxy") {
+            return Err(AppError::ValidationError(
+                "scheduled_invocation keys require scopes='proxy'".to_string(),
+            ));
+        }
+        if body.callback_url.is_some() {
+            return Err(AppError::ValidationError(
+                "scheduled_invocation keys do not support callback_url".to_string(),
+            ));
+        }
+        "proxy"
+    } else {
+        body.scopes.as_deref().unwrap_or("read")
+    };
 
     let expires_at = body
         .expires_at
@@ -1235,25 +1370,66 @@ pub async fn create_key(
     )
     .await?;
 
-    let created = key_service::create_api_key_with_scope_authorization(
-        &state.db,
-        &user_id_str,
-        Some(&actor),
-        &body.name,
-        scopes,
-        expires_at,
-        body.description.as_deref(),
-        Some(&body.allowed_service_ids),
-        Some(&body.allowed_node_ids),
-        Some(allow_all_services),
-        Some(allow_all_nodes),
-        body.rate_limit_per_second,
-        body.rate_limit_burst,
-        body.platform.as_deref(),
-        body.callback_url.as_deref(),
-        body.scope_plan_digest.as_deref(),
-    )
-    .await?;
+    let (created, durable_grants) = if scheduled {
+        if allow_all_services || allow_all_nodes {
+            return Err(AppError::ValidationError(
+                "scheduled_invocation keys require exact service and node scopes".to_string(),
+            ));
+        }
+        let expires_at = expires_at.ok_or_else(|| {
+            AppError::ValidationError(
+                "scheduled_invocation keys require a finite expires_at".to_string(),
+            )
+        })?;
+        let expected_digest = body.scope_plan_digest.as_deref().ok_or_else(|| {
+            AppError::ValidationError(
+                "scheduled_invocation provisioning requires scope_plan_digest".to_string(),
+            )
+        })?;
+        let provisioned = durable_operation_grant_service::provision_scheduled_key(
+            &state.db,
+            &actor,
+            &user_id_str,
+            &body.name,
+            expires_at,
+            body.description.as_deref(),
+            &body.allowed_service_ids,
+            &body.allowed_node_ids,
+            body.rate_limit_per_second,
+            body.rate_limit_burst,
+            body.platform.as_deref(),
+            &body.selected_operations,
+            expected_digest,
+        )
+        .await?;
+        let receipts = provisioned
+            .grants
+            .into_iter()
+            .map(DurableGrantReceipt::from)
+            .collect();
+        (provisioned.key, receipts)
+    } else {
+        let created = key_service::create_api_key_with_scope_authorization(
+            &state.db,
+            &user_id_str,
+            Some(&actor),
+            &body.name,
+            scopes,
+            expires_at,
+            body.description.as_deref(),
+            Some(&body.allowed_service_ids),
+            Some(&body.allowed_node_ids),
+            Some(allow_all_services),
+            Some(allow_all_nodes),
+            body.rate_limit_per_second,
+            body.rate_limit_burst,
+            body.platform.as_deref(),
+            body.callback_url.as_deref(),
+            body.scope_plan_digest.as_deref(),
+        )
+        .await?;
+        (created, Vec::new())
+    };
 
     // Telemetry: api_key.created. `scope_mode` collapses the two
     // allow-all flags into a single enum: "all" when both are unrestricted,
@@ -1275,6 +1451,21 @@ pub async fn create_key(
         },
     );
 
+    if scheduled {
+        audit_service::log_for_user(
+            state.db.clone(),
+            &auth_user,
+            "durable_grants_provisioned",
+            Some(serde_json::json!({
+                "api_key_id": &created.id,
+                "grant_ids": durable_grants.iter().map(|grant| &grant.id).collect::<Vec<_>>(),
+                "operation_count": durable_grants.len(),
+                "owner_user_id": &user_id_str,
+                "decision": "authorized",
+            })),
+        );
+    }
+
     Ok(Json(CreateApiKeyResponse {
         id: created.id,
         name: created.name,
@@ -1290,6 +1481,9 @@ pub async fn create_key(
         rate_limit_per_second: created.rate_limit_per_second,
         rate_limit_burst: created.rate_limit_burst,
         platform: created.platform,
+        purpose: created.purpose,
+        scheduled_write_enabled: created.scheduled_write_enabled,
+        durable_grants,
     }))
 }
 
@@ -1456,7 +1650,139 @@ pub async fn rotate_key(
         rate_limit_per_second: created.rate_limit_per_second,
         rate_limit_burst: created.rate_limit_burst,
         platform: created.platform,
+        purpose: created.purpose,
+        scheduled_write_enabled: created.scheduled_write_enabled,
+        durable_grants: Vec::new(),
     }))
+}
+
+#[utoipa::path(
+    get,
+    path = "/api/v1/api-keys/{key_id}/durable-grants",
+    params(
+        ("key_id" = String, Path, description = "Scheduled API key ID"),
+        DurableGrantListQuery
+    ),
+    responses(
+        (status = 200, description = "Durable grant receipts", body = DurableGrantListResponse),
+        (status = 401, description = "Unauthorized", body = crate::errors::ErrorResponse),
+        (status = 403, description = "Organization admin access required", body = crate::errors::ErrorResponse),
+        (status = 404, description = "API key not found", body = crate::errors::ErrorResponse)
+    ),
+    security(("bearer_auth" = [])),
+    tag = "API Keys"
+)]
+pub async fn list_durable_grants(
+    State(state): State<AppState>,
+    auth_user: AuthUser,
+    Path(key_id): Path<String>,
+    Query(query): Query<DurableGrantListQuery>,
+) -> AppResult<Json<DurableGrantListResponse>> {
+    let actor = auth_user.user_id.to_string();
+    let owner = resolve_api_key_write_owner(&state, &actor, &key_id).await?;
+    let grants = durable_operation_grant_service::list_grants(
+        &state.db,
+        &owner,
+        &key_id,
+        query.include_revoked,
+    )
+    .await?
+    .into_iter()
+    .map(DurableGrantReceipt::from)
+    .collect();
+    Ok(Json(DurableGrantListResponse { grants }))
+}
+
+#[utoipa::path(
+    post,
+    path = "/api/v1/api-keys/{key_id}/durable-grants/{grant_id}/revoke",
+    params(
+        ("key_id" = String, Path, description = "Scheduled API key ID"),
+        ("grant_id" = String, Path, description = "Durable grant ID")
+    ),
+    responses(
+        (status = 200, description = "Revoked durable grant receipt", body = DurableGrantReceipt),
+        (status = 401, description = "Unauthorized", body = crate::errors::ErrorResponse),
+        (status = 403, description = "Organization admin access required", body = crate::errors::ErrorResponse),
+        (status = 404, description = "Active durable grant not found", body = crate::errors::ErrorResponse)
+    ),
+    security(("bearer_auth" = [])),
+    tag = "API Keys"
+)]
+pub async fn revoke_durable_grant(
+    State(state): State<AppState>,
+    auth_user: AuthUser,
+    Path((key_id, grant_id)): Path<(String, String)>,
+) -> AppResult<Json<DurableGrantReceipt>> {
+    auth_user.ensure_write_scope()?;
+    let actor = auth_user.user_id.to_string();
+    let owner = resolve_api_key_write_owner(&state, &actor, &key_id).await?;
+    let grant = durable_operation_grant_service::revoke_grant(
+        &state.db, &owner, &key_id, &grant_id, &actor,
+    )
+    .await?;
+    audit_service::log_for_user(
+        state.db.clone(),
+        &auth_user,
+        "durable_grant_revoked",
+        Some(serde_json::json!({
+            "api_key_id": &key_id,
+            "grant_id": &grant_id,
+            "endpoint_id": &grant.endpoint_id,
+            "contract_digest": &grant.contract_digest,
+            "decision": "revoked",
+        })),
+    );
+    Ok(Json(grant.into()))
+}
+
+#[utoipa::path(
+    post,
+    path = "/api/v1/api-keys/{key_id}/durable-grants/reauthorize",
+    params(("key_id" = String, Path, description = "Scheduled API key ID")),
+    request_body = ReauthorizeDurableGrantsRequest,
+    responses(
+        (status = 200, description = "Replacement durable grant receipts", body = DurableGrantListResponse),
+        (status = 400, description = "Invalid durable operation selection", body = crate::errors::ErrorResponse),
+        (status = 401, description = "Unauthorized", body = crate::errors::ErrorResponse),
+        (status = 403, description = "Organization admin access required", body = crate::errors::ErrorResponse),
+        (status = 409, description = "Scope plan is stale", body = crate::errors::ErrorResponse)
+    ),
+    security(("bearer_auth" = [])),
+    tag = "API Keys"
+)]
+pub async fn reauthorize_durable_grants(
+    State(state): State<AppState>,
+    auth_user: AuthUser,
+    Path(key_id): Path<String>,
+    Json(body): Json<ReauthorizeDurableGrantsRequest>,
+) -> AppResult<Json<DurableGrantListResponse>> {
+    auth_user.ensure_write_scope()?;
+    let actor = auth_user.user_id.to_string();
+    let owner = resolve_api_key_write_owner(&state, &actor, &key_id).await?;
+    let grants = durable_operation_grant_service::reauthorize_scheduled_key(
+        &state.db,
+        &actor,
+        &owner,
+        &key_id,
+        &body.selected_operations,
+        &body.scope_plan_digest,
+    )
+    .await?;
+    let receipts: Vec<DurableGrantReceipt> =
+        grants.into_iter().map(DurableGrantReceipt::from).collect();
+    audit_service::log_for_user(
+        state.db.clone(),
+        &auth_user,
+        "durable_grants_reauthorized",
+        Some(serde_json::json!({
+            "api_key_id": &key_id,
+            "grant_ids": receipts.iter().map(|grant| &grant.id).collect::<Vec<_>>(),
+            "operation_count": receipts.len(),
+            "decision": "authorized",
+        })),
+    );
+    Ok(Json(DurableGrantListResponse { grants: receipts }))
 }
 
 #[cfg(test)]
@@ -1761,6 +2087,8 @@ mod tests {
                 rate_limit_per_second: None,
                 rate_limit_burst: None,
                 platform: None,
+                purpose: Default::default(),
+                scheduled_write_enabled: false,
             }
         }
 
@@ -2093,5 +2421,103 @@ mod tests {
         assert_eq!(dates.len(), 30);
         assert_eq!(dates[0], "2026-04-26");
         assert_eq!(dates[29], "2026-05-25");
+    }
+
+    #[tokio::test]
+    async fn durable_grant_owner_acl_allows_personal_owner_and_org_admin_only() {
+        use crate::errors::AppError;
+        use crate::models::api_key::{ApiKey, ApiKeyPurpose, COLLECTION_NAME as API_KEYS};
+        use crate::models::org_membership::{
+            COLLECTION_NAME as ORG_MEMBERSHIPS, OrgMembership, OrgRole,
+        };
+        use crate::models::user::{COLLECTION_NAME as USERS, User, UserType};
+        use crate::test_utils::{
+            connect_test_database, test_app_state, test_membership, test_user,
+        };
+
+        let Some(db) = connect_test_database("durable_grant_owner_acl").await else {
+            return;
+        };
+        let personal_id = uuid::Uuid::new_v4().to_string();
+        let admin_id = uuid::Uuid::new_v4().to_string();
+        let member_id = uuid::Uuid::new_v4().to_string();
+        let outsider_id = uuid::Uuid::new_v4().to_string();
+        let org_id = uuid::Uuid::new_v4().to_string();
+        for id in [&personal_id, &admin_id, &member_id, &outsider_id] {
+            db.collection::<User>(USERS)
+                .insert_one(test_user(id, UserType::Person))
+                .await
+                .unwrap();
+        }
+        db.collection::<User>(USERS)
+            .insert_one(test_user(&org_id, UserType::Org))
+            .await
+            .unwrap();
+        db.collection::<OrgMembership>(ORG_MEMBERSHIPS)
+            .insert_many([
+                test_membership(&org_id, &admin_id, OrgRole::Admin, None),
+                test_membership(&org_id, &member_id, OrgRole::Member, None),
+            ])
+            .await
+            .unwrap();
+
+        let make_key = |id: String, owner: String| ApiKey {
+            id,
+            user_id: owner,
+            name: "scheduled".to_string(),
+            key_prefix: "nyxid_ag_test".to_string(),
+            key_hash: uuid::Uuid::new_v4().to_string(),
+            scopes: "proxy".to_string(),
+            last_used_at: None,
+            expires_at: Some(Utc::now() + Duration::days(1)),
+            is_active: true,
+            created_at: Utc::now(),
+            description: None,
+            allowed_service_ids: vec![uuid::Uuid::new_v4().to_string()],
+            allowed_node_ids: Vec::new(),
+            allow_all_services: false,
+            allow_all_nodes: false,
+            rate_limit_per_second: None,
+            rate_limit_burst: None,
+            platform: None,
+            callback_url: None,
+            purpose: ApiKeyPurpose::ScheduledInvocation,
+            scheduled_write_enabled: true,
+        };
+        let personal_key_id = uuid::Uuid::new_v4().to_string();
+        let org_key_id = uuid::Uuid::new_v4().to_string();
+        db.collection::<ApiKey>(API_KEYS)
+            .insert_many([
+                make_key(personal_key_id.clone(), personal_id.clone()),
+                make_key(org_key_id.clone(), org_id.clone()),
+            ])
+            .await
+            .unwrap();
+        let state = test_app_state(db);
+
+        assert_eq!(
+            super::resolve_api_key_write_owner(&state, &personal_id, &personal_key_id)
+                .await
+                .unwrap(),
+            personal_id
+        );
+        assert_eq!(
+            super::resolve_api_key_write_owner(&state, &admin_id, &org_key_id)
+                .await
+                .unwrap(),
+            org_id
+        );
+        assert!(matches!(
+            super::resolve_api_key_write_owner(&state, &member_id, &org_key_id).await,
+            Err(AppError::OrgRoleInsufficient(_))
+        ));
+        assert!(matches!(
+            super::resolve_api_key_write_owner(&state, &outsider_id, &org_key_id).await,
+            Err(AppError::NotFound(_))
+        ));
+        assert!(matches!(
+            super::resolve_api_key_write_owner(&state, &outsider_id, &personal_key_id).await,
+            Err(AppError::NotFound(_))
+        ));
     }
 }

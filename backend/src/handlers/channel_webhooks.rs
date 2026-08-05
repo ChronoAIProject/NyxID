@@ -905,6 +905,8 @@ mod tests {
             rate_limit_burst: None,
             platform: Some("codex".to_string()),
             callback_url: Some(callback_url),
+            purpose: Default::default(),
+            scheduled_write_enabled: false,
         };
 
         let conversation = crate::models::channel_conversation::ChannelConversation {

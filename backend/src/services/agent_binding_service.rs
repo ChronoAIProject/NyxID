@@ -346,6 +346,8 @@ mod tests {
             rate_limit_burst: None,
             platform: Some("claude-code".to_string()),
             callback_url: None,
+            purpose: Default::default(),
+            scheduled_write_enabled: false,
         }
     }
 

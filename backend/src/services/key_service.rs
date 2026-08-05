@@ -9,7 +9,7 @@ use crate::errors::{AppError, AppResult};
 use crate::models::agent_service_binding::{
     AgentServiceBinding, COLLECTION_NAME as AGENT_BINDINGS,
 };
-use crate::models::api_key::{ApiKey, COLLECTION_NAME as API_KEYS};
+use crate::models::api_key::{ApiKey, ApiKeyPurpose, COLLECTION_NAME as API_KEYS};
 use crate::redaction::RedactedLen;
 use crate::services::api_key_scope_service::{self, ScopeAuthorization};
 
@@ -30,6 +30,8 @@ pub struct CreatedApiKey {
     pub rate_limit_per_second: Option<u32>,
     pub rate_limit_burst: Option<u32>,
     pub platform: Option<String>,
+    pub purpose: ApiKeyPurpose,
+    pub scheduled_write_enabled: bool,
 }
 
 impl fmt::Debug for CreatedApiKey {
@@ -49,6 +51,8 @@ impl fmt::Debug for CreatedApiKey {
             .field("rate_limit_per_second", &self.rate_limit_per_second)
             .field("rate_limit_burst", &self.rate_limit_burst)
             .field("platform", &self.platform)
+            .field("purpose", &self.purpose)
+            .field("scheduled_write_enabled", &self.scheduled_write_enabled)
             .finish()
     }
 }
@@ -196,6 +200,50 @@ pub async fn create_api_key_with_scope_authorization(
     callback_url: Option<&str>,
     scope_plan_digest: Option<&str>,
 ) -> AppResult<CreatedApiKey> {
+    create_api_key_with_security_class(
+        db,
+        user_id,
+        scope_actor_user_id,
+        name,
+        scopes,
+        expires_at,
+        description,
+        allowed_service_ids,
+        allowed_node_ids,
+        allow_all_services,
+        allow_all_nodes,
+        rate_limit_per_second,
+        rate_limit_burst,
+        platform,
+        callback_url,
+        scope_plan_digest,
+        ApiKeyPurpose::General,
+        false,
+    )
+    .await
+}
+
+#[allow(clippy::too_many_arguments)]
+pub async fn create_api_key_with_security_class(
+    db: &mongodb::Database,
+    user_id: &str,
+    scope_actor_user_id: Option<&str>,
+    name: &str,
+    scopes: &str,
+    expires_at: Option<chrono::DateTime<Utc>>,
+    description: Option<&str>,
+    allowed_service_ids: Option<&[String]>,
+    allowed_node_ids: Option<&[String]>,
+    allow_all_services: Option<bool>,
+    allow_all_nodes: Option<bool>,
+    rate_limit_per_second: Option<u32>,
+    rate_limit_burst: Option<u32>,
+    platform: Option<&str>,
+    callback_url: Option<&str>,
+    scope_plan_digest: Option<&str>,
+    purpose: ApiKeyPurpose,
+    scheduled_write_enabled: bool,
+) -> AppResult<CreatedApiKey> {
     if name.is_empty() || name.len() > 200 {
         return Err(AppError::ValidationError(
             "API key name must be between 1 and 200 characters".to_string(),
@@ -209,6 +257,14 @@ pub async fn create_api_key_with_scope_authorization(
     let node_ids = allowed_node_ids.unwrap_or(&[]).to_vec();
     let all_svcs = allow_all_services.unwrap_or(true);
     let all_nodes = allow_all_nodes.unwrap_or(true);
+
+    if purpose == ApiKeyPurpose::ScheduledInvocation && (all_svcs || all_nodes || scopes != "proxy")
+    {
+        return Err(AppError::DurableGrantMismatch(
+            "scheduled_invocation keys require exact service/node scopes and scopes='proxy'"
+                .to_string(),
+        ));
+    }
 
     if let Some(expected_digest) = scope_plan_digest {
         let actor_user_id = scope_actor_user_id.ok_or_else(|| {
@@ -286,6 +342,8 @@ pub async fn create_api_key_with_scope_authorization(
                 None
             }
         },
+        purpose,
+        scheduled_write_enabled,
     };
 
     db.collection::<ApiKey>(API_KEYS)
@@ -307,6 +365,8 @@ pub async fn create_api_key_with_scope_authorization(
         rate_limit_per_second,
         rate_limit_burst,
         platform: platform.map(|s| s.to_string()),
+        purpose,
+        scheduled_write_enabled,
     })
 }
 
@@ -371,6 +431,12 @@ pub async fn rotate_api_key_with_scope_authorization(
         .find_one(doc! { "_id": key_id, "user_id": user_id })
         .await?
         .ok_or_else(|| AppError::NotFound("API key not found".to_string()))?;
+
+    if old_key.purpose == ApiKeyPurpose::ScheduledInvocation {
+        return Err(AppError::DurableGrantMismatch(
+            "scheduled_invocation keys must be reprovisioned from a fresh scope plan".to_string(),
+        ));
+    }
 
     // Snapshot old bindings BEFORE deactivating so we can clone them onto the new key.
     let old_bindings: Vec<AgentServiceBinding> = db
@@ -472,6 +538,22 @@ pub async fn update_api_key_scope_with_scope_authorization(
         .find_one(doc! { "_id": key_id, "user_id": user_id, "is_active": true })
         .await?
         .ok_or_else(|| AppError::NotFound("API key not found".to_string()))?;
+
+    if existing.purpose == ApiKeyPurpose::ScheduledInvocation
+        && (scopes.is_some()
+            || allowed_service_ids.is_some()
+            || allowed_node_ids.is_some()
+            || allow_all_services.is_some()
+            || allow_all_nodes.is_some()
+            || platform.is_some()
+            || callback_url.is_some()
+            || scope_plan_digest.is_some())
+    {
+        return Err(AppError::DurableGrantMismatch(
+            "scheduled_invocation authority is immutable; use durable grant reauthorization"
+                .to_string(),
+        ));
+    }
 
     if let Some(n) = name
         && (n.is_empty() || n.len() > 200)
