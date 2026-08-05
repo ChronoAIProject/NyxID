@@ -1,26 +1,57 @@
-import { useMemo, useState } from "react";
+import { useMemo, useState, type ReactNode } from "react";
 import { Badge } from "@/components/ui/badge";
-import { Button } from "@/components/ui/button";
+import { Button, ButtonIcon } from "@/components/ui/button";
 import { Checkbox } from "@/components/ui/checkbox";
-import {
-  Card,
-  CardContent,
-  CardDescription,
-  CardHeader,
-  CardTitle,
-} from "@/components/ui/card";
+import { Card, CardContent } from "@/components/ui/card";
 import { Label } from "@/components/ui/label";
 import { Switch } from "@/components/ui/switch";
 import { AlertTriangle, ShieldCheck } from "lucide-react";
 import {
   OAUTH_SCOPE_META,
-  scopeRiskClass,
+  scopeRiskBadgeVariant,
   scopeRiskLabel,
 } from "@/lib/constants";
 import { useApplyTheme } from "@/hooks/use-theme";
 import { NyxidLogo } from "@/components/brand/nyxid-logo";
+import { DetailSection } from "@/components/shared/detail-section";
+import { DetailRow } from "@/components/shared/detail-row";
+import { ErrorBanner } from "@/components/shared/error-banner";
 import { useUserServices } from "@/hooks/use-user-services";
 import { oauthConsentServiceAccessSchema } from "@/schemas/oauth-consent";
+
+/**
+ * Standalone shell for the consent surface, matching `login-device.tsx` — the
+ * sibling "a human reviews and approves an access request" page. The
+ * `bg-background` is load-bearing: the document body carries an inline dark
+ * colour as an anti-flash guard for the never-themed public pages, so a themed
+ * standalone page that doesn't paint its own canvas renders a light card on a
+ * black void.
+ */
+function ConsentShell({ children }: { readonly children: ReactNode }) {
+  return (
+    <main
+      className="flex min-h-dvh items-start justify-center bg-background px-4 py-8 text-foreground sm:items-center sm:py-10"
+      style={{
+        paddingTop: "max(2rem, var(--sat))",
+        paddingBottom: "max(2rem, var(--sab))",
+      }}
+    >
+      <div className="flex w-full max-w-xl flex-col gap-5">
+        <div className="flex justify-center">
+          <NyxidLogo className="h-8 w-auto" />
+        </div>
+        {children}
+      </div>
+    </main>
+  );
+}
+
+/**
+ * Fill for sections nested inside the Card. `bg-overlay` is the theme-aware
+ * successor to the `white/[α]` idiom (app.css "Interactive chrome"): identical
+ * in dark, black-alpha on light, so the nested layer survives both themes.
+ */
+const NESTED_SECTION = "bg-overlay";
 
 function readParam(search: URLSearchParams, key: string): string {
   return search.get(key) ?? "";
@@ -252,107 +283,55 @@ export function OAuthConsentPage() {
 
   if (missing) {
     return (
-      <div
-        className="mx-auto flex min-h-dvh w-full max-w-2xl items-center px-6 py-10"
-        style={{
-          paddingTop: "max(2.5rem, var(--sat))",
-          paddingBottom: "max(2.5rem, var(--sab))",
-        }}
-      >
-        <Card className="w-full">
-          <CardHeader>
-            <CardTitle>Invalid consent request</CardTitle>
-            <CardDescription>
-              Missing required OAuth parameters. Please restart the sign-in
-              flow.
-            </CardDescription>
-          </CardHeader>
-        </Card>
-      </div>
+      <ConsentShell>
+        <header className="flex flex-col gap-2 text-center">
+          <h1 className="text-[22px] font-bold leading-tight tracking-tight text-foreground sm:text-[28px]">
+            Invalid consent request
+          </h1>
+        </header>
+        <ErrorBanner message="Missing required OAuth parameters. Please restart the sign-in flow." />
+      </ConsentShell>
     );
   }
 
   return (
-    <div
-      className="mx-auto flex min-h-dvh w-full max-w-2xl items-center px-6 py-10"
-      style={{
-        paddingTop: "max(2.5rem, var(--sat))",
-        paddingBottom: "max(2.5rem, var(--sab))",
-      }}
-    >
-      <Card className="w-full">
-        <CardHeader className="space-y-4">
-          <div className="flex items-center">
-            <NyxidLogo className="h-7 w-auto" />
-          </div>
-          <CardTitle>
-            {bindingReview
-              ? isLarkBinding
-                ? "Review Lark bot access"
-                : "Review application access"
-              : isLarkBinding
-                ? "Authorize Lark bot"
-                : "Authorize application"}
-          </CardTitle>
-          <CardDescription>
-            {bindingReview ? (
-              <>
-                Review the NyxID services available to{" "}
-                <span className="font-medium text-foreground">
-                  {clientName}
-                </span>
-                .
-              </>
-            ) : (
-              <>
-                <span className="font-medium text-foreground">
-                  {clientName}
-                </span>{" "}
-                wants to access your account via OAuth.
-              </>
-            )}
-          </CardDescription>
-        </CardHeader>
+    <ConsentShell>
+      <header className="flex flex-col gap-2 text-center">
+        <h1 className="text-[22px] font-bold leading-tight tracking-tight text-foreground sm:text-[28px]">
+          {bindingReview
+            ? isLarkBinding
+              ? "Review Lark bot access"
+              : "Review application access"
+            : isLarkBinding
+              ? "Authorize Lark bot"
+              : "Authorize application"}
+        </h1>
+        <p className="mx-auto max-w-md text-[12px] text-muted-foreground">
+          {bindingReview ? (
+            <>
+              Review the NyxID services available to{" "}
+              <span className="font-medium text-foreground">{clientName}</span>.
+            </>
+          ) : (
+            <>
+              <span className="font-medium text-foreground">{clientName}</span>{" "}
+              wants to access your account via OAuth.
+            </>
+          )}
+        </p>
+      </header>
 
-        <CardContent className="space-y-6">
-          <div className="rounded-lg border border-border bg-muted px-4 py-3">
-            <div className="flex items-center gap-2 text-[12px] font-medium text-foreground">
-              <ShieldCheck className="h-4 w-4 text-primary" />
-              App verification details
-            </div>
-            <div className="mt-2 space-y-1 text-xs text-muted-foreground">
-              <p>
-                Application:{" "}
-                <span className="font-medium text-foreground">
-                  {clientName}
-                </span>
-              </p>
-              <p>
-                Redirect host:{" "}
-                <span className="text-foreground">{redirectHost}</span>
-              </p>
-            </div>
-          </div>
+      <Card className="border-border/50">
+        <CardContent className="flex flex-col gap-4 pt-4">
+          <DetailSection title="App details" className={NESTED_SECTION}>
+            <DetailRow label="Application" value={clientName} />
+            <DetailRow label="Redirect host" value={redirectHost} />
+            <DetailRow label="Client ID" value={clientId} mono copyable />
+            <DetailRow label="Redirect URI" value={redirectUri} mono copyable />
+          </DetailSection>
 
-          <div className="space-y-2">
-            <p className="text-xs uppercase tracking-wide text-text-tertiary">
-              Requested scopes
-            </p>
-            <div className="flex flex-wrap gap-2">
-              {scopes.map((item) => (
-                <Badge key={item} variant="secondary">
-                  {item}
-                </Badge>
-              ))}
-            </div>
-          </div>
-
-          <div className="space-y-2">
-            <p className="text-xs uppercase tracking-wide text-text-tertiary">
-              Scope impact
-            </p>
-            <div className="space-y-2">
-              {scopes.map((item) => {
+          <DetailSection title="Requested access" className={NESTED_SECTION}>
+            {scopes.map((item) => {
                 const meta = OAUTH_SCOPE_META[item] ?? {
                   title: "Custom permission",
                   description:
@@ -360,51 +339,33 @@ export function OAuthConsentPage() {
                   risk: "medium" as const,
                 };
                 return (
-                  <div
-                    key={`meta-${item}`}
-                    className="rounded-lg border border-border bg-muted/50 px-3 py-2"
-                  >
-                    <div className="flex items-start justify-between gap-2">
-                      <p className="min-w-0 break-words text-xs text-foreground pt-0.5">
-                        {item}
+                  <div key={`meta-${item}`} className="px-4 py-2.5">
+                    <div className="flex items-start justify-between gap-3">
+                      <p className="min-w-0 break-words text-[12px] font-medium text-foreground">
+                        {meta.title}
                       </p>
-                      <span
-                        className={`shrink-0 rounded-full border px-2 py-0.5 text-[10px] font-medium ${scopeRiskClass(meta.risk)}`}
+                      <Badge
+                        variant={scopeRiskBadgeVariant(meta.risk)}
+                        className="shrink-0"
                       >
                         {scopeRiskLabel(meta.risk)}
-                      </span>
+                      </Badge>
                     </div>
-                    <p className="mt-1 text-xs text-muted-foreground">
-                      <span className="font-medium text-foreground">
-                        {meta.title}
-                      </span>
-                      {" - "}
+                    <p className="mt-1 text-[12px] leading-relaxed text-muted-foreground">
                       {meta.description}
+                    </p>
+                    <p className="mt-1.5 break-all font-mono text-[11px] text-text-tertiary">
+                      {item}
                     </p>
                   </div>
                 );
               })}
-            </div>
-          </div>
+          </DetailSection>
 
-          <div className="space-y-3 rounded-lg border border-border bg-muted/30 px-4 py-3">
-            <div className="flex items-center justify-between gap-4">
-              <div className="min-w-0">
-                <p className="text-xs uppercase tracking-wide text-text-tertiary">
-                  Service access
-                </p>
-                <p className="mt-1 text-xs text-muted-foreground">
-                  {serviceAccess.allow_all_services
-                    ? bindingReview && currentBindingAllowsAllServices
-                      ? "This binding currently authorizes all available services."
-                      : "This app will be able to use all of your available services through the proxy."
-                    : summaryServices.length > 0
-                      ? bindingReview
-                        ? "Review the current grant and select any additional services."
-                        : "This app will be able to use these services through the proxy:"
-                      : "No service access requested. This app only signs you in."}
-                </p>
-              </div>
+          <DetailSection
+            title="Service access"
+            className={NESTED_SECTION}
+            action={
               <Button
                 type="button"
                 variant="ghost"
@@ -414,19 +375,31 @@ export function OAuthConsentPage() {
               >
                 {customize ? "Done" : "Customize"}
               </Button>
-            </div>
+            }
+          >
+            <p className="px-4 py-2.5 text-[12px] leading-relaxed text-muted-foreground">
+              {serviceAccess.allow_all_services
+                ? bindingReview && currentBindingAllowsAllServices
+                  ? "This binding currently authorizes all available services."
+                  : "This app will be able to use all of your available services through the proxy."
+                : summaryServices.length > 0
+                  ? bindingReview
+                    ? "Review the current grant and select any additional services."
+                    : "This app will be able to use these services through the proxy:"
+                  : "No service access requested. This app only signs you in."}
+            </p>
 
             {!customize &&
               !serviceAccess.allow_all_services &&
               (summaryServices.length > 0 || unmatchedDefaults.length > 0) && (
-                <div className="space-y-2 border-t border-border pt-3">
+                <div className="divide-y divide-border/30">
                   {summaryServices.map((item) => (
                     <div
                       key={item.id}
-                      className="flex items-start justify-between gap-2 rounded-md border border-border bg-background/60 px-3 py-2"
+                      className="flex items-start justify-between gap-3 px-4 py-2.5"
                     >
                       <div className="min-w-0">
-                        <p className="break-words text-xs font-medium text-foreground">
+                        <p className="break-words text-[12px] font-medium text-foreground">
                           {item.primary}
                         </p>
                         {item.secondary && (
@@ -471,11 +444,8 @@ export function OAuthConsentPage() {
                     </div>
                   ))}
                   {unmatchedDefaults.map((name) => (
-                    <div
-                      key={`unmatched-${name}`}
-                      className="rounded-md border border-dashed border-border bg-background/40 px-3 py-2"
-                    >
-                      <p className="break-words text-xs text-muted-foreground">
+                    <div key={`unmatched-${name}`} className="px-4 py-2.5">
+                      <p className="break-words text-[12px] leading-relaxed text-muted-foreground">
                         <span className="font-medium text-foreground">
                           {name}
                         </span>{" "}
@@ -488,8 +458,8 @@ export function OAuthConsentPage() {
               )}
 
             {customize && (
-              <div className="space-y-3 border-t border-border pt-3">
-                <div className="flex items-center justify-between gap-2">
+              <div className="divide-y divide-border/30">
+                <div className="flex items-center justify-between gap-2 px-4 py-2.5">
                   <Label htmlFor="oauth-allow-all-services">All services</Label>
                   <Switch
                     id="oauth-allow-all-services"
@@ -500,9 +470,9 @@ export function OAuthConsentPage() {
                 </div>
 
                 {!allowAllServices && (
-                  <div className="space-y-2">
+                  <div className="divide-y divide-border/30">
                     {userServicesLoading ? (
-                      <p className="text-xs text-muted-foreground">
+                      <p className="px-4 py-2.5 text-[12px] text-muted-foreground">
                         Loading services...
                       </p>
                     ) : selectableServices.length > 0 ? (
@@ -511,7 +481,7 @@ export function OAuthConsentPage() {
                         return (
                           <div
                             key={service.id}
-                            className="flex items-start gap-2 rounded-md border border-border bg-background/60 px-3 py-2"
+                            className="flex items-start gap-2.5 px-4 py-2.5"
                           >
                             <Checkbox
                               id={`oauth-service-${service.id}`}
@@ -526,7 +496,7 @@ export function OAuthConsentPage() {
                             <div className="min-w-0">
                               <Label
                                 htmlFor={`oauth-service-${service.id}`}
-                                className="cursor-pointer text-xs leading-5 text-foreground"
+                                className="cursor-pointer text-[12px] leading-5 text-foreground"
                               >
                                 <span className="block break-words font-medium">
                                   {serviceDisplayName(service)}
@@ -593,7 +563,7 @@ export function OAuthConsentPage() {
                         );
                       })
                     ) : (
-                      <p className="text-xs text-muted-foreground">
+                      <p className="px-4 py-2.5 text-[12px] text-muted-foreground">
                         No active services are available.
                       </p>
                     )}
@@ -601,36 +571,21 @@ export function OAuthConsentPage() {
                 )}
               </div>
             )}
-          </div>
+          </DetailSection>
 
-          <div className="space-y-1">
-            <p className="text-xs uppercase tracking-wide text-text-tertiary">
-              Client ID
-            </p>
-            <p className="text-xs text-foreground">{clientId}</p>
-          </div>
-
-          <div className="space-y-1">
-            <p className="text-xs uppercase tracking-wide text-text-tertiary">
-              Redirect URI
-            </p>
-            <p className="break-all text-xs text-foreground">{redirectUri}</p>
-          </div>
-
-          <div className="rounded-lg border border-yellow-500/30 bg-yellow-500/10 px-4 py-3 light:border-warning/40 light:bg-warning/10">
-            <div className="flex items-start gap-2">
-              <AlertTriangle className="mt-0.5 h-4 w-4 text-yellow-300 light:text-warning" />
-              <p className="text-xs text-yellow-100/90 light:text-warning">
-                Only continue if you trust this application. You can revoke this
-                access later from <strong>Authorized Applications</strong>.
-              </p>
+          <div className="flex gap-3 rounded-xl border border-warning/15 bg-warning/[0.04] px-4 py-3">
+            <div className="flex h-9 w-9 shrink-0 items-center justify-center rounded-lg bg-warning/10">
+              <AlertTriangle className="h-4 w-4 text-warning" />
             </div>
+            <p className="text-[12px] leading-relaxed text-warning">
+              Only continue if you trust this application.
+            </p>
           </div>
 
           <form
             method="POST"
             action="/oauth/authorize/decision"
-            className="flex flex-wrap items-center gap-3 pt-1"
+            className="flex flex-col gap-2 sm:flex-row sm:justify-end"
           >
             <input type="hidden" name="response_type" value={responseType} />
             <input type="hidden" name="client_id" value={clientId} />
@@ -706,6 +661,7 @@ export function OAuthConsentPage() {
               variant="outline"
               name="decision"
               value="deny"
+              className="w-full sm:w-auto"
             >
               {bindingReview ? "Cancel" : "Deny"}
             </Button>
@@ -714,12 +670,20 @@ export function OAuthConsentPage() {
               type="submit"
               name="decision"
               value="allow"
+              className="w-full sm:w-auto"
             >
+              <ButtonIcon variant="primary">
+                <ShieldCheck />
+              </ButtonIcon>
               {bindingReview ? "Update access" : "Allow"}
             </Button>
           </form>
         </CardContent>
       </Card>
-    </div>
+
+      <p className="text-center text-[11px] text-text-tertiary">
+        You can revoke this access at any time from Authorized Applications.
+      </p>
+    </ConsentShell>
   );
 }

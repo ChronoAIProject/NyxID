@@ -10,15 +10,14 @@ const buttonVariants = cva(
     variants: {
       variant: {
         default:
-          "border border-white/[0.08] bg-white/[0.04] text-foreground hover:border-white/[0.15] hover:bg-white/[0.06]",
+          "border border-hairline bg-overlay text-foreground hover:border-hairline-strong hover:bg-overlay-strong",
         destructive:
           "border border-destructive/30 bg-destructive/10 text-destructive hover:border-destructive/50 hover:bg-destructive/15",
         outline:
-          "border border-white/[0.08] bg-transparent text-muted-foreground hover:border-white/[0.15] hover:text-foreground",
+          "border border-hairline bg-transparent text-muted-foreground hover:border-hairline-strong hover:text-foreground",
         secondary:
-          "border border-white/[0.08] bg-white/[0.04] text-muted-foreground hover:border-white/[0.15] hover:text-foreground",
-        ghost:
-          "text-muted-foreground hover:bg-white/[0.04] hover:text-foreground",
+          "border border-hairline bg-overlay text-muted-foreground hover:border-hairline-strong hover:text-foreground",
+        ghost: "text-muted-foreground hover:bg-overlay hover:text-foreground",
         link: "text-nyx-secondary-400 underline-offset-4 hover:underline",
         primary:
           "nyx-gradient-vivid text-white shadow-[0_0_12px_rgba(90,42,241,0.25)] hover:shadow-[0_0_18px_rgba(90,42,241,0.35)] hover:brightness-110",
@@ -44,8 +43,10 @@ export function ButtonIcon({ children, className, variant }: { readonly children
       variant === "destructive"
         ? "border border-destructive/20 bg-destructive/10"
         : variant === "primary"
-          ? "border border-white/20 bg-white/10"
-          : "border border-white/[0.08] bg-white/[0.04]",
+          ? // Sits on the purple gradient fill, so white-alpha is correct in
+            // both themes and must NOT become a theme-aware token.
+            "border border-white/20 bg-white/10"
+          : "border border-hairline bg-overlay",
       className,
     )}>
       {children}

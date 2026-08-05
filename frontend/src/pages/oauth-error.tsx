@@ -49,11 +49,11 @@ export function OAuthErrorPage() {
 
         <Card className="w-full">
           <CardHeader className="space-y-3">
-            <div className="flex h-8 w-8 items-center justify-center rounded-md bg-red-500/10">
+            <div className="flex h-8 w-8 items-center justify-center rounded-md bg-destructive/10">
               {isMissingRequiredService ? (
                 <ServiceIcon slug={serviceSlug} size="xs" />
               ) : (
-                <ShieldAlert className="h-4 w-4 text-red-400" />
+                <ShieldAlert className="h-4 w-4 text-destructive" />
               )}
             </div>
             <CardTitle>{title}</CardTitle>
