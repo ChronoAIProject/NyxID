@@ -2,6 +2,7 @@ import { useState } from "react";
 import { useNavigate } from "@tanstack/react-router";
 import { ExternalLink, KeyRound, Loader2, RefreshCw } from "lucide-react";
 import { AddKeyDialog } from "@/components/dashboard/add-key-dialog";
+import { ManageConnectionModal } from "@/components/assistant/manage-connection-modal";
 import { ServiceIcon } from "@/components/service-icon";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -36,6 +37,7 @@ export function ConnectCard({
 }) {
   const navigate = useNavigate();
   const [dialogOpen, setDialogOpen] = useState(false);
+  const [managedKeyId, setManagedKeyId] = useState<string | null>(null);
   const { data: keys } = useKeys();
   // Resolve the real connect modality from the catalog. `block.auth_kind` is
   // display data the live authorization frame can't populate — the transport
@@ -246,6 +248,13 @@ export function ConnectCard({
       <AddKeyDialog
         open={dialogOpen}
         onOpenChange={setDialogOpen}
+        launch="popup"
+        flow="cc"
+        onPopupViewResult={(keyId) => {
+          setDialogOpen(false);
+          window.setTimeout(() => setManagedKeyId(keyId), 0);
+          return true;
+        }}
         prefillSlug={
           !reconnectKey && block.catalog_slug !== "custom"
             ? block.catalog_slug
@@ -253,6 +262,14 @@ export function ConnectCard({
         }
         reconnectKey={reconnectKey}
       />
+      {managedKeyId && (
+        <ManageConnectionModal
+          keyIds={[managedKeyId]}
+          serviceName={serviceName}
+          iconSlug={block.catalog_slug}
+          onClose={() => setManagedKeyId(null)}
+        />
+      )}
     </section>
   );
 }

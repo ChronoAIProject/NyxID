@@ -2957,6 +2957,7 @@ async fn migrate_provider_tokens(db: &Database) -> Result<(), Box<dyn std::error
             expires_at: token.expires_at,
             provider_config_id: Some(token.provider_config_id.clone()),
             connection_id: token.connection_id.clone(),
+            oauth_attempt_nonce: None,
             user_oauth_client_id_encrypted: user_creds
                 .as_ref()
                 .and_then(|c| c.client_id_encrypted.clone()),
@@ -3202,6 +3203,7 @@ async fn migrate_service_connections(db: &Database) -> Result<(), Box<dyn std::e
             expires_at: None,
             provider_config_id: None,
             connection_id: None,
+            oauth_attempt_nonce: None,
             user_oauth_client_id_encrypted: None,
             user_oauth_client_secret_encrypted: None,
             status: "active".to_string(),
@@ -3459,6 +3461,7 @@ async fn migrate_node_service_bindings(db: &Database) -> Result<(), Box<dyn std:
             expires_at: None,
             provider_config_id: None,
             connection_id: None,
+            oauth_attempt_nonce: None,
             user_oauth_client_id_encrypted: None,
             user_oauth_client_secret_encrypted: None,
             status: "active".to_string(),

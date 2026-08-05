@@ -74,6 +74,8 @@ import {
   LoginDevicePage,
   ConnectLinkPage,
   ConnectLinkReturnPage,
+  OAuthLaunchingPage,
+  OAuthCompletePage,
   SshTerminalPage,
   KeysPage,
   BillingPage,
@@ -179,6 +181,18 @@ const oauthConsentRoute = createRoute({
     }
   },
   component: OAuthConsentPage,
+});
+
+const oauthLaunchingRoute = createRoute({
+  path: "/oauth-launching",
+  getParentRoute: () => rootRoute,
+  component: OAuthLaunchingPage,
+});
+
+const oauthCompleteRoute = createRoute({
+  path: "/oauth",
+  getParentRoute: () => rootRoute,
+  component: OAuthCompletePage,
 });
 
 const oauthErrorRoute = createRoute({
@@ -849,6 +863,8 @@ const routeTree = rootRoute.addChildren([
   landingRoute,
   authLayout.addChildren([loginRoute, registerRoute]),
   oauthConsentRoute,
+  oauthLaunchingRoute,
+  oauthCompleteRoute,
   oauthErrorRoute,
   privacyRoute,
   termsRoute,

@@ -398,7 +398,7 @@ pub async fn complete_connect_link(
             let redirect_path = format!("/connect/return/{}", view.link.id);
             let on_behalf_of =
                 (view.link.user_id != actor_id).then_some(view.link.user_id.as_str());
-            let authorization_url = user_token_service::initiate_oauth_connect(
+            let initiate_result = user_token_service::initiate_oauth_connect(
                 &state.db,
                 &state.encryption_keys,
                 &state.config.base_url,
@@ -410,6 +410,7 @@ pub async fn complete_connect_link(
                 None,
                 Some(&connection_id),
                 Some(&view.link.id),
+                None, // hosted connect links use redirect-path routing, not popup flows
             )
             .await?;
             user_api_key_service::mark_provider_connection_pending_by_connection_id(
@@ -420,7 +421,7 @@ pub async fn complete_connect_link(
             )
             .await?;
             let mut response = completion_response(view, "oauth_required")?;
-            response.authorization_url = Some(authorization_url);
+            response.authorization_url = Some(initiate_result.authorization_url);
             Ok(Json(response))
         }
         connect_link_service::CompleteResult::DeviceCodeRequired {

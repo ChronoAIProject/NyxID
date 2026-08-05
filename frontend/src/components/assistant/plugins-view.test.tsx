@@ -15,23 +15,34 @@ const mocks = vi.hoisted(() => ({
   useUpdateKey: vi.fn(),
   useDeleteKey: vi.fn(),
   useUpdateExternalApiKey: vi.fn(),
+  addDialogProps: null as {
+    readonly launch?: "popup";
+    readonly flow?: "cc";
+    readonly onPopupViewResult?: (keyId: string) => boolean;
+  } | null,
 }));
 
 // The full add-service dialog has its own test suite and many hooks; stub it
-// to a marker so this test only asserts Connect opens it with the right slug.
+// to a marker so this test only asserts Connect opens it with the right slug
+// and hands it the popup contract.
 vi.mock("@/components/dashboard/add-key-dialog", () => ({
   AddKeyDialog: ({
     open,
     prefillSlug,
+    ...props
   }: {
     readonly open: boolean;
     readonly prefillSlug?: string;
+    readonly launch?: "popup";
+    readonly flow?: "cc";
+    readonly onPopupViewResult?: (keyId: string) => boolean;
   }) =>
+    ((mocks.addDialogProps = props),
     open ? (
       <div role="dialog" aria-label="Add service" data-prefill={prefillSlug}>
         Add service dialog
       </div>
-    ) : null,
+    ) : null),
 }));
 
 vi.mock("@/hooks/use-keys", () => ({
@@ -155,6 +166,7 @@ describe("PluginsView", () => {
     vi.clearAllMocks();
     resetSkillCatalog();
     mockLoaded();
+    mocks.addDialogProps = null;
     // Manage-modal hooks: a fully-shaped key + no-op mutations.
     mocks.useKey.mockReturnValue({
       data: {
@@ -202,6 +214,32 @@ describe("PluginsView", () => {
     await user.click(screen.getByRole("button", { name: "Connect GitHub" }));
     const dialog = await screen.findByRole("dialog", { name: "Add service" });
     expect(dialog).toHaveAttribute("data-prefill", "github");
+  });
+
+  it("runs plugin OAuth in the managed popup and opens the result in place", async () => {
+    const user = userEvent.setup();
+    render(<PluginsView />);
+    await user.click(screen.getByRole("button", { name: "Connect GitHub" }));
+    await screen.findByRole("dialog", { name: "Add service" });
+    // Both props are load-bearing: the backend mints an attempt nonce only for
+    // `cc`, and without one the popup opens and immediately closes again.
+    expect(mocks.addDialogProps).toMatchObject({ launch: "popup", flow: "cc" });
+
+    const onPopupViewResult = mocks.addDialogProps?.onPopupViewResult;
+    expect(onPopupViewResult).toBeTypeOf("function");
+    let handled = false;
+    act(() => {
+      handled = onPopupViewResult?.("key-popup") ?? false;
+    });
+    // Handled === true is what makes the popup ack and stop waiting.
+    expect(handled).toBe(true);
+
+    expect(
+      screen.queryByRole("dialog", { name: "Add service" }),
+    ).not.toBeInTheDocument();
+    // Falls through to the same manage modal an Added card opens.
+    expect(await screen.findByRole("dialog")).toBeInTheDocument();
+    expect(mocks.useKey).toHaveBeenCalledWith("key-popup");
   });
 
   it("connects from the keyboard", async () => {

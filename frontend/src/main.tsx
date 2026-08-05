@@ -7,41 +7,13 @@ import { useAuthStore } from "./stores/auth-store";
 import { useConsentStore } from "./stores/consent-store";
 import { usePublicConfig } from "./hooks/use-public-config";
 import { initTelemetry, identify as telemetryIdentify } from "./lib/telemetry";
+import { isPublicPath } from "./lib/public-paths";
 import { ConsentBanner } from "./components/consent-banner";
 import "./app.css";
 
 // Clear the chunk-reload guard on successful app bootstrap.
 // This ensures future deploys can auto-reload again.
 sessionStorage.removeItem("nyxid_chunk_reload");
-
-// Paths that should render without first resolving the auth
-// session. Includes the landing/login/register pages users may
-// hit before authenticating, and `/cli/pair`: that route is the
-// remote-pairing target and must render for unauthenticated
-// visitors so `CliPairPage` can redirect to `/login` with a
-// `return_to` carrying `?code=...` intact. Routing to bare
-// `/login` from here would drop the query string and strand the
-// pairing. `/login/device` follows the same pattern for CLI
-// device-code login and preserves `?user_code=...`.
-function isPublicPath(path: string): boolean {
-  return (
-    path === "/" ||
-    path === "/login" ||
-    path === "/register" ||
-    path === "/privacy" ||
-    path === "/terms" ||
-    path === "/blog" ||
-    path.startsWith("/blog/") ||
-    path === "/docs" ||
-    path.startsWith("/docs/") ||
-    path.startsWith("/preview/") ||
-    path.startsWith("/error") ||
-    path.startsWith("/oauth-consent") ||
-    path === "/cli-auth" ||
-    path === "/cli/pair" ||
-    path === "/login/device"
-  );
-}
 
 const queryClient = new QueryClient({
   defaultOptions: {

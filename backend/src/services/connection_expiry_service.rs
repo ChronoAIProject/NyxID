@@ -295,6 +295,7 @@ mod tests {
             expires_at: Some(now),
             provider_config_id: Some("github-provider".to_string()),
             connection_id: Some(Uuid::new_v4().to_string()),
+            oauth_attempt_nonce: None,
             user_oauth_client_id_encrypted: None,
             user_oauth_client_secret_encrypted: None,
             credential_source: Some("platform".to_string()),

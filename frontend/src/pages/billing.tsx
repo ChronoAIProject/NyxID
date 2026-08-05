@@ -1,16 +1,19 @@
-import { useMemo, useState } from "react";
+import { Fragment, useMemo, useState } from "react";
 import { toast } from "sonner";
 import {
-  CreditCard,
+  ChevronDown,
+  ChevronRight,
   ExternalLink,
+  Info,
   Plus,
-  RefreshCw,
   WalletCards,
 } from "lucide-react";
 import { ApiError } from "@/lib/api-client";
 import { openExternal } from "@/lib/navigation";
+import { formatRelativeTime } from "@/lib/utils";
 import {
   BILLING_USAGE_PERIODS,
+  type BillingMetric,
   type BillingUsagePeriod,
   type BillingUsageRow,
   type BillingWalletResponse,
@@ -31,6 +34,15 @@ import {
   CardHeader,
   CardTitle,
 } from "@/components/ui/card";
+import {
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogFooter,
+  DialogHeader,
+  DialogTitle,
+  DialogTrigger,
+} from "@/components/ui/dialog";
 import { Input } from "@/components/ui/input";
 import {
   Select,
@@ -40,6 +52,11 @@ import {
   SelectValue,
 } from "@/components/ui/select";
 import { Skeleton } from "@/components/ui/skeleton";
+import {
+  Tooltip,
+  TooltipContent,
+  TooltipTrigger,
+} from "@/components/ui/tooltip";
 import { ErrorBanner } from "@/components/shared/error-banner";
 import {
   Table,
@@ -51,10 +68,10 @@ import {
 } from "@/components/ui/table";
 
 const DEFAULT_TOP_UP_CREDITS = 100;
+const TOP_UP_PRESETS = [100, 500, 1_000, 5_000] as const;
 
 export function BillingPage() {
   const [period, setPeriod] = useState<BillingUsagePeriod>("30d");
-  const [topUpCredits, setTopUpCredits] = useState(String(DEFAULT_TOP_UP_CREDITS));
   const walletQuery = useBillingWallet();
   const usageQuery = useBillingUsage(period);
   const provisionWallet = useProvisionBillingWallet();
@@ -66,13 +83,6 @@ export function BillingPage() {
   const billingReady =
     Boolean(billingCapability?.charging_enabled) &&
     Boolean(billingCapability?.lago_configured);
-  const topUpAmount = Number(topUpCredits);
-  const topUpDisabled =
-    !billingReady ||
-    !Number.isInteger(topUpAmount) ||
-    topUpAmount <= 0 ||
-    topUpAmount > 10_000_000 ||
-    topUpBilling.isPending;
 
   async function handleProvisionWallet() {
     try {
@@ -83,12 +93,10 @@ export function BillingPage() {
     }
   }
 
-  async function handleTopUp() {
-    if (topUpDisabled) return;
-
+  async function handleTopUp(amountCredits: number) {
     try {
       const checkout = await topUpBilling.mutateAsync({
-        amount_credits: topUpAmount,
+        amount_credits: amountCredits,
         idempotency_key: crypto.randomUUID(),
       });
       openExternal(checkout.checkout_url);
@@ -138,59 +146,18 @@ export function BillingPage() {
         </div>
       )}
 
-      <div className="grid gap-4 xl:grid-cols-[1.2fr_0.8fr]">
-        <WalletCard
-          wallet={wallet}
-          loading={walletQuery.isLoading}
-          unavailable={walletUnavailable}
-          error={walletQuery.error}
-          onRetry={() => void walletQuery.refetch()}
-          onProvision={() => void handleProvisionWallet()}
-          provisioning={provisionWallet.isPending}
-          billingReady={billingReady}
-        />
-
-        <Card>
-          <CardHeader className="flex-row items-center justify-between space-y-0">
-            <div>
-              <CardTitle>Top Up</CardTitle>
-              <p className="mt-1 text-[12px] text-muted-foreground">
-                Add credits through hosted checkout.
-              </p>
-            </div>
-            <CreditCard className="h-4 w-4 text-text-tertiary" />
-          </CardHeader>
-          <CardContent className="space-y-4">
-            <div className="space-y-2">
-              <label className="text-[12px] font-medium" htmlFor="topup-credits">
-                Credits
-              </label>
-              <Input
-                id="topup-credits"
-                type="number"
-                min={1}
-                max={10_000_000}
-                step={1}
-                value={topUpCredits}
-                onChange={(event) => setTopUpCredits(event.target.value)}
-                disabled={!billingReady || topUpBilling.isPending}
-              />
-            </div>
-            <Button
-              variant="primary"
-              className="w-full"
-              disabled={topUpDisabled}
-              isLoading={topUpBilling.isPending}
-              onClick={() => void handleTopUp()}
-            >
-              <ButtonIcon variant="primary">
-                <ExternalLink className="h-3 w-3" />
-              </ButtonIcon>
-              Checkout
-            </Button>
-          </CardContent>
-        </Card>
-      </div>
+      <WalletCard
+        wallet={wallet}
+        loading={walletQuery.isLoading}
+        unavailable={walletUnavailable}
+        error={walletQuery.error}
+        onRetry={() => void walletQuery.refetch()}
+        onProvision={() => void handleProvisionWallet()}
+        provisioning={provisionWallet.isPending}
+        billingReady={billingReady}
+        onTopUp={handleTopUp}
+        topUpPending={topUpBilling.isPending}
+      />
 
       <UsageSummary
         rows={usageQuery.data?.rows ?? []}
@@ -350,6 +317,8 @@ function WalletCard({
   onProvision,
   provisioning,
   billingReady,
+  onTopUp,
+  topUpPending,
 }: {
   readonly wallet: BillingWalletResponse | undefined;
   readonly loading: boolean;
@@ -359,9 +328,13 @@ function WalletCard({
   readonly onProvision: () => void;
   readonly provisioning: boolean;
   readonly billingReady: boolean;
+  readonly onTopUp: (amountCredits: number) => Promise<void>;
+  readonly topUpPending: boolean;
 }) {
+  const [showBreakdown, setShowBreakdown] = useState(false);
+
   if (loading) {
-    return <Skeleton className="h-[278px] w-full" />;
+    return <Skeleton className="h-[170px] w-full" />;
   }
 
   if (!wallet && unavailable) {
@@ -409,31 +382,265 @@ function WalletCard({
   return (
     <Card>
       <CardHeader className="flex-row items-center justify-between space-y-0">
-        <div>
-          <CardTitle>Wallet</CardTitle>
-          <p className="mt-1 text-[12px] text-muted-foreground">
-            Owner {wallet.owner_id}
-          </p>
-        </div>
-        <Badge variant={wallet.suspended ? "destructive" : "success"}>
-          {labelize(wallet.collection_state)}
-        </Badge>
+        <CardTitle>Wallet</CardTitle>
+        {wallet.suspended && <Badge variant="destructive">Suspended</Badge>}
       </CardHeader>
-      <CardContent className="space-y-4">
-        <div className="grid gap-3 sm:grid-cols-3">
-          <MetricBlock label="Available" value={formatCredits(wallet.available_credits)} />
-          <MetricBlock label="Balance" value={formatCredits(wallet.balance_credits)} />
-          <MetricBlock label="Reserved" value={formatCredits(wallet.reserved_credits)} />
+      <CardContent>
+        <div className="flex items-start justify-between gap-3">
+          <div className="min-w-0">
+            <div className="flex items-center gap-1.5">
+              <span className="text-[11px] text-muted-foreground">Balance</span>
+              <Tooltip>
+                <TooltipTrigger asChild>
+                  <button
+                    type="button"
+                    aria-label="What this balance means"
+                    className="text-text-tertiary transition-colors hover:text-foreground"
+                  >
+                    <Info className="h-3 w-3" />
+                  </button>
+                </TooltipTrigger>
+                <TooltipContent side="top" className="max-w-[260px] leading-relaxed">
+                  Credits held with our billing provider — 1 credit is 1 USD. This
+                  is a synced figure, refreshed periodically rather than read live,
+                  so a top-up or very recent usage can take a few minutes to show.
+                </TooltipContent>
+              </Tooltip>
+            </div>
+            <div className="mt-1 truncate text-[28px] font-semibold leading-tight">
+              {formatCredits(wallet.balance_credits)}
+            </div>
+            <div className="mt-1 text-[11px] text-muted-foreground">
+              Updated {formatRelativeTime(wallet.balance_synced_at)}
+            </div>
+            <button
+              type="button"
+              aria-expanded={showBreakdown}
+              aria-controls="wallet-breakdown"
+              className="mt-2 flex items-center gap-1 text-[11px] text-muted-foreground transition-colors hover:text-foreground"
+              onClick={() => setShowBreakdown((current) => !current)}
+            >
+              {showBreakdown ? "Hide breakdown" : "View breakdown"}
+              <ChevronDown
+                className={`h-3 w-3 transition-transform ${
+                  showBreakdown ? "rotate-180" : ""
+                }`}
+              />
+            </button>
+          </div>
+          <AddCreditsDialog
+            billingReady={billingReady}
+            pending={topUpPending}
+            onTopUp={onTopUp}
+          />
         </div>
-        <div className="grid gap-3 sm:grid-cols-3">
-          <Detail label="Plan" value={labelize(wallet.plan_kind)} />
-          <Detail label="Overdraft" value={formatCredits(wallet.overdraft_cap_credits)} />
-          <Detail label="Synced" value={formatDateTime(wallet.balance_synced_at)} />
-        </div>
+
+        {showBreakdown && (
+          <div id="wallet-breakdown">
+            <hr className="my-4 border-border" />
+            <p className="text-[11px] leading-relaxed text-muted-foreground">
+              Not all of your balance is spendable at any moment — requests in
+              flight hold credits until they finish.
+            </p>
+            <div className="mt-3 space-y-1.5">
+              <BreakdownRow
+                label="Available"
+                hint="Spendable right now"
+                value={formatCredits(wallet.available_credits)}
+                emphasis
+              />
+              <BreakdownRow
+                label="Reserved"
+                hint="Held for requests in flight"
+                value={formatCredits(wallet.reserved_credits)}
+              />
+              <BreakdownRow
+                label="Pending"
+                hint="Charged, awaiting provider sync"
+                value={formatCredits(wallet.pending_lago_debits)}
+              />
+              {wallet.overdraft_cap_credits > 0 && (
+                <BreakdownRow
+                  label="Overdraft"
+                  hint="Extra capacity beyond your balance"
+                  value={formatCredits(wallet.overdraft_cap_credits)}
+                />
+              )}
+            </div>
+            <hr className="my-3 border-border" />
+            <div className="flex items-center justify-between text-[11px] text-muted-foreground">
+              <span>Plan</span>
+              <span className="text-foreground">{labelize(wallet.plan_kind)}</span>
+            </div>
+            <p className="mt-2 text-[11px] text-muted-foreground">
+              Available = Balance − Reserved − Pending.
+            </p>
+          </div>
+        )}
       </CardContent>
     </Card>
   );
 }
+
+/**
+ * Adding credits is the wallet's primary verb, so it lives on the wallet card.
+ * The amount form is bulky enough to crowd out the balance, so it opens in a
+ * dialog rather than sitting inline.
+ */
+function AddCreditsDialog({
+  billingReady,
+  pending,
+  onTopUp,
+}: {
+  readonly billingReady: boolean;
+  readonly pending: boolean;
+  readonly onTopUp: (amountCredits: number) => Promise<void>;
+}) {
+  const [open, setOpen] = useState(false);
+  const [credits, setCredits] = useState(String(DEFAULT_TOP_UP_CREDITS));
+
+  const amount = Number(credits);
+  const amountValid =
+    Number.isInteger(amount) && amount > 0 && amount <= 10_000_000;
+  const submitDisabled = !billingReady || !amountValid || pending;
+
+  const trigger = (
+    <Button variant="primary" disabled={!billingReady || pending}>
+      <ButtonIcon variant="primary">
+        <Plus className="h-3 w-3" />
+      </ButtonIcon>
+      Add credits
+    </Button>
+  );
+
+  // A disabled trigger swallows pointer events, so the reason has to sit on a
+  // wrapper rather than the button itself.
+  if (!billingReady) {
+    return (
+      <Tooltip>
+        <TooltipTrigger asChild>
+          <span tabIndex={0}>{trigger}</span>
+        </TooltipTrigger>
+        <TooltipContent side="left">
+          Payments aren&apos;t enabled on this deployment yet.
+        </TooltipContent>
+      </Tooltip>
+    );
+  }
+
+  return (
+    <Dialog open={open} onOpenChange={setOpen}>
+      <DialogTrigger asChild>{trigger}</DialogTrigger>
+      <DialogContent className="sm:max-w-[420px]">
+        <DialogHeader>
+          <DialogTitle>Add credits</DialogTitle>
+          <DialogDescription>
+            1 credit = 1 USD. Credits never expire.
+          </DialogDescription>
+        </DialogHeader>
+
+        <div className="space-y-4">
+          <div className="space-y-2">
+            <span className="text-[12px] font-medium">Amount</span>
+            <div className="flex flex-wrap gap-2">
+              {TOP_UP_PRESETS.map((preset) => (
+                <Button
+                  key={preset}
+                  variant={amount === preset ? "secondary" : "outline"}
+                  size="sm"
+                  disabled={pending}
+                  onClick={() => setCredits(String(preset))}
+                >
+                  {formatNumber(preset)}
+                </Button>
+              ))}
+            </div>
+          </div>
+
+          <div className="space-y-2">
+            <label className="text-[12px] font-medium" htmlFor="topup-credits">
+              Or enter an amount
+            </label>
+            <div className="flex items-center gap-3">
+              <Input
+                id="topup-credits"
+                type="number"
+                min={1}
+                max={10_000_000}
+                step={1}
+                value={credits}
+                onChange={(event) => setCredits(event.target.value)}
+                disabled={pending}
+                aria-describedby="topup-total"
+              />
+              <span
+                id="topup-total"
+                className="shrink-0 text-[13px] text-muted-foreground"
+              >
+                {formatUsd(amount)}
+              </span>
+            </div>
+          </div>
+
+          <p className="text-[11px] leading-relaxed text-muted-foreground">
+            We&apos;ll hand you to Stripe to pay, then bring you back here.
+            Credits land once the payment clears.
+          </p>
+        </div>
+
+        <DialogFooter>
+          <Button variant="outline" onClick={() => setOpen(false)}>
+            Cancel
+          </Button>
+          <Button
+            variant="primary"
+            disabled={submitDisabled}
+            isLoading={pending}
+            onClick={() => void onTopUp(amount)}
+          >
+            <ButtonIcon variant="primary">
+              <ExternalLink className="h-3 w-3" />
+            </ButtonIcon>
+            Continue to payment
+          </Button>
+        </DialogFooter>
+      </DialogContent>
+    </Dialog>
+  );
+}
+
+function BreakdownRow({
+  label,
+  hint,
+  value,
+  emphasis = false,
+}: {
+  readonly label: string;
+  readonly hint: string;
+  readonly value: string;
+  readonly emphasis?: boolean;
+}) {
+  return (
+    <div className="flex items-baseline justify-between gap-3">
+      <div className="min-w-0">
+        <div className={emphasis ? "text-[12px] font-medium" : "text-[12px]"}>
+          {label}
+        </div>
+        <div className="text-[11px] text-muted-foreground">{hint}</div>
+      </div>
+      <div
+        className={
+          emphasis
+            ? "shrink-0 text-[13px] font-semibold"
+            : "shrink-0 text-[13px] text-muted-foreground"
+        }
+      >
+        {value}
+      </div>
+    </div>
+  );
+}
+
 
 function UsageSummary({
   rows,
@@ -452,7 +659,17 @@ function UsageSummary({
     | undefined;
   readonly loading: boolean;
 }) {
-  const groupedRows = useMemo(() => rows, [rows]);
+  const services = useMemo(() => groupByService(rows), [rows]);
+  const metricTotals = useMemo(() => sumByMetric(rows), [rows]);
+  const [expanded, setExpanded] = useState<readonly string[]>([]);
+
+  function toggle(key: string) {
+    setExpanded((current) =>
+      current.includes(key)
+        ? current.filter((entry) => entry !== key)
+        : [...current, key],
+    );
+  }
 
   if (loading) {
     return <Skeleton className="h-[320px] w-full" />;
@@ -460,69 +677,124 @@ function UsageSummary({
 
   return (
     <Card>
-      <CardHeader className="flex-row items-center justify-between space-y-0">
-        <div>
-          <CardTitle>Usage</CardTitle>
-          <p className="mt-1 text-[12px] text-muted-foreground">
-            Per-service quantity and estimated cost.
-          </p>
-        </div>
-        <div className="flex items-center gap-2 text-[12px] text-muted-foreground">
-          <RefreshCw className="h-3.5 w-3.5" />
-          {formatEstimatedCredits(totals?.estimated_credits_micros)}
-        </div>
+      <CardHeader>
+        <CardTitle>Usage</CardTitle>
+        <p className="mt-1 text-[12px] text-muted-foreground">
+          Estimated cost per service. Expand a row for the model, agent, and
+          layer behind it.
+        </p>
       </CardHeader>
       <CardContent className="space-y-4">
         <div className="grid gap-3 sm:grid-cols-4">
-          <MetricBlock label="Quantity" value={formatNumber(totals?.quantity ?? 0)} />
-          <MetricBlock label="Requests" value={formatNumber(totals?.requests ?? 0)} />
-          <MetricBlock label="Bytes" value={formatNumber(totals?.bytes ?? 0)} />
-          <MetricBlock label="Events" value={formatNumber(totals?.events ?? 0)} />
+          <MetricBlock
+            label="Est. cost"
+            value={formatEstimatedCredits(totals?.estimated_credits_micros)}
+          />
+          <MetricBlock label="Tokens" value={formatNumber(metricTotals.tokens)} />
+          <MetricBlock label="Requests" value={formatNumber(metricTotals.requests)} />
+          <MetricBlock label="Bytes" value={formatNumber(metricTotals.bytes)} />
         </div>
         <div className="overflow-hidden rounded-lg border border-border">
           <Table>
             <TableHeader>
               <TableRow>
                 <TableHead>Service</TableHead>
-                <TableHead>Layer</TableHead>
-                <TableHead>Metric</TableHead>
-                <TableHead className="text-right">Quantity</TableHead>
-                <TableHead className="text-right">Cost</TableHead>
+                <TableHead>Usage</TableHead>
+                <TableHead className="text-right">Est. cost</TableHead>
                 <TableHead>Status</TableHead>
               </TableRow>
             </TableHeader>
             <TableBody>
-              {groupedRows.length === 0 ? (
+              {services.length === 0 ? (
                 <TableRow>
-                  <TableCell colSpan={6} className="py-8 text-center text-muted-foreground">
+                  <TableCell colSpan={4} className="py-8 text-center text-muted-foreground">
                     No usage in this period.
                   </TableCell>
                 </TableRow>
               ) : (
-                groupedRows.map((row, index) => (
-                  <TableRow key={`${row.service_id ?? row.service_slug ?? "service"}-${row.layer}-${row.metric}-${index}`}>
-                    <TableCell className="font-medium">
-                      {row.service_slug ?? row.service_id ?? "Unknown"}
-                    </TableCell>
-                    <TableCell>{labelize(row.layer)}</TableCell>
-                    <TableCell>{labelize(row.metric)}</TableCell>
-                    <TableCell className="text-right">{formatNumber(row.quantity)}</TableCell>
-                    <TableCell className="text-right">
-                      {row.billable === false
-                        ? "—"
-                        : formatEstimatedCredits(row.estimated_credits_micros)}
-                    </TableCell>
-                    <TableCell>
-                      {row.billable === false ? (
-                        <Badge variant="secondary">Free</Badge>
-                      ) : (
-                        <Badge variant={row.lago_acked ? "success" : "secondary"}>
-                          {row.lago_acked ? "Acked" : "Pending"}
-                        </Badge>
-                      )}
-                    </TableCell>
-                  </TableRow>
-                ))
+                services.map((service) => {
+                  const isOpen = expanded.includes(service.key);
+                  return (
+                    <Fragment key={service.key}>
+                      <TableRow
+                        className="cursor-pointer"
+                        onClick={() => toggle(service.key)}
+                      >
+                        <TableCell className="font-medium">
+                          <button
+                            type="button"
+                            aria-expanded={isOpen}
+                            aria-label={`${isOpen ? "Collapse" : "Expand"} ${service.label}`}
+                            className="flex items-center gap-1.5 text-left"
+                            onClick={(event) => {
+                              event.stopPropagation();
+                              toggle(service.key);
+                            }}
+                          >
+                            <ChevronRight
+                              className={`h-3.5 w-3.5 shrink-0 text-text-tertiary transition-transform ${
+                                isOpen ? "rotate-90" : ""
+                              }`}
+                            />
+                            <span className="truncate">{service.label}</span>
+                          </button>
+                        </TableCell>
+                        <TableCell className="text-muted-foreground">
+                          {describeUsage(service)}
+                        </TableCell>
+                        <TableCell className="text-right tabular-nums">
+                          {formatEstimatedCredits(service.costMicros)}
+                        </TableCell>
+                        <TableCell>
+                          <UsageStatusBadge
+                            billable={service.billable}
+                            acked={service.allAcked}
+                          />
+                        </TableCell>
+                      </TableRow>
+                      {isOpen &&
+                        service.rows.map((row, index) => (
+                          <TableRow
+                            key={`${service.key}-detail-${row.layer}-${row.metric}-${row.model ?? ""}-${row.api_key_id ?? ""}-${index}`}
+                            className="bg-overlay hover:bg-overlay"
+                          >
+                            <TableCell className="py-2 pl-9">
+                              <div className="flex flex-wrap items-center gap-1.5 text-[12px]">
+                                <Badge variant="secondary">
+                                  {labelize(row.layer)}
+                                </Badge>
+                                {row.model && <span>{row.model}</span>}
+                                <span className="text-muted-foreground">
+                                  {describeAgent(row)}
+                                </span>
+                              </div>
+                              <div className="mt-0.5 text-[11px] text-text-tertiary">
+                                {formatNumber(row.events)}{" "}
+                                {row.events === 1 ? "event" : "events"} ·{" "}
+                                {row.lago_metric_code}
+                              </div>
+                            </TableCell>
+                            <TableCell className="py-2 align-top text-[12px] text-muted-foreground">
+                              {formatNumber(row.quantity)} {row.metric}
+                            </TableCell>
+                            <TableCell className="py-2 text-right align-top text-[12px] tabular-nums">
+                              {row.billable === false
+                                ? "—"
+                                : formatEstimatedCredits(
+                                    row.estimated_credits_micros,
+                                  )}
+                            </TableCell>
+                            <TableCell className="py-2 align-top">
+                              <UsageStatusBadge
+                                billable={row.billable !== false}
+                                acked={row.lago_acked}
+                              />
+                            </TableCell>
+                          </TableRow>
+                        ))}
+                    </Fragment>
+                  );
+                })
               )}
             </TableBody>
           </Table>
@@ -532,20 +804,112 @@ function UsageSummary({
   );
 }
 
+function UsageStatusBadge({
+  billable,
+  acked,
+}: {
+  readonly billable: boolean;
+  readonly acked: boolean;
+}) {
+  if (!billable) {
+    return <Badge variant="secondary">Free</Badge>;
+  }
+  return (
+    <Badge variant={acked ? "success" : "secondary"}>
+      {acked ? "Acked" : "Pending"}
+    </Badge>
+  );
+}
+
+type ServiceGroup = {
+  readonly key: string;
+  readonly label: string;
+  readonly rows: readonly BillingUsageRow[];
+  readonly costMicros: number | null;
+  readonly metrics: readonly BillingMetric[];
+  readonly quantity: number;
+  readonly allAcked: boolean;
+  readonly billable: boolean;
+};
+
+/**
+ * Collapse the flat ledger rows into one row per service.
+ *
+ * The API already splits a service across layer, metric, model, agent, and ack
+ * state, so a single service routinely spans several rows. Costs are summed
+ * (credits are a common unit); quantities are only summed when every row shares
+ * one metric, because tokens, requests, and bytes cannot be meaningfully added.
+ */
+function groupByService(
+  rows: readonly BillingUsageRow[],
+): readonly ServiceGroup[] {
+  const groups = new Map<string, BillingUsageRow[]>();
+  for (const row of rows) {
+    const key = row.service_slug ?? row.service_id ?? "unknown";
+    const existing = groups.get(key);
+    if (existing) {
+      existing.push(row);
+    } else {
+      groups.set(key, [row]);
+    }
+  }
+
+  return [...groups.entries()].map(([key, groupRows]) => {
+    const costs = groupRows
+      .map((row) => row.estimated_credits_micros)
+      .filter((value): value is number => typeof value === "number");
+    const metrics = [...new Set(groupRows.map((row) => row.metric))];
+    return {
+      key,
+      label: groupRows[0]?.service_slug ?? groupRows[0]?.service_id ?? "Unknown",
+      rows: groupRows,
+      costMicros: costs.length > 0 ? costs.reduce((a, b) => a + b, 0) : null,
+      metrics,
+      quantity: groupRows.reduce((total, row) => total + row.quantity, 0),
+      allAcked: groupRows.every((row) => row.lago_acked),
+      billable: groupRows.some((row) => row.billable !== false),
+    };
+  });
+}
+
+/** Per-metric totals, so unlike units are never added into one number. */
+function sumByMetric(rows: readonly BillingUsageRow[]): Record<BillingMetric, number> {
+  const totals: Record<BillingMetric, number> = {
+    tokens: 0,
+    requests: 0,
+    bytes: 0,
+  };
+  for (const row of rows) {
+    totals[row.metric] += row.quantity;
+  }
+  return totals;
+}
+
+function describeUsage(service: ServiceGroup): string {
+  const [metric] = service.metrics;
+  if (service.metrics.length === 1 && metric) {
+    return `${formatNumber(service.quantity)} ${metric}`;
+  }
+  return `${String(service.metrics.length)} metrics`;
+}
+
+/**
+ * A null `api_key_id` only tells us the request was not attributed to an agent
+ * key — it could be browser session, service-account, delegated, or relay auth,
+ * and the ledger does not record which. Say that, rather than guessing
+ * "Session".
+ */
+function describeAgent(row: BillingUsageRow): string {
+  if (row.api_key_name) return row.api_key_name;
+  if (row.api_key_id) return "Unnamed key";
+  return "No agent key";
+}
+
 function MetricBlock({ label, value }: { readonly label: string; readonly value: string }) {
   return (
     <div className="rounded-lg border border-border/70 bg-overlay px-3 py-3">
       <div className="text-[11px] text-muted-foreground">{label}</div>
       <div className="mt-1 truncate text-[20px] font-semibold leading-tight">{value}</div>
-    </div>
-  );
-}
-
-function Detail({ label, value }: { readonly label: string; readonly value: string }) {
-  return (
-    <div>
-      <div className="text-[11px] text-muted-foreground">{label}</div>
-      <div className="mt-1 text-[12px] text-foreground">{value}</div>
     </div>
   );
 }
@@ -577,6 +941,17 @@ function formatCredits(value: number): string {
   return `${formatNumber(value)} credits`;
 }
 
+/** Credits are 1:1 with USD, so the charge is worth stating outright. */
+function formatUsd(credits: number): string {
+  if (!Number.isFinite(credits) || credits <= 0) {
+    return "—";
+  }
+  return new Intl.NumberFormat(undefined, {
+    style: "currency",
+    currency: "USD",
+  }).format(credits);
+}
+
 function formatNumber(value: number): string {
   return new Intl.NumberFormat().format(value);
 }
@@ -588,17 +963,6 @@ function formatEstimatedCredits(value: number | null | undefined): string {
   return `${new Intl.NumberFormat(undefined, {
     maximumFractionDigits: 6,
   }).format(value / 1_000_000)} credits`;
-}
-
-function formatDateTime(value: string): string {
-  const date = new Date(value);
-  if (Number.isNaN(date.getTime())) {
-    return "-";
-  }
-  return new Intl.DateTimeFormat(undefined, {
-    dateStyle: "medium",
-    timeStyle: "short",
-  }).format(date);
 }
 
 function isBillingNotConfigured(error: unknown): boolean {

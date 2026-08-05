@@ -45,6 +45,12 @@ pub struct OAuthState {
     /// e.g., "/admin/service-accounts/{sa_id}" for admin flows.
     #[serde(default)]
     pub redirect_path: Option<String>,
+    /// NyxID-owned wire token for the surface that initiated this flow.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub flow_kind: Option<String>,
+    /// Per-attempt UUID used to correlate and generation-guard popup flows.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub attempt_nonce: Option<String>,
     /// Atomic-claim flag set by `handle_oauth_callback` when it begins the
     /// token exchange. Replaces the previous `find_one_and_delete` claim
     /// pattern: keeping the row alive (just marked consumed) during the
@@ -84,6 +90,8 @@ mod tests {
             target_user_id: None,
             credential_user_id: None,
             redirect_path: None,
+            flow_kind: Some("cc".to_string()),
+            attempt_nonce: Some(uuid::Uuid::new_v4().to_string()),
             connection_id: None,
             connect_link_id: None,
             consumed: false,
@@ -97,6 +105,8 @@ mod tests {
         assert!(restored.target_user_id.is_none());
         assert!(restored.credential_user_id.is_none());
         assert!(restored.redirect_path.is_none());
+        assert_eq!(restored.flow_kind.as_deref(), Some("cc"));
+        assert!(restored.attempt_nonce.is_some());
     }
 
     #[test]
@@ -112,6 +122,8 @@ mod tests {
             target_user_id: None,
             credential_user_id: Some(uuid::Uuid::new_v4().to_string()),
             redirect_path: None,
+            flow_kind: None,
+            attempt_nonce: None,
             connection_id: None,
             connect_link_id: None,
             consumed: false,
@@ -140,6 +152,8 @@ mod tests {
             target_user_id: Some(sa_id.clone()),
             credential_user_id: Some(uuid::Uuid::new_v4().to_string()),
             redirect_path: Some(redirect.clone()),
+            flow_kind: None,
+            attempt_nonce: None,
             connection_id: None,
             connect_link_id: None,
             consumed: false,
@@ -177,5 +191,11 @@ mod tests {
         // (user, provider) write scope".
         assert!(restored.connection_id.is_none());
         assert!(restored.connect_link_id.is_none());
+        assert!(restored.flow_kind.is_none());
+        assert!(restored.attempt_nonce.is_none());
+
+        let reserialized = bson::to_document(&restored).expect("reserialize legacy document");
+        assert!(!reserialized.contains_key("flow_kind"));
+        assert!(!reserialized.contains_key("attempt_nonce"));
     }
 }

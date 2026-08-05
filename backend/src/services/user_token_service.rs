@@ -9,6 +9,7 @@ use zeroize::Zeroizing;
 
 use crate::crypto::aes::EncryptionKeys;
 use crate::errors::{AppError, AppResult};
+use crate::models::oauth_flow_kind::OAuthFlowKind;
 use crate::models::oauth_state::{COLLECTION_NAME as OAUTH_STATES, OAuthState};
 use crate::models::provider_config::{COLLECTION_NAME as PROVIDER_CONFIGS, ProviderConfig};
 use crate::models::user_api_key::{COLLECTION_NAME as USER_API_KEYS, UserApiKey};
@@ -62,6 +63,25 @@ pub struct UserProviderTokenSummary {
 
 const OAUTH_PROVIDER_NOT_CONFIGURED_MESSAGE: &str =
     "This provider is not configured for OAuth yet. Please contact your admin.";
+pub const CHAT_CONNECT_STATE_PREFIX: &str = "1cc_";
+
+#[derive(Debug)]
+pub struct OAuthInitiateResult {
+    pub authorization_url: String,
+    pub attempt_nonce: Option<String>,
+}
+
+/// Return the canonical UUID-v4 nonce embedded in a chat-connect state id.
+/// Other state formats, including every legacy bare UUID, return `None`.
+pub fn chat_attempt_nonce_from_state(state: &str) -> Option<&str> {
+    let nonce = state.strip_prefix(CHAT_CONNECT_STATE_PREFIX)?;
+    let parsed = Uuid::parse_str(nonce).ok()?;
+    if parsed.get_version() == Some(uuid::Version::Random) && parsed.to_string() == nonce {
+        Some(nonce)
+    } else {
+        None
+    }
+}
 
 /// Maximum number of user-supplied additional scopes per OAuth initiate request.
 const MAX_ADDITIONAL_SCOPES: usize = 32;
@@ -586,7 +606,8 @@ pub async fn initiate_oauth_connect(
     scope_override: Option<&[String]>,
     connection_id: Option<&str>,
     connect_link_id: Option<&str>,
-) -> AppResult<String> {
+    flow_kind: Option<OAuthFlowKind>,
+) -> AppResult<OAuthInitiateResult> {
     let provider = db
         .collection::<ProviderConfig>(PROVIDER_CONFIGS)
         .find_one(doc! { "_id": provider_id, "is_active": true })
@@ -709,8 +730,21 @@ pub async fn initiate_oauth_connect(
 
     let client_id = resolved.client_id;
 
-    // Create state for CSRF protection
-    let state_id = Uuid::new_v4().to_string();
+    if flow_kind == Some(OAuthFlowKind::ChatConnect) && connection_id.is_none() {
+        return Err(AppError::ValidationError(
+            "Chat OAuth requires a connection key".to_string(),
+        ));
+    }
+
+    // Chat state is self-discriminating so callback error routing never adds
+    // a database lookup to a legacy missing-code path. All legacy states keep
+    // their original bare UUID shape.
+    let attempt_nonce =
+        (flow_kind == Some(OAuthFlowKind::ChatConnect)).then(|| Uuid::new_v4().to_string());
+    let state_id = match attempt_nonce.as_deref() {
+        Some(nonce) => format!("{CHAT_CONNECT_STATE_PREFIX}{nonce}"),
+        None => Uuid::new_v4().to_string(),
+    };
     let now = Utc::now();
     let expires_at = now + Duration::minutes(10);
 
@@ -741,6 +775,8 @@ pub async fn initiate_oauth_connect(
         target_user_id: on_behalf_of.map(String::from),
         credential_user_id: resolved.credential_user_id.clone(),
         redirect_path: redirect_path.map(String::from),
+        flow_kind: flow_kind.map(|kind| kind.as_wire().to_string()),
+        attempt_nonce: attempt_nonce.clone(),
         connection_id: connection_id.map(String::from),
         connect_link_id: connect_link_id.map(String::from),
         consumed: false,
@@ -751,6 +787,22 @@ pub async fn initiate_oauth_connect(
     db.collection::<OAuthState>(OAUTH_STATES)
         .insert_one(&oauth_state)
         .await?;
+
+    if let (Some(connection_id), Some(nonce)) = (connection_id, attempt_nonce.as_deref())
+        && let Err(error) = crate::services::user_api_key_service::begin_chat_oauth_attempt(
+            db,
+            on_behalf_of.unwrap_or(user_id),
+            connection_id,
+            nonce,
+        )
+        .await
+    {
+        let _ = db
+            .collection::<OAuthState>(OAUTH_STATES)
+            .delete_one(doc! { "_id": &state_id })
+            .await;
+        return Err(error);
+    }
 
     // Use the generic callback URL (matches the route registered for the callback)
     let callback_url = format!(
@@ -821,7 +873,10 @@ pub async fn initiate_oauth_connect(
         "OAuth connect flow initiated"
     );
 
-    Ok(auth_url)
+    Ok(OAuthInitiateResult {
+        authorization_url: auth_url,
+        attempt_nonce,
+    })
 }
 
 /// Result from requesting a device code (RFC 8628 step 1).
@@ -1032,6 +1087,8 @@ pub async fn request_device_code(
         target_user_id: on_behalf_of.map(String::from),
         credential_user_id: resolved.credential_user_id.clone(),
         redirect_path: None,
+        flow_kind: None,
+        attempt_nonce: None,
         connection_id: connection_id.map(String::from),
         connect_link_id: None,
         consumed: false,
@@ -1753,30 +1810,53 @@ pub async fn handle_oauth_callback(
         // helper owns encryption end-to-end (encrypts from plaintext).
         // Letting them drop naturally at end-of-scope is functionally
         // identical to dropping them explicitly.
-        crate::services::user_api_key_service::write_oauth_tokens_to_key(
-            db,
-            encryption_keys,
-            conn_id,
-            access_token,
-            refresh_token,
-            scope,
-            token_expires_at,
-        )
-        .await
-        .inspect_err(|e| {
-            // Multi-connection write failed (e.g. UserApiKey was
-            // deleted mid-flow). The OAuth state row is still alive
-            // with `consumed: true` and will be cleaned up by TTL.
-            // Logging here so the rare race is visible to ops without
-            // requiring a heavier audit-log emission.
-            tracing::warn!(
-                user_id = %user_id,
-                provider_id = %provider_id,
-                connection_id = %conn_id,
-                error = %e,
-                "multi-connection write failed; OAuthState left consumed=true (TTL will sweep)"
-            );
-        })?;
+        if oauth_state.flow_kind.as_deref() == Some(OAuthFlowKind::ChatConnect.as_wire()) {
+            let nonce = oauth_state
+                .attempt_nonce
+                .as_deref()
+                .ok_or_else(|| AppError::BadRequest("Invalid chat OAuth attempt".to_string()))?;
+            let wrote = crate::services::user_api_key_service::write_chat_oauth_tokens_to_key(
+                db,
+                encryption_keys,
+                conn_id,
+                nonce,
+                access_token,
+                refresh_token,
+                scope,
+                token_expires_at,
+            )
+            .await?;
+            if !wrote {
+                return Err(AppError::BadRequest(
+                    "OAuth attempt is no longer current".to_string(),
+                ));
+            }
+        } else {
+            crate::services::user_api_key_service::write_oauth_tokens_to_key(
+                db,
+                encryption_keys,
+                conn_id,
+                access_token,
+                refresh_token,
+                scope,
+                token_expires_at,
+            )
+            .await
+            .inspect_err(|e| {
+                // Multi-connection write failed (e.g. UserApiKey was
+                // deleted mid-flow). The OAuth state row is still alive
+                // with `consumed: true` and will be cleaned up by TTL.
+                // Logging here so the rare race is visible to ops without
+                // requiring a heavier audit-log emission.
+                tracing::warn!(
+                    user_id = %user_id,
+                    provider_id = %provider_id,
+                    connection_id = %conn_id,
+                    error = %e,
+                    "multi-connection write failed; OAuthState left consumed=true (TTL will sweep)"
+                );
+            })?;
+        }
 
         // Best-effort cleanup of the consumed OAuth state. Identical
         // ordering to the legacy branch (done last so reconcile's "no
@@ -2731,10 +2811,11 @@ pub async fn list_user_tokens(
 mod tests {
     use super::{
         DevicePollFlow, build_telegram_identity_metadata, build_telegram_identity_update_doc,
-        build_user_token_summary, classify_device_poll_failure, ensure_additional_scopes_supported,
-        merge_scopes, normalize_telegram_bot_api_key, oauth_token_payload, params_to_json_body,
-        parse_additional_scopes, parse_token_exchange_response, resolve_scope_param,
-        token_exchange_provider_error, uses_json_oauth_token_exchange,
+        build_user_token_summary, chat_attempt_nonce_from_state, classify_device_poll_failure,
+        ensure_additional_scopes_supported, merge_scopes, normalize_telegram_bot_api_key,
+        oauth_token_payload, params_to_json_body, parse_additional_scopes,
+        parse_token_exchange_response, resolve_scope_param, token_exchange_provider_error,
+        uses_json_oauth_token_exchange,
     };
     use crate::crypto::telegram::TelegramLoginData;
     use crate::errors::AppError;
@@ -2743,6 +2824,21 @@ mod tests {
     use chrono::Utc;
     use mongodb::bson::Bson;
     use std::collections::HashMap;
+
+    #[test]
+    fn chat_state_discriminator_requires_canonical_uuid_v4() {
+        let nonce = uuid::Uuid::new_v4().to_string();
+        let state = format!("1cc_{nonce}");
+        assert_eq!(chat_attempt_nonce_from_state(&state), Some(nonce.as_str()));
+        for invalid in [
+            nonce.as_str(),
+            "1cc_not-a-uuid",
+            "1cc_00000000-0000-1000-8000-000000000000",
+            "1CC_00000000-0000-4000-8000-000000000000",
+        ] {
+            assert!(chat_attempt_nonce_from_state(invalid).is_none());
+        }
+    }
 
     fn make_provider(provider_type: &str) -> ProviderConfig {
         ProviderConfig {
@@ -3420,6 +3516,7 @@ mod tests {
             expires_at: Some(now - Duration::minutes(1)),
             provider_config_id: Some(provider_config_id.to_string()),
             connection_id: Some(connection_id),
+            oauth_attempt_nonce: None,
             user_oauth_client_id_encrypted: user_client_id_enc,
             user_oauth_client_secret_encrypted: user_client_secret_enc,
             status: "active".to_string(),
@@ -3514,13 +3611,14 @@ mod tests {
             None,
             Some(&connection_id),
             None,
+            None,
         )
         .await
         .expect("initiation should succeed");
 
         // The redirect carries the BYO client id, not the platform one.
         assert!(
-            auth_url.contains("user-byo-client-id"),
+            auth_url.authorization_url.contains("user-byo-client-id"),
             "authorize URL must use the resolved BYO client"
         );
 
@@ -3626,16 +3724,18 @@ mod tests {
             None,
             Some(&connection_id),
             None,
+            None,
         )
         .await
         .expect("initiation should succeed");
 
         assert!(
-            auth_url.contains("platform-client-id"),
-            "managed pin must use the platform client, got: {auth_url}"
+            auth_url.authorization_url.contains("platform-client-id"),
+            "managed pin must use the platform client, got: {}",
+            auth_url.authorization_url
         );
         assert!(
-            !auth_url.contains("legacy-byo-client-id"),
+            !auth_url.authorization_url.contains("legacy-byo-client-id"),
             "managed pin must NOT fall through to the user's legacy BYO client"
         );
 
@@ -3717,16 +3817,18 @@ mod tests {
             None,
             Some(&connection_id),
             None,
+            None,
         )
         .await
         .expect("reconnect should succeed");
 
         assert!(
-            auth_url.contains("my-own-client-id"),
-            "BYO reconnect must keep the user's own client, got: {auth_url}"
+            auth_url.authorization_url.contains("my-own-client-id"),
+            "BYO reconnect must keep the user's own client, got: {}",
+            auth_url.authorization_url
         );
         assert!(
-            !auth_url.contains("platform-client-id"),
+            !auth_url.authorization_url.contains("platform-client-id"),
             "BYO reconnect must NOT flip to the platform client"
         );
     }
@@ -3774,6 +3876,7 @@ mod tests {
             Some(&["read:user".to_string(), "delete_repo".to_string()]),
             Some(&connection_id),
             None,
+            None,
         )
         .await
         .expect_err("delete_repo must be rejected on the shared app");
@@ -3791,6 +3894,7 @@ mod tests {
             &[],
             Some(&["read:user".to_string(), "repo".to_string()]),
             Some(&connection_id),
+            None,
             None,
         )
         .await
@@ -4146,6 +4250,7 @@ mod tests {
             expires_at: None,
             provider_config_id: Some(provider_id.clone()),
             connection_id: Some(Uuid::new_v4().to_string()),
+            oauth_attempt_nonce: None,
             user_oauth_client_id_encrypted: None,
             user_oauth_client_secret_encrypted: None,
             status: "active".to_string(),
@@ -4995,6 +5100,7 @@ mod tests {
             expires_at,
             provider_config_id: Some(provider_config_id.to_string()),
             connection_id,
+            oauth_attempt_nonce: None,
             user_oauth_client_id_encrypted: None,
             user_oauth_client_secret_encrypted: None,
             status: status.to_string(),

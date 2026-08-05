@@ -278,7 +278,7 @@ pub async fn initiate_oauth_for_sa(
     let admin_id = auth_user.user_id.to_string();
     let redirect_path = format!("/admin/service-accounts/{}", sa_id);
 
-    let auth_url = user_token_service::initiate_oauth_connect(
+    let auth_result = user_token_service::initiate_oauth_connect(
         &state.db,
         &state.encryption_keys,
         &state.config.base_url,
@@ -290,6 +290,7 @@ pub async fn initiate_oauth_for_sa(
         None, // no scope_override: SA-connect picker is a later pass (NyxID#917)
         None, // admin-on-behalf-of flow stays single-tenant per SA
         None, // not a hosted connect-link flow
+        None, // legacy-routed flow; SA popup migration is out of scope
     )
     .await?;
 
@@ -304,7 +305,7 @@ pub async fn initiate_oauth_for_sa(
     );
 
     Ok(Json(AdminSaOAuthInitiateResponse {
-        authorization_url: auth_url,
+        authorization_url: auth_result.authorization_url,
     }))
 }
 

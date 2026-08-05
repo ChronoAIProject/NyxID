@@ -39,6 +39,7 @@ pub mod notification_channel;
 pub mod nullable_field;
 pub mod oauth_broker_binding;
 pub mod oauth_client;
+pub mod oauth_flow_kind;
 pub mod oauth_state;
 pub mod oracle_pool;
 pub mod oracle_session;

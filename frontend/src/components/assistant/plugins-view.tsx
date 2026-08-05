@@ -253,6 +253,16 @@ function ConnectorsTab({ query }: { readonly query: string }) {
   const catalogQuery = useCatalog();
   const [manageCardId, setManageCardId] = useState<string | null>(null);
   const [connectSlug, setConnectSlug] = useState<string | null>(null);
+  // Settled result of a managed-popup OAuth connect. The popup's "view result"
+  // action hands back the key it authorized, and the grid opens the same
+  // manage modal the Added cards use. The label rides along because
+  // `connectSlug` is cleared as the dialog closes and the freshly minted key
+  // has not landed in `items` yet.
+  const [popupResult, setPopupResult] = useState<{
+    readonly keyId: string;
+    readonly name: string;
+    readonly iconSlug: string | null;
+  } | null>(null);
 
   const items = useMemo(
     () => deriveConnectorItems(keysQuery.data ?? [], catalogQuery.data ?? []),
@@ -365,15 +375,45 @@ function ConnectorsTab({ query }: { readonly query: string }) {
       )}
 
       {/* The same add-service dialog the Studio /keys page uses — handles every
-          connect flavor (OAuth popup, API-key paste, device-code) and
-          invalidates the keys query on success, so the card moves to Added. */}
+          connect flavor (API-key paste, device-code) and invalidates the keys
+          query on success, so the card moves to Added. OAuth opts into the
+          managed popup on the same `cc` contract as the assistant's connect
+          card, so the grid stays on screen while the user authorizes instead
+          of the tab navigating away to the provider. */}
       {connectSlug !== null && (
         <AddKeyDialog
           open
           prefillSlug={connectSlug}
+          launch="popup"
+          flow="cc"
+          onPopupViewResult={(keyId) => {
+            const connecting = items.available.find(
+              (candidate) => candidate.connectSlug === connectSlug,
+            );
+            setConnectSlug(null);
+            // Deferred a tick so the add dialog unmounts before the manage
+            // modal mounts; two overlapping Radix dialogs fight over focus.
+            window.setTimeout(() => {
+              setPopupResult({
+                keyId,
+                name: connecting?.name ?? connectSlug,
+                iconSlug: connecting?.iconSlug ?? connectSlug,
+              });
+            }, 0);
+            return true;
+          }}
           onOpenChange={(next) => {
             if (!next) setConnectSlug(null);
           }}
+        />
+      )}
+
+      {popupResult && (
+        <ManageConnectionModal
+          keyIds={[popupResult.keyId]}
+          serviceName={popupResult.name}
+          iconSlug={popupResult.iconSlug}
+          onClose={() => setPopupResult(null)}
         />
       )}
     </>

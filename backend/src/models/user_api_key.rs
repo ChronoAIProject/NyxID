@@ -40,6 +40,9 @@ pub struct UserApiKey {
     /// connection rather than by `(user_id, provider_config_id)`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub connection_id: Option<String>,
+    /// Current chat-popup OAuth attempt allowed to mutate this connection.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub oauth_attempt_nonce: Option<String>,
 
     // --- User-owned OAuth app credentials (merged from UserProviderCredentials) ---
     #[serde(default, with = "crate::models::bson_bytes::optional")]
@@ -115,6 +118,7 @@ mod tests {
             expires_at: None,
             provider_config_id: None,
             connection_id: None,
+            oauth_attempt_nonce: None,
             user_oauth_client_id_encrypted: None,
             user_oauth_client_secret_encrypted: None,
             status: "active".to_string(),
@@ -150,6 +154,7 @@ mod tests {
             expires_at: Some(Utc::now()),
             provider_config_id: Some("github-provider-id".to_string()),
             connection_id: Some(conn_id.clone()),
+            oauth_attempt_nonce: None,
             user_oauth_client_id_encrypted: Some(vec![10, 11]),
             user_oauth_client_secret_encrypted: Some(vec![12, 13]),
             status: "active".to_string(),
@@ -192,5 +197,8 @@ mod tests {
         };
         let restored: UserApiKey = bson::from_document(doc).expect("deserialize");
         assert!(restored.connection_id.is_none());
+        assert!(restored.oauth_attempt_nonce.is_none());
+        let reserialized = bson::to_document(&restored).expect("reserialize legacy document");
+        assert!(!reserialized.contains_key("oauth_attempt_nonce"));
     }
 }
