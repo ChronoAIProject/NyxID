@@ -24,6 +24,7 @@ pub const MIN_TTL_SECS: i64 = 60;
 pub const MAX_TTL_SECS: i64 = 60 * 60;
 pub const MAX_WAIT_SECS: u64 = 120;
 pub const CLAIM_STALE_SECS: i64 = 5 * 60;
+pub const PINNED_GRACE_SECS: i64 = 30 * 60;
 
 const MAX_LABEL_LEN: usize = 200;
 const MAX_REQUESTED_BY_LEN: usize = 200;
@@ -693,18 +694,36 @@ async fn claim_expiry(
     link: ConnectLink,
     actor_user_id: Option<&str>,
 ) -> AppResult<ConnectLink> {
-    if link.status != ConnectLinkStatus::Pending
-        || link.expires_at > Utc::now()
-        || link.completed_user_service_id.is_some()
-    {
+    let now = Utc::now();
+    let expires_at = if link.completed_user_service_id.is_some() {
+        link.expires_at + Duration::seconds(PINNED_GRACE_SECS)
+    } else {
+        link.expires_at
+    };
+    if link.status != ConnectLinkStatus::Pending || expires_at > now {
         return Ok(link);
     }
-    let mut filter = doc! {
+    let expiry_filter = doc! {
+        "$or": [
+            {
+                "completed_user_service_id": null,
+                "expires_at": { "$lte": bson::DateTime::from_chrono(now) },
+            },
+            {
+                "completed_user_service_id": { "$ne": null },
+                "expires_at": {
+                    "$lte": bson::DateTime::from_chrono(
+                        now - Duration::seconds(PINNED_GRACE_SECS)
+                    ),
+                },
+            },
+        ]
+    };
+    let filter = doc! {
         "_id": &link.id,
         "status": "pending",
-        "completed_user_service_id": null,
+        "$and": [expiry_filter, claim_available_filter(now)],
     };
-    filter.extend(claim_available_filter(Utc::now()));
     let updated = db
         .collection::<ConnectLink>(CONNECT_LINKS)
         .find_one_and_update(
@@ -1004,6 +1023,7 @@ mod tests {
         assert_eq!(MAX_TTL_SECS, 3600);
         assert_eq!(MAX_WAIT_SECS, 120);
         assert_eq!(CLAIM_STALE_SECS, 300);
+        assert_eq!(PINNED_GRACE_SECS, 1800);
     }
 
     #[test]
@@ -1435,5 +1455,66 @@ mod tests {
             view.link.completed_user_service_id.as_deref(),
             Some(service_id.as_str())
         );
+    }
+
+    #[tokio::test]
+    async fn pinned_link_past_grace_expires_and_refuses_callback_and_resume() {
+        let Some(db) = connect_test_database("connect_link_pinned_grace_expired").await else {
+            return;
+        };
+        let (owner, created) = create_test_link(&db, "pinned-grace-expired").await;
+        let service_id = provision_test_link(&db, &owner, &created).await;
+        let service = db
+            .collection::<UserService>(USER_SERVICES)
+            .find_one(doc! { "_id": &service_id })
+            .await
+            .expect("read provisioned service")
+            .expect("provisioned service");
+        let key_id = service.api_key_id.expect("provisioned API key");
+        let connection_id = Uuid::new_v4().to_string();
+        db.collection::<UserApiKey>(USER_API_KEYS)
+            .update_one(
+                doc! { "_id": &key_id },
+                doc! { "$set": {
+                    "connection_id": &connection_id,
+                    "status": "active",
+                } },
+            )
+            .await
+            .expect("mark provisioned key active");
+        db.collection::<ConnectLink>(CONNECT_LINKS)
+            .update_one(
+                doc! { "_id": &created.link.id },
+                doc! {
+                    "$set": {
+                        "status": "pending",
+                        "expires_at": bson::DateTime::from_chrono(
+                            Utc::now() - Duration::seconds(PINNED_GRACE_SECS + 1)
+                        ),
+                    },
+                    "$unset": { "completed_at": "" },
+                },
+            )
+            .await
+            .expect("restore pinned link past grace");
+
+        let view = get_for_actor(&db, &owner, &created.link.id)
+            .await
+            .expect("read expired pinned link");
+        assert_eq!(view.link.status, ConnectLinkStatus::Expired);
+
+        let callback = complete_oauth_callback(&db, &created.link.id, &owner, &connection_id).await;
+        assert!(matches!(callback, Err(AppError::ConnectLinkExpired)));
+
+        let resumed = complete(
+            &db,
+            &crate::test_utils::test_encryption_keys(),
+            &owner,
+            &created.raw_token,
+            CompleteInput::default(),
+            false,
+        )
+        .await;
+        assert!(matches!(resumed, Err(AppError::ConnectLinkExpired)));
     }
 }

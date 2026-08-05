@@ -171,7 +171,7 @@ First-party RFC 8628-style login for headless CLI environments: `nyxid login --d
 Single-use hosted credential setup for agents and CLI callers. An authenticated creator requests a catalog service link, gives the returned URL to the same account's human user, and polls until the service is provisioned.
 
 - `connect_links` stores UUID-string IDs and only SHA-256 hashes of `nyx_clk_` tokens. Raw tokens appear once in the hosted URL and must never be logged, audited, or persisted in OAuth state.
-- Links default to 15 minutes, are clamped to 60-3600 seconds, and retain an observable `expired` terminal state through atomic query-time expiry claims.
+- Links default to 15 minutes, are clamped to 60-3600 seconds, and retain an observable `expired` terminal state through atomic query-time expiry claims. An OAuth or device flow pinned before expiry gets 30 minutes of finalization grace, then expires if it remains pending.
 - Preview is public and rate-limited but non-mutating. Completion is human-session-only; API keys, service accounts, delegated tokens, and relay tokens are rejected before the handler. Personal completion requires the exact creating account; org-owned completion uses `org_service::resolve_owner_access` write access. Unauthorized access is not-found-shaped.
 - API-key and OAuth provisioning must reuse `unified_key_service`; completion is atomically serialized and single-use. OAuth state carries only `connect_link_id`, while the browser keeps the raw token in session storage across the redirect.
 - MCP callers use `nyx__connect_service` followed by `nyx__wait_for_connection`. A pending link must not activate service tools or emit `tools/list_changed`; activation happens only after completed status is observed.
