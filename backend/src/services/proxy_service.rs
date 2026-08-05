@@ -139,8 +139,12 @@ pub(crate) fn build_effective_outbound_headers(
     outbound_headers
 }
 
-/// Headers that are safe to forward to downstream services.
-/// Uses an allowlist approach to prevent leaking sensitive headers.
+/// Caller headers that are safe to forward to downstream HTTP services.
+///
+/// This is the single admission policy for both direct and node-routed HTTP
+/// requests. Framing, hop-by-hop, authentication, and NyxID trust-boundary
+/// headers stay outside the allowlist and are generated or injected by the
+/// component that owns them.
 ///
 /// In addition to the explicit list below, any caller-supplied header whose
 /// lowercased name starts with `x-openclaw-` is forwarded. OpenClaw gateways
@@ -160,6 +164,8 @@ const ALLOWED_FORWARD_HEADERS: &[&str] = &[
     "user-agent",
     "x-request-id",
     "x-correlation-id",
+    "idempotency-key",
+    "x-trace-id",
     "range",
     "if-range",
     "if-none-match",
@@ -201,13 +207,39 @@ const ALLOWED_FORWARD_HEADERS: &[&str] = &[
 const ALLOWED_FORWARD_HEADER_PREFIXES: &[&str] =
     &["x-openclaw-", "x-amz-", "x-goog-", "x-openrouter-"];
 
-/// Returns `true` when the header name is in the allowlist or matches an
+/// Returns `true` when the lowercased header name matches a downstream-owned
+/// namespace that is safe to forward.
+pub(crate) fn is_allowed_forward_header_prefix(name_lower: &str) -> bool {
+    ALLOWED_FORWARD_HEADER_PREFIXES
+        .iter()
+        .any(|prefix| name_lower.starts_with(prefix))
+}
+
+/// Returns `true` when the header name is in the HTTP allowlist or matches an
 /// allowlisted prefix. Caller must lowercase the name before calling.
 fn is_allowed_forward_header(name_lower: &str) -> bool {
-    ALLOWED_FORWARD_HEADERS.contains(&name_lower)
-        || ALLOWED_FORWARD_HEADER_PREFIXES
-            .iter()
-            .any(|prefix| name_lower.starts_with(prefix))
+    ALLOWED_FORWARD_HEADERS.contains(&name_lower) || is_allowed_forward_header_prefix(name_lower)
+}
+
+/// Collect caller headers admitted by the shared downstream HTTP policy.
+///
+/// Header names are normalized by `HeaderMap`, matching remains
+/// case-insensitive, and repeated values retain their map iteration order for
+/// the existing deterministic merge rules in `merge_into_header_list`.
+pub(crate) fn collect_forward_headers(headers: &http::HeaderMap) -> Vec<(String, String)> {
+    headers
+        .iter()
+        .filter_map(|(name, value)| {
+            let name_lower = name.as_str().to_ascii_lowercase();
+            if !is_allowed_forward_header(&name_lower) {
+                return None;
+            }
+            value
+                .to_str()
+                .ok()
+                .map(|value| (name.to_string(), value.to_string()))
+        })
+        .collect()
 }
 
 /// Header name the current `auth_method` will inject via
@@ -2761,16 +2793,7 @@ pub(crate) async fn forward_request_with_extra_outbound_headers(
     //
     // The shared builder applies this exact sequence for both direct and
     // node-routed HTTP requests.
-    let mut outbound_headers: Vec<(String, String)> = Vec::new();
-    for (name, value) in headers.iter() {
-        let name_lower = name.as_str().to_ascii_lowercase();
-        if !is_allowed_forward_header(&name_lower) {
-            continue;
-        }
-        if let Ok(v) = value.to_str() {
-            outbound_headers.push((name.as_str().to_string(), v.to_string()));
-        }
-    }
+    let outbound_headers = collect_forward_headers(&headers);
     let outbound_headers = build_effective_outbound_headers(
         target,
         outbound_headers,
@@ -3210,6 +3233,8 @@ mod tests {
         assert!(is_allowed_forward_header("content-type"));
         assert!(is_allowed_forward_header("user-agent"));
         assert!(is_allowed_forward_header("range"));
+        assert!(is_allowed_forward_header("idempotency-key"));
+        assert!(is_allowed_forward_header("x-trace-id"));
     }
 
     #[test]
@@ -3246,10 +3271,11 @@ mod tests {
         // infrastructure headers.
         assert!(!is_allowed_forward_header("authorization"));
         assert!(!is_allowed_forward_header("cookie"));
-        assert!(!is_allowed_forward_header("idempotency-key"));
         assert!(!is_allowed_forward_header("x-nyxid-internal"));
         assert!(!is_allowed_forward_header("x-forwarded-for"));
         assert!(!is_allowed_forward_header("host"));
+        assert!(!is_allowed_forward_header("content-length"));
+        assert!(!is_allowed_forward_header("connection"));
         // Standard browser `Referer` stays blocked — only OpenRouter's
         // deliberate `HTTP-Referer` spelling passes.
         assert!(!is_allowed_forward_header("referer"));
@@ -3261,6 +3287,7 @@ mod tests {
         query: Option<String>,
         content_type: Option<String>,
         idempotency_key: Option<String>,
+        trace_id: Option<String>,
         user_agent: Option<String>,
         body: Vec<u8>,
     }
@@ -3280,6 +3307,10 @@ mod tests {
                 .map(ToString::to_string),
             idempotency_key: headers
                 .get("idempotency-key")
+                .and_then(|value| value.to_str().ok())
+                .map(ToString::to_string),
+            trace_id: headers
+                .get("x-trace-id")
                 .and_then(|value| value.to_str().ok())
                 .map(ToString::to_string),
             user_agent: headers
@@ -3942,7 +3973,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn forward_request_strips_caller_supplied_idempotency_key() {
+    async fn forward_request_preserves_request_scoped_headers_and_json_content_type() {
         let (sender, mut receiver) = mpsc::unbounded_channel();
         let app = Router::new()
             .route("/api/v1/test", post(capture_request))
@@ -3957,7 +3988,9 @@ mod tests {
         });
 
         let mut headers = reqwest::header::HeaderMap::new();
+        headers.insert("content-type", "application/json".parse().unwrap());
         headers.insert("idempotency-key", "caller-supplied-key".parse().unwrap());
+        headers.insert("x-trace-id", "trace-001".parse().unwrap());
 
         let response = forward_request(
             &Client::new(),
@@ -3966,7 +3999,7 @@ mod tests {
             "api/v1/test",
             None,
             headers,
-            ProxyBody::Buffered(Some(Bytes::from_static(b"{}"))),
+            ProxyBody::Buffered(Some(Bytes::from_static(br#"{"operation":"probe"}"#))),
             vec![],
             vec![],
             None,
@@ -3978,10 +4011,13 @@ mod tests {
 
         assert_eq!(response.status(), StatusCode::OK);
         let captured = receiver.recv().await.expect("captured request");
+        assert_eq!(captured.content_type.as_deref(), Some("application/json"));
         assert_eq!(
-            captured.idempotency_key, None,
-            "caller-supplied idempotency keys must not reach shared downstreams"
+            captured.idempotency_key.as_deref(),
+            Some("caller-supplied-key")
         );
+        assert_eq!(captured.trace_id.as_deref(), Some("trace-001"));
+        assert_eq!(captured.body, br#"{"operation":"probe"}"#);
 
         server.abort();
     }
@@ -5946,6 +5982,62 @@ mod tests {
             .collect();
         assert_eq!(operation_headers.len(), 1);
         assert_eq!(operation_headers[0].1, "Catalog.Write");
+    }
+
+    #[test]
+    fn effective_headers_apply_caller_and_default_precedence_after_shared_admission() {
+        let mut target = make_proxy_target_with_auth("none", "");
+        target.catalog_default_headers = vec![
+            DefaultRequestHeader {
+                name: "Content-Type".to_string(),
+                value: "application/octet-stream".to_string(),
+                overridable: true,
+                sensitive: false,
+            },
+            DefaultRequestHeader {
+                name: "Idempotency-Key".to_string(),
+                value: "catalog-key".to_string(),
+                overridable: true,
+                sensitive: false,
+            },
+            DefaultRequestHeader {
+                name: "X-Trace-ID".to_string(),
+                value: "catalog-trace".to_string(),
+                overridable: false,
+                sensitive: false,
+            },
+        ];
+        target.user_service_default_headers = vec![DefaultRequestHeader {
+            name: "x-trace-id".to_string(),
+            value: "user-service-trace".to_string(),
+            overridable: false,
+            sensitive: false,
+        }];
+
+        let mut caller = http::HeaderMap::new();
+        caller.insert("content-type", "application/json".parse().unwrap());
+        caller.insert("idempotency-key", "caller-key".parse().unwrap());
+        caller.insert("x-trace-id", "caller-trace".parse().unwrap());
+
+        let effective = build_effective_outbound_headers(
+            &target,
+            collect_forward_headers(&caller),
+            &[],
+            &[],
+            &[],
+        );
+        for (name, expected) in [
+            ("content-type", "application/json"),
+            ("idempotency-key", "caller-key"),
+            ("x-trace-id", "user-service-trace"),
+        ] {
+            let matching: Vec<_> = effective
+                .iter()
+                .filter(|(actual_name, _)| actual_name.eq_ignore_ascii_case(name))
+                .collect();
+            assert_eq!(matching.len(), 1, "{name} must be single-valued");
+            assert_eq!(matching[0].1, expected);
+        }
     }
 
     #[test]

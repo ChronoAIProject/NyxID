@@ -4012,6 +4012,7 @@ dependencies = [
  "jsonwebtoken 10.3.0",
  "libc",
  "mongodb",
+ "nyxid-cli",
  "nyxid-cloud-auth",
  "open",
  "p256",

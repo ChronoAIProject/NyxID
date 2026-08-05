@@ -10,6 +10,14 @@ repository.workspace = true
 name = "nyxid"
 path = "src/main.rs"
 
+[lib]
+name = "nyxid_node_proxy_test"
+path = "src/node_proxy_test_lib.rs"
+
+[features]
+default = []
+node-proxy-test = []
+
 [package.metadata.dist]
 dist = true
 
