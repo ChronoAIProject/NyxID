@@ -1,3 +1,5 @@
+> **SUPERSEDED (2026-08-05):** current state, verified finding dispositions, and readiness live in `docs/OAUTH_CHAT_POPUP_STATUS.md`. This file is kept as the review trail only.
+
 # Codex Adversarial Review — OAuth Embedded Flow Plan
 
 Source: `codex exec` (gpt-5 class, high reasoning, read-only sandbox), 2026-08-04.

@@ -1,3 +1,5 @@
+> **SUPERSEDED (2026-08-05):** current state, verified finding dispositions, and readiness live in `docs/OAUTH_CHAT_POPUP_STATUS.md`. This file is kept as the review trail only.
+
 # Adversarial Review: OAuth Chat Popup Implementation Plan
 
 Reviewed against `a1aa10eb`, the upstream v3 design, the prior 24 findings,

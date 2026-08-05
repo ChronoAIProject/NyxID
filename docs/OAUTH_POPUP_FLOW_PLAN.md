@@ -1,3 +1,5 @@
+> **SUPERSEDED (2026-08-05):** current state, verified finding dispositions, and readiness live in `docs/OAUTH_CHAT_POPUP_STATUS.md`. This file is kept as the review trail only.
+
 # NyxID OAuth — Universal Popup Flow (Plan v3)
 
 Status: draft, not implemented. Supersedes v1/v2. v2 was written for a

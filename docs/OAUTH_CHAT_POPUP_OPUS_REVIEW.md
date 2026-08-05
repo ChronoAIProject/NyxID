@@ -1,3 +1,5 @@
+> **SUPERSEDED (2026-08-05):** current state, verified finding dispositions, and readiness live in `docs/OAUTH_CHAT_POPUP_STATUS.md`. This file is kept as the review trail only.
+
 # Adversarial Review: Chat OAuth Popup Pilot Implementation
 
 Reviewed `41b46065..1d8c036d` against `origin/main` (52 files, ~2661 insertions),

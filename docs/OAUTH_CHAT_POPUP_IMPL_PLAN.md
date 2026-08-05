@@ -1,3 +1,5 @@
+> **SUPERSEDED (2026-08-05):** current state, verified finding dispositions, and readiness live in `docs/OAUTH_CHAT_POPUP_STATUS.md`. This file is kept as the review trail only.
+
 # OAuth Chat Popup — Pilot Implementation Plan (PR-A + PR-B + PR-C)
 
 Scope: §11 of `docs/OAUTH_POPUP_FLOW_PLAN.md` only — the chat-only pilot, one
