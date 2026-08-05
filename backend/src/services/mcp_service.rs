@@ -3722,6 +3722,7 @@ pub async fn connect_service(
                 requested_by: requested_by.map(str::to_string),
                 callback_url: None,
                 ttl_secs: None,
+                oauth_client_id: None,
             },
         )
         .await?;

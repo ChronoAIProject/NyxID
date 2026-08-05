@@ -26,6 +26,10 @@ pub struct ConnectLink {
     pub service_id: String,
     pub label: Option<String>,
     pub requested_by: Option<String>,
+    #[serde(default)]
+    pub requesting_app_id: Option<String>,
+    #[serde(default)]
+    pub requesting_app_name: Option<String>,
     pub token_hash: String,
     pub status: ConnectLinkStatus,
     pub callback_url: Option<String>,
@@ -41,6 +45,10 @@ pub struct ConnectLink {
     pub completion_claim_id: Option<String>,
     #[serde(default, with = "bson_datetime::optional")]
     pub completion_claim_at: Option<DateTime<Utc>>,
+    #[serde(default)]
+    pub last_error: Option<String>,
+    #[serde(default, with = "bson_datetime::optional")]
+    pub last_error_at: Option<DateTime<Utc>>,
 }
 
 impl fmt::Debug for ConnectLinkStatus {
@@ -63,6 +71,8 @@ impl fmt::Debug for ConnectLink {
             .field("service_id", &self.service_id)
             .field("label", &self.label)
             .field("requested_by", &self.requested_by)
+            .field("requesting_app_id", &self.requesting_app_id)
+            .field("requesting_app_name", &self.requesting_app_name)
             .field("token_hash", &RedactedLen(self.token_hash.len()))
             .field("status", &self.status)
             .field(
@@ -84,6 +94,8 @@ impl fmt::Debug for ConnectLink {
                     .map(|claim_id| RedactedLen(claim_id.len())),
             )
             .field("completion_claim_at", &self.completion_claim_at)
+            .field("last_error", &self.last_error)
+            .field("last_error_at", &self.last_error_at)
             .finish()
     }
 }
@@ -101,6 +113,8 @@ mod tests {
             service_id: uuid::Uuid::new_v4().to_string(),
             label: Some("Release automation".to_string()),
             requested_by: Some("codex-release".to_string()),
+            requesting_app_id: Some("desktop-client".to_string()),
+            requesting_app_name: Some("Desktop Client".to_string()),
             token_hash: "ab".repeat(32),
             status: ConnectLinkStatus::Pending,
             callback_url: Some("https://app.example.test/connected".to_string()),
@@ -110,6 +124,8 @@ mod tests {
             completed_user_service_id: None,
             completion_claim_id: Some("completion-claim-secret".to_string()),
             completion_claim_at: Some(now),
+            last_error: Some("provider_access_denied".to_string()),
+            last_error_at: Some(now),
         }
     }
 

@@ -1380,6 +1380,10 @@ pub fn build_router(
             "/connect-links/complete",
             post(handlers::connect_links::complete_connect_link),
         )
+        .route(
+            "/connect-links/cancel",
+            post(handlers::connect_links::cancel_hosted_connect_link),
+        )
         .route("/devices/onboard", post(handlers::devices::onboard_device))
         .route(
             "/devices/onboard/{bootstrap_id}",

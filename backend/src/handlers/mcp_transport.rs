@@ -2099,6 +2099,9 @@ async fn handle_wait_for_connection(
                 "service_slug": view.completed_service_slug,
                 "service_id": view.link.service_id,
                 "expires_at": view.link.expires_at.to_rfc3339(),
+                "last_error": (status == "pending")
+                    .then(|| view.link.last_error.clone())
+                    .flatten(),
                 "instructions": if status == "completed" {
                     "Connection completed. Retry the original tool call."
                 } else if status == "pending" {
@@ -3241,6 +3244,7 @@ mod tests {
             session_id: None,
             scope: "proxy".to_string(),
             acting_client_id: None,
+            oauth_client_id: None,
             approval_owner_user_id: None,
             auth_method: AuthMethod::ApiKey,
             allow_all_services: true,

@@ -34,6 +34,7 @@
         crate::handlers::connect_links::get_connect_link,
         crate::handlers::connect_links::cancel_connect_link,
         crate::handlers::connect_links::preview_connect_link,
+        crate::handlers::connect_links::cancel_hosted_connect_link,
         crate::handlers::connect_links::complete_connect_link,
         // Catalog
         crate::handlers::catalog::list_catalog,
@@ -103,6 +104,7 @@
             crate::handlers::connect_links::PreviewConnectLinkResponse,
             crate::handlers::connect_links::ConnectedServiceResponse,
             crate::handlers::connect_links::ConnectLinkStatusResponse,
+            crate::handlers::connect_links::CancelHostedConnectLinkRequest,
             crate::handlers::connect_links::CompleteConnectLinkRequest,
             crate::handlers::connect_links::CompleteConnectLinkResponse,
             // Catalog

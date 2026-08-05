@@ -12,11 +12,12 @@ use crate::models::connect_link::{
 use crate::models::downstream_service::{
     COLLECTION_NAME as DOWNSTREAM_SERVICES, DownstreamService,
 };
+use crate::models::oauth_client::{COLLECTION_NAME as OAUTH_CLIENTS, OauthClient};
 use crate::models::provider_config::{COLLECTION_NAME as PROVIDERS, ProviderConfig};
 use crate::models::user_api_key::{COLLECTION_NAME as USER_API_KEYS, UserApiKey};
 use crate::models::user_service::{COLLECTION_NAME as USER_SERVICES, UserService};
 use crate::redaction::RedactedLen;
-use crate::services::{audit_service, org_service, unified_key_service};
+use crate::services::{audit_service, oauth_service, org_service, unified_key_service};
 
 pub const CONNECT_LINK_PREFIX: &str = "nyx_clk_";
 pub const DEFAULT_TTL_SECS: i64 = 15 * 60;
@@ -29,6 +30,7 @@ pub const PINNED_GRACE_SECS: i64 = 30 * 60;
 const MAX_LABEL_LEN: usize = 200;
 const MAX_REQUESTED_BY_LEN: usize = 200;
 const MAX_CALLBACK_URL_LEN: usize = 2048;
+const MAX_LAST_ERROR_LEN: usize = 100;
 
 pub struct CreateInput {
     pub user_id: String,
@@ -37,6 +39,7 @@ pub struct CreateInput {
     pub requested_by: Option<String>,
     pub callback_url: Option<String>,
     pub ttl_secs: Option<i64>,
+    pub oauth_client_id: Option<String>,
 }
 
 pub struct CreatedLink {
@@ -144,9 +147,18 @@ pub async fn create(db: &mongodb::Database, input: CreateInput) -> AppResult<Cre
         ));
     }
     let label = normalize_optional(input.label, MAX_LABEL_LEN, "label")?;
-    let requested_by =
+    let supplied_requested_by =
         normalize_optional(input.requested_by, MAX_REQUESTED_BY_LEN, "requested_by")?;
-    let callback_url = validate_callback_url(input.callback_url.as_deref())?;
+    let (callback_url, requesting_app) = resolve_requesting_app(
+        db,
+        input.oauth_client_id.as_deref(),
+        input.callback_url.as_deref(),
+    )
+    .await?;
+    let requested_by = requesting_app
+        .as_ref()
+        .map(|client| client.client_name.clone())
+        .or(supplied_requested_by);
     let ttl_secs = input
         .ttl_secs
         .unwrap_or(DEFAULT_TTL_SECS)
@@ -161,6 +173,10 @@ pub async fn create(db: &mongodb::Database, input: CreateInput) -> AppResult<Cre
         service_id: service.service_id.clone(),
         label,
         requested_by,
+        requesting_app_id: requesting_app.as_ref().map(|client| client.id.clone()),
+        requesting_app_name: requesting_app
+            .as_ref()
+            .map(|client| client.client_name.clone()),
         token_hash: hash_token(&raw_token),
         status: ConnectLinkStatus::Pending,
         callback_url,
@@ -170,6 +186,8 @@ pub async fn create(db: &mongodb::Database, input: CreateInput) -> AppResult<Cre
         completed_user_service_id: None,
         completion_claim_id: None,
         completion_claim_at: None,
+        last_error: None,
+        last_error_at: None,
     };
 
     db.collection::<ConnectLink>(CONNECT_LINKS)
@@ -251,6 +269,8 @@ pub async fn cancel(
                 "$unset": {
                     "completion_claim_id": "",
                     "completion_claim_at": "",
+                    "last_error": "",
+                    "last_error_at": "",
                 },
             },
         )
@@ -261,6 +281,16 @@ pub async fn cancel(
     };
 
     view_for_link(db, updated).await
+}
+
+pub async fn cancel_by_token(
+    db: &mongodb::Database,
+    actor_user_id: &str,
+    raw_token: &str,
+) -> AppResult<LinkView> {
+    let link = find_by_raw_token(db, raw_token).await?;
+    ensure_actor_can_manage(db, actor_user_id, &link).await?;
+    cancel(db, actor_user_id, &link.id).await
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -469,6 +499,8 @@ pub async fn complete_oauth_callback(
                 "$unset": {
                     "completion_claim_id": "",
                     "completion_claim_at": "",
+                    "last_error": "",
+                    "last_error_at": "",
                 },
             },
         )
@@ -476,6 +508,39 @@ pub async fn complete_oauth_callback(
         .await?
         .ok_or(AppError::ConnectLinkAlreadyCompleted)?;
     view_for_link(db, updated).await
+}
+
+pub async fn record_provider_error(
+    db: &mongodb::Database,
+    connect_link_id: &str,
+    owner_user_id: &str,
+    error: &str,
+) -> AppResult<bool> {
+    if error.is_empty()
+        || error.len() > MAX_LAST_ERROR_LEN
+        || !error
+            .bytes()
+            .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'_')
+    {
+        return Err(AppError::ValidationError(
+            "connect-link provider error code is invalid".to_string(),
+        ));
+    }
+    let result = db
+        .collection::<ConnectLink>(CONNECT_LINKS)
+        .update_one(
+            doc! {
+                "_id": connect_link_id,
+                "user_id": owner_user_id,
+                "status": "pending",
+            },
+            doc! { "$set": {
+                "last_error": error,
+                "last_error_at": bson::DateTime::from_chrono(Utc::now()),
+            } },
+        )
+        .await?;
+    Ok(result.modified_count == 1)
 }
 
 pub async fn wait_for_status(
@@ -539,6 +604,8 @@ async fn resume_existing_completion(
                     "$unset": {
                         "completion_claim_id": "",
                         "completion_claim_at": "",
+                        "last_error": "",
+                        "last_error_at": "",
                     },
                 },
             )
@@ -584,6 +651,8 @@ async fn store_provisioned_service(
                 "$unset": {
                     "completion_claim_id": "",
                     "completion_claim_at": "",
+                    "last_error": "",
+                    "last_error_at": "",
                 },
             },
         )
@@ -610,6 +679,8 @@ async fn finish_claim(
                 "$unset": {
                     "completion_claim_id": "",
                     "completion_claim_at": "",
+                    "last_error": "",
+                    "last_error_at": "",
                 },
             },
         )
@@ -878,6 +949,54 @@ fn normalize_optional(
     Ok(Some(value.to_string()))
 }
 
+async fn resolve_requesting_app(
+    db: &mongodb::Database,
+    oauth_client_id: Option<&str>,
+    callback_url: Option<&str>,
+) -> AppResult<(Option<String>, Option<OauthClient>)> {
+    let Some(client_id) = oauth_client_id else {
+        return Ok((validate_callback_url(callback_url)?, None));
+    };
+
+    let callback_url = validate_app_callback_url(callback_url)?;
+    let client = match callback_url.as_deref() {
+        Some(callback_url) => oauth_service::validate_client(db, client_id, callback_url).await?,
+        None => db
+            .collection::<OauthClient>(OAUTH_CLIENTS)
+            .find_one(doc! { "_id": client_id, "is_active": true })
+            .await?
+            .ok_or_else(|| AppError::NotFound("OAuth client not found".to_string()))?,
+    };
+    Ok((callback_url, Some(client)))
+}
+
+fn validate_app_callback_url(raw: Option<&str>) -> AppResult<Option<String>> {
+    let Some(raw) = raw else {
+        return Ok(None);
+    };
+    let raw = raw.trim();
+    if raw.is_empty() {
+        return Ok(None);
+    }
+    if raw.len() > MAX_CALLBACK_URL_LEN {
+        return Err(AppError::ValidationError(
+            "callback_url is too long".to_string(),
+        ));
+    }
+    let parsed = url::Url::parse(raw)
+        .map_err(|_| AppError::ValidationError("callback_url must be absolute".to_string()))?;
+    if matches!(parsed.scheme(), "javascript" | "data" | "file")
+        || !parsed.username().is_empty()
+        || parsed.password().is_some()
+        || parsed.fragment().is_some()
+    {
+        return Err(AppError::ValidationError(
+            "callback_url must not contain userinfo or a fragment".to_string(),
+        ));
+    }
+    Ok(Some(raw.to_string()))
+}
+
 pub fn validate_callback_url(raw: Option<&str>) -> AppResult<Option<String>> {
     let Some(raw) = raw else {
         return Ok(None);
@@ -904,6 +1023,35 @@ pub fn validate_callback_url(raw: Option<&str>) -> AppResult<Option<String>> {
             "callback_url must be an absolute HTTP(S) URL without userinfo or a fragment"
                 .to_string(),
         ));
+    }
+    Ok(Some(parsed.to_string()))
+}
+
+pub fn terminal_callback_url(link: &ConnectLink) -> AppResult<Option<String>> {
+    let status = match link.status {
+        ConnectLinkStatus::Pending => return Ok(None),
+        ConnectLinkStatus::Completed => "completed",
+        ConnectLinkStatus::Expired => "expired",
+        ConnectLinkStatus::Cancelled => "cancelled",
+    };
+    let Some(callback_url) = link.callback_url.as_deref() else {
+        return Ok(None);
+    };
+    let mut parsed = url::Url::parse(callback_url).map_err(|_| {
+        AppError::Internal("stored connect-link callback URL is invalid".to_string())
+    })?;
+    let existing_pairs: Vec<(String, String)> = parsed
+        .query_pairs()
+        .filter(|(key, _)| key != "status" && key != "connect_link_id")
+        .map(|(key, value)| (key.into_owned(), value.into_owned()))
+        .collect();
+    parsed.set_query(None);
+    parsed.set_fragment(None);
+    {
+        let mut query = parsed.query_pairs_mut();
+        query.extend_pairs(existing_pairs.iter().map(|(key, value)| (key, value)));
+        query.append_pair("status", status);
+        query.append_pair("connect_link_id", &link.id);
     }
     Ok(Some(parsed.to_string()))
 }
@@ -939,6 +1087,38 @@ mod tests {
         service
     }
 
+    async fn insert_oauth_client(
+        db: &mongodb::Database,
+        name: &str,
+        redirect_uris: Vec<String>,
+    ) -> OauthClient {
+        let now = Utc::now();
+        let client = OauthClient {
+            id: Uuid::new_v4().to_string(),
+            client_name: name.to_string(),
+            client_secret_hash: String::new(),
+            redirect_uris,
+            allowed_scopes: "openid profile".to_string(),
+            scope_provenance: Default::default(),
+            grant_types: "authorization_code refresh_token".to_string(),
+            client_type: "public".to_string(),
+            is_active: true,
+            delegation_scopes: String::new(),
+            default_service_catalog_slugs: Vec::new(),
+            broker_capability_enabled: false,
+            revocation_webhook_url: None,
+            revocation_webhook_secret_encrypted: None,
+            created_by: Some("test".to_string()),
+            created_at: now,
+            updated_at: now,
+        };
+        db.collection::<OauthClient>(OAUTH_CLIENTS)
+            .insert_one(&client)
+            .await
+            .expect("insert OAuth client");
+        client
+    }
+
     async fn create_test_link(db: &mongodb::Database, suffix: &str) -> (String, CreatedLink) {
         let service = insert_catalog_service(db, suffix).await;
         let owner = Uuid::new_v4().to_string();
@@ -951,6 +1131,7 @@ mod tests {
                 requested_by: None,
                 callback_url: None,
                 ttl_secs: None,
+                oauth_client_id: None,
             },
         )
         .await
@@ -1045,6 +1226,135 @@ mod tests {
         }
     }
 
+    #[tokio::test]
+    async fn app_callback_exact_match_uses_authenticated_app_identity() {
+        let Some(db) = connect_test_database("connect_link_app_exact_callback").await else {
+            return;
+        };
+        let service = insert_catalog_service(&db, "app-exact").await;
+        let callback = "https://desktop.example.test/connect/return";
+        let client = insert_oauth_client(&db, "Desktop App", vec![callback.to_string()]).await;
+        let created = create(
+            &db,
+            CreateInput {
+                user_id: Uuid::new_v4().to_string(),
+                service_slug: service.slug,
+                label: None,
+                requested_by: Some("spoofed request name".to_string()),
+                callback_url: Some(callback.to_string()),
+                ttl_secs: None,
+                oauth_client_id: Some(client.id.clone()),
+            },
+        )
+        .await
+        .expect("create app connect link");
+
+        assert_eq!(created.link.callback_url.as_deref(), Some(callback));
+        assert_eq!(
+            created.link.requesting_app_id.as_deref(),
+            Some(client.id.as_str())
+        );
+        assert_eq!(
+            created.link.requesting_app_name.as_deref(),
+            Some("Desktop App")
+        );
+        assert_eq!(created.link.requested_by.as_deref(), Some("Desktop App"));
+    }
+
+    #[tokio::test]
+    async fn app_callback_accepts_registered_custom_scheme() {
+        let Some(db) = connect_test_database("connect_link_app_custom_callback").await else {
+            return;
+        };
+        let service = insert_catalog_service(&db, "app-custom").await;
+        let callback = "desktop-app://connect/return";
+        let client = insert_oauth_client(&db, "Native App", vec![callback.to_string()]).await;
+        let created = create(
+            &db,
+            CreateInput {
+                user_id: Uuid::new_v4().to_string(),
+                service_slug: service.slug,
+                label: None,
+                requested_by: None,
+                callback_url: Some(callback.to_string()),
+                ttl_secs: None,
+                oauth_client_id: Some(client.id),
+            },
+        )
+        .await
+        .expect("registered custom callback accepted");
+        assert_eq!(created.link.callback_url.as_deref(), Some(callback));
+    }
+
+    #[tokio::test]
+    async fn app_callback_rejects_unregistered_uri() {
+        let Some(db) = connect_test_database("connect_link_app_callback_reject").await else {
+            return;
+        };
+        let service = insert_catalog_service(&db, "app-reject").await;
+        let client = insert_oauth_client(
+            &db,
+            "Desktop App",
+            vec!["https://desktop.example.test/registered".to_string()],
+        )
+        .await;
+        let result = create(
+            &db,
+            CreateInput {
+                user_id: Uuid::new_v4().to_string(),
+                service_slug: service.slug,
+                label: None,
+                requested_by: None,
+                callback_url: Some("https://other.example.test/return".to_string()),
+                ttl_secs: None,
+                oauth_client_id: Some(client.id),
+            },
+        )
+        .await;
+        assert!(matches!(result, Err(AppError::InvalidRedirectUri)));
+    }
+
+    #[tokio::test]
+    async fn terminal_callback_replaces_reserved_params_for_every_outcome() {
+        let Some(db) = connect_test_database("connect_link_terminal_callbacks").await else {
+            return;
+        };
+        let (_, created) = create_test_link(&db, "terminal-callbacks").await;
+        let mut link = created.link;
+        link.callback_url = Some(
+            "https://desktop.example.test/return?flow=abc&status=old&connect_link_id=old"
+                .to_string(),
+        );
+
+        assert!(
+            terminal_callback_url(&link)
+                .expect("pending callback")
+                .is_none()
+        );
+        for (status, expected) in [
+            (ConnectLinkStatus::Completed, "completed"),
+            (ConnectLinkStatus::Cancelled, "cancelled"),
+            (ConnectLinkStatus::Expired, "expired"),
+        ] {
+            link.status = status;
+            let callback = terminal_callback_url(&link)
+                .expect("build terminal callback")
+                .expect("callback exists");
+            let parsed = url::Url::parse(&callback).expect("parse terminal callback");
+            let pairs: std::collections::HashMap<_, _> = parsed.query_pairs().collect();
+            assert_eq!(pairs.get("flow").map(|value| value.as_ref()), Some("abc"));
+            assert_eq!(
+                pairs.get("status").map(|value| value.as_ref()),
+                Some(expected)
+            );
+            assert_eq!(
+                pairs.get("connect_link_id").map(|value| value.as_ref()),
+                Some(link.id.as_str())
+            );
+            assert!(!callback.contains(CONNECT_LINK_PREFIX));
+        }
+    }
+
     #[test]
     fn raw_token_requires_prefix_and_32_hex_bytes() {
         let valid = format!("{CONNECT_LINK_PREFIX}{}", "ab".repeat(32));
@@ -1100,6 +1410,7 @@ mod tests {
                 requested_by: Some("test-agent".to_string()),
                 callback_url: None,
                 ttl_secs: None,
+                oauth_client_id: None,
             },
         )
         .await
@@ -1139,6 +1450,7 @@ mod tests {
                 requested_by: None,
                 callback_url: None,
                 ttl_secs: None,
+                oauth_client_id: None,
             },
         )
         .await
@@ -1180,6 +1492,7 @@ mod tests {
                 requested_by: None,
                 callback_url: None,
                 ttl_secs: None,
+                oauth_client_id: None,
             },
         )
         .await
@@ -1218,6 +1531,7 @@ mod tests {
                 requested_by: None,
                 callback_url: None,
                 ttl_secs: None,
+                oauth_client_id: None,
             },
         )
         .await
@@ -1443,6 +1757,20 @@ mod tests {
             .await
             .expect("restore pending OAuth link");
 
+        assert!(
+            record_provider_error(&db, &created.link.id, &owner, "provider_access_denied")
+                .await
+                .expect("record provider decline")
+        );
+        let declined = get_for_actor(&db, &owner, &created.link.id)
+            .await
+            .expect("read declined link");
+        assert_eq!(
+            declined.link.last_error.as_deref(),
+            Some("provider_access_denied")
+        );
+        assert!(declined.link.last_error_at.is_some());
+
         let view = complete_oauth_callback(&db, &created.link.id, &owner, &connection_id)
             .await
             .expect("complete expired OAuth callback");
@@ -1451,6 +1779,8 @@ mod tests {
             view.link.completed_user_service_id.as_deref(),
             Some(service_id.as_str())
         );
+        assert!(view.link.last_error.is_none());
+        assert!(view.link.last_error_at.is_none());
     }
 
     #[tokio::test]

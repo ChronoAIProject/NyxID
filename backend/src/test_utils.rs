@@ -614,6 +614,7 @@ pub(crate) fn test_auth_user(user_id: &str) -> AuthUser {
         session_id: None,
         scope: String::new(),
         acting_client_id: None,
+        oauth_client_id: None,
         approval_owner_user_id: None,
         auth_method: AuthMethod::Session,
         allow_all_services: true,
