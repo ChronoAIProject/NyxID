@@ -125,26 +125,42 @@ fn print_result(
     status: &str,
     connected: Option<&ConnectedService>,
 ) -> Result<()> {
-    match args.auth.output {
-        OutputFormat::Json => println!(
-            "{}",
-            serde_json::to_string_pretty(&ConnectOutput {
-                id: &created.id,
-                connect_url: &created.connect_url,
-                expires_at: &created.expires_at,
-                status,
-                service_slug: connected.map(|service| service.slug.as_str()),
-                user_service_id: connected.map(|service| service.id.as_str()),
-            })?
-        ),
+    let stdout = std::io::stdout();
+    let mut output = stdout.lock();
+    write_result(&mut output, args.auth.output, created, status, connected)
+}
+
+fn write_result(
+    output: &mut impl Write,
+    format: OutputFormat,
+    created: &CreateConnectLinkResponse,
+    status: &str,
+    connected: Option<&ConnectedService>,
+) -> Result<()> {
+    match format {
+        OutputFormat::Json => {
+            writeln!(
+                output,
+                "{}",
+                serde_json::to_string_pretty(&ConnectOutput {
+                    id: &created.id,
+                    connect_url: &created.connect_url,
+                    expires_at: &created.expires_at,
+                    status,
+                    service_slug: connected.map(|service| service.slug.as_str()),
+                    user_service_id: connected.map(|service| service.id.as_str()),
+                })?
+            )?;
+        }
         OutputFormat::Table => {
             if let Some(service) = connected {
-                eprintln!("Connected: {}", service.slug);
+                writeln!(output, "Connected: {}", service.slug)?;
             } else {
-                eprintln!(
+                writeln!(
+                    output,
                     "Connect link created. It expires at {}.",
                     created.expires_at
-                );
+                )?;
             }
         }
     }
@@ -193,6 +209,34 @@ mod tests {
         for status in ["completed", "expired", "cancelled"] {
             assert!(is_terminal_status(status));
         }
+    }
+
+    #[test]
+    fn table_result_is_written_to_the_output_stream() {
+        let created = CreateConnectLinkResponse {
+            id: "1c4e4357-75ec-431a-8c88-9913475cfb78".to_string(),
+            connect_url: "https://app.example.test/connect/nyx_clk_token".to_string(),
+            expires_at: "2026-08-05T10:15:00Z".to_string(),
+        };
+        let connected = ConnectedService {
+            id: "c859ff2a-9a25-4907-a4b4-c22bd33897af".to_string(),
+            slug: "github".to_string(),
+        };
+        let mut output = Vec::new();
+
+        write_result(
+            &mut output,
+            OutputFormat::Table,
+            &created,
+            "completed",
+            Some(&connected),
+        )
+        .expect("write table result");
+
+        assert_eq!(
+            String::from_utf8(output).expect("UTF-8 output"),
+            "Connected: github\n"
+        );
     }
 
     #[tokio::test]
