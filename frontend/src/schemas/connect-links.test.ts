@@ -33,6 +33,37 @@ describe("connect link schemas", () => {
     expect(parsed.callback_url).toContain("status=cancelled");
   });
 
+  it("accepts backend wire timestamps and OAuth previews without an auth key name", () => {
+    const parsed = connectLinkPreviewSchema.parse({
+      service_name: "GitHub",
+      service_slug: "api-github",
+      label: null,
+      requested_by: null,
+      created_at: "2026-08-06T01:15:04.123456+00:00",
+      expires_at: "2026-08-06T01:30:04.123+00:00",
+      status: "pending",
+      connect_method: "oauth",
+      auth_key_name: "",
+      credential_mode: "admin",
+      has_platform_oauth_credentials: true,
+      requires_gateway_url: false,
+      api_key_url: null,
+      api_key_instructions: null,
+    });
+    expect(parsed.auth_key_name).toBe("");
+
+    const status = connectLinkStatusResponseSchema.parse({
+      id: "65dd8fe8-9ee8-4c89-af1e-b283a17bcf37",
+      status: "completed",
+      service_name: "GitHub",
+      service_slug: "api-github",
+      expires_at: "2026-08-06T01:30:04+00:00",
+      completed_at: "2026-08-06T01:20:04.500+00:00",
+      last_error_at: "2026-08-06T01:18:04+00:00",
+    });
+    expect(status.status).toBe("completed");
+  });
+
   it("validates BYO OAuth and gateway fields independently", () => {
     const empty = connectOAuthFormSchema.parse({
       endpoint_url: "",

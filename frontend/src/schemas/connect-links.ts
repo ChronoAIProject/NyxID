@@ -19,11 +19,11 @@ export const connectLinkPreviewSchema = z.object({
   service_slug: z.string().min(1),
   label: z.string().nullable(),
   requested_by: z.string().nullable(),
-  created_at: z.string().datetime(),
-  expires_at: z.string().datetime(),
+  created_at: z.string().datetime({ offset: true }),
+  expires_at: z.string().datetime({ offset: true }),
   status: connectLinkStatusSchema,
   connect_method: connectMethodSchema,
-  auth_key_name: z.string().min(1),
+  auth_key_name: z.string(),
   credential_mode: z.string().nullable(),
   has_platform_oauth_credentials: z.boolean(),
   requires_gateway_url: z.boolean(),
@@ -80,8 +80,8 @@ export const connectLinkStatusResponseSchema = z.object({
   status: connectLinkStatusSchema,
   service_name: z.string(),
   service_slug: z.string(),
-  expires_at: z.string().datetime(),
-  completed_at: z.string().datetime().nullable().optional(),
+  expires_at: z.string().datetime({ offset: true }),
+  completed_at: z.string().datetime({ offset: true }).nullable().optional(),
   connected_service: z
     .object({ id: z.string(), slug: z.string() })
     .nullable()
@@ -90,7 +90,7 @@ export const connectLinkStatusResponseSchema = z.object({
   requesting_app_id: z.string().nullable().optional(),
   requesting_app_name: z.string().nullable().optional(),
   last_error: z.string().nullable().optional(),
-  last_error_at: z.string().datetime().nullable().optional(),
+  last_error_at: z.string().datetime({ offset: true }).nullable().optional(),
 });
 
 export type ConnectLinkPreview = z.infer<typeof connectLinkPreviewSchema>;

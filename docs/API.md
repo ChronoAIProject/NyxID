@@ -3251,7 +3251,7 @@ Content-Type: application/json
 {
   "id": "6c02c84a-3d97-430f-8468-c96b609d9563",
   "connect_url": "https://app.nyxid.dev/connect/nyx_clk_<opaque-secret>",
-  "expires_at": "2026-08-05T10:15:00+00:00"
+  "expires_at": "2026-08-05T10:15:00.000Z"
 }
 ```
 
@@ -3265,11 +3265,11 @@ Treat `connect_url` as a single-use secret and hand it only to the browser. The 
   "status": "pending",
   "service_name": "GitHub",
   "service_slug": "github",
-  "expires_at": "2026-08-05T10:15:00+00:00",
+  "expires_at": "2026-08-05T10:15:00.000Z",
   "requesting_app_id": "desktop-client-id",
   "requesting_app_name": "Desktop App",
   "last_error": "provider_access_denied",
-  "last_error_at": "2026-08-05T10:04:12+00:00"
+  "last_error_at": "2026-08-05T10:04:12.000Z"
 }
 ```
 
