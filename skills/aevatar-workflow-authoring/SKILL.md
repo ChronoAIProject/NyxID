@@ -1,7 +1,7 @@
 ---
 name: aevatar-workflow-authoring
 description: Author, preview, validate, and persist an executable aevatar workflow from a natural-language request. Use it when the user wants to create, build, set up, automate, or feature-probe a multi-step task as a runnable Aevatar workflow. It covers exact NyxID operation and authored-request admission, bounded YAML, file inputs, terminal run verification, feature-equivalent evidence boundaries, and reusable publication. Not for blindly rerunning an existing failed workflow.
-version: "2.5"
+version: "2.6"
 metadata:
   category: tool-based
   tool-list:
@@ -33,7 +33,7 @@ The core DSL, engine rules, and tool protocol are here. Load the linked REST or 
 
 1. **Confirm the intent is authoring.** The user wants a *new* runnable workflow. If they want to run something that already exists, stop and search for it instead.
 2. **Clarify just enough.** Pin down: the trigger/input, the ordered steps, the desired output, and which external services (if any) are involved. Ask only what you cannot reasonably infer; do not over-interrogate.
-3. **Select the exact external capability (only if external calls are needed).** Prefer a published operation: call `list_external_workflow_capabilities`, copy its exact selector, then inspect readiness for `interactive` or `durable`. Use typed `capability.nyxid_request` only when no published operation represents a required HTTP request; it needs an exact UserService selected from authoritative `/api/v1/keys`, a typed method/path/body contract, and bind-time authenticated confirmation/grant. `/api/v1/user-services` is only a routing projection and is never execution authority.
+3. **Select the exact external capability (only if external calls are needed).** Prefer a published operation: call `list_external_workflow_capabilities`, copy its exact `user_service_id + endpoint_id` selector, then inspect readiness for `interactive` or `durable`. The YAML/proto selector has no `operation_id` field. Use typed `capability.nyxid_request` only when no published operation represents a required HTTP request; it needs an exact UserService selected from authoritative `/api/v1/keys`, a typed method/path/body contract, and bind-time authenticated confirmation/grant. One step carries exactly one of `nyxid_operation` or `nyxid_request`, never both. `/api/v1/user-services` is only a routing projection and is never execution authority.
 4. **Author the YAML.** Apply the DSL below and obey every rule in **Engine rules (must obey)**. Prefer the reliable-core primitives; use advanced primitives only when the task truly needs them.
 5. **Preview before execution.** Use the explicit-request preview or draft-run readiness surface. Confirm unique call sites, read/write classification, approval requirements, exact workflow/revision identity, and every blocker. Preview/readiness proves admission readiness only; it does not prove runtime credential propagation or downstream authorization.
 6. **Run once when authorized, then observe the same run.** Never use another mutation as a status check. For a real acceptance run, require terminal completion, `lastSuccess=true`, non-empty required step outputs, and non-empty final output. On failure, read run detail and audit, find the first failed step, and diagnose before any rerun. Do not blindly retry a mutation or a failed workflow. If the original definition is blocked by a stale or inaccessible external resource, a separately authorized feature-equivalent probe may substitute an accessible sanitized resource while preserving the relevant step, selector, transform, file, and fan-out shapes. Its success proves only those platform features; the original workflow remains blocked or unproven. Never add sends, approvals, external mutations, or schedules merely to broaden a probe.
@@ -56,6 +56,7 @@ These are the failure modes that break generated workflows. Check every one befo
 - **Role is not model.** `target_role` selects the actor, not a model — never put a model name in `target_role`. A role *may* carry `provider`/`model`, but set them only when the user explicitly wants a specific model; otherwise omit and let the session default apply.
 - **`parameters` values are strings.** Bare words are read as strings (`op: trim`); quote anything numeric or boolean so it stays a string (`n: "50"`, `max_iterations: "5"`).
 - **Determinism for money/counts/dedup.** Use `transform` (`sum`, `group_by`, `round`, …) for any arithmetic, totals, or deduplication. Never let an `llm_call` compute amounts or counts.
+- **Transform operations are an allowlist.** Supported operations are `identity`, `count`, `count_words`, `take`, `take_last`, `join`, `split`, `json_extract`, `json_parse`, `rss_extract_items`, `distinct`, `uppercase`, `lowercase`, `trim`, `reverse_lines`, `sum`, `subtract`, `multiply`, `divide`, `round`, `min`, `max`, `group_by`, and `template`. There is no `replace` or `regex_replace`. The current runtime treats an unknown operation as identity and can report the step successful, so reject any unlisted `op` during authoring and assert the transformed output. If deterministic string replacement is essential, use a bounded `code_execute` step only when its admission policy permits it; never substitute an LLM.
 - **Side effects are at-least-once.** `tool_call` / `connector_call` may run more than once on retry. Keep them idempotent where it matters.
 - **External calls go through tools, not raw hosts.** Use `nyxid_proxy` (or a typed tool) — never embed a vendor base URL as a direct target. See **Accessing external services**.
 - **Files are typed inputs.** `input_file_refs` is not `$input` text and not an interpolation variable. Use `foreach` with `items_source: input_file_refs` to process multiple files; file tools are still invoked through `type: tool_call`.
@@ -125,7 +126,7 @@ steps:
   capability:
     nyxid_operation:
       user_service_id: <copied-user-service-id>
-      operation_id: <listed-operation-id>
+      endpoint_id: <listed-endpoint-id>
   parameters:
     tool: nyxid_proxy
     arguments: '{"query":{}}'
@@ -159,7 +160,7 @@ Do not call external services or LLMs from `code_execute`; use `nyxid_proxy` for
     arguments: '{"file_ref":{"file_id":"<file-id>","owner_run_id":"<run-id>"},"slug":"my-upload-service","path":"/v1/upload"}'
 ```
 
-`transform` — deterministic data ops: `trim`, `split`, `json_extract`, `json_parse`, and numeric `sum`/`subtract`/`multiply`/`divide`/`round`/`min`/`max`/`group_by`, plus `rss_extract_items`.
+`transform` — deterministic data ops from the allowlist above. `replace` and `regex_replace` are not implemented; never author them. Unknown names silently behave as identity in the current runtime, so validate the name and the output rather than trusting a green step.
 ```yaml
 - id: total
   type: transform
@@ -295,7 +296,7 @@ Advanced notes: `human_approval`/`wait_signal` suspend the run until a resume/si
 - `${steps.<id>.output}` — a prior step's text output. **It is `.output`, NOT `.text`.** The engine registers `steps.<id>.output` and never `steps.<id>.text`, so `${steps.<id>.text}` silently resolves to an empty string — the run still shows every step "completed", but a tool/connector downstream receives an empty argument and fails.
 - `${<name>}` — a workflow variable written by an `assign` step (`target: <name>`). This is the canonical way to read a captured value back in a later step; `${steps.<capture-id>.text}` does NOT work (use the bare `${<name>}`, or equivalently `${steps.<capture-id>.output}`).
 - `${steps.<id>.json.<field>}` — a field from a prior step whose output was a JSON object (e.g. a `tool_call` result). Also: `${steps.<id>.success}`, `${steps.<id>.error}`, `${steps.<id>.annotations.<ns>.<key>}`.
-- Expression functions (usable in any value, incl. `condition`): `if`, `concat`, `isblank`, `length`, `not`, `and`, `or`, `upper`, `lower`, `trim`, `json`, `add`, `sub`, `mul`, `div`, `eq`, `lt`, `lte`, `gt`. **There is no `contains`/substring function.**
+- Expression functions (usable in any value, incl. `condition`): `if`, `concat`, `isblank`, `length`, `not`, `and`, `or`, `upper`, `lower`, `trim`, `json`, `add`, `sub`, `mul`, `div`, `eq`, `lt`, `lte`, `gt`. **There is no `contains`, `replace`, regex, or substring function.**
 
 > **Gotchas that silently break runs (verified against the engine — a clean test run does NOT catch these, because failed tool calls return their error as ordinary step output):**
 > - **`${steps.<id>.text}` is always empty — use `${steps.<id>.output}`.** This is the #1 cause of "every step completed but the connector got an empty argument."
@@ -324,13 +325,13 @@ There is a raw current-turn proxy surface, two compiled workflow capability shap
   ```
   This is a direct current-turn tool call, not workflow YAML.
 - **No dynamic current-turn operation tools.** `nyxid_service_operation__*` and `nyxid_service_request` are retired. Never invent or cache one of those tool names. Current-turn management uses the typed connected-service tools; raw one-off HTTP uses `nyxid_proxy` only where that surface is explicitly available.
-- **Compiled published operation.** Call `list_external_workflow_capabilities`, copy the exact descriptor `selector`, inspect it for the required execution mode, and persist it beside the step as `capability.nyxid_operation`:
+- **Compiled published operation.** Call `list_external_workflow_capabilities`, copy the exact descriptor `selector`, inspect it for the required execution mode, and persist it beside the step as `capability.nyxid_operation`. `endpoint_id` is the authored operation selector; `operation_id` is reserved/absent from this YAML/proto contract:
   ```json
   {
     "selector": {
       "nyx_id_operation": {
         "user_service_id": "us-lark-7",
-        "operation_id": "get-message"
+        "endpoint_id": "get-message"
       }
     },
     "execution_mode": "interactive"
@@ -343,13 +344,24 @@ There is a raw current-turn proxy surface, two compiled workflow capability shap
     capability:
       nyxid_operation:
         user_service_id: us-lark-7
-        operation_id: get-message
+        endpoint_id: get-message
     parameters:
       tool: nyxid_proxy
       arguments: '{"path_params":{"message_id":"m-42"}}'
   ```
-  The compiler's admission proof owns UserService identity, slug, operation ID, method, path template, digest, schemas, and response policy. Runtime `arguments` may contain only admitted `path_params`, `query`, `headers`, `body`, and `response_mode`. Do not send `service_id`, `user_service_id`, `slug`, `path`, `method`, `operation_id`, or a contract digest in `arguments`.
-- **Compiled authored HTTP request.** Use `capability.nyxid_request` only for an exact request contract that cannot be selected as a published operation. Author the typed method, relative path template, allowed request fields, and response policy; select one exact UserService from `/api/v1/keys`. Binding must preview the current request-contract digest and risk, then obtain the authenticated binder's explicit confirmation/grant. Saving a draft, preview success, or `/api/v1/user-services` cannot grant execution. Authored requests never rediscover inventory or OpenAPI at runtime; they execute only the committed proof and matching grant.
+  The compiler's admission proof owns UserService identity, slug, internal operation identity, method, path template, digest, schemas, and response policy. Runtime `arguments` may contain only admitted `path_params`, `query`, `headers`, `body`, and `response_mode`. Do not send `service_id`, `user_service_id`, `slug`, `path`, `method`, `endpoint_id`, `operation_id`, or a contract digest in `arguments`.
+- **Operation discovery is surface-dependent.** `list_external_workflow_capabilities` is an in-session tool, not a public REST endpoint. `/api/v1/keys` proves exact UserService identity but does not replace the workflow operation list. If the client surface exposes neither the list tool nor an operation picker, do not probe invented REST paths or guess an endpoint. Report `operation discovery unavailable` and require an exact selector from an authoritative service contract or a supported surface before binding.
+- **Compiled authored HTTP request.** Use `capability.nyxid_request` only for an exact request contract that cannot be selected as a published operation. Author the typed method, relative path template, allowed request fields, and response policy; select one exact UserService from `/api/v1/keys`. Binding must preview the current request-contract digest and risk, then obtain the authenticated binder's explicit confirmation/grant. Saving a draft, preview success, or `/api/v1/user-services` cannot grant execution. Authored requests never rediscover inventory or OpenAPI at runtime; they execute only the committed proof and matching grant. A step capability is a oneof: do not put `nyxid_request` beside `nyxid_operation` on the same step. Different steps may use different shapes when each is admitted independently.
+  ```yaml
+  capability:
+    nyxid_request:
+      user_service_id: us-lark-7
+      method: GET
+      path_template: /open-apis/bitable/v1/apps/{app_token}/tables/{table_id}/records/{record_id}
+      query_parameters: [user_id_type]
+      body_mode: none
+      response_mode: text
+  ```
 - **Registered workflow connectors.** If the capability is a connector registered in the workflow connector registry, call it with `connector_call` and authorize it on the role:
   ```yaml
   roles:
@@ -364,7 +376,8 @@ There is a raw current-turn proxy surface, two compiled workflow capability shap
   ```
 - **`allowed_tools` gotcha.** A role with no `allowed_tools` sees the full inherited tool catalog (including `nyxid_proxy`). But the moment you set `allowed_tools` on a role, you **must** list every tool its steps call (e.g. `allowed_tools: [nyxid_proxy]`) — otherwise the `tool_call` will not resolve the tool at run time.
 - **Prefer a typed tool when one exists** for the capability (they expose stable control fields and validation) over a hand-built proxy path.
-- **Missing service** → degrade gracefully (skip that source) or stop and ask the user to connect it. Never fabricate a slug or connector.
+- **Missing or invisible service.** Use `nyxid_require_service` for an in-session connect/add/authorize request, or the supported NyxID CLI/console flow as a client. `USER_SERVICE_NOT_VISIBLE` does not prove that a simple registration retry will fix the account, and `/api/auth/nyxid/authorization-catalog:refresh` is reconciliation rather than service registration. If refresh returns `api_key_scope_plan_route_unresolved`, stop and report the catalog blocker; do not delete/reconnect unrelated services or guess which route caused it. `org_role_insufficient` requires an authorized organization operator. Never fabricate a slug, connector, or self-service path.
+- **Preflight downstream data access separately.** Binding/readiness does not test provider data ACLs. For Lark Base, before any create/approval/send/update step, run one explicitly authorized read-only call against a known sample `record_id` with the same UserService, Base/app token, table, and admitted read contract; require expected fields, not only 2xx. `91403` means the exact Bot application lacks Base document access (add it through the document-application entry). `1254302 RolePermNotAllow` means its advanced-permission role does not cover the target table/action. This probe proves only downstream read access, not durable admission or write authority.
 
 ---
 
@@ -424,6 +437,7 @@ Read [references/worked-examples.md](references/worked-examples.md) when you nee
 - [ ] Any date/time the logic needs is injected via input, not assumed.
 - [ ] No hardcoded `model:` unless the user demanded one.
 - [ ] Arithmetic / totals / dedup use `transform`, not `llm_call`.
-- [ ] Every workflow external call copied an exact listed selector, passed readiness for its execution mode, and puts only runtime operation values in `nyxid_proxy.arguments`; raw current-turn proxy calls use exact `service_id + slug + path`.
+- [ ] Every transform `op` is on the explicit allowlist; no `replace`/`regex_replace` or other unknown identity fallback is present, and required transformed output is asserted.
+- [ ] Every workflow external call copied an exact listed `user_service_id + endpoint_id` selector (or carries one independently admitted `nyxid_request`), passed readiness for its execution mode, and puts only runtime operation values in `nyxid_proxy.arguments`; raw current-turn proxy calls use exact `service_id + slug + path`.
 - [ ] One authorized dispatch was observed to root `RUN_FINISHED` / `RUN_ERROR`, or a `RUN_OBSERVATION_TIMEOUT` was reconciled by querying the same `actorId + commandId`; no second run was created as a status check.
 - [ ] Any parallel fan-out uses the right primitive: same input → `parallel` / `race`; a list of different items → `foreach` (concatenate) or `map_reduce` (synthesize). Per-item `tool_call` fetches use `foreach`, not `map_reduce`.

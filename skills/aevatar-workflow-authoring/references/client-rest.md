@@ -20,7 +20,11 @@ scopeId=$(aev "api/studio/context" | jq -r .scopeId)
 
 The `aevatar` service must already be connected. Do not send the stored NyxID access token directly to the Aevatar backend: that route can authenticate while resolving no scope. `jq` is optional; use any structured JSON reader.
 
-The `nyxid_services` tool is server-side. As a client, discover exact connected-service instances through the NyxID CLI or the authenticated Aevatar preview surface. `/api/v1/keys` is the authoritative UserService instance/readiness inventory; `/api/v1/user-services` is only a routing projection. Never invent a slug, UserService identity, endpoint, method, or path.
+The `nyxid_services` and `list_external_workflow_capabilities` tools are server-side. As a client, discover exact connected-service instances through the NyxID CLI or console. `/api/v1/keys` is the authoritative UserService instance/readiness inventory; `/api/v1/user-services` is only a routing projection. Neither is a documented REST operation picker. If no supported client surface lists workflow operations, stop with `operation discovery unavailable` and obtain an exact `user_service_id + endpoint_id` selector from an authoritative service contract or an in-session picker. Do not probe guessed Aevatar paths or invent a slug, UserService identity, endpoint, method, or path.
+
+In YAML, `capability.nyxid_operation` contains `user_service_id` and `endpoint_id`; `operation_id` is not a valid selector field. `capability.nyxid_request` is a separate oneof alternative for an exact authored HTTP contract. A step must not contain both. Draft preview success does not grant either shape.
+
+For a connect/add/authorize request, use the supported NyxID service flow rather than treating an Aevatar remediation label as an endpoint. `USER_SERVICE_NOT_VISIBLE` is not proof that `/api/auth/nyxid/authorization-catalog:refresh` will register it. If refresh returns `api_key_scope_plan_route_unresolved`, stop and report the catalog reconciliation blocker; do not repeatedly refresh or remove unrelated active services. `org_role_insufficient` requires an authorized organization operator.
 
 ## Draft-run validation
 

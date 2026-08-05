@@ -1,7 +1,7 @@
 ---
 name: aevatar-team-builder
 description: Build an Aevatar agent team and its members over the REST API. Use when a user wants to "create a team", "add a member", "make a workflow member / script member / gagent member", "set the team's entry point", or "assemble agents into a team". It creates the team, creates members whose implementation is a workflow (most common), a script, or a hosted gagent, binds each member's concrete implementation (the workflow YAML is attached here), waits for the async binding to succeed, and sets the team entry member. Author the workflow YAML first with the workflow-authoring skill; publish the result as a service with the service-publisher skill.
-version: "1.5"
+version: "1.6"
 metadata:
   category: plain
   tag:
@@ -95,6 +95,19 @@ This is where the real implementation lands. It starts an **async binding run**.
 commits workflow/revision identity and the capability admission plan together; a later run must
 preserve all three. If execution fails, do not create another binding/run until run detail and audit
 identify the first failed boundary.
+
+Before this mutation, preflight every external call through `aevatar-workflow-authoring`. A
+published NyxID selector is exactly `user_service_id + endpoint_id`; `operation_id` is not a valid
+YAML field. One step carries either `nyxid_operation` or `nyxid_request`, never both. If the client
+surface has no operation list/picker, stop rather than guess an endpoint or treat `/api/v1/keys` as
+an operation catalog. `NYXID_OPERATION_SELECTION_REQUIRED` is a blocker, not permission to retry
+the bind.
+
+Likewise, `USER_SERVICE_NOT_VISIBLE` does not prove that the remediation label `register_service`
+has a self-serve Aevatar endpoint. Connect or authorize through the supported NyxID service flow,
+then reread exact UserService authority. `/api/auth/nyxid/authorization-catalog:refresh` only
+reconciles the catalog. If it returns `api_key_scope_plan_route_unresolved`, report that blocker;
+do not repeatedly bind/refresh, remove unrelated services, or guess the failing route.
 
 ```bash
 # Author the YAML first with aevatar-workflow-authoring; pass it inline.

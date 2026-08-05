@@ -1,7 +1,7 @@
 ---
 name: aevatar-feasibility-advisor
 description: Use before building when a user asks whether Aevatar can achieve a goal, what prerequisites it has, or why it is unavailable. Triggers include bots and third-party APIs, inbound channels, external HTTP triggers, schedules, service exposure, Agent Profiles and tool ceilings, and bounded managed or private-host codex_exec work. It distinguishes outbound connectors from inbound channels and separates not connected, host-gated, not deployed, and genuinely unsupported outcomes. It chooses managed_sandbox versus private_ssh without promising repository, model, credential, runtime, or deployment capabilities the caller does not control, then routes feasible work to the owning Aevatar skill.
-version: "1.7"
+version: "1.8"
 metadata:
   category: plain
   tag:
@@ -151,7 +151,7 @@ not a fixed list.
 | Pure LLM / text / transform / branching pipeline | ✅ Always | Author a workflow (`aevatar-workflow-authoring`). No external anything. |
 | Bounded one-shot Codex work that can start from empty Git | ✅ With the managed target | Choose `managed_sandbox`; require internal eligibility, the user's own usable `chrono-sandbox` and `chrono-llm-public` UserServices, `workspace.kind=empty_git`, timeout ≤ 180 seconds, and the public `CODEX_EXEC_READY` proof. |
 | Codex work requiring an existing private repository or host Codex configuration | ✅ With the private target | Choose `private_ssh`; require the user's hardened NyxID SSH service, fixed principal/workspace and working host Codex setup, no request `workspace`, timeout ≤ 300 seconds, and the private public-sample proof. |
-| **Call** a third-party API (read/post): GitHub, Slack, Google, X/Twitter, Reddit, a custom HTTP API… | ✅ If the connector is in the catalog | User **connects the `api-*` connector in NyxID** (OAuth for `user` mode, or supplies a token for `admin` mode — per the catalog entry). Then use the invocation mode matching the surface; never paste raw route fields into a compiled admitted workflow call. |
+| **Call** a third-party API (read/post): GitHub, Slack, Google, X/Twitter, Reddit, a custom HTTP API… | ✅ If the connector and an exact operation/request contract are discoverable | User **connects the `api-*` connector in NyxID** (OAuth for `user` mode, or supplies a token for `admin` mode — per the catalog entry). A compiled published call additionally needs an exact `user_service_id + endpoint_id` from the supported operation list/picker; `/api/v1/keys` alone is not that picker. If the caller surface cannot discover one, report a tooling blocker instead of guessing. |
 | A connector that is **NOT in the catalog** | ⚠️ Only if it's a plain HTTP API | If it speaks HTTP + a supported `auth_method`, NyxID can add it (platform/admin work — not self-serve). If not HTTP, ❌. |
 | **Inbound bot** that replies in-platform: **Lark / Telegram** | ✅ Yes | Connect the bot connector (`api-lark-bot` / `api-telegram-bot`) **and** register the channel (channel-admin / `channel_registrations`); NyxID provisions the webhook to Aevatar's relay. |
 | **Inbound bot** on a platform with a connector but **no channel module** (Discord, Slack, X, …) | ❌ Not self-serve | Outbound calls work, but inbound-reply needs a new Aevatar **channel module** + relay wiring = Aevatar platform work. Offer the outbound-only version as the alternative. |
@@ -184,9 +184,18 @@ State these plainly when they bite:
 - **Lark Base has two permission layers.** `bitable:app:readonly` is an application API scope;
   it does not grant the Bot access to a specific Base document. Lark error `91403` means the
   Base document ACL denied that application. In the current Base UI, open the Base's `...`/More
-  menu, choose **Add Applications**, and add the exact Bot application used by the selected NyxID
-  UserService with view access for read-only workflows. Do not ask the user to change API scopes
-  when that scope is already enabled, and do not confuse a Base with a spreadsheet file.
+  menu, choose **Add Applications** (the document-application entry), and add the exact Bot
+  application used by the selected NyxID UserService. With advanced permissions, the application
+  also needs a role covering the target table; `1254302 RolePermNotAllow` means that role coverage
+  is insufficient. Before any side effect, require an authorized read-only probe of a known sample
+  `record_id` using the same UserService/Base/table. A 2xx without expected fields is not a pass.
+  Do not ask the user to change API scopes when that scope is already enabled, and do not confuse a
+  Base with a spreadsheet file.
+- **No string replacement primitive.** Workflow expressions and transforms have no `replace` or
+  `regex_replace`. Unknown transform names currently fall back to identity while the step can stay
+  green. A goal that requires deterministic string replacement needs an explicitly admitted bounded
+  `code_execute` workaround or platform work; never promise `transform op: replace` or use an LLM
+  for deterministic identifiers, money, or counts.
 
 ## How to satisfy each prerequisite (what you tell the user to do)
 
@@ -195,6 +204,11 @@ State these plainly when they bite:
   get it at `<api_key_url>`.>" In-session, finish through `nyxid_require_service`; for REST/CLI
   verification, confirm the exact UserService and readiness through `/api/v1/keys`, not merely the
   `/api/v1/user-services` projection.
+- **Select a workflow operation** → in-session, copy the exact `user_service_id + endpoint_id` from
+  `list_external_workflow_capabilities` and inspect readiness. The tool is not a REST endpoint, and
+  `/api/v1/keys` is not an operation picker. If the client has no supported picker/list, stop with a
+  discovery blocker. `nyxid_request` is a separately admitted exact HTTP contract, not a second
+  selector to combine with `nyxid_operation` on one step.
 - **Register an inbound channel** (Lark/Telegram) → connect the bot connector, then register the
   channel via the channel-admin tool so NyxID wires the webhook to Aevatar's relay.
 - **External HTTP trigger** (Lark Base / webhook sender / external cron) → do **not** ask for
