@@ -2355,8 +2355,14 @@ async fn maybe_refresh_provider_backed_api_key(
     // Legacy single-tenant path: refresh runs against
     // `user_provider_tokens`, then `sync_provider_token_to_api_keys`
     // fans the new token out to all legacy keys for `(user, provider)`.
-    match user_token_service::get_active_token(db, encryption_keys, user_id, provider_config_id)
-        .await
+    match user_token_service::get_active_token(
+        db,
+        encryption_keys,
+        user_id,
+        provider_config_id,
+        connection_expiry_notifier,
+    )
+    .await
     {
         Ok(_) => {
             user_api_key_service::sync_provider_token_to_api_keys(db, user_id, provider_config_id)

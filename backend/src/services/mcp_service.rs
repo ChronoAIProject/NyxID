@@ -3167,6 +3167,7 @@ pub async fn execute_tool(
                 encryption_keys,
                 user_id,
                 downstream_service_id,
+                Some(connection_expiry_notifier),
             )
             .await
             {

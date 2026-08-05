@@ -1000,6 +1000,7 @@ pub async fn manual_refresh(
         &state.encryption_keys,
         effective_user_id,
         &provider_id,
+        Some(&state.connection_expiry_notifier),
     )
     .await?;
     sync_provider_credentials_to_unified_keys(&state, effective_user_id, &provider_id, true, false)

@@ -9,6 +9,7 @@ use crate::models::provider_config::{COLLECTION_NAME as PROVIDER_CONFIGS, Provid
 use crate::models::service_provider_requirement::{
     COLLECTION_NAME as REQUIREMENTS, ServiceProviderRequirement,
 };
+use crate::services::connection_expiry_service::ConnectionExpiryNotifier;
 use crate::services::user_token_service;
 
 /// A resolved credential ready for injection into a proxied request.
@@ -71,6 +72,7 @@ pub async fn resolve_delegated_credentials(
     encryption_keys: &EncryptionKeys,
     user_id: &str,
     service_id: &str,
+    connection_expiry_notifier: Option<&ConnectionExpiryNotifier>,
 ) -> AppResult<Vec<DelegatedCredential>> {
     // Load all requirements for this service
     let requirements: Vec<ServiceProviderRequirement> = db
@@ -120,6 +122,7 @@ pub async fn resolve_delegated_credentials(
             encryption_keys,
             user_id,
             &req.provider_config_id,
+            connection_expiry_notifier,
         )
         .await;
 
@@ -370,7 +373,7 @@ mod tests {
             .unwrap();
 
         let credentials =
-            resolve_delegated_credentials(&db, &encryption_keys, &org_user_id, &service_id)
+            resolve_delegated_credentials(&db, &encryption_keys, &org_user_id, &service_id, None)
                 .await
                 .unwrap();
 

@@ -1,5 +1,6 @@
 use std::sync::Arc;
 
+use futures::TryStreamExt;
 use mongodb::Database;
 use mongodb::bson::{self, doc};
 use reqwest::Client;
@@ -125,6 +126,39 @@ pub async fn transition_oauth_key_to_dead(
 
     spawn_transition_side_effects(db.clone(), api_key.clone(), notifier.cloned());
     Ok(true)
+}
+
+/// Transition every healthy legacy key shadowing a provider token.
+/// Multi-connection keys are excluded because they own independent tokens and
+/// use `transition_oauth_key_to_dead` directly during in-place refresh.
+pub async fn transition_legacy_oauth_keys_to_dead(
+    db: &Database,
+    user_id: &str,
+    provider_config_id: &str,
+    dead_status: &str,
+    error_message: &str,
+    notifier: Option<&ConnectionExpiryNotifier>,
+) -> AppResult<u64> {
+    let keys: Vec<UserApiKey> = db
+        .collection::<UserApiKey>(USER_API_KEYS)
+        .find(doc! {
+            "user_id": user_id,
+            "provider_config_id": provider_config_id,
+            "connection_id": null,
+            "credential_type": "oauth2",
+            "status": "active",
+        })
+        .await?
+        .try_collect()
+        .await?;
+
+    let mut transitioned = 0;
+    for key in &keys {
+        if transition_oauth_key_to_dead(db, key, dead_status, error_message, notifier).await? {
+            transitioned += 1;
+        }
+    }
+    Ok(transitioned)
 }
 
 fn spawn_transition_side_effects(
@@ -411,6 +445,77 @@ mod tests {
             .unwrap()
             .expect("second notification after recovery");
         wait_for_event_count(&db, &user_id, 2).await;
+    }
+
+    #[tokio::test]
+    async fn legacy_transition_notifies_and_audits_once() {
+        let Some(db) = connect_test_database("connection_expiry_legacy_transition").await else {
+            return;
+        };
+        let user_id = Uuid::new_v4().to_string();
+        let provider_id = Uuid::new_v4().to_string();
+        let mut key = oauth_key(&user_id);
+        key.provider_config_id = Some(provider_id.clone());
+        key.connection_id = None;
+        let service = user_service(&user_id, &key.id);
+        db.collection::<UserApiKey>(USER_API_KEYS)
+            .insert_one(&key)
+            .await
+            .unwrap();
+        db.collection::<UserService>(USER_SERVICES)
+            .insert_one(&service)
+            .await
+            .unwrap();
+
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        let notifier =
+            ConnectionExpiryNotifier::with_test_delivery(Arc::new(test_app_config()), tx);
+
+        assert_eq!(
+            transition_legacy_oauth_keys_to_dead(
+                &db,
+                &user_id,
+                &provider_id,
+                "refresh_failed",
+                "refresh rejected",
+                Some(&notifier),
+            )
+            .await
+            .unwrap(),
+            1
+        );
+        timeout(Duration::from_secs(3), rx.recv())
+            .await
+            .unwrap()
+            .expect("legacy expiry notification");
+        wait_for_event_count(&db, &user_id, 1).await;
+
+        let stored = db
+            .collection::<UserApiKey>(USER_API_KEYS)
+            .find_one(doc! { "_id": &key.id })
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(stored.status, "refresh_failed");
+        assert_eq!(
+            transition_legacy_oauth_keys_to_dead(
+                &db,
+                &user_id,
+                &provider_id,
+                "refresh_failed",
+                "refresh rejected again",
+                Some(&notifier),
+            )
+            .await
+            .unwrap(),
+            0
+        );
+        assert!(
+            timeout(Duration::from_millis(100), rx.recv())
+                .await
+                .is_err()
+        );
+        assert_eq!(event_count(&db, &user_id).await, 1);
     }
 
     #[tokio::test]

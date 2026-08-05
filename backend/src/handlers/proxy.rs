@@ -1852,6 +1852,7 @@ async fn execute_proxy_inner(
             &state.encryption_keys,
             delegated_owner,
             service_id,
+            Some(&state.connection_expiry_notifier),
         )
         .await
         {

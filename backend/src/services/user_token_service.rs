@@ -2499,6 +2499,7 @@ pub async fn get_active_token(
     encryption_keys: &EncryptionKeys,
     user_id: &str,
     provider_id: &str,
+    notifier: Option<&ConnectionExpiryNotifier>,
 ) -> AppResult<DecryptedProviderToken> {
     let token = db
         .collection::<UserProviderToken>(COLLECTION_NAME)
@@ -2550,6 +2551,24 @@ pub async fn get_active_token(
                         });
                     }
                     Err(e) => {
+                        if let Err(transition_error) =
+                            connection_expiry_service::transition_legacy_oauth_keys_to_dead(
+                                db,
+                                user_id,
+                                provider_id,
+                                "refresh_failed",
+                                "OAuth token refresh failed; reconnect required",
+                                notifier,
+                            )
+                            .await
+                        {
+                            tracing::warn!(
+                                user_id = %user_id,
+                                provider_id = %provider_id,
+                                error = %transition_error,
+                                "Failed to transition legacy keys after OAuth refresh failure"
+                            );
+                        }
                         tracing::warn!(
                             user_id = %user_id,
                             provider_id = %provider_id,
@@ -4291,7 +4310,7 @@ mod tests {
             make_api_key_token(&enc, &user_id, &provider_id, "sk-secret-123", "active").await;
         insert_test_token(&db, &token).await;
 
-        let result = super::get_active_token(&db, &enc, &user_id, &provider_id)
+        let result = super::get_active_token(&db, &enc, &user_id, &provider_id, None)
             .await
             .expect("should return decrypted token");
 
@@ -4323,7 +4342,7 @@ mod tests {
         .await;
         insert_test_token(&db, &token).await;
 
-        let result = super::get_active_token(&db, &enc, &user_id, &provider_id)
+        let result = super::get_active_token(&db, &enc, &user_id, &provider_id, None)
             .await
             .expect("should return decrypted token");
 
@@ -4347,7 +4366,7 @@ mod tests {
         assert!(token.last_used_at.is_none());
         insert_test_token(&db, &token).await;
 
-        let _ = super::get_active_token(&db, &enc, &user_id, &provider_id)
+        let _ = super::get_active_token(&db, &enc, &user_id, &provider_id, None)
             .await
             .unwrap();
 
@@ -4379,7 +4398,7 @@ mod tests {
             make_api_key_token(&enc, &user_id, &provider_id, "key-expired", "expired").await;
         insert_test_token(&db, &token).await;
 
-        let result = super::get_active_token(&db, &enc, &user_id, &provider_id)
+        let result = super::get_active_token(&db, &enc, &user_id, &provider_id, None)
             .await
             .expect("should find expired-status token");
         assert_eq!(result.api_key.as_deref(), Some("key-expired"));
@@ -4399,7 +4418,7 @@ mod tests {
             make_api_key_token(&enc, &user_id, &provider_id, "key-revoked", "revoked").await;
         insert_test_token(&db, &token).await;
 
-        let result = super::get_active_token(&db, &enc, &user_id, &provider_id).await;
+        let result = super::get_active_token(&db, &enc, &user_id, &provider_id, None).await;
         assert!(result.is_err(), "should not find revoked token");
         assert!(matches!(result.unwrap_err(), AppError::NotFound(_)));
     }
@@ -4414,7 +4433,7 @@ mod tests {
         let user_id = Uuid::new_v4().to_string();
         let provider_id = Uuid::new_v4().to_string();
 
-        let result = super::get_active_token(&db, &enc, &user_id, &provider_id).await;
+        let result = super::get_active_token(&db, &enc, &user_id, &provider_id, None).await;
         assert!(result.is_err(), "should return NotFound");
         assert!(matches!(result.unwrap_err(), AppError::NotFound(_)));
     }
@@ -4454,7 +4473,7 @@ mod tests {
         };
         insert_test_token(&db, &token).await;
 
-        let result = super::get_active_token(&db, &enc, &user_id, &provider_id).await;
+        let result = super::get_active_token(&db, &enc, &user_id, &provider_id, None).await;
         assert!(result.is_err(), "unknown token_type should error");
         let err = result.unwrap_err();
         assert!(matches!(err, AppError::Internal(_)));
@@ -4728,7 +4747,7 @@ mod tests {
         .await
         .unwrap();
 
-        let result = super::get_active_token(&db, &enc, &user_id, &provider_id)
+        let result = super::get_active_token(&db, &enc, &user_id, &provider_id, None)
             .await
             .unwrap();
         assert_eq!(result.token_type, "api_key");
