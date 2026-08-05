@@ -53,10 +53,10 @@ nyxid service add --custom                                # add custom endpoint 
 Official catalog services ship NyxID-hosted curated OpenAPI overlays (served at `/api/v1/catalog-specs/{spec_key}/openapi.json`), so `nyxid catalog endpoints <slug>` returns real operations for the official slugs (LLM providers, GitHub, Slack, Discord, Telegram, Lark/Feishu incl. Bitable, Spotify, X, Microsoft Graph, Google, Reddit, Twitch, Facebook, Firecrawl) with no admin setup. The matching endpoint rows are materialized automatically at backend startup; they are what publishes concrete `service_id + endpoint_id` operations to MCP/workflow consumers. A valid user-mounted `--openapi-spec-url` on a catalog-backed service overrides the template's registered endpoints for that instance; a broken or empty mounted spec falls back to the template endpoints. Services can also carry `recommended_skills` (instance-level via `nyxid service update <id> --recommended-skill <name>`, repeatable; `--clear-recommended-skills` to clear; catalog-level via the admin service update) -- skill names agents should load to use the service, surfaced through `/keys`, the catalog, and `/api/v1/mcp/config`.
 
 > For API key services, just run `nyxid service add <slug>` without flags. The CLI securely prompts for the key (input hidden). Never ask the user to paste secrets into chat or set environment variables manually.
-
-For agent-driven setup, prefer `nyxid connect <slug>` or the MCP pair `nyx__connect_service` and `nyx__wait_for_connection`. These return a short-lived hosted URL so the human enters credentials in NyxID's browser page rather than in chat. The link is single-use, creator-scoped, and expires after 15 minutes by default.
 > For automation/scripting only: `--credential-env <VAR>` reads from an environment variable.
 > For multi-field credentials such as AWS access-key JSON: `--credential-file <PATH>` reads the credential bytes from a file. Pass `-` to read from stdin.
+
+For agent-driven setup, prefer `nyxid connect <slug>` or the MCP pair `nyx__connect_service` and `nyx__wait_for_connection`. These return a short-lived hosted URL so the human enters credentials in NyxID's browser page rather than in chat. The link is single-use, creator-scoped, and expires after 15 minutes by default.
 
 ## Inventory authority and Lark Base access
 
