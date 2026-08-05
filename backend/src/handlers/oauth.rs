@@ -1179,33 +1179,31 @@ fn oauth_success_page(redirect_url: &str) -> Response {
 <title>NyxID — Authenticated</title>
 <style>
 *{{margin:0;padding:0;box-sizing:border-box}}
-body{{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif;display:flex;align-items:center;justify-content:center;flex-direction:column;min-height:100vh;background:#0a0a0b;color:#e4e4e7}}
-.wrap{{display:flex;flex-direction:column;align-items:center;gap:2rem;width:100%;max-width:26rem;padding:1.5rem}}
-.logo{{display:flex;align-items:center;gap:.6rem}}
-.logo svg{{width:28px;height:28px}}
-.logo span{{font-size:1.2rem;font-weight:700;letter-spacing:-.02em;background:linear-gradient(135deg,#c084fc,#818cf8);-webkit-background-clip:text;-webkit-text-fill-color:transparent}}
-.card{{width:100%;text-align:center;padding:2.5rem 2rem;border:1px solid #27272a;border-radius:.75rem;background:#18181b}}
-.icon{{width:3rem;height:3rem;margin:0 auto 1.25rem;border-radius:50%;background:rgba(52,211,153,.12);display:flex;align-items:center;justify-content:center}}
-.icon svg{{width:1.25rem;height:1.25rem;color:#34d399}}
-h1{{font-size:1.125rem;font-weight:600;margin-bottom:.375rem}}
-.sub{{font-size:.8125rem;color:#a1a1aa;line-height:1.5}}
-.bar{{margin-top:1.5rem;height:3px;border-radius:2px;background:#27272a;overflow:hidden}}
-.bar .fill{{height:100%;width:0;border-radius:2px;background:linear-gradient(90deg,#818cf8,#c084fc);animation:progress 1.8s ease-in-out forwards}}
+body{{font-family:"Mona Sans",-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif;display:flex;align-items:center;justify-content:center;flex-direction:column;min-height:100vh;background:#0D0D0D;color:#FAFAFA;line-height:1.4;-webkit-font-smoothing:antialiased}}
+.wrap{{display:flex;flex-direction:column;align-items:center;gap:2rem;width:100%;max-width:28.75rem;padding:1rem}}
+.logo svg{{display:block;height:30px;width:auto}}
+.card{{width:100%;text-align:center;padding:1.25rem;border:1px solid rgba(16,185,129,.25);border-radius:12px;background:rgba(16,185,129,.03);box-shadow:0 1px 2px 0 rgba(0,0,0,.05)}}
+.icon{{width:2.75rem;height:2.75rem;margin:0 auto 1rem;border-radius:12px;border:1px solid rgba(16,185,129,.30);background:rgba(16,185,129,.10);display:flex;align-items:center;justify-content:center}}
+.icon svg{{width:1.25rem;height:1.25rem;color:#10B981}}
+h1{{font-size:15px;font-weight:600;margin-bottom:.25rem}}
+.sub{{font-size:12px;color:#A3A3A3}}
+.bar{{margin-top:1.25rem;height:3px;border-radius:2px;background:#262626;overflow:hidden}}
+.bar .fill{{height:100%;width:0;border-radius:2px;background:linear-gradient(to right,#A672FB 0%,#5E00F5 100%);animation:progress 1.8s ease-in-out forwards}}
 @keyframes progress{{to{{width:100%}}}}
-.foot{{font-size:.6875rem;color:#52525b}}
+@media (prefers-reduced-motion:reduce){{.bar .fill{{animation:none;width:100%}}}}
+.foot{{font-size:11px;color:#525252}}
 </style>
 </head>
 <body>
 <div class="wrap">
   <div class="logo">
-    <svg viewBox="0 0 32 32" fill="none"><circle cx="16" cy="16" r="14" stroke="url(#pg)" stroke-width="2.5"/><circle cx="16" cy="16" r="4" fill="url(#pg)"/><defs><linearGradient id="pg" x1="4" y1="4" x2="28" y2="28"><stop stop-color="#c084fc"/><stop offset="1" stop-color="#818cf8"/></linearGradient></defs></svg>
-    <span>NyxID</span>
+    <svg role="img" aria-label="NyxID" viewBox="0 0 1062 301" fill="none" xmlns="http://www.w3.org/2000/svg"> <path d="M258.614 53.8457V205.377C258.614 234.778 234.78 258.612 205.38 258.612H131.074C130.268 258.612 129.613 257.957 129.613 257.15V117.358C129.613 115.867 127.645 115.332 126.891 116.619L44.0376 257.889C43.7745 258.337 43.2951 258.612 42.7777 258.612H2.073C1.26616 258.612 0.611328 257.957 0.611328 257.15V2.07323C0.611328 1.26639 1.26616 0.611557 2.073 0.611557H85.1516C85.9584 0.611557 86.6133 1.26639 86.6133 2.07323V141.865C86.6133 143.356 88.5807 143.891 89.3349 142.604L172.191 1.33362C172.454 0.886352 172.934 0.611557 173.451 0.611557H205.377C234.777 0.611557 258.611 24.4456 258.611 53.8457H258.614Z" fill="url(#paint0_linear_5_302)"/> <g filter="url(#filter0_f_5_302)"> <path d="M2.07324 1.37621H85.1514C85.536 1.37621 85.8486 1.68882 85.8486 2.07347V141.864C85.8486 144.134 88.845 144.95 89.9941 142.991L172.85 1.71996L172.851 1.72093C172.977 1.50652 173.206 1.37625 173.451 1.37621H205.377C234.355 1.37621 257.847 24.868 257.847 53.8459V54.6106H257.85V205.377C257.85 234.355 234.358 257.847 205.38 257.847H131.074C130.69 257.847 130.377 257.534 130.377 257.15V117.359C130.377 115.089 127.38 114.272 126.231 116.232L43.3789 257.502C43.2526 257.717 43.0228 257.847 42.7773 257.847H2.07324C1.68859 257.847 1.37598 257.534 1.37598 257.15V2.07347C1.37598 1.68882 1.68859 1.37621 2.07324 1.37621Z" stroke="url(#paint1_linear_5_302)" stroke-opacity="0.5" stroke-width="1.52891"/> </g> <path d="M581.159 193.441L587.61 215.028H589.099L595.302 193.441L615.648 125.951H654.604L602.994 265.148C599.52 274.411 595.385 281.607 590.588 286.735C585.791 291.862 580.332 295.42 574.212 297.405C568.092 299.39 561.226 300.381 553.617 300.381H531.038V270.359H546.67C550.474 270.359 553.617 269.863 556.099 268.87C558.745 268.043 560.896 266.554 562.55 264.404C564.369 262.419 565.858 259.855 567.016 256.712L570.144 248.577L519.128 125.951H559.324L581.159 193.441ZM462.01 204.606H463.498L461.762 148.034V78.0637H499.228V258.946H454.317L378.641 133.891H377.151L378.641 186.245V258.946H339.188V78.0637H386.58L462.01 204.606ZM731.847 163.17L734.824 168.132H736.065L739.043 163.17L762.614 125.951H804.051L759.885 189.719L808.765 258.946H765.592L738.05 217.012L734.824 211.306H733.584L730.11 217.012L701.328 258.946H660.388L710.509 190.711L665.102 125.951H708.275L731.847 163.17ZM867.114 258.946H828.407V78.0637H867.114V258.946ZM978.508 78.0637C996.372 78.0637 1011.51 81.8679 1023.91 89.4768C1036.32 96.9204 1045.75 107.425 1052.2 120.989C1058.65 134.553 1061.88 150.433 1061.88 168.628C1061.88 182.027 1060.06 194.351 1056.42 205.599C1052.78 216.682 1047.4 226.193 1040.29 234.133C1033.18 242.073 1024.41 248.193 1013.99 252.493C1003.73 256.794 991.906 258.946 978.508 258.946H901.342V78.0637H978.508ZM940.049 225.945H972.057C979.335 225.945 986.035 224.952 992.155 222.967C998.275 220.982 1003.57 217.756 1008.04 213.29C1012.5 208.824 1015.97 202.869 1018.46 195.426C1020.94 187.982 1022.18 178.801 1022.18 167.884C1022.18 153.658 1020.03 142.41 1015.73 134.139C1011.59 125.868 1005.72 119.914 998.109 116.275C990.666 112.636 981.981 110.816 972.057 110.816H940.049V225.945Z" fill="white"/> <defs> <filter id="filter0_f_5_302" x="-0.000234365" y="-5.48363e-06" width="259.226" height="259.223" filterUnits="userSpaceOnUse" color-interpolation-filters="sRGB"> <feFlood flood-opacity="0" result="BackgroundImageFix"/> <feBlend mode="normal" in="SourceGraphic" in2="BackgroundImageFix" result="shape"/> <feGaussianBlur stdDeviation="0.305781" result="effect1_foregroundBlur_5_302"/> </filter> <linearGradient id="paint0_linear_5_302" x1="129.613" y1="0.611557" x2="129.613" y2="258.612" gradientUnits="userSpaceOnUse"> <stop stop-color="#A672FB"/> <stop offset="1" stop-color="#5E00F5"/> </linearGradient> <linearGradient id="paint1_linear_5_302" x1="129.613" y1="0.611557" x2="129.613" y2="258.612" gradientUnits="userSpaceOnUse"> <stop stop-color="white"/> <stop offset="1" stop-color="white" stop-opacity="0"/> </linearGradient> </defs> </svg>
   </div>
   <div class="card">
     <div class="icon">
-      <svg fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"/></svg>
+      <svg fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><path d="m9 12 2 2 4-4"/></svg>
     </div>
-    <h1>Authentication Successful</h1>
+    <h1>Authentication successful</h1>
     <p class="sub">Redirecting you back to the application&hellip;</p>
     <div class="bar"><div class="fill"></div></div>
   </div>
