@@ -41,7 +41,7 @@ Strict separation: `handlers/` -> `services/` -> `models/`
 - 11000-11099 oracle relay: 11000 `OraclePoolNotFound`, 11001 `OraclePoolSlugTaken`, 11002 `OraclePoolInactive`, 11003 `OracleWorkerTokenInvalid`, 11004 `OracleQueueFull`, 11005 `OracleQuotaExceeded`, 11006 `OracleTaskNotFound`, 11007 `OracleSessionNotFound`, 11008 `OracleSessionClosed`, 11009 `OraclePayloadTooLarge`, 11010 `OracleExtractDisabled`
 - 11100 `AnonymousIncompatibleService` (HTTP 400)
 - 11200-11207 auth-device login: 11200 `AuthDeviceCodeNotFound`, 11201 `AuthDeviceCodeExpired`, 11202 `AuthDeviceCodePending`, 11203 `AuthDeviceCodeSlowDown`, 11204 `AuthDeviceCodeDenied`, 11205 `AuthDeviceCodeAlreadyDelivered`, 11206 `AuthDeviceCodeRateLimited`, 11207 `AuthDeviceUserCodeInvalid`
-- 11300-11304 connect links: 11300 `ConnectLinkNotFound`, 11301 `ConnectLinkExpired`, 11302 `ConnectLinkAlreadyCompleted`, 11303 `ConnectLinkCancelled`, 11304 `ConnectLinkRateLimited`
+- 11300-11305 connect links: 11300 `ConnectLinkNotFound`, 11301 `ConnectLinkExpired`, 11302 `ConnectLinkAlreadyCompleted`, 11303 `ConnectLinkCancelled`, 11304 `ConnectLinkRateLimited`, 11305 `ConnectLinkCompletionInProgress`
 - 11500 `GrantCascadeConfirmationRequired` (HTTP 409)
 
 ### 4. Frontend Patterns

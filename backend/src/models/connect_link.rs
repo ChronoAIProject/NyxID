@@ -39,6 +39,8 @@ pub struct ConnectLink {
     /// Short-lived claim that serializes provisioning attempts. It is cleared
     /// after a normal failure or after the provisioned service id is stored.
     pub completion_claim_id: Option<String>,
+    #[serde(default, with = "bson_datetime::optional")]
+    pub completion_claim_at: Option<DateTime<Utc>>,
 }
 
 impl fmt::Debug for ConnectLinkStatus {
@@ -81,6 +83,7 @@ impl fmt::Debug for ConnectLink {
                     .as_ref()
                     .map(|claim_id| RedactedLen(claim_id.len())),
             )
+            .field("completion_claim_at", &self.completion_claim_at)
             .finish()
     }
 }
@@ -106,6 +109,7 @@ mod tests {
             expires_at: now + chrono::Duration::minutes(15),
             completed_user_service_id: None,
             completion_claim_id: Some("completion-claim-secret".to_string()),
+            completion_claim_at: Some(now),
         }
     }
 
@@ -130,6 +134,15 @@ mod tests {
         assert_eq!(
             restored.expires_at.timestamp_millis(),
             link.expires_at.timestamp_millis()
+        );
+        assert_eq!(
+            restored
+                .completion_claim_at
+                .expect("completion claim timestamp")
+                .timestamp_millis(),
+            link.completion_claim_at
+                .expect("fixture completion claim timestamp")
+                .timestamp_millis()
         );
     }
 

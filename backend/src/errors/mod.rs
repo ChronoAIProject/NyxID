@@ -339,6 +339,9 @@ pub enum AppError {
     #[error("Connect link rate limited")]
     ConnectLinkRateLimited,
 
+    #[error("Connect link completion is already in progress")]
+    ConnectLinkCompletionInProgress,
+
     #[error("Channel bot not found: {0}")]
     ChannelBotNotFound(String),
 
@@ -556,6 +559,7 @@ impl AppError {
             Self::ConnectLinkAlreadyCompleted => StatusCode::CONFLICT,
             Self::ConnectLinkCancelled => StatusCode::GONE,
             Self::ConnectLinkRateLimited => StatusCode::TOO_MANY_REQUESTS,
+            Self::ConnectLinkCompletionInProgress => StatusCode::CONFLICT,
             Self::ChannelBotNotFound(_) => StatusCode::NOT_FOUND,
             Self::ChannelBotInactive(_) => StatusCode::BAD_REQUEST,
             Self::ChannelBotLimitReached(_) => StatusCode::TOO_MANY_REQUESTS,
@@ -696,6 +700,7 @@ impl AppError {
             Self::ConnectLinkAlreadyCompleted => 11302,
             Self::ConnectLinkCancelled => 11303,
             Self::ConnectLinkRateLimited => 11304,
+            Self::ConnectLinkCompletionInProgress => 11305,
             Self::ChannelBotNotFound(_) => 10000,
             Self::ChannelBotInactive(_) => 10001,
             Self::ChannelBotLimitReached(_) => 10002,
@@ -872,6 +877,7 @@ impl AppError {
             Self::ConnectLinkAlreadyCompleted => "connect_link_already_completed",
             Self::ConnectLinkCancelled => "connect_link_cancelled",
             Self::ConnectLinkRateLimited => "connect_link_rate_limited",
+            Self::ConnectLinkCompletionInProgress => "connect_link_completion_in_progress",
             Self::ChannelBotNotFound(_) => "channel_bot_not_found",
             Self::ChannelBotInactive(_) => "channel_bot_inactive",
             Self::ChannelBotLimitReached(_) => "channel_bot_limit_reached",
@@ -1269,6 +1275,14 @@ mod tests {
         assert_eq!(status.as_u16(), 499);
         assert!(!status.is_server_error());
         assert_eq!(AppError::ClientDisconnected.error_code(), 8012);
+    }
+
+    #[test]
+    fn connect_link_completion_in_progress_contract() {
+        let error = AppError::ConnectLinkCompletionInProgress;
+        assert_eq!(error.status_code(), StatusCode::CONFLICT);
+        assert_eq!(error.error_code(), 11305);
+        assert_eq!(error.error_key(), "connect_link_completion_in_progress");
     }
 
     #[test]

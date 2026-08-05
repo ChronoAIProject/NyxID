@@ -23,6 +23,7 @@ pub const DEFAULT_TTL_SECS: i64 = 15 * 60;
 pub const MIN_TTL_SECS: i64 = 60;
 pub const MAX_TTL_SECS: i64 = 60 * 60;
 pub const MAX_WAIT_SECS: u64 = 120;
+pub const CLAIM_STALE_SECS: i64 = 5 * 60;
 
 const MAX_LABEL_LEN: usize = 200;
 const MAX_REQUESTED_BY_LEN: usize = 200;
@@ -167,6 +168,7 @@ pub async fn create(db: &mongodb::Database, input: CreateInput) -> AppResult<Cre
         expires_at: now + Duration::seconds(ttl_secs),
         completed_user_service_id: None,
         completion_claim_id: None,
+        completion_claim_at: None,
     };
 
     db.collection::<ConnectLink>(CONNECT_LINKS)
@@ -220,27 +222,42 @@ pub async fn cancel(
     actor_user_id: &str,
     link_id: &str,
 ) -> AppResult<LinkView> {
-    let current = get_for_actor(db, actor_user_id, link_id).await?;
-    match current.link.status {
+    let current = db
+        .collection::<ConnectLink>(CONNECT_LINKS)
+        .find_one(doc! { "_id": link_id })
+        .await?
+        .ok_or(AppError::ConnectLinkNotFound)?;
+    ensure_actor_can_manage(db, actor_user_id, &current).await?;
+    let current = claim_expiry(db, current, Some(actor_user_id)).await?;
+    match current.status {
         ConnectLinkStatus::Expired => return Err(AppError::ConnectLinkExpired),
         ConnectLinkStatus::Completed => return Err(AppError::ConnectLinkAlreadyCompleted),
-        ConnectLinkStatus::Cancelled => return Ok(current),
+        ConnectLinkStatus::Cancelled => return view_for_link(db, current).await,
         ConnectLinkStatus::Pending => {}
     }
 
+    let mut filter = doc! {
+        "_id": link_id,
+        "status": "pending",
+    };
+    filter.extend(claim_available_filter(Utc::now()));
     let updated = db
         .collection::<ConnectLink>(CONNECT_LINKS)
         .find_one_and_update(
+            filter,
             doc! {
-                "_id": link_id,
-                "status": "pending",
-                "completion_claim_id": null,
+                "$set": { "status": "cancelled" },
+                "$unset": {
+                    "completion_claim_id": "",
+                    "completion_claim_at": "",
+                },
             },
-            doc! { "$set": { "status": "cancelled" } },
         )
         .return_document(ReturnDocument::After)
-        .await?
-        .ok_or(AppError::ConnectLinkAlreadyCompleted)?;
+        .await?;
+    let Some(updated) = updated else {
+        return Err(completion_conflict_error(db, link_id).await?);
+    };
 
     view_for_link(db, updated).await
 }
@@ -265,21 +282,32 @@ pub async fn complete(
     }
 
     let claim_id = Uuid::new_v4().to_string();
+    let claim_at = Utc::now();
+    let mut claim_filter = doc! {
+        "_id": &current.id,
+        "status": "pending",
+        "completed_user_service_id": null,
+        "expires_at": { "$gt": bson::DateTime::from_chrono(claim_at) },
+    };
+    claim_filter.extend(claim_available_filter(claim_at));
+
+    // A stale takeover can duplicate provisioning if the prior process created
+    // a service and died before pinning its id. Re-provisioning is intentional:
+    // takeover is allowed only while completed_user_service_id remains null.
     let claimed = db
         .collection::<ConnectLink>(CONNECT_LINKS)
         .find_one_and_update(
-            doc! {
-                "_id": &current.id,
-                "status": "pending",
-                "completion_claim_id": null,
-                "completed_user_service_id": null,
-                "expires_at": { "$gt": bson::DateTime::from_chrono(Utc::now()) },
-            },
-            doc! { "$set": { "completion_claim_id": &claim_id } },
+            claim_filter,
+            doc! { "$set": {
+                "completion_claim_id": &claim_id,
+                "completion_claim_at": bson::DateTime::from_chrono(claim_at),
+            } },
         )
         .return_document(ReturnDocument::After)
-        .await?
-        .ok_or(AppError::ConnectLinkAlreadyCompleted)?;
+        .await?;
+    let Some(claimed) = claimed else {
+        return Err(completion_conflict_error(db, &current.id).await?);
+    };
 
     let credential = input.credential.unwrap_or("").trim();
     if catalog.connect_method() == "api_key" && credential.is_empty() {
@@ -437,7 +465,10 @@ pub async fn complete_oauth_callback(
                     "status": "completed",
                     "completed_at": bson::DateTime::from_chrono(Utc::now()),
                 },
-                "$unset": { "completion_claim_id": "" },
+                "$unset": {
+                    "completion_claim_id": "",
+                    "completion_claim_at": "",
+                },
             },
         )
         .return_document(ReturnDocument::After)
@@ -454,13 +485,23 @@ pub async fn wait_for_status(
 ) -> AppResult<LinkView> {
     let timeout_secs = timeout_secs.clamp(1, MAX_WAIT_SECS);
     let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(timeout_secs);
+    let collection = db.collection::<ConnectLink>(CONNECT_LINKS);
+    let mut link = collection
+        .find_one(doc! { "_id": link_id })
+        .await?
+        .ok_or(AppError::ConnectLinkNotFound)?;
+    ensure_actor_can_manage(db, actor_user_id, &link).await?;
+
     loop {
-        let view = get_for_actor(db, actor_user_id, link_id).await?;
-        if view.link.status != ConnectLinkStatus::Pending || tokio::time::Instant::now() >= deadline
-        {
-            return Ok(view);
+        link = claim_expiry(db, link, Some(actor_user_id)).await?;
+        if link.status != ConnectLinkStatus::Pending || tokio::time::Instant::now() >= deadline {
+            return view_for_link(db, link).await;
         }
-        tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+        tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+        link = collection
+            .find_one(doc! { "_id": link_id })
+            .await?
+            .ok_or(AppError::ConnectLinkNotFound)?;
     }
 }
 
@@ -494,7 +535,10 @@ async fn resume_existing_completion(
                         "status": "completed",
                         "completed_at": bson::DateTime::from_chrono(Utc::now()),
                     },
-                    "$unset": { "completion_claim_id": "" },
+                    "$unset": {
+                        "completion_claim_id": "",
+                        "completion_claim_at": "",
+                    },
                 },
             )
             .return_document(ReturnDocument::After)
@@ -536,7 +580,10 @@ async fn store_provisioned_service(
             doc! { "_id": link_id, "status": "pending", "completion_claim_id": claim_id },
             doc! {
                 "$set": { "completed_user_service_id": service_id },
-                "$unset": { "completion_claim_id": "" },
+                "$unset": {
+                    "completion_claim_id": "",
+                    "completion_claim_at": "",
+                },
             },
         )
         .return_document(ReturnDocument::After)
@@ -559,7 +606,10 @@ async fn finish_claim(
                     "completed_at": bson::DateTime::from_chrono(Utc::now()),
                     "completed_user_service_id": service_id,
                 },
-                "$unset": { "completion_claim_id": "" },
+                "$unset": {
+                    "completion_claim_id": "",
+                    "completion_claim_at": "",
+                },
             },
         )
         .return_document(ReturnDocument::After)
@@ -572,7 +622,10 @@ async fn release_claim(db: &mongodb::Database, link_id: &str, claim_id: &str) {
         .collection::<ConnectLink>(CONNECT_LINKS)
         .update_one(
             doc! { "_id": link_id, "status": "pending", "completion_claim_id": claim_id },
-            doc! { "$unset": { "completion_claim_id": "" } },
+            doc! { "$unset": {
+                "completion_claim_id": "",
+                "completion_claim_at": "",
+            } },
         )
         .await
     {
@@ -601,6 +654,31 @@ async fn ensure_actor_can_manage(
     }
 }
 
+fn claim_available_filter(now: chrono::DateTime<Utc>) -> bson::Document {
+    let stale_before = now - Duration::seconds(CLAIM_STALE_SECS);
+    doc! {
+        "$or": [
+            { "completion_claim_id": null },
+            { "completion_claim_at": null },
+            { "completion_claim_at": { "$lte": bson::DateTime::from_chrono(stale_before) } },
+        ]
+    }
+}
+
+async fn completion_conflict_error(db: &mongodb::Database, link_id: &str) -> AppResult<AppError> {
+    let link = db
+        .collection::<ConnectLink>(CONNECT_LINKS)
+        .find_one(doc! { "_id": link_id })
+        .await?
+        .ok_or(AppError::ConnectLinkNotFound)?;
+    Ok(match link.status {
+        ConnectLinkStatus::Completed => AppError::ConnectLinkAlreadyCompleted,
+        ConnectLinkStatus::Expired => AppError::ConnectLinkExpired,
+        ConnectLinkStatus::Cancelled => AppError::ConnectLinkCancelled,
+        ConnectLinkStatus::Pending => AppError::ConnectLinkCompletionInProgress,
+    })
+}
+
 fn ensure_pending(link: &ConnectLink) -> AppResult<()> {
     match link.status {
         ConnectLinkStatus::Pending => Ok(()),
@@ -615,20 +693,28 @@ async fn claim_expiry(
     link: ConnectLink,
     actor_user_id: Option<&str>,
 ) -> AppResult<ConnectLink> {
-    if link.status != ConnectLinkStatus::Pending || link.expires_at > Utc::now() {
+    if link.status != ConnectLinkStatus::Pending
+        || link.expires_at > Utc::now()
+        || link.completed_user_service_id.is_some()
+    {
         return Ok(link);
     }
+    let mut filter = doc! {
+        "_id": &link.id,
+        "status": "pending",
+        "completed_user_service_id": null,
+    };
+    filter.extend(claim_available_filter(Utc::now()));
     let updated = db
         .collection::<ConnectLink>(CONNECT_LINKS)
         .find_one_and_update(
-            doc! {
-                "_id": &link.id,
-                "status": "pending",
-                "completion_claim_id": null,
-            },
+            filter,
             doc! {
                 "$set": { "status": "expired" },
-                "$unset": { "completion_claim_id": "" },
+                "$unset": {
+                    "completion_claim_id": "",
+                    "completion_claim_at": "",
+                },
             },
         )
         .return_document(ReturnDocument::After)
@@ -834,6 +920,54 @@ mod tests {
         service
     }
 
+    async fn create_test_link(db: &mongodb::Database, suffix: &str) -> (String, CreatedLink) {
+        let service = insert_catalog_service(db, suffix).await;
+        let owner = Uuid::new_v4().to_string();
+        let created = create(
+            db,
+            CreateInput {
+                user_id: owner.clone(),
+                service_slug: service.slug,
+                label: Some(format!("Connect {suffix}")),
+                requested_by: None,
+                callback_url: None,
+                ttl_secs: None,
+            },
+        )
+        .await
+        .expect("create test link");
+        (owner, created)
+    }
+
+    async fn provision_test_link(
+        db: &mongodb::Database,
+        owner: &str,
+        created: &CreatedLink,
+    ) -> String {
+        let result = complete(
+            db,
+            &crate::test_utils::test_encryption_keys(),
+            owner,
+            &created.raw_token,
+            CompleteInput {
+                credential: Some("test-secret"),
+                ..CompleteInput::default()
+            },
+            false,
+        )
+        .await
+        .expect("provision test link");
+        match result {
+            CompleteResult::Completed(view) => view
+                .link
+                .completed_user_service_id
+                .expect("completed service id"),
+            CompleteResult::OauthRequired { .. } | CompleteResult::DeviceCodeRequired { .. } => {
+                panic!("API-key test service should complete immediately")
+            }
+        }
+    }
+
     #[test]
     fn callback_url_accepts_absolute_http_and_https() {
         assert!(validate_callback_url(Some("https://agent.example/callback?run=1")).is_ok());
@@ -869,6 +1003,7 @@ mod tests {
         assert_eq!(MIN_TTL_SECS, 60);
         assert_eq!(MAX_TTL_SECS, 3600);
         assert_eq!(MAX_WAIT_SECS, 120);
+        assert_eq!(CLAIM_STALE_SECS, 300);
     }
 
     #[test]
@@ -1036,6 +1171,7 @@ mod tests {
                 doc! { "$set": {
                     "expires_at": bson::DateTime::from_chrono(Utc::now() - Duration::seconds(1)),
                     "completion_claim_id": "active-claim",
+                    "completion_claim_at": bson::DateTime::from_chrono(Utc::now()),
                 } },
             )
             .await
@@ -1048,6 +1184,256 @@ mod tests {
         assert_eq!(
             view.link.completion_claim_id.as_deref(),
             Some("active-claim")
+        );
+    }
+
+    #[tokio::test]
+    async fn stale_completion_claim_is_taken_over_and_completed() {
+        let Some(db) = connect_test_database("connect_link_stale_takeover").await else {
+            return;
+        };
+        let (owner, created) = create_test_link(&db, "stale-takeover").await;
+        db.collection::<ConnectLink>(CONNECT_LINKS)
+            .update_one(
+                doc! { "_id": &created.link.id },
+                doc! { "$set": {
+                    "completion_claim_id": "abandoned-claim",
+                    "completion_claim_at": bson::DateTime::from_chrono(
+                        Utc::now() - Duration::seconds(CLAIM_STALE_SECS + 1)
+                    ),
+                } },
+            )
+            .await
+            .expect("seed stale claim");
+
+        let service_id = provision_test_link(&db, &owner, &created).await;
+        let stored = db
+            .collection::<ConnectLink>(CONNECT_LINKS)
+            .find_one(doc! { "_id": &created.link.id })
+            .await
+            .expect("read completed link")
+            .expect("completed link");
+        assert_eq!(stored.status, ConnectLinkStatus::Completed);
+        assert_eq!(
+            stored.completed_user_service_id.as_deref(),
+            Some(service_id.as_str())
+        );
+        assert!(stored.completion_claim_id.is_none());
+        assert!(stored.completion_claim_at.is_none());
+    }
+
+    #[tokio::test]
+    async fn stale_completion_claim_can_be_cancelled() {
+        let Some(db) = connect_test_database("connect_link_stale_cancel").await else {
+            return;
+        };
+        let (owner, created) = create_test_link(&db, "stale-cancel").await;
+        db.collection::<ConnectLink>(CONNECT_LINKS)
+            .update_one(
+                doc! { "_id": &created.link.id },
+                doc! { "$set": {
+                    "completion_claim_id": "abandoned-claim",
+                    "completion_claim_at": bson::DateTime::from_chrono(
+                        Utc::now() - Duration::seconds(CLAIM_STALE_SECS + 1)
+                    ),
+                } },
+            )
+            .await
+            .expect("seed stale claim");
+
+        let view = cancel(&db, &owner, &created.link.id)
+            .await
+            .expect("cancel stale claim");
+        assert_eq!(view.link.status, ConnectLinkStatus::Cancelled);
+        assert!(view.link.completion_claim_id.is_none());
+        assert!(view.link.completion_claim_at.is_none());
+    }
+
+    #[tokio::test]
+    async fn expired_link_with_stale_completion_claim_reaches_expired() {
+        let Some(db) = connect_test_database("connect_link_stale_expiry").await else {
+            return;
+        };
+        let (owner, created) = create_test_link(&db, "stale-expiry").await;
+        db.collection::<ConnectLink>(CONNECT_LINKS)
+            .update_one(
+                doc! { "_id": &created.link.id },
+                doc! { "$set": {
+                    "expires_at": bson::DateTime::from_chrono(Utc::now() - Duration::seconds(1)),
+                    "completion_claim_id": "abandoned-claim",
+                    "completion_claim_at": bson::DateTime::from_chrono(
+                        Utc::now() - Duration::seconds(CLAIM_STALE_SECS + 1)
+                    ),
+                } },
+            )
+            .await
+            .expect("seed expired stale claim");
+
+        let view = get_for_actor(&db, &owner, &created.link.id)
+            .await
+            .expect("expire stale claim");
+        assert_eq!(view.link.status, ConnectLinkStatus::Expired);
+        assert!(view.link.completion_claim_id.is_none());
+        assert!(view.link.completion_claim_at.is_none());
+    }
+
+    #[tokio::test]
+    async fn fresh_completion_claim_blocks_complete_and_cancel_with_conflict() {
+        let Some(db) = connect_test_database("connect_link_fresh_claim_conflict").await else {
+            return;
+        };
+        let (owner, created) = create_test_link(&db, "fresh-claim-conflict").await;
+        db.collection::<ConnectLink>(CONNECT_LINKS)
+            .update_one(
+                doc! { "_id": &created.link.id },
+                doc! { "$set": {
+                    "completion_claim_id": "active-claim",
+                    "completion_claim_at": bson::DateTime::from_chrono(Utc::now()),
+                } },
+            )
+            .await
+            .expect("seed active claim");
+
+        let completion = complete(
+            &db,
+            &crate::test_utils::test_encryption_keys(),
+            &owner,
+            &created.raw_token,
+            CompleteInput {
+                credential: Some("test-secret"),
+                ..CompleteInput::default()
+            },
+            false,
+        )
+        .await;
+        assert!(matches!(
+            completion,
+            Err(AppError::ConnectLinkCompletionInProgress)
+        ));
+        assert!(matches!(
+            cancel(&db, &owner, &created.link.id).await,
+            Err(AppError::ConnectLinkCompletionInProgress)
+        ));
+    }
+
+    #[tokio::test]
+    async fn initial_completion_claim_still_rejects_expired_link() {
+        let Some(db) = connect_test_database("connect_link_initial_claim_expired").await else {
+            return;
+        };
+        let (owner, created) = create_test_link(&db, "initial-claim-expired").await;
+        db.collection::<ConnectLink>(CONNECT_LINKS)
+            .update_one(
+                doc! { "_id": &created.link.id },
+                doc! { "$set": {
+                    "expires_at": bson::DateTime::from_chrono(Utc::now() - Duration::seconds(1)),
+                } },
+            )
+            .await
+            .expect("expire link");
+
+        let result = complete(
+            &db,
+            &crate::test_utils::test_encryption_keys(),
+            &owner,
+            &created.raw_token,
+            CompleteInput {
+                credential: Some("test-secret"),
+                ..CompleteInput::default()
+            },
+            false,
+        )
+        .await;
+        assert!(matches!(result, Err(AppError::ConnectLinkExpired)));
+    }
+
+    #[tokio::test]
+    async fn oauth_callback_completes_pinned_service_after_link_expiry() {
+        let Some(db) = connect_test_database("connect_link_oauth_after_expiry").await else {
+            return;
+        };
+        let (owner, created) = create_test_link(&db, "oauth-after-expiry").await;
+        let service_id = provision_test_link(&db, &owner, &created).await;
+        let service = db
+            .collection::<UserService>(USER_SERVICES)
+            .find_one(doc! { "_id": &service_id })
+            .await
+            .expect("read provisioned service")
+            .expect("provisioned service");
+        let key_id = service.api_key_id.expect("provisioned API key");
+        let connection_id = Uuid::new_v4().to_string();
+        db.collection::<UserApiKey>(USER_API_KEYS)
+            .update_one(
+                doc! { "_id": &key_id },
+                doc! { "$set": {
+                    "connection_id": &connection_id,
+                    "status": "active",
+                } },
+            )
+            .await
+            .expect("mark OAuth key active");
+        db.collection::<ConnectLink>(CONNECT_LINKS)
+            .update_one(
+                doc! { "_id": &created.link.id },
+                doc! {
+                    "$set": {
+                        "status": "pending",
+                        "expires_at": bson::DateTime::from_chrono(Utc::now() - Duration::seconds(1)),
+                    },
+                    "$unset": { "completed_at": "" },
+                },
+            )
+            .await
+            .expect("restore pending OAuth link");
+
+        let view = complete_oauth_callback(&db, &created.link.id, &owner, &connection_id)
+            .await
+            .expect("complete expired OAuth callback");
+        assert_eq!(view.link.status, ConnectLinkStatus::Completed);
+        assert_eq!(
+            view.link.completed_user_service_id.as_deref(),
+            Some(service_id.as_str())
+        );
+    }
+
+    #[tokio::test]
+    async fn device_poll_resumes_pinned_active_service_after_link_expiry() {
+        let Some(db) = connect_test_database("connect_link_device_after_expiry").await else {
+            return;
+        };
+        let (owner, created) = create_test_link(&db, "device-after-expiry").await;
+        let service_id = provision_test_link(&db, &owner, &created).await;
+        db.collection::<ConnectLink>(CONNECT_LINKS)
+            .update_one(
+                doc! { "_id": &created.link.id },
+                doc! {
+                    "$set": {
+                        "status": "pending",
+                        "expires_at": bson::DateTime::from_chrono(Utc::now() - Duration::seconds(1)),
+                    },
+                    "$unset": { "completed_at": "" },
+                },
+            )
+            .await
+            .expect("restore pending device link");
+
+        let result = complete(
+            &db,
+            &crate::test_utils::test_encryption_keys(),
+            &owner,
+            &created.raw_token,
+            CompleteInput::default(),
+            false,
+        )
+        .await
+        .expect("resume expired device link");
+        let CompleteResult::Completed(view) = result else {
+            panic!("active pinned service should complete")
+        };
+        assert_eq!(view.link.status, ConnectLinkStatus::Completed);
+        assert_eq!(
+            view.link.completed_user_service_id.as_deref(),
+            Some(service_id.as_str())
         );
     }
 }
