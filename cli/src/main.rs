@@ -145,6 +145,7 @@ fn command_names(command: &Commands) -> (&'static str, &'static str) {
         Commands::ResetPassword(_) => ("auth", "reset_password"),
         Commands::Whoami(_) => ("user", "whoami"),
         Commands::Status(_) => ("user", "status"),
+        Commands::Connect(_) => ("service", "connect"),
         Commands::Doctor(_) => ("cli", "doctor"),
         Commands::Profile { .. } => ("user", "profile"),
         Commands::Mfa { .. } => ("user", "mfa"),
@@ -205,6 +206,7 @@ async fn run(cli: Cli) -> Result<()> {
             let mut api = api::ApiClient::from_auth_checked(&auth).await?;
             commands::status::run(&mut api, auth.output).await
         }
+        Commands::Connect(args) => commands::connect::run(args).await,
         Commands::Doctor(args) => commands::doctor::run(args).await,
 
         // C5, I1-I3: Profile
