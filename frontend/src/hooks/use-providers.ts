@@ -17,6 +17,7 @@ import type {
   TelegramWidgetConfig,
   TelegramLoginData,
 } from "@/types/api";
+import type { OAuthFlowKind } from "@/types/oauth-popup";
 
 interface ProviderTokenScopeOptions {
   readonly targetOrgId?: string | null;
@@ -148,6 +149,8 @@ export function useInitiateOAuth() {
              * for legacy add-flows that don't pre-create a placeholder.
              */
             readonly keyId?: string;
+            /** Popup completion routing discriminator. Omit for legacy callers. */
+            readonly flow?: OAuthFlowKind;
           },
     ): Promise<OAuthInitiateResponse> => {
       const params =
@@ -170,6 +173,9 @@ export function useInitiateOAuth() {
       }
       if (params.keyId) {
         query.set("key_id", params.keyId);
+      }
+      if (params.flow) {
+        query.set("flow", params.flow);
       }
       const queryString = query.toString();
       const suffix = queryString ? `?${queryString}` : "";

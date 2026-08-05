@@ -1,0 +1,975 @@
+> **SUPERSEDED (2026-08-05):** current state, verified finding dispositions, and readiness live in `docs/OAUTH_CHAT_POPUP_STATUS.md`. This file is kept as the review trail only.
+
+# OAuth Chat Popup — Pilot Implementation Plan (PR-A + PR-B + PR-C)
+
+Scope: §11 of `docs/OAUTH_POPUP_FLOW_PLAN.md` only — the chat-only pilot, one
+branch (`feature/oauth-chat-popup-flow`), PR target `main`. Everything else in
+the design doc (providers grid, SA providers, CLI wizard, social login, D-3 /
+full retry transaction, Phase-2 embed) is OUT of scope. D-1 and D-2 stay
+separate PRs (D-2 assessment: §7 below).
+
+This plan was verified against HEAD (`fc93d51c`). Where the design doc drifted
+from reality, the correction is recorded in §1 and the tasks follow the
+corrected reality, not the doc.
+
+### 0.1 Accepted SOL review corrections (implementation authority)
+
+`docs/OAUTH_CHAT_POPUP_SOL_REVIEW.md` was accepted in full. The following
+corrections supersede any older wording later in this document:
+
+1. `/oauth` and `/oauth-launching` are added to `main.tsx:isPublicPath` so
+   both root routes render before auth resolution. `/oauth` is also excluded
+   from telemetry pageviews. Production serves both with the existing SPA
+   fallback; completion data is fixed tokens plus an opaque nonce, scrubbed on
+   mount. The nginx access log necessarily sees the initial request; this is an
+   accepted P2 because removing query strings from infrastructure logs requires
+   deployment-specific edge configuration outside this chat-only PR.
+2. The launch interstitial owns external navigation. It installs a validated
+   `postMessage` listener, clears `window.opener`, and only then sends a
+   launch-ready acknowledgement to the parent. The parent never assigns an
+   external `popup.location` directly; it waits for the ready acknowledgement
+   and sends the URL back to the interstitial. A timeout closes the placeholder
+   and falls back to the existing `noopener noreferrer` anchor.
+3. Provider URL validation deliberately permits cross-origin HTTP(S) URLs but
+   requires their `state` query parameter to equal `1cc_<attempt_nonce>`.
+   The trusted interstitial also records the initial provider origin in the
+   popup's NyxID session storage. Retry transfers the next nonce and URL over
+   the attempt-scoped channel and requires both the state binding and that
+   recorded origin before the popup self-navigates.
+4. D-2 remains outside this branch for non-`cc` flows. Instead, a `cc`
+   attempt-generation guard is stored on its target `UserApiKey`. Pending,
+   denial/failure, and success writes match the current `attempt_nonce`
+   atomically; stale attempt A therefore cannot fail or overwrite retry B.
+   This was chosen over consume-on-denial because it fixes the retry race
+   without forking state-claim semantics. Legacy key mutations additionally
+   unset the chat-only optional nonce; old rows have no such field, so legacy
+   observable behavior and BSON shape remain unchanged.
+5. Both new `OAuthState` options use `serde(default,
+   skip_serializing_if = "Option::is_none")`. Tests prove an old BSON document
+   stays key-identical after deserialize -> serialize.
+6. The OAuth state id is a bare UUID for every legacy flow and
+   `1cc_<uuid-v4>` for chat. The suffix is `attempt_nonce`. The callback can
+   classify and correlate missing-code, invalid, and TTL-reaped `cc` states
+   from the state string without a database read; prefix forgery can only
+   select a fixed NyxID completion page and cannot authorize a token exchange.
+7. BroadcastChannel is per attempt: `nyxid.oauth.<attempt_nonce>`. Messages do
+   not repeat the current channel selector. `oauth_result` remains only a wakeup;
+   the opener invalidates/refetches server state before changing UI. The next
+   correlation id is transferred only inside the already attempt-scoped retry
+   channel.
+8. The single-flow lock lives until explicit completion/cancel, not merely a
+   failed poll result. Async continuations are launch-id guarded; unmount closes
+   the placeholder popup. No-ack CTA fallback renders a neutral manual-return
+   page instead of navigating a still-live popup into a second NyxID app.
+9. `View connection` closes `AddKeyDialog` before mounting
+   `ManageConnectionModal`, preventing overlapping Radix focus traps. Cancel is
+   UI cleanup only in this pilot and is labelled accordingly; durable
+   server-side state cancellation remains coupled to the all-flow D-2 work.
+10. The final backend gate is `cargo nextest run -p nyxid` when available,
+    matching CI. Real COOP/mobile popup behavior remains a documented P2: the
+    repository has no browser E2E fixture for cross-origin provider headers,
+    so unit tests cover protocol ordering and the manual matrix remains
+    required after deploy.
+
+### 0.2 Accepted Opus implementation-review corrections (Stage 3)
+
+`docs/OAUTH_CHAT_POPUP_OPUS_REVIEW.md` found three server-lifecycle P1s and
+eight P2s after implementation. These corrections are part of the shipped
+contract and supersede older wording below:
+
+1. **F-1 / F-11, non-destructive initiate.** `begin_chat_oauth_attempt` is
+   scoped by both `user_id` and `connection_id`. Its atomic update always
+   stamps `oauth_attempt_nonce`, but resets fields only when status is
+   `failed`, `refresh_failed`, `expired`, or `pending_auth`. An active
+   credential, scopes, expiry, status, and error remain intact until a
+   nonce-guarded exchange succeeds. Denial removes the matching nonce from an
+   active row without changing credential data; a pending placeholder still
+   becomes `failed`. Reconnect polling requires the server's
+   `last_authorized_at` marker to advance, so preserved `active` is never
+   mistaken for completion.
+2. **F-2, reaped denial routing.** A provider error with an unknown or
+   TTL-reaped canonical `1cc_<uuid-v4>` state still selects `/oauth` using the
+   suffix nonce and a fixed error code. Invalid legacy state strings retain
+   the legacy dashboard redirect.
+3. **F-3, bidirectional invalidation.** Legacy OAuth token success, provider
+   reset, and connection failure all unset `oauth_attempt_nonce`; each legacy
+   mutation therefore invalidates an in-flight chat callback. Chat success and
+   denial also clear their matching generation.
+4. **F-7, soft close hint.** The opener polls `OAuthPopupHandle.isClosed()`
+   and shows an actionable "Start again" hint. This signal never changes
+   server state or fails/deletes a placeholder. Only explicit user action
+   releases the client lock, because COOP can make a live popup appear closed.
+5. **F-8 / F-9, completion lifecycle.** Retry is not offered when the trusted
+   interstitial's provider-origin binding is absent; the user is sent back to
+   the NyxID tab and no retry action is posted. Success auto-close is cancelled
+   by pointer or keyboard interaction, not by a navigation-time focus event.
+6. **F-5 decision: keep one correlation identifier.** `attempt_nonce` is an
+   OAuth correlation identifier and origin-scoped BroadcastChannel selector,
+   **not a secret capability or authorization boundary**. It necessarily
+   transits the provider in `state` and the `/oauth` query and may appear in
+   provider/edge logs. Learning it outside the NyxID origin does not grant
+   BroadcastChannel access; same-origin script execution is already inside the
+   frontend trust boundary. Messages contain no token/key material, retry URLs
+   remain state- and provider-origin-bound, and server mutations remain
+   authenticated and generation-guarded. A second channel secret would add a
+   storage/rotation protocol without changing that same-origin boundary, so it
+   is outside the pilot.
+7. **F-6 decision: completion input is untrusted.** `oauth_result` is a wakeup
+   only: it invalidates key queries and never activates a key, invokes
+   `onViewResult`, or changes connection state. A query-asserted success shows
+   neutral "response received / being verified" copy. Fresh connects settle
+   only from server key state; active reconnects additionally require
+   `last_authorized_at` to advance. `view_result` is explicit user navigation
+   and has no credential mutation authority.
+8. **Accepted P2, F-4.** OAuth-state insertion and key nonce stamping remain
+   separate MongoDB writes. A cross-tab transaction requires broader
+   transaction/revocation design; the per-tab lock and nonce guard keep NyxID
+   data correct, but two concurrent tabs can discard one exchanged grant
+   without revoking that orphan upstream grant. This residual is accepted for
+   the chat pilot and belongs with all-flow retry work.
+9. Infrastructure query logging and real-browser COOP/mobile E2E remain
+   accepted P2s: edge log policy is deployment-owned, and this repository has
+   no external-provider browser fixture. Unit tests pin in-repo invariants and
+   the manual browser matrix remains required before production enablement.
+
+---
+
+## 1. Verified file/line map and corrections to the design doc
+
+### 1.1 Backend — verified, matches the design doc
+
+| Claim | Reality at HEAD |
+|---|---|
+| `OAuthState` fields | `backend/src/models/oauth_state.rs:7-59`. No `flow_kind` / `attempt_nonce` yet. All-fields struct literals (no `..Default`), so new fields are compiler-enforced at every constructor. |
+| `OAuthState` constructors | Exactly five: `services/user_token_service.rs:731` (OAuth initiate), `:1021` (device-code initiate), `handlers/user_tokens.rs:1407` (test helper), `services/user_api_key_service.rs:2067` (test helper, used by `live_oauth_state` / `live_oauth_state_for_org`), `models/oauth_state.rs:72,99,126` (model tests). Plus the legacy-doc bson test at `models/oauth_state.rs:152`. |
+| Initiate handler | `handlers/user_tokens.rs:361` `initiate_oauth_connect`; query struct `OAuthInitiateQuery` at `:71` (`redirect_path`, `scope`, `scope_override`, `target_org_id`, `key_id`). Calls service at `:395`. Service fn `services/user_token_service.rs:576` (10 params, already `#[allow(clippy::too_many_arguments)]` at `:567`, returns `String`). |
+| Generic callback | `handlers/user_tokens.rs:492` `generic_oauth_callback_impl`. Branch order: provider-error (`:500`), missing code (`:550`), missing state (`:556`), peek (`:564`), session mismatch (`:587`), `handle_oauth_callback` (`:655`) with success / sync-failure / exchange-failure arms. POST form_post variant at `:811` funnels into the same impl. |
+| Redirect builders | `redirect_callback` `:826` → `{FRONTEND_URL}/providers/callback?status=&message=`; `redirect_to_path` `:842` → `{FRONTEND_URL}{path}?provider_status=&message=`. |
+| Session check | `ensure_callback_user_matches_state` `:1279` — returns `Ok(())` when `auth_user` is `None` (D-1, confirmed present, out of scope). |
+| State claim | `services/user_token_service.rs:1550-1558` — atomic `consumed` flip only inside `handle_oauth_callback`; denial branch peeks without claiming (D-2, confirmed present). `peek_oauth_state` `:1504` is a bare `find_one` — it returns expired-but-unreaped and already-consumed rows, which §4 exploits for error attribution. |
+| SA initiate | `handlers/admin_sa_providers.rs:263` `initiate_oauth_for_sa`, service call at `:281` — separate call site that must be updated for the service signature change (passes `None` flow; SA flows stay legacy). |
+| Placeholder failing | `services/user_api_key_service.rs:621` `fail_oauth_placeholders` → `fail_connection_placeholder` `:585` only flips rows with `status ∈ {pending_auth}`. |
+| Existing callback tests | `handlers/user_tokens.rs` tests mod (`:1292` on): `generic_oauth_callback_impl` invoked directly, `LOCATION` header asserted via `redirect_location` / `redirect_query_param` helpers, Mongo via `connect_test_database` + `test_app_state` (skips when no local Mongo). Model new tests on these. |
+
+### 1.2 Frontend — verified, with corrections
+
+| Claim | Reality at HEAD |
+|---|---|
+| `AddKeyDialog` OAuth handoff | `components/dashboard/add-key-dialog.tsx`: `OAuthStep` at `:1445`; `handleConnect` `:1508` awaits `ensureKey()` then `initiateOAuth.mutateAsync` (with `redirectPath: /keys/{key.id}`, `keyId`), then renders the `<a target="_blank">` anchor at `:1565-1573`; polling via `useKeyAuthorizationStatus(pendingKeyId, authorizing)` `:1503`. Outer dialog props at `:2449-2480`; `OAuthStep` mounted at `:3058-3097`. `cleanupPendingAuthKey` `:1387`. |
+| Poll hook | `hooks/use-keys.ts:54-91` `useKeyAuthorizationStatus` — matches the doc. |
+| Initiate hook | `hooks/use-providers.ts:110` `useInitiateOAuth` — builds query params; needs a `flow` param. `OAuthInitiateResponse` lives in `types/api.ts:637`. |
+| Router | `router.tsx:97` `rootRoute`; `/oauth-consent` at `:165`; `dashboardLayout` + auth `beforeLoad` at `:319-352` (doc said `:318` — off by one, same code); `/providers/callback` nests under `providersRedirectRoute` (`:457`) under `dashboardLayout` — confirmed NOT a session-free precedent. Route tree assembly `:833-914`. Lazy-page registry: `pages/lazy.ts`. |
+| Connect card | `components/assistant/blocks/connect-card.tsx` — `AddKeyDialog` mounted at `:246-255` ✓. |
+
+**Correction C1 — the connect card does NOT open `ManageConnectionModal`.**
+The design doc (§4.1) says the card "can already open [the modal] via its
+'Manage' affordance (`blocks/connect-card.tsx:112`)". False at HEAD: `:112`
+is `actionLabel` selection, and the card's Manage action **navigates** to
+`/keys/$keyId` (`:175-180`). `ManageConnectionModal`
+(`components/assistant/manage-connection-modal.tsx:458`, props
+`{keyIds, serviceName, iconSlug?, onClose}`) is only mounted by
+`components/assistant/plugins-view.tsx:359`. The pilot must newly mount it
+from the connect card for the "View connection" CTA (task F9). Its props fit:
+`keyIds` are `KeyInfo.id`s (UserService ids), exactly what `OAuthStep`'s
+`pendingKeyId` holds.
+
+**Correction C2 — `/oauth/launching` cannot exist; the interstitial is
+`/oauth-launching`.** Prod nginx (`frontend/nginx.conf.template:35`) has
+`location /oauth/ { proxy_pass BACKEND }` — every path under `/oauth/` is
+proxied to Axum, which nests the OAuth2 IdP router at `/oauth`
+(`backend/src/routes.rs:1426`). `/oauth/launching` would 404 at the backend
+in prod. Bare `/oauth` does NOT match the `location /oauth/` prefix, so the
+completion route `/oauth` (with or without query) falls through to the SPA
+`try_files` — the completion route survives, the interstitial path does not.
+Decision: interstitial route is **`/oauth-launching`** (root-level sibling,
+like `/oauth-consent`). Zero infra changes.
+
+**Correction C3 — vite dev proxy must mirror nginx.** `vite.config.ts:51`
+proxies regex `^/oauth(?:/.*)?$`, which matches **bare `/oauth`** (unlike
+prod nginx). In dev, refreshing the popup after the URL is scrubbed to
+`/oauth`, or opening `/oauth` directly, would proxy to the backend and 404.
+Change the key to `^/oauth/` so dev matches prod semantics (`/oauth/token`
+etc. still proxied; bare `/oauth` served by the SPA). One line, task F11.
+
+**Correction C4 — the window name cannot be `nyxid_oauth_{nonce}`.** The
+popup must open synchronously in the click handler, but the server nonce only
+exists after the initiate response. Use a client-minted launch id
+(`crypto.randomUUID()`) for the window name — uniqueness per attempt is the
+requirement (Codex 9/10), not which side minted it. The server
+`attempt_nonce` remains the broadcast correlation identifier and channel
+selector; it is not an authorization capability.
+
+**Correction C5 — the initiate response must return `attempt_nonce`.** The
+design stores the nonce on `OAuthState` and puts it in the completion URL,
+but the opener must also know it to match broadcasts. `OAuthInitiateResponse`
+(Rust + `types/api.ts`) gains `attempt_nonce` (optional; only set when `flow`
+was sent). Legacy responses are byte-identical via
+`#[serde(skip_serializing_if = "Option::is_none")]`.
+
+**Correction C6 — canonical chat states are attributable without a row.** The
+self-discriminating `1cc_<uuid-v4>` state format lets missing-code, invalid,
+provider-denial, and TTL-reaped chat callbacks route to `/oauth` without a new
+database lookup on the shared missing-code path. Malformed and legacy state
+strings keep today's byte-identical redirect. Expired-but-unreaped and
+already-consumed rows additionally retain precise `state_expired` /
+`state_replayed` attribution.
+
+**Correction C7 — retry cannot relaunch from the opener.** Design §4.2 has
+the opener relaunch the popup on `action:"retry"` — but a broadcast handler
+has no user activation in the opener's context, so `window.open` there gets
+popup-blocked, and the opener's retained handle may be unusable post-COOP.
+Instead the existing popup relaunches itself: opener re-runs initiate and
+transfers the fresh authorize URL over the old attempt's attempt-scoped
+channel; the popup validates HTTP(S) plus `state=1cc_<nextNonce>` before
+requiring the provider origin recorded by the trusted interstitial and setting
+its own `location.href`, which needs no gesture and no handle.
+
+**Correction C8 — wizard source closure.** `hooks/use-keys.ts` is in the CLI
+wizard bundle source closure (`cli/src/wizard/bundle-meta/index.manifest`). The
+Stage-3 server-verification fix must extend it so an already-active reconnect
+keeps polling until `last_authorized_at` advances. Rebuild the wizard only
+after the final rebase and all source edits, commit every generated
+`cli/src/wizard/` artifact together, then run `wizard_bundle_freshness`.
+
+**Correction C9 — initiate-failure handling in the popup.** Design §5 says
+"navigate the interstitial to an error state". Simpler and better UX for the
+pilot: if `ensureKey()`/initiate fails after the sync-open, the opener closes
+the popup and shows the error inline in the dialog (the existing `setError`
+path at `add-key-dialog.tsx:1545-1553`). The user's context is the dialog;
+an error marooned in a popup helps nobody.
+
+---
+
+## 2. Ordered task list
+
+Order matters: backend first (frontend tests can then be written against the
+real contract), each task compiles and passes tests on its own.
+
+### B1 — `backend/src/models/oauth_flow_kind.rs` (new)
+
+The flow-kind enum + wire tokens. Model layer: no business logic, no HTTP.
+
+- `OAuthFlowKind` enum (§3 for exact shape) with `as_wire() -> &'static str`,
+  `parse(&str) -> Option<Self>`, and `ALL_WIRE_TOKENS: [&str; 6]` (the TS
+  parity anchor).
+- Register `pub mod oauth_flow_kind;` in `models/mod.rs`.
+- Unit tests: round-trip every variant; `parse` rejects unknown/empty/case
+  variants; `ALL_WIRE_TOKENS` matches the documented set exactly.
+
+### B2 — `backend/src/models/oauth_state.rs`
+
+Add two serde-defaulted fields:
+
+```rust
+/// Wire token of the NyxID surface that initiated this flow
+/// (`OAuthFlowKind`). Stored as the raw token so a row written by a
+/// newer server with an unknown token still deserializes; parse at the
+/// use site via `OAuthFlowKind::parse`. `None` = legacy / non-popup flow.
+#[serde(default, skip_serializing_if = "Option::is_none")]
+pub flow_kind: Option<String>,
+/// High-entropy per-attempt completion nonce (UUID v4). Minted at
+/// initiate when `flow_kind` is set; echoed on the `/oauth` completion
+/// URL so the opener can correlate broadcasts to the attempt it started.
+/// Never an authorization credential — the DB row stays the source of truth.
+#[serde(default, skip_serializing_if = "Option::is_none")]
+pub attempt_nonce: Option<String>,
+```
+
+Stored as `Option<String>`, not `Option<OAuthFlowKind>`, deliberately: an
+unknown token must degrade to legacy fall-through, not a deserialization
+error (forward compatibility when later PRs add variants).
+
+- Update the three model-test constructors; extend
+  `bson_backward_compat_missing_new_fields` to assert both new fields
+  default to `None`, then reserialize and assert neither BSON key exists;
+  extend one roundtrip test with `Some` values.
+
+### B3 — remaining `OAuthState` constructors
+
+Compiler-driven: `services/user_token_service.rs:731` (values threaded in,
+see B4) and `:1021` (device-code: both `None`),
+`handlers/user_tokens.rs:1407` test helper (`None`, `None`),
+`services/user_api_key_service.rs:2067` test helper (`None`, `None`).
+`cargo build` must be clean before moving on.
+
+### B4 — service: `initiate_oauth_connect` accepts the flow, mints the nonce
+
+`services/user_token_service.rs:576`:
+
+- New params: `flow_kind: Option<OAuthFlowKind>` (last position).
+- For `ChatConnect`, mint `attempt_nonce = Uuid::new_v4().to_string()` and use
+  `state_id = format!("1cc_{attempt_nonce}")`. For `None` and reserved
+  non-chat flow kinds, keep today's bare UUID state id exactly.
+- Store `flow_kind.map(|f| f.as_wire().to_string())` and the nonce on the
+  `OAuthState` row.
+- Return type changes from `String` to a dedicated struct:
+
+```rust
+pub struct OAuthInitiateResult {
+    pub authorization_url: String,
+    pub attempt_nonce: Option<String>,
+}
+```
+
+- Update call sites: `handlers/user_tokens.rs:395` (threads the parsed
+  flow, returns nonce in the response), `handlers/admin_sa_providers.rs:281`
+  (pass `None`, use `.authorization_url` — SA behavior unchanged), handler
+  test at `handlers/user_tokens.rs:1770`.
+- The authorization URL itself is untouched — nothing new rides the provider
+  redirect except the `cc`-only, versioned state discriminator. Legacy `state`
+  stays an opaque bare UUID byte-for-byte.
+
+### B4a — attempt-generation guard for the chat placeholder
+
+- Add `oauth_attempt_nonce: Option<String>` to `UserApiKey`, serde-defaulted
+  and skipped when absent. Every existing constructor uses `None`, preserving
+  legacy BSON.
+- After `cc` state insertion and before returning the authorize URL, atomically
+  reset/mark the selected key `pending_auth` and set its nonce.
+- Add cc-only guarded failure/success service entry points whose Mongo filters
+  include `oauth_attempt_nonce: <state nonce>`. Keep the existing non-cc
+  functions and their filters/update documents unchanged.
+- Successful guarded writes unset the nonce. A stale callback receives a
+  not-current/no-op result and must not fail the active generation.
+
+### B5 — handler: initiate accepts `flow`, response carries the nonce
+
+`handlers/user_tokens.rs`:
+
+- `OAuthInitiateQuery` += `pub flow: Option<String>`.
+- Parse: absent → `None`; present-but-unknown token →
+  `AppError::ValidationError("unknown flow kind")` (explicit beats silent —
+  a typo'd `flow` must not silently produce a legacy-routed callback).
+  All six tokens parse; only `cc` changes callback routing (§2 B6), so a
+  future surface sending `kc` today falls through to legacy behavior at the
+  callback — additive by construction.
+- `OAuthInitiateResponse` += `#[serde(skip_serializing_if = "Option::is_none")]
+  pub attempt_nonce: Option<String>`.
+- Audit metadata for `provider_oauth_initiated` adds `"flow": "cc"` only for
+  chat; absent-flow audit JSON remains key-identical.
+- Device-code initiate (`DeviceCodeInitiateQuery`) is NOT given `flow` in the
+  pilot — chat's device-code path keeps today's in-dialog code display, which
+  already never navigates.
+
+### B6 — handler: callback routes `cc` to `/oauth` on every attributable branch
+
+`handlers/user_tokens.rs` `generic_oauth_callback_impl`. Structure the change
+so non-`cc` code paths are provably untouched: at each branch, compute
+`let cc = oauth_state.flow_kind.as_deref().and_then(OAuthFlowKind::parse)
+== Some(OAuthFlowKind::ChatConnect)` from the peeked row **only where a row
+is available**, and only the final redirect selection changes; every
+side-effect (placeholder failing, audit rows, token writes, sync) stays
+byte-identical for all flows including `cc`.
+
+New builder alongside `redirect_callback` / `redirect_to_path`:
+
+```rust
+/// Redirect to the SPA popup-completion route. Fixed enum tokens and an
+/// opaque nonce only — never free text, ids, or provider-controlled strings.
+fn redirect_to_oauth_completion(
+    frontend_url: &str,
+    status: &str,               // "complete" | "error"
+    flow: &str,                 // wire token
+    code: Option<&str>,         // fixed error-code token, errors only
+    nonce: Option<&str>,
+) -> axum::response::Redirect  // → {FRONTEND_URL}/oauth?...
+```
+
+Branch-by-branch (all redirects carry `flow=cc` and `nonce=<row nonce>`;
+`nonce` omitted only if the row unexpectedly has none):
+
+| Branch (line at HEAD) | `cc` behavior | non-`cc` / legacy |
+|---|---|---|
+| Provider error, row peeked ok (`:500-548`) | `status=error`, `code=access_denied` when `normalized_oauth_error_code(error) == "access_denied"`, else `provider_error`. `fail_oauth_placeholders` + audit unchanged. | unchanged (`redirect_callback` with message) |
+| Provider error, canonical `1cc_<uuid>` but no row | `status=error`, fixed provider error code, nonce from suffix | malformed/legacy state unchanged |
+| Missing code, state has valid `1cc_<uuid>` discriminator | classify without DB, `status=error`, `code=provider_error`, nonce from suffix | unchanged immediate redirect with no DB lookup |
+| Missing state (`:556`) | — (unattributable, C6) | unchanged (`Missing state parameter`) |
+| Peek failed — unknown or reaped state (`:564-583`) | valid `1cc_<uuid>` → `state_invalid` with suffix nonce | unchanged (`Invalid or expired OAuth state`) |
+| Session mismatch (`:587-651`) | `status=error`, `code=session_mismatch`. Audit + placeholder-failing (with the masked-email message, which stays in the DB error_message and audit as today) unchanged; the masked emails just no longer ride the URL for `cc`. | unchanged |
+| Success (`:665-753`) | `status=complete` (`redirect_path` ignored for `cc`; the row's `redirect_path` is unset anyway since popup mode stops sending it, F8) | unchanged |
+| Legacy-sync failure (`:695-747`) | `status=error`, `code=exchange_failed` (near-unreachable for `cc` — it always has `connection_id` — but handled) | unchanged |
+| Exchange failure (`:755-802`) | If the peeked row was already expired (`oauth_state.expires_at < Utc::now()`): `code=state_expired`. Else if the peeked row had `consumed == true` (a prior claim won; this is a replay): `code=state_replayed`. Else `code=exchange_failed`. Placeholder-failing + audit unchanged. | unchanged |
+
+No error-message string matching anywhere — expiry/replay classification uses
+the already-peeked row's fields (C6 note: `peek_oauth_state` returns expired
+and consumed rows, verified).
+
+All `cc` placeholder failure and success mutations pass the row nonce to the
+attempt-generation guard. Non-`cc` branches call the existing functions.
+
+### B7 — backend tests
+
+See §5.1.
+
+### F1 — `frontend/src/schemas/oauth-popup.ts` + `frontend/src/types/oauth-popup.ts` (new)
+
+- `OAUTH_FLOW_TOKENS = ["cc","kc","pc","sa","wz","sl"] as const` (TS mirror,
+  §3), `OAUTH_ERROR_CODES` (§4), `OauthFlowKind` / `OauthErrorCode` types.
+- Zod schema `oauthCompletionSearchSchema` parsing the `/oauth` search:
+  `status` ∈ {complete,error}; unknown/absent `flow` → `undefined` (generic
+  copy — never an error, per design §3); unknown/absent `code` →
+  `undefined`; `nonce` is an optional canonical UUID-v4.
+- Broadcast message types + type guards (the current nonce is the channel name
+  channel selector and is not repeated in messages):
+  `OAuthResultMessage {type:"oauth_result", status, flow?, code?}`,
+  `OAuthActionMessage {type:"oauth_action", action:"view_result"|"retry"|"dismiss"}`,
+  `OAuthAckMessage {type:"oauth_ack"}`,
+  `OAuthRetryMessage {type:"oauth_retry", nextNonce, url}`. The retry guard
+  requires a UUID-v4 `nextNonce`, HTTP(S), no URL credentials,
+  `url.searchParams.get("state") === "1cc_" + nextNonce`, and the provider
+  origin recorded by the trusted launch interstitial. Cross-origin provider
+  origins such as GitHub and Google are expected and allowed; an unrelated
+  channel-supplied origin is not.
+- Vitest: `schemas/oauth-popup.test.ts` (§5.2).
+
+### F2 — `frontend/src/lib/oauth-popup.ts` (new)
+
+The popup manager. Framework-free module (testable without React):
+
+- `oauthChannelName(nonce) = "nyxid.oauth." + nonce`; `openChannel(nonce)`
+  validates UUID-v4 and guards environments without `BroadcastChannel`
+  (returns null; callers degrade to poll-only).
+- `openOAuthPopup(): OAuthPopupHandle | null` — **synchronous**:
+  `window.open("/oauth-launching", `nyxid_oauth_${launchId}`,
+  "popup,width=760,height=820")` with a fresh `crypto.randomUUID()` launch
+  id per call (C4). Returns `null` when blocked (caller falls back to the
+  existing anchor flow). Handle: `{ launchId, ready, navigate(url, nonce),
+  close(), isClosed() }`. `ready` resolves only after an origin/source/launch-id
+  validated interstitial acknowledgement. `navigate` posts a same-origin
+  message to the interstitial; it never assigns external location from the
+  opener. `isClosed()` is documented as a **soft hint only** (COOP,
+  Codex 7): it may inform a retry affordance, it must never fail a
+  placeholder.
+- `postResult` / `postAction` / `postAck` / `postRetry` helpers receive the
+  already-open per-attempt channel; no global channel exists.
+
+### F3 — `frontend/src/stores/oauth-popup-store.ts` (new)
+
+Single-flow lock (design §5): Zustand store, app-level not component-level.
+
+```ts
+interface OAuthPopupAttempt {
+  launchId: string;
+  nonce: string | null;   // set once initiate resolves
+  keyId: string | null;   // UserService id of the placeholder
+  slug: string;           // catalog slug, for the "already in progress" copy
+  startedAt: number;
+}
+// state: attempt: OAuthPopupAttempt | null
+// actions: begin(attempt) -> boolean (false if one is active), setNonce/keyId, end(launchId)
+```
+
+`begin` refuses while an attempt is active; the caller surfaces "a connection
+is already in progress". Ownership persists across retryable failed poll
+states and ends only on explicit success dismissal, cleanup, or unmount after
+closing/aborting the launch.
+`end` is keyed by `launchId` so a stale attempt can't clear a newer one.
+
+### F4 — `/oauth-launching` interstitial: `pages/oauth-launching.tsx` (new)
+
+- First effect on mount: capture the opener only for a one-time ready
+  `postMessage`, install the navigation listener, set `window.opener = null`,
+  then post `{type:"oauth_launch_ready", launchId}` to the captured opener.
+  Navigation messages must match origin, source relationship, and launch id;
+  the URL must pass `validateAuthorizationUrl(url, nonce)`. Before navigation,
+  it records that authenticated URL's provider origin in the popup's
+  origin-scoped session storage. Only this page sets its own `location.href`,
+  after opener severance.
+- Renders a minimal spinner card, "Connecting…" (no auth guard, no data
+  fetching, no telemetry).
+
+### F5 — `/oauth` completion page: `pages/oauth-complete.tsx` (new)
+
+Mount sequence, in order:
+
+1. Capture + parse search params via `oauthCompletionSearchSchema` into
+   state (before scrubbing).
+2. Open the nonce-scoped channel and broadcast `oauth_result` — first, before
+   any delay. If the nonce is absent/invalid, render generic copy with no
+   action protocol.
+3. `history.replaceState(null, "", "/oauth")` — scrub the query (history /
+   log / referrer hygiene, Codex 20).
+4. Render flow/code copy + CTAs (tables below), `role="status"
+   aria-live="polite"`, focus on the primary CTA.
+
+Behavior:
+
+- **Success**: visible ~3s countdown then `window.close()`. Any pointerdown
+  / keydown interaction on the page cancels the countdown
+  permanently. `prefers-reduced-motion`: same timing, no animated counter.
+  Secondary CTA "Stay here" cancels the countdown.
+- **Errors never auto-close.**
+- ~300ms after any close attempt, if still alive: swap to "You can close
+  this window" + manual close button; when `window.opener == null` (always
+  true here — C2 note: opener is severed; the check is for direct opens
+  where there was never an opener *and* no live receiver) also render a
+  "Back to NyxID" link to `/`.
+- **Direct open** (no `status` param): generic "Nothing to complete" copy +
+  "Back to NyxID" link. No broadcast.
+
+CTA protocol (design §4.1, with C7 retry):
+
+- CTA click → `postAction({action})` on the nonce-scoped channel → wait 400ms
+  for `oauth_ack` → on ack `window.close()`; on timeout render manual-return
+  copy. A missing ack never turns the popup into a second dashboard.
+- `view_result` (cc success primary, "View connection"): opener closes the
+  add dialog and opens `ManageConnectionModal` in place (F9). No-ack fallback:
+  show "Return to your NyxID tab to view the connection."
+- `retry` ("Try again" / "Start over" on retryable codes): opener re-runs
+  the connect (F8) and answers `oauth_retry {nextNonce, url}` over the current
+  attempt-scoped channel; the
+  popup validates HTTP(S)+state+recorded-provider-origin binding (F1 guard),
+  adopts `nextNonce`, and
+  `location.href = url` — self-navigation, no gesture needed (C7). Timeout
+  (10s): render "Couldn't restart from here — go back to your chat and click
+  Connect again." (no auto-close).
+- `dismiss`: `postAction`, close after ack, and show neutral manual-return copy
+  if no ack arrives. It is
+  labelled "Close" rather than "Cancel" because durable OAuth-state
+  cancellation remains out of this pilot.
+
+Copy tables (pilot): query-asserted `status=complete` renders neutral
+"Authorization response received / Return to NyxID while the connection is
+verified" copy. It never asserts that a credential was stored. Unknown/absent
+flow remains generic. Error copy comes from the fixed §4 table; tokens are
+never rendered raw.
+
+Register in `pages/lazy.ts`; routes in `router.tsx` as direct children of
+`rootRoute` (before `dashboardLayout` in the children array, like the other
+root routes): `oauthCompletionRoute` (`path: "/oauth"`, `validateSearch`
+via the zod schema) and `oauthLaunchingRoute` (`path: "/oauth-launching"`,
+`validateSearch: () => ({})`). No `beforeLoad` auth guards on either.
+
+### F6 — `hooks/use-oauth-popup.ts` plus server-verified polling
+
+Opener-side receiver, nonce-scoped:
+
+```ts
+useOAuthPopupReceiver({
+  nonce,                        // null until initiate resolves → hook inert
+  keyId,
+  onResult?: (msg) => void,     // UI nudge; poll remains the source of truth
+  onViewResult?: () => boolean, // return true = handled (ack is sent)
+  onRetry?: () => Promise<{ url: string; nextNonce: string } | null>,
+})
+```
+
+- Opens only `oauthChannelName(nonce)`; messages do not repeat the current selector.
+- On `oauth_result`: `void queryClient.invalidateQueries({queryKey:["keys"]})`
+  and the key detail equivalent — a wakeup for the existing poll, not a state
+  transition; the DB row stays the source of truth (FI-004).
+- Reconnect completion requires the fetched key's `last_authorized_at` to
+  differ from the pre-initiate baseline. Preserved `active` status alone is
+  not completion.
+- On `oauth_action view_result`: call `onViewResult`; if it returns true,
+  `postAck()`.
+- On `oauth_action retry`: run one retry at a time; on success
+  `postRetry({nextNonce, url})`, and the hook's owner swaps its
+  active nonce to `nextNonce`.
+- On `oauth_action dismiss`: `postAck`, release local popup ownership without
+  claiming server-side cancellation.
+- Tears down the channel subscription on unmount (a closed dialog stops
+  acking; the popup's no-ack fallback covers it).
+
+### F7 — `hooks/use-providers.ts` + `types/api.ts`
+
+- `useInitiateOAuth` input += `readonly flow?: "cc"` → `query.set("flow",
+  params.flow)`. (Type the param as the TS union later when more surfaces
+  ship; pilot accepts only `"cc"`.)
+- `types/api.ts` `OAuthInitiateResponse` += `readonly attempt_nonce?: string`.
+
+### F8 — `components/dashboard/add-key-dialog.tsx`
+
+- New props: `launch?: "popup" | "tab"` (default `"tab"`) and
+  `flow?: "cc"` — threaded to `OAuthStep`. `/keys` and every existing caller
+  pass nothing → today's behavior, byte-identical (default path does not
+  touch the new code).
+- `OAuthStep` popup branch in `handleConnect` (only when
+  `launch === "popup"`):
+  1. **Synchronously** `openOAuthPopup()` — before any await (Codex 5), then
+     `begin()` with its client launch id. If the lock is already held, close
+     the new window, show "a connection is already in progress", and return.
+     `null` (blocked) falls through to the existing anchor flow unchanged
+     without acquiring the lock (design §5 fallback).
+  3. Start/await the interstitial `ready` handshake while running
+     `ensureKey()` and initiate. `await initiateOAuth.mutateAsync({...,
+     flow: "cc", keyId: key.id})` — **without `redirectPath`** (meaningless
+     for `cc`; and against a not-yet-deployed backend the flow degrades to
+     the legacy `/providers/callback` page inside the popup, which the poll
+     still resolves — mixed-version safe).
+  4. Require a valid `attempt_nonce`; store nonce/keyId on the attempt; validate
+     and send `handle.navigate(authorization_url, attempt_nonce)` to the ready
+     interstitial. Missing nonce (old backend) or a failed ready handshake
+     closes the placeholder window, releases popup ownership, and falls back
+     to the existing safe anchor flow.
+  5. On throw: close the popup, `end()` the lock, existing `setError` +
+     `cleanupPendingAuthKey` path unchanged (C9).
+  - The "authorizing" UI keeps the poll (`useKeyAuthorizationStatus` —
+    unchanged, still the completion authority) and keeps the anchor link as
+    a visible fallback ("Popup didn't open?"). Mount
+    `useOAuthPopupReceiver` with `onRetry` = re-run initiate against the
+    same placeholder (initiate already flips a `failed` placeholder back to
+    pending server-side, `handlers/user_tokens.rs:409-422`) and
+    `onViewResult` = delegate upward via a new optional dialog prop
+    `onPopupViewResult?: (keyId: string) => boolean`.
+  - Do not end the lock merely because a retryable failed status arrived.
+    Cleanup is launch-id guarded; unmount closes the handle and invalidates
+    pending async continuations before releasing the lock.
+
+### F9 — `components/assistant/blocks/connect-card.tsx`
+
+- Pass `launch="popup"` and `flow="cc"` to its `AddKeyDialog`.
+- Implement `onPopupViewResult`: close `AddKeyDialog`, then set local state → render
+  `<ManageConnectionModal keyIds={[keyId]} serviceName={serviceName}
+  iconSlug={block.catalog_slug} onClose={...} />` **in place over the
+  transcript** — no navigation (C1; design's two CTA rules). Return `true`.
+- Everything else on the card (poll-driven state flips, guidance copy)
+  unchanged.
+
+### F10 — `vite.config.ts`
+
+Proxy key `"^/oauth(?:/.*)?$"` → `"^/oauth/"` (C3). Verify dev login and
+`/oauth/token` traffic still proxy (they have subpaths; they do).
+
+### F10a — public boot and telemetry
+
+- `main.tsx:isPublicPath` includes exact `/oauth` and `/oauth-launching`.
+- `telemetry.ts:SENSITIVE_PATH_PATTERNS` includes exact bare `/oauth`, with a
+  regression test. Completion mount still scrubs the query immediately.
+
+### F11 — docs touch-up
+
+Amend `docs/OAUTH_POPUP_FLOW_PLAN.md` with a short "pilot implementation
+notes" pointer to this file for corrections C1-C9 (don't rewrite the design
+doc's body in this PR).
+
+### Final gate (before handing back)
+
+1. `cargo fmt --all -- --check`, `cargo clippy --workspace --all-targets --
+   -D warnings`, `cargo nextest run -p nyxid` (fall back to
+   `cargo test -p nyxid` only when nextest is unavailable; needs local Mongo via
+   `docker compose up -d`; Mongo-less runs skip the integration tests —
+   don't mistake skips for green).
+2. `cd frontend && npm run lint && npm run test && npm run build` —
+   **`npm run build` is the real type gate** (tsc -b with
+   `noUncheckedIndexedAccess`); `tsc --noEmit` passing means nothing.
+3. `cargo test -p nyxid-cli --test wizard_bundle_freshness` — only if red,
+   rebuild + commit the wizard bundle (C8).
+4. Before trusting any red vitest run: `lsof -ti :3000 :3001` — a live dev
+   server answering test fetches with real 401s is a known flake source.
+
+---
+
+## 3. `flow_kind` enum — exact shape
+
+Rust — `backend/src/models/oauth_flow_kind.rs` (single source of truth):
+
+```rust
+/// NyxID-owned identifier of which surface initiated an OAuth flow, used
+/// by the callback to route popup flows to the `/oauth` completion route.
+/// Wire tokens are stable and mirrored in
+/// `frontend/src/types/oauth-popup.ts` (`OAUTH_FLOW_TOKENS`); both sides
+/// pin the full set in tests. Pilot: only `ChatConnect` is emitted; the
+/// rest are reserved (accepted at initiate, legacy-routed at callback).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum OAuthFlowKind {
+    ChatConnect,           // "cc" — assistant chat connect card
+    KeyConnect,            // "kc" — AddKeyDialog on /keys
+    ProviderConnect,       // "pc" — admin providers grid
+    ServiceAccountConnect, // "sa" — admin SA providers
+    WizardConnect,         // "wz" — CLI wizard
+    SocialLogin,           // "sl" — sign-in with GitHub/Google
+}
+
+impl OAuthFlowKind {
+    pub const ALL_WIRE_TOKENS: [&'static str; 6] = ["cc", "kc", "pc", "sa", "wz", "sl"];
+    pub fn as_wire(self) -> &'static str { /* match */ }
+    pub fn parse(token: &str) -> Option<Self> { /* exact match, case-sensitive */ }
+}
+```
+
+On `OAuthState` the field is `Option<String>` holding the wire token (B2
+rationale: unknown tokens degrade, never fail deserialization).
+
+TS mirror — `frontend/src/types/oauth-popup.ts`:
+
+```ts
+/** Mirrors backend/src/models/oauth_flow_kind.rs — both sides pin this set in tests. */
+export const OAUTH_FLOW_TOKENS = ["cc", "kc", "pc", "sa", "wz", "sl"] as const;
+export type OauthFlowKind = (typeof OAUTH_FLOW_TOKENS)[number];
+```
+
+"Parity test" means both sides assert the same literal list against their
+own constant (cross-language execution isn't possible in either CI job); the
+mirror comment points each file at the other.
+
+---
+
+## 4. `/oauth` query contract
+
+```
+/oauth?status=complete&flow=cc&nonce=<uuid-v4>
+/oauth?status=error&flow=cc&code=<error_code>&nonce=<uuid-v4>
+```
+
+| Param | Values | Notes |
+|---|---|---|
+| `status` | `complete` \| `error` | required; anything else / absent → direct-open generic page, no broadcast |
+| `flow` | wire token (§3) | pilot emits only `cc`; unknown/absent → generic copy |
+| `code` | error-code set below | errors only; unknown/absent → generic error copy |
+| `nonce` | opaque UUID v4 from `OAuthState.attempt_nonce` | correlation id and same-origin channel selector; not authorization; receivers ignore unknown values |
+| `provider` | catalog slug | **reserved, not emitted in the pilot** (would need a provider-slug lookup on every branch; the chat card already knows the service name) |
+
+Nothing else, ever: no token material, no key/account/connection ids, no
+free text (Codex 20). The page scrubs the query with `history.replaceState`
+immediately after capture.
+
+Fixed error-code set (full set reserved; **pilot emits** the marked ones):
+
+| Code | Pilot emits | Produced by |
+|---|---|---|
+| `access_denied` | ✓ | provider callback `error=access_denied` |
+| `provider_error` | ✓ | any other provider `error`; missing authorization code |
+| `state_expired` | ✓ | exchange failed and the peeked row was past `expires_at` |
+| `state_replayed` | ✓ | exchange failed and the peeked row was already `consumed` |
+| `session_mismatch` | ✓ | browser session ≠ initiating user |
+| `exchange_failed` | ✓ | token exchange / sync failure (residual) |
+| `state_invalid` | ✓ | canonical chat state is unknown or TTL-reaped on a code callback |
+| `session_required` | — | reserved for D-1's fix |
+| `server_error` | — | reserved (C9 keeps initiate failures in the dialog) |
+
+Retryable codes (popup shows "Try again"/"Start over" wired to the retry
+protocol): `access_denied`, `state_expired`, `state_replayed`,
+`exchange_failed`, `provider_error`. `session_mismatch` primary CTA is
+"Switch account" → `oauth_action` is not applicable; it renders a plain
+link-out message (opener navigation to `/login` would dump the chat — for the
+pilot the copy instructs, it does not navigate the opener).
+
+Broadcast channel `nyxid.oauth.<attempt_nonce>` message shapes: §F1. The
+selector also appears in provider state and the completion URL; it is not a
+secret. Messages do not repeat it or carry token/key material.
+All completion-page → opener communication is BroadcastChannel only;
+`window.opener` is never used (it is severed at the interstitial and by
+provider COOP anyway).
+
+---
+
+## 5. Test list
+
+### 5.1 Rust (`cargo test -p nyxid`, live-Mongo integration style as at `handlers/user_tokens.rs:1292+`)
+
+`models/oauth_flow_kind.rs`:
+1. `wire_round_trip` — every variant `parse(as_wire(v)) == Some(v)`.
+2. `parse_rejects_unknown` — `""`, `"CC"`, `"chat"`, `"xx"` → `None`.
+3. `wire_token_set_pinned` — `ALL_WIRE_TOKENS == ["cc","kc","pc","sa","wz","sl"]` (the TS-parity anchor).
+
+`models/oauth_state.rs`:
+4. Extend `bson_roundtrip` with `flow_kind: Some("cc")` + nonce; assert restored.
+5. Extend `bson_backward_compat_missing_new_fields` — legacy doc → both `None`.
+   Reserialize and assert both keys remain absent.
+
+`handlers/user_tokens.rs` (new; all model on the existing
+`generic_oauth_callback_impl` tests, asserting the `LOCATION` header):
+6. `initiate_with_flow_cc_stores_flow_and_nonce_and_returns_nonce` — call the
+   initiate handler with `flow=cc`; assert the `OAuthState` row has
+   `flow_kind == Some("cc")` and a non-empty `attempt_nonce`, and the JSON
+   response carries the same nonce.
+7. `initiate_with_unknown_flow_is_rejected` — `flow=zz` → `ValidationError`.
+8. `initiate_without_flow_unchanged` — row has `None`/`None`; response JSON
+   has **no** `attempt_nonce` key (serialize and assert absence — byte-parity
+   with today).
+9. `callback_success_cc_redirects_to_oauth_complete` — seeded `cc` state +
+   pending key; assert `LOCATION` starts `{FRONTEND_URL}/oauth`, has
+   `status=complete&flow=cc&nonce=<row nonce>`, and has no `message`/
+   `provider_status` param. (Success requires a token exchange; follow the
+   existing test suite's approach for the success path — if the suite only
+   exercises error paths without an HTTP mock, split this into the
+   redirect-builder unit test + the sync-failure branch test and note it in
+   the PR.)
+10. `callback_denial_cc_redirects_with_access_denied` — `error=access_denied`
+    + `cc` row → `/oauth?...code=access_denied&nonce=...`; placeholder still
+    flipped to `failed` with the same message as today (side-effect parity).
+11. `callback_denial_non_cc_unchanged` — extend/keep
+    `oauth_callback_denial_marks_placeholder_failed` asserting the exact
+    legacy `LOCATION` (`/providers/callback?status=error&message=...`) —
+    the byte-identity regression guard.
+12. `callback_missing_code_cc_attributed` — no `code`, valid `cc` state →
+    `/oauth?...code=provider_error`.
+13. `callback_missing_code_without_state_unchanged` / missing-state branch →
+    legacy `Missing authorization code` / `Missing state parameter` redirects
+    byte-identical, even when the caller "was" a popup.
+14. `callback_unknown_state_unchanged` — a malformed/legacy bogus state id →
+    legacy `Invalid or expired OAuth state` redirect; canonical `1cc_<uuid>`
+    routes to `/oauth?...code=state_invalid`.
+15. `callback_session_mismatch_cc` — mismatched `AuthUser` + `cc` row →
+    `/oauth?...code=session_mismatch&nonce=...`; assert **no email fragment
+    anywhere in the URL**; placeholder failed as today.
+16. `callback_session_mismatch_non_cc_unchanged` — keep existing test green.
+17. `callback_expired_row_cc_maps_state_expired` — seed `cc` row with
+    `expires_at` in the past + a `code`; exchange path errors → `/oauth?...
+    code=state_expired`.
+18. `callback_consumed_row_cc_maps_state_replayed` — seed `cc` row with
+    `consumed: true` → `/oauth?...code=state_replayed`.
+19. `sa_initiate_unaffected` — existing SA handler tests keep passing with
+    the new service signature (flow `None`); no new SA behavior.
+
+### 5.2 Vitest (`frontend && npm run test`; jsdom has no `BroadcastChannel` — add a tiny test polyfill/mock in the new test files, and note the design-doc caveat that COOP/`closed` semantics are only validatable in a real browser, which stays on the manual matrix)
+
+`schemas/oauth-popup.test.ts`:
+1. Parses a complete success URL; parses each pilot error code.
+2. Unknown `flow` / unknown `code` → `undefined` fields (generic), not a throw.
+3. Missing `status` → direct-open shape.
+4. `OAUTH_FLOW_TOKENS` pinned to `["cc","kc","pc","sa","wz","sl"]` (Rust-parity anchor).
+5. Authorization/retry URL guard: accepts a cross-origin HTTP(S) provider URL
+   only when `state=1cc_<nonce>` and the recorded provider origin match;
+   rejects credentials, non-HTTP(S), unrelated origins, and mismatched state.
+
+`lib/oauth-popup.test.ts`:
+6. `openOAuthPopup` calls `window.open` with `/oauth-launching`, a
+   `popup,width=760,height=820` feature string, and a `nyxid_oauth_`-prefixed
+   name; two calls → two distinct names.
+7. Blocked open (`window.open` → null) returns null.
+
+`stores/oauth-popup-store.test.ts`:
+8. `begin` refuses while active; `end` with a stale `launchId` does not clear
+   a newer attempt; `setNonce` attaches to the active attempt.
+
+`pages/oauth-complete.test.tsx`:
+9. Success mount: broadcasts `oauth_result` **before** the auto-close timer
+   could fire; `history.replaceState` called scrubbing the query.
+10. Success: countdown → `window.close` at ~3s (fake timers); a keydown
+    before expiry cancels it and no close happens.
+11. Error (`access_denied`, flow `cc`): renders the cc copy + "Try again";
+    never calls `window.close` no matter how long timers advance.
+12. Unknown flow token: generic copy, token never rendered in the DOM.
+13. CTA ack path: click "View connection" → `oauth_action` posted on the
+    nonce-scoped channel; ack within 400ms → `window.close`; no ack → neutral
+    manual-return copy and no navigation.
+14. Retry path: `oauth_retry` with a next nonce and matching cross-origin
+    HTTP(S) provider URL → `location.href` set; mismatched state, provider
+    origin, or non-HTTP URL → ignored + error copy.
+15. Direct open (no params): generic page, no broadcast posted.
+
+`hooks/use-oauth-popup.test.ts` (renderHook):
+16. `oauth_result` with matching nonce → invalidates `["keys"]` and
+    `["keys", keyId]`; non-matching nonce → nothing (spy on queryClient).
+17. `oauth_action view_result` → `onViewResult` called; returns true → ack
+    posted with the nonce; unknown nonce → neither.
+18. `oauth_action retry` → `onRetry` result broadcast as `oauth_retry` with
+    `nextNonce`.
+
+`components/dashboard/add-key-dialog` (extend existing coverage or a focused
+new test file for `OAuthStep` popup mode):
+19. `launch="popup"`: clicking Connect calls `window.open` **synchronously**
+    (assert it happened before the mocked initiate promise resolves).
+20. Blocked popup → anchor fallback UI renders exactly as the default path;
+    lock released.
+21. Initiate rejection → popup handle closed, inline error shown (C9), lock
+    released.
+22. Default (`launch` absent) → `window.open` never called; initiate called
+    **with** `redirectPath` and **without** `flow` (legacy byte-parity).
+23. Popup mode → initiate called with `flow: "cc"`, `keyId`, and **no**
+    `redirectPath`.
+
+`components/assistant/blocks/connect-card`:
+24. Passes `launch="popup"` / `flow="cc"` to `AddKeyDialog`.
+25. `onPopupViewResult` opens `ManageConnectionModal` with the attempt's
+    keyId, closes `AddKeyDialog`, and **does not navigate** (router mock
+    untouched; assert only one dialog remains).
+
+Additional accepted-review tests:
+
+26. `main.tsx` public-path policy includes `/oauth` and `/oauth-launching`;
+    telemetry drops bare `/oauth` pageviews.
+27. Interstitial clears opener before ready and ignores navigation before or
+    without the validated launch id; valid external URL self-navigates.
+28. A stale cc attempt nonce cannot fail or activate a key after retry stamps a
+    new nonce; equivalent non-cc operations retain their old filters.
+29. Per-attempt channel names differ, and messages never repeat the current
+    correlation selector.
+30. Initiating chat OAuth for an active key preserves token/scope/expiry data;
+    denial leaves it usable; guarded success replaces it and advances
+    `last_authorized_at`.
+31. Legacy success, reset, and failure each clear a chat generation, and stale
+    chat callbacks cannot mutate afterwards.
+32. A canonical reaped chat denial remains popup-routed; a missing provider
+    origin sends no retry action; focus does not cancel auto-close; popup
+    `closed` produces only a user-actionable soft hint with no server mutation.
+
+---
+
+## 6. Risk list — what could regress, and how the plan prevents it
+
+1. **Legacy OAuth flows change behavior** (providers grid, SA, wizard,
+   social, `/keys` dialog). Prevention: the callback change is
+   redirect-selection only, gated on `flow_kind == Some("cc")` read from the
+   row; every side-effect line is shared; tests 11/13/14/16/19 assert exact
+   legacy `LOCATION` strings; test 8 asserts the initiate response JSON is
+   key-identical when `flow` is absent; the frontend default path never
+   enters the new code (test 22).
+2. **A missed `OAuthState` constructor.** Rust struct literals without
+   `..Default` — the compiler finds every site (B3); serde defaults cover
+   only old BSON, which test 5 pins.
+3. **`/oauth` route collides with the backend IdP surface.** C2/C3: the
+   completion route is exactly `/oauth` (SPA-served in prod; vite aligned in
+   F10); the interstitial avoids `/oauth/*` entirely. Residual risk: other
+   reverse proxies in front of prod (Cloudflare) routing `/oauth` — the
+   known prod edge config (see memory: edge serves CORS headers) should be
+   spot-checked at deploy: `curl -s https://<prod>/oauth | grep -q index`
+   equivalent.
+4. **Safari blocks the popup anyway** (activation lost). Prevention: open is
+   the first statement in the click handler (test 19); blocked-open falls
+   back to today's anchor flow (test 20), and polling remains the completion
+   authority in every case.
+5. **Broadcast spoofing / cross-talk** (Codex 11): any same-origin page that
+   knows the selector can open the channel; the nonce is correlation, not
+   authorization. Results only trigger query invalidation (DB is truth), and
+   reconnect completion requires a server `last_authorized_at` advance.
+   Provider navigation additionally requires HTTP(S)+state+recorded-origin
+   binding (tests 5/14/29).
+6. **Chat tab navigated away / conversation destroyed** — the failure this
+   design exists to prevent. Prevention: cc `view_result` opens
+   `ManageConnectionModal` in place (test 25); no-ack paths show neutral
+   manual-return copy and never navigate into a second NyxID dashboard.
+7. **Popup closed while consent is pending.** `isClosed()` produces a soft
+   hint only. No placeholder is failed or deleted from this signal; the user
+   may explicitly release the local lock and start again. Query polling and
+   server state remain authoritative.
+8. **Wizard bundle freshness CI red on an unrelated-looking PR.** C8:
+   `use-keys.ts` is intentionally changed, so the bundle and all metadata are
+   regenerated after the last rebase/source edit, then freshness is tested.
+9. **Frontend type gate.** `npm run build` (tsc -b, strict) is in the final
+   gate; new files use `readonly` prop conventions matching the codebase.
+10. **Mixed-version deploys** (new FE, old BE or vice versa). New FE + old
+    BE: `flow` is an unknown query param to old axum `Query` → ignored;
+    popup degrades to legacy `/providers/callback` page inside the popup;
+    poll completes. Old FE + new BE: no `flow` sent → rows have `None` →
+    byte-identical legacy behavior. No ordering constraint.
+11. **Rate limiting / SEC-9 TODO**: initiate/callback rate limits unchanged;
+    the popup flow adds no new endpoints and no new unauthenticated surface
+    (`/oauth` and `/oauth-launching` are static SPA pages).
+
+---
+
+## 7. D-2 assessment — generation guard selected for the pilot
+
+The SOL review disproved the original assessment: an unconsumed denial from
+attempt A can re-fail retry B, after which the success writer correctly refuses
+to resurrect the `failed` row. Retry therefore needs protection in this PR.
+
+This branch does **not** consume denial state. Instead, each cc attempt stamps
+its `attempt_nonce` onto the target key. Every cc failure and success mutation
+matches that nonce in the same MongoDB update that changes status/token data.
+Once retry B stamps nonce B, callbacks carrying nonce A have `matched_count=0`
+and cannot mutate the row. This guard covers both stale denial and stale success
+without changing state-claim behavior. Denial clears the current nonce even
+when the target key remains active, and every legacy OAuth success/reset/failure
+unsets it, so the guard is bidirectional across chat and dashboard flows.
+
+The choice preserves the pilot's primary safety property: non-cc state ids,
+claims, redirects, responses, audits, and data outcomes are unchanged. Legacy
+key updates include only an idempotent `$unset` of a field legacy documents do
+not contain. The complete D-2 fix remains an all-flow atomic terminal-claim PR;
+when it lands it may remove the denial replay at the source, while the
+generation guard remains useful against any late callback from an older
+attempt.

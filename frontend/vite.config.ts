@@ -48,7 +48,7 @@ const proxyTarget = {
 
 const apiProxy = {
   "/api": proxyTarget,
-  "^/oauth(?:/.*)?$": proxyTarget,
+  "^/oauth/": proxyTarget,
   "/mcp": proxyTarget,
   "/.well-known": proxyTarget,
   "/health": proxyTarget,

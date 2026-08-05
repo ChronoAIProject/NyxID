@@ -636,6 +636,7 @@ export interface UserProviderToken {
 
 export interface OAuthInitiateResponse {
   readonly authorization_url: string;
+  readonly attempt_nonce?: string;
 }
 
 export interface DeviceCodeInitiateResponse {

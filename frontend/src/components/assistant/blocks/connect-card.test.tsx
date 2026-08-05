@@ -1,4 +1,4 @@
-import { render, screen } from "@testing-library/react";
+import { act, render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import type { ConnectCardContentBlock } from "@/types/assistant";
@@ -14,6 +14,7 @@ const mocks = vi.hoisted(() => ({
   // isn't in the catalog at all.
   catalogEntry: null as Record<string, unknown> | null,
   catalogError: null as unknown,
+  addDialogProps: null as Record<string, unknown> | null,
 }));
 
 vi.mock("@tanstack/react-router", () => ({
@@ -38,18 +39,29 @@ vi.mock("@/components/dashboard/add-key-dialog", () => ({
     open,
     prefillSlug,
     reconnectKey,
+    ...props
   }: {
     readonly open: boolean;
     readonly prefillSlug?: string;
     readonly reconnectKey?: { readonly id: string } | null;
+    readonly launch?: "popup";
+    readonly flow?: "cc";
+    readonly onPopupViewResult?: (keyId: string) => boolean;
   }) =>
+    (mocks.addDialogProps = { open, prefillSlug, reconnectKey, ...props },
     open ? (
       <div
         data-testid="add-key-dialog"
         data-prefill={prefillSlug ?? ""}
         data-reconnect={reconnectKey?.id ?? ""}
       />
-    ) : null,
+    ) : null),
+}));
+
+vi.mock("@/components/assistant/manage-connection-modal", () => ({
+  ManageConnectionModal: ({ keyIds }: { readonly keyIds: readonly string[] }) => (
+    <div data-testid="manage-connection-modal" data-key-id={keyIds[0]} />
+  ),
 }));
 
 function blocker(
@@ -86,10 +98,39 @@ beforeEach(() => {
   mocks.keys = [];
   mocks.catalogEntry = null;
   mocks.catalogError = null;
+  mocks.addDialogProps = null;
   mocks.navigate.mockReset();
 });
 
 describe("ConnectCard authorization actions", () => {
+  it("opts chat OAuth into popup mode and replaces the add dialog for result view", async () => {
+    mocks.catalogEntry = { slug: "api-github", name: "GitHub", provider_type: "oauth2" };
+    const user = userEvent.setup();
+    render(<ConnectCard block={blocker("NYXID_SERVICE_NOT_CONNECTED")} />);
+
+    await user.click(screen.getByRole("button", { name: "Connect" }));
+    expect(screen.getByTestId("add-key-dialog")).toBeInTheDocument();
+    expect(mocks.addDialogProps).toMatchObject({ launch: "popup", flow: "cc" });
+    const onPopupViewResult = mocks.addDialogProps?.onPopupViewResult as
+      | ((keyId: string) => boolean)
+      | undefined;
+    expect(onPopupViewResult).toBeTypeOf("function");
+
+    let handled = false;
+    act(() => {
+      handled = onPopupViewResult?.("key-popup") ?? false;
+    });
+    expect(handled).toBe(true);
+    expect(screen.queryByTestId("add-key-dialog")).not.toBeInTheDocument();
+    await waitFor(() =>
+      expect(screen.getByTestId("manage-connection-modal")).toHaveAttribute(
+        "data-key-id",
+        "key-popup",
+      ),
+    );
+    expect(mocks.navigate).not.toHaveBeenCalled();
+  });
+
   it("opens OAuth reauthorization for a matching unauthorized key", async () => {
     mocks.keys = [
       {

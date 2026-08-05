@@ -513,6 +513,7 @@ mod tests {
             expires_at: None,
             provider_config_id: Some(uuid::Uuid::new_v4().to_string()),
             connection_id: Some(connection_id.to_string()),
+            oauth_attempt_nonce: None,
             user_oauth_client_id_encrypted: None,
             user_oauth_client_secret_encrypted: None,
             status: "pending_auth".to_string(),

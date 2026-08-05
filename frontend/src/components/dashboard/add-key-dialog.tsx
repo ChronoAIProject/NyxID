@@ -1,4 +1,4 @@
-import { useState, useEffect, useRef, useCallback } from "react";
+import { useState, useEffect, useRef, useCallback, useMemo } from "react";
 import {
   KEY_AUTH_ACTIVE,
   KEY_AUTH_FAILED,
@@ -57,6 +57,13 @@ import {
 import type { CatalogEntry, KeyInfo } from "@/types/keys";
 import type { DeviceCodePollResponse } from "@/types/api";
 import { isValidHttpUrl } from "@/schemas/http-url";
+import { openOAuthPopup, type OAuthPopupHandle } from "@/lib/oauth-popup";
+import { oauthAttemptNonceSchema, validateAuthorizationUrl } from "@/schemas/oauth-popup";
+import { useOAuthPopupStore } from "@/stores/oauth-popup-store";
+import { useOAuthPopupReceiver } from "@/hooks/use-oauth-popup";
+import type { OAuthFlowKind } from "@/types/oauth-popup";
+
+const POPUP_CLOSED_POLL_MS = 1_000;
 
 type WizardStep =
   | "catalog"
@@ -1454,6 +1461,10 @@ function OAuthStep({
   reconnectMode,
   lockedScopes = [],
   grantedScopes = [],
+  launch,
+  flow,
+  onPopupViewResult,
+  onPopupDismiss,
 }: {
   readonly catalogEntry: CatalogEntry;
   readonly ensureKey: () => Promise<KeyInfo>;
@@ -1481,8 +1492,15 @@ function OAuthStep({
    * Drives the change summary + removal warning, and seeds the selection.
    */
   readonly grantedScopes?: readonly string[];
+  readonly launch?: "popup";
+  readonly flow?: OAuthFlowKind;
+  readonly onPopupViewResult?: (keyId: string) => boolean;
+  readonly onPopupDismiss: () => void;
 }) {
-  const initiateOAuth = useInitiateOAuth();
+  const {
+    mutateAsync: initiateOAuthAsync,
+    isPending: oauthInitiatePending,
+  } = useInitiateOAuth();
   const [error, setError] = useState<string | null>(null);
   // Scope picker (NyxID#917): seed from the connection's granted scopes when
   // editing an existing connection, otherwise the provider's defaults (all
@@ -1502,26 +1520,174 @@ function OAuthStep({
   // provider callback lands. Same shape DeviceCodeStep already uses.
   const [authorizationUrl, setAuthorizationUrl] = useState<string | null>(null);
   const [pendingKeyId, setPendingKeyId] = useState<string | null>(null);
+  const [previousAuthorizationAt, setPreviousAuthorizationAt] = useState<
+    string | null | undefined
+  >(undefined);
+  const [popupMayBeClosed, setPopupMayBeClosed] = useState(false);
   const authorizing = authorizationUrl !== null;
-  const pendingKey = useKeyAuthorizationStatus(pendingKeyId, authorizing);
+  const pendingKey = useKeyAuthorizationStatus(
+    pendingKeyId,
+    authorizing,
+    previousAuthorizationAt,
+  );
   const authorizationStatus = pendingKey.data?.status;
-  const authorized = authorizationStatus === KEY_AUTH_ACTIVE;
+  const authorizationAdvanced =
+    previousAuthorizationAt === undefined ||
+    (pendingKey.data?.last_authorized_at != null &&
+      pendingKey.data.last_authorized_at !== previousAuthorizationAt);
+  const authorized =
+    authorizationStatus === KEY_AUTH_ACTIVE && authorizationAdvanced;
   const authorizationFailed = authorizationStatus === KEY_AUTH_FAILED;
+  const popupRef = useRef<OAuthPopupHandle | null>(null);
+  const launchIdRef = useRef<string | null>(null);
+  const generationRef = useRef(0);
+  const [activeLaunchId, setActiveLaunchId] = useState<string | null>(null);
+  const submittedScopes = useMemo(
+    () =>
+      platformScopeAllowlist
+        ? selectedScopes.filter((scope) =>
+            platformScopeAllowlist.includes(scope),
+          )
+        : selectedScopes,
+    [platformScopeAllowlist, selectedScopes],
+  );
+
+  const retryPopup = useCallback(async () => {
+    if (!catalogEntry.provider_config_id || !pendingKeyId || !flow) {
+      throw new Error("OAuth retry is unavailable");
+    }
+    setError(null);
+    try {
+      const response = await initiateOAuthAsync({
+        providerId: catalogEntry.provider_config_id,
+        scopeOverride: submittedScopes,
+        keyId: pendingKeyId,
+        flow,
+        ...(targetOrgId ? { targetOrgId } : {}),
+      });
+      const nextNonce = response.attempt_nonce;
+      if (
+        !nextNonce ||
+        !oauthAttemptNonceSchema.safeParse(nextNonce).success ||
+        validateAuthorizationUrl(response.authorization_url, nextNonce) === null
+      ) {
+        throw new Error("OAuth retry returned an invalid authorization URL");
+      }
+      setAuthorizationUrl(response.authorization_url);
+      return { nextNonce, url: response.authorization_url };
+    } catch (retryError) {
+      setError(
+        retryError instanceof ApiError
+          ? retryError.message
+          : "Failed to restart OAuth flow",
+      );
+      throw retryError;
+    }
+  }, [
+    catalogEntry.provider_config_id,
+    flow,
+    initiateOAuthAsync,
+    pendingKeyId,
+    submittedScopes,
+    targetOrgId,
+  ]);
+
+  const handlePopupViewResult = useCallback(
+    (keyId: string) => {
+      const handled = onPopupViewResult?.(keyId) ?? false;
+      if (handled && launchIdRef.current) {
+        useOAuthPopupStore.getState().end(launchIdRef.current);
+      }
+      return handled;
+    },
+    [onPopupViewResult],
+  );
+  const handlePopupDismiss = useCallback(() => {
+    const launchId = launchIdRef.current;
+    popupRef.current?.close();
+    popupRef.current = null;
+    if (launchId) useOAuthPopupStore.getState().end(launchId);
+    onPopupDismiss();
+  }, [onPopupDismiss]);
+  useOAuthPopupReceiver({
+    launchId: activeLaunchId,
+    onRetry: retryPopup,
+    onViewResult: handlePopupViewResult,
+    onDismiss: handlePopupDismiss,
+  });
+
+  useEffect(() => {
+    return () => {
+      generationRef.current += 1;
+      popupRef.current?.close();
+      const launchId = launchIdRef.current;
+      if (launchId) useOAuthPopupStore.getState().end(launchId);
+    };
+  }, []);
+
+  useEffect(() => {
+    if (!authorizing || launch !== "popup" || !popupRef.current) return;
+    const timer = window.setInterval(() => {
+      if (popupRef.current?.isClosed()) {
+        setPopupMayBeClosed(true);
+        window.clearInterval(timer);
+      }
+    }, POPUP_CLOSED_POLL_MS);
+    return () => window.clearInterval(timer);
+  }, [authorizing, launch]);
+
+  const startOverAfterClosedHint = useCallback(() => {
+    const launchId = launchIdRef.current;
+    popupRef.current?.close();
+    popupRef.current = null;
+    launchIdRef.current = null;
+    setActiveLaunchId(null);
+    if (launchId) useOAuthPopupStore.getState().end(launchId);
+    setPopupMayBeClosed(false);
+    setAuthorizationUrl(null);
+    setPendingKeyId(null);
+    setPreviousAuthorizationAt(undefined);
+  }, []);
 
   async function handleConnect() {
-    if (!catalogEntry.provider_config_id) return;
+    const popup = launch === "popup" ? openOAuthPopup() : null;
+    if (!catalogEntry.provider_config_id) {
+      popup?.close();
+      return;
+    }
+    const generation = generationRef.current + 1;
+    generationRef.current = generation;
+    setPopupMayBeClosed(false);
+    if (popup) {
+      const began = useOAuthPopupStore.getState().begin({
+        launchId: popup.launchId,
+        nonce: null,
+        keyId: null,
+        slug: catalogEntry.slug,
+        startedAt: Date.now(),
+      });
+      if (!began) {
+        popup.close();
+        setError("Another connection is already in progress");
+        return;
+      }
+      popupRef.current = popup;
+      launchIdRef.current = popup.launchId;
+      setActiveLaunchId(popup.launchId);
+    }
     setError(null);
     // On the managed path, never submit a scope the shared app can't grant —
     // catalog defaults may include scopes outside the allowlist (e.g. a Google
     // row that carried Drive from its BYO era). The picker shows those gated,
     // but we also drop them from the submitted set so a plain Connect can't be
     // rejected by the backend allowlist for scopes the user never chose.
-    const submittedScopes = platformScopeAllowlist
-      ? selectedScopes.filter((s) => platformScopeAllowlist.includes(s))
-      : selectedScopes;
     let key: KeyInfo | null = null;
     try {
       key = await ensureKey();
+      if (generationRef.current !== generation) return;
+      if (popup) {
+        useOAuthPopupStore.getState().setKeyId(popup.launchId, key.id);
+      }
       // The development mock has no external provider callback to return
       // through. Preserve the real state machine by advancing this same
       // OAuth step to the shipped verify step after the mock key is created.
@@ -1529,9 +1695,9 @@ function OAuthStep({
         onComplete(key.id);
         return;
       }
-      const response = await initiateOAuth.mutateAsync({
+      const response = await initiateOAuthAsync({
         providerId: catalogEntry.provider_config_id,
-        redirectPath: `/keys/${key.id}`,
+        ...(launch === "popup" ? {} : { redirectPath: `/keys/${key.id}` }),
         scopeOverride: submittedScopes,
         // Multi-connection: thread the placeholder's id so the OAuth
         // callback writes the resulting tokens straight onto THIS
@@ -1541,14 +1707,61 @@ function OAuthStep({
         // minted placeholder stuck in `pending_auth` while the token
         // landed on the legacy row.
         keyId: key.id,
+        ...(flow ? { flow } : {}),
         ...(targetOrgId ? { targetOrgId } : {}),
       });
+      if (generationRef.current !== generation) return;
       setPendingKeyId(key.id);
+      setPreviousAuthorizationAt(
+        reconnectMode ? (key.last_authorized_at ?? null) : undefined,
+      );
       setAuthorizationUrl(response.authorization_url);
       // The handoff to the provider is the point of no return for this
       // dialog's callbacks: from here the user may never come back to it.
       onAuthorizationPending?.(key.id);
+      if (launch === "popup") {
+        const nonce = response.attempt_nonce;
+        if (!nonce) {
+          popup?.close();
+          if (popup) {
+            useOAuthPopupStore.getState().end(popup.launchId);
+            popupRef.current = null;
+            launchIdRef.current = null;
+            setActiveLaunchId(null);
+          }
+          return;
+        }
+        if (!oauthAttemptNonceSchema.safeParse(nonce).success) {
+          throw new Error("OAuth provider returned an invalid attempt nonce");
+        }
+        if (
+          validateAuthorizationUrl(response.authorization_url, nonce) === null
+        ) {
+          throw new Error("OAuth provider returned an invalid authorization URL");
+        }
+        if (popup) {
+          useOAuthPopupStore.getState().setNonce(popup.launchId, nonce);
+          try {
+            await popup.navigate(response.authorization_url, nonce);
+          } catch {
+            if (generationRef.current !== generation) return;
+            popup.close();
+            popupRef.current = null;
+            launchIdRef.current = null;
+            setActiveLaunchId(null);
+            useOAuthPopupStore.getState().end(popup.launchId);
+          }
+        }
+      }
     } catch (err) {
+      popup?.close();
+      if (popup) useOAuthPopupStore.getState().end(popup.launchId);
+      popupRef.current = null;
+      launchIdRef.current = null;
+      setActiveLaunchId(null);
+      setPendingKeyId(null);
+      setPreviousAuthorizationAt(undefined);
+      setAuthorizationUrl(null);
       await cleanupPendingAuthKey(key, { protectExistingKey: reconnectMode });
       if (!reconnectMode) {
         onKeyCleared();
@@ -1597,6 +1810,14 @@ function OAuthStep({
                 Authorization was denied or expired.
               </span>
             </>
+          ) : popupMayBeClosed ? (
+            <>
+              <AlertCircle className="h-3.5 w-3.5 shrink-0 text-warning" />
+              <span className="text-foreground">
+                The provider window may have closed. If it is still open,
+                finish there; otherwise start again.
+              </span>
+            </>
           ) : (
             <>
               <Loader2 className="h-3.5 w-3.5 shrink-0 animate-spin text-text-tertiary" />
@@ -1611,7 +1832,11 @@ function OAuthStep({
           <Button
             variant="primary"
             className="w-full"
-            onClick={() => onComplete(pendingKeyId)}
+            onClick={() => {
+              const launchId = launchIdRef.current;
+              if (launchId) useOAuthPopupStore.getState().end(launchId);
+              onComplete(pendingKeyId);
+            }}
           >
             Continue
           </Button>
@@ -1624,11 +1849,22 @@ function OAuthStep({
             onClick={() => {
               setAuthorizationUrl(null);
               setPendingKeyId(null);
+              setPreviousAuthorizationAt(undefined);
             }}
           >
             Try again
           </Button>
         )}
+
+        {popupMayBeClosed && !authorized && !authorizationFailed ? (
+          <Button
+            variant="outline"
+            className="w-full"
+            onClick={startOverAfterClosedHint}
+          >
+            Start again
+          </Button>
+        ) : null}
       </div>
     );
   }
@@ -1672,9 +1908,9 @@ function OAuthStep({
         variant="primary"
         className="w-full"
         onClick={() => void handleConnect()}
-        disabled={initiateOAuth.isPending}
+        disabled={oauthInitiatePending}
       >
-        {initiateOAuth.isPending ? (
+        {oauthInitiatePending ? (
           <>
             <ButtonIcon>
               <Loader2 className="h-3 w-3 animate-spin" />
@@ -2469,6 +2705,9 @@ export function AddKeyDialog({
   reconnectKey,
   onSuccess,
   onAuthorizationPending,
+  launch,
+  flow,
+  onPopupViewResult,
 }: {
   readonly open: boolean;
   readonly onOpenChange: (open: boolean) => void;
@@ -2501,6 +2740,10 @@ export function AddKeyDialog({
    * dismissed dialog stops meaning a lost outcome.
    */
   readonly onAuthorizationPending?: (keyId: string) => void;
+  /** Assistant chat opts into the managed popup; all other callers stay legacy. */
+  readonly launch?: "popup";
+  readonly flow?: OAuthFlowKind;
+  readonly onPopupViewResult?: (keyId: string) => boolean;
 }) {
   const createKey = useCreateKey();
   const { data: catalogEntries } = useCatalog({
@@ -3105,6 +3348,10 @@ export function AddKeyDialog({
                 ? (selectedEntry.platform_scope_allowlist ?? null)
                 : null
             }
+            launch={launch}
+            flow={flow}
+            onPopupViewResult={onPopupViewResult}
+            onPopupDismiss={() => handleOpenChange(false)}
             onBack={() => {
               if (isReconnect) {
                 handleOpenChange(false);

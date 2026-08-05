@@ -122,6 +122,7 @@ const SENSITIVE_PATH_PATTERNS: RegExp[] = [
   /\/verify-email\/[^/]+/,
   /\/reset-password\/[^/]+/,
   /\/oauth\/callback/,
+  /^\/oauth$/,
   /\/approve\/[^/]+/,
 ];
 
@@ -318,4 +319,3 @@ export function disableTelemetry(): void {
   inited = false;
   telemetryActive = false;
 }
-
