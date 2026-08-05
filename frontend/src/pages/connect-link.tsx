@@ -44,6 +44,7 @@ import {
   validateConnectOAuthForm,
 } from "@/schemas/connect-links";
 import { useAuthStore } from "@/stores/auth-store";
+import { cn } from "@/lib/utils";
 
 const CLICK_THROTTLE_MS = 750;
 
@@ -58,8 +59,11 @@ export function ConnectLinkPage() {
   const navigate = useNavigate();
   const { isAuthenticated, isLoading } = useAuthStore();
   const [showSetupForm, setShowSetupForm] = useState(false);
-  const [deviceChallenge, setDeviceChallenge] = useState<DeviceChallenge | null>(null);
-  const [completedCallback, setCompletedCallback] = useState<string | null>(null);
+  const [deviceChallenge, setDeviceChallenge] =
+    useState<DeviceChallenge | null>(null);
+  const [completedCallback, setCompletedCallback] = useState<string | null>(
+    null,
+  );
   const [submitError, setSubmitError] = useState<string | null>(null);
   const lastClickAtRef = useRef(0);
   const preview = usePreviewConnectLink();
@@ -142,7 +146,8 @@ export function ConnectLinkPage() {
   }
 
   function handleDeviceCheck() {
-    if (!deviceChallenge?.state || complete.isPending || withinCooldown()) return;
+    if (!deviceChallenge?.state || complete.isPending || withinCooldown())
+      return;
     void submitCompletion({ device_state: deviceChallenge.state });
   }
 
@@ -178,7 +183,8 @@ export function ConnectLinkPage() {
             {!preview.data ? (
               <div className="space-y-4">
                 <p className="text-[12px] leading-relaxed text-muted-foreground">
-                  Review who requested this connection before sharing a credential.
+                  Review who requested this connection before sharing a
+                  credential.
                 </p>
                 <div className="flex justify-end">
                   <Button
@@ -320,7 +326,10 @@ export function ConnectLinkReturnPage() {
       </ConnectShell>
     );
   }
-  if (status.data?.status === "expired" || status.data?.status === "cancelled") {
+  if (
+    status.data?.status === "expired" ||
+    status.data?.status === "cancelled"
+  ) {
     return (
       <ConnectShell>
         <ErrorBanner
@@ -550,24 +559,27 @@ function OAuthSetupForm({
   );
 }
 
-function RequestDetails({
-  preview,
-}: {
-  readonly preview: ConnectLinkPreview;
-}) {
+function RequestDetails({ preview }: { readonly preview: ConnectLinkPreview }) {
   return (
     <div className="divide-y divide-border/30 rounded-lg border border-border/50 bg-white/[0.02]">
-      <DetailRow label="Service" value={preview.service_name} />
-      <DetailRow
+      <ConnectLinkDetailRow label="Service" value={preview.service_name} />
+      <ConnectLinkDetailRow
         label="Requested by"
         value={preview.requested_by ?? "Your NyxID account"}
       />
-      <DetailRow label="Label" value={preview.label ?? "Not provided"} />
-      <DetailRow
+      <ConnectLinkDetailRow
+        label="Label"
+        value={preview.label ?? "Not provided"}
+      />
+      <ConnectLinkDetailRow
         label="Created"
         value={new Date(preview.created_at).toLocaleString()}
       />
-      <DetailRow label="Status" value={preview.status} />
+      <ConnectLinkDetailRow
+        label="Status"
+        value={preview.status}
+        capitalizeValue
+      />
       {preview.api_key_url ? (
         <div className="flex items-center justify-between gap-4 px-4 py-2.5 text-[12px]">
           <span className="text-muted-foreground">Credential source</span>
@@ -585,17 +597,24 @@ function RequestDetails({
   );
 }
 
-function DetailRow({
+export function ConnectLinkDetailRow({
   label,
   value,
+  capitalizeValue = false,
 }: {
   readonly label: string;
   readonly value: string;
+  readonly capitalizeValue?: boolean;
 }) {
   return (
     <div className="flex justify-between gap-4 px-4 py-2.5 text-[12px]">
       <span className="text-muted-foreground">{label}</span>
-      <span className="min-w-0 break-words text-right font-medium capitalize text-foreground">
+      <span
+        className={cn(
+          "min-w-0 break-words text-right font-medium text-foreground",
+          capitalizeValue && "capitalize",
+        )}
+      >
         {value}
       </span>
     </div>
@@ -618,7 +637,9 @@ function DeviceCodePanel({
       <p className="text-[12px] text-muted-foreground">
         Enter this code at the provider, then check the connection.
       </p>
-      <p className="font-mono text-[15px] font-semibold text-foreground">{code}</p>
+      <p className="font-mono text-[15px] font-semibold text-foreground">
+        {code}
+      </p>
       <div className="flex flex-wrap justify-end gap-2">
         <Button asChild variant="outline">
           <a href={url} target="_blank" rel="noreferrer">
@@ -639,7 +660,11 @@ function DeviceCodePanel({
   );
 }
 
-function SuccessPanel({ callbackUrl }: { readonly callbackUrl: string | null }) {
+function SuccessPanel({
+  callbackUrl,
+}: {
+  readonly callbackUrl: string | null;
+}) {
   return (
     <Card className="border-success/25 bg-success/[0.03]">
       <CardContent className="flex flex-col items-center gap-3 p-6 text-center">

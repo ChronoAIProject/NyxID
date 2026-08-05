@@ -1,3 +1,4 @@
+import { render, screen } from "@testing-library/react";
 import { describe, expect, it } from "vitest";
 import {
   connectLinkErrorMessage,
@@ -6,6 +7,7 @@ import {
   connectLinkProviderError,
 } from "@/lib/connect-link-page";
 import type { ConnectLinkPreview } from "@/schemas/connect-links";
+import { ConnectLinkDetailRow } from "@/pages/connect-link";
 
 function preview(
   overrides: Partial<ConnectLinkPreview> = {},
@@ -31,7 +33,9 @@ function preview(
 
 describe("connect link page error handling", () => {
   it("surfaces safe Error messages and uses a stable fallback", () => {
-    expect(connectLinkErrorMessage(new Error("Link expired"))).toBe("Link expired");
+    expect(connectLinkErrorMessage(new Error("Link expired"))).toBe(
+      "Link expired",
+    );
     expect(connectLinkErrorMessage({ secret: "must not render" })).toBe(
       "The connection request failed.",
     );
@@ -41,9 +45,9 @@ describe("connect link page error handling", () => {
     expect(
       connectLinkNeedsSetupForm(preview({ connect_method: "api_key" })),
     ).toBe(true);
-    expect(connectLinkNeedsSetupForm(preview({ requires_gateway_url: true }))).toBe(
-      true,
-    );
+    expect(
+      connectLinkNeedsSetupForm(preview({ requires_gateway_url: true })),
+    ).toBe(true);
     expect(
       connectLinkNeedsOAuthCredentials(
         preview({
@@ -70,5 +74,17 @@ describe("connect link page error handling", () => {
       ),
     ).toBe("Authorization was denied");
     expect(connectLinkProviderError("?provider_status=success")).toBeNull();
+  });
+
+  it("capitalizes only the status detail value", () => {
+    const { rerender } = render(
+      <ConnectLinkDetailRow label="Requested by" value="codex-agent" />,
+    );
+    expect(screen.getByText("codex-agent")).not.toHaveClass("capitalize");
+
+    rerender(
+      <ConnectLinkDetailRow label="Status" value="pending" capitalizeValue />,
+    );
+    expect(screen.getByText("pending")).toHaveClass("capitalize");
   });
 });
