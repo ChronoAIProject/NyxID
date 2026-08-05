@@ -12,9 +12,11 @@ the superseded docs remain only as the review trail:
 - `OAUTH_CHAT_POPUP_SOL_REVIEW.md` — 7 P1s against the plan
 - `OAUTH_CHAT_POPUP_OPUS_REVIEW.md` — 3 P1 / 8 P2 against the implementation
 
-Branch: `feature/oauth-chat-popup-flow`, 13 commits, rebased onto
-`origin/main` (merge-base == main tip `682189ad` at verification time), pushed
-as draft PR #1349 against `main`.
+Branch: `feature/oauth-chat-popup-flow`, 15 commits, rebased onto
+`origin/main` (merge-base == main tip `682189ad` at verification time), open
+(un-drafted) PR #1349 against `main`. Updated 2026-08-05 for `403f6fc3`
+(CodeQL-driven refactor of `validateAuthorizationUrl`; see §5 CodeQL entry
+and §8).
 
 ---
 
@@ -158,6 +160,13 @@ All in `backend/src/services/user_api_key_service.rs`:
    embedded credentials, `state == 1cc_<nextNonce>`, and origin equal to the
    provider origin recorded in sessionStorage by the trusted interstitial.
    Retry is not offered at all when that recorded origin is absent.
+   Since `403f6fc3` the validator returns the parsed `URL` object (`URL |
+   null`) instead of a boolean, and every navigation sink (`window.location.
+   assign`, `postMessage` url fields, the sessionStorage origin write) uses
+   the returned object's `.href` / `.origin` — never the raw input string —
+   so the sanitisation sits on the static-analyser-visible taint path. Keep
+   it that way: new call sites must check `=== null` and navigate with the
+   returned object.
 4. **`oauth_result` is a wakeup only.** The opener never trusts message or
    query content for state; it invalidates queries and settles from
    authenticated `/keys/:id` reads (+ `last_authorized_at` advancement for
@@ -216,6 +225,13 @@ All in `backend/src/services/user_api_key_service.rs`:
 8 fixed, 2 consciously accepted (F-4, F-5), 1 partially fixed with the
 remainder accepted by design (F-6). Nothing unaddressed.**
 
+### CodeQL on PR #1349 (post-realignment) — fixed in `403f6fc3`
+
+| # | Sev | Finding | Disposition |
+|---|---|---|---|
+| CQ-1 | high | `js/xss` on `oauth-launching.tsx:51` (`window.location.assign(message.url)`) | **Fixed** — analyser blind spot, not a real hole: the sanitiser was a separate boolean-returning function, so CodeQL could not connect it to the sink. `validateAuthorizationUrl` now returns `URL \| null` and all sinks consume the returned object's `.href`/`.origin` (§4.3), putting sanitisation on the taint path. No validation predicate was weakened or removed; `oauth-complete.tsx` additionally gained an explicit re-validation (with `expectedProviderOrigin`) directly before its `assign`. Fixed by making the sanitiser analyser-visible — **not** by dismissing/suppressing the alert. Alert cleared (`code-scanning/alerts?pr=1349&state=open` empty). |
+| CQ-2 | medium | `js/client-side-unvalidated-url-redirection`, same line | **Fixed** — same root cause and same change as CQ-1; alert cleared. Regression test added: interstitial rejects `javascript:` URLs and navigates only with the parsed, protocol-approved URL (`oauth-launching.test.tsx`). |
+
 ---
 
 ## 6. Deliberately out of scope for this branch
@@ -249,17 +265,23 @@ mobile browser:
    /interaction event cancelling it) and pointer/keyboard still cancels.
 5. Popup-blocked fallback anchor (`noopener noreferrer`) end-to-end.
 
-## 8. Gate results — independently re-run 2026-08-05 (this realignment pass, at `87599c59`)
+## 8. Gate results — independently re-run 2026-08-05
 
-| Gate | Result |
-|---|---|
-| `cargo fmt --all -- --check` | clean |
-| `cargo clippy --workspace --all-targets -- -D warnings` | clean |
-| `cargo nextest run -p nyxid` | **4997/4997 passed**, 0 skipped (MongoDB on 27018 was up, so the Mongo-gated lifecycle tests genuinely ran) |
-| `cargo test -p nyxid-cli --test wizard_bundle_freshness` | passed |
-| `npm --prefix frontend run lint` | 0 errors (23 pre-existing warnings) |
-| `npm --prefix frontend run test` | **2630/2630 passed** (221 files) |
-| `npm --prefix frontend run build` | passed (tsc -b + vite) |
+Rust gates ran at `87599c59` (realignment pass); the only commit since,
+`403f6fc3`, is frontend-only (verified from its diff: all 8 touched files are
+under `frontend/src/`), so the frontend gates plus the wizard-freshness check
+were re-run at `403f6fc3` (delta pass) and the backend gates were not.
+
+| Gate | Verified at | Result |
+|---|---|---|
+| `cargo fmt --all -- --check` | `87599c59` | clean |
+| `cargo clippy --workspace --all-targets -- -D warnings` | `87599c59` | clean |
+| `cargo nextest run -p nyxid` | `87599c59` | **4997/4997 passed**, 0 skipped (MongoDB on 27018 was up, so the Mongo-gated lifecycle tests genuinely ran) |
+| `cargo test -p nyxid-cli --test wizard_bundle_freshness` | `403f6fc3` | passed (schemas/hooks/pages files touched by `403f6fc3` are outside the wizard source closure) |
+| `npm --prefix frontend run lint` | `87599c59` | 0 errors (23 pre-existing warnings) |
+| `npm --prefix frontend run test` | `403f6fc3` | **2631/2631 passed** (221 files; +1 = the new interstitial URL-validation regression test) |
+| `npm --prefix frontend run build` | `403f6fc3` | passed (tsc -b + vite) |
+| GitHub CI on PR #1349 | `403f6fc3` | 22 pass / 5 skipping / 0 fail; open CodeQL alerts on the PR: none |
 
 ## 9. CI gotchas for anyone touching this branch
 
@@ -269,7 +291,10 @@ mobile browser:
   three CLI CI jobs. Sequence: rebase → all source edits →
   `npm --prefix frontend run build:wizard` → commit `cli/src/wizard/` →
   `cargo test -p nyxid-cli --test wizard_bundle_freshness`. (`87599c59` is
-  exactly this commit and touches only `cli/src/wizard/`.)
+  exactly this commit and touches only `cli/src/wizard/`. `403f6fc3` landed
+  after it without a rebuild and freshness still passes, because its files
+  are outside the wizard source closure — do not rely on that for other
+  frontend files; when in doubt run the freshness test.)
 - **`npm run build` is the real frontend type gate** (`tsc -b` with
   `noUncheckedIndexedAccess`); `tsc --noEmit` passes code that CI rejects.
 - CI (`ci.yml`) gates PRs into `main`/`dev` — this PR targets `main`, so it
@@ -279,7 +304,7 @@ mobile browser:
 
 ## 10. Readiness verdict
 
-**Ready to un-draft and request review.** All 3 Opus P1s are genuinely fixed
+**Un-drafted and ready for human review.** All 3 Opus P1s are genuinely fixed
 in code with regression tests; all 8 P2s are fixed or explicitly
 accepted-and-documented; none of Sol's 7 plan-round P1 fixes regressed during
 the fix round; the branch is rebased onto current `main` with the wizard
