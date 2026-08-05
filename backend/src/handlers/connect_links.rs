@@ -222,7 +222,7 @@ pub async fn create_connect_link(
             "connect_link_id": &created.link.id,
             "service_id": &created.link.service_id,
             "service_slug": &created.link.service_slug,
-            "expires_at": created.link.expires_at.to_rfc3339(),
+            "expires_at": created.link.expires_at.to_rfc3339_opts(chrono::SecondsFormat::Millis, true),
             "has_callback_url": created.link.callback_url.is_some(),
         })),
     );
@@ -230,7 +230,10 @@ pub async fn create_connect_link(
     Ok(Json(CreateConnectLinkResponse {
         id: created.link.id,
         connect_url,
-        expires_at: created.link.expires_at.to_rfc3339(),
+        expires_at: created
+            .link
+            .expires_at
+            .to_rfc3339_opts(chrono::SecondsFormat::Millis, true),
     }))
 }
 
@@ -300,8 +303,14 @@ pub async fn preview_connect_link(
         service_slug: view.service.service_slug,
         label: view.link.label,
         requested_by: view.link.requested_by,
-        created_at: view.link.created_at.to_rfc3339(),
-        expires_at: view.link.expires_at.to_rfc3339(),
+        created_at: view
+            .link
+            .created_at
+            .to_rfc3339_opts(chrono::SecondsFormat::Millis, true),
+        expires_at: view
+            .link
+            .expires_at
+            .to_rfc3339_opts(chrono::SecondsFormat::Millis, true),
         status: status_name(view.link.status).to_string(),
         connect_method,
         auth_key_name: view.service.auth_key_name,
@@ -543,14 +552,23 @@ fn status_response(view: connect_link_service::LinkView) -> AppResult<ConnectLin
         status: status_name(view.link.status).to_string(),
         service_name: view.service.service_name,
         service_slug: view.service.service_slug,
-        expires_at: view.link.expires_at.to_rfc3339(),
-        completed_at: view.link.completed_at.map(|date| date.to_rfc3339()),
+        expires_at: view
+            .link
+            .expires_at
+            .to_rfc3339_opts(chrono::SecondsFormat::Millis, true),
+        completed_at: view
+            .link
+            .completed_at
+            .map(|date| date.to_rfc3339_opts(chrono::SecondsFormat::Millis, true)),
         connected_service,
         callback_url,
         requesting_app_id: view.link.requesting_app_id,
         requesting_app_name: view.link.requesting_app_name,
         last_error: view.link.last_error,
-        last_error_at: view.link.last_error_at.map(|date| date.to_rfc3339()),
+        last_error_at: view
+            .link
+            .last_error_at
+            .map(|date| date.to_rfc3339_opts(chrono::SecondsFormat::Millis, true)),
     })
 }
 
@@ -677,6 +695,18 @@ mod tests {
         assert_eq!(preview.service_slug, service.slug);
         assert_eq!(preview.requested_by.as_deref(), Some("handler-test"));
         assert_eq!(preview.status, "pending");
+        // The hosted page validates timestamps with a Z-suffix-friendly
+        // parser; keep the wire format UTC-suffixed, never offset form.
+        for timestamp in [
+            &created.expires_at,
+            &preview.created_at,
+            &preview.expires_at,
+        ] {
+            assert!(
+                timestamp.ends_with('Z') && !timestamp.contains('+'),
+                "wire timestamps must use the Z suffix, got {timestamp}"
+            );
+        }
     }
 
     #[tokio::test]
