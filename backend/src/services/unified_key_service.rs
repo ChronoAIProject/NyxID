@@ -422,6 +422,9 @@ pub struct KeyView {
     pub auth_method: String,
     pub auth_key_name: String,
     pub status: String,
+    /// Cheap OAuth connection health derived from the stored expiry/status.
+    /// `None` for non-OAuth credentials or OAuth rows without a known expiry.
+    pub connection_status: Option<String>,
     pub catalog_service_id: Option<String>,
     pub catalog_service_slug: Option<String>,
     pub catalog_service_name: Option<String>,
@@ -3746,6 +3749,7 @@ fn build_key_view(
         status: ak
             .map(|k| k.status.clone())
             .unwrap_or_else(|| "active".to_string()),
+        connection_status: ak.and_then(oauth_connection_status),
         catalog_service_id: svc.catalog_service_id.clone(),
         catalog_service_slug: catalog_ds.map(|ds| ds.slug.clone()),
         catalog_service_name: catalog_ds.map(|ds| ds.name.clone()),
@@ -3807,6 +3811,26 @@ fn build_key_view(
         recommended_skills: ep.recommended_skills.clone(),
         credential_source,
     }
+}
+
+pub(crate) fn oauth_connection_status(api_key: &UserApiKey) -> Option<String> {
+    if api_key.credential_type != "oauth2" {
+        return None;
+    }
+    if matches!(
+        api_key.status.as_str(),
+        "expired" | "revoked" | "failed" | "refresh_failed"
+    ) {
+        return Some("expired".to_string());
+    }
+    api_key.expires_at.map(|expires_at| {
+        if expires_at <= Utc::now() && api_key.refresh_token_encrypted.is_none() {
+            "expired"
+        } else {
+            "active"
+        }
+        .to_string()
+    })
 }
 
 /// Async post-pass for `build_key_view`: decrypt
@@ -3874,9 +3898,9 @@ mod tests {
         direct_credential_type_for_service, direct_credential_type_from_auth_method,
         ensure_user_api_key_for_update, exact_slug_conflict, generate_slug_from_label, get_key,
         identity_config_from_downstream_service, is_duplicate_slug_app_error, list_keys,
-        random_slug_suffix, reconcile_provider_key_for_service_routing, resolve_openapi_spec_url,
-        resolve_unique_slug, revoke_key_if_pending, slug_candidate_with_suffix,
-        validate_token_exchange_catalog_credential,
+        oauth_connection_status, random_slug_suffix, reconcile_provider_key_for_service_routing,
+        resolve_openapi_spec_url, resolve_unique_slug, revoke_key_if_pending,
+        slug_candidate_with_suffix, validate_token_exchange_catalog_credential,
     };
     use crate::errors::{AppError, AppResult};
     use crate::models::downstream_service::{
@@ -3968,6 +3992,26 @@ mod tests {
             created_at: Utc::now(),
             updated_at: Utc::now(),
         }
+    }
+
+    #[test]
+    fn oauth_connection_health_uses_stored_status_expiry_and_refreshability() {
+        let mut key = sample_api_key("oauth2");
+        assert!(oauth_connection_status(&key).is_none());
+
+        key.expires_at = Some(Utc::now() + chrono::Duration::minutes(5));
+        assert_eq!(oauth_connection_status(&key).as_deref(), Some("active"));
+
+        key.expires_at = Some(Utc::now() - chrono::Duration::minutes(5));
+        assert_eq!(oauth_connection_status(&key).as_deref(), Some("expired"));
+
+        key.refresh_token_encrypted = Some(vec![1, 2, 3]);
+        assert_eq!(oauth_connection_status(&key).as_deref(), Some("active"));
+
+        key.status = "refresh_failed".to_string();
+        assert_eq!(oauth_connection_status(&key).as_deref(), Some("expired"));
+
+        assert!(oauth_connection_status(&sample_api_key("api_key")).is_none());
     }
 
     fn sample_service(auth_method: &str) -> UserService {
