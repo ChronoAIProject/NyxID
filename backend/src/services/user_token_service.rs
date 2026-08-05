@@ -2552,15 +2552,8 @@ pub async fn get_active_token(
                     }
                     Err(e) => {
                         if let Err(transition_error) =
-                            connection_expiry_service::transition_legacy_oauth_keys_to_dead(
-                                db,
-                                user_id,
-                                provider_id,
-                                "refresh_failed",
-                                "OAuth token refresh failed; reconnect required",
-                                notifier,
-                            )
-                            .await
+                            transition_legacy_keys_from_stored_token_state(db, &token, notifier)
+                                .await
                         {
                             tracing::warn!(
                                 user_id = %user_id,
@@ -2595,6 +2588,41 @@ pub async fn get_active_token(
         }
         other => Err(AppError::Internal(format!("Unknown token type: {other}"))),
     }
+}
+
+async fn transition_legacy_keys_from_stored_token_state(
+    db: &mongodb::Database,
+    attempted_token: &UserProviderToken,
+    notifier: Option<&ConnectionExpiryNotifier>,
+) -> AppResult<u64> {
+    let Some(stored_token) = db
+        .collection::<UserProviderToken>(COLLECTION_NAME)
+        .find_one(doc! { "_id": &attempted_token.id })
+        .await?
+    else {
+        return Ok(0);
+    };
+
+    if !matches!(stored_token.status.as_str(), "refresh_failed" | "expired") {
+        return Ok(0);
+    }
+
+    let error_message = stored_token.error_message.as_deref().unwrap_or_else(|| {
+        if stored_token.status == "expired" {
+            "OAuth token expired; reconnect required"
+        } else {
+            "OAuth token refresh failed; reconnect required"
+        }
+    });
+    connection_expiry_service::transition_legacy_oauth_keys_to_dead(
+        db,
+        &stored_token.user_id,
+        &stored_token.provider_config_id,
+        &stored_token.status,
+        error_message,
+        notifier,
+    )
+    .await
 }
 
 /// Atomically claim the currently active provider token by its observed `_id`.
