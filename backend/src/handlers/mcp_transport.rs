@@ -16,9 +16,9 @@ use crate::models::service_account::{COLLECTION_NAME as SERVICE_ACCOUNTS, Servic
 use crate::models::user::{COLLECTION_NAME as USERS, User};
 use crate::mw::auth::{self, AuthMethod};
 use crate::services::{
-    approval_service, audit_service, mcp_service, notification_service, operation_descriptor,
-    oracle_pool_service, oracle_session_service, oracle_task_service, proxy_service, ssh_service,
-    user_service_service,
+    approval_service, audit_service, connect_link_service, mcp_service, notification_service,
+    operation_descriptor, oracle_pool_service, oracle_session_service, oracle_task_service,
+    proxy_service, ssh_service, user_service_service,
 };
 use crate::telemetry::{TelemetryContext, TelemetryEvent, emit_event};
 
@@ -1188,6 +1188,17 @@ async fn handle_tools_call(
             )
             .await;
         }
+        "nyx__wait_for_connection" => {
+            return handle_wait_for_connection(
+                state,
+                auth,
+                session_id,
+                &arguments,
+                request.id.clone(),
+                client_accepts_sse,
+            )
+            .await;
+        }
         "nyx__call_tool" => {
             return handle_meta_call_tool(
                 state,
@@ -1928,6 +1939,20 @@ async fn handle_meta_connect(
     let credential = arguments.get("credential").and_then(|c| c.as_str());
     let credential_label = arguments.get("credential_label").and_then(|l| l.as_str());
 
+    if credential.is_none_or(|value| value.trim().is_empty()) {
+        let rate_key = auth.api_key_id.as_deref().map_or_else(
+            || format!("user:{}", auth.user_id),
+            |id| format!("api-key:{id}"),
+        );
+        if !state.connect_link_create_limiter.check(&rate_key) {
+            return tool_result(
+                request_id,
+                &crate::errors::AppError::ConnectLinkRateLimited.to_string(),
+                true,
+            );
+        }
+    }
+
     match mcp_service::connect_service(
         &state.db,
         &state.encryption_keys,
@@ -1936,10 +1961,30 @@ async fn handle_meta_connect(
         service_id,
         credential,
         credential_label,
+        &state.config.frontend_url,
+        auth.api_key_name.as_deref(),
     )
     .await
     {
         Ok(result) => {
+            if result.get("status").and_then(|value| value.as_str()) == Some("pending_connection") {
+                audit_service::log_async(
+                    state.db.clone(),
+                    Some(auth.user_id.clone()),
+                    "connect_link_created".to_string(),
+                    Some(serde_json::json!({
+                        "connect_link_id": result.get("connect_link_id"),
+                        "service_id": service_id,
+                        "service_slug": result.get("service_slug"),
+                    })),
+                    auth.ip_address.clone(),
+                    auth.user_agent.clone(),
+                    auth.api_key_id.clone(),
+                    auth.api_key_name.clone(),
+                );
+                let text = serde_json::to_string_pretty(&result).unwrap_or_default();
+                return tool_result(request_id, &text, false);
+            }
             // Activate the newly connected service. Stateless (API-key,
             // no session) callers skip activation tracking.
             let changed = match session_id {
@@ -2001,6 +2046,90 @@ async fn handle_meta_connect(
                 other => other.to_string(),
             };
             tool_result(request_id, &msg, true)
+        }
+    }
+}
+
+async fn handle_wait_for_connection(
+    state: &AppState,
+    auth: &McpAuthContext,
+    session_id: Option<&str>,
+    arguments: &serde_json::Value,
+    request_id: Option<serde_json::Value>,
+    client_accepts_sse: bool,
+) -> Response {
+    let link_id = match arguments
+        .get("connect_link_id")
+        .and_then(serde_json::Value::as_str)
+    {
+        Some(id) if uuid::Uuid::try_parse(id).is_ok() => id,
+        Some(_) => return tool_result(request_id, "Invalid connect_link_id format", true),
+        None => return tool_result(request_id, "connect_link_id is required", true),
+    };
+    let timeout_secs = arguments
+        .get("timeout_secs")
+        .and_then(serde_json::Value::as_u64)
+        .unwrap_or(30)
+        .clamp(1, connect_link_service::MAX_WAIT_SECS);
+
+    match connect_link_service::wait_for_status(&state.db, &auth.user_id, link_id, timeout_secs)
+        .await
+    {
+        Ok(view) => {
+            let status = match view.link.status {
+                crate::models::connect_link::ConnectLinkStatus::Pending => "pending",
+                crate::models::connect_link::ConnectLinkStatus::Completed => "completed",
+                crate::models::connect_link::ConnectLinkStatus::Expired => "expired",
+                crate::models::connect_link::ConnectLinkStatus::Cancelled => "cancelled",
+            };
+            let changed = status == "completed"
+                && session_id.is_some_and(|sid| {
+                    state
+                        .mcp_sessions
+                        .activate_services(sid, std::slice::from_ref(&view.link.service_id))
+                });
+            if changed && let Some(sid) = session_id {
+                send_tools_list_changed(state, sid);
+            }
+            let result = serde_json::json!({
+                "status": status,
+                "connect_link_id": view.link.id,
+                "service_slug": view.completed_service_slug,
+                "service_id": view.link.service_id,
+                "expires_at": view.link.expires_at.to_rfc3339(),
+                "instructions": if status == "completed" {
+                    "Connection completed. Retry the original tool call."
+                } else if status == "pending" {
+                    "Connection is still pending. Surface the connect URL to the user and wait again."
+                } else {
+                    "This connect link can no longer be used. Create a new one with nyx__connect_service."
+                },
+            });
+            let text = serde_json::to_string_pretty(&result).unwrap_or_default();
+            if changed && client_accepts_sse {
+                tool_result_with_notifications(
+                    request_id,
+                    &text,
+                    false,
+                    vec![serde_json::json!({
+                        "jsonrpc": JSONRPC_VERSION,
+                        "method": "notifications/tools/list_changed",
+                    })],
+                )
+            } else {
+                tool_result(request_id, &text, false)
+            }
+        }
+        Err(error) => {
+            tracing::warn!(connect_link_id = link_id, %error, "wait_for_connection failed");
+            let message = match error {
+                crate::errors::AppError::Internal(_)
+                | crate::errors::AppError::DatabaseError(_) => {
+                    "Failed to check connection status".to_string()
+                }
+                other => other.to_string(),
+            };
+            tool_result(request_id, &message, true)
         }
     }
 }
