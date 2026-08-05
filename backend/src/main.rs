@@ -88,6 +88,9 @@ pub struct AppState {
     pub fcm_auth: Option<Arc<FcmAuth>>,
     /// APNs push notification auth (None if not configured)
     pub apns_auth: Option<Arc<ApnsAuth>>,
+    /// Shared delivery runtime for connection-expiry notifications.
+    pub connection_expiry_notifier:
+        Arc<services::connection_expiry_service::ConnectionExpiryNotifier>,
     /// Versioned encryption keys for AES-256-GCM (current + optional previous for rotation)
     pub encryption_keys: Arc<EncryptionKeys>,
     /// WebSocket connection manager for credential nodes
@@ -110,6 +113,12 @@ pub struct AppState {
     pub auth_device_approve_per_user_limiter: mw::rate_limit::SharedPerKeyRateLimiter,
     /// Per-IP limiter for `POST /api/v1/auth/device/preview` (30/min).
     pub auth_device_preview_limiter: mw::rate_limit::SharedPerIpRateLimiter,
+    /// Per-creator limiter for `POST /api/v1/connect-links` (10/min).
+    pub connect_link_create_limiter: mw::rate_limit::SharedPerKeyRateLimiter,
+    /// Per-IP limiter for public connect-link previews (30/min).
+    pub connect_link_preview_limiter: mw::rate_limit::SharedPerIpRateLimiter,
+    /// Per-IP limiter for connect-link completion attempts (30/min).
+    pub connect_link_complete_limiter: mw::rate_limit::SharedPerIpRateLimiter,
     /// Per-IP rate limiter for `POST /cli-pairings/claim`. Tighter than
     /// the global rate limiter (5 attempts per 60s per IP) so brute
     /// forcing the 8-char pairing code is infeasible even from a
@@ -655,12 +664,20 @@ async fn main() {
         db,
         config: config.clone(),
         jwt_keys,
-        http_client,
+        http_client: http_client.clone(),
         jwk_json,
         mcp_sessions: mcp_sessions.clone(),
         jwks_cache,
         fcm_auth: fcm_auth.clone(),
         apns_auth: apns_auth.clone(),
+        connection_expiry_notifier: Arc::new(
+            services::connection_expiry_service::ConnectionExpiryNotifier::new(
+                Arc::new(config.clone()),
+                http_client.clone(),
+                fcm_auth.clone(),
+                apns_auth.clone(),
+            ),
+        ),
         encryption_keys: encryption_keys.clone(),
         node_ws_manager,
         ssh_session_manager,
@@ -672,6 +689,9 @@ async fn main() {
         auth_device_approve_limiter: mw::rate_limit::create_per_ip_rate_limiter(10, 60),
         auth_device_approve_per_user_limiter: mw::rate_limit::create_per_key_rate_limiter(10, 300),
         auth_device_preview_limiter: mw::rate_limit::create_per_ip_rate_limiter(30, 60),
+        connect_link_create_limiter: mw::rate_limit::create_per_key_rate_limiter(10, 60),
+        connect_link_preview_limiter: mw::rate_limit::create_per_ip_rate_limiter(30, 60),
+        connect_link_complete_limiter: mw::rate_limit::create_per_ip_rate_limiter(30, 60),
         // 5 claim attempts per 60 seconds per IP; window-based, not token
         // bucket, because we want a hard cap on guesses per unit time.
         cli_pairing_claim_limiter: mw::rate_limit::create_per_ip_rate_limiter(5, 60),
@@ -828,6 +848,30 @@ async fn main() {
             cleanup_auth_device_preview_limiter.cleanup();
         }
     });
+    let cleanup_connect_link_create_limiter = state.connect_link_create_limiter.clone();
+    tokio::spawn(async move {
+        let mut interval = tokio::time::interval(std::time::Duration::from_secs(60));
+        loop {
+            interval.tick().await;
+            cleanup_connect_link_create_limiter.cleanup();
+        }
+    });
+    let cleanup_connect_link_preview_limiter = state.connect_link_preview_limiter.clone();
+    tokio::spawn(async move {
+        let mut interval = tokio::time::interval(std::time::Duration::from_secs(60));
+        loop {
+            interval.tick().await;
+            cleanup_connect_link_preview_limiter.cleanup();
+        }
+    });
+    let cleanup_connect_link_complete_limiter = state.connect_link_complete_limiter.clone();
+    tokio::spawn(async move {
+        let mut interval = tokio::time::interval(std::time::Duration::from_secs(60));
+        loop {
+            interval.tick().await;
+            cleanup_connect_link_complete_limiter.cleanup();
+        }
+    });
 
     // Spawn background cleanup for the per-channel event limiter and the
     // event idempotency LRU. Same cadence as the per-agent limiter.
@@ -912,6 +956,7 @@ async fn main() {
     if config.oauth_refresh_sweep_interval_secs > 0 {
         let refresh_db = state.db.clone();
         let refresh_keys = state.encryption_keys.clone();
+        let refresh_notifier = state.connection_expiry_notifier.clone();
         let refresh_interval = config.oauth_refresh_sweep_interval_secs;
         let refresh_window =
             chrono::Duration::seconds(config.oauth_refresh_sweep_window_secs.max(0));
@@ -931,6 +976,7 @@ async fn main() {
                     &refresh_db,
                     &refresh_keys,
                     refresh_window,
+                    Some(&refresh_notifier),
                 )
                 .await
                 {

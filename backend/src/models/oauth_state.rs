@@ -37,6 +37,10 @@ pub struct OAuthState {
     /// back to the old `(user, provider)` write scope.
     #[serde(default)]
     pub connection_id: Option<String>,
+    /// Hosted connect link completed after this OAuth state writes an active
+    /// token. Set only by the connect-link completion flow.
+    #[serde(default)]
+    pub connect_link_id: Option<String>,
     /// Custom frontend redirect path after OAuth callback completes.
     /// e.g., "/admin/service-accounts/{sa_id}" for admin flows.
     #[serde(default)]
@@ -89,6 +93,7 @@ mod tests {
             flow_kind: Some("cc".to_string()),
             attempt_nonce: Some(uuid::Uuid::new_v4().to_string()),
             connection_id: None,
+            connect_link_id: None,
             consumed: false,
             expires_at: Utc::now(),
             created_at: Utc::now(),
@@ -120,6 +125,7 @@ mod tests {
             flow_kind: None,
             attempt_nonce: None,
             connection_id: None,
+            connect_link_id: None,
             consumed: false,
             expires_at: Utc::now(),
             created_at: Utc::now(),
@@ -149,6 +155,7 @@ mod tests {
             flow_kind: None,
             attempt_nonce: None,
             connection_id: None,
+            connect_link_id: None,
             consumed: false,
             expires_at: Utc::now(),
             created_at: Utc::now(),
@@ -183,6 +190,7 @@ mod tests {
         // callback path treats `None` as "use the legacy
         // (user, provider) write scope".
         assert!(restored.connection_id.is_none());
+        assert!(restored.connect_link_id.is_none());
         assert!(restored.flow_kind.is_none());
         assert!(restored.attempt_nonce.is_none());
 

@@ -42,6 +42,8 @@ nyxid catalog list --output json                          # browse available ser
 nyxid catalog list --all --output json                    # include system services without auth
 nyxid catalog show <slug> --output json                   # full metadata: links, capabilities, auth notes
 nyxid catalog endpoints <slug>                            # list API endpoints from OpenAPI spec
+nyxid connect <slug>                                      # hosted link; browser handles OAuth or API key entry
+nyxid connect <slug> --no-wait --output json              # return the link immediately for an agent to relay
 nyxid service add <slug> --oauth                          # OAuth flow (opens browser -- easiest)
 nyxid service add <slug> --device-code                    # device code flow (enter code on website)
 nyxid service add <slug>                                  # API key (CLI prompts securely)
@@ -53,6 +55,8 @@ Official catalog services ship NyxID-hosted curated OpenAPI overlays (served at 
 > For API key services, just run `nyxid service add <slug>` without flags. The CLI securely prompts for the key (input hidden). Never ask the user to paste secrets into chat or set environment variables manually.
 > For automation/scripting only: `--credential-env <VAR>` reads from an environment variable.
 > For multi-field credentials such as AWS access-key JSON: `--credential-file <PATH>` reads the credential bytes from a file. Pass `-` to read from stdin.
+
+For agent-driven setup, prefer `nyxid connect <slug>` or the MCP pair `nyx__connect_service` and `nyx__wait_for_connection`. These return a short-lived hosted URL so the human enters credentials in NyxID's browser page rather than in chat. The link is single-use, creator-scoped, and expires after 15 minutes by default.
 
 ## Inventory authority and Lark Base access
 

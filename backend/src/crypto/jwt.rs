@@ -41,6 +41,9 @@ pub struct Claims {
     pub scope: String,
     /// Token type: "access", "refresh", or "id"
     pub token_type: String,
+    /// Registered OAuth client that received this access token.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub client_id: Option<String>,
     /// User's roles (present when "roles" scope is requested)
     #[serde(skip_serializing_if = "Option::is_none")]
     pub roles: Option<Vec<String>>,
@@ -348,6 +351,62 @@ pub fn generate_access_token(
     mtls_x5t_s256: Option<&str>,
     restrictions: Option<AccessTokenRestrictions<'_>>,
 ) -> Result<String, AppError> {
+    generate_access_token_for_client(
+        keys,
+        config,
+        user_id,
+        scope,
+        rbac,
+        ttl_override_secs,
+        dpop_jkt,
+        mtls_x5t_s256,
+        restrictions,
+        None,
+    )
+}
+
+/// Generate an access token bound to the registered OAuth client that
+/// completed the authorization-code flow.
+#[allow(clippy::too_many_arguments)]
+pub fn generate_oauth_access_token(
+    keys: &JwtKeys,
+    config: &AppConfig,
+    user_id: &Uuid,
+    scope: &str,
+    rbac: Option<&RbacClaimData>,
+    ttl_override_secs: Option<i64>,
+    dpop_jkt: Option<&str>,
+    mtls_x5t_s256: Option<&str>,
+    restrictions: Option<AccessTokenRestrictions<'_>>,
+    client_id: &str,
+) -> Result<String, AppError> {
+    generate_access_token_for_client(
+        keys,
+        config,
+        user_id,
+        scope,
+        rbac,
+        ttl_override_secs,
+        dpop_jkt,
+        mtls_x5t_s256,
+        restrictions,
+        Some(client_id),
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn generate_access_token_for_client(
+    keys: &JwtKeys,
+    config: &AppConfig,
+    user_id: &Uuid,
+    scope: &str,
+    rbac: Option<&RbacClaimData>,
+    ttl_override_secs: Option<i64>,
+    dpop_jkt: Option<&str>,
+    mtls_x5t_s256: Option<&str>,
+    restrictions: Option<AccessTokenRestrictions<'_>>,
+    client_id: Option<&str>,
+) -> Result<String, AppError> {
     let now = Utc::now().timestamp();
     let cnf = if dpop_jkt.is_some() || mtls_x5t_s256.is_some() {
         Some(Cnf {
@@ -367,6 +426,7 @@ pub fn generate_access_token(
         jti: Uuid::new_v4().to_string(),
         scope: scope.to_string(),
         token_type: "access".to_string(),
+        client_id: client_id.map(String::from),
         roles: rbac.and_then(|r| r.roles.clone()),
         groups: rbac.and_then(|r| r.groups.clone()),
         permissions: rbac.and_then(|r| r.permissions.clone()),
@@ -436,6 +496,7 @@ pub fn generate_assistant_forward_access_token(
         jti: Uuid::new_v4().to_string(),
         scope: "proxy".to_string(),
         token_type: "access".to_string(),
+        client_id: None,
         roles: None,
         groups: None,
         permissions: None,
@@ -502,6 +563,7 @@ pub fn generate_relay_access_token(
         jti: Uuid::new_v4().to_string(),
         scope: scope.to_string(),
         token_type: "access".to_string(),
+        client_id: None,
         roles: rbac.and_then(|r| r.roles.clone()),
         groups: rbac.and_then(|r| r.groups.clone()),
         permissions: rbac.and_then(|r| r.permissions.clone()),
@@ -611,6 +673,7 @@ pub fn generate_refresh_token(
         jti: jti.clone(),
         scope: String::new(),
         token_type: "refresh".to_string(),
+        client_id: None,
         roles: None,
         groups: None,
         permissions: None,
@@ -662,6 +725,7 @@ pub fn reissue_refresh_token(
         jti: jti.to_string(),
         scope: String::new(),
         token_type: "refresh".to_string(),
+        client_id: None,
         roles: None,
         groups: None,
         permissions: None,
@@ -725,6 +789,7 @@ pub fn generate_delegated_access_token(
         jti: Uuid::new_v4().to_string(),
         scope: scope.to_string(),
         token_type: "access".to_string(),
+        client_id: None,
         roles: None,
         groups: None,
         permissions: None,
@@ -869,6 +934,7 @@ pub fn generate_service_account_token(
         jti: jti.clone(),
         scope: scope.to_string(),
         token_type: "access".to_string(),
+        client_id: None,
         roles: None,
         groups: None,
         permissions: None,
@@ -1159,6 +1225,7 @@ mod tests {
             approval_expiry_interval_secs: 5,
             oauth_refresh_sweep_interval_secs: 600,
             oauth_refresh_sweep_window_secs: 900,
+            connection_expiry_notifications: true,
             fcm_service_account_path: None,
             fcm_project_id: None,
             apns_key_path: None,
@@ -1485,6 +1552,7 @@ mod tests {
             jti: Uuid::new_v4().to_string(),
             scope: String::new(),
             token_type: "access".to_string(),
+            client_id: None,
             roles: None,
             groups: None,
             permissions: None,
@@ -1600,6 +1668,7 @@ mod tests {
             jti: "jti-abc".to_string(),
             scope: "openid profile".to_string(),
             token_type: "access".to_string(),
+            client_id: Some("client-123".to_string()),
             roles: None,
             groups: None,
             permissions: None,
@@ -1689,6 +1758,7 @@ mod tests {
             session_id: None,
             scope: "llm:proxy".to_string(),
             acting_client_id: Some("test-client-id".to_string()),
+            oauth_client_id: None,
             approval_owner_user_id: None,
             auth_method: crate::mw::auth::AuthMethod::Delegated,
             allow_all_services: false,

@@ -988,6 +988,17 @@ pub fn build_router(
                 .delete(handlers::keys::delete_key),
         );
 
+    let connect_link_routes = Router::new()
+        .route("/", post(handlers::connect_links::create_connect_link))
+        .route("/{id}", get(handlers::connect_links::get_connect_link))
+        .route(
+            "/{id}/cancel",
+            post(handlers::connect_links::cancel_connect_link),
+        )
+        .layer(middleware::from_fn(reject_delegated_tokens))
+        .layer(middleware::from_fn(reject_service_account_tokens))
+        .layer(middleware::from_fn(reject_relay_tokens));
+
     let user_endpoint_routes = Router::new()
         .route("/", get(handlers::user_endpoints::list_endpoints))
         .route(
@@ -1243,6 +1254,10 @@ pub fn build_router(
             get(handlers::docs::catalog_spec_json),
         )
         .nest("/auth/device", auth_device_public_routes)
+        .route(
+            "/connect-links/preview",
+            post(handlers::connect_links::preview_connect_link),
+        )
         .nest("/devices/code", device_code_public_routes)
         .nest("/devices/onboard", device_onboard_public_routes);
 
@@ -1301,6 +1316,7 @@ pub fn build_router(
         .nest("/providers", provider_routes)
         .nest("/nodes", node_registration_routes)
         .nest("/oracle", oracle_consumer_routes)
+        .nest("/connect-links", connect_link_routes)
         .layer(middleware::from_fn(reject_delegated_tokens))
         .layer(middleware::from_fn(reject_relay_tokens));
 
@@ -1359,6 +1375,14 @@ pub fn build_router(
         .route(
             "/auth/device/approve",
             post(handlers::auth_device::approve_auth_device),
+        )
+        .route(
+            "/connect-links/complete",
+            post(handlers::connect_links::complete_connect_link),
+        )
+        .route(
+            "/connect-links/cancel",
+            post(handlers::connect_links::cancel_hosted_connect_link),
         )
         .route("/devices/onboard", post(handlers::devices::onboard_device))
         .route(

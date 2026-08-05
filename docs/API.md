@@ -27,6 +27,7 @@ This document describes every HTTP endpoint exposed by the NyxID backend. All en
   - [User Endpoints](#user-endpoints)
   - [External API Keys](#external-api-keys)
   - [User Services](#user-services)
+  - [Third-party Connector Integration](#third-party-connector-integration)
   - [Service Catalog](#service-catalog)
   - [Sessions](#sessions)
   - [Service Endpoints](#service-endpoints)
@@ -447,6 +448,81 @@ curl -X POST http://localhost:3001/api/v1/auth/refresh \
     "refresh_token": "eyJhbGciOiJSUzI1NiIsInR5cCI6IkpXVCJ9..."
   }'
 ```
+
+---
+
+#### POST /api/v1/auth/device/request
+
+Start a first-party device login for a CLI, desktop app, or other input-constrained client. This public contract is stable and versioned with `/api/v1`.
+
+**Auth:** None
+
+**Request Body:**
+
+| Field | Type | Required | Description |
+|-------|------|----------|-------------|
+| `client_label` | string | No | Short client name shown to the approving user |
+| `client_user_agent` | string | No | Sanitized client context shown during review |
+
+```json
+{
+  "client_label": "Desktop workstation",
+  "client_user_agent": "desktop-app/1.4"
+}
+```
+
+**Response (200):**
+
+```json
+{
+  "device_code": "nyx_adc_<opaque-secret>",
+  "user_code": "7KM2RQ9D",
+  "verification_uri": "https://app.nyxid.dev/login/device",
+  "verification_uri_complete": "https://app.nyxid.dev/login/device?user_code=7KM2RQ9D",
+  "expires_in": 600,
+  "interval": 5
+}
+```
+
+The `device_code` is a secret and must not be logged or displayed. The `user_code` is for manual entry at `verification_uri`. Codes expire 10 minutes after issuance.
+
+#### POST /api/v1/auth/device/poll
+
+Poll for approval and atomically receive the first-party token pair once. This public contract is stable and versioned with `/api/v1`.
+
+**Auth:** None
+
+```json
+{
+  "device_code": "nyx_adc_<opaque-secret>"
+}
+```
+
+**Response (200, approved):**
+
+```json
+{
+  "access_token": "eyJhbGciOiJSUzI1NiIsInR5cCI6IkpXVCJ9...",
+  "refresh_token": "eyJhbGciOiJSUzI1NiIsInR5cCI6IkpXVCJ9...",
+  "token_type": "Bearer",
+  "expires_in": 900
+}
+```
+
+Poll no faster than the `interval` returned by `/request`. A `11202` response means approval is still pending. On `11203`, add 5 seconds to the client's current interval before polling again; each additional premature poll increases the server-side interval by another 5 seconds. Stop on denied, expired, or already-delivered responses. Token delivery is single-use: the first approved poll receives the tokens and every later poll returns `11205`.
+
+| Code | Key | HTTP | Meaning |
+|------|-----|------|---------|
+| `11200` | `auth_device_code_not_found` | 404 | Device code does not exist |
+| `11201` | `auth_device_expired_token` | 410 | Device code reached its 10-minute TTL |
+| `11202` | `auth_device_authorization_pending` | 400 | User decision is still pending |
+| `11203` | `auth_device_slow_down` | 429 | Client polled before the current interval elapsed |
+| `11204` | `auth_device_access_denied` | 403 | User denied the login request |
+| `11205` | `auth_device_already_delivered` | 410 | The token pair was already delivered to one poller |
+| `11206` | `auth_device_rate_limited` | 429 | Endpoint rate limit was exceeded |
+| `11207` | `auth_device_user_code_invalid` | 400 | The first-party review UI supplied an invalid user code |
+
+`POST /api/v1/auth/device/preview` and `POST /api/v1/auth/device/approve` support the first-party browser review surface. Integrators should direct users to `verification_uri`; they should not call those UI endpoints. Approval requires a human session and rejects API-key, service-account, delegated, and relay credentials.
 
 ---
 
@@ -3056,6 +3132,78 @@ List user's service bindings.
 
 **Auth:** Required
 
+**Response (200):**
+
+```json
+{
+  "services": [
+    {
+      "id": "6fd22b58-0261-4b86-8ce7-73a255a0619d",
+      "slug": "github",
+      "label": "Work GitHub",
+      "catalog_service_name": "GitHub",
+      "resource_uri": "https://api.nyxid.dev/api/v1/proxy/s/github",
+      "endpoint_id": "985fba62-f4fb-4c71-ae19-e669ae86ca19",
+      "api_key_id": "b306c83f-a1f8-4117-a28e-ac1ab84385c0",
+      "auth_method": "bearer",
+      "auth_key_name": "Authorization",
+      "catalog_service_id": "33ab1178-c9d5-40ec-86a2-fc542a97120e",
+      "node_priority": 0,
+      "ssh_auth_mode": "proxy_only",
+      "ssh_node_keys_stale": false,
+      "admin_only": false,
+      "is_active": true,
+      "identity_propagation_mode": "none",
+      "identity_include_user_id": false,
+      "identity_include_email": false,
+      "identity_include_name": false,
+      "forward_access_token": false,
+      "inject_delegation_token": false,
+      "delegation_token_scope": "",
+      "ws_frame_injections": [],
+      "created_at": "2026-08-05T10:00:00+00:00",
+      "updated_at": "2026-08-05T10:00:00+00:00",
+      "credential_source": { "type": "personal" }
+    }
+  ]
+}
+```
+
+| Field | Type | Notes |
+|-------|------|-------|
+| `id` | UUID string | Stable UserService identifier |
+| `slug` | string | Stable proxy slug; used by `/api/v1/proxy/s/{slug}` |
+| `is_active` | boolean | Stable active/inactive contract for the binding |
+| `label` | string, omitted | Human-readable endpoint label |
+| `catalog_service_name` | string, omitted | Catalog display name |
+| `resource_uri` | absolute URI | RFC 8707 resource identifier for this service |
+| `endpoint_id` | UUID string | Bound user endpoint |
+| `api_key_id` | UUID string, omitted | Bound external credential |
+| `auth_method` | string | Credential injection method |
+| `auth_key_name` | string | Header or parameter name used for credential injection |
+| `catalog_service_id` | UUID string, omitted | Source catalog service |
+| `node_id` | UUID string, omitted | Selected credential node |
+| `node_priority` | integer | Node routing priority |
+| `ssh_auth_mode` | string | `cert`, `node_key`, or `proxy_only` |
+| `ssh_node_keys_stale` | boolean | Whether node-key material needs refresh |
+| `admin_only` | boolean | Whether the service is restricted to administrators |
+| `identity_propagation_mode` | string | `none`, `headers`, `jwt`, or `both` |
+| `identity_include_user_id` | boolean | Include user ID in propagated identity |
+| `identity_include_email` | boolean | Include email in propagated identity |
+| `identity_include_name` | boolean | Include display name in propagated identity |
+| `identity_jwt_audience` | string, omitted | Audience for propagated identity JWTs |
+| `forward_access_token` | boolean | Forward the caller's access token |
+| `inject_delegation_token` | boolean | Inject a delegated NyxID token |
+| `delegation_token_scope` | string | Delegated token scope string |
+| `custom_user_agent` | string, omitted | Per-service User-Agent override |
+| `default_request_headers` | array, omitted | User-owned default request headers |
+| `ws_frame_injections` | array | WebSocket frame injection rules |
+| `created_at` | RFC 3339 string | Creation timestamp |
+| `updated_at` | RFC 3339 string | Last-update timestamp |
+| `credential_source` | object | `{ "type": "personal" }` or org provenance with `org_id`, `org_name`, `avatar_url`, `role`, and `allowed` |
+
+The integration contract guarantees `services[].id`, `services[].slug`, and `services[].is_active` across compatible `/api/v1` releases. Other fields are documented for current clients but may evolve additively; clients should ignore unknown fields.
+
 #### PUT /api/v1/user-services/{id}
 
 Update auth config or node routing.
@@ -3067,6 +3215,67 @@ Update auth config or node routing.
 Deactivate a service binding.
 
 **Auth:** Required
+
+---
+
+### Third-party Connector Integration
+
+Registered developer apps should use connect links for browser-based connector setup instead of inferring an attempt from changes to `/user-services`.
+
+1. Obtain a normal user OAuth access token through the authorization-code flow.
+2. Create a link with `POST /api/v1/connect-links`. When the access token belongs to a registered app, `callback_url` must satisfy that app's registered OAuth redirect URI matching policy. Registered custom schemes and public-client loopback redirects are supported.
+3. Open the returned `connect_url` in the user's browser. Credential submission and provider authorization remain human-session-only.
+4. On a terminal outcome, the browser returns to the stored callback URI after NyxID adds `status=completed|cancelled|expired` and `connect_link_id=<id>`. Existing query parameters are preserved; reserved status parameters are replaced. Fragments and userinfo are rejected, and the raw connect token is never included.
+5. Use `GET /api/v1/connect-links/{id}` as the polling fallback. `POST /api/v1/connect-links/{id}/cancel` cancels an attempt from the creating app.
+
+**Create request:**
+
+```http
+POST /api/v1/connect-links
+Authorization: Bearer <developer-app-user-access-token>
+Content-Type: application/json
+```
+
+```json
+{
+  "service_slug": "github",
+  "label": "Work account",
+  "callback_url": "desktop-app://connect/return",
+  "expires_in": 900
+}
+```
+
+**Create response:**
+
+```json
+{
+  "id": "6c02c84a-3d97-430f-8468-c96b609d9563",
+  "connect_url": "https://app.nyxid.dev/connect/nyx_clk_<opaque-secret>",
+  "expires_at": "2026-08-05T10:15:00+00:00"
+}
+```
+
+Treat `connect_url` as a single-use secret and hand it only to the browser. The authenticated app ID and display name are recorded on the link; a request-body `requested_by` value cannot override that identity.
+
+**Polling response:**
+
+```json
+{
+  "id": "6c02c84a-3d97-430f-8468-c96b609d9563",
+  "status": "pending",
+  "service_name": "GitHub",
+  "service_slug": "github",
+  "expires_at": "2026-08-05T10:15:00+00:00",
+  "requesting_app_id": "desktop-client-id",
+  "requesting_app_name": "Desktop App",
+  "last_error": "provider_access_denied",
+  "last_error_at": "2026-08-05T10:04:12+00:00"
+}
+```
+
+`status` is one of `pending`, `completed`, `expired`, or `cancelled`. A completed response includes `connected_service: { "id", "slug" }`. Terminal responses with a callback include the fully merged `callback_url`.
+
+`last_error` is an optional short, stable, metadata-only code. `provider_access_denied` means the provider consent screen was declined, but the link remains `pending` and may be retried within its TTL and finalization grace. The field is cleared when a later attempt succeeds. Its absence means no provider decline has been recorded; it does not prove that the browser is still open.
 
 ---
 

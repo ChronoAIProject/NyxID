@@ -25,6 +25,7 @@ pub mod channel_events;
 pub mod channel_relay;
 pub mod channel_webhooks;
 pub mod cli_pairings;
+pub mod connect_links;
 pub mod connections;
 pub mod consent;
 pub mod credential_accept;

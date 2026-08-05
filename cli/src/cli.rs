@@ -31,6 +31,8 @@ pub enum Commands {
     Whoami(AuthArgs),
     /// Show account overview (services, keys, nodes)
     Status(AuthArgs),
+    /// Create a hosted link for connecting a service credential
+    Connect(ConnectArgs),
     /// Run local CLI health checks
     Doctor(DoctorArgs),
     /// Manage user profile
@@ -199,6 +201,23 @@ pub enum Commands {
     },
     /// Show CLI version and project links
     Info,
+}
+
+#[derive(Args, Clone)]
+pub struct ConnectArgs {
+    /// Catalog service slug to connect
+    pub service_slug: String,
+    /// Human-readable label shown on the hosted connection page
+    #[arg(long)]
+    pub label: Option<String>,
+    /// Return immediately after creating the link
+    #[arg(long)]
+    pub no_wait: bool,
+    /// Maximum seconds to wait for completion
+    #[arg(long, default_value_t = 900, value_parser = clap::value_parser!(u64).range(1..=3600))]
+    pub timeout: u64,
+    #[command(flatten)]
+    pub auth: AuthArgs,
 }
 
 #[derive(Subcommand)]

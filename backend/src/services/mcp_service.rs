@@ -26,8 +26,8 @@ use crate::services::content_type::{
 };
 use crate::services::node_ws_manager::NodeWsManager;
 use crate::services::{
-    api_docs_service, connection_service, node_routing_service, openapi_parser,
-    operation_descriptor, proxy_service,
+    api_docs_service, connect_link_service, connection_service, node_routing_service,
+    openapi_parser, operation_descriptor, proxy_service,
 };
 
 // ---------------------------------------------------------------------------
@@ -1535,8 +1535,8 @@ pub fn generate_tool_definitions(
 
     tools.push(McpToolDefinition {
         name: "nyx__connect_service".to_string(),
-        description: "Connect to an available service. For services requiring credentials \
-            (connection type), provide your API key or token."
+        description: "Connect to an available service. If a credential is required and omitted, \
+            returns a hosted connection URL that the user can open."
             .to_string(),
         input_schema: serde_json::json!({
             "type": "object",
@@ -1555,6 +1555,30 @@ pub fn generate_tool_definitions(
                 }
             },
             "required": ["service_id"]
+        }),
+    });
+
+    tools.push(McpToolDefinition {
+        name: "nyx__wait_for_connection".to_string(),
+        description: "Wait for a hosted service connection to complete. Call this after \
+            nyx__connect_service returns pending_connection, then retry the original tool call."
+            .to_string(),
+        input_schema: serde_json::json!({
+            "type": "object",
+            "properties": {
+                "connect_link_id": {
+                    "type": "string",
+                    "description": "Connect link ID returned by nyx__connect_service"
+                },
+                "timeout_secs": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "maximum": 120,
+                    "default": 30,
+                    "description": "Maximum seconds to wait before returning the current status"
+                }
+            },
+            "required": ["connect_link_id"]
         }),
     });
 
@@ -2839,6 +2863,8 @@ pub async fn execute_tool(
     arguments: &serde_json::Value,
     jwt_keys: &crate::crypto::jwt::JwtKeys,
     config: &crate::config::AppConfig,
+    connection_expiry_notifier:
+        &crate::services::connection_expiry_service::ConnectionExpiryNotifier,
     token_exchange_cache: &crate::services::provider_token_exchange_service::TokenExchangeCache,
     cloud_response_cache: &crate::services::cloud_response_cache::CloudResponseCache,
     exec_ctx: &McpExecContext<'_>,
@@ -2870,6 +2896,7 @@ pub async fn execute_tool(
                 user_service_id,
                 Some(&service.service_slug),
                 None,
+                Some(connection_expiry_notifier),
             )
             .await?
             .ok_or_else(|| {
@@ -2887,6 +2914,7 @@ pub async fn execute_tool(
                     user_id,
                     ak_id,
                     user_service_id,
+                    Some(connection_expiry_notifier),
                 )
                 .await?
             {
@@ -3139,6 +3167,7 @@ pub async fn execute_tool(
                 encryption_keys,
                 user_id,
                 downstream_service_id,
+                Some(connection_expiry_notifier),
             )
             .await
             {
@@ -3665,6 +3694,7 @@ pub async fn discover_services(
 // ---------------------------------------------------------------------------
 
 /// Connect the user to a service from within the MCP client.
+#[allow(clippy::too_many_arguments)]
 pub async fn connect_service(
     db: &mongodb::Database,
     encryption_keys: &EncryptionKeys,
@@ -3673,7 +3703,42 @@ pub async fn connect_service(
     service_id: &str,
     credential: Option<&str>,
     credential_label: Option<&str>,
+    frontend_url: &str,
+    requested_by: Option<&str>,
 ) -> AppResult<serde_json::Value> {
+    let service = db
+        .collection::<DownstreamService>(DOWNSTREAM_SERVICES)
+        .find_one(doc! { "_id": service_id, "is_active": true })
+        .await?
+        .ok_or_else(|| AppError::NotFound("Service not found".to_string()))?;
+
+    if service.requires_user_credential && credential.is_none_or(|value| value.trim().is_empty()) {
+        let created = connect_link_service::create(
+            db,
+            connect_link_service::CreateInput {
+                user_id: user_id.to_string(),
+                service_slug: service.slug,
+                label: credential_label.map(str::to_string),
+                requested_by: requested_by.map(str::to_string),
+                callback_url: None,
+                ttl_secs: None,
+                oauth_client_id: None,
+            },
+        )
+        .await?;
+        let connect_url =
+            connect_link_service::build_connect_url(frontend_url, &created.raw_token)?;
+        return Ok(serde_json::json!({
+            "status": "pending_connection",
+            "connect_url": connect_url,
+            "connect_link_id": created.link.id,
+            "expires_at": created.link.expires_at.to_rfc3339(),
+            "service_id": created.link.service_id,
+            "service_slug": created.link.service_slug,
+            "instructions": "Open this URL in a browser to connect the service, then call nyx__wait_for_connection with connect_link_id.",
+        }));
+    }
+
     let result = connection_service::connect_user(
         db,
         encryption_keys,
@@ -3700,7 +3765,9 @@ pub async fn connect_service(
 mod tests {
     use super::*;
     use crate::models::downstream_service::test_helpers::dummy_service;
-    use crate::test_utils::{connect_test_database, test_user_endpoint, test_user_service};
+    use crate::test_utils::{
+        connect_test_database, test_encryption_keys, test_user_endpoint, test_user_service,
+    };
 
     fn make_endpoint(name: &str, description: &str) -> McpToolEndpoint {
         McpToolEndpoint {
@@ -4596,6 +4663,53 @@ mod tests {
         assert!(connected_ids.is_disjoint(&discover_ids));
     }
 
+    #[tokio::test]
+    async fn connect_service_without_credential_returns_hosted_pending_link() {
+        let Some(db) = connect_test_database("mcp_connect_link_pending").await else {
+            return;
+        };
+        let user_id = uuid::Uuid::new_v4().to_string();
+        let mut service = dummy_service();
+        service.id = uuid::Uuid::new_v4().to_string();
+        service.slug = format!("mcp-connect-{}", uuid::Uuid::new_v4());
+        service.requires_user_credential = true;
+        db.collection::<DownstreamService>(DOWNSTREAM_SERVICES)
+            .insert_one(&service)
+            .await
+            .expect("insert service");
+        let node_ws_manager = NodeWsManager::new(30, 100);
+
+        let result = connect_service(
+            &db,
+            &test_encryption_keys(),
+            &node_ws_manager,
+            &user_id,
+            &service.id,
+            None,
+            Some("Coding agent"),
+            "https://app.example.test",
+            Some("codex"),
+        )
+        .await
+        .expect("create hosted connect link");
+
+        assert_eq!(result["status"], "pending_connection");
+        assert_eq!(result["service_slug"], service.slug);
+        assert!(
+            result["connect_url"]
+                .as_str()
+                .is_some_and(|url| url.starts_with("https://app.example.test/connect/nyx_clk_"))
+        );
+        let link_id = result["connect_link_id"].as_str().expect("link id");
+        let view = connect_link_service::wait_for_status(&db, &user_id, link_id, 1)
+            .await
+            .expect("read pending link");
+        assert_eq!(
+            view.link.status,
+            crate::models::connect_link::ConnectLinkStatus::Pending
+        );
+    }
+
     // -- generate_tool_definitions tests --
 
     #[test]
@@ -4610,8 +4724,8 @@ mod tests {
         let empty_set = HashSet::new();
         let tools = generate_tool_definitions(&services, Some(&empty_set));
 
-        // Should only have the 13 meta-tools (5 core + 2 SSH + 6 oracle)
-        assert_eq!(tools.len(), 13);
+        // Should only have the 14 meta-tools (6 core + 2 SSH + 6 oracle)
+        assert_eq!(tools.len(), 14);
         assert!(tools.iter().all(|t| t.name.starts_with("nyx__")));
     }
 
@@ -4636,8 +4750,8 @@ mod tests {
         activated.insert("svc-1".to_string());
         let tools = generate_tool_definitions(&services, Some(&activated));
 
-        // 13 meta-tools + 1 weather tool (news excluded)
-        assert_eq!(tools.len(), 14);
+        // 14 meta-tools + 1 weather tool (news excluded)
+        assert_eq!(tools.len(), 15);
         assert!(tools.iter().any(|t| t.name == "weather__get_forecast"));
         assert!(!tools.iter().any(|t| t.name == "news__headlines"));
     }
@@ -4661,8 +4775,8 @@ mod tests {
 
         let tools = generate_tool_definitions(&services, None);
 
-        // 13 meta-tools + 2 service tools
-        assert_eq!(tools.len(), 15);
+        // 14 meta-tools + 2 service tools
+        assert_eq!(tools.len(), 16);
         assert!(tools.iter().any(|t| t.name == "weather__get_forecast"));
         assert!(tools.iter().any(|t| t.name == "news__headlines"));
     }

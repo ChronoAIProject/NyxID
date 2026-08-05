@@ -571,6 +571,7 @@ async fn proxy_request_inner(
             us_id,
             None,
             Some(service_id),
+            Some(&state.connection_expiry_notifier),
         )
         .await?
         {
@@ -631,6 +632,7 @@ async fn proxy_request_inner(
         &user_id_str,
         None,
         Some(service_id),
+        Some(&state.connection_expiry_notifier),
     )
     .await?
     {
@@ -791,6 +793,7 @@ async fn proxy_request_by_slug_inner(
             us_id,
             Some(slug),
             None,
+            Some(&state.connection_expiry_notifier),
         )
         .await?
         {
@@ -851,6 +854,7 @@ async fn proxy_request_by_slug_inner(
         &user_id_str,
         Some(slug),
         None,
+        Some(&state.connection_expiry_notifier),
     )
     .await?
     {
@@ -1514,6 +1518,7 @@ async fn execute_proxy_inner(
                 &user_id_str,
                 ak_id,
                 us_id,
+                Some(&state.connection_expiry_notifier),
             )
             .await?
         {
@@ -1847,6 +1852,7 @@ async fn execute_proxy_inner(
             &state.encryption_keys,
             delegated_owner,
             service_id,
+            Some(&state.connection_expiry_notifier),
         )
         .await
         {
@@ -7062,6 +7068,7 @@ mod proxy_resolution_integration_tests {
             session_id: None,
             scope: "proxy".to_string(),
             acting_client_id: None,
+            oauth_client_id: None,
             approval_owner_user_id: Some(owner_user_id.to_string()),
             auth_method: AuthMethod::ServiceAccount,
             allow_all_services: true,
@@ -7084,6 +7091,7 @@ mod proxy_resolution_integration_tests {
             session_id: None,
             scope: "proxy".to_string(),
             acting_client_id: None,
+            oauth_client_id: None,
             approval_owner_user_id: None,
             auth_method: AuthMethod::AccessToken,
             allow_all_services: true,

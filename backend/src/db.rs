@@ -11,6 +11,7 @@ use crate::config::AppConfig;
 use crate::models::anonymous_endpoint_usage::COLLECTION_NAME as ANONYMOUS_ENDPOINT_USAGE;
 use crate::models::auth_device_code::{AuthDeviceCode, COLLECTION_NAME as AUTH_DEVICE_CODES};
 use crate::models::billing_topup_session::COLLECTION_NAME as BILLING_TOPUP_SESSIONS;
+use crate::models::connect_link::{COLLECTION_NAME as CONNECT_LINKS, ConnectLink};
 use crate::models::device_code::COLLECTION_NAME as DEVICE_CODES;
 use crate::models::device_onboard_credential::COLLECTION_NAME as DEVICE_ONBOARD_CREDENTIALS;
 use crate::models::downstream_service::{
@@ -1122,6 +1123,30 @@ pub async fn ensure_indexes(db: &Database) -> Result<(), mongodb::error::Error> 
                 )
                 .build(),
         )
+        .await?;
+
+    // ── connect_links ──
+    let connect_links = db.collection::<ConnectLink>(CONNECT_LINKS);
+    connect_links
+        .create_index(
+            IndexModel::builder()
+                .keys(doc! { "token_hash": 1 })
+                .options(IndexOptions::builder().unique(true).build())
+                .build(),
+        )
+        .await?;
+    connect_links
+        .create_index(
+            IndexModel::builder()
+                .keys(doc! { "user_id": 1, "created_at": -1 })
+                .build(),
+        )
+        .await?;
+    // Keep expired rows long enough to surface the terminal state to pollers.
+    // Expiration is claimed atomically at read/complete time instead of using
+    // a Mongo TTL index that could erase the status before the agent sees it.
+    connect_links
+        .create_index(IndexModel::builder().keys(doc! { "expires_at": 1 }).build())
         .await?;
 
     // ── device_onboard_credentials ──

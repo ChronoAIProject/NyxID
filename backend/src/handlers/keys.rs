@@ -402,6 +402,8 @@ pub struct KeyResponse {
     pub auth_key_name: String,
     pub status: String,
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub connection_status: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub catalog_service_id: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub catalog_service_slug: Option<String>,
@@ -2151,6 +2153,10 @@ fn key_response_from_result(result: &unified_key_service::CreateKeyResult) -> Ke
             .as_ref()
             .map(|api_key| api_key.status.clone())
             .unwrap_or_else(|| "active".to_string()),
+        connection_status: result
+            .api_key
+            .as_ref()
+            .and_then(unified_key_service::oauth_connection_status),
         catalog_service_id: result.service.catalog_service_id.clone(),
         catalog_service_slug: None,
         catalog_service_name: None,
@@ -2265,6 +2271,7 @@ fn key_response_from_view(view: unified_key_service::KeyView) -> KeyResponse {
         auth_method: view.auth_method,
         auth_key_name: view.auth_key_name,
         status: view.status,
+        connection_status: view.connection_status,
         catalog_service_id: view.catalog_service_id,
         catalog_service_slug: view.catalog_service_slug,
         catalog_service_name: view.catalog_service_name,

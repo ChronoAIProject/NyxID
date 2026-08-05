@@ -23,6 +23,7 @@ use crate::models::user_service_connection::{
 };
 use crate::models::ws_frame_injection::WsFrameInjection;
 use crate::services::cloud_response_cache::{self, CloudResponseCache};
+use crate::services::connection_expiry_service::ConnectionExpiryNotifier;
 use crate::services::delegation_service::DelegatedCredential;
 use crate::services::node_ws_manager::NodeWsManager;
 use crate::services::provider_token_exchange_service::{self, TokenExchangeCache};
@@ -860,6 +861,7 @@ pub async fn resolve_proxy_target_from_user_service(
     user_id: &str,
     slug: Option<&str>,
     catalog_service_id: Option<&str>,
+    connection_expiry_notifier: Option<&ConnectionExpiryNotifier>,
 ) -> AppResult<Option<UserServiceResolution>> {
     // NyxID#974 routing boundary: identical-instance service pools belong
     // here, before `finish_resolution()`, because this function is the
@@ -871,7 +873,16 @@ pub async fn resolve_proxy_target_from_user_service(
     let personal = lookup_user_service(db, user_id, slug, catalog_service_id).await?;
     if let Some(us) = personal {
         return Ok(Some(
-            finish_resolution(db, encryption_keys, user_id, us, None, None).await?,
+            finish_resolution(
+                db,
+                encryption_keys,
+                user_id,
+                us,
+                None,
+                None,
+                connection_expiry_notifier,
+            )
+            .await?,
         ));
     }
     if catalog_service_id.is_none()
@@ -886,7 +897,16 @@ pub async fn resolve_proxy_target_from_user_service(
             "Resolved proxy target via service pool"
         );
         return Ok(Some(
-            finish_resolution(db, encryption_keys, user_id, us, None, Some(pool_selection)).await?,
+            finish_resolution(
+                db,
+                encryption_keys,
+                user_id,
+                us,
+                None,
+                Some(pool_selection),
+                connection_expiry_notifier,
+            )
+            .await?,
         ));
     }
 
@@ -986,6 +1006,7 @@ pub async fn resolve_proxy_target_from_user_service(
                 org_us,
                 Some(routing),
                 pool_selection,
+                connection_expiry_notifier,
             )
             .await?,
         ));
@@ -1279,6 +1300,7 @@ pub async fn resolve_proxy_target_by_user_service_id(
     user_service_id: &str,
     expected_slug: Option<&str>,
     expected_catalog_service_id: Option<&str>,
+    connection_expiry_notifier: Option<&ConnectionExpiryNotifier>,
 ) -> AppResult<Option<UserServiceResolution>> {
     let svc = match user_service_service::find_user_service_by_id(db, user_service_id).await? {
         Some(s) => s,
@@ -1358,7 +1380,16 @@ pub async fn resolve_proxy_target_by_user_service_id(
 
     let owner_id = svc.user_id.clone();
     Ok(Some(
-        finish_resolution(db, encryption_keys, &owner_id, svc, org_routing, None).await?,
+        finish_resolution(
+            db,
+            encryption_keys,
+            &owner_id,
+            svc,
+            org_routing,
+            None,
+            connection_expiry_notifier,
+        )
+        .await?,
     ))
 }
 
@@ -1788,6 +1819,7 @@ async fn finish_resolution(
     user_service: crate::models::user_service::UserService,
     org_routing: Option<OrgRouting>,
     pool_selection: Option<service_pool_service::PoolSelection>,
+    connection_expiry_notifier: Option<&ConnectionExpiryNotifier>,
 ) -> AppResult<UserServiceResolution> {
     // For auto-provisioned services, verify the catalog entry is still eligible
     // before allowing the proxy request through.
@@ -1935,9 +1967,14 @@ async fn finish_resolution(
             AppError::Internal("Data integrity error: API key not found".to_string())
         })?;
 
-    let api_key =
-        maybe_refresh_provider_backed_api_key(db, encryption_keys, effective_owner_id, api_key)
-            .await?;
+    let api_key = maybe_refresh_provider_backed_api_key(
+        db,
+        encryption_keys,
+        effective_owner_id,
+        api_key,
+        connection_expiry_notifier,
+    )
+    .await?;
 
     // Node-routed services: resolve what we can but don't block on API key status
     // since the node agent handles credential injection locally.
@@ -2167,6 +2204,7 @@ pub async fn resolve_agent_credential_override(
     user_id: &str,
     api_key_id: &str,
     user_service_id: &str,
+    connection_expiry_notifier: Option<&ConnectionExpiryNotifier>,
 ) -> AppResult<Option<String>> {
     let override_key_id = agent_binding_service::resolve_credential_override(
         db,
@@ -2192,8 +2230,14 @@ pub async fn resolve_agent_credential_override(
             AppError::Internal("Bound credential not found".to_string())
         })?;
 
-    let api_key =
-        maybe_refresh_provider_backed_api_key(db, encryption_keys, user_id, api_key).await?;
+    let api_key = maybe_refresh_provider_backed_api_key(
+        db,
+        encryption_keys,
+        user_id,
+        api_key,
+        connection_expiry_notifier,
+    )
+    .await?;
 
     if api_key.status != "active" {
         return Err(AppError::BadRequest(format!(
@@ -2221,6 +2265,7 @@ async fn maybe_refresh_provider_backed_api_key(
     encryption_keys: &EncryptionKeys,
     user_id: &str,
     api_key: UserApiKey,
+    connection_expiry_notifier: Option<&ConnectionExpiryNotifier>,
 ) -> AppResult<UserApiKey> {
     // GCP service account: mint a fresh Google access token from the
     // stored SA key when the cached token is missing or within the
@@ -2284,6 +2329,7 @@ async fn maybe_refresh_provider_backed_api_key(
             db,
             encryption_keys,
             &api_key,
+            connection_expiry_notifier,
         )
         .await
         {
@@ -2309,8 +2355,14 @@ async fn maybe_refresh_provider_backed_api_key(
     // Legacy single-tenant path: refresh runs against
     // `user_provider_tokens`, then `sync_provider_token_to_api_keys`
     // fans the new token out to all legacy keys for `(user, provider)`.
-    match user_token_service::get_active_token(db, encryption_keys, user_id, provider_config_id)
-        .await
+    match user_token_service::get_active_token(
+        db,
+        encryption_keys,
+        user_id,
+        provider_config_id,
+        connection_expiry_notifier,
+    )
+    .await
     {
         Ok(_) => {
             user_api_key_service::sync_provider_token_to_api_keys(db, user_id, provider_config_id)
@@ -3378,6 +3430,7 @@ mod tests {
             &member_id,
             Some("svc-a"),
             None,
+            None,
         )
         .await
         .expect("service A should resolve")
@@ -3397,6 +3450,7 @@ mod tests {
             &node_manager,
             &member_id,
             Some("svc-c"),
+            None,
             None,
         )
         .await
@@ -3425,6 +3479,7 @@ mod tests {
             &node_manager,
             &member_id,
             Some("svc-a"),
+            None,
             None,
         )
         .await
@@ -3496,6 +3551,7 @@ mod tests {
             &member_id,
             Some("admin-svc"),
             None,
+            None,
         )
         .await
         {
@@ -3510,6 +3566,7 @@ mod tests {
             &member_id,
             &service_id,
             Some("admin-svc"),
+            None,
             None,
         )
         .await
@@ -3534,6 +3591,7 @@ mod tests {
             &node_manager,
             &admin_id,
             Some("admin-svc"),
+            None,
             None,
         )
         .await
@@ -3646,10 +3704,16 @@ mod tests {
             .unwrap();
 
         // Branch 1: no binding -> None (proxy uses the service default).
-        let no_override =
-            resolve_agent_credential_override(&db, &keys, &user_id, &api_key_id, &user_service_id)
-                .await
-                .unwrap();
+        let no_override = resolve_agent_credential_override(
+            &db,
+            &keys,
+            &user_id,
+            &api_key_id,
+            &user_service_id,
+            None,
+        )
+        .await
+        .unwrap();
         assert!(
             no_override.is_none(),
             "with no binding the agent must fall back to the service default credential"
@@ -3667,10 +3731,16 @@ mod tests {
         .await
         .unwrap();
 
-        let override_value =
-            resolve_agent_credential_override(&db, &keys, &user_id, &api_key_id, &user_service_id)
-                .await
-                .unwrap();
+        let override_value = resolve_agent_credential_override(
+            &db,
+            &keys,
+            &user_id,
+            &api_key_id,
+            &user_service_id,
+            None,
+        )
+        .await
+        .unwrap();
         assert_eq!(
             override_value.as_deref(),
             Some(override_secret),

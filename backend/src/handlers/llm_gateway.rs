@@ -295,6 +295,7 @@ pub async fn llm_proxy_request(
             &user_id_str,
             None,
             Some(&service_id),
+            Some(&state.connection_expiry_notifier),
         )
         .await?
         {
@@ -403,6 +404,7 @@ pub async fn llm_proxy_request(
             &state.encryption_keys,
             &user_id_str,
             &service_id,
+            Some(&state.connection_expiry_notifier),
         )
         .await
         .map_err(|e| {
@@ -654,6 +656,7 @@ pub async fn gateway_request(
             &user_id_str,
             None,
             Some(&service_id),
+            Some(&state.connection_expiry_notifier),
         )
         .await?
         {
@@ -812,6 +815,7 @@ pub async fn gateway_request(
             &state.encryption_keys,
             &user_id_str,
             &service_id,
+            Some(&state.connection_expiry_notifier),
         )
         .await
         .map_err(|e| {

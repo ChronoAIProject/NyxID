@@ -7,6 +7,7 @@ pub mod billing;
 pub mod catalog;
 pub mod channel_bot;
 pub mod channel_event;
+pub mod connect;
 pub mod developer_app;
 pub mod device;
 pub mod doctor;

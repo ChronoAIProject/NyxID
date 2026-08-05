@@ -29,6 +29,13 @@
         crate::handlers::keys::get_key,
         crate::handlers::keys::update_key,
         crate::handlers::keys::delete_key,
+        // Hosted Connect Links
+        crate::handlers::connect_links::create_connect_link,
+        crate::handlers::connect_links::get_connect_link,
+        crate::handlers::connect_links::cancel_connect_link,
+        crate::handlers::connect_links::preview_connect_link,
+        crate::handlers::connect_links::cancel_hosted_connect_link,
+        crate::handlers::connect_links::complete_connect_link,
         // Catalog
         crate::handlers::catalog::list_catalog,
         crate::handlers::catalog::get_catalog_entry,
@@ -90,6 +97,16 @@
             crate::handlers::keys::KeyResponse,
             crate::handlers::keys::KeyListResponse,
             crate::handlers::keys::DeleteKeyResponse,
+            // Hosted Connect Links
+            crate::handlers::connect_links::CreateConnectLinkRequest,
+            crate::handlers::connect_links::CreateConnectLinkResponse,
+            crate::handlers::connect_links::PreviewConnectLinkRequest,
+            crate::handlers::connect_links::PreviewConnectLinkResponse,
+            crate::handlers::connect_links::ConnectedServiceResponse,
+            crate::handlers::connect_links::ConnectLinkStatusResponse,
+            crate::handlers::connect_links::CancelHostedConnectLinkRequest,
+            crate::handlers::connect_links::CompleteConnectLinkRequest,
+            crate::handlers::connect_links::CompleteConnectLinkResponse,
             // Catalog
             crate::handlers::catalog::CatalogEntryResponse,
             crate::handlers::catalog::CatalogListResponse,
@@ -156,6 +173,7 @@
         (name = "Proxy", description = "Authenticated downstream service discovery"),
         (name = "SSH", description = "SSH certificate issuance and WebSocket tunnel endpoints"),
         (name = "AI Services", description = "Unified key management: auto-provisions endpoint, credential, and proxy routing from catalog or custom input"),
+        (name = "Connect Links", description = "Hosted single-use service credential connection flows"),
         (name = "Catalog", description = "Read-only service catalog for users (admin-created services and providers)"),
         (name = "Endpoints", description = "User-managed target URLs"),
         (name = "External API Keys", description = "User's external API keys and credentials"),
