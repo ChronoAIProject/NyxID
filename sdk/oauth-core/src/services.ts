@@ -152,7 +152,7 @@ class Transport {
   readonly #authorization: string;
 
   constructor(config: NyxServicesClientConfig) {
-    this.baseUrl = config.baseUrl.replace(/\/+$/g, "");
+    this.baseUrl = trimTrailingSlashes(config.baseUrl);
     this.fetchFn = config.fetchFn ?? globalThis.fetch.bind(globalThis);
     const credential = config.auth.apiKey ?? config.auth.accessToken;
     if (credential === undefined || !credential.trim()) {
@@ -262,7 +262,7 @@ class ServicesResource implements ServicesApi {
     path: string,
     options: ServiceRequestOptions = {},
   ): Promise<Response> {
-    const normalizedPath = path.replace(/^\/+/, "");
+    const normalizedPath = trimLeadingSlashes(path);
     const url = new URL(
       `${this.transport.baseUrl}/api/v1/proxy/s/${encodeURIComponent(slug)}/${normalizedPath}`,
     );
@@ -314,6 +314,22 @@ function extractErrorMessage(body: unknown): string | undefined {
   if (typeof record.message === "string") return record.message;
   if (typeof record.error === "string") return record.error;
   return undefined;
+}
+
+function trimTrailingSlashes(value: string): string {
+  let end = value.length;
+  while (end > 0 && value.charCodeAt(end - 1) === 0x2f) {
+    end -= 1;
+  }
+  return value.slice(0, end);
+}
+
+function trimLeadingSlashes(value: string): string {
+  let start = 0;
+  while (start < value.length && value.charCodeAt(start) === 0x2f) {
+    start += 1;
+  }
+  return value.slice(start);
 }
 
 function delay(durationMs: number): Promise<void> {
