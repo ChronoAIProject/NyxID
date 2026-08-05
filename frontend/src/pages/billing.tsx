@@ -3,7 +3,6 @@ import { toast } from "sonner";
 import {
   ChevronDown,
   ChevronRight,
-  CreditCard,
   ExternalLink,
   Info,
   Plus,
@@ -35,6 +34,15 @@ import {
   CardHeader,
   CardTitle,
 } from "@/components/ui/card";
+import {
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogFooter,
+  DialogHeader,
+  DialogTitle,
+  DialogTrigger,
+} from "@/components/ui/dialog";
 import { Input } from "@/components/ui/input";
 import {
   Select,
@@ -64,7 +72,6 @@ const TOP_UP_PRESETS = [100, 500, 1_000, 5_000] as const;
 
 export function BillingPage() {
   const [period, setPeriod] = useState<BillingUsagePeriod>("30d");
-  const [topUpCredits, setTopUpCredits] = useState(String(DEFAULT_TOP_UP_CREDITS));
   const walletQuery = useBillingWallet();
   const usageQuery = useBillingUsage(period);
   const provisionWallet = useProvisionBillingWallet();
@@ -76,13 +83,6 @@ export function BillingPage() {
   const billingReady =
     Boolean(billingCapability?.charging_enabled) &&
     Boolean(billingCapability?.lago_configured);
-  const topUpAmount = Number(topUpCredits);
-  const topUpDisabled =
-    !billingReady ||
-    !Number.isInteger(topUpAmount) ||
-    topUpAmount <= 0 ||
-    topUpAmount > 10_000_000 ||
-    topUpBilling.isPending;
 
   async function handleProvisionWallet() {
     try {
@@ -93,12 +93,10 @@ export function BillingPage() {
     }
   }
 
-  async function handleTopUp() {
-    if (topUpDisabled) return;
-
+  async function handleTopUp(amountCredits: number) {
     try {
       const checkout = await topUpBilling.mutateAsync({
-        amount_credits: topUpAmount,
+        amount_credits: amountCredits,
         idempotency_key: crypto.randomUUID(),
       });
       openExternal(checkout.checkout_url);
@@ -148,96 +146,18 @@ export function BillingPage() {
         </div>
       )}
 
-      {/* items-start: expanding the wallet breakdown must not stretch Top Up. */}
-      <div className="grid items-start gap-4 xl:grid-cols-[1.2fr_0.8fr]">
-        <WalletCard
-          wallet={wallet}
-          loading={walletQuery.isLoading}
-          unavailable={walletUnavailable}
-          error={walletQuery.error}
-          onRetry={() => void walletQuery.refetch()}
-          onProvision={() => void handleProvisionWallet()}
-          provisioning={provisionWallet.isPending}
-          billingReady={billingReady}
-        />
-
-        <Card>
-          <CardHeader className="flex-row items-center justify-between space-y-0">
-            <div>
-              <CardTitle>Add credits</CardTitle>
-              <p className="mt-1 text-[12px] text-muted-foreground">
-                1 credit = 1 USD. Credits never expire.
-              </p>
-            </div>
-            <CreditCard className="h-4 w-4 text-text-tertiary" />
-          </CardHeader>
-          <CardContent className="space-y-4">
-            <div className="space-y-2">
-              <span className="text-[12px] font-medium">Amount</span>
-              <div className="flex flex-wrap gap-2">
-                {TOP_UP_PRESETS.map((preset) => (
-                  <Button
-                    key={preset}
-                    variant={
-                      topUpAmount === preset && topUpCredits !== ""
-                        ? "secondary"
-                        : "outline"
-                    }
-                    size="sm"
-                    disabled={!billingReady || topUpBilling.isPending}
-                    onClick={() => setTopUpCredits(String(preset))}
-                  >
-                    {formatNumber(preset)}
-                  </Button>
-                ))}
-              </div>
-            </div>
-
-            <div className="space-y-2">
-              <label className="text-[12px] font-medium" htmlFor="topup-credits">
-                Or enter an amount
-              </label>
-              <div className="flex items-center gap-3">
-                <Input
-                  id="topup-credits"
-                  type="number"
-                  min={1}
-                  max={10_000_000}
-                  step={1}
-                  value={topUpCredits}
-                  onChange={(event) => setTopUpCredits(event.target.value)}
-                  disabled={!billingReady || topUpBilling.isPending}
-                  aria-describedby="topup-total"
-                />
-                <span
-                  id="topup-total"
-                  className="shrink-0 text-[13px] text-muted-foreground"
-                >
-                  {formatUsd(topUpAmount)}
-                </span>
-              </div>
-            </div>
-
-            <Button
-              variant="primary"
-              className="w-full"
-              disabled={topUpDisabled}
-              isLoading={topUpBilling.isPending}
-              onClick={() => void handleTopUp()}
-            >
-              <ButtonIcon variant="primary">
-                <ExternalLink className="h-3 w-3" />
-              </ButtonIcon>
-              Continue to payment
-            </Button>
-            <p className="text-[11px] leading-relaxed text-muted-foreground">
-              {billingReady
-                ? "We'll hand you to Stripe to pay, then bring you back here. Credits land once the payment clears."
-                : "Payments aren't enabled on this deployment yet."}
-            </p>
-          </CardContent>
-        </Card>
-      </div>
+      <WalletCard
+        wallet={wallet}
+        loading={walletQuery.isLoading}
+        unavailable={walletUnavailable}
+        error={walletQuery.error}
+        onRetry={() => void walletQuery.refetch()}
+        onProvision={() => void handleProvisionWallet()}
+        provisioning={provisionWallet.isPending}
+        billingReady={billingReady}
+        onTopUp={handleTopUp}
+        topUpPending={topUpBilling.isPending}
+      />
 
       <UsageSummary
         rows={usageQuery.data?.rows ?? []}
@@ -397,6 +317,8 @@ function WalletCard({
   onProvision,
   provisioning,
   billingReady,
+  onTopUp,
+  topUpPending,
 }: {
   readonly wallet: BillingWalletResponse | undefined;
   readonly loading: boolean;
@@ -406,6 +328,8 @@ function WalletCard({
   readonly onProvision: () => void;
   readonly provisioning: boolean;
   readonly billingReady: boolean;
+  readonly onTopUp: (amountCredits: number) => Promise<void>;
+  readonly topUpPending: boolean;
 }) {
   const [showBreakdown, setShowBreakdown] = useState(false);
 
@@ -489,23 +413,26 @@ function WalletCard({
             <div className="mt-1 text-[11px] text-muted-foreground">
               Updated {formatRelativeTime(wallet.balance_synced_at)}
             </div>
+            <button
+              type="button"
+              aria-expanded={showBreakdown}
+              aria-controls="wallet-breakdown"
+              className="mt-2 flex items-center gap-1 text-[11px] text-muted-foreground transition-colors hover:text-foreground"
+              onClick={() => setShowBreakdown((current) => !current)}
+            >
+              {showBreakdown ? "Hide breakdown" : "View breakdown"}
+              <ChevronDown
+                className={`h-3 w-3 transition-transform ${
+                  showBreakdown ? "rotate-180" : ""
+                }`}
+              />
+            </button>
           </div>
-          <Button
-            variant="outline"
-            size="icon"
-            aria-expanded={showBreakdown}
-            aria-controls="wallet-breakdown"
-            aria-label={
-              showBreakdown ? "Hide balance breakdown" : "Show balance breakdown"
-            }
-            onClick={() => setShowBreakdown((current) => !current)}
-          >
-            <ChevronDown
-              className={`h-3.5 w-3.5 transition-transform ${
-                showBreakdown ? "rotate-180" : ""
-              }`}
-            />
-          </Button>
+          <AddCreditsDialog
+            billingReady={billingReady}
+            pending={topUpPending}
+            onTopUp={onTopUp}
+          />
         </div>
 
         {showBreakdown && (
@@ -552,6 +479,133 @@ function WalletCard({
         )}
       </CardContent>
     </Card>
+  );
+}
+
+/**
+ * Adding credits is the wallet's primary verb, so it lives on the wallet card.
+ * The amount form is bulky enough to crowd out the balance, so it opens in a
+ * dialog rather than sitting inline.
+ */
+function AddCreditsDialog({
+  billingReady,
+  pending,
+  onTopUp,
+}: {
+  readonly billingReady: boolean;
+  readonly pending: boolean;
+  readonly onTopUp: (amountCredits: number) => Promise<void>;
+}) {
+  const [open, setOpen] = useState(false);
+  const [credits, setCredits] = useState(String(DEFAULT_TOP_UP_CREDITS));
+
+  const amount = Number(credits);
+  const amountValid =
+    Number.isInteger(amount) && amount > 0 && amount <= 10_000_000;
+  const submitDisabled = !billingReady || !amountValid || pending;
+
+  const trigger = (
+    <Button variant="primary" disabled={!billingReady || pending}>
+      <ButtonIcon variant="primary">
+        <Plus className="h-3 w-3" />
+      </ButtonIcon>
+      Add credits
+    </Button>
+  );
+
+  // A disabled trigger swallows pointer events, so the reason has to sit on a
+  // wrapper rather than the button itself.
+  if (!billingReady) {
+    return (
+      <Tooltip>
+        <TooltipTrigger asChild>
+          <span tabIndex={0}>{trigger}</span>
+        </TooltipTrigger>
+        <TooltipContent side="left">
+          Payments aren&apos;t enabled on this deployment yet.
+        </TooltipContent>
+      </Tooltip>
+    );
+  }
+
+  return (
+    <Dialog open={open} onOpenChange={setOpen}>
+      <DialogTrigger asChild>{trigger}</DialogTrigger>
+      <DialogContent className="sm:max-w-[420px]">
+        <DialogHeader>
+          <DialogTitle>Add credits</DialogTitle>
+          <DialogDescription>
+            1 credit = 1 USD. Credits never expire.
+          </DialogDescription>
+        </DialogHeader>
+
+        <div className="space-y-4">
+          <div className="space-y-2">
+            <span className="text-[12px] font-medium">Amount</span>
+            <div className="flex flex-wrap gap-2">
+              {TOP_UP_PRESETS.map((preset) => (
+                <Button
+                  key={preset}
+                  variant={amount === preset ? "secondary" : "outline"}
+                  size="sm"
+                  disabled={pending}
+                  onClick={() => setCredits(String(preset))}
+                >
+                  {formatNumber(preset)}
+                </Button>
+              ))}
+            </div>
+          </div>
+
+          <div className="space-y-2">
+            <label className="text-[12px] font-medium" htmlFor="topup-credits">
+              Or enter an amount
+            </label>
+            <div className="flex items-center gap-3">
+              <Input
+                id="topup-credits"
+                type="number"
+                min={1}
+                max={10_000_000}
+                step={1}
+                value={credits}
+                onChange={(event) => setCredits(event.target.value)}
+                disabled={pending}
+                aria-describedby="topup-total"
+              />
+              <span
+                id="topup-total"
+                className="shrink-0 text-[13px] text-muted-foreground"
+              >
+                {formatUsd(amount)}
+              </span>
+            </div>
+          </div>
+
+          <p className="text-[11px] leading-relaxed text-muted-foreground">
+            We&apos;ll hand you to Stripe to pay, then bring you back here.
+            Credits land once the payment clears.
+          </p>
+        </div>
+
+        <DialogFooter>
+          <Button variant="outline" onClick={() => setOpen(false)}>
+            Cancel
+          </Button>
+          <Button
+            variant="primary"
+            disabled={submitDisabled}
+            isLoading={pending}
+            onClick={() => void onTopUp(amount)}
+          >
+            <ButtonIcon variant="primary">
+              <ExternalLink className="h-3 w-3" />
+            </ButtonIcon>
+            Continue to payment
+          </Button>
+        </DialogFooter>
+      </DialogContent>
+    </Dialog>
   );
 }
 
