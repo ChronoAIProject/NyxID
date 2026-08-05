@@ -670,6 +670,8 @@ mod tests {
             rate_limit_per_second: None,
             rate_limit_burst: None,
             platform: None,
+            purpose: Default::default(),
+            scheduled_write_enabled: false,
         }
     }
 

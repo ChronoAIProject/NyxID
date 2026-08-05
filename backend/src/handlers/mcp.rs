@@ -326,6 +326,7 @@ mod tests {
                 path: "/items/{id}".to_string(),
                 ..Default::default()
             }],
+            durable_endpoint_metadata: Default::default(),
             source: McpToolSource::UserManaged {
                 user_service_id: "user-service-1".to_string(),
                 effective_owner_id: "owner-1".to_string(),

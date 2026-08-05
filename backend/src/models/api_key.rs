@@ -5,6 +5,14 @@ use super::bson_datetime;
 
 pub const COLLECTION_NAME: &str = "api_keys";
 
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize, utoipa::ToSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum ApiKeyPurpose {
+    #[default]
+    General,
+    ScheduledInvocation,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ApiKey {
     #[serde(rename = "_id")]
@@ -66,6 +74,16 @@ pub struct ApiKey {
     /// Callback URL for channel bot relay: the agent receives inbound messages here.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub callback_url: Option<String>,
+
+    /// Security class for the key. Legacy rows default to `general` and never
+    /// gain durable-write authority.
+    #[serde(default)]
+    pub purpose: ApiKeyPurpose,
+
+    /// Fail-closed activation fence for scheduled keys. Provisioning creates
+    /// the key with this false and enables it only after every grant is stored.
+    #[serde(default)]
+    pub scheduled_write_enabled: bool,
 }
 
 fn default_true() -> bool {
@@ -102,6 +120,8 @@ mod tests {
             rate_limit_burst: None,
             platform: None,
             callback_url: None,
+            purpose: ApiKeyPurpose::General,
+            scheduled_write_enabled: false,
         }
     }
 
@@ -148,11 +168,15 @@ mod tests {
         doc.remove("rate_limit_burst");
         doc.remove("platform");
         doc.remove("callback_url");
+        doc.remove("purpose");
+        doc.remove("scheduled_write_enabled");
         let restored: ApiKey = bson::from_document(doc).expect("deserialize");
         assert_eq!(restored.rate_limit_per_second, None);
         assert_eq!(restored.rate_limit_burst, None);
         assert_eq!(restored.platform, None);
         assert_eq!(restored.callback_url, None);
+        assert_eq!(restored.purpose, ApiKeyPurpose::General);
+        assert!(!restored.scheduled_write_enabled);
     }
 
     #[test]

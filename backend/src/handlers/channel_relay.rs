@@ -1098,6 +1098,7 @@ mod tests {
             allowed_node_ids: api_key.allowed_node_ids.clone(),
             api_key_id: Some(api_key.id.clone()),
             api_key_name: Some(api_key.name.clone()),
+            api_key_purpose: api_key.purpose,
             rate_limit_per_second: api_key.rate_limit_per_second,
             rate_limit_burst: api_key.rate_limit_burst,
             ip_address: None,
@@ -1121,6 +1122,7 @@ mod tests {
             allowed_node_ids: vec![],
             api_key_id: Some("key-1".to_string()),
             api_key_name: Some("agent".to_string()),
+            api_key_purpose: crate::models::api_key::ApiKeyPurpose::General,
             rate_limit_per_second: None,
             rate_limit_burst: None,
             ip_address: None,
@@ -1235,6 +1237,8 @@ mod tests {
             rate_limit_burst: None,
             platform: Some("codex".to_string()),
             callback_url: Some("https://agent.example.com/callback".to_string()),
+            purpose: Default::default(),
+            scheduled_write_enabled: false,
         };
 
         let bot = ChannelBot {

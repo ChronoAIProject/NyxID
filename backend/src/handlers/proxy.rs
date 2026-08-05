@@ -16,6 +16,9 @@ use crate::downstream_disconnect::{
     CancelOnDropStream, request_cancellation, until_client_disconnect,
 };
 use crate::errors::{AppError, AppResult};
+use crate::models::api_key::ApiKeyPurpose;
+use crate::models::durable_operation_execution::DurableExecutionStatus;
+use crate::models::durable_operation_grant::DurableReplayPolicy;
 use crate::models::service_account::{COLLECTION_NAME as SERVICE_ACCOUNTS, ServiceAccount};
 use crate::models::service_billing::{BillingMetric, PlatformUsage, ResaleUsage};
 use crate::models::usage_meter::CredentialClass;
@@ -23,10 +26,10 @@ use crate::models::user::{COLLECTION_NAME as USERS, User};
 use crate::mw::auth::{AuthMethod, AuthUser};
 use crate::services::node_ws_manager::{NodeProxyRequest, ProxyResponseType, StreamChunk};
 use crate::services::{
-    approval_service, audit_service, chatgpt_translator, delegation_service, identity_service,
-    llm_usage_service, node_metrics_service, node_routing_service, node_service,
-    notification_service, operation_descriptor, proxy_discovery_service, proxy_service, sse_parser,
-    ws_frame_injector,
+    approval_service, audit_service, chatgpt_translator, delegation_service,
+    durable_operation_grant_service, identity_service, llm_usage_service, node_metrics_service,
+    node_routing_service, node_service, notification_service, operation_descriptor,
+    proxy_discovery_service, proxy_service, sse_parser, ws_frame_injector,
 };
 use crate::telemetry::{TelemetryContext, TelemetryEvent, emit_event};
 
@@ -51,6 +54,15 @@ fn proxy_error_telemetry_fields(err: &AppError) -> (u16, u32) {
         AppError::NodeNotFound(_) => (404, 8000),
         AppError::NodeOffline(_) => (503, 8001),
         AppError::NodeProxyTimeout => (504, 8002),
+        AppError::DurableGrantMissing(_) => (403, 9008),
+        AppError::DurableGrantMismatch(_) => (403, 9009),
+        AppError::DurableGrantExpired => (410, 9010),
+        AppError::DurableGrantRevoked => (403, 9011),
+        AppError::DurableGrantContractDrift => (409, 9012),
+        AppError::DurableGrantQuotaExhausted => (429, 9013),
+        AppError::DurableOperationDuplicate => (409, 9014),
+        AppError::DurableOperationConflict => (409, 9015),
+        AppError::DurableOperationOutcomeUncertain => (409, 9016),
         AppError::NodeCredentialMissing(_) => (502, 8004),
         AppError::WsProxyDownstream(_) => (502, 8005),
         AppError::ClientDisconnected => (499, 8012),
@@ -422,6 +434,99 @@ fn collect_forward_headers_with_prefixes(
             }
         })
         .collect()
+}
+
+fn effective_header_map(headers: Vec<(String, String)>) -> AppResult<axum::http::HeaderMap> {
+    let mut result = axum::http::HeaderMap::new();
+    for (name, value) in headers {
+        let name = axum::http::HeaderName::from_bytes(name.as_bytes()).map_err(|_| {
+            AppError::DurableGrantMismatch(
+                "effective downstream header name is invalid".to_string(),
+            )
+        })?;
+        let value = axum::http::HeaderValue::from_str(&value).map_err(|_| {
+            AppError::DurableGrantMismatch(
+                "effective downstream header value is invalid".to_string(),
+            )
+        })?;
+        result.append(name, value);
+    }
+    Ok(result)
+}
+
+fn strip_durable_idempotency_defaults(
+    headers: &mut Vec<crate::models::default_request_header::DefaultRequestHeader>,
+) {
+    headers.retain(|header| !header.name.eq_ignore_ascii_case("idempotency-key"));
+}
+
+fn single_system_header(
+    headers: &axum::http::HeaderMap,
+    name: &'static str,
+) -> AppResult<Option<String>> {
+    let mut values = headers.get_all(name).iter();
+    let Some(value) = values.next() else {
+        return Ok(None);
+    };
+    if values.next().is_some() {
+        return Err(AppError::DurableGrantMismatch(format!(
+            "{name} must be supplied exactly once"
+        )));
+    }
+    let value = value
+        .to_str()
+        .map_err(|_| AppError::DurableGrantMismatch(format!("{name} must be valid ASCII text")))?;
+    Ok(Some(value.to_string()))
+}
+
+fn caller_bearer_token_for_downstream(
+    headers: &axum::http::HeaderMap,
+    scheduled_invocation: bool,
+) -> Option<String> {
+    if scheduled_invocation {
+        return None;
+    }
+    headers
+        .get("authorization")
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| value.strip_prefix("Bearer "))
+        .map(String::from)
+}
+
+async fn finish_durable_operation(
+    state: &AppState,
+    auth_user: &AuthUser,
+    reservation: &durable_operation_grant_service::DurableExecutionReservation,
+    status: DurableExecutionStatus,
+    response_status: Option<u16>,
+    node_id: Option<&str>,
+    detail: &'static str,
+) {
+    durable_operation_grant_service::mark_terminal(
+        &state.db,
+        reservation,
+        status,
+        response_status,
+        detail,
+    )
+    .await;
+    audit_service::log_for_user(
+        state.db.clone(),
+        auth_user,
+        "durable_operation_terminal",
+        Some(serde_json::json!({
+            "api_key_id": auth_user.api_key_id.as_deref(),
+            "grant_id": &reservation.grant_id,
+            "operation_id": &reservation.operation_id,
+            "endpoint_id": &reservation.endpoint_id,
+            "contract_digest": &reservation.contract_digest,
+            "terminal_outcome": status,
+            "response_status": response_status,
+            "downstream_attempts": 1,
+            "node_id": node_id,
+            "client_audit_binding": &reservation.client_audit_binding,
+        })),
+    );
 }
 
 /// Extract `?_nyxid_via=<user_service_id>` from the request URI.
@@ -973,7 +1078,7 @@ pub(crate) async fn execute_proxy(
     request: Request<Body>,
     resolved_slug: &mut String,
 ) -> AppResult<Response> {
-    execute_proxy_inner(
+    Box::pin(execute_proxy_inner(
         state,
         auth_user,
         service_id,
@@ -983,7 +1088,7 @@ pub(crate) async fn execute_proxy(
         TargetMode::CallerAddressed,
         Vec::new(),
         resolved_slug,
-    )
+    ))
     .await
 }
 
@@ -1028,7 +1133,10 @@ pub(crate) async fn execute_admin_proxy(
     extra_outbound_headers: Vec<(String, String)>,
     resolved_slug: &mut String,
 ) -> AppResult<Response> {
-    execute_proxy_inner(
+    // Keep the very large proxy state machine off caller task stacks. This
+    // wrapper is shared by assistant handlers whose own futures already carry
+    // substantial request state.
+    Box::pin(execute_proxy_inner(
         state,
         auth_user,
         service_id,
@@ -1038,7 +1146,7 @@ pub(crate) async fn execute_admin_proxy(
         TargetMode::AdminManaged,
         extra_outbound_headers,
         resolved_slug,
-    )
+    ))
     .await
 }
 
@@ -1342,7 +1450,7 @@ async fn execute_proxy_inner(
     request: Request<Body>,
     pre_resolved: Option<PreResolved>,
     target_mode: TargetMode,
-    extra_outbound_headers: Vec<(String, String)>,
+    mut extra_outbound_headers: Vec<(String, String)>,
     resolved_slug: &mut String,
 ) -> AppResult<Response> {
     let downstream_cancellation = request_cancellation(&request);
@@ -1390,7 +1498,7 @@ async fn execute_proxy_inner(
     let mut agent_override_applied = false;
     let (
         node_route,
-        target,
+        mut target,
         has_server_credential,
         master_credential,
         resolved_user_service_id,
@@ -1676,14 +1784,48 @@ async fn execute_proxy_inner(
         .query()
         .map(strip_internal_query_params)
         .filter(|q| !q.is_empty());
-    let all_headers = request.headers().clone();
+    let mut all_headers = request.headers().clone();
+    let durable_grant_id = single_system_header(
+        &all_headers,
+        durable_operation_grant_service::DURABLE_GRANT_HEADER,
+    )?;
+    let durable_operation_id = single_system_header(
+        &all_headers,
+        durable_operation_grant_service::OPERATION_ID_HEADER,
+    )?;
+    all_headers.remove(durable_operation_grant_service::DURABLE_GRANT_HEADER);
+    all_headers.remove(durable_operation_grant_service::OPERATION_ID_HEADER);
+    // Durable idempotency is NyxID-owned and derived from operation_id. A
+    // caller value is never trusted or forwarded independently.
+    all_headers.remove("idempotency-key");
+
+    let scheduled_api_key_id = if auth_user.auth_method == AuthMethod::ApiKey
+        && auth_user.api_key_purpose == ApiKeyPurpose::ScheduledInvocation
+    {
+        Some(auth_user.api_key_id.as_deref().ok_or_else(|| {
+            AppError::DurableGrantMismatch("API-key authentication is missing key identity".into())
+        })?)
+    } else {
+        None
+    };
+    if scheduled_api_key_id.is_some() {
+        // Idempotency forwarding is owned exclusively by the durable endpoint
+        // contract. Service defaults cannot create replay semantics that the
+        // selected operation did not authorize.
+        strip_durable_idempotency_defaults(&mut target.catalog_default_headers);
+        strip_durable_idempotency_defaults(&mut target.user_service_default_headers);
+    }
+    if scheduled_api_key_id.is_none()
+        && (durable_grant_id.is_some() || durable_operation_id.is_some())
+    {
+        return Err(AppError::DurableGrantMismatch(
+            "durable authorization headers require a scheduled_invocation API key".to_string(),
+        ));
+    }
 
     // Extract the caller's raw Bearer token for nyxid_token passthrough.
-    let caller_token = all_headers
-        .get("authorization")
-        .and_then(|v| v.to_str().ok())
-        .and_then(|s| s.strip_prefix("Bearer "))
-        .map(String::from);
+    let caller_token =
+        caller_bearer_token_for_downstream(&all_headers, scheduled_api_key_id.is_some());
 
     // Check for WebSocket upgrade BEFORE consuming the request body.
     let is_ws = is_ws_candidate;
@@ -1750,21 +1892,41 @@ async fn execute_proxy_inner(
     )
     .await?;
 
+    let durable_candidate = scheduled_api_key_id.is_some();
     let enforce_approval = match &approval_outcome {
         approval_service::ApprovalOutcome::Allowed { required } => {
-            *required && auth_user.auth_method != crate::mw::auth::AuthMethod::Session
+            *required
+                && auth_user.auth_method != crate::mw::auth::AuthMethod::Session
+                && !durable_candidate
         }
         approval_service::ApprovalOutcome::Denied => false,
-        approval_service::ApprovalOutcome::NeedsApproval(_) => true,
+        approval_service::ApprovalOutcome::NeedsApproval(_) => !durable_candidate,
     };
 
     match approval_outcome {
         approval_service::ApprovalOutcome::Allowed { .. } => {}
         approval_service::ApprovalOutcome::Denied => {
+            if let Some(api_key_id) = scheduled_api_key_id {
+                audit_service::log_for_user(
+                    state.db.clone(),
+                    auth_user,
+                    "durable_operation_denied",
+                    Some(serde_json::json!({
+                        "api_key_id": api_key_id,
+                        "grant_id": durable_grant_id.as_deref(),
+                        "operation_id": durable_operation_id.as_deref(),
+                        "user_service_id": resolved_user_service_id.as_deref(),
+                        "decision": "denied",
+                        "downstream_attempts": 0,
+                        "reason": "approval_policy_deny",
+                    })),
+                );
+            }
             return Err(AppError::Forbidden(
                 "Operation denied by approval policy".to_string(),
             ));
         }
+        approval_service::ApprovalOutcome::NeedsApproval(_) if durable_candidate => {}
         approval_service::ApprovalOutcome::NeedsApproval(pending) => {
             let notify_user_ids = approval_service::approval_notification_recipients(
                 &state.db,
@@ -1824,6 +1986,7 @@ async fn execute_proxy_inner(
         Some(body_bytes)
     };
     let body = force_stream_usage_for_service(&target.service.slug, path, body);
+    let durable_authorization_body = body.clone().unwrap_or_default();
     let request_body_len = body.as_ref().map(|b| b.len() as i64).unwrap_or(0);
 
     // === Delegated Credentials ===
@@ -1999,6 +2162,138 @@ async fn execute_proxy_inner(
     }
 
     let metered = state.billing.open(&billing_ctx).await?;
+
+    let durable_reservation = if let Some(api_key_id) = scheduled_api_key_id {
+        let grant_id = match durable_grant_id.as_deref() {
+            Some(grant_id) => grant_id,
+            None => {
+                let error = AppError::DurableGrantMissing(
+                    "X-NyxID-Durable-Grant-Id is required for scheduled_invocation keys"
+                        .to_string(),
+                );
+                audit_service::log_for_user(
+                    state.db.clone(),
+                    auth_user,
+                    "durable_operation_denied",
+                    Some(serde_json::json!({
+                        "api_key_id": api_key_id,
+                        "grant_id": null,
+                        "operation_id": durable_operation_id.as_deref(),
+                        "user_service_id": resolved_user_service_id.as_deref(),
+                        "decision": "denied",
+                        "downstream_attempts": 0,
+                        "reason": error.to_string(),
+                    })),
+                );
+                return Err(error);
+            }
+        };
+        let operation_id = match durable_operation_id.as_deref() {
+            Some(operation_id) => operation_id,
+            None => {
+                let error = AppError::DurableGrantMissing(
+                    "X-NyxID-Operation-Id is required for scheduled_invocation keys".to_string(),
+                );
+                audit_service::log_for_user(
+                    state.db.clone(),
+                    auth_user,
+                    "durable_operation_denied",
+                    Some(serde_json::json!({
+                        "api_key_id": api_key_id,
+                        "grant_id": grant_id,
+                        "operation_id": null,
+                        "user_service_id": resolved_user_service_id.as_deref(),
+                        "decision": "denied",
+                        "downstream_attempts": 0,
+                        "reason": error.to_string(),
+                    })),
+                );
+                return Err(error);
+            }
+        };
+        let user_service_id = resolved_user_service_id.as_deref().ok_or_else(|| {
+            AppError::DurableGrantMismatch(
+                "scheduled_invocation keys require an exact UserService route".to_string(),
+            )
+        })?;
+        let mut authorization_delegated = delegated.clone();
+        proxy_service::extend_with_path_credential(&mut authorization_delegated, &target);
+        let prepared_authorization = proxy_service::prepare_delegated_request(
+            path,
+            query.as_deref(),
+            &authorization_delegated,
+        )?;
+        let effective_headers =
+            effective_header_map(proxy_service::build_effective_outbound_headers(
+                &target,
+                node_forward_headers.clone(),
+                &identity_headers,
+                &prepared_authorization.delegated_headers,
+                &extra_outbound_headers,
+            ))?;
+        let reservation = durable_operation_grant_service::authorize_and_reserve(
+            &state.db,
+            &state.node_ws_manager,
+            &user_id_str,
+            api_key_id,
+            user_service_id,
+            &method_str,
+            path,
+            query.as_deref(),
+            &effective_headers,
+            durable_authorization_body.as_ref(),
+            grant_id,
+            operation_id,
+            is_ws,
+        )
+        .await;
+        match reservation {
+            Ok(reservation) => {
+                audit_service::log_for_user(
+                    state.db.clone(),
+                    auth_user,
+                    "durable_operation_admitted",
+                    Some(serde_json::json!({
+                        "api_key_id": api_key_id,
+                        "grant_id": &reservation.grant_id,
+                        "operation_id": &reservation.operation_id,
+                        "user_service_id": user_service_id,
+                        "endpoint_id": &reservation.endpoint_id,
+                        "contract_digest": &reservation.contract_digest,
+                        "decision": "admitted",
+                        "downstream_attempts": 0,
+                        "client_audit_binding": &reservation.client_audit_binding,
+                    })),
+                );
+                if reservation.replay_policy == DurableReplayPolicy::DownstreamIdempotencyKey {
+                    extra_outbound_headers.push((
+                        "Idempotency-Key".to_string(),
+                        reservation.operation_id.clone(),
+                    ));
+                }
+                Some(reservation)
+            }
+            Err(error) => {
+                audit_service::log_for_user(
+                    state.db.clone(),
+                    auth_user,
+                    "durable_operation_denied",
+                    Some(serde_json::json!({
+                        "api_key_id": api_key_id,
+                        "grant_id": grant_id,
+                        "operation_id": operation_id,
+                        "user_service_id": user_service_id,
+                        "decision": "denied",
+                        "downstream_attempts": 0,
+                        "reason": error.to_string(),
+                    })),
+                );
+                return Err(error);
+            }
+        }
+    } else {
+        None
+    };
     let collect_realtime_llm_usage =
         websocket_realtime_usage_enabled(catalog_service_slug.as_deref(), &metered);
 
@@ -2080,68 +2375,20 @@ async fn execute_proxy_inner(
             format!("/{}", prepared.path)
         };
 
-        let mut enriched_headers = node_forward_headers;
-        enriched_headers.extend(identity_headers.iter().cloned());
-
-        // Override User-Agent if the service specifies a custom one.
-        // By default (None), the client's User-Agent is forwarded as-is.
-        // NyxID#514: when neither caller nor service supplies a UA,
-        // inject `NyxID-Proxy/{version}` as a benign fallback so
-        // UA-required APIs (GitHub etc.) don't 403 silently.
-        if let Some(ref ua) = target.service.custom_user_agent {
-            enriched_headers.retain(|(name, _)| !name.eq_ignore_ascii_case("user-agent"));
-            enriched_headers.push(("user-agent".to_string(), ua.clone()));
-        } else if !enriched_headers
-            .iter()
-            .any(|(name, _)| name.eq_ignore_ascii_case("user-agent"))
-        {
-            enriched_headers.push((
-                "user-agent".to_string(),
-                proxy_service::DEFAULT_PROXY_USER_AGENT.to_string(),
-            ));
-        }
-
+        let mut base_headers = node_forward_headers;
         // Forward the caller's NyxID access token when the service is configured for it.
         if target.service.forward_access_token
             && let Some(ref token) = caller_token
         {
-            enriched_headers.push(("authorization".to_string(), format!("Bearer {token}")));
+            base_headers.push(("authorization".to_string(), format!("Bearer {token}")));
         }
-
-        // Merge service-level default headers (NyxID#356) into the node
-        // request. The node agent applies these alongside the caller /
-        // identity headers when it builds the outbound request on the
-        // user's machine. Merge semantics match the direct HTTP path in
-        // `proxy_service::forward_request`.
-        //
-        // Delegated provider credentials (e.g. Anthropic `x-api-key`,
-        // Google `x-goog-api-key`) are appended AFTER this merge, so a
-        // colliding non-overridable default cannot replace the real
-        // downstream token — see the equivalent block in `forward_request`.
-        enriched_headers = crate::models::default_request_header::merge_into_header_list(
-            enriched_headers,
-            &[
-                target.catalog_default_headers.as_slice(),
-                target.user_service_default_headers.as_slice(),
-            ],
+        let enriched_headers = proxy_service::build_effective_outbound_headers(
+            &target,
+            base_headers,
+            &identity_headers,
+            &prepared.delegated_headers,
+            &extra_outbound_headers,
         );
-
-        // Strip any header whose name will collide with what the node
-        // agent appends locally when it applies `auth_method`, plus any
-        // delegated-credential names we are about to re-append below.
-        // Without this, a catalog/user default called `x-api-key`
-        // (or any other `auth_key_name` / delegated name) would ride
-        // along on the frame and the node would append the real
-        // credential on top — the wire would then carry BOTH values.
-        if let Some(cred_name) = proxy_service::credential_header_name(&target) {
-            enriched_headers.retain(|(n, _)| !n.eq_ignore_ascii_case(&cred_name));
-        }
-        for (delegated_name, _) in &prepared.delegated_headers {
-            enriched_headers.retain(|(n, _)| !n.eq_ignore_ascii_case(delegated_name));
-        }
-        // Re-append delegated headers last so they win over any
-        // colliding default.
-        enriched_headers.extend(prepared.delegated_headers.iter().cloned());
 
         // Build base node request (will be cloned for failover retries)
         let node_request = NodeProxyRequest {
@@ -2191,14 +2438,42 @@ async fn execute_proxy_inner(
                         last_error = Some(AppError::NodeOffline(message));
                         continue;
                     }
-                    Err(error) => return Err(error),
+                    Err(error) => {
+                        if let Some(reservation) = durable_reservation.as_ref() {
+                            durable_operation_grant_service::mark_pre_dispatch_rejected(
+                                &state.db,
+                                reservation,
+                                "node signing preparation failed before dispatch",
+                            )
+                            .await;
+                        }
+                        return Err(error);
+                    }
                 }
             } else {
                 None
             };
 
             let start = std::time::Instant::now();
-            state.billing.mark_forwarded(&metered).await?;
+            if let Err(error) = state.billing.mark_forwarded(&metered).await {
+                if let Some(reservation) = durable_reservation.as_ref() {
+                    durable_operation_grant_service::mark_pre_dispatch_rejected(
+                        &state.db,
+                        reservation,
+                        "billing admission failed before dispatch",
+                    )
+                    .await;
+                }
+                return Err(error);
+            }
+            if let Some(reservation) = durable_reservation.as_ref() {
+                durable_operation_grant_service::mark_dispatched(
+                    &state.db,
+                    reservation,
+                    Some(node_id),
+                )
+                .await?;
+            }
             let result = state
                 .node_ws_manager
                 .send_proxy_request(
@@ -2220,7 +2495,8 @@ async fn execute_proxy_inner(
                             node_metrics_service::record_success(db_clone, nid, latency_ms).await;
                     });
 
-                    let mut response = match proxy_response {
+                    let response_result: AppResult<Response> = async {
+                        let response = match proxy_response {
                         ProxyResponseType::Complete(node_response) => {
                             let response_len = node_response.body.len() as i64;
                             let request_len = request_body_len;
@@ -2364,6 +2640,28 @@ async fn execute_proxy_inner(
                                     AppError::Internal(format!("Failed to build response: {e}"))
                                 })?
                         }
+                        };
+                        Ok(response)
+                    }
+                    .await;
+                    let mut response = match response_result {
+                        Ok(response) => response,
+                        Err(error) => {
+                            if let Some(reservation) = durable_reservation.as_ref() {
+                                finish_durable_operation(
+                                    state,
+                                    auth_user,
+                                    reservation,
+                                    DurableExecutionStatus::OutcomeUncertain,
+                                    None,
+                                    Some(node_id),
+                                    "node response failed after dispatch",
+                                )
+                                .await;
+                                return Err(AppError::DurableOperationOutcomeUncertain);
+                            }
+                            return Err(error);
+                        }
                     };
 
                     let proxy_actor_user_id = auth_user.proxy_resolution_user_id();
@@ -2389,6 +2687,25 @@ async fn execute_proxy_inner(
                         target.connection_id.as_deref(),
                     );
 
+                    if let Some(reservation) = durable_reservation.as_ref() {
+                        let response_status = response.status().as_u16();
+                        let terminal_status = if response.status().is_success() {
+                            DurableExecutionStatus::Completed
+                        } else {
+                            DurableExecutionStatus::Failed
+                        };
+                        finish_durable_operation(
+                            state,
+                            auth_user,
+                            reservation,
+                            terminal_status,
+                            Some(response_status),
+                            Some(node_id),
+                            "downstream response received",
+                        )
+                        .await;
+                    }
+
                     return Ok(response);
                 }
                 Err(err @ AppError::NodeCredentialMissing(_)) => {
@@ -2411,6 +2728,19 @@ async fn execute_proxy_inner(
                         let _ = node_metrics_service::record_error(db_clone, nid, err_msg).await;
                     });
 
+                    if let Some(reservation) = durable_reservation.as_ref() {
+                        finish_durable_operation(
+                            state,
+                            auth_user,
+                            reservation,
+                            DurableExecutionStatus::Failed,
+                            None,
+                            Some(node_id),
+                            "node rejected the request before downstream credential use",
+                        )
+                        .await;
+                        return Err(err);
+                    }
                     last_error = Some(err);
                     continue;
                 }
@@ -2425,10 +2755,38 @@ async fn execute_proxy_inner(
                         let _ = node_metrics_service::record_error(db_clone, nid, err_msg).await;
                     });
 
+                    if let Some(reservation) = durable_reservation.as_ref() {
+                        finish_durable_operation(
+                            state,
+                            auth_user,
+                            reservation,
+                            DurableExecutionStatus::OutcomeUncertain,
+                            None,
+                            Some(node_id),
+                            "node transport failed after dispatch",
+                        )
+                        .await;
+                        return Err(AppError::DurableOperationOutcomeUncertain);
+                    }
                     last_error = Some(AppError::NodeOffline(format!("Node {node_id} failed")));
                     continue;
                 }
-                Err(e) => return Err(e),
+                Err(e) => {
+                    if let Some(reservation) = durable_reservation.as_ref() {
+                        finish_durable_operation(
+                            state,
+                            auth_user,
+                            reservation,
+                            DurableExecutionStatus::OutcomeUncertain,
+                            None,
+                            Some(node_id),
+                            "node request failed after dispatch",
+                        )
+                        .await;
+                        return Err(AppError::DurableOperationOutcomeUncertain);
+                    }
+                    return Err(e);
+                }
             }
         }
 
@@ -2442,6 +2800,14 @@ async fn execute_proxy_inner(
         //   * No server-side credential is available, so direct routing
         //     cannot succeed anyway.
         if node_routing_required || !has_server_credential {
+            if let Some(reservation) = durable_reservation.as_ref() {
+                durable_operation_grant_service::mark_pre_dispatch_rejected(
+                    &state.db,
+                    reservation,
+                    "no dispatchable node accepted the request",
+                )
+                .await;
+            }
             audit_service::log_for_user(
                 state.db.clone(),
                 auth_user,
@@ -2549,8 +2915,21 @@ async fn execute_proxy_inner(
             model.clone(),
         );
 
-        state.billing.mark_forwarded(&metered).await?;
-        let mut response = until_client_disconnect(
+        if let Err(error) = state.billing.mark_forwarded(&metered).await {
+            if let Some(reservation) = durable_reservation.as_ref() {
+                durable_operation_grant_service::mark_pre_dispatch_rejected(
+                    &state.db,
+                    reservation,
+                    "billing admission failed before dispatch",
+                )
+                .await;
+            }
+            return Err(error);
+        }
+        if let Some(reservation) = durable_reservation.as_ref() {
+            durable_operation_grant_service::mark_dispatched(&state.db, reservation, None).await?;
+        }
+        let response_result = until_client_disconnect(
             &downstream_cancellation,
             chatgpt_translator::send_to_chatgpt(
                 &translated.body,
@@ -2572,8 +2951,42 @@ async fn execute_proxy_inner(
                 billing_egress_permit,
             ),
         )
-        .await
-        .map_err(|_| proxy_client_disconnected(service_id))??;
+        .await;
+        let mut response = match response_result {
+            Ok(Ok(response)) => response,
+            Ok(Err(error)) => {
+                if let Some(reservation) = durable_reservation.as_ref() {
+                    finish_durable_operation(
+                        state,
+                        auth_user,
+                        reservation,
+                        DurableExecutionStatus::OutcomeUncertain,
+                        None,
+                        None,
+                        "direct transport failed after dispatch",
+                    )
+                    .await;
+                    return Err(AppError::DurableOperationOutcomeUncertain);
+                }
+                return Err(error);
+            }
+            Err(_) => {
+                if let Some(reservation) = durable_reservation.as_ref() {
+                    finish_durable_operation(
+                        state,
+                        auth_user,
+                        reservation,
+                        DurableExecutionStatus::OutcomeUncertain,
+                        None,
+                        None,
+                        "client disconnected after dispatch",
+                    )
+                    .await;
+                    return Err(AppError::DurableOperationOutcomeUncertain);
+                }
+                return Err(proxy_client_disconnected(service_id));
+            }
+        };
 
         let status = response.status();
 
@@ -2598,12 +3011,42 @@ async fn execute_proxy_inner(
             target.connection_id.as_deref(),
         );
 
+        if let Some(reservation) = durable_reservation.as_ref() {
+            finish_durable_operation(
+                state,
+                auth_user,
+                reservation,
+                if status.is_success() {
+                    DurableExecutionStatus::Completed
+                } else {
+                    DurableExecutionStatus::Failed
+                },
+                Some(status.as_u16()),
+                None,
+                "downstream response received",
+            )
+            .await;
+        }
+
         return Ok(response);
     }
 
     // Reuse the shared reqwest::Client from AppState for connection pooling.
-    state.billing.mark_forwarded(&metered).await?;
-    let downstream_response = until_client_disconnect(
+    if let Err(error) = state.billing.mark_forwarded(&metered).await {
+        if let Some(reservation) = durable_reservation.as_ref() {
+            durable_operation_grant_service::mark_pre_dispatch_rejected(
+                &state.db,
+                reservation,
+                "billing admission failed before dispatch",
+            )
+            .await;
+        }
+        return Err(error);
+    }
+    if let Some(reservation) = durable_reservation.as_ref() {
+        durable_operation_grant_service::mark_dispatched(&state.db, reservation, None).await?;
+    }
+    let downstream_result = until_client_disconnect(
         &downstream_cancellation,
         proxy_service::forward_request_with_extra_outbound_headers(
             &state.http_client,
@@ -2622,12 +3065,63 @@ async fn execute_proxy_inner(
             billing_egress_permit,
         ),
     )
-    .await
-    .map_err(|_| proxy_client_disconnected(service_id))??;
+    .await;
+    let downstream_response = match downstream_result {
+        Ok(Ok(response)) => response,
+        Ok(Err(error)) => {
+            if let Some(reservation) = durable_reservation.as_ref() {
+                finish_durable_operation(
+                    state,
+                    auth_user,
+                    reservation,
+                    DurableExecutionStatus::OutcomeUncertain,
+                    None,
+                    None,
+                    "direct transport failed after dispatch",
+                )
+                .await;
+                return Err(AppError::DurableOperationOutcomeUncertain);
+            }
+            return Err(error);
+        }
+        Err(_) => {
+            if let Some(reservation) = durable_reservation.as_ref() {
+                finish_durable_operation(
+                    state,
+                    auth_user,
+                    reservation,
+                    DurableExecutionStatus::OutcomeUncertain,
+                    None,
+                    None,
+                    "client disconnected after dispatch",
+                )
+                .await;
+                return Err(AppError::DurableOperationOutcomeUncertain);
+            }
+            return Err(proxy_client_disconnected(service_id));
+        }
+    };
 
     // Convert reqwest Response back to axum Response
     let status = StatusCode::from_u16(downstream_response.status().as_u16())
         .unwrap_or(StatusCode::BAD_GATEWAY);
+
+    if let Some(reservation) = durable_reservation.as_ref() {
+        finish_durable_operation(
+            state,
+            auth_user,
+            reservation,
+            if status.is_success() {
+                DurableExecutionStatus::Completed
+            } else {
+                DurableExecutionStatus::Failed
+            },
+            Some(status.as_u16()),
+            None,
+            "downstream response received",
+        )
+        .await;
+    }
 
     // Same exact, case-insensitive media-type test the response-header
     // middleware uses, so `content-length` stripping and SSE usage
@@ -4744,11 +5238,12 @@ mod tests {
     use super::{
         ALLOWED_FORWARD_HEADER_PREFIXES, ALLOWED_FORWARD_HEADERS, ALLOWED_WS_FORWARD_HEADERS,
         ConnectionUsageStats, WsPassthroughGuard, add_websocket_usage_provenance,
-        apply_agent_attribution_headers, auth_kind_label, collect_forward_headers_with_prefixes,
-        compose_pre_resolved_node_ids, enforce_node_route_scope, final_credential_class,
-        is_chat_completions_proxy_path, is_codex_transport_path, is_ws_upgrade_request,
-        should_enforce_runtime_approval, validate_range_header, websocket_realtime_usage_enabled,
-        websocket_resale_usage,
+        apply_agent_attribution_headers, auth_kind_label, caller_bearer_token_for_downstream,
+        collect_forward_headers_with_prefixes, compose_pre_resolved_node_ids,
+        enforce_node_route_scope, final_credential_class, is_chat_completions_proxy_path,
+        is_codex_transport_path, is_ws_upgrade_request, should_enforce_runtime_approval,
+        single_system_header, strip_durable_idempotency_defaults, validate_range_header,
+        websocket_realtime_usage_enabled, websocket_resale_usage,
     };
     use crate::models::service_billing::{BillingMetric, ServiceBilling};
     use crate::models::usage_meter::CredentialClass;
@@ -4771,6 +5266,64 @@ mod tests {
     use tower::ServiceExt;
 
     // ---- validate_range_header tests ----
+
+    #[test]
+    fn durable_system_headers_are_never_caller_forwarded() {
+        let mut headers = axum::http::HeaderMap::new();
+        headers.insert("x-nyxid-durable-grant-id", "grant-1".parse().unwrap());
+        headers.insert("x-nyxid-operation-id", "operation-1".parse().unwrap());
+        headers.insert("content-type", "application/json".parse().unwrap());
+
+        let forwarded = collect_forward_headers_with_prefixes(
+            &headers,
+            ALLOWED_FORWARD_HEADERS,
+            ALLOWED_FORWARD_HEADER_PREFIXES,
+        );
+        assert_eq!(
+            forwarded,
+            vec![("content-type".to_string(), "application/json".to_string())]
+        );
+    }
+
+    #[test]
+    fn durable_system_headers_must_be_single_valued() {
+        let mut headers = axum::http::HeaderMap::new();
+        headers.append("x-nyxid-operation-id", "one".parse().unwrap());
+        headers.append("x-nyxid-operation-id", "two".parse().unwrap());
+        assert!(single_system_header(&headers, "x-nyxid-operation-id").is_err());
+    }
+
+    #[test]
+    fn scheduled_bearer_credential_is_never_forwarded_as_a_downstream_access_token() {
+        let mut headers = axum::http::HeaderMap::new();
+        headers.insert("authorization", "Bearer nyxid_ag_example".parse().unwrap());
+        assert_eq!(
+            caller_bearer_token_for_downstream(&headers, false).as_deref(),
+            Some("nyxid_ag_example")
+        );
+        assert_eq!(caller_bearer_token_for_downstream(&headers, true), None);
+    }
+
+    #[test]
+    fn scheduled_requests_strip_default_idempotency_headers() {
+        let mut headers = vec![
+            crate::models::default_request_header::DefaultRequestHeader {
+                name: "Idempotency-Key".to_string(),
+                value: "catalog-default".to_string(),
+                overridable: false,
+                sensitive: false,
+            },
+            crate::models::default_request_header::DefaultRequestHeader {
+                name: "X-Amz-Target".to_string(),
+                value: "Service.Write".to_string(),
+                overridable: false,
+                sensitive: false,
+            },
+        ];
+        strip_durable_idempotency_defaults(&mut headers);
+        assert_eq!(headers.len(), 1);
+        assert_eq!(headers[0].name, "X-Amz-Target");
+    }
 
     #[test]
     fn auth_kind_label_covers_every_method() {
@@ -7078,6 +7631,7 @@ mod proxy_resolution_integration_tests {
             allowed_node_ids: vec![],
             api_key_id: None,
             api_key_name: None,
+            api_key_purpose: crate::models::api_key::ApiKeyPurpose::General,
             rate_limit_per_second: None,
             rate_limit_burst: None,
             ip_address: None,
@@ -7101,6 +7655,7 @@ mod proxy_resolution_integration_tests {
             allowed_node_ids: vec![],
             api_key_id: None,
             api_key_name: None,
+            api_key_purpose: crate::models::api_key::ApiKeyPurpose::General,
             rate_limit_per_second: None,
             rate_limit_burst: None,
             ip_address: None,
@@ -7849,6 +8404,7 @@ mod proxy_resolution_integration_tests {
                 callback_url: None,
                 target_org_id: None,
                 scope_plan_digest: None,
+                selected_operations: Vec::new(),
             }),
         )
         .await

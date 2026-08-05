@@ -1382,6 +1382,62 @@ pub enum ApiKeyCommands {
         #[command(flatten)]
         auth: AuthArgs,
     },
+    /// Preview an exact v2 scope plan for scheduled durable writes
+    DurablePlan {
+        /// JSON file containing the scope-plan request, including
+        /// selected_operations and key_expires_at
+        #[arg(long, value_name = "FILE")]
+        file: PathBuf,
+        #[command(flatten)]
+        auth: AuthArgs,
+    },
+    /// Provision a scheduled-invocation key and its durable grants
+    DurableCreate {
+        /// JSON file containing the confirmed create request, including the
+        /// v2 scope_plan_digest and the same selected_operations
+        #[arg(long, value_name = "FILE")]
+        file: PathBuf,
+        /// Confirm provisioning without an interactive prompt
+        #[arg(long)]
+        yes: bool,
+        #[command(flatten)]
+        auth: AuthArgs,
+    },
+    /// List durable grants for a scheduled-invocation key
+    DurableGrants {
+        /// Scheduled API key ID
+        id: String,
+        /// Include revoked grant receipts
+        #[arg(long)]
+        include_revoked: bool,
+        #[command(flatten)]
+        auth: AuthArgs,
+    },
+    /// Revoke one durable grant immediately
+    DurableRevoke {
+        /// Scheduled API key ID
+        id: String,
+        /// Durable grant ID
+        grant_id: String,
+        /// Confirm revocation without an interactive prompt
+        #[arg(long)]
+        yes: bool,
+        #[command(flatten)]
+        auth: AuthArgs,
+    },
+    /// Replace active grants from a freshly confirmed v2 scope plan
+    DurableReauthorize {
+        /// Scheduled API key ID
+        id: String,
+        /// JSON file containing selected_operations and scope_plan_digest
+        #[arg(long, value_name = "FILE")]
+        file: PathBuf,
+        /// Confirm replacement without an interactive prompt
+        #[arg(long)]
+        yes: bool,
+        #[command(flatten)]
+        auth: AuthArgs,
+    },
 }
 
 // ---- Org ----

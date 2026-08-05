@@ -6,7 +6,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::AppState;
 use crate::errors::{AppError, AppResult};
-use crate::models::service_endpoint::OperationResponseContract;
+use crate::models::service_endpoint::{EndpointRisk, OperationResponseContract};
 use crate::mw::auth::AuthUser;
 use crate::services::service_endpoint_service::{
     EndpointInput, EndpointUpdate, validate_request_content_type, validate_response_contract,
@@ -29,6 +29,8 @@ pub struct CreateEndpointRequest {
     pub request_body_required: Option<bool>,
     pub response_description: Option<String>,
     pub response: Option<OperationResponseContract>,
+    pub risk: Option<EndpointRisk>,
+    pub supports_idempotency_key: Option<bool>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -43,6 +45,8 @@ pub struct UpdateEndpointRequest {
     pub request_body_required: Option<bool>,
     pub response_description: Option<Option<String>>,
     pub response: Option<OperationResponseContract>,
+    pub risk: Option<Option<EndpointRisk>>,
+    pub supports_idempotency_key: Option<bool>,
     pub is_active: Option<bool>,
 }
 
@@ -60,6 +64,8 @@ pub struct EndpointResponse {
     pub request_body_required: bool,
     pub response_description: Option<String>,
     pub response: OperationResponseContract,
+    pub risk: Option<EndpointRisk>,
+    pub supports_idempotency_key: bool,
     pub is_active: bool,
     pub created_at: String,
     pub updated_at: String,
@@ -150,6 +156,8 @@ fn endpoint_to_response(e: crate::models::service_endpoint::ServiceEndpoint) -> 
         request_body_required,
         response_description: e.response_description,
         response: e.response,
+        risk: e.risk,
+        supports_idempotency_key: e.supports_idempotency_key,
         is_active: e.is_active,
         created_at: e.created_at.to_rfc3339(),
         updated_at: e.updated_at.to_rfc3339(),
@@ -212,6 +220,8 @@ pub async fn create_endpoint(
         request_content_type: body.request_content_type,
         response_description: body.response_description,
         response: body.response.unwrap_or_default(),
+        risk: body.risk,
+        supports_idempotency_key: body.supports_idempotency_key.unwrap_or(false),
     };
 
     let endpoint = service_endpoint_service::create_endpoint(&state.db, &service_id, input).await?;
@@ -266,6 +276,8 @@ pub async fn update_endpoint(
         request_body_required: body.request_body_required,
         response_description: body.response_description,
         response: body.response,
+        risk: body.risk,
+        supports_idempotency_key: body.supports_idempotency_key,
         is_active: body.is_active,
     };
 
@@ -346,6 +358,8 @@ pub async fn discover_endpoints(
             request_body_required: p.request_body_required,
             response_description: None,
             response: p.response,
+            risk: p.risk,
+            supports_idempotency_key: p.supports_idempotency_key,
         })
         .collect();
 
@@ -423,6 +437,8 @@ mod tests {
             request_body_required: true,
             response_description: None,
             response: Default::default(),
+            risk: None,
+            supports_idempotency_key: false,
             is_active: true,
             created_at: Utc::now(),
             updated_at: Utc::now(),
