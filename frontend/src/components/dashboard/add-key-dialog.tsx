@@ -63,6 +63,8 @@ import { useOAuthPopupStore } from "@/stores/oauth-popup-store";
 import { useOAuthPopupReceiver } from "@/hooks/use-oauth-popup";
 import type { OAuthFlowKind } from "@/types/oauth-popup";
 
+const POPUP_CLOSED_POLL_MS = 1_000;
+
 type WizardStep =
   | "catalog"
   | "routing"
@@ -1518,10 +1520,23 @@ function OAuthStep({
   // provider callback lands. Same shape DeviceCodeStep already uses.
   const [authorizationUrl, setAuthorizationUrl] = useState<string | null>(null);
   const [pendingKeyId, setPendingKeyId] = useState<string | null>(null);
+  const [previousAuthorizationAt, setPreviousAuthorizationAt] = useState<
+    string | null | undefined
+  >(undefined);
+  const [popupMayBeClosed, setPopupMayBeClosed] = useState(false);
   const authorizing = authorizationUrl !== null;
-  const pendingKey = useKeyAuthorizationStatus(pendingKeyId, authorizing);
+  const pendingKey = useKeyAuthorizationStatus(
+    pendingKeyId,
+    authorizing,
+    previousAuthorizationAt,
+  );
   const authorizationStatus = pendingKey.data?.status;
-  const authorized = authorizationStatus === KEY_AUTH_ACTIVE;
+  const authorizationAdvanced =
+    previousAuthorizationAt === undefined ||
+    (pendingKey.data?.last_authorized_at != null &&
+      pendingKey.data.last_authorized_at !== previousAuthorizationAt);
+  const authorized =
+    authorizationStatus === KEY_AUTH_ACTIVE && authorizationAdvanced;
   const authorizationFailed = authorizationStatus === KEY_AUTH_FAILED;
   const popupRef = useRef<OAuthPopupHandle | null>(null);
   const launchIdRef = useRef<string | null>(null);
@@ -1610,6 +1625,30 @@ function OAuthStep({
     };
   }, []);
 
+  useEffect(() => {
+    if (!authorizing || launch !== "popup" || !popupRef.current) return;
+    const timer = window.setInterval(() => {
+      if (popupRef.current?.isClosed()) {
+        setPopupMayBeClosed(true);
+        window.clearInterval(timer);
+      }
+    }, POPUP_CLOSED_POLL_MS);
+    return () => window.clearInterval(timer);
+  }, [authorizing, launch]);
+
+  const startOverAfterClosedHint = useCallback(() => {
+    const launchId = launchIdRef.current;
+    popupRef.current?.close();
+    popupRef.current = null;
+    launchIdRef.current = null;
+    setActiveLaunchId(null);
+    if (launchId) useOAuthPopupStore.getState().end(launchId);
+    setPopupMayBeClosed(false);
+    setAuthorizationUrl(null);
+    setPendingKeyId(null);
+    setPreviousAuthorizationAt(undefined);
+  }, []);
+
   async function handleConnect() {
     const popup = launch === "popup" ? openOAuthPopup() : null;
     if (!catalogEntry.provider_config_id) {
@@ -1618,6 +1657,7 @@ function OAuthStep({
     }
     const generation = generationRef.current + 1;
     generationRef.current = generation;
+    setPopupMayBeClosed(false);
     if (popup) {
       const began = useOAuthPopupStore.getState().begin({
         launchId: popup.launchId,
@@ -1672,6 +1712,9 @@ function OAuthStep({
       });
       if (generationRef.current !== generation) return;
       setPendingKeyId(key.id);
+      setPreviousAuthorizationAt(
+        reconnectMode ? (key.last_authorized_at ?? null) : undefined,
+      );
       setAuthorizationUrl(response.authorization_url);
       // The handoff to the provider is the point of no return for this
       // dialog's callbacks: from here the user may never come back to it.
@@ -1715,6 +1758,7 @@ function OAuthStep({
       launchIdRef.current = null;
       setActiveLaunchId(null);
       setPendingKeyId(null);
+      setPreviousAuthorizationAt(undefined);
       setAuthorizationUrl(null);
       await cleanupPendingAuthKey(key, { protectExistingKey: reconnectMode });
       if (!reconnectMode) {
@@ -1764,6 +1808,14 @@ function OAuthStep({
                 Authorization was denied or expired.
               </span>
             </>
+          ) : popupMayBeClosed ? (
+            <>
+              <AlertCircle className="h-3.5 w-3.5 shrink-0 text-warning" />
+              <span className="text-foreground">
+                The provider window may have closed. If it is still open,
+                finish there; otherwise start again.
+              </span>
+            </>
           ) : (
             <>
               <Loader2 className="h-3.5 w-3.5 shrink-0 animate-spin text-text-tertiary" />
@@ -1795,11 +1847,22 @@ function OAuthStep({
             onClick={() => {
               setAuthorizationUrl(null);
               setPendingKeyId(null);
+              setPreviousAuthorizationAt(undefined);
             }}
           >
             Try again
           </Button>
         )}
+
+        {popupMayBeClosed && !authorized && !authorizationFailed ? (
+          <Button
+            variant="outline"
+            className="w-full"
+            onClick={startOverAfterClosedHint}
+          >
+            Start again
+          </Button>
+        ) : null}
       </div>
     );
   }

@@ -55,6 +55,7 @@ export const KEY_AUTH_FAILED = "failed";
 export function useKeyAuthorizationStatus(
   keyId: string | null,
   enabled: boolean,
+  previousAuthorizationAt?: string | null,
 ) {
   const queryClient = useQueryClient();
   const active = Boolean(keyId) && enabled;
@@ -69,8 +70,15 @@ export function useKeyAuthorizationStatus(
     // dead once the row is terminal — a caller that leaves its dialog open
     // must not keep hitting `/keys/:id` forever.
     refetchInterval: (current) => {
-      const status = current.state.data?.status;
-      if (status === KEY_AUTH_ACTIVE || status === KEY_AUTH_FAILED) {
+      const key = current.state.data;
+      const authorizationAdvanced =
+        previousAuthorizationAt === undefined ||
+        (key?.last_authorized_at != null &&
+          key.last_authorized_at !== previousAuthorizationAt);
+      if (
+        key?.status === KEY_AUTH_FAILED ||
+        (key?.status === KEY_AUTH_ACTIVE && authorizationAdvanced)
+      ) {
         return false;
       }
       return active ? 2_000 : false;
@@ -83,11 +91,18 @@ export function useKeyAuthorizationStatus(
   // transcript card is still Authorizing, because nothing refreshes the list
   // the card renders from. `exact` keeps it off this query's own key.
   const status = query.data?.status;
+  const authorizationAdvanced =
+    previousAuthorizationAt === undefined ||
+    (query.data?.last_authorized_at != null &&
+      query.data.last_authorized_at !== previousAuthorizationAt);
   useEffect(() => {
-    if (status === KEY_AUTH_ACTIVE || status === KEY_AUTH_FAILED) {
+    if (
+      status === KEY_AUTH_FAILED ||
+      (status === KEY_AUTH_ACTIVE && authorizationAdvanced)
+    ) {
       void queryClient.invalidateQueries({ queryKey: ["keys"], exact: true });
     }
-  }, [status, queryClient]);
+  }, [authorizationAdvanced, status, queryClient]);
 
   return query;
 }

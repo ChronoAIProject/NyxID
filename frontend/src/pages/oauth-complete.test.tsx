@@ -40,6 +40,7 @@ class MockBroadcastChannel {
 describe("OAuth completion page", () => {
   beforeEach(() => {
     MockBroadcastChannel.instances = [];
+    sessionStorage.clear();
     vi.stubGlobal("BroadcastChannel", MockBroadcastChannel);
     vi.spyOn(window, "close").mockImplementation(() => undefined);
   });
@@ -70,6 +71,7 @@ describe("OAuth completion page", () => {
 
   it("never auto-closes an error and exposes retry", () => {
     vi.useFakeTimers();
+    sessionStorage.setItem("nyxid.oauth.provider-origin", "https://github.com");
     window.history.replaceState(
       {},
       "",
@@ -95,6 +97,57 @@ describe("OAuth completion page", () => {
     fireEvent.keyDown(window, { key: "Tab" });
     vi.advanceTimersByTime(3_500);
     expect(window.close).not.toHaveBeenCalled();
+  });
+
+  it("does not cancel success auto-close when the popup receives focus", () => {
+    vi.useFakeTimers();
+    window.history.replaceState(
+      {},
+      "",
+      `/oauth?status=complete&flow=cc&nonce=${NONCE}`,
+    );
+    render(<OAuthCompletePage />);
+    fireEvent.focus(window);
+    vi.advanceTimersByTime(3_500);
+    expect(window.close).toHaveBeenCalledTimes(1);
+  });
+
+  it("shows only a neutral, unverified success acknowledgement", () => {
+    window.history.replaceState(
+      {},
+      "",
+      `/oauth?status=complete&flow=cc&nonce=${NONCE}`,
+    );
+    render(<OAuthCompletePage />);
+    expect(
+      screen.getByText("Authorization response received"),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByText(/while the connection is verified/i),
+    ).toBeInTheDocument();
+    expect(screen.queryByText("Connection complete")).not.toBeInTheDocument();
+    expect(
+      screen.queryByText(/credential is secured/i),
+    ).not.toBeInTheDocument();
+  });
+
+  it("does not request a retry when the provider origin binding is missing", () => {
+    window.history.replaceState(
+      {},
+      "",
+      `/oauth?status=error&flow=cc&code=access_denied&nonce=${NONCE}`,
+    );
+    render(<OAuthCompletePage />);
+    expect(
+      screen.getByText(/start the connection again there/i),
+    ).toBeInTheDocument();
+    expect(
+      screen.queryByRole("button", { name: /try again/i }),
+    ).not.toBeInTheDocument();
+    expect(MockBroadcastChannel.instances[0]?.messages).not.toContainEqual({
+      type: "oauth_action",
+      action: "retry",
+    });
   });
 
   it("direct open does not broadcast", () => {

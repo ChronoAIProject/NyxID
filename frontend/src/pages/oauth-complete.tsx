@@ -98,7 +98,6 @@ export function OAuthCompletePage() {
     const cancel = () => setStaying(true);
     window.addEventListener("pointerdown", cancel, { once: true });
     window.addEventListener("keydown", cancel, { once: true });
-    window.addEventListener("focus", cancel, { once: true });
     const timer = window.setTimeout(() => {
       window.close();
       window.setTimeout(() => setManualReturn(true), 300);
@@ -107,7 +106,6 @@ export function OAuthCompletePage() {
       window.clearTimeout(timer);
       window.removeEventListener("pointerdown", cancel);
       window.removeEventListener("keydown", cancel);
-      window.removeEventListener("focus", cancel);
     };
   }, [search.status, staying]);
 
@@ -167,21 +165,27 @@ export function OAuthCompletePage() {
     search.code !== "session_mismatch" &&
     search.code !== "session_required" &&
     search.code !== "state_invalid";
+  const canRetryHere = retryable && expectedProviderOrigin !== null;
 
   return (
     <OAuthResultShell
-      icon={success ? "success" : "error"}
+      icon={success ? "neutral" : "error"}
       title={
         success
-          ? "Connection complete"
+          ? "Authorization response received"
           : (errorCopy?.[0] ?? "Authorization failed")
       }
     >
       <p role="status" aria-live="polite">
         {success
-          ? "The credential is secured in NyxID."
+          ? "Return to NyxID while the connection is verified."
           : (errorCopy?.[1] ?? "Return to NyxID and try again.")}
       </p>
+      {!success && retryable && expectedProviderOrigin === null ? (
+        <div className="mt-5 rounded-md border border-border bg-muted/40 px-3 py-2 text-[12px] text-foreground">
+          Return to your NyxID tab and start the connection again there.
+        </div>
+      ) : null}
       {manualReturn ? (
         <div className="mt-5 rounded-md border border-border bg-muted/40 px-3 py-2 text-[12px] text-foreground">
           Return to your NyxID tab to continue. You can close this window.
@@ -196,7 +200,7 @@ export function OAuthCompletePage() {
             >
               View connection
             </Button>
-          ) : retryable ? (
+          ) : canRetryHere ? (
             <Button
               autoFocus
               disabled={pendingAction !== null}

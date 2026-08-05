@@ -59,6 +59,8 @@ export interface KeyInfo {
   readonly source_app_name?: string | null;
   readonly expires_at: string | null;
   readonly last_used_at: string | null;
+  /** Advances only after a fresh OAuth authorization callback succeeds. */
+  readonly last_authorized_at?: string | null;
   readonly error_message: string | null;
   readonly created_at: string;
   readonly service_type: string;

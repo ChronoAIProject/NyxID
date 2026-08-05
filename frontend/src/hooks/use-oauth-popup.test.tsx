@@ -57,12 +57,13 @@ describe("useOAuthPopupReceiver", () => {
 
   it("treats result as a wakeup and never trusts message state", async () => {
     const invalidate = vi.spyOn(queryClient, "invalidateQueries");
+    const onViewResult = vi.fn(() => true);
     renderHook(
       () =>
         useOAuthPopupReceiver({
           launchId: "launch-a",
           onRetry: vi.fn(),
-          onViewResult: vi.fn(() => true),
+          onViewResult,
           onDismiss: vi.fn(),
         }),
       { wrapper: Wrapper },
@@ -77,6 +78,12 @@ describe("useOAuthPopupReceiver", () => {
       expect(invalidate).toHaveBeenCalledWith({ queryKey: ["keys"] }),
     );
     expect(invalidate).toHaveBeenCalledWith({ queryKey: ["keys", "key-a"] });
+    expect(onViewResult).not.toHaveBeenCalled();
+    expect(useOAuthPopupStore.getState().attempt).toMatchObject({
+      launchId: "launch-a",
+      nonce: NONCE_A,
+      keyId: "key-a",
+    });
   });
 
   it("transfers retry only on the old capability channel, then rotates it", async () => {
