@@ -344,6 +344,7 @@ pub(crate) fn test_app_config() -> AppConfig {
         approval_expiry_interval_secs: 5,
         oauth_refresh_sweep_interval_secs: 600,
         oauth_refresh_sweep_window_secs: 900,
+        connection_expiry_notifications: true,
         fcm_service_account_path: None,
         fcm_project_id: None,
         apns_key_path: None,
@@ -521,9 +522,17 @@ pub(crate) fn test_app_state_with_config(db: mongodb::Database, config: AppConfi
         http_client: http_client.clone(),
         jwk_json: serde_json::json!({}),
         mcp_sessions: Arc::new(McpSessionStore::new()),
-        jwks_cache: Arc::new(JwksCache::new(http_client)),
+        jwks_cache: Arc::new(JwksCache::new(http_client.clone())),
         fcm_auth: None,
         apns_auth: None,
+        connection_expiry_notifier: Arc::new(
+            crate::services::connection_expiry_service::ConnectionExpiryNotifier::new(
+                Arc::new(config.clone()),
+                http_client.clone(),
+                None,
+                None,
+            ),
+        ),
         encryption_keys: Arc::new(test_encryption_keys()),
         node_ws_manager: Arc::new(NodeWsManager::new(
             config.node_proxy_timeout_secs,

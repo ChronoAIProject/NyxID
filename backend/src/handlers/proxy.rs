@@ -571,6 +571,7 @@ async fn proxy_request_inner(
             us_id,
             None,
             Some(service_id),
+            Some(&state.connection_expiry_notifier),
         )
         .await?
         {
@@ -631,6 +632,7 @@ async fn proxy_request_inner(
         &user_id_str,
         None,
         Some(service_id),
+        Some(&state.connection_expiry_notifier),
     )
     .await?
     {
@@ -791,6 +793,7 @@ async fn proxy_request_by_slug_inner(
             us_id,
             Some(slug),
             None,
+            Some(&state.connection_expiry_notifier),
         )
         .await?
         {
@@ -851,6 +854,7 @@ async fn proxy_request_by_slug_inner(
         &user_id_str,
         Some(slug),
         None,
+        Some(&state.connection_expiry_notifier),
     )
     .await?
     {
@@ -1514,6 +1518,7 @@ async fn execute_proxy_inner(
                 &user_id_str,
                 ak_id,
                 us_id,
+                Some(&state.connection_expiry_notifier),
             )
             .await?
         {

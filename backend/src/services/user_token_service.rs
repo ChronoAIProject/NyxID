@@ -13,6 +13,7 @@ use crate::models::oauth_state::{COLLECTION_NAME as OAUTH_STATES, OAuthState};
 use crate::models::provider_config::{COLLECTION_NAME as PROVIDER_CONFIGS, ProviderConfig};
 use crate::models::user_api_key::{COLLECTION_NAME as USER_API_KEYS, UserApiKey};
 use crate::models::user_provider_token::{COLLECTION_NAME, UserProviderToken};
+use crate::services::connection_expiry_service::{self, ConnectionExpiryNotifier};
 use crate::services::oauth_flow;
 use crate::services::user_credentials_service;
 
@@ -2102,37 +2103,11 @@ fn classify_device_poll_failure(
 /// per the design intent — the next refresh attempt would fail and the
 /// row would be marked `status: "failed"`. Callers should not invoke
 /// this function concurrently for the same key.
-/// Fire-and-forget: emit a `key_refresh_failed` audit event so dashboards
-/// and operators can detect silently-broken multi-connection refreshes
-/// without waiting on a user-facing 401. Includes `connection_id`,
-/// `provider_config_id`, `api_key_id`, and a truncated error message
-/// so the root cause is visible without a second DB read.
-fn emit_key_refresh_failed_audit(
-    db: &mongodb::Database,
-    api_key: &UserApiKey,
-    truncated_error: &str,
-) {
-    crate::services::audit_service::log_async(
-        db.clone(),
-        Some(api_key.user_id.clone()),
-        "key_refresh_failed".to_string(),
-        Some(serde_json::json!({
-            "api_key_id": &api_key.id,
-            "provider_config_id": api_key.provider_config_id.as_deref(),
-            "connection_id": api_key.connection_id.as_deref(),
-            "error": truncated_error,
-        })),
-        None,
-        None,
-        None,
-        None,
-    );
-}
-
 pub async fn refresh_user_api_key_in_place(
     db: &mongodb::Database,
     encryption_keys: &EncryptionKeys,
     api_key: &UserApiKey,
+    notifier: Option<&ConnectionExpiryNotifier>,
 ) -> AppResult<UserApiKey> {
     let provider_id = api_key.provider_config_id.as_deref().ok_or_else(|| {
         AppError::Internal(
@@ -2223,7 +2198,6 @@ pub async fn refresh_user_api_key_in_place(
         .map_err(|e| AppError::Internal(format!("Token refresh request failed: {e}")))?;
 
     if !response.status().is_success() {
-        let now = Utc::now();
         let status = response.status();
 
         // Transient vs terminal classification (OAuth 2.0 §5.2 error
@@ -2264,36 +2238,17 @@ pub async fn refresh_user_api_key_in_place(
         // additionally refuses to resurrect a row the user has revoked
         // out from under the refresh (or that a sibling already marked
         // `failed` — same outcome, redundant write avoided).
-        let snapshot_updated_at = bson::DateTime::from_chrono(api_key.updated_at);
-        let write = db
-            .collection::<UserApiKey>(USER_API_KEYS)
-            .update_one(
-                doc! {
-                    "_id": &api_key.id,
-                    "updated_at": &snapshot_updated_at,
-                    "status": { "$nin": ["revoked", "failed"] },
-                },
-                doc! { "$set": {
-                    "status": "failed",
-                    "error_message": format!("Refresh failed: {status} {truncated}"),
-                    "updated_at": bson::DateTime::from_chrono(now),
-                }},
-            )
-            .await?;
+        let error_message = format!("Refresh failed: {status} {truncated}");
+        let transitioned = connection_expiry_service::transition_oauth_key_to_dead(
+            db,
+            api_key,
+            "failed",
+            &error_message,
+            notifier,
+        )
+        .await?;
 
-        if write.matched_count > 0 {
-            // Surface refresh failure as an audit event so dashboards /
-            // operators can detect silently-broken connections without
-            // waiting for the user to complain about a 401. Includes
-            // `connection_id` and the truncated provider response so the
-            // root cause (revoked grant, rotated client_secret, etc.) is
-            // visible without a separate DB read.
-            emit_key_refresh_failed_audit(
-                db,
-                api_key,
-                &format!("Refresh failed: {status} {truncated}"),
-            );
-        } else {
+        if !transitioned {
             // Lost the race to a concurrent write. Either a sibling
             // refresh succeeded (and the live row is active with a
             // fresh token), or the user revoked the key, or another
@@ -2329,7 +2284,6 @@ pub async fn refresh_user_api_key_in_place(
         .and_then(|value| value.as_i64())
         .is_some_and(|code| code != 0)
     {
-        let now = Utc::now();
         let msg = token_data
             .get("msg")
             .and_then(|m| m.as_str())
@@ -2340,26 +2294,17 @@ pub async fn refresh_user_api_key_in_place(
 
         // Same CAS guard as the HTTP-error branch — see that branch's
         // comment for the race description.
-        let snapshot_updated_at = bson::DateTime::from_chrono(api_key.updated_at);
-        let write = db
-            .collection::<UserApiKey>(USER_API_KEYS)
-            .update_one(
-                doc! {
-                    "_id": &api_key.id,
-                    "updated_at": &snapshot_updated_at,
-                    "status": { "$nin": ["revoked", "failed"] },
-                },
-                doc! { "$set": {
-                    "status": "failed",
-                    "error_message": format!("Refresh failed: {truncated}"),
-                    "updated_at": bson::DateTime::from_chrono(now),
-                }},
-            )
-            .await?;
+        let error_message = format!("Refresh failed: {truncated}");
+        let transitioned = connection_expiry_service::transition_oauth_key_to_dead(
+            db,
+            api_key,
+            "failed",
+            &error_message,
+            notifier,
+        )
+        .await?;
 
-        if write.matched_count > 0 {
-            emit_key_refresh_failed_audit(db, api_key, &format!("Refresh failed: {truncated}"));
-        } else {
+        if !transitioned {
             tracing::info!(
                 api_key_id = %api_key.id,
                 connection_id = ?api_key.connection_id,
@@ -2494,6 +2439,7 @@ pub async fn refresh_expiring_oauth_keys(
     db: &mongodb::Database,
     encryption_keys: &EncryptionKeys,
     window: Duration,
+    notifier: Option<&ConnectionExpiryNotifier>,
 ) -> AppResult<RefreshSweepReport> {
     let deadline = Utc::now() + window;
     let candidates: Vec<UserApiKey> = db
@@ -2515,7 +2461,7 @@ pub async fn refresh_expiring_oauth_keys(
     };
 
     for key in &candidates {
-        match refresh_user_api_key_in_place(db, encryption_keys, key).await {
+        match refresh_user_api_key_in_place(db, encryption_keys, key, notifier).await {
             Ok(_) => report.refreshed += 1,
             Err(error) => {
                 // `refresh_user_api_key_in_place` already persists a
@@ -3835,7 +3781,7 @@ mod tests {
         let key =
             insert_pending_user_api_key(&db, &encryption_keys, &provider_id, None, None).await;
 
-        let refreshed = super::refresh_user_api_key_in_place(&db, &encryption_keys, &key)
+        let refreshed = super::refresh_user_api_key_in_place(&db, &encryption_keys, &key, None)
             .await
             .expect("refresh should succeed");
 
@@ -3887,7 +3833,7 @@ mod tests {
         )
         .await;
 
-        let refreshed = super::refresh_user_api_key_in_place(&db, &encryption_keys, &key)
+        let refreshed = super::refresh_user_api_key_in_place(&db, &encryption_keys, &key, None)
             .await
             .expect("BYO refresh should succeed");
 
@@ -3923,7 +3869,7 @@ mod tests {
         let key =
             insert_pending_user_api_key(&db, &encryption_keys, &provider_id, None, None).await;
 
-        let err = super::refresh_user_api_key_in_place(&db, &encryption_keys, &key)
+        let err = super::refresh_user_api_key_in_place(&db, &encryption_keys, &key, None)
             .await
             .expect_err("expected Err on 4xx refresh");
         assert!(matches!(err, AppError::Internal(_)));
@@ -3972,7 +3918,7 @@ mod tests {
         let key =
             insert_pending_user_api_key(&db, &encryption_keys, &provider_id, None, None).await;
 
-        let err = super::refresh_user_api_key_in_place(&db, &encryption_keys, &key)
+        let err = super::refresh_user_api_key_in_place(&db, &encryption_keys, &key, None)
             .await
             .expect_err("expected transient Err on 5xx");
         assert!(matches!(err, AppError::Internal(_)));
@@ -4037,7 +3983,7 @@ mod tests {
         let key =
             insert_pending_user_api_key(&db, &encryption_keys, &provider_id, None, None).await;
 
-        let err = super::refresh_user_api_key_in_place(&db, &encryption_keys, &key)
+        let err = super::refresh_user_api_key_in_place(&db, &encryption_keys, &key, None)
             .await
             .expect_err("Lark non-zero code response should error");
         assert!(matches!(err, AppError::Internal(_)));
@@ -4095,7 +4041,7 @@ mod tests {
             insert_pending_user_api_key(&db, &encryption_keys, &provider_id, None, None).await;
         let original_rt_encrypted = key.refresh_token_encrypted.clone().unwrap();
 
-        let refreshed = super::refresh_user_api_key_in_place(&db, &encryption_keys, &key)
+        let refreshed = super::refresh_user_api_key_in_place(&db, &encryption_keys, &key, None)
             .await
             .expect("refresh should succeed");
 
@@ -4169,7 +4115,7 @@ mod tests {
             .await
             .unwrap();
 
-        let err = super::refresh_user_api_key_in_place(&db, &encryption_keys, &key)
+        let err = super::refresh_user_api_key_in_place(&db, &encryption_keys, &key, None)
             .await
             .expect_err("missing refresh_token should error");
         assert!(matches!(err, AppError::Internal(ref m) if m.contains("refresh_token")));
@@ -5095,7 +5041,7 @@ mod tests {
         .await;
 
         let report =
-            super::refresh_expiring_oauth_keys(&db, &encryption_keys, Duration::minutes(15))
+            super::refresh_expiring_oauth_keys(&db, &encryption_keys, Duration::minutes(15), None)
                 .await
                 .expect("sweep should succeed");
         assert_eq!(
@@ -5181,7 +5127,7 @@ mod tests {
         .await;
 
         let report =
-            super::refresh_expiring_oauth_keys(&db, &encryption_keys, Duration::minutes(15))
+            super::refresh_expiring_oauth_keys(&db, &encryption_keys, Duration::minutes(15), None)
                 .await
                 .expect("sweep itself should not error even when keys fail");
         assert_eq!(report.considered, 2);
@@ -5199,5 +5145,13 @@ mod tests {
                 .unwrap();
             assert_eq!(row.status, "failed");
         }
+
+        let second =
+            super::refresh_expiring_oauth_keys(&db, &encryption_keys, Duration::minutes(15), None)
+                .await
+                .expect("already-dead keys should be skipped on the next sweep");
+        assert_eq!(second.considered, 0);
+        assert_eq!(second.refreshed, 0);
+        assert_eq!(second.failed, 0);
     }
 }

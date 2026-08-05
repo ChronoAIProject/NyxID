@@ -177,6 +177,7 @@ ci0O2dgc19c2/sLtanU7P2KAzhEo8O0tIc0Dwe/nMqKfue82eGVL3DqM\n\
             approval_expiry_interval_secs: 5,
             oauth_refresh_sweep_interval_secs: 600,
             oauth_refresh_sweep_window_secs: 900,
+            connection_expiry_notifications: true,
             fcm_service_account_path: None,
             fcm_project_id: None,
             apns_key_path: None,

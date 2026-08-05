@@ -88,6 +88,9 @@ pub struct AppState {
     pub fcm_auth: Option<Arc<FcmAuth>>,
     /// APNs push notification auth (None if not configured)
     pub apns_auth: Option<Arc<ApnsAuth>>,
+    /// Shared delivery runtime for connection-expiry notifications.
+    pub connection_expiry_notifier:
+        Arc<services::connection_expiry_service::ConnectionExpiryNotifier>,
     /// Versioned encryption keys for AES-256-GCM (current + optional previous for rotation)
     pub encryption_keys: Arc<EncryptionKeys>,
     /// WebSocket connection manager for credential nodes
@@ -661,12 +664,20 @@ async fn main() {
         db,
         config: config.clone(),
         jwt_keys,
-        http_client,
+        http_client: http_client.clone(),
         jwk_json,
         mcp_sessions: mcp_sessions.clone(),
         jwks_cache,
         fcm_auth: fcm_auth.clone(),
         apns_auth: apns_auth.clone(),
+        connection_expiry_notifier: Arc::new(
+            services::connection_expiry_service::ConnectionExpiryNotifier::new(
+                Arc::new(config.clone()),
+                http_client.clone(),
+                fcm_auth.clone(),
+                apns_auth.clone(),
+            ),
+        ),
         encryption_keys: encryption_keys.clone(),
         node_ws_manager,
         ssh_session_manager,
@@ -945,6 +956,7 @@ async fn main() {
     if config.oauth_refresh_sweep_interval_secs > 0 {
         let refresh_db = state.db.clone();
         let refresh_keys = state.encryption_keys.clone();
+        let refresh_notifier = state.connection_expiry_notifier.clone();
         let refresh_interval = config.oauth_refresh_sweep_interval_secs;
         let refresh_window =
             chrono::Duration::seconds(config.oauth_refresh_sweep_window_secs.max(0));
@@ -964,6 +976,7 @@ async fn main() {
                     &refresh_db,
                     &refresh_keys,
                     refresh_window,
+                    Some(&refresh_notifier),
                 )
                 .await
                 {

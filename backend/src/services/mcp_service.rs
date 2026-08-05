@@ -2863,6 +2863,8 @@ pub async fn execute_tool(
     arguments: &serde_json::Value,
     jwt_keys: &crate::crypto::jwt::JwtKeys,
     config: &crate::config::AppConfig,
+    connection_expiry_notifier:
+        &crate::services::connection_expiry_service::ConnectionExpiryNotifier,
     token_exchange_cache: &crate::services::provider_token_exchange_service::TokenExchangeCache,
     cloud_response_cache: &crate::services::cloud_response_cache::CloudResponseCache,
     exec_ctx: &McpExecContext<'_>,
@@ -2894,6 +2896,7 @@ pub async fn execute_tool(
                 user_service_id,
                 Some(&service.service_slug),
                 None,
+                Some(connection_expiry_notifier),
             )
             .await?
             .ok_or_else(|| {
@@ -2911,6 +2914,7 @@ pub async fn execute_tool(
                     user_id,
                     ak_id,
                     user_service_id,
+                    Some(connection_expiry_notifier),
                 )
                 .await?
             {

@@ -350,6 +350,7 @@ APPROVAL_EXPIRY_INTERVAL_SECS=5     # Interval between expiry sweeps
 
 # OAuth token refresh (optional)
 OAUTH_REFRESH_SWEEP_INTERVAL_SECS=600  # Proactive refresh sweep for expiring multi-connection OAuth
+CONNECTION_EXPIRY_NOTIFICATIONS=true  # Notify once when OAuth dies; transition audits remain enabled
                                        # tokens; 0 disables (lazy proxy-time refresh still applies).
                                        # Does NOT extend refresh-token lifetime (a Google app in
                                        # "Testing" still expires refresh tokens after 7 days).

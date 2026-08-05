@@ -191,6 +191,10 @@ pub struct AppConfig {
     /// race for idle services.
     pub oauth_refresh_sweep_window_secs: i64,
 
+    /// Notify users when an OAuth connection changes from healthy to dead.
+    /// Audit events remain enabled regardless of this setting. Default: true.
+    pub connection_expiry_notifications: bool,
+
     // -- FCM (Firebase Cloud Messaging) --
     /// Path to FCM service account JSON file.
     pub fcm_service_account_path: Option<String>,
@@ -478,6 +482,10 @@ impl std::fmt::Debug for AppConfig {
             .field(
                 "oauth_refresh_sweep_window_secs",
                 &self.oauth_refresh_sweep_window_secs,
+            )
+            .field(
+                "connection_expiry_notifications",
+                &self.connection_expiry_notifications,
             )
             .field("fcm_service_account_path", &self.fcm_service_account_path)
             .field("fcm_project_id", &self.fcm_project_id)
@@ -883,6 +891,11 @@ impl AppConfig {
                 .ok()
                 .and_then(|v| v.parse().ok())
                 .unwrap_or(900),
+
+            connection_expiry_notifications: parse_bool_env(
+                "CONNECTION_EXPIRY_NOTIFICATIONS",
+                true,
+            ),
 
             fcm_service_account_path: env::var("FCM_SERVICE_ACCOUNT_PATH")
                 .ok()
@@ -1394,6 +1407,7 @@ mod tests {
             approval_expiry_interval_secs: 5,
             oauth_refresh_sweep_interval_secs: 600,
             oauth_refresh_sweep_window_secs: 900,
+            connection_expiry_notifications: true,
             fcm_service_account_path: None,
             fcm_project_id: None,
             apns_key_path: None,

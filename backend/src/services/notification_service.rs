@@ -53,6 +53,21 @@ struct RenderedDeviceNotification {
     data: HashMap<String, String>,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ConnectionExpiredNotificationContext {
+    pub service_label: String,
+    pub service_slug: String,
+    pub user_service_id: String,
+    pub api_key_id: String,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct RenderedConnectionExpiredNotification {
+    title: String,
+    body: String,
+    data: HashMap<String, String>,
+}
+
 /// Result of sending push to a single device.
 enum PushResult {
     Success,
@@ -175,6 +190,123 @@ pub async fn send_device_notification(
         channels: channels_used,
         telegram_chat_id,
         telegram_message_id,
+    })
+}
+
+/// Send a dead-connection notice through the user's enabled channels.
+/// Missing channels and individual delivery failures are treated as a no-op;
+/// credential refresh and proxy execution must never depend on notification
+/// infrastructure availability.
+#[allow(clippy::too_many_arguments)]
+pub async fn send_connection_expired_notification(
+    db: &Database,
+    config: &AppConfig,
+    http_client: &Client,
+    fcm_auth: Option<&FcmAuth>,
+    apns_auth: Option<&ApnsAuth>,
+    user_id: &str,
+    context: &ConnectionExpiredNotificationContext,
+) -> AppResult<NotificationResult> {
+    let Some(channel) = db
+        .collection::<NotificationChannel>(COLLECTION_NAME)
+        .find_one(doc! { "user_id": user_id })
+        .await?
+    else {
+        return Ok(NotificationResult {
+            channels: Vec::new(),
+            telegram_chat_id: None,
+            telegram_message_id: None,
+        });
+    };
+    let rendered = render_connection_expired_notification(config, context);
+    let mut channels_used = Vec::new();
+    let mut telegram_chat_id = None;
+    let mut tokens_to_remove = Vec::new();
+
+    if channel.telegram_enabled
+        && let Some(chat_id) = channel.telegram_chat_id
+        && let Some(bot_token) = config.telegram_bot_token.as_deref()
+    {
+        let telegram_text = format!(
+            "<b>{}</b>\n\n{}",
+            html_escape(&rendered.title),
+            html_escape(&rendered.body)
+        );
+        match telegram_service::send_text_message(http_client, bot_token, chat_id, &telegram_text)
+            .await
+        {
+            Ok(()) => {
+                channels_used.push("telegram".to_string());
+                telegram_chat_id = Some(chat_id);
+            }
+            Err(error) => tracing::warn!(
+                user_id = %user_id,
+                error = %error,
+                "Telegram connection expiry notification failed"
+            ),
+        }
+    }
+
+    if channel.push_enabled && !channel.push_devices.is_empty() {
+        let unique_devices = unique_devices_by_token(&channel.push_devices);
+        let push_futures: Vec<_> = unique_devices
+            .iter()
+            .map(|device| {
+                send_push_to_device(
+                    http_client,
+                    fcm_auth,
+                    apns_auth,
+                    config,
+                    device,
+                    &rendered.title,
+                    &rendered.body,
+                    &rendered.data,
+                )
+            })
+            .collect();
+        let results = futures::future::join_all(push_futures).await;
+        let mut successful_device_ids = Vec::new();
+        for (index, result) in results.into_iter().enumerate() {
+            match result {
+                Ok(PushResult::Success) => {
+                    let platform = &unique_devices[index].platform;
+                    if !channels_used.contains(platform) {
+                        channels_used.push(platform.clone());
+                    }
+                    successful_device_ids.push(unique_devices[index].device_id.clone());
+                }
+                Ok(PushResult::TokenInvalid) => {
+                    tokens_to_remove.push(unique_devices[index].device_id.clone());
+                }
+                Err(error) => tracing::warn!(
+                    user_id = %user_id,
+                    device_id = %unique_devices[index].device_id,
+                    error = %error,
+                    "Push connection expiry notification failed"
+                ),
+            }
+        }
+        if !successful_device_ids.is_empty() {
+            let db = db.clone();
+            let channel_id = channel.id.clone();
+            tokio::spawn(async move {
+                update_device_last_used(&db, &channel_id, &successful_device_ids).await;
+            });
+        }
+    }
+
+    if !tokens_to_remove.is_empty() {
+        let db = db.clone();
+        let channel_id = channel.id;
+        tokio::spawn(async move {
+            remove_stale_device_tokens(&db, &channel_id, &tokens_to_remove).await;
+        });
+    }
+
+    Ok(NotificationResult {
+        channels: channels_used,
+        telegram_chat_id,
+        telegram_message_id: None,
     })
 }
 
@@ -565,6 +697,31 @@ fn render_device_notification(
     }
 
     RenderedDeviceNotification { title, body, data }
+}
+
+fn render_connection_expired_notification(
+    config: &AppConfig,
+    context: &ConnectionExpiredNotificationContext,
+) -> RenderedConnectionExpiredNotification {
+    let keys_url = format!("{}/keys", config.frontend_url.trim_end_matches('/'));
+    let body = format!(
+        "{} ({}) needs to be reconnected. Open {} or run nyxid connect {}.",
+        context.service_label, context.service_slug, keys_url, context.service_slug
+    );
+    let mut data = HashMap::new();
+    data.insert("type".to_string(), "connection_expired".to_string());
+    data.insert("service_slug".to_string(), context.service_slug.clone());
+    data.insert(
+        "user_service_id".to_string(),
+        context.user_service_id.clone(),
+    );
+    data.insert("api_key_id".to_string(), context.api_key_id.clone());
+    data.insert("reconnect_url".to_string(), keys_url);
+    RenderedConnectionExpiredNotification {
+        title: "Connection expired".to_string(),
+        body,
+        data,
+    }
 }
 
 fn html_escape(value: &str) -> String {
@@ -1319,6 +1476,30 @@ mod tests {
         assert_eq!(
             html_escape("Kitchen <Cam> & Lab"),
             "Kitchen &lt;Cam&gt; &amp; Lab"
+        );
+    }
+
+    #[test]
+    fn render_connection_expired_includes_reconnect_paths_and_metadata() {
+        let config = crate::test_utils::test_app_config();
+        let context = ConnectionExpiredNotificationContext {
+            service_label: "GitHub work".to_string(),
+            service_slug: "github-work".to_string(),
+            user_service_id: "service-id".to_string(),
+            api_key_id: "key-id".to_string(),
+        };
+        let rendered = render_connection_expired_notification(&config, &context);
+        assert_eq!(rendered.title, "Connection expired");
+        assert!(rendered.body.contains("GitHub work (github-work)"));
+        assert!(rendered.body.contains("/keys"));
+        assert!(rendered.body.contains("nyxid connect github-work"));
+        assert_eq!(
+            rendered.data.get("type").map(String::as_str),
+            Some("connection_expired")
+        );
+        assert_eq!(
+            rendered.data.get("user_service_id").map(String::as_str),
+            Some("service-id")
         );
     }
 }
