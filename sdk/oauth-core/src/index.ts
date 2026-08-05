@@ -7,6 +7,8 @@ export interface NyxIDClientConfig {
   readonly fetchFn?: typeof fetch;
 }
 
+export * from "./services.js";
+
 export interface LoginRedirectOptions {
   readonly scope?: string;
   readonly redirectUri?: string;

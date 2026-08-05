@@ -7,6 +7,8 @@ sdk/
 |-- package.json
 |-- oauth-core/
 |   |-- src/index.ts
+|   |-- src/services.ts
+|   |-- test/services.test.ts
 |   |-- package.json
 |   |-- tsconfig.json
 |   `-- README.md
@@ -26,7 +28,7 @@ sdk/
 ## Responsibilities
 
 - `sdk/package.json`: workspace root, unified build and publish-precheck scripts.
-- `oauth-core`: protocol and PKCE primitives, token and callback handling.
+- `oauth-core`: protocol and PKCE primitives, token handling, connect-link orchestration, and service proxy calls.
 - `oauth-react`: React bindings layered on top of core primitives.
 - `demo-react`: runnable reference client showing end-to-end OAuth redirect flow.
 
