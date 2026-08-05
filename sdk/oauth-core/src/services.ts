@@ -17,6 +17,12 @@ export type ConnectLinkStatus =
 export interface CreateConnectLinkInput {
   readonly serviceSlug: string;
   readonly label?: string;
+  /**
+   * Browser return URI. For an OAuth access token issued to a registered app,
+   * this must match that app's redirect URI policy. Terminal redirects add
+   * `status` and `connect_link_id` query parameters and never include the raw
+   * connect token.
+   */
   readonly callbackUrl?: string;
   readonly expiresIn?: number;
 }
@@ -40,7 +46,13 @@ export interface ConnectLinkResponse {
   readonly expires_at: string;
   readonly completed_at?: string;
   readonly connected_service?: ConnectedService;
+  /** Present only for terminal outcomes, with status and link-id query params. */
   readonly callback_url?: string;
+  readonly requesting_app_id?: string;
+  readonly requesting_app_name?: string;
+  /** Stable provider-decline code while the link remains retryable. */
+  readonly last_error?: string;
+  readonly last_error_at?: string;
 }
 
 export interface WaitForCompletionOptions {
@@ -112,7 +124,9 @@ export interface ConnectLinksApi {
   /**
    * Creates a browser connection flow. Credential submission and OAuth
    * completion remain human-only browser operations; this SDK intentionally
-   * does not expose the completion endpoint.
+   * does not expose the completion endpoint. A terminal callback contains
+   * `status=completed|cancelled|expired` and `connect_link_id`, never the raw
+   * connect token.
    */
   create(input: CreateConnectLinkInput): Promise<CreateConnectLinkResponse>;
   get(id: string): Promise<ConnectLinkResponse>;

@@ -90,6 +90,24 @@ describe("NyxServicesClient connect links", () => {
     ).toBe("Bearer oauth-access-token");
   });
 
+  it("preserves app identity and provider-decline status fields", async () => {
+    const response = {
+      ...link("pending"),
+      requesting_app_id: "desktop-client",
+      requesting_app_name: "Desktop App",
+      last_error: "provider_access_denied",
+      last_error_at: "2026-08-05T11:00:00Z",
+    };
+    const fetchFn = vi.fn<typeof fetch>().mockResolvedValue(jsonResponse(response));
+    const client = new NyxServicesClient({
+      baseUrl: "https://api.example",
+      auth: { accessToken: "oauth-access-token" },
+      fetchFn,
+    });
+
+    await expect(client.connectLinks.get("link-1")).resolves.toEqual(response);
+  });
+
   it("rejects an expired link with a typed error", async () => {
     const fetchFn = vi
       .fn<typeof fetch>()
