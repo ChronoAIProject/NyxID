@@ -29,6 +29,7 @@ export const connectLinkPreviewSchema = z.object({
   requires_gateway_url: z.boolean(),
   api_key_url: z.string().url().nullable(),
   api_key_instructions: z.string().nullable(),
+  callback_url: z.string().url().nullable().optional(),
 });
 
 export const connectCredentialFormSchema = z.object({
@@ -86,6 +87,10 @@ export const connectLinkStatusResponseSchema = z.object({
     .nullable()
     .optional(),
   callback_url: z.string().url().nullable().optional(),
+  requesting_app_id: z.string().nullable().optional(),
+  requesting_app_name: z.string().nullable().optional(),
+  last_error: z.string().nullable().optional(),
+  last_error_at: z.string().datetime().nullable().optional(),
 });
 
 export type ConnectLinkPreview = z.infer<typeof connectLinkPreviewSchema>;

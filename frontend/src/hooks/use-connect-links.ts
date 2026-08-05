@@ -53,6 +53,20 @@ export function useCompleteConnectLink() {
   });
 }
 
+export async function cancelHostedConnectLink(
+  token: string,
+): Promise<ConnectLinkStatusResponse> {
+  const response = await api.post<ConnectLinkStatusResponse>(
+    "/connect-links/cancel",
+    { token },
+  );
+  return connectLinkStatusResponseSchema.parse(response);
+}
+
+export function useCancelHostedConnectLink() {
+  return useMutation({ mutationFn: cancelHostedConnectLink });
+}
+
 export function useConnectLinkStatus(id: string, enabled = true) {
   return useQuery({
     queryKey: ["connect-links", id],

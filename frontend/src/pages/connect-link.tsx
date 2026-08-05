@@ -6,6 +6,7 @@ import {
   ExternalLink,
   KeyRound,
   ShieldCheck,
+  XCircle,
 } from "lucide-react";
 import { ErrorBanner } from "@/components/shared/error-banner";
 import { Button, ButtonIcon } from "@/components/ui/button";
@@ -23,6 +24,7 @@ import { Input } from "@/components/ui/input";
 import { Skeleton } from "@/components/ui/skeleton";
 import {
   connectLinkStorageKey,
+  useCancelHostedConnectLink,
   useCompleteConnectLink,
   useConnectLinkStatus,
   usePreviewConnectLink,
@@ -61,13 +63,13 @@ export function ConnectLinkPage() {
   const [showSetupForm, setShowSetupForm] = useState(false);
   const [deviceChallenge, setDeviceChallenge] =
     useState<DeviceChallenge | null>(null);
-  const [completedCallback, setCompletedCallback] = useState<string | null>(
-    null,
-  );
   const [submitError, setSubmitError] = useState<string | null>(null);
   const lastClickAtRef = useRef(0);
   const preview = usePreviewConnectLink();
   const complete = useCompleteConnectLink();
+  const cancel = useCancelHostedConnectLink();
+  const actionPending =
+    preview.isPending || complete.isPending || cancel.isPending;
 
   useEffect(() => {
     if (isLoading || isAuthenticated) return;
@@ -76,13 +78,17 @@ export function ConnectLinkPage() {
   }, [isAuthenticated, isLoading, navigate, token]);
 
   useEffect(() => {
-    if (!completedCallback) return;
+    const callback =
+      complete.data?.status === "completed"
+        ? complete.data.callback_url
+        : cancel.data?.callback_url ?? preview.data?.callback_url;
+    if (!callback) return;
     const timer = window.setTimeout(
-      () => window.location.assign(completedCallback),
+      () => window.location.assign(callback),
       1_500,
     );
     return () => window.clearTimeout(timer);
-  }, [completedCallback]);
+  }, [cancel.data, complete.data, preview.data]);
 
   function withinCooldown(): boolean {
     const now = Date.now();
@@ -92,7 +98,7 @@ export function ConnectLinkPage() {
   }
 
   async function handlePreview() {
-    if (preview.isPending || withinCooldown()) return;
+    if (actionPending || withinCooldown()) return;
     setSubmitError(null);
     try {
       await preview.mutateAsync(token);
@@ -102,7 +108,7 @@ export function ConnectLinkPage() {
   }
 
   async function handleConnect() {
-    if (!preview.data || complete.isPending || withinCooldown()) return;
+    if (!preview.data || actionPending || withinCooldown()) return;
     if (connectLinkNeedsSetupForm(preview.data)) {
       setShowSetupForm(true);
       return;
@@ -129,24 +135,43 @@ export function ConnectLinkPage() {
         return;
       }
       setDeviceChallenge(null);
-      setCompletedCallback(result.callback_url ?? null);
     } catch (error) {
       setSubmitError(connectLinkErrorMessage(error));
+      await refreshPreviewAfterTerminalError();
+    }
+  }
+
+  async function refreshPreviewAfterTerminalError() {
+    try {
+      await preview.mutateAsync(token);
+    } catch {
+      // Preserve the original action error when the follow-up preview also fails.
+    }
+  }
+
+  async function handleCancel() {
+    if (actionPending || withinCooldown()) return;
+    setSubmitError(null);
+    try {
+      await cancel.mutateAsync(token);
+    } catch (error) {
+      setSubmitError(connectLinkErrorMessage(error));
+      await refreshPreviewAfterTerminalError();
     }
   }
 
   function handleCredentialSubmit(values: ConnectCredentialForm) {
-    if (complete.isPending || withinCooldown()) return;
+    if (actionPending || withinCooldown()) return;
     void submitCompletion(values);
   }
 
   function handleOAuthSubmit(values: ConnectOAuthForm) {
-    if (complete.isPending || withinCooldown()) return;
+    if (actionPending || withinCooldown()) return;
     void submitCompletion(values);
   }
 
   function handleDeviceCheck() {
-    if (!deviceChallenge?.state || complete.isPending || withinCooldown())
+    if (!deviceChallenge?.state || actionPending || withinCooldown())
       return;
     void submitCompletion({ device_state: deviceChallenge.state });
   }
@@ -159,7 +184,13 @@ export function ConnectLinkPage() {
     );
   }
 
-  const completed = complete.data?.status === "completed";
+  const terminal = complete.data?.status === "completed"
+    ? { status: "completed" as const, callbackUrl: complete.data.callback_url }
+    : cancel.data && cancel.data.status !== "pending"
+      ? { status: cancel.data.status, callbackUrl: cancel.data.callback_url }
+      : preview.data && preview.data.status !== "pending"
+        ? { status: preview.data.status, callbackUrl: preview.data.callback_url }
+        : null;
   return (
     <ConnectShell>
       <header className="space-y-2 text-center">
@@ -171,8 +202,11 @@ export function ConnectLinkPage() {
         </h1>
       </header>
 
-      {completed ? (
-        <SuccessPanel callbackUrl={complete.data?.callback_url ?? null} />
+      {terminal ? (
+        <TerminalPanel
+          status={terminal.status}
+          callbackUrl={terminal.callbackUrl ?? null}
+        />
       ) : (
         <Card className="border-border/50">
           <CardHeader>
@@ -190,7 +224,7 @@ export function ConnectLinkPage() {
                   <Button
                     type="button"
                     variant="primary"
-                    disabled={preview.isPending}
+                    disabled={actionPending}
                     isLoading={preview.isPending}
                     onClick={() => void handlePreview()}
                   >
@@ -213,13 +247,13 @@ export function ConnectLinkPage() {
                   preview.data.connect_method === "api_key" ? (
                     <CredentialForm
                       preview={preview.data}
-                      pending={complete.isPending}
+                      pending={actionPending}
                       onSubmit={handleCredentialSubmit}
                     />
                   ) : (
                     <OAuthSetupForm
                       preview={preview.data}
-                      pending={complete.isPending}
+                      pending={actionPending}
                       onSubmit={handleOAuthSubmit}
                     />
                   )
@@ -229,7 +263,7 @@ export function ConnectLinkPage() {
                       type="button"
                       variant="primary"
                       disabled={
-                        complete.isPending || preview.data.status !== "pending"
+                        actionPending || preview.data.status !== "pending"
                       }
                       isLoading={complete.isPending}
                       onClick={() => void handleConnect()}
@@ -245,9 +279,25 @@ export function ConnectLinkPage() {
                   <DeviceCodePanel
                     code={deviceChallenge.code}
                     url={deviceChallenge.url}
-                    pending={complete.isPending}
+                    pending={actionPending}
                     onCheck={handleDeviceCheck}
                   />
+                ) : null}
+                {preview.data.status === "pending" ? (
+                  <div className="flex justify-start">
+                    <Button
+                      type="button"
+                      variant="destructive"
+                      disabled={actionPending}
+                      isLoading={cancel.isPending}
+                      onClick={() => void handleCancel()}
+                    >
+                      <ButtonIcon variant="destructive">
+                        <XCircle />
+                      </ButtonIcon>
+                      Cancel request
+                    </Button>
+                  </div>
                 ) : null}
               </>
             )}
@@ -294,7 +344,12 @@ export function ConnectLinkReturnPage() {
   }, [complete, linkId, providerError, status]);
 
   useEffect(() => {
-    if (status.data?.status !== "completed") return;
+    if (
+      status.data?.status !== "completed" &&
+      status.data?.status !== "cancelled" &&
+      status.data?.status !== "expired"
+    )
+      return;
     sessionStorage.removeItem(connectLinkStorageKey(linkId));
     const callback = status.data.callback_url;
     if (!callback) return;
@@ -319,21 +374,16 @@ export function ConnectLinkReturnPage() {
       </ConnectShell>
     );
   }
-  if (status.data?.status === "completed") {
-    return (
-      <ConnectShell>
-        <SuccessPanel callbackUrl={status.data.callback_url ?? null} />
-      </ConnectShell>
-    );
-  }
   if (
-    status.data?.status === "expired" ||
-    status.data?.status === "cancelled"
+    status.data?.status === "completed" ||
+    status.data?.status === "cancelled" ||
+    status.data?.status === "expired"
   ) {
     return (
       <ConnectShell>
-        <ErrorBanner
-          message={`This connection request is ${status.data.status}.`}
+        <TerminalPanel
+          status={status.data.status}
+          callbackUrl={status.data.callback_url ?? null}
         />
       </ConnectShell>
     );
@@ -660,20 +710,35 @@ function DeviceCodePanel({
   );
 }
 
-function SuccessPanel({
+export function TerminalPanel({
+  status,
   callbackUrl,
 }: {
+  readonly status: "completed" | "cancelled" | "expired";
   readonly callbackUrl: string | null;
 }) {
+  const completed = status === "completed";
   return (
-    <Card className="border-success/25 bg-success/[0.03]">
+    <Card
+      className={completed ? "border-success/25 bg-success/[0.03]" : "border-border/50"}
+    >
       <CardContent className="flex flex-col items-center gap-3 p-6 text-center">
-        <CheckCircle2 className="h-6 w-6 text-success" />
+        {completed ? (
+          <CheckCircle2 className="h-6 w-6 text-success" />
+        ) : (
+          <XCircle className="h-6 w-6 text-muted-foreground" />
+        )}
         <h2 className="text-[15px] font-semibold text-foreground">
-          Service connected
+          {completed
+            ? "Service connected"
+            : status === "cancelled"
+              ? "Connection cancelled"
+              : "Connection request expired"}
         </h2>
         <p className="text-[12px] text-muted-foreground">
-          Return to your agent. It can now retry the original request.
+          {completed
+            ? "Return to your agent. It can now retry the original request."
+            : "No credential was connected. Return to the requesting application."}
         </p>
         {callbackUrl ? (
           <p className="text-[11px] text-muted-foreground">
