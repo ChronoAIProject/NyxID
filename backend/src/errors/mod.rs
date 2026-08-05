@@ -324,6 +324,21 @@ pub enum AppError {
     #[error("Auth device user code invalid")]
     AuthDeviceUserCodeInvalid,
 
+    #[error("Connect link not found")]
+    ConnectLinkNotFound,
+
+    #[error("Connect link expired")]
+    ConnectLinkExpired,
+
+    #[error("Connect link already completed")]
+    ConnectLinkAlreadyCompleted,
+
+    #[error("Connect link cancelled")]
+    ConnectLinkCancelled,
+
+    #[error("Connect link rate limited")]
+    ConnectLinkRateLimited,
+
     #[error("Channel bot not found: {0}")]
     ChannelBotNotFound(String),
 
@@ -536,6 +551,11 @@ impl AppError {
             Self::AuthDeviceCodeAlreadyDelivered => StatusCode::GONE,
             Self::AuthDeviceCodeRateLimited => StatusCode::TOO_MANY_REQUESTS,
             Self::AuthDeviceUserCodeInvalid => StatusCode::BAD_REQUEST,
+            Self::ConnectLinkNotFound => StatusCode::NOT_FOUND,
+            Self::ConnectLinkExpired => StatusCode::GONE,
+            Self::ConnectLinkAlreadyCompleted => StatusCode::CONFLICT,
+            Self::ConnectLinkCancelled => StatusCode::GONE,
+            Self::ConnectLinkRateLimited => StatusCode::TOO_MANY_REQUESTS,
             Self::ChannelBotNotFound(_) => StatusCode::NOT_FOUND,
             Self::ChannelBotInactive(_) => StatusCode::BAD_REQUEST,
             Self::ChannelBotLimitReached(_) => StatusCode::TOO_MANY_REQUESTS,
@@ -671,6 +691,11 @@ impl AppError {
             Self::AuthDeviceCodeAlreadyDelivered => 11205,
             Self::AuthDeviceCodeRateLimited => 11206,
             Self::AuthDeviceUserCodeInvalid => 11207,
+            Self::ConnectLinkNotFound => 11300,
+            Self::ConnectLinkExpired => 11301,
+            Self::ConnectLinkAlreadyCompleted => 11302,
+            Self::ConnectLinkCancelled => 11303,
+            Self::ConnectLinkRateLimited => 11304,
             Self::ChannelBotNotFound(_) => 10000,
             Self::ChannelBotInactive(_) => 10001,
             Self::ChannelBotLimitReached(_) => 10002,
@@ -842,6 +867,11 @@ impl AppError {
             Self::AuthDeviceCodeAlreadyDelivered => "auth_device_already_delivered",
             Self::AuthDeviceCodeRateLimited => "auth_device_rate_limited",
             Self::AuthDeviceUserCodeInvalid => "auth_device_user_code_invalid",
+            Self::ConnectLinkNotFound => "connect_link_not_found",
+            Self::ConnectLinkExpired => "connect_link_expired",
+            Self::ConnectLinkAlreadyCompleted => "connect_link_already_completed",
+            Self::ConnectLinkCancelled => "connect_link_cancelled",
+            Self::ConnectLinkRateLimited => "connect_link_rate_limited",
             Self::ChannelBotNotFound(_) => "channel_bot_not_found",
             Self::ChannelBotInactive(_) => "channel_bot_inactive",
             Self::ChannelBotLimitReached(_) => "channel_bot_limit_reached",

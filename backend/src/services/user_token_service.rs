@@ -584,6 +584,7 @@ pub async fn initiate_oauth_connect(
     additional_scopes: &[String],
     scope_override: Option<&[String]>,
     connection_id: Option<&str>,
+    connect_link_id: Option<&str>,
 ) -> AppResult<String> {
     let provider = db
         .collection::<ProviderConfig>(PROVIDER_CONFIGS)
@@ -740,6 +741,7 @@ pub async fn initiate_oauth_connect(
         credential_user_id: resolved.credential_user_id.clone(),
         redirect_path: redirect_path.map(String::from),
         connection_id: connection_id.map(String::from),
+        connect_link_id: connect_link_id.map(String::from),
         consumed: false,
         expires_at,
         created_at: now,
@@ -1030,6 +1032,7 @@ pub async fn request_device_code(
         credential_user_id: resolved.credential_user_id.clone(),
         redirect_path: None,
         connection_id: connection_id.map(String::from),
+        connect_link_id: None,
         consumed: false,
         expires_at,
         created_at: now,
@@ -3517,6 +3520,7 @@ mod tests {
             &[],
             None,
             Some(&connection_id),
+            None,
         )
         .await
         .expect("initiation should succeed");
@@ -3628,6 +3632,7 @@ mod tests {
             &[],
             None,
             Some(&connection_id),
+            None,
         )
         .await
         .expect("initiation should succeed");
@@ -3718,6 +3723,7 @@ mod tests {
             &[],
             None,
             Some(&connection_id),
+            None,
         )
         .await
         .expect("reconnect should succeed");
@@ -3774,6 +3780,7 @@ mod tests {
             &[],
             Some(&["read:user".to_string(), "delete_repo".to_string()]),
             Some(&connection_id),
+            None,
         )
         .await
         .expect_err("delete_repo must be rejected on the shared app");
@@ -3791,6 +3798,7 @@ mod tests {
             &[],
             Some(&["read:user".to_string(), "repo".to_string()]),
             Some(&connection_id),
+            None,
         )
         .await
         .expect("allowlisted scopes should pass");

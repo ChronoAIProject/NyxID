@@ -540,6 +540,9 @@ pub(crate) fn test_app_state_with_config(db: mongodb::Database, config: AppConfi
             10, 300,
         ),
         auth_device_preview_limiter: crate::mw::rate_limit::create_per_ip_rate_limiter(30, 60),
+        connect_link_create_limiter: crate::mw::rate_limit::create_per_key_rate_limiter(10, 60),
+        connect_link_preview_limiter: crate::mw::rate_limit::create_per_ip_rate_limiter(30, 60),
+        connect_link_complete_limiter: crate::mw::rate_limit::create_per_ip_rate_limiter(30, 60),
         public_proxy_limiter: crate::mw::rate_limit::create_per_ip_rate_limiter(
             config.public_proxy_rate_limit_per_minute,
             60,

@@ -383,6 +383,7 @@ fn delegated_read_denied_path(path: &str) -> bool {
                 | "oracle"
                 | "channel-bots"
                 | "channel-conversations"
+                | "connect-links"
         )
     ) {
         return true;

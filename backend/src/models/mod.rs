@@ -18,6 +18,7 @@ pub mod channel_conversation;
 pub mod channel_event_log;
 pub mod channel_message;
 pub mod cli_pairing;
+pub mod connect_link;
 pub mod consent;
 pub mod default_request_header;
 pub mod device_code;

@@ -2076,6 +2076,7 @@ mod tests {
             credential_user_id: None,
             redirect_path: None,
             connection_id: None,
+            connect_link_id: None,
             consumed: false,
             expires_at: now + Duration::minutes(10),
             created_at: now,

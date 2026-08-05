@@ -110,6 +110,12 @@ pub struct AppState {
     pub auth_device_approve_per_user_limiter: mw::rate_limit::SharedPerKeyRateLimiter,
     /// Per-IP limiter for `POST /api/v1/auth/device/preview` (30/min).
     pub auth_device_preview_limiter: mw::rate_limit::SharedPerIpRateLimiter,
+    /// Per-creator limiter for `POST /api/v1/connect-links` (10/min).
+    pub connect_link_create_limiter: mw::rate_limit::SharedPerKeyRateLimiter,
+    /// Per-IP limiter for public connect-link previews (30/min).
+    pub connect_link_preview_limiter: mw::rate_limit::SharedPerIpRateLimiter,
+    /// Per-IP limiter for connect-link completion attempts (30/min).
+    pub connect_link_complete_limiter: mw::rate_limit::SharedPerIpRateLimiter,
     /// Per-IP rate limiter for `POST /cli-pairings/claim`. Tighter than
     /// the global rate limiter (5 attempts per 60s per IP) so brute
     /// forcing the 8-char pairing code is infeasible even from a
@@ -672,6 +678,9 @@ async fn main() {
         auth_device_approve_limiter: mw::rate_limit::create_per_ip_rate_limiter(10, 60),
         auth_device_approve_per_user_limiter: mw::rate_limit::create_per_key_rate_limiter(10, 300),
         auth_device_preview_limiter: mw::rate_limit::create_per_ip_rate_limiter(30, 60),
+        connect_link_create_limiter: mw::rate_limit::create_per_key_rate_limiter(10, 60),
+        connect_link_preview_limiter: mw::rate_limit::create_per_ip_rate_limiter(30, 60),
+        connect_link_complete_limiter: mw::rate_limit::create_per_ip_rate_limiter(30, 60),
         // 5 claim attempts per 60 seconds per IP; window-based, not token
         // bucket, because we want a hard cap on guesses per unit time.
         cli_pairing_claim_limiter: mw::rate_limit::create_per_ip_rate_limiter(5, 60),
@@ -826,6 +835,30 @@ async fn main() {
         loop {
             interval.tick().await;
             cleanup_auth_device_preview_limiter.cleanup();
+        }
+    });
+    let cleanup_connect_link_create_limiter = state.connect_link_create_limiter.clone();
+    tokio::spawn(async move {
+        let mut interval = tokio::time::interval(std::time::Duration::from_secs(60));
+        loop {
+            interval.tick().await;
+            cleanup_connect_link_create_limiter.cleanup();
+        }
+    });
+    let cleanup_connect_link_preview_limiter = state.connect_link_preview_limiter.clone();
+    tokio::spawn(async move {
+        let mut interval = tokio::time::interval(std::time::Duration::from_secs(60));
+        loop {
+            interval.tick().await;
+            cleanup_connect_link_preview_limiter.cleanup();
+        }
+    });
+    let cleanup_connect_link_complete_limiter = state.connect_link_complete_limiter.clone();
+    tokio::spawn(async move {
+        let mut interval = tokio::time::interval(std::time::Duration::from_secs(60));
+        loop {
+            interval.tick().await;
+            cleanup_connect_link_complete_limiter.cleanup();
         }
     });
 
