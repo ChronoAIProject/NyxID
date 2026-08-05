@@ -173,6 +173,8 @@ Single-use hosted credential setup for agents and CLI callers. An authenticated 
 - `connect_links` stores UUID-string IDs and only SHA-256 hashes of `nyx_clk_` tokens. Raw tokens appear once in the hosted URL and must never be logged, audited, or persisted in OAuth state.
 - Links default to 15 minutes, are clamped to 60-3600 seconds, and retain an observable `expired` terminal state through atomic query-time expiry claims. An OAuth or device flow pinned before expiry gets 30 minutes of finalization grace, then expires if it remains pending.
 - Preview is public and rate-limited but non-mutating. Completion is human-session-only; API keys, service accounts, delegated tokens, and relay tokens are rejected before the handler. Personal completion requires the exact creating account; org-owned completion uses `org_service::resolve_owner_access` write access. Unauthorized access is not-found-shaped.
+- Normal authorization-code access tokens issued to registered developer apps may create, read, and creator-cancel connect links; their JWT `client_id` binds the link to the active app record. Delegated, relay, and service-account tokens remain rejected on that route group, and no other rejection layer is weakened. App callbacks use `oauth_service::validate_client` against registered redirect policy, while sessions and agent API keys retain shape-only HTTP(S) validation. The authenticated app ID/name overrides untrusted request-body attribution.
+- Hosted human decline uses the same raw-token and owner checks as completion but only transitions the link to `cancelled`. Every terminal callback is built from the stored URI with `status` and `connect_link_id`; existing query parameters are preserved, reserved parameters are replaced, and raw tokens are never added. Provider callback errors store only a normalized `last_error` code and timestamp while the link remains retryable.
 - API-key and OAuth provisioning must reuse `unified_key_service`; completion is atomically serialized and single-use. OAuth state carries only `connect_link_id`, while the browser keeps the raw token in session storage across the redirect.
 - MCP callers use `nyx__connect_service` followed by `nyx__wait_for_connection`. A pending link must not activate service tools or emit `tools/list_changed`; activation happens only after completed status is observed.
 
@@ -224,7 +226,7 @@ sdk/                     # OAuth SDK monorepo (@nyxids/* npm namespace): oauth-c
 All API routes under `/api/v1`:
 - `/auth` -- register, login, logout, refresh, verify-email, forgot/reset-password
 - `/auth/device/{request,poll,approve,preview}` -- auth device-code login (see Critical Rule 12 for auth posture per route)
-- `/connect-links` -- create, poll, cancel, public preview, and human-only completion for hosted service connections (see Critical Rule 13)
+- `/connect-links` -- create, poll, creator cancel, public preview, human decline, and human-only completion for hosted service connections (see Critical Rule 13)
 - `/auth/mfa` -- setup, confirm, verify (login), disable (nested under `/auth` in `routes.rs`; `setup` is idempotent against unverified factors per NyxID#506)
 - `/users` -- get/update current user
 - `/api-keys` -- CRUD + rotate; `ApiKey` scope + agent isolation fields per Critical Rules 8-9
