@@ -987,6 +987,43 @@ mod tests {
         }
     }
 
+    fn test_oauth_provider() -> ProviderConfig {
+        ProviderConfig {
+            id: Uuid::new_v4().to_string(),
+            slug: format!("connect-link-oauth-{}", Uuid::new_v4()),
+            name: "Connect Link OAuth".to_string(),
+            description: None,
+            provider_type: "oauth2".to_string(),
+            authorization_url: Some("https://auth.example.test/authorize".to_string()),
+            token_url: Some("https://auth.example.test/token".to_string()),
+            revocation_url: None,
+            revocation: None,
+            default_scopes: None,
+            client_id_encrypted: Some(vec![1, 2, 3]),
+            client_secret_encrypted: Some(vec![4, 5, 6]),
+            supports_pkce: true,
+            device_code_url: None,
+            device_token_url: None,
+            device_verification_url: None,
+            hosted_callback_url: None,
+            api_key_instructions: None,
+            api_key_url: None,
+            icon_url: None,
+            documentation_url: None,
+            is_active: true,
+            credential_mode: "admin".to_string(),
+            token_endpoint_auth_method: "client_secret_post".to_string(),
+            extra_auth_params: None,
+            device_code_format: "rfc8628".to_string(),
+            client_id_param_name: None,
+            requires_gateway_url: false,
+            created_by: "test".to_string(),
+            revocation_seed_version: 0,
+            created_at: Utc::now(),
+            updated_at: Utc::now(),
+        }
+    }
+
     #[test]
     fn callback_url_accepts_absolute_http_and_https() {
         assert!(validate_callback_url(Some("https://agent.example/callback?run=1")).is_ok());
@@ -1516,5 +1553,100 @@ mod tests {
         )
         .await;
         assert!(matches!(resumed, Err(AppError::ConnectLinkExpired)));
+    }
+
+    #[tokio::test]
+    async fn pinned_oauth_resume_stops_after_finalization_grace() {
+        let Some(db) = connect_test_database("connect_link_oauth_resume_grace").await else {
+            return;
+        };
+        let (owner, created) = create_test_link(&db, "oauth-resume-grace").await;
+        let service_id = provision_test_link(&db, &owner, &created).await;
+        let service = db
+            .collection::<UserService>(USER_SERVICES)
+            .find_one(doc! { "_id": &service_id })
+            .await
+            .expect("read provisioned service")
+            .expect("provisioned service");
+        let key_id = service.api_key_id.expect("provisioned API key");
+        let connection_id = Uuid::new_v4().to_string();
+        let provider = test_oauth_provider();
+        db.collection::<ProviderConfig>(PROVIDERS)
+            .insert_one(&provider)
+            .await
+            .expect("insert OAuth provider");
+        db.collection::<DownstreamService>(DOWNSTREAM_SERVICES)
+            .update_one(
+                doc! { "_id": &created.link.service_id },
+                doc! { "$set": { "provider_config_id": &provider.id } },
+            )
+            .await
+            .expect("configure catalog OAuth provider");
+        db.collection::<UserApiKey>(USER_API_KEYS)
+            .update_one(
+                doc! { "_id": &key_id },
+                doc! { "$set": {
+                    "connection_id": &connection_id,
+                    "status": "pending_auth",
+                } },
+            )
+            .await
+            .expect("mark provisioned key pending OAuth");
+        db.collection::<ConnectLink>(CONNECT_LINKS)
+            .update_one(
+                doc! { "_id": &created.link.id },
+                doc! {
+                    "$set": {
+                        "status": "pending",
+                        "expires_at": bson::DateTime::from_chrono(
+                            Utc::now() - Duration::seconds(1)
+                        ),
+                    },
+                    "$unset": { "completed_at": "" },
+                },
+            )
+            .await
+            .expect("restore pinned OAuth link within grace");
+
+        let within_grace = complete(
+            &db,
+            &crate::test_utils::test_encryption_keys(),
+            &owner,
+            &created.raw_token,
+            CompleteInput::default(),
+            false,
+        )
+        .await
+        .expect("resume pinned OAuth link within grace");
+        assert!(matches!(
+            within_grace,
+            CompleteResult::OauthRequired {
+                connection_id: resumed_connection_id,
+                ..
+            } if resumed_connection_id == connection_id
+        ));
+
+        db.collection::<ConnectLink>(CONNECT_LINKS)
+            .update_one(
+                doc! { "_id": &created.link.id },
+                doc! { "$set": {
+                    "expires_at": bson::DateTime::from_chrono(
+                        Utc::now() - Duration::seconds(PINNED_GRACE_SECS + 1)
+                    ),
+                } },
+            )
+            .await
+            .expect("move pinned OAuth link past grace");
+
+        let after_grace = complete(
+            &db,
+            &crate::test_utils::test_encryption_keys(),
+            &owner,
+            &created.raw_token,
+            CompleteInput::default(),
+            false,
+        )
+        .await;
+        assert!(matches!(after_grace, Err(AppError::ConnectLinkExpired)));
     }
 }
