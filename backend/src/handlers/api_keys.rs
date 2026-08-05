@@ -1243,6 +1243,7 @@ pub async fn plan_key_scope(
     } else {
         api_key_scope_service::build_scope_plan_with_operations(
             &state.db,
+            &state.node_ws_manager,
             &actor,
             body.target_org_id.as_deref(),
             &body.selected_service_ids,
@@ -1388,6 +1389,7 @@ pub async fn create_key(
         })?;
         let provisioned = durable_operation_grant_service::provision_scheduled_key(
             &state.db,
+            &state.node_ws_manager,
             &actor,
             &user_id_str,
             &body.name,
@@ -1762,6 +1764,7 @@ pub async fn reauthorize_durable_grants(
     let owner = resolve_api_key_write_owner(&state, &actor, &key_id).await?;
     let grants = durable_operation_grant_service::reauthorize_scheduled_key(
         &state.db,
+        &state.node_ws_manager,
         &actor,
         &owner,
         &key_id,

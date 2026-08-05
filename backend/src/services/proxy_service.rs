@@ -84,6 +84,60 @@ pub(crate) struct PreparedDelegatedRequest {
     pub delegated_headers: Vec<(String, String)>,
 }
 
+/// Resolve the non-authentication headers that will be sent by either HTTP
+/// transport. Callers supply an already allowlisted base list; this function
+/// applies the shared user-agent, identity, default, delegated, and
+/// server-owned precedence rules.
+pub(crate) fn build_effective_outbound_headers(
+    target: &ProxyTarget,
+    mut outbound_headers: Vec<(String, String)>,
+    identity_headers: &[(String, String)],
+    delegated_headers: &[(String, String)],
+    extra_outbound_headers: &[(String, String)],
+) -> Vec<(String, String)> {
+    if let Some(ref user_agent) = target.service.custom_user_agent {
+        outbound_headers.retain(|(name, _)| !name.eq_ignore_ascii_case("user-agent"));
+        outbound_headers.push(("user-agent".to_string(), user_agent.clone()));
+    } else if !outbound_headers
+        .iter()
+        .any(|(name, _)| name.eq_ignore_ascii_case("user-agent"))
+    {
+        outbound_headers.push((
+            "user-agent".to_string(),
+            DEFAULT_PROXY_USER_AGENT.to_string(),
+        ));
+    }
+    outbound_headers.extend(identity_headers.iter().cloned());
+    outbound_headers = default_request_header::merge_into_header_list(
+        outbound_headers,
+        &[
+            target.catalog_default_headers.as_slice(),
+            target.user_service_default_headers.as_slice(),
+        ],
+    );
+
+    if let Some(credential_name) = credential_header_name(target) {
+        outbound_headers.retain(|(name, _)| !name.eq_ignore_ascii_case(&credential_name));
+    }
+    for (delegated_name, _) in delegated_headers {
+        outbound_headers.retain(|(name, _)| !name.eq_ignore_ascii_case(delegated_name));
+    }
+    if target.auth_method == "aws_sigv4" {
+        outbound_headers.retain(|(name, _)| {
+            !matches!(
+                name.to_ascii_lowercase().as_str(),
+                "x-amz-date" | "x-amz-content-sha256" | "x-amz-security-token" | "authorization"
+            )
+        });
+    }
+    outbound_headers.extend(delegated_headers.iter().cloned());
+    for (name, value) in extra_outbound_headers {
+        outbound_headers.retain(|(existing, _)| !existing.eq_ignore_ascii_case(name));
+        outbound_headers.push((name.clone(), value.clone()));
+    }
+    outbound_headers
+}
+
 /// Headers that are safe to forward to downstream services.
 /// Uses an allowlist approach to prevent leaking sensitive headers.
 ///
@@ -2643,125 +2697,37 @@ pub(crate) async fn forward_request_with_extra_outbound_headers(
     // append-by-default `RequestBuilder::header()` doesn't produce
     // duplicate entries when defaults collide with caller headers.
     //
-    // Order of precedence (low → high, per NyxID#356, NyxID#514):
+    // Order of precedence (low -> high, per NyxID#356, NyxID#514):
     //   1. Default UA fallback (`NyxID-Proxy/{version}`) — only when no UA otherwise
     //   2. Caller-supplied headers (filtered by the forward allowlist)
     //   3. Service `custom_user_agent` override (User-Agent only)
     //   4. Identity propagation headers
-    //   5. Delegated provider credential headers (`prepared.delegated_headers`)
-    //   6. `DownstreamService.default_request_headers` (admin catalog)
-    //   7. `UserService.default_request_headers`       (per-user override)
+    //   5. `DownstreamService.default_request_headers` (admin catalog)
+    //   6. `UserService.default_request_headers`       (per-user override)
+    //   7. Delegated provider credential headers (`prepared.delegated_headers`)
+    //   8. Server-owned extra headers
     //
-    // Layers 2–5 must all sit in `outbound_headers` BEFORE the merge so a
-    // non-overridable default collides with them inside
-    // `merge_into_header_list` and wins. The node-routed path in
-    // `handlers/proxy.rs` puts delegated headers in the same lower-precedence
-    // bucket; the two paths must agree here.
-    let has_custom_ua = target.service.custom_user_agent.is_some();
+    // The shared builder applies this exact sequence for both direct and
+    // node-routed HTTP requests.
     let mut outbound_headers: Vec<(String, String)> = Vec::new();
-    let mut caller_supplied_ua = false;
     for (name, value) in headers.iter() {
         let name_lower = name.as_str().to_ascii_lowercase();
-        if has_custom_ua && name_lower == "user-agent" {
-            continue;
-        }
         if !is_allowed_forward_header(&name_lower) {
             continue;
         }
         if let Ok(v) = value.to_str() {
-            if name_lower == "user-agent" {
-                caller_supplied_ua = true;
-            }
             outbound_headers.push((name.as_str().to_string(), v.to_string()));
         }
     }
-    if let Some(ref ua) = target.service.custom_user_agent {
-        outbound_headers.push(("user-agent".to_string(), ua.clone()));
-    } else if !caller_supplied_ua {
-        // NyxID#514: inject a benign default UA when neither the caller
-        // nor the service supplies one. Prevents silent 403s from
-        // UA-required APIs (e.g. GitHub) when the client SDK omits UA
-        // by default (.NET HttpClient, Python urllib, Java
-        // HttpURLConnection, etc.). The service `custom_user_agent`
-        // and any caller-supplied UA still win.
-        outbound_headers.push((
-            "user-agent".to_string(),
-            DEFAULT_PROXY_USER_AGENT.to_string(),
-        ));
-    }
-    for (name, value) in &identity_headers {
-        outbound_headers.push((name.clone(), value.clone()));
-    }
-    outbound_headers = default_request_header::merge_into_header_list(
+    let outbound_headers = build_effective_outbound_headers(
+        target,
         outbound_headers,
-        &[
-            target.catalog_default_headers.as_slice(),
-            target.user_service_default_headers.as_slice(),
-        ],
+        &identity_headers,
+        &prepared.delegated_headers,
+        &extra_outbound_headers,
     );
-    append_extra_outbound_headers(&mut outbound_headers, extra_outbound_headers);
-
-    // `reqwest::RequestBuilder::header` appends — it does NOT replace an
-    // existing value for the same name. Credential injection (including
-    // delegated provider headers and the service `auth_method`) also
-    // appends, so a default with the same name as the credential would
-    // ride alongside it on the wire.
-    //
-    // Two separate credential classes must win over defaults:
-    //
-    //   1. The service's own `auth_method` credential — `header` auth
-    //      uses `auth_key_name`, `bearer`/`basic`/... use `authorization`,
-    //      `token_exchange` parses its `injection` format. Resolved by
-    //      `credential_header_name(target)`.
-    //
-    //   2. Delegated provider credentials in `prepared.delegated_headers`
-    //      — these are how `auth_method = "none"` services combined with
-    //      `ServiceProviderRequirement` surface real downstream tokens
-    //      (e.g. Anthropic `x-api-key`, Google `x-goog-api-key`). A
-    //      non-overridable default with the same name would otherwise
-    //      *replace* the real token via `merge_into_header_list`, so we
-    //      explicitly strip those names before defaults could have
-    //      overwritten them, then apply the delegated headers last.
-    //
-    // Also strip `authorization` when `forward_access_token` is going to
-    // inject a NyxID bearer on top. The WS path uses
-    // `HeaderMap::insert` which replaces, so it doesn't need any of this
-    // filtering.
-    if let Some(cred_name) = credential_header_name(target) {
-        outbound_headers.retain(|(n, _)| !n.eq_ignore_ascii_case(&cred_name));
-    }
-    for (delegated_name, _) in &prepared.delegated_headers {
-        outbound_headers.retain(|(n, _)| !n.eq_ignore_ascii_case(delegated_name));
-    }
-    if target.service.forward_access_token && caller_token.is_some() {
-        outbound_headers.retain(|(n, _)| !n.eq_ignore_ascii_case("authorization"));
-    }
-    // SigV4 attaches its own X-Amz-Date / X-Amz-Content-Sha256 / X-Amz-
-    // Security-Token after the auth dispatch. `reqwest::header()` appends
-    // rather than replaces, so a caller-supplied value for any of these
-    // would ride alongside the signer's value on the wire — AWS rejects
-    // the request with a signature-mismatch error and the body hash
-    // disagreement is a latent integrity bug regardless. Codex review
-    // BLOCKER 8: strip them from `outbound_headers` before attaching.
-    if target.auth_method == "aws_sigv4" {
-        outbound_headers.retain(|(n, _)| {
-            let lower = n.to_ascii_lowercase();
-            !matches!(
-                lower.as_str(),
-                "x-amz-date" | "x-amz-content-sha256" | "x-amz-security-token" | "authorization"
-            )
-        });
-    }
 
     for (name, value) in &outbound_headers {
-        request = request.header(name, value);
-    }
-
-    // Delegated provider credential headers are applied here, AFTER
-    // defaults have been attached, so a colliding non-overridable
-    // default cannot replace the real downstream token. See comment
-    // block above for the rationale.
-    for (name, value) in &prepared.delegated_headers {
         request = request.header(name, value);
     }
 
@@ -2815,12 +2781,8 @@ pub(crate) async fn forward_request_with_extra_outbound_headers(
                 None => prepared.path.clone(),
             };
             // Headers that have actually been attached to the outgoing
-            // request, plus any prepared delegated headers. Both feed
-            // the cache key's header digest.
-            let mut key_headers: Vec<(String, String)> = outbound_headers.to_vec();
-            for (n, v) in &prepared.delegated_headers {
-                key_headers.push((n.clone(), v.clone()));
-            }
+            // request feed the cache key's header digest.
+            let key_headers: Vec<(String, String)> = outbound_headers.to_vec();
             let fingerprint = CloudResponseCache::credential_fingerprint(&target.credential);
             let key = CloudResponseCache::key(
                 &target.auth_method,
@@ -2927,10 +2889,7 @@ pub(crate) async fn forward_request_with_extra_outbound_headers(
             // exactly the bytes that will be sent. `prepared.delegated_headers`
             // are typically empty for cloud-billing services but signed if
             // present for consistency with the direct-header path.
-            let mut signed_input: Vec<(String, String)> = outbound_headers.clone();
-            for (name, value) in &prepared.delegated_headers {
-                signed_input.push((name.clone(), value.clone()));
-            }
+            let signed_input: Vec<(String, String)> = outbound_headers.clone();
             let body_bytes: &[u8] = match &body {
                 ProxyBody::Buffered(Some(b)) => b.as_ref(),
                 ProxyBody::Buffered(None) => &[][..],
@@ -3027,16 +2986,6 @@ pub(crate) async fn forward_request_with_extra_outbound_headers(
     }
 
     Ok(response)
-}
-
-fn append_extra_outbound_headers(
-    outbound_headers: &mut Vec<(String, String)>,
-    extra_outbound_headers: Vec<(String, String)>,
-) {
-    for (name, value) in extra_outbound_headers {
-        outbound_headers.retain(|(existing_name, _)| !existing_name.eq_ignore_ascii_case(&name));
-        outbound_headers.push((name, value));
-    }
 }
 
 /// Whether an HTTP method semantically supports a request body.
@@ -5903,6 +5852,30 @@ mod tests {
     fn credential_header_name_header_custom() {
         let t = make_proxy_target_with_auth("header", "X-Api-Key");
         assert_eq!(credential_header_name(&t), Some("X-Api-Key".into()));
+    }
+
+    #[test]
+    fn effective_headers_include_non_overridable_operation_defaults() {
+        let mut target = make_proxy_target_with_auth("none", "");
+        target.catalog_default_headers = vec![DefaultRequestHeader {
+            name: "X-Amz-Target".to_string(),
+            value: "Catalog.Write".to_string(),
+            overridable: false,
+            sensitive: false,
+        }];
+        let headers = build_effective_outbound_headers(
+            &target,
+            vec![("x-amz-target".to_string(), "Caller.Write".to_string())],
+            &[],
+            &[],
+            &[],
+        );
+        let operation_headers: Vec<_> = headers
+            .iter()
+            .filter(|(name, _)| name.eq_ignore_ascii_case("x-amz-target"))
+            .collect();
+        assert_eq!(operation_headers.len(), 1);
+        assert_eq!(operation_headers[0].1, "Catalog.Write");
     }
 
     #[test]

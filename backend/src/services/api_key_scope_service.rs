@@ -18,6 +18,7 @@ use crate::models::{
     api_key::ApiKeyPurpose,
     durable_operation_grant::{DurableOperationPlan, DurableOperationSelection},
 };
+use crate::services::node_ws_manager::NodeWsManager;
 use crate::services::{
     durable_operation_grant_service, node_service, org_service, user_service_service,
 };
@@ -668,6 +669,7 @@ pub async fn build_scope_plan(
 
 pub async fn build_scope_plan_with_operations(
     db: &mongodb::Database,
+    node_ws_manager: &NodeWsManager,
     actor_user_id: &str,
     target_owner_id: Option<&str>,
     selected_service_ids: &[String],
@@ -699,7 +701,9 @@ pub async fn build_scope_plan_with_operations(
         build_base_scope_plan(db, actor_user_id, target_owner_id, &submitted_service_ids).await?;
     let operations = durable_operation_grant_service::build_operation_plans(
         db,
+        node_ws_manager,
         &plan.intended_key_owner.id,
+        &plan.allowed_node_ids,
         selected_operations,
         key_expires_at,
     )
@@ -734,6 +738,7 @@ pub async fn build_scope_plan_with_operations(
 #[allow(clippy::too_many_arguments)]
 pub async fn verify_durable_scope_plan_precondition(
     db: &mongodb::Database,
+    node_ws_manager: &NodeWsManager,
     actor_user_id: &str,
     key_owner_user_id: &str,
     allowed_service_ids: &[String],
@@ -745,6 +750,7 @@ pub async fn verify_durable_scope_plan_precondition(
     let target_owner_id = (key_owner_user_id != actor_user_id).then_some(key_owner_user_id);
     let plan = build_scope_plan_with_operations(
         db,
+        node_ws_manager,
         actor_user_id,
         target_owner_id,
         allowed_service_ids,

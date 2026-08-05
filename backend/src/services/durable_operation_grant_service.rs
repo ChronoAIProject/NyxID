@@ -18,11 +18,11 @@ use crate::models::durable_operation_grant::{
     DurableOperationGrant, DurableOperationPlan, DurableOperationSelection,
     DurableParameterConstraint, DurableReplayPolicy, DurableValueConstraint,
 };
-use crate::models::service_endpoint::{
-    COLLECTION_NAME as SERVICE_ENDPOINTS, EndpointRisk, ServiceEndpoint,
-};
+use crate::models::service_endpoint::{EndpointRisk, ServiceEndpoint};
 use crate::models::user_service::{COLLECTION_NAME as USER_SERVICES, UserService};
-use crate::services::{api_key_scope_service, key_service};
+use crate::services::mcp_service::{NodeScope, ServiceScope};
+use crate::services::node_ws_manager::NodeWsManager;
+use crate::services::{api_key_scope_service, key_service, mcp_service};
 
 pub const DURABLE_GRANT_CONTRACT_VERSION: &str = "durable-operation-grant-v1";
 pub const DURABLE_GRANT_HEADER: &str = "x-nyxid-durable-grant-id";
@@ -133,6 +133,77 @@ pub fn endpoint_contract_digest(endpoint: &ServiceEndpoint) -> AppResult<String>
         "risk": endpoint.risk,
         "supports_idempotency_key": endpoint.supports_idempotency_key,
     })))
+}
+
+async fn load_active_published_endpoint(
+    db: &mongodb::Database,
+    node_ws_manager: &NodeWsManager,
+    owner_user_id: &str,
+    user_service_id: &str,
+    allowed_node_ids: &[String],
+    endpoint_id: &str,
+) -> AppResult<Option<ServiceEndpoint>> {
+    let catalog_backed = db
+        .collection::<UserService>(USER_SERVICES)
+        .find_one(doc! {
+            "_id": user_service_id,
+            "user_id": owner_user_id,
+            "is_active": true,
+            "service_type": "http",
+            "catalog_service_id": { "$type": "string", "$ne": "" },
+        })
+        .await?
+        .is_some();
+    if !catalog_backed {
+        return Ok(None);
+    }
+
+    let service_ids = [user_service_id.to_string()];
+    let catalog = mcp_service::load_operation_catalog(
+        db,
+        node_ws_manager,
+        owner_user_id,
+        NodeScope::Allowed(allowed_node_ids),
+        ServiceScope::Allowed(&service_ids),
+    )
+    .await?;
+    let Some(service) = catalog
+        .services
+        .into_iter()
+        .find(|service| service.service_id == user_service_id && !service.is_generic_proxy)
+    else {
+        return Ok(None);
+    };
+    let Some(endpoint) = service
+        .endpoints
+        .into_iter()
+        .find(|endpoint| endpoint.endpoint_id == endpoint_id)
+    else {
+        return Ok(None);
+    };
+    let Some(metadata) = service.durable_endpoint_metadata.get(endpoint_id).copied() else {
+        return Ok(None);
+    };
+    let now = Utc::now();
+    Ok(Some(ServiceEndpoint {
+        id: endpoint.endpoint_id,
+        service_id: user_service_id.to_string(),
+        name: endpoint.name,
+        description: endpoint.description,
+        method: endpoint.method,
+        path: endpoint.path,
+        parameters: endpoint.parameters,
+        request_body_schema: endpoint.request_body_schema,
+        request_content_type: endpoint.request_content_type,
+        request_body_required: endpoint.request_body_required,
+        response_description: endpoint.response_description,
+        response: endpoint.response,
+        risk: metadata.risk,
+        supports_idempotency_key: metadata.supports_idempotency_key,
+        is_active: true,
+        created_at: now,
+        updated_at: now,
+    }))
 }
 
 fn validate_rule(rule: &DurableValueConstraint, scalar_only: bool) -> AppResult<()> {
@@ -391,7 +462,9 @@ fn normalize_and_validate_constraints(
 
 pub async fn build_operation_plans(
     db: &mongodb::Database,
+    node_ws_manager: &NodeWsManager,
     owner_user_id: &str,
+    allowed_node_ids: &[String],
     selections: &[DurableOperationSelection],
     key_expires_at: Option<DateTime<Utc>>,
 ) -> AppResult<Vec<DurableOperationPlan>> {
@@ -430,37 +503,21 @@ pub async fn build_operation_plans(
             validate_client_audit_binding(binding)?;
         }
 
-        let service = db
-            .collection::<UserService>(USER_SERVICES)
-            .find_one(doc! {
-                "_id": &selection.user_service_id,
-                "user_id": owner_user_id,
-                "is_active": true,
-            })
-            .await?
-            .ok_or_else(|| {
-                AppError::ApiKeyScopePlanNotFound(format!(
-                    "UserService '{}' not found",
-                    selection.user_service_id
-                ))
-            })?;
-        let catalog_service_id = service.catalog_service_id.as_deref().ok_or_else(|| {
-            validation("durable grants require a catalog-backed PublishedEndpoint")
+        let endpoint = load_active_published_endpoint(
+            db,
+            node_ws_manager,
+            owner_user_id,
+            &selection.user_service_id,
+            allowed_node_ids,
+            &selection.endpoint_id,
+        )
+        .await?
+        .ok_or_else(|| {
+            AppError::ApiKeyScopePlanNotFound(format!(
+                "active published endpoint '{}' not found for UserService '{}'",
+                selection.endpoint_id, selection.user_service_id
+            ))
         })?;
-        let endpoint = db
-            .collection::<ServiceEndpoint>(SERVICE_ENDPOINTS)
-            .find_one(doc! {
-                "_id": &selection.endpoint_id,
-                "service_id": catalog_service_id,
-                "is_active": true,
-            })
-            .await?
-            .ok_or_else(|| {
-                AppError::ApiKeyScopePlanNotFound(format!(
-                    "active endpoint '{}' not found for UserService '{}'",
-                    selection.endpoint_id, selection.user_service_id
-                ))
-            })?;
 
         let method = endpoint.method.to_uppercase();
         if !matches!(method.as_str(), "POST" | "PUT" | "PATCH")
@@ -876,10 +933,10 @@ async fn claim_quota(db: &mongodb::Database, grant_id: &str, now: DateTime<Utc>)
 #[allow(clippy::too_many_arguments)]
 pub async fn authorize_and_reserve(
     db: &mongodb::Database,
+    node_ws_manager: &NodeWsManager,
     owner_user_id: &str,
     api_key_id: &str,
     user_service_id: &str,
-    catalog_service_id: &str,
     method: &str,
     path: &str,
     query: Option<&str>,
@@ -953,15 +1010,16 @@ pub async fn authorize_and_reserve(
         return Err(AppError::DurableGrantExpired);
     }
 
-    let endpoint = db
-        .collection::<ServiceEndpoint>(SERVICE_ENDPOINTS)
-        .find_one(doc! {
-            "_id": &grant.endpoint_id,
-            "service_id": catalog_service_id,
-            "is_active": true,
-        })
-        .await?
-        .ok_or(AppError::DurableGrantContractDrift)?;
+    let endpoint = load_active_published_endpoint(
+        db,
+        node_ws_manager,
+        owner_user_id,
+        user_service_id,
+        &key.allowed_node_ids,
+        &grant.endpoint_id,
+    )
+    .await?
+    .ok_or(AppError::DurableGrantContractDrift)?;
     if endpoint.risk != Some(EndpointRisk::Write)
         || endpoint_contract_digest(&endpoint)? != grant.contract_digest
     {
@@ -1201,6 +1259,7 @@ pub fn grant_from_plan(
 #[allow(clippy::too_many_arguments)]
 pub async fn provision_scheduled_key(
     db: &mongodb::Database,
+    node_ws_manager: &NodeWsManager,
     actor_user_id: &str,
     owner_user_id: &str,
     name: &str,
@@ -1216,6 +1275,7 @@ pub async fn provision_scheduled_key(
 ) -> AppResult<ProvisionedScheduledKey> {
     let plan = api_key_scope_service::verify_durable_scope_plan_precondition(
         db,
+        node_ws_manager,
         actor_user_id,
         owner_user_id,
         allowed_service_ids,
@@ -1308,6 +1368,7 @@ pub async fn provision_scheduled_key(
 #[allow(clippy::too_many_arguments)]
 pub async fn reauthorize_scheduled_key(
     db: &mongodb::Database,
+    node_ws_manager: &NodeWsManager,
     actor_user_id: &str,
     owner_user_id: &str,
     api_key_id: &str,
@@ -1331,6 +1392,7 @@ pub async fn reauthorize_scheduled_key(
     })?;
     let plan = api_key_scope_service::verify_durable_scope_plan_precondition(
         db,
+        node_ws_manager,
         actor_user_id,
         owner_user_id,
         &key.allowed_service_ids,
@@ -1402,8 +1464,14 @@ pub async fn reauthorize_scheduled_key(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::models::service_endpoint::OperationResponseContract;
-    use crate::test_utils::connect_test_database;
+    use crate::models::downstream_service::{
+        COLLECTION_NAME as DOWNSTREAM_SERVICES, test_helpers::dummy_service,
+    };
+    use crate::models::service_endpoint::{
+        COLLECTION_NAME as SERVICE_ENDPOINTS, OperationResponseContract,
+    };
+    use crate::models::user_endpoint::{COLLECTION_NAME as USER_ENDPOINTS, UserEndpoint};
+    use crate::test_utils::{connect_test_database, test_user_endpoint, test_user_service};
     use mongodb::{IndexModel, options::IndexOptions};
     use serde_json::json;
 
@@ -1487,6 +1555,8 @@ mod tests {
         endpoint: &ServiceEndpoint,
     ) -> DurableOperationGrant {
         let now = Utc::now();
+        let mut published_endpoint = endpoint.clone();
+        published_endpoint.service_id = user_service_id.to_string();
         DurableOperationGrant {
             id: id.to_string(),
             user_id: owner.to_string(),
@@ -1495,7 +1565,7 @@ mod tests {
             endpoint_id: endpoint.id.clone(),
             method: "POST".to_string(),
             normalized_path_template: "/items/{item_id}".to_string(),
-            contract_digest: endpoint_contract_digest(endpoint).unwrap(),
+            contract_digest: endpoint_contract_digest(&published_endpoint).unwrap(),
             constraints: constraints(),
             valid_from: now - Duration::minutes(1),
             expires_at: now + Duration::hours(1),
@@ -1602,6 +1672,105 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn operation_plans_reject_template_rows_hidden_by_an_instance_spec() {
+        let Some(db) = connect_test_database("durable_instance_spec_precedence").await else {
+            return;
+        };
+        let _cache_guard = crate::services::api_docs_service::SpecCacheTestGuard::acquire();
+        let owner = Uuid::new_v4().to_string();
+        let user_service_id = Uuid::new_v4().to_string();
+        let user_endpoint_id = Uuid::new_v4().to_string();
+        let template = endpoint();
+        let spec_url = format!("https://example.com/{}.json", Uuid::new_v4());
+
+        let mut catalog_service = dummy_service();
+        catalog_service.id = template.service_id.clone();
+        catalog_service.slug = format!("durable-precedence-{}", Uuid::new_v4());
+        catalog_service.requires_user_credential = false;
+        db.collection::<crate::models::downstream_service::DownstreamService>(DOWNSTREAM_SERVICES)
+            .insert_one(catalog_service)
+            .await
+            .unwrap();
+        db.collection::<ServiceEndpoint>(SERVICE_ENDPOINTS)
+            .insert_one(&template)
+            .await
+            .unwrap();
+        db.collection::<UserEndpoint>(USER_ENDPOINTS)
+            .insert_one(test_user_endpoint(
+                &user_endpoint_id,
+                &owner,
+                "Instance override",
+                "https://durable.example.test",
+                Some(&spec_url),
+                Some(&template.service_id),
+            ))
+            .await
+            .unwrap();
+        db.collection::<UserService>(USER_SERVICES)
+            .insert_one(test_user_service(
+                &user_service_id,
+                &owner,
+                "durable-instance-override",
+                &user_endpoint_id,
+                Some(&template.service_id),
+                None,
+            ))
+            .await
+            .unwrap();
+        crate::services::api_docs_service::cache_test_spec(
+            &spec_url,
+            Some(&owner),
+            json!({
+                "openapi": "3.1.0",
+                "info": { "title": "Instance", "version": "1.0.0" },
+                "paths": {
+                    "/instance-write": {
+                        "post": {
+                            "operationId": "instance_write",
+                            "x-aevatar-tool": { "readOnly": false },
+                            "responses": { "200": { "description": "ok" } }
+                        }
+                    }
+                }
+            }),
+        );
+        let cached_spec =
+            crate::services::api_docs_service::fetch_spec_json_scoped(&spec_url, &owner)
+                .await
+                .unwrap();
+        let parsed_spec =
+            crate::services::openapi_parser::parse_openapi_spec_value(&cached_spec).unwrap();
+        assert_eq!(parsed_spec.len(), 1);
+        assert_eq!(parsed_spec[0].risk, Some(EndpointRisk::Write));
+
+        let now = Utc::now();
+        let selection = DurableOperationSelection {
+            user_service_id: user_service_id.clone(),
+            endpoint_id: template.id.clone(),
+            constraints: constraints(),
+            valid_from: now.to_rfc3339(),
+            expires_at: (now + Duration::hours(1)).to_rfc3339(),
+            total_limit: 1,
+            window: None,
+            replay_policy: DurableReplayPolicy::NonReplayable,
+            client_audit_binding: None,
+        };
+        let result = build_operation_plans(
+            &db,
+            &NodeWsManager::new(30, 100),
+            &owner,
+            &[],
+            &[selection],
+            Some(now + Duration::hours(2)),
+        )
+        .await;
+        assert!(
+            matches!(result, Err(AppError::ApiKeyScopePlanNotFound(_))),
+            "unexpected planning result: {result:?}"
+        );
+    }
+
+    #[tokio::test]
     async fn exact_key_binding_and_operation_ledger_are_fail_closed() {
         let Some(db) = connect_test_database("durable_operation_ledger").await else {
             return;
@@ -1620,6 +1789,7 @@ mod tests {
         let key_id = Uuid::new_v4().to_string();
         let other_key_id = Uuid::new_v4().to_string();
         let user_service_id = Uuid::new_v4().to_string();
+        let user_endpoint_id = Uuid::new_v4().to_string();
         let endpoint = endpoint();
         let mut grant = grant(
             &Uuid::new_v4().to_string(),
@@ -1639,6 +1809,36 @@ mod tests {
             .rule = DurableValueConstraint::OneOf {
             values: vec![json!({"name": "alpha"}), json!({"name": "different"})],
         };
+        let mut catalog_service = dummy_service();
+        catalog_service.id = endpoint.service_id.clone();
+        catalog_service.slug = format!("durable-ledger-{}", Uuid::new_v4());
+        catalog_service.requires_user_credential = false;
+        db.collection::<crate::models::downstream_service::DownstreamService>(DOWNSTREAM_SERVICES)
+            .insert_one(catalog_service)
+            .await
+            .unwrap();
+        db.collection::<UserEndpoint>(USER_ENDPOINTS)
+            .insert_one(test_user_endpoint(
+                &user_endpoint_id,
+                &owner,
+                "Durable ledger endpoint",
+                "https://durable.example.test",
+                None,
+                Some(&endpoint.service_id),
+            ))
+            .await
+            .unwrap();
+        db.collection::<UserService>(USER_SERVICES)
+            .insert_one(test_user_service(
+                &user_service_id,
+                &owner,
+                "durable-ledger-service",
+                &user_endpoint_id,
+                Some(&endpoint.service_id),
+                None,
+            ))
+            .await
+            .unwrap();
         db.collection::<ApiKey>(API_KEYS)
             .insert_many([
                 scheduled_key(&key_id, &owner, &user_service_id),
@@ -1657,12 +1857,13 @@ mod tests {
 
         let mut headers = HeaderMap::new();
         headers.insert("content-type", "application/json".parse().unwrap());
+        let node_ws_manager = NodeWsManager::new(30, 100);
         let wrong_key = authorize_and_reserve(
             &db,
+            &node_ws_manager,
             &owner,
             &other_key_id,
             &user_service_id,
-            &endpoint.service_id,
             "POST",
             "/items/42",
             Some("mode=sync"),
@@ -1685,10 +1886,10 @@ mod tests {
         let invoke = || {
             authorize_and_reserve(
                 &db,
+                &node_ws_manager,
                 &owner,
                 &key_id,
                 &user_service_id,
-                &endpoint.service_id,
                 "POST",
                 "/items/42",
                 Some("mode=sync"),
@@ -1705,10 +1906,10 @@ mod tests {
 
         let duplicate = authorize_and_reserve(
             &db,
+            &node_ws_manager,
             &owner,
             &key_id,
             &user_service_id,
-            &endpoint.service_id,
             "POST",
             "/items/42",
             Some("mode=sync"),
@@ -1726,10 +1927,10 @@ mod tests {
 
         let conflict = authorize_and_reserve(
             &db,
+            &node_ws_manager,
             &owner,
             &key_id,
             &user_service_id,
-            &endpoint.service_id,
             "POST",
             "/items/42",
             Some("mode=sync"),
@@ -1745,10 +1946,10 @@ mod tests {
         mark_dispatched(&db, &reservations[0], None).await.unwrap();
         let uncertain = authorize_and_reserve(
             &db,
+            &node_ws_manager,
             &owner,
             &key_id,
             &user_service_id,
-            &endpoint.service_id,
             "POST",
             "/items/42",
             Some("mode=sync"),

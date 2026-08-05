@@ -436,6 +436,30 @@ fn collect_forward_headers_with_prefixes(
         .collect()
 }
 
+fn effective_header_map(headers: Vec<(String, String)>) -> AppResult<axum::http::HeaderMap> {
+    let mut result = axum::http::HeaderMap::new();
+    for (name, value) in headers {
+        let name = axum::http::HeaderName::from_bytes(name.as_bytes()).map_err(|_| {
+            AppError::DurableGrantMismatch(
+                "effective downstream header name is invalid".to_string(),
+            )
+        })?;
+        let value = axum::http::HeaderValue::from_str(&value).map_err(|_| {
+            AppError::DurableGrantMismatch(
+                "effective downstream header value is invalid".to_string(),
+            )
+        })?;
+        result.append(name, value);
+    }
+    Ok(result)
+}
+
+fn strip_durable_idempotency_defaults(
+    headers: &mut Vec<crate::models::default_request_header::DefaultRequestHeader>,
+) {
+    headers.retain(|header| !header.name.eq_ignore_ascii_case("idempotency-key"));
+}
+
 fn single_system_header(
     headers: &axum::http::HeaderMap,
     name: &'static str,
@@ -1470,7 +1494,7 @@ async fn execute_proxy_inner(
     let mut agent_override_applied = false;
     let (
         node_route,
-        target,
+        mut target,
         has_server_credential,
         master_credential,
         resolved_user_service_id,
@@ -1779,6 +1803,13 @@ async fn execute_proxy_inner(
     } else {
         None
     };
+    if scheduled_api_key_id.is_some() {
+        // Idempotency forwarding is owned exclusively by the durable endpoint
+        // contract. Service defaults cannot create replay semantics that the
+        // selected operation did not authorize.
+        strip_durable_idempotency_defaults(&mut target.catalog_default_headers);
+        strip_durable_idempotency_defaults(&mut target.user_service_default_headers);
+    }
     if scheduled_api_key_id.is_none()
         && (durable_grant_id.is_some() || durable_operation_id.is_some())
     {
@@ -1826,7 +1857,6 @@ async fn execute_proxy_inner(
         (bytes, None)
     };
 
-    let durable_authorization_body = body_bytes.clone();
     let operation = operation_descriptor::build_http_descriptor(
         &method_str,
         path,
@@ -1951,6 +1981,7 @@ async fn execute_proxy_inner(
         Some(body_bytes)
     };
     let body = force_stream_usage_for_service(&target.service.slug, path, body);
+    let durable_authorization_body = body.clone().unwrap_or_default();
     let request_body_len = body.as_ref().map(|b| b.len() as i64).unwrap_or(0);
 
     // === Delegated Credentials ===
@@ -2179,16 +2210,31 @@ async fn execute_proxy_inner(
                 "scheduled_invocation keys require an exact UserService route".to_string(),
             )
         })?;
+        let mut authorization_delegated = delegated.clone();
+        proxy_service::extend_with_path_credential(&mut authorization_delegated, &target);
+        let prepared_authorization = proxy_service::prepare_delegated_request(
+            path,
+            query.as_deref(),
+            &authorization_delegated,
+        )?;
+        let effective_headers =
+            effective_header_map(proxy_service::build_effective_outbound_headers(
+                &target,
+                node_forward_headers.clone(),
+                &identity_headers,
+                &prepared_authorization.delegated_headers,
+                &extra_outbound_headers,
+            ))?;
         let reservation = durable_operation_grant_service::authorize_and_reserve(
             &state.db,
+            &state.node_ws_manager,
             &user_id_str,
             api_key_id,
             user_service_id,
-            &target.service.id,
             &method_str,
             path,
             query.as_deref(),
-            &all_headers,
+            &effective_headers,
             durable_authorization_body.as_ref(),
             grant_id,
             operation_id,
@@ -2323,75 +2369,20 @@ async fn execute_proxy_inner(
             format!("/{}", prepared.path)
         };
 
-        let mut enriched_headers = node_forward_headers;
-        enriched_headers.extend(identity_headers.iter().cloned());
-
-        // Override User-Agent if the service specifies a custom one.
-        // By default (None), the client's User-Agent is forwarded as-is.
-        // NyxID#514: when neither caller nor service supplies a UA,
-        // inject `NyxID-Proxy/{version}` as a benign fallback so
-        // UA-required APIs (GitHub etc.) don't 403 silently.
-        if let Some(ref ua) = target.service.custom_user_agent {
-            enriched_headers.retain(|(name, _)| !name.eq_ignore_ascii_case("user-agent"));
-            enriched_headers.push(("user-agent".to_string(), ua.clone()));
-        } else if !enriched_headers
-            .iter()
-            .any(|(name, _)| name.eq_ignore_ascii_case("user-agent"))
-        {
-            enriched_headers.push((
-                "user-agent".to_string(),
-                proxy_service::DEFAULT_PROXY_USER_AGENT.to_string(),
-            ));
-        }
-
+        let mut base_headers = node_forward_headers;
         // Forward the caller's NyxID access token when the service is configured for it.
         if target.service.forward_access_token
             && let Some(ref token) = caller_token
         {
-            enriched_headers.push(("authorization".to_string(), format!("Bearer {token}")));
+            base_headers.push(("authorization".to_string(), format!("Bearer {token}")));
         }
-
-        // Merge service-level default headers (NyxID#356) into the node
-        // request. The node agent applies these alongside the caller /
-        // identity headers when it builds the outbound request on the
-        // user's machine. Merge semantics match the direct HTTP path in
-        // `proxy_service::forward_request`.
-        //
-        // Delegated provider credentials (e.g. Anthropic `x-api-key`,
-        // Google `x-goog-api-key`) are appended AFTER this merge, so a
-        // colliding non-overridable default cannot replace the real
-        // downstream token — see the equivalent block in `forward_request`.
-        enriched_headers = crate::models::default_request_header::merge_into_header_list(
-            enriched_headers,
-            &[
-                target.catalog_default_headers.as_slice(),
-                target.user_service_default_headers.as_slice(),
-            ],
+        let enriched_headers = proxy_service::build_effective_outbound_headers(
+            &target,
+            base_headers,
+            &identity_headers,
+            &prepared.delegated_headers,
+            &extra_outbound_headers,
         );
-
-        // Strip any header whose name will collide with what the node
-        // agent appends locally when it applies `auth_method`, plus any
-        // delegated-credential names we are about to re-append below.
-        // Without this, a catalog/user default called `x-api-key`
-        // (or any other `auth_key_name` / delegated name) would ride
-        // along on the frame and the node would append the real
-        // credential on top — the wire would then carry BOTH values.
-        if let Some(cred_name) = proxy_service::credential_header_name(&target) {
-            enriched_headers.retain(|(n, _)| !n.eq_ignore_ascii_case(&cred_name));
-        }
-        for (delegated_name, _) in &prepared.delegated_headers {
-            enriched_headers.retain(|(n, _)| !n.eq_ignore_ascii_case(delegated_name));
-        }
-        // Re-append delegated headers last so they win over any
-        // colliding default.
-        enriched_headers.extend(prepared.delegated_headers.iter().cloned());
-        // Server-owned headers bypass the caller allowlist and override
-        // catalog/user defaults. For durable operations this contains only
-        // the operation-derived idempotency key.
-        for (name, value) in &extra_outbound_headers {
-            enriched_headers.retain(|(existing, _)| !existing.eq_ignore_ascii_case(name));
-            enriched_headers.push((name.clone(), value.clone()));
-        }
 
         // Build base node request (will be cloned for failover retries)
         let node_request = NodeProxyRequest {
@@ -5245,8 +5236,8 @@ mod tests {
         collect_forward_headers_with_prefixes, compose_pre_resolved_node_ids,
         enforce_node_route_scope, final_credential_class, is_chat_completions_proxy_path,
         is_codex_transport_path, is_ws_upgrade_request, should_enforce_runtime_approval,
-        single_system_header, validate_range_header, websocket_realtime_usage_enabled,
-        websocket_resale_usage,
+        single_system_header, strip_durable_idempotency_defaults, validate_range_header,
+        websocket_realtime_usage_enabled, websocket_resale_usage,
     };
     use crate::models::service_billing::{BillingMetric, ServiceBilling};
     use crate::models::usage_meter::CredentialClass;
@@ -5305,6 +5296,27 @@ mod tests {
             Some("nyxid_ag_example")
         );
         assert_eq!(caller_bearer_token_for_downstream(&headers, true), None);
+    }
+
+    #[test]
+    fn scheduled_requests_strip_default_idempotency_headers() {
+        let mut headers = vec![
+            crate::models::default_request_header::DefaultRequestHeader {
+                name: "Idempotency-Key".to_string(),
+                value: "catalog-default".to_string(),
+                overridable: false,
+                sensitive: false,
+            },
+            crate::models::default_request_header::DefaultRequestHeader {
+                name: "X-Amz-Target".to_string(),
+                value: "Service.Write".to_string(),
+                overridable: false,
+                sensitive: false,
+            },
+        ];
+        strip_durable_idempotency_defaults(&mut headers);
+        assert_eq!(headers.len(), 1);
+        assert_eq!(headers[0].name, "X-Amz-Target");
     }
 
     #[test]
