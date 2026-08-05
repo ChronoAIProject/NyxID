@@ -1,7 +1,7 @@
 ---
 name: aevatar-platform-map
 description: Entry point, panorama, and router for the Aevatar skill family. Use before building, running, publishing, scheduling, externally triggering, or operating Aevatar resources; configuring an Agent Profile; assessing managed/private codex_exec feasibility and setup; running the canonical Codex readiness proof; authoring a workflow with codex_exec; diagnosing a Codex failure; or deciding which companion skill owns a request. It teaches resource and identity boundaries, NyxID-brokered auth, client REST versus in-session tools, deployment gates, and exact handoffs without treating member, workflow, service, profile, schedule, or Codex capabilities as one lifecycle.
-version: "1.12"
+version: "1.13"
 metadata:
   category: plain
   tag:
@@ -202,7 +202,7 @@ For managed `codex_exec`, normal execution is credential-read-only. Explicitly `
 
 | You want to… | Use the skill | Key endpoints |
 |---|---|---|
-| **Decide if a goal is even possible** + what must be in place first (use FIRST, before building) | `aevatar-feasibility-advisor` | read-only `GET /api/v1/services`, `GET /api/v1/catalog` (NyxID) |
+| **Decide if a goal is even possible** + what must be in place first (use FIRST, before building) | `aevatar-feasibility-advisor` | read-only `GET /api/v1/keys`, `GET /api/v1/catalog` (NyxID) |
 | **Triage a failure** — is it an aevatar / nyxid / ornn problem? read the code, then file an issue or get authoritative usage guidance (use AFTER something breaks) | `aevatar-triage` | reads repos via `gh` or `nyxid_proxy` `api-github`; `gh issue` |
 | Assess whether **Codex fits the task** and select managed versus private | `aevatar-feasibility-advisor` | read-only contract decision; no Codex call yet |
 | Configure or repair managed/private **`codex_exec`** | `aevatar-codex-exec-node-setup` | in-session `codex_exec`; managed UserService readiness or private NyxID SSH route |
@@ -329,6 +329,10 @@ lifecycle, and none of its IDs are aliases. Agent Profile work is not part of th
   and role terminal frames are progress. `RUN_OBSERVATION_TIMEOUT` closes a stalled observation
   stream but does not by itself prove whole-run failure; query the same `actorId + commandId` and
   never create another run as a status probe.
+- **Keep feature controls separate from the original artifact.** When an original workflow is
+  blocked by an inaccessible or stale external resource, an authorized feature-equivalent probe
+  may use a sanitized accessible resource while preserving the relevant execution shapes. Its
+  success proves only those features; it never turns the original workflow into a success.
 - **Detect deployment-gated capabilities.** Agent Profile management exists in the codebase but
   may not be exposed by the running deployment. Probe the surface (tool list, or the complete
   route family in `GET /api/openapi.json`) before promising it — and report its absence honestly

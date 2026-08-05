@@ -1,7 +1,7 @@
 ---
 name: aevatar-codex-exec-node-setup
 description: Configure and prove Aevatar codex_exec for one NyxID account, choosing operator-managed chrono-sandbox/gVisor for bounded empty-workspace work or private NyxID node-backed SSH for a fixed host workspace. Use for managed eligibility and UserService readiness, private node/SSH hardening, mandatory public-sample verification, or diagnosing typed managed and private-route failures.
-version: "4.1"
+version: "4.2"
 metadata:
   category: tool-based
   tool-list:
