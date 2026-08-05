@@ -11,7 +11,7 @@ use crate::models::downstream_service::{
 };
 use crate::models::service_billing::{BillingMetric, PlatformUsage};
 use crate::models::service_endpoint::{
-    COLLECTION_NAME as SERVICE_ENDPOINTS, OperationResponseContract, ServiceEndpoint,
+    COLLECTION_NAME as SERVICE_ENDPOINTS, EndpointRisk, OperationResponseContract, ServiceEndpoint,
 };
 use crate::models::usage_meter::CredentialClass;
 use crate::models::user_api_key::{COLLECTION_NAME as USER_API_KEYS, UserApiKey};
@@ -159,6 +159,10 @@ pub struct McpToolService {
     pub description: Option<String>,
     pub service_category: String,
     pub endpoints: Vec<McpToolEndpoint>,
+    /// Durable-authorization metadata keyed by the exact endpoint identity
+    /// published in `endpoints`. Keeping it on the canonical catalog result
+    /// preserves instance-spec precedence for security consumers.
+    pub durable_endpoint_metadata: HashMap<String, McpDurableEndpointMetadata>,
     pub source: McpToolSource,
     /// Whether the service can currently execute requests with its configured
     /// credential and routing state.
@@ -172,6 +176,12 @@ pub struct McpToolService {
     /// service: the instance's `UserEndpoint.recommended_skills` when set,
     /// else the catalog template's `DownstreamService.recommended_skills`.
     pub recommended_skills: Vec<String>,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct McpDurableEndpointMetadata {
+    pub risk: Option<EndpointRisk>,
+    pub supports_idempotency_key: bool,
 }
 
 fn mcp_credential_class(
@@ -845,7 +855,7 @@ async fn load_user_tools_inner(
             .unwrap_or(&us.slug);
 
         let user_spec_url = user_endpoint.and_then(|ep| ep.openapi_spec_url.as_deref());
-        let (endpoints, is_generic, invalid_openapi_contract) = if let Some(catalog_id) =
+        let (published, is_generic, invalid_openapi_contract) = if let Some(catalog_id) =
             us.catalog_service_id.as_deref()
         {
             // Catalog-backed: the instance's user-mounted spec is a
@@ -857,13 +867,19 @@ async fn load_user_tools_inner(
             // generic proxy tool exactly like a custom endpoint (#1290).
             let template_rows = eps_by_svc
                 .get(catalog_id)
-                .map(|eps| service_endpoints_to_mcp(eps))
-                .unwrap_or_default();
+                .map(|eps| ParsedMcpEndpoints {
+                    endpoints: service_endpoints_to_mcp(eps),
+                    durable_metadata: service_endpoint_durable_metadata(eps),
+                })
+                .unwrap_or_else(|| ParsedMcpEndpoints {
+                    endpoints: Vec::new(),
+                    durable_metadata: HashMap::new(),
+                });
             match user_spec_url {
                 Some(spec_url) => {
                     match try_user_spec_endpoints(spec_url, &r.effective_owner_id, &us.id).await {
                         Some(instance_endpoints) => (instance_endpoints, false, false),
-                        None if !template_rows.is_empty() => {
+                        None if !template_rows.endpoints.is_empty() => {
                             tracing::warn!(
                                 user_service_id = %us.id,
                                 spec_url = %api_docs_service::redact_url_for_logs(spec_url),
@@ -872,7 +888,10 @@ async fn load_user_tools_inner(
                             (template_rows, false, false)
                         }
                         None => (
-                            vec![build_generic_proxy_endpoint(endpoint_label)],
+                            ParsedMcpEndpoints {
+                                endpoints: vec![build_generic_proxy_endpoint(endpoint_label)],
+                                durable_metadata: HashMap::new(),
+                            },
                             true,
                             true,
                         ),
@@ -887,7 +906,14 @@ async fn load_user_tools_inner(
             user_spec_endpoints(spec_url, &r.effective_owner_id, &us.id, endpoint_label).await
         } else {
             let generic_ep = build_generic_proxy_endpoint(endpoint_label);
-            (vec![generic_ep], true, false)
+            (
+                ParsedMcpEndpoints {
+                    endpoints: vec![generic_ep],
+                    durable_metadata: HashMap::new(),
+                },
+                true,
+                false,
+            )
         };
 
         let recommended_skills = user_endpoint
@@ -905,7 +931,8 @@ async fn load_user_tools_inner(
             service_slug: us.slug.clone(),
             description: None,
             service_category: "user_service".to_string(),
-            endpoints,
+            endpoints: published.endpoints,
+            durable_endpoint_metadata: published.durable_metadata,
             recommended_skills,
             source: McpToolSource::UserManaged {
                 user_service_id: us.id.clone(),
@@ -929,10 +956,9 @@ async fn load_user_tools_inner(
             continue;
         }
 
-        let endpoints = eps_by_svc
-            .get(svc.id.as_str())
-            .map(|eps| service_endpoints_to_mcp(eps))
-            .unwrap_or_default();
+        let endpoint_rows = eps_by_svc.get(svc.id.as_str()).cloned().unwrap_or_default();
+        let endpoints = service_endpoints_to_mcp(&endpoint_rows);
+        let durable_endpoint_metadata = service_endpoint_durable_metadata(&endpoint_rows);
 
         result.push(McpToolService {
             service_id: svc.id.clone(),
@@ -941,6 +967,7 @@ async fn load_user_tools_inner(
             description: svc.description.clone(),
             service_category: svc.service_category.clone(),
             endpoints,
+            durable_endpoint_metadata,
             recommended_skills: svc.recommended_skills.clone().unwrap_or_default(),
             source: McpToolSource::Platform {
                 downstream_service_id: svc.id.clone(),
@@ -973,33 +1000,71 @@ fn service_endpoints_to_mcp(eps: &[&ServiceEndpoint]) -> Vec<McpToolEndpoint> {
         .collect()
 }
 
+fn service_endpoint_durable_metadata(
+    eps: &[&ServiceEndpoint],
+) -> HashMap<String, McpDurableEndpointMetadata> {
+    eps.iter()
+        .map(|endpoint| {
+            (
+                endpoint.id.clone(),
+                McpDurableEndpointMetadata {
+                    risk: endpoint.risk,
+                    supports_idempotency_key: endpoint.supports_idempotency_key,
+                },
+            )
+        })
+        .collect()
+}
+
+struct ParsedMcpEndpoints {
+    endpoints: Vec<McpToolEndpoint>,
+    durable_metadata: HashMap<String, McpDurableEndpointMetadata>,
+}
+
 /// Fetch the user-supplied OpenAPI spec through the hardened cache (scoped
 /// by the owning user id), parse it, and convert to MCP tool endpoints.
 async fn fetch_and_parse_user_spec(
     spec_url: &str,
     owner_id: &str,
-) -> AppResult<Vec<McpToolEndpoint>> {
+) -> AppResult<ParsedMcpEndpoints> {
     let spec = api_docs_service::fetch_spec_json_scoped(spec_url, owner_id).await?;
     let parsed = openapi_parser::parse_openapi_spec_value(&spec)?;
-    Ok(parsed
-        .into_iter()
-        .map(|p| McpToolEndpoint {
+    let mut endpoints = Vec::with_capacity(parsed.len());
+    let mut durable_metadata = HashMap::with_capacity(parsed.len());
+    for parsed_endpoint in parsed {
+        let endpoint_id = opaque_operation_id(
+            parsed_endpoint.source_operation_id.as_deref(),
+            &parsed_endpoint.method,
+            &parsed_endpoint.path,
+        );
+        durable_metadata.insert(
+            endpoint_id.clone(),
+            McpDurableEndpointMetadata {
+                risk: parsed_endpoint.risk,
+                supports_idempotency_key: parsed_endpoint.supports_idempotency_key,
+            },
+        );
+        endpoints.push(McpToolEndpoint {
             // Dynamic operations have no persisted row. Hash the producer's
             // OpenAPI operationId, falling back to canonical method/path, so
             // callers receive a stable opaque ID and never derive identity.
-            endpoint_id: opaque_operation_id(p.source_operation_id.as_deref(), &p.method, &p.path),
-            name: p.name,
-            description: p.description,
-            method: p.method,
-            path: p.path,
-            parameters: p.parameters,
-            request_body_schema: p.request_body_schema,
-            request_content_type: p.request_content_type,
-            request_body_required: p.request_body_required,
+            endpoint_id,
+            name: parsed_endpoint.name,
+            description: parsed_endpoint.description,
+            method: parsed_endpoint.method,
+            path: parsed_endpoint.path,
+            parameters: parsed_endpoint.parameters,
+            request_body_schema: parsed_endpoint.request_body_schema,
+            request_content_type: parsed_endpoint.request_content_type,
+            request_body_required: parsed_endpoint.request_body_required,
             response_description: None,
-            response: p.response,
-        })
-        .collect())
+            response: parsed_endpoint.response,
+        });
+    }
+    Ok(ParsedMcpEndpoints {
+        endpoints,
+        durable_metadata,
+    })
 }
 
 /// Fetch and parse a user-mounted OpenAPI spec, returning `Some(endpoints)`
@@ -1010,9 +1075,9 @@ async fn try_user_spec_endpoints(
     spec_url: &str,
     owner_id: &str,
     user_service_id: &str,
-) -> Option<Vec<McpToolEndpoint>> {
+) -> Option<ParsedMcpEndpoints> {
     match fetch_and_parse_user_spec(spec_url, owner_id).await {
-        Ok(mcp_endpoints) if !mcp_endpoints.is_empty() => Some(mcp_endpoints),
+        Ok(parsed) if !parsed.endpoints.is_empty() => Some(parsed),
         Ok(_) => {
             tracing::debug!(
                 user_service_id = %user_service_id,
@@ -1042,11 +1107,14 @@ async fn user_spec_endpoints(
     owner_id: &str,
     user_service_id: &str,
     endpoint_label: &str,
-) -> (Vec<McpToolEndpoint>, bool, bool) {
+) -> (ParsedMcpEndpoints, bool, bool) {
     match try_user_spec_endpoints(spec_url, owner_id, user_service_id).await {
-        Some(mcp_endpoints) => (mcp_endpoints, false, false),
+        Some(parsed) => (parsed, false, false),
         None => (
-            vec![build_generic_proxy_endpoint(endpoint_label)],
+            ParsedMcpEndpoints {
+                endpoints: vec![build_generic_proxy_endpoint(endpoint_label)],
+                durable_metadata: HashMap::new(),
+            },
             true,
             true,
         ),
@@ -1875,6 +1943,7 @@ pub async fn load_public_tools(db: &mongodb::Database) -> AppResult<Vec<McpToolS
             service_category: "public".to_string(),
             recommended_skills: Vec::new(),
             endpoints,
+            durable_endpoint_metadata: HashMap::new(),
             source: McpToolSource::Platform {
                 downstream_service_id: svc.id,
             },
@@ -3799,6 +3868,7 @@ mod tests {
             service_category: "connection".to_string(),
             recommended_skills: Vec::new(),
             endpoints,
+            durable_endpoint_metadata: HashMap::new(),
             source: McpToolSource::Platform {
                 downstream_service_id: id.to_string(),
             },
@@ -4132,6 +4202,8 @@ mod tests {
                 request_body_required: false,
                 response_description: None,
                 response: OperationResponseContract::default(),
+                risk: None,
+                supports_idempotency_key: false,
                 is_active: true,
                 created_at: chrono::Utc::now(),
                 updated_at: chrono::Utc::now(),
@@ -4229,6 +4301,8 @@ mod tests {
                 request_body_required: false,
                 response_description: None,
                 response: OperationResponseContract::default(),
+                risk: None,
+                supports_idempotency_key: false,
                 is_active: true,
                 created_at: chrono::Utc::now(),
                 updated_at: chrono::Utc::now(),
@@ -4417,6 +4491,8 @@ mod tests {
                 request_body_required: false,
                 response_description: None,
                 response: OperationResponseContract::default(),
+                risk: None,
+                supports_idempotency_key: false,
                 is_active: true,
                 created_at: chrono::Utc::now(),
                 updated_at: chrono::Utc::now(),
@@ -4529,6 +4605,8 @@ mod tests {
                 request_body_required: false,
                 response_description: None,
                 response: OperationResponseContract::default(),
+                risk: None,
+                supports_idempotency_key: false,
                 is_active: true,
                 created_at: chrono::Utc::now(),
                 updated_at: chrono::Utc::now(),

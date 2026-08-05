@@ -611,6 +611,46 @@ pub async fn ensure_indexes(db: &Database) -> Result<(), mongodb::error::Error> 
         )
         .await?;
 
+    // ── durable operation grants / operation-id ledger ──
+    let durable_grants = db.collection::<mongodb::bson::Document>("durable_operation_grants");
+    durable_grants
+        .create_index(
+            IndexModel::builder()
+                .keys(doc! { "user_id": 1, "api_key_id": 1, "created_at": -1 })
+                .build(),
+        )
+        .await?;
+    durable_grants
+        .create_index(
+            IndexModel::builder()
+                .keys(doc! {
+                    "api_key_id": 1,
+                    "user_service_id": 1,
+                    "endpoint_id": 1,
+                    "revoked_at": 1,
+                })
+                .build(),
+        )
+        .await?;
+
+    let durable_executions =
+        db.collection::<mongodb::bson::Document>("durable_operation_executions");
+    durable_executions
+        .create_index(
+            IndexModel::builder()
+                .keys(doc! { "grant_id": 1, "operation_id": 1 })
+                .options(IndexOptions::builder().unique(true).build())
+                .build(),
+        )
+        .await?;
+    durable_executions
+        .create_index(
+            IndexModel::builder()
+                .keys(doc! { "api_key_id": 1, "created_at": -1 })
+                .build(),
+        )
+        .await?;
+
     // ── provider_configs ──
     let provider_configs = db.collection::<mongodb::bson::Document>("provider_configs");
     provider_configs

@@ -4,6 +4,11 @@
 
 Agent isolation lets different AI agents (Claude Code, Codex, custom bots, etc.) belonging to the same NyxID user operate with independent credentials, rate limits, scopes, and audit trails. There is no separate "agent" model -- an **API key is the agent identity**.
 
+Unattended scheduled writes use the separate, fail-closed
+`scheduled_invocation` key purpose documented in
+[Durable Operation Grants](DURABLE_OPERATION_GRANTS.md). General agent keys and
+legacy `ApprovalGrant` rows never gain that authority.
+
 ```mermaid
 graph TD
     subgraph Same NyxID User

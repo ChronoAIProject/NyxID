@@ -3,6 +3,13 @@ use serde::{Deserialize, Serialize};
 
 pub const COLLECTION_NAME: &str = "service_endpoints";
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, utoipa::ToSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum EndpointRisk {
+    Read,
+    Write,
+}
+
 fn default_request_body_required() -> bool {
     true
 }
@@ -41,6 +48,14 @@ pub struct ServiceEndpoint {
     pub response_description: Option<String>,
     #[serde(default)]
     pub response: OperationResponseContract,
+    /// Explicitly published security classification. Missing on legacy or
+    /// unclassified discovered rows, which makes them ineligible for durable
+    /// grants.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub risk: Option<EndpointRisk>,
+    /// Whether the endpoint contract explicitly permits an Idempotency-Key.
+    #[serde(default)]
+    pub supports_idempotency_key: bool,
     pub is_active: bool,
     #[serde(with = "bson::serde_helpers::chrono_datetime_as_bson_datetime")]
     pub created_at: DateTime<Utc>,
@@ -79,6 +94,8 @@ mod tests {
                 content_types: vec!["application/json".to_string()],
                 binary_artifact: Some(false),
             },
+            risk: Some(EndpointRisk::Read),
+            supports_idempotency_key: false,
             is_active: true,
             created_at: Utc::now(),
             updated_at: Utc::now(),
@@ -110,10 +127,14 @@ mod tests {
         let endpoint = make_endpoint();
         let mut doc = bson::to_document(&endpoint).expect("serialize");
         doc.remove("response");
+        doc.remove("risk");
+        doc.remove("supports_idempotency_key");
 
         let restored: ServiceEndpoint = bson::from_document(doc).expect("deserialize legacy row");
         assert!(restored.response.content_types.is_empty());
         assert_eq!(restored.response.binary_artifact, None);
+        assert_eq!(restored.risk, None);
+        assert!(!restored.supports_idempotency_key);
     }
 
     #[test]

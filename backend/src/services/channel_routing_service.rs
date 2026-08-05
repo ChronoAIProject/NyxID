@@ -360,6 +360,8 @@ mod tests {
             rate_limit_burst: None,
             platform: None,
             callback_url: callback_url.map(String::from),
+            purpose: Default::default(),
+            scheduled_write_enabled: false,
         }
     }
 

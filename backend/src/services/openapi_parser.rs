@@ -1,7 +1,7 @@
 use std::collections::HashSet;
 
 use crate::errors::{AppError, AppResult};
-use crate::models::service_endpoint::OperationResponseContract;
+use crate::models::service_endpoint::{EndpointRisk, OperationResponseContract};
 use crate::services::content_type::{
     is_binary_content_type, is_json_content_type, normalize_content_type,
     schema_contains_binary_field, schema_is_binary,
@@ -19,6 +19,8 @@ pub struct ParsedEndpoint {
     pub request_content_type: Option<String>,
     pub request_body_required: bool,
     pub response: OperationResponseContract,
+    pub risk: Option<EndpointRisk>,
+    pub supports_idempotency_key: bool,
 }
 
 #[derive(Default)]
@@ -137,6 +139,34 @@ fn parse_endpoints_from_spec(
                 extract_request_body_swagger2(operation, path_obj, spec)
             };
             let response = extract_response_contract(operation, spec, is_openapi3);
+            let risk = operation
+                .get("x-aevatar-tool")
+                .and_then(|value| value.get("readOnly"))
+                .and_then(|value| value.as_bool())
+                .map(|read_only| {
+                    if read_only {
+                        EndpointRisk::Read
+                    } else {
+                        EndpointRisk::Write
+                    }
+                });
+            let supports_idempotency_key = operation
+                .get("x-nyxid-idempotency-key")
+                .and_then(|value| value.as_bool())
+                .unwrap_or(false)
+                || parameters.as_ref().is_some_and(|parameters| {
+                    parameters.as_array().is_some_and(|parameters| {
+                        parameters.iter().any(|parameter| {
+                            parameter.get("in").and_then(|value| value.as_str()) == Some("header")
+                                && parameter
+                                    .get("name")
+                                    .and_then(|value| value.as_str())
+                                    .is_some_and(|name| {
+                                        name.eq_ignore_ascii_case("idempotency-key")
+                                    })
+                        })
+                    })
+                });
 
             endpoints.push(ParsedEndpoint {
                 source_operation_id,
@@ -149,6 +179,8 @@ fn parse_endpoints_from_spec(
                 request_content_type: request_body.content_type,
                 request_body_required: request_body.required,
                 response,
+                risk,
+                supports_idempotency_key,
             });
         }
     }
@@ -2282,6 +2314,46 @@ mod tests {
         let endpoints = parse_openapi_spec_value(&spec).unwrap();
         assert_eq!(endpoints.len(), 1);
         assert_eq!(endpoints[0].method, "POST");
+    }
+
+    #[test]
+    fn durable_risk_remains_unclassified_without_explicit_tool_metadata() {
+        let spec = serde_json::json!({
+            "openapi": "3.1.0",
+            "paths": {
+                "/items": {
+                    "post": {
+                        "operationId": "createItem",
+                        "responses": { "200": {} }
+                    }
+                }
+            }
+        });
+        let endpoints = parse_openapi_spec_value(&spec).unwrap();
+        assert_eq!(endpoints[0].risk, None);
+        assert!(!endpoints[0].supports_idempotency_key);
+    }
+
+    #[test]
+    fn durable_metadata_uses_explicit_write_and_idempotency_contracts() {
+        let spec = serde_json::json!({
+            "openapi": "3.1.0",
+            "paths": {
+                "/items": {
+                    "post": {
+                        "operationId": "createItem",
+                        "x-aevatar-tool": { "readOnly": false },
+                        "parameters": [
+                            {"name": "Idempotency-Key", "in": "header", "schema": {"type": "string"}}
+                        ],
+                        "responses": { "200": {} }
+                    }
+                }
+            }
+        });
+        let endpoints = parse_openapi_spec_value(&spec).unwrap();
+        assert_eq!(endpoints[0].risk, Some(EndpointRisk::Write));
+        assert!(endpoints[0].supports_idempotency_key);
     }
 
     // ---- extract_swagger2_consumes ----
