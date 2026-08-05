@@ -7407,22 +7407,24 @@ mod proxy_resolution_integration_tests {
     use crate::models::user_endpoint::{COLLECTION_NAME as USER_ENDPOINTS, UserEndpoint};
     use crate::models::user_service::{COLLECTION_NAME as USER_SERVICES, UserService};
     use crate::mw::auth::{AuthMethod, AuthUser};
-    use crate::services::node_ws_manager::{NodeOutboundMessage, NodeProxyResponse};
+    use crate::services::node_ws_manager::NodeOutboundMessage;
     use crate::test_utils::{
         connect_test_database, test_app_state, test_membership, test_user, test_user_endpoint,
         test_user_service,
     };
     use axum::{
-        Router,
-        body::{Body, to_bytes},
+        Json, Router,
+        body::{Body, Bytes, to_bytes},
         extract::{Path, State},
         http::{HeaderName, HeaderValue, Method, Request, StatusCode, Uri},
         response::{IntoResponse, Response},
-        routing::{any, get},
+        routing::{any, get, post},
     };
     use base64::Engine as _;
     use chrono::Utc;
+    use futures::{SinkExt, StreamExt};
     use mongodb::bson::doc;
+    use nyxid_node_proxy_test::{NodeMetrics as AgentNodeMetrics, ReplayGuard};
     use tokio::net::TcpListener;
     use tokio::sync::mpsc;
 
@@ -7509,6 +7511,159 @@ mod proxy_resolution_integration_tests {
                 .expect("serve downstream auth test app");
         });
         (format!("http://{addr}"), server)
+    }
+
+    async fn echo_node_request(
+        headers: axum::http::HeaderMap,
+        body: Bytes,
+    ) -> Json<serde_json::Value> {
+        Json(serde_json::json!({
+            "content_type": headers
+                .get("content-type")
+                .and_then(|value| value.to_str().ok()),
+            "idempotency_key": headers
+                .get("idempotency-key")
+                .and_then(|value| value.to_str().ok()),
+            "trace_id": headers
+                .get("x-trace-id")
+                .and_then(|value| value.to_str().ok()),
+            "body": String::from_utf8_lossy(&body),
+        }))
+    }
+
+    async fn start_node_echo_downstream() -> (String, tokio::task::JoinHandle<()>) {
+        let app = Router::new().route("/commands", post(echo_node_request));
+        let listener = TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind node echo downstream");
+        let addr = listener.local_addr().expect("node echo downstream addr");
+        let server = tokio::spawn(async move {
+            axum::serve(listener, app)
+                .await
+                .expect("serve node echo downstream");
+        });
+        (format!("http://{addr}"), server)
+    }
+
+    async fn start_node_executor(
+        state: AppState,
+        node: &Node,
+        service_slug: &str,
+        target_url: &str,
+    ) -> (tokio::task::JoinHandle<()>, tokio::task::JoinHandle<()>) {
+        let app = Router::new()
+            .route(
+                "/api/v1/nodes/ws",
+                get(crate::handlers::node_ws::ws_handler),
+            )
+            .with_state(state.clone());
+        let listener = TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind node WebSocket server");
+        let addr = listener.local_addr().expect("node WebSocket server addr");
+        let ws_server = tokio::spawn(async move {
+            axum::serve(
+                listener,
+                app.into_make_service_with_connect_info::<std::net::SocketAddr>(),
+            )
+            .await
+            .expect("serve node WebSocket handler");
+        });
+
+        let (mut socket, response) =
+            tokio_tungstenite::connect_async(format!("ws://{addr}/api/v1/nodes/ws"))
+                .await
+                .expect("connect node executor WebSocket");
+        assert_eq!(response.status(), StatusCode::SWITCHING_PROTOCOLS);
+        socket
+            .send(tokio_tungstenite::tungstenite::Message::Text(
+                serde_json::json!({
+                    "type": "auth",
+                    "node_id": node.id,
+                    "token": "test-node-auth-token",
+                })
+                .to_string()
+                .into(),
+            ))
+            .await
+            .expect("authenticate node executor");
+        let auth_response = socket
+            .next()
+            .await
+            .expect("node auth response")
+            .expect("read node auth response");
+        let tokio_tungstenite::tungstenite::Message::Text(auth_response) = auth_response else {
+            panic!("expected text node auth response");
+        };
+        let auth_response: serde_json::Value =
+            serde_json::from_str(&auth_response).expect("parse node auth response");
+        assert_eq!(auth_response["type"], "auth_ok");
+
+        for _ in 0..100 {
+            if state.node_ws_manager.is_connected(&node.id) {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+        assert!(
+            state.node_ws_manager.is_connected(&node.id),
+            "authenticated node WebSocket must be registered"
+        );
+
+        let credentials = nyxid_node_proxy_test::no_auth_credentials(service_slug, target_url)
+            .expect("build node executor credentials");
+        let signing_secret = "11".repeat(32);
+        let executor = tokio::spawn(async move {
+            let (mut ws_sink, mut ws_stream) = socket.split();
+            let replay_guard = tokio::sync::Mutex::new(ReplayGuard::new());
+            let metrics = AgentNodeMetrics::new();
+            let http_client = nyxid_node_proxy_test::proxy_executor::build_http_client()
+                .expect("build node executor HTTP client");
+
+            while let Some(message) = ws_stream.next().await {
+                let message = message.expect("read proxy request from backend WebSocket");
+                let tokio_tungstenite::tungstenite::Message::Text(text) = message else {
+                    continue;
+                };
+                let request: serde_json::Value =
+                    serde_json::from_str(&text).expect("parse backend node request");
+                if request["type"] != "proxy_request" {
+                    continue;
+                }
+
+                let (tx, mut rx) = mpsc::channel(8);
+                nyxid_node_proxy_test::proxy_executor::execute_proxy_request(
+                    &request,
+                    &credentials,
+                    Some(&signing_secret),
+                    &replay_guard,
+                    &metrics,
+                    &tx,
+                    false,
+                    &http_client,
+                )
+                .await;
+                drop(tx);
+
+                while let Some(response) = rx.recv().await {
+                    let message = match response {
+                        nyxid_node_proxy_test::ws_client::NodeWsMessage::Text(text) => {
+                            tokio_tungstenite::tungstenite::Message::Text(text.into())
+                        }
+                        nyxid_node_proxy_test::ws_client::NodeWsMessage::Binary(bytes) => {
+                            tokio_tungstenite::tungstenite::Message::Binary(bytes.into())
+                        }
+                    };
+                    ws_sink
+                        .send(message)
+                        .await
+                        .expect("send node executor response over WebSocket");
+                }
+                break;
+            }
+        });
+
+        (executor, ws_server)
     }
 
     fn proxy_request(uri: &str) -> Request<Body> {
@@ -7948,12 +8103,13 @@ mod proxy_resolution_integration_tests {
 
         let state = test_app_state(db.clone());
         let node = insert_online_node(&state, &org_id, "org-node").await;
+        let (base_url, echo_server) = start_node_echo_downstream().await;
 
         let endpoint = test_user_endpoint(
             &Uuid::new_v4().to_string(),
             &org_id,
             "Org Node Target",
-            "https://node-target.example.test",
+            &base_url,
             None,
             None,
         );
@@ -7974,42 +8130,8 @@ mod proxy_resolution_integration_tests {
             .await
             .expect("insert user service");
 
-        let (tx, mut rx) = mpsc::channel(256);
-        state.node_ws_manager.register_connection(&node.id, tx);
-        let manager = state.node_ws_manager.clone();
-        let node_id = node.id.clone();
-        let expected_slug = service.slug.clone();
-        let responder = tokio::spawn(async move {
-            let Some(NodeOutboundMessage::Text(msg)) = rx.recv().await else {
-                panic!("expected outbound node proxy request");
-            };
-            let parsed: serde_json::Value = serde_json::from_str(&msg).expect("valid node request");
-            assert_eq!(
-                parsed["service_slug"].as_str(),
-                Some(expected_slug.as_str())
-            );
-            assert_eq!(parsed["method"], "POST");
-            assert_eq!(parsed["headers"]["content-type"], "application/json");
-            assert_eq!(parsed["headers"]["idempotency-key"], "caller-key-001");
-            assert_eq!(parsed["headers"]["x-trace-id"], "trace-001");
-            let body = base64::engine::general_purpose::STANDARD
-                .decode(parsed["body"].as_str().expect("base64 request body"))
-                .expect("decode node request body");
-            assert_eq!(body, br#"{"operation":"probe"}"#);
-            let request_id = parsed["request_id"]
-                .as_str()
-                .expect("request id")
-                .to_string();
-            manager.deliver_proxy_response(
-                &node_id,
-                NodeProxyResponse {
-                    request_id,
-                    status: 200,
-                    headers: vec![("content-type".to_string(), "text/plain".to_string())],
-                    body: b"proxied-through-node".to_vec(),
-                },
-            );
-        });
+        let (executor, ws_server) =
+            start_node_executor(state.clone(), &node, &service.slug, &base_url).await;
 
         let mut resolved_slug = String::new();
         let response = proxy_request_by_slug_inner(
@@ -8028,7 +8150,16 @@ mod proxy_resolution_integration_tests {
 
         assert_eq!(response.status(), StatusCode::OK);
         assert_eq!(resolved_slug, service.slug);
-        responder.await.expect("node responder task");
+        let response_body = to_bytes(response.into_body(), 1024 * 1024)
+            .await
+            .expect("read node-routed echo response");
+        let observed: serde_json::Value =
+            serde_json::from_slice(&response_body).expect("parse node-routed echo response");
+        assert_eq!(observed["content_type"], "application/json");
+        assert_eq!(observed["idempotency_key"], "caller-key-001");
+        assert_eq!(observed["trace_id"], "trace-001");
+        assert_eq!(observed["body"], r#"{"operation":"probe"}"#);
+        executor.await.expect("node executor task");
 
         let audit = wait_for_node_proxy_audit(&db, &node.id)
             .await
@@ -8042,6 +8173,8 @@ mod proxy_resolution_integration_tests {
             data.get("owner_user_id").and_then(|v| v.as_str()),
             Some(org_id.as_str())
         );
+        ws_server.abort();
+        echo_server.abort();
     }
 
     #[tokio::test]
