@@ -55,6 +55,31 @@ Accordingly, `available` means the NyxID preconditions for a turn hold. It does
 not predict which capabilities Aevatar will invoke, just as GitHub readiness does
 not predict whether Aevatar will call a GitHub tool.
 
+## Consumer semantics for required capabilities
+
+`required = true` marks a capability the chat execution loop depends on. It does
+not change how `status` is computed; it changes what a consumer may do with it.
+The normative consumption rule is:
+
+- On a required capability, only `missing` and `cannot_use` are actionable
+  not-ready states. A consumer MAY block or gate the turn on them and SHOULD
+  surface the capability's `reasonCode` and `managementUrl`.
+- `cannot_check` on a required capability MUST NOT be treated as a block. It
+  means readiness could not determine the state; the consumer proceeds and lets
+  execution decide.
+
+The asymmetry is deliberate and load-bearing. The producer fails closed at the
+evidence layer: it never claims availability it cannot prove. That refusal is
+not evidence of unavailability, so the consumer must fail open on it. Treating
+`cannot_check` as a block would convert the guarded populations described under
+"Model evidence" (organization-affiliated, pool-routed, and node-pinned users,
+pending [NyxID#1386](https://github.com/ChronoAIProject/NyxID/issues/1386)) into users
+locked out of a chat that works for them -- a strictly worse failure than the
+false "ready" this contract exists to prevent. The matrix scenario
+`model_org_presence_unverifiable` demonstrates the shape: a required capability
+on `cannot_check` beside otherwise working rows, in a configuration where chat
+succeeds.
+
 ## GitHub evidence
 
 The producer derives connection and OAuth grant evidence independently. Personal
