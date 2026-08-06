@@ -462,6 +462,10 @@ pub fn build_router(
         .route("/{service_id}", put(handlers::services::update_service))
         .route("/{service_id}", delete(handlers::services::delete_service))
         .route(
+            "/{service_id}/resync-identity",
+            post(handlers::services::resync_service_identity),
+        )
+        .route(
             "/{service_id}/oidc-credentials",
             get(handlers::services::get_oidc_credentials),
         )

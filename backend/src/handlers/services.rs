@@ -23,8 +23,8 @@ use crate::models::ws_frame_injection::WsFrameInjection;
 use crate::mw::auth::{AuthUser, SERVICE_DELEGATION_SCOPES};
 use crate::services::url_validation::{validate_base_url, validate_optional_spec_url};
 use crate::services::{
-    anonymous_endpoint_service, api_docs_service, audit_service, catalog_spec_sync,
-    oauth_client_service, ssh_service, user_service_service,
+    anonymous_endpoint_service, api_docs_service, audit_service, catalog_identity_service,
+    catalog_spec_sync, oauth_client_service, ssh_service, user_service_service,
 };
 use crate::telemetry::{TelemetryContext, TelemetryEvent, emit_event};
 
@@ -234,6 +234,12 @@ pub struct ServiceListResponse {
     pub services: Vec<ServiceResponse>,
 }
 
+#[derive(Debug, Serialize, ToSchema)]
+pub struct ResyncIdentityResponse {
+    pub catalog_service_id: String,
+    pub affected_count: u64,
+}
+
 #[derive(Debug, Deserialize, ToSchema)]
 pub struct UpdateServiceRequest {
     pub name: Option<String>,
@@ -295,6 +301,17 @@ pub struct UpdateServiceRequest {
     /// `/anonymous-endpoints` endpoints for single-rule edits.
     #[serde(default)]
     pub anonymous_endpoints: Option<Vec<AnonymousEndpointRule>>,
+}
+
+fn identity_update_requested(body: &UpdateServiceRequest) -> bool {
+    body.identity_propagation_mode.is_some()
+        || body.identity_include_user_id.is_some()
+        || body.identity_include_email.is_some()
+        || body.identity_include_name.is_some()
+        || body.identity_jwt_audience.is_some()
+        || body.forward_access_token.is_some()
+        || body.inject_delegation_token.is_some()
+        || body.delegation_token_scope.is_some()
 }
 
 #[derive(Debug, Serialize, ToSchema)]
@@ -1791,7 +1808,11 @@ pub async fn update_service(
         ));
     }
 
-    let now = Utc::now();
+    let identity_changed = identity_update_requested(&body);
+    let mut now = Utc::now();
+    if identity_changed && now.timestamp_millis() <= service.updated_at.timestamp_millis() {
+        now = service.updated_at + chrono::Duration::milliseconds(1);
+    }
     set_doc.insert("updated_at", bson::DateTime::from_chrono(now));
     if let Some(docs_metadata) = http_docs_refresh {
         let refresh_openapi_url = should_refresh_openapi_url(&service, &body);
@@ -1827,95 +1848,47 @@ pub async fn update_service(
 
     // Always unset the legacy api_spec_url alias to prevent duplicate-field
     // deserialization errors on documents created before the field was renamed.
-    state
+    let mut catalog_filter = doc! { "_id": &service_id };
+    if identity_changed {
+        // The revision guard makes catalog identity transitions a total order.
+        // The reconciliation service then catches up across any later revision
+        // that commits while this request is updating materialized instances.
+        catalog_filter.insert(
+            "updated_at",
+            bson::DateTime::from_chrono(service.updated_at),
+        );
+    }
+    let committed_service = state
         .db
         .collection::<DownstreamService>(DOWNSTREAM_SERVICES)
-        .update_one(
-            doc! { "_id": &service_id },
+        .find_one_and_update(
+            catalog_filter,
             doc! {
                 "$set": &set_doc,
                 "$unset": { "api_spec_url": "" },
             },
         )
-        .await?;
-
-    // Propagate identity/forward_access_token changes to all UserService records
-    // that were provisioned from this catalog service (auto or manual).
-    let identity_changed = body.identity_propagation_mode.is_some()
-        || body.identity_include_user_id.is_some()
-        || body.identity_include_email.is_some()
-        || body.identity_include_name.is_some()
-        || body.identity_jwt_audience.is_some()
-        || body.forward_access_token.is_some()
-        || body.inject_delegation_token.is_some()
-        || body.delegation_token_scope.is_some();
+        .return_document(mongodb::options::ReturnDocument::After)
+        .await?
+        .ok_or_else(|| {
+            if identity_changed {
+                AppError::Conflict(
+                    "Service changed during the identity update; retry the request".to_string(),
+                )
+            } else {
+                AppError::NotFound("Service not found".to_string())
+            }
+        })?;
 
     if identity_changed {
-        let mut user_svc_set = bson::Document::new();
-        if let Some(ref mode) = body.identity_propagation_mode {
-            user_svc_set.insert("identity_propagation_mode", mode.as_str());
-        }
-        if let Some(v) = body.identity_include_user_id {
-            user_svc_set.insert("identity_include_user_id", v);
-        }
-        if let Some(v) = body.identity_include_email {
-            user_svc_set.insert("identity_include_email", v);
-        }
-        if let Some(v) = body.identity_include_name {
-            user_svc_set.insert("identity_include_name", v);
-        }
-        if let Some(ref aud) = body.identity_jwt_audience {
-            user_svc_set.insert("identity_jwt_audience", aud.as_str());
-        }
-        if let Some(v) = body.forward_access_token {
-            user_svc_set.insert("forward_access_token", v);
-        }
-        if let Some(v) = body.inject_delegation_token {
-            user_svc_set.insert("inject_delegation_token", v);
-        }
-        if let Some(ref scope) = body.delegation_token_scope {
-            let scope = if scope.is_empty() {
-                "llm:proxy"
-            } else {
-                scope.as_str()
-            };
-            user_svc_set.insert("delegation_token_scope", scope);
-        }
-
-        if !user_svc_set.is_empty() {
-            user_svc_set.insert("updated_at", bson::DateTime::from_chrono(Utc::now()));
-            let db = state.db.clone();
-            let sid = service_id.clone();
-            tokio::spawn(async move {
-                match db
-                    .collection::<crate::models::user_service::UserService>(
-                        crate::models::user_service::COLLECTION_NAME,
-                    )
-                    .update_many(
-                        doc! { "catalog_service_id": &sid },
-                        doc! { "$set": &user_svc_set },
-                    )
-                    .await
-                {
-                    Ok(result) => {
-                        if result.modified_count > 0 {
-                            tracing::info!(
-                                catalog_service_id = %sid,
-                                modified = result.modified_count,
-                                "Propagated identity config to user services"
-                            );
-                        }
-                    }
-                    Err(e) => {
-                        tracing::error!(
-                            catalog_service_id = %sid,
-                            error = %e,
-                            "Failed to propagate identity config to user services"
-                        );
-                    }
-                }
-            });
-        }
+        catalog_identity_service::propagate_catalog_update(
+            &state.db,
+            &audit_service::AuditActor::from_auth_user(&auth_user),
+            &service_id,
+            catalog_identity_service::CatalogIdentityState::from_service(&service),
+            catalog_identity_service::CatalogIdentityState::from_service(&committed_service),
+        )
+        .await?;
     }
 
     // If base_url changed and service has an OIDC client, update default redirect URI
@@ -1990,6 +1963,45 @@ pub async fn update_service(
         updated,
         routing.as_ref(),
     )))
+}
+
+/// POST /api/v1/services/{service_id}/resync-identity
+///
+/// Force every user-service instance back to the catalog's current identity
+/// settings. This deliberate recovery operation requires platform admin.
+#[utoipa::path(
+    post,
+    path = "/api/v1/services/{service_id}/resync-identity",
+    params(
+        ("service_id" = String, Path, description = "Downstream service ID")
+    ),
+    responses(
+        (status = 200, description = "Identity settings resynchronized", body = ResyncIdentityResponse),
+        (status = 400, description = "HTTP service required", body = crate::errors::ErrorResponse),
+        (status = 403, description = "Admin access required", body = crate::errors::ErrorResponse),
+        (status = 404, description = "Service not found", body = crate::errors::ErrorResponse)
+    ),
+    tag = "Services"
+)]
+pub async fn resync_service_identity(
+    State(state): State<AppState>,
+    auth_user: AuthUser,
+    Path(service_id): Path<String>,
+) -> AppResult<Json<ResyncIdentityResponse>> {
+    require_admin(&state, &auth_user).await?;
+    let service = fetch_service(&state, &service_id).await?;
+    super::services_helpers::require_http_service(&service)?;
+    let affected_count = catalog_identity_service::force_resync(
+        &state.db,
+        &audit_service::AuditActor::from_auth_user(&auth_user),
+        &service,
+    )
+    .await?;
+
+    Ok(Json(ResyncIdentityResponse {
+        catalog_service_id: service_id,
+        affected_count,
+    }))
 }
 
 /// GET /api/v1/services/{service_id}/oidc-credentials
@@ -2272,18 +2284,23 @@ pub async fn regenerate_oidc_secret(
 mod tests {
     use super::{
         CreateServiceRequest, UpdateServiceRequest, create_service, derive_http_service_category,
-        derive_ssh_service_category, derive_visibility, normalize_service_type,
-        resolve_spec_url_update,
+        derive_ssh_service_category, derive_visibility, identity_update_requested,
+        normalize_service_type, resolve_spec_url_update, resync_service_identity, update_service,
     };
     use crate::errors::AppError;
+    use crate::models::downstream_service::test_helpers::dummy_service;
     use crate::models::downstream_service::{
         COLLECTION_NAME as DOWNSTREAM_SERVICES, DownstreamService,
     };
     use crate::models::user::{COLLECTION_NAME as USERS, User, UserType};
+    use crate::models::user_service::{COLLECTION_NAME as USER_SERVICES, UserService};
     use crate::services::role_service;
-    use crate::test_utils::{connect_test_database, test_app_state, test_auth_user, test_user};
+    use crate::test_utils::{
+        connect_test_database, test_app_state, test_auth_user, test_user, test_user_service,
+    };
     use axum::Json;
-    use axum::extract::State;
+    use axum::extract::{Path, State};
+    use futures::TryStreamExt;
     use mongodb::bson::doc;
     use uuid::Uuid;
 
@@ -2426,6 +2443,206 @@ mod tests {
             .await
             .expect("count created downstream service");
         assert_eq!(service_count, 1);
+    }
+
+    #[test]
+    fn non_identity_update_does_not_request_propagation() {
+        let body: UpdateServiceRequest =
+            serde_json::from_str(r#"{"name":"Renamed"}"#).expect("parse update");
+        assert!(!identity_update_requested(&body));
+
+        let body: UpdateServiceRequest =
+            serde_json::from_str(r#"{"name":"Renamed","forward_access_token":true}"#)
+                .expect("parse identity update");
+        assert!(identity_update_requested(&body));
+    }
+
+    #[tokio::test]
+    async fn resync_identity_rejects_non_admin() {
+        let Some(db) = connect_test_database("h_services_resync_non_admin").await else {
+            eprintln!("skipping resync non-admin test: no local MongoDB available");
+            return;
+        };
+        let user_id = seed_user(&db, false).await;
+        let state = test_app_state(db);
+
+        let error = resync_service_identity(
+            State(state),
+            test_auth_user(&user_id),
+            Path("catalog-service".to_string()),
+        )
+        .await
+        .expect_err("non-admin resync should be rejected");
+        assert!(matches!(error, AppError::Forbidden(_)));
+    }
+
+    #[tokio::test]
+    async fn update_service_propagates_inherited_value_and_skips_customized_value() {
+        let Some(db) = connect_test_database("h_services_identity_update").await else {
+            eprintln!("skipping service identity update test: no local MongoDB available");
+            return;
+        };
+        let admin_id = seed_user(&db, true).await;
+        let state = test_app_state(db.clone());
+        let auth = test_auth_user(&admin_id);
+        let catalog_id = "catalog-update";
+        let (base_url, server) = spawn_empty_docs_server().await;
+        let mut catalog = dummy_service();
+        catalog.id = catalog_id.to_string();
+        catalog.created_by = admin_id.clone();
+        catalog.base_url = base_url;
+        catalog.delegation_token_scope = "llm:proxy".to_string();
+        db.collection::<DownstreamService>(DOWNSTREAM_SERVICES)
+            .insert_one(&catalog)
+            .await
+            .expect("insert catalog service");
+
+        let inherited = test_user_service(
+            "inherited",
+            "owner-a",
+            "service-a",
+            "endpoint-a",
+            Some(catalog_id),
+            None,
+        );
+        let mut customized = test_user_service(
+            "customized",
+            "owner-b",
+            "service-b",
+            "endpoint-b",
+            Some(catalog_id),
+            None,
+        );
+        customized.forward_access_token = true;
+        let customized_updated_at = customized.updated_at.timestamp_millis();
+        db.collection::<UserService>(USER_SERVICES)
+            .insert_many([&inherited, &customized])
+            .await
+            .expect("insert user services");
+
+        let body: UpdateServiceRequest =
+            serde_json::from_str(r#"{"forward_access_token":true}"#).expect("parse update");
+        let Json(_) = update_service(
+            State(state.clone()),
+            auth.clone(),
+            crate::telemetry::TelemetryContext::default(),
+            Path(catalog_id.to_string()),
+            Json(body),
+        )
+        .await
+        .expect("update catalog identity");
+
+        let inherited_after = db
+            .collection::<UserService>(USER_SERVICES)
+            .find_one(doc! { "_id": "inherited" })
+            .await
+            .expect("find inherited service")
+            .expect("inherited service exists");
+        let customized_after = db
+            .collection::<UserService>(USER_SERVICES)
+            .find_one(doc! { "_id": "customized" })
+            .await
+            .expect("find customized service")
+            .expect("customized service exists");
+        assert!(inherited_after.forward_access_token);
+        assert!(customized_after.forward_access_token);
+        assert_eq!(
+            customized_after.updated_at.timestamp_millis(),
+            customized_updated_at,
+            "a customized field must not be rewritten"
+        );
+
+        let inherited_updated_at = inherited_after.updated_at.timestamp_millis();
+        let customized_updated_at = customized_after.updated_at.timestamp_millis();
+        let body: UpdateServiceRequest =
+            serde_json::from_str(r#"{"name":"Renamed catalog"}"#).expect("parse update");
+        let Json(_) = update_service(
+            State(state),
+            auth,
+            crate::telemetry::TelemetryContext::default(),
+            Path(catalog_id.to_string()),
+            Json(body),
+        )
+        .await
+        .expect("update non-identity catalog field");
+        server.abort();
+
+        let rows: Vec<UserService> = db
+            .collection::<UserService>(USER_SERVICES)
+            .find(doc! { "catalog_service_id": catalog_id })
+            .await
+            .expect("find user services")
+            .try_collect()
+            .await
+            .expect("collect user services");
+        assert_eq!(rows.len(), 2);
+        for row in rows {
+            let expected = if row.id == "inherited" {
+                inherited_updated_at
+            } else {
+                customized_updated_at
+            };
+            assert_eq!(
+                row.updated_at.timestamp_millis(),
+                expected,
+                "a non-identity catalog update must not write user_services"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn resync_identity_allows_admin_and_force_aligns_instances() {
+        let Some(db) = connect_test_database("h_services_resync_admin").await else {
+            eprintln!("skipping resync admin test: no local MongoDB available");
+            return;
+        };
+        let admin_id = seed_user(&db, true).await;
+        let state = test_app_state(db.clone());
+        let catalog_id = "catalog-resync";
+        let mut catalog = dummy_service();
+        catalog.id = catalog_id.to_string();
+        catalog.created_by = admin_id.clone();
+        catalog.identity_propagation_mode = "jwt".to_string();
+        catalog.forward_access_token = true;
+        catalog.delegation_token_scope = "account:read".to_string();
+        db.collection::<DownstreamService>(DOWNSTREAM_SERVICES)
+            .insert_one(&catalog)
+            .await
+            .expect("insert catalog service");
+        let mut customized = test_user_service(
+            "customized",
+            "owner",
+            "service",
+            "endpoint",
+            Some(catalog_id),
+            None,
+        );
+        customized.identity_propagation_mode = "both".to_string();
+        customized.delegation_token_scope = "owner:scope".to_string();
+        db.collection::<UserService>(USER_SERVICES)
+            .insert_one(&customized)
+            .await
+            .expect("insert user service");
+
+        let Json(response) = resync_service_identity(
+            State(state),
+            test_auth_user(&admin_id),
+            Path(catalog_id.to_string()),
+        )
+        .await
+        .expect("admin resync should succeed");
+        assert_eq!(response.catalog_service_id, catalog_id);
+        assert_eq!(response.affected_count, 1);
+
+        let after = db
+            .collection::<UserService>(USER_SERVICES)
+            .find_one(doc! { "_id": "customized" })
+            .await
+            .expect("find user service")
+            .expect("user service exists");
+        assert_eq!(after.identity_propagation_mode, "jwt");
+        assert!(after.forward_access_token);
+        assert_eq!(after.delegation_token_scope, "account:read");
     }
 
     // Three wire shapes on the update request need to stay distinguishable
