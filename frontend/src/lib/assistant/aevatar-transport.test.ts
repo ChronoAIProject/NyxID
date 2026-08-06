@@ -5597,7 +5597,12 @@ describe("studio new chats and typed actor compatibility", () => {
   const RUN_ACTOR = "workflow-definition:studio:run:43bfe86961b44fc2a6422d0b";
   const ACTION_ACTOR = "nyxid-chat-workflow-action-1";
 
-  function workflowContextFrame(stateVersion: string): ChatStreamFrame {
+  /**
+   * Omit `stateVersion` to model the wire shape of a CREATE turn: proto3 JSON
+   * elides default-valued scalars, so the reservation's version-0 watermark
+   * reaches the client as a missing member, never as `"0"`.
+   */
+  function workflowContextFrame(stateVersion?: string): ChatStreamFrame {
     return {
       timestamp: "1785297207163",
       custom: {
@@ -5608,7 +5613,7 @@ describe("studio new chats and typed actor compatibility", () => {
           scopeId: USER_ID,
           conversationId: WORKFLOW_CONVERSATION,
           turnId: WORKFLOW_TURN,
-          stateVersion,
+          ...(stateVersion === undefined ? {} : { stateVersion }),
         },
       },
     };
@@ -6885,6 +6890,500 @@ describe("studio new chats and typed actor compatibility", () => {
       minimumStateVersion: 2,
       sessionId: bodies[0]?.["sessionId"],
     });
+  });
+
+  // Production capture of a create turn (2026-08-06): the chat context frame
+  // carries scopeId/conversationId/turnId and NO stateVersion member, because
+  // proto3 JSON elides the version-0 default. Requiring the member rejected
+  // the first turn of every new conversation with "invalid state version"
+  // while the run completed upstream — the reply was only reachable by
+  // reloading the transcript.
+  it("accepts a create context whose elided stateVersion is absent", async () => {
+    let streamAttempt = 0;
+    const streams = mockChatStreams((request) => {
+      if (request.url !== WORKFLOW_URL) return undefined;
+      streamAttempt += 1;
+      return {
+        frames: [
+          // Create omits the member; the continuation carries a real one.
+          streamAttempt === 1
+            ? workflowContextFrame()
+            : workflowContextFrame("3"),
+          { runStarted: { threadId: RUN_ACTOR, runId: RUN_ACTOR } },
+          ...WORKFLOW_TAIL,
+        ],
+      };
+    });
+    stubFetch((url, init) =>
+      url === `${ASSISTANT_BASE}/conversations/${WORKFLOW_CONVERSATION}` &&
+      (init?.method ?? "GET") === "GET"
+        ? jsonResponse(workflowHistory(2, WORKFLOW_TURN))
+        : undefined,
+    );
+    const transport = new AevatarAssistantTransport();
+    const conversation = await transport.createConversation();
+
+    const created = await collectWorkflowTurn(
+      transport,
+      conversation.id,
+      "create",
+    );
+
+    expect(created.at(-1)).toMatchObject({
+      event: "turn.completed",
+      status: "completed",
+    });
+    // The turn is delivered, not swallowed: the run's answer reaches the UI.
+    expect(
+      created.some((event) => event.event === "message.completed"),
+    ).toBe(true);
+
+    // The elided watermark leaves no stored fence, so the next turn recovers
+    // one from history rather than continuing at a fabricated version.
+    const continued = await collectWorkflowTurn(
+      transport,
+      conversation.id,
+      "continue",
+    );
+    expect(continued.at(-1)).toMatchObject({
+      event: "turn.completed",
+      status: "completed",
+    });
+
+    const bodies = streams.mock.calls.map(
+      ([request]) => JSON.parse(request.bodyText) as Record<string, unknown>,
+    );
+    expect(bodies).toHaveLength(2);
+    expect(bodies[0]).toHaveProperty("commandId");
+    expect(bodies[1]).toEqual({
+      prompt: "continue",
+      conversationId: WORKFLOW_CONVERSATION,
+      minimumStateVersion: 2,
+      sessionId: bodies[0]?.["sessionId"],
+    });
+  });
+
+  // Absence is the elided int64 default and must pass; a value that IS present
+  // must be a canonical int64 encoding. `Number("")`/`Number(true)`/`Number([])`
+  // are all 0, so a bare `Number()` cast would wave these through as a
+  // legitimate create-turn watermark.
+  it.each([
+    ["an empty string", ""],
+    ["whitespace", "  "],
+    ["a hex string", "0x10"],
+    ["an exponent string", "1e3"],
+    ["a boolean", true],
+    ["an array", []],
+    ["a negative version", "-1"],
+  ])("fails closed on a present but non-int64 stateVersion: %s", async (
+    _label,
+    stateVersion,
+  ) => {
+    mockChatStreams((request) =>
+      request.url === WORKFLOW_URL
+        ? {
+            frames: [
+              {
+                timestamp: "1785297207163",
+                custom: {
+                  name: "aevatar.chat.context",
+                  payload: {
+                    "@type":
+                      "type.googleapis.com/aevatar.workflow.runs.WorkflowChatContextPayload",
+                    scopeId: USER_ID,
+                    conversationId: WORKFLOW_CONVERSATION,
+                    turnId: WORKFLOW_TURN,
+                    stateVersion,
+                  },
+                },
+              },
+              { runStarted: { threadId: RUN_ACTOR, runId: RUN_ACTOR } },
+              ...WORKFLOW_TAIL,
+            ],
+          }
+        : undefined,
+    );
+    stubFetch();
+    const transport = new AevatarAssistantTransport();
+    const conversation = await transport.createConversation();
+
+    const events = await collectWorkflowTurn(
+      transport,
+      conversation.id,
+      "create",
+    );
+
+    expect(events.at(-1)).toMatchObject({
+      event: "turn.completed",
+      status: "failed",
+      error: { code: "stream_protocol_error" },
+    });
+  });
+
+  function customFrame(name: string, payload: unknown): ChatStreamFrame {
+    return { custom: { name, payload } } as ChatStreamFrame;
+  }
+
+  function openedBlocks(events: TurnEvent[]): ContentBlock[] {
+    return events.flatMap((event) =>
+      event.event === "block.started" ? [event.block] : [],
+    );
+  }
+
+  /** The run ledger's step rows, from the last patch that carried them. */
+  function finalRunSteps(
+    events: TurnEvent[],
+  ): readonly { status?: string; meta?: string }[] {
+    for (let index = events.length - 1; index >= 0; index -= 1) {
+      const event = events[index];
+      if (event?.event !== "block.updated") continue;
+      const steps = (event.patch as { steps?: unknown }).steps;
+      if (Array.isArray(steps)) {
+        return steps as readonly { status?: string; meta?: string }[];
+      }
+    }
+    return [];
+  }
+
+  // `WorkflowStepCompletedCustomPayload.success` is a proto3 bool, so a FAILED
+  // step omits it. Frame order mirrors production: the `stepFinished` envelope
+  // frame (which has no success member at all) lands first and marks the row
+  // done, then `aevatar.step.completed` corrects it.
+  it("marks a workflow step failed when its elided success bool is absent", async () => {
+    mockChatStreams((request) =>
+      request.url === WORKFLOW_URL
+        ? {
+            frames: [
+              workflowContextFrame("3"),
+              { runStarted: { threadId: RUN_ACTOR, runId: RUN_ACTOR } },
+              customFrame("aevatar.step.request", { stepId: "reply" }),
+              { stepFinished: { stepName: "reply" } },
+              customFrame("aevatar.step.completed", { stepId: "reply" }),
+              { usage: {} },
+              {
+                runFinished: {
+                  threadId: RUN_ACTOR,
+                  result: { output: "done" },
+                },
+              },
+            ] as ChatStreamFrame[],
+          }
+        : undefined,
+    );
+    stubFetch();
+    const transport = new AevatarAssistantTransport();
+    const conversation = await transport.createConversation();
+
+    const events = await collectWorkflowTurn(transport, conversation.id, "go");
+
+    expect(finalRunSteps(events)).toContainEqual(
+      expect.objectContaining({ status: "failed", meta: "Step failed" }),
+    );
+  });
+
+  it("keeps a workflow step done when success is present and true", async () => {
+    mockChatStreams((request) =>
+      request.url === WORKFLOW_URL
+        ? {
+            frames: [
+              workflowContextFrame("3"),
+              { runStarted: { threadId: RUN_ACTOR, runId: RUN_ACTOR } },
+              customFrame("aevatar.step.request", { stepId: "reply" }),
+              customFrame("aevatar.step.completed", {
+                stepId: "reply",
+                success: true,
+              }),
+              {
+                runFinished: {
+                  threadId: RUN_ACTOR,
+                  result: { output: "done" },
+                },
+              },
+            ] as ChatStreamFrame[],
+          }
+        : undefined,
+    );
+    stubFetch();
+    const transport = new AevatarAssistantTransport();
+    const conversation = await transport.createConversation();
+
+    const events = await collectWorkflowTurn(transport, conversation.id, "go");
+
+    expect(finalRunSteps(events)).toContainEqual(
+      expect.objectContaining({ status: "done" }),
+    );
+  });
+
+  // Studio never emits `nyxid.authorization.required` — the blocked verdict
+  // arrives only inside the `nyxid_require_service` result, in snake_case.
+  it("opens a connect card from a blocked require-service tool result", async () => {
+    mockChatStreams((request) =>
+      request.url === WORKFLOW_URL
+        ? {
+            frames: [
+              workflowContextFrame("3"),
+              { runStarted: { threadId: RUN_ACTOR, runId: RUN_ACTOR } },
+              {
+                toolCallStart: {
+                  toolCallId: "c1",
+                  toolName: "nyxid_require_service",
+                },
+              },
+              {
+                toolCallEnd: {
+                  toolCallId: "c1",
+                  result: JSON.stringify({
+                    blocked: true,
+                    service_slug: "api-github",
+                    readiness_status: "ServiceRegistrationRequired",
+                    reason_code: "USER_SERVICE_NOT_VISIBLE",
+                    safe_message:
+                      "No caller-visible NyxID UserService matches the requested service.",
+                  }),
+                },
+              },
+              ...WORKFLOW_TAIL,
+            ] as ChatStreamFrame[],
+          }
+        : undefined,
+    );
+    stubFetch();
+    const transport = new AevatarAssistantTransport();
+    const conversation = await transport.createConversation();
+
+    const events = await collectWorkflowTurn(
+      transport,
+      conversation.id,
+      "connect github",
+    );
+
+    const card = openedBlocks(events).find(
+      (block) => block.type === "connect_card",
+    );
+    expect(card?.type === "connect_card" && card.catalog_slug).toBe(
+      "api-github",
+    );
+    expect(card?.type === "connect_card" && card.service_name).toBe("Github");
+    // The blocked capability is a failure, not a completed tool call.
+    expect(finalRunSteps(events)).toContainEqual(
+      expect.objectContaining({ status: "failed" }),
+    );
+  });
+
+  it("leaves an unblocked require-service result without a connect card", async () => {
+    mockChatStreams((request) =>
+      request.url === WORKFLOW_URL
+        ? {
+            frames: [
+              workflowContextFrame("3"),
+              { runStarted: { threadId: RUN_ACTOR, runId: RUN_ACTOR } },
+              {
+                toolCallStart: {
+                  toolCallId: "c1",
+                  toolName: "nyxid_require_service",
+                },
+              },
+              {
+                toolCallEnd: {
+                  toolCallId: "c1",
+                  // The exact production shape for a connected service.
+                  result: JSON.stringify({
+                    blocked: false,
+                    service_slug: "api-github",
+                    readiness_status: "Ready",
+                    reason_code: "",
+                    safe_message: "",
+                  }),
+                },
+              },
+              ...WORKFLOW_TAIL,
+            ] as ChatStreamFrame[],
+          }
+        : undefined,
+    );
+    stubFetch();
+    const transport = new AevatarAssistantTransport();
+    const conversation = await transport.createConversation();
+
+    const events = await collectWorkflowTurn(
+      transport,
+      conversation.id,
+      "connect github",
+    );
+
+    expect(
+      openedBlocks(events).some((block) => block.type === "connect_card"),
+    ).toBe(false);
+    expect(finalRunSteps(events)).not.toContainEqual(
+      expect.objectContaining({ status: "failed" }),
+    );
+  });
+
+  // The payload has no requestId/approvalRequestId/commandId, so casting it to
+  // the approval shape made the card path bail and drop the suspension.
+  it("renders a human-input suspension instead of dropping it", async () => {
+    mockChatStreams((request) =>
+      request.url === WORKFLOW_URL
+        ? {
+            frames: [
+              workflowContextFrame("3"),
+              { runStarted: { threadId: RUN_ACTOR, runId: RUN_ACTOR } },
+              customFrame("aevatar.human_input.request", {
+                stepId: "collect",
+                runId: RUN_ACTOR,
+                suspensionType: "form",
+                prompt: "Which repository should I use?",
+                options: ["nyxid", "aevatar"],
+              }),
+              ...WORKFLOW_TAIL,
+            ] as ChatStreamFrame[],
+          }
+        : undefined,
+    );
+    stubFetch();
+    const transport = new AevatarAssistantTransport();
+    const conversation = await transport.createConversation();
+
+    const events = await collectWorkflowTurn(transport, conversation.id, "go");
+
+    const prose = openedBlocks(events).find(
+      (block) => block.type === "text" && block.text.includes("repository"),
+    );
+    expect(prose?.type === "text" && prose.text).toContain(
+      "Which repository should I use?",
+    );
+    expect(prose?.type === "text" && prose.text).toContain("nyxid, aevatar");
+  });
+
+  it("renders a workflow media chunk nested under part", async () => {
+    mockChatStreams((request) =>
+      request.url === WORKFLOW_URL
+        ? {
+            frames: [
+              workflowContextFrame("3"),
+              { runStarted: { threadId: RUN_ACTOR, runId: RUN_ACTOR } },
+              customFrame("aevatar.media.chunk", {
+                sessionId: "s1",
+                agentId: "a1",
+                // ChatContentPart names the location `uri`, not `url`.
+                part: {
+                  kind: "IMAGE",
+                  mediaType: "image/png",
+                  uri: "https://example.test/chart.png",
+                  name: "chart.png",
+                },
+              }),
+              ...WORKFLOW_TAIL,
+            ] as ChatStreamFrame[],
+          }
+        : undefined,
+    );
+    stubFetch();
+    const transport = new AevatarAssistantTransport();
+    const conversation = await transport.createConversation();
+
+    const events = await collectWorkflowTurn(transport, conversation.id, "go");
+
+    const artifact = openedBlocks(events).find(
+      (block) => block.type === "artifact",
+    );
+    expect(artifact?.type === "artifact" && artifact.name).toBe("chart.png");
+    expect(artifact?.type === "artifact" && artifact.download_url).toBe(
+      "https://example.test/chart.png",
+    );
+    expect(artifact?.type === "artifact" && artifact.mime).toBe("image/png");
+  });
+
+  /**
+   * Hold a workflow stream open with a completion that never settles, exactly
+   * like an upstream idling at a suspension, so the client watchdog is the
+   * only thing that can end the turn.
+   */
+  function openWorkflowStream(): (frames: ChatStreamFrame[]) => void {
+    let push: (frames: ChatStreamFrame[]) => void = () => {};
+    vi.spyOn(chatStreamClient, "start").mockImplementation(
+      (request): ChatStreamRequestHandle => {
+        push = (frames) => request.onFrames(frames);
+        return {
+          headers: Promise.resolve({
+            kind: "response",
+            status: 200,
+            contentType: "text/event-stream",
+          }),
+          completion: new Promise(() => {}),
+          cancel: vi.fn(),
+        };
+      },
+    );
+    return (frames) => push(frames);
+  }
+
+  it("suspends the progress watchdog while a workflow waits on a signal", async () => {
+    vi.useFakeTimers();
+    try {
+      const push = openWorkflowStream();
+      stubFetch();
+      const transport = new AevatarAssistantTransport();
+      const conversation = await transport.createConversation();
+      const events: TurnEvent[] = [];
+      transport.sendMessage(conversation.id, "wait", (event) =>
+        events.push(event),
+      );
+      await vi.advanceTimersByTimeAsync(0);
+      push([
+        workflowContextFrame("3"),
+        { runStarted: { threadId: RUN_ACTOR, runId: RUN_ACTOR } },
+        customFrame("aevatar.workflow.waiting_signal", {
+          runId: RUN_ACTOR,
+          stepId: "await",
+          signalName: "approval",
+          timeoutMs: 0,
+        }),
+      ] as ChatStreamFrame[]);
+
+      await vi.advanceTimersByTimeAsync(180_000);
+
+      expect(events.some((event) => event.event === "turn.completed")).toBe(
+        false,
+      );
+      expect(events.at(-1)).toMatchObject({
+        event: "turn.status",
+        status: "waiting",
+      });
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  // Control for the test above: without the suspension the watchdog MUST still
+  // fire, otherwise that test would pass simply because it never armed.
+  it("still stops a workflow run that goes silent without a suspension", async () => {
+    vi.useFakeTimers();
+    try {
+      const push = openWorkflowStream();
+      stubFetch();
+      const transport = new AevatarAssistantTransport();
+      const conversation = await transport.createConversation();
+      const events: TurnEvent[] = [];
+      transport.sendMessage(conversation.id, "wait", (event) =>
+        events.push(event),
+      );
+      await vi.advanceTimersByTimeAsync(0);
+      push([
+        workflowContextFrame("3"),
+        { runStarted: { threadId: RUN_ACTOR, runId: RUN_ACTOR } },
+      ] as ChatStreamFrame[]);
+
+      await vi.advanceTimersByTimeAsync(180_000);
+
+      expect(events.at(-1)).toMatchObject({
+        event: "turn.completed",
+        status: "failed",
+        error: { code: "upstream_progress_timeout" },
+      });
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it("recovers after a context-free terminal and fails closed when recovery stays empty", async () => {

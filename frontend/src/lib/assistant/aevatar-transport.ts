@@ -347,7 +347,7 @@ type AuthorizationReasonCode =
   | "NYXID_SERVICE_NOT_CONNECTED"
   | "NYXID_UNAUTHORIZED";
 
-interface AuthorizationBlocker {
+export interface AuthorizationBlocker {
   readonly serviceSlug: string;
   readonly serviceLabel: string;
   readonly reasonCode: AuthorizationReasonCode;
@@ -726,6 +726,12 @@ interface RunningTurn {
   /** Action request id → action card block id. */
   promptedActionIds: Map<string, string>;
   waitingForApproval: boolean;
+  /**
+   * Suspended on `aevatar.workflow.waiting_signal`. Distinct from
+   * `waitingForApproval`: it silences the progress watchdog, but there is no
+   * card to decide and no approval continuation to start.
+   */
+  awaitingSignal: boolean;
   watchdog: ReturnType<typeof setTimeout> | null;
   deliveryStarted: boolean;
   deliveryTerminal:
@@ -839,6 +845,50 @@ function safeTurnId(value: unknown): string | null {
   if (typeof value !== "string") return null;
   const normalized = value.trim();
   return OPAQUE_TURN_ID_PATTERN.test(normalized) ? normalized : null;
+}
+
+/**
+ * proto3 implicit presence: an ABSENT member is the type default, not "unknown".
+ *
+ * Aevatar serializes workflow chat frames with `WithFormatDefaultValues(false)`,
+ * so `false`, `0` and `""` never appear on the wire — the member is dropped.
+ * Read a workflow-proto scalar through these rather than by hand: `x !== false`
+ * silently inverts an elided `false`, which is how a FAILED step came to render
+ * as "Completed".
+ *
+ * Only for fields the workflow proto actually declares. Frames shared with the
+ * AG-UI/actor protocol (`stepFinished`, `toolCallEnd`) carry members the
+ * workflow proto does not have at all, where absence means "this protocol never
+ * sends it" — the opposite reading.
+ */
+function protoBool(value: unknown): boolean {
+  return value === true;
+}
+
+function protoString(value: unknown): string {
+  return typeof value === "string" ? value : "";
+}
+
+/**
+ * `WorkflowChatContextPayload.state_version` (proto3 `int64`) as it arrives.
+ *
+ * Aevatar serializes chat frames with `WithFormatDefaultValues(false)`, so an
+ * int64 holding the type default is ELIDED rather than sent as `0` — which is
+ * every create turn, whose chat-history reservation has no prior watermark.
+ * Absence therefore decodes to the elided `0`. A value that IS present must be
+ * a canonical int64 encoding (JSON number, or the decimal string protobuf uses
+ * for 64-bit ints); `""`, `"0x10"`, `true` and friends are protocol violations,
+ * not zeroes. Returns null when the value is present and not decodable.
+ */
+function chatContextStateVersion(value: unknown): number | null {
+  if (value === undefined || value === null) return 0;
+  const parsed =
+    typeof value === "number"
+      ? value
+      : typeof value === "string" && /^-?\d+$/.test(value)
+        ? Number(value)
+        : Number.NaN;
+  return Number.isSafeInteger(parsed) && parsed >= 0 ? parsed : null;
 }
 
 function positiveStateVersion(value: unknown): number | undefined {
@@ -1264,6 +1314,82 @@ function parseAuthorizationBlocker(
       : `Connect or reauthorize ${serviceSlug} to continue.`;
 
   return { serviceSlug, serviceLabel, reasonCode, safeMessage };
+}
+
+/**
+ * The same blocker, as it reaches the WORKFLOW (studio) path.
+ *
+ * Studio never emits `custom nyxid.authorization.required` — that frame is
+ * built only by the `nyxid-chat` actor surface, which chat stopped using when
+ * turns moved to the studio engine. On studio the verdict arrives instead as
+ * the `nyxid_require_service` tool's own JSON result, in snake_case (it is a
+ * plain `System.Text.Json` object, not protobuf, so nothing is elided):
+ *
+ *   {"blocked":true,"service_slug":"api-github",
+ *    "readiness_status":"ServiceRegistrationRequired",
+ *    "reason_code":"USER_SERVICE_NOT_VISIBLE","safe_message":"..."}
+ *
+ * Keyed on the shape rather than the tool name so any NyxID tool publishing
+ * this contract surfaces a card. `blocked` is the authority: upstream sets it
+ * only for `ServiceRegistrationRequired`, so a transient
+ * `NYXID_SOURCE_UNAVAILABLE` stays an ordinary failure and never prompts a
+ * pointless reconnect.
+ */
+export function parseToolResultBlocker(
+  result: unknown,
+): AuthorizationBlocker | null {
+  if (typeof result !== "string" || !result.includes("blocked")) return null;
+  let record: unknown;
+  try {
+    record = JSON.parse(result);
+  } catch {
+    return null;
+  }
+  if (!record || typeof record !== "object" || Array.isArray(record)) {
+    return null;
+  }
+  const body = record as Record<string, unknown>;
+  if (body["blocked"] !== true) return null;
+
+  const rawSlug = body["service_slug"];
+  if (typeof rawSlug !== "string") return null;
+  const serviceSlug = rawSlug.trim().toLowerCase();
+  if (!/^[a-z0-9][a-z0-9-]{0,127}$/.test(serviceSlug)) return null;
+
+  // Upstream's `safe_message` here is operator diagnostics ("No caller-visible
+  // NyxID UserService matches the requested service."), not user-facing prose,
+  // so the card keeps NyxID's actionable wording. `reason_code` is upstream's
+  // own vocabulary (`USER_SERVICE_NOT_VISIBLE`), which is a not-connected
+  // condition; only an explicit unauthorized code means "reconnect".
+  const reasonCode: AuthorizationReasonCode =
+    body["reason_code"] === "NYXID_UNAUTHORIZED"
+      ? "NYXID_UNAUTHORIZED"
+      : "NYXID_SERVICE_NOT_CONNECTED";
+  const serviceLabel = humanizeSlug(serviceSlug);
+  return {
+    serviceSlug,
+    serviceLabel,
+    reasonCode,
+    safeMessage:
+      reasonCode === "NYXID_UNAUTHORIZED"
+        ? `Reconnect ${serviceLabel} to continue.`
+        : `Connect ${serviceLabel} to continue.`,
+  };
+}
+
+/**
+ * `aevatar.media.chunk` (`MediaContentEvent`) flattened to the artifact shape.
+ * `ChatContentPart` names the location `uri`; the flat AG-UI payload calls it
+ * `url`, so reading `url` on the workflow path always missed.
+ */
+function mediaPartPayload(payload: Record<string, unknown>): MediaPayload {
+  const part = unpackAny(payload["part"]);
+  return {
+    mediaType: protoString(part["mediaType"]) || undefined,
+    dataBase64: protoString(part["dataBase64"]) || undefined,
+    url: protoString(part["uri"]) || undefined,
+    name: protoString(part["name"]) || undefined,
+  };
 }
 
 function humanizeSlug(slug: string): string {
@@ -3475,6 +3601,7 @@ export class AevatarAssistantTransport implements AssistantTransport {
       promptedConnectSlugs: new Map(),
       promptedActionIds: new Map(),
       waitingForApproval: false,
+      awaitingSignal: false,
       watchdog: null,
       deliveryStarted: false,
       deliveryTerminal: null,
@@ -4499,7 +4626,7 @@ export class AevatarAssistantTransport implements AssistantTransport {
 
   private armWatchdog(conversationId: string, run: RunningTurn): void {
     this.clearWatchdog(run);
-    if (run.finished || run.waitingForApproval) return;
+    if (run.finished || run.waitingForApproval || run.awaitingSignal) return;
     run.watchdog = setTimeout(() => {
       // A hung run holds the conversation actor: without a server-side stop
       // the next send fails with ACTIVE_TURN_REQUIRES_STEERING until the
@@ -4898,11 +5025,13 @@ export class AevatarAssistantTransport implements AssistantTransport {
         );
         return;
       case "aevatar.human_input.request":
-        this.addApprovalCard(
-          conversationId,
-          run,
-          payload as ToolApprovalPayload,
-        );
+        // NOT a ToolApprovalPayload. `WorkflowHumanInputRequestCustomPayload`
+        // has no requestId/approvalRequestId/commandId at all, so casting it
+        // to the approval shape made `addApprovalCard` bail on its identity
+        // guard and drop the suspension silently — the user saw a turn that
+        // simply stopped. Its identity is the step, and its prose is
+        // `prompt`/`content`, not `message`/`body`.
+        this.addHumanInputCard(conversationId, run, payload);
         return;
       case "aevatar.step.request": {
         const step = payload as StepPayload;
@@ -4912,16 +5041,30 @@ export class AevatarAssistantTransport implements AssistantTransport {
       }
       case "aevatar.step.completed": {
         const step = payload as StepPayload;
+        // `WorkflowStepCompletedCustomPayload.success` is a proto3 bool, so a
+        // FAILED step omits it entirely. Absence is `false` here, not "no
+        // signal" — the earlier `stepFinished` envelope frame (which has no
+        // success member at all) already marked the row done, and this frame
+        // is the authoritative correction.
+        const succeeded = protoBool(step.success);
         this.finishRunStep(
           conversationId,
           run,
           step.stepId ?? "",
-          step.success !== false,
-          step.success === false ? "Step failed" : "Completed",
+          succeeded,
+          succeeded ? "Completed" : "Step failed",
         );
         return;
       }
       case "aevatar.workflow.waiting_signal":
+        // A signal wait is an upstream suspension, not a hang: the run is
+        // idle on purpose and may stay idle far longer than the client's
+        // progress watchdog. Leaving the watchdog armed made NyxID stop a
+        // healthy run and report `upstream_progress_timeout`. Held separate
+        // from `waitingForApproval`, which additionally means "a card is
+        // decidable" and drives the approval-continuation paths.
+        run.awaitingSignal = true;
+        this.clearWatchdog(run);
         if (run.turnId) {
           this.emit(conversationId, run, {
             cursor: this.nextCursor(run),
@@ -4930,6 +5073,27 @@ export class AevatarAssistantTransport implements AssistantTransport {
             status: "waiting",
           });
         }
+        return;
+      case "aevatar.workflow.signal.buffered":
+        // The awaited signal landed: the run is live again, so let the next
+        // frame re-arm the watchdog.
+        run.awaitingSignal = false;
+        if (run.turnId) {
+          this.emit(conversationId, run, {
+            cursor: this.nextCursor(run),
+            event: "turn.status",
+            turn_id: run.turnId,
+            status: "running",
+          });
+        }
+        return;
+      case "aevatar.media.chunk":
+        // `MediaContentEvent{session_id, agent_id, part}` — the media fields
+        // are nested under `part`, and the location field is `uri`. NyxID
+        // previously only read a FLAT top-level `mediaContent` envelope arm,
+        // which the workflow proto does not define, so studio attachments
+        // were dropped outright.
+        this.addMediaArtifact(conversationId, run, mediaPartPayload(payload));
         return;
       case "aevatar.chat.context":
         this.applyWorkflowChatContext(
@@ -5037,10 +5201,12 @@ export class AevatarAssistantTransport implements AssistantTransport {
       }
     }
 
-    const rawVersion = payload.stateVersion;
-    const stateVersion =
-      typeof rawVersion === "number" ? rawVersion : Number(rawVersion);
-    if (!Number.isSafeInteger(stateVersion) || stateVersion < 0) {
+    // A create turn carries no `stateVersion` member at all (elided int64
+    // default), while every continuation carries one. Absent means "no
+    // watermark yet", not malformed. Rejecting absence broke the first turn of
+    // every new conversation while continuations kept working.
+    const stateVersion = chatContextStateVersion(payload.stateVersion);
+    if (stateVersion === null) {
       run.deliveryProtocolError = {
         code: "stream_protocol_error",
         message: "The assistant stream returned an invalid state version.",
@@ -5141,17 +5307,27 @@ export class AevatarAssistantTransport implements AssistantTransport {
       this.finishRunStep(conversationId, run, callId, true, "Completed");
       return;
     }
-    const failed = /(ERROR|DENIED)/i.test(receipt.status ?? "");
+    // `AgentToolReceiptStatus` is an enum: the failure members are non-zero
+    // (`DENIED`, `ERROR`) so they always reach the wire, while `UNSPECIFIED`
+    // is elided — absence is correctly "not a failure". `AUTHORIZATION_REQUIRED`
+    // matches neither name, so the blocked verdict is read from the result.
+    const blocker = parseToolResultBlocker(receipt.resultJson);
+    if (blocker) this.addConnectCard(conversationId, run, blocker);
+    const failed =
+      Boolean(blocker) ||
+      /(ERROR|DENIED|AUTHORIZATION_REQUIRED)/i.test(receipt.status ?? "");
     this.finishRunStep(
       conversationId,
       run,
       callId,
       !failed,
-      summarizeToolResult(
-        failed
-          ? (receipt.errorMessage ?? receipt.errorCode ?? "Failed")
-          : receipt.resultJson,
-      ),
+      blocker
+        ? blocker.safeMessage
+        : summarizeToolResult(
+            failed
+              ? (receipt.errorMessage ?? receipt.errorCode ?? "Failed")
+              : receipt.resultJson,
+          ),
     );
   }
 
@@ -5315,8 +5491,13 @@ export class AevatarAssistantTransport implements AssistantTransport {
   ): void {
     const key = payload.toolCallId ?? "";
     const status = (payload.status ?? "").toUpperCase();
+    // On the workflow path `toolCallEnd` carries only `{toolCallId, result}` —
+    // `status`/`success`/`error` exist solely on the AG-UI/actor shape — so a
+    // blocked capability can only be seen by reading the result itself.
+    const blocker = parseToolResultBlocker(payload.result);
+    if (blocker) this.addConnectCard(conversationId, run, blocker);
     const succeeded =
-      payload.success !== false && !/(ERROR|DENIED)/.test(status);
+      !blocker && payload.success !== false && !/(ERROR|DENIED)/.test(status);
     const outcome = payload.result ?? payload.error;
     if (!key && run.stepKeys.size === 0) {
       this.startRunStep(
@@ -5331,9 +5512,11 @@ export class AevatarAssistantTransport implements AssistantTransport {
       run,
       key || [...run.stepKeys.keys()].at(-1) || "",
       succeeded,
-      succeeded
-        ? summarizeToolResult(payload.result)
-        : summarizeToolResult(outcome),
+      blocker
+        ? blocker.safeMessage
+        : succeeded
+          ? summarizeToolResult(payload.result)
+          : summarizeToolResult(outcome),
     );
   }
 
@@ -5490,6 +5673,60 @@ export class AevatarAssistantTransport implements AssistantTransport {
       payload.toolCallId ?? payload.stepId ?? "",
       requestId,
     );
+    if (run.runBlockId) this.patchRunBlock(conversationId, run);
+    if (run.turnId) {
+      this.emit(conversationId, run, {
+        cursor: this.nextCursor(run),
+        event: "turn.status",
+        turn_id: run.turnId,
+        status: "waiting",
+      });
+    }
+  }
+
+  /**
+   * `aevatar.human_input.request` — a workflow step suspended awaiting a person.
+   *
+   * Rendered as prose and deliberately NOT as an approval card:
+   * `WorkflowHumanInputRequestCustomPayload` carries no approval/request id, so
+   * an approve/deny control would post a decision against an identity upstream
+   * never issued. Showing the ask and holding the watchdog is the honest
+   * subset; a real input control needs an upstream resume identity first.
+   */
+  private addHumanInputCard(
+    conversationId: string,
+    run: RunningTurn,
+    payload: Record<string, unknown>,
+  ): void {
+    const stepId = protoString(payload["stepId"]);
+    const dedupeKey = `human-input:${stepId || protoString(payload["runId"])}`;
+    if (run.promptedApprovalIds.has(dedupeKey)) return;
+    run.promptedApprovalIds.add(dedupeKey);
+
+    // A human gate has no client-imposed deadline.
+    run.awaitingSignal = true;
+    this.clearWatchdog(run);
+
+    const prompt =
+      protoString(payload["prompt"]) || protoString(payload["content"]);
+    const options = Array.isArray(payload["options"])
+      ? payload["options"].filter(
+          (option): option is string => typeof option === "string",
+        )
+      : [];
+    const text = [
+      prompt || "The workflow is waiting for your input to continue.",
+      options.length > 0 ? `Options: ${options.join(", ")}` : "",
+    ]
+      .filter(Boolean)
+      .join("\n\n");
+    this.appendActivityBlock(conversationId, run, {
+      type: "text",
+      block_id: newId("human-input"),
+      text: redactDisplayText(text),
+    });
+
+    if (stepId) this.markStepWaiting(conversationId, run, stepId, dedupeKey);
     if (run.runBlockId) this.patchRunBlock(conversationId, run);
     if (run.turnId) {
       this.emit(conversationId, run, {
