@@ -303,15 +303,29 @@ pub struct UpdateServiceRequest {
     pub anonymous_endpoints: Option<Vec<AnonymousEndpointRule>>,
 }
 
-fn identity_update_requested(body: &UpdateServiceRequest) -> bool {
-    body.identity_propagation_mode.is_some()
-        || body.identity_include_user_id.is_some()
-        || body.identity_include_email.is_some()
-        || body.identity_include_name.is_some()
-        || body.identity_jwt_audience.is_some()
-        || body.forward_access_token.is_some()
-        || body.inject_delegation_token.is_some()
-        || body.delegation_token_scope.is_some()
+fn identity_update_fields(body: &UpdateServiceRequest) -> Vec<&'static str> {
+    [
+        body.identity_propagation_mode
+            .as_ref()
+            .map(|_| "identity_propagation_mode"),
+        body.identity_include_user_id
+            .map(|_| "identity_include_user_id"),
+        body.identity_include_email
+            .map(|_| "identity_include_email"),
+        body.identity_include_name.map(|_| "identity_include_name"),
+        body.identity_jwt_audience
+            .as_ref()
+            .map(|_| "identity_jwt_audience"),
+        body.forward_access_token.map(|_| "forward_access_token"),
+        body.inject_delegation_token
+            .map(|_| "inject_delegation_token"),
+        body.delegation_token_scope
+            .as_ref()
+            .map(|_| "delegation_token_scope"),
+    ]
+    .into_iter()
+    .flatten()
+    .collect()
 }
 
 #[derive(Debug, Serialize, ToSchema)]
@@ -1808,12 +1822,19 @@ pub async fn update_service(
         ));
     }
 
-    let identity_changed = identity_update_requested(&body);
+    let identity_fields = identity_update_fields(&body);
+    let identity_changed = !identity_fields.is_empty();
     let mut now = Utc::now();
     if identity_changed && now.timestamp_millis() <= service.updated_at.timestamp_millis() {
         now = service.updated_at + chrono::Duration::milliseconds(1);
     }
     set_doc.insert("updated_at", bson::DateTime::from_chrono(now));
+    if identity_changed {
+        set_doc.insert(
+            crate::models::catalog_identity_reconciliation::FIELD_NAME,
+            catalog_identity_service::pending_reconciliation_marker(now, &identity_fields),
+        );
+    }
     if let Some(docs_metadata) = http_docs_refresh {
         let refresh_openapi_url = should_refresh_openapi_url(&service, &body);
         let refresh_asyncapi_url = should_refresh_asyncapi_url(&service, &body);
@@ -2284,10 +2305,15 @@ pub async fn regenerate_oidc_secret(
 mod tests {
     use super::{
         CreateServiceRequest, UpdateServiceRequest, create_service, derive_http_service_category,
-        derive_ssh_service_category, derive_visibility, identity_update_requested,
+        derive_ssh_service_category, derive_visibility, identity_update_fields,
         normalize_service_type, resolve_spec_url_update, resync_service_identity, update_service,
     };
     use crate::errors::AppError;
+    use crate::models::audit_log::COLLECTION_NAME as AUDIT_LOGS;
+    use crate::models::catalog_identity_reconciliation::{
+        CatalogIdentityReconciliation, CatalogIdentityReconciliationStatus,
+        FIELD_NAME as RECONCILIATION_FIELD,
+    };
     use crate::models::downstream_service::test_helpers::dummy_service;
     use crate::models::downstream_service::{
         COLLECTION_NAME as DOWNSTREAM_SERVICES, DownstreamService,
@@ -2301,7 +2327,7 @@ mod tests {
     use axum::Json;
     use axum::extract::{Path, State};
     use futures::TryStreamExt;
-    use mongodb::bson::doc;
+    use mongodb::bson::{self, doc};
     use uuid::Uuid;
 
     async fn seed_user(db: &mongodb::Database, is_admin: bool) -> String {
@@ -2449,12 +2475,12 @@ mod tests {
     fn non_identity_update_does_not_request_propagation() {
         let body: UpdateServiceRequest =
             serde_json::from_str(r#"{"name":"Renamed"}"#).expect("parse update");
-        assert!(!identity_update_requested(&body));
+        assert!(identity_update_fields(&body).is_empty());
 
         let body: UpdateServiceRequest =
             serde_json::from_str(r#"{"name":"Renamed","forward_access_token":true}"#)
                 .expect("parse identity update");
-        assert!(identity_update_requested(&body));
+        assert_eq!(identity_update_fields(&body), ["forward_access_token"]);
     }
 
     #[tokio::test]
@@ -2588,6 +2614,102 @@ mod tests {
                 "a non-identity catalog update must not write user_services"
             );
         }
+    }
+
+    #[tokio::test]
+    async fn update_service_keeps_durable_failure_when_propagation_and_audit_fail() {
+        let Some(db) = connect_test_database("h_services_identity_durable_failure").await else {
+            eprintln!("skipping durable identity failure test: no local MongoDB available");
+            return;
+        };
+        let admin_id = seed_user(&db, true).await;
+        let state = test_app_state(db.clone());
+        let catalog_id = "catalog-durable-failure";
+        let (base_url, server) = spawn_empty_docs_server().await;
+        let mut catalog = dummy_service();
+        catalog.id = catalog_id.to_string();
+        catalog.created_by = admin_id.clone();
+        catalog.base_url = base_url;
+        catalog.delegation_token_scope = "llm:proxy".to_string();
+        db.collection::<DownstreamService>(DOWNSTREAM_SERVICES)
+            .insert_one(&catalog)
+            .await
+            .expect("insert catalog service");
+        db.collection::<UserService>(USER_SERVICES)
+            .insert_one(test_user_service(
+                "user-service",
+                "owner",
+                "service",
+                "endpoint",
+                Some(catalog_id),
+                None,
+            ))
+            .await
+            .expect("insert user service");
+
+        db.create_collection(AUDIT_LOGS)
+            .await
+            .expect("create audit collection");
+        db.run_command(doc! {
+            "collMod": AUDIT_LOGS,
+            "validator": { "_id": { "$exists": false } },
+            "validationLevel": "strict",
+            "validationAction": "error",
+        })
+        .await
+        .expect("install rejecting audit validator");
+        db.run_command(doc! {
+            "collMod": USER_SERVICES,
+            "validator": { "forward_access_token": { "$ne": true } },
+            "validationLevel": "strict",
+            "validationAction": "error",
+        })
+        .await
+        .expect("install rejecting user-service validator");
+
+        let body: UpdateServiceRequest =
+            serde_json::from_str(r#"{"forward_access_token":true}"#).expect("parse update");
+        let error = update_service(
+            State(state),
+            test_auth_user(&admin_id),
+            crate::telemetry::TelemetryContext::default(),
+            Path(catalog_id.to_string()),
+            Json(body),
+        )
+        .await
+        .expect_err("propagation should fail");
+        server.abort();
+        assert!(matches!(error, AppError::DatabaseError(_)));
+
+        let persisted = db
+            .collection::<mongodb::bson::Document>(DOWNSTREAM_SERVICES)
+            .find_one(doc! { "_id": catalog_id })
+            .await
+            .expect("find catalog service")
+            .expect("catalog service exists");
+        let marker: CatalogIdentityReconciliation = bson::from_document(
+            persisted
+                .get_document(RECONCILIATION_FIELD)
+                .expect("durable reconciliation marker")
+                .clone(),
+        )
+        .expect("deserialize reconciliation marker");
+        assert_eq!(marker.status, CatalogIdentityReconciliationStatus::Failed);
+        assert_eq!(marker.fields, ["forward_access_token"]);
+        assert_eq!(
+            marker.failure_stage.as_deref(),
+            Some("user_services_update")
+        );
+        assert!(marker.failed_at.is_some());
+        assert_eq!(marker.matched_count, Some(0));
+        assert_eq!(
+            db.collection::<mongodb::bson::Document>(AUDIT_LOGS)
+                .count_documents(doc! {})
+                .await
+                .expect("count audit rows"),
+            0,
+            "the durable marker must not depend on audit persistence"
+        );
     }
 
     #[tokio::test]

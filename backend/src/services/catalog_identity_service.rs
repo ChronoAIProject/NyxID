@@ -3,6 +3,10 @@ use mongodb::bson::{self, Bson, Document, doc};
 use serde::Serialize;
 
 use crate::errors::{AppError, AppResult};
+use crate::models::catalog_identity_reconciliation::{
+    CatalogIdentityReconciliation, CatalogIdentityReconciliationStatus,
+    FIELD_NAME as RECONCILIATION_FIELD,
+};
 use crate::models::downstream_service::{
     COLLECTION_NAME as DOWNSTREAM_SERVICES, DownstreamService,
 };
@@ -155,6 +159,22 @@ pub fn effective_identity_config(service: &DownstreamService) -> IdentityConfig 
     }
 }
 
+/// Build the write-ahead marker stored atomically with a catalog identity edit.
+pub fn pending_reconciliation_marker(revision: DateTime<Utc>, fields: &[&'static str]) -> Document {
+    bson::to_document(&CatalogIdentityReconciliation {
+        status: CatalogIdentityReconciliationStatus::Pending,
+        fields: fields.iter().map(|field| (*field).to_string()).collect(),
+        revision,
+        requested_at: revision,
+        failure_stage: None,
+        failed_at: None,
+        matched_count: None,
+        modified_count: None,
+        skipped_customized_count: None,
+    })
+    .expect("catalog identity reconciliation markers always serialize to BSON")
+}
+
 /// Reconcile an admin catalog edit and catch up across any later catalog
 /// revisions that committed while this request was updating instances.
 ///
@@ -169,6 +189,7 @@ pub async fn propagate_catalog_update(
     previous: CatalogIdentityState,
     committed: CatalogIdentityState,
 ) -> AppResult<ReconciliationReport> {
+    let marker_revision = committed.revision;
     let outcome = reconcile_catalog_revisions(db, catalog_service_id, previous, committed).await;
 
     match outcome {
@@ -183,9 +204,19 @@ pub async fn propagate_catalog_update(
                 None,
             )
             .await?;
+            clear_reconciliation_marker(db, catalog_service_id, marker_revision).await?;
             Ok(report)
         }
         Err(failure) => {
+            if let Err(marker_error) =
+                mark_reconciliation_failed(db, catalog_service_id, marker_revision, &failure).await
+            {
+                tracing::error!(
+                    catalog_service_id,
+                    error = %marker_error,
+                    "Failed to update catalog identity reconciliation marker"
+                );
+            }
             if let Err(audit_error) = persist_outcome(
                 db,
                 actor,
@@ -270,6 +301,8 @@ pub async fn force_resync(
                 None,
             )
             .await?;
+            clear_reconciliation_marker_for_catalog_revision(db, &service.id, target.updated_at)
+                .await?;
             return Ok(result.matched_count);
         }
 
@@ -280,6 +313,96 @@ pub async fn force_resync(
     Err(AppError::Conflict(
         "Catalog identity changed repeatedly during resync; retry the request".to_string(),
     ))
+}
+
+async fn mark_reconciliation_failed(
+    db: &mongodb::Database,
+    catalog_service_id: &str,
+    marker_revision: DateTime<Utc>,
+    failure: &ReconciliationFailure,
+) -> AppResult<()> {
+    let mut filter = doc! { "_id": catalog_service_id };
+    filter.insert(
+        format!("{RECONCILIATION_FIELD}.revision"),
+        bson::DateTime::from_chrono(marker_revision),
+    );
+
+    let mut set_doc = Document::new();
+    set_doc.insert(format!("{RECONCILIATION_FIELD}.status"), "failed");
+    set_doc.insert(
+        format!("{RECONCILIATION_FIELD}.fields"),
+        bson::to_bson(&failure.report.fields)
+            .expect("catalog identity field names always serialize to BSON"),
+    );
+    set_doc.insert(
+        format!("{RECONCILIATION_FIELD}.failure_stage"),
+        failure.stage,
+    );
+    set_doc.insert(
+        format!("{RECONCILIATION_FIELD}.failed_at"),
+        bson::DateTime::from_chrono(Utc::now()),
+    );
+    set_doc.insert(
+        format!("{RECONCILIATION_FIELD}.matched_count"),
+        durable_count(failure.report.matched_count),
+    );
+    set_doc.insert(
+        format!("{RECONCILIATION_FIELD}.modified_count"),
+        durable_count(failure.report.modified_count),
+    );
+    set_doc.insert(
+        format!("{RECONCILIATION_FIELD}.skipped_customized_count"),
+        durable_count(failure.report.skipped_customized_count),
+    );
+
+    db.collection::<DownstreamService>(DOWNSTREAM_SERVICES)
+        .update_one(filter, doc! { "$set": set_doc })
+        .await?;
+    Ok(())
+}
+
+async fn clear_reconciliation_marker(
+    db: &mongodb::Database,
+    catalog_service_id: &str,
+    marker_revision: DateTime<Utc>,
+) -> AppResult<()> {
+    let mut filter = doc! { "_id": catalog_service_id };
+    filter.insert(
+        format!("{RECONCILIATION_FIELD}.revision"),
+        bson::DateTime::from_chrono(marker_revision),
+    );
+    clear_reconciliation_marker_with_filter(db, filter).await
+}
+
+async fn clear_reconciliation_marker_for_catalog_revision(
+    db: &mongodb::Database,
+    catalog_service_id: &str,
+    catalog_revision: DateTime<Utc>,
+) -> AppResult<()> {
+    clear_reconciliation_marker_with_filter(
+        db,
+        doc! {
+            "_id": catalog_service_id,
+            "updated_at": bson::DateTime::from_chrono(catalog_revision),
+        },
+    )
+    .await
+}
+
+async fn clear_reconciliation_marker_with_filter(
+    db: &mongodb::Database,
+    filter: Document,
+) -> AppResult<()> {
+    let mut unset_doc = Document::new();
+    unset_doc.insert(RECONCILIATION_FIELD, "");
+    db.collection::<DownstreamService>(DOWNSTREAM_SERVICES)
+        .update_one(filter, doc! { "$unset": unset_doc })
+        .await?;
+    Ok(())
+}
+
+fn durable_count(count: u64) -> i64 {
+    i64::try_from(count).unwrap_or(i64::MAX)
 }
 
 async fn audit_resync_failure(

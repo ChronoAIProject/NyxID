@@ -12,6 +12,7 @@ pub mod billing_topup_session;
 pub mod billing_wallet;
 pub mod bson_bytes;
 pub mod bson_datetime;
+pub mod catalog_identity_reconciliation;
 pub mod chain_verify_status;
 pub mod channel_bot;
 pub mod channel_conversation;
