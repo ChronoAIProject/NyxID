@@ -1245,6 +1245,29 @@ pub enum TriggerCommands {
         #[command(flatten)]
         auth: AuthArgs,
     },
+    /// List webhook delivery records
+    Deliveries {
+        id: String,
+        #[arg(long, default_value_t = 1)]
+        page: u64,
+        #[arg(long, default_value_t = 20)]
+        per_page: u64,
+        #[command(flatten)]
+        auth: AuthArgs,
+    },
+    /// Redeliver a retained webhook event
+    Redeliver {
+        id: String,
+        event_id: String,
+        #[command(flatten)]
+        auth: AuthArgs,
+    },
+    /// Rotate the outbound webhook signing secret
+    RotateDeliverySecret {
+        id: String,
+        #[command(flatten)]
+        auth: AuthArgs,
+    },
 }
 
 // ---- Billing ----
