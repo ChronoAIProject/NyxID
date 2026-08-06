@@ -1,6 +1,8 @@
 import { resolveAssistantAction } from "@/lib/assistant/action-registry";
 import { ChatStreamParser } from "@/lib/assistant/chat-stream-parser";
 import {
+  type AuthorizationBlocker,
+  parseToolResultBlocker,
   redactDisplayText,
   summarizeToolResult,
 } from "@/lib/assistant/aevatar-transport";
@@ -80,6 +82,20 @@ function safeErrorCode(value: unknown, fallback: string): string {
   return typeof value === "string" && /^[A-Za-z0-9._:-]{1,128}$/.test(value)
     ? value
     : fallback;
+}
+
+/**
+ * `aevatar.media.chunk` (`MediaContentEvent`) flattened to the fields `addMedia`
+ * reads. `ChatContentPart` names the location `uri`, not `url`.
+ */
+function mediaPartFields(body: Record<string, unknown>): Record<string, unknown> {
+  const part = unpackAny(body["part"]);
+  return {
+    mediaType: part["mediaType"],
+    dataBase64: part["dataBase64"],
+    url: part["uri"],
+    name: part["name"],
+  };
 }
 
 function safeErrorMessage(value: unknown, fallback: string): string {
@@ -181,6 +197,17 @@ class ReplayProjector {
   private readonly promptedActions = new Map<string, string>();
   private readonly openCards = new Map<string, "approval" | "connect">();
   private waitingForApproval = false;
+  /**
+   * Suspended on a signal wait or a human-input request. Mirrors the live
+   * transport's flag of the same name so a capture that legitimately ENDS at a
+   * suspension is finalized as waiting rather than scored a truncated failure.
+   */
+  private awaitingSignal = false;
+
+  /** Idle on purpose — an approval gate, a signal wait, or human input. */
+  private get suspended(): boolean {
+    return this.waitingForApproval || this.awaitingSignal;
+  }
 
   constructor(context: WireReplayContext) {
     this.context = context;
@@ -199,7 +226,7 @@ class ReplayProjector {
       partial:
         this.context.truncated ||
         this.context.captureOutcome !== "complete" ||
-        (!this.terminal && !this.waitingForApproval),
+        (!this.terminal && !this.suspended),
     };
   }
 
@@ -552,14 +579,23 @@ class ReplayProjector {
       this.startStep(key, stringValue(body, "toolName") || "tool", frame);
     }
     const status = stringValue(body, "status").toUpperCase();
+    // Workflow `toolCallEnd` is only `{toolCallId, result}`, so a blocked
+    // capability is visible solely inside the result. Mirrors the live
+    // transport; parity breaks on a blocked turn otherwise.
+    const blocker = parseToolResultBlocker(body["result"]);
+    if (blocker) this.addConnectionBlocker(blocker, frame);
     const succeeded =
-      booleanValue(body, "success") !== false && !/(ERROR|DENIED)/.test(status);
+      !blocker &&
+      booleanValue(body, "success") !== false &&
+      !/(ERROR|DENIED)/.test(status);
     this.finishStep(
       key,
       succeeded,
-      summarizeToolResult(
-        succeeded ? body["result"] : (body["result"] ?? body["error"]),
-      ),
+      blocker
+        ? blocker.safeMessage
+        : summarizeToolResult(
+            succeeded ? body["result"] : (body["result"] ?? body["error"]),
+          ),
       frame,
     );
   }
@@ -623,6 +659,76 @@ class ReplayProjector {
         status: "waiting",
       });
     }
+  }
+
+  /**
+   * Render a blocker recovered from a tool result through the same card path
+   * as a typed `nyxid.authorization.required` frame, by handing it back in
+   * that frame's camelCase shape.
+   */
+  /** Prose mirror of the live transport's human-input suspension rendering. */
+  private addHumanInput(
+    body: Record<string, unknown>,
+    frame: ChatStreamFrame,
+  ): void {
+    const stepId = stringValue(body, "stepId");
+    const dedupeKey = `human-input:${stepId || stringValue(body, "runId")}`;
+    if (this.promptedApprovals.has(dedupeKey)) return;
+    this.promptedApprovals.add(dedupeKey);
+    this.awaitingSignal = true;
+
+    const prompt = stringValue(body, "prompt") || stringValue(body, "content");
+    const options = Array.isArray(body["options"])
+      ? body["options"].filter(
+          (option): option is string => typeof option === "string",
+        )
+      : [];
+    const text = [
+      prompt || "The workflow is waiting for your input to continue.",
+      options.length > 0 ? `Options: ${options.join(", ")}` : "",
+    ]
+      .filter(Boolean)
+      .join("\n\n");
+    this.appendActivityBlock(
+      {
+        type: "text",
+        block_id: this.nextId("human-input"),
+        text: redactDisplayText(text),
+      },
+      frame,
+    );
+    // Parity with the live transport, which moves the correlated step to
+    // waiting rather than leaving it active behind the prompt.
+    const step = stepId
+      ? this.steps.find((candidate) => candidate.key === stepId)
+      : undefined;
+    if (step?.status === "active") {
+      step.status = "waiting";
+      step.approval_request_id = dedupeKey;
+      this.patchRun(frame);
+    }
+    if (this.turnId) {
+      this.emit({
+        event: "turn.status",
+        turn_id: this.turnId,
+        status: "waiting",
+      });
+    }
+  }
+
+  private addConnectionBlocker(
+    blocker: AuthorizationBlocker,
+    frame: ChatStreamFrame,
+  ): void {
+    this.addConnection(
+      {
+        reasonCode: blocker.reasonCode,
+        serviceSlug: blocker.serviceSlug,
+        serviceLabel: blocker.serviceLabel,
+        safeMessage: blocker.safeMessage,
+      },
+      frame,
+    );
   }
 
   private addConnection(payload: unknown, frame: ChatStreamFrame): void {
@@ -798,8 +904,16 @@ class ReplayProjector {
         this.addAction(payload, frame);
         return;
       case "aevatar.tool_approval.pending":
-      case "aevatar.human_input.request":
         this.addApproval(unpackAny(payload), frame);
+        return;
+      case "aevatar.human_input.request":
+        // Not an approval payload — it has no request id, so the approval
+        // path dropped it. Mirrors the live transport's prose rendering.
+        this.addHumanInput(unpackAny(payload), frame);
+        return;
+      case "aevatar.media.chunk":
+        // Media fields are nested under `part`, and the location is `uri`.
+        this.addMedia(mediaPartFields(unpackAny(payload)), frame);
         return;
       case "aevatar.step.request": {
         const body = unpackAny(payload);
@@ -812,7 +926,9 @@ class ReplayProjector {
       }
       case "aevatar.step.completed": {
         const body = unpackAny(payload);
-        const succeeded = booleanValue(body, "success") !== false;
+        // proto3 elides a `false` bool, so an absent `success` IS a failure.
+        // Must match the live transport or replay parity drifts on failures.
+        const succeeded = booleanValue(body, "success") === true;
         this.finishStep(
           stringValue(body, "stepId"),
           succeeded,
@@ -822,11 +938,23 @@ class ReplayProjector {
         return;
       }
       case "aevatar.workflow.waiting_signal":
+        this.awaitingSignal = true;
         if (this.turnId) {
           this.emit({
             event: "turn.status",
             turn_id: this.turnId,
             status: "waiting",
+          });
+        }
+        return;
+      case "aevatar.workflow.signal.buffered":
+        // The awaited signal landed; the run is live again.
+        this.awaitingSignal = false;
+        if (this.turnId) {
+          this.emit({
+            event: "turn.status",
+            turn_id: this.turnId,
+            status: "running",
           });
         }
         return;
@@ -904,15 +1032,26 @@ class ReplayProjector {
       this.finishStep(key, true, "Completed", frame);
       return;
     }
-    const failed = /(ERROR|DENIED)/i.test(stringValue(receipt, "status"));
+    // Parity with the live transport: `AUTHORIZATION_REQUIRED` contains neither
+    // "ERROR" nor "DENIED", so status alone scored a blocked capability as a
+    // success.
+    const blocker = parseToolResultBlocker(receipt["resultJson"]);
+    if (blocker) this.addConnectionBlocker(blocker, frame);
+    const failed =
+      Boolean(blocker) ||
+      /(ERROR|DENIED|AUTHORIZATION_REQUIRED)/i.test(
+        stringValue(receipt, "status"),
+      );
     this.finishStep(
       key,
       !failed,
-      summarizeToolResult(
-        failed
-          ? (receipt["errorMessage"] ?? receipt["errorCode"] ?? "Failed")
-          : receipt["resultJson"],
-      ),
+      blocker
+        ? blocker.safeMessage
+        : summarizeToolResult(
+            failed
+              ? (receipt["errorMessage"] ?? receipt["errorCode"] ?? "Failed")
+              : receipt["resultJson"],
+          ),
       frame,
     );
   }
@@ -1053,12 +1192,12 @@ class ReplayProjector {
         this.finalizeActivity("blocked");
         this.completeTurn("blocked", null);
       } else {
-        this.finalizeActivity(this.waitingForApproval ? "waiting" : "done");
+        this.finalizeActivity(this.suspended ? "waiting" : "done");
         this.completeTurn("completed", null);
       }
       return;
     }
-    if (this.waitingForApproval && this.context.captureOutcome === "complete") {
+    if (this.suspended && this.context.captureOutcome === "complete") {
       this.finalizeActivity("waiting");
       this.completeTurn("completed", null);
       return;
