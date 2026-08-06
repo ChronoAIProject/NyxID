@@ -21,6 +21,9 @@ use crate::models::trigger::{
     COLLECTION_NAME as TRIGGERS, Trigger, TriggerDelivery, TriggerStatus, TriggerTokenLocation,
     TriggerVerification,
 };
+use crate::models::trigger_delivery::{
+    COLLECTION_NAME as TRIGGER_DELIVERIES, TriggerDeliveryRecord, TriggerDeliveryRecordStatus,
+};
 use crate::models::user_service::{COLLECTION_NAME as USER_SERVICES, UserService};
 use crate::mw::rate_limit::PerChannelEventLimiter;
 use crate::services::channel_event_service::{self, EventEnvelope};
@@ -30,6 +33,9 @@ use crate::services::webhook_delivery_service::{self, DeliveryFailure, Signature
 use crate::services::{audit_service, notification_service};
 
 pub const TRIGGER_SECRET_PREFIX: &str = "nyx_trg_";
+pub const TRIGGER_DELIVERY_SECRET_PREFIX: &str = "nyx_twh_";
+pub const TRIGGER_ENVELOPE_OVERHEAD_BYTES: usize = 4 * 1024;
+const METADATA_ONLY_RETENTION_HOURS: i64 = 72;
 const MAX_LABEL_LEN: usize = 128;
 const MAX_EVENT_ID_LEN: usize = 128;
 
@@ -53,11 +59,27 @@ pub struct CreatedTrigger {
     pub trigger: Trigger,
     pub raw_secret: String,
     pub delivery_signing_secret: Option<String>,
+    pub delivery_signing_key_id: Option<String>,
 }
 
 pub struct UpdatedTrigger {
     pub trigger: Trigger,
     pub delivery_signing_secret: Option<String>,
+    pub delivery_signing_key_id: Option<String>,
+}
+
+pub struct RotatedDeliverySecret {
+    pub trigger: Trigger,
+    pub raw_secret: String,
+    pub key_id: String,
+}
+
+pub enum WebhookAdmission {
+    Accepted {
+        record: Box<TriggerDeliveryRecord>,
+        body: Vec<u8>,
+    },
+    Duplicate,
 }
 
 #[derive(serde::Serialize)]
@@ -83,7 +105,7 @@ pub async fn create(
     )
     .await?;
     validate_verification(&input.verification)?;
-    let (delivery, delivery_secret_encrypted, delivery_signing_secret) =
+    let (delivery, delivery_secret_encrypted, delivery_signing_secret, delivery_key_id) =
         prepare_delivery(encryption_keys, input.delivery).await?;
     let raw_secret = format!("{TRIGGER_SECRET_PREFIX}{}", generate_random_token());
     let verification_secret_encrypted = match input.verification {
@@ -104,6 +126,7 @@ pub async fn create(
         verification_secret_encrypted,
         delivery,
         delivery_secret_encrypted,
+        delivery_key_id: delivery_key_id.clone(),
         created_at: now,
         updated_at: now,
     };
@@ -114,6 +137,7 @@ pub async fn create(
         trigger,
         raw_secret,
         delivery_signing_secret,
+        delivery_signing_key_id: delivery_key_id,
     })
 }
 
@@ -169,6 +193,7 @@ pub async fn update(
 ) -> AppResult<UpdatedTrigger> {
     let mut set_doc = doc! { "updated_at": bson::DateTime::from_chrono(Utc::now()) };
     let mut delivery_signing_secret = None;
+    let mut delivery_signing_key_id = current.delivery_key_id.clone();
     if let Some(label) = input.label {
         set_doc.insert("label", validate_label(&label)?);
     }
@@ -186,20 +211,25 @@ pub async fn update(
             &delivery,
         )
         .await?;
-        let (delivery, encrypted, raw) = prepare_delivery(encryption_keys, delivery).await?;
+        let (delivery, encrypted, raw, key_id) =
+            prepare_delivery(encryption_keys, delivery).await?;
         set_doc.insert(
             "delivery",
             bson::to_bson(&delivery).map_err(serialization_error)?,
         );
         delivery_signing_secret = raw;
+        delivery_signing_key_id = key_id.clone();
         match encrypted {
-            Some(encrypted) => set_doc.insert(
-                "delivery_secret_encrypted",
-                bson::Binary {
-                    subtype: bson::spec::BinarySubtype::Generic,
-                    bytes: encrypted,
-                },
-            ),
+            Some(encrypted) => {
+                set_doc.insert(
+                    "delivery_secret_encrypted",
+                    bson::Binary {
+                        subtype: bson::spec::BinarySubtype::Generic,
+                        bytes: encrypted,
+                    },
+                );
+                set_doc.insert("delivery_key_id", key_id.unwrap_or_default());
+            }
             None => {
                 let updated = db
                     .collection::<Trigger>(TRIGGERS)
@@ -207,7 +237,10 @@ pub async fn update(
                         doc! { "_id": &current.id, "user_id": &current.user_id },
                         doc! {
                             "$set": set_doc,
-                            "$unset": { "delivery_secret_encrypted": "" },
+                            "$unset": {
+                                "delivery_secret_encrypted": "",
+                                "delivery_key_id": "",
+                            },
                         },
                     )
                     .return_document(ReturnDocument::After)
@@ -216,6 +249,7 @@ pub async fn update(
                 return Ok(UpdatedTrigger {
                     trigger: updated,
                     delivery_signing_secret,
+                    delivery_signing_key_id,
                 });
             }
         };
@@ -232,6 +266,7 @@ pub async fn update(
     Ok(UpdatedTrigger {
         trigger: updated,
         delivery_signing_secret,
+        delivery_signing_key_id,
     })
 }
 
@@ -286,11 +321,54 @@ pub async fn rotate_secret(
     Ok((updated, raw_secret))
 }
 
+pub async fn rotate_delivery_secret(
+    db: &Database,
+    encryption_keys: &EncryptionKeys,
+    current: &Trigger,
+) -> AppResult<RotatedDeliverySecret> {
+    if !matches!(current.delivery, TriggerDelivery::Webhook { .. }) {
+        return Err(AppError::TriggerDeliveryUnsupported);
+    }
+    let raw_secret = format!(
+        "{TRIGGER_DELIVERY_SECRET_PREFIX}{}",
+        generate_random_token()
+    );
+    let encrypted = encryption_keys.encrypt(raw_secret.as_bytes()).await?;
+    let key_id = webhook_delivery_service::generate_signing_key_id();
+    let trigger = db
+        .collection::<Trigger>(TRIGGERS)
+        .find_one_and_update(
+            doc! { "_id": &current.id, "user_id": &current.user_id },
+            doc! { "$set": {
+                "delivery_secret_encrypted": bson::Binary {
+                    subtype: bson::spec::BinarySubtype::Generic,
+                    bytes: encrypted,
+                },
+                "delivery_key_id": &key_id,
+                "updated_at": bson::DateTime::from_chrono(Utc::now()),
+            }},
+        )
+        .return_document(ReturnDocument::After)
+        .await?
+        .ok_or(AppError::TriggerNotFound)?;
+    Ok(RotatedDeliverySecret {
+        trigger,
+        raw_secret,
+        key_id,
+    })
+}
+
 pub async fn load_active_for_ingress(db: &Database, id: &str) -> AppResult<Trigger> {
-    db.collection::<Trigger>(TRIGGERS)
+    let trigger = db
+        .collection::<Trigger>(TRIGGERS)
         .find_one(doc! { "_id": id, "status": "active" })
         .await?
-        .ok_or(AppError::TriggerNotFound)
+        .ok_or(AppError::TriggerNotFound)?;
+    let trigger = ensure_delivery_key_id(db, trigger).await?;
+    if trigger.status != TriggerStatus::Active {
+        return Err(AppError::TriggerNotFound);
+    }
+    Ok(trigger)
 }
 
 pub async fn verify_ingress(
@@ -396,9 +474,19 @@ pub async fn deliver_event(
     let value = serde_json::to_value(&envelope).map_err(serialization_error)?;
     match &trigger.delivery {
         TriggerDelivery::Webhook { .. } => {
-            deliver_webhook_envelope(encryption_keys, http_client, trigger, &envelope)
-                .await
-                .map_err(|_| AppError::TriggerDeliveryFailed)?
+            let body = serde_json::to_vec(&envelope).map_err(serialization_error)?;
+            deliver_webhook_body(
+                encryption_keys,
+                http_client,
+                trigger,
+                event_id,
+                &body,
+                config
+                    .trigger_payload_max_bytes
+                    .saturating_add(TRIGGER_ENVELOPE_OVERHEAD_BYTES),
+            )
+            .await
+            .map_err(|_| AppError::TriggerDeliveryFailed)?
         }
         TriggerDelivery::Agent { conversation_id } => {
             let agent_envelope = EventEnvelope {
@@ -461,33 +549,106 @@ pub async fn deliver_event(
     Ok(())
 }
 
-/// Spawn bounded webhook delivery after the ingress handler has atomically
-/// reserved the event id. Delivery failure is isolated from the provider
-/// request and recorded with metadata only.
+pub async fn admit_webhook_delivery(
+    db: &Database,
+    encryption_keys: &EncryptionKeys,
+    trigger: &Trigger,
+    event_id: &str,
+    payload: serde_json::Value,
+    retention_hours: u64,
+    max_body_bytes: usize,
+) -> AppResult<WebhookAdmission> {
+    if !matches!(trigger.delivery, TriggerDelivery::Webhook { .. }) {
+        return Err(AppError::TriggerDeliveryUnsupported);
+    }
+    let now = Utc::now();
+    let envelope = TriggerEventEnvelope {
+        event_id: event_id.to_string(),
+        trigger_id: trigger.id.clone(),
+        source: "inbound_webhook",
+        received_at: now,
+        payload,
+    };
+    let body = serde_json::to_vec(&envelope).map_err(serialization_error)?;
+    if body.len() > max_body_bytes {
+        return Err(AppError::TriggerPayloadTooLarge);
+    }
+    let envelope_encrypted = if retention_hours == 0 {
+        None
+    } else {
+        Some(encryption_keys.encrypt(&body).await?)
+    };
+    let retained_hours = if retention_hours == 0 {
+        METADATA_ONLY_RETENTION_HOURS
+    } else {
+        i64::try_from(retention_hours).unwrap_or(i64::MAX)
+    };
+    let record = TriggerDeliveryRecord {
+        id: delivery_record_id(&trigger.id, event_id),
+        trigger_id: trigger.id.clone(),
+        user_id: trigger.user_id.clone(),
+        event_id: event_id.to_string(),
+        status: TriggerDeliveryRecordStatus::Pending,
+        attempts: 0,
+        last_status_code: None,
+        envelope_encrypted,
+        created_at: now,
+        updated_at: now,
+        expires_at: now + chrono::Duration::hours(retained_hours),
+        delivered_at: None,
+    };
+    match db
+        .collection::<TriggerDeliveryRecord>(TRIGGER_DELIVERIES)
+        .insert_one(&record)
+        .await
+    {
+        Ok(_) => Ok(WebhookAdmission::Accepted {
+            record: Box::new(record),
+            body,
+        }),
+        Err(error) if is_duplicate_key_error(&error) => Ok(WebhookAdmission::Duplicate),
+        Err(error) => Err(error.into()),
+    }
+}
+
+/// Spawn delivery after durable admission. Delivery failure is isolated from
+/// the ingress request and reflected in the metadata-only delivery record.
 pub fn dispatch_webhook_event(
     db: Database,
     encryption_keys: Arc<EncryptionKeys>,
     http_client: reqwest::Client,
     trigger: Trigger,
-    event_id: String,
-    payload: serde_json::Value,
+    record: TriggerDeliveryRecord,
+    body: Vec<u8>,
+    max_body_bytes: usize,
 ) {
     tokio::spawn(async move {
-        let envelope = TriggerEventEnvelope {
-            event_id: event_id.clone(),
-            trigger_id: trigger.id.clone(),
-            source: "inbound_webhook",
-            received_at: Utc::now(),
-            payload,
-        };
-        match deliver_webhook_envelope(&encryption_keys, &http_client, &trigger, &envelope).await {
+        let event_id = record.event_id.clone();
+        let outcome = deliver_webhook_body(
+            &encryption_keys,
+            &http_client,
+            &trigger,
+            &event_id,
+            &body,
+            max_body_bytes,
+        )
+        .await;
+        if let Err(error) = update_delivery_after_attempt(&db, &record, &outcome).await {
+            tracing::warn!(
+                trigger_id = %trigger.id,
+                event_id,
+                %error,
+                "failed to update trigger delivery record"
+            );
+        }
+        match outcome {
             Ok(()) => audit_service::log_async(
-                db,
-                Some(trigger.user_id),
+                db.clone(),
+                Some(trigger.user_id.clone()),
                 "trigger_event_forwarded".to_string(),
                 Some(serde_json::json!({
-                    "trigger_id": trigger.id,
-                    "event_id": event_id,
+                    "trigger_id": &trigger.id,
+                    "event_id": &event_id,
                     "delivery_type": "webhook",
                 })),
                 None,
@@ -500,11 +661,43 @@ pub fn dispatch_webhook_event(
     });
 }
 
-async fn deliver_webhook_envelope(
+async fn update_delivery_after_attempt(
+    db: &Database,
+    record: &TriggerDeliveryRecord,
+    outcome: &Result<(), DeliveryFailure>,
+) -> AppResult<()> {
+    let now = Utc::now();
+    let (status, last_status_code) = match outcome {
+        Ok(()) => ("delivered", None),
+        Err(failure) => ("failed", failure.last_status),
+    };
+    let mut set_doc = doc! {
+        "status": status,
+        "last_status_code": bson::to_bson(&last_status_code).map_err(serialization_error)?,
+        "updated_at": bson::DateTime::from_chrono(now),
+    };
+    if outcome.is_ok() {
+        set_doc.insert("delivered_at", bson::DateTime::from_chrono(now));
+    }
+    db.collection::<TriggerDeliveryRecord>(TRIGGER_DELIVERIES)
+        .update_one(
+            doc! { "_id": &record.id, "trigger_id": &record.trigger_id },
+            doc! {
+                "$set": set_doc,
+                "$inc": { "attempts": 1_i32 },
+            },
+        )
+        .await?;
+    Ok(())
+}
+
+async fn deliver_webhook_body(
     encryption_keys: &EncryptionKeys,
     http_client: &reqwest::Client,
     trigger: &Trigger,
-    envelope: &TriggerEventEnvelope,
+    event_id: &str,
+    body: &[u8],
+    max_body_bytes: usize,
 ) -> Result<(), DeliveryFailure> {
     let TriggerDelivery::Webhook { url } = &trigger.delivery else {
         return Err(DeliveryFailure {
@@ -520,6 +713,20 @@ async fn deliver_webhook_envelope(
             last_status: None,
         });
     };
+    let Some(key_id) = trigger.delivery_key_id.as_deref() else {
+        return Err(DeliveryFailure {
+            attempts: 0,
+            reason: "signing_key_id_missing",
+            last_status: None,
+        });
+    };
+    if body.len() > max_body_bytes {
+        return Err(DeliveryFailure {
+            attempts: 0,
+            reason: "body_too_large",
+            last_status: None,
+        });
+    }
     let secret = encryption_keys
         .decrypt(encrypted)
         .await
@@ -536,26 +743,15 @@ async fn deliver_webhook_envelope(
                 last_status: None,
             }
         })?;
-    let body = serde_json::to_vec(envelope).map_err(|error| {
-        tracing::warn!(
-            trigger_id = %trigger.id,
-            %error,
-            "failed to serialize trigger webhook envelope"
-        );
-        DeliveryFailure {
-            attempts: 0,
-            reason: "serialization_failed",
-            last_status: None,
-        }
-    })?;
     webhook_delivery_service::deliver_signed_body(
         http_client,
         url,
         secret.as_slice(),
         "trigger.event",
-        &envelope.event_id,
-        &body,
+        event_id,
+        body,
         SignatureContract::Timestamped,
+        Some(key_id),
     )
     .await
 }
@@ -593,6 +789,129 @@ fn record_webhook_delivery_failure(
     );
 }
 
+pub async fn list_deliveries(
+    db: &Database,
+    trigger_id: &str,
+    page: u64,
+    per_page: u64,
+) -> AppResult<(Vec<TriggerDeliveryRecord>, u64)> {
+    let page = page.max(1);
+    let per_page = per_page.clamp(1, 100);
+    let filter = doc! { "trigger_id": trigger_id };
+    let total = db
+        .collection::<TriggerDeliveryRecord>(TRIGGER_DELIVERIES)
+        .count_documents(filter.clone())
+        .await?;
+    let deliveries = db
+        .collection::<TriggerDeliveryRecord>(TRIGGER_DELIVERIES)
+        .find(filter)
+        .sort(doc! { "created_at": -1, "_id": -1 })
+        .skip((page - 1).saturating_mul(per_page))
+        .limit(i64::try_from(per_page).unwrap_or(100))
+        .await?
+        .try_collect()
+        .await?;
+    Ok((deliveries, total))
+}
+
+pub async fn redeliver(
+    db: &Database,
+    encryption_keys: &EncryptionKeys,
+    http_client: &reqwest::Client,
+    trigger: &Trigger,
+    event_id: &str,
+    max_body_bytes: usize,
+) -> AppResult<TriggerDeliveryRecord> {
+    if !matches!(trigger.delivery, TriggerDelivery::Webhook { .. }) {
+        return Err(AppError::TriggerDeliveryUnsupported);
+    }
+    let trigger = ensure_delivery_key_id(db, trigger.clone()).await?;
+    let record = db
+        .collection::<TriggerDeliveryRecord>(TRIGGER_DELIVERIES)
+        .find_one(doc! { "trigger_id": &trigger.id, "event_id": event_id })
+        .await?
+        .ok_or(AppError::TriggerDeliveryRecordNotFound)?;
+    let encrypted = record
+        .envelope_encrypted
+        .as_deref()
+        .ok_or(AppError::TriggerDeliveryRecordNotFound)?;
+    let body = Zeroizing::new(encryption_keys.decrypt(encrypted).await?);
+    db.collection::<TriggerDeliveryRecord>(TRIGGER_DELIVERIES)
+        .update_one(
+            doc! { "_id": &record.id, "trigger_id": &trigger.id },
+            doc! {
+                "$set": {
+                    "status": "pending",
+                    "updated_at": bson::DateTime::from_chrono(Utc::now()),
+                },
+                "$unset": { "delivered_at": "" },
+            },
+        )
+        .await?;
+    let outcome = deliver_webhook_body(
+        encryption_keys,
+        http_client,
+        &trigger,
+        event_id,
+        body.as_slice(),
+        max_body_bytes,
+    )
+    .await;
+    update_delivery_after_attempt(db, &record, &outcome).await?;
+    if let Err(failure) = outcome {
+        record_webhook_delivery_failure(db, &trigger, event_id, failure);
+    }
+    db.collection::<TriggerDeliveryRecord>(TRIGGER_DELIVERIES)
+        .find_one(doc! { "_id": &record.id })
+        .await?
+        .ok_or(AppError::TriggerDeliveryRecordNotFound)
+}
+
+async fn ensure_delivery_key_id(db: &Database, trigger: Trigger) -> AppResult<Trigger> {
+    if !matches!(trigger.delivery, TriggerDelivery::Webhook { .. })
+        || trigger.delivery_key_id.is_some()
+    {
+        return Ok(trigger);
+    }
+    let key_id = webhook_delivery_service::generate_signing_key_id();
+    if let Some(updated) = db
+        .collection::<Trigger>(TRIGGERS)
+        .find_one_and_update(
+            doc! {
+                "_id": &trigger.id,
+                "$or": [
+                    { "delivery_key_id": null },
+                    { "delivery_key_id": { "$exists": false } },
+                ],
+            },
+            doc! { "$set": { "delivery_key_id": key_id } },
+        )
+        .return_document(ReturnDocument::After)
+        .await?
+    {
+        return Ok(updated);
+    }
+    db.collection::<Trigger>(TRIGGERS)
+        .find_one(doc! { "_id": &trigger.id })
+        .await?
+        .ok_or(AppError::TriggerNotFound)
+}
+
+fn delivery_record_id(trigger_id: &str, event_id: &str) -> String {
+    hex::encode(Sha256::digest(
+        format!("{trigger_id}\0{event_id}").as_bytes(),
+    ))
+}
+
+fn is_duplicate_key_error(error: &mongodb::error::Error) -> bool {
+    if let mongodb::error::ErrorKind::Write(mongodb::error::WriteFailure::WriteError(write_error)) =
+        error.kind.as_ref()
+    {
+        return write_error.code == 11000;
+    }
+    false
+}
+
 fn agent_event_uuid(trigger_id: &str, event_id: &str) -> String {
     let digest = Sha256::digest(format!("{trigger_id}.{event_id}").as_bytes());
     let mut bytes = [0_u8; 16];
@@ -605,15 +924,29 @@ fn agent_event_uuid(trigger_id: &str, event_id: &str) -> String {
 async fn prepare_delivery(
     encryption_keys: &EncryptionKeys,
     delivery: TriggerDelivery,
-) -> AppResult<(TriggerDelivery, Option<Vec<u8>>, Option<String>)> {
+) -> AppResult<(
+    TriggerDelivery,
+    Option<Vec<u8>>,
+    Option<String>,
+    Option<String>,
+)> {
     match delivery {
         TriggerDelivery::Webhook { url } => {
             let url = webhook_delivery_service::validate_webhook_url(&url, "delivery.url").await?;
-            let raw = format!("nyx_twh_{}", generate_random_token());
+            let raw = format!(
+                "{TRIGGER_DELIVERY_SECRET_PREFIX}{}",
+                generate_random_token()
+            );
             let encrypted = encryption_keys.encrypt(raw.as_bytes()).await?;
-            Ok((TriggerDelivery::Webhook { url }, Some(encrypted), Some(raw)))
+            let key_id = webhook_delivery_service::generate_signing_key_id();
+            Ok((
+                TriggerDelivery::Webhook { url },
+                Some(encrypted),
+                Some(raw),
+                Some(key_id),
+            ))
         }
-        other => Ok((other, None, None)),
+        other => Ok((other, None, None, None)),
     }
 }
 
@@ -686,6 +1019,23 @@ mod tests {
     use axum::http::{HeaderMap, HeaderValue};
     use chrono::TimeZone;
 
+    async fn webhook_trigger(keys: &EncryptionKeys, url: String) -> Trigger {
+        let mut trigger = trigger(
+            TriggerVerification::Token {
+                location: TriggerTokenLocation::Bearer,
+            },
+            None,
+        );
+        trigger.delivery = TriggerDelivery::Webhook { url };
+        trigger.delivery_secret_encrypted = Some(
+            keys.encrypt(b"delivery-signing-secret")
+                .await
+                .expect("encrypt delivery secret"),
+        );
+        trigger.delivery_key_id = Some("key_fixture".to_string());
+        trigger
+    }
+
     fn trigger(verification: TriggerVerification, encrypted: Option<Vec<u8>>) -> Trigger {
         Trigger {
             id: Uuid::new_v4().to_string(),
@@ -698,6 +1048,7 @@ mod tests {
             verification_secret_encrypted: encrypted,
             delivery: TriggerDelivery::Notification,
             delivery_secret_encrypted: None,
+            delivery_key_id: None,
             created_at: Utc::now(),
             updated_at: Utc::now(),
         }
@@ -721,6 +1072,226 @@ mod tests {
             serde_json::to_string(&envelope).expect("serialize envelope"),
             r#"{"event_id":"provider-event-123","trigger_id":"trigger-uuid","source":"inbound_webhook","received_at":"2026-08-06T09:30:00.123Z","payload":{"action":"opened"}}"#
         );
+    }
+
+    #[tokio::test]
+    async fn webhook_admission_is_durable_dedup_and_encrypts_retained_envelope() {
+        let Some(db) = connect_test_database("trigger_delivery_durable_admission").await else {
+            return;
+        };
+        let keys = test_encryption_keys();
+        let trigger = webhook_trigger(&keys, "https://events.example.test/hook".to_string()).await;
+        let payload = serde_json::json!({"event_id":"event-1","action":"opened"});
+        let first = admit_webhook_delivery(
+            &db,
+            &keys,
+            &trigger,
+            "event-1",
+            payload.clone(),
+            72,
+            256 * 1024 + TRIGGER_ENVELOPE_OVERHEAD_BYTES,
+        )
+        .await
+        .expect("admit first event");
+        let WebhookAdmission::Accepted { record, body } = first else {
+            panic!("first event must be accepted")
+        };
+        assert!(record.envelope_encrypted.is_some());
+        assert!(!format!("{record:?}").contains("opened"));
+        let plaintext = keys
+            .decrypt(record.envelope_encrypted.as_deref().unwrap())
+            .await
+            .unwrap();
+        assert_eq!(plaintext, body);
+
+        let second = admit_webhook_delivery(
+            &db,
+            &keys,
+            &trigger,
+            "event-1",
+            payload,
+            72,
+            256 * 1024 + TRIGGER_ENVELOPE_OVERHEAD_BYTES,
+        )
+        .await
+        .expect("deduplicate second event");
+        assert!(matches!(second, WebhookAdmission::Duplicate));
+    }
+
+    #[tokio::test]
+    async fn zero_retention_keeps_metadata_without_replayable_payload() {
+        let Some(db) = connect_test_database("trigger_delivery_metadata_only").await else {
+            return;
+        };
+        let keys = test_encryption_keys();
+        let trigger = webhook_trigger(&keys, "https://events.example.test/hook".to_string()).await;
+        let admitted = admit_webhook_delivery(
+            &db,
+            &keys,
+            &trigger,
+            "event-1",
+            serde_json::json!({"action":"opened"}),
+            0,
+            256 * 1024 + TRIGGER_ENVELOPE_OVERHEAD_BYTES,
+        )
+        .await
+        .unwrap();
+        let WebhookAdmission::Accepted { record, .. } = admitted else {
+            panic!("event must be accepted")
+        };
+        assert!(record.envelope_encrypted.is_none());
+        assert!(matches!(
+            redeliver(
+                &db,
+                &keys,
+                &reqwest::Client::new(),
+                &trigger,
+                "event-1",
+                256 * 1024 + TRIGGER_ENVELOPE_OVERHEAD_BYTES,
+            )
+            .await,
+            Err(AppError::TriggerDeliveryRecordNotFound)
+        ));
+    }
+
+    #[tokio::test]
+    async fn redelivery_uses_retained_envelope_and_records_success() {
+        let Some(db) = connect_test_database("trigger_delivery_redelivery").await else {
+            return;
+        };
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        let app = axum::Router::new().route(
+            "/hook",
+            axum::routing::post(
+                move |headers: axum::http::HeaderMap, body: axum::body::Bytes| {
+                    let tx = tx.clone();
+                    async move {
+                        tx.send((headers, body)).unwrap();
+                        axum::http::StatusCode::NO_CONTENT
+                    }
+                },
+            ),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        let keys = test_encryption_keys();
+        let trigger = webhook_trigger(&keys, format!("http://{address}/hook")).await;
+        admit_webhook_delivery(
+            &db,
+            &keys,
+            &trigger,
+            "event-1",
+            serde_json::json!({"action":"opened"}),
+            72,
+            256 * 1024 + TRIGGER_ENVELOPE_OVERHEAD_BYTES,
+        )
+        .await
+        .unwrap();
+
+        let updated = redeliver(
+            &db,
+            &keys,
+            &reqwest::Client::new(),
+            &trigger,
+            "event-1",
+            256 * 1024 + TRIGGER_ENVELOPE_OVERHEAD_BYTES,
+        )
+        .await
+        .expect("redeliver retained envelope");
+        assert_eq!(updated.status, TriggerDeliveryRecordStatus::Delivered);
+        assert_eq!(updated.attempts, 1);
+        assert!(updated.delivered_at.is_some());
+        let (headers, body) = rx.recv().await.unwrap();
+        assert_eq!(headers["X-NyxID-Event"], "trigger.event");
+        assert_eq!(headers["X-NyxID-Delivery-Id"], "event-1");
+        assert_eq!(headers["X-NyxID-Key-Id"], "key_fixture");
+        let envelope: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(envelope["payload"]["action"], "opened");
+    }
+
+    #[tokio::test]
+    async fn redelivery_assigns_stable_key_id_to_legacy_trigger() {
+        let Some(db) = connect_test_database("trigger_delivery_legacy_key_id").await else {
+            return;
+        };
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        let app = axum::Router::new().route(
+            "/hook",
+            axum::routing::post(move |headers: axum::http::HeaderMap| {
+                let tx = tx.clone();
+                async move {
+                    tx.send(headers).unwrap();
+                    axum::http::StatusCode::NO_CONTENT
+                }
+            }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        let keys = test_encryption_keys();
+        let mut trigger = webhook_trigger(&keys, format!("http://{address}/hook")).await;
+        trigger.delivery_key_id = None;
+        db.collection::<Trigger>(TRIGGERS)
+            .insert_one(&trigger)
+            .await
+            .unwrap();
+        admit_webhook_delivery(
+            &db,
+            &keys,
+            &trigger,
+            "event-legacy",
+            serde_json::json!({"action":"opened"}),
+            72,
+            256 * 1024 + TRIGGER_ENVELOPE_OVERHEAD_BYTES,
+        )
+        .await
+        .unwrap();
+
+        redeliver(
+            &db,
+            &keys,
+            &reqwest::Client::new(),
+            &trigger,
+            "event-legacy",
+            256 * 1024 + TRIGGER_ENVELOPE_OVERHEAD_BYTES,
+        )
+        .await
+        .expect("redeliver legacy trigger");
+        let headers = rx.recv().await.unwrap();
+        let stored = db
+            .collection::<Trigger>(TRIGGERS)
+            .find_one(doc! { "_id": &trigger.id })
+            .await
+            .unwrap()
+            .unwrap();
+        let key_id = stored
+            .delivery_key_id
+            .expect("legacy trigger receives stable key id");
+        assert!(key_id.starts_with("key_"));
+        assert_eq!(headers["X-NyxID-Key-Id"], key_id);
+    }
+
+    #[tokio::test]
+    async fn outbound_trigger_envelope_ceiling_is_enforced_at_admission() {
+        let Some(db) = connect_test_database("trigger_delivery_body_ceiling").await else {
+            return;
+        };
+        let keys = test_encryption_keys();
+        let trigger = webhook_trigger(&keys, "https://events.example.test/hook".to_string()).await;
+        assert!(matches!(
+            admit_webhook_delivery(
+                &db,
+                &keys,
+                &trigger,
+                "event-1",
+                serde_json::json!({"payload":"x".repeat(128)}),
+                72,
+                64,
+            )
+            .await,
+            Err(AppError::TriggerPayloadTooLarge)
+        ));
     }
 
     #[tokio::test]
@@ -854,6 +1425,50 @@ mod tests {
         assert!(matches!(
             get_for_actor(&db, &owner, &rotated.id).await,
             Err(AppError::TriggerNotFound)
+        ));
+    }
+
+    #[tokio::test]
+    async fn delivery_secret_rotation_replaces_secret_and_key_id() {
+        let Some(db) = connect_test_database("trigger_delivery_secret_rotation").await else {
+            return;
+        };
+        let keys = test_encryption_keys();
+        let mut current =
+            webhook_trigger(&keys, "https://events.example.test/hook".to_string()).await;
+        let previous_key_id = current.delivery_key_id.clone();
+        db.collection::<Trigger>(TRIGGERS)
+            .insert_one(&current)
+            .await
+            .unwrap();
+        let rotated = rotate_delivery_secret(&db, &keys, &current)
+            .await
+            .expect("rotate delivery secret");
+        assert!(
+            rotated
+                .raw_secret
+                .starts_with(TRIGGER_DELIVERY_SECRET_PREFIX)
+        );
+        assert_ne!(Some(rotated.key_id.clone()), previous_key_id);
+        assert_eq!(
+            rotated.trigger.delivery_key_id.as_deref(),
+            Some(rotated.key_id.as_str())
+        );
+        let decrypted = keys
+            .decrypt(
+                rotated
+                    .trigger
+                    .delivery_secret_encrypted
+                    .as_deref()
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(decrypted, rotated.raw_secret.as_bytes());
+        current.delivery = TriggerDelivery::Notification;
+        assert!(matches!(
+            rotate_delivery_secret(&db, &keys, &current).await,
+            Err(AppError::TriggerDeliveryUnsupported)
         ));
     }
 }

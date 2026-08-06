@@ -59,4 +59,31 @@ describe("webhook signature verification", () => {
       }),
     ).resolves.toBe(false);
   });
+
+  it("selects rotation secrets by the emitted key id", async () => {
+    const fixture = {
+      timestamp: BACKEND_FIXTURE.timestamp,
+      rawBody: BACKEND_FIXTURE.rawBody,
+      signatureHeader: BACKEND_FIXTURE.signatureHeader,
+    };
+    await expect(
+      verifyConnectionWebhookSignature({
+        ...fixture,
+        keyId: "key_current",
+        secretsByKeyId: {
+          key_previous: "previous-secret",
+          key_current: BACKEND_FIXTURE.secret,
+        },
+        nowSeconds: 1_700_000_100,
+      }),
+    ).resolves.toBe(true);
+    await expect(
+      verifyTriggerWebhookSignature({
+        ...fixture,
+        keyId: "key_unknown",
+        secretsByKeyId: { key_current: BACKEND_FIXTURE.secret },
+        nowSeconds: 1_700_000_100,
+      }),
+    ).resolves.toBe(false);
+  });
 });

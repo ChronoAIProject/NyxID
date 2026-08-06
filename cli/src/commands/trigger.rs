@@ -130,6 +130,61 @@ pub async fn run(command: TriggerCommands) -> Result<()> {
             }
             Ok(())
         }
+        TriggerCommands::Deliveries {
+            id,
+            page,
+            per_page,
+            auth,
+        } => {
+            let output = auth.output;
+            let mut api = ApiClient::from_auth_checked(&auth).await?;
+            let result: Value = api
+                .get(&format!(
+                    "/triggers/{}/deliveries?page={page}&per_page={per_page}",
+                    urlencoding::encode(&id),
+                ))
+                .await?;
+            print_deliveries(output, &result)
+        }
+        TriggerCommands::Redeliver { id, event_id, auth } => {
+            let output = auth.output;
+            let mut api = ApiClient::from_auth_checked(&auth).await?;
+            let result: Value = api
+                .post(
+                    &format!(
+                        "/triggers/{}/deliveries/{}/redeliver",
+                        urlencoding::encode(&id),
+                        urlencoding::encode(&event_id),
+                    ),
+                    &json!({}),
+                )
+                .await?;
+            print_redelivery(output, &result)
+        }
+        TriggerCommands::RotateDeliverySecret { id, auth } => {
+            let output = auth.output;
+            let mut api = ApiClient::from_auth_checked(&auth).await?;
+            let result: Value = api
+                .post(
+                    &format!(
+                        "/triggers/{}/rotate-delivery-secret",
+                        urlencoding::encode(&id),
+                    ),
+                    &json!({}),
+                )
+                .await?;
+            match output {
+                OutputFormat::Json => println!("{}", serde_json::to_string_pretty(&result)?),
+                OutputFormat::Table => {
+                    println!("Key ID:                  {}", text(&result, "key_id"));
+                    println!(
+                        "Delivery signing secret: {}",
+                        text(&result, "delivery_signing_secret")
+                    );
+                }
+            }
+            Ok(())
+        }
     }
 }
 
@@ -268,6 +323,58 @@ fn print_detail(trigger: &Value) {
     println!("Inbound URL:  {}", text(trigger, "inbound_url"));
 }
 
+fn print_deliveries(output: OutputFormat, result: &Value) -> Result<()> {
+    if matches!(output, OutputFormat::Json) {
+        println!("{}", serde_json::to_string_pretty(result)?);
+        return Ok(());
+    }
+    let items = result
+        .get("deliveries")
+        .and_then(Value::as_array)
+        .map(Vec::as_slice)
+        .unwrap_or(&[]);
+    let mut table = Table::new();
+    table.load_preset(UTF8_FULL_CONDENSED);
+    table.set_header([
+        "Event ID", "Status", "Attempts", "HTTP", "Replay", "Created",
+    ]);
+    for delivery in items {
+        table.add_row([
+            text(delivery, "event_id").to_string(),
+            text(delivery, "status").to_string(),
+            delivery
+                .get("attempts")
+                .and_then(Value::as_u64)
+                .map(|value| value.to_string())
+                .unwrap_or_else(|| "-".to_string()),
+            delivery
+                .get("last_status_code")
+                .and_then(Value::as_u64)
+                .map(|value| value.to_string())
+                .unwrap_or_else(|| "-".to_string()),
+            delivery
+                .get("replay_available")
+                .and_then(Value::as_bool)
+                .map(|value| if value { "yes" } else { "no" }.to_string())
+                .unwrap_or_else(|| "-".to_string()),
+            text(delivery, "created_at").to_string(),
+        ]);
+    }
+    println!("{table}");
+    Ok(())
+}
+
+fn print_redelivery(output: OutputFormat, result: &Value) -> Result<()> {
+    if matches!(output, OutputFormat::Json) {
+        println!("{}", serde_json::to_string_pretty(result)?);
+        return Ok(());
+    }
+    let delivery = result.get("delivery").unwrap_or(&Value::Null);
+    println!("Event ID: {}", text(delivery, "event_id"));
+    println!("Status:   {}", text(delivery, "status"));
+    Ok(())
+}
+
 fn text<'a>(value: &'a Value, key: &str) -> &'a str {
     value.get(key).and_then(Value::as_str).unwrap_or("-")
 }
@@ -341,10 +448,53 @@ mod tests {
             ],
             vec!["nyxid", "trigger", "delete", "trigger-id"],
             vec!["nyxid", "trigger", "rotate-secret", "trigger-id"],
+            vec!["nyxid", "trigger", "deliveries", "trigger-id"],
+            vec!["nyxid", "trigger", "redeliver", "trigger-id", "event-id"],
+            vec!["nyxid", "trigger", "rotate-delivery-secret", "trigger-id"],
         ] {
             let cli = crate::cli::Cli::try_parse_from(args).expect("parse trigger subcommand");
             assert!(matches!(cli.command, crate::cli::Commands::Trigger { .. }));
         }
+    }
+
+    #[test]
+    fn delivery_management_arguments_parse() {
+        let cli = crate::cli::Cli::parse_from([
+            "nyxid",
+            "trigger",
+            "deliveries",
+            "trigger-id",
+            "--page",
+            "2",
+            "--per-page",
+            "10",
+        ]);
+        let crate::cli::Commands::Trigger {
+            command:
+                TriggerCommands::Deliveries {
+                    id, page, per_page, ..
+                },
+        } = cli.command
+        else {
+            panic!("expected trigger deliveries command")
+        };
+        assert_eq!(id, "trigger-id");
+        assert_eq!(page, 2);
+        assert_eq!(per_page, 10);
+
+        let cli = crate::cli::Cli::parse_from([
+            "nyxid",
+            "trigger",
+            "redeliver",
+            "trigger-id",
+            "event/id",
+        ]);
+        assert!(matches!(
+            cli.command,
+            crate::cli::Commands::Trigger {
+                command: TriggerCommands::Redeliver { event_id, .. }
+            } if event_id == "event/id"
+        ));
     }
 
     #[test]

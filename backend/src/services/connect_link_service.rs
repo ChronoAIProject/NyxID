@@ -27,6 +27,8 @@ pub const MAX_TTL_SECS: i64 = 60 * 60;
 pub const MAX_WAIT_SECS: u64 = 120;
 pub const CLAIM_STALE_SECS: i64 = 5 * 60;
 pub const PINNED_GRACE_SECS: i64 = 30 * 60;
+pub const WEBHOOK_REDISPATCH_STALE_SECS: i64 = 120;
+pub const WEBHOOK_MAX_DISPATCH_CYCLES: u32 = 5;
 
 const MAX_LABEL_LEN: usize = 200;
 const MAX_REQUESTED_BY_LEN: usize = 200;
@@ -190,6 +192,10 @@ pub async fn create(db: &mongodb::Database, input: CreateInput) -> AppResult<Cre
         last_error: None,
         last_error_at: None,
         webhook_event_reserved_at: None,
+        webhook_event_id: None,
+        webhook_event_status: None,
+        webhook_event_attempts: 0,
+        webhook_event_delivered_at: None,
     };
 
     db.collection::<ConnectLink>(CONNECT_LINKS)
@@ -418,6 +424,7 @@ pub async fn complete(
             &claimed.user_id,
             &service_id,
             app_id,
+            &claimed.id,
         )
         .await
     {
@@ -895,17 +902,20 @@ pub async fn expire_pending_app_links(
             expired += 1;
         }
     }
+    redispatch_terminal_webhooks(db, dispatcher).await?;
     Ok(expired)
 }
 
-/// Atomically reserve and dispatch the single terminal lifecycle event for a
-/// third-party connect link. Delivery remains best effort and never changes
-/// the link transition result.
+/// Atomically reserve the single terminal lifecycle event and begin its first
+/// delivery cycle. The link document remains the durable outbox until the
+/// event is delivered or exhausts the bounded redispatch cycles.
 pub async fn dispatch_terminal_webhook_if_needed(
     db: &mongodb::Database,
     dispatcher: &crate::services::developer_webhook_service::DeveloperWebhookDispatcher,
     link_id: &str,
 ) {
+    let event_id = Uuid::new_v4().to_string();
+    let now = Utc::now();
     let claimed = db
         .collection::<ConnectLink>(CONNECT_LINKS)
         .find_one_and_update(
@@ -919,7 +929,10 @@ pub async fn dispatch_terminal_webhook_if_needed(
                 ],
             },
             doc! { "$set": {
-                "webhook_event_reserved_at": bson::DateTime::from_chrono(Utc::now()),
+                "webhook_event_reserved_at": bson::DateTime::from_chrono(now),
+                "webhook_event_id": &event_id,
+                "webhook_event_status": "pending",
+                "webhook_event_attempts": 1_i32,
             }},
         )
         .return_document(ReturnDocument::After)
@@ -932,27 +945,190 @@ pub async fn dispatch_terminal_webhook_if_needed(
             return;
         }
     };
-    let Some(app_id) = link.requesting_app_id.clone() else {
+    spawn_terminal_webhook_delivery(db.clone(), dispatcher.clone(), link);
+}
+
+/// Reclaim stale outbox reservations. A compare-and-swap on the cycle count
+/// keeps concurrent sweepers from dispatching the same cycle.
+pub async fn redispatch_terminal_webhooks(
+    db: &mongodb::Database,
+    dispatcher: &crate::services::developer_webhook_service::DeveloperWebhookDispatcher,
+) -> AppResult<u64> {
+    let stale_before = Utc::now() - Duration::seconds(WEBHOOK_REDISPATCH_STALE_SECS);
+    let candidates: Vec<ConnectLink> = db
+        .collection::<ConnectLink>(CONNECT_LINKS)
+        .find(doc! {
+            "requesting_app_id": { "$type": "string" },
+            "status": { "$in": ["completed", "cancelled", "expired"] },
+            "webhook_event_status": "pending",
+            "webhook_event_delivered_at": null,
+            "webhook_event_reserved_at": {
+                "$lte": bson::DateTime::from_chrono(stale_before),
+            },
+            "webhook_event_attempts": { "$lt": WEBHOOK_MAX_DISPATCH_CYCLES as i64 },
+        })
+        .await?
+        .try_collect()
+        .await?;
+    let mut claimed_count = 0;
+    for candidate in candidates {
+        let claimed = db
+            .collection::<ConnectLink>(CONNECT_LINKS)
+            .find_one_and_update(
+                doc! {
+                    "_id": &candidate.id,
+                    "webhook_event_status": "pending",
+                    "webhook_event_attempts": candidate.webhook_event_attempts as i64,
+                    "webhook_event_reserved_at": {
+                        "$lte": bson::DateTime::from_chrono(stale_before),
+                    },
+                },
+                doc! {
+                    "$set": {
+                        "webhook_event_reserved_at": bson::DateTime::from_chrono(Utc::now()),
+                    },
+                    "$inc": { "webhook_event_attempts": 1_i32 },
+                },
+            )
+            .return_document(ReturnDocument::After)
+            .await?;
+        if let Some(link) = claimed {
+            claimed_count += 1;
+            spawn_terminal_webhook_delivery(db.clone(), dispatcher.clone(), link);
+        }
+    }
+    abandon_stale_exhausted_webhooks(db).await?;
+    Ok(claimed_count)
+}
+
+async fn abandon_stale_exhausted_webhooks(db: &mongodb::Database) -> AppResult<()> {
+    let stale_before = Utc::now() - Duration::seconds(WEBHOOK_REDISPATCH_STALE_SECS);
+    let exhausted: Vec<ConnectLink> = db
+        .collection::<ConnectLink>(CONNECT_LINKS)
+        .find(doc! {
+            "webhook_event_status": "pending",
+            "webhook_event_attempts": { "$gte": WEBHOOK_MAX_DISPATCH_CYCLES as i64 },
+            "webhook_event_reserved_at": {
+                "$lte": bson::DateTime::from_chrono(stale_before),
+            },
+        })
+        .await?
+        .try_collect()
+        .await?;
+    for link in exhausted {
+        abandon_terminal_webhook(
+            db,
+            &link,
+            crate::services::webhook_delivery_service::DeliveryFailure {
+                attempts: 0,
+                reason: "dispatch_cycle_cap_reached",
+                last_status: None,
+            },
+        )
+        .await;
+    }
+    Ok(())
+}
+
+fn spawn_terminal_webhook_delivery(
+    db: mongodb::Database,
+    dispatcher: crate::services::developer_webhook_service::DeveloperWebhookDispatcher,
+    link: ConnectLink,
+) {
+    tokio::spawn(async move {
+        let (Some(app_id), Some(event_id), Some(event_type)) = (
+            link.requesting_app_id.as_deref(),
+            link.webhook_event_id.as_deref(),
+            terminal_webhook_event_type(link.status),
+        ) else {
+            return;
+        };
+        let status = event_type.trim_start_matches("connect_link.");
+        let result = dispatcher
+            .deliver_for_app(
+                &db,
+                app_id,
+                event_id,
+                event_type,
+                serde_json::json!({
+                    "user_id": &link.user_id,
+                    "connect_link_id": &link.id,
+                    "service_id": &link.service_id,
+                    "service_slug": &link.service_slug,
+                    "status": status,
+                    "user_service_id": &link.completed_user_service_id,
+                    "completed_at": &link.completed_at,
+                    "expires_at": &link.expires_at,
+                }),
+            )
+            .await;
+        match result {
+            Ok(()) => {
+                if let Err(error) = db
+                    .collection::<ConnectLink>(CONNECT_LINKS)
+                    .update_one(
+                        doc! {
+                            "_id": &link.id,
+                            "webhook_event_id": event_id,
+                            "webhook_event_status": "pending",
+                        },
+                        doc! { "$set": {
+                            "webhook_event_status": "delivered",
+                            "webhook_event_delivered_at": bson::DateTime::from_chrono(Utc::now()),
+                        }},
+                    )
+                    .await
+                {
+                    tracing::warn!(connect_link_id = %link.id, %error, "failed to mark terminal webhook delivered");
+                }
+            }
+            Err(failure) if link.webhook_event_attempts >= WEBHOOK_MAX_DISPATCH_CYCLES => {
+                abandon_terminal_webhook(&db, &link, failure).await;
+            }
+            Err(failure) => {
+                tracing::warn!(
+                    connect_link_id = %link.id,
+                    event_id,
+                    cycle = link.webhook_event_attempts,
+                    reason = failure.reason,
+                    "terminal webhook cycle failed; outbox remains pending"
+                );
+            }
+        }
+    });
+}
+
+async fn abandon_terminal_webhook(
+    db: &mongodb::Database,
+    link: &ConnectLink,
+    failure: crate::services::webhook_delivery_service::DeliveryFailure,
+) {
+    let Some(event_id) = link.webhook_event_id.as_deref() else {
         return;
     };
-    let Some(event_type) = terminal_webhook_event_type(link.status) else {
+    let updated = db
+        .collection::<ConnectLink>(CONNECT_LINKS)
+        .update_one(
+            doc! {
+                "_id": &link.id,
+                "webhook_event_id": event_id,
+                "webhook_event_status": "pending",
+            },
+            doc! { "$set": { "webhook_event_status": "abandoned" } },
+        )
+        .await;
+    if !matches!(updated, Ok(result) if result.modified_count == 1) {
         return;
-    };
-    let status = event_type.trim_start_matches("connect_link.");
-    dispatcher.dispatch(
-        db.clone(),
-        app_id,
-        event_type,
-        serde_json::json!({
-            "connect_link_id": link.id,
-            "service_id": link.service_id,
-            "service_slug": link.service_slug,
-            "status": status,
-            "user_service_id": link.completed_user_service_id,
-            "completed_at": link.completed_at,
-            "expires_at": link.expires_at,
-        }),
-    );
+    }
+    if let (Some(app_id), Some(event_type)) = (
+        link.requesting_app_id.as_deref(),
+        terminal_webhook_event_type(link.status),
+    ) {
+        crate::services::developer_webhook_service::record_terminal_delivery_failure(
+            db, app_id, event_id, event_type, failure,
+        )
+        .await;
+    }
 }
 
 fn terminal_webhook_event_type(status: ConnectLinkStatus) -> Option<&'static str> {
@@ -1250,6 +1426,7 @@ mod tests {
             revocation_webhook_secret_encrypted: None,
             connection_webhook_url: None,
             connection_webhook_secret_encrypted: None,
+            connection_webhook_key_id: None,
             connection_webhook_enabled: false,
             created_by: Some("test".to_string()),
             created_at: now,
@@ -1569,6 +1746,7 @@ mod tests {
         let envelope: serde_json::Value =
             serde_json::from_slice(&body).expect("parse terminal webhook");
         assert_eq!(envelope["event_type"], "connect_link.cancelled");
+        assert_eq!(envelope["data"]["user_id"], created.link.user_id);
         assert_eq!(envelope["data"]["connect_link_id"], created.link.id);
         assert_eq!(envelope["data"]["status"], "cancelled");
 
@@ -1577,6 +1755,190 @@ mod tests {
             tokio::time::timeout(std::time::Duration::from_millis(100), rx.recv())
                 .await
                 .is_err()
+        );
+        tokio::time::timeout(std::time::Duration::from_secs(3), async {
+            loop {
+                let stored = db
+                    .collection::<ConnectLink>(CONNECT_LINKS)
+                    .find_one(doc! { "_id": &created.link.id })
+                    .await
+                    .unwrap()
+                    .expect("terminal link");
+                if stored.webhook_event_status
+                    == Some(crate::models::connect_link::ConnectLinkWebhookStatus::Delivered)
+                {
+                    assert!(stored.webhook_event_delivered_at.is_some());
+                    assert_eq!(stored.webhook_event_attempts, 1);
+                    break;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+            }
+        })
+        .await
+        .expect("delivery state persisted");
+    }
+
+    #[tokio::test]
+    async fn stale_reserved_terminal_webhook_is_redelivered_once() {
+        let Some(db) = connect_test_database("connect_link_outbox_redispatch").await else {
+            return;
+        };
+        let (_, created) = create_test_link(&db, "outbox-redispatch").await;
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<axum::body::Bytes>();
+        let receiver = axum::Router::new().route(
+            "/events",
+            axum::routing::post(move |body: axum::body::Bytes| {
+                let tx = tx.clone();
+                async move {
+                    tx.send(body).expect("capture redispatch");
+                    axum::http::StatusCode::NO_CONTENT
+                }
+            }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind redispatch receiver");
+        let address = listener.local_addr().unwrap();
+        tokio::spawn(async move { axum::serve(listener, receiver).await.unwrap() });
+        let client = insert_oauth_client(&db, "Outbox App", Vec::new()).await;
+        let keys = std::sync::Arc::new(crate::test_utils::test_encryption_keys());
+        let encrypted = keys.encrypt(b"outbox-secret").await.unwrap();
+        db.collection::<OauthClient>(OAUTH_CLIENTS)
+            .update_one(
+                doc! { "_id": &client.id },
+                doc! { "$set": {
+                    "connection_webhook_url": format!("http://{address}/events"),
+                    "connection_webhook_secret_encrypted": bson::Binary {
+                        subtype: bson::spec::BinarySubtype::Generic,
+                        bytes: encrypted,
+                    },
+                    "connection_webhook_key_id": "key_outbox",
+                    "connection_webhook_enabled": true,
+                }},
+            )
+            .await
+            .unwrap();
+        let event_id = Uuid::new_v4().to_string();
+        db.collection::<ConnectLink>(CONNECT_LINKS)
+            .update_one(
+                doc! { "_id": &created.link.id },
+                doc! { "$set": {
+                    "status": "cancelled",
+                    "requesting_app_id": &client.id,
+                    "webhook_event_id": &event_id,
+                    "webhook_event_status": "pending",
+                    "webhook_event_attempts": 1_i32,
+                    "webhook_event_reserved_at": bson::DateTime::from_chrono(
+                        Utc::now() - Duration::seconds(WEBHOOK_REDISPATCH_STALE_SECS + 1)
+                    ),
+                }},
+            )
+            .await
+            .unwrap();
+        let dispatcher =
+            crate::services::developer_webhook_service::DeveloperWebhookDispatcher::new(
+                reqwest::Client::new(),
+                keys,
+            );
+
+        assert_eq!(
+            redispatch_terminal_webhooks(&db, &dispatcher)
+                .await
+                .unwrap(),
+            1
+        );
+        let body = tokio::time::timeout(std::time::Duration::from_secs(3), rx.recv())
+            .await
+            .expect("redispatch received")
+            .expect("redispatch body");
+        let envelope: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(envelope["event_id"], event_id);
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        assert_eq!(
+            redispatch_terminal_webhooks(&db, &dispatcher)
+                .await
+                .unwrap(),
+            0
+        );
+        assert!(
+            tokio::time::timeout(std::time::Duration::from_millis(100), rx.recv())
+                .await
+                .is_err()
+        );
+    }
+
+    #[tokio::test]
+    async fn stale_terminal_webhook_at_cycle_cap_is_abandoned_and_audited() {
+        let Some(db) = connect_test_database("connect_link_outbox_cap").await else {
+            return;
+        };
+        let (_, created) = create_test_link(&db, "outbox-cap").await;
+        let client = insert_oauth_client(&db, "Capped Outbox App", Vec::new()).await;
+        let event_id = Uuid::new_v4().to_string();
+        db.collection::<ConnectLink>(CONNECT_LINKS)
+            .update_one(
+                doc! { "_id": &created.link.id },
+                doc! { "$set": {
+                    "status": "expired",
+                    "requesting_app_id": &client.id,
+                    "webhook_event_id": &event_id,
+                    "webhook_event_status": "pending",
+                    "webhook_event_attempts": WEBHOOK_MAX_DISPATCH_CYCLES as i64,
+                    "webhook_event_reserved_at": bson::DateTime::from_chrono(
+                        Utc::now() - Duration::seconds(WEBHOOK_REDISPATCH_STALE_SECS + 1)
+                    ),
+                }},
+            )
+            .await
+            .unwrap();
+        let dispatcher =
+            crate::services::developer_webhook_service::DeveloperWebhookDispatcher::new(
+                reqwest::Client::new(),
+                std::sync::Arc::new(crate::test_utils::test_encryption_keys()),
+            );
+
+        assert_eq!(
+            redispatch_terminal_webhooks(&db, &dispatcher)
+                .await
+                .unwrap(),
+            0
+        );
+        let stored = db
+            .collection::<ConnectLink>(CONNECT_LINKS)
+            .find_one(doc! { "_id": &created.link.id })
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            stored.webhook_event_status,
+            Some(crate::models::connect_link::ConnectLinkWebhookStatus::Abandoned)
+        );
+        tokio::time::timeout(std::time::Duration::from_secs(3), async {
+            loop {
+                if db
+                    .collection::<crate::models::audit_log::AuditLog>(
+                        crate::models::audit_log::COLLECTION_NAME,
+                    )
+                    .find_one(doc! {
+                        "event_type": "connection_webhook_delivery_failed",
+                        "event_data.event_id": &event_id,
+                    })
+                    .await
+                    .unwrap()
+                    .is_some()
+                {
+                    break;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+            }
+        })
+        .await
+        .expect("abandonment audit persisted");
+        assert_eq!(
+            redispatch_terminal_webhooks(&db, &dispatcher)
+                .await
+                .unwrap(),
+            0
         );
     }
 
@@ -1732,6 +2094,50 @@ mod tests {
             .unwrap()
             .expect("pinned link");
         assert_eq!(stored.status, ConnectLinkStatus::Pending);
+    }
+
+    #[tokio::test]
+    async fn app_completion_stamps_connect_link_service_provenance() {
+        let Some(db) = connect_test_database("connect_link_service_provenance").await else {
+            return;
+        };
+        let app_id = Uuid::new_v4().to_string();
+        let (owner, created) = create_test_link(&db, "provenance-success").await;
+        db.collection::<ConnectLink>(CONNECT_LINKS)
+            .update_one(
+                doc! { "_id": &created.link.id },
+                doc! { "$set": { "requesting_app_id": &app_id } },
+            )
+            .await
+            .expect("bind requesting app");
+
+        let completed = complete(
+            &db,
+            &crate::test_utils::test_encryption_keys(),
+            &owner,
+            &created.raw_token,
+            CompleteInput {
+                credential: Some("test-secret"),
+                ..CompleteInput::default()
+            },
+            false,
+        )
+        .await
+        .expect("complete app connect link");
+        let CompleteResult::Completed(view) = completed else {
+            panic!("API-key link should complete")
+        };
+        let service = db
+            .collection::<UserService>(USER_SERVICES)
+            .find_one(doc! {
+                "_id": view.link.completed_user_service_id.expect("service id")
+            })
+            .await
+            .unwrap()
+            .expect("provisioned service");
+        assert_eq!(service.source.as_deref(), Some("connect_link"));
+        assert_eq!(service.source_id.as_deref(), Some(created.link.id.as_str()));
+        assert_eq!(service.source_app_id.as_deref(), Some(app_id.as_str()));
     }
 
     #[tokio::test]

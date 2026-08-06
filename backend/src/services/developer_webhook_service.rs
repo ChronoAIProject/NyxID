@@ -17,6 +17,7 @@ use crate::services::audit_service;
 use crate::services::webhook_delivery_service::{self, DeliveryFailure, SignatureContract};
 
 pub const CONNECTION_WEBHOOK_SECRET_PREFIX: &str = "nyx_cwh_";
+pub const CONNECTION_WEBHOOK_MAX_BODY_BYTES: usize = 16 * 1024;
 const APP_WEBHOOK_MAX_PER_MINUTE: u32 = 120;
 
 #[derive(Clone)]
@@ -59,71 +60,121 @@ impl DeveloperWebhookDispatcher {
     pub fn dispatch(&self, db: Database, app_id: String, event_type: &str, data: Value) {
         let dispatcher = self.clone();
         let event_type = event_type.to_string();
+        let event_id = Uuid::new_v4().to_string();
         tokio::spawn(async move {
-            dispatcher
-                .deliver_for_app(&db, &app_id, &event_type, data)
-                .await;
+            if let Err(failure) = dispatcher
+                .deliver_for_app(&db, &app_id, &event_id, &event_type, data)
+                .await
+            {
+                record_final_failure_for_app(&db, &app_id, &event_id, &event_type, failure).await;
+            }
         });
     }
 
-    async fn deliver_for_app(&self, db: &Database, app_id: &str, event_type: &str, data: Value) {
-        let client = match db
+    pub async fn deliver_for_app(
+        &self,
+        db: &Database,
+        app_id: &str,
+        event_id: &str,
+        event_type: &str,
+        data: Value,
+    ) -> Result<(), DeliveryFailure> {
+        if !data
+            .get("user_id")
+            .and_then(serde_json::Value::as_str)
+            .is_some_and(|value| !value.is_empty())
+        {
+            return Err(DeliveryFailure {
+                attempts: 0,
+                reason: "tenant_identity_missing",
+                last_status: None,
+            });
+        }
+        let mut client = match db
             .collection::<OauthClient>(OAUTH_CLIENTS)
             .find_one(doc! { "_id": app_id, "is_active": true })
             .await
         {
             Ok(Some(client)) => client,
-            Ok(None) => return,
+            Ok(None) => return Ok(()),
             Err(error) => {
                 tracing::warn!(app_id, %error, "failed to load developer webhook configuration");
-                return;
+                return Err(DeliveryFailure {
+                    attempts: 0,
+                    reason: "configuration_load_failed",
+                    last_status: None,
+                });
             }
         };
         if !client.connection_webhook_enabled {
-            return;
+            return Ok(());
         }
-        let (Some(url), Some(encrypted_secret)) = (
+        if !self.limiter.check(app_id) {
+            return Err(DeliveryFailure {
+                attempts: 0,
+                reason: "app_rate_limited",
+                last_status: None,
+            });
+        }
+        if client.connection_webhook_key_id.is_none() {
+            let generated = webhook_delivery_service::generate_signing_key_id();
+            client = match db
+                .collection::<OauthClient>(OAUTH_CLIENTS)
+                .find_one_and_update(
+                    doc! {
+                        "_id": app_id,
+                        "$or": [
+                            { "connection_webhook_key_id": null },
+                            { "connection_webhook_key_id": { "$exists": false } },
+                        ],
+                    },
+                    doc! { "$set": { "connection_webhook_key_id": &generated } },
+                )
+                .return_document(ReturnDocument::After)
+                .await
+            {
+                Ok(Some(updated)) => updated,
+                Ok(None) => db
+                    .collection::<OauthClient>(OAUTH_CLIENTS)
+                    .find_one(doc! { "_id": app_id, "is_active": true })
+                    .await
+                    .ok()
+                    .flatten()
+                    .ok_or(DeliveryFailure {
+                        attempts: 0,
+                        reason: "key_id_load_failed",
+                        last_status: None,
+                    })?,
+                Err(error) => {
+                    tracing::warn!(app_id, %error, "failed to persist webhook signing key id");
+                    return Err(DeliveryFailure {
+                        attempts: 0,
+                        reason: "key_id_store_failed",
+                        last_status: None,
+                    });
+                }
+            };
+        }
+        let (Some(url), Some(encrypted_secret), Some(key_id)) = (
             client.connection_webhook_url.as_deref(),
             client.connection_webhook_secret_encrypted.as_deref(),
+            client.connection_webhook_key_id.as_deref(),
         ) else {
-            return;
+            return Ok(());
         };
-
-        let event_id = Uuid::new_v4().to_string();
-        if !self.limiter.check(app_id) {
-            record_final_failure(
-                db,
-                &client,
-                &event_id,
-                event_type,
-                DeliveryFailure {
-                    attempts: 0,
-                    reason: "app_rate_limited",
-                    last_status: None,
-                },
-            );
-            return;
-        }
         let secret = match self.encryption_keys.decrypt(encrypted_secret).await {
             Ok(secret) => Zeroizing::new(secret),
             Err(error) => {
                 tracing::warn!(app_id, %error, "failed to decrypt developer webhook secret");
-                record_final_failure(
-                    db,
-                    &client,
-                    &event_id,
-                    event_type,
-                    DeliveryFailure {
-                        attempts: 0,
-                        reason: "secret_decrypt_failed",
-                        last_status: None,
-                    },
-                );
-                return;
+                return Err(DeliveryFailure {
+                    attempts: 0,
+                    reason: "secret_decrypt_failed",
+                    last_status: None,
+                });
             }
         };
         let envelope = ConnectionWebhookEnvelope {
-            event_id: event_id.clone(),
+            event_id: event_id.to_string(),
             event_type: event_type.to_string(),
             occurred_at: Utc::now(),
             data,
@@ -132,34 +183,60 @@ impl DeveloperWebhookDispatcher {
             Ok(body) => body,
             Err(error) => {
                 tracing::warn!(app_id, %error, "failed to serialize developer webhook event");
-                return;
+                return Err(DeliveryFailure {
+                    attempts: 0,
+                    reason: "serialization_failed",
+                    last_status: None,
+                });
             }
         };
+        if body.len() > CONNECTION_WEBHOOK_MAX_BODY_BYTES {
+            return Err(DeliveryFailure {
+                attempts: 0,
+                reason: "body_too_large",
+                last_status: None,
+            });
+        }
 
-        match webhook_delivery_service::deliver_signed_body(
+        webhook_delivery_service::deliver_signed_body(
             &self.http_client,
             url,
             secret.as_slice(),
             event_type,
-            &event_id,
+            event_id,
             &body,
             SignatureContract::Timestamped,
+            Some(key_id),
         )
-        .await
-        {
-            Ok(()) => tracing::debug!(app_id, event_id, event_type, "developer webhook delivered"),
-            Err(failure) => record_final_failure(db, &client, &event_id, event_type, failure),
-        }
+        .await?;
+        tracing::debug!(app_id, event_id, event_type, "developer webhook delivered");
+        Ok(())
     }
 }
 
-fn record_final_failure(
+async fn record_final_failure_for_app(
     db: &Database,
-    client: &OauthClient,
+    app_id: &str,
     event_id: &str,
     event_type: &str,
     failure: DeliveryFailure,
 ) {
+    let client = match db
+        .collection::<OauthClient>(OAUTH_CLIENTS)
+        .find_one(doc! { "_id": app_id })
+        .await
+    {
+        Ok(Some(client)) => client,
+        _ => {
+            tracing::error!(
+                app_id,
+                event_id,
+                event_type,
+                "developer webhook delivery exhausted"
+            );
+            return;
+        }
+    };
     tracing::error!(
         app_id = %client.id,
         event_id,
@@ -188,13 +265,23 @@ fn record_final_failure(
     );
 }
 
+pub async fn record_terminal_delivery_failure(
+    db: &Database,
+    app_id: &str,
+    event_id: &str,
+    event_type: &str,
+    failure: DeliveryFailure,
+) {
+    record_final_failure_for_app(db, app_id, event_id, event_type, failure).await;
+}
+
 pub async fn configure(
     db: &Database,
     encryption_keys: &EncryptionKeys,
     client_id: &str,
     created_by: &str,
     url: &str,
-) -> AppResult<(OauthClient, String)> {
+) -> AppResult<(OauthClient, String, String)> {
     let url = webhook_delivery_service::validate_webhook_url(url, "connection_webhook_url").await?;
     store_configuration(db, encryption_keys, client_id, created_by, &url).await
 }
@@ -205,12 +292,13 @@ async fn store_configuration(
     client_id: &str,
     created_by: &str,
     url: &str,
-) -> AppResult<(OauthClient, String)> {
+) -> AppResult<(OauthClient, String, String)> {
     let raw_secret = format!(
         "{CONNECTION_WEBHOOK_SECRET_PREFIX}{}",
         generate_random_token()
     );
     let encrypted_secret = encryption_keys.encrypt(raw_secret.as_bytes()).await?;
+    let key_id = webhook_delivery_service::generate_signing_key_id();
     let updated = db
         .collection::<OauthClient>(OAUTH_CLIENTS)
         .find_one_and_update(
@@ -221,6 +309,7 @@ async fn store_configuration(
                     subtype: bson::spec::BinarySubtype::Generic,
                     bytes: encrypted_secret,
                 },
+                "connection_webhook_key_id": &key_id,
                 "connection_webhook_enabled": true,
                 "updated_at": bson::DateTime::from_chrono(Utc::now()),
             }},
@@ -228,7 +317,7 @@ async fn store_configuration(
         .return_document(ReturnDocument::After)
         .await?
         .ok_or_else(|| AppError::NotFound("OAuth client not found".to_string()))?;
-    Ok((updated, raw_secret))
+    Ok((updated, raw_secret, key_id))
 }
 
 pub async fn rotate_secret(
@@ -236,7 +325,7 @@ pub async fn rotate_secret(
     encryption_keys: &EncryptionKeys,
     client_id: &str,
     created_by: &str,
-) -> AppResult<(OauthClient, String)> {
+) -> AppResult<(OauthClient, String, String)> {
     let existing = db
         .collection::<OauthClient>(OAUTH_CLIENTS)
         .find_one(doc! {
@@ -271,7 +360,10 @@ pub async fn disable(db: &Database, client_id: &str, created_by: &str) -> AppRes
                     "connection_webhook_enabled": false,
                     "updated_at": bson::DateTime::from_chrono(Utc::now()),
                 },
-                "$unset": { "connection_webhook_secret_encrypted": "" },
+                "$unset": {
+                    "connection_webhook_secret_encrypted": "",
+                    "connection_webhook_key_id": "",
+                },
             },
         )
         .return_document(ReturnDocument::After)
@@ -308,6 +400,7 @@ mod tests {
             revocation_webhook_secret_encrypted: None,
             connection_webhook_url: None,
             connection_webhook_secret_encrypted: None,
+            connection_webhook_key_id: None,
             connection_webhook_enabled: false,
             created_by: Some(owner.to_string()),
             created_at: now,
@@ -325,13 +418,59 @@ mod tests {
                 .single()
                 .expect("fixture timestamp")
                 + chrono::Duration::milliseconds(123),
-            data: serde_json::json!({"status":"completed"}),
+            data: serde_json::json!({
+                "user_id": "user-uuid",
+                "connect_link_id": "6c02c84a-3d97-430f-8468-c96b609d9563",
+                "service_id": "catalog-service-id",
+                "service_slug": "service-slug",
+                "status": "completed",
+                "user_service_id": "user-service-id",
+                "completed_at": "2026-08-06T09:29:59.000Z",
+                "expires_at": "2026-08-06T09:45:00.000Z",
+            }),
         };
 
         assert_eq!(
             serde_json::to_string(&envelope).expect("serialize envelope"),
-            r#"{"event_id":"3cc24472-c0b4-436c-a42a-17f43087f3e7","event_type":"connect_link.completed","occurred_at":"2026-08-06T09:30:00.123Z","data":{"status":"completed"}}"#
+            r#"{"event_id":"3cc24472-c0b4-436c-a42a-17f43087f3e7","event_type":"connect_link.completed","occurred_at":"2026-08-06T09:30:00.123Z","data":{"user_id":"user-uuid","connect_link_id":"6c02c84a-3d97-430f-8468-c96b609d9563","service_id":"catalog-service-id","service_slug":"service-slug","status":"completed","user_service_id":"user-service-id","completed_at":"2026-08-06T09:29:59.000Z","expires_at":"2026-08-06T09:45:00.000Z"}}"#
         );
+    }
+
+    #[tokio::test]
+    async fn connection_webhook_body_ceiling_is_enforced_before_send() {
+        let Some(db) = connect_test_database("developer_connection_webhook_body_ceiling").await
+        else {
+            return;
+        };
+        let owner = uuid::Uuid::new_v4().to_string();
+        let client_id = uuid::Uuid::new_v4().to_string();
+        let keys = Arc::new(test_encryption_keys());
+        let mut configured = client(&client_id, &owner);
+        configured.connection_webhook_url = Some("http://127.0.0.1:1/events".to_string());
+        configured.connection_webhook_secret_encrypted =
+            Some(keys.encrypt(b"body-limit-secret").await.unwrap());
+        configured.connection_webhook_key_id = Some("key_body_limit".to_string());
+        configured.connection_webhook_enabled = true;
+        db.collection::<OauthClient>(OAUTH_CLIENTS)
+            .insert_one(configured)
+            .await
+            .unwrap();
+
+        let failure = DeveloperWebhookDispatcher::new(reqwest::Client::new(), keys)
+            .deliver_for_app(
+                &db,
+                &client_id,
+                "event-id",
+                "connect_link.completed",
+                serde_json::json!({
+                    "user_id": "user-id",
+                    "oversized": "x".repeat(CONNECTION_WEBHOOK_MAX_BODY_BYTES),
+                }),
+            )
+            .await
+            .expect_err("oversized metadata envelope must be rejected");
+        assert_eq!(failure.reason, "body_too_large");
+        assert_eq!(failure.attempts, 0);
     }
 
     #[tokio::test]
@@ -347,7 +486,7 @@ mod tests {
             .expect("insert client");
         let keys = test_encryption_keys();
 
-        let (configured, first_secret) = store_configuration(
+        let (configured, first_secret, first_key_id) = store_configuration(
             &db,
             &keys,
             &client_id,
@@ -358,6 +497,10 @@ mod tests {
         .expect("configure webhook");
         assert!(first_secret.starts_with(CONNECTION_WEBHOOK_SECRET_PREFIX));
         assert!(configured.connection_webhook_enabled);
+        assert_eq!(
+            configured.connection_webhook_key_id.as_deref(),
+            Some(first_key_id.as_str())
+        );
         assert!(!format!("{configured:?}").contains(&first_secret));
         let stored_first = Zeroizing::new(
             keys.decrypt(
@@ -371,10 +514,11 @@ mod tests {
         );
         assert_eq!(stored_first.as_slice(), first_secret.as_bytes());
 
-        let (rotated, second_secret) = rotate_secret(&db, &keys, &client_id, &owner)
+        let (rotated, second_secret, second_key_id) = rotate_secret(&db, &keys, &client_id, &owner)
             .await
             .expect("rotate webhook secret");
         assert_ne!(first_secret, second_secret);
+        assert_ne!(first_key_id, second_key_id);
         let stored_second = Zeroizing::new(
             keys.decrypt(
                 rotated
@@ -431,6 +575,7 @@ mod tests {
                 .await
                 .expect("encrypt signing secret"),
         );
+        configured.connection_webhook_key_id = Some("key_fixture".to_string());
         configured.connection_webhook_enabled = true;
         db.collection::<OauthClient>(OAUTH_CLIENTS)
             .insert_one(configured)
@@ -442,14 +587,17 @@ mod tests {
             .deliver_for_app(
                 &db,
                 &client_id,
+                "event-id",
                 "connect_link.completed",
                 serde_json::json!({
+                    "user_id": &owner,
                     "connect_link_id": "link-id",
                     "service_slug": "github",
                     "status": "completed",
                 }),
             )
-            .await;
+            .await
+            .expect("deliver lifecycle webhook");
 
         let (headers, body) = rx.recv().await.expect("captured delivery");
         let timestamp = headers
@@ -468,12 +616,15 @@ mod tests {
         );
         assert_eq!(supplied_signature, expected_signature);
         assert_eq!(headers["X-NyxID-Event"], "connect_link.completed");
+        assert_eq!(headers["X-NyxID-Delivery-Id"], "event-id");
+        assert_eq!(headers["X-NyxID-Key-Id"], "key_fixture");
 
         let envelope: serde_json::Value =
             serde_json::from_slice(&body).expect("parse lifecycle envelope");
-        assert!(uuid::Uuid::parse_str(envelope["event_id"].as_str().unwrap_or_default()).is_ok());
+        assert_eq!(envelope["event_id"], "event-id");
         assert_eq!(envelope["event_type"], "connect_link.completed");
         assert_eq!(envelope["data"]["connect_link_id"], "link-id");
+        assert_eq!(envelope["data"]["user_id"], owner);
         assert_eq!(envelope["data"]["status"], "completed");
         assert!(envelope["occurred_at"].is_string());
     }
@@ -513,20 +664,34 @@ mod tests {
                 .await
                 .expect("encrypt signing secret"),
         );
+        configured.connection_webhook_key_id = Some("key_failure".to_string());
         configured.connection_webhook_enabled = true;
         db.collection::<OauthClient>(OAUTH_CLIENTS)
             .insert_one(configured)
             .await
             .expect("insert configured client");
 
-        DeveloperWebhookDispatcher::new(reqwest::Client::new(), keys)
+        let failure = DeveloperWebhookDispatcher::new(reqwest::Client::new(), keys)
             .deliver_for_app(
                 &db,
                 &client_id,
+                "event-id",
                 "connect_link.expired",
-                serde_json::json!({ "connect_link_id": "private-event-payload" }),
+                serde_json::json!({
+                    "user_id": &owner,
+                    "connect_link_id": "private-event-payload",
+                }),
             )
-            .await;
+            .await
+            .expect_err("receiver rejects delivery");
+        record_terminal_delivery_failure(
+            &db,
+            &client_id,
+            "event-id",
+            "connect_link.expired",
+            failure,
+        )
+        .await;
         assert_eq!(attempts.load(std::sync::atomic::Ordering::SeqCst), 3);
 
         let audit = tokio::time::timeout(std::time::Duration::from_secs(3), async {

@@ -174,6 +174,7 @@ export interface TriggerResponse {
   readonly status: TriggerStatus;
   readonly verification: TriggerVerification;
   readonly delivery: TriggerDelivery;
+  readonly delivery_signing_key_id: string | null;
   readonly inbound_url: string;
   readonly created_at: string;
   readonly updated_at: string;
@@ -197,11 +198,13 @@ export interface CreateTriggerResponse {
   readonly trigger: TriggerResponse;
   readonly secret: string;
   readonly delivery_signing_secret: string | null;
+  readonly delivery_signing_key_id: string | null;
 }
 
 export interface UpdateTriggerResponse {
   readonly trigger: TriggerResponse;
   readonly delivery_signing_secret: string | null;
+  readonly delivery_signing_key_id: string | null;
 }
 
 export interface ListTriggersResponse {
@@ -211,6 +214,41 @@ export interface ListTriggersResponse {
 export interface RotateTriggerSecretResponse {
   readonly trigger: TriggerResponse;
   readonly secret: string;
+}
+
+export interface RotateTriggerDeliverySecretResponse {
+  readonly trigger: TriggerResponse;
+  readonly delivery_signing_secret: string;
+  readonly key_id: string;
+}
+
+export type TriggerDeliveryRecordStatus = "pending" | "delivered" | "failed";
+
+export interface TriggerDeliveryRecord {
+  readonly event_id: string;
+  readonly status: TriggerDeliveryRecordStatus;
+  readonly attempts: number;
+  readonly last_status_code: number | null;
+  readonly replay_available: boolean;
+  readonly created_at: string;
+  readonly updated_at: string;
+  readonly delivered_at: string | null;
+}
+
+export interface ListTriggerDeliveriesOptions {
+  readonly page?: number;
+  readonly perPage?: number;
+}
+
+export interface ListTriggerDeliveriesResponse {
+  readonly deliveries: readonly TriggerDeliveryRecord[];
+  readonly page: number;
+  readonly per_page: number;
+  readonly total: number;
+}
+
+export interface RedeliverTriggerResponse {
+  readonly delivery: TriggerDeliveryRecord;
 }
 
 export interface DeleteTriggerResponse {
@@ -229,6 +267,12 @@ export interface TriggersApi {
   update(id: string, input: UpdateTriggerInput): Promise<UpdateTriggerResponse>;
   delete(id: string): Promise<DeleteTriggerResponse>;
   rotateSecret(id: string): Promise<RotateTriggerSecretResponse>;
+  rotateDeliverySecret(id: string): Promise<RotateTriggerDeliverySecretResponse>;
+  listDeliveries(
+    id: string,
+    options?: ListTriggerDeliveriesOptions,
+  ): Promise<ListTriggerDeliveriesResponse>;
+  redeliver(id: string, eventId: string): Promise<RedeliverTriggerResponse>;
 }
 
 class Transport {
@@ -414,6 +458,38 @@ class TriggersResource implements TriggersApi {
   rotateSecret(id: string): Promise<RotateTriggerSecretResponse> {
     return this.transport.json<RotateTriggerSecretResponse>(
       `/api/v1/triggers/${encodeURIComponent(id)}/rotate-secret`,
+      { method: "POST" },
+    );
+  }
+
+  rotateDeliverySecret(
+    id: string,
+  ): Promise<RotateTriggerDeliverySecretResponse> {
+    return this.transport.json<RotateTriggerDeliverySecretResponse>(
+      `/api/v1/triggers/${encodeURIComponent(id)}/rotate-delivery-secret`,
+      { method: "POST" },
+    );
+  }
+
+  listDeliveries(
+    id: string,
+    options: ListTriggerDeliveriesOptions = {},
+  ): Promise<ListTriggerDeliveriesResponse> {
+    const query = new URLSearchParams();
+    if (options.page !== undefined) query.set("page", String(options.page));
+    if (options.perPage !== undefined) {
+      query.set("per_page", String(options.perPage));
+    }
+    const encodedQuery = query.toString();
+    const suffix = encodedQuery ? `?${encodedQuery}` : "";
+    return this.transport.json<ListTriggerDeliveriesResponse>(
+      `/api/v1/triggers/${encodeURIComponent(id)}/deliveries${suffix}`,
+    );
+  }
+
+  redeliver(id: string, eventId: string): Promise<RedeliverTriggerResponse> {
+    return this.transport.json<RedeliverTriggerResponse>(
+      `/api/v1/triggers/${encodeURIComponent(id)}/deliveries/${encodeURIComponent(eventId)}/redeliver`,
       { method: "POST" },
     );
   }

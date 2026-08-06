@@ -2477,6 +2477,10 @@ mod tests {
                 last_error: None,
                 last_error_at: None,
                 webhook_event_reserved_at: None,
+                webhook_event_id: None,
+                webhook_event_status: None,
+                webhook_event_attempts: 0,
+                webhook_event_delivered_at: None,
             })
             .await
             .expect("insert connect link");

@@ -2,7 +2,12 @@ const DEFAULT_TIMESTAMP_TOLERANCE_SECONDS = 300;
 const SIGNATURE_PATTERN = /^sha256=([0-9a-f]{64})$/i;
 
 export interface VerifyWebhookSignatureInput {
-  readonly secret: string;
+  /** Single current secret for backward-compatible receivers. */
+  readonly secret?: string;
+  /** Value from X-NyxID-Key-Id. Required when selecting from secretsByKeyId. */
+  readonly keyId?: string;
+  /** Secrets retained during zero-gap rotation, keyed by X-NyxID-Key-Id. */
+  readonly secretsByKeyId?: Readonly<Record<string, string>>;
   readonly timestamp: string;
   readonly rawBody: string | Uint8Array;
   readonly signatureHeader: string;
@@ -38,7 +43,11 @@ async function verifyTimestampedSignature(
 ): Promise<boolean> {
   try {
     const match = SIGNATURE_PATTERN.exec(input.signatureHeader);
-    if (!match || !input.secret) return false;
+    const secret =
+      input.keyId && input.secretsByKeyId
+        ? input.secretsByKeyId[input.keyId]
+        : input.secret;
+    if (!match || !secret) return false;
 
     const timestampSeconds = Number(input.timestamp);
     const nowSeconds = input.nowSeconds ?? Math.floor(Date.now() / 1_000);
@@ -61,7 +70,7 @@ async function verifyTimestampedSignature(
     const encoder = new TextEncoder();
     const key = await subtle.importKey(
       "raw",
-      encoder.encode(input.secret),
+      encoder.encode(secret),
       { name: "HMAC", hash: "SHA-256" },
       false,
       ["verify"],

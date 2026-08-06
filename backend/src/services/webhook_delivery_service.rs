@@ -6,6 +6,7 @@ use sha2::Sha256;
 use std::time::Duration;
 use tokio::time::sleep;
 
+use crate::crypto::token::generate_random_token;
 use crate::errors::{AppError, AppResult};
 
 const MAX_ATTEMPTS: u32 = 3;
@@ -54,6 +55,7 @@ pub async fn deliver_signed_body(
     event_id: &str,
     body: &[u8],
     signature_contract: SignatureContract,
+    key_id: Option<&str>,
 ) -> Result<(), DeliveryFailure> {
     let mut policy = DeliveryPolicy::default();
     if signature_contract == SignatureContract::BodyOnly {
@@ -67,6 +69,7 @@ pub async fn deliver_signed_body(
         event_id,
         body,
         signature_contract,
+        key_id,
         policy,
     )
     .await
@@ -81,6 +84,7 @@ async fn deliver_with_policy(
     event_id: &str,
     body: &[u8],
     signature_contract: SignatureContract,
+    key_id: Option<&str>,
     policy: DeliveryPolicy,
 ) -> Result<(), DeliveryFailure> {
     let timestamp = chrono::Utc::now().timestamp().to_string();
@@ -102,6 +106,9 @@ async fn deliver_with_policy(
             .body(body.to_vec());
         if signature_contract == SignatureContract::Timestamped {
             request = request.header("X-NyxID-Timestamp", &timestamp);
+        }
+        if let Some(key_id) = key_id {
+            request = request.header("X-NyxID-Key-Id", key_id);
         }
 
         match request.send().await {
@@ -127,6 +134,11 @@ async fn deliver_with_policy(
         reason,
         last_status,
     })
+}
+
+pub fn generate_signing_key_id() -> String {
+    let random = generate_random_token();
+    format!("key_{}", &random[..16])
 }
 
 pub fn compute_timestamped_signature(secret: &[u8], timestamp: &str, body: &[u8]) -> String {
@@ -216,6 +228,7 @@ mod tests {
             "event-id",
             b"{}",
             SignatureContract::Timestamped,
+            Some("key_fixture"),
             DeliveryPolicy {
                 max_attempts: 3,
                 base_backoff: Duration::from_millis(1),

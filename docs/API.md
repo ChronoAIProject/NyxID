@@ -3294,11 +3294,12 @@ Content-Type: application/json
   "client_id": "desktop-client-id",
   "connection_webhook_url": "https://desktop.example.com/nyxid/events",
   "connection_webhook_enabled": true,
-  "signing_secret": "nyx_cwh_<opaque-secret>"
+  "signing_secret": "nyx_cwh_<opaque-secret>",
+  "key_id": "key_0123456789abcdef"
 }
 ```
 
-- `POST /api/v1/developer/oauth-clients/{client_id}/connection-webhook/rotate-secret` rotates and returns a new secret.
+- `POST /api/v1/developer/oauth-clients/{client_id}/connection-webhook/rotate-secret` rotates and returns a new secret plus its non-secret `key_id`.
 - `DELETE /api/v1/developer/oauth-clients/{client_id}/connection-webhook` disables delivery and removes the stored encrypted secret.
 
 Events are `connect_link.completed`, `connect_link.cancelled`, `connect_link.expired`, and `connection.expired`. Only links created by the app produce connect-link events. Connection expiry routes through the `source_app_id` recorded when that link provisions its service.
@@ -3311,29 +3312,49 @@ Abandoned app-bound links are expired by a background sweep, so `connect_link.ex
   "event_type": "connect_link.completed",
   "occurred_at": "2026-08-06T09:30:00.123Z",
   "data": {
+    "user_id": "user-uuid",
     "connect_link_id": "6c02c84a-3d97-430f-8468-c96b609d9563",
     "service_id": "catalog-service-id",
-    "service_slug": "github",
+    "service_slug": "service-slug",
     "status": "completed",
-    "user_service_id": "user-service-id"
+    "user_service_id": "user-service-id",
+    "completed_at": "2026-08-06T09:29:59.000Z",
+    "expires_at": "2026-08-06T09:45:00.000Z"
   }
 }
 ```
 
-NyxID sends `X-NyxID-Timestamp` as Unix seconds and `X-NyxID-Signature: sha256=<hex>`. Verify HMAC-SHA256 over the exact bytes `timestamp + "." + raw_request_body`, reject stale timestamps, and compare in constant time:
+Every event's `data.user_id` is the NyxID subject whose connection changed. `connection.expired` also includes `connect_link_id` when the service was provisioned through a connect link; legacy and manually provisioned services omit that field.
+
+The following request headers are a stable contract for connection and outbound trigger webhooks:
+
+- `X-NyxID-Event`: event type, such as `connect_link.completed` or `trigger.event`.
+- `X-NyxID-Delivery-Id`: the envelope event ID. Retries and connect-link outbox redispatches retain the same value.
+- `X-NyxID-Key-Id`: non-secret signing-key identifier returned with the one-time secret.
+- `X-NyxID-Timestamp`: Unix seconds included in the signed content.
+- `X-NyxID-Signature`: `sha256=<hex>` HMAC-SHA256 signature.
+
+Verify HMAC-SHA256 over the exact bytes `timestamp + "." + raw_request_body`, reject stale timestamps, select the held secret using `X-NyxID-Key-Id`, and compare in constant time:
 
 ```python
 import hashlib
 import hmac
 
+signing_secret = secrets_by_key_id[key_id]
 signed = timestamp.encode() + b"." + raw_body
 expected = hmac.new(signing_secret.encode(), signed, hashlib.sha256).hexdigest()
 valid = hmac.compare_digest(signature.removeprefix("sha256="), expected)
 ```
 
-Delivery is best effort and never rolls back a link or credential transition. NyxID makes up to three attempts with short request timeouts and bounded backoff. A final failure writes a metadata-only audit event; event bodies and secrets are never logged.
+For zero-gap rotation, keep the current and previous secrets in a receiver map keyed by `key_id`, call the rotate endpoint, accept either key, and remove the old slot only after observing deliveries with the new `X-NyxID-Key-Id`.
 
-Envelope timestamps use Chrono's RFC 3339 UTC serialization. The fixture value is emitted exactly as `2026-08-06T09:30:00.123Z`, matching the example above.
+Connect-link terminal events use the link document as a durable outbox. Each dispatch cycle makes up to three attempts with short timeouts and bounded backoff. A stale undelivered reservation is reclaimed by the expiry sweep after 120 seconds, for at most five dispatch cycles. Delivery is at least once: a process crash after the receiver accepts but before NyxID records success can produce a duplicate with the same event ID. After the cap, the outbox is marked `abandoned` and a metadata-only final-failure audit is emitted.
+
+`connection.expired` is best effort because it has no durable outbox: it receives one bounded three-attempt cycle and is not redelivered after process loss or final failure. Integrations should periodically reconcile with authenticated `GET /api/v1/user-services`; its cheap `connection_status` field is `active` or `expired` when credential expiry is knowable.
+
+Connection webhook bodies are metadata-only and enforced at a maximum of 16 KiB. Delivery never rolls back a link or credential transition, and event bodies and secrets are never logged.
+
+Envelope timestamps use RFC 3339 UTC serialization. The wire-format assertion emits the example above byte-for-byte, including `2026-08-06T09:30:00.123Z`.
 
 ---
 
@@ -7321,20 +7342,27 @@ Content-Type: application/json
 - `{"mode":"token","location":"query"}` for `?token=nyx_trg_...`.
 - `{"mode":"hmac_sha256","header_name":"X-Hub-Signature-256"}` for `sha256=<hex>` over the exact raw body.
 
+Prefer bearer or HMAC verification. Query tokens are supported only for senders that cannot set headers; URLs commonly leak into reverse-proxy logs, browser history, monitoring systems, and referrer data.
+
 `delivery` supports:
 
-- `{"type":"webhook","url":"https://receiver.example.com/events"}`. The create/update response includes a separate `delivery_signing_secret` once, and outbound delivery uses the timestamp-bound signature contract above.
-- `{"type":"agent","conversation_id":"..."}`. The conversation must be an active device conversation owned by the trigger owner; events enter the existing channel-event relay pipeline.
+- `{"type":"webhook","url":"https://receiver.example.com/events"}`. The create/update response includes a separate `delivery_signing_secret` once and `delivery_signing_key_id`; outbound delivery uses the timestamp-bound signature and stable-header contract above.
+- `{"type":"agent","conversation_id":"..."}`. The conversation must be an active NyxID device conversation owned by the trigger owner; events enter the channel-event gateway and its conversation-bound agent routing. This target does not invoke an external application's agent runtime. Use `webhook` when events must reach external infrastructure.
 - `{"type":"notification"}`. The envelope is delivered through the owner's configured notification channels.
 
-Create returns `trigger`, the one-time inbound `secret`, and an optional one-time `delivery_signing_secret`. Other routes are:
+Create returns `trigger`, the one-time inbound `secret`, and optional one-time `delivery_signing_secret` plus `delivery_signing_key_id`. Other routes are:
 
 - `GET /api/v1/triggers` and `GET /api/v1/triggers/{id}`
 - `PATCH /api/v1/triggers/{id}` for `label`, `status`, or `delivery`
 - `DELETE /api/v1/triggers/{id}`
 - `POST /api/v1/triggers/{id}/rotate-secret`
+- `POST /api/v1/triggers/{id}/rotate-delivery-secret` for webhook targets; returns a replacement `delivery_signing_secret` and `key_id` once.
+- `GET /api/v1/triggers/{id}/deliveries?page=1&per_page=20` for metadata-only delivery history, newest first (`per_page` maximum 100).
+- `POST /api/v1/triggers/{id}/deliveries/{event_id}/redeliver` to replay a retained encrypted envelope.
 
-The CLI equivalents are `nyxid trigger create|list|show|update|delete|rotate-secret`; use `--org` for org-owned triggers.
+Changing a trigger's `delivery` through `PATCH` intentionally mints a replacement delivery secret. Use `rotate-delivery-secret` when only key rotation is intended. Receivers should follow the two-key `X-NyxID-Key-Id` rotation procedure documented above.
+
+The CLI adds `nyxid trigger deliveries <id>`, `nyxid trigger redeliver <id> <event_id>`, and `nyxid trigger rotate-delivery-secret <id>` alongside the existing management commands; use `--org` for org-owned triggers.
 
 #### Public ingress
 
@@ -7359,16 +7387,20 @@ The forwarded envelope is:
 }
 ```
 
-Event identity is taken from `X-NyxID-Event-Id`, then a top-level payload `event_id`, then the SHA-256 body hash. Unknown and disabled trigger IDs both return the same not-found-shaped response. The per-trigger rate limit is applied before the body is read or an HMAC secret is decrypted. Payload bodies are never persisted or included in audit logs. Envelope timestamps use the same Chrono RFC 3339 UTC format as connection webhooks; the fixture value is emitted exactly as `2026-08-06T09:30:00.123Z`, matching the example above.
+Event identity is taken from `X-NyxID-Event-Id`, then a top-level payload `event_id`, then the SHA-256 body hash. Unknown and disabled trigger IDs both return the same not-found-shaped response. The per-trigger rate limit is applied before the body is read or an HMAC secret is decrypted. Envelope timestamps use the same RFC 3339 UTC format as connection webhooks; the wire fixture emits exactly `2026-08-06T09:30:00.123Z`.
 
 Delivery and dedup semantics depend on the target:
 
-- `webhook`: NyxID atomically reserves the event ID, returns `{"status":"accepted","event_id":"..."}` immediately, and performs up to three bounded delivery attempts in the background. From the sender's view this is at-most-once: a retry returns `duplicate` even if all internal attempts fail. Final failure creates a metadata-only audit event.
-- `agent` and `notification`: delivery completes before the ingress response, and the event ID enters the bounded per-process dedup cache only after success. A transient failure is returned to the sender, which may retry. The best-effort in-process cache can admit concurrent duplicates, matching the channel-event gateway contract.
+- `webhook`: an atomic `trigger_deliveries` insert provides exactly-once admission and durable dedup across replicas and restarts. NyxID then returns `{"status":"accepted","event_id":"..."}` immediately and performs up to three bounded delivery attempts in the background. A sender retry returns `duplicate` even when delivery failed; use the delivery history and replay endpoint for recovery. Final failure creates a metadata-only audit event.
+- `agent` and `notification`: delivery completes before the ingress response, and the event ID enters a best-effort in-memory dedup cache only after success. Dedup is per process, bounded to the configured cache capacity and a five-minute default window, and does not coordinate replicas. Concurrent or cross-replica duplicates are possible, so senders should retry failures and consumers should remain idempotent.
+
+Webhook-target envelopes are encrypted at rest with the configured encryption keys and removed by a database TTL index after `TRIGGER_DELIVERY_RETENTION_HOURS` (72 hours by default). Delivery list responses never contain payloads. Setting retention to `0` stores metadata for the default 72-hour bounded window but no envelope, makes `replay_available` false, and causes redelivery to return `trigger_delivery_record_not_found` (11606). Agent and notification payloads are never persisted.
+
+Delivery history entries contain `event_id`, `status` (`pending`, `delivered`, or `failed`), `attempts`, optional `last_status_code`, `replay_available`, and timestamps. Pagination responses also contain `page`, `per_page`, and `total`.
 
 Unsupported or unconfigured agent/notification targets return HTTP 400 with `trigger_delivery_unsupported`; synchronous delivery failures return HTTP 502 with `trigger_delivery_failed`. Trigger notifications contain bounded previews rather than the full provider payload so they fit Telegram and mobile push limits.
 
-Default ingress limits are 10 events/second per trigger, burst 20, and 256 KiB per body. See `TRIGGER_RATE_LIMIT_PER_SECOND`, `TRIGGER_RATE_LIMIT_BURST`, and `TRIGGER_PAYLOAD_MAX_BYTES`.
+Default ingress limits are 10 events/second per trigger, burst 20, and 256 KiB per raw request body. Outbound trigger webhook bodies are enforced at `TRIGGER_PAYLOAD_MAX_BYTES + 4096` bytes, 266240 bytes with the default configuration. See `TRIGGER_RATE_LIMIT_PER_SECOND`, `TRIGGER_RATE_LIMIT_BURST`, `TRIGGER_PAYLOAD_MAX_BYTES`, and `TRIGGER_DELIVERY_RETENTION_HOURS`.
 
 ### Telegram Webhook
 

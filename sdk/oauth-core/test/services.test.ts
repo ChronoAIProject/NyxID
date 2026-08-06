@@ -207,6 +207,7 @@ function trigger(): TriggerResponse {
     status: "active",
     verification: { mode: "token", location: "bearer" },
     delivery: { type: "notification" },
+    delivery_signing_key_id: null,
     inbound_url: "https://api.example/api/v1/webhooks/triggers/trigger-1",
     created_at: "2026-08-06T09:30:00.123+00:00",
     updated_at: "2026-08-06T09:30:00.123+00:00",
@@ -219,6 +220,7 @@ describe("NyxServicesClient triggers", () => {
       trigger: trigger(),
       secret: "nyx_trg_once",
       delivery_signing_secret: null,
+      delivery_signing_key_id: null,
     };
     const fetchFn = vi
       .fn<typeof fetch>()
@@ -276,10 +278,51 @@ describe("NyxServicesClient triggers", () => {
         jsonResponse({
           trigger: { ...item, status: "disabled" },
           delivery_signing_secret: null,
+          delivery_signing_key_id: null,
         }),
       )
       .mockResolvedValueOnce(
         jsonResponse({ trigger: item, secret: "nyx_trg_rotated" }),
+      )
+      .mockResolvedValueOnce(
+        jsonResponse({
+          trigger: { ...item, delivery_signing_key_id: "key_new" },
+          delivery_signing_secret: "nyx_twh_rotated",
+          key_id: "key_new",
+        }),
+      )
+      .mockResolvedValueOnce(
+        jsonResponse({
+          deliveries: [
+            {
+              event_id: "event/1",
+              status: "failed",
+              attempts: 1,
+              last_status_code: 503,
+              replay_available: true,
+              created_at: "2026-08-06T09:30:00.123+00:00",
+              updated_at: "2026-08-06T09:31:00.123+00:00",
+              delivered_at: null,
+            },
+          ],
+          page: 2,
+          per_page: 10,
+          total: 11,
+        }),
+      )
+      .mockResolvedValueOnce(
+        jsonResponse({
+          delivery: {
+            event_id: "event/1",
+            status: "delivered",
+            attempts: 2,
+            last_status_code: null,
+            replay_available: true,
+            created_at: "2026-08-06T09:30:00.123+00:00",
+            updated_at: "2026-08-06T09:32:00.123+00:00",
+            delivered_at: "2026-08-06T09:32:00.123+00:00",
+          },
+        }),
       )
       .mockResolvedValueOnce(jsonResponse({ message: "Trigger deleted" }));
     const client = new NyxServicesClient({
@@ -298,6 +341,15 @@ describe("NyxServicesClient triggers", () => {
     ).resolves.toMatchObject({
       secret: "nyx_trg_rotated",
     });
+    await expect(
+      client.triggers.rotateDeliverySecret("trigger/1"),
+    ).resolves.toMatchObject({ key_id: "key_new" });
+    await expect(
+      client.triggers.listDeliveries("trigger/1", { page: 2, perPage: 10 }),
+    ).resolves.toMatchObject({ total: 11 });
+    await expect(
+      client.triggers.redeliver("trigger/1", "event/1"),
+    ).resolves.toMatchObject({ delivery: { status: "delivered" } });
     await expect(client.triggers.delete("trigger/1")).resolves.toEqual({
       message: "Trigger deleted",
     });
@@ -307,12 +359,17 @@ describe("NyxServicesClient triggers", () => {
       "https://api.example/api/v1/triggers/trigger%2F1",
       "https://api.example/api/v1/triggers/trigger%2F1",
       "https://api.example/api/v1/triggers/trigger%2F1/rotate-secret",
+      "https://api.example/api/v1/triggers/trigger%2F1/rotate-delivery-secret",
+      "https://api.example/api/v1/triggers/trigger%2F1/deliveries?page=2&per_page=10",
+      "https://api.example/api/v1/triggers/trigger%2F1/deliveries/event%2F1/redeliver",
       "https://api.example/api/v1/triggers/trigger%2F1",
     ]);
     expect(fetchFn.mock.calls[2][1]?.method).toBe("PATCH");
     expect(JSON.parse(String(fetchFn.mock.calls[2][1]?.body))).toEqual({
       status: "disabled",
     });
-    expect(fetchFn.mock.calls[4][1]?.method).toBe("DELETE");
+    expect(fetchFn.mock.calls[4][1]?.method).toBe("POST");
+    expect(fetchFn.mock.calls[6][1]?.method).toBe("POST");
+    expect(fetchFn.mock.calls[7][1]?.method).toBe("DELETE");
   });
 });

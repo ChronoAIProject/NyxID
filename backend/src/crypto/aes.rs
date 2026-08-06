@@ -1050,6 +1050,7 @@ mod tests {
             trigger_rate_limit_per_second: 10,
             trigger_rate_limit_burst: 20,
             trigger_payload_max_bytes: 256 * 1024,
+            trigger_delivery_retention_hours: 72,
             oracle_task_retention_days: 30,
             cloud_response_cache_ttl_secs: 0,
             cloud_response_cache_max_entry_bytes: 1024 * 1024,

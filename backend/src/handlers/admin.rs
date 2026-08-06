@@ -3025,6 +3025,7 @@ mod operator_route_tests {
             revocation_webhook_secret_encrypted: None,
             connection_webhook_url: None,
             connection_webhook_secret_encrypted: None,
+            connection_webhook_key_id: None,
             connection_webhook_enabled: false,
             created_by: Some("dynamic_registration".to_string()),
             created_at: now,

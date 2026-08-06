@@ -83,6 +83,7 @@ pub fn dispatch_revocation_event(
             &delivery_id,
             &body,
             SignatureContract::BodyOnly,
+            None,
         )
         .await
         {
