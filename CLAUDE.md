@@ -43,7 +43,7 @@ Strict separation: `handlers/` -> `services/` -> `models/`
 - 11200-11207 auth-device login: 11200 `AuthDeviceCodeNotFound`, 11201 `AuthDeviceCodeExpired`, 11202 `AuthDeviceCodePending`, 11203 `AuthDeviceCodeSlowDown`, 11204 `AuthDeviceCodeDenied`, 11205 `AuthDeviceCodeAlreadyDelivered`, 11206 `AuthDeviceCodeRateLimited`, 11207 `AuthDeviceUserCodeInvalid`
 - 11300-11305 connect links: 11300 `ConnectLinkNotFound`, 11301 `ConnectLinkExpired`, 11302 `ConnectLinkAlreadyCompleted`, 11303 `ConnectLinkCancelled`, 11304 `ConnectLinkRateLimited`, 11305 `ConnectLinkCompletionInProgress`
 - 11500 `GrantCascadeConfirmationRequired` (HTTP 409)
-- 11600-11606 triggers: 11600 `TriggerNotFound`, 11601 `TriggerDisabled`, 11602 `TriggerSecretInvalid`, 11603 `TriggerRateLimited`, 11604 `TriggerPayloadTooLarge`, 11605 `TriggerDeliveryUnsupported`, 11606 `TriggerDeliveryFailed`
+- 11600-11605 triggers: 11600 `TriggerNotFound`, 11601 `TriggerSecretInvalid`, 11602 `TriggerRateLimited`, 11603 `TriggerPayloadTooLarge`, 11604 `TriggerDeliveryUnsupported`, 11605 `TriggerDeliveryFailed`
 
 ### 4. Frontend Patterns
 
@@ -173,6 +173,7 @@ Single-use hosted credential setup for agents and CLI callers. An authenticated 
 
 - `connect_links` stores UUID-string IDs and only SHA-256 hashes of `nyx_clk_` tokens. Raw tokens appear once in the hosted URL and must never be logged, audited, or persisted in OAuth state.
 - Links default to 15 minutes, are clamped to 60-3600 seconds, and retain an observable `expired` terminal state through atomic query-time expiry claims. An OAuth or device flow pinned before expiry gets 30 minutes of finalization grace, then expires if it remains pending.
+- App-bound abandoned links are also claimed by the `CONNECT_LINK_EXPIRY_SWEEP_INTERVAL_SECS` background sweep so `connect_link.expired` webhooks do not depend on polling. `0` disables the sweep.
 - Preview is public and rate-limited but non-mutating. Completion is human-session-only; API keys, service accounts, delegated tokens, and relay tokens are rejected before the handler. Personal completion requires the exact creating account; org-owned completion uses `org_service::resolve_owner_access` write access. Unauthorized access is not-found-shaped.
 - Normal authorization-code access tokens issued to registered developer apps may create, read, and creator-cancel connect links; their JWT `client_id` binds the link to the active app record. Delegated, relay, and service-account tokens remain rejected on that route group, and no other rejection layer is weakened. App callbacks use `oauth_service::validate_client` against registered redirect policy, while sessions and agent API keys retain shape-only HTTP(S) validation. The authenticated app ID/name overrides untrusted request-body attribution.
 - Hosted human decline uses the same raw-token and owner checks as completion but only transitions the link to `cancelled`. Every terminal callback is built from the stored URI with `status` and `connect_link_id`; existing query parameters are preserved, reserved parameters are replaced, and raw tokens are never added. Provider callback errors store only a normalized `last_error` code and timestamp while the link remains retryable.
@@ -184,7 +185,7 @@ Single-use hosted credential setup for agents and CLI callers. An authenticated 
 - Developer-app connection webhooks use a server-generated secret encrypted with `EncryptionKeys`. Secrets are returned only by configure/rotate responses. Delivery signs `X-NyxID-Timestamp + "." + raw_body` with HMAC-SHA256 and sends `X-NyxID-Signature: sha256=<hex>`; retries are bounded and transition paths never depend on delivery success.
 - Outbound webhook configuration requires HTTPS and public DNS/IP targets. Apply `webhook_delivery_service::validate_webhook_url` to every new server-fetched webhook URL.
 - Trigger inbound secrets use the `nyx_trg_` prefix and are SHA-256 hashed. HMAC verification additionally retains an encrypted copy because verification requires the raw key. Trigger and delivery types are serde-tagged enums; all secret-bearing structs use redacted `Debug` implementations.
-- Trigger ingress is public but secret-verified before rate limiting. Unknown and disabled triggers are not-found-shaped. Payload bodies are never persisted; dedup is bounded, per-process, and inserted only after successful delivery. Agent targets enter through the trusted channel-event service path without broadening the public channel-event auth contract.
+- Trigger ingress is public; unknown and disabled triggers are not-found-shaped, then per-trigger rate limiting runs before body reads, HMAC decryption, or verification. Payload bodies are never persisted. Dedup is bounded and per-process: webhook targets reserve atomically before fire-and-forget delivery, while agent and notification targets insert only after synchronous success so senders may retry failures. Agent targets enter through the trusted channel-event service path without broadening the public channel-event auth contract.
 
 ## File Structure
 
@@ -360,6 +361,7 @@ TELEGRAM_WEBHOOK_SECRET=            # Random string for webhook verification
 TELEGRAM_WEBHOOK_URL=               # e.g. https://auth.nyxid.dev/api/v1/webhooks/telegram
 TELEGRAM_BOT_USERNAME=              # Without @
 APPROVAL_EXPIRY_INTERVAL_SECS=5     # Interval between expiry sweeps
+CONNECT_LINK_EXPIRY_SWEEP_INTERVAL_SECS=60  # App connect-link expiry webhooks; 0 disables
 
 # OAuth token refresh (optional)
 OAUTH_REFRESH_SWEEP_INTERVAL_SECS=600  # Proactive refresh sweep for expiring multi-connection OAuth

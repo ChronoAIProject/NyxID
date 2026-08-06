@@ -3303,11 +3303,13 @@ Content-Type: application/json
 
 Events are `connect_link.completed`, `connect_link.cancelled`, `connect_link.expired`, and `connection.expired`. Only links created by the app produce connect-link events. Connection expiry routes through the `source_app_id` recorded when that link provisions its service.
 
+Abandoned app-bound links are expired by a background sweep, so `connect_link.expired` delivery does not require the app to poll or revisit the hosted page.
+
 ```json
 {
   "event_id": "3cc24472-c0b4-436c-a42a-17f43087f3e7",
   "event_type": "connect_link.completed",
-  "occurred_at": "2026-08-06T09:30:00Z",
+  "occurred_at": "2026-08-06T09:30:00.123Z",
   "data": {
     "connect_link_id": "6c02c84a-3d97-430f-8468-c96b609d9563",
     "service_id": "catalog-service-id",
@@ -3330,6 +3332,8 @@ valid = hmac.compare_digest(signature.removeprefix("sha256="), expected)
 ```
 
 Delivery is best effort and never rolls back a link or credential transition. NyxID makes up to three attempts with short request timeouts and bounded backoff. A final failure writes a metadata-only audit event; event bodies and secrets are never logged.
+
+Envelope timestamps use Chrono's RFC 3339 UTC serialization. The fixture value is emitted exactly as `2026-08-06T09:30:00.123Z`, matching the example above.
 
 ---
 
@@ -7350,14 +7354,19 @@ The forwarded envelope is:
   "event_id": "provider-event-123",
   "trigger_id": "trigger-uuid",
   "source": "inbound_webhook",
-  "received_at": "2026-08-06T09:30:00Z",
+  "received_at": "2026-08-06T09:30:00.123Z",
   "payload": {"action":"opened","resource":{"id":"42"}}
 }
 ```
 
-Event identity is taken from `X-NyxID-Event-Id`, then a top-level payload `event_id`, then the SHA-256 body hash. Successful deliveries enter a bounded per-process dedup cache for five minutes by default; a replay returns `{"status":"duplicate","event_id":"..."}` without forwarding. Failed deliveries are not inserted, so a provider retry can succeed. Unknown and disabled trigger IDs both return the same not-found-shaped response. Payload bodies are never persisted or included in audit logs.
+Event identity is taken from `X-NyxID-Event-Id`, then a top-level payload `event_id`, then the SHA-256 body hash. Unknown and disabled trigger IDs both return the same not-found-shaped response. The per-trigger rate limit is applied before the body is read or an HMAC secret is decrypted. Payload bodies are never persisted or included in audit logs. Envelope timestamps use the same Chrono RFC 3339 UTC format as connection webhooks; the fixture value is emitted exactly as `2026-08-06T09:30:00.123Z`, matching the example above.
 
-A transient outbound webhook failure returns HTTP 502 with `trigger_delivery_failed`; unsupported or unconfigured delivery targets return HTTP 400 with `trigger_delivery_unsupported`.
+Delivery and dedup semantics depend on the target:
+
+- `webhook`: NyxID atomically reserves the event ID, returns `{"status":"accepted","event_id":"..."}` immediately, and performs up to three bounded delivery attempts in the background. From the sender's view this is at-most-once: a retry returns `duplicate` even if all internal attempts fail. Final failure creates a metadata-only audit event.
+- `agent` and `notification`: delivery completes before the ingress response, and the event ID enters the bounded per-process dedup cache only after success. A transient failure is returned to the sender, which may retry. The best-effort in-process cache can admit concurrent duplicates, matching the channel-event gateway contract.
+
+Unsupported or unconfigured agent/notification targets return HTTP 400 with `trigger_delivery_unsupported`; synchronous delivery failures return HTTP 502 with `trigger_delivery_failed`. Trigger notifications contain bounded previews rather than the full provider payload so they fit Telegram and mobile push limits.
 
 Default ingress limits are 10 events/second per trigger, burst 20, and 256 KiB per body. See `TRIGGER_RATE_LIMIT_PER_SECOND`, `TRIGGER_RATE_LIMIT_BURST`, and `TRIGGER_PAYLOAD_MAX_BYTES`.
 

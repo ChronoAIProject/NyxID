@@ -272,6 +272,12 @@ The approval system works without Telegram -- users can always approve/reject vi
 
 **Telegram delivery modes:** When `TELEGRAM_WEBHOOK_URL` (and `TELEGRAM_WEBHOOK_SECRET`) are set, the backend registers a webhook with Telegram at startup. When only `TELEGRAM_BOT_TOKEN` is set (no webhook URL), the backend automatically falls back to `getUpdates` long polling -- ideal for local development without ngrok or tunnels.
 
+## Hosted Connect Links
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `CONNECT_LINK_EXPIRY_SWEEP_INTERVAL_SECS` | `60` | Interval between sweeps that claim overdue app-bound connect links and dispatch `connect_link.expired`. Effective deadlines include the pinned OAuth/device finalization grace. `0` disables the sweep; query-time expiry remains active. |
+
 ## OAuth Token Refresh (Optional)
 
 | Variable | Default | Description |
