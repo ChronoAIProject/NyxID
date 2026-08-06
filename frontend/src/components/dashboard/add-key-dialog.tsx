@@ -61,6 +61,7 @@ import { openOAuthPopup, type OAuthPopupHandle } from "@/lib/oauth-popup";
 import {
   oauthAttemptNonceSchema,
   validateAuthorizationUrl,
+  validateHttpAuthorizationUrl,
 } from "@/schemas/oauth-popup";
 import { useOAuthPopupStore } from "@/stores/oauth-popup-store";
 import { useOAuthPopupReceiver } from "@/hooks/use-oauth-popup";
@@ -1779,36 +1780,73 @@ function OAuthStep({
         ? (key.last_authorized_at ?? null)
         : undefined;
       let nonce: string | undefined;
+      let validatedAuthorizationUrl: URL | null = null;
       if (launch === "popup") {
         nonce = response.attempt_nonce;
-        if (!nonce || !oauthAttemptNonceSchema.safeParse(nonce).success) {
-          throw new Error("OAuth provider returned an invalid attempt nonce");
-        }
-        if (
-          validateAuthorizationUrl(response.authorization_url, nonce) === null
-        ) {
+        validatedAuthorizationUrl = validateHttpAuthorizationUrl(
+          response.authorization_url,
+        );
+        if (validatedAuthorizationUrl === null) {
           throw new Error(
             "OAuth provider returned an invalid authorization URL",
           );
         }
+        if (nonce !== undefined) {
+          if (!oauthAttemptNonceSchema.safeParse(nonce).success) {
+            throw new Error("OAuth provider returned an invalid attempt nonce");
+          }
+          if (
+            validateAuthorizationUrl(response.authorization_url, nonce) ===
+            null
+          ) {
+            throw new Error(
+              "OAuth provider returned an invalid authorization URL",
+            );
+          }
+        }
       }
+      const authorizationHref =
+        validatedAuthorizationUrl?.href ?? response.authorization_url;
       setPendingKeyId(key.id);
       setPreviousAuthorizationAt(baseline);
-      setAuthorizationUrl(response.authorization_url);
+      setAuthorizationUrl(authorizationHref);
       // The handoff to the provider is the point of no return for this
       // dialog's callbacks: from here the user may never come back to it.
       announceAuthorization(key.id, baseline);
-      if (launch === "popup" && nonce) {
-        if (popup) {
-          useOAuthPopupStore.getState().setNonce(popup.launchId, nonce);
+      if (launch === "popup" && popup) {
+        const releasePopupToManualLink = () => {
+          popup.close();
+          useOAuthPopupStore.getState().end(popup.launchId);
+          if (popupRef.current?.launchId === popup.launchId) {
+            popupRef.current = null;
+          }
+          if (launchIdRef.current === popup.launchId) {
+            launchIdRef.current = null;
+            setActiveLaunchId(null);
+          }
+        };
+        // Frontend-first rollout can briefly pair this UI with a backend that
+        // predates the nonce contract. Keep the validated manual link usable.
+        if (!nonce) {
+          releasePopupToManualLink();
+          return;
+        }
+        useOAuthPopupStore.getState().setNonce(popup.launchId, nonce);
+        try {
           await popup.navigate(
-            response.authorization_url,
+            authorizationHref,
             nonce,
             catalogEntry.name,
           );
+        } catch {
+          if (generationRef.current !== generation) return;
+          // A cold interstitial or detached popup does not invalidate the
+          // server-side attempt. Poll it and retain the explicit manual link.
+          releasePopupToManualLink();
         }
       }
     } catch (err) {
+      if (generationRef.current !== generation) return;
       abortAnnouncedAuthorization();
       popup?.close();
       if (popup) useOAuthPopupStore.getState().end(popup.launchId);

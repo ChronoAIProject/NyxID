@@ -3,6 +3,7 @@ import {
   isOAuthRetryMessage,
   oauthCompletionSearchSchema,
   validateAuthorizationUrl,
+  validateHttpAuthorizationUrl,
 } from "./oauth-popup";
 import { OAUTH_ERROR_CODES, OAUTH_FLOW_TOKENS } from "@/types/oauth-popup";
 
@@ -57,6 +58,17 @@ describe("OAuth popup schemas", () => {
     ]) {
       expect(validateAuthorizationUrl(url, NONCE)).toBeNull();
     }
+  });
+
+  it("accepts only credential-free HTTP URLs for a manual fallback", () => {
+    expect(
+      validateHttpAuthorizationUrl("https://github.com/login/oauth/authorize")
+        ?.href,
+    ).toBe("https://github.com/login/oauth/authorize");
+    expect(validateHttpAuthorizationUrl("javascript:alert(1)")).toBeNull();
+    expect(
+      validateHttpAuthorizationUrl("https://user:pass@github.com/oauth"),
+    ).toBeNull();
   });
 
   it("binds retry navigation to the interstitial's provider origin", () => {

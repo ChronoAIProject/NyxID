@@ -10,7 +10,9 @@ import type {
   OAuthRetryMessage,
 } from "@/types/oauth-popup";
 
-const POPUP_READY_TIMEOUT_MS = 2_000;
+// Allow a cold/no-cache SPA interstitial to load. Expiry only switches the
+// dialog to its non-destructive manual-link fallback.
+const POPUP_READY_TIMEOUT_MS = 5_000;
 const MAX_SERVICE_NAME_LENGTH = 64;
 export const OAUTH_LAUNCH_CONTEXT_KEY = "nyxid.oauth.launch-context";
 
