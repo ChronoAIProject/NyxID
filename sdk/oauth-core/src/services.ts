@@ -60,12 +60,7 @@ export interface WaitForCompletionOptions {
   readonly intervalMs?: number;
 }
 
-export type ServiceQueryValue =
-  | string
-  | number
-  | boolean
-  | null
-  | undefined;
+export type ServiceQueryValue = string | number | boolean | null | undefined;
 
 export interface ServiceRequestOptions {
   readonly method?: string;
@@ -146,6 +141,96 @@ export interface ServicesApi {
   ): Promise<Response>;
 }
 
+export type TriggerStatus = "active" | "disabled";
+
+export type TriggerVerification =
+  | {
+      readonly mode: "token";
+      readonly location: "bearer" | "query";
+    }
+  | {
+      readonly mode: "hmac_sha256";
+      readonly header_name: string;
+    };
+
+export type TriggerDelivery =
+  | {
+      readonly type: "webhook";
+      readonly url: string;
+    }
+  | {
+      readonly type: "agent";
+      readonly conversation_id: string;
+    }
+  | {
+      readonly type: "notification";
+    };
+
+export interface TriggerResponse {
+  readonly id: string;
+  readonly user_id: string;
+  readonly label: string;
+  readonly user_service_id: string | null;
+  readonly status: TriggerStatus;
+  readonly verification: TriggerVerification;
+  readonly delivery: TriggerDelivery;
+  readonly inbound_url: string;
+  readonly created_at: string;
+  readonly updated_at: string;
+}
+
+export interface CreateTriggerInput {
+  readonly label: string;
+  readonly userServiceId?: string;
+  readonly verification: TriggerVerification;
+  readonly delivery: TriggerDelivery;
+  readonly targetOrgId?: string;
+}
+
+export interface UpdateTriggerInput {
+  readonly label?: string;
+  readonly status?: TriggerStatus;
+  readonly delivery?: TriggerDelivery;
+}
+
+export interface CreateTriggerResponse {
+  readonly trigger: TriggerResponse;
+  readonly secret: string;
+  readonly delivery_signing_secret: string | null;
+}
+
+export interface UpdateTriggerResponse {
+  readonly trigger: TriggerResponse;
+  readonly delivery_signing_secret: string | null;
+}
+
+export interface ListTriggersResponse {
+  readonly triggers: readonly TriggerResponse[];
+}
+
+export interface RotateTriggerSecretResponse {
+  readonly trigger: TriggerResponse;
+  readonly secret: string;
+}
+
+export interface DeleteTriggerResponse {
+  readonly message: string;
+}
+
+export interface TriggersApi {
+  /**
+   * Creates an inbound trigger and returns its secret once. The public
+   * `inbound_url` is intended for the provider's server-to-server webhook,
+   * not for authenticated SDK requests.
+   */
+  create(input: CreateTriggerInput): Promise<CreateTriggerResponse>;
+  list(): Promise<ListTriggersResponse>;
+  get(id: string): Promise<TriggerResponse>;
+  update(id: string, input: UpdateTriggerInput): Promise<UpdateTriggerResponse>;
+  delete(id: string): Promise<DeleteTriggerResponse>;
+  rotateSecret(id: string): Promise<RotateTriggerSecretResponse>;
+}
+
 class Transport {
   readonly baseUrl: string;
   readonly fetchFn: typeof fetch;
@@ -169,7 +254,8 @@ class Transport {
     });
     if (!response.ok) {
       const body: unknown = await response.json().catch(() => null);
-      const message = extractErrorMessage(body) ??
+      const message =
+        extractErrorMessage(body) ??
         `NyxID request failed with HTTP ${response.status}`;
       throw new NyxServicesHttpError(response.status, message, body);
     }
@@ -277,6 +363,62 @@ class ServicesResource implements ServicesApi {
   }
 }
 
+class TriggersResource implements TriggersApi {
+  constructor(private readonly transport: Transport) {}
+
+  create(input: CreateTriggerInput): Promise<CreateTriggerResponse> {
+    return this.transport.json<CreateTriggerResponse>("/api/v1/triggers", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        label: input.label,
+        user_service_id: input.userServiceId,
+        verification: input.verification,
+        delivery: input.delivery,
+        target_org_id: input.targetOrgId,
+      }),
+    });
+  }
+
+  list(): Promise<ListTriggersResponse> {
+    return this.transport.json<ListTriggersResponse>("/api/v1/triggers");
+  }
+
+  get(id: string): Promise<TriggerResponse> {
+    return this.transport.json<TriggerResponse>(
+      `/api/v1/triggers/${encodeURIComponent(id)}`,
+    );
+  }
+
+  update(
+    id: string,
+    input: UpdateTriggerInput,
+  ): Promise<UpdateTriggerResponse> {
+    return this.transport.json<UpdateTriggerResponse>(
+      `/api/v1/triggers/${encodeURIComponent(id)}`,
+      {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(input),
+      },
+    );
+  }
+
+  delete(id: string): Promise<DeleteTriggerResponse> {
+    return this.transport.json<DeleteTriggerResponse>(
+      `/api/v1/triggers/${encodeURIComponent(id)}`,
+      { method: "DELETE" },
+    );
+  }
+
+  rotateSecret(id: string): Promise<RotateTriggerSecretResponse> {
+    return this.transport.json<RotateTriggerSecretResponse>(
+      `/api/v1/triggers/${encodeURIComponent(id)}/rotate-secret`,
+      { method: "POST" },
+    );
+  }
+}
+
 /**
  * Authenticated client for connect-link orchestration and service proxy calls.
  * It accepts either a NyxID agent API key or an OAuth access token without
@@ -285,11 +427,13 @@ class ServicesResource implements ServicesApi {
 export class NyxServicesClient {
   readonly connectLinks: ConnectLinksApi;
   readonly services: ServicesApi;
+  readonly triggers: TriggersApi;
 
   constructor(config: NyxServicesClientConfig) {
     const transport = new Transport(config);
     this.connectLinks = new ConnectLinksResource(transport);
     this.services = new ServicesResource(transport);
+    this.triggers = new TriggersResource(transport);
   }
 }
 
