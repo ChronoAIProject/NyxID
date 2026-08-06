@@ -23,7 +23,9 @@ completion surface out of the backend-owned `/oauth/` namespace, makes chat
 cards settle from attempt-aware authenticated reads, and keeps the completion
 page outcome-neutral. Design and adversarial review:
 `OAUTH_POPUP_COMPLETION_FIX_PLAN.md` v2 and
-`OAUTH_POPUP_COMPLETION_FIX_SOL_REVIEW.md`.
+`OAUTH_POPUP_COMPLETION_FIX_SOL_REVIEW.md`. The implementation review and its
+round-two corrections are recorded in
+`OAUTH_POPUP_COMPLETION_FIX_OPUS_REVIEW.md` and §5 below.
 
 ---
 
@@ -189,6 +191,10 @@ All in `backend/src/services/user_api_key_service.rs`:
    matching tab-local service label, the page only directs the user back to
    the chat where authenticated reads show the result; it never says connected
    or authorized.
+   `KeyInfo.is_active` is the `UserService` enabled flag and is not
+   authorization evidence; `GET /keys` only returns rows where it is true.
+   Every card settlement branch must require `UserApiKey.status == active`
+   (and timestamp advancement for reconnects).
 5. **Initiate is non-destructive** (§3). Credential-clearing writes happen
    only under the legacy unhealthy-status gate or after a nonce-guarded
    exchange/denial on a `pending_auth` row.
@@ -254,6 +260,27 @@ wizard rebuilding were added. Implementation also generation-isolates the
 dialog-scoped status query, closing the same-key retry cache hole on both the
 card and dialog surfaces.
 
+### Completion-state implementation review, round 2 (2026-08-07)
+
+`OAUTH_POPUP_COMPLETION_FIX_OPUS_REVIEW.md` returned REWORK after reproducing
+two false-Connected card states and finding three test gaps plus a destructive
+popup-handoff regression. All findings were accepted and corrected:
+
+| # | Sev | Finding | Disposition |
+|---|---|---|---|
+| F-1 | P1 | Cancelled fresh connect became Connected because `is_active` was treated as authorization | **Fixed** — the cancelled escape hatch remains, but requires matching key id plus `status == active`; reconnects also require `last_authorized_at` advancement. |
+| F-2 | P1 | `connectedNow` had the same defect, hiding all pending/failed/timed-out states | **Fixed** — catalog matching now requires `status == active`; a real `pending_auth` placeholder remains Authorizing. |
+| F-3 | P2 | Pending fixtures used the impossible `is_active: false` server shape | **Fixed** — fixtures now mirror `GET /keys` (`is_active: true`, `status: pending_auth`) and explicitly reject Connected copy. |
+| F-4 | P2 | Dialog query generation isolation was mocked out of its tests | **Fixed** — a real QueryClient test retries the same key under a new attempt id and proves no stale terminal result is exposed. |
+| F-5 | P2 | Reverting the registered route to `/oauth` left the suite green | **Fixed** — a route-table test observes the exported route object's exact `/oauth-complete` path. |
+| F-6 | P2 | Popup readiness/handoff failure deleted the placeholder and removed the manual link; destructive cleanup lacked a generation guard | **Fixed** — validated handoff failures retain polling, the announced attempt, and the manual link; old backends without a nonce degrade through a credential-free HTTP(S) URL validator; fatal cleanup is generation-guarded. The ready budget is 5s for a cold/no-cache interstitial, after which fallback is non-destructive. |
+
+Each correction was mutation-checked: locally reverting the production line
+made its new focused regression test fail, then restoring it returned the
+six-file focused suite to **70/70 passing**. In particular, removing the outer
+generation guard caused a reproduced
+`DELETE /keys/fresh-service-1?only_if_pending=true` after unmount.
+
 ### CodeQL on PR #1349 (post-realignment) — fixed in `403f6fc3`
 
 | # | Sev | Finding | Disposition |
@@ -302,6 +329,23 @@ mobile browser:
    dialog-close rendering neutral Cancelled rather than Failed.
 
 ## 8. Gate results
+
+### Completion-state repair, round 2 — re-run 2026-08-07
+
+| Gate | Result |
+|---|---|
+| `npm --prefix frontend run build` | passed: `tsc -b`, main and credential-accept Vite builds, and mock-footprint assertion; one pre-existing lightningcss pseudo-class warning |
+| `npm --prefix frontend run lint` | passed: 0 errors, 23 pre-existing warnings outside the changed files |
+| `npm --prefix frontend test` | host-contention run: **2659 passed, 1 unrelated 5s timeout** (`AddKeyDialog — custom endpoint path`) |
+| `npm --prefix frontend test -- --maxWorkers=2` | **2660/2660 passed** in 223 files (282.91s) |
+| `cargo test -p nyxid` | final exact rerun: **4997/4997 passed** (317.58s) |
+
+The first exact Cargo run had 4996 passes and one unrelated elapsed-time
+failure in `approve_handler_returns_before_slow_notification_dispatch_finishes`.
+The test passed alone (1/1 in 7.64s); the exact full command then passed on
+rerun. Host load during diagnosis was 18.90 on 12 cores. No timeout or runner
+configuration was changed. Wizard build/freshness remains sequenced last,
+after this documentation and all source edits.
 
 ### Completion-state repair — independently re-run 2026-08-06
 
