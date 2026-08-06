@@ -11,8 +11,15 @@ import {
   resetChatActivityForTests,
 } from "@/lib/assistant/connect-watch";
 import type { ActionReport } from "@/schemas/assistant-actions";
+import { usePendingConnectStore } from "@/stores/pending-connect-store";
 import type { ActionCardContentBlock } from "@/types/assistant";
 import { ActionCard } from "./action-card";
+
+// The pending-authorization store outlives any one card by design, so it also
+// outlives any one test. Reset it or a stranded attempt leaks forward.
+beforeEach(() => {
+  usePendingConnectStore.setState({ attempts: {} });
+});
 
 const { mockGet } = vi.hoisted(() => ({ mockGet: vi.fn() }));
 
@@ -45,6 +52,9 @@ vi.mock("@/components/dashboard/add-key-dialog", () => ({
     prefillCustom,
     onSuccess,
     onAuthorizationPending,
+    launch,
+    flow,
+    onPopupViewResult,
   }: {
     readonly open: boolean;
     readonly onOpenChange: (open: boolean) => void;
@@ -53,13 +63,24 @@ vi.mock("@/components/dashboard/add-key-dialog", () => ({
     readonly prefillCustom?: { readonly name?: string };
     readonly onSuccess?: (result: AddKeyDialogCompletion) => void;
     readonly onAuthorizationPending?: (keyId: string) => void;
+    readonly launch?: string;
+    readonly flow?: string;
+    readonly onPopupViewResult?: (keyId: string) => boolean;
   }) =>
     open ? (
       <div
         role="dialog"
         data-prefill={prefillSlug ?? prefillCustom?.name ?? ""}
         data-prefill-include-all={String(prefillIncludeAllCatalog ?? false)}
+        data-launch={launch ?? ""}
+        data-flow={flow ?? ""}
       >
+        <button
+          type="button"
+          onClick={() => onPopupViewResult?.("key-pending-1")}
+        >
+          Return from popup
+        </button>
         <button
           type="button"
           onClick={() =>
@@ -182,6 +203,61 @@ describe("ActionCard", () => {
         },
       },
     });
+  });
+
+  it("hands the connect journey to the managed popup, not the chat tab", async () => {
+    // Provider consent pages cannot be iframed, so the popup is the only
+    // handoff that keeps the conversation alive underneath it. Without these
+    // two props the dialog silently takes the legacy path: a second click on
+    // a `target="_blank"` link, and a callback that redirects the chat tab to
+    // the key page.
+    const user = userEvent.setup();
+    renderCard(
+      <ActionCard
+        block={catalogBlock()}
+        onProgress={vi.fn()}
+        onBlock={vi.fn()}
+        onResolve={vi.fn()}
+      />,
+    );
+
+    await user.click(screen.getByRole("button", { name: "Connect GitHub" }));
+    const dialog = screen.getByRole("dialog");
+    expect(dialog).toHaveAttribute("data-launch", "popup");
+    expect(dialog).toHaveAttribute("data-flow", "cc");
+  });
+
+  it("closes the dialog on return from the popup without abandoning the connection", async () => {
+    const user = userEvent.setup();
+    const onProgress = vi.fn();
+    mockGet.mockResolvedValue({ id: "key-pending-1", status: "pending_auth" });
+    const { rerender } = renderCard(
+      <ActionCard
+        block={catalogBlock()}
+        onProgress={onProgress}
+        onBlock={vi.fn()}
+        onResolve={vi.fn()}
+      />,
+    );
+
+    await user.click(screen.getByRole("button", { name: "Connect GitHub" }));
+    rerender(
+      <ActionCard
+        block={catalogBlock({ status: "in_progress" })}
+        onProgress={onProgress}
+        onBlock={vi.fn()}
+        onResolve={vi.fn()}
+      />,
+    );
+    await user.click(
+      screen.getByRole("button", { name: "Hand off to provider" }),
+    );
+    await user.click(screen.getByRole("button", { name: "Return from popup" }));
+
+    // Back in the transcript, and still owned by the card's watch — the
+    // outcome belongs in the conversation, not on a detour to the keys page.
+    expect(screen.queryByRole("dialog")).toBeNull();
+    expect(onProgress).not.toHaveBeenCalledWith("action-card-1", false);
   });
 
   it("rolls a rejected completed report out of its busy projection", async () => {
@@ -744,5 +820,90 @@ describe("ActionCard background authorization watch", () => {
       "action-card-1",
       expect.stringContaining("stopped waiting"),
     );
+  });
+
+  it("carries a live authorization across a remount", async () => {
+    // The regression this exists for: the busy projection lives in the
+    // transport mirror and survives a history refetch, but the watch that
+    // clears it used to be component state. Anything that remounts the card
+    // — switching conversations, a focus refetch that re-keys the message
+    // group — destroyed the exit and left the card spinning at "Connecting"
+    // with every control disabled and no writer able to move it.
+    const user = userEvent.setup();
+    const props = watchProps();
+    mockGet.mockResolvedValue({ id: "key-pending-1", status: "pending_auth" });
+
+    const { rerender, unmount } = renderCard(
+      <ActionCard block={catalogBlock()} {...props} />,
+    );
+    await handOffAndDismiss(user, rerender, props);
+    unmount();
+
+    renderCard(
+      <ActionCard block={catalogBlock({ status: "in_progress" })} {...props} />,
+    );
+
+    expect(props.onProgress).not.toHaveBeenCalledWith("action-card-1", false);
+    expect(
+      await screen.findByRole("button", { name: /Waiting for authorization/ }),
+    ).toBeInTheDocument();
+
+    // And it is a live watch, not just preserved copy: the remounted card
+    // still settles itself off the key's terminal status. The window spans a
+    // poll interval, so it outlasts waitFor's default.
+    mockGet.mockResolvedValue({ id: "key-pending-1", status: "active" });
+    await waitFor(
+      () => {
+        expect(props.onResolve).toHaveBeenCalledWith({
+          actionRequestId: "act-1",
+          originTurnId: "turn-origin-1",
+          disposition: "completed",
+          resource: { userService: { userServiceId: "key-pending-1" } },
+        });
+      },
+      { timeout: 4_000 },
+    );
+  });
+
+  it("returns a stranded busy card to actionable on mount", async () => {
+    // No authorization behind the busy projection and no dialog open: the
+    // card can only have been orphaned, so it must not mount into a disabled
+    // spinner. Rolling back to `pending` is what makes retry possible.
+    const props = watchProps();
+    mockGet.mockResolvedValue({ id: "key-pending-1", status: "pending_auth" });
+
+    renderCard(
+      <ActionCard block={catalogBlock({ status: "in_progress" })} {...props} />,
+    );
+
+    await waitFor(() => {
+      expect(props.onProgress).toHaveBeenCalledWith("action-card-1", false);
+    });
+  });
+
+  it("keeps decline reachable while a connection is in flight", async () => {
+    // The manual floor under every automatic settlement. A busy card whose
+    // watch is gone still has to be abandonable.
+    const user = userEvent.setup();
+    const props = watchProps();
+    mockGet.mockResolvedValue({ id: "key-pending-1", status: "pending_auth" });
+    usePendingConnectStore.setState({
+      attempts: {
+        "action-card-1": { keyId: "key-pending-1", startedAt: Date.now() },
+      },
+    });
+
+    renderCard(
+      <ActionCard block={catalogBlock({ status: "in_progress" })} {...props} />,
+    );
+
+    const decline = screen.getByRole("button", { name: "Decline" });
+    expect(decline).toBeEnabled();
+    await user.click(decline);
+    expect(props.onResolve).toHaveBeenCalledWith({
+      actionRequestId: "act-1",
+      originTurnId: "turn-origin-1",
+      disposition: "declined",
+    });
   });
 });
