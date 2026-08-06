@@ -39,6 +39,7 @@ vi.mock("@tanstack/react-router", () => ({
 }));
 
 vi.mock("@/hooks/use-keys", () => ({
+  KEY_AUTH_ACTIVE: "active",
   KEY_AUTH_FAILED: "failed",
   useKeys: () => ({ data: mocks.keys }),
   useKeyAuthorizationWatch: () => mocks.watch,
@@ -443,7 +444,9 @@ describe("ConnectCard authorization settlement", () => {
       {
         id: "key-1",
         catalog_service_slug: "api-github",
-        is_active: false,
+        // GET /keys only returns enabled UserService rows; authorization state
+        // is carried independently by UserApiKey.status.
+        is_active: true,
         auto_connected: false,
         status: "pending_auth",
         credential_type: "oauth2",
@@ -555,7 +558,7 @@ describe("ConnectCard catalog resolution", () => {
       {
         id: "key-github",
         catalog_service_slug: "api-github",
-        is_active: false,
+        is_active: true,
         auto_connected: false,
         status: "pending_auth",
         credential_type: "oauth2",
@@ -607,12 +610,12 @@ describe("ConnectCard catalog resolution", () => {
     ).toBeInTheDocument();
   });
 
-  it("streams authorization progress while the placeholder key is pending", () => {
+  it("never renders a real pending placeholder as Connected", () => {
     mocks.keys = [
       {
         id: "key-github",
         catalog_service_slug: "api-github",
-        is_active: false,
+        is_active: true,
         auto_connected: false,
         status: "pending_auth",
         credential_type: "oauth2",
@@ -623,6 +626,7 @@ describe("ConnectCard catalog resolution", () => {
 
     expect(screen.getByRole("status")).toHaveTextContent(/Waiting for GitHub/i);
     expect(screen.getByText("Authorizing")).toBeInTheDocument();
+    expect(screen.queryByText("Connected")).not.toBeInTheDocument();
   });
 });
 

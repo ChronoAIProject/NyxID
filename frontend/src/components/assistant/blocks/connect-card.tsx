@@ -8,6 +8,7 @@ import { ServiceIcon } from "@/components/service-icon";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import {
+  KEY_AUTH_ACTIVE,
   KEY_AUTH_FAILED,
   useCatalogEntry,
   useKeyAuthorizationWatch,
@@ -118,13 +119,15 @@ export function ConnectCard({
     !needsReauthorization &&
     block.catalog_slug !== "custom" &&
     (keys ?? []).some(
-      (key) => key.is_active && key.catalog_service_slug === block.catalog_slug,
+      (key) =>
+        key.status === KEY_AUTH_ACTIVE &&
+        key.catalog_service_slug === block.catalog_slug,
     );
   const cancelledAuthorizationAdvanced =
     localVerdict?.kind === "cancelled" &&
     matchingKey !== undefined &&
     matchingKey.id === localVerdict.keyId &&
-    matchingKey.is_active &&
+    matchingKey.status === KEY_AUTH_ACTIVE &&
     (localVerdict.previousAuthorizationAt === undefined ||
       (matchingKey.last_authorized_at != null &&
         matchingKey.last_authorized_at !==
