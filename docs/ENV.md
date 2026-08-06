@@ -300,8 +300,9 @@ The sweep only refreshes the short-lived **access** token. It does **not** exten
 | `TRIGGER_RATE_LIMIT_PER_SECOND` | `10` | Sustained public ingress rate allowed per trigger. |
 | `TRIGGER_RATE_LIMIT_BURST` | `20` | Per-trigger token bucket capacity. |
 | `TRIGGER_PAYLOAD_MAX_BYTES` | `262144` | Maximum raw trigger request body size. |
+| `TRIGGER_DELIVERY_RETENTION_HOURS` | `72` | Hours to retain encrypted webhook-target envelopes for durable dedup and replay. `0` disables payload storage/replay while metadata remains bounded to 72 hours. |
 
-Trigger dedup uses the shared `CHANNEL_EVENT_DEDUP_CAPACITY` and `CHANNEL_EVENT_DEDUP_TTL_SECS` bounds in a separate cache.
+Webhook-target dedup uses durable delivery records. Agent and notification targets use the shared `CHANNEL_EVENT_DEDUP_CAPACITY` and `CHANNEL_EVENT_DEDUP_TTL_SECS` bounds in a separate per-process cache.
 
 ## Mobile Push Notifications (Optional)
 

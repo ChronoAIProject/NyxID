@@ -43,7 +43,7 @@ Strict separation: `handlers/` -> `services/` -> `models/`
 - 11200-11207 auth-device login: 11200 `AuthDeviceCodeNotFound`, 11201 `AuthDeviceCodeExpired`, 11202 `AuthDeviceCodePending`, 11203 `AuthDeviceCodeSlowDown`, 11204 `AuthDeviceCodeDenied`, 11205 `AuthDeviceCodeAlreadyDelivered`, 11206 `AuthDeviceCodeRateLimited`, 11207 `AuthDeviceUserCodeInvalid`
 - 11300-11305 connect links: 11300 `ConnectLinkNotFound`, 11301 `ConnectLinkExpired`, 11302 `ConnectLinkAlreadyCompleted`, 11303 `ConnectLinkCancelled`, 11304 `ConnectLinkRateLimited`, 11305 `ConnectLinkCompletionInProgress`
 - 11500 `GrantCascadeConfirmationRequired` (HTTP 409)
-- 11600-11605 triggers: 11600 `TriggerNotFound`, 11601 `TriggerSecretInvalid`, 11602 `TriggerRateLimited`, 11603 `TriggerPayloadTooLarge`, 11604 `TriggerDeliveryUnsupported`, 11605 `TriggerDeliveryFailed`
+- 11600-11606 triggers: 11600 `TriggerNotFound`, 11601 `TriggerSecretInvalid`, 11602 `TriggerRateLimited`, 11603 `TriggerPayloadTooLarge`, 11604 `TriggerDeliveryUnsupported`, 11605 `TriggerDeliveryFailed`, 11606 `TriggerDeliveryRecordNotFound`
 
 ### 4. Frontend Patterns
 
@@ -182,10 +182,10 @@ Single-use hosted credential setup for agents and CLI callers. An authenticated 
 
 ### 14. Connection Webhooks and Triggers
 
-- Developer-app connection webhooks use a server-generated secret encrypted with `EncryptionKeys`. Secrets are returned only by configure/rotate responses. Delivery signs `X-NyxID-Timestamp + "." + raw_body` with HMAC-SHA256 and sends `X-NyxID-Signature: sha256=<hex>`; retries are bounded and transition paths never depend on delivery success.
+- Developer-app connection webhooks use a server-generated secret encrypted with `EncryptionKeys`. Secrets are returned only by configure/rotate responses, alongside a non-secret key ID. Delivery signs `X-NyxID-Timestamp + "." + raw_body` with HMAC-SHA256 and sends the signature, timestamp, event type, delivery ID, and key ID headers. Connect-link terminal events use the link as a durable bounded outbox; connection-expiry events remain best effort. Transition paths never depend on delivery success.
 - Outbound webhook configuration requires HTTPS and public DNS/IP targets. Apply `webhook_delivery_service::validate_webhook_url` to every new server-fetched webhook URL.
 - Trigger inbound secrets use the `nyx_trg_` prefix and are SHA-256 hashed. HMAC verification additionally retains an encrypted copy because verification requires the raw key. Trigger and delivery types are serde-tagged enums; all secret-bearing structs use redacted `Debug` implementations.
-- Trigger ingress is public; unknown and disabled triggers are not-found-shaped, then per-trigger rate limiting runs before body reads, HMAC decryption, or verification. Payload bodies are never persisted. Dedup is bounded and per-process: webhook targets reserve atomically before fire-and-forget delivery, while agent and notification targets insert only after synchronous success so senders may retry failures. Agent targets enter through the trusted channel-event service path without broadening the public channel-event auth contract.
+- Trigger ingress is public; unknown and disabled triggers are not-found-shaped, then per-trigger rate limiting runs before body reads, HMAC decryption, or verification. Webhook-target envelopes are persisted only in `trigger_deliveries`, encrypted with `EncryptionKeys`, and TTL-expired for durable dedup and authenticated replay; `TRIGGER_DELIVERY_RETENTION_HOURS=0` stores metadata only. Agent and notification payloads are never persisted and retain bounded per-process dedup after synchronous success. Agent targets enter through the trusted channel-event service path without broadening the public channel-event auth contract.
 
 ## File Structure
 
@@ -236,8 +236,8 @@ All API routes under `/api/v1`:
 - `/auth` -- register, login, logout, refresh, verify-email, forgot/reset-password
 - `/auth/device/{request,poll,approve,preview}` -- auth device-code login (see Critical Rule 12 for auth posture per route)
 - `/connect-links` -- create, poll, creator cancel, public preview, human decline, and human-only completion for hosted service connections (see Critical Rule 13)
-- `/developer/oauth-clients/{client_id}/connection-webhook` -- human-only developer-app lifecycle webhook configure/disable; `/connection-webhook/rotate-secret` returns a new signing secret once
-- `/triggers` -- trigger CRUD and secret rotation (JWT or agent API key; delegated, relay, and service-account tokens rejected)
+- `/developer/oauth-clients/{client_id}/connection-webhook` -- human-only developer-app lifecycle webhook configure/disable; `/connection-webhook/rotate-secret` returns a new signing secret and key ID once
+- `/triggers` -- trigger CRUD; `/{id}/rotate-secret`, `/{id}/rotate-delivery-secret`, `/{id}/deliveries`, and `/{id}/deliveries/{event_id}/redeliver` cover inbound/outbound secret rotation, delivery history, and retained-envelope replay (JWT or agent API key; delegated, relay, and service-account tokens rejected)
 - `/webhooks/triggers/{trigger_id}` -- unauthenticated trigger ingress verified by token or raw-body HMAC (see Critical Rule 14)
 - `/auth/mfa` -- setup, confirm, verify (login), disable (nested under `/auth` in `routes.rs`; `setup` is idempotent against unverified factors per NyxID#506)
 - `/users` -- get/update current user
@@ -396,6 +396,7 @@ CHANNEL_EVENT_DEDUP_TTL_SECS=300
 TRIGGER_RATE_LIMIT_PER_SECOND=10
 TRIGGER_RATE_LIMIT_BURST=20
 TRIGGER_PAYLOAD_MAX_BYTES=262144
+TRIGGER_DELIVERY_RETENTION_HOURS=72  # 0 keeps metadata only and disables replay
 
 INVITE_CODE_REQUIRED=true           # Gate registration behind invite codes (issue #179); false for public launch
 AUTO_VERIFY_EMAIL=false             # Dev only: skip email verification on registration
