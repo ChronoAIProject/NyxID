@@ -1,5 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import aevatarNyxidChatStream from "@/lib/assistant/__fixtures__/aevatar-nyxid-chat-stream.sse?raw";
+import aevatarWorkflowCreateStream from "@/lib/assistant/__fixtures__/aevatar-workflow-create-stream.sse?raw";
 import { AevatarAssistantTransport } from "@/lib/assistant/aevatar-transport";
 import {
   chatStreamClient,
@@ -425,6 +426,53 @@ describe("wire replay projector parity", () => {
       truncated: false,
     });
 
+    expect(normalizeGeneratedIds(replay.events)).toEqual(
+      normalizeGeneratedIds(liveEvents),
+    );
+    expect(normalizeGeneratedIds(replay.state.messages)).toEqual(
+      normalizeGeneratedIds(reduce(liveEvents).messages),
+    );
+  });
+
+  // Sanitized capture of a real workflow CREATE turn (production, 2026-08-06).
+  // Every synthetic workflow fixture models a continuation, which always
+  // carries a `stateVersion`; a create turn's context frame omits the member
+  // entirely because proto3 JSON elides the version-0 default. That divergence
+  // is invisible to the replay projector — it never reads the watermark — so
+  // only a live-transport replay of the real bytes catches a transport that
+  // rejects the create shape.
+  it("matches the live workflow transport for the real create-turn SSE fixture", async () => {
+    const framer = new WireLineFramer(64 * 1024);
+    const pushed = framer.push(
+      new TextEncoder().encode(aevatarWorkflowCreateStream),
+    );
+    const finished = framer.finish();
+    const frames = parseCapturedWireLines([
+      ...pushed.lines,
+      ...finished.lines,
+    ]);
+
+    const liveEvents = await projectThroughLiveTransport("workflow", frames);
+
+    expect(liveEvents.at(-1)).toMatchObject({
+      event: "turn.completed",
+      status: "completed",
+    });
+    expect(
+      reduce(liveEvents).messages.some((message) =>
+        message.blocks.some(
+          (block) =>
+            block.type === "text" &&
+            block.text.includes("What would you like to build"),
+        ),
+      ),
+    ).toBe(true);
+
+    const replay = projectReplayFrames(frames, {
+      protocol: "workflow",
+      captureOutcome: "complete",
+      truncated: false,
+    });
     expect(normalizeGeneratedIds(replay.events)).toEqual(
       normalizeGeneratedIds(liveEvents),
     );
