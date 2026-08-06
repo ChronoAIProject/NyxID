@@ -1330,11 +1330,16 @@ function parseAuthorizationBlocker(
  *    "reason_code":"USER_SERVICE_NOT_VISIBLE","safe_message":"..."}
  *
  * Keyed on the shape rather than the tool name so any NyxID tool publishing
- * this contract surfaces a card. `blocked` is the authority: upstream sets it
- * only for `ServiceRegistrationRequired`, so a transient
- * `NYXID_SOURCE_UNAVAILABLE` stays an ordinary failure and never prompts a
- * pointless reconnect.
+ * this contract surfaces a card — which means the WHOLE DTO must be present
+ * before `blocked` is treated as authority. `blocked: true` plus a slug is not
+ * enough: any tool could emit those two keys and mint a bogus connect card
+ * while failing its own step. Upstream only sets `blocked` alongside
+ * `ServiceRegistrationRequired` with a non-empty code and message, so
+ * requiring all five mirrors its own invariant and keeps a transient
+ * `NYXID_SOURCE_UNAVAILABLE` an ordinary failure.
  */
+const REQUIRE_SERVICE_BLOCKED_STATUS = "ServiceRegistrationRequired";
+
 export function parseToolResultBlocker(
   result: unknown,
 ): AuthorizationBlocker | null {
@@ -1350,11 +1355,20 @@ export function parseToolResultBlocker(
   }
   const body = record as Record<string, unknown>;
   if (body["blocked"] !== true) return null;
+  if (body["readiness_status"] !== REQUIRE_SERVICE_BLOCKED_STATUS) return null;
+  // Upstream refuses to set `blocked` without both of these, so their absence
+  // means this is not the readiness DTO.
+  const rawReason = body["reason_code"];
+  const rawSafeMessage = body["safe_message"];
+  if (typeof rawReason !== "string" || !rawReason.trim()) return null;
+  if (typeof rawSafeMessage !== "string" || !rawSafeMessage.trim()) return null;
 
   const rawSlug = body["service_slug"];
   if (typeof rawSlug !== "string") return null;
   const serviceSlug = rawSlug.trim().toLowerCase();
-  if (!/^[a-z0-9][a-z0-9-]{0,127}$/.test(serviceSlug)) return null;
+  // Upstream normalizes slugs to `[a-z0-9._-]`; keep parity so a legitimate
+  // dotted or underscored slug still raises a card.
+  if (!/^[a-z0-9][a-z0-9._-]{0,127}$/.test(serviceSlug)) return null;
 
   // Upstream's `safe_message` here is operator diagnostics ("No caller-visible
   // NyxID UserService matches the requested service."), not user-facing prose,
@@ -1362,7 +1376,7 @@ export function parseToolResultBlocker(
   // own vocabulary (`USER_SERVICE_NOT_VISIBLE`), which is a not-connected
   // condition; only an explicit unauthorized code means "reconnect".
   const reasonCode: AuthorizationReasonCode =
-    body["reason_code"] === "NYXID_UNAUTHORIZED"
+    rawReason === "NYXID_UNAUTHORIZED"
       ? "NYXID_UNAUTHORIZED"
       : "NYXID_SERVICE_NOT_CONNECTED";
   const serviceLabel = humanizeSlug(serviceSlug);
@@ -1387,9 +1401,31 @@ function mediaPartPayload(payload: Record<string, unknown>): MediaPayload {
   return {
     mediaType: protoString(part["mediaType"]) || undefined,
     dataBase64: protoString(part["dataBase64"]) || undefined,
-    url: protoString(part["uri"]) || undefined,
+    url: safeMediaUrl(protoString(part["uri"])),
     name: protoString(part["name"]) || undefined,
   };
+}
+
+/**
+ * An artifact's `download_url` is rendered directly as an anchor `href`, so a
+ * producer-supplied location is only safe after its scheme is checked — a
+ * `javascript:` or `data:text/html` URI would otherwise be one click away.
+ * The flat AG-UI arm always had this hole; it was unreachable because the
+ * workflow producer emits media nested under `part`, and wiring that up makes
+ * it reachable. Anything not plainly fetchable is dropped, which degrades to
+ * the "shapeless media" acknowledgement rather than rendering a live link.
+ */
+function safeMediaUrl(value: string): string | undefined {
+  if (!value) return undefined;
+  let parsed: URL;
+  try {
+    parsed = new URL(value, window.location.origin);
+  } catch {
+    return undefined;
+  }
+  return parsed.protocol === "https:" || parsed.protocol === "http:"
+    ? parsed.toString()
+    : undefined;
 }
 
 function humanizeSlug(slug: string): string {
@@ -5075,9 +5111,14 @@ export class AevatarAssistantTransport implements AssistantTransport {
         }
         return;
       case "aevatar.workflow.signal.buffered":
-        // The awaited signal landed: the run is live again, so let the next
-        // frame re-arm the watchdog.
+        // The awaited signal landed: the run is live again. Re-arm HERE rather
+        // than leaving it to the next frame — the per-frame `armWatchdog` at
+        // the top of this dispatch already ran while `awaitingSignal` was
+        // still true, so it cleared the timer without setting one. If upstream
+        // then stalls, no later frame arrives to arm it and the run hangs
+        // until the user presses Stop.
         run.awaitingSignal = false;
+        this.armWatchdog(conversationId, run);
         if (run.turnId) {
           this.emit(conversationId, run, {
             cursor: this.nextCursor(run),
@@ -5687,11 +5728,21 @@ export class AevatarAssistantTransport implements AssistantTransport {
   /**
    * `aevatar.human_input.request` — a workflow step suspended awaiting a person.
    *
-   * Rendered as prose and deliberately NOT as an approval card:
-   * `WorkflowHumanInputRequestCustomPayload` carries no approval/request id, so
-   * an approve/deny control would post a decision against an identity upstream
-   * never issued. Showing the ask and holding the watchdog is the honest
-   * subset; a real input control needs an upstream resume identity first.
+   * Rendered as prose and deliberately NOT as an approval card: the payload
+   * carries no approval id, and approve/deny is the wrong shape for a request
+   * that wants typed input or a choice from `options`.
+   *
+   * A resume identity DOES exist — upstream's `CanResume` is `runId + stepId`,
+   * both of which this payload carries — so an actual input control is
+   * buildable; it needs a NyxID resume route and a card type, which is feature
+   * work rather than frame decoding. Until then this shows the ask instead of
+   * dropping it, and suspends the watchdog for the same reason an approval
+   * gate does: the run is idle on a person, not hung.
+   *
+   * Consequence to keep in mind: nothing in the workflow frame vocabulary
+   * announces a resume (the adapter emits no resumed event), so a run resumed
+   * out of band stays flagged and its watchdog stays off for the rest of the
+   * stream. That is the same trade the approval gate already makes.
    */
   private addHumanInputCard(
     conversationId: string,

@@ -197,6 +197,17 @@ class ReplayProjector {
   private readonly promptedActions = new Map<string, string>();
   private readonly openCards = new Map<string, "approval" | "connect">();
   private waitingForApproval = false;
+  /**
+   * Suspended on a signal wait or a human-input request. Mirrors the live
+   * transport's flag of the same name so a capture that legitimately ENDS at a
+   * suspension is finalized as waiting rather than scored a truncated failure.
+   */
+  private awaitingSignal = false;
+
+  /** Idle on purpose — an approval gate, a signal wait, or human input. */
+  private get suspended(): boolean {
+    return this.waitingForApproval || this.awaitingSignal;
+  }
 
   constructor(context: WireReplayContext) {
     this.context = context;
@@ -215,7 +226,7 @@ class ReplayProjector {
       partial:
         this.context.truncated ||
         this.context.captureOutcome !== "complete" ||
-        (!this.terminal && !this.waitingForApproval),
+        (!this.terminal && !this.suspended),
     };
   }
 
@@ -664,6 +675,7 @@ class ReplayProjector {
     const dedupeKey = `human-input:${stepId || stringValue(body, "runId")}`;
     if (this.promptedApprovals.has(dedupeKey)) return;
     this.promptedApprovals.add(dedupeKey);
+    this.awaitingSignal = true;
 
     const prompt = stringValue(body, "prompt") || stringValue(body, "content");
     const options = Array.isArray(body["options"])
@@ -685,6 +697,16 @@ class ReplayProjector {
       },
       frame,
     );
+    // Parity with the live transport, which moves the correlated step to
+    // waiting rather than leaving it active behind the prompt.
+    const step = stepId
+      ? this.steps.find((candidate) => candidate.key === stepId)
+      : undefined;
+    if (step?.status === "active") {
+      step.status = "waiting";
+      step.approval_request_id = dedupeKey;
+      this.patchRun(frame);
+    }
     if (this.turnId) {
       this.emit({
         event: "turn.status",
@@ -916,6 +938,7 @@ class ReplayProjector {
         return;
       }
       case "aevatar.workflow.waiting_signal":
+        this.awaitingSignal = true;
         if (this.turnId) {
           this.emit({
             event: "turn.status",
@@ -926,6 +949,7 @@ class ReplayProjector {
         return;
       case "aevatar.workflow.signal.buffered":
         // The awaited signal landed; the run is live again.
+        this.awaitingSignal = false;
         if (this.turnId) {
           this.emit({
             event: "turn.status",
@@ -1008,15 +1032,26 @@ class ReplayProjector {
       this.finishStep(key, true, "Completed", frame);
       return;
     }
-    const failed = /(ERROR|DENIED)/i.test(stringValue(receipt, "status"));
+    // Parity with the live transport: `AUTHORIZATION_REQUIRED` contains neither
+    // "ERROR" nor "DENIED", so status alone scored a blocked capability as a
+    // success.
+    const blocker = parseToolResultBlocker(receipt["resultJson"]);
+    if (blocker) this.addConnectionBlocker(blocker, frame);
+    const failed =
+      Boolean(blocker) ||
+      /(ERROR|DENIED|AUTHORIZATION_REQUIRED)/i.test(
+        stringValue(receipt, "status"),
+      );
     this.finishStep(
       key,
       !failed,
-      summarizeToolResult(
-        failed
-          ? (receipt["errorMessage"] ?? receipt["errorCode"] ?? "Failed")
-          : receipt["resultJson"],
-      ),
+      blocker
+        ? blocker.safeMessage
+        : summarizeToolResult(
+            failed
+              ? (receipt["errorMessage"] ?? receipt["errorCode"] ?? "Failed")
+              : receipt["resultJson"],
+          ),
       frame,
     );
   }
@@ -1157,12 +1192,12 @@ class ReplayProjector {
         this.finalizeActivity("blocked");
         this.completeTurn("blocked", null);
       } else {
-        this.finalizeActivity(this.waitingForApproval ? "waiting" : "done");
+        this.finalizeActivity(this.suspended ? "waiting" : "done");
         this.completeTurn("completed", null);
       }
       return;
     }
-    if (this.waitingForApproval && this.context.captureOutcome === "complete") {
+    if (this.suspended && this.context.captureOutcome === "complete") {
       this.finalizeActivity("waiting");
       this.completeTurn("completed", null);
       return;

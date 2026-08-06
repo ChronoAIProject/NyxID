@@ -7219,6 +7219,123 @@ describe("studio new chats and typed actor compatibility", () => {
     );
   });
 
+  // `blocked: true` is authority only once the whole readiness DTO is present.
+  // Without that, any tool emitting two common keys could mint a connect card
+  // for a service the user is not actually missing, and fail its own step.
+  it.each([
+    [
+      "an unrelated tool echoing blocked + slug",
+      { blocked: true, service_slug: "api-github" },
+    ],
+    [
+      "a non-registration readiness status",
+      {
+        blocked: true,
+        service_slug: "api-github",
+        readiness_status: "SourceStale",
+        reason_code: "NYXID_SOURCE_UNAVAILABLE",
+        safe_message: "Capability facts are unavailable.",
+      },
+    ],
+    [
+      "an empty reason code",
+      {
+        blocked: true,
+        service_slug: "api-github",
+        readiness_status: "ServiceRegistrationRequired",
+        reason_code: "",
+        safe_message: "something",
+      },
+    ],
+    [
+      "an empty safe message",
+      {
+        blocked: true,
+        service_slug: "api-github",
+        readiness_status: "ServiceRegistrationRequired",
+        reason_code: "USER_SERVICE_NOT_VISIBLE",
+        safe_message: "",
+      },
+    ],
+  ])("does not mint a connect card from %s", async (_label, result) => {
+    mockChatStreams((request) =>
+      request.url === WORKFLOW_URL
+        ? {
+            frames: [
+              workflowContextFrame("3"),
+              { runStarted: { threadId: RUN_ACTOR, runId: RUN_ACTOR } },
+              { toolCallStart: { toolCallId: "c1", toolName: "some_tool" } },
+              {
+                toolCallEnd: {
+                  toolCallId: "c1",
+                  result: JSON.stringify(result),
+                },
+              },
+              ...WORKFLOW_TAIL,
+            ] as ChatStreamFrame[],
+          }
+        : undefined,
+    );
+    stubFetch();
+    const transport = new AevatarAssistantTransport();
+    const conversation = await transport.createConversation();
+
+    const events = await collectWorkflowTurn(transport, conversation.id, "go");
+
+    expect(
+      openedBlocks(events).some((block) => block.type === "connect_card"),
+    ).toBe(false);
+  });
+
+  // `armWatchdog` runs before this frame is dispatched, while the run is still
+  // flagged as suspended, so it clears the timer without setting one. Clearing
+  // the flag alone would leave the run with no watchdog at all.
+  it("re-arms the watchdog when the awaited signal arrives", async () => {
+    vi.useFakeTimers();
+    try {
+      const push = openWorkflowStream();
+      stubFetch();
+      const transport = new AevatarAssistantTransport();
+      const conversation = await transport.createConversation();
+      const events: TurnEvent[] = [];
+      transport.sendMessage(conversation.id, "wait", (event) =>
+        events.push(event),
+      );
+      await vi.advanceTimersByTimeAsync(0);
+      push([
+        workflowContextFrame("3"),
+        { runStarted: { threadId: RUN_ACTOR, runId: RUN_ACTOR } },
+        customFrame("aevatar.workflow.waiting_signal", {
+          runId: RUN_ACTOR,
+          stepId: "await",
+          signalName: "approval",
+        }),
+      ] as ChatStreamFrame[]);
+      await vi.advanceTimersByTimeAsync(180_000);
+      expect(events.some((event) => event.event === "turn.completed")).toBe(
+        false,
+      );
+
+      // Signal lands, then upstream stalls and sends nothing further.
+      push([
+        customFrame("aevatar.workflow.signal.buffered", {
+          runId: RUN_ACTOR,
+          stepId: "await",
+          signalName: "approval",
+        }),
+      ] as ChatStreamFrame[]);
+      await vi.advanceTimersByTimeAsync(180_000);
+
+      expect(events.at(-1)).toMatchObject({
+        event: "turn.completed",
+        status: "failed",
+        error: { code: "upstream_progress_timeout" },
+      });
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   // The payload has no requestId/approvalRequestId/commandId, so casting it to
   // the approval shape made the card path bail and drop the suspension.
   it("renders a human-input suspension instead of dropping it", async () => {
@@ -7266,8 +7383,9 @@ describe("studio new chats and typed actor compatibility", () => {
                 sessionId: "s1",
                 agentId: "a1",
                 // ChatContentPart names the location `uri`, not `url`.
+                // `kind` carries protobuf-JSON's full enum member name.
                 part: {
-                  kind: "IMAGE",
+                  kind: "CHAT_CONTENT_PART_KIND_IMAGE",
                   mediaType: "image/png",
                   uri: "https://example.test/chart.png",
                   name: "chart.png",
