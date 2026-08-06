@@ -24,6 +24,7 @@ import {
 } from "@/lib/assistant/action-registry";
 import { connectWatchDeadline } from "@/lib/assistant/connect-watch";
 import type { ActionReport } from "@/schemas/assistant-actions";
+import { usePendingConnectStore } from "@/stores/pending-connect-store";
 import type { ActionCardContentBlock } from "@/types/assistant";
 
 interface ActionCardProps {
@@ -195,17 +196,23 @@ export function ActionCard({
   const [dialogOpen, setDialogOpen] = useState(false);
   const resolvingRef = useRef(false);
   /**
-   * An out-of-band authorization handed to a provider, still settling. Held on
-   * the card rather than in the dialog because the dialog is the short-lived
-   * surface: the user goes to GitHub, comes back to the chat, and never
-   * reopens it. `startedAt` anchors both the poll cadence and the deadline.
+   * An out-of-band authorization handed to a provider, still settling. Held
+   * outside React (keyed by block id) rather than in the dialog or in this
+   * component: the dialog is the short-lived surface — the user goes to
+   * GitHub, comes back to the chat, and never reopens it — and the card
+   * itself outlives neither a conversation switch nor a history refetch that
+   * re-keys message groups. The busy projection it clears lives in the
+   * transport mirror and survives both, so the watch has to as well.
    */
-  const [pendingAuth, setPendingAuth] = useState<{
-    readonly keyId: string;
-    readonly startedAt: number;
-  } | null>(null);
+  const pendingAuth = usePendingConnectStore(
+    (state) => state.attempts[block.block_id] ?? null,
+  );
+  const beginPendingAuth = usePendingConnectStore((state) => state.begin);
+  const endPendingAuth = usePendingConnectStore((state) => state.end);
   /** Guards one auto-settlement per watched key against effect re-entry. */
   const watchSettledRef = useRef<string | null>(null);
+  /** One mount-time reconciliation, whatever the deps churn afterwards. */
+  const reconciledRef = useRef(false);
   const { visible, lastActivityAt } = useChatPresence();
 
   useEffect(() => {
@@ -213,6 +220,19 @@ export function ActionCard({
       resolvingRef.current = false;
     }
   }, [block.status]);
+
+  // A card that mounts busy with no authorization behind it and no dialog open
+  // was stranded: `in_progress` disables every control, and its only writers
+  // (dialog dismissal, the watch, an explicit report) are all gone. Roll it
+  // back to actionable instead of leaving a "Connecting" spinner nobody can
+  // clear. Fresh cards mount `pending`, and a remount mid-authorization finds
+  // its attempt in the store, so neither is touched.
+  useEffect(() => {
+    if (reconciledRef.current) return;
+    reconciledRef.current = true;
+    if (block.status !== "in_progress" || pendingAuth !== null) return;
+    onProgress(block.block_id, false);
+  }, [block.block_id, block.status, pendingAuth, onProgress]);
 
   const settled =
     block.status === "completed" ||
@@ -242,7 +262,7 @@ export function ActionCard({
       resolvingRef.current = true;
       void Promise.resolve()
         .then(() => {
-          setPendingAuth(null);
+          endPendingAuth(block.block_id);
           return onResolve({
             actionRequestId: block.action_request_id,
             originTurnId: block.origin_turn_id,
@@ -265,7 +285,7 @@ export function ActionCard({
           : AUTHORIZATION_TIMEOUT_NOTE;
       void Promise.resolve()
         .then(() => {
-          setPendingAuth(null);
+          endPendingAuth(block.block_id);
           return onBlock(block.block_id, note);
         })
         .catch(() => undefined);
@@ -279,6 +299,7 @@ export function ActionCard({
     block.block_id,
     block.action_request_id,
     block.origin_turn_id,
+    endPendingAuth,
     onResolve,
     onBlock,
     onProgress,
@@ -304,7 +325,12 @@ export function ActionCard({
   const blocked = block.status === "blocked";
   const conflicted = block.status === "conflicted";
   const primaryDisabled = busy || blocked || conflicted;
-  const secondaryDisabled = busy || conflicted;
+  // Decline stays live through `in_progress`. Abandoning a connection the user
+  // started is always their call, and it is the manual floor under every
+  // automatic settlement: with it disabled, a busy card that lost its watch
+  // had no reachable control at all. `report` supersedes any watch still
+  // running, and the transport de-duplicates a report already queued.
+  const secondaryDisabled = conflicted;
   const params = block.params;
 
   function setOpen(next: boolean) {
@@ -330,7 +356,7 @@ export function ActionCard({
     // A manual outcome supersedes any watch still running for this card.
     if (pendingAuth) {
       watchSettledRef.current = pendingAuth.keyId;
-      setPendingAuth(null);
+      endPendingAuth(block.block_id);
     }
     if (disposition === "completed" && !userServiceId?.trim()) {
       resolvingRef.current = true;
@@ -509,10 +535,25 @@ export function ActionCard({
                 }
               : undefined
           }
+          // Provider consent pages can never be iframed, so a top-level popup
+          // is the only handoff that keeps this conversation alive underneath
+          // it. Without this the action card fell back to the legacy path — a
+          // `target="_blank"` link needing a second click, and a callback that
+          // redirects to the key page, taking the chat tab with it.
+          launch="popup"
+          flow="cc"
+          onPopupViewResult={() => {
+            // The popup is done and the user asked to come back. Close the
+            // dialog and let the card settle itself from the key's terminal
+            // status — the outcome belongs in the transcript, not on a
+            // detour to the keys page.
+            setOpen(false);
+            return true;
+          }}
           onSuccess={({ userServiceId }) => report("completed", userServiceId)}
           onAuthorizationPending={(keyId) => {
             watchSettledRef.current = null;
-            setPendingAuth({ keyId, startedAt: Date.now() });
+            beginPendingAuth(block.block_id, { keyId, startedAt: Date.now() });
           }}
         />
       ) : null}
