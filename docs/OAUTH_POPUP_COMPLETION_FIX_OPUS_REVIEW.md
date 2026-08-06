@@ -933,3 +933,305 @@ popup itself to say "connected", that needs the backend-signed completion
 receipt already specced as a follow-up in `OAUTH_POPUP_FLOW_PLAN.md` §10.1; it
 cannot be done with the nonce alone.
 
+---
+
+# Round 3 — rebase resolution review (2026-08-07)
+
+The round-2 APPROVE was given at base `21297220`. The branch has since been
+rebased onto `047dc0b4` (~60 commits of `main`), where PR #1384 had relocated
+`ActionCard`'s `pendingAuth` into `frontend/src/stores/pending-connect-store.ts`
+— a semantic collision with the lifecycle work I approved. PR #1391.
+
+**Scope: the rebase resolution and post-approval changes only.** Round 2 stands
+for everything that survived unchanged, and I established exactly what that is
+before reviewing anything.
+
+## Scope isolation — what actually changed
+
+I compared the branch's *own contribution* before and after the rebase, per
+file, rather than diffing the trees (which `main`'s 60 commits would swamp):
+`git diff 21297220..f9e6ce95 -- <f>` vs `git diff 047dc0b4..HEAD -- <f>`.
+Of 26 source files the branch touches, **19 contributions are byte-identical**
+and 7 differ.
+
+Stronger still, these 14 files' **final content** is byte-identical to the tip
+I approved (`git rev-parse f9e6ce95:<f>` == `HEAD:<f>`):
+
+```
+frontend/nginx.conf.template                      frontend/src/lib/oauth-popup.ts
+frontend/src/pages/oauth-complete.tsx             frontend/src/lib/public-paths.ts
+frontend/src/pages/oauth-launching.tsx            frontend/src/lib/telemetry.ts
+frontend/src/components/assistant/blocks/connect-card.tsx    (+ its .test.tsx)
+frontend/src/hooks/use-keys.ts                    frontend/src/hooks/use-oauth-popup.ts
+frontend/src/types/oauth-popup.ts                 frontend/src/router.test.ts
+frontend/src/components/dashboard/add-key-dialog.test.tsx
+frontend/src/hooks/use-key-authorization-watch.test.tsx
+```
+
+`frontend/package.json`, `frontend/package-lock.json` and `Cargo.lock` are
+untouched relative to the new base.
+
+The 7 that differ:
+
+| File | Nature of the difference |
+|---|---|
+| `backend/src/handlers/user_tokens.rs` | context drift only — **semantically identical** (same one production line, same two test asserts) |
+| `frontend/src/router.tsx` | context drift only — **semantically identical** (`export` + `/oauth-complete`) |
+| `frontend/src/components/dashboard/add-key-dialog.tsx` | **comments only** — 6 added lines, zero code, addressing my round-2 N-3 and N-4 |
+| `frontend/src/stores/pending-connect-store.ts` | the store extension (main's file) |
+| `frontend/src/components/assistant/blocks/action-card.tsx` + `.test.tsx` | the resolution |
+| `frontend/src/schemas/oauth-popup.ts` + `.test.ts` | the post-approval N-2 fix |
+
+The dialog delta, verified strictly (every `+`/`-` line in the post-approval
+diff):
+
+```
++        // Present-but-malformed is a broken contract and throws; absent means
++        // a pre-nonce backend and degrades to the manual link below. An empty
++        // string counts as malformed on purpose — a backend that sends the
++        // field must send a valid one.
++      // Normalized only on the popup path; the legacy (non-popup) anchor still
++      // renders the backend's raw string, unvalidated, as it always has.
+```
+
+Both round-2 nits answered in place, no behaviour touched.
+
+## 1. Does the merged lifetime preserve both invariants at once?
+
+**Yes.** The two card types do not share a lifecycle surface, and I verified the
+premises rather than assuming them.
+
+- **Only `ActionCard` consumes the store.** `grep -rn usePendingConnectStore
+  frontend/src` (non-test) returns the store itself and four lines in
+  `action-card.tsx`. `ConnectCard` still holds `pendingAuth` /
+  `pendingAuthRef` / `localVerdict` in component state — its file is
+  byte-identical to the approved tip.
+- **The store key cannot collide.** Records are keyed by `block.block_id`, and
+  action-card block ids come from the transport's
+  `newId(prefix) => `${prefix}-${crypto.randomUUID()}``
+  (`aevatar-transport.ts:808-810`). A surviving record can only ever rejoin the
+  exact card that created it — including across the conversation switches and
+  history refetches #1384 exists for, and it is dropped on reload together with
+  the local block it clears.
+- **Watch generations cannot collide either.** The cache key is
+  `["keys", keyId, "authorization", attemptId]`, and `attemptId` is minted per
+  initiation inside `AddKeyDialog.announceAuthorization` with
+  `crypto.randomUUID()`. Two cards each own an `AddKeyDialog` instance, so two
+  simultaneous attempts on the *same key* still occupy different cache entries
+  and different settle guards.
+- **The divergent abort wiring is inert, not conflicting.** With no
+  `onAuthorizationAborted` prop, `abortAnnouncedAuthorization()` clears the
+  dialog's internal `announcedAttemptIdRef` and calls
+  `authorizationAbortedRef.current?.(…)` — `undefined` — so the store is never
+  touched. Main's "dialog close ≠ abandonment" survives literally.
+- **No orphan record can point at a deleted placeholder.** After the round-2
+  restructure, nothing between `announceAuthorization` and the end of
+  `handleConnect` can throw to the outer catch: the no-nonce case `return`s
+  through `releasePopupToManualLink()`, and `popup.navigate` has its own
+  `catch`. The outer catch — the only caller of `cleanupPendingAuthKey` — can
+  therefore only fire *before* a store record exists.
+- **The one genuinely shared singleton is already guarded.**
+  `useOAuthPopupStore.begin` refuses a second concurrent attempt
+  (`if (get().attempt !== null) return false`), so an ActionCard launch cannot
+  clobber a live ConnectCard launch. Unchanged by the rebase; noted because it
+  is the only cross-card mutable state that exists.
+- **`reconciledRef`'s stranded-card rollback still reads a self-contained
+  record** (keyId + attemptId + previousAuthorizationAt + startedAt) with no
+  external registry to fall out of sync with.
+
+### Finding R-1 — P2: the deliberate `onAuthorizationAborted` omission is neither tested nor commented
+
+This is the load-bearing claim of the whole resolution, and it is the one thing
+holding it up that a future contributor cannot see.
+
+```
+RV-A  add to ActionCard's <AddKeyDialog>:
+        onAuthorizationAborted={() => { endPendingAuth(block.block_id); }}
+      npx vitest run action-card.test.tsx
+        Test Files  1 passed (1)
+              Tests  22 passed (22)          <-- green
+```
+
+Deliberately breaking main's invariant is invisible to the suite. The reason is
+structural: `action-card.test.tsx` mocks `AddKeyDialog`, and the mock only fires
+the callbacks its own buttons are wired to — `onAuthorizationAborted` is never
+among them. Main's natural guard,
+*"keeps the card busy when the dialog is dismissed mid-authorization"*
+(`action-card.test.tsx:697`), drives that mock and so cannot observe the prop.
+
+Contrast the other card, where the same mutation is caught immediately:
+
+```
+RV-B  remove onAuthorizationAborted from ConnectCard
+        × renders a matching abort as neutral cancellation and ignores stale aborts
+        × lets an advanced reconnect authorization override a simultaneous cancellation
+        Tests  2 failed | 18 passed (20)
+```
+
+And the rationale is not written down either: `grep -in abort
+action-card.tsx` returns **nothing**. Every other non-obvious decision in that
+same JSX block is commented — why `launch="popup"`, why `onPopupViewResult`
+closes the dialog — but the one introduced by a conflict resolution, and the one
+a reader is most likely to "fix" for consistency with `ConnectCard`, is silent.
+
+**Failure scenario.** Someone notices the asymmetry, adds
+`onAuthorizationAborted` to `ActionCard` "for consistency", CI stays green, and
+#1384's stranded-`Connecting` card is back in production.
+
+**Correction.** Two small things in files already being touched: (a) have the
+mocked dialog's dismiss button call `onAuthorizationAborted`, and assert the
+card stays busy and `usePendingConnectStore.getState().attempts["action-card-1"]`
+survives — that turns RV-A red; (b) one comment on the absent prop stating the
+invariant and pointing at #1384.
+
+This is a coverage gap, not a defect — the shipped behaviour is correct.
+
+### Finding R-2 — P3: `if (!attemptId) return;` turns a broken record into a stranded card
+
+`action-card.tsx:253-262`. If a store record ever lacked `attemptId`, the settle
+effect returns early — and so does the guard below it, since
+`watchSettledRef.current === attemptId` is `undefined === undefined`. The card
+would mount `in_progress`, skip the stranded-card rollback (because
+`pendingAuth !== null`), and never settle: precisely the class #1384 fixed.
+Only TypeScript prevents it today — one call site, spreading a typed
+`AuthorizationAttempt`, and the store has no `persist` middleware so no legacy
+shapes can be rehydrated. Low probability, bad failure mode; `?? "legacy"` or
+simply dropping the redundant guard (a record always has a `keyId`) would be
+more robust.
+
+## 2. Are the re-keyed settle guards still stale-safe?
+
+**Yes — and `ActionCard` got strictly safer without changing behaviour.**
+
+- `ActionCard` never reads `is_active` (`grep` returns nothing). The only input
+  that settles it to `completed` is `watch.authorized`, i.e.
+  `status === KEY_AUTH_ACTIVE && authorizationAdvanced` from an authenticated
+  `GET /keys/{id}`. The F-1/F-2 class has no foothold here.
+- `previousAuthorizationAt` threads dialog → store → watch. `ActionCard` passes
+  no `reconnectKey`, so it is always `undefined` there, which makes
+  `watch.authorized ≡ watch.status === KEY_AUTH_ACTIVE` — **exactly main's
+  pre-rebase semantics**. The resolution neither loosens nor tightens
+  `ActionCard` today, and the reconnect gate is correctly wired if one is ever
+  added. That is what a rebase resolution should look like.
+- `attemptId` isolation survived the move: it is in the store record, the query
+  key, the settle guard (`watchSettledRef.current === attemptId`), and the
+  manual-outcome guard (`watchSettledRef.current = pendingAuth.attemptId`).
+  Because it now lives in the store rather than being re-minted per mount, a
+  remount rejoins the *same* cache generation — better than a component-state
+  version would have been.
+- `ConnectCard`'s four `connected` branches are byte-identical to the file I
+  verified in round 2; nothing needs re-deriving.
+
+Focused re-run across all 11 affected files: **147/147 passed**.
+
+## 3. Did anything previously verified regress?
+
+- **nginx, completion copy, launching interstitial, ConnectCard, `use-keys`,
+  `use-oauth-popup`, public paths, telemetry, types** — byte-identical final
+  content to the approved tip (table above). Round-2 evidence stands verbatim;
+  no re-run needed and none would be meaningful.
+- **Non-`cc` flows** — re-audited against `main`'s 168 changed lines in
+  `user_tokens.rs`: still exactly **seven** `redirect_to_oauth_completion` call
+  sites, **all seven** `OAuthFlowKind::ChatConnect.as_wire()`, target still
+  `{frontend_url}/oauth-complete`. `main` introduced no new completion redirect
+  and no non-`cc` one.
+- **Query preservation / headers** — `nginx.conf.template` is byte-identical, so
+  the round-2 live probes (302 with `%20`/`%2B` intact, `no-cache` on SPA HTML,
+  `public, immutable` on hashed assets, all three security headers on every
+  location class) transfer unchanged.
+- **Wizard bundle** — rebuilt post-rebase (`index.html` + `index.hash`);
+  `wizard_bundle_is_fresh ... ok`; the bundle contains **zero** `oauth-complete`
+  strings and only the same 19 pre-existing admin `oauth-client*` occurrences,
+  i.e. no stale completion route baked in.
+- **Lockfiles** — untouched.
+- **Build / lint** — `npm run build` exit 0 (incl. the mock-footprint
+  assertion); `npm run lint` 0 errors, the same 23 pre-existing warnings.
+
+## 4. The post-approval N-2 fix
+
+`validateHttpAuthorizationUrl` now parses with `new URL(rawUrl)` — no base — so
+`""`, `not a url`, `/relative/path` and `//protocol-relative` are rejected
+instead of silently resolving into same-origin NyxID links on the nonce-free
+fallback path. It is pinned:
+
+```
+RV-C  new URL(rawUrl)  ->  new URL(rawUrl, window.location.origin)
+        × rejects non-absolute URLs instead of base-resolving them to NyxID
+        Tests  1 failed | 5 passed (6)
+```
+
+**It does not narrow anything legitimate.** I re-ran my hostile corpus, extended
+with the four junk shapes and eight real provider URL shapes:
+
+```
+HOSTILE / JUNK — 20/20 BLOCKED, now including:
+  BLOCKED  ""            BLOCKED  "not a url"
+  BLOCKED  "/relative/path"        BLOCKED  "//evil.example/protocol-relative"
+  (plus every javascript:/data:/vbscript:/blob:/file:/about:/chrome:/ws: form
+   and all three embedded-credential forms, unchanged from round 2)
+
+LEGITIMATE PROVIDER URLS — 8/8 allowed:
+  https://github.com/login/oauth/authorize
+  …?client_id=x&scope=repo%20user&state=1cc_<nonce>
+  http://localhost:3001/oauth/authorize
+  HTTPS://GitHub.com/...            -> https://github.com/...   (scheme/host normalized)
+  https://login.microsoftonline.com/common/oauth2/v2.0/authorize?a=1
+  https://accounts.google.com:443/o/oauth2/v2/auth  -> default port stripped
+  https://xn--80ak6aa92e.com/auth   (punycode IDN)
+  https://provider.example/auth?redirect_uri=https%3A%2F%2Fnyx%2Ffoo
+
+nonce-bound validator still binds:  origin-pinned match -> URL, wrong origin -> null
+```
+
+Note the fix also reaches `validateAuthorizationUrl`, which delegates — so the
+*nonce-bound* path is absolute-only too. That is correct (an OAuth authorization
+endpoint is always absolute) and the new test asserts it on both functions.
+
+## Gates I ran
+
+| Gate | Result |
+|---|---|
+| `npm --prefix frontend run build` | **pass** (exit 0) |
+| `npm --prefix frontend run lint` | **pass** — 0 errors, 23 pre-existing warnings |
+| Focused suite, 11 affected files | **147/147 passed** |
+| `cargo test -p nyxid-cli --test wizard_bundle_freshness` | **pass** |
+| Revert-proofs RV-A / RV-B / RV-C | run; results above |
+| Hostile + legitimate URL corpus | run; results above |
+
+Per the brief I did not re-run the full suites. The reported 2757/2757 and
+5115/5115 are consistent with my focused runs, with round 2's contention
+pattern, and with build/lint being green.
+
+---
+
+# Round 3 verdict: APPROVE WITH CHANGES
+
+The rebase resolution is **correct**. Main's store-based lifetime is preserved
+intact, this branch's cancellation semantics are preserved intact, and the two
+live on structurally separate lifecycles — separate state owners, UUID-keyed
+records, UUID-keyed watch generations, and the only shared singleton already
+refusing concurrent use. I could not construct an ordering where one card
+settles, mutates, or strands the other. `ActionCard`'s port is behaviour-
+preserving on main's semantics while correctly threading the reconnect gate,
+and no path can still reach a connected/completed outcome without an
+authenticated read of `UserApiKey.status`. Everything I verified in rounds 1–2
+that matters is byte-identical, and the post-approval N-2 fix is right, pinned,
+and costs no legitimate provider URL.
+
+**The change I want before this lands: R-1.** The resolution's central decision
+— `ActionCard` deliberately not wiring `onAuthorizationAborted` — is currently
+held up by nothing a future contributor can see: no comment, and a mutation that
+breaks it leaves the suite 22/22 green. That is the same class of gap as
+round-1 F-4 and F-5, and here the regression it invites is main's own #1384. It
+is ~10 lines in two files that are already being edited.
+
+Not a blocker on correctness: if the owner prefers to merge #1391 now and land
+R-1 as an immediate follow-up, that is a defensible call — nothing shipped is
+wrong today. R-2 is a P3 and can ride whenever.
+
+The deploy gates from round 2 are unchanged and still outstanding:
+frontend-image-first rollout, the §3.1d executable smoke (still prose), and the
+§7 manual browser matrix. Both owner requirements remain met — the ConnectCard
+state machine and the completion page are byte-identical to the versions I
+assessed against them in round 2.
+
