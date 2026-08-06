@@ -675,6 +675,38 @@ pub async fn create_user_service(
     Ok(service)
 }
 
+/// Attach immutable developer-app provenance to a newly provisioned service.
+pub async fn set_source_app_id(
+    db: &mongodb::Database,
+    user_id: &str,
+    service_id: &str,
+    source_app_id: &str,
+) -> AppResult<()> {
+    let result = db
+        .collection::<UserService>(COLLECTION_NAME)
+        .update_one(
+            doc! {
+                "_id": service_id,
+                "user_id": user_id,
+                "$or": [
+                    { "source_app_id": null },
+                    { "source_app_id": { "$exists": false } },
+                ],
+            },
+            doc! { "$set": {
+                "source_app_id": source_app_id,
+                "updated_at": bson::DateTime::from_chrono(Utc::now()),
+            }},
+        )
+        .await?;
+    if result.matched_count != 1 {
+        return Err(AppError::Internal(
+            "Failed to attach developer app provenance to user service".to_string(),
+        ));
+    }
+    Ok(())
+}
+
 /// Update service config (auth method, node routing, identity propagation, etc.).
 ///
 /// `user_id` is the *effective owner* of the service (caller for personal,

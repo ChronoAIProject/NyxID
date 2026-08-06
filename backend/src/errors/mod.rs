@@ -369,6 +369,24 @@ pub enum AppError {
     #[error("Connect link completion is already in progress")]
     ConnectLinkCompletionInProgress,
 
+    #[error("Trigger not found")]
+    TriggerNotFound,
+
+    #[error("Trigger secret invalid")]
+    TriggerSecretInvalid,
+
+    #[error("Trigger rate limited")]
+    TriggerRateLimited,
+
+    #[error("Trigger payload too large")]
+    TriggerPayloadTooLarge,
+
+    #[error("Trigger delivery unsupported")]
+    TriggerDeliveryUnsupported,
+
+    #[error("Trigger delivery failed")]
+    TriggerDeliveryFailed,
+
     #[error("Channel bot not found: {0}")]
     ChannelBotNotFound(String),
 
@@ -595,6 +613,12 @@ impl AppError {
             Self::ConnectLinkCancelled => StatusCode::GONE,
             Self::ConnectLinkRateLimited => StatusCode::TOO_MANY_REQUESTS,
             Self::ConnectLinkCompletionInProgress => StatusCode::CONFLICT,
+            Self::TriggerNotFound => StatusCode::NOT_FOUND,
+            Self::TriggerSecretInvalid => StatusCode::UNAUTHORIZED,
+            Self::TriggerRateLimited => StatusCode::TOO_MANY_REQUESTS,
+            Self::TriggerPayloadTooLarge => StatusCode::PAYLOAD_TOO_LARGE,
+            Self::TriggerDeliveryUnsupported => StatusCode::BAD_REQUEST,
+            Self::TriggerDeliveryFailed => StatusCode::BAD_GATEWAY,
             Self::ChannelBotNotFound(_) => StatusCode::NOT_FOUND,
             Self::ChannelBotInactive(_) => StatusCode::BAD_REQUEST,
             Self::ChannelBotLimitReached(_) => StatusCode::TOO_MANY_REQUESTS,
@@ -745,6 +769,12 @@ impl AppError {
             Self::ConnectLinkCancelled => 11303,
             Self::ConnectLinkRateLimited => 11304,
             Self::ConnectLinkCompletionInProgress => 11305,
+            Self::TriggerNotFound => 11600,
+            Self::TriggerSecretInvalid => 11601,
+            Self::TriggerRateLimited => 11602,
+            Self::TriggerPayloadTooLarge => 11603,
+            Self::TriggerDeliveryUnsupported => 11604,
+            Self::TriggerDeliveryFailed => 11605,
             Self::ChannelBotNotFound(_) => 10000,
             Self::ChannelBotInactive(_) => 10001,
             Self::ChannelBotLimitReached(_) => 10002,
@@ -931,6 +961,12 @@ impl AppError {
             Self::ConnectLinkCancelled => "connect_link_cancelled",
             Self::ConnectLinkRateLimited => "connect_link_rate_limited",
             Self::ConnectLinkCompletionInProgress => "connect_link_completion_in_progress",
+            Self::TriggerNotFound => "trigger_not_found",
+            Self::TriggerSecretInvalid => "trigger_secret_invalid",
+            Self::TriggerRateLimited => "trigger_rate_limited",
+            Self::TriggerPayloadTooLarge => "trigger_payload_too_large",
+            Self::TriggerDeliveryUnsupported => "trigger_delivery_unsupported",
+            Self::TriggerDeliveryFailed => "trigger_delivery_failed",
             Self::ChannelBotNotFound(_) => "channel_bot_not_found",
             Self::ChannelBotInactive(_) => "channel_bot_inactive",
             Self::ChannelBotLimitReached(_) => "channel_bot_limit_reached",
@@ -1430,6 +1466,12 @@ mod tests {
             AppError::ConnectLinkCancelled.error_code(),
             AppError::ConnectLinkRateLimited.error_code(),
             AppError::ConnectLinkCompletionInProgress.error_code(),
+            AppError::TriggerNotFound.error_code(),
+            AppError::TriggerSecretInvalid.error_code(),
+            AppError::TriggerRateLimited.error_code(),
+            AppError::TriggerPayloadTooLarge.error_code(),
+            AppError::TriggerDeliveryUnsupported.error_code(),
+            AppError::TriggerDeliveryFailed.error_code(),
             AppError::ChannelBotNotFound("".into()).error_code(),
             AppError::ChannelBotInactive("".into()).error_code(),
             AppError::ChannelBotLimitReached("".into()).error_code(),

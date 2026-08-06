@@ -5,6 +5,7 @@ import {
   ConnectLinkTimeoutError,
   NyxServicesClient,
   type ConnectLinkResponse,
+  type TriggerResponse,
 } from "../src/index.js";
 
 function link(
@@ -98,7 +99,9 @@ describe("NyxServicesClient connect links", () => {
       last_error: "provider_access_denied",
       last_error_at: "2026-08-05T11:00:00Z",
     };
-    const fetchFn = vi.fn<typeof fetch>().mockResolvedValue(jsonResponse(response));
+    const fetchFn = vi
+      .fn<typeof fetch>()
+      .mockResolvedValue(jsonResponse(response));
     const client = new NyxServicesClient({
       baseUrl: "https://api.example",
       auth: { accessToken: "oauth-access-token" },
@@ -118,9 +121,9 @@ describe("NyxServicesClient connect links", () => {
       fetchFn,
     });
 
-    await expect(client.connectLinks.waitForCompletion("link-1")).rejects.toBeInstanceOf(
-      ConnectLinkExpiredError,
-    );
+    await expect(
+      client.connectLinks.waitForCompletion("link-1"),
+    ).rejects.toBeInstanceOf(ConnectLinkExpiredError);
   });
 
   it("rejects pending links after the configured timeout", async () => {
@@ -192,5 +195,124 @@ describe("NyxServicesClient service requests", () => {
     expect(new Headers(init?.headers).get("Authorization")).toBe(
       "Bearer oauth-access-token",
     );
+  });
+});
+
+function trigger(): TriggerResponse {
+  return {
+    id: "trigger-1",
+    user_id: "user-1",
+    label: "Repository activity",
+    user_service_id: null,
+    status: "active",
+    verification: { mode: "token", location: "bearer" },
+    delivery: { type: "notification" },
+    inbound_url: "https://api.example/api/v1/webhooks/triggers/trigger-1",
+    created_at: "2026-08-06T09:30:00.123+00:00",
+    updated_at: "2026-08-06T09:30:00.123+00:00",
+  };
+}
+
+describe("NyxServicesClient triggers", () => {
+  it("creates triggers with exact backend tagged unions and field names", async () => {
+    const created = {
+      trigger: trigger(),
+      secret: "nyx_trg_once",
+      delivery_signing_secret: null,
+    };
+    const fetchFn = vi
+      .fn<typeof fetch>()
+      .mockResolvedValue(jsonResponse(created));
+    const client = new NyxServicesClient({
+      baseUrl: "https://api.example/",
+      auth: { apiKey: "nyxid_ag_test" },
+      fetchFn,
+    });
+
+    await expect(
+      client.triggers.create({
+        label: "Repository activity",
+        userServiceId: "service-1",
+        targetOrgId: "org-1",
+        verification: {
+          mode: "hmac_sha256",
+          header_name: "X-Hub-Signature-256",
+        },
+        delivery: {
+          type: "webhook",
+          url: "https://receiver.example/events",
+        },
+      }),
+    ).resolves.toEqual(created);
+
+    const [url, init] = fetchFn.mock.calls[0];
+    expect(url).toBe("https://api.example/api/v1/triggers");
+    expect(init?.method).toBe("POST");
+    expect(new Headers(init?.headers).get("Authorization")).toBe(
+      "Bearer nyxid_ag_test",
+    );
+    expect(JSON.parse(String(init?.body))).toEqual({
+      label: "Repository activity",
+      user_service_id: "service-1",
+      target_org_id: "org-1",
+      verification: {
+        mode: "hmac_sha256",
+        header_name: "X-Hub-Signature-256",
+      },
+      delivery: {
+        type: "webhook",
+        url: "https://receiver.example/events",
+      },
+    });
+  });
+
+  it("lists, gets, updates, rotates, and deletes using encoded routes", async () => {
+    const item = trigger();
+    const fetchFn = vi
+      .fn<typeof fetch>()
+      .mockResolvedValueOnce(jsonResponse({ triggers: [item] }))
+      .mockResolvedValueOnce(jsonResponse(item))
+      .mockResolvedValueOnce(
+        jsonResponse({
+          trigger: { ...item, status: "disabled" },
+          delivery_signing_secret: null,
+        }),
+      )
+      .mockResolvedValueOnce(
+        jsonResponse({ trigger: item, secret: "nyx_trg_rotated" }),
+      )
+      .mockResolvedValueOnce(jsonResponse({ message: "Trigger deleted" }));
+    const client = new NyxServicesClient({
+      baseUrl: "https://api.example",
+      auth: { accessToken: "oauth-token" },
+      fetchFn,
+    });
+
+    await expect(client.triggers.list()).resolves.toEqual({ triggers: [item] });
+    await expect(client.triggers.get("trigger/1")).resolves.toEqual(item);
+    await expect(
+      client.triggers.update("trigger/1", { status: "disabled" }),
+    ).resolves.toMatchObject({ trigger: { status: "disabled" } });
+    await expect(
+      client.triggers.rotateSecret("trigger/1"),
+    ).resolves.toMatchObject({
+      secret: "nyx_trg_rotated",
+    });
+    await expect(client.triggers.delete("trigger/1")).resolves.toEqual({
+      message: "Trigger deleted",
+    });
+
+    expect(fetchFn.mock.calls.map(([url]) => url)).toEqual([
+      "https://api.example/api/v1/triggers",
+      "https://api.example/api/v1/triggers/trigger%2F1",
+      "https://api.example/api/v1/triggers/trigger%2F1",
+      "https://api.example/api/v1/triggers/trigger%2F1/rotate-secret",
+      "https://api.example/api/v1/triggers/trigger%2F1",
+    ]);
+    expect(fetchFn.mock.calls[2][1]?.method).toBe("PATCH");
+    expect(JSON.parse(String(fetchFn.mock.calls[2][1]?.body))).toEqual({
+      status: "disabled",
+    });
+    expect(fetchFn.mock.calls[4][1]?.method).toBe("DELETE");
   });
 });

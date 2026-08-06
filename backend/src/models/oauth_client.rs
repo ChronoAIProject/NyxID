@@ -20,7 +20,7 @@ pub enum ScopeProvenance {
 
 pub const COLLECTION_NAME: &str = "oauth_clients";
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize)]
 pub struct OauthClient {
     #[serde(rename = "_id")]
     pub id: String,
@@ -56,11 +56,78 @@ pub struct OauthClient {
     pub revocation_webhook_url: Option<String>,
     #[serde(default, with = "crate::models::bson_bytes::optional")]
     pub revocation_webhook_secret_encrypted: Option<Vec<u8>>,
+    #[serde(default)]
+    pub connection_webhook_url: Option<String>,
+    #[serde(default, with = "crate::models::bson_bytes::optional")]
+    pub connection_webhook_secret_encrypted: Option<Vec<u8>>,
+    #[serde(default)]
+    pub connection_webhook_enabled: bool,
     pub created_by: Option<String>,
     #[serde(with = "bson::serde_helpers::chrono_datetime_as_bson_datetime")]
     pub created_at: DateTime<Utc>,
     #[serde(with = "bson::serde_helpers::chrono_datetime_as_bson_datetime")]
     pub updated_at: DateTime<Utc>,
+}
+
+impl std::fmt::Debug for OauthClient {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        use crate::redaction::RedactedLen;
+        f.debug_struct("OauthClient")
+            .field("id", &self.id)
+            .field("client_name", &self.client_name)
+            .field(
+                "client_secret_hash",
+                &RedactedLen(self.client_secret_hash.len()),
+            )
+            .field("redirect_uris", &self.redirect_uris)
+            .field("allowed_scopes", &self.allowed_scopes)
+            .field("scope_provenance", &self.scope_provenance)
+            .field("grant_types", &self.grant_types)
+            .field("client_type", &self.client_type)
+            .field("is_active", &self.is_active)
+            .field("delegation_scopes", &self.delegation_scopes)
+            .field(
+                "default_service_catalog_slugs",
+                &self.default_service_catalog_slugs,
+            )
+            .field("broker_capability_enabled", &self.broker_capability_enabled)
+            .field(
+                "revocation_webhook_url",
+                &self
+                    .revocation_webhook_url
+                    .as_ref()
+                    .map(|value| RedactedLen(value.len())),
+            )
+            .field(
+                "revocation_webhook_secret_encrypted",
+                &self
+                    .revocation_webhook_secret_encrypted
+                    .as_ref()
+                    .map(|value| RedactedLen(value.len())),
+            )
+            .field(
+                "connection_webhook_url",
+                &self
+                    .connection_webhook_url
+                    .as_ref()
+                    .map(|value| RedactedLen(value.len())),
+            )
+            .field(
+                "connection_webhook_secret_encrypted",
+                &self
+                    .connection_webhook_secret_encrypted
+                    .as_ref()
+                    .map(|value| RedactedLen(value.len())),
+            )
+            .field(
+                "connection_webhook_enabled",
+                &self.connection_webhook_enabled,
+            )
+            .field("created_by", &self.created_by)
+            .field("created_at", &self.created_at)
+            .field("updated_at", &self.updated_at)
+            .finish()
+    }
 }
 
 #[cfg(test)]
@@ -89,6 +156,9 @@ mod tests {
             broker_capability_enabled: true,
             revocation_webhook_url: Some("https://client.example.com/cae".to_string()),
             revocation_webhook_secret_encrypted: Some(vec![1, 2, 3]),
+            connection_webhook_url: Some("https://client.example.com/connections".to_string()),
+            connection_webhook_secret_encrypted: Some(vec![4, 5, 6]),
+            connection_webhook_enabled: true,
             created_by: Some("admin".to_string()),
             created_at: Utc::now(),
             updated_at: Utc::now(),
@@ -110,6 +180,15 @@ mod tests {
             client.revocation_webhook_secret_encrypted,
             restored.revocation_webhook_secret_encrypted
         );
+        assert_eq!(
+            client.connection_webhook_secret_encrypted,
+            restored.connection_webhook_secret_encrypted
+        );
+        let debug = format!("{client:?}");
+        assert!(!debug.contains("abc123"));
+        assert!(!debug.contains("client.example.com"));
+        assert!(!debug.contains("[1, 2, 3]"));
+        assert!(!debug.contains("[4, 5, 6]"));
     }
 
     #[test]
@@ -154,6 +233,9 @@ mod tests {
             broker_capability_enabled: false,
             revocation_webhook_url: None,
             revocation_webhook_secret_encrypted: None,
+            connection_webhook_url: None,
+            connection_webhook_secret_encrypted: None,
+            connection_webhook_enabled: false,
             created_by: Some("dev".to_string()),
             created_at: Utc::now(),
             updated_at: Utc::now(),
@@ -187,6 +269,9 @@ mod tests {
             broker_capability_enabled: true,
             revocation_webhook_url: None,
             revocation_webhook_secret_encrypted: None,
+            connection_webhook_url: None,
+            connection_webhook_secret_encrypted: None,
+            connection_webhook_enabled: false,
             created_by: Some("admin".to_string()),
             created_at: Utc::now(),
             updated_at: Utc::now(),
@@ -195,5 +280,35 @@ mod tests {
         let restored: OauthClient = bson::from_document(doc).expect("deserialize");
         assert!(restored.revocation_webhook_url.is_none());
         assert!(restored.revocation_webhook_secret_encrypted.is_none());
+    }
+
+    #[test]
+    fn debug_redacts_secret_material() {
+        let client = OauthClient {
+            id: "client".to_string(),
+            client_name: "Client".to_string(),
+            client_secret_hash: "secret-hash-value".to_string(),
+            redirect_uris: vec![],
+            allowed_scopes: "openid".to_string(),
+            scope_provenance: ScopeProvenance::Explicit,
+            grant_types: "authorization_code".to_string(),
+            client_type: "confidential".to_string(),
+            is_active: true,
+            delegation_scopes: String::new(),
+            default_service_catalog_slugs: vec![],
+            broker_capability_enabled: false,
+            revocation_webhook_url: None,
+            revocation_webhook_secret_encrypted: Some(vec![1, 2, 3]),
+            connection_webhook_url: None,
+            connection_webhook_secret_encrypted: Some(vec![4, 5, 6]),
+            connection_webhook_enabled: true,
+            created_by: None,
+            created_at: Utc::now(),
+            updated_at: Utc::now(),
+        };
+        let debug = format!("{client:?}");
+        assert!(!debug.contains("secret-hash-value"));
+        assert!(!debug.contains("[1, 2, 3]"));
+        assert!(!debug.contains("[4, 5, 6]"));
     }
 }

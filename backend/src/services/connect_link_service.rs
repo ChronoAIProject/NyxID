@@ -1,4 +1,5 @@
 use chrono::{Duration, Utc};
+use futures::TryStreamExt;
 use mongodb::bson::{self, doc};
 use mongodb::options::ReturnDocument;
 use uuid::Uuid;
@@ -188,6 +189,7 @@ pub async fn create(db: &mongodb::Database, input: CreateInput) -> AppResult<Cre
         completion_claim_at: None,
         last_error: None,
         last_error_at: None,
+        webhook_event_reserved_at: None,
     };
 
     db.collection::<ConnectLink>(CONNECT_LINKS)
@@ -410,6 +412,23 @@ pub async fn complete(
     };
 
     let service_id = created.service.id.clone();
+    if let Some(app_id) = claimed.requesting_app_id.as_deref()
+        && let Err(error) = crate::services::user_service_service::set_source_app_id(
+            db,
+            &claimed.user_id,
+            &service_id,
+            app_id,
+        )
+        .await
+    {
+        tracing::warn!(
+            connect_link_id = %claimed.id,
+            user_service_id = %service_id,
+            requesting_app_id = %app_id,
+            %error,
+            "failed to record connect-link service provenance"
+        );
+    }
     let pending_oauth = created
         .api_key
         .as_ref()
@@ -835,6 +854,127 @@ async fn claim_expiry(
     }
 }
 
+/// Expire abandoned app-bound links without requiring their creator to poll.
+/// The per-link claim and terminal-event reservation keep concurrent sweeps
+/// idempotent across server instances.
+pub async fn expire_pending_app_links(
+    db: &mongodb::Database,
+    dispatcher: &crate::services::developer_webhook_service::DeveloperWebhookDispatcher,
+) -> AppResult<u64> {
+    let now = Utc::now();
+    let links: Vec<ConnectLink> = db
+        .collection::<ConnectLink>(CONNECT_LINKS)
+        .find(doc! {
+            "status": "pending",
+            "requesting_app_id": { "$type": "string" },
+            "$or": [
+                {
+                    "completed_user_service_id": null,
+                    "expires_at": { "$lte": bson::DateTime::from_chrono(now) },
+                },
+                {
+                    "completed_user_service_id": { "$ne": null },
+                    "expires_at": {
+                        "$lte": bson::DateTime::from_chrono(
+                            now - Duration::seconds(PINNED_GRACE_SECS)
+                        ),
+                    },
+                },
+            ],
+        })
+        .await?
+        .try_collect()
+        .await?;
+
+    let mut expired = 0;
+    for link in links {
+        let link_id = link.id.clone();
+        let updated = claim_expiry(db, link, None).await?;
+        if updated.status == ConnectLinkStatus::Expired {
+            dispatch_terminal_webhook_if_needed(db, dispatcher, &link_id).await;
+            expired += 1;
+        }
+    }
+    Ok(expired)
+}
+
+/// Atomically reserve and dispatch the single terminal lifecycle event for a
+/// third-party connect link. Delivery remains best effort and never changes
+/// the link transition result.
+pub async fn dispatch_terminal_webhook_if_needed(
+    db: &mongodb::Database,
+    dispatcher: &crate::services::developer_webhook_service::DeveloperWebhookDispatcher,
+    link_id: &str,
+) {
+    let claimed = db
+        .collection::<ConnectLink>(CONNECT_LINKS)
+        .find_one_and_update(
+            doc! {
+                "_id": link_id,
+                "requesting_app_id": { "$type": "string" },
+                "status": { "$in": ["completed", "cancelled", "expired"] },
+                "$or": [
+                    { "webhook_event_reserved_at": null },
+                    { "webhook_event_reserved_at": { "$exists": false } },
+                ],
+            },
+            doc! { "$set": {
+                "webhook_event_reserved_at": bson::DateTime::from_chrono(Utc::now()),
+            }},
+        )
+        .return_document(ReturnDocument::After)
+        .await;
+    let link = match claimed {
+        Ok(Some(link)) => link,
+        Ok(None) => return,
+        Err(error) => {
+            tracing::warn!(link_id, %error, "failed to reserve connect-link webhook event");
+            return;
+        }
+    };
+    let Some(app_id) = link.requesting_app_id.clone() else {
+        return;
+    };
+    let Some(event_type) = terminal_webhook_event_type(link.status) else {
+        return;
+    };
+    let status = event_type.trim_start_matches("connect_link.");
+    dispatcher.dispatch(
+        db.clone(),
+        app_id,
+        event_type,
+        serde_json::json!({
+            "connect_link_id": link.id,
+            "service_id": link.service_id,
+            "service_slug": link.service_slug,
+            "status": status,
+            "user_service_id": link.completed_user_service_id,
+            "completed_at": link.completed_at,
+            "expires_at": link.expires_at,
+        }),
+    );
+}
+
+fn terminal_webhook_event_type(status: ConnectLinkStatus) -> Option<&'static str> {
+    match status {
+        ConnectLinkStatus::Completed => Some("connect_link.completed"),
+        ConnectLinkStatus::Cancelled => Some("connect_link.cancelled"),
+        ConnectLinkStatus::Expired => Some("connect_link.expired"),
+        ConnectLinkStatus::Pending => None,
+    }
+}
+
+pub async fn dispatch_terminal_webhook_by_token_if_needed(
+    db: &mongodb::Database,
+    dispatcher: &crate::services::developer_webhook_service::DeveloperWebhookDispatcher,
+    raw_token: &str,
+) {
+    let Ok(link) = find_by_raw_token(db, raw_token).await else {
+        return;
+    };
+    dispatch_terminal_webhook_if_needed(db, dispatcher, &link.id).await;
+}
+
 async fn view_for_link(db: &mongodb::Database, link: ConnectLink) -> AppResult<LinkView> {
     let service = load_catalog_info_by_id(db, &link.service_id).await?;
     let completed_service_slug = match link.completed_user_service_id.as_deref() {
@@ -1108,6 +1248,9 @@ mod tests {
             broker_capability_enabled: false,
             revocation_webhook_url: None,
             revocation_webhook_secret_encrypted: None,
+            connection_webhook_url: None,
+            connection_webhook_secret_encrypted: None,
+            connection_webhook_enabled: false,
             created_by: Some("test".to_string()),
             created_at: now,
             updated_at: now,
@@ -1355,12 +1498,344 @@ mod tests {
         }
     }
 
+    #[tokio::test]
+    async fn terminal_webhook_reservation_is_single_use() {
+        let Some(db) = connect_test_database("connect_link_terminal_webhook_reservation").await
+        else {
+            return;
+        };
+        let (_, created) = create_test_link(&db, "terminal-webhook").await;
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<axum::body::Bytes>();
+        let receiver = axum::Router::new().route(
+            "/events",
+            axum::routing::post(move |body: axum::body::Bytes| {
+                let tx = tx.clone();
+                async move {
+                    tx.send(body).expect("capture terminal webhook");
+                    axum::http::StatusCode::NO_CONTENT
+                }
+            }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind terminal webhook receiver");
+        let address = listener.local_addr().expect("terminal receiver address");
+        tokio::spawn(async move {
+            axum::serve(listener, receiver)
+                .await
+                .expect("serve terminal webhook receiver")
+        });
+        let client = insert_oauth_client(&db, "Webhook App", Vec::new()).await;
+        let keys = std::sync::Arc::new(crate::test_utils::test_encryption_keys());
+        let encrypted_secret = keys
+            .encrypt(b"terminal-webhook-secret")
+            .await
+            .expect("encrypt terminal webhook secret");
+        db.collection::<OauthClient>(OAUTH_CLIENTS)
+            .update_one(
+                doc! { "_id": &client.id },
+                doc! { "$set": {
+                    "connection_webhook_url": format!("http://{address}/events"),
+                    "connection_webhook_secret_encrypted": bson::Binary {
+                        subtype: bson::spec::BinarySubtype::Generic,
+                        bytes: encrypted_secret,
+                    },
+                    "connection_webhook_enabled": true,
+                }},
+            )
+            .await
+            .expect("configure terminal webhook");
+        db.collection::<ConnectLink>(CONNECT_LINKS)
+            .update_one(
+                doc! { "_id": &created.link.id },
+                doc! { "$set": {
+                    "status": "cancelled",
+                    "requesting_app_id": &client.id,
+                }},
+            )
+            .await
+            .expect("make link terminal");
+        let dispatcher =
+            crate::services::developer_webhook_service::DeveloperWebhookDispatcher::new(
+                reqwest::Client::new(),
+                keys,
+            );
+
+        dispatch_terminal_webhook_if_needed(&db, &dispatcher, &created.link.id).await;
+        let body = tokio::time::timeout(std::time::Duration::from_secs(3), rx.recv())
+            .await
+            .expect("terminal webhook delivery")
+            .expect("terminal webhook body");
+        let envelope: serde_json::Value =
+            serde_json::from_slice(&body).expect("parse terminal webhook");
+        assert_eq!(envelope["event_type"], "connect_link.cancelled");
+        assert_eq!(envelope["data"]["connect_link_id"], created.link.id);
+        assert_eq!(envelope["data"]["status"], "cancelled");
+
+        dispatch_terminal_webhook_if_needed(&db, &dispatcher, &created.link.id).await;
+        assert!(
+            tokio::time::timeout(std::time::Duration::from_millis(100), rx.recv())
+                .await
+                .is_err()
+        );
+    }
+
+    #[tokio::test]
+    async fn expiry_sweep_expires_app_link_and_dispatches_once_without_polling() {
+        let Some(db) = connect_test_database("connect_link_expiry_sweep_dispatch").await else {
+            return;
+        };
+        let (_, created) = create_test_link(&db, "expiry-sweep-dispatch").await;
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<axum::body::Bytes>();
+        let receiver = axum::Router::new().route(
+            "/events",
+            axum::routing::post(move |body: axum::body::Bytes| {
+                let tx = tx.clone();
+                async move {
+                    tx.send(body).expect("capture expiry webhook");
+                    axum::http::StatusCode::NO_CONTENT
+                }
+            }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind expiry webhook receiver");
+        let address = listener.local_addr().expect("expiry receiver address");
+        tokio::spawn(async move {
+            axum::serve(listener, receiver)
+                .await
+                .expect("serve expiry webhook receiver")
+        });
+
+        let client = insert_oauth_client(&db, "Expiry Webhook App", Vec::new()).await;
+        let keys = std::sync::Arc::new(crate::test_utils::test_encryption_keys());
+        let encrypted_secret = keys
+            .encrypt(b"expiry-webhook-secret")
+            .await
+            .expect("encrypt expiry webhook secret");
+        db.collection::<OauthClient>(OAUTH_CLIENTS)
+            .update_one(
+                doc! { "_id": &client.id },
+                doc! { "$set": {
+                    "connection_webhook_url": format!("http://{address}/events"),
+                    "connection_webhook_secret_encrypted": bson::Binary {
+                        subtype: bson::spec::BinarySubtype::Generic,
+                        bytes: encrypted_secret,
+                    },
+                    "connection_webhook_enabled": true,
+                }},
+            )
+            .await
+            .expect("configure expiry webhook");
+        db.collection::<ConnectLink>(CONNECT_LINKS)
+            .update_one(
+                doc! { "_id": &created.link.id },
+                doc! { "$set": {
+                    "requesting_app_id": &client.id,
+                    "expires_at": bson::DateTime::from_chrono(Utc::now() - Duration::seconds(1)),
+                }},
+            )
+            .await
+            .expect("make app link overdue");
+        let dispatcher =
+            crate::services::developer_webhook_service::DeveloperWebhookDispatcher::new(
+                reqwest::Client::new(),
+                keys,
+            );
+
+        assert_eq!(expire_pending_app_links(&db, &dispatcher).await.unwrap(), 1);
+        let body = tokio::time::timeout(std::time::Duration::from_secs(3), rx.recv())
+            .await
+            .expect("expiry webhook delivery")
+            .expect("expiry webhook body");
+        let envelope: serde_json::Value =
+            serde_json::from_slice(&body).expect("parse expiry webhook");
+        assert_eq!(envelope["event_type"], "connect_link.expired");
+        assert_eq!(envelope["data"]["connect_link_id"], created.link.id);
+
+        assert_eq!(expire_pending_app_links(&db, &dispatcher).await.unwrap(), 0);
+        assert!(
+            tokio::time::timeout(std::time::Duration::from_millis(100), rx.recv())
+                .await
+                .is_err()
+        );
+        let stored = db
+            .collection::<ConnectLink>(CONNECT_LINKS)
+            .find_one(doc! { "_id": &created.link.id })
+            .await
+            .unwrap()
+            .expect("expired link");
+        assert_eq!(stored.status, ConnectLinkStatus::Expired);
+    }
+
+    #[tokio::test]
+    async fn expiry_sweep_ignores_non_app_links() {
+        let Some(db) = connect_test_database("connect_link_expiry_sweep_non_app").await else {
+            return;
+        };
+        let (_, created) = create_test_link(&db, "expiry-sweep-non-app").await;
+        db.collection::<ConnectLink>(CONNECT_LINKS)
+            .update_one(
+                doc! { "_id": &created.link.id },
+                doc! { "$set": {
+                    "expires_at": bson::DateTime::from_chrono(Utc::now() - Duration::seconds(1)),
+                }},
+            )
+            .await
+            .expect("make first-party link overdue");
+        let dispatcher =
+            crate::services::developer_webhook_service::DeveloperWebhookDispatcher::new(
+                reqwest::Client::new(),
+                std::sync::Arc::new(crate::test_utils::test_encryption_keys()),
+            );
+
+        assert_eq!(expire_pending_app_links(&db, &dispatcher).await.unwrap(), 0);
+        let stored = db
+            .collection::<ConnectLink>(CONNECT_LINKS)
+            .find_one(doc! { "_id": &created.link.id })
+            .await
+            .unwrap()
+            .expect("first-party link");
+        assert_eq!(stored.status, ConnectLinkStatus::Pending);
+    }
+
+    #[tokio::test]
+    async fn expiry_sweep_preserves_pinned_link_within_grace() {
+        let Some(db) = connect_test_database("connect_link_expiry_sweep_pinned_grace").await else {
+            return;
+        };
+        let (_, created) = create_test_link(&db, "expiry-sweep-pinned-grace").await;
+        db.collection::<ConnectLink>(CONNECT_LINKS)
+            .update_one(
+                doc! { "_id": &created.link.id },
+                doc! { "$set": {
+                    "requesting_app_id": "app-id",
+                    "completed_user_service_id": "pinned-service-id",
+                    "expires_at": bson::DateTime::from_chrono(
+                        Utc::now() - Duration::seconds(PINNED_GRACE_SECS - 1)
+                    ),
+                }},
+            )
+            .await
+            .expect("pin app link within grace");
+        let dispatcher =
+            crate::services::developer_webhook_service::DeveloperWebhookDispatcher::new(
+                reqwest::Client::new(),
+                std::sync::Arc::new(crate::test_utils::test_encryption_keys()),
+            );
+
+        assert_eq!(expire_pending_app_links(&db, &dispatcher).await.unwrap(), 0);
+        let stored = db
+            .collection::<ConnectLink>(CONNECT_LINKS)
+            .find_one(doc! { "_id": &created.link.id })
+            .await
+            .unwrap()
+            .expect("pinned link");
+        assert_eq!(stored.status, ConnectLinkStatus::Pending);
+    }
+
+    #[tokio::test]
+    async fn provenance_write_failure_does_not_abort_completed_link() {
+        let Some(db) = connect_test_database("connect_link_provenance_failure_isolated").await
+        else {
+            return;
+        };
+        let app_id = Uuid::new_v4().to_string();
+        let mut existing = crate::test_utils::test_user_service(
+            &Uuid::new_v4().to_string(),
+            &Uuid::new_v4().to_string(),
+            "existing-provenance",
+            &Uuid::new_v4().to_string(),
+            None,
+            None,
+        );
+        existing.source_app_id = Some(app_id.clone());
+        db.collection::<UserService>(USER_SERVICES)
+            .insert_one(&existing)
+            .await
+            .expect("insert existing provenance row");
+        db.collection::<UserService>(USER_SERVICES)
+            .create_index(
+                mongodb::IndexModel::builder()
+                    .keys(doc! { "source_app_id": 1 })
+                    .options(
+                        mongodb::options::IndexOptions::builder()
+                            .unique(true)
+                            .partial_filter_expression(
+                                doc! { "source_app_id": { "$type": "string" } },
+                            )
+                            .build(),
+                    )
+                    .build(),
+            )
+            .await
+            .expect("create provenance failure index");
+
+        let (owner, created) = create_test_link(&db, "provenance-failure").await;
+        db.collection::<ConnectLink>(CONNECT_LINKS)
+            .update_one(
+                doc! { "_id": &created.link.id },
+                doc! { "$set": { "requesting_app_id": &app_id } },
+            )
+            .await
+            .expect("bind requesting app");
+
+        let completed = complete(
+            &db,
+            &crate::test_utils::test_encryption_keys(),
+            &owner,
+            &created.raw_token,
+            CompleteInput {
+                credential: Some("test-secret"),
+                ..CompleteInput::default()
+            },
+            false,
+        )
+        .await
+        .expect("provenance failure must not fail completion");
+        let CompleteResult::Completed(view) = completed else {
+            panic!("API-key link should complete")
+        };
+        assert_eq!(view.link.status, ConnectLinkStatus::Completed);
+        let service_id = view
+            .link
+            .completed_user_service_id
+            .expect("completed service id");
+        let service = db
+            .collection::<UserService>(USER_SERVICES)
+            .find_one(doc! { "_id": service_id })
+            .await
+            .unwrap()
+            .expect("provisioned service");
+        assert!(service.source_app_id.is_none());
+    }
+
     #[test]
     fn raw_token_requires_prefix_and_32_hex_bytes() {
         let valid = format!("{CONNECT_LINK_PREFIX}{}", "ab".repeat(32));
         assert!(validate_raw_token(&valid).is_ok());
         assert!(validate_raw_token("nyx_clk_short").is_err());
         assert!(validate_raw_token(&format!("{CONNECT_LINK_PREFIX}{}", "zz".repeat(32))).is_err());
+    }
+
+    #[test]
+    fn terminal_webhook_event_names_cover_every_terminal_status() {
+        assert_eq!(
+            terminal_webhook_event_type(ConnectLinkStatus::Completed),
+            Some("connect_link.completed")
+        );
+        assert_eq!(
+            terminal_webhook_event_type(ConnectLinkStatus::Cancelled),
+            Some("connect_link.cancelled")
+        );
+        assert_eq!(
+            terminal_webhook_event_type(ConnectLinkStatus::Expired),
+            Some("connect_link.expired")
+        );
+        assert_eq!(
+            terminal_webhook_event_type(ConnectLinkStatus::Pending),
+            None
+        );
     }
 
     #[test]

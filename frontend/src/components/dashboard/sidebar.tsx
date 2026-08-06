@@ -28,6 +28,7 @@ import {
   PanelLeft,
   Circle,
   QrCode,
+  Webhook,
 } from "lucide-react";
 import {
   Popover,
@@ -64,6 +65,7 @@ export const APPROVALS_NAV = [
 
 export const DEVELOPER_NAV = [
   { to: "/developer/apps", icon: Code, label: "Developer Apps" },
+  { to: "/triggers", icon: Webhook, label: "Triggers" },
   { to: "/ai-setup", icon: Sparkles, label: "AI Setup" },
   { to: "/integration-guide", icon: BookMarked, label: "Integration Guide" },
 ] as const;

@@ -161,6 +161,9 @@ export const DeveloperAppDetailPage = lazy(() =>
     default: m.DeveloperAppDetailPage,
   })),
 );
+export const TriggersPage = lazy(() =>
+  import("@/pages/triggers").then((m) => ({ default: m.TriggersPage })),
+);
 export const IntegrationGuidePage = lazy(() =>
   import("@/pages/integration-guide").then((m) => ({
     default: m.IntegrationGuidePage,

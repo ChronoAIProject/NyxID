@@ -272,6 +272,12 @@ The approval system works without Telegram -- users can always approve/reject vi
 
 **Telegram delivery modes:** When `TELEGRAM_WEBHOOK_URL` (and `TELEGRAM_WEBHOOK_SECRET`) are set, the backend registers a webhook with Telegram at startup. When only `TELEGRAM_BOT_TOKEN` is set (no webhook URL), the backend automatically falls back to `getUpdates` long polling -- ideal for local development without ngrok or tunnels.
 
+## Hosted Connect Links
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `CONNECT_LINK_EXPIRY_SWEEP_INTERVAL_SECS` | `60` | Interval between sweeps that claim overdue app-bound connect links and dispatch `connect_link.expired`. Effective deadlines include the pinned OAuth/device finalization grace. `0` disables the sweep; query-time expiry remains active. |
+
 ## OAuth Token Refresh (Optional)
 
 | Variable | Default | Description |
@@ -286,6 +292,16 @@ The sweep only refreshes the short-lived **access** token. It does **not** exten
 
 - A Google OAuth app left in **"Testing"** publishing status expires its refresh tokens after 7 days regardless. Publish the app (Google Cloud Console → OAuth consent screen → Publish) to fix.
 - A connection authorized before refresh tokens were issued (no `access_type=offline` consent) has no refresh token to use. Re-add the connection once to obtain one.
+
+## Trigger Ingress
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `TRIGGER_RATE_LIMIT_PER_SECOND` | `10` | Sustained public ingress rate allowed per trigger. |
+| `TRIGGER_RATE_LIMIT_BURST` | `20` | Per-trigger token bucket capacity. |
+| `TRIGGER_PAYLOAD_MAX_BYTES` | `262144` | Maximum raw trigger request body size. |
+
+Trigger dedup uses the shared `CHANNEL_EVENT_DEDUP_CAPACITY` and `CHANNEL_EVENT_DEDUP_TTL_SECS` bounds in a separate cache.
 
 ## Mobile Push Notifications (Optional)
 

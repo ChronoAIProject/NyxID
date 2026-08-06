@@ -196,6 +196,9 @@ export interface OAuthClient {
   readonly allowed_scopes: string;
   readonly delegation_scopes: string;
   readonly broker_capability_enabled: boolean;
+  readonly revocation_webhook_url: string | null;
+  readonly connection_webhook_url: string | null;
+  readonly connection_webhook_enabled: boolean;
   readonly is_active: boolean;
   readonly default_service_catalog_slugs: readonly string[];
   readonly client_secret: string | null;

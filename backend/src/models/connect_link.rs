@@ -49,6 +49,8 @@ pub struct ConnectLink {
     pub last_error: Option<String>,
     #[serde(default, with = "bson_datetime::optional")]
     pub last_error_at: Option<DateTime<Utc>>,
+    #[serde(default, with = "bson_datetime::optional")]
+    pub webhook_event_reserved_at: Option<DateTime<Utc>>,
 }
 
 impl fmt::Debug for ConnectLinkStatus {
@@ -96,6 +98,7 @@ impl fmt::Debug for ConnectLink {
             .field("completion_claim_at", &self.completion_claim_at)
             .field("last_error", &self.last_error)
             .field("last_error_at", &self.last_error_at)
+            .field("webhook_event_reserved_at", &self.webhook_event_reserved_at)
             .finish()
     }
 }
@@ -126,6 +129,7 @@ mod tests {
             completion_claim_at: Some(now),
             last_error: Some("provider_access_denied".to_string()),
             last_error_at: Some(now),
+            webhook_event_reserved_at: None,
         }
     }
 

@@ -6,19 +6,12 @@
 //! clients can verify the event came from NyxID and was not tampered with.
 
 use chrono::{DateTime, Utc};
-use hmac::{Hmac, Mac};
 use serde::Serialize;
-use sha2::Sha256;
-use std::time::Duration;
-use tokio::time::sleep;
 use uuid::Uuid;
 use zeroize::Zeroizing;
 
 use crate::models::oauth_client::OauthClient;
-
-const MAX_ATTEMPTS: u32 = 3;
-const BASE_BACKOFF_MS: u64 = 1_000;
-const HTTP_TIMEOUT: Duration = Duration::from_secs(10);
+use crate::services::webhook_delivery_service::{self, SignatureContract};
 
 #[derive(Debug, Serialize, Clone)]
 pub struct RevocationEvent {
@@ -82,66 +75,37 @@ pub fn dispatch_revocation_event(
                 return;
             }
         };
-        let signature = compute_signature(&raw_hmac_secret, &body);
-
-        for attempt in 0..MAX_ATTEMPTS {
-            let request = http_client
-                .post(&url)
-                .timeout(HTTP_TIMEOUT)
-                .header("Content-Type", "application/json")
-                .header("X-NyxID-Event", event.event_type)
-                .header("X-NyxID-Delivery-Id", &delivery_id)
-                .header("X-NyxID-Signature", format!("sha256={signature}"))
-                .body(body.clone());
-
-            match request.send().await {
-                Ok(response) if response.status().is_success() => {
-                    tracing::debug!(
-                        delivery_id = %delivery_id,
-                        client_id = %event.client_id,
-                        attempt = attempt + 1,
-                        "CAE webhook delivered"
-                    );
-                    return;
-                }
-                Ok(response) => {
-                    tracing::warn!(
-                        delivery_id = %delivery_id,
-                        status = %response.status(),
-                        attempt = attempt + 1,
-                        "CAE webhook returned non-2xx"
-                    );
-                }
-                Err(error) => {
-                    tracing::warn!(
-                        delivery_id = %delivery_id,
-                        error = %error,
-                        attempt = attempt + 1,
-                        "CAE webhook send failed"
-                    );
-                }
-            }
-
-            if attempt + 1 < MAX_ATTEMPTS {
-                let backoff_ms = BASE_BACKOFF_MS * 4_u64.pow(attempt);
-                sleep(Duration::from_millis(backoff_ms)).await;
-            }
+        match webhook_delivery_service::deliver_signed_body(
+            &http_client,
+            &url,
+            raw_hmac_secret.as_bytes(),
+            event.event_type,
+            &delivery_id,
+            &body,
+            SignatureContract::BodyOnly,
+        )
+        .await
+        {
+            Ok(()) => tracing::debug!(
+                delivery_id = %delivery_id,
+                client_id = %event.client_id,
+                "CAE webhook delivered"
+            ),
+            Err(failure) => tracing::error!(
+                delivery_id = %delivery_id,
+                client_id = %event.client_id,
+                attempts = failure.attempts,
+                reason = failure.reason,
+                last_status = failure.last_status,
+                "CAE webhook delivery exhausted retries"
+            ),
         }
-
-        tracing::error!(
-            delivery_id = %delivery_id,
-            client_id = %event.client_id,
-            "CAE webhook delivery exhausted retries"
-        );
     });
 }
 
+#[cfg(test)]
 fn compute_signature(secret: &str, body: &[u8]) -> String {
-    type HmacSha256 = Hmac<Sha256>;
-    let mut mac =
-        HmacSha256::new_from_slice(secret.as_bytes()).expect("HMAC accepts any length key");
-    mac.update(body);
-    hex::encode(mac.finalize().into_bytes())
+    webhook_delivery_service::compute_body_signature(secret.as_bytes(), body)
 }
 
 #[cfg(test)]

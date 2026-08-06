@@ -91,6 +91,9 @@ pub struct AppState {
     /// Shared delivery runtime for connection-expiry notifications.
     pub connection_expiry_notifier:
         Arc<services::connection_expiry_service::ConnectionExpiryNotifier>,
+    /// Signed lifecycle delivery runtime for registered developer apps.
+    pub developer_webhook_dispatcher:
+        Arc<services::developer_webhook_service::DeveloperWebhookDispatcher>,
     /// Versioned encryption keys for AES-256-GCM (current + optional previous for rotation)
     pub encryption_keys: Arc<EncryptionKeys>,
     /// WebSocket connection manager for credential nodes
@@ -161,6 +164,10 @@ pub struct AppState {
     pub per_message_edit_limiter: mw::rate_limit::SharedPerMessageEditRateLimiter,
     /// Best-effort idempotency cache for inbound channel events.
     pub event_dedup_cache: Arc<EventDedupCache>,
+    /// Per-trigger token bucket for public trigger ingress.
+    pub per_trigger_limiter: mw::rate_limit::SharedPerChannelEventLimiter,
+    /// Best-effort idempotency cache for inbound trigger events.
+    pub trigger_dedup_cache: Arc<EventDedupCache>,
     /// Per-process DPoP proof replay cache keyed by proof jti.
     pub dpop_jti_cache: Arc<DpopJtiCache>,
     /// Active WebSocket passthrough connection count (for resource limiting)
@@ -623,6 +630,14 @@ async fn main() {
         config.channel_event_dedup_capacity,
         std::time::Duration::from_secs(config.channel_event_dedup_ttl_secs),
     ));
+    let per_trigger_limiter = Arc::new(mw::rate_limit::PerChannelEventLimiter::new(
+        config.trigger_rate_limit_per_second,
+        config.trigger_rate_limit_burst,
+    ));
+    let trigger_dedup_cache = Arc::new(EventDedupCache::new(
+        config.channel_event_dedup_capacity,
+        std::time::Duration::from_secs(config.channel_event_dedup_ttl_secs),
+    ));
     let dpop_jti_cache = Arc::new(DpopJtiCache::new(
         DPOP_JTI_CACHE_CAPACITY,
         std::time::Duration::from_secs(DPOP_JTI_CACHE_TTL_SECS),
@@ -660,6 +675,21 @@ async fn main() {
     let broker_policy = services::platform_settings_service::load_broker_policy(&db, &config)
         .await
         .expect("Failed to load platform broker policy");
+    let developer_webhook_dispatcher = Arc::new(
+        services::developer_webhook_service::DeveloperWebhookDispatcher::new(
+            http_client.clone(),
+            encryption_keys.clone(),
+        ),
+    );
+    let connection_expiry_notifier = Arc::new(
+        services::connection_expiry_service::ConnectionExpiryNotifier::new(
+            Arc::new(config.clone()),
+            http_client.clone(),
+            fcm_auth.clone(),
+            apns_auth.clone(),
+            Some(developer_webhook_dispatcher.clone()),
+        ),
+    );
     let state = AppState {
         db,
         config: config.clone(),
@@ -670,14 +700,8 @@ async fn main() {
         jwks_cache,
         fcm_auth: fcm_auth.clone(),
         apns_auth: apns_auth.clone(),
-        connection_expiry_notifier: Arc::new(
-            services::connection_expiry_service::ConnectionExpiryNotifier::new(
-                Arc::new(config.clone()),
-                http_client.clone(),
-                fcm_auth.clone(),
-                apns_auth.clone(),
-            ),
-        ),
+        connection_expiry_notifier,
+        developer_webhook_dispatcher,
         encryption_keys: encryption_keys.clone(),
         node_ws_manager,
         ssh_session_manager,
@@ -711,6 +735,8 @@ async fn main() {
         per_channel_event_limiter,
         per_message_edit_limiter,
         event_dedup_cache,
+        per_trigger_limiter,
+        trigger_dedup_cache,
         dpop_jti_cache,
         ws_passthrough_count: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
         token_exchange_cache: Arc::new(TokenExchangeCache::new()),
@@ -883,6 +909,25 @@ async fn main() {
             cleanup_event_limiter.cleanup();
         }
     });
+
+    let cleanup_developer_webhooks = state.developer_webhook_dispatcher.clone();
+    tokio::spawn(async move {
+        let mut interval = tokio::time::interval(std::time::Duration::from_secs(120));
+        loop {
+            interval.tick().await;
+            cleanup_developer_webhooks.cleanup();
+        }
+    });
+    let cleanup_trigger_limiter = state.per_trigger_limiter.clone();
+    let cleanup_trigger_dedup = state.trigger_dedup_cache.clone();
+    tokio::spawn(async move {
+        let mut interval = tokio::time::interval(std::time::Duration::from_secs(60));
+        loop {
+            interval.tick().await;
+            cleanup_trigger_limiter.cleanup();
+            cleanup_trigger_dedup.cleanup();
+        }
+    });
     let cleanup_edit_limiter = state.per_message_edit_limiter.clone();
     tokio::spawn(async move {
         let mut interval = tokio::time::interval(std::time::Duration::from_secs(60));
@@ -899,6 +944,30 @@ async fn main() {
             cleanup_event_dedup.cleanup();
         }
     });
+
+    // Expire abandoned app-bound connect links even when their creator has
+    // stopped polling. Disabled when the interval is 0.
+    if config.connect_link_expiry_sweep_interval_secs > 0 {
+        let connect_link_expiry_db = state.db.clone();
+        let connect_link_expiry_dispatcher = state.developer_webhook_dispatcher.clone();
+        let connect_link_expiry_interval = config.connect_link_expiry_sweep_interval_secs;
+        tokio::spawn(async move {
+            let mut interval =
+                tokio::time::interval(std::time::Duration::from_secs(connect_link_expiry_interval));
+            interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+            loop {
+                interval.tick().await;
+                if let Err(error) = services::connect_link_service::expire_pending_app_links(
+                    &connect_link_expiry_db,
+                    &connect_link_expiry_dispatcher,
+                )
+                .await
+                {
+                    tracing::warn!(%error, "Connect-link expiry sweep error");
+                }
+            }
+        });
+    }
 
     // Spawn background cleanup task for MCP session reaper.
     // Sessions live up to 30 days (extended on every request via touch()).

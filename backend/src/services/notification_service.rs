@@ -68,6 +68,18 @@ struct RenderedConnectionExpiredNotification {
     data: HashMap<String, String>,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct RenderedTriggerNotification {
+    title: String,
+    telegram_message: String,
+    push_body: String,
+    push_data: HashMap<String, String>,
+}
+
+const TELEGRAM_TRIGGER_PREVIEW_MAX_CHARS: usize = 2_800;
+const PUSH_TRIGGER_PREVIEW_MAX_CHARS: usize = 512;
+const TRUNCATION_MARKER: &str = "\n...[truncated]";
+
 /// Result of sending push to a single device.
 enum PushResult {
     Success,
@@ -308,6 +320,128 @@ pub async fn send_connection_expired_notification(
         telegram_chat_id,
         telegram_message_id: None,
     })
+}
+
+/// Deliver an inbound trigger envelope through the user's configured
+/// notification channels. The payload is not persisted.
+#[allow(clippy::too_many_arguments)]
+pub async fn send_trigger_notification(
+    db: &Database,
+    config: &AppConfig,
+    http_client: &Client,
+    fcm_auth: Option<&FcmAuth>,
+    apns_auth: Option<&ApnsAuth>,
+    user_id: &str,
+    trigger_label: &str,
+    envelope: &serde_json::Value,
+) -> AppResult<()> {
+    let Some(channel) = db
+        .collection::<NotificationChannel>(COLLECTION_NAME)
+        .find_one(doc! { "user_id": user_id })
+        .await?
+    else {
+        return Err(AppError::TriggerDeliveryUnsupported);
+    };
+    let rendered = render_trigger_notification(trigger_label, envelope)?;
+    let mut delivered = false;
+    let mut attempted = false;
+
+    if channel.telegram_enabled
+        && let Some(chat_id) = channel.telegram_chat_id
+        && let Some(bot_token) = config.telegram_bot_token.as_deref()
+    {
+        attempted = true;
+        if telegram_service::send_text_message(
+            http_client,
+            bot_token,
+            chat_id,
+            &rendered.telegram_message,
+        )
+        .await
+        .is_ok()
+        {
+            delivered = true;
+        }
+    }
+
+    if channel.push_enabled && !channel.push_devices.is_empty() {
+        attempted = true;
+        for device in unique_devices_by_token(&channel.push_devices) {
+            if send_push_to_device(
+                http_client,
+                fcm_auth,
+                apns_auth,
+                config,
+                device,
+                &rendered.title,
+                &rendered.push_body,
+                &rendered.push_data,
+            )
+            .await
+            .is_ok()
+            {
+                delivered = true;
+            }
+        }
+    }
+
+    if delivered {
+        Ok(())
+    } else if attempted {
+        Err(AppError::TriggerDeliveryFailed)
+    } else {
+        Err(AppError::TriggerDeliveryUnsupported)
+    }
+}
+
+fn render_trigger_notification(
+    trigger_label: &str,
+    envelope: &serde_json::Value,
+) -> AppResult<RenderedTriggerNotification> {
+    let title = format!("Trigger: {trigger_label}");
+    let event_id = envelope
+        .get("event_id")
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or("unknown");
+    let preview_value = envelope.get("payload").unwrap_or(envelope);
+    let pretty_preview = serde_json::to_string_pretty(preview_value)
+        .map_err(|_| AppError::TriggerDeliveryUnsupported)?;
+    let telegram_preview = truncate_chars(
+        &html_escape(&pretty_preview),
+        TELEGRAM_TRIGGER_PREVIEW_MAX_CHARS,
+    );
+    let push_preview = truncate_chars(&pretty_preview, PUSH_TRIGGER_PREVIEW_MAX_CHARS);
+    let telegram_message = format!(
+        "<b>{}</b>\n\n<pre>{}</pre>",
+        html_escape(&title),
+        telegram_preview
+    );
+    let push_body = format!("Event {event_id}\n{push_preview}");
+    let mut push_data = HashMap::new();
+    push_data.insert("type".to_string(), "trigger_event".to_string());
+    push_data.insert(
+        "trigger_label".to_string(),
+        truncate_chars(trigger_label, 128),
+    );
+    push_data.insert("event_id".to_string(), truncate_chars(event_id, 128));
+    push_data.insert("preview".to_string(), push_preview);
+    Ok(RenderedTriggerNotification {
+        title,
+        telegram_message,
+        push_body,
+        push_data,
+    })
+}
+
+fn truncate_chars(value: &str, max_chars: usize) -> String {
+    if value.chars().count() <= max_chars {
+        return value.to_string();
+    }
+    let marker_len = TRUNCATION_MARKER.chars().count();
+    let retained = max_chars.saturating_sub(marker_len);
+    let mut truncated: String = value.chars().take(retained).collect();
+    truncated.push_str(TRUNCATION_MARKER);
+    truncated
 }
 
 /// Send an approval notification to the user via all enabled channels.
@@ -1501,5 +1635,44 @@ mod tests {
             rendered.data.get("user_service_id").map(String::as_str),
             Some("service-id")
         );
+    }
+
+    #[test]
+    fn oversized_trigger_payload_renders_deliverable_bounded_notifications() {
+        let envelope = serde_json::json!({
+            "event_id": "provider-event-123",
+            "trigger_id": "trigger-id",
+            "source": "inbound_webhook",
+            "received_at": "2026-08-06T09:30:00Z",
+            "payload": {
+                "content": "<private>".repeat(40_000),
+            },
+        });
+
+        let rendered = render_trigger_notification("Repository activity", &envelope)
+            .expect("oversized payload still renders");
+        assert!(rendered.telegram_message.chars().count() < 4_096);
+        assert!(rendered.telegram_message.contains(TRUNCATION_MARKER));
+        assert!(rendered.push_body.chars().count() < 1_024);
+        assert!(rendered.push_body.contains(TRUNCATION_MARKER));
+        assert_eq!(
+            rendered.push_data.get("type").map(String::as_str),
+            Some("trigger_event")
+        );
+        assert_eq!(
+            rendered.push_data.get("trigger_label").map(String::as_str),
+            Some("Repository activity")
+        );
+        assert_eq!(
+            rendered.push_data.get("event_id").map(String::as_str),
+            Some("provider-event-123")
+        );
+        assert!(
+            rendered
+                .push_data
+                .get("preview")
+                .is_some_and(|preview| preview.chars().count() <= PUSH_TRIGGER_PREVIEW_MAX_CHARS)
+        );
+        assert!(!rendered.push_data.contains_key("envelope"));
     }
 }

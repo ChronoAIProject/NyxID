@@ -342,6 +342,7 @@ pub(crate) fn test_app_config() -> AppConfig {
         telegram_webhook_url: None,
         telegram_bot_username: None,
         approval_expiry_interval_secs: 5,
+        connect_link_expiry_sweep_interval_secs: 60,
         oauth_refresh_sweep_interval_secs: 600,
         oauth_refresh_sweep_window_secs: 900,
         connection_expiry_notifications: true,
@@ -387,6 +388,9 @@ pub(crate) fn test_app_config() -> AppConfig {
         channel_event_rate_limit_burst: 200,
         channel_event_dedup_capacity: 32_768,
         channel_event_dedup_ttl_secs: 300,
+        trigger_rate_limit_per_second: 10,
+        trigger_rate_limit_burst: 20,
+        trigger_payload_max_bytes: 256 * 1024,
         oracle_task_retention_days: 30,
         cloud_response_cache_ttl_secs: 0,
         cloud_response_cache_max_entry_bytes: 1024 * 1024,
@@ -514,6 +518,13 @@ pub(crate) fn test_app_state_with_config(db: mongodb::Database, config: AppConfi
         db.clone(),
         Arc::new(config.clone()),
     ));
+    let encryption_keys = Arc::new(test_encryption_keys());
+    let developer_webhook_dispatcher = Arc::new(
+        crate::services::developer_webhook_service::DeveloperWebhookDispatcher::new(
+            http_client.clone(),
+            encryption_keys.clone(),
+        ),
+    );
 
     AppState {
         db,
@@ -531,9 +542,11 @@ pub(crate) fn test_app_state_with_config(db: mongodb::Database, config: AppConfi
                 http_client.clone(),
                 None,
                 None,
+                Some(developer_webhook_dispatcher.clone()),
             ),
         ),
-        encryption_keys: Arc::new(test_encryption_keys()),
+        developer_webhook_dispatcher,
+        encryption_keys,
         node_ws_manager: Arc::new(NodeWsManager::new(
             config.node_proxy_timeout_secs,
             config.node_max_ws_connections,
@@ -582,6 +595,14 @@ pub(crate) fn test_app_state_with_config(db: mongodb::Database, config: AppConfi
             config.channel_relay_edit_rate_limit_burst,
         )),
         event_dedup_cache: Arc::new(EventDedupCache::new(
+            config.channel_event_dedup_capacity,
+            Duration::from_secs(config.channel_event_dedup_ttl_secs),
+        )),
+        per_trigger_limiter: Arc::new(crate::mw::rate_limit::PerChannelEventLimiter::new(
+            config.trigger_rate_limit_per_second,
+            config.trigger_rate_limit_burst,
+        )),
+        trigger_dedup_cache: Arc::new(EventDedupCache::new(
             config.channel_event_dedup_capacity,
             Duration::from_secs(config.channel_event_dedup_ttl_secs),
         )),
