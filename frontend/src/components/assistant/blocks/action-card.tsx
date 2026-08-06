@@ -12,11 +12,7 @@ import { ServiceIcon } from "@/components/service-icon";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { useChatPresence } from "@/hooks/use-chat-presence";
-import {
-  KEY_AUTH_ACTIVE,
-  KEY_AUTH_FAILED,
-  useKeyAuthorizationWatch,
-} from "@/hooks/use-keys";
+import { KEY_AUTH_FAILED, useKeyAuthorizationWatch } from "@/hooks/use-keys";
 import {
   actionServiceLabel,
   clampServiceLabel,
@@ -209,7 +205,7 @@ export function ActionCard({
   );
   const beginPendingAuth = usePendingConnectStore((state) => state.begin);
   const endPendingAuth = usePendingConnectStore((state) => state.end);
-  /** Guards one auto-settlement per watched key against effect re-entry. */
+  /** Guards one auto-settlement per authorization attempt against effect re-entry. */
   const watchSettledRef = useRef<string | null>(null);
   /** One mount-time reconciliation, whatever the deps churn afterwards. */
   const reconciledRef = useRef(false);
@@ -240,6 +236,8 @@ export function ActionCard({
     block.status === "failed";
 
   const watch = useKeyAuthorizationWatch(pendingAuth?.keyId ?? null, {
+    attemptId: pendingAuth?.attemptId ?? "idle",
+    previousAuthorizationAt: pendingAuth?.previousAuthorizationAt,
     // Presence gate: a hidden tab stops polling and resumes on focus.
     enabled: pendingAuth !== null && !settled && visible,
     deadlineAt: pendingAuth
@@ -253,12 +251,20 @@ export function ActionCard({
   // surface on the card rather than leaving it waiting in silence.
   useEffect(() => {
     const keyId = pendingAuth?.keyId;
-    if (!keyId || settled || watchSettledRef.current === keyId) return;
+    const attemptId = pendingAuth?.attemptId;
+    if (
+      !keyId ||
+      !attemptId ||
+      settled ||
+      watchSettledRef.current === attemptId
+    ) {
+      return;
+    }
 
     // The ref is the synchronous re-entry guard; the state clear rides the
     // microtask so this effect never sets the state it depends on inline.
-    if (watch.status === KEY_AUTH_ACTIVE) {
-      watchSettledRef.current = keyId;
+    if (watch.authorized) {
+      watchSettledRef.current = attemptId;
       resolvingRef.current = true;
       void Promise.resolve()
         .then(() => {
@@ -278,7 +284,7 @@ export function ActionCard({
     }
 
     if (watch.status === KEY_AUTH_FAILED || watch.timedOut) {
-      watchSettledRef.current = keyId;
+      watchSettledRef.current = attemptId;
       const note =
         watch.status === KEY_AUTH_FAILED
           ? authorizationFailedNote(watch.errorMessage)
@@ -294,6 +300,7 @@ export function ActionCard({
     pendingAuth,
     settled,
     watch.status,
+    watch.authorized,
     watch.timedOut,
     watch.errorMessage,
     block.block_id,
@@ -355,7 +362,7 @@ export function ActionCard({
   ) {
     // A manual outcome supersedes any watch still running for this card.
     if (pendingAuth) {
-      watchSettledRef.current = pendingAuth.keyId;
+      watchSettledRef.current = pendingAuth.attemptId;
       endPendingAuth(block.block_id);
     }
     if (disposition === "completed" && !userServiceId?.trim()) {
@@ -551,9 +558,12 @@ export function ActionCard({
             return true;
           }}
           onSuccess={({ userServiceId }) => report("completed", userServiceId)}
-          onAuthorizationPending={(keyId) => {
+          onAuthorizationPending={(attempt) => {
             watchSettledRef.current = null;
-            beginPendingAuth(block.block_id, { keyId, startedAt: Date.now() });
+            beginPendingAuth(block.block_id, {
+              ...attempt,
+              startedAt: Date.now(),
+            });
           }}
         />
       ) : null}

@@ -49,6 +49,7 @@ describe("OAuth popup manager", () => {
     const navigation = handle!.navigate(
       `https://github.com/login/oauth/authorize?state=1cc_${nonce}`,
       nonce,
+      "GitHub",
     );
     expect(popup.postMessage).not.toHaveBeenCalled();
 
@@ -74,6 +75,7 @@ describe("OAuth popup manager", () => {
         launchId: handle!.launchId,
         nonce,
         url: `https://github.com/login/oauth/authorize?state=1cc_${nonce}`,
+        serviceName: "GitHub",
       },
       window.location.origin,
     );

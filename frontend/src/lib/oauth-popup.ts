@@ -11,12 +11,19 @@ import type {
 } from "@/types/oauth-popup";
 
 const POPUP_READY_TIMEOUT_MS = 2_000;
-export const OAUTH_PROVIDER_ORIGIN_KEY = "nyxid.oauth.provider-origin";
+const MAX_SERVICE_NAME_LENGTH = 64;
+export const OAUTH_LAUNCH_CONTEXT_KEY = "nyxid.oauth.launch-context";
+
+export interface OAuthLaunchContext {
+  readonly providerOrigin: string;
+  readonly nonce: string;
+  readonly serviceName?: string;
+}
 
 export interface OAuthPopupHandle {
   readonly launchId: string;
   readonly ready: Promise<void>;
-  navigate(url: string, nonce: string): Promise<void>;
+  navigate(url: string, nonce: string, serviceName?: string): Promise<void>;
   close(): void;
   /** A soft hint only: COOP can make a live popup appear closed. */
   isClosed(): boolean;
@@ -32,6 +39,67 @@ export function openOAuthChannel(nonce: string): BroadcastChannel | null {
   const name = oauthChannelName(nonce);
   if (!name || typeof BroadcastChannel === "undefined") return null;
   return new BroadcastChannel(name);
+}
+
+function validServiceName(value: unknown): value is string {
+  return (
+    typeof value === "string" &&
+    value.length > 0 &&
+    value.length <= MAX_SERVICE_NAME_LENGTH
+  );
+}
+
+export function writeOAuthLaunchContext(context: OAuthLaunchContext): void {
+  sessionStorage.setItem(OAUTH_LAUNCH_CONTEXT_KEY, JSON.stringify(context));
+}
+
+export function readOAuthLaunchContext(): OAuthLaunchContext | null {
+  const raw = sessionStorage.getItem(OAUTH_LAUNCH_CONTEXT_KEY);
+  if (raw === null) return null;
+  try {
+    const value = JSON.parse(raw) as unknown;
+    if (typeof value !== "object" || value === null) return null;
+    const record = value as Record<string, unknown>;
+    if (
+      typeof record.providerOrigin !== "string" ||
+      typeof record.nonce !== "string" ||
+      !oauthAttemptNonceSchema.safeParse(record.nonce).success ||
+      (record.serviceName !== undefined &&
+        !validServiceName(record.serviceName))
+    ) {
+      return null;
+    }
+    const providerUrl = new URL(record.providerOrigin);
+    if (
+      (providerUrl.protocol !== "https:" && providerUrl.protocol !== "http:") ||
+      providerUrl.username !== "" ||
+      providerUrl.password !== "" ||
+      providerUrl.origin !== record.providerOrigin
+    ) {
+      return null;
+    }
+    return {
+      providerOrigin: providerUrl.origin,
+      nonce: record.nonce,
+      ...(record.serviceName !== undefined
+        ? { serviceName: record.serviceName }
+        : {}),
+    };
+  } catch {
+    return null;
+  }
+}
+
+export function oauthLaunchContextForNavigation(
+  authorizationUrl: URL,
+  nonce: string,
+  serviceName: unknown,
+): OAuthLaunchContext {
+  return {
+    providerOrigin: authorizationUrl.origin,
+    nonce,
+    ...(validServiceName(serviceName) ? { serviceName } : {}),
+  };
 }
 
 export function openOAuthPopup(): OAuthPopupHandle | null {
@@ -77,7 +145,7 @@ export function openOAuthPopup(): OAuthPopupHandle | null {
   return {
     launchId,
     ready,
-    async navigate(url, nonce) {
+    async navigate(url, nonce, serviceName) {
       const authorizationUrl = validateAuthorizationUrl(url, nonce);
       if (authorizationUrl === null) {
         throw new Error("Invalid OAuth authorization URL");
@@ -89,6 +157,7 @@ export function openOAuthPopup(): OAuthPopupHandle | null {
           launchId,
           nonce,
           url: authorizationUrl.href,
+          ...(serviceName !== undefined ? { serviceName } : {}),
         },
         window.location.origin,
       );

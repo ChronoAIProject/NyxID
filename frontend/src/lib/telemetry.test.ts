@@ -286,7 +286,7 @@ describe("before_send privacy hook", () => {
       "/reset-password/abc-token",
       "/verify-email/xyz",
       "/oauth/callback",
-      "/oauth",
+      "/oauth-complete",
       "/approve/req-1",
     ]) {
       expect(beforeSend({ properties: { $pathname: pathname } })).toBeNull();

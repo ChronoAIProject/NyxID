@@ -48,19 +48,23 @@ export const KEY_AUTH_FAILED = "failed";
  * denies or abandons it (the backend's lazy placeholder reconciliation
  * converges abandoned flows to `failed`).
  *
- * Shares `["keys", keyId]` with `useKey` so a completed flow warms the same
- * cache entry. Polls only while `enabled` — never leave this running behind a
- * closed dialog or a card that already resolved.
+ * An attempt id gives retries a private cache generation; callers that omit it
+ * retain the shared `["keys", keyId]` detail cache. Terminal observations
+ * invalidate both the shared detail and list queries. Polls only while
+ * `enabled` — never leave this running behind a closed dialog.
  */
 export function useKeyAuthorizationStatus(
   keyId: string | null,
   enabled: boolean,
   previousAuthorizationAt?: string | null,
+  attemptId?: string,
 ) {
   const queryClient = useQueryClient();
   const active = Boolean(keyId) && enabled;
   const query = useQuery({
-    queryKey: ["keys", keyId],
+    queryKey: attemptId
+      ? ["keys", keyId, "authorization", attemptId]
+      : ["keys", keyId],
     queryFn: async (): Promise<KeyInfo> => {
       return api.get<KeyInfo>(`/keys/${keyId ?? ""}`);
     },
@@ -101,8 +105,14 @@ export function useKeyAuthorizationStatus(
       (status === KEY_AUTH_ACTIVE && authorizationAdvanced)
     ) {
       void queryClient.invalidateQueries({ queryKey: ["keys"], exact: true });
+      if (keyId) {
+        void queryClient.invalidateQueries({
+          queryKey: ["keys", keyId],
+          exact: true,
+        });
+      }
     }
-  }, [authorizationAdvanced, status, queryClient]);
+  }, [authorizationAdvanced, keyId, status, queryClient]);
 
   return query;
 }
@@ -110,6 +120,8 @@ export function useKeyAuthorizationStatus(
 export interface KeyAuthorizationWatch {
   /** Latest observed key status; `undefined` before the first read lands. */
   readonly status: string | undefined;
+  /** Active is terminal for this attempt, including reconnect baseline checks. */
+  readonly authorized: boolean;
   /** Backend-supplied reason when `status` is `failed`. */
   readonly errorMessage: string | undefined;
   /** The watch gave up before the row reached a terminal status. */
@@ -132,9 +144,14 @@ export interface KeyAuthorizationWatch {
  */
 export function useKeyAuthorizationWatch(
   keyId: string | null,
-  options: { readonly enabled: boolean; readonly deadlineAt: number },
+  options: {
+    readonly attemptId: string;
+    readonly previousAuthorizationAt?: string | null;
+    readonly enabled: boolean;
+    readonly deadlineAt: number;
+  },
 ): KeyAuthorizationWatch {
-  const { enabled, deadlineAt } = options;
+  const { attemptId, previousAuthorizationAt, enabled, deadlineAt } = options;
   const queryClient = useQueryClient();
   /**
    * The (key, deadline) pair a timer has already fired for. Storing the pair
@@ -143,41 +160,48 @@ export function useKeyAuthorizationWatch(
    * no state written synchronously from an effect.
    */
   const [expiredFor, setExpiredFor] = useState<{
-    readonly keyId: string;
+    readonly attemptId: string;
     readonly deadlineAt: number;
   } | null>(null);
   const startedAtRef = useRef(0);
 
-  // A new key restarts the cadence window. Ref-only, so render stays pure.
+  // A new attempt restarts the cadence window. Ref-only, so render stays pure.
   useEffect(() => {
     startedAtRef.current = Date.now();
-  }, [keyId]);
+  }, [attemptId]);
 
   // Nothing re-renders on its own when a deadline passes, so arm a timer for
   // it. Re-armed whenever activity pushes `deadlineAt` out.
   useEffect(() => {
     if (!enabled || !keyId || deadlineAt <= 0) return;
-    const fire = () => setExpiredFor({ keyId, deadlineAt });
+    const fire = () => setExpiredFor({ attemptId, deadlineAt });
     // Zero delay rather than a direct call: an effect that sets state inline
     // re-enters render before the browser can paint.
     const timer = setTimeout(fire, Math.max(0, deadlineAt - Date.now()));
     return () => clearTimeout(timer);
-  }, [enabled, keyId, deadlineAt]);
+  }, [attemptId, enabled, keyId, deadlineAt]);
 
   const expired =
     expiredFor !== null &&
-    expiredFor.keyId === keyId &&
+    expiredFor.attemptId === attemptId &&
     expiredFor.deadlineAt >= deadlineAt;
   const active = Boolean(keyId) && enabled && !expired;
   const query = useQuery({
-    queryKey: ["keys", keyId],
+    queryKey: ["keys", keyId, "authorization", attemptId],
     queryFn: async (): Promise<KeyInfo> => {
       return api.get<KeyInfo>(`/keys/${keyId ?? ""}`);
     },
     enabled: active,
     refetchInterval: (current) => {
-      const status = current.state.data?.status;
-      if (status === KEY_AUTH_ACTIVE || status === KEY_AUTH_FAILED) {
+      const key = current.state.data;
+      const authorizationAdvanced =
+        previousAuthorizationAt === undefined ||
+        (key?.last_authorized_at != null &&
+          key.last_authorized_at !== previousAuthorizationAt);
+      if (
+        key?.status === KEY_AUTH_FAILED ||
+        (key?.status === KEY_AUTH_ACTIVE && authorizationAdvanced)
+      ) {
         return false;
       }
       if (!active) return false;
@@ -189,15 +213,27 @@ export function useKeyAuthorizationWatch(
   });
 
   const status = query.data?.status;
+  const authorizationAdvanced =
+    previousAuthorizationAt === undefined ||
+    (query.data?.last_authorized_at != null &&
+      query.data.last_authorized_at !== previousAuthorizationAt);
+  const terminalActive = status === KEY_AUTH_ACTIVE && authorizationAdvanced;
   useEffect(() => {
-    if (status === KEY_AUTH_ACTIVE || status === KEY_AUTH_FAILED) {
+    if (terminalActive || status === KEY_AUTH_FAILED) {
       void queryClient.invalidateQueries({ queryKey: ["keys"], exact: true });
+      if (keyId) {
+        void queryClient.invalidateQueries({
+          queryKey: ["keys", keyId],
+          exact: true,
+        });
+      }
     }
-  }, [status, queryClient]);
+  }, [keyId, queryClient, status, terminalActive]);
 
-  const terminal = status === KEY_AUTH_ACTIVE || status === KEY_AUTH_FAILED;
+  const terminal = terminalActive || status === KEY_AUTH_FAILED;
   return {
     status,
+    authorized: terminalActive,
     errorMessage: query.data?.error_message ?? undefined,
     timedOut: expired && !terminal,
   };
@@ -251,7 +287,8 @@ export function useExternalApiKeys() {
   return useQuery({
     queryKey: ["external-api-keys"],
     queryFn: async (): Promise<readonly ExternalApiKeyInfo[]> => {
-      const res = await api.get<ExternalApiKeyListResponse>("/api-keys/external");
+      const res =
+        await api.get<ExternalApiKeyListResponse>("/api-keys/external");
       return res.api_keys;
     },
   });
@@ -349,9 +386,7 @@ interface UpdateKeyParams {
    *   `null` clears,
    *   array replaces.
    */
-  readonly default_request_headers?:
-    | null
-    | readonly DefaultRequestHeader[];
+  readonly default_request_headers?: null | readonly DefaultRequestHeader[];
 }
 
 export function useUpdateKey() {
@@ -415,9 +450,7 @@ interface UpdateUserServiceParams {
    *   `null` clears,
    *   array replaces.
    */
-  readonly default_request_headers?:
-    | null
-    | readonly DefaultRequestHeader[];
+  readonly default_request_headers?: null | readonly DefaultRequestHeader[];
   readonly ws_frame_injections?: readonly WsFrameInjection[];
 }
 

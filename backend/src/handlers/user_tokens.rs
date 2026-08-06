@@ -1079,7 +1079,7 @@ fn redirect_to_oauth_completion(
     code: Option<&str>,
     nonce: Option<&str>,
 ) -> axum::response::Redirect {
-    let mut url = url::Url::parse(&format!("{frontend_url}/oauth"))
+    let mut url = url::Url::parse(&format!("{frontend_url}/oauth-complete"))
         .expect("frontend_url should be a valid URL");
     let mut query = url.query_pairs_mut();
     query
@@ -2328,7 +2328,10 @@ mod tests {
             .await,
         );
 
-        assert!(location.starts_with(&format!("{}/oauth?", frontend_url.trim_end_matches('/'))));
+        assert!(location.starts_with(&format!(
+            "{}/oauth-complete?",
+            frontend_url.trim_end_matches('/')
+        )));
         assert_eq!(
             redirect_query_param(&location, "status").as_deref(),
             Some("error")
@@ -2417,7 +2420,10 @@ mod tests {
             .await,
         );
 
-        assert!(location.starts_with(&format!("{}/oauth?", frontend_url.trim_end_matches('/'))));
+        assert!(location.starts_with(&format!(
+            "{}/oauth-complete?",
+            frontend_url.trim_end_matches('/')
+        )));
         assert_eq!(
             redirect_query_param(&location, "status").as_deref(),
             Some("error")

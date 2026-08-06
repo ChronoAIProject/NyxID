@@ -1,7 +1,10 @@
 import { useEffect, useState } from "react";
 import { Loader2 } from "lucide-react";
 import { NyxidIcon } from "@/components/brand/nyxid-icon";
-import { OAUTH_PROVIDER_ORIGIN_KEY } from "@/lib/oauth-popup";
+import {
+  oauthLaunchContextForNavigation,
+  writeOAuthLaunchContext,
+} from "@/lib/oauth-popup";
 import { validateAuthorizationUrl } from "@/schemas/oauth-popup";
 import type { OAuthLaunchNavigateMessage } from "@/types/oauth-popup";
 
@@ -48,9 +51,12 @@ export function OAuthLaunchingPage() {
       );
       if (authorizationUrl === null) return;
       window.removeEventListener("message", onMessage);
-      sessionStorage.setItem(
-        OAUTH_PROVIDER_ORIGIN_KEY,
-        authorizationUrl.origin,
+      writeOAuthLaunchContext(
+        oauthLaunchContextForNavigation(
+          authorizationUrl,
+          message.nonce,
+          message.serviceName,
+        ),
       );
       window.location.assign(authorizationUrl.href);
     };

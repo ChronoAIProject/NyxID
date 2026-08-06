@@ -3,6 +3,13 @@ import { create } from "zustand";
 export interface PendingConnectAuthorization {
   /** Placeholder key whose terminal status settles the card. */
   readonly keyId: string;
+  /** One generation per initiation; scopes the watch's cache and settle guard. */
+  readonly attemptId: string;
+  /**
+   * Reconnect baseline: `active` counts as authorized only after
+   * `last_authorized_at` advances past this. `undefined` is the fresh-add case.
+   */
+  readonly previousAuthorizationAt: string | null | undefined;
   /** Anchors both the poll cadence and the give-up deadline. */
   readonly startedAt: number;
 }

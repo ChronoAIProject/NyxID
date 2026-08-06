@@ -3,7 +3,10 @@ import { act, fireEvent, render, screen, waitFor } from "@testing-library/react"
 import userEvent from "@testing-library/user-event";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { ReactElement, ReactNode } from "react";
-import type { AddKeyDialogCompletion } from "@/components/dashboard/add-key-dialog";
+import type {
+  AddKeyDialogCompletion,
+  AuthorizationAttempt,
+} from "@/components/dashboard/add-key-dialog";
 import {
   CONNECT_WATCH_ACTIVITY_GRACE_MS,
   CONNECT_WATCH_BASE_MS,
@@ -62,7 +65,7 @@ vi.mock("@/components/dashboard/add-key-dialog", () => ({
     readonly prefillIncludeAllCatalog?: boolean;
     readonly prefillCustom?: { readonly name?: string };
     readonly onSuccess?: (result: AddKeyDialogCompletion) => void;
-    readonly onAuthorizationPending?: (keyId: string) => void;
+    readonly onAuthorizationPending?: (attempt: AuthorizationAttempt) => void;
     readonly launch?: string;
     readonly flow?: string;
     readonly onPopupViewResult?: (keyId: string) => boolean;
@@ -105,7 +108,13 @@ vi.mock("@/components/dashboard/add-key-dialog", () => ({
         </button>
         <button
           type="button"
-          onClick={() => onAuthorizationPending?.("key-pending-1")}
+          onClick={() =>
+            onAuthorizationPending?.({
+              keyId: "key-pending-1",
+              attemptId: "attempt-pending-1",
+              previousAuthorizationAt: undefined,
+            })
+          }
         >
           Hand off to provider
         </button>
@@ -889,7 +898,12 @@ describe("ActionCard background authorization watch", () => {
     mockGet.mockResolvedValue({ id: "key-pending-1", status: "pending_auth" });
     usePendingConnectStore.setState({
       attempts: {
-        "action-card-1": { keyId: "key-pending-1", startedAt: Date.now() },
+        "action-card-1": {
+          keyId: "key-pending-1",
+          attemptId: "attempt-pending-1",
+          previousAuthorizationAt: undefined,
+          startedAt: Date.now(),
+        },
       },
     });
 

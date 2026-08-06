@@ -191,7 +191,7 @@ const oauthLaunchingRoute = createRoute({
 });
 
 const oauthCompleteRoute = createRoute({
-  path: "/oauth",
+  path: "/oauth-complete",
   getParentRoute: () => rootRoute,
   component: OAuthCompletePage,
 });
