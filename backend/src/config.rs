@@ -177,6 +177,10 @@ pub struct AppConfig {
     /// Interval in seconds between approval expiry sweeps (default: 5).
     pub approval_expiry_interval_secs: u64,
 
+    /// Interval in seconds between abandoned app connect-link expiry sweeps
+    /// (default: 60). Set to 0 to disable the sweep.
+    pub connect_link_expiry_sweep_interval_secs: u64,
+
     /// Interval in seconds between proactive OAuth token-refresh sweeps
     /// (default: 600 = 10 min). Set to 0 to disable the sweep entirely
     /// (lazy proxy-time refresh still applies). The sweep refreshes
@@ -480,6 +484,10 @@ impl std::fmt::Debug for AppConfig {
             .field(
                 "approval_expiry_interval_secs",
                 &self.approval_expiry_interval_secs,
+            )
+            .field(
+                "connect_link_expiry_sweep_interval_secs",
+                &self.connect_link_expiry_sweep_interval_secs,
             )
             .field(
                 "oauth_refresh_sweep_interval_secs",
@@ -893,6 +901,13 @@ impl AppConfig {
                 .ok()
                 .and_then(|v| v.parse().ok())
                 .unwrap_or(5),
+
+            connect_link_expiry_sweep_interval_secs: env::var(
+                "CONNECT_LINK_EXPIRY_SWEEP_INTERVAL_SECS",
+            )
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(60),
 
             oauth_refresh_sweep_interval_secs: env::var("OAUTH_REFRESH_SWEEP_INTERVAL_SECS")
                 .ok()
@@ -1429,6 +1444,7 @@ mod tests {
             telegram_webhook_url: None,
             telegram_bot_username: None,
             approval_expiry_interval_secs: 5,
+            connect_link_expiry_sweep_interval_secs: 60,
             oauth_refresh_sweep_interval_secs: 600,
             oauth_refresh_sweep_window_secs: 900,
             connection_expiry_notifications: true,

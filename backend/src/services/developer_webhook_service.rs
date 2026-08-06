@@ -283,7 +283,7 @@ pub async fn disable(db: &Database, client_id: &str, created_by: &str) -> AppRes
 mod tests {
     use super::*;
     use axum::{Router, body::Bytes, http::HeaderMap, routing::post};
-    use chrono::Utc;
+    use chrono::{TimeZone, Utc};
 
     use crate::models::audit_log::{AuditLog, COLLECTION_NAME as AUDIT_LOGS};
     use crate::models::oauth_client::ScopeProvenance;
@@ -313,6 +313,25 @@ mod tests {
             created_at: now,
             updated_at: now,
         }
+    }
+
+    #[test]
+    fn connection_webhook_envelope_timestamp_wire_format_is_stable() {
+        let envelope = ConnectionWebhookEnvelope {
+            event_id: "3cc24472-c0b4-436c-a42a-17f43087f3e7".to_string(),
+            event_type: "connect_link.completed".to_string(),
+            occurred_at: Utc
+                .with_ymd_and_hms(2026, 8, 6, 9, 30, 0)
+                .single()
+                .expect("fixture timestamp")
+                + chrono::Duration::milliseconds(123),
+            data: serde_json::json!({"status":"completed"}),
+        };
+
+        assert_eq!(
+            serde_json::to_string(&envelope).expect("serialize envelope"),
+            r#"{"event_id":"3cc24472-c0b4-436c-a42a-17f43087f3e7","event_type":"connect_link.completed","occurred_at":"2026-08-06T09:30:00.123Z","data":{"status":"completed"}}"#
+        );
     }
 
     #[tokio::test]

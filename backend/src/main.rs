@@ -945,6 +945,30 @@ async fn main() {
         }
     });
 
+    // Expire abandoned app-bound connect links even when their creator has
+    // stopped polling. Disabled when the interval is 0.
+    if config.connect_link_expiry_sweep_interval_secs > 0 {
+        let connect_link_expiry_db = state.db.clone();
+        let connect_link_expiry_dispatcher = state.developer_webhook_dispatcher.clone();
+        let connect_link_expiry_interval = config.connect_link_expiry_sweep_interval_secs;
+        tokio::spawn(async move {
+            let mut interval =
+                tokio::time::interval(std::time::Duration::from_secs(connect_link_expiry_interval));
+            interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+            loop {
+                interval.tick().await;
+                if let Err(error) = services::connect_link_service::expire_pending_app_links(
+                    &connect_link_expiry_db,
+                    &connect_link_expiry_dispatcher,
+                )
+                .await
+                {
+                    tracing::warn!(%error, "Connect-link expiry sweep error");
+                }
+            }
+        });
+    }
+
     // Spawn background cleanup task for MCP session reaper.
     // Sessions live up to 30 days (extended on every request via touch()).
     // Reaper runs every 5 minutes to clean up sessions idle longer than 30 days.
