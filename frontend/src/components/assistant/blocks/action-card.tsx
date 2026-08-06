@@ -235,8 +235,12 @@ export function ActionCard({
     block.status === "declined" ||
     block.status === "failed";
 
+  // Typed, non-persisted records always carry an attempt id. Keep malformed
+  // runtime data settleable anyway, with a fallback isolated to this card.
+  const authorizationAttemptId =
+    pendingAuth?.attemptId ?? `missing:${block.block_id}`;
   const watch = useKeyAuthorizationWatch(pendingAuth?.keyId ?? null, {
-    attemptId: pendingAuth?.attemptId ?? "idle",
+    attemptId: authorizationAttemptId,
     previousAuthorizationAt: pendingAuth?.previousAuthorizationAt,
     // Presence gate: a hidden tab stops polling and resumes on focus.
     enabled: pendingAuth !== null && !settled && visible,
@@ -251,7 +255,7 @@ export function ActionCard({
   // surface on the card rather than leaving it waiting in silence.
   useEffect(() => {
     const keyId = pendingAuth?.keyId;
-    const attemptId = pendingAuth?.attemptId;
+    const attemptId = pendingAuth ? authorizationAttemptId : null;
     if (
       !keyId ||
       !attemptId ||
@@ -298,6 +302,7 @@ export function ActionCard({
     }
   }, [
     pendingAuth,
+    authorizationAttemptId,
     settled,
     watch.status,
     watch.authorized,
@@ -362,7 +367,7 @@ export function ActionCard({
   ) {
     // A manual outcome supersedes any watch still running for this card.
     if (pendingAuth) {
-      watchSettledRef.current = pendingAuth.attemptId;
+      watchSettledRef.current = authorizationAttemptId;
       endPendingAuth(block.block_id);
     }
     if (disposition === "completed" && !userServiceId?.trim()) {
@@ -558,6 +563,9 @@ export function ActionCard({
             return true;
           }}
           onSuccess={({ userServiceId }) => report("completed", userServiceId)}
+          // Deliberately no onAuthorizationAborted: closing this short-lived
+          // dialog is not abandonment. The store-backed watch must survive
+          // dismissal/remount and settle the busy card (#1384).
           onAuthorizationPending={(attempt) => {
             watchSettledRef.current = null;
             beginPendingAuth(block.block_id, {
