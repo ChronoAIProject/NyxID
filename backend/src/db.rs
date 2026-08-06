@@ -26,6 +26,7 @@ use crate::models::oauth_broker_binding::{
 use crate::models::provider_config::{COLLECTION_NAME as PROVIDER_CONFIGS, ProviderConfig};
 use crate::models::pushed_authorization_request::COLLECTION_NAME as PAR_COLLECTION;
 use crate::models::ssh_auth_mode::SshAuthMode;
+use crate::models::trigger::{COLLECTION_NAME as TRIGGERS, Trigger};
 use crate::models::user_api_key::{COLLECTION_NAME as USER_API_KEYS, UserApiKey};
 use crate::models::user_endpoint::{COLLECTION_NAME as USER_ENDPOINTS, UserEndpoint};
 use crate::models::user_provider_credentials::{
@@ -1187,6 +1188,32 @@ pub async fn ensure_indexes(db: &Database) -> Result<(), mongodb::error::Error> 
     // a Mongo TTL index that could erase the status before the agent sees it.
     connect_links
         .create_index(IndexModel::builder().keys(doc! { "expires_at": 1 }).build())
+        .await?;
+
+    // ── triggers ──
+    let triggers = db.collection::<Trigger>(TRIGGERS);
+    triggers
+        .create_index(
+            IndexModel::builder()
+                .keys(doc! { "secret_hash": 1 })
+                .options(IndexOptions::builder().unique(true).build())
+                .build(),
+        )
+        .await?;
+    triggers
+        .create_index(
+            IndexModel::builder()
+                .keys(doc! { "user_id": 1, "created_at": -1 })
+                .build(),
+        )
+        .await?;
+    triggers
+        .create_index(
+            IndexModel::builder()
+                .keys(doc! { "user_service_id": 1 })
+                .options(IndexOptions::builder().sparse(true).build())
+                .build(),
+        )
         .await?;
 
     // ── device_onboard_credentials ──

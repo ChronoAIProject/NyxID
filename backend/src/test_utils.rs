@@ -387,6 +387,9 @@ pub(crate) fn test_app_config() -> AppConfig {
         channel_event_rate_limit_burst: 200,
         channel_event_dedup_capacity: 32_768,
         channel_event_dedup_ttl_secs: 300,
+        trigger_rate_limit_per_second: 10,
+        trigger_rate_limit_burst: 20,
+        trigger_payload_max_bytes: 256 * 1024,
         oracle_task_retention_days: 30,
         cloud_response_cache_ttl_secs: 0,
         cloud_response_cache_max_entry_bytes: 1024 * 1024,
@@ -591,6 +594,14 @@ pub(crate) fn test_app_state_with_config(db: mongodb::Database, config: AppConfi
             config.channel_relay_edit_rate_limit_burst,
         )),
         event_dedup_cache: Arc::new(EventDedupCache::new(
+            config.channel_event_dedup_capacity,
+            Duration::from_secs(config.channel_event_dedup_ttl_secs),
+        )),
+        per_trigger_limiter: Arc::new(crate::mw::rate_limit::PerChannelEventLimiter::new(
+            config.trigger_rate_limit_per_second,
+            config.trigger_rate_limit_burst,
+        )),
+        trigger_dedup_cache: Arc::new(EventDedupCache::new(
             config.channel_event_dedup_capacity,
             Duration::from_secs(config.channel_event_dedup_ttl_secs),
         )),

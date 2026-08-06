@@ -310,6 +310,82 @@ pub async fn send_connection_expired_notification(
     })
 }
 
+/// Deliver an inbound trigger envelope through the user's configured
+/// notification channels. The payload is not persisted.
+#[allow(clippy::too_many_arguments)]
+pub async fn send_trigger_notification(
+    db: &Database,
+    config: &AppConfig,
+    http_client: &Client,
+    fcm_auth: Option<&FcmAuth>,
+    apns_auth: Option<&ApnsAuth>,
+    user_id: &str,
+    trigger_label: &str,
+    envelope: &serde_json::Value,
+) -> AppResult<()> {
+    let Some(channel) = db
+        .collection::<NotificationChannel>(COLLECTION_NAME)
+        .find_one(doc! { "user_id": user_id })
+        .await?
+    else {
+        return Err(AppError::TriggerDeliveryUnsupported);
+    };
+    let body = serde_json::to_string(envelope).map_err(|_| AppError::TriggerDeliveryUnsupported)?;
+    let title = format!("Trigger: {trigger_label}");
+    let mut delivered = false;
+    let mut attempted = false;
+
+    if channel.telegram_enabled
+        && let Some(chat_id) = channel.telegram_chat_id
+        && let Some(bot_token) = config.telegram_bot_token.as_deref()
+    {
+        attempted = true;
+        let message = format!(
+            "<b>{}</b>\n\n<pre>{}</pre>",
+            html_escape(&title),
+            html_escape(&body)
+        );
+        if telegram_service::send_text_message(http_client, bot_token, chat_id, &message)
+            .await
+            .is_ok()
+        {
+            delivered = true;
+        }
+    }
+
+    if channel.push_enabled && !channel.push_devices.is_empty() {
+        attempted = true;
+        let mut data = HashMap::new();
+        data.insert("type".to_string(), "trigger_event".to_string());
+        data.insert("envelope".to_string(), body.clone());
+        for device in unique_devices_by_token(&channel.push_devices) {
+            if send_push_to_device(
+                http_client,
+                fcm_auth,
+                apns_auth,
+                config,
+                device,
+                &title,
+                &body,
+                &data,
+            )
+            .await
+            .is_ok()
+            {
+                delivered = true;
+            }
+        }
+    }
+
+    if delivered {
+        Ok(())
+    } else if attempted {
+        Err(AppError::TriggerDeliveryFailed)
+    } else {
+        Err(AppError::TriggerDeliveryUnsupported)
+    }
+}
+
 /// Send an approval notification to the user via all enabled channels.
 /// Returns which channels succeeded and Telegram metadata.
 ///

@@ -1015,6 +1015,25 @@ pub fn build_router(
         .layer(middleware::from_fn(reject_service_account_tokens))
         .layer(middleware::from_fn(reject_relay_tokens));
 
+    let trigger_routes = Router::new()
+        .route(
+            "/",
+            get(handlers::triggers::list_triggers).post(handlers::triggers::create_trigger),
+        )
+        .route(
+            "/{id}",
+            get(handlers::triggers::get_trigger)
+                .patch(handlers::triggers::update_trigger)
+                .delete(handlers::triggers::delete_trigger),
+        )
+        .route(
+            "/{id}/rotate-secret",
+            post(handlers::triggers::rotate_trigger_secret),
+        )
+        .layer(middleware::from_fn(reject_delegated_tokens))
+        .layer(middleware::from_fn(reject_service_account_tokens))
+        .layer(middleware::from_fn(reject_relay_tokens));
+
     let user_endpoint_routes = Router::new()
         .route("/", get(handlers::user_endpoints::list_endpoints))
         .route(
@@ -1342,6 +1361,7 @@ pub fn build_router(
         .nest("/nodes", node_registration_routes)
         .nest("/oracle", oracle_consumer_routes)
         .nest("/connect-links", connect_link_routes)
+        .nest("/triggers", trigger_routes)
         .layer(middleware::from_fn(reject_delegated_tokens))
         .layer(middleware::from_fn(reject_relay_tokens));
 
@@ -1483,6 +1503,12 @@ pub fn build_router(
     let webhook_routes = Router::new()
         .route("/telegram", post(handlers::webhooks::telegram_webhook))
         .route("/lago", post(handlers::billing::lago_webhook));
+    let trigger_webhook_routes = Router::new()
+        .route(
+            "/{trigger_id}",
+            post(handlers::trigger_webhooks::receive_trigger),
+        )
+        .layer(DefaultBodyLimit::disable());
 
     // Integration webhook routes -- unauthenticated (verified by HMAC signature)
     let integration_routes = Router::new().route(
@@ -1507,6 +1533,7 @@ pub fn build_router(
             get(handlers::credential_accept::asset),
         )
         .nest("/api/v1/webhooks", webhook_routes)
+        .nest("/api/v1/webhooks/triggers", trigger_webhook_routes)
         // Channel bot webhook routes -- unauthenticated (per-bot signature verified)
         .route(
             "/api/v1/webhooks/channel/telegram/{bot_id}",

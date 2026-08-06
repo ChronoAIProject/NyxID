@@ -297,6 +297,12 @@ pub struct AppConfig {
     pub channel_event_dedup_capacity: usize,
     /// Event dedup TTL in seconds (default 300 = 5 minutes).
     pub channel_event_dedup_ttl_secs: u64,
+    /// Per-trigger ingress rate limit (events per second, default 10).
+    pub trigger_rate_limit_per_second: u32,
+    /// Per-trigger ingress burst capacity (default 20).
+    pub trigger_rate_limit_burst: u32,
+    /// Maximum trigger ingress body size in bytes (default 256 KiB).
+    pub trigger_payload_max_bytes: usize,
 
     // Oracle relay (browser worker pools)
     /// Days to retain terminal oracle tasks (prompt + response bodies)
@@ -614,6 +620,12 @@ impl std::fmt::Debug for AppConfig {
                 "channel_event_dedup_ttl_secs",
                 &self.channel_event_dedup_ttl_secs,
             )
+            .field(
+                "trigger_rate_limit_per_second",
+                &self.trigger_rate_limit_per_second,
+            )
+            .field("trigger_rate_limit_burst", &self.trigger_rate_limit_burst)
+            .field("trigger_payload_max_bytes", &self.trigger_payload_max_bytes)
             .field(
                 "oracle_task_retention_days",
                 &self.oracle_task_retention_days,
@@ -1043,6 +1055,18 @@ impl AppConfig {
                 .ok()
                 .and_then(|v| v.parse().ok())
                 .unwrap_or(300),
+            trigger_rate_limit_per_second: env::var("TRIGGER_RATE_LIMIT_PER_SECOND")
+                .ok()
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(10),
+            trigger_rate_limit_burst: env::var("TRIGGER_RATE_LIMIT_BURST")
+                .ok()
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(20),
+            trigger_payload_max_bytes: env::var("TRIGGER_PAYLOAD_MAX_BYTES")
+                .ok()
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(256 * 1024),
             oracle_task_retention_days: env::var("ORACLE_TASK_RETENTION_DAYS")
                 .ok()
                 .and_then(|v| v.parse().ok())
@@ -1450,6 +1474,9 @@ mod tests {
             channel_event_rate_limit_burst: 200,
             channel_event_dedup_capacity: 32_768,
             channel_event_dedup_ttl_secs: 300,
+            trigger_rate_limit_per_second: 10,
+            trigger_rate_limit_burst: 20,
+            trigger_payload_max_bytes: 256 * 1024,
             oracle_task_retention_days: 30,
             cloud_response_cache_ttl_secs: 0,
             cloud_response_cache_max_entry_bytes:

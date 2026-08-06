@@ -99,6 +99,7 @@ pub mod telegram_service;
 pub mod telemetry_erasure_service;
 pub mod token_exchange_service;
 pub mod token_service;
+pub mod trigger_service;
 pub mod unified_key_service;
 pub mod url_validation;
 pub mod user_api_key_service;
