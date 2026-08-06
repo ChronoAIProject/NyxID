@@ -1,0 +1,995 @@
+{
+  "revision": "nyxid-assistant-readiness.v2",
+  "scenarios": [
+    {
+      "name": "all_ready",
+      "description": "All registered assistant capabilities are available.",
+      "response": {
+        "revision": "nyxid-assistant-readiness.v2",
+        "evaluatedAt": "2026-08-01T00:00:00Z",
+        "capabilities": [
+          {
+            "capabilityId": "api-github",
+            "label": "GitHub",
+            "required": false,
+            "status": "available",
+            "connectionState": "connected",
+            "grantState": "granted",
+            "requestedScopes": [
+              "repo"
+            ],
+            "managementUrl": "https://id.nyx.example/keys",
+            "reasonCode": null
+          },
+          {
+            "capabilityId": "model",
+            "label": "Model",
+            "required": true,
+            "status": "available",
+            "connectionState": "connected",
+            "grantState": "not_required",
+            "requestedScopes": [],
+            "managementUrl": "https://id.nyx.example/keys",
+            "reasonCode": null
+          },
+          {
+            "capabilityId": "runtime",
+            "label": "Runtime",
+            "required": true,
+            "status": "available",
+            "connectionState": "connected",
+            "grantState": "not_required",
+            "requestedScopes": [],
+            "managementUrl": null,
+            "reasonCode": null
+          }
+        ]
+      }
+    },
+    {
+      "name": "not_connected",
+      "description": "The GitHub connector has no user route projection.",
+      "response": {
+        "revision": "nyxid-assistant-readiness.v2",
+        "evaluatedAt": "2026-08-01T00:00:00Z",
+        "capabilities": [
+          {
+            "capabilityId": "api-github",
+            "label": "GitHub",
+            "required": false,
+            "status": "missing",
+            "connectionState": "not_connected",
+            "grantState": "missing",
+            "requestedScopes": [
+              "repo"
+            ],
+            "managementUrl": "https://id.nyx.example/keys",
+            "reasonCode": "service_not_connected"
+          },
+          {
+            "capabilityId": "model",
+            "label": "Model",
+            "required": true,
+            "status": "available",
+            "connectionState": "connected",
+            "grantState": "not_required",
+            "requestedScopes": [],
+            "managementUrl": "https://id.nyx.example/keys",
+            "reasonCode": null
+          },
+          {
+            "capabilityId": "runtime",
+            "label": "Runtime",
+            "required": true,
+            "status": "available",
+            "connectionState": "connected",
+            "grantState": "not_required",
+            "requestedScopes": [],
+            "managementUrl": null,
+            "reasonCode": null
+          }
+        ]
+      }
+    },
+    {
+      "name": "connecting",
+      "description": "The GitHub connector is still connecting.",
+      "response": {
+        "revision": "nyxid-assistant-readiness.v2",
+        "evaluatedAt": "2026-08-01T00:00:00Z",
+        "capabilities": [
+          {
+            "capabilityId": "api-github",
+            "label": "GitHub",
+            "required": false,
+            "status": "cannot_check",
+            "connectionState": "connecting",
+            "grantState": "unknown",
+            "requestedScopes": [
+              "repo"
+            ],
+            "managementUrl": "https://id.nyx.example/keys",
+            "reasonCode": "connection_in_progress"
+          },
+          {
+            "capabilityId": "model",
+            "label": "Model",
+            "required": true,
+            "status": "available",
+            "connectionState": "connected",
+            "grantState": "not_required",
+            "requestedScopes": [],
+            "managementUrl": "https://id.nyx.example/keys",
+            "reasonCode": null
+          },
+          {
+            "capabilityId": "runtime",
+            "label": "Runtime",
+            "required": true,
+            "status": "available",
+            "connectionState": "connected",
+            "grantState": "not_required",
+            "requestedScopes": [],
+            "managementUrl": null,
+            "reasonCode": null
+          }
+        ]
+      }
+    },
+    {
+      "name": "verifying",
+      "description": "The GitHub connector is waiting for verification.",
+      "response": {
+        "revision": "nyxid-assistant-readiness.v2",
+        "evaluatedAt": "2026-08-01T00:00:00Z",
+        "capabilities": [
+          {
+            "capabilityId": "api-github",
+            "label": "GitHub",
+            "required": false,
+            "status": "cannot_check",
+            "connectionState": "verifying",
+            "grantState": "unknown",
+            "requestedScopes": [
+              "repo"
+            ],
+            "managementUrl": "https://id.nyx.example/keys",
+            "reasonCode": "connection_verification_pending"
+          },
+          {
+            "capabilityId": "model",
+            "label": "Model",
+            "required": true,
+            "status": "available",
+            "connectionState": "connected",
+            "grantState": "not_required",
+            "requestedScopes": [],
+            "managementUrl": "https://id.nyx.example/keys",
+            "reasonCode": null
+          },
+          {
+            "capabilityId": "runtime",
+            "label": "Runtime",
+            "required": true,
+            "status": "available",
+            "connectionState": "connected",
+            "grantState": "not_required",
+            "requestedScopes": [],
+            "managementUrl": null,
+            "reasonCode": null
+          }
+        ]
+      }
+    },
+    {
+      "name": "expired",
+      "description": "The GitHub connector and its grant are expired.",
+      "response": {
+        "revision": "nyxid-assistant-readiness.v2",
+        "evaluatedAt": "2026-08-01T00:00:00Z",
+        "capabilities": [
+          {
+            "capabilityId": "api-github",
+            "label": "GitHub",
+            "required": false,
+            "status": "cannot_use",
+            "connectionState": "expired",
+            "grantState": "expired",
+            "requestedScopes": [
+              "repo"
+            ],
+            "managementUrl": "https://id.nyx.example/keys",
+            "reasonCode": "connection_expired"
+          },
+          {
+            "capabilityId": "model",
+            "label": "Model",
+            "required": true,
+            "status": "available",
+            "connectionState": "connected",
+            "grantState": "not_required",
+            "requestedScopes": [],
+            "managementUrl": "https://id.nyx.example/keys",
+            "reasonCode": null
+          },
+          {
+            "capabilityId": "runtime",
+            "label": "Runtime",
+            "required": true,
+            "status": "available",
+            "connectionState": "connected",
+            "grantState": "not_required",
+            "requestedScopes": [],
+            "managementUrl": null,
+            "reasonCode": null
+          }
+        ]
+      }
+    },
+    {
+      "name": "revoked",
+      "description": "The GitHub connector and its grant are revoked.",
+      "response": {
+        "revision": "nyxid-assistant-readiness.v2",
+        "evaluatedAt": "2026-08-01T00:00:00Z",
+        "capabilities": [
+          {
+            "capabilityId": "api-github",
+            "label": "GitHub",
+            "required": false,
+            "status": "cannot_use",
+            "connectionState": "revoked",
+            "grantState": "revoked",
+            "requestedScopes": [
+              "repo"
+            ],
+            "managementUrl": "https://id.nyx.example/keys",
+            "reasonCode": "connection_revoked"
+          },
+          {
+            "capabilityId": "model",
+            "label": "Model",
+            "required": true,
+            "status": "available",
+            "connectionState": "connected",
+            "grantState": "not_required",
+            "requestedScopes": [],
+            "managementUrl": "https://id.nyx.example/keys",
+            "reasonCode": null
+          },
+          {
+            "capabilityId": "runtime",
+            "label": "Runtime",
+            "required": true,
+            "status": "available",
+            "connectionState": "connected",
+            "grantState": "not_required",
+            "requestedScopes": [],
+            "managementUrl": null,
+            "reasonCode": null
+          }
+        ]
+      }
+    },
+    {
+      "name": "unknown",
+      "description": "The GitHub connector evidence is indeterminate.",
+      "response": {
+        "revision": "nyxid-assistant-readiness.v2",
+        "evaluatedAt": "2026-08-01T00:00:00Z",
+        "capabilities": [
+          {
+            "capabilityId": "api-github",
+            "label": "GitHub",
+            "required": false,
+            "status": "cannot_check",
+            "connectionState": "unknown",
+            "grantState": "unknown",
+            "requestedScopes": [
+              "repo"
+            ],
+            "managementUrl": "https://id.nyx.example/keys",
+            "reasonCode": "connection_state_unknown"
+          },
+          {
+            "capabilityId": "model",
+            "label": "Model",
+            "required": true,
+            "status": "available",
+            "connectionState": "connected",
+            "grantState": "not_required",
+            "requestedScopes": [],
+            "managementUrl": "https://id.nyx.example/keys",
+            "reasonCode": null
+          },
+          {
+            "capabilityId": "runtime",
+            "label": "Runtime",
+            "required": true,
+            "status": "available",
+            "connectionState": "connected",
+            "grantState": "not_required",
+            "requestedScopes": [],
+            "managementUrl": null,
+            "reasonCode": null
+          }
+        ]
+      }
+    },
+    {
+      "name": "partial_grant",
+      "description": "The GitHub grant is incomplete.",
+      "response": {
+        "revision": "nyxid-assistant-readiness.v2",
+        "evaluatedAt": "2026-08-01T00:00:00Z",
+        "capabilities": [
+          {
+            "capabilityId": "api-github",
+            "label": "GitHub",
+            "required": false,
+            "status": "cannot_use",
+            "connectionState": "connected",
+            "grantState": "partial",
+            "requestedScopes": [
+              "repo"
+            ],
+            "managementUrl": "https://id.nyx.example/keys",
+            "reasonCode": "grant_partial"
+          },
+          {
+            "capabilityId": "model",
+            "label": "Model",
+            "required": true,
+            "status": "available",
+            "connectionState": "connected",
+            "grantState": "not_required",
+            "requestedScopes": [],
+            "managementUrl": "https://id.nyx.example/keys",
+            "reasonCode": null
+          },
+          {
+            "capabilityId": "runtime",
+            "label": "Runtime",
+            "required": true,
+            "status": "available",
+            "connectionState": "connected",
+            "grantState": "not_required",
+            "requestedScopes": [],
+            "managementUrl": null,
+            "reasonCode": null
+          }
+        ]
+      }
+    },
+    {
+      "name": "missing_grant",
+      "description": "The GitHub connector lacks its requested grant.",
+      "response": {
+        "revision": "nyxid-assistant-readiness.v2",
+        "evaluatedAt": "2026-08-01T00:00:00Z",
+        "capabilities": [
+          {
+            "capabilityId": "api-github",
+            "label": "GitHub",
+            "required": false,
+            "status": "cannot_use",
+            "connectionState": "connected",
+            "grantState": "missing",
+            "requestedScopes": [
+              "repo"
+            ],
+            "managementUrl": "https://id.nyx.example/keys",
+            "reasonCode": "grant_missing"
+          },
+          {
+            "capabilityId": "model",
+            "label": "Model",
+            "required": true,
+            "status": "available",
+            "connectionState": "connected",
+            "grantState": "not_required",
+            "requestedScopes": [],
+            "managementUrl": "https://id.nyx.example/keys",
+            "reasonCode": null
+          },
+          {
+            "capabilityId": "runtime",
+            "label": "Runtime",
+            "required": true,
+            "status": "available",
+            "connectionState": "connected",
+            "grantState": "not_required",
+            "requestedScopes": [],
+            "managementUrl": null,
+            "reasonCode": null
+          }
+        ]
+      }
+    },
+    {
+      "name": "expired_grant",
+      "description": "The GitHub grant has expired.",
+      "response": {
+        "revision": "nyxid-assistant-readiness.v2",
+        "evaluatedAt": "2026-08-01T00:00:00Z",
+        "capabilities": [
+          {
+            "capabilityId": "api-github",
+            "label": "GitHub",
+            "required": false,
+            "status": "cannot_use",
+            "connectionState": "connected",
+            "grantState": "expired",
+            "requestedScopes": [
+              "repo"
+            ],
+            "managementUrl": "https://id.nyx.example/keys",
+            "reasonCode": "grant_expired"
+          },
+          {
+            "capabilityId": "model",
+            "label": "Model",
+            "required": true,
+            "status": "available",
+            "connectionState": "connected",
+            "grantState": "not_required",
+            "requestedScopes": [],
+            "managementUrl": "https://id.nyx.example/keys",
+            "reasonCode": null
+          },
+          {
+            "capabilityId": "runtime",
+            "label": "Runtime",
+            "required": true,
+            "status": "available",
+            "connectionState": "connected",
+            "grantState": "not_required",
+            "requestedScopes": [],
+            "managementUrl": null,
+            "reasonCode": null
+          }
+        ]
+      }
+    },
+    {
+      "name": "revoked_grant",
+      "description": "The GitHub grant has been revoked.",
+      "response": {
+        "revision": "nyxid-assistant-readiness.v2",
+        "evaluatedAt": "2026-08-01T00:00:00Z",
+        "capabilities": [
+          {
+            "capabilityId": "api-github",
+            "label": "GitHub",
+            "required": false,
+            "status": "cannot_use",
+            "connectionState": "connected",
+            "grantState": "revoked",
+            "requestedScopes": [
+              "repo"
+            ],
+            "managementUrl": "https://id.nyx.example/keys",
+            "reasonCode": "grant_revoked"
+          },
+          {
+            "capabilityId": "model",
+            "label": "Model",
+            "required": true,
+            "status": "available",
+            "connectionState": "connected",
+            "grantState": "not_required",
+            "requestedScopes": [],
+            "managementUrl": "https://id.nyx.example/keys",
+            "reasonCode": null
+          },
+          {
+            "capabilityId": "runtime",
+            "label": "Runtime",
+            "required": true,
+            "status": "available",
+            "connectionState": "connected",
+            "grantState": "not_required",
+            "requestedScopes": [],
+            "managementUrl": null,
+            "reasonCode": null
+          }
+        ]
+      }
+    },
+    {
+      "name": "unknown_grant",
+      "description": "The GitHub grant evidence is indeterminate.",
+      "response": {
+        "revision": "nyxid-assistant-readiness.v2",
+        "evaluatedAt": "2026-08-01T00:00:00Z",
+        "capabilities": [
+          {
+            "capabilityId": "api-github",
+            "label": "GitHub",
+            "required": false,
+            "status": "cannot_check",
+            "connectionState": "connected",
+            "grantState": "unknown",
+            "requestedScopes": [
+              "repo"
+            ],
+            "managementUrl": "https://id.nyx.example/keys",
+            "reasonCode": "grant_unknown"
+          },
+          {
+            "capabilityId": "model",
+            "label": "Model",
+            "required": true,
+            "status": "available",
+            "connectionState": "connected",
+            "grantState": "not_required",
+            "requestedScopes": [],
+            "managementUrl": "https://id.nyx.example/keys",
+            "reasonCode": null
+          },
+          {
+            "capabilityId": "runtime",
+            "label": "Runtime",
+            "required": true,
+            "status": "available",
+            "connectionState": "connected",
+            "grantState": "not_required",
+            "requestedScopes": [],
+            "managementUrl": null,
+            "reasonCode": null
+          }
+        ]
+      }
+    },
+    {
+      "name": "model_backstop_available",
+      "description": "The platform model callback is available through the catalog backstop.",
+      "response": {
+        "revision": "nyxid-assistant-readiness.v2",
+        "evaluatedAt": "2026-08-01T00:00:00Z",
+        "capabilities": [
+          {
+            "capabilityId": "api-github",
+            "label": "GitHub",
+            "required": false,
+            "status": "available",
+            "connectionState": "connected",
+            "grantState": "granted",
+            "requestedScopes": [
+              "repo"
+            ],
+            "managementUrl": "https://id.nyx.example/keys",
+            "reasonCode": null
+          },
+          {
+            "capabilityId": "model",
+            "label": "Model",
+            "required": true,
+            "status": "available",
+            "connectionState": "connected",
+            "grantState": "not_required",
+            "requestedScopes": [],
+            "managementUrl": "https://id.nyx.example/keys",
+            "reasonCode": null
+          },
+          {
+            "capabilityId": "runtime",
+            "label": "Runtime",
+            "required": true,
+            "status": "available",
+            "connectionState": "connected",
+            "grantState": "not_required",
+            "requestedScopes": [],
+            "managementUrl": null,
+            "reasonCode": null
+          }
+        ]
+      }
+    },
+    {
+      "name": "model_disconnected",
+      "description": "The model callback has an explicit user disconnect.",
+      "response": {
+        "revision": "nyxid-assistant-readiness.v2",
+        "evaluatedAt": "2026-08-01T00:00:00Z",
+        "capabilities": [
+          {
+            "capabilityId": "api-github",
+            "label": "GitHub",
+            "required": false,
+            "status": "available",
+            "connectionState": "connected",
+            "grantState": "granted",
+            "requestedScopes": [
+              "repo"
+            ],
+            "managementUrl": "https://id.nyx.example/keys",
+            "reasonCode": null
+          },
+          {
+            "capabilityId": "model",
+            "label": "Model",
+            "required": true,
+            "status": "missing",
+            "connectionState": "not_connected",
+            "grantState": "missing",
+            "requestedScopes": [],
+            "managementUrl": "https://id.nyx.example/keys",
+            "reasonCode": "service_not_connected"
+          },
+          {
+            "capabilityId": "runtime",
+            "label": "Runtime",
+            "required": true,
+            "status": "available",
+            "connectionState": "connected",
+            "grantState": "not_required",
+            "requestedScopes": [],
+            "managementUrl": null,
+            "reasonCode": null
+          }
+        ]
+      }
+    },
+    {
+      "name": "model_credential_unprovisioned",
+      "description": "The model callback requires credential material that is not stored.",
+      "response": {
+        "revision": "nyxid-assistant-readiness.v2",
+        "evaluatedAt": "2026-08-01T00:00:00Z",
+        "capabilities": [
+          {
+            "capabilityId": "api-github",
+            "label": "GitHub",
+            "required": false,
+            "status": "available",
+            "connectionState": "connected",
+            "grantState": "granted",
+            "requestedScopes": [
+              "repo"
+            ],
+            "managementUrl": "https://id.nyx.example/keys",
+            "reasonCode": null
+          },
+          {
+            "capabilityId": "model",
+            "label": "Model",
+            "required": true,
+            "status": "cannot_check",
+            "connectionState": "verifying",
+            "grantState": "not_required",
+            "requestedScopes": [],
+            "managementUrl": "https://id.nyx.example/keys",
+            "reasonCode": "connection_verification_pending"
+          },
+          {
+            "capabilityId": "runtime",
+            "label": "Runtime",
+            "required": true,
+            "status": "available",
+            "connectionState": "connected",
+            "grantState": "not_required",
+            "requestedScopes": [],
+            "managementUrl": null,
+            "reasonCode": null
+          }
+        ]
+      }
+    },
+    {
+      "name": "model_byok_expired",
+      "description": "The model BYOK credential has expired.",
+      "response": {
+        "revision": "nyxid-assistant-readiness.v2",
+        "evaluatedAt": "2026-08-01T00:00:00Z",
+        "capabilities": [
+          {
+            "capabilityId": "api-github",
+            "label": "GitHub",
+            "required": false,
+            "status": "available",
+            "connectionState": "connected",
+            "grantState": "granted",
+            "requestedScopes": [
+              "repo"
+            ],
+            "managementUrl": "https://id.nyx.example/keys",
+            "reasonCode": null
+          },
+          {
+            "capabilityId": "model",
+            "label": "Model",
+            "required": true,
+            "status": "cannot_use",
+            "connectionState": "expired",
+            "grantState": "not_required",
+            "requestedScopes": [],
+            "managementUrl": "https://id.nyx.example/keys",
+            "reasonCode": "connection_expired"
+          },
+          {
+            "capabilityId": "runtime",
+            "label": "Runtime",
+            "required": true,
+            "status": "available",
+            "connectionState": "connected",
+            "grantState": "not_required",
+            "requestedScopes": [],
+            "managementUrl": null,
+            "reasonCode": null
+          }
+        ]
+      }
+    },
+    {
+      "name": "model_org_presence_unverifiable",
+      "description": "Organization routing prevents a conclusive model callback classification.",
+      "response": {
+        "revision": "nyxid-assistant-readiness.v2",
+        "evaluatedAt": "2026-08-01T00:00:00Z",
+        "capabilities": [
+          {
+            "capabilityId": "api-github",
+            "label": "GitHub",
+            "required": false,
+            "status": "available",
+            "connectionState": "connected",
+            "grantState": "granted",
+            "requestedScopes": [
+              "repo"
+            ],
+            "managementUrl": "https://id.nyx.example/keys",
+            "reasonCode": null
+          },
+          {
+            "capabilityId": "model",
+            "label": "Model",
+            "required": true,
+            "status": "cannot_check",
+            "connectionState": "unknown",
+            "grantState": "unknown",
+            "requestedScopes": [],
+            "managementUrl": "https://id.nyx.example/keys",
+            "reasonCode": "capability_evidence_unavailable"
+          },
+          {
+            "capabilityId": "runtime",
+            "label": "Runtime",
+            "required": true,
+            "status": "available",
+            "connectionState": "connected",
+            "grantState": "not_required",
+            "requestedScopes": [],
+            "managementUrl": null,
+            "reasonCode": null
+          }
+        ]
+      }
+    },
+    {
+      "name": "model_autoprovision_drift",
+      "description": "The auto-provisioned model route no longer matches the catalog.",
+      "response": {
+        "revision": "nyxid-assistant-readiness.v2",
+        "evaluatedAt": "2026-08-01T00:00:00Z",
+        "capabilities": [
+          {
+            "capabilityId": "api-github",
+            "label": "GitHub",
+            "required": false,
+            "status": "available",
+            "connectionState": "connected",
+            "grantState": "granted",
+            "requestedScopes": [
+              "repo"
+            ],
+            "managementUrl": "https://id.nyx.example/keys",
+            "reasonCode": null
+          },
+          {
+            "capabilityId": "model",
+            "label": "Model",
+            "required": true,
+            "status": "cannot_use",
+            "connectionState": "connected",
+            "grantState": "not_required",
+            "requestedScopes": [],
+            "managementUrl": "https://id.nyx.example/keys",
+            "reasonCode": "execution_unavailable"
+          },
+          {
+            "capabilityId": "runtime",
+            "label": "Runtime",
+            "required": true,
+            "status": "available",
+            "connectionState": "connected",
+            "grantState": "not_required",
+            "requestedScopes": [],
+            "managementUrl": null,
+            "reasonCode": null
+          }
+        ]
+      }
+    },
+    {
+      "name": "runtime_unprovisioned",
+      "description": "The platform runtime catalog target is unavailable.",
+      "response": {
+        "revision": "nyxid-assistant-readiness.v2",
+        "evaluatedAt": "2026-08-01T00:00:00Z",
+        "capabilities": [
+          {
+            "capabilityId": "api-github",
+            "label": "GitHub",
+            "required": false,
+            "status": "available",
+            "connectionState": "connected",
+            "grantState": "granted",
+            "requestedScopes": [
+              "repo"
+            ],
+            "managementUrl": "https://id.nyx.example/keys",
+            "reasonCode": null
+          },
+          {
+            "capabilityId": "model",
+            "label": "Model",
+            "required": true,
+            "status": "available",
+            "connectionState": "connected",
+            "grantState": "not_required",
+            "requestedScopes": [],
+            "managementUrl": "https://id.nyx.example/keys",
+            "reasonCode": null
+          },
+          {
+            "capabilityId": "runtime",
+            "label": "Runtime",
+            "required": true,
+            "status": "cannot_check",
+            "connectionState": "unknown",
+            "grantState": "unknown",
+            "requestedScopes": [],
+            "managementUrl": null,
+            "reasonCode": "capability_evidence_unavailable"
+          }
+        ]
+      }
+    },
+    {
+      "name": "runtime_credential_unprovisioned",
+      "description": "The runtime requires credential material that is not stored.",
+      "response": {
+        "revision": "nyxid-assistant-readiness.v2",
+        "evaluatedAt": "2026-08-01T00:00:00Z",
+        "capabilities": [
+          {
+            "capabilityId": "api-github",
+            "label": "GitHub",
+            "required": false,
+            "status": "available",
+            "connectionState": "connected",
+            "grantState": "granted",
+            "requestedScopes": [
+              "repo"
+            ],
+            "managementUrl": "https://id.nyx.example/keys",
+            "reasonCode": null
+          },
+          {
+            "capabilityId": "model",
+            "label": "Model",
+            "required": true,
+            "status": "available",
+            "connectionState": "connected",
+            "grantState": "not_required",
+            "requestedScopes": [],
+            "managementUrl": "https://id.nyx.example/keys",
+            "reasonCode": null
+          },
+          {
+            "capabilityId": "runtime",
+            "label": "Runtime",
+            "required": true,
+            "status": "cannot_check",
+            "connectionState": "verifying",
+            "grantState": "not_required",
+            "requestedScopes": [],
+            "managementUrl": null,
+            "reasonCode": "connection_verification_pending"
+          }
+        ]
+      }
+    },
+    {
+      "name": "runtime_misconfigured",
+      "description": "The runtime catalog target cannot execute as an admin service.",
+      "response": {
+        "revision": "nyxid-assistant-readiness.v2",
+        "evaluatedAt": "2026-08-01T00:00:00Z",
+        "capabilities": [
+          {
+            "capabilityId": "api-github",
+            "label": "GitHub",
+            "required": false,
+            "status": "available",
+            "connectionState": "connected",
+            "grantState": "granted",
+            "requestedScopes": [
+              "repo"
+            ],
+            "managementUrl": "https://id.nyx.example/keys",
+            "reasonCode": null
+          },
+          {
+            "capabilityId": "model",
+            "label": "Model",
+            "required": true,
+            "status": "available",
+            "connectionState": "connected",
+            "grantState": "not_required",
+            "requestedScopes": [],
+            "managementUrl": "https://id.nyx.example/keys",
+            "reasonCode": null
+          },
+          {
+            "capabilityId": "runtime",
+            "label": "Runtime",
+            "required": true,
+            "status": "cannot_use",
+            "connectionState": "connected",
+            "grantState": "not_required",
+            "requestedScopes": [],
+            "managementUrl": null,
+            "reasonCode": "execution_unavailable"
+          }
+        ]
+      }
+    },
+    {
+      "name": "runtime_auth_chain_unconfigured",
+      "description": "The runtime identity and delegation delivery chain is not configured.",
+      "response": {
+        "revision": "nyxid-assistant-readiness.v2",
+        "evaluatedAt": "2026-08-01T00:00:00Z",
+        "capabilities": [
+          {
+            "capabilityId": "api-github",
+            "label": "GitHub",
+            "required": false,
+            "status": "available",
+            "connectionState": "connected",
+            "grantState": "granted",
+            "requestedScopes": [
+              "repo"
+            ],
+            "managementUrl": "https://id.nyx.example/keys",
+            "reasonCode": null
+          },
+          {
+            "capabilityId": "model",
+            "label": "Model",
+            "required": true,
+            "status": "available",
+            "connectionState": "connected",
+            "grantState": "not_required",
+            "requestedScopes": [],
+            "managementUrl": "https://id.nyx.example/keys",
+            "reasonCode": null
+          },
+          {
+            "capabilityId": "runtime",
+            "label": "Runtime",
+            "required": true,
+            "status": "cannot_use",
+            "connectionState": "connected",
+            "grantState": "not_required",
+            "requestedScopes": [],
+            "managementUrl": null,
+            "reasonCode": "execution_unavailable"
+          }
+        ]
+      }
+    }
+  ]
+}

@@ -4,7 +4,7 @@ use serde::Serialize;
 
 use crate::AppState;
 use crate::mw::auth::AuthUser;
-use crate::services::assistant_readiness_service::{self, CapabilityReadiness};
+use crate::services::assistant_readiness_service::{self, CapabilityReadiness, ReadinessSnapshot};
 
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -41,17 +41,24 @@ pub async fn get_readiness(
         evaluated_at,
     )
     .await;
+    Json(readiness_response(&state.config.frontend_url, snapshot))
+}
+
+fn readiness_response(
+    frontend_url: &str,
+    snapshot: ReadinessSnapshot,
+) -> AssistantReadinessResponse {
     let capabilities = snapshot
         .capabilities
         .into_iter()
-        .map(|capability| capability_response(&state.config.frontend_url, capability))
+        .map(|capability| capability_response(frontend_url, capability))
         .collect();
 
-    Json(AssistantReadinessResponse {
+    AssistantReadinessResponse {
         revision: snapshot.revision,
         evaluated_at: snapshot.evaluated_at,
         capabilities,
-    })
+    }
 }
 
 fn capability_response(
@@ -66,7 +73,9 @@ fn capability_response(
         connection_state: capability.connection_state.as_str(),
         grant_state: capability.grant_state.as_str(),
         requested_scopes: capability.requested_scopes,
-        management_url: build_management_url(frontend_url, capability.management_path),
+        management_url: capability
+            .management_path
+            .and_then(|path| build_management_url(frontend_url, path)),
         reason_code: capability.reason_code.map(|reason| reason.as_str()),
     }
 }
@@ -99,6 +108,8 @@ fn build_management_url(frontend_url: &str, path: &str) -> Option<String> {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::{BTreeSet, HashSet};
+
     use axum::extract::State;
     use serde_json::Value;
     use uuid::Uuid;
@@ -113,7 +124,129 @@ mod tests {
         test_user_service,
     };
 
-    const FIXTURE: &str = include_str!("../../../tests/fixtures/assistant/readiness-v1.json");
+    use crate::services::assistant_readiness_service::{
+        CapabilityStatus, ConnectionState, FixtureEvidence, GrantState,
+    };
+
+    const FIXTURE: &str = include_str!("../../../tests/fixtures/assistant/readiness-v2.json");
+    const MATRIX_FIXTURE: &str =
+        include_str!("../../../tests/fixtures/assistant/readiness-v2-matrix.json");
+    const EVALUATED_AT: &str = "2026-08-01T00:00:00Z";
+
+    fn fixture_evidence(
+        connection_state: ConnectionState,
+        grant_state: GrantState,
+    ) -> FixtureEvidence {
+        FixtureEvidence {
+            catalog_available: true,
+            access_allowed: true,
+            connection_state,
+            grant_state,
+            executable: Some(connection_state != ConnectionState::NotConnected),
+        }
+    }
+
+    fn unavailable_evidence() -> FixtureEvidence {
+        FixtureEvidence {
+            catalog_available: false,
+            access_allowed: true,
+            connection_state: ConnectionState::Unknown,
+            grant_state: GrantState::Unknown,
+            executable: None,
+        }
+    }
+
+    fn platform_fixture_evidence(
+        connection_state: ConnectionState,
+        executable: bool,
+    ) -> FixtureEvidence {
+        FixtureEvidence {
+            catalog_available: true,
+            access_allowed: true,
+            connection_state,
+            grant_state: GrantState::NotRequired,
+            executable: Some(executable),
+        }
+    }
+
+    fn serialized_fixture_response(
+        github: FixtureEvidence,
+        model: FixtureEvidence,
+        runtime: FixtureEvidence,
+    ) -> Value {
+        let evaluated_at = DateTime::parse_from_rfc3339(EVALUATED_AT)
+            .expect("fixture timestamp")
+            .with_timezone(&Utc);
+        let snapshot = ReadinessSnapshot {
+            revision: assistant_readiness_service::ASSISTANT_READINESS_REVISION,
+            evaluated_at,
+            capabilities: vec![
+                assistant_readiness_service::evaluate_fixture_capability("api-github", github),
+                assistant_readiness_service::evaluate_fixture_capability("model", model),
+                assistant_readiness_service::evaluate_fixture_capability("runtime", runtime),
+            ],
+        };
+        serde_json::to_value(readiness_response("https://id.nyx.example", snapshot))
+            .expect("serialize fixture response through handler")
+    }
+
+    fn expected_scenario(name: &str) -> Value {
+        let mut github = fixture_evidence(ConnectionState::Connected, GrantState::Granted);
+        let mut model = platform_fixture_evidence(ConnectionState::Connected, true);
+        let mut runtime = platform_fixture_evidence(ConnectionState::Connected, true);
+        match name {
+            "all_ready" | "model_backstop_available" => {}
+            "not_connected" => {
+                github = fixture_evidence(ConnectionState::NotConnected, GrantState::Missing)
+            }
+            "connecting" => {
+                github = fixture_evidence(ConnectionState::Connecting, GrantState::Unknown)
+            }
+            "verifying" => {
+                github = fixture_evidence(ConnectionState::Verifying, GrantState::Unknown)
+            }
+            "expired" => github = fixture_evidence(ConnectionState::Expired, GrantState::Expired),
+            "revoked" => github = fixture_evidence(ConnectionState::Revoked, GrantState::Revoked),
+            "unknown" => github = fixture_evidence(ConnectionState::Unknown, GrantState::Unknown),
+            "partial_grant" => {
+                github = fixture_evidence(ConnectionState::Connected, GrantState::Partial)
+            }
+            "missing_grant" => {
+                github = fixture_evidence(ConnectionState::Connected, GrantState::Missing)
+            }
+            "expired_grant" => {
+                github = fixture_evidence(ConnectionState::Connected, GrantState::Expired)
+            }
+            "revoked_grant" => {
+                github = fixture_evidence(ConnectionState::Connected, GrantState::Revoked)
+            }
+            "unknown_grant" => {
+                github = fixture_evidence(ConnectionState::Connected, GrantState::Unknown)
+            }
+            "model_disconnected" => {
+                model = fixture_evidence(ConnectionState::NotConnected, GrantState::Missing)
+            }
+            "model_credential_unprovisioned" => {
+                model = platform_fixture_evidence(ConnectionState::Verifying, false)
+            }
+            "model_byok_expired" => {
+                model = platform_fixture_evidence(ConnectionState::Expired, true)
+            }
+            "model_org_presence_unverifiable" => model = unavailable_evidence(),
+            "model_autoprovision_drift" => {
+                model = platform_fixture_evidence(ConnectionState::Connected, false)
+            }
+            "runtime_unprovisioned" => runtime = unavailable_evidence(),
+            "runtime_credential_unprovisioned" => {
+                runtime = platform_fixture_evidence(ConnectionState::Verifying, false)
+            }
+            "runtime_misconfigured" | "runtime_auth_chain_unconfigured" => {
+                runtime = platform_fixture_evidence(ConnectionState::Connected, false)
+            }
+            _ => panic!("unknown fixture scenario '{name}'"),
+        }
+        serialized_fixture_response(github, model, runtime)
+    }
 
     #[test]
     fn management_url_is_https_configuration_owned_and_normalized() {
@@ -146,35 +279,107 @@ mod tests {
     }
 
     #[test]
-    fn versioned_fixture_matches_the_published_contract_and_contains_no_secret_shape() {
+    fn canonical_fixture_matches_actual_handler_serialization() {
         let fixture: Value = serde_json::from_str(FIXTURE).expect("fixture must be valid JSON");
+        assert_eq!(fixture, expected_scenario("all_ready"));
         assert_eq!(
             fixture["revision"],
             assistant_readiness_service::ASSISTANT_READINESS_REVISION
         );
-        assert!(fixture["evaluatedAt"].as_str().is_some());
         let capabilities = fixture["capabilities"]
             .as_array()
             .expect("capabilities array");
-        assert_eq!(capabilities.len(), 1);
+        assert_eq!(capabilities.len(), 3);
         assert_eq!(capabilities[0]["capabilityId"], "api-github");
         assert_eq!(
             capabilities[0]["requestedScopes"],
             serde_json::json!(["repo"])
         );
+        assert_eq!(capabilities[1]["capabilityId"], "model");
+        assert_eq!(capabilities[1]["required"], true);
+        assert_eq!(capabilities[1]["requestedScopes"], serde_json::json!([]));
+        assert_eq!(capabilities[2]["capabilityId"], "runtime");
+        assert_eq!(capabilities[2]["required"], true);
+        assert!(capabilities[2]["managementUrl"].is_null());
+    }
+
+    #[test]
+    fn matrix_rows_are_profile_valid_and_match_actual_handler_serialization() {
+        let matrix: Value =
+            serde_json::from_str(MATRIX_FIXTURE).expect("matrix fixture must be valid JSON");
         assert_eq!(
-            capabilities[0]["managementUrl"],
-            "https://id.nyx.example/keys"
+            matrix["revision"],
+            assistant_readiness_service::ASSISTANT_READINESS_REVISION
         );
+        let scenarios = matrix["scenarios"].as_array().expect("scenarios array");
+        let mut names = HashSet::new();
+        for scenario in scenarios {
+            let name = scenario["name"].as_str().expect("scenario name");
+            assert!(names.insert(name), "duplicate scenario '{name}'");
+            assert_eq!(scenario["response"], expected_scenario(name), "{name}");
+        }
+        assert_eq!(names.len(), 22);
+    }
+
+    #[test]
+    fn matrix_covers_every_closed_status_connection_and_grant_value() {
+        let matrix: Value = serde_json::from_str(MATRIX_FIXTURE).expect("valid matrix fixture");
+        let capabilities = matrix["scenarios"]
+            .as_array()
+            .expect("scenarios array")
+            .iter()
+            .flat_map(|scenario| {
+                scenario["response"]["capabilities"]
+                    .as_array()
+                    .expect("scenario capabilities")
+            });
+        let mut statuses = BTreeSet::new();
+        let mut connections = BTreeSet::new();
+        let mut grants = BTreeSet::new();
+        for capability in capabilities {
+            statuses.insert(capability["status"].as_str().expect("status"));
+            connections.insert(
+                capability["connectionState"]
+                    .as_str()
+                    .expect("connectionState"),
+            );
+            grants.insert(capability["grantState"].as_str().expect("grantState"));
+        }
+
+        assert_eq!(
+            statuses,
+            CapabilityStatus::ALL
+                .map(CapabilityStatus::as_str)
+                .into_iter()
+                .collect()
+        );
+        assert_eq!(
+            connections,
+            ConnectionState::ALL
+                .map(ConnectionState::as_str)
+                .into_iter()
+                .collect()
+        );
+        assert_eq!(
+            grants,
+            GrantState::ALL
+                .map(GrantState::as_str)
+                .into_iter()
+                .collect()
+        );
+    }
+
+    #[test]
+    fn fixtures_preserve_reason_and_safety_contracts() {
+        let fixture: Value = serde_json::from_str(FIXTURE).expect("valid canonical fixture");
+        let matrix: Value = serde_json::from_str(MATRIX_FIXTURE).expect("valid matrix fixture");
 
         assert_no_secret_shape(&fixture);
-        let management_url = capabilities[0]["managementUrl"]
-            .as_str()
-            .and_then(|value| url::Url::parse(value).ok())
-            .expect("safe fixture management URL");
-        assert_eq!(management_url.scheme(), "https");
-        assert!(management_url.username().is_empty());
-        assert!(management_url.password().is_none());
+        assert_no_secret_shape(&matrix);
+        assert_response_contract(&fixture);
+        for scenario in matrix["scenarios"].as_array().expect("scenarios array") {
+            assert_response_contract(&scenario["response"]);
+        }
     }
 
     #[tokio::test]
@@ -214,7 +419,8 @@ mod tests {
         let Json(response) = get_readiness(State(state), test_auth_user(&actor_id)).await;
         let json = serde_json::to_value(response).expect("serialize response");
 
-        assert_eq!(json["revision"], "nyxid-assistant-readiness.v1");
+        assert_eq!(json["revision"], "nyxid-assistant-readiness.v2");
+        assert_eq!(json["capabilities"][0]["capabilityId"], "api-github");
         assert_eq!(json["capabilities"][0]["status"], "missing");
         assert_eq!(json["capabilities"][0]["connectionState"], "not_connected");
         assert_eq!(json["capabilities"][0]["grantState"], "missing");
@@ -222,8 +428,49 @@ mod tests {
             json["capabilities"][0]["reasonCode"],
             "service_not_connected"
         );
+        for capability_id in ["model", "runtime"] {
+            let capability = json["capabilities"]
+                .as_array()
+                .expect("capabilities")
+                .iter()
+                .find(|capability| capability["capabilityId"] == capability_id)
+                .expect("platform capability");
+            assert_eq!(capability["status"], "cannot_check");
+            assert_eq!(capability["connectionState"], "unknown");
+            assert_eq!(capability["grantState"], "unknown");
+        }
         assert!(json.to_string().find(&actor_id).is_none());
         assert!(json.to_string().find(&other_user_id).is_none());
+    }
+
+    fn assert_response_contract(response: &Value) {
+        assert_eq!(
+            response["revision"],
+            assistant_readiness_service::ASSISTANT_READINESS_REVISION
+        );
+        assert!(response["evaluatedAt"].as_str().is_some());
+        let capabilities = response["capabilities"]
+            .as_array()
+            .expect("capabilities array");
+        assert_eq!(capabilities.len(), 3);
+        for capability in capabilities {
+            assert_eq!(
+                capability["reasonCode"].is_null(),
+                capability["status"] == "available"
+            );
+            if capability["capabilityId"] == "runtime" {
+                assert!(capability["managementUrl"].is_null());
+            } else {
+                let management_url = capability["managementUrl"]
+                    .as_str()
+                    .and_then(|value| url::Url::parse(value).ok())
+                    .expect("safe fixture management URL");
+                assert_eq!(management_url.scheme(), "https");
+                assert!(management_url.host_str().is_some());
+                assert!(management_url.username().is_empty());
+                assert!(management_url.password().is_none());
+            }
+        }
     }
 
     fn assert_no_secret_shape(value: &Value) {

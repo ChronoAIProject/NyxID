@@ -1,0 +1,41 @@
+{
+  "revision": "nyxid-assistant-readiness.v2",
+  "evaluatedAt": "2026-08-01T00:00:00Z",
+  "capabilities": [
+    {
+      "capabilityId": "api-github",
+      "label": "GitHub",
+      "required": false,
+      "status": "available",
+      "connectionState": "connected",
+      "grantState": "granted",
+      "requestedScopes": [
+        "repo"
+      ],
+      "managementUrl": "https://id.nyx.example/keys",
+      "reasonCode": null
+    },
+    {
+      "capabilityId": "model",
+      "label": "Model",
+      "required": true,
+      "status": "available",
+      "connectionState": "connected",
+      "grantState": "not_required",
+      "requestedScopes": [],
+      "managementUrl": "https://id.nyx.example/keys",
+      "reasonCode": null
+    },
+    {
+      "capabilityId": "runtime",
+      "label": "Runtime",
+      "required": true,
+      "status": "available",
+      "connectionState": "connected",
+      "grantState": "not_required",
+      "requestedScopes": [],
+      "managementUrl": null,
+      "reasonCode": null
+    }
+  ]
+}
