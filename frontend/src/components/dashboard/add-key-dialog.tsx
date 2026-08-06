@@ -1791,6 +1791,10 @@ function OAuthStep({
             "OAuth provider returned an invalid authorization URL",
           );
         }
+        // Present-but-malformed is a broken contract and throws; absent means
+        // a pre-nonce backend and degrades to the manual link below. An empty
+        // string counts as malformed on purpose — a backend that sends the
+        // field must send a valid one.
         if (nonce !== undefined) {
           if (!oauthAttemptNonceSchema.safeParse(nonce).success) {
             throw new Error("OAuth provider returned an invalid attempt nonce");
@@ -1805,6 +1809,8 @@ function OAuthStep({
           }
         }
       }
+      // Normalized only on the popup path; the legacy (non-popup) anchor still
+      // renders the backend's raw string, unvalidated, as it always has.
       const authorizationHref =
         validatedAuthorizationUrl?.href ?? response.authorization_url;
       setPendingKeyId(key.id);

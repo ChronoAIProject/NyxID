@@ -71,6 +71,23 @@ describe("OAuth popup schemas", () => {
     ).toBeNull();
   });
 
+  it("rejects non-absolute URLs instead of base-resolving them to NyxID", () => {
+    // The nonce-free fallback renders this as a user-facing anchor with no
+    // state binding left to catch nonsense — junk must fail, not resolve to
+    // a same-origin link.
+    for (const url of [
+      "",
+      "not a url",
+      "/relative/path",
+      "//evil.example/protocol-relative",
+    ]) {
+      expect(validateHttpAuthorizationUrl(url)).toBeNull();
+      expect(
+        validateAuthorizationUrl(`${url}?state=1cc_${NONCE}`, NONCE),
+      ).toBeNull();
+    }
+  });
+
   it("binds retry navigation to the interstitial's provider origin", () => {
     const githubUrl = `https://github.com/login/oauth/authorize?state=1cc_${NONCE}`;
     expect(

@@ -94,7 +94,11 @@ export function validateAuthorizationUrl(
 /** Safe manual fallback when an older backend has no popup nonce contract. */
 export function validateHttpAuthorizationUrl(rawUrl: string): URL | null {
   try {
-    const url = new URL(rawUrl, window.location.origin);
+    // No base URL: authorization endpoints are always absolute. Base-resolving
+    // would silently turn "", relative paths, and protocol-relative junk into
+    // same-origin NyxID links — dead ends on the nonce-free fallback path,
+    // which has no state binding left to reject them.
+    const url = new URL(rawUrl);
     if (
       (url.protocol !== "https:" && url.protocol !== "http:") ||
       url.username !== "" ||
