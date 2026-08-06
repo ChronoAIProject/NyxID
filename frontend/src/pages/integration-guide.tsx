@@ -8,7 +8,7 @@ import { Copy } from "lucide-react";
 import { toast } from "sonner";
 import {
   OAUTH_SCOPE_META,
-  scopeRiskClass,
+  scopeRiskBadgeVariant,
   scopeRiskLabel,
 } from "@/lib/constants";
 import {
@@ -218,11 +218,12 @@ export function IntegrationGuidePage() {
                   {meta.description}
                 </p>
               </div>
-              <span
-                className={`shrink-0 rounded-full border px-2 py-0.5 text-[10px] font-medium ${scopeRiskClass(meta.risk)}`}
+              <Badge
+                variant={scopeRiskBadgeVariant(meta.risk)}
+                className="shrink-0"
               >
                 {scopeRiskLabel(meta.risk)}
-              </span>
+              </Badge>
             </div>
           ))}
         </CardContent>
