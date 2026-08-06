@@ -25,9 +25,9 @@ use crate::models::user_service::{COLLECTION_NAME as USER_SERVICES, UserService}
 use crate::mw::rate_limit::PerChannelEventLimiter;
 use crate::services::channel_event_service::{self, EventEnvelope};
 use crate::services::event_dedup_cache::EventDedupCache;
-use crate::services::notification_service;
 use crate::services::push_service::{ApnsAuth, FcmAuth};
-use crate::services::webhook_delivery_service::{self, SignatureContract};
+use crate::services::webhook_delivery_service::{self, DeliveryFailure, SignatureContract};
+use crate::services::{audit_service, notification_service};
 
 pub const TRIGGER_SECRET_PREFIX: &str = "nyx_trg_";
 const MAX_LABEL_LEN: usize = 128;
@@ -147,7 +147,11 @@ pub async fn ensure_actor_can_write(
     actor_user_id: &str,
     id: &str,
 ) -> AppResult<Trigger> {
-    let trigger = get_for_actor(db, actor_user_id, id).await?;
+    let trigger = db
+        .collection::<Trigger>(TRIGGERS)
+        .find_one(doc! { "_id": id })
+        .await?
+        .ok_or(AppError::TriggerNotFound)?;
     let access =
         crate::services::org_service::resolve_owner_access(db, actor_user_id, &trigger.user_id)
             .await?;
@@ -391,24 +395,10 @@ pub async fn deliver_event(
     };
     let value = serde_json::to_value(&envelope).map_err(serialization_error)?;
     match &trigger.delivery {
-        TriggerDelivery::Webhook { url } => {
-            let encrypted = trigger
-                .delivery_secret_encrypted
-                .as_deref()
-                .ok_or(AppError::TriggerDeliveryUnsupported)?;
-            let secret = Zeroizing::new(encryption_keys.decrypt(encrypted).await?);
-            let body = serde_json::to_vec(&envelope).map_err(serialization_error)?;
-            webhook_delivery_service::deliver_signed_body(
-                http_client,
-                url,
-                secret.as_slice(),
-                "trigger.event",
-                event_id,
-                &body,
-                SignatureContract::Timestamped,
-            )
-            .await
-            .map_err(|_| AppError::TriggerDeliveryFailed)?;
+        TriggerDelivery::Webhook { .. } => {
+            deliver_webhook_envelope(encryption_keys, http_client, trigger, &envelope)
+                .await
+                .map_err(|_| AppError::TriggerDeliveryFailed)?
         }
         TriggerDelivery::Agent { conversation_id } => {
             let agent_envelope = EventEnvelope {
@@ -469,6 +459,138 @@ pub async fn deliver_event(
         }
     }
     Ok(())
+}
+
+/// Spawn bounded webhook delivery after the ingress handler has atomically
+/// reserved the event id. Delivery failure is isolated from the provider
+/// request and recorded with metadata only.
+pub fn dispatch_webhook_event(
+    db: Database,
+    encryption_keys: Arc<EncryptionKeys>,
+    http_client: reqwest::Client,
+    trigger: Trigger,
+    event_id: String,
+    payload: serde_json::Value,
+) {
+    tokio::spawn(async move {
+        let envelope = TriggerEventEnvelope {
+            event_id: event_id.clone(),
+            trigger_id: trigger.id.clone(),
+            source: "inbound_webhook",
+            received_at: Utc::now(),
+            payload,
+        };
+        match deliver_webhook_envelope(&encryption_keys, &http_client, &trigger, &envelope).await {
+            Ok(()) => audit_service::log_async(
+                db,
+                Some(trigger.user_id),
+                "trigger_event_forwarded".to_string(),
+                Some(serde_json::json!({
+                    "trigger_id": trigger.id,
+                    "event_id": event_id,
+                    "delivery_type": "webhook",
+                })),
+                None,
+                None,
+                None,
+                None,
+            ),
+            Err(failure) => record_webhook_delivery_failure(&db, &trigger, &event_id, failure),
+        }
+    });
+}
+
+async fn deliver_webhook_envelope(
+    encryption_keys: &EncryptionKeys,
+    http_client: &reqwest::Client,
+    trigger: &Trigger,
+    envelope: &TriggerEventEnvelope,
+) -> Result<(), DeliveryFailure> {
+    let TriggerDelivery::Webhook { url } = &trigger.delivery else {
+        return Err(DeliveryFailure {
+            attempts: 0,
+            reason: "delivery_type_mismatch",
+            last_status: None,
+        });
+    };
+    let Some(encrypted) = trigger.delivery_secret_encrypted.as_deref() else {
+        return Err(DeliveryFailure {
+            attempts: 0,
+            reason: "signing_secret_missing",
+            last_status: None,
+        });
+    };
+    let secret = encryption_keys
+        .decrypt(encrypted)
+        .await
+        .map(Zeroizing::new)
+        .map_err(|error| {
+            tracing::warn!(
+                trigger_id = %trigger.id,
+                %error,
+                "failed to decrypt trigger webhook signing secret"
+            );
+            DeliveryFailure {
+                attempts: 0,
+                reason: "secret_decrypt_failed",
+                last_status: None,
+            }
+        })?;
+    let body = serde_json::to_vec(envelope).map_err(|error| {
+        tracing::warn!(
+            trigger_id = %trigger.id,
+            %error,
+            "failed to serialize trigger webhook envelope"
+        );
+        DeliveryFailure {
+            attempts: 0,
+            reason: "serialization_failed",
+            last_status: None,
+        }
+    })?;
+    webhook_delivery_service::deliver_signed_body(
+        http_client,
+        url,
+        secret.as_slice(),
+        "trigger.event",
+        &envelope.event_id,
+        &body,
+        SignatureContract::Timestamped,
+    )
+    .await
+}
+
+fn record_webhook_delivery_failure(
+    db: &Database,
+    trigger: &Trigger,
+    event_id: &str,
+    failure: DeliveryFailure,
+) {
+    tracing::error!(
+        trigger_id = %trigger.id,
+        event_id,
+        attempts = failure.attempts,
+        reason = failure.reason,
+        last_status = failure.last_status,
+        "trigger webhook delivery exhausted"
+    );
+    audit_service::log_async(
+        db.clone(),
+        Some(trigger.user_id.clone()),
+        "trigger_webhook_delivery_failed".to_string(),
+        Some(serde_json::json!({
+            "trigger_id": &trigger.id,
+            "event_id": event_id,
+            "delivery_type": "webhook",
+            "attempts": failure.attempts,
+            "reason": failure.reason,
+            "last_status": failure.last_status,
+        })),
+        None,
+        None,
+        None,
+        None,
+    );
 }
 
 fn agent_event_uuid(trigger_id: &str, event_id: &str) -> String {
@@ -562,6 +684,7 @@ mod tests {
     use super::*;
     use crate::test_utils::{connect_test_database, test_encryption_keys};
     use axum::http::{HeaderMap, HeaderValue};
+    use chrono::TimeZone;
 
     fn trigger(verification: TriggerVerification, encrypted: Option<Vec<u8>>) -> Trigger {
         Trigger {
@@ -578,6 +701,26 @@ mod tests {
             created_at: Utc::now(),
             updated_at: Utc::now(),
         }
+    }
+
+    #[test]
+    fn trigger_event_envelope_timestamp_wire_format_is_stable() {
+        let envelope = TriggerEventEnvelope {
+            event_id: "provider-event-123".to_string(),
+            trigger_id: "trigger-uuid".to_string(),
+            source: "inbound_webhook",
+            received_at: Utc
+                .with_ymd_and_hms(2026, 8, 6, 9, 30, 0)
+                .single()
+                .expect("fixture timestamp")
+                + chrono::Duration::milliseconds(123),
+            payload: serde_json::json!({"action":"opened"}),
+        };
+
+        assert_eq!(
+            serde_json::to_string(&envelope).expect("serialize envelope"),
+            r#"{"event_id":"provider-event-123","trigger_id":"trigger-uuid","source":"inbound_webhook","received_at":"2026-08-06T09:30:00.123Z","payload":{"action":"opened"}}"#
+        );
     }
 
     #[tokio::test]

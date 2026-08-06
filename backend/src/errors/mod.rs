@@ -372,9 +372,6 @@ pub enum AppError {
     #[error("Trigger not found")]
     TriggerNotFound,
 
-    #[error("Trigger disabled")]
-    TriggerDisabled,
-
     #[error("Trigger secret invalid")]
     TriggerSecretInvalid,
 
@@ -616,7 +613,7 @@ impl AppError {
             Self::ConnectLinkCancelled => StatusCode::GONE,
             Self::ConnectLinkRateLimited => StatusCode::TOO_MANY_REQUESTS,
             Self::ConnectLinkCompletionInProgress => StatusCode::CONFLICT,
-            Self::TriggerNotFound | Self::TriggerDisabled => StatusCode::NOT_FOUND,
+            Self::TriggerNotFound => StatusCode::NOT_FOUND,
             Self::TriggerSecretInvalid => StatusCode::UNAUTHORIZED,
             Self::TriggerRateLimited => StatusCode::TOO_MANY_REQUESTS,
             Self::TriggerPayloadTooLarge => StatusCode::PAYLOAD_TOO_LARGE,
@@ -773,12 +770,11 @@ impl AppError {
             Self::ConnectLinkRateLimited => 11304,
             Self::ConnectLinkCompletionInProgress => 11305,
             Self::TriggerNotFound => 11600,
-            Self::TriggerDisabled => 11601,
-            Self::TriggerSecretInvalid => 11602,
-            Self::TriggerRateLimited => 11603,
-            Self::TriggerPayloadTooLarge => 11604,
-            Self::TriggerDeliveryUnsupported => 11605,
-            Self::TriggerDeliveryFailed => 11606,
+            Self::TriggerSecretInvalid => 11601,
+            Self::TriggerRateLimited => 11602,
+            Self::TriggerPayloadTooLarge => 11603,
+            Self::TriggerDeliveryUnsupported => 11604,
+            Self::TriggerDeliveryFailed => 11605,
             Self::ChannelBotNotFound(_) => 10000,
             Self::ChannelBotInactive(_) => 10001,
             Self::ChannelBotLimitReached(_) => 10002,
@@ -966,7 +962,6 @@ impl AppError {
             Self::ConnectLinkRateLimited => "connect_link_rate_limited",
             Self::ConnectLinkCompletionInProgress => "connect_link_completion_in_progress",
             Self::TriggerNotFound => "trigger_not_found",
-            Self::TriggerDisabled => "trigger_disabled",
             Self::TriggerSecretInvalid => "trigger_secret_invalid",
             Self::TriggerRateLimited => "trigger_rate_limited",
             Self::TriggerPayloadTooLarge => "trigger_payload_too_large",
@@ -1472,7 +1467,6 @@ mod tests {
             AppError::ConnectLinkRateLimited.error_code(),
             AppError::ConnectLinkCompletionInProgress.error_code(),
             AppError::TriggerNotFound.error_code(),
-            AppError::TriggerDisabled.error_code(),
             AppError::TriggerSecretInvalid.error_code(),
             AppError::TriggerRateLimited.error_code(),
             AppError::TriggerPayloadTooLarge.error_code(),

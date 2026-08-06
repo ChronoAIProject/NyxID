@@ -25,6 +25,9 @@ pub async fn receive_trigger(
     request: Request<Body>,
 ) -> AppResult<Json<TriggerIngressResponse>> {
     let trigger = trigger_service::load_active_for_ingress(&state.db, &trigger_id).await?;
+    if !state.per_trigger_limiter.check(&trigger.id) {
+        return Err(AppError::TriggerRateLimited);
+    }
     let headers = request.headers().clone();
     let body = to_bytes(request.into_body(), state.config.trigger_payload_max_bytes)
         .await
@@ -37,12 +40,41 @@ pub async fn receive_trigger(
         &body,
     )
     .await?;
-    if !state.per_trigger_limiter.check(&trigger.id) {
-        return Err(AppError::TriggerRateLimited);
-    }
     let payload: serde_json::Value = serde_json::from_slice(&body)
         .map_err(|_| AppError::ValidationError("trigger payload must be valid JSON".to_string()))?;
     let event_id = trigger_service::event_id(&headers, &payload, &body)?;
+
+    if matches!(
+        &trigger.delivery,
+        crate::models::trigger::TriggerDelivery::Webhook { .. }
+    ) {
+        if !state
+            .trigger_dedup_cache
+            .insert_if_absent(&trigger.id, &event_id)
+        {
+            return Ok(Json(TriggerIngressResponse {
+                status: "duplicate",
+                event_id,
+            }));
+        }
+        trigger_service::dispatch_webhook_event(
+            state.db.clone(),
+            state.encryption_keys.clone(),
+            state.http_client.clone(),
+            trigger,
+            event_id.clone(),
+            payload,
+        );
+        return Ok(Json(TriggerIngressResponse {
+            status: "accepted",
+            event_id,
+        }));
+    }
+
+    // Synchronous agent and notification targets intentionally insert only
+    // after successful delivery so provider retries can recover failures.
+    // Concurrent identical requests may both pass this best-effort check,
+    // matching the existing channel-event gateway contract.
     if state.trigger_dedup_cache.contains(&trigger.id, &event_id) {
         return Ok(Json(TriggerIngressResponse {
             status: "duplicate",
@@ -96,6 +128,7 @@ mod tests {
     use super::*;
     use axum::{
         Router,
+        body::Bytes,
         http::{HeaderValue, StatusCode},
         routing::post,
     };
@@ -108,6 +141,7 @@ mod tests {
     };
 
     use crate::crypto::token::hash_token;
+    use crate::models::audit_log::{AuditLog, COLLECTION_NAME as AUDIT_LOGS};
     use crate::models::trigger::{
         COLLECTION_NAME as TRIGGERS, Trigger, TriggerDelivery, TriggerStatus, TriggerTokenLocation,
         TriggerVerification,
@@ -133,6 +167,16 @@ mod tests {
         let address = listener.local_addr().expect("receiver address");
         tokio::spawn(async move { axum::serve(listener, app).await.expect("serve receiver") });
         (format!("http://{address}/hook"), count)
+    }
+
+    async fn wait_for_count(count: &AtomicUsize, expected: usize) {
+        tokio::time::timeout(std::time::Duration::from_secs(3), async {
+            while count.load(Ordering::SeqCst) < expected {
+                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("delivery count reached");
     }
 
     async fn insert_trigger(
@@ -224,6 +268,7 @@ mod tests {
         let Json(second) = invoke().await.expect("deduplicated delivery");
         assert_eq!(first.status, "accepted");
         assert_eq!(second.status, "duplicate");
+        wait_for_count(&count, 1).await;
         assert_eq!(count.load(Ordering::SeqCst), 1);
     }
 
@@ -291,6 +336,7 @@ mod tests {
         .await
         .expect("HMAC delivery");
         assert_eq!(result.status, "accepted");
+        wait_for_count(&count, 1).await;
         assert_eq!(count.load(Ordering::SeqCst), 1);
     }
 
@@ -323,6 +369,7 @@ mod tests {
         .await
         .expect("query-token delivery");
         assert_eq!(result.status, "accepted");
+        wait_for_count(&count, 1).await;
         assert_eq!(count.load(Ordering::SeqCst), 1);
     }
 
@@ -380,5 +427,190 @@ mod tests {
         )
         .await;
         assert!(matches!(result, Err(AppError::TriggerPayloadTooLarge)));
+    }
+
+    #[tokio::test]
+    async fn webhook_target_acks_before_delivery_finishes() {
+        let Some(db) = connect_test_database("trigger_ingress_async_ack").await else {
+            return;
+        };
+        let state = test_app_state_with_config(db, test_app_config());
+        let count = Arc::new(AtomicUsize::new(0));
+        let handler_count = count.clone();
+        let app = Router::new().route(
+            "/hook",
+            post(move || {
+                let handler_count = handler_count.clone();
+                async move {
+                    tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+                    handler_count.fetch_add(1, Ordering::SeqCst);
+                    StatusCode::NO_CONTENT
+                }
+            }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind slow receiver");
+        let address = listener.local_addr().expect("slow receiver address");
+        tokio::spawn(async move {
+            axum::serve(listener, app)
+                .await
+                .expect("serve slow receiver")
+        });
+        let trigger = insert_trigger(
+            &state,
+            format!("http://{address}/hook"),
+            TriggerVerification::Token {
+                location: TriggerTokenLocation::Bearer,
+            },
+            "nyx_trg_async",
+            TriggerStatus::Active,
+        )
+        .await;
+
+        let Json(response) = tokio::time::timeout(
+            std::time::Duration::from_secs(1),
+            receive_trigger(
+                State(state),
+                Path(trigger.id),
+                Query(HashMap::new()),
+                request(r#"{"event_id":"async-event"}"#, Some("nyx_trg_async")),
+            ),
+        )
+        .await
+        .expect("ingress should acknowledge before delivery")
+        .expect("accepted ingress");
+        assert_eq!(response.status, "accepted");
+        wait_for_count(&count, 1).await;
+    }
+
+    #[tokio::test]
+    async fn rate_limit_runs_before_request_body_is_read() {
+        let Some(db) = connect_test_database("trigger_ingress_rate_before_body").await else {
+            return;
+        };
+        let mut config = test_app_config();
+        config.trigger_rate_limit_per_second = 0;
+        config.trigger_rate_limit_burst = 0;
+        let state = test_app_state_with_config(db, config);
+        let (url, _) = receiver().await;
+        let trigger = insert_trigger(
+            &state,
+            url,
+            TriggerVerification::Token {
+                location: TriggerTokenLocation::Bearer,
+            },
+            "nyx_trg_limited",
+            TriggerStatus::Active,
+        )
+        .await;
+        let body_reads = Arc::new(AtomicUsize::new(0));
+        let stream_reads = body_reads.clone();
+        let body = Body::from_stream(futures::stream::once(async move {
+            stream_reads.fetch_add(1, Ordering::SeqCst);
+            Ok::<Bytes, std::convert::Infallible>(Bytes::from_static(b"{}"))
+        }));
+        let limited_request = Request::builder()
+            .method("POST")
+            .uri("/")
+            .header("Authorization", "Bearer nyx_trg_limited")
+            .body(body)
+            .expect("limited request");
+
+        let result = receive_trigger(
+            State(state),
+            Path(trigger.id),
+            Query(HashMap::new()),
+            limited_request,
+        )
+        .await;
+        assert!(matches!(result, Err(AppError::TriggerRateLimited)));
+        assert_eq!(body_reads.load(Ordering::SeqCst), 0);
+    }
+
+    #[tokio::test]
+    async fn exhausted_async_webhook_delivery_records_metadata_only_failure() {
+        let Some(db) = connect_test_database("trigger_ingress_async_failure_audit").await else {
+            return;
+        };
+        let state = test_app_state_with_config(db.clone(), test_app_config());
+        let attempts = Arc::new(AtomicUsize::new(0));
+        let handler_attempts = attempts.clone();
+        let app = Router::new().route(
+            "/hook",
+            post(move || {
+                let handler_attempts = handler_attempts.clone();
+                async move {
+                    handler_attempts.fetch_add(1, Ordering::SeqCst);
+                    StatusCode::SERVICE_UNAVAILABLE
+                }
+            }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind failing trigger receiver");
+        let address = listener.local_addr().expect("failing trigger address");
+        tokio::spawn(async move {
+            axum::serve(listener, app)
+                .await
+                .expect("serve failing trigger receiver")
+        });
+        let trigger = insert_trigger(
+            &state,
+            format!("http://{address}/hook"),
+            TriggerVerification::Token {
+                location: TriggerTokenLocation::Bearer,
+            },
+            "nyx_trg_failure",
+            TriggerStatus::Active,
+        )
+        .await;
+
+        let Json(response) = receive_trigger(
+            State(state),
+            Path(trigger.id.clone()),
+            Query(HashMap::new()),
+            request(
+                r#"{"event_id":"failed-event","private":"payload-secret"}"#,
+                Some("nyx_trg_failure"),
+            ),
+        )
+        .await
+        .expect("failure is isolated from ingress");
+        assert_eq!(response.status, "accepted");
+        tokio::time::timeout(std::time::Duration::from_secs(8), async {
+            while attempts.load(Ordering::SeqCst) < 3 {
+                tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+            }
+        })
+        .await
+        .expect("three bounded attempts");
+
+        let audit = tokio::time::timeout(std::time::Duration::from_secs(3), async {
+            loop {
+                if let Some(audit) = db
+                    .collection::<AuditLog>(AUDIT_LOGS)
+                    .find_one(mongodb::bson::doc! {
+                        "user_id": &trigger.user_id,
+                        "event_type": "trigger_webhook_delivery_failed",
+                    })
+                    .await
+                    .expect("query failure audit")
+                {
+                    break audit;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+            }
+        })
+        .await
+        .expect("failure audit persisted");
+        let metadata = audit.event_data.expect("failure metadata");
+        assert_eq!(metadata["trigger_id"], trigger.id);
+        assert_eq!(metadata["event_id"], "failed-event");
+        assert_eq!(metadata["attempts"], 3);
+        let serialized = serde_json::to_string(&metadata).expect("serialize failure metadata");
+        assert!(!serialized.contains("payload-secret"));
+        assert!(!serialized.contains("nyx_trg_failure"));
+        assert!(!serialized.contains(&address.to_string()));
     }
 }
