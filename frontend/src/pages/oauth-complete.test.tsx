@@ -11,7 +11,7 @@ function setLaunchContext(nonce = NONCE) {
     OAUTH_LAUNCH_CONTEXT_KEY,
     JSON.stringify({
       providerOrigin: "https://github.com",
-      nonce,
+      correlationId: nonce,
       serviceName: "GitHub",
     }),
   );
@@ -236,7 +236,7 @@ describe("OAuth completion page", () => {
       JSON.parse(sessionStorage.getItem(OAUTH_LAUNCH_CONTEXT_KEY) ?? ""),
     ).toEqual({
       providerOrigin: "https://github.com",
-      nonce: NEXT_NONCE,
+      correlationId: NEXT_NONCE,
       serviceName: "GitHub",
     });
   });

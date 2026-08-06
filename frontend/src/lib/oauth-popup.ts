@@ -16,9 +16,9 @@ const POPUP_READY_TIMEOUT_MS = 5_000;
 const MAX_SERVICE_NAME_LENGTH = 64;
 export const OAUTH_LAUNCH_CONTEXT_KEY = "nyxid.oauth.launch-context";
 
-export interface OAuthLaunchContext {
+export interface PopupLaunchMetadata {
   readonly providerOrigin: string;
-  readonly nonce: string;
+  readonly correlationId: string;
   readonly serviceName?: string;
 }
 
@@ -51,11 +51,11 @@ function validServiceName(value: unknown): value is string {
   );
 }
 
-export function writeOAuthLaunchContext(context: OAuthLaunchContext): void {
-  sessionStorage.setItem(OAUTH_LAUNCH_CONTEXT_KEY, JSON.stringify(context));
+export function writePopupLaunchMetadata(metadata: PopupLaunchMetadata): void {
+  sessionStorage.setItem(OAUTH_LAUNCH_CONTEXT_KEY, JSON.stringify(metadata));
 }
 
-export function readOAuthLaunchContext(): OAuthLaunchContext | null {
+export function readPopupLaunchMetadata(): PopupLaunchMetadata | null {
   const raw = sessionStorage.getItem(OAUTH_LAUNCH_CONTEXT_KEY);
   if (raw === null) return null;
   try {
@@ -64,8 +64,8 @@ export function readOAuthLaunchContext(): OAuthLaunchContext | null {
     const record = value as Record<string, unknown>;
     if (
       typeof record.providerOrigin !== "string" ||
-      typeof record.nonce !== "string" ||
-      !oauthAttemptNonceSchema.safeParse(record.nonce).success ||
+      typeof record.correlationId !== "string" ||
+      !oauthAttemptNonceSchema.safeParse(record.correlationId).success ||
       (record.serviceName !== undefined &&
         !validServiceName(record.serviceName))
     ) {
@@ -82,7 +82,7 @@ export function readOAuthLaunchContext(): OAuthLaunchContext | null {
     }
     return {
       providerOrigin: providerUrl.origin,
-      nonce: record.nonce,
+      correlationId: record.correlationId,
       ...(record.serviceName !== undefined
         ? { serviceName: record.serviceName }
         : {}),
@@ -92,14 +92,14 @@ export function readOAuthLaunchContext(): OAuthLaunchContext | null {
   }
 }
 
-export function oauthLaunchContextForNavigation(
-  authorizationUrl: URL,
-  nonce: string,
+export function popupLaunchMetadataForNavigation(
+  providerUrl: URL,
+  correlationId: string,
   serviceName: unknown,
-): OAuthLaunchContext {
+): PopupLaunchMetadata {
   return {
-    providerOrigin: authorizationUrl.origin,
-    nonce,
+    providerOrigin: providerUrl.origin,
+    correlationId,
     ...(validServiceName(serviceName) ? { serviceName } : {}),
   };
 }

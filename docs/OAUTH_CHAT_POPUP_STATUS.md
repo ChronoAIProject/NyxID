@@ -118,7 +118,7 @@ Broadcast messages (`frontend/src/types/oauth-popup.ts`): `oauth_result`
 dismiss), `oauth_ack`, `oauth_retry` ({nextNonce, url}); plus the launch
 handshake pair `oauth_launch_ready` / `oauth_launch_navigate` over
 postMessage. The navigate message may carry a length-capped `serviceName` used
-only for display. The interstitial stores `{providerOrigin, nonce,
+only for display. The interstitial stores `{providerOrigin, correlationId,
 serviceName?}` under `nyxid.oauth.launch-context` in the popup's
 sessionStorage. **No message or launch-context record ever carries tokens,
 key material, or credential material.**
@@ -170,10 +170,10 @@ All in `backend/src/services/user_api_key_service.rs`:
    secrets.
 3. **Retry URLs are triple-bound** (`validateAuthorizationUrl`): http(s), no
    embedded credentials, `state == 1cc_<nextNonce>`, and origin equal to the
-   provider origin recorded in the parsed launch-context record by the trusted
+   provider origin recorded in the parsed launch metadata by the trusted
    interstitial. Context reads, display enrichment, and retry updates require
-   `flow=cc` plus a matching nonce; that match is correlation, never outcome
-   proof.
+   `flow=cc` plus `correlationId === nonce`; that match is correlation, never
+   outcome proof.
    Retry is not offered at all when that recorded origin is absent.
    Since `403f6fc3` the validator returns the parsed `URL` object (`URL |
    null`) instead of a boolean, and every navigation sink (`window.location.

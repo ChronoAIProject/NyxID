@@ -6,8 +6,8 @@ import {
   openOAuthChannel,
   postOAuthAction,
   postOAuthResult,
-  readOAuthLaunchContext,
-  writeOAuthLaunchContext,
+  readPopupLaunchMetadata,
+  writePopupLaunchMetadata,
 } from "@/lib/oauth-popup";
 import {
   isOAuthAckMessage,
@@ -66,12 +66,12 @@ export function OAuthCompletePage() {
       Object.fromEntries(new URLSearchParams(window.location.search)),
     ),
   );
-  const [launchContext] = useState(() =>
-    search.flow === "cc" ? readOAuthLaunchContext() : null,
+  const [launchMetadata] = useState(() =>
+    search.flow === "cc" ? readPopupLaunchMetadata() : null,
   );
   const displayContext =
-    search.flow === "cc" && launchContext?.nonce === search.nonce
-      ? launchContext
+    search.flow === "cc" && launchMetadata?.correlationId === search.nonce
+      ? launchMetadata
       : null;
   const expectedProviderOrigin = displayContext?.providerOrigin ?? null;
   const [manualReturn, setManualReturn] = useState(false);
@@ -139,21 +139,21 @@ export function OAuthCompletePage() {
           expectedProviderOrigin !== null &&
           isOAuthRetryMessage(event.data, expectedProviderOrigin)
         ) {
-          const authorizationUrl = validateAuthorizationUrl(
+          const providerUrl = validateAuthorizationUrl(
             event.data.url,
             event.data.nextNonce,
             expectedProviderOrigin,
           );
-          if (authorizationUrl === null) return;
-          writeOAuthLaunchContext({
+          if (providerUrl === null) return;
+          writePopupLaunchMetadata({
             ...displayContext,
-            providerOrigin: authorizationUrl.origin,
-            nonce: event.data.nextNonce,
+            providerOrigin: providerUrl.origin,
+            correlationId: event.data.nextNonce,
           });
           window.clearTimeout(timeout);
           channel.removeEventListener("message", onMessage);
           channel.close();
-          window.location.assign(authorizationUrl.href);
+          window.location.assign(providerUrl.href);
         } else if (action !== "retry" && isOAuthAckMessage(event.data)) {
           window.clearTimeout(timeout);
           channel.removeEventListener("message", onMessage);

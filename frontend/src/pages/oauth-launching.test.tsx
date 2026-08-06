@@ -103,7 +103,7 @@ describe("OAuth launching interstitial", () => {
       JSON.parse(sessionStorage.getItem(OAUTH_LAUNCH_CONTEXT_KEY) ?? ""),
     ).toEqual({
       providerOrigin: "https://github.com",
-      nonce: NONCE,
+      correlationId: NONCE,
       serviceName: "GitHub",
     });
   });
@@ -141,7 +141,7 @@ describe("OAuth launching interstitial", () => {
       JSON.parse(sessionStorage.getItem(OAUTH_LAUNCH_CONTEXT_KEY) ?? ""),
     ).toEqual({
       providerOrigin: "https://github.com",
-      nonce: NONCE,
+      correlationId: NONCE,
     });
   });
 });
