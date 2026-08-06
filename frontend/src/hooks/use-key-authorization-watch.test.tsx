@@ -2,7 +2,10 @@ import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { renderHook, waitFor } from "@testing-library/react";
 import type { PropsWithChildren } from "react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { useKeyAuthorizationWatch } from "./use-keys";
+import {
+  useKeyAuthorizationStatus,
+  useKeyAuthorizationWatch,
+} from "./use-keys";
 
 const { mockGet } = vi.hoisted(() => ({ mockGet: vi.fn() }));
 
@@ -92,5 +95,27 @@ describe("useKeyAuthorizationWatch", () => {
 
     await vi.advanceTimersByTimeAsync(2_100);
     await waitFor(() => expect(result.current.authorized).toBe(true));
+  });
+});
+
+describe("useKeyAuthorizationStatus", () => {
+  it("does not expose a stale terminal result to a retried dialog attempt", async () => {
+    mockGet
+      .mockResolvedValueOnce({ id: "k1", status: "failed" })
+      .mockResolvedValue({ id: "k1", status: "pending_auth" });
+    const { Wrapper } = harness();
+    const { result, rerender } = renderHook(
+      ({ attemptId }: { readonly attemptId: string }) =>
+        useKeyAuthorizationStatus("k1", true, undefined, attemptId),
+      { wrapper: Wrapper, initialProps: { attemptId: "attempt-a" } },
+    );
+
+    await waitFor(() => expect(result.current.data?.status).toBe("failed"));
+    rerender({ attemptId: "attempt-b" });
+
+    expect(result.current.data).toBeUndefined();
+    await waitFor(() =>
+      expect(result.current.data?.status).toBe("pending_auth"),
+    );
   });
 });
