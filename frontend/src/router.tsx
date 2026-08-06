@@ -54,6 +54,7 @@ import {
   ConsentsPage,
   DeveloperAppsPage,
   DeveloperAppDetailPage,
+  TriggersPage,
   IntegrationGuidePage,
   OAuthConsentPage,
   OAuthErrorPage,
@@ -588,6 +589,12 @@ const developerAppDetailRoute = createRoute({
   component: DeveloperAppDetailPage,
 });
 
+const triggersRoute = createRoute({
+  path: "/triggers",
+  getParentRoute: () => dashboardLayout,
+  component: TriggersPage,
+});
+
 const integrationGuideRoute = createRoute({
   path: "/integration-guide",
   getParentRoute: () => dashboardLayout,
@@ -908,6 +915,7 @@ const routeTree = rootRoute.addChildren([
     guideRoute,
     developerAppsRoute,
     developerAppDetailRoute,
+    triggersRoute,
     integrationGuideRoute,
     aiSetupRoute,
     notificationSettingsRoute,
