@@ -98,7 +98,7 @@ pub struct UserService {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub source_id: Option<String>,
     /// Developer app (OAuth client) ID that triggered this auto-provision.
-    /// Set when a private service is auto-provisioned via developer app consent.
+    /// Set by developer-app consent and hosted connect-link provisioning.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub source_app_id: Option<String>,
 

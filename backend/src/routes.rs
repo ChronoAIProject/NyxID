@@ -1231,6 +1231,15 @@ pub fn build_router(
         .route(
             "/oauth-clients/{client_id}/rotate-secret",
             post(handlers::developer_apps::rotate_my_oauth_client_secret),
+        )
+        .route(
+            "/oauth-clients/{client_id}/connection-webhook",
+            put(handlers::developer_apps::configure_connection_webhook)
+                .delete(handlers::developer_apps::disable_connection_webhook),
+        )
+        .route(
+            "/oauth-clients/{client_id}/connection-webhook/rotate-secret",
+            post(handlers::developer_apps::rotate_connection_webhook_secret),
         );
 
     // Proxy pass-through routes allow larger request bodies than the rest of the API.

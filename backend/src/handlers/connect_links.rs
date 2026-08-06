@@ -250,6 +250,12 @@ pub async fn get_connect_link(
 ) -> AppResult<Json<ConnectLinkStatusResponse>> {
     let view =
         connect_link_service::get_for_actor(&state.db, &auth_user.user_id.to_string(), &id).await?;
+    connect_link_service::dispatch_terminal_webhook_if_needed(
+        &state.db,
+        &state.developer_webhook_dispatcher,
+        &view.link.id,
+    )
+    .await;
     Ok(Json(status_response(view)?))
 }
 
@@ -264,7 +270,24 @@ pub async fn cancel_connect_link(
     auth_user: AuthUser,
     Path(id): Path<String>,
 ) -> AppResult<Json<ConnectLinkStatusResponse>> {
-    let view = connect_link_service::cancel(&state.db, &auth_user.user_id.to_string(), &id).await?;
+    let view =
+        match connect_link_service::cancel(&state.db, &auth_user.user_id.to_string(), &id).await {
+            Ok(view) => view,
+            Err(error) => {
+                if matches!(
+                    &error,
+                    AppError::ConnectLinkExpired | AppError::ConnectLinkAlreadyCompleted
+                ) {
+                    connect_link_service::dispatch_terminal_webhook_if_needed(
+                        &state.db,
+                        &state.developer_webhook_dispatcher,
+                        &id,
+                    )
+                    .await;
+                }
+                return Err(error);
+            }
+        };
     audit_service::log_for_user(
         state.db.clone(),
         &auth_user,
@@ -275,6 +298,12 @@ pub async fn cancel_connect_link(
             "service_slug": &view.link.service_slug,
         })),
     );
+    connect_link_service::dispatch_terminal_webhook_if_needed(
+        &state.db,
+        &state.developer_webhook_dispatcher,
+        &view.link.id,
+    )
+    .await;
     Ok(Json(status_response(view)?))
 }
 
@@ -296,6 +325,12 @@ pub async fn preview_connect_link(
         return Err(AppError::ConnectLinkRateLimited);
     }
     let view = connect_link_service::preview(&state.db, &body.token).await?;
+    connect_link_service::dispatch_terminal_webhook_if_needed(
+        &state.db,
+        &state.developer_webhook_dispatcher,
+        &view.link.id,
+    )
+    .await;
     let callback_url = connect_link_service::terminal_callback_url(&view.link)?;
     let connect_method = view.service.connect_method().to_string();
     Ok(Json(PreviewConnectLinkResponse {
@@ -341,12 +376,29 @@ pub async fn cancel_hosted_connect_link(
     if !state.connect_link_complete_limiter.check(client_ip) {
         return Err(AppError::ConnectLinkRateLimited);
     }
-    let view = connect_link_service::cancel_by_token(
+    let view = match connect_link_service::cancel_by_token(
         &state.db,
         &auth_user.user_id.to_string(),
         &body.token,
     )
-    .await?;
+    .await
+    {
+        Ok(view) => view,
+        Err(error) => {
+            if matches!(
+                &error,
+                AppError::ConnectLinkExpired | AppError::ConnectLinkAlreadyCompleted
+            ) {
+                connect_link_service::dispatch_terminal_webhook_by_token_if_needed(
+                    &state.db,
+                    &state.developer_webhook_dispatcher,
+                    &body.token,
+                )
+                .await;
+            }
+            return Err(error);
+        }
+    };
     audit_service::log_for_user(
         state.db.clone(),
         &auth_user,
@@ -357,6 +409,12 @@ pub async fn cancel_hosted_connect_link(
             "service_slug": &view.link.service_slug,
         })),
     );
+    connect_link_service::dispatch_terminal_webhook_if_needed(
+        &state.db,
+        &state.developer_webhook_dispatcher,
+        &view.link.id,
+    )
+    .await;
     Ok(Json(status_response(view)?))
 }
 
@@ -379,7 +437,7 @@ pub async fn complete_connect_link(
         return Err(AppError::ConnectLinkRateLimited);
     }
     let actor_id = auth_user.user_id.to_string();
-    let result = connect_link_service::complete(
+    let result = match connect_link_service::complete(
         &state.db,
         &state.encryption_keys,
         &actor_id,
@@ -392,11 +450,29 @@ pub async fn complete_connect_link(
         },
         state.config.is_production(),
     )
-    .await?;
+    .await
+    {
+        Ok(result) => result,
+        Err(error) => {
+            connect_link_service::dispatch_terminal_webhook_by_token_if_needed(
+                &state.db,
+                &state.developer_webhook_dispatcher,
+                &body.token,
+            )
+            .await;
+            return Err(error);
+        }
+    };
 
     match result {
         connect_link_service::CompleteResult::Completed(view) => {
             audit_completed(&state, &auth_user, &view);
+            connect_link_service::dispatch_terminal_webhook_if_needed(
+                &state.db,
+                &state.developer_webhook_dispatcher,
+                &view.link.id,
+            )
+            .await;
             Ok(Json(completion_response(view, "completed")?))
         }
         connect_link_service::CompleteResult::OauthRequired {
@@ -449,14 +525,32 @@ pub async fn complete_connect_link(
                 .await?;
                 return match poll.status.as_str() {
                     "complete" => {
-                        let completed = connect_link_service::complete_oauth_callback(
+                        let completed = match connect_link_service::complete_oauth_callback(
                             &state.db,
                             &view.link.id,
                             &view.link.user_id,
                             &connection_id,
                         )
-                        .await?;
+                        .await
+                        {
+                            Ok(completed) => completed,
+                            Err(error) => {
+                                connect_link_service::dispatch_terminal_webhook_if_needed(
+                                    &state.db,
+                                    &state.developer_webhook_dispatcher,
+                                    &view.link.id,
+                                )
+                                .await;
+                                return Err(error);
+                            }
+                        };
                         audit_completed(&state, &auth_user, &completed);
+                        connect_link_service::dispatch_terminal_webhook_if_needed(
+                            &state.db,
+                            &state.developer_webhook_dispatcher,
+                            &completed.link.id,
+                        )
+                        .await;
                         Ok(Json(completion_response(completed, "completed")?))
                     }
                     "pending" | "slow_down" => {
@@ -599,6 +693,7 @@ mod tests {
         COLLECTION_NAME as DOWNSTREAM_SERVICES, DownstreamService, test_helpers::dummy_service,
     };
     use crate::models::oauth_client::{COLLECTION_NAME as OAUTH_CLIENTS, OauthClient};
+    use crate::models::user_service::{COLLECTION_NAME as USER_SERVICES, UserService};
     use crate::test_utils::{connect_test_database, test_app_state, test_auth_user};
 
     #[test]
@@ -740,6 +835,9 @@ mod tests {
             broker_capability_enabled: false,
             revocation_webhook_url: None,
             revocation_webhook_secret_encrypted: None,
+            connection_webhook_url: None,
+            connection_webhook_secret_encrypted: None,
+            connection_webhook_enabled: false,
             created_by: Some("test".to_string()),
             created_at: now,
             updated_at: now,
@@ -754,7 +852,7 @@ mod tests {
         auth.oauth_client_id = Some(app.id.clone());
 
         let Json(response) = create_connect_link(
-            State(state),
+            State(state.clone()),
             auth,
             Json(CreateConnectLinkRequest {
                 service_slug: service.slug,
@@ -775,6 +873,38 @@ mod tests {
         assert_eq!(stored.requesting_app_id.as_deref(), Some(app.id.as_str()));
         assert_eq!(stored.requested_by.as_deref(), Some("Desktop App"));
         assert_eq!(stored.callback_url.as_deref(), Some(callback_url));
+
+        let raw_token = response
+            .connect_url
+            .rsplit('/')
+            .next()
+            .expect("raw token in connect URL")
+            .to_string();
+        let Json(completed) = complete_connect_link(
+            State(state),
+            test_auth_user(&actor_id),
+            ConnectInfo("127.0.0.1:43129".parse().unwrap()),
+            HeaderMap::new(),
+            Json(CompleteConnectLinkRequest {
+                token: raw_token,
+                credential: Some("test-secret".to_string()),
+                endpoint_url: None,
+                oauth_client_id: None,
+                oauth_client_secret: None,
+                device_state: None,
+            }),
+        )
+        .await
+        .expect("complete app-created link");
+        let provisioned = db
+            .collection::<UserService>(USER_SERVICES)
+            .find_one(mongodb::bson::doc! {
+                "_id": completed.user_service_id.expect("provisioned service id"),
+            })
+            .await
+            .expect("read provisioned service")
+            .expect("provisioned service");
+        assert_eq!(provisioned.source_app_id.as_deref(), Some(app.id.as_str()));
     }
 
     #[tokio::test]

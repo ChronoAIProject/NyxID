@@ -1,0 +1,540 @@
+//! Developer-app connection lifecycle webhook configuration and delivery.
+
+use chrono::{DateTime, Utc};
+use mongodb::{Database, bson::doc, options::ReturnDocument};
+use serde::Serialize;
+use serde_json::Value;
+use std::sync::Arc;
+use uuid::Uuid;
+use zeroize::Zeroizing;
+
+use crate::crypto::aes::EncryptionKeys;
+use crate::crypto::token::generate_random_token;
+use crate::errors::{AppError, AppResult};
+use crate::models::oauth_client::{COLLECTION_NAME as OAUTH_CLIENTS, OauthClient};
+use crate::mw::rate_limit::{PerKeyRateLimiter, SharedPerKeyRateLimiter};
+use crate::services::audit_service;
+use crate::services::webhook_delivery_service::{self, DeliveryFailure, SignatureContract};
+
+pub const CONNECTION_WEBHOOK_SECRET_PREFIX: &str = "nyx_cwh_";
+const APP_WEBHOOK_MAX_PER_MINUTE: u32 = 120;
+
+#[derive(Clone)]
+pub struct DeveloperWebhookDispatcher {
+    http_client: reqwest::Client,
+    encryption_keys: Arc<EncryptionKeys>,
+    limiter: SharedPerKeyRateLimiter,
+}
+
+impl std::fmt::Debug for DeveloperWebhookDispatcher {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("DeveloperWebhookDispatcher")
+            .field("http_client", &"configured")
+            .field("encryption_keys", &"[REDACTED]")
+            .finish_non_exhaustive()
+    }
+}
+
+#[derive(Serialize)]
+pub struct ConnectionWebhookEnvelope {
+    pub event_id: String,
+    pub event_type: String,
+    pub occurred_at: DateTime<Utc>,
+    pub data: Value,
+}
+
+impl DeveloperWebhookDispatcher {
+    pub fn new(http_client: reqwest::Client, encryption_keys: Arc<EncryptionKeys>) -> Self {
+        Self {
+            http_client,
+            encryption_keys,
+            limiter: Arc::new(PerKeyRateLimiter::new(APP_WEBHOOK_MAX_PER_MINUTE, 60)),
+        }
+    }
+
+    pub fn cleanup(&self) {
+        self.limiter.cleanup();
+    }
+
+    pub fn dispatch(&self, db: Database, app_id: String, event_type: &str, data: Value) {
+        let dispatcher = self.clone();
+        let event_type = event_type.to_string();
+        tokio::spawn(async move {
+            dispatcher
+                .deliver_for_app(&db, &app_id, &event_type, data)
+                .await;
+        });
+    }
+
+    async fn deliver_for_app(&self, db: &Database, app_id: &str, event_type: &str, data: Value) {
+        let client = match db
+            .collection::<OauthClient>(OAUTH_CLIENTS)
+            .find_one(doc! { "_id": app_id, "is_active": true })
+            .await
+        {
+            Ok(Some(client)) => client,
+            Ok(None) => return,
+            Err(error) => {
+                tracing::warn!(app_id, %error, "failed to load developer webhook configuration");
+                return;
+            }
+        };
+        if !client.connection_webhook_enabled {
+            return;
+        }
+        let (Some(url), Some(encrypted_secret)) = (
+            client.connection_webhook_url.as_deref(),
+            client.connection_webhook_secret_encrypted.as_deref(),
+        ) else {
+            return;
+        };
+
+        let event_id = Uuid::new_v4().to_string();
+        if !self.limiter.check(app_id) {
+            record_final_failure(
+                db,
+                &client,
+                &event_id,
+                event_type,
+                DeliveryFailure {
+                    attempts: 0,
+                    reason: "app_rate_limited",
+                    last_status: None,
+                },
+            );
+            return;
+        }
+        let secret = match self.encryption_keys.decrypt(encrypted_secret).await {
+            Ok(secret) => Zeroizing::new(secret),
+            Err(error) => {
+                tracing::warn!(app_id, %error, "failed to decrypt developer webhook secret");
+                record_final_failure(
+                    db,
+                    &client,
+                    &event_id,
+                    event_type,
+                    DeliveryFailure {
+                        attempts: 0,
+                        reason: "secret_decrypt_failed",
+                        last_status: None,
+                    },
+                );
+                return;
+            }
+        };
+        let envelope = ConnectionWebhookEnvelope {
+            event_id: event_id.clone(),
+            event_type: event_type.to_string(),
+            occurred_at: Utc::now(),
+            data,
+        };
+        let body = match serde_json::to_vec(&envelope) {
+            Ok(body) => body,
+            Err(error) => {
+                tracing::warn!(app_id, %error, "failed to serialize developer webhook event");
+                return;
+            }
+        };
+
+        match webhook_delivery_service::deliver_signed_body(
+            &self.http_client,
+            url,
+            secret.as_slice(),
+            event_type,
+            &event_id,
+            &body,
+            SignatureContract::Timestamped,
+        )
+        .await
+        {
+            Ok(()) => tracing::debug!(app_id, event_id, event_type, "developer webhook delivered"),
+            Err(failure) => record_final_failure(db, &client, &event_id, event_type, failure),
+        }
+    }
+}
+
+fn record_final_failure(
+    db: &Database,
+    client: &OauthClient,
+    event_id: &str,
+    event_type: &str,
+    failure: DeliveryFailure,
+) {
+    tracing::error!(
+        app_id = %client.id,
+        event_id,
+        event_type,
+        attempts = failure.attempts,
+        reason = failure.reason,
+        last_status = failure.last_status,
+        "developer webhook delivery exhausted"
+    );
+    audit_service::log_async(
+        db.clone(),
+        client.created_by.clone(),
+        "connection_webhook_delivery_failed".to_string(),
+        Some(serde_json::json!({
+            "app_id": &client.id,
+            "event_id": event_id,
+            "event_type": event_type,
+            "attempts": failure.attempts,
+            "reason": failure.reason,
+            "last_status": failure.last_status,
+        })),
+        None,
+        None,
+        None,
+        None,
+    );
+}
+
+pub async fn configure(
+    db: &Database,
+    encryption_keys: &EncryptionKeys,
+    client_id: &str,
+    created_by: &str,
+    url: &str,
+) -> AppResult<(OauthClient, String)> {
+    let url = webhook_delivery_service::validate_webhook_url(url, "connection_webhook_url").await?;
+    store_configuration(db, encryption_keys, client_id, created_by, &url).await
+}
+
+async fn store_configuration(
+    db: &Database,
+    encryption_keys: &EncryptionKeys,
+    client_id: &str,
+    created_by: &str,
+    url: &str,
+) -> AppResult<(OauthClient, String)> {
+    let raw_secret = format!(
+        "{CONNECTION_WEBHOOK_SECRET_PREFIX}{}",
+        generate_random_token()
+    );
+    let encrypted_secret = encryption_keys.encrypt(raw_secret.as_bytes()).await?;
+    let updated = db
+        .collection::<OauthClient>(OAUTH_CLIENTS)
+        .find_one_and_update(
+            doc! { "_id": client_id, "created_by": created_by, "is_active": true },
+            doc! { "$set": {
+                "connection_webhook_url": url,
+                "connection_webhook_secret_encrypted": bson::Binary {
+                    subtype: bson::spec::BinarySubtype::Generic,
+                    bytes: encrypted_secret,
+                },
+                "connection_webhook_enabled": true,
+                "updated_at": bson::DateTime::from_chrono(Utc::now()),
+            }},
+        )
+        .return_document(ReturnDocument::After)
+        .await?
+        .ok_or_else(|| AppError::NotFound("OAuth client not found".to_string()))?;
+    Ok((updated, raw_secret))
+}
+
+pub async fn rotate_secret(
+    db: &Database,
+    encryption_keys: &EncryptionKeys,
+    client_id: &str,
+    created_by: &str,
+) -> AppResult<(OauthClient, String)> {
+    let existing = db
+        .collection::<OauthClient>(OAUTH_CLIENTS)
+        .find_one(doc! {
+            "_id": client_id,
+            "created_by": created_by,
+            "is_active": true,
+            "connection_webhook_enabled": true,
+            "connection_webhook_url": { "$type": "string" },
+            "connection_webhook_secret_encrypted": { "$type": "binData" },
+        })
+        .await?
+        .ok_or_else(|| AppError::NotFound("Connection webhook not configured".to_string()))?;
+    store_configuration(
+        db,
+        encryption_keys,
+        client_id,
+        created_by,
+        existing
+            .connection_webhook_url
+            .as_deref()
+            .unwrap_or_default(),
+    )
+    .await
+}
+
+pub async fn disable(db: &Database, client_id: &str, created_by: &str) -> AppResult<OauthClient> {
+    db.collection::<OauthClient>(OAUTH_CLIENTS)
+        .find_one_and_update(
+            doc! { "_id": client_id, "created_by": created_by, "is_active": true },
+            doc! {
+                "$set": {
+                    "connection_webhook_enabled": false,
+                    "updated_at": bson::DateTime::from_chrono(Utc::now()),
+                },
+                "$unset": { "connection_webhook_secret_encrypted": "" },
+            },
+        )
+        .return_document(ReturnDocument::After)
+        .await?
+        .ok_or_else(|| AppError::NotFound("OAuth client not found".to_string()))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use axum::{Router, body::Bytes, http::HeaderMap, routing::post};
+    use chrono::Utc;
+
+    use crate::models::audit_log::{AuditLog, COLLECTION_NAME as AUDIT_LOGS};
+    use crate::models::oauth_client::ScopeProvenance;
+    use crate::test_utils::{connect_test_database, test_encryption_keys};
+
+    fn client(id: &str, owner: &str) -> OauthClient {
+        let now = Utc::now();
+        OauthClient {
+            id: id.to_string(),
+            client_name: "Webhook Test App".to_string(),
+            client_secret_hash: "redacted-hash".to_string(),
+            redirect_uris: vec!["https://app.example.test/callback".to_string()],
+            allowed_scopes: "openid".to_string(),
+            scope_provenance: ScopeProvenance::Explicit,
+            grant_types: "authorization_code".to_string(),
+            client_type: "confidential".to_string(),
+            is_active: true,
+            delegation_scopes: String::new(),
+            default_service_catalog_slugs: Vec::new(),
+            broker_capability_enabled: false,
+            revocation_webhook_url: None,
+            revocation_webhook_secret_encrypted: None,
+            connection_webhook_url: None,
+            connection_webhook_secret_encrypted: None,
+            connection_webhook_enabled: false,
+            created_by: Some(owner.to_string()),
+            created_at: now,
+            updated_at: now,
+        }
+    }
+
+    #[tokio::test]
+    async fn configuration_returns_secret_once_rotation_replaces_it_and_disable_clears_it() {
+        let Some(db) = connect_test_database("developer_connection_webhook_config").await else {
+            return;
+        };
+        let owner = uuid::Uuid::new_v4().to_string();
+        let client_id = uuid::Uuid::new_v4().to_string();
+        db.collection::<OauthClient>(OAUTH_CLIENTS)
+            .insert_one(client(&client_id, &owner))
+            .await
+            .expect("insert client");
+        let keys = test_encryption_keys();
+
+        let (configured, first_secret) = store_configuration(
+            &db,
+            &keys,
+            &client_id,
+            &owner,
+            "https://receiver.example.test/events",
+        )
+        .await
+        .expect("configure webhook");
+        assert!(first_secret.starts_with(CONNECTION_WEBHOOK_SECRET_PREFIX));
+        assert!(configured.connection_webhook_enabled);
+        assert!(!format!("{configured:?}").contains(&first_secret));
+        let stored_first = Zeroizing::new(
+            keys.decrypt(
+                configured
+                    .connection_webhook_secret_encrypted
+                    .as_deref()
+                    .expect("encrypted secret"),
+            )
+            .await
+            .expect("decrypt first secret"),
+        );
+        assert_eq!(stored_first.as_slice(), first_secret.as_bytes());
+
+        let (rotated, second_secret) = rotate_secret(&db, &keys, &client_id, &owner)
+            .await
+            .expect("rotate webhook secret");
+        assert_ne!(first_secret, second_secret);
+        let stored_second = Zeroizing::new(
+            keys.decrypt(
+                rotated
+                    .connection_webhook_secret_encrypted
+                    .as_deref()
+                    .expect("rotated encrypted secret"),
+            )
+            .await
+            .expect("decrypt rotated secret"),
+        );
+        assert_eq!(stored_second.as_slice(), second_secret.as_bytes());
+
+        let disabled = disable(&db, &client_id, &owner)
+            .await
+            .expect("disable webhook");
+        assert!(!disabled.connection_webhook_enabled);
+        assert!(disabled.connection_webhook_secret_encrypted.is_none());
+        assert!(matches!(
+            rotate_secret(&db, &keys, &client_id, &owner).await,
+            Err(AppError::NotFound(_))
+        ));
+    }
+
+    #[tokio::test]
+    async fn lifecycle_delivery_uses_timestamp_bound_signature_and_metadata_envelope() {
+        let Some(db) = connect_test_database("developer_connection_webhook_delivery").await else {
+            return;
+        };
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<(HeaderMap, Bytes)>();
+        let app = Router::new().route(
+            "/events",
+            post(move |headers: HeaderMap, body: Bytes| {
+                let tx = tx.clone();
+                async move {
+                    tx.send((headers, body)).expect("capture delivery");
+                    axum::http::StatusCode::NO_CONTENT
+                }
+            }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind receiver");
+        let address = listener.local_addr().expect("receiver address");
+        tokio::spawn(async move { axum::serve(listener, app).await.expect("serve receiver") });
+
+        let owner = uuid::Uuid::new_v4().to_string();
+        let client_id = uuid::Uuid::new_v4().to_string();
+        let keys = Arc::new(test_encryption_keys());
+        let raw_secret = "nyx_cwh_fixture-secret";
+        let mut configured = client(&client_id, &owner);
+        configured.connection_webhook_url = Some(format!("http://{address}/events"));
+        configured.connection_webhook_secret_encrypted = Some(
+            keys.encrypt(raw_secret.as_bytes())
+                .await
+                .expect("encrypt signing secret"),
+        );
+        configured.connection_webhook_enabled = true;
+        db.collection::<OauthClient>(OAUTH_CLIENTS)
+            .insert_one(configured)
+            .await
+            .expect("insert configured client");
+
+        let dispatcher = DeveloperWebhookDispatcher::new(reqwest::Client::new(), keys);
+        dispatcher
+            .deliver_for_app(
+                &db,
+                &client_id,
+                "connect_link.completed",
+                serde_json::json!({
+                    "connect_link_id": "link-id",
+                    "service_slug": "github",
+                    "status": "completed",
+                }),
+            )
+            .await;
+
+        let (headers, body) = rx.recv().await.expect("captured delivery");
+        let timestamp = headers
+            .get("X-NyxID-Timestamp")
+            .and_then(|value| value.to_str().ok())
+            .expect("timestamp header");
+        let supplied_signature = headers
+            .get("X-NyxID-Signature")
+            .and_then(|value| value.to_str().ok())
+            .and_then(|value| value.strip_prefix("sha256="))
+            .expect("signature header");
+        let expected_signature = webhook_delivery_service::compute_timestamped_signature(
+            raw_secret.as_bytes(),
+            timestamp,
+            &body,
+        );
+        assert_eq!(supplied_signature, expected_signature);
+        assert_eq!(headers["X-NyxID-Event"], "connect_link.completed");
+
+        let envelope: serde_json::Value =
+            serde_json::from_slice(&body).expect("parse lifecycle envelope");
+        assert!(uuid::Uuid::parse_str(envelope["event_id"].as_str().unwrap_or_default()).is_ok());
+        assert_eq!(envelope["event_type"], "connect_link.completed");
+        assert_eq!(envelope["data"]["connect_link_id"], "link-id");
+        assert_eq!(envelope["data"]["status"], "completed");
+        assert!(envelope["occurred_at"].is_string());
+    }
+
+    #[tokio::test]
+    async fn exhausted_delivery_retries_emit_metadata_only_failure_audit() {
+        let Some(db) = connect_test_database("developer_connection_webhook_failure_audit").await
+        else {
+            return;
+        };
+        let attempts = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let handler_attempts = attempts.clone();
+        let app = Router::new().route(
+            "/events",
+            post(move || {
+                let handler_attempts = handler_attempts.clone();
+                async move {
+                    handler_attempts.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                    axum::http::StatusCode::SERVICE_UNAVAILABLE
+                }
+            }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind failing receiver");
+        let address = listener.local_addr().expect("failing receiver address");
+        tokio::spawn(async move { axum::serve(listener, app).await.expect("serve receiver") });
+
+        let owner = uuid::Uuid::new_v4().to_string();
+        let client_id = uuid::Uuid::new_v4().to_string();
+        let keys = Arc::new(test_encryption_keys());
+        let raw_secret = "nyx_cwh_failure-secret";
+        let mut configured = client(&client_id, &owner);
+        configured.connection_webhook_url = Some(format!("http://{address}/events"));
+        configured.connection_webhook_secret_encrypted = Some(
+            keys.encrypt(raw_secret.as_bytes())
+                .await
+                .expect("encrypt signing secret"),
+        );
+        configured.connection_webhook_enabled = true;
+        db.collection::<OauthClient>(OAUTH_CLIENTS)
+            .insert_one(configured)
+            .await
+            .expect("insert configured client");
+
+        DeveloperWebhookDispatcher::new(reqwest::Client::new(), keys)
+            .deliver_for_app(
+                &db,
+                &client_id,
+                "connect_link.expired",
+                serde_json::json!({ "connect_link_id": "private-event-payload" }),
+            )
+            .await;
+        assert_eq!(attempts.load(std::sync::atomic::Ordering::SeqCst), 3);
+
+        let audit = tokio::time::timeout(std::time::Duration::from_secs(3), async {
+            loop {
+                if let Some(audit) = db
+                    .collection::<AuditLog>(AUDIT_LOGS)
+                    .find_one(mongodb::bson::doc! {
+                        "user_id": &owner,
+                        "event_type": "connection_webhook_delivery_failed",
+                    })
+                    .await
+                    .expect("query failure audit")
+                {
+                    break audit;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+            }
+        })
+        .await
+        .expect("failure audit should be persisted");
+        let data = audit.event_data.expect("failure audit metadata");
+        assert_eq!(data["app_id"], client_id);
+        assert_eq!(data["event_type"], "connect_link.expired");
+        assert_eq!(data["attempts"], 3);
+        let serialized = serde_json::to_string(&data).expect("serialize audit metadata");
+        assert!(!serialized.contains(raw_secret));
+        assert!(!serialized.contains(&address.to_string()));
+        assert!(!serialized.contains("private-event-payload"));
+    }
+}

@@ -10,7 +10,10 @@ use crate::errors::{AppError, AppResult};
 use crate::handlers::admin_helpers::require_admin;
 use crate::models::oauth_client::{COLLECTION_NAME as OAUTH_CLIENTS, OauthClient};
 use crate::mw::auth::AuthUser;
-use crate::services::{oauth_broker_service, oauth_client_service, org_service};
+use crate::services::{
+    developer_webhook_service, oauth_broker_service, oauth_client_service, org_service,
+    webhook_delivery_service,
+};
 use crate::telemetry::{TelemetryContext, TelemetryEvent, emit_event, hash_short_id};
 use mongodb::bson::doc;
 
@@ -131,11 +134,27 @@ pub struct DeveloperOAuthClientResponse {
     pub delegation_scopes: String,
     pub broker_capability_enabled: bool,
     pub revocation_webhook_url: Option<String>,
+    pub connection_webhook_url: Option<String>,
+    pub connection_webhook_enabled: bool,
     pub is_active: bool,
     pub default_service_catalog_slugs: Vec<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub client_secret: Option<String>,
     pub created_at: String,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct ConfigureConnectionWebhookRequest {
+    pub url: String,
+}
+
+#[derive(Serialize)]
+pub struct ConnectionWebhookSecretResponse {
+    pub client_id: String,
+    pub connection_webhook_url: String,
+    pub connection_webhook_enabled: bool,
+    /// Returned only by configuration and rotation endpoints.
+    pub signing_secret: String,
 }
 
 #[derive(Debug, Serialize)]
@@ -161,6 +180,8 @@ fn to_response(c: OauthClient, secret: Option<String>) -> DeveloperOAuthClientRe
         delegation_scopes: c.delegation_scopes,
         broker_capability_enabled: c.broker_capability_enabled,
         revocation_webhook_url: c.revocation_webhook_url,
+        connection_webhook_url: c.connection_webhook_url,
+        connection_webhook_enabled: c.connection_webhook_enabled,
         is_active: c.is_active,
         default_service_catalog_slugs: c.default_service_catalog_slugs,
         client_secret: secret,
@@ -298,6 +319,9 @@ pub async fn create_my_oauth_client(
 
     let revocation_webhook_url =
         normalize_optional_nonempty(body.revocation_webhook_url.as_deref());
+    if let Some(url) = revocation_webhook_url {
+        webhook_delivery_service::validate_webhook_url(url, "revocation_webhook_url").await?;
+    }
     let revocation_webhook_secret_encrypted =
         match normalize_optional_nonempty(body.revocation_webhook_secret.as_deref()) {
             Some(secret) => Some(state.encryption_keys.encrypt(secret.as_bytes()).await?),
@@ -420,6 +444,9 @@ pub async fn update_my_oauth_client(
     .await?;
     let revocation_webhook_url =
         normalize_optional_nonempty(body.revocation_webhook_url.as_deref());
+    if let Some(url) = revocation_webhook_url {
+        webhook_delivery_service::validate_webhook_url(url, "revocation_webhook_url").await?;
+    }
     let revocation_webhook_secret_encrypted =
         match normalize_optional_nonempty(body.revocation_webhook_secret.as_deref()) {
             Some(secret) => Some(state.encryption_keys.encrypt(secret.as_bytes()).await?),
@@ -476,6 +503,84 @@ pub async fn rotate_my_oauth_client_secret(
         id: updated.id,
         client_secret: new_secret,
     }))
+}
+
+/// PUT /api/v1/developer/oauth-clients/:client_id/connection-webhook
+pub async fn configure_connection_webhook(
+    State(state): State<AppState>,
+    auth_user: AuthUser,
+    Path(client_id): Path<String>,
+    Json(body): Json<ConfigureConnectionWebhookRequest>,
+) -> AppResult<Json<ConnectionWebhookSecretResponse>> {
+    let actor = auth_user.user_id.to_string();
+    let owner = resolve_developer_app_write_owner(&state, &actor, &client_id).await?;
+    let (client, signing_secret) = developer_webhook_service::configure(
+        &state.db,
+        &state.encryption_keys,
+        &client_id,
+        &owner,
+        &body.url,
+    )
+    .await?;
+    crate::services::audit_service::log_for_user(
+        state.db.clone(),
+        &auth_user,
+        "connection_webhook_configured",
+        Some(serde_json::json!({ "app_id": &client.id })),
+    );
+    Ok(Json(ConnectionWebhookSecretResponse {
+        client_id: client.id,
+        connection_webhook_url: client.connection_webhook_url.unwrap_or_default(),
+        connection_webhook_enabled: client.connection_webhook_enabled,
+        signing_secret,
+    }))
+}
+
+/// POST /api/v1/developer/oauth-clients/:client_id/connection-webhook/rotate-secret
+pub async fn rotate_connection_webhook_secret(
+    State(state): State<AppState>,
+    auth_user: AuthUser,
+    Path(client_id): Path<String>,
+) -> AppResult<Json<ConnectionWebhookSecretResponse>> {
+    let actor = auth_user.user_id.to_string();
+    let owner = resolve_developer_app_write_owner(&state, &actor, &client_id).await?;
+    let (client, signing_secret) = developer_webhook_service::rotate_secret(
+        &state.db,
+        &state.encryption_keys,
+        &client_id,
+        &owner,
+    )
+    .await?;
+    crate::services::audit_service::log_for_user(
+        state.db.clone(),
+        &auth_user,
+        "connection_webhook_secret_rotated",
+        Some(serde_json::json!({ "app_id": &client.id })),
+    );
+    Ok(Json(ConnectionWebhookSecretResponse {
+        client_id: client.id,
+        connection_webhook_url: client.connection_webhook_url.unwrap_or_default(),
+        connection_webhook_enabled: client.connection_webhook_enabled,
+        signing_secret,
+    }))
+}
+
+/// DELETE /api/v1/developer/oauth-clients/:client_id/connection-webhook
+pub async fn disable_connection_webhook(
+    State(state): State<AppState>,
+    auth_user: AuthUser,
+    Path(client_id): Path<String>,
+) -> AppResult<Json<DeveloperOAuthClientResponse>> {
+    let actor = auth_user.user_id.to_string();
+    let owner = resolve_developer_app_write_owner(&state, &actor, &client_id).await?;
+    let client = developer_webhook_service::disable(&state.db, &client_id, &owner).await?;
+    crate::services::audit_service::log_for_user(
+        state.db.clone(),
+        &auth_user,
+        "connection_webhook_disabled",
+        Some(serde_json::json!({ "app_id": &client.id })),
+    );
+    Ok(Json(to_response(client, None)))
 }
 
 /// DELETE /api/v1/developer/oauth-clients/:client_id
@@ -1447,6 +1552,9 @@ mod tests {
             broker_capability_enabled: true,
             revocation_webhook_url: Some("https://ex.com/revoke".to_string()),
             revocation_webhook_secret_encrypted: None,
+            connection_webhook_url: None,
+            connection_webhook_secret_encrypted: None,
+            connection_webhook_enabled: false,
             is_active: true,
             created_by: Some("user_1".to_string()),
             created_at: Utc::now(),
@@ -1478,6 +1586,9 @@ mod tests {
             broker_capability_enabled: false,
             revocation_webhook_url: None,
             revocation_webhook_secret_encrypted: None,
+            connection_webhook_url: None,
+            connection_webhook_secret_encrypted: None,
+            connection_webhook_enabled: false,
             is_active: false,
             created_by: None,
             created_at: Utc::now(),
@@ -1500,6 +1611,8 @@ mod tests {
             default_service_catalog_slugs: Vec::new(),
             broker_capability_enabled: false,
             revocation_webhook_url: None,
+            connection_webhook_url: None,
+            connection_webhook_enabled: false,
             is_active: true,
             client_secret: None,
             created_at: "2025-01-01T00:00:00Z".to_string(),
@@ -1521,6 +1634,8 @@ mod tests {
             default_service_catalog_slugs: Vec::new(),
             broker_capability_enabled: false,
             revocation_webhook_url: None,
+            connection_webhook_url: None,
+            connection_webhook_enabled: false,
             is_active: true,
             client_secret: Some("secret_abc".to_string()),
             created_at: "2025-01-01T00:00:00Z".to_string(),

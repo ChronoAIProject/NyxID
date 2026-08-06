@@ -514,6 +514,13 @@ pub(crate) fn test_app_state_with_config(db: mongodb::Database, config: AppConfi
         db.clone(),
         Arc::new(config.clone()),
     ));
+    let encryption_keys = Arc::new(test_encryption_keys());
+    let developer_webhook_dispatcher = Arc::new(
+        crate::services::developer_webhook_service::DeveloperWebhookDispatcher::new(
+            http_client.clone(),
+            encryption_keys.clone(),
+        ),
+    );
 
     AppState {
         db,
@@ -531,9 +538,11 @@ pub(crate) fn test_app_state_with_config(db: mongodb::Database, config: AppConfi
                 http_client.clone(),
                 None,
                 None,
+                Some(developer_webhook_dispatcher.clone()),
             ),
         ),
-        encryption_keys: Arc::new(test_encryption_keys()),
+        developer_webhook_dispatcher,
+        encryption_keys,
         node_ws_manager: Arc::new(NodeWsManager::new(
             config.node_proxy_timeout_secs,
             config.node_max_ws_connections,

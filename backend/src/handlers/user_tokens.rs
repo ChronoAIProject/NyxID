@@ -863,29 +863,45 @@ async fn generic_oauth_callback_impl(
                 )
                 .await
                 {
-                    Ok(view) => audit_service::log_async(
-                        state.db.clone(),
-                        Some(outcome.user_id.clone()),
-                        "connect_link_completed".to_string(),
-                        Some(serde_json::json!({
-                            "connect_link_id": &view.link.id,
-                            "service_id": &view.link.service_id,
-                            "service_slug": &view.link.service_slug,
-                            "user_service_id": &view.link.completed_user_service_id,
-                        })),
-                        auth_user.as_ref().and_then(|user| user.ip_address.clone()),
-                        auth_user.as_ref().and_then(|user| user.user_agent.clone()),
-                        auth_user.as_ref().and_then(|user| user.api_key_id.clone()),
-                        auth_user
-                            .as_ref()
-                            .and_then(|user| user.api_key_name.clone()),
-                    ),
-                    Err(error) => tracing::warn!(
-                        connect_link_id,
-                        connection_id,
-                        %error,
-                        "OAuth connection succeeded but connect-link completion failed"
-                    ),
+                    Ok(view) => {
+                        audit_service::log_async(
+                            state.db.clone(),
+                            Some(outcome.user_id.clone()),
+                            "connect_link_completed".to_string(),
+                            Some(serde_json::json!({
+                                "connect_link_id": &view.link.id,
+                                "service_id": &view.link.service_id,
+                                "service_slug": &view.link.service_slug,
+                                "user_service_id": &view.link.completed_user_service_id,
+                            })),
+                            auth_user.as_ref().and_then(|user| user.ip_address.clone()),
+                            auth_user.as_ref().and_then(|user| user.user_agent.clone()),
+                            auth_user.as_ref().and_then(|user| user.api_key_id.clone()),
+                            auth_user
+                                .as_ref()
+                                .and_then(|user| user.api_key_name.clone()),
+                        );
+                        crate::services::connect_link_service::dispatch_terminal_webhook_if_needed(
+                            &state.db,
+                            &state.developer_webhook_dispatcher,
+                            &view.link.id,
+                        )
+                        .await;
+                    }
+                    Err(error) => {
+                        crate::services::connect_link_service::dispatch_terminal_webhook_if_needed(
+                            &state.db,
+                            &state.developer_webhook_dispatcher,
+                            connect_link_id,
+                        )
+                        .await;
+                        tracing::warn!(
+                            connect_link_id,
+                            connection_id,
+                            %error,
+                            "OAuth connection succeeded but connect-link completion failed"
+                        );
+                    }
                 }
             }
 
@@ -2460,6 +2476,7 @@ mod tests {
                 completion_claim_at: None,
                 last_error: None,
                 last_error_at: None,
+                webhook_event_reserved_at: None,
             })
             .await
             .expect("insert connect link");

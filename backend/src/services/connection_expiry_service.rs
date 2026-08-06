@@ -19,6 +19,8 @@ pub struct ConnectionExpiryNotifier {
     http_client: Client,
     fcm_auth: Option<Arc<FcmAuth>>,
     apns_auth: Option<Arc<ApnsAuth>>,
+    developer_webhook_dispatcher:
+        Option<Arc<crate::services::developer_webhook_service::DeveloperWebhookDispatcher>>,
     #[cfg(test)]
     test_delivery_tx:
         Option<tokio::sync::mpsc::UnboundedSender<ConnectionExpiredNotificationContext>>,
@@ -30,12 +32,16 @@ impl ConnectionExpiryNotifier {
         http_client: Client,
         fcm_auth: Option<Arc<FcmAuth>>,
         apns_auth: Option<Arc<ApnsAuth>>,
+        developer_webhook_dispatcher: Option<
+            Arc<crate::services::developer_webhook_service::DeveloperWebhookDispatcher>,
+        >,
     ) -> Self {
         Self {
             config,
             http_client,
             fcm_auth,
             apns_auth,
+            developer_webhook_dispatcher,
             #[cfg(test)]
             test_delivery_tx: None,
         }
@@ -84,6 +90,7 @@ impl ConnectionExpiryNotifier {
             http_client: Client::new(),
             fcm_auth: None,
             apns_auth: None,
+            developer_webhook_dispatcher: None,
             test_delivery_tx: Some(tx),
         }
     }
@@ -125,7 +132,13 @@ pub async fn transition_oauth_key_to_dead(
     }
 
     let audit_error = error_message.chars().take(200).collect();
-    spawn_transition_side_effects(db.clone(), api_key.clone(), audit_error, notifier.cloned());
+    spawn_transition_side_effects(
+        db.clone(),
+        api_key.clone(),
+        dead_status.to_string(),
+        audit_error,
+        notifier.cloned(),
+    );
     Ok(true)
 }
 
@@ -165,6 +178,7 @@ pub async fn transition_legacy_oauth_keys_to_dead(
 fn spawn_transition_side_effects(
     db: Database,
     api_key: UserApiKey,
+    dead_status: String,
     audit_error: String,
     notifier: Option<ConnectionExpiryNotifier>,
 ) {
@@ -217,6 +231,30 @@ fn spawn_transition_side_effects(
                 api_key_id = %api_key.id,
                 error = %error,
                 "Failed to persist connection expiry audit event"
+            );
+        }
+
+        if let (Some(dispatcher), Some(user_service), Some(app_id)) = (
+            notifier
+                .as_ref()
+                .and_then(|notifier| notifier.developer_webhook_dispatcher.as_deref()),
+            user_service.as_ref(),
+            user_service
+                .as_ref()
+                .and_then(|service| service.source_app_id.as_deref()),
+        ) {
+            dispatcher.dispatch(
+                db.clone(),
+                app_id.to_string(),
+                "connection.expired",
+                serde_json::json!({
+                    "user_service_id": &user_service.id,
+                    "user_service_slug": &user_service.slug,
+                    "api_key_id": &api_key.id,
+                    "status": dead_status,
+                    "credential_type": &api_key.credential_type,
+                    "provider_config_id": api_key.provider_config_id.as_deref(),
+                }),
             );
         }
 
@@ -273,6 +311,9 @@ mod tests {
 
     use super::*;
     use crate::models::audit_log::{AuditLog, COLLECTION_NAME as AUDIT_LOGS};
+    use crate::models::oauth_client::{
+        COLLECTION_NAME as OAUTH_CLIENTS, OauthClient, ScopeProvenance,
+    };
     use crate::models::provider_config::{COLLECTION_NAME as PROVIDER_CONFIGS, ProviderConfig};
     use crate::models::ssh_auth_mode::SshAuthMode;
     use crate::models::user_provider_token::{
@@ -342,6 +383,37 @@ mod tests {
             source: Some("auto_provision".to_string()),
             source_id: None,
             source_app_id: None,
+            created_at: now,
+            updated_at: now,
+        }
+    }
+
+    fn webhook_client(
+        id: &str,
+        owner: &str,
+        url: String,
+        encrypted_secret: Vec<u8>,
+    ) -> OauthClient {
+        let now = Utc::now();
+        OauthClient {
+            id: id.to_string(),
+            client_name: "Connection Webhook App".to_string(),
+            client_secret_hash: "hash".to_string(),
+            redirect_uris: Vec::new(),
+            allowed_scopes: "openid".to_string(),
+            scope_provenance: ScopeProvenance::Explicit,
+            grant_types: "authorization_code".to_string(),
+            client_type: "public".to_string(),
+            is_active: true,
+            delegation_scopes: String::new(),
+            default_service_catalog_slugs: Vec::new(),
+            broker_capability_enabled: false,
+            revocation_webhook_url: None,
+            revocation_webhook_secret_encrypted: None,
+            connection_webhook_url: Some(url),
+            connection_webhook_secret_encrypted: Some(encrypted_secret),
+            connection_webhook_enabled: true,
+            created_by: Some(owner.to_string()),
             created_at: now,
             updated_at: now,
         }
@@ -738,13 +810,15 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn notification_failure_does_not_fail_dead_transition() {
+    async fn notification_and_webhook_delivery_do_not_block_or_fail_dead_transition() {
         let Some(db) = connect_test_database("connection_expiry_delivery_failure").await else {
             return;
         };
         let user_id = Uuid::new_v4().to_string();
         let key = oauth_key(&user_id);
-        let service = user_service(&user_id, &key.id);
+        let app_id = Uuid::new_v4().to_string();
+        let mut service = user_service(&user_id, &key.id);
+        service.source_app_id = Some(app_id.clone());
         db.collection::<UserApiKey>(USER_API_KEYS)
             .insert_one(&key)
             .await
@@ -754,16 +828,67 @@ mod tests {
             .await
             .unwrap();
 
+        let (request_started_tx, mut request_started_rx) = tokio::sync::mpsc::unbounded_channel();
+        let receiver = axum::Router::new().route(
+            "/events",
+            axum::routing::post(move |body: axum::body::Bytes| {
+                let request_started_tx = request_started_tx.clone();
+                async move {
+                    request_started_tx.send(body).expect("record request start");
+                    std::future::pending::<axum::http::StatusCode>().await
+                }
+            }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind blocking webhook receiver");
+        let address = listener.local_addr().expect("webhook receiver address");
+        tokio::spawn(async move {
+            axum::serve(listener, receiver)
+                .await
+                .expect("serve blocking webhook receiver")
+        });
+
+        let keys = Arc::new(test_encryption_keys());
+        let encrypted_secret = keys
+            .encrypt(b"webhook-signing-secret")
+            .await
+            .expect("encrypt webhook secret");
+        db.collection::<OauthClient>(OAUTH_CLIENTS)
+            .insert_one(webhook_client(
+                &app_id,
+                &user_id,
+                format!("http://{address}/events"),
+                encrypted_secret,
+            ))
+            .await
+            .expect("insert webhook client");
+
         let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
         drop(rx);
-        let notifier =
+        let mut notifier =
             ConnectionExpiryNotifier::with_test_delivery(Arc::new(test_app_config()), tx);
+        notifier.developer_webhook_dispatcher = Some(Arc::new(
+            crate::services::developer_webhook_service::DeveloperWebhookDispatcher::new(
+                reqwest::Client::new(),
+                keys,
+            ),
+        ));
 
         assert!(
             transition_oauth_key_to_dead(&db, &key, "failed", "refresh rejected", Some(&notifier))
                 .await
-                .expect("notification delivery cannot fail refresh transition")
+                .expect("side-effect delivery cannot fail refresh transition")
         );
+        let webhook_body = timeout(Duration::from_secs(3), request_started_rx.recv())
+            .await
+            .expect("webhook delivery should start in the background")
+            .expect("webhook request start");
+        let envelope: serde_json::Value =
+            serde_json::from_slice(&webhook_body).expect("connection expiry envelope");
+        assert_eq!(envelope["event_type"], "connection.expired");
+        assert_eq!(envelope["data"]["status"], "failed");
+        assert_eq!(envelope["data"]["user_service_id"], service.id);
         wait_for_event_count(&db, &user_id, 1).await;
         let stored = db
             .collection::<UserApiKey>(USER_API_KEYS)

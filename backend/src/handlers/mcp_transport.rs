@@ -2078,6 +2078,12 @@ async fn handle_wait_for_connection(
         .await
     {
         Ok(view) => {
+            connect_link_service::dispatch_terminal_webhook_if_needed(
+                &state.db,
+                &state.developer_webhook_dispatcher,
+                &view.link.id,
+            )
+            .await;
             let status = match view.link.status {
                 crate::models::connect_link::ConnectLinkStatus::Pending => "pending",
                 crate::models::connect_link::ConnectLinkStatus::Completed => "completed",

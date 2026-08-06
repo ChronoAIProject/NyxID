@@ -1896,6 +1896,13 @@ pub async fn create_oauth_client(
         .unwrap_or_else(|| oauth_client_service::DEFAULT_ALLOWED_SCOPES.to_string());
     let revocation_webhook_url =
         normalize_optional_nonempty(body.revocation_webhook_url.as_deref());
+    if let Some(url) = revocation_webhook_url {
+        crate::services::webhook_delivery_service::validate_webhook_url(
+            url,
+            "revocation_webhook_url",
+        )
+        .await?;
+    }
     let revocation_webhook_secret_encrypted =
         match normalize_optional_nonempty(body.revocation_webhook_secret.as_deref()) {
             Some(secret) => Some(state.encryption_keys.encrypt(secret.as_bytes()).await?),
@@ -3016,6 +3023,9 @@ mod operator_route_tests {
             broker_capability_enabled: false,
             revocation_webhook_url: None,
             revocation_webhook_secret_encrypted: None,
+            connection_webhook_url: None,
+            connection_webhook_secret_encrypted: None,
+            connection_webhook_enabled: false,
             created_by: Some("dynamic_registration".to_string()),
             created_at: now,
             updated_at: now,

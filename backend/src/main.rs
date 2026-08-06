@@ -91,6 +91,9 @@ pub struct AppState {
     /// Shared delivery runtime for connection-expiry notifications.
     pub connection_expiry_notifier:
         Arc<services::connection_expiry_service::ConnectionExpiryNotifier>,
+    /// Signed lifecycle delivery runtime for registered developer apps.
+    pub developer_webhook_dispatcher:
+        Arc<services::developer_webhook_service::DeveloperWebhookDispatcher>,
     /// Versioned encryption keys for AES-256-GCM (current + optional previous for rotation)
     pub encryption_keys: Arc<EncryptionKeys>,
     /// WebSocket connection manager for credential nodes
@@ -660,6 +663,21 @@ async fn main() {
     let broker_policy = services::platform_settings_service::load_broker_policy(&db, &config)
         .await
         .expect("Failed to load platform broker policy");
+    let developer_webhook_dispatcher = Arc::new(
+        services::developer_webhook_service::DeveloperWebhookDispatcher::new(
+            http_client.clone(),
+            encryption_keys.clone(),
+        ),
+    );
+    let connection_expiry_notifier = Arc::new(
+        services::connection_expiry_service::ConnectionExpiryNotifier::new(
+            Arc::new(config.clone()),
+            http_client.clone(),
+            fcm_auth.clone(),
+            apns_auth.clone(),
+            Some(developer_webhook_dispatcher.clone()),
+        ),
+    );
     let state = AppState {
         db,
         config: config.clone(),
@@ -670,14 +688,8 @@ async fn main() {
         jwks_cache,
         fcm_auth: fcm_auth.clone(),
         apns_auth: apns_auth.clone(),
-        connection_expiry_notifier: Arc::new(
-            services::connection_expiry_service::ConnectionExpiryNotifier::new(
-                Arc::new(config.clone()),
-                http_client.clone(),
-                fcm_auth.clone(),
-                apns_auth.clone(),
-            ),
-        ),
+        connection_expiry_notifier,
+        developer_webhook_dispatcher,
         encryption_keys: encryption_keys.clone(),
         node_ws_manager,
         ssh_session_manager,
