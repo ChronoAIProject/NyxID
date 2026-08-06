@@ -65,6 +65,11 @@ pub enum Commands {
         #[command(subcommand)]
         command: PoolCommands,
     },
+    /// Manage inbound event triggers
+    Trigger {
+        #[command(subcommand)]
+        command: TriggerCommands,
+    },
     /// Manage billing wallet, usage, and top-ups
     Billing {
         #[command(subcommand)]
@@ -1151,6 +1156,92 @@ pub enum PoolCommands {
         /// Routing strategy
         #[arg(value_enum)]
         strategy: PoolStrategyArg,
+        #[command(flatten)]
+        auth: AuthArgs,
+    },
+}
+
+#[derive(Clone, Copy, Debug, ValueEnum)]
+pub enum TriggerVerificationArg {
+    Bearer,
+    Query,
+    Hmac,
+}
+
+#[derive(Clone, Copy, Debug, ValueEnum)]
+pub enum TriggerDeliveryArg {
+    Webhook,
+    Agent,
+    Notification,
+}
+
+#[derive(Clone, Copy, Debug, ValueEnum)]
+pub enum TriggerStatusArg {
+    Active,
+    Disabled,
+}
+
+#[derive(Subcommand)]
+pub enum TriggerCommands {
+    /// Create an inbound trigger
+    Create {
+        #[arg(long)]
+        label: String,
+        #[arg(long)]
+        user_service_id: Option<String>,
+        #[arg(long, value_enum, default_value = "bearer")]
+        verification: TriggerVerificationArg,
+        #[arg(long, default_value = "X-Hub-Signature-256")]
+        signature_header: String,
+        #[arg(long, value_enum)]
+        delivery: TriggerDeliveryArg,
+        #[arg(long)]
+        delivery_url: Option<String>,
+        #[arg(long)]
+        conversation_id: Option<String>,
+        #[arg(long, value_name = "ID|SLUG|NAME")]
+        org: Option<String>,
+        #[command(flatten)]
+        auth: AuthArgs,
+    },
+    /// List triggers
+    List {
+        #[arg(long, value_name = "ID|SLUG|NAME")]
+        org: Option<String>,
+        #[command(flatten)]
+        auth: AuthArgs,
+    },
+    /// Show trigger details
+    Show {
+        id: String,
+        #[command(flatten)]
+        auth: AuthArgs,
+    },
+    /// Update a trigger
+    Update {
+        id: String,
+        #[arg(long)]
+        label: Option<String>,
+        #[arg(long, value_enum)]
+        status: Option<TriggerStatusArg>,
+        #[arg(long, value_enum)]
+        delivery: Option<TriggerDeliveryArg>,
+        #[arg(long)]
+        delivery_url: Option<String>,
+        #[arg(long)]
+        conversation_id: Option<String>,
+        #[command(flatten)]
+        auth: AuthArgs,
+    },
+    /// Delete a trigger
+    Delete {
+        id: String,
+        #[command(flatten)]
+        auth: AuthArgs,
+    },
+    /// Rotate the inbound secret
+    RotateSecret {
+        id: String,
         #[command(flatten)]
         auth: AuthArgs,
     },
