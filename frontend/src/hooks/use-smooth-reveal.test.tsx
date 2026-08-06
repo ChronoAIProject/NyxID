@@ -1,0 +1,136 @@
+import { act, renderHook } from "@testing-library/react";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { useSmoothReveal } from "./use-smooth-reveal";
+
+/** Roughly one frame at 60Hz, which is what the fake clock drives rAF at. */
+const FRAME_MS = 16;
+
+function runFrames(count: number): void {
+  for (let frame = 0; frame < count; frame += 1) {
+    act(() => {
+      vi.advanceTimersByTime(FRAME_MS);
+    });
+  }
+}
+
+/**
+ * Frames until the reveal catches up. The first frame only establishes the
+ * clock baseline — there is no previous timestamp to measure against — so a
+ * converged reveal always costs at least two.
+ */
+function framesToConverge(text: string): number {
+  const { result, rerender, unmount } = renderHook(
+    ({ value }: { value: string }) => useSmoothReveal(value, true),
+    { initialProps: { value: "" } },
+  );
+  rerender({ value: text });
+  let frames = 0;
+  while (result.current !== text && frames < 500) {
+    runFrames(1);
+    frames += 1;
+  }
+  unmount();
+  return frames;
+}
+
+beforeEach(() => {
+  vi.useFakeTimers();
+});
+
+afterEach(() => {
+  vi.useRealTimers();
+});
+
+describe("useSmoothReveal", () => {
+  it("returns the whole text when the block is not streaming", () => {
+    const { result } = renderHook(() => useSmoothReveal("Settled answer.", false));
+    expect(result.current).toBe("Settled answer.");
+  });
+
+  it("withholds arrived characters while streaming, then converges", () => {
+    const text = "a".repeat(400);
+    const { result, rerender } = renderHook(
+      ({ value }: { value: string }) => useSmoothReveal(value, true),
+      { initialProps: { value: "" } },
+    );
+
+    rerender({ value: text });
+    runFrames(2);
+    // Paced, not painted whole: a 400-character chunk does not land at once.
+    expect(result.current.length).toBeGreaterThan(0);
+    expect(result.current.length).toBeLessThan(text.length);
+
+    // ...and it is never anything but a prefix of what actually arrived.
+    expect(text.startsWith(result.current)).toBe(true);
+
+    runFrames(30);
+    expect(result.current).toBe(text);
+  });
+
+  it("makes the wait grow with the logarithm of the backlog, not with it", () => {
+    const short = framesToConverge("b".repeat(200));
+    const long = framesToConverge("b".repeat(1200));
+    // The drain rate is proportional to the backlog, so the backlog decays
+    // exponentially and the wait grows logarithmically: six times the text
+    // costs well under twice the frames. A fixed characters-per-second rate —
+    // the obvious implementation — would have cost six times as long, which is
+    // exactly how a typewriter effect makes long answers crawl.
+    expect(long).toBeLessThan(short * 2);
+    // And neither is allowed to feel like a stall.
+    expect(long * FRAME_MS).toBeLessThan(500);
+  });
+
+  it("snaps a backlog too large to be a stream", () => {
+    const bulk = "c".repeat(4000);
+    const { result, rerender } = renderHook(
+      ({ value }: { value: string }) => useSmoothReveal(value, true),
+      { initialProps: { value: "" } },
+    );
+    rerender({ value: bulk });
+    // A re-mount or history projection is not typing; it appears at once, on
+    // the first frame that carries a clock delta.
+    runFrames(2);
+    expect(result.current).toBe(bulk);
+  });
+
+  it("never slices past a block whose text was replaced with a shorter one", () => {
+    const { result, rerender } = renderHook(
+      ({ value }: { value: string }) => useSmoothReveal(value, true),
+      { initialProps: { value: "d".repeat(500) } },
+    );
+    runFrames(30);
+    rerender({ value: "short" });
+    runFrames(1);
+    expect(result.current).toBe("short");
+  });
+
+  it("hands over the full text the moment the block settles", () => {
+    const text = "e".repeat(600);
+    const { result, rerender } = renderHook(
+      ({ value, active }: { value: string; active: boolean }) =>
+        useSmoothReveal(value, active),
+      { initialProps: { value: "", active: true } },
+    );
+    rerender({ value: text, active: true });
+    runFrames(1);
+    expect(result.current.length).toBeLessThan(text.length);
+
+    rerender({ value: text, active: false });
+    // No content may be left stranded behind the animation when a turn ends.
+    expect(result.current).toBe(text);
+  });
+
+  it("does not pace when the reader asked for reduced motion", () => {
+    const matchMedia = vi
+      .spyOn(window, "matchMedia")
+      .mockReturnValue({ matches: true } as MediaQueryList);
+    const text = "f".repeat(800);
+    const { result, rerender } = renderHook(
+      ({ value }: { value: string }) => useSmoothReveal(value, true),
+      { initialProps: { value: "" } },
+    );
+    rerender({ value: text });
+    expect(result.current).toBe(text);
+    matchMedia.mockRestore();
+  });
+});

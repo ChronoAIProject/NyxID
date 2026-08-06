@@ -1,6 +1,8 @@
 import {
   createContext,
+  memo,
   useContext,
+  useMemo,
   type ComponentProps,
   type CSSProperties,
 } from "react";
@@ -8,6 +10,8 @@ import type { Root } from "mdast";
 import ReactMarkdown, { type Components } from "react-markdown";
 import rehypeSanitize, { defaultSchema } from "rehype-sanitize";
 import remarkGfm from "remark-gfm";
+import { useSmoothReveal } from "@/hooks/use-smooth-reveal";
+import { splitStableMarkdown } from "@/lib/assistant/markdown-stream";
 
 // Everything the assistant may stream should actually render (issue: results
 // were flattened). rehype-sanitize still scrubs attributes/urls; these are the
@@ -346,31 +350,86 @@ const COMPONENTS: Components = {
   },
 };
 
-export function TextBlock({
+// Hoisted so the plugin arrays keep a stable identity across renders — rebuilt
+// inline they defeat every memo react-markdown applies internally.
+type MarkdownProps = ComponentProps<typeof ReactMarkdown>;
+const REMARK_PLUGINS: MarkdownProps["remarkPlugins"] = [
+  remarkGfm,
+  remarkSafeModelContent,
+];
+const REHYPE_PLUGINS: MarkdownProps["rehypePlugins"] = [
+  [rehypeSanitize, SANITIZE_SCHEMA],
+];
+const urlTransform: MarkdownProps["urlTransform"] = (url) =>
+  allowedHref(url) ?? "";
+
+/**
+ * One parse, memoized on the text it parsed.
+ *
+ * react-markdown holds no internal cache: a parent re-render re-runs remark,
+ * rehype-sanitize and the whole JSX build for text that has not changed by a
+ * character. Measured at ~15 ms for a 4 000-character answer — per re-render,
+ * per block. Memoizing here is what keeps a settled transcript out of the
+ * streaming block's frame budget.
+ *
+ * Rendered WITHOUT a wrapper element, deliberately: react-markdown emits its
+ * blocks into a fragment, so a split block's prefix and tail remain siblings
+ * under one parent and the `first:mt-0` rhythm still resolves across the seam.
+ */
+const MarkdownSegment = memo(function MarkdownSegment({
+  text,
+}: {
+  readonly text: string;
+}) {
+  return (
+    <ReactMarkdown
+      allowedElements={ALLOWED_ELEMENTS}
+      remarkPlugins={REMARK_PLUGINS}
+      rehypePlugins={REHYPE_PLUGINS}
+      urlTransform={urlTransform}
+      components={COMPONENTS}
+    >
+      {text}
+    </ReactMarkdown>
+  );
+});
+
+export const TextBlock = memo(function TextBlock({
   text,
   streaming = false,
 }: {
   readonly text: string;
   /**
-   * True for the actively-streaming text block: renders a blinking caret glued
-   * to the end of the last line so the turn reads as "still writing" rather
-   * than freezing between chunks.
+   * True for the actively-streaming text block: paces the reveal against the
+   * frame clock and renders a blinking caret glued to the end of the last line,
+   * so the turn reads as "still writing" rather than freezing between chunks.
    */
   readonly streaming?: boolean;
 }) {
+  const revealed = useSmoothReveal(text, streaming);
+  // Everything above the last settled block is frozen and memoized; only the
+  // live tail is re-parsed per frame. Splitting is refused wherever it could
+  // change meaning, in which case this is a whole-text parse as before.
+  const { prefix, tail } = useMemo(
+    () => splitStableMarkdown(revealed),
+    [revealed],
+  );
+
   return (
     <div
       className={`text-[12px] ${streaming ? "[&>p:has(+_[data-streaming-caret])]:inline" : ""}`}
     >
-      <ReactMarkdown
-        allowedElements={ALLOWED_ELEMENTS}
-        remarkPlugins={[remarkGfm, remarkSafeModelContent]}
-        rehypePlugins={[[rehypeSanitize, SANITIZE_SCHEMA]]}
-        urlTransform={(url) => allowedHref(url) ?? ""}
-        components={COMPONENTS}
-      >
-        {text}
-      </ReactMarkdown>
+      {prefix ? (
+        <>
+          <MarkdownSegment text={prefix} />
+          {/* mdast-util-to-hast separates top-level blocks with a newline text
+              node. Two parses each produce their own but none at the seam, so
+              this restores it and keeps split output byte-identical to a whole
+              parse — see text-block.split.test.tsx. */}
+          {"\n"}
+        </>
+      ) : null}
+      <MarkdownSegment text={tail} />
       {streaming ? (
         <span
           aria-hidden
@@ -380,4 +439,4 @@ export function TextBlock({
       ) : null}
     </div>
   );
-}
+});

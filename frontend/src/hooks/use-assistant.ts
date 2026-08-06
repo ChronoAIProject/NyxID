@@ -54,28 +54,14 @@ const APPROVAL_HISTORY_PAGE_SIZE = 20;
 // sits well above the observed worst-case time-to-first-event.
 const STREAM_START_DEADLINE_MS = 30_000;
 const PROJECTION_DEADLINE_MS = 5_000;
-// Streaming events update the transport mirror synchronously. Sparse text can
-// arrive at a relaxed cadence, while a growing backlog needs shorter samples
-// to avoid landing as large Markdown jumps. The lower bound still limits a
-// busy stream to about 42 projections per second on the main thread.
-const STREAM_PROJECTION_MIN_INTERVAL_MS = 24;
-const STREAM_PROJECTION_MAX_INTERVAL_MS = 90;
+// Streaming events update the transport mirror synchronously; a projection is
+// what publishes the mirror to React. This used to shorten under text backlog
+// (down to 24 ms) so that arriving prose would not land as large Markdown
+// jumps — a job the view layer now does properly, pacing the reveal against
+// the frame clock in `useSmoothReveal`. Sampling faster than that only bought
+// re-renders nobody could see, so the cadence is a flat interval again: fewer
+// projections, more frame budget left for the block actually being written.
 const STREAM_PROJECTION_INTERVAL_MS = 50;
-const STREAM_PROJECTION_FAST_BACKLOG_CHARS = 120;
-
-function streamProjectionInterval(pendingTextChars: number): number {
-  if (pendingTextChars <= 0) return STREAM_PROJECTION_INTERVAL_MS;
-  const pressure = Math.min(
-    pendingTextChars / STREAM_PROJECTION_FAST_BACKLOG_CHARS,
-    1,
-  );
-  return Math.round(
-    STREAM_PROJECTION_MAX_INTERVAL_MS -
-      pressure *
-        (STREAM_PROJECTION_MAX_INTERVAL_MS -
-          STREAM_PROJECTION_MIN_INTERVAL_MS),
-  );
-}
 
 const activeHandles = new Map<string, TurnHandle>();
 const episodeOwners = new WeakMap<QueryClient, Map<string, symbol>>();
@@ -577,7 +563,6 @@ function createTurnEventPump(
   let startDeadline: ReturnType<typeof setTimeout> | undefined;
   let projectionTimer: ReturnType<typeof setTimeout> | undefined;
   let projectionDueAt: number | undefined;
-  let pendingTextChars = 0;
   const ownsEpisode = () => owners.get(targetId) === owner;
   const clearStartDeadline = () => {
     if (startDeadline !== undefined) {
@@ -602,7 +587,6 @@ function createTurnEventPump(
   const project = () => {
     projectionTimer = undefined;
     projectionDueAt = undefined;
-    pendingTextChars = 0;
     if (!ownsEpisode()) return;
     projections += 1;
     publish();
@@ -621,7 +605,7 @@ function createTurnEventPump(
       project();
       return;
     }
-    const delay = streamProjectionInterval(pendingTextChars);
+    const delay = STREAM_PROJECTION_INTERVAL_MS;
     const dueAt = Date.now() + delay;
     if (
       projectionTimer !== undefined &&
@@ -667,7 +651,6 @@ function createTurnEventPump(
     clearStartDeadline();
     if (event.cursor <= lastSeenCursor) return;
     lastSeenCursor = event.cursor;
-    if (event.event === "block.delta") pendingTextChars += event.text.length;
     if (eventPrintsContent(event)) printed = true;
     if (event.event === "turn.completed") open = false;
     const turn = turnFromEvent(event);

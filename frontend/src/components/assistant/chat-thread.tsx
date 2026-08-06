@@ -426,6 +426,7 @@ export function ChatThread({
 }) {
   const rootRef = useRef<HTMLDivElement>(null);
   const scrollRef = useRef<HTMLDivElement>(null);
+  const contentRef = useRef<HTMLDivElement>(null);
   const [scrolledFromTop, setScrolledFromTop] = useState(false);
   const thinkingPresence = useFadingPresence(thinking, 500);
   const following = useRef(true);
@@ -447,7 +448,10 @@ export function ChatThread({
     setScrolledFromTop(element.scrollTop > 1);
   }, []);
 
-  useEffect(() => {
+  // Before paint, not after: adjusting the scroll in a passive effect lets the
+  // browser paint one frame at the stale offset first, and that one-frame
+  // rebound at every update is a large part of what reads as juddering.
+  useLayoutEffect(() => {
     const element = scrollRef.current;
     if (!element) return;
     // Sending always pulls the view back to the tail; assistant streaming still
@@ -460,6 +464,23 @@ export function ChatThread({
     if (following.current) element.scrollTop = element.scrollHeight;
     setScrolledFromTop(element.scrollTop > 1);
   }, [messages, thinking, streaming, bottomInset]);
+
+  // Streamed text grows INSIDE a memoized block, so the thread does not
+  // re-render as the answer writes itself and the effect above never fires for
+  // it. Following the tail is therefore driven off the content box itself,
+  // which is the thing that actually changes height.
+  useEffect(() => {
+    const element = scrollRef.current;
+    const content = contentRef.current;
+    if (!element || !content || typeof ResizeObserver === "undefined") return;
+    const observer = new ResizeObserver(() => {
+      if (following.current) element.scrollTop = element.scrollHeight;
+    });
+    observer.observe(content);
+    return () => {
+      observer.disconnect();
+    };
+  }, [hasMessages]);
 
   useLayoutEffect(() => {
     const root = rootRef.current;
@@ -586,6 +607,7 @@ export function ChatThread({
         style={{ maskImage: fadeMask, WebkitMaskImage: fadeMask }}
       >
         <div
+          ref={contentRef}
           className="mx-auto flex w-full max-w-[758px] flex-col gap-6 px-4 py-6 sm:px-6 sm:py-8"
           style={{ paddingBottom: `calc(${String(bottomInset)}px + 1.5rem)` }}
         >
