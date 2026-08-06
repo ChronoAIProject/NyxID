@@ -1871,12 +1871,15 @@ pub async fn update_service(
     // deserialization errors on documents created before the field was renamed.
     let mut catalog_filter = doc! { "_id": &service_id };
     if identity_changed {
-        // The revision guard makes catalog identity transitions a total order.
-        // The reconciliation service then catches up across any later revision
-        // that commits while this request is updating materialized instances.
+        // Serialize identity transitions and keep an unresolved reconciliation
+        // from being overwritten by a concurrent edit or retry.
         catalog_filter.insert(
             "updated_at",
             bson::DateTime::from_chrono(service.updated_at),
+        );
+        catalog_filter.insert(
+            crate::models::catalog_identity_reconciliation::FIELD_NAME,
+            doc! { "$exists": false },
         );
     }
     let committed_service = state
@@ -1894,7 +1897,8 @@ pub async fn update_service(
         .ok_or_else(|| {
             if identity_changed {
                 AppError::Conflict(
-                    "Service changed during the identity update; retry the request".to_string(),
+                    "Service changed or has unresolved identity reconciliation; retry after it completes or run identity resync"
+                        .to_string(),
                 )
             } else {
                 AppError::NotFound("Service not found".to_string())
@@ -2670,7 +2674,7 @@ mod tests {
         let body: UpdateServiceRequest =
             serde_json::from_str(r#"{"forward_access_token":true}"#).expect("parse update");
         let error = update_service(
-            State(state),
+            State(state.clone()),
             test_auth_user(&admin_id),
             crate::telemetry::TelemetryContext::default(),
             Path(catalog_id.to_string()),
@@ -2678,7 +2682,6 @@ mod tests {
         )
         .await
         .expect_err("propagation should fail");
-        server.abort();
         assert!(matches!(error, AppError::DatabaseError(_)));
 
         let persisted = db
@@ -2687,13 +2690,12 @@ mod tests {
             .await
             .expect("find catalog service")
             .expect("catalog service exists");
-        let marker: CatalogIdentityReconciliation = bson::from_document(
-            persisted
-                .get_document(RECONCILIATION_FIELD)
-                .expect("durable reconciliation marker")
-                .clone(),
-        )
-        .expect("deserialize reconciliation marker");
+        let marker_document = persisted
+            .get_document(RECONCILIATION_FIELD)
+            .expect("durable reconciliation marker")
+            .clone();
+        let marker: CatalogIdentityReconciliation = bson::from_document(marker_document.clone())
+            .expect("deserialize reconciliation marker");
         assert_eq!(marker.status, CatalogIdentityReconciliationStatus::Failed);
         assert_eq!(marker.fields, ["forward_access_token"]);
         assert_eq!(
@@ -2702,6 +2704,41 @@ mod tests {
         );
         assert!(marker.failed_at.is_some());
         assert_eq!(marker.matched_count, Some(0));
+
+        let retry_body: UpdateServiceRequest =
+            serde_json::from_str(r#"{"forward_access_token":true}"#).expect("parse retry");
+        let retry_error = update_service(
+            State(state),
+            test_auth_user(&admin_id),
+            crate::telemetry::TelemetryContext::default(),
+            Path(catalog_id.to_string()),
+            Json(retry_body),
+        )
+        .await
+        .expect_err("retry must not overwrite unresolved reconciliation");
+        server.abort();
+        assert!(matches!(retry_error, AppError::Conflict(_)));
+
+        let after_retry = db
+            .collection::<mongodb::bson::Document>(DOWNSTREAM_SERVICES)
+            .find_one(doc! { "_id": catalog_id })
+            .await
+            .expect("find catalog service after retry")
+            .expect("catalog service exists after retry");
+        assert_eq!(
+            after_retry
+                .get_document(RECONCILIATION_FIELD)
+                .expect("reconciliation marker after retry"),
+            &marker_document,
+            "a retry must preserve the unresolved reconciliation generation"
+        );
+        let stale_instance = db
+            .collection::<UserService>(USER_SERVICES)
+            .find_one(doc! { "_id": "user-service" })
+            .await
+            .expect("find user service after retry")
+            .expect("user service exists after retry");
+        assert!(!stale_instance.forward_access_token);
         assert_eq!(
             db.collection::<mongodb::bson::Document>(AUDIT_LOGS)
                 .count_documents(doc! {})
