@@ -3445,6 +3445,63 @@ async fn reconcile_firecrawl_seed_metadata(
     Ok(())
 }
 
+/// Keep the operator-managed Codex boundary on downstream-specific authority.
+///
+/// `chrono-sandbox` rejects caller bearer credentials and accepts only an
+/// `llm:proxy` delegation token. `UserService` rows snapshot these fields when
+/// provisioned, so both the catalog row and every linked snapshot must be
+/// reconciled together.
+async fn reconcile_chrono_sandbox_identity(
+    db: &mongodb::Database,
+    service_col: &mongodb::Collection<DownstreamService>,
+    now: chrono::DateTime<Utc>,
+) -> AppResult<()> {
+    let Some(service) = service_col
+        .find_one(doc! { "slug": "chrono-sandbox", "is_active": true })
+        .await?
+    else {
+        return Ok(());
+    };
+
+    let identity_drift = doc! {
+        "$or": [
+            { "forward_access_token": { "$ne": false } },
+            { "inject_delegation_token": { "$ne": true } },
+            { "delegation_token_scope": { "$ne": "llm:proxy" } },
+        ],
+    };
+    let identity_config = doc! {
+        "forward_access_token": false,
+        "inject_delegation_token": true,
+        "delegation_token_scope": "llm:proxy",
+        "updated_at": bson::DateTime::from_chrono(now),
+    };
+
+    let mut catalog_filter = doc! { "_id": &service.id };
+    catalog_filter.extend(identity_drift.clone());
+    let catalog_result = service_col
+        .update_one(catalog_filter, doc! { "$set": &identity_config })
+        .await?;
+
+    let mut user_service_filter = doc! { "catalog_service_id": &service.id };
+    user_service_filter.extend(identity_drift);
+    let user_service_result = db
+        .collection::<UserService>(USER_SERVICES)
+        .update_many(user_service_filter, doc! { "$set": identity_config })
+        .await?;
+
+    if catalog_result.modified_count > 0 || user_service_result.modified_count > 0 {
+        tracing::info!(
+            catalog_service_id = %service.id,
+            catalog_modified = catalog_result.modified_count,
+            user_services_modified = user_service_result.modified_count,
+            "Reconciled chrono-sandbox delegation identity"
+        );
+    }
+
+    Ok(())
+}
+
 /// Seed downstream services for each default provider (idempotent).
 ///
 /// Creates a `DownstreamService` and a `ServiceProviderRequirement` for each
@@ -3458,6 +3515,8 @@ pub async fn seed_default_services(
     let req_col = db.collection::<ServiceProviderRequirement>(REQUIREMENTS);
     let now = Utc::now();
     let mut seeded_count: u32 = 0;
+
+    reconcile_chrono_sandbox_identity(db, &service_col, now).await?;
 
     // Upgrade existing openai-codex downstream service base_url
     // (was api.openai.com/v1, now chatgpt.com/backend-api/codex)
@@ -5225,7 +5284,7 @@ mod tests {
     use crate::models::service_provider_requirement::{
         COLLECTION_NAME as REQUIREMENTS, ServiceProviderRequirement,
     };
-    use crate::test_utils::{connect_test_database, test_encryption_keys};
+    use crate::test_utils::{connect_test_database, test_encryption_keys, test_user_service};
     use chrono::Utc;
     use mongodb::bson::doc;
     use uuid::Uuid;
@@ -5328,6 +5387,115 @@ mod tests {
             .await
             .expect("count seeded services");
         assert_eq!(service_count, DEFAULT_SERVICE_SEEDS.len() as u64);
+    }
+
+    #[tokio::test]
+    async fn seed_default_services_reconciles_chrono_sandbox_identity_snapshots() {
+        let Some(db) = seed_default_catalog("prov_seed_chrono_sandbox_identity").await else {
+            return;
+        };
+        let service_col = db.collection::<DownstreamService>(DOWNSTREAM_SERVICES);
+        let catalog = service_col
+            .find_one(doc! { "slug": "api-github" })
+            .await
+            .expect("query seeded catalog service")
+            .expect("api-github should be seeded");
+
+        service_col
+            .update_one(
+                doc! { "_id": &catalog.id },
+                doc! { "$set": {
+                    "slug": "chrono-sandbox",
+                    "forward_access_token": true,
+                    "inject_delegation_token": true,
+                    "delegation_token_scope": "proxy:*",
+                }},
+            )
+            .await
+            .expect("prepare drifted chrono-sandbox catalog service");
+
+        let user_service_col = db.collection::<super::UserService>(super::USER_SERVICES);
+        let linked_id = Uuid::new_v4().to_string();
+        let mut linked = test_user_service(
+            &linked_id,
+            &Uuid::new_v4().to_string(),
+            "chrono-sandbox",
+            &Uuid::new_v4().to_string(),
+            Some(&catalog.id),
+            None,
+        );
+        linked.forward_access_token = true;
+        linked.inject_delegation_token = true;
+        linked.delegation_token_scope = "proxy:*".to_string();
+        user_service_col
+            .insert_one(&linked)
+            .await
+            .expect("insert linked user service");
+
+        let unrelated_id = Uuid::new_v4().to_string();
+        let unrelated_catalog_id = Uuid::new_v4().to_string();
+        let mut unrelated = test_user_service(
+            &unrelated_id,
+            &Uuid::new_v4().to_string(),
+            "other-service",
+            &Uuid::new_v4().to_string(),
+            Some(&unrelated_catalog_id),
+            None,
+        );
+        unrelated.forward_access_token = true;
+        unrelated.inject_delegation_token = true;
+        unrelated.delegation_token_scope = "proxy:*".to_string();
+        user_service_col
+            .insert_one(&unrelated)
+            .await
+            .expect("insert unrelated user service");
+
+        let reconciled_at = Utc::now() + chrono::Duration::seconds(1);
+        super::reconcile_chrono_sandbox_identity(&db, &service_col, reconciled_at)
+            .await
+            .expect("reconcile chrono-sandbox identity");
+
+        let reconciled_catalog = service_col
+            .find_one(doc! { "_id": &catalog.id })
+            .await
+            .expect("query reconciled catalog service")
+            .expect("catalog service should remain");
+        assert!(!reconciled_catalog.forward_access_token);
+        assert!(reconciled_catalog.inject_delegation_token);
+        assert_eq!(reconciled_catalog.delegation_token_scope, "llm:proxy");
+
+        let reconciled_linked = user_service_col
+            .find_one(doc! { "_id": &linked_id })
+            .await
+            .expect("query reconciled linked service")
+            .expect("linked service should remain");
+        assert!(!reconciled_linked.forward_access_token);
+        assert!(reconciled_linked.inject_delegation_token);
+        assert_eq!(reconciled_linked.delegation_token_scope, "llm:proxy");
+
+        let untouched = user_service_col
+            .find_one(doc! { "_id": &unrelated_id })
+            .await
+            .expect("query unrelated service")
+            .expect("unrelated service should remain");
+        assert!(untouched.forward_access_token);
+        assert!(untouched.inject_delegation_token);
+        assert_eq!(untouched.delegation_token_scope, "proxy:*");
+
+        super::reconcile_chrono_sandbox_identity(
+            &db,
+            &service_col,
+            reconciled_at + chrono::Duration::minutes(1),
+        )
+        .await
+        .expect("repeat chrono-sandbox reconciliation");
+
+        let after_second_run = user_service_col
+            .find_one(doc! { "_id": &linked_id })
+            .await
+            .expect("query linked service after second run")
+            .expect("linked service should remain after second run");
+        assert_eq!(after_second_run.updated_at, reconciled_linked.updated_at);
     }
 
     #[tokio::test]
