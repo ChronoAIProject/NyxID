@@ -1734,6 +1734,82 @@ mod tests {
         assert_eq!(stored.status, ConnectLinkStatus::Pending);
     }
 
+    #[tokio::test]
+    async fn provenance_write_failure_does_not_abort_completed_link() {
+        let Some(db) = connect_test_database("connect_link_provenance_failure_isolated").await
+        else {
+            return;
+        };
+        let app_id = Uuid::new_v4().to_string();
+        let mut existing = crate::test_utils::test_user_service(
+            &Uuid::new_v4().to_string(),
+            &Uuid::new_v4().to_string(),
+            "existing-provenance",
+            &Uuid::new_v4().to_string(),
+            None,
+            None,
+        );
+        existing.source_app_id = Some(app_id.clone());
+        db.collection::<UserService>(USER_SERVICES)
+            .insert_one(&existing)
+            .await
+            .expect("insert existing provenance row");
+        db.collection::<UserService>(USER_SERVICES)
+            .create_index(
+                mongodb::IndexModel::builder()
+                    .keys(doc! { "source_app_id": 1 })
+                    .options(
+                        mongodb::options::IndexOptions::builder()
+                            .unique(true)
+                            .partial_filter_expression(
+                                doc! { "source_app_id": { "$type": "string" } },
+                            )
+                            .build(),
+                    )
+                    .build(),
+            )
+            .await
+            .expect("create provenance failure index");
+
+        let (owner, created) = create_test_link(&db, "provenance-failure").await;
+        db.collection::<ConnectLink>(CONNECT_LINKS)
+            .update_one(
+                doc! { "_id": &created.link.id },
+                doc! { "$set": { "requesting_app_id": &app_id } },
+            )
+            .await
+            .expect("bind requesting app");
+
+        let completed = complete(
+            &db,
+            &crate::test_utils::test_encryption_keys(),
+            &owner,
+            &created.raw_token,
+            CompleteInput {
+                credential: Some("test-secret"),
+                ..CompleteInput::default()
+            },
+            false,
+        )
+        .await
+        .expect("provenance failure must not fail completion");
+        let CompleteResult::Completed(view) = completed else {
+            panic!("API-key link should complete")
+        };
+        assert_eq!(view.link.status, ConnectLinkStatus::Completed);
+        let service_id = view
+            .link
+            .completed_user_service_id
+            .expect("completed service id");
+        let service = db
+            .collection::<UserService>(USER_SERVICES)
+            .find_one(doc! { "_id": service_id })
+            .await
+            .unwrap()
+            .expect("provisioned service");
+        assert!(service.source_app_id.is_none());
+    }
+
     #[test]
     fn raw_token_requires_prefix_and_32_hex_bytes() {
         let valid = format!("{CONNECT_LINK_PREFIX}{}", "ab".repeat(32));
