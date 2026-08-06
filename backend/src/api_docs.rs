@@ -17,6 +17,7 @@
         crate::handlers::services::create_service,
         crate::handlers::services::get_service,
         crate::handlers::services::update_service,
+        crate::handlers::services::resync_service_identity,
         crate::handlers::services::delete_service,
         crate::handlers::services::get_oidc_credentials,
         crate::handlers::services::update_redirect_uris,
