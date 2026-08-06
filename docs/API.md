@@ -3277,6 +3277,60 @@ Treat `connect_url` as a single-use secret and hand it only to the browser. The 
 
 `last_error` is an optional short, stable, metadata-only code. `provider_access_denied` means the provider consent screen was declined, but the link remains `pending` and may be retried within its TTL and finalization grace. The field is cleared when a later attempt succeeds. Its absence means no provider decline has been recorded; it does not prove that the browser is still open.
 
+#### Connection lifecycle webhooks
+
+A developer app can register one HTTPS webhook for server-side lifecycle delivery. The target must resolve only to public IP addresses. Configure and rotate endpoints return the signing secret exactly once; normal app reads never include it.
+
+```http
+PUT /api/v1/developer/oauth-clients/{client_id}/connection-webhook
+Authorization: Bearer <human-session-access-token>
+Content-Type: application/json
+
+{"url":"https://desktop.example.com/nyxid/events"}
+```
+
+```json
+{
+  "client_id": "desktop-client-id",
+  "connection_webhook_url": "https://desktop.example.com/nyxid/events",
+  "connection_webhook_enabled": true,
+  "signing_secret": "nyx_cwh_<opaque-secret>"
+}
+```
+
+- `POST /api/v1/developer/oauth-clients/{client_id}/connection-webhook/rotate-secret` rotates and returns a new secret.
+- `DELETE /api/v1/developer/oauth-clients/{client_id}/connection-webhook` disables delivery and removes the stored encrypted secret.
+
+Events are `connect_link.completed`, `connect_link.cancelled`, `connect_link.expired`, and `connection.expired`. Only links created by the app produce connect-link events. Connection expiry routes through the `source_app_id` recorded when that link provisions its service.
+
+```json
+{
+  "event_id": "3cc24472-c0b4-436c-a42a-17f43087f3e7",
+  "event_type": "connect_link.completed",
+  "occurred_at": "2026-08-06T09:30:00Z",
+  "data": {
+    "connect_link_id": "6c02c84a-3d97-430f-8468-c96b609d9563",
+    "service_id": "catalog-service-id",
+    "service_slug": "github",
+    "status": "completed",
+    "user_service_id": "user-service-id"
+  }
+}
+```
+
+NyxID sends `X-NyxID-Timestamp` as Unix seconds and `X-NyxID-Signature: sha256=<hex>`. Verify HMAC-SHA256 over the exact bytes `timestamp + "." + raw_request_body`, reject stale timestamps, and compare in constant time:
+
+```python
+import hashlib
+import hmac
+
+signed = timestamp.encode() + b"." + raw_body
+expected = hmac.new(signing_secret.encode(), signed, hashlib.sha256).hexdigest()
+valid = hmac.compare_digest(signature.removeprefix("sha256="), expected)
+```
+
+Delivery is best effort and never rolls back a link or credential transition. NyxID makes up to three attempts with short request timeouts and bounded backoff. A final failure writes a metadata-only audit event; event bodies and secrets are never logged.
+
 ---
 
 ### Service Catalog
@@ -7234,6 +7288,78 @@ curl -X DELETE -H "Authorization: Bearer $TOKEN" \
 ---
 
 ## Webhooks
+
+### Inbound Triggers
+
+Triggers provide a provider-neutral inbound event relay. Management routes accept a normal user token or agent API key and reject delegated, relay, and service-account tokens.
+
+#### Create and manage
+
+```http
+POST /api/v1/triggers
+Authorization: Bearer <access-token-or-agent-key>
+Content-Type: application/json
+```
+
+```json
+{
+  "label": "Repository activity",
+  "user_service_id": "optional-user-service-id",
+  "verification": {"mode":"token","location":"bearer"},
+  "delivery": {"type":"agent","conversation_id":"device-conversation-id"},
+  "target_org_id": null
+}
+```
+
+`verification` supports:
+
+- `{"mode":"token","location":"bearer"}` for `Authorization: Bearer nyx_trg_...`.
+- `{"mode":"token","location":"query"}` for `?token=nyx_trg_...`.
+- `{"mode":"hmac_sha256","header_name":"X-Hub-Signature-256"}` for `sha256=<hex>` over the exact raw body.
+
+`delivery` supports:
+
+- `{"type":"webhook","url":"https://receiver.example.com/events"}`. The create/update response includes a separate `delivery_signing_secret` once, and outbound delivery uses the timestamp-bound signature contract above.
+- `{"type":"agent","conversation_id":"..."}`. The conversation must be an active device conversation owned by the trigger owner; events enter the existing channel-event relay pipeline.
+- `{"type":"notification"}`. The envelope is delivered through the owner's configured notification channels.
+
+Create returns `trigger`, the one-time inbound `secret`, and an optional one-time `delivery_signing_secret`. Other routes are:
+
+- `GET /api/v1/triggers` and `GET /api/v1/triggers/{id}`
+- `PATCH /api/v1/triggers/{id}` for `label`, `status`, or `delivery`
+- `DELETE /api/v1/triggers/{id}`
+- `POST /api/v1/triggers/{id}/rotate-secret`
+
+The CLI equivalents are `nyxid trigger create|list|show|update|delete|rotate-secret`; use `--org` for org-owned triggers.
+
+#### Public ingress
+
+```http
+POST /api/v1/webhooks/triggers/{trigger_id}
+Authorization: Bearer nyx_trg_<opaque-secret>
+X-NyxID-Event-Id: provider-event-123
+Content-Type: application/json
+
+{"action":"opened","resource":{"id":"42"}}
+```
+
+The forwarded envelope is:
+
+```json
+{
+  "event_id": "provider-event-123",
+  "trigger_id": "trigger-uuid",
+  "source": "inbound_webhook",
+  "received_at": "2026-08-06T09:30:00Z",
+  "payload": {"action":"opened","resource":{"id":"42"}}
+}
+```
+
+Event identity is taken from `X-NyxID-Event-Id`, then a top-level payload `event_id`, then the SHA-256 body hash. Successful deliveries enter a bounded per-process dedup cache for five minutes by default; a replay returns `{"status":"duplicate","event_id":"..."}` without forwarding. Failed deliveries are not inserted, so a provider retry can succeed. Unknown and disabled trigger IDs both return the same not-found-shaped response. Payload bodies are never persisted or included in audit logs.
+
+A transient outbound webhook failure returns HTTP 502 with `trigger_delivery_failed`; unsupported or unconfigured delivery targets return HTTP 400 with `trigger_delivery_unsupported`.
+
+Default ingress limits are 10 events/second per trigger, burst 20, and 256 KiB per body. See `TRIGGER_RATE_LIMIT_PER_SECOND`, `TRIGGER_RATE_LIMIT_BURST`, and `TRIGGER_PAYLOAD_MAX_BYTES`.
 
 ### Telegram Webhook
 
