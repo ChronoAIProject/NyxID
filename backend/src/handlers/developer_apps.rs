@@ -155,6 +155,7 @@ pub struct ConnectionWebhookSecretResponse {
     pub connection_webhook_enabled: bool,
     /// Returned only by configuration and rotation endpoints.
     pub signing_secret: String,
+    pub key_id: String,
 }
 
 #[derive(Debug, Serialize)]
@@ -514,7 +515,7 @@ pub async fn configure_connection_webhook(
 ) -> AppResult<Json<ConnectionWebhookSecretResponse>> {
     let actor = auth_user.user_id.to_string();
     let owner = resolve_developer_app_write_owner(&state, &actor, &client_id).await?;
-    let (client, signing_secret) = developer_webhook_service::configure(
+    let (client, signing_secret, key_id) = developer_webhook_service::configure(
         &state.db,
         &state.encryption_keys,
         &client_id,
@@ -533,6 +534,7 @@ pub async fn configure_connection_webhook(
         connection_webhook_url: client.connection_webhook_url.unwrap_or_default(),
         connection_webhook_enabled: client.connection_webhook_enabled,
         signing_secret,
+        key_id,
     }))
 }
 
@@ -544,7 +546,7 @@ pub async fn rotate_connection_webhook_secret(
 ) -> AppResult<Json<ConnectionWebhookSecretResponse>> {
     let actor = auth_user.user_id.to_string();
     let owner = resolve_developer_app_write_owner(&state, &actor, &client_id).await?;
-    let (client, signing_secret) = developer_webhook_service::rotate_secret(
+    let (client, signing_secret, key_id) = developer_webhook_service::rotate_secret(
         &state.db,
         &state.encryption_keys,
         &client_id,
@@ -562,6 +564,7 @@ pub async fn rotate_connection_webhook_secret(
         connection_webhook_url: client.connection_webhook_url.unwrap_or_default(),
         connection_webhook_enabled: client.connection_webhook_enabled,
         signing_secret,
+        key_id,
     }))
 }
 
@@ -1554,6 +1557,7 @@ mod tests {
             revocation_webhook_secret_encrypted: None,
             connection_webhook_url: None,
             connection_webhook_secret_encrypted: None,
+            connection_webhook_key_id: None,
             connection_webhook_enabled: false,
             is_active: true,
             created_by: Some("user_1".to_string()),
@@ -1588,6 +1592,7 @@ mod tests {
             revocation_webhook_secret_encrypted: None,
             connection_webhook_url: None,
             connection_webhook_secret_encrypted: None,
+            connection_webhook_key_id: None,
             connection_webhook_enabled: false,
             is_active: false,
             created_by: None,

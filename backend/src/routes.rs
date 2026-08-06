@@ -1030,6 +1030,18 @@ pub fn build_router(
             "/{id}/rotate-secret",
             post(handlers::triggers::rotate_trigger_secret),
         )
+        .route(
+            "/{id}/rotate-delivery-secret",
+            post(handlers::triggers::rotate_trigger_delivery_secret),
+        )
+        .route(
+            "/{id}/deliveries",
+            get(handlers::triggers::list_trigger_deliveries),
+        )
+        .route(
+            "/{id}/deliveries/{event_id}/redeliver",
+            post(handlers::triggers::redeliver_trigger_delivery),
+        )
         .layer(middleware::from_fn(reject_delegated_tokens))
         .layer(middleware::from_fn(reject_service_account_tokens))
         .layer(middleware::from_fn(reject_relay_tokens));

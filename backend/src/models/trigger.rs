@@ -68,6 +68,8 @@ pub struct Trigger {
     pub delivery: TriggerDelivery,
     #[serde(default, with = "crate::models::bson_bytes::optional")]
     pub delivery_secret_encrypted: Option<Vec<u8>>,
+    #[serde(default)]
+    pub delivery_key_id: Option<String>,
     #[serde(with = "bson::serde_helpers::chrono_datetime_as_bson_datetime")]
     pub created_at: DateTime<Utc>,
     #[serde(with = "bson::serde_helpers::chrono_datetime_as_bson_datetime")]
@@ -99,6 +101,7 @@ impl fmt::Debug for Trigger {
                     .as_ref()
                     .map(|value| RedactedLen(value.len())),
             )
+            .field("delivery_key_id", &self.delivery_key_id)
             .field("created_at", &self.created_at)
             .field("updated_at", &self.updated_at)
             .finish()
@@ -125,6 +128,7 @@ mod tests {
             verification_secret_encrypted: Some(vec![1, 2, 3]),
             delivery: TriggerDelivery::Notification,
             delivery_secret_encrypted: None,
+            delivery_key_id: None,
             created_at: now,
             updated_at: now,
         };

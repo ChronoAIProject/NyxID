@@ -681,6 +681,7 @@ pub async fn set_source_app_id(
     user_id: &str,
     service_id: &str,
     source_app_id: &str,
+    connect_link_id: &str,
 ) -> AppResult<()> {
     let result = db
         .collection::<UserService>(COLLECTION_NAME)
@@ -689,11 +690,26 @@ pub async fn set_source_app_id(
                 "_id": service_id,
                 "user_id": user_id,
                 "$or": [
-                    { "source_app_id": null },
-                    { "source_app_id": { "$exists": false } },
+                    {
+                        "source": null,
+                        "source_id": null,
+                        "source_app_id": null,
+                    },
+                    {
+                        "source": { "$exists": false },
+                        "source_id": { "$exists": false },
+                        "source_app_id": { "$exists": false },
+                    },
+                    {
+                        "source": null,
+                        "source_id": null,
+                        "source_app_id": source_app_id,
+                    },
                 ],
             },
             doc! { "$set": {
+                "source": "connect_link",
+                "source_id": connect_link_id,
                 "source_app_id": source_app_id,
                 "updated_at": bson::DateTime::from_chrono(Utc::now()),
             }},
@@ -701,7 +717,7 @@ pub async fn set_source_app_id(
         .await?;
     if result.matched_count != 1 {
         return Err(AppError::Internal(
-            "Failed to attach developer app provenance to user service".to_string(),
+            "Failed to attach connect-link developer app provenance to user service".to_string(),
         ));
     }
     Ok(())

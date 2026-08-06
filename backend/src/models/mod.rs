@@ -68,6 +68,7 @@ pub mod session;
 pub mod ssh_auth_mode;
 pub mod telemetry_erasure_job;
 pub mod trigger;
+pub mod trigger_delivery;
 pub mod usage_meter;
 pub mod user;
 pub mod user_api_key;

@@ -61,6 +61,8 @@ pub struct OauthClient {
     #[serde(default, with = "crate::models::bson_bytes::optional")]
     pub connection_webhook_secret_encrypted: Option<Vec<u8>>,
     #[serde(default)]
+    pub connection_webhook_key_id: Option<String>,
+    #[serde(default)]
     pub connection_webhook_enabled: bool,
     pub created_by: Option<String>,
     #[serde(with = "bson::serde_helpers::chrono_datetime_as_bson_datetime")]
@@ -119,6 +121,7 @@ impl std::fmt::Debug for OauthClient {
                     .as_ref()
                     .map(|value| RedactedLen(value.len())),
             )
+            .field("connection_webhook_key_id", &self.connection_webhook_key_id)
             .field(
                 "connection_webhook_enabled",
                 &self.connection_webhook_enabled,
@@ -158,6 +161,7 @@ mod tests {
             revocation_webhook_secret_encrypted: Some(vec![1, 2, 3]),
             connection_webhook_url: Some("https://client.example.com/connections".to_string()),
             connection_webhook_secret_encrypted: Some(vec![4, 5, 6]),
+            connection_webhook_key_id: Some("key_fixture".to_string()),
             connection_webhook_enabled: true,
             created_by: Some("admin".to_string()),
             created_at: Utc::now(),
@@ -235,6 +239,7 @@ mod tests {
             revocation_webhook_secret_encrypted: None,
             connection_webhook_url: None,
             connection_webhook_secret_encrypted: None,
+            connection_webhook_key_id: None,
             connection_webhook_enabled: false,
             created_by: Some("dev".to_string()),
             created_at: Utc::now(),
@@ -271,6 +276,7 @@ mod tests {
             revocation_webhook_secret_encrypted: None,
             connection_webhook_url: None,
             connection_webhook_secret_encrypted: None,
+            connection_webhook_key_id: None,
             connection_webhook_enabled: false,
             created_by: Some("admin".to_string()),
             created_at: Utc::now(),
@@ -301,6 +307,7 @@ mod tests {
             revocation_webhook_secret_encrypted: Some(vec![1, 2, 3]),
             connection_webhook_url: None,
             connection_webhook_secret_encrypted: Some(vec![4, 5, 6]),
+            connection_webhook_key_id: Some("key_fixture".to_string()),
             connection_webhook_enabled: true,
             created_by: None,
             created_at: Utc::now(),

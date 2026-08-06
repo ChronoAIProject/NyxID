@@ -2394,6 +2394,7 @@ mod tests {
                 revocation_webhook_secret_encrypted: Some(vec![19, 20, 21]),
                 connection_webhook_url: None,
                 connection_webhook_secret_encrypted: None,
+                connection_webhook_key_id: None,
                 connection_webhook_enabled: false,
                 created_by: Some(actor_id.to_string()),
                 created_at: chrono::Utc::now(),

@@ -27,6 +27,9 @@ use crate::models::provider_config::{COLLECTION_NAME as PROVIDER_CONFIGS, Provid
 use crate::models::pushed_authorization_request::COLLECTION_NAME as PAR_COLLECTION;
 use crate::models::ssh_auth_mode::SshAuthMode;
 use crate::models::trigger::{COLLECTION_NAME as TRIGGERS, Trigger};
+use crate::models::trigger_delivery::{
+    COLLECTION_NAME as TRIGGER_DELIVERIES, TriggerDeliveryRecord,
+};
 use crate::models::user_api_key::{COLLECTION_NAME as USER_API_KEYS, UserApiKey};
 use crate::models::user_endpoint::{COLLECTION_NAME as USER_ENDPOINTS, UserEndpoint};
 use crate::models::user_provider_credentials::{
@@ -1189,6 +1192,17 @@ pub async fn ensure_indexes(db: &Database) -> Result<(), mongodb::error::Error> 
     connect_links
         .create_index(IndexModel::builder().keys(doc! { "expires_at": 1 }).build())
         .await?;
+    connect_links
+        .create_index(
+            IndexModel::builder()
+                .keys(doc! {
+                    "webhook_event_status": 1,
+                    "webhook_event_reserved_at": 1,
+                    "webhook_event_attempts": 1,
+                })
+                .build(),
+        )
+        .await?;
 
     // ── triggers ──
     let triggers = db.collection::<Trigger>(TRIGGERS);
@@ -1197,6 +1211,42 @@ pub async fn ensure_indexes(db: &Database) -> Result<(), mongodb::error::Error> 
             IndexModel::builder()
                 .keys(doc! { "secret_hash": 1 })
                 .options(IndexOptions::builder().unique(true).build())
+                .build(),
+        )
+        .await?;
+
+    // ── trigger_deliveries ──
+    let trigger_deliveries = db.collection::<TriggerDeliveryRecord>(TRIGGER_DELIVERIES);
+    trigger_deliveries
+        .create_index(
+            IndexModel::builder()
+                .keys(doc! { "trigger_id": 1, "event_id": 1 })
+                .options(
+                    IndexOptions::builder()
+                        .name("trigger_delivery_event_unique".to_string())
+                        .unique(true)
+                        .build(),
+                )
+                .build(),
+        )
+        .await?;
+    trigger_deliveries
+        .create_index(
+            IndexModel::builder()
+                .keys(doc! { "trigger_id": 1, "created_at": -1, "_id": -1 })
+                .build(),
+        )
+        .await?;
+    trigger_deliveries
+        .create_index(
+            IndexModel::builder()
+                .keys(doc! { "expires_at": 1 })
+                .options(
+                    IndexOptions::builder()
+                        .name("trigger_deliveries_expiry_ttl".to_string())
+                        .expire_after(Duration::from_secs(0))
+                        .build(),
+                )
                 .build(),
         )
         .await?;

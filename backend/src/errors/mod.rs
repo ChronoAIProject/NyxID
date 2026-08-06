@@ -387,6 +387,9 @@ pub enum AppError {
     #[error("Trigger delivery failed")]
     TriggerDeliveryFailed,
 
+    #[error("Trigger delivery record not found")]
+    TriggerDeliveryRecordNotFound,
+
     #[error("Channel bot not found: {0}")]
     ChannelBotNotFound(String),
 
@@ -619,6 +622,7 @@ impl AppError {
             Self::TriggerPayloadTooLarge => StatusCode::PAYLOAD_TOO_LARGE,
             Self::TriggerDeliveryUnsupported => StatusCode::BAD_REQUEST,
             Self::TriggerDeliveryFailed => StatusCode::BAD_GATEWAY,
+            Self::TriggerDeliveryRecordNotFound => StatusCode::NOT_FOUND,
             Self::ChannelBotNotFound(_) => StatusCode::NOT_FOUND,
             Self::ChannelBotInactive(_) => StatusCode::BAD_REQUEST,
             Self::ChannelBotLimitReached(_) => StatusCode::TOO_MANY_REQUESTS,
@@ -775,6 +779,7 @@ impl AppError {
             Self::TriggerPayloadTooLarge => 11603,
             Self::TriggerDeliveryUnsupported => 11604,
             Self::TriggerDeliveryFailed => 11605,
+            Self::TriggerDeliveryRecordNotFound => 11606,
             Self::ChannelBotNotFound(_) => 10000,
             Self::ChannelBotInactive(_) => 10001,
             Self::ChannelBotLimitReached(_) => 10002,
@@ -967,6 +972,7 @@ impl AppError {
             Self::TriggerPayloadTooLarge => "trigger_payload_too_large",
             Self::TriggerDeliveryUnsupported => "trigger_delivery_unsupported",
             Self::TriggerDeliveryFailed => "trigger_delivery_failed",
+            Self::TriggerDeliveryRecordNotFound => "trigger_delivery_record_not_found",
             Self::ChannelBotNotFound(_) => "channel_bot_not_found",
             Self::ChannelBotInactive(_) => "channel_bot_inactive",
             Self::ChannelBotLimitReached(_) => "channel_bot_limit_reached",
@@ -1472,6 +1478,7 @@ mod tests {
             AppError::TriggerPayloadTooLarge.error_code(),
             AppError::TriggerDeliveryUnsupported.error_code(),
             AppError::TriggerDeliveryFailed.error_code(),
+            AppError::TriggerDeliveryRecordNotFound.error_code(),
             AppError::ChannelBotNotFound("".into()).error_code(),
             AppError::ChannelBotInactive("".into()).error_code(),
             AppError::ChannelBotLimitReached("".into()).error_code(),

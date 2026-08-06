@@ -17,6 +17,14 @@ pub enum ConnectLinkStatus {
     Cancelled,
 }
 
+#[derive(Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum ConnectLinkWebhookStatus {
+    Pending,
+    Delivered,
+    Abandoned,
+}
+
 #[derive(Clone, Serialize, Deserialize)]
 pub struct ConnectLink {
     #[serde(rename = "_id")]
@@ -51,6 +59,14 @@ pub struct ConnectLink {
     pub last_error_at: Option<DateTime<Utc>>,
     #[serde(default, with = "bson_datetime::optional")]
     pub webhook_event_reserved_at: Option<DateTime<Utc>>,
+    #[serde(default)]
+    pub webhook_event_id: Option<String>,
+    #[serde(default)]
+    pub webhook_event_status: Option<ConnectLinkWebhookStatus>,
+    #[serde(default)]
+    pub webhook_event_attempts: u32,
+    #[serde(default, with = "bson_datetime::optional")]
+    pub webhook_event_delivered_at: Option<DateTime<Utc>>,
 }
 
 impl fmt::Debug for ConnectLinkStatus {
@@ -60,6 +76,16 @@ impl fmt::Debug for ConnectLinkStatus {
             Self::Completed => "Completed",
             Self::Expired => "Expired",
             Self::Cancelled => "Cancelled",
+        })
+    }
+}
+
+impl fmt::Debug for ConnectLinkWebhookStatus {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(match self {
+            Self::Pending => "Pending",
+            Self::Delivered => "Delivered",
+            Self::Abandoned => "Abandoned",
         })
     }
 }
@@ -99,6 +125,13 @@ impl fmt::Debug for ConnectLink {
             .field("last_error", &self.last_error)
             .field("last_error_at", &self.last_error_at)
             .field("webhook_event_reserved_at", &self.webhook_event_reserved_at)
+            .field("webhook_event_id", &self.webhook_event_id)
+            .field("webhook_event_status", &self.webhook_event_status)
+            .field("webhook_event_attempts", &self.webhook_event_attempts)
+            .field(
+                "webhook_event_delivered_at",
+                &self.webhook_event_delivered_at,
+            )
             .finish()
     }
 }
@@ -130,6 +163,10 @@ mod tests {
             last_error: Some("provider_access_denied".to_string()),
             last_error_at: Some(now),
             webhook_event_reserved_at: None,
+            webhook_event_id: None,
+            webhook_event_status: None,
+            webhook_event_attempts: 0,
+            webhook_event_delivered_at: None,
         }
     }
 

@@ -307,6 +307,9 @@ pub struct AppConfig {
     pub trigger_rate_limit_burst: u32,
     /// Maximum trigger ingress body size in bytes (default 256 KiB).
     pub trigger_payload_max_bytes: usize,
+    /// Hours to retain encrypted webhook-target trigger envelopes (default 72).
+    /// Zero keeps bounded metadata but does not persist replayable payloads.
+    pub trigger_delivery_retention_hours: u64,
 
     // Oracle relay (browser worker pools)
     /// Days to retain terminal oracle tasks (prompt + response bodies)
@@ -633,6 +636,10 @@ impl std::fmt::Debug for AppConfig {
                 &self.trigger_rate_limit_per_second,
             )
             .field("trigger_rate_limit_burst", &self.trigger_rate_limit_burst)
+            .field(
+                "trigger_delivery_retention_hours",
+                &self.trigger_delivery_retention_hours,
+            )
             .field("trigger_payload_max_bytes", &self.trigger_payload_max_bytes)
             .field(
                 "oracle_task_retention_days",
@@ -1082,6 +1089,10 @@ impl AppConfig {
                 .ok()
                 .and_then(|v| v.parse().ok())
                 .unwrap_or(256 * 1024),
+            trigger_delivery_retention_hours: env::var("TRIGGER_DELIVERY_RETENTION_HOURS")
+                .ok()
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(72),
             oracle_task_retention_days: env::var("ORACLE_TASK_RETENTION_DAYS")
                 .ok()
                 .and_then(|v| v.parse().ok())
@@ -1493,6 +1504,7 @@ mod tests {
             trigger_rate_limit_per_second: 10,
             trigger_rate_limit_burst: 20,
             trigger_payload_max_bytes: 256 * 1024,
+            trigger_delivery_retention_hours: 72,
             oracle_task_retention_days: 30,
             cloud_response_cache_ttl_secs: 0,
             cloud_response_cache_max_entry_bytes:

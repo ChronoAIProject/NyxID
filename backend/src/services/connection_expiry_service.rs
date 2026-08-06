@@ -243,18 +243,12 @@ fn spawn_transition_side_effects(
                 .as_ref()
                 .and_then(|service| service.source_app_id.as_deref()),
         ) {
+            let webhook_data = connection_webhook_data(&api_key, user_service, &dead_status);
             dispatcher.dispatch(
                 db.clone(),
                 app_id.to_string(),
                 "connection.expired",
-                serde_json::json!({
-                    "user_service_id": &user_service.id,
-                    "user_service_slug": &user_service.slug,
-                    "api_key_id": &api_key.id,
-                    "status": dead_status,
-                    "credential_type": &api_key.credential_type,
-                    "provider_config_id": api_key.provider_config_id.as_deref(),
-                }),
+                webhook_data,
             );
         }
 
@@ -298,6 +292,32 @@ fn spawn_transition_side_effects(
             }
         }
     });
+}
+
+fn connection_webhook_data(
+    api_key: &UserApiKey,
+    user_service: &UserService,
+    dead_status: &str,
+) -> serde_json::Value {
+    let mut data = serde_json::json!({
+        "user_id": &api_key.user_id,
+        "user_service_id": &user_service.id,
+        "user_service_slug": &user_service.slug,
+        "api_key_id": &api_key.id,
+        "status": dead_status,
+        "credential_type": &api_key.credential_type,
+        "provider_config_id": api_key.provider_config_id.as_deref(),
+    });
+    if user_service.source.as_deref() == Some("connect_link")
+        && let Some(connect_link_id) = user_service.source_id.as_deref()
+        && let Some(object) = data.as_object_mut()
+    {
+        object.insert(
+            "connect_link_id".to_string(),
+            serde_json::Value::String(connect_link_id.to_string()),
+        );
+    }
+    data
 }
 
 #[cfg(test)]
@@ -388,6 +408,16 @@ mod tests {
         }
     }
 
+    #[test]
+    fn expiry_webhook_omits_unresolvable_connect_link_id() {
+        let user_id = Uuid::new_v4().to_string();
+        let key = oauth_key(&user_id);
+        let service = user_service(&user_id, &key.id);
+        let data = connection_webhook_data(&key, &service, "expired");
+        assert_eq!(data["user_id"], user_id);
+        assert!(data.get("connect_link_id").is_none());
+    }
+
     fn webhook_client(
         id: &str,
         owner: &str,
@@ -412,6 +442,7 @@ mod tests {
             revocation_webhook_secret_encrypted: None,
             connection_webhook_url: Some(url),
             connection_webhook_secret_encrypted: Some(encrypted_secret),
+            connection_webhook_key_id: None,
             connection_webhook_enabled: true,
             created_by: Some(owner.to_string()),
             created_at: now,
@@ -819,6 +850,8 @@ mod tests {
         let app_id = Uuid::new_v4().to_string();
         let mut service = user_service(&user_id, &key.id);
         service.source_app_id = Some(app_id.clone());
+        service.source = Some("connect_link".to_string());
+        service.source_id = Some("connect-link-id".to_string());
         db.collection::<UserApiKey>(USER_API_KEYS)
             .insert_one(&key)
             .await
@@ -887,6 +920,8 @@ mod tests {
         let envelope: serde_json::Value =
             serde_json::from_slice(&webhook_body).expect("connection expiry envelope");
         assert_eq!(envelope["event_type"], "connection.expired");
+        assert_eq!(envelope["data"]["user_id"], user_id);
+        assert_eq!(envelope["data"]["connect_link_id"], "connect-link-id");
         assert_eq!(envelope["data"]["status"], "failed");
         assert_eq!(envelope["data"]["user_service_id"], service.id);
         wait_for_event_count(&db, &user_id, 1).await;

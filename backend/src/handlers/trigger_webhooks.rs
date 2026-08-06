@@ -48,22 +48,34 @@ pub async fn receive_trigger(
         &trigger.delivery,
         crate::models::trigger::TriggerDelivery::Webhook { .. }
     ) {
-        if !state
-            .trigger_dedup_cache
-            .insert_if_absent(&trigger.id, &event_id)
-        {
+        let max_body_bytes = state
+            .config
+            .trigger_payload_max_bytes
+            .saturating_add(trigger_service::TRIGGER_ENVELOPE_OVERHEAD_BYTES);
+        let admission = trigger_service::admit_webhook_delivery(
+            &state.db,
+            &state.encryption_keys,
+            &trigger,
+            &event_id,
+            payload,
+            state.config.trigger_delivery_retention_hours,
+            max_body_bytes,
+        )
+        .await?;
+        let trigger_service::WebhookAdmission::Accepted { record, body } = admission else {
             return Ok(Json(TriggerIngressResponse {
                 status: "duplicate",
                 event_id,
             }));
-        }
+        };
         trigger_service::dispatch_webhook_event(
             state.db.clone(),
             state.encryption_keys.clone(),
             state.http_client.clone(),
             trigger,
-            event_id.clone(),
-            payload,
+            *record,
+            body,
+            max_body_bytes,
         );
         return Ok(Json(TriggerIngressResponse {
             status: "accepted",
@@ -216,6 +228,7 @@ mod tests {
                     .await
                     .expect("encrypt delivery secret"),
             ),
+            delivery_key_id: Some("key_fixture".to_string()),
             created_at: now,
             updated_at: now,
         };
@@ -241,7 +254,7 @@ mod tests {
         let Some(db) = connect_test_database("trigger_ingress_dedup").await else {
             return;
         };
-        let state = test_app_state_with_config(db, test_app_config());
+        let state = test_app_state_with_config(db.clone(), test_app_config());
         let (url, count) = receiver().await;
         let trigger = insert_trigger(
             &state,
@@ -253,23 +266,58 @@ mod tests {
             TriggerStatus::Active,
         )
         .await;
-        let invoke = || {
-            receive_trigger(
-                State(state.clone()),
-                Path(trigger.id.clone()),
-                Query(HashMap::new()),
-                request(
-                    r#"{"event_id":"delivery-1","action":"completed"}"#,
-                    Some("nyx_trg_valid"),
-                ),
-            )
-        };
-        let Json(first) = invoke().await.expect("first delivery");
-        let Json(second) = invoke().await.expect("deduplicated delivery");
+        let Json(first) = receive_trigger(
+            State(state),
+            Path(trigger.id.clone()),
+            Query(HashMap::new()),
+            request(
+                r#"{"event_id":"delivery-1","action":"completed"}"#,
+                Some("nyx_trg_valid"),
+            ),
+        )
+        .await
+        .expect("first delivery");
+        let restarted_state = test_app_state_with_config(db.clone(), test_app_config());
+        let Json(second) = receive_trigger(
+            State(restarted_state),
+            Path(trigger.id.clone()),
+            Query(HashMap::new()),
+            request(
+                r#"{"event_id":"delivery-1","action":"completed"}"#,
+                Some("nyx_trg_valid"),
+            ),
+        )
+        .await
+        .expect("deduplicated delivery");
         assert_eq!(first.status, "accepted");
         assert_eq!(second.status, "duplicate");
         wait_for_count(&count, 1).await;
         assert_eq!(count.load(Ordering::SeqCst), 1);
+        tokio::time::timeout(std::time::Duration::from_secs(3), async {
+            loop {
+                let record = db
+                    .collection::<crate::models::trigger_delivery::TriggerDeliveryRecord>(
+                        crate::models::trigger_delivery::COLLECTION_NAME,
+                    )
+                    .find_one(mongodb::bson::doc! {
+                        "trigger_id": &trigger.id,
+                        "event_id": "delivery-1",
+                    })
+                    .await
+                    .unwrap()
+                    .expect("durable delivery record");
+                if record.status
+                    == crate::models::trigger_delivery::TriggerDeliveryRecordStatus::Delivered
+                {
+                    assert_eq!(record.attempts, 1);
+                    assert!(record.envelope_encrypted.is_some());
+                    break;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+            }
+        })
+        .await
+        .expect("delivery record completed");
     }
 
     #[tokio::test]
