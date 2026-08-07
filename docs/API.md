@@ -7347,7 +7347,7 @@ Prefer bearer or HMAC verification. Query tokens are supported only for senders 
 `delivery` supports:
 
 - `{"type":"webhook","url":"https://receiver.example.com/events"}`. The create/update response includes a separate `delivery_signing_secret` once and `delivery_signing_key_id`; outbound delivery uses the timestamp-bound signature and stable-header contract above.
-- `{"type":"agent","conversation_id":"..."}`. The conversation must be an active NyxID device conversation owned by the trigger owner; events enter the channel-event gateway and its conversation-bound agent routing. This target does not invoke an external application's agent runtime. Use `webhook` when events must reach external infrastructure.
+- `{"type":"agent","conversation_id":"..."}`. The conversation must be an active NyxID device conversation owned by the trigger owner; events enter the channel-event gateway and its conversation-bound agent routing. This target does not invoke an external application's agent runtime. Use `webhook` when events must reach external infrastructure; it is also the only target with durable cross-replica dedup and the delivery-history/replay contract described below.
 - `{"type":"notification"}`. The envelope is delivered through the owner's configured notification channels.
 
 Create returns `trigger`, the one-time inbound `secret`, and optional one-time `delivery_signing_secret` plus `delivery_signing_key_id`. Other routes are:
