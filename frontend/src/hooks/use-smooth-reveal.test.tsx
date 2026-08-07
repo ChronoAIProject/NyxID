@@ -13,6 +13,15 @@ function runFrames(count: number): void {
   }
 }
 
+function recordFrames(count: number, read: () => string): string[] {
+  const outputs: string[] = [];
+  for (let frame = 0; frame < count; frame += 1) {
+    runFrames(1);
+    outputs.push(read());
+  }
+  return outputs;
+}
+
 /**
  * Frames until the reveal catches up. The first frame only establishes the
  * clock baseline — there is no previous timestamp to measure against — so a
@@ -132,5 +141,84 @@ describe("useSmoothReveal", () => {
     rerender({ value: text });
     expect(result.current).toBe(text);
     matchMedia.mockRestore();
+  });
+
+  it("never paints an incomplete emphasis run", () => {
+    const { result, rerender } = renderHook(
+      ({ value }: { value: string }) => useSmoothReveal(value, true),
+      { initialProps: { value: "" } },
+    );
+    const outputs = [result.current];
+
+    rerender({ value: "make it **bo" });
+    outputs.push(result.current, ...recordFrames(20, () => result.current));
+    rerender({ value: "make it **bold** please" });
+    outputs.push(result.current, ...recordFrames(30, () => result.current));
+
+    for (const output of outputs) {
+      const completeRuns = output.match(/\*\*/g)?.length ?? 0;
+      expect(completeRuns === 0 || completeRuns >= 2, output).toBe(true);
+    }
+    expect(result.current).toBe("make it **bold** please");
+  });
+
+  it("never paints part of a grapheme cluster", () => {
+    const text = "Hi 👩‍💻!";
+    const { result, rerender } = renderHook(
+      ({ value }: { value: string }) => useSmoothReveal(value, true),
+      { initialProps: { value: "" } },
+    );
+    rerender({ value: text });
+
+    const outputs = recordFrames(20, () => result.current);
+    for (const output of outputs) {
+      expect(output).not.toMatch(/[\uD800-\uDBFF]$/);
+      if (output.includes("👩")) expect(output).toContain("👩‍💻");
+    }
+    expect(result.current).toBe(text);
+  });
+
+  it("never retracts when the inline scan window slides", () => {
+    const initial = `${"a".repeat(45)}\`${"b".repeat(164)}\`${"c".repeat(90)}`;
+    expect(initial).toHaveLength(301);
+    const { result, rerender } = renderHook(
+      ({ value }: { value: string }) => useSmoothReveal(value, true),
+      { initialProps: { value: "" } },
+    );
+    rerender({ value: initial });
+    runFrames(40);
+    expect(result.current).toBe(initial);
+
+    const outputs = [result.current];
+    rerender({ value: `${initial}!` });
+    outputs.push(result.current, ...recordFrames(3, () => result.current));
+    for (let index = 1; index < outputs.length; index += 1) {
+      expect(outputs[index]?.startsWith(outputs[index - 1] ?? "")).toBe(true);
+    }
+  });
+
+  it("resets the display clamp for a same-length replacement", () => {
+    const { result, rerender } = renderHook(
+      ({ value }: { value: string }) => useSmoothReveal(value, true),
+      { initialProps: { value: "plain text!" } },
+    );
+    expect(result.current).toBe("plain text!");
+
+    rerender({ value: "**open tail" });
+    expect(result.current).toBe("");
+  });
+
+  it("reveals a withheld unsafe tail synchronously on settle", () => {
+    const { result, rerender } = renderHook(
+      ({ value, active }: { value: string; active: boolean }) =>
+        useSmoothReveal(value, active),
+      { initialProps: { value: "", active: true } },
+    );
+    rerender({ value: "**open", active: true });
+    runFrames(10);
+    expect(result.current).toBe("");
+
+    rerender({ value: "**open", active: false });
+    expect(result.current).toBe("**open");
   });
 });

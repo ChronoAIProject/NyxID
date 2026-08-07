@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState } from "react";
+import { safeRevealEnd } from "@/lib/assistant/reveal-boundary";
 
 /**
  * The backlog is drained over roughly this long, so the text on screen trails
@@ -51,6 +52,10 @@ export function useSmoothReveal(text: string, active: boolean): string {
   // rebuilt on every delta — restarting it would drop the timestamp baseline
   // each time and the reveal would never accumulate.
   const targetRef = useRef(text.length);
+  const [displayed, setDisplayed] = useState(() => ({
+    source: text,
+    cut: text.length,
+  }));
 
   const paced =
     active &&
@@ -99,7 +104,21 @@ export function useSmoothReveal(text: string, active: boolean): string {
     };
   }, [paced]);
 
-  // Clamped rather than trusted: a block whose text was REPLACED (completed, or
-  // re-projected shorter) must never slice past its own end.
-  return paced ? text.slice(0, Math.min(revealed, text.length)) : text;
+  if (!paced) {
+    if (displayed.source !== text || displayed.cut !== text.length) {
+      setDisplayed({ source: text, cut: text.length });
+    }
+    return text;
+  }
+
+  const safeCut = safeRevealEnd(text, Math.min(revealed, text.length));
+  const extendsPreviousText = text.startsWith(displayed.source);
+  const displayedCut = extendsPreviousText
+    ? Math.max(displayed.cut, safeCut)
+    : safeCut;
+  const clampedCut = Math.min(displayedCut, text.length);
+  if (displayed.source !== text || displayed.cut !== clampedCut) {
+    setDisplayed({ source: text, cut: clampedCut });
+  }
+  return text.slice(0, clampedCut);
 }
