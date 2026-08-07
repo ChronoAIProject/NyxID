@@ -17,6 +17,7 @@ The live Aevatar contract wins over prose. If the deployed or pinned upstream co
 7. [Testing and gaps](07-testing-and-gaps.md) identifies executable coverage, fault-injection controls, and current operational gaps.
 8. [Mock scenario interception](mock-scenario-intercept-spec.md) specifies the implemented developer-only scripted-flow interceptor; its accepted adversarial findings are preserved in the [spec review](mock-scenario-intercept-spec.review.md).
 9. [Mock scenario implementation plan](mock-scenario-intercept-plan.md) records the ordered work packages and verification gates; its accepted planning findings are preserved in the [plan review](mock-scenario-intercept-plan.review.md).
+10. [Smooth text streaming plan](smooth-streaming-plan.md) is **exploratory, not a contract** — nothing in it is implemented. It analyses text-reveal smoothing concepts and gates the work behind measurement; its adversarial findings are preserved in the [plan review](smooth-streaming-plan.review.md).
 
 ## Scope
 
