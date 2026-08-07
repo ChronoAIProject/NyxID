@@ -221,4 +221,110 @@ describe("useSmoothReveal", () => {
     rerender({ value: "**open", active: false });
     expect(result.current).toBe("**open");
   });
+
+  it("spreads later chunks over the observed arrival cadence", () => {
+    const { result, rerender } = renderHook(
+      ({ value }: { value: string }) => useSmoothReveal(value, true),
+      { initialProps: { value: "" } },
+    );
+    rerender({ value: "a".repeat(60) });
+    runFrames(20);
+    rerender({ value: "a".repeat(120) });
+    runFrames(20);
+    rerender({ value: "a".repeat(180) });
+
+    runFrames(2);
+    const early = result.current.length;
+    runFrames(6);
+    expect(result.current.length).toBeGreaterThan(early);
+    expect(result.current.length).toBeLessThan(180);
+  });
+
+  it("switches back to the legacy drain after producer idle", () => {
+    const { result, rerender } = renderHook(
+      ({ value }: { value: string }) => useSmoothReveal(value, true),
+      { initialProps: { value: "" } },
+    );
+    rerender({ value: "a".repeat(60) });
+    runFrames(20);
+    rerender({ value: "a".repeat(120) });
+    runFrames(20);
+    rerender({ value: "a".repeat(1020) });
+
+    runFrames(38);
+    const beforeAdaptiveFrame = result.current.length;
+    runFrames(1);
+    const adaptiveAdvance = result.current.length - beforeAdaptiveFrame;
+    runFrames(1);
+    const beforeLegacyFrame = result.current.length;
+    runFrames(1);
+    const legacyAdvance = result.current.length - beforeLegacyFrame;
+
+    expect(legacyAdvance).toBeGreaterThan(adaptiveAdvance);
+    runFrames(25);
+    expect(result.current).toBe("a".repeat(1020));
+  });
+
+  it("snaps a projection-sized jump after cadence tracking is armed", () => {
+    const { result, rerender } = renderHook(
+      ({ value }: { value: string }) => useSmoothReveal(value, true),
+      { initialProps: { value: "" } },
+    );
+    rerender({ value: "a".repeat(60) });
+    runFrames(19);
+    rerender({ value: "a".repeat(120) });
+    rerender({ value: "a".repeat(4120) });
+
+    runFrames(1);
+    expect(result.current).toBe("a".repeat(4120));
+  });
+
+  it("discards stale cadence after a producer stall", () => {
+    const { result, rerender } = renderHook(
+      ({ value }: { value: string }) => useSmoothReveal(value, true),
+      { initialProps: { value: "" } },
+    );
+    rerender({ value: "a".repeat(60) });
+    runFrames(20);
+    rerender({ value: "a".repeat(120) });
+    runFrames(100);
+    rerender({ value: "a".repeat(180) });
+
+    runFrames(8);
+    expect(result.current).toBe("a".repeat(180));
+  });
+
+  it("keeps the adaptive floor time-derived at high refresh rates", () => {
+    vi.stubGlobal(
+      "requestAnimationFrame",
+      (callback: FrameRequestCallback) =>
+        window.setTimeout(() => callback(performance.now()), 8),
+    );
+    vi.stubGlobal("cancelAnimationFrame", (frame: number) => {
+      window.clearTimeout(frame);
+    });
+    const advance = (milliseconds: number) => {
+      act(() => {
+        vi.advanceTimersByTime(milliseconds);
+      });
+    };
+    try {
+      const { result, rerender } = renderHook(
+        ({ value }: { value: string }) => useSmoothReveal(value, true),
+        { initialProps: { value: "" } },
+      );
+      rerender({ value: "a".repeat(60) });
+      advance(320);
+      rerender({ value: "a".repeat(120) });
+      advance(600);
+
+      expect(result.current.length).toBeLessThan(120);
+      const before = result.current.length;
+      advance(32);
+      expect(result.current.length - before).toBeGreaterThan(0);
+      expect(result.current.length - before).toBeLessThanOrEqual(2);
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
 });
