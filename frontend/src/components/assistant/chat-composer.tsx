@@ -519,7 +519,7 @@ function DraftedChatComposer({
       >
         <div
           ref={composerRef}
-          className={`relative ml-[30px] flex gap-1.5 rounded-xl border border-hairline bg-card p-1.5 transition-colors focus-within:border-hairline-strong ${
+          className={`relative ml-[30px] flex gap-1.5 rounded-xl border border-hairline bg-card px-3 py-2 transition-colors focus-within:border-hairline-strong ${
             multiline ? "flex-col items-stretch" : "items-start"
           }`}
         >

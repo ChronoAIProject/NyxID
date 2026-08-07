@@ -4457,7 +4457,7 @@ describe("chat action cards", () => {
     expect(card).toMatchObject({
       type: "action_card",
       status: "completed",
-      outcome_note: "Reported — awaiting assistant verification.",
+      outcome_note: "Connected. The assistant can use this service now.",
     });
   });
 
@@ -4694,10 +4694,10 @@ describe("chat action cards", () => {
       .find((block) => block.type === "action_card");
     expect(card).toMatchObject({ status: "completed" });
     expect(card?.type === "action_card" ? card.outcome_note : "").toContain(
-      "has not reached the assistant",
+      "has not been told yet",
     );
     expect(card?.type === "action_card" ? card.outcome_note : "").not.toContain(
-      "assistant received",
+      "can use this service now",
     );
 
     await collectTurn(transport, "Continue when idle");
@@ -4710,7 +4710,7 @@ describe("chat action cards", () => {
       .flatMap((message) => message.blocks)
       .find((block) => block.type === "action_card");
     expect(card?.type === "action_card" ? card.outcome_note : "").toBe(
-      "Reported — awaiting assistant verification.",
+      "Connected. The assistant can use this service now.",
     );
   });
 
@@ -8946,7 +8946,7 @@ describe("studio new chats and typed actor compatibility", () => {
           event.event === "block.updated" &&
           "outcome_note" in event.patch &&
           event.patch.outcome_note ===
-            "Reported — awaiting assistant verification.",
+            "Connected. The assistant can use this service now.",
       ),
     ).toBe(true);
   });

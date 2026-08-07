@@ -529,18 +529,18 @@ function actionOutcome(disposition: ActionReport["disposition"]): {
   if (disposition === "completed") {
     return {
       status: "completed",
-      note: "Reported — awaiting assistant verification.",
+      note: "Connected. The assistant can use this service now.",
     };
   }
   if (disposition === "declined") {
     return {
       status: "declined",
-      note: "You declined this request. No service was connected and no credential was shared.",
+      note: "You declined. Nothing was connected and no credential was shared.",
     };
   }
   return {
     status: "failed",
-    note: "The connection could not be completed. Ask the assistant to request it again.",
+    note: "The connection did not complete. Ask the assistant to request this service again.",
   };
 }
 
