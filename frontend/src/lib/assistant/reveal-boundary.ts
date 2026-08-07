@@ -36,6 +36,12 @@ const MAX_WORD_HOLDBACK = 24;
 /** How far back an unclosed inline opener is looked for. */
 const INLINE_WINDOW = 256;
 
+/** A fenced block opens on a run of at least this many backticks at line start. */
+const MIN_FENCE_LENGTH = 3;
+
+/** CommonMark allows up to this much indent before a fence still counts. */
+const MAX_FENCE_INDENT = 3;
+
 /** Guards the backwards walks against pathological input. */
 const MAX_STEPS = 64;
 
@@ -131,19 +137,31 @@ function runLength(
   return length;
 }
 
-/**
- * True when `*` at `at` is a list bullet rather than emphasis: first thing on
- * its line and followed by a space. Holding a cut back to a bullet would stall
- * the reveal at the start of every list item.
- */
-function isBullet(text: string, at: number, length: number): boolean {
-  if (length !== 1 || text[at + 1] !== " ") return false;
+/** Leading whitespace on the line containing `at`, or -1 when `at` is not at
+ *  the start of its line (ignoring indent). */
+function lineIndent(text: string, at: number): number {
+  let indent = 0;
   for (let index = at - 1; index >= 0; index -= 1) {
     const character = text[index];
-    if (character === "\n") return true;
-    if (character !== " " && character !== "\t") return false;
+    if (character === "\n") return indent;
+    if (character !== " " && character !== "\t") return -1;
+    indent += 1;
   }
-  return true;
+  return indent;
+}
+
+/**
+ * True when the backtick run at `at` opens a FENCED BLOCK rather than a code
+ * span. The distinction matters: a fence's content is literal code, so there is
+ * nothing inline to protect inside it — treating ``` as a span opener parks the
+ * reveal at the top of every code block until the holdback bound expires and
+ * then dumps the whole thing at once, which is exactly the stutter this module
+ * exists to remove.
+ */
+function isFence(text: string, at: number, length: number): boolean {
+  if (length < MIN_FENCE_LENGTH) return false;
+  const indent = lineIndent(text, at);
+  return indent >= 0 && indent <= MAX_FENCE_INDENT;
 }
 
 /**
@@ -236,6 +254,34 @@ function linkDestinationEnd(
   return null;
 }
 
+/** Offset just past the closing fence of the block opened at `openAt`, or null
+ *  when the block is still open at `end`. */
+function fenceCloseEnd(
+  text: string,
+  openAt: number,
+  openLength: number,
+  end: number,
+): number | null {
+  let index = text.indexOf("\n", openAt + openLength);
+  while (index >= 0 && index < end) {
+    const lineStart = index + 1;
+    let cursor = lineStart;
+    while (cursor < end && (text[cursor] === " " || text[cursor] === "\t")) {
+      cursor += 1;
+    }
+    const length = runLength(text, cursor, text[openAt] ?? "`", end);
+    if (
+      length >= openLength &&
+      cursor - lineStart <= MAX_FENCE_INDENT &&
+      length > 0
+    ) {
+      return cursor + length;
+    }
+    index = text.indexOf("\n", lineStart);
+  }
+  return null;
+}
+
 function inlineSafeEnd(text: string, end: number): number {
   const start = Math.max(0, end - INLINE_WINDOW);
   const emphasis: EmphasisDelimiter[] = [];
@@ -254,6 +300,16 @@ function inlineSafeEnd(text: string, end: number): number {
 
     if (character === "`") {
       const length = runLength(text, index, "`", end);
+      if (codeSpanAt === null && isFence(text, index, length)) {
+        // Inside an open fence nothing is inline; a closing fence ends the
+        // block and also ends any paragraph-level construct before it.
+        const closing = fenceCloseEnd(text, index, length, end);
+        if (closing === null) return end;
+        emphasis.length = 0;
+        brackets.length = 0;
+        index = closing;
+        continue;
+      }
       if (codeSpanAt === null) {
         codeSpanAt = index;
         codeSpanLength = length;
@@ -271,13 +327,25 @@ function inlineSafeEnd(text: string, end: number): number {
 
     if (character === "*" || character === "_" || character === "~") {
       const length = runLength(text, index, character, end);
-      if (character === "*" && isBullet(text, index, length)) {
-        index += length;
-        continue;
+      // A cut INSIDE a delimiter run is never right — it paints `*` for a `**`
+      // that has already arrived. Looking past the head is safe here because it
+      // can only hold more, never release an unclosed run early.
+      if (
+        index + length >= end &&
+        runLength(text, index, character, text.length) > length
+      ) {
+        emphasis.push({ at: index, character, length });
+        break;
       }
-      // GFM strikethrough uses pairs. Treating a prose tilde as a delimiter
-      // would unnecessarily hold ordinary approximations such as "~10 ms".
-      if (character === "~" && length !== 2) {
+      // Single-marker runs are NOT held. A lone `*` or `_` is far more often
+      // literal prose — a glob (`*.ts`), a multiplication (`5*3`), a list
+      // bullet, `SELECT *` — than an italic opener that will close, and the
+      // cost of guessing wrong is asymmetric: a false positive freezes the
+      // reveal for up to MAX_HOLDBACK characters, while a false negative
+      // flickers one asterisk. `**`, `~~`, code spans and links, where a bad
+      // cut shows `**bo` or a whole raw URL, are still protected.
+      // GFM strikethrough is likewise only a pair, so "~10 ms" never holds.
+      if (length < 2 || (character === "~" && length !== 2)) {
         index += length;
         continue;
       }
@@ -290,9 +358,15 @@ function inlineSafeEnd(text: string, end: number): number {
       const matching = canClose
         ? matchingDelimiterIndex(emphasis, character, length)
         : -1;
+      // A run touching the head has no right-hand context yet, so it cannot be
+      // ruled out as an opener. Closing is decidable (it depends only on what
+      // precedes), so a genuine closer still closes; anything else is held for
+      // one arrival — without this, a chunk that ends exactly at `**` paints
+      // the literal markers and the display clamp then pins them forever.
+      const atHead = index + length >= end;
       if (matching >= 0) {
         emphasis.splice(matching);
-      } else if (canOpen) {
+      } else if (canOpen || atHead) {
         emphasis.push({ at: index, character, length });
       }
       index += length;
@@ -368,7 +442,12 @@ export function safeRevealEnd(text: string, desired: number): number {
 
   const inline = Math.min(grapheme, inlineSafeEnd(text, grapheme));
   const word = Math.min(inline, wordSafeEnd(text, inline));
-  if (capped - word > MAX_HOLDBACK) return grapheme;
+  // Past the bound the hold is CLAMPED, not abandoned. Abandoning it returns
+  // `grapheme`, which paints the withheld run in a single frame — a
+  // ~MAX_HOLDBACK-character jump after a ~MAX_HOLDBACK-character freeze, which
+  // is a worse stutter than the flicker the hold was protecting against. Riding
+  // a constant bounded distance behind keeps the text moving instead.
+  const bounded = Math.max(word, capped - MAX_HOLDBACK);
   // A construct-aware cut may itself land mid-cluster.
-  return word === grapheme ? grapheme : graphemeSafeEnd(text, word);
+  return bounded === grapheme ? grapheme : graphemeSafeEnd(text, bounded);
 }

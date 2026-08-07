@@ -1,6 +1,6 @@
 # Smooth Text Streaming
 
-Last verified against `41678074` (2026-08-07).
+Last verified against the phase-2 fix commit (2026-08-07).
 
 This document is the single specification for how streamed assistant text is
 revealed and rendered. Section 2 describes the baseline shipped in PR #1390;
@@ -184,16 +184,31 @@ loop, so it cannot change the reveal rate or strand content. Properties:
    keycap); the fallback is intentionally conservative but cannot implement all
    Unicode grapheme-break rules without the platform segmenter.
 2. **Inline-construct safety.** One left-to-right scan over the trailing
-   256 units finds the earliest still-open inline construct — emphasis runs
-   (`*`, `_`, `~~`), backtick code spans, `[text](destination)` links — and
-   moves the cut before it. Code spans win over everything (no other marker
-   means anything inside one); escaped markers are skipped; delimiter runs
-   must be left/right-flanking and close a run of the same character and
-   length; a leading `* ` is a list bullet, not emphasis. A `]` exactly at the
-   reveal head remains provisional until one following unit proves whether it
-   starts an inline-link destination. Link destinations track balanced,
-   escaped parentheses. A shortcut reference `[x]` is released as literal
-   text as soon as a following non-`(` unit disambiguates it.
+   256 units finds the earliest still-open inline construct — emphasis runs of
+   **two or more** markers (`**`, `__`, `~~`), backtick code spans,
+   `[text](destination)` links — and moves the cut before it. Code spans win
+   over everything (no other marker means anything inside one); escaped markers
+   are skipped; delimiter runs must be left/right-flanking and close a run of
+   the same character and length. A `]` exactly at the reveal head remains
+   provisional until one following unit proves whether it starts an inline-link
+   destination. Link destinations track balanced, escaped parentheses. A
+   shortcut reference `[x]` is released as literal text as soon as a following
+   non-`(` unit disambiguates it. Three further rules, each of which the
+   phase-2 attack found load-bearing:
+   - **Single-marker runs are never held.** A lone `*` or `_` is far more often
+     literal prose — a glob (`*.ts`), a multiplication (`5*3`), a list bullet,
+     `SELECT *` — than an italic opener that will close, and the costs are
+     asymmetric: a false positive freezes the reveal, a false negative flickers
+     one asterisk. This also subsumes the old list-bullet special case.
+   - **A backtick run of three or more at line start is a fenced BLOCK, not a
+     code span.** Fence content is literal code with nothing inline to protect,
+     so the scan skips to the closing fence (resetting paragraph-level
+     delimiter state) or, if the fence is still open, holds nothing at all.
+   - **A delimiter run touching the reveal head stays provisional.** Right-hand
+     flanking is undecidable there, and `**` is a single model token, so an
+     arrival routinely ends right after one. Closing is still decided normally
+     (it depends only on the left context), so a genuine closer closes; a cut
+     that would land *inside* an already-arrived run always moves before it.
 3. **Word safety.** A cut landing inside a word (letters/digits on both
    sides) snaps back to the word start, bounded by `MAX_WORD_HOLDBACK = 24`
    so long tokens (URLs, identifiers) reveal progressively instead of being
@@ -203,28 +218,40 @@ loop, so it cannot change the reveal rate or strand content. Properties:
 
 ### 4.3 The bound and the trade
 
-Rules 2–3 together may withhold at most `MAX_HOLDBACK = 96` already-arrived
-units; past that they are abandoned and only grapheme safety applies. This is
-the explicit answer to the retired review's core objection ("there is no rule
-that both never shows broken markup and never withholds output
-indefinitely"): a model can emit an opener it never closes, and a stalled
-answer is worse than a stray asterisk, so the bound is the named trade. A
-never-closed `**` therefore degrades to today's behavior after 96 more units
-arrive. The bound is in arrived units, not wall-clock time: if the producer
-pauses immediately after a short opener, the short tail remains withheld until
-more text arrives or settle synchronously exposes the full text.
+Rules 2–3 together may withhold at most `MAX_HOLDBACK = 96` units of the paced
+reveal head; past that the hold is **clamped, not abandoned** — the cut rides a
+constant 96 units behind instead of snapping forward. This is the explicit
+answer to the retired review's core objection ("there is no rule that both never
+shows broken markup and never withholds output indefinitely"): a model can emit
+an opener it never closes, and a stalled answer is worse than a stray asterisk,
+so the bound is the named trade.
+
+Clamping rather than abandoning matters, and the phase-2 attack found the
+original abandon-at-the-bound behaviour to be a smoothness regression in its own
+right: abandoning returns the full cut in one frame, so a never-closed opener
+produced a ~96-character freeze followed by a ~96-character jump — a worse
+stutter than the flicker being prevented. Clamping keeps one revealed unit
+moving out for every unit in.
+
+The bound is in *revealed* units, not arrived units and not wall-clock time.
+Because the paced head lags arrival by roughly one chunk under §5, an opener is
+released somewhat later than 96 further arrivals; and if the producer pauses
+immediately after a short opener, the short tail remains withheld until more
+text arrives or settle synchronously exposes the full text.
 
 ### 4.4 Accepted approximations
 
 The inline scan is parser-lite, not CommonMark: it implements flanking and
 same-run matching but not the full delimiter multiple-of-three rule, link
-titles, or every CommonMark destination edge case. Its bounded window also
-does not carry block-fence state from an opener more than 256 units behind the
-head, so literal markers late in a long fenced block can cause an unnecessary
-hold. Every such hold is bounded by `MAX_HOLDBACK` arrived units and never
-changes settled output; it is not promised to be transient in wall-clock time
-while a producer is paused. This is deliberate; a real incremental CommonMark
-parser here is not worth its complexity.
+titles, or every CommonMark destination edge case. It also does not hold
+single-marker emphasis at all (above), so `*italic*` flickers one asterisk
+before it resolves. Its bounded window does not carry block-fence state from an
+opener more than 256 units behind the head, so a literal `` ` `` or `**` late in
+a long fenced block can still cause an unnecessary hold. Every such hold is
+bounded by `MAX_HOLDBACK` revealed units and never changes settled output; it is
+not promised to be transient in wall-clock time while a producer is paused. This
+is deliberate; a real incremental CommonMark parser here is not worth its
+complexity.
 
 Also deliberately **not** done: the one-grapheme provisional-tail reserve
 (holding the last revealed grapheme in case a later chunk extends it with a
@@ -265,6 +292,30 @@ React commit, allowing an old cut to leak into unrelated replacement content.
   chain even when their length does not shrink.
 - Replaced the proposed render-time refs with guarded state adjustment after
   the React 19 lint gate correctly rejected reading and mutating refs in render.
+
+### 4.7 Amendments from the phase-2 attack
+
+Four defects were found by driving the hook with realistic feeds rather than by
+reading the code, and fixed in `fix(assistant): stop the boundary transform
+stalling ordinary answers`:
+
+- **Fenced code blocks froze.** ``` was scanned as an unterminated inline code
+  span, so the reveal parked at the top of every code block for a whole
+  holdback and then painted ~100 characters in one frame. Fences are now
+  recognized as block constructs.
+- **A lone `*` stranded short answers.** `"Use *.ts to match TypeScript
+  files."` painted as `"Use *"` for its entire stream and only appeared on
+  settle, because the block never grew 96 units past the marker. Single-marker
+  runs are no longer held.
+- **A chunk ending exactly at `**` painted literal markers**, and the monotone
+  clamp then pinned them for the rest of the turn — so the headline D2 fix did
+  not hold at the single most common chunk boundary. Head-touching runs are now
+  provisional, and a cut is never placed inside an already-arrived run.
+- **Abandoning the hold at the bound was itself a stutter** (freeze then jump);
+  the hold is now clamped instead. See §4.3.
+
+Also corrected in this document: the holdback bound is in *revealed* units, not
+arrived units.
 
 ## 5. Delta B — adaptive drain spread (implemented)
 
@@ -401,9 +452,14 @@ New tests (concrete; drive with the existing fake-timer/`runFrames` harness):
   omits the opening run or contains a complete `**...**` run. The former regex
   `/\*\*[^*]*$/` is vacuous for `**bold*`, the exact one-marker-short frame the
   test must reject.
-- Grapheme: stream `"Hi 👩‍💻!"` from empty; assert no frame's output ends
-  with a lone high surrogate (`/[\uD800-\uDBFF]$/`) and that any output
-  containing `"👩"` contains the full `"👩‍💻"` cluster.
+- Grapheme: assert no frame's output ends with a lone high surrogate
+  (`/[\uD800-\uDBFF]$/`), a ZWJ, a variation selector or a skin-tone modifier.
+  The fixture must be long and emoji-dense and must be fed in chunks: the
+  originally-shipped `"Hi 👩‍💻!"` converged inside the first frame's
+  11-character advance, so no cut ever landed mid-cluster and the test passed
+  unchanged against the pre-Delta-A hook. Corrected in phase 2; grapheme safety
+  is real (an unprotected slice tears 12 surrogates and 3 ZWJ sequences over 90
+  frames of the corrected fixture) but the original test did not show it.
 - Monotonicity: use a 301-unit fixture whose opening backtick is exactly about
   to slide out of the 256-unit scan window while its old closer remains within
   the 96-unit holdback. Converge at 301 units, append one unit, and assert every
@@ -500,6 +556,31 @@ public signature `useSmoothReveal(text, active): string`; `TextBlock` props;
 `splitStableMarkdown` and its tests (untouched by both deltas); the caret
 markup; `SNAP_BACKLOG_CHARS`, `DRAIN_MS`, `MIN_CHARS_PER_SECOND`,
 `MAX_FRAME_SECONDS` values in legacy mode.
+
+### 6.2 Known residuals (phase-2 attack, accepted)
+
+- **`safeRevealEnd` is O(text length) per frame.** `Intl.Segmenter`'s
+  `Segments.containing` scans rather than seeking: measured 4 µs at 1 k
+  characters, 27 µs at 20 k, 87 µs at 50 k. The monotone clamp's render-phase
+  `setDisplayed` roughly doubles component invocations per advancing frame
+  (measured 37 renders over 20 frames), so budget ~2× those numbers plus a
+  second `splitStableMarkdown` pass. At 50 k characters that is ~1 % of a 60 Hz
+  frame — not a frame-budget regression, but it is the one place the delta
+  reintroduces the per-paint linearity §2.2 exists to remove. If a 200 k-answer
+  profile ever shows it, the sound fix is to segment only the suffix beginning
+  at the previous frame's cut, which is already a known grapheme boundary in the
+  same string.
+- **The adaptive credit ref is mutated inside the `setRevealed` updater**, i.e.
+  during render. This is the same render-phase side effect §4.6 removed from the
+  display clamp. Under StrictMode double-invocation or a discarded concurrent
+  render the credit is consumed twice, so the adaptive branch can advance
+  slightly faster than elapsed time; measured effect is ~2 characters over 40
+  frames and it is bounded by `target`, so it is a purity defect rather than a
+  visible one. Fixing it properly means moving the credit and a revealed mirror
+  into the rAF effect closure.
+- **`prefersReducedMotion()` calls `matchMedia` on every render** (pre-existing,
+  now at ~2 renders/frame) and does not subscribe, so toggling the OS setting
+  mid-stream has no effect until the next render.
 
 ### Deliberately deferred
 

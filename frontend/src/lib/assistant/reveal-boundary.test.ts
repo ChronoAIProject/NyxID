@@ -132,11 +132,59 @@ describe("safeRevealEnd", () => {
       expect(revealed(text, text.length)).toBe(text);
     });
 
-    it("gives up rather than withhold an opener that never closes", () => {
+    it("rides a bounded distance behind an opener that never closes", () => {
       const text = `a**${"b".repeat(200)}`;
-      // Past the holdback bound the text is shown as-is: a stalled answer is
-      // worse than a stray asterisk.
-      expect(revealed(text, text.length)).toBe(text);
+      // Past the holdback bound the hold is clamped rather than dropped: a
+      // stalled answer is worse than a stray asterisk, but so is freezing for
+      // 96 characters and then painting all 96 in one frame.
+      expect(text.length - safeRevealEnd(text, text.length)).toBe(96);
+      // ...and it keeps MOVING while it does so — one arrived unit in, one
+      // revealed unit out, never a jump.
+      for (let desired = 100; desired <= text.length; desired += 1) {
+        expect(safeRevealEnd(text, desired) - safeRevealEnd(text, desired - 1)).toBe(1);
+      }
+    });
+
+    it("never holds a single-marker run, which is usually literal prose", () => {
+      for (const text of [
+        "Use *.ts to match TypeScript files.",
+        "The cost is 5*3 dollars in total.",
+        "Run SELECT * FROM users to see them.",
+        "Set snake_case names for the fields.",
+      ]) {
+        expect(revealed(text, text.length)).toBe(text);
+      }
+    });
+
+    it("holds a two-marker run that ends exactly at the head", () => {
+      // The common chunk boundary: `**` is a single model token, so an arrival
+      // routinely ends right after it. Flanking is undecidable there, so the
+      // run must stay provisional rather than paint as literal asterisks.
+      expect(revealed("make it **", 10)).toBe("make it ");
+      expect(revealed("a ~~", 4)).toBe("a ");
+      // A genuine closer is still decidable from its left context and closes.
+      expect(revealed("make it **bold**", 16)).toBe("make it **bold**");
+    });
+  });
+
+  describe("fenced code blocks", () => {
+    it("does not treat a fence opener as an unterminated code span", () => {
+      const text = "Here is code:\n\n```ts\nconst x = 1;\nconst y = 2;\n";
+      // Every offset inside the open fence reveals as it arrives: the content
+      // is literal code, so there is no inline construct to protect.
+      for (const desired of [21, 30, 40, text.length]) {
+        expect(safeRevealEnd(text, desired)).toBe(desired);
+      }
+    });
+
+    it("resumes inline safety after the fence closes", () => {
+      const text = "```\ncode *here*\n```\nthen **bol";
+      expect(revealed(text, text.length)).toBe("```\ncode *here*\n```\nthen ");
+    });
+
+    it("still holds a real inline code span", () => {
+      const text = "run ``npm insta";
+      expect(revealed(text, text.length)).toBe("run ");
     });
   });
 
