@@ -67,6 +67,10 @@ pub struct BillingUsageRow {
     /// observability only, no cost, never pushed to Lago.
     pub billable: bool,
     pub estimated_credits_micros: Option<i64>,
+    /// Provider-reported token classes summed over the group (LLM traffic
+    /// only). None when no row in the group carried a breakdown.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub token_breakdown: Option<crate::models::service_billing::TokenBreakdown>,
 }
 
 #[derive(Debug, Serialize, ToSchema)]
@@ -236,6 +240,12 @@ pub async fn get_usage(
                 },
                 "quantity": { "$sum": "$quantity" },
                 "events": { "$sum": 1 },
+                // Token-class observability sums; absent on non-LLM rows
+                // and rows written before breakdown capture shipped.
+                "prompt_tokens": { "$sum": { "$ifNull": ["$token_breakdown.prompt_tokens", 0] } },
+                "completion_tokens": { "$sum": { "$ifNull": ["$token_breakdown.completion_tokens", 0] } },
+                "cached_tokens": { "$sum": { "$ifNull": ["$token_breakdown.cached_tokens", 0] } },
+                "cache_creation_tokens": { "$sum": { "$ifNull": ["$token_breakdown.cache_creation_tokens", 0] } },
             }
         },
         doc! { "$sort": { "_id.service_slug": 1, "_id.layer": 1, "_id.metric": 1 } },
@@ -290,6 +300,7 @@ pub async fn get_usage(
             lago_acked: id_doc.get_bool("lago_acked").unwrap_or(false),
             billable,
             estimated_credits_micros,
+            token_breakdown: usage_row_breakdown(&doc),
         });
     }
 
@@ -795,6 +806,18 @@ fn parse_metric(value: &str) -> Option<BillingMetric> {
         "bytes" => Some(BillingMetric::Bytes),
         _ => None,
     }
+}
+
+/// Summed token-class breakdown for one aggregation group; None when every
+/// class summed to zero (non-LLM rows, or rows predating breakdown capture).
+fn usage_row_breakdown(doc: &Document) -> Option<crate::models::service_billing::TokenBreakdown> {
+    let breakdown = crate::models::service_billing::TokenBreakdown {
+        prompt_tokens: doc_i64(doc, "prompt_tokens").unwrap_or(0),
+        completion_tokens: doc_i64(doc, "completion_tokens").unwrap_or(0),
+        cached_tokens: doc_i64(doc, "cached_tokens").unwrap_or(0),
+        cache_creation_tokens: doc_i64(doc, "cache_creation_tokens").unwrap_or(0),
+    };
+    (!breakdown.is_empty()).then_some(breakdown)
 }
 
 fn doc_i64(doc: &Document, key: &str) -> Option<i64> {

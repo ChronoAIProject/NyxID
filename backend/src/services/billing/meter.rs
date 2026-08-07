@@ -136,6 +136,7 @@ pub(super) async fn persist_settlement_intent(
             BillingLayer::Platform,
             platform_quantity,
             model.clone(),
+            platform.token_breakdown.as_ref(),
             Some(resale_quantity),
             finalized_at,
         )
@@ -170,6 +171,7 @@ pub(super) async fn persist_settlement_intent(
             BillingLayer::Platform,
             platform_quantity,
             model.clone(),
+            platform.token_breakdown.as_ref(),
             None,
             finalized_at,
         )
@@ -185,6 +187,7 @@ pub(super) async fn persist_settlement_intent(
             BillingLayer::Resale,
             resale_quantity,
             model,
+            None,
             None,
             finalized_at,
         )
@@ -294,6 +297,7 @@ async fn insert_reserved_row(
         lago_metric_code,
         credential_class: ctx.credential_class,
         model: None,
+        token_breakdown: None,
         reserved_credits,
         quantity: None,
         pending_resale_quantity: None,
@@ -325,12 +329,14 @@ async fn insert_reserved_row(
     Ok(())
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn finalize_layer(
     db: &mongodb::Database,
     billing_request_id: &str,
     layer: BillingLayer,
     quantity: i64,
     model: Option<String>,
+    token_breakdown: Option<&crate::models::service_billing::TokenBreakdown>,
     pending_resale_quantity: Option<i64>,
     finalized_at: chrono::DateTime<Utc>,
 ) -> AppResult<Option<UsageMeterRow>> {
@@ -343,6 +349,11 @@ async fn finalize_layer(
         "updated_at": bson::DateTime::from_chrono(finalized_at),
         "finalized_at": bson::DateTime::from_chrono(finalized_at),
     };
+    if let Some(breakdown) = token_breakdown
+        && let Ok(breakdown) = bson::to_bson(breakdown)
+    {
+        set.insert("token_breakdown", breakdown);
+    }
     if let Some(resale_quantity) = pending_resale_quantity {
         set.insert("pending_resale_quantity", resale_quantity);
     }
@@ -384,6 +395,7 @@ async fn materialize_pending_resale_intent(
         BillingLayer::Resale,
         resale_quantity,
         coordinator.model.clone(),
+        None,
         None,
         finalized_at,
     )
@@ -812,6 +824,7 @@ mod tests {
             BillingLayer::Platform,
             42,
             Some("model-before-detach".to_string()),
+            None,
             Some(17),
             finalized_at,
         )
@@ -1417,6 +1430,49 @@ mod tests {
             })
             .await
             .expect("insert wallet");
+    }
+
+    /// The provider-reported token breakdown persists onto the finalized
+    /// platform row and never onto resale rows.
+    #[tokio::test]
+    async fn settle_persists_token_breakdown_on_platform_row() {
+        let Some(db) = connect_test_database("billing_token_breakdown").await else {
+            return;
+        };
+        create_usage_transaction_index(&db).await;
+        let ctx = platform_context("billing-breakdown", "owner-breakdown");
+        let metered = open(&db, &ctx, None).await.expect("open");
+        mark_forwarded(&db, &metered).await.expect("mark forwarded");
+
+        let breakdown = crate::models::service_billing::TokenBreakdown {
+            prompt_tokens: 120,
+            completion_tokens: 40,
+            cached_tokens: 100,
+            cache_creation_tokens: 30,
+        };
+        settle(
+            &db,
+            &metered,
+            PlatformUsage::llm_completion(640, 160).with_token_breakdown(Some(breakdown)),
+            None,
+            Some("test-model".to_string()),
+        )
+        .await
+        .expect("settle");
+
+        let row = db
+            .collection::<UsageMeterRow>(crate::models::usage_meter::COLLECTION_NAME)
+            .find_one(doc! { "billing_request_id": "billing-breakdown" })
+            .await
+            .expect("find row")
+            .expect("row exists");
+        assert_eq!(row.token_breakdown, Some(breakdown));
+
+        // An empty breakdown is dropped instead of stored as zeros.
+        let empty = PlatformUsage::llm_completion(64, 1).with_token_breakdown(Some(
+            crate::models::service_billing::TokenBreakdown::default(),
+        ));
+        assert!(empty.token_breakdown.is_none());
     }
 
     fn platform_context(request_id: &str, owner_id: &str) -> BillingRouteContext {

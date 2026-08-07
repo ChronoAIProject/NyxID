@@ -70,12 +70,41 @@ impl ServiceBilling {
     }
 }
 
+/// Provider-reported token classes for one LLM exchange. `prompt_tokens`
+/// follows each provider's own accounting: OpenAI includes cached tokens
+/// inside `prompt_tokens`, Anthropic reports cache reads and writes
+/// outside `input_tokens`. Observability only for now; billing still
+/// charges the single total-token quantity.
+#[derive(Clone, Copy, Debug, Default, Serialize, Deserialize, ToSchema, PartialEq, Eq)]
+pub struct TokenBreakdown {
+    pub prompt_tokens: i64,
+    pub completion_tokens: i64,
+    /// Cache-read tokens (OpenAI `prompt_tokens_details.cached_tokens`,
+    /// Anthropic `cache_read_input_tokens`).
+    #[serde(default)]
+    pub cached_tokens: i64,
+    /// Cache-write tokens (Anthropic `cache_creation_input_tokens`).
+    #[serde(default)]
+    pub cache_creation_tokens: i64,
+}
+
+impl TokenBreakdown {
+    pub fn is_empty(&self) -> bool {
+        self.prompt_tokens == 0
+            && self.completion_tokens == 0
+            && self.cached_tokens == 0
+            && self.cache_creation_tokens == 0
+    }
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize, ToSchema, PartialEq, Eq)]
 pub struct PlatformUsage {
     pub requests: i64,
     pub bytes: i64,
     #[serde(default)]
     pub tokens: i64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub token_breakdown: Option<TokenBreakdown>,
 }
 
 impl PlatformUsage {
@@ -84,6 +113,7 @@ impl PlatformUsage {
             requests: 1,
             bytes,
             tokens: 0,
+            token_breakdown: None,
         }
     }
 
@@ -92,7 +122,13 @@ impl PlatformUsage {
             requests: 1,
             bytes,
             tokens,
+            token_breakdown: None,
         }
+    }
+
+    pub fn with_token_breakdown(mut self, breakdown: Option<TokenBreakdown>) -> Self {
+        self.token_breakdown = breakdown.filter(|breakdown| !breakdown.is_empty());
+        self
     }
 }
 
