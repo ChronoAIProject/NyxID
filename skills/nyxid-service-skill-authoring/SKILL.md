@@ -1,7 +1,7 @@
 ---
 name: nyxid-service-skill-authoring
 description: Find or author an agent skill for a NyxID proxy service that has no OpenAPI spec or typed operations. Use when a NyxID service only exposes the generic proxy tool, `nyxid catalog endpoints` returns nothing for the slug, or you would otherwise have to guess endpoint paths. Searches Ornn for an existing skill bound to the service; if none exists, creates one — researching the official OpenAPI spec on the web for public services, or collecting the contract from the user for private/custom services (never fabricate endpoints) — then uploads it to Ornn, binds it to the service, and records it locally.
-version: "1.1"
+version: "1.2"
 metadata:
   category: plain
   tag:
@@ -53,11 +53,19 @@ e.g. `https://nyx-api.chrono-ai.fun`):
   (`nyxid catalog endpoints <slug>`):
   `GET {BASE}/api/v1/catalog/{slug}/endpoints`.
 - **Mount a spec / set skills** (`nyxid service update ...`):
-  `PUT {BASE}/api/v1/keys/{user_service_id}` with a JSON body — e.g.
+  `PUT {BASE}/api/v1/keys/{id}` with the exact ID returned by the keys inventory and a JSON body — e.g.
   `{"openapi_spec_url": "https://..."}` (empty string clears) or
   `{"recommended_skills": ["name"]}` (empty list clears). The endpoint
   document alone can also be updated via
   `PUT {BASE}/api/v1/endpoints/{endpoint_id}` with the same fields.
+- **Update account-owned routing or identity settings**:
+  resolve the exact UserService ID from `GET {BASE}/api/v1/keys`, then use
+  `PUT {BASE}/api/v1/user-services/{user_service_id}` — for example,
+  `{"forward_access_token": true}`. A catalog service ID is a different
+  identity and must never be used here. Read `GET {BASE}/api/v1/keys`
+  afterward and verify the same UserService ID. Platform-wide catalog
+  recovery is the separate admin-only
+  `POST {BASE}/api/v1/services/{catalog_service_id}/resync-identity` API.
 - **Call the target service through the proxy**
   (`nyxid proxy request <slug> ...`):
   `M {BASE}/api/v1/proxy/s/{slug}/<path>` — NyxID injects the stored
