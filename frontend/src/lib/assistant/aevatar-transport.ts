@@ -3216,12 +3216,12 @@ export class AevatarAssistantTransport implements AssistantTransport {
 
   private actionOutcomeNote(disposition: ActionReport["disposition"]): string {
     if (disposition === "completed") {
-      return "Reporting the new service reference to the assistant.";
+      return "Connected. Telling the assistant it can use this service…";
     }
     if (disposition === "declined") {
-      return "You declined this request. Sending the decision to the assistant; no credential was shared.";
+      return "You declined. Nothing was connected and no credential was shared. Telling the assistant…";
     }
-    return "The connection could not be completed. Sending the failure to the assistant.";
+    return "The connection did not complete. Telling the assistant…";
   }
 
   private settledActionOutcomeNote(
@@ -3230,17 +3230,17 @@ export class AevatarAssistantTransport implements AssistantTransport {
   ): string {
     if (disposition === "completed") {
       return delivered
-        ? "Reported — awaiting assistant verification."
-        : "The new service reference has not reached the assistant; delivery will retry after the next turn.";
+        ? "Connected. The assistant can use this service now."
+        : "Connected, but the assistant has not been told yet — NyxID will retry after your next message.";
     }
     if (disposition === "declined") {
       return delivered
-        ? "You declined this request. The assistant received the decision; no credential was shared."
-        : "You declined this request. The decision has not reached the assistant; delivery will retry after the next turn.";
+        ? "You declined. Nothing was connected and no credential was shared."
+        : "You declined. The assistant has not been told yet — NyxID will retry after your next message. No credential was shared.";
     }
     return delivered
-      ? "The assistant received the connection failure. Ask it to request the service again."
-      : "The connection failure has not reached the assistant; delivery will retry after the next turn.";
+      ? "The connection did not complete. Ask the assistant to request this service again."
+      : "The connection did not complete, and the assistant has not been told yet — NyxID will retry after your next message.";
   }
 
   private updateActionBatchOutcomeNotes(

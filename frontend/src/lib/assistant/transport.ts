@@ -306,10 +306,10 @@ class MockAssistantTransport implements AssistantTransport {
             : "failed";
       const outcomeNote =
         report.disposition === "completed"
-          ? "Reported — awaiting assistant verification."
+          ? "Connected. The assistant can use this service now."
           : report.disposition === "declined"
-            ? "You declined this request. No service was connected and no credential was shared."
-            : "The connection could not be completed. Ask the assistant to request it again.";
+            ? "You declined. Nothing was connected and no credential was shared."
+            : "The connection did not complete. Ask the assistant to request this service again.";
       this.emitLocalActionPatch(
         conversationId,
         card.block_id,

@@ -814,7 +814,7 @@ describe("ScenarioInterceptTransport journey verification", () => {
         event: "block.updated",
         patch: {
           status: "completed",
-          outcome_note: "Reported — awaiting assistant verification.",
+          outcome_note: "Connected. The assistant can use this service now.",
         },
       });
       await flushAsync();
