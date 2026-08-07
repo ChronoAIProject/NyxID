@@ -3637,6 +3637,7 @@ pub(crate) fn llm_platform_usage(
         fallback_bytes,
         llm_usage_service::token_quantity_or_estimate(usage, fallback_bytes),
     )
+    .with_token_breakdown(usage.map(llm_usage_service::ReportedLlmUsage::token_breakdown))
 }
 
 fn websocket_realtime_usage_enabled(
@@ -3656,6 +3657,13 @@ fn websocket_platform_usage(stats: &ConnectionUsageStats) -> PlatformUsage {
         PlatformUsage::llm_completion(
             stats.total_bytes(),
             stats.realtime_llm_usage.token_quantity(),
+        )
+        .with_token_breakdown(
+            stats
+                .realtime_llm_usage
+                .reported_usage
+                .as_ref()
+                .map(llm_usage_service::ReportedLlmUsage::token_breakdown),
         )
     } else {
         llm_platform_usage(None, stats.total_bytes())
@@ -5560,6 +5568,8 @@ mod tests {
                     prompt_tokens: 20,
                     completion_tokens: 10,
                     total_tokens: 30,
+                    cached_tokens: 0,
+                    cache_creation_tokens: 0,
                     reported_cost: None,
                 }),
                 uncovered_bytes: 20,

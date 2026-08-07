@@ -776,6 +776,11 @@ function UsageSummary({
                             </TableCell>
                             <TableCell className="py-2 align-top text-[12px] text-muted-foreground">
                               {formatNumber(row.quantity)} {row.metric}
+                              {row.token_breakdown ? (
+                                <div className="mt-0.5 text-[11px] text-text-tertiary">
+                                  {formatTokenBreakdown(row.token_breakdown)}
+                                </div>
+                              ) : null}
                             </TableCell>
                             <TableCell className="py-2 text-right align-top text-[12px] tabular-nums">
                               {row.billable === false
@@ -912,6 +917,22 @@ function MetricBlock({ label, value }: { readonly label: string; readonly value:
       <div className="mt-1 truncate text-[20px] font-semibold leading-tight">{value}</div>
     </div>
   );
+}
+
+function formatTokenBreakdown(
+  breakdown: NonNullable<BillingUsageRow["token_breakdown"]>,
+): string {
+  const parts = [
+    `in ${formatNumber(breakdown.prompt_tokens)}`,
+    `out ${formatNumber(breakdown.completion_tokens)}`,
+  ];
+  if (breakdown.cached_tokens > 0) {
+    parts.push(`cached ${formatNumber(breakdown.cached_tokens)}`);
+  }
+  if (breakdown.cache_creation_tokens > 0) {
+    parts.push(`cache write ${formatNumber(breakdown.cache_creation_tokens)}`);
+  }
+  return parts.join(" / ");
 }
 
 function periodLabel(period: BillingUsagePeriod): string {
