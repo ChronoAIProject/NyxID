@@ -722,7 +722,7 @@ curl -X PUT http://localhost:3001/api/v1/keys/$KEY_ID \
   -H "Content-Type: application/json" \
   -d '{"node_id": "NODE_UUID"}'
 
-# Delete a service (deactivates service + key)
+# Delete a service (hard-deletes the credential + endpoint; not reversible)
 curl -X DELETE http://localhost:3001/api/v1/keys/$KEY_ID \
   -H "X-API-Key: $NYXID_API_KEY"
 ```
@@ -2242,9 +2242,9 @@ Base URL: `http://localhost:3001`
 | Method | Endpoint | Description |
 |--------|----------|-------------|
 | POST | `/api/v1/keys` | Add service from catalog or custom (auto-provisions endpoint + key + service) |
-| GET | `/api/v1/keys` | List all services (combined view) |
+| GET | `/api/v1/keys` | List all services (combined view). Includes **disabled** services -- check `is_active` |
 | GET | `/api/v1/keys/{id}` | Get combined view |
-| DELETE | `/api/v1/keys/{id}` | Revoke (deactivates service + key) |
+| DELETE | `/api/v1/keys/{id}` | Delete a service: hard-deletes credential + endpoint, may revoke upstream |
 | POST | `/api/v1/keys/oauth/authorize` | Start OAuth flow for a provider |
 | GET | `/api/v1/keys/oauth/callback` | OAuth callback |
 | POST | `/api/v1/keys/{id}/refresh` | Force token refresh |
@@ -2278,7 +2278,7 @@ Base URL: `http://localhost:3001`
 |--------|----------|-------------|
 | GET | `/api/v1/user-services` | List user's service bindings |
 | PUT | `/api/v1/user-services/{id}` | Update auth config, node routing |
-| DELETE | `/api/v1/user-services/{id}` | Deactivate service |
+| DELETE | `/api/v1/user-services/{id}` | Disables only (keeps credential + endpoint) despite the verb -- prefer `PUT {is_active:false}`; use `DELETE /keys/{id}` to really delete |
 
 ### Services (Admin -- Catalog Management)
 

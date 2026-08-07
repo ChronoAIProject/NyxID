@@ -40,7 +40,7 @@ import {
 import type { CatalogEntry, KeyInfo } from "@/types/keys";
 import { AddKeyDialog } from "@/components/dashboard/add-key-dialog";
 import { GrantCascadeDialog } from "@/components/shared/grant-cascade-dialog";
-import { RevokeConnectionDialog } from "@/components/shared/revoke-connection-dialog";
+import { DeleteConnectionDialog } from "@/components/shared/delete-connection-dialog";
 import {
   parseGrantCascadeDetails,
   type GrantCascadeDetails,
@@ -320,7 +320,7 @@ function ConnectionPanel({
       {
         onSuccess: () =>
           toast.success(
-            nextActive ? "Connection enabled" : "Connection paused",
+            nextActive ? "Connection enabled" : "Connection disabled",
           ),
         onError: () => toast.error("Could not update the connection."),
       },
@@ -357,7 +357,7 @@ function ConnectionPanel({
           setConfirmingRevoke(false);
           return;
         }
-        toast.error("Could not revoke the connection.");
+        toast.error("Could not delete the connection.");
       },
     });
   }
@@ -476,7 +476,8 @@ function ConnectionPanel({
                     Enabled
                   </p>
                   <p className="text-[11px] text-text-tertiary">
-                    Pause to block the assistant from using this connection.
+                    Disable to stop the assistant using this connection. Your
+                    credential is kept — you can enable it again any time.
                   </p>
                 </div>
                 <Switch
@@ -512,7 +513,7 @@ function ConnectionPanel({
               className="text-destructive hover:text-destructive"
               onClick={() => setConfirmingRevoke(true)}
             >
-              Revoke
+              Delete
             </Button>
           )}
         </div>
@@ -522,7 +523,7 @@ function ConnectionPanel({
           upstream account, and rendered in-card it read as an error the app
           had raised rather than a step the user had just triggered. */}
       {confirmingRevoke && (
-        <RevokeConnectionDialog
+        <DeleteConnectionDialog
           providerName={providerName}
           connectionLabel={showLabel ? key.label : null}
           revokesGrant={revokesGrant}

@@ -238,7 +238,7 @@ function KeyCardContent({
                 : "Auto-connected"}
             </Badge>
           )}
-          {!keyInfo.is_active && <Badge variant="secondary">Inactive</Badge>}
+          {!keyInfo.is_active && <Badge variant="secondary">Disabled</Badge>}
         </div>
 
         {showReconnect && (
@@ -406,6 +406,10 @@ function ServiceTableRow({
             {isBlocked && <Badge variant="secondary">Read-Only</Badge>}
             {isReadOnly && !isBlocked && <Badge variant="secondary">View-Only</Badge>}
             {keyInfo.admin_only && <Badge variant="secondary">Admin-only</Badge>}
+            {/* Disabled services are listed so they can be re-enabled, so the
+                table has to say so — the credential status badge beside this
+                one reports the credential, which stays healthy while paused. */}
+            {!keyInfo.is_active && <Badge variant="secondary">Disabled</Badge>}
             <Badge variant={statusVariant(displayStatus)}>
               {displayStatusLabel}
             </Badge>

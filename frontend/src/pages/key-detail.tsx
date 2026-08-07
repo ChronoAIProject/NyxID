@@ -707,7 +707,7 @@ function ServiceSection({
   const isNodeBound = nodeId !== undefined && nodeId !== null && nodeId !== "";
 
   let badgeVariant: "success" | "secondary" | "destructive" = "secondary";
-  let badgeLabel = "Inactive";
+  let badgeLabel = "Disabled";
   let credentialBlocked = false;
   let nodeWarning: string | null = null;
   let nodeHint: string | null = null;
@@ -773,7 +773,7 @@ function ServiceSection({
       { serviceId, is_active: !isActive },
       {
         onSuccess: () => {
-          toast.success(isActive ? "Service deactivated" : "Service activated");
+          toast.success(isActive ? "Service disabled" : "Service enabled");
         },
         onError: (err) => {
           const message =
@@ -792,17 +792,20 @@ function ServiceSection({
             <Server className="h-4 w-4 text-primary" />
             <CardTitle className="text-[15px]">Service</CardTitle>
           </div>
+          {/* Disable is reversible, so it is not a destructive action —
+              `destructive` (red) is reserved for Delete, the one action here
+              that cannot be undone. */}
           {!readOnly &&
             (isActive ? (
               <Button
-                variant="destructive"
+                variant="outline"
                 onClick={toggleActive}
                 disabled={updateService.isPending}
               >
-                <ButtonIcon variant="destructive">
+                <ButtonIcon>
                   <Power className="h-3 w-3" />
                 </ButtonIcon>
-                Deactivate
+                Disable
               </Button>
             ) : (
               <Button
@@ -813,7 +816,7 @@ function ServiceSection({
                 <ButtonIcon variant="primary">
                   <Power className="h-3 w-3" />
                 </ButtonIcon>
-                Activate
+                Enable
               </Button>
             ))}
         </div>
@@ -1659,11 +1662,11 @@ function DeleteKeyDialog({
     >
       <DialogContent>
         <DialogHeader>
-          <DialogTitle>Delete Service</DialogTitle>
+          <DialogTitle>Delete service</DialogTitle>
           <DialogDescription>
             {revokesGrant
               ? grantRevocationDescription(providerName)
-              : "This will deactivate the service and revoke the API key. Proxied requests using this key will stop working. This action cannot be undone."}
+              : "This permanently deletes the service and its stored credential. Proxied requests using it will stop working, and this cannot be undone. To stop it temporarily instead, use Disable."}
           </DialogDescription>
         </DialogHeader>
         <DialogFooter>

@@ -1992,7 +1992,14 @@ pub async fn list_keys(
     encryption_keys: &EncryptionKeys,
     user_id: &str,
 ) -> AppResult<Vec<KeyView>> {
-    let tagged = user_service_service::list_user_services_with_sources(db, user_id).await?;
+    // Disabled services are included here and nowhere else: `/keys` is the
+    // management surface that owns the Enable control, so a paused row has to
+    // stay visible for the pause to be reversible. Each `KeyView` carries
+    // `is_active` for the UI to badge them. Enforcement consumers keep using
+    // the active-only `list_user_services_with_sources`.
+    let tagged =
+        user_service_service::list_user_services_with_sources_including_disabled(db, user_id)
+            .await?;
     if tagged.is_empty() {
         return Ok(vec![]);
     }
