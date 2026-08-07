@@ -1,7 +1,7 @@
 ---
 name: aevatar-codex-exec-node-setup
 description: Configure and prove Aevatar codex_exec for one NyxID account, choosing operator-managed chrono-sandbox/gVisor for bounded empty-workspace work or private NyxID node-backed SSH for a fixed host workspace. Use for managed eligibility and UserService readiness, private node/SSH hardening, mandatory public-sample verification, or diagnosing typed managed and private-route failures.
-version: "4.2"
+version: "4.3"
 metadata:
   category: tool-based
   tool-list:
@@ -19,7 +19,7 @@ metadata:
     - workflow
   depends-on:
     - aevatar-codex-exec-workflow-sample@3.1
-compatibility: NyxID CLI and an Aevatar deployment that exposes codex_exec; private SSH additionally requires macOS or Linux, OpenSSH, Codex CLI, and Git
+compatibility: NyxID authenticated Web API or CLI and an Aevatar deployment that exposes codex_exec; private SSH additionally requires macOS or Linux, OpenSSH, Codex CLI, and Git
 disable-model-invocation: false
 user-invocable: true
 ---
@@ -62,20 +62,39 @@ Require only these managed prerequisites:
 
 1. The caller is authenticated as the exact intended native NyxID user.
 2. Managed Codex is enabled with `RolloutBoundary=InternalOnly`, and the user is eligible through `Eligibility.Mode=Allowlist` or the internal `All` policy.
-3. That user directly owns exactly one active, usable `chrono-sandbox` UserService and has exactly one usable `chrono-llm-public` route.
+3. That user directly owns exactly one active, usable `chrono-sandbox` UserService with
+   `forward_access_token=true` and has exactly one usable `chrono-llm-public` route.
 4. Operations deployed the approved immutable runner digest under gVisor with fixed resource, output, timeout, and cleanup bounds.
 5. The explicit credential lifecycle reports `execution_ready=true` with
    `execution_readiness_reason=ready`; `status=active` alone is insufficient.
 6. The public `aevatar-codex-exec-workflow-sample@3.1` managed proof returns exact
    `CODEX_EXEC_READY` through Aevatar.
 
-Confirm only the user-facing identity and service inventory before the proof:
+Confirm only the user-facing identity and service inventory before the proof. The CLI form is:
 
 ```bash
 nyxid --version
 nyxid whoami
 nyxid service list
 ```
+
+The CLI is not required for service configuration. An HTTP-only client can inspect the same
+authoritative inventory with authenticated `GET /api/v1/keys`. If the exact account-owned
+`chrono-sandbox` entry reads `forward_access_token=false`, repair that UserService directly:
+
+```http
+PUT /api/v1/user-services/{chronoSandboxUserServiceId}
+Authorization: Bearer <nyxid-token>
+Content-Type: application/json
+
+{"forward_access_token":true}
+```
+
+Read `GET /api/v1/keys` again and verify `forward_access_token=true` on that same UserService ID
+before retesting. The catalog entry's `id` and the account-owned entry's `id` are intentionally
+different; use the latter here. Never send `catalog_service_id` to `/api/v1/user-services/{id}`.
+`POST /api/v1/services/{catalogServiceId}/resync-identity` is a separate admin-only catalog
+recovery operation, not the owner self-service path.
 
 Do not require a personal node, local Codex login, caller-managed OpenSandbox key, separate LLM
 consent, Landlock installation, or sandbox-side credential injection. Prepare the managed
@@ -243,6 +262,7 @@ For managed, all must be true:
 
 - the exact native NyxID user is eligible under the internal rollout policy
 - that user has the required active `chrono-sandbox` and `chrono-llm-public` UserServices
+- the exact `chrono-sandbox` UserService reads back `forward_access_token=true`
 - operations deployed the approved immutable runner under gVisor with bounded output and strict cleanup
 - the public managed workflow returned exact `CODEX_EXEC_READY`
 - no raw persistent key or request-local delegation token appeared in output

@@ -33,7 +33,7 @@ Preserve only the typed code and sanitized `diagnostic_id`. Never request a raw 
 
 | Code | Meaning | Check |
 |---|---|---|
-| `managed_proxy_authorization_denied` | NyxID or chrono-sandbox rejected the invocation authority | Inspect the exact UserService policy and sanitized diagnostic; normal execution does not rotate or repair credentials |
+| `managed_proxy_authorization_denied` or downstream `UNAUTHORIZED` | NyxID or chrono-sandbox rejected the invocation authority; a common cause is `forward_access_token=false` on the caller's exact `chrono-sandbox` UserService | Read the authoritative `GET /api/v1/keys` inventory. If that exact account-owned UserService reads false, send `PUT /api/v1/user-services/{userServiceId}` with `{"forward_access_token":true}`, then read back the same ID before retesting. Never substitute its different `catalog_service_id`; catalog resync is admin-only |
 | `managed_proxy_target_unavailable` | The exact personal `chrono-sandbox` proxy target cannot be resolved | Verify the user's active `chrono-sandbox` UserService and deployment route |
 | `managed_proxy_timeout` | NyxID proxy or chrono-sandbox did not return within the bounded transport wait | Correlate the sanitized diagnostic at NyxID/chrono-sandbox; do not repair local sandbox tooling |
 | `managed_proxy_unavailable` | NyxID proxy or chrono-sandbox is temporarily unavailable or capacity-limited | Retry later and escalate repeated failures with the sanitized diagnostic |
