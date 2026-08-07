@@ -433,22 +433,51 @@ describe("ActionCard", () => {
     });
   });
 
-  it("renders terminal receipts and the unsupported decline-only state", () => {
+  it("keeps the whole card on a terminal outcome and drops only its controls", () => {
     const onBlock = vi.fn();
     const onResolve = vi.fn();
     const { rerender } = renderCard(
       <ActionCard
         block={catalogBlock({
           status: "completed",
-          outcome_note: "Reported — awaiting assistant verification.",
+          outcome_note: "Connected. The assistant can use this service now.",
         })}
         onProgress={vi.fn()}
         onBlock={onBlock}
         onResolve={onResolve}
       />,
     );
+    // The service, scopes, and routing the user consented to survive the
+    // verdict; only the CTA row and the connect dialog go away.
     expect(
-      screen.getByText("Reported — awaiting assistant verification"),
+      screen.getByRole("heading", { name: "Connect GitHub" }),
+    ).toBeInTheDocument();
+    expect(screen.getByText("repo")).toBeInTheDocument();
+    expect(screen.getByText("Node node-1")).toBeInTheDocument();
+    expect(screen.getByText("Connected")).toBeInTheDocument();
+    expect(
+      screen.getByText("Connected. The assistant can use this service now."),
+    ).toBeInTheDocument();
+    expect(screen.queryByRole("button")).not.toBeInTheDocument();
+    expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
+
+    rerender(
+      <ActionCard
+        block={catalogBlock({
+          status: "failed",
+          outcome_note:
+            "The connection did not complete. Ask the assistant to request this service again.",
+        })}
+        onProgress={vi.fn()}
+        onBlock={onBlock}
+        onResolve={onResolve}
+      />,
+    );
+    expect(screen.getByText("Failed")).toBeInTheDocument();
+    expect(
+      screen.getByText(
+        "The connection did not complete. Ask the assistant to request this service again.",
+      ),
     ).toBeInTheDocument();
     expect(screen.queryByRole("button")).not.toBeInTheDocument();
 

@@ -13,6 +13,15 @@ function runFrames(count: number): void {
   }
 }
 
+function recordFrames(count: number, read: () => string): string[] {
+  const outputs: string[] = [];
+  for (let frame = 0; frame < count; frame += 1) {
+    runFrames(1);
+    outputs.push(read());
+  }
+  return outputs;
+}
+
 /**
  * Frames until the reveal catches up. The first frame only establishes the
  * clock baseline — there is no previous timestamp to measure against — so a
@@ -132,5 +141,295 @@ describe("useSmoothReveal", () => {
     rerender({ value: text });
     expect(result.current).toBe(text);
     matchMedia.mockRestore();
+  });
+
+  it("never paints an incomplete emphasis run", () => {
+    const { result, rerender } = renderHook(
+      ({ value }: { value: string }) => useSmoothReveal(value, true),
+      { initialProps: { value: "" } },
+    );
+    const outputs = [result.current];
+
+    rerender({ value: "make it **bo" });
+    outputs.push(result.current, ...recordFrames(20, () => result.current));
+    rerender({ value: "make it **bold** please" });
+    outputs.push(result.current, ...recordFrames(30, () => result.current));
+
+    for (const output of outputs) {
+      const completeRuns = output.match(/\*\*/g)?.length ?? 0;
+      expect(completeRuns === 0 || completeRuns >= 2, output).toBe(true);
+    }
+    expect(result.current).toBe("make it **bold** please");
+  });
+
+  it("never paints part of a grapheme cluster", () => {
+    // Long and emoji-dense on purpose: a short fixture converges inside the
+    // first frame's 11-character advance, so no cut ever lands mid-cluster and
+    // the assertions are vacuous against an unprotected slice.
+    const text =
+      "Team 👩‍💻 shipped 👨‍👩‍👧‍👦 today 🇬🇧 and 👋🏽 waved, then 👩‍💻 again and 🏳️‍🌈 too. ".repeat(
+        3,
+      );
+    const { result, rerender } = renderHook(
+      ({ value }: { value: string }) => useSmoothReveal(value, true),
+      { initialProps: { value: "" } },
+    );
+
+    const outputs: string[] = [];
+    for (let arrived = 12; arrived <= text.length; arrived += 12) {
+      rerender({ value: text.slice(0, arrived) });
+      outputs.push(...recordFrames(3, () => result.current));
+    }
+    for (const output of outputs) {
+      // A lone high surrogate paints a replacement glyph...
+      expect(output).not.toMatch(/[\uD800-\uDBFF]$/);
+      // ...and the code point the cut left behind must not be one that attaches
+      // to what precedes it, or the reader sees a decomposed sequence. Checked
+      // against the SOURCE, so this does not just restate the implementation.
+      // (Explicit code points rather than a character class: lone combining
+      // code points in a class are what `no-misleading-character-class` exists
+      // to reject.)
+      const next = text.codePointAt(output.length) ?? 0;
+      const attachesLeft =
+        next === 0x200d ||
+        next === 0xfe0f ||
+        next === 0x20e3 ||
+        (next >= 0x1f3fb && next <= 0x1f3ff) ||
+        (next >= 0xdc00 && next <= 0xdfff);
+      expect(attachesLeft, output).toBe(false);
+    }
+    rerender({ value: text });
+    runFrames(60);
+    expect(result.current).toBe(text);
+  });
+
+  it("does not retract a painted glyph that a later chunk extends", () => {
+    // "👩" is a complete cluster until "‍💻" arrives and folds it into a
+    // longer one, so the raw safe cut moves BACKWARDS across the append. Only
+    // the monotone display clamp keeps the paint a prefix chain.
+    const { result, rerender } = renderHook(
+      ({ value }: { value: string }) => useSmoothReveal(value, true),
+      { initialProps: { value: "" } },
+    );
+    rerender({ value: "Hi 👩" });
+    runFrames(6);
+    const outputs = [result.current];
+    rerender({ value: "Hi 👩‍💻 there" });
+    outputs.push(result.current, ...recordFrames(10, () => result.current));
+    for (let index = 1; index < outputs.length; index += 1) {
+      expect(outputs[index]?.startsWith(outputs[index - 1] ?? "")).toBe(true);
+    }
+  });
+
+  it("streams a fenced code block instead of freezing at its opener", () => {
+    // ``` is a BLOCK fence, not an unterminated inline code span. Treating it
+    // as a span parks the reveal at the top of every code block for a whole
+    // holdback and then paints it all in one frame.
+    const text = `Here is code:\n\n\`\`\`ts\n${"const alpha = 1;\n".repeat(12)}`;
+    const { result, rerender } = renderHook(
+      ({ value }: { value: string }) => useSmoothReveal(value, true),
+      { initialProps: { value: "" } },
+    );
+    const painted: number[] = [];
+    for (let arrived = 20; arrived <= text.length; arrived += 20) {
+      rerender({ value: text.slice(0, arrived) });
+      runFrames(3);
+      painted.push(result.current.length);
+    }
+    // Never frozen for a whole sampling window, and never dumped in one step.
+    for (let index = 1; index < painted.length; index += 1) {
+      const step = (painted[index] ?? 0) - (painted[index - 1] ?? 0);
+      expect(step, `step ${index}`).toBeGreaterThan(0);
+      expect(step, `step ${index}`).toBeLessThan(40);
+    }
+  });
+
+  it("does not strand a short answer behind a lone asterisk", () => {
+    // A glob, a multiplication or a `SELECT *` is not an italic opener. Holding
+    // for one showed this whole answer as "Use *" until it settled.
+    const text = "Use *.ts to match TypeScript files.";
+    const { result, rerender } = renderHook(
+      ({ value }: { value: string }) => useSmoothReveal(value, true),
+      { initialProps: { value: "" } },
+    );
+    for (let arrived = 5; arrived <= text.length; arrived += 5) {
+      rerender({ value: text.slice(0, arrived) });
+      runFrames(4);
+    }
+    expect(result.current.length).toBeGreaterThan(text.length - 12);
+  });
+
+  it("never paints the markers of a chunk that ends exactly at an opener", () => {
+    // `**` is a single model token, so an arrival routinely ends right after
+    // it. Painting it literally then pins it forever through the display clamp.
+    const { result, rerender } = renderHook(
+      ({ value }: { value: string }) => useSmoothReveal(value, true),
+      { initialProps: { value: "" } },
+    );
+    const outputs: string[] = [];
+    rerender({ value: "make it " });
+    outputs.push(...recordFrames(6, () => result.current));
+    rerender({ value: "make it **" });
+    outputs.push(...recordFrames(6, () => result.current));
+    rerender({ value: "make it **bold** please" });
+    outputs.push(...recordFrames(20, () => result.current));
+
+    for (const output of outputs) {
+      // Strike out every CLOSED bold run; any asterisk left over was painted
+      // as a literal marker.
+      const residual = output.replace(/\*\*[^*]*\*\*/g, "");
+      expect(residual.includes("*"), output).toBe(false);
+    }
+    expect(result.current).toBe("make it **bold** please");
+  });
+
+  it("never retracts when the inline scan window slides", () => {
+    const initial = `${"a".repeat(45)}\`${"b".repeat(164)}\`${"c".repeat(90)}`;
+    expect(initial).toHaveLength(301);
+    const { result, rerender } = renderHook(
+      ({ value }: { value: string }) => useSmoothReveal(value, true),
+      { initialProps: { value: "" } },
+    );
+    rerender({ value: initial });
+    runFrames(40);
+    expect(result.current).toBe(initial);
+
+    const outputs = [result.current];
+    rerender({ value: `${initial}!` });
+    outputs.push(result.current, ...recordFrames(3, () => result.current));
+    for (let index = 1; index < outputs.length; index += 1) {
+      expect(outputs[index]?.startsWith(outputs[index - 1] ?? "")).toBe(true);
+    }
+  });
+
+  it("resets the display clamp for a same-length replacement", () => {
+    const { result, rerender } = renderHook(
+      ({ value }: { value: string }) => useSmoothReveal(value, true),
+      { initialProps: { value: "plain text!" } },
+    );
+    expect(result.current).toBe("plain text!");
+
+    rerender({ value: "**open tail" });
+    expect(result.current).toBe("");
+  });
+
+  it("reveals a withheld unsafe tail synchronously on settle", () => {
+    const { result, rerender } = renderHook(
+      ({ value, active }: { value: string; active: boolean }) =>
+        useSmoothReveal(value, active),
+      { initialProps: { value: "", active: true } },
+    );
+    rerender({ value: "**open", active: true });
+    runFrames(10);
+    expect(result.current).toBe("");
+
+    rerender({ value: "**open", active: false });
+    expect(result.current).toBe("**open");
+  });
+
+  it("spreads later chunks over the observed arrival cadence", () => {
+    const { result, rerender } = renderHook(
+      ({ value }: { value: string }) => useSmoothReveal(value, true),
+      { initialProps: { value: "" } },
+    );
+    rerender({ value: "a".repeat(60) });
+    runFrames(20);
+    rerender({ value: "a".repeat(120) });
+    runFrames(20);
+    rerender({ value: "a".repeat(180) });
+
+    runFrames(2);
+    const early = result.current.length;
+    runFrames(6);
+    expect(result.current.length).toBeGreaterThan(early);
+    expect(result.current.length).toBeLessThan(180);
+  });
+
+  it("switches back to the legacy drain after producer idle", () => {
+    const { result, rerender } = renderHook(
+      ({ value }: { value: string }) => useSmoothReveal(value, true),
+      { initialProps: { value: "" } },
+    );
+    rerender({ value: "a".repeat(60) });
+    runFrames(20);
+    rerender({ value: "a".repeat(120) });
+    runFrames(20);
+    rerender({ value: "a".repeat(1020) });
+
+    runFrames(38);
+    const beforeAdaptiveFrame = result.current.length;
+    runFrames(1);
+    const adaptiveAdvance = result.current.length - beforeAdaptiveFrame;
+    runFrames(1);
+    const beforeLegacyFrame = result.current.length;
+    runFrames(1);
+    const legacyAdvance = result.current.length - beforeLegacyFrame;
+
+    expect(legacyAdvance).toBeGreaterThan(adaptiveAdvance);
+    runFrames(25);
+    expect(result.current).toBe("a".repeat(1020));
+  });
+
+  it("snaps a projection-sized jump after cadence tracking is armed", () => {
+    const { result, rerender } = renderHook(
+      ({ value }: { value: string }) => useSmoothReveal(value, true),
+      { initialProps: { value: "" } },
+    );
+    rerender({ value: "a".repeat(60) });
+    runFrames(19);
+    rerender({ value: "a".repeat(120) });
+    rerender({ value: "a".repeat(4120) });
+
+    runFrames(1);
+    expect(result.current).toBe("a".repeat(4120));
+  });
+
+  it("discards stale cadence after a producer stall", () => {
+    const { result, rerender } = renderHook(
+      ({ value }: { value: string }) => useSmoothReveal(value, true),
+      { initialProps: { value: "" } },
+    );
+    rerender({ value: "a".repeat(60) });
+    runFrames(20);
+    rerender({ value: "a".repeat(120) });
+    runFrames(100);
+    rerender({ value: "a".repeat(180) });
+
+    runFrames(8);
+    expect(result.current).toBe("a".repeat(180));
+  });
+
+  it("keeps the adaptive floor time-derived at high refresh rates", () => {
+    vi.stubGlobal(
+      "requestAnimationFrame",
+      (callback: FrameRequestCallback) =>
+        window.setTimeout(() => callback(performance.now()), 8),
+    );
+    vi.stubGlobal("cancelAnimationFrame", (frame: number) => {
+      window.clearTimeout(frame);
+    });
+    const advance = (milliseconds: number) => {
+      act(() => {
+        vi.advanceTimersByTime(milliseconds);
+      });
+    };
+    try {
+      const { result, rerender } = renderHook(
+        ({ value }: { value: string }) => useSmoothReveal(value, true),
+        { initialProps: { value: "" } },
+      );
+      rerender({ value: "a".repeat(60) });
+      advance(320);
+      rerender({ value: "a".repeat(120) });
+      advance(600);
+
+      expect(result.current.length).toBeLessThan(120);
+      const before = result.current.length;
+      advance(32);
+      expect(result.current.length - before).toBeGreaterThan(0);
+      expect(result.current.length - before).toBeLessThanOrEqual(2);
+    } finally {
+      vi.unstubAllGlobals();
+    }
   });
 });
