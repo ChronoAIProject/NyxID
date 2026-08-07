@@ -3,7 +3,7 @@ import { isPublicPath } from "./public-paths";
 
 describe("public route policy", () => {
   it("renders both OAuth popup routes before auth resolution", () => {
-    expect(isPublicPath("/oauth")).toBe(true);
+    expect(isPublicPath("/oauth-complete")).toBe(true);
     expect(isPublicPath("/oauth-launching")).toBe(true);
   });
 

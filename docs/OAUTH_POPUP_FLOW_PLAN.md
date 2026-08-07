@@ -397,6 +397,18 @@ transaction so the placeholder-before-state reconciliation race stays closed.
    `frame-ancestors 'none'` stay as they are (`mw/security_headers.rs:34,38`).
    Nothing in this plan needs a framing carve-out.
 
+### 10.1 Follow-up: authenticated completion receipts
+
+The `cc` pilot deliberately keeps success copy outcome-neutral. Before the
+universal six-flow page makes an outcome claim, the backend must issue a
+short-lived authenticated receipt covering at least flow, nonce, status/error
+code, provider identity, and expiry. The public page can verify a signed value
+through published keys or resolve an opaque single-use handle through a
+metadata-only endpoint. The receipt must never contain OAuth tokens or
+credential material. A correlation nonce, even when matched to tab-local
+launch context, is not outcome proof because the provider learns it through
+OAuth `state` and controls the popup's navigation.
+
 ## 11. Scope option: chat-only pilot (recommended first cut)
 
 The popup flow can be confined to the assistant chat connect card, leaving

@@ -1,7 +1,10 @@
 import { useEffect, useState } from "react";
 import { Loader2 } from "lucide-react";
 import { NyxidIcon } from "@/components/brand/nyxid-icon";
-import { OAUTH_PROVIDER_ORIGIN_KEY } from "@/lib/oauth-popup";
+import {
+  popupLaunchMetadataForNavigation,
+  writePopupLaunchMetadata,
+} from "@/lib/oauth-popup";
 import { validateAuthorizationUrl } from "@/schemas/oauth-popup";
 import type { OAuthLaunchNavigateMessage } from "@/types/oauth-popup";
 
@@ -42,17 +45,20 @@ export function OAuthLaunchingPage() {
       ) {
         return;
       }
-      const authorizationUrl = validateAuthorizationUrl(
+      const providerUrl = validateAuthorizationUrl(
         message.url,
         message.nonce,
       );
-      if (authorizationUrl === null) return;
+      if (providerUrl === null) return;
       window.removeEventListener("message", onMessage);
-      sessionStorage.setItem(
-        OAUTH_PROVIDER_ORIGIN_KEY,
-        authorizationUrl.origin,
+      writePopupLaunchMetadata(
+        popupLaunchMetadataForNavigation(
+          providerUrl,
+          message.nonce,
+          message.serviceName,
+        ),
       );
-      window.location.assign(authorizationUrl.href);
+      window.location.assign(providerUrl.href);
     };
     window.addEventListener("message", onMessage);
 

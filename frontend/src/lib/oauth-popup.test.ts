@@ -2,7 +2,10 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { oauthChannelName, openOAuthPopup } from "./oauth-popup";
 
 describe("OAuth popup manager", () => {
-  afterEach(() => vi.restoreAllMocks());
+  afterEach(() => {
+    vi.useRealTimers();
+    vi.restoreAllMocks();
+  });
 
   it("opens synchronously with unique isolated window names", () => {
     const popup = {
@@ -49,6 +52,7 @@ describe("OAuth popup manager", () => {
     const navigation = handle!.navigate(
       `https://github.com/login/oauth/authorize?state=1cc_${nonce}`,
       nonce,
+      "GitHub",
     );
     expect(popup.postMessage).not.toHaveBeenCalled();
 
@@ -74,9 +78,42 @@ describe("OAuth popup manager", () => {
         launchId: handle!.launchId,
         nonce,
         url: `https://github.com/login/oauth/authorize?state=1cc_${nonce}`,
+        serviceName: "GitHub",
       },
       window.location.origin,
     );
+    handle?.close();
+  });
+
+  it("allows five seconds for a cold interstitial before falling back", async () => {
+    vi.useFakeTimers();
+    const nonce = "8e1fcf2a-e679-4da2-9f54-2d90cd5f0085";
+    const popup = {
+      closed: false,
+      close: vi.fn(),
+      postMessage: vi.fn(),
+    } as unknown as Window;
+    vi.spyOn(window, "open").mockReturnValue(popup);
+    const handle = openOAuthPopup();
+    let outcome: string | undefined;
+    void handle
+      ?.navigate(
+        `https://github.com/login/oauth/authorize?state=1cc_${nonce}`,
+        nonce,
+      )
+      .then(
+        () => {
+          outcome = "resolved";
+        },
+        (error: unknown) => {
+          outcome = error instanceof Error ? error.message : "rejected";
+        },
+      );
+
+    await vi.advanceTimersByTimeAsync(4_999);
+    expect(outcome).toBeUndefined();
+    await vi.advanceTimersByTimeAsync(1);
+    expect(outcome).toBe("OAuth popup did not become ready");
     handle?.close();
   });
 });

@@ -79,15 +79,30 @@ export function validateAuthorizationUrl(
   expectedProviderOrigin?: string,
 ): URL | null {
   if (!oauthAttemptNonceSchema.safeParse(nonce).success) return null;
+  const url = validateHttpAuthorizationUrl(rawUrl);
+  if (
+    url === null ||
+    (expectedProviderOrigin !== undefined &&
+      url.origin !== expectedProviderOrigin) ||
+    url.searchParams.get("state") !== `1cc_${nonce}`
+  ) {
+    return null;
+  }
+  return url;
+}
+
+/** Safe manual fallback when an older backend has no popup nonce contract. */
+export function validateHttpAuthorizationUrl(rawUrl: string): URL | null {
   try {
-    const url = new URL(rawUrl, window.location.origin);
+    // No base URL: authorization endpoints are always absolute. Base-resolving
+    // would silently turn "", relative paths, and protocol-relative junk into
+    // same-origin NyxID links — dead ends on the nonce-free fallback path,
+    // which has no state binding left to reject them.
+    const url = new URL(rawUrl);
     if (
       (url.protocol !== "https:" && url.protocol !== "http:") ||
       url.username !== "" ||
-      url.password !== "" ||
-      (expectedProviderOrigin !== undefined &&
-        url.origin !== expectedProviderOrigin) ||
-      url.searchParams.get("state") !== `1cc_${nonce}`
+      url.password !== ""
     ) {
       return null;
     }

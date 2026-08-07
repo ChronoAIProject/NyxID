@@ -190,8 +190,8 @@ const oauthLaunchingRoute = createRoute({
   component: OAuthLaunchingPage,
 });
 
-const oauthCompleteRoute = createRoute({
-  path: "/oauth",
+export const oauthCompleteRoute = createRoute({
+  path: "/oauth-complete",
   getParentRoute: () => rootRoute,
   component: OAuthCompletePage,
 });

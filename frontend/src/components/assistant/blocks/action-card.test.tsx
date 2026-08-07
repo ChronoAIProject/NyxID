@@ -3,7 +3,10 @@ import { act, fireEvent, render, screen, waitFor } from "@testing-library/react"
 import userEvent from "@testing-library/user-event";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { ReactElement, ReactNode } from "react";
-import type { AddKeyDialogCompletion } from "@/components/dashboard/add-key-dialog";
+import type {
+  AddKeyDialogCompletion,
+  AuthorizationAttempt,
+} from "@/components/dashboard/add-key-dialog";
 import {
   CONNECT_WATCH_ACTIVITY_GRACE_MS,
   CONNECT_WATCH_BASE_MS,
@@ -52,6 +55,7 @@ vi.mock("@/components/dashboard/add-key-dialog", () => ({
     prefillCustom,
     onSuccess,
     onAuthorizationPending,
+    onAuthorizationAborted,
     launch,
     flow,
     onPopupViewResult,
@@ -62,7 +66,8 @@ vi.mock("@/components/dashboard/add-key-dialog", () => ({
     readonly prefillIncludeAllCatalog?: boolean;
     readonly prefillCustom?: { readonly name?: string };
     readonly onSuccess?: (result: AddKeyDialogCompletion) => void;
-    readonly onAuthorizationPending?: (keyId: string) => void;
+    readonly onAuthorizationPending?: (attempt: AuthorizationAttempt) => void;
+    readonly onAuthorizationAborted?: (attemptId: string) => void;
     readonly launch?: string;
     readonly flow?: string;
     readonly onPopupViewResult?: (keyId: string) => boolean;
@@ -105,11 +110,23 @@ vi.mock("@/components/dashboard/add-key-dialog", () => ({
         </button>
         <button
           type="button"
-          onClick={() => onAuthorizationPending?.("key-pending-1")}
+          onClick={() =>
+            onAuthorizationPending?.({
+              keyId: "key-pending-1",
+              attemptId: "attempt-pending-1",
+              previousAuthorizationAt: undefined,
+            })
+          }
         >
           Hand off to provider
         </button>
-        <button type="button" onClick={() => onOpenChange(false)}>
+        <button
+          type="button"
+          onClick={() => {
+            onAuthorizationAborted?.("attempt-pending-1");
+            onOpenChange(false);
+          }}
+        >
           Dismiss mock connection
         </button>
       </div>
@@ -705,6 +722,27 @@ describe("ActionCard background authorization watch", () => {
     expect(screen.getByText("Authorizing")).toBeInTheDocument();
   });
 
+  it("does not treat the dialog abort callback as authorization abandonment", async () => {
+    const user = userEvent.setup();
+    const props = watchProps();
+    mockGet.mockResolvedValue({ id: "key-pending-1", status: "pending_auth" });
+
+    const { rerender } = renderCard(
+      <ActionCard block={catalogBlock()} {...props} />,
+    );
+    await handOffAndDismiss(user, rerender, props);
+
+    expect(
+      usePendingConnectStore.getState().attempts["action-card-1"],
+    ).toMatchObject({
+      keyId: "key-pending-1",
+      attemptId: "attempt-pending-1",
+    });
+    expect(
+      screen.getByRole("button", { name: /Waiting for authorization/ }),
+    ).toBeInTheDocument();
+  });
+
   it("reports completion once the watched key goes active, with no further clicks", async () => {
     const user = userEvent.setup();
     const props = watchProps();
@@ -881,6 +919,33 @@ describe("ActionCard background authorization watch", () => {
     });
   });
 
+  it("settles a malformed store record that is missing its attempt id", async () => {
+    const props = watchProps();
+    mockGet.mockResolvedValue({ id: "key-pending-1", status: "active" });
+    usePendingConnectStore.setState({
+      attempts: {
+        "action-card-1": {
+          keyId: "key-pending-1",
+          previousAuthorizationAt: undefined,
+          startedAt: Date.now(),
+        } as unknown as AuthorizationAttempt & { readonly startedAt: number },
+      },
+    });
+
+    renderCard(
+      <ActionCard block={catalogBlock({ status: "in_progress" })} {...props} />,
+    );
+
+    await waitFor(() => {
+      expect(props.onResolve).toHaveBeenCalledWith({
+        actionRequestId: "act-1",
+        originTurnId: "turn-origin-1",
+        disposition: "completed",
+        resource: { userService: { userServiceId: "key-pending-1" } },
+      });
+    });
+  });
+
   it("keeps decline reachable while a connection is in flight", async () => {
     // The manual floor under every automatic settlement. A busy card whose
     // watch is gone still has to be abandonable.
@@ -889,7 +954,12 @@ describe("ActionCard background authorization watch", () => {
     mockGet.mockResolvedValue({ id: "key-pending-1", status: "pending_auth" });
     usePendingConnectStore.setState({
       attempts: {
-        "action-card-1": { keyId: "key-pending-1", startedAt: Date.now() },
+        "action-card-1": {
+          keyId: "key-pending-1",
+          attemptId: "attempt-pending-1",
+          previousAuthorizationAt: undefined,
+          startedAt: Date.now(),
+        },
       },
     });
 

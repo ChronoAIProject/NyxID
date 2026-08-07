@@ -1,8 +1,21 @@
 import { fireEvent, render, screen } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { OAUTH_LAUNCH_CONTEXT_KEY } from "@/lib/oauth-popup";
 import { OAuthCompletePage } from "./oauth-complete";
 
 const NONCE = "8e1fcf2a-e679-4da2-9f54-2d90cd5f0085";
+const NEXT_NONCE = "23f1c824-960c-4b5c-8e12-71f1dbce5b20";
+
+function setLaunchContext(nonce = NONCE) {
+  sessionStorage.setItem(
+    OAUTH_LAUNCH_CONTEXT_KEY,
+    JSON.stringify({
+      providerOrigin: "https://github.com",
+      correlationId: nonce,
+      serviceName: "GitHub",
+    }),
+  );
+}
 
 class MockBroadcastChannel {
   static instances: MockBroadcastChannel[] = [];
@@ -54,7 +67,7 @@ describe("OAuth completion page", () => {
     window.history.replaceState(
       {},
       "",
-      `/oauth?status=complete&flow=cc&nonce=${NONCE}`,
+      `/oauth-complete?status=complete&flow=cc&nonce=${NONCE}`,
     );
     render(<OAuthCompletePage />);
     const channel = MockBroadcastChannel.instances[0];
@@ -65,20 +78,20 @@ describe("OAuth completion page", () => {
       flow: "cc",
     });
     expect(channel?.messages[0]).not.toHaveProperty("nonce");
-    expect(window.location.pathname).toBe("/oauth");
+    expect(window.location.pathname).toBe("/oauth-complete");
     expect(window.location.search).toBe("");
   });
 
   it("never auto-closes an error and exposes retry", () => {
     vi.useFakeTimers();
-    sessionStorage.setItem("nyxid.oauth.provider-origin", "https://github.com");
+    setLaunchContext();
     window.history.replaceState(
       {},
       "",
-      `/oauth?status=error&flow=cc&code=access_denied&nonce=${NONCE}`,
+      `/oauth-complete?status=error&flow=cc&code=access_denied&nonce=${NONCE}`,
     );
     render(<OAuthCompletePage />);
-    expect(screen.getByText("Authorization declined")).toBeInTheDocument();
+    expect(screen.getByText("GitHub: Authorization declined")).toBeInTheDocument();
     expect(
       screen.getByRole("button", { name: /try again/i }),
     ).toBeInTheDocument();
@@ -86,12 +99,31 @@ describe("OAuth completion page", () => {
     expect(window.close).not.toHaveBeenCalled();
   });
 
+  it.each([
+    ["provider_error", "Provider could not complete authorization"],
+    ["state_expired", "Authorization expired"],
+    ["state_replayed", "Authorization already used"],
+    ["state_invalid", "Authorization is no longer valid"],
+    ["session_mismatch", "Different NyxID account"],
+    ["session_required", "NyxID session required"],
+    ["exchange_failed", "Connection could not be saved"],
+    ["server_error", "Connection could not be completed"],
+  ] as const)("maps %s to specific failure copy", (code, title) => {
+    window.history.replaceState(
+      {},
+      "",
+      `/oauth-complete?status=error&flow=cc&code=${code}&nonce=${NONCE}`,
+    );
+    render(<OAuthCompletePage />);
+    expect(screen.getByText(title)).toBeInTheDocument();
+  });
+
   it("cancels success auto-close after interaction", () => {
     vi.useFakeTimers();
     window.history.replaceState(
       {},
       "",
-      `/oauth?status=complete&flow=cc&nonce=${NONCE}`,
+      `/oauth-complete?status=complete&flow=cc&nonce=${NONCE}`,
     );
     render(<OAuthCompletePage />);
     fireEvent.keyDown(window, { key: "Tab" });
@@ -104,7 +136,7 @@ describe("OAuth completion page", () => {
     window.history.replaceState(
       {},
       "",
-      `/oauth?status=complete&flow=cc&nonce=${NONCE}`,
+      `/oauth-complete?status=complete&flow=cc&nonce=${NONCE}`,
     );
     render(<OAuthCompletePage />);
     fireEvent.focus(window);
@@ -116,7 +148,7 @@ describe("OAuth completion page", () => {
     window.history.replaceState(
       {},
       "",
-      `/oauth?status=complete&flow=cc&nonce=${NONCE}`,
+      `/oauth-complete?status=complete&flow=cc&nonce=${NONCE}`,
     );
     render(<OAuthCompletePage />);
     expect(
@@ -129,13 +161,91 @@ describe("OAuth completion page", () => {
     expect(
       screen.queryByText(/credential is secured/i),
     ).not.toBeInTheDocument();
+    expect(document.querySelector(".lucide-circle-check-big")).toBeNull();
+  });
+
+  it("names the service but never claims success for a trusted cc display context", () => {
+    setLaunchContext();
+    window.history.replaceState(
+      {},
+      "",
+      `/oauth-complete?status=complete&flow=cc&nonce=${NONCE}`,
+    );
+    render(<OAuthCompletePage />);
+
+    expect(
+      screen.getByText(/the GitHub connection's status appears there/i),
+    ).toBeInTheDocument();
+    expect(screen.queryByText(/authorized|connected/i)).not.toBeInTheDocument();
+    expect(document.querySelector(".lucide-circle-check-big")).toBeNull();
+  });
+
+  it("ignores launch context when the nonce does not match", () => {
+    setLaunchContext(NEXT_NONCE);
+    window.history.replaceState(
+      {},
+      "",
+      `/oauth-complete?status=complete&flow=cc&nonce=${NONCE}`,
+    );
+    render(<OAuthCompletePage />);
+
+    expect(screen.queryByText(/GitHub/)).not.toBeInTheDocument();
+    expect(
+      screen.getByText(/while the connection is verified/i),
+    ).toBeInTheDocument();
+  });
+
+  it("ignores matching launch context outside the cc pilot", () => {
+    setLaunchContext();
+    window.history.replaceState(
+      {},
+      "",
+      `/oauth-complete?status=complete&flow=kc&nonce=${NONCE}`,
+    );
+    render(<OAuthCompletePage />);
+
+    expect(screen.queryByText(/GitHub/)).not.toBeInTheDocument();
+    expect(
+      screen.getByText(/while the connection is verified/i),
+    ).toBeInTheDocument();
+  });
+
+  it("updates the cc launch-context nonce before retry navigation", async () => {
+    setLaunchContext();
+    const assign = vi
+      .spyOn(window.location, "assign")
+      .mockImplementation(() => {});
+    window.history.replaceState(
+      {},
+      "",
+      `/oauth-complete?status=error&flow=cc&code=access_denied&nonce=${NONCE}`,
+    );
+    render(<OAuthCompletePage />);
+    fireEvent.click(screen.getByRole("button", { name: /try again/i }));
+
+    MockBroadcastChannel.instances[0]?.emit({
+      type: "oauth_retry",
+      nextNonce: NEXT_NONCE,
+      url: `https://github.com/login/oauth/authorize?state=1cc_${NEXT_NONCE}`,
+    });
+
+    expect(assign).toHaveBeenCalledWith(
+      `https://github.com/login/oauth/authorize?state=1cc_${NEXT_NONCE}`,
+    );
+    expect(
+      JSON.parse(sessionStorage.getItem(OAUTH_LAUNCH_CONTEXT_KEY) ?? ""),
+    ).toEqual({
+      providerOrigin: "https://github.com",
+      correlationId: NEXT_NONCE,
+      serviceName: "GitHub",
+    });
   });
 
   it("does not request a retry when the provider origin binding is missing", () => {
     window.history.replaceState(
       {},
       "",
-      `/oauth?status=error&flow=cc&code=access_denied&nonce=${NONCE}`,
+      `/oauth-complete?status=error&flow=cc&code=access_denied&nonce=${NONCE}`,
     );
     render(<OAuthCompletePage />);
     expect(
@@ -151,9 +261,12 @@ describe("OAuth completion page", () => {
   });
 
   it("direct open does not broadcast", () => {
-    window.history.replaceState({}, "", "/oauth");
+    window.history.replaceState({}, "", "/oauth-complete");
     render(<OAuthCompletePage />);
     expect(screen.getByText("Nothing to complete")).toBeInTheDocument();
+    expect(
+      screen.getByText(/isn't part of an active connection attempt/i),
+    ).toBeInTheDocument();
     expect(MockBroadcastChannel.instances).toHaveLength(0);
   });
 });

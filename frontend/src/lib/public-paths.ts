@@ -21,7 +21,7 @@ export function isPublicPath(path: string): boolean {
     path.startsWith("/preview/") ||
     path.startsWith("/error") ||
     path.startsWith("/oauth-consent") ||
-    path === "/oauth" ||
+    path === "/oauth-complete" ||
     path === "/oauth-launching" ||
     path === "/cli-auth" ||
     path === "/cli/pair" ||
