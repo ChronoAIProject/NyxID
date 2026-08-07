@@ -1,7 +1,7 @@
 ---
 name: aevatar-platform-map
 description: Entry point, panorama, and router for the Aevatar skill family. Use before building, running, publishing, scheduling, externally triggering, or operating Aevatar resources; configuring an Agent Profile; assessing managed/private codex_exec feasibility and setup; running the canonical Codex readiness proof; authoring a workflow with codex_exec; diagnosing a Codex failure; or deciding which companion skill owns a request. It teaches resource and identity boundaries, NyxID-brokered auth, client REST versus in-session tools, deployment gates, and exact handoffs without treating member, workflow, service, profile, schedule, or Codex capabilities as one lifecycle.
-version: "1.14"
+version: "1.15"
 metadata:
   category: plain
   tag:
@@ -323,9 +323,11 @@ lifecycle, and none of its IDs are aliases. Agent Profile work is not part of th
   Catalog refresh only reconciles. On `api_key_scope_plan_route_unresolved`, stop and surface the
   blocker instead of guessing a route, deleting a service, or retrying binding.
 - **Lark connection proof is separate from binding.** Before side effects, use the same UserService
-  and Base/table contract to read one known `record_id`. `91403` means document-application access;
-  `1254302 RolePermNotAllow` means advanced-role coverage. There is no implied generic connection
-  preflight in a successful bind or publish.
+  and Base/table contract to read one known `record_id` only when the workflow actually reads Base.
+  `91403` means document-application access; `1254302 RolePermNotAllow` means advanced-role
+  coverage. A dedicated authenticated automation or signed Host/Adapter ingress may instead pass
+  required fields directly; a push-only workflow needs no Base read permission. There is no implied
+  generic connection preflight in a successful bind or publish.
 - **Many steps are async, and `202` is admission only.** Bindings, deployments, runs, Agent Key
   provisioning, and Profile mutations all settle over time. A `202 Accepted` never proves commit,
   credential issuance, vault write, projection visibility, publication, cron fire, or success —

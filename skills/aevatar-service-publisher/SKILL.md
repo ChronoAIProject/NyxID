@@ -1,7 +1,7 @@
 ---
 name: aevatar-service-publisher
 description: Publish an Aevatar member, team, or workflow as an invocable service and (host permitting) register it with NyxID, then verify, invoke, or wire external HTTP triggers such as Lark Base automation — all over the REST API. Use when a user wants to "publish/bind a service", "expose my workflow/team as a service", "register it with NyxID", "make it callable", "get the service slug/URL", "invoke my service", "let Lark Base call my workflow", "trigger this workflow from an external webhook", or "version/deploy/roll out a service". It covers the simple scope binding, reading back a member's published service, the full account-level service lifecycle (revision → publish → deploy → rollout), how to confirm the NyxID registration (slug + status), how to invoke an endpoint, and how to distinguish direct NyxID proxy triggering from host-gated externalExposure. Build the team/member first with the team-builder skill.
-version: "1.8"
+version: "1.9"
 metadata:
   category: plain
   tag:
@@ -193,6 +193,21 @@ NyxID without Aevatar service `externalExposure`. Lark Base automation's "send H
 request" action fits this class: it is an outbound HTTP action to a specified URL, not an
 Aevatar inbound chat channel.
 
+### Choose input authority before transport
+
+Do not make `record_id` read-back a universal rule. Choose one ingress contract and keep its
+authority explicit:
+
+| Ingress | What it proves | Field policy |
+|---|---|---|
+| Shared/unverified webhook or broadly shared API key | At most that some caller reached the endpoint | Treat pushed business fields as claims. Accept a locator such as `record_id` and read authoritative fields through an admitted provider capability. |
+| Direct NyxID proxy with a credential dedicated exclusively to one Base automation | The dedicated automation principal invoked Aevatar | The workflow may accept pushed fields as input. Do not claim this if people or unrelated automations share the key. |
+| NyxID trigger webhook target into Aevatar's Host ingress | Inbound token/HMAC verification, exact outbound body HMAC, stable delivery identity, and durable webhook dedupe/history | Prefer this when Base can set a static bearer token but cannot compute HMAC. The Host may map `payload.<field>` directly into the workflow prompt. |
+
+Even on a trusted path, read Base when the workflow needs fields omitted from the event, must
+observe a newer state than the triggering snapshot, or has an independent business requirement to
+revalidate. Record the delivery id and source; never infer trust from a route name or payload field.
+
 ### Direct NyxID proxy trigger
 
 Create a dedicated NyxID API key with the minimum required proxy authority and store it only in
@@ -231,7 +246,7 @@ Trade-offs:
 - If the external tool cannot set headers, cannot keep secrets safely, cannot tolerate SSE,
   or cannot build the typed envelope, use an adapter path below instead of forcing it.
 
-For Lark Base, `bitable:app:readonly` is only an application API scope. The exact Base document
+If the workflow actually calls the Lark Base read API, `bitable:app:readonly` is only an application API scope. The exact Base document
 must also grant the selected Bot application access. Error `91403` is a document ACL denial, not
 evidence that the API scope is missing. In the current Base UI, open `...`/More, choose **Add
 Applications** (the document-application entry), and add the exact Bot application used by the
@@ -244,7 +259,8 @@ enabling the real trigger, run one explicitly authorized **read-only** probe aga
 `record_id`, using the same UserService, Base/app token, table, and admitted read contract. Require
 the expected record fields, not only HTTP 2xx. This proves downstream document/role access only; it
 does not prove durable workflow admission, trigger delivery, or a later write. Do not use a create,
-approval, send, or update call as a connection test.
+approval, send, or update call as a connection test. Skip this Base probe entirely when the trusted
+push contract supplies all required fields and the workflow contains no Base read.
 
 ### Adapter path
 
@@ -268,6 +284,32 @@ auth (`X-Aevatar-Timestamp` plus `X-Aevatar-Signature` over `timestamp.body` by 
 This is a good first-class bridge for Lark Base-style webhooks **if the host configures the
 binding and secret** (`WorkflowWebhookIngress:Enabled` + binding + replay store). It is not
 currently a normal client self-serve operation, so report it as host-managed.
+
+NyxID v0.10+ can provide the missing sender-facing adapter and durable delivery contract:
+
+```bash
+nyxid trigger create \
+  --label "Lark Base to Aevatar" \
+  --verification bearer \
+  --delivery webhook \
+  --delivery-url "https://<aevatar-host>/api/workflow-webhooks/<route-key>" \
+  --output json
+```
+
+Store the returned inbound `secret` only in the Base automation's `Authorization: Bearer ...`
+header. Store the one-time `delivery_signing_secret` only in the Aevatar Host binding. Configure
+that binding with `HmacSignatureHeader=X-NyxID-Signature`,
+`HmacTimestampHeader=X-NyxID-Timestamp`, and
+`DeliveryIdHeader=X-NyxID-Delivery-Id`; NyxID signs the exact bytes
+`timestamp + "." + body` and sends `X-NyxID-Key-Id` for rotation. The delivered JSON wraps the
+original Base body under `payload`, so map fields with `PromptTemplate` placeholders such as
+`{{payload.name}}`. Never place either secret in workflow YAML, chat, logs, issue text, or a URL.
+The current Aevatar Host binding holds one HMAC secret and does not select secrets by
+`X-NyxID-Key-Id`; coordinate trigger-secret rotation with the Host configuration instead of
+claiming zero-gap automatic rotation on this receiver.
+Use `nyxid trigger deliveries` and an explicit `nyxid trigger redeliver` for failed retained
+deliveries; never replay by issuing a second business mutation blindly. Load the NyxID skill's
+`references/triggers.md` for the full trigger lifecycle and retention limits.
 
 ## Next
 
