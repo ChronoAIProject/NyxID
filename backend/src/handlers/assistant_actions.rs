@@ -6,9 +6,12 @@ use serde::Serialize;
 use serde_json::{Value, json};
 
 pub const ASSISTANT_ACTIONS_SCHEMA_VERSION: u32 = 4;
-pub const ASSISTANT_ACTIONS_REVISION: &str = "nyxid-assistant-actions.v4";
+pub const ASSISTANT_ACTIONS_REVISION: &str = "nyxid-assistant-actions.v5";
 
 const SERVICE_CONNECT_DESCRIPTION: &str = "Ask the user's browser to connect a service through NyxID. Use when a task needs a catalog service (by slug) or a custom HTTPS endpoint that the user has not connected yet. NyxID owns the entire journey - auth modality, consent copy, and credential storage - and reports back only completion or decline with a safe resource reference. Never ask the user for keys, tokens, or passwords in chat.";
+const SERVICE_REAUTHORIZE_DESCRIPTION: &str = "Ask the user's browser to re-authorize an existing connected service and review its requested scopes. Use when a task needs permissions that the referenced user service does not currently grant. NyxID owns the authorization journey and credential storage, and reports only a safe user-service reference. Never ask the user for keys, tokens, passwords, or authorization codes in chat.";
+const KEY_CREATE_DESCRIPTION: &str = "Ask the user's browser to create a scoped NyxID API key for the named platform and allowed services. Use when the user wants a new agent identity bounded to specific user-service IDs. NyxID owns key creation and one-time key display, and reports only a safe key reference. Never request, expose, or repeat key material in chat.";
+const KEY_ROTATE_DESCRIPTION: &str = "Ask the user's browser to rotate an existing NyxID API key. Use when the user wants a replacement key and the previous value must be invalidated. NyxID owns rotation and one-time key display, and reports only a safe key reference. Never request, expose, or repeat key material in chat.";
 
 #[derive(Serialize)]
 struct AssistantActionsManifest {
@@ -32,58 +35,114 @@ static MANIFEST_BODY: LazyLock<String> = LazyLock::new(|| {
     let manifest = AssistantActionsManifest {
         schema_version: ASSISTANT_ACTIONS_SCHEMA_VERSION,
         revision: ASSISTANT_ACTIONS_REVISION,
-        actions: vec![AssistantActionDescriptor {
-            action: "service.connect",
-            description: SERVICE_CONNECT_DESCRIPTION,
-            params_schema: json!({
-                "oneOf": [
-                    {
-                        "type": "object",
-                        "additionalProperties": false,
-                        "required": ["catalogService"],
-                        "properties": {
-                            "catalogService": {
-                                "type": "object",
-                                "additionalProperties": false,
-                                "required": ["serviceSlug"],
-                                "properties": {
-                                    "serviceSlug": { "type": "string" },
-                                    "requestedScopes": {
-                                        "type": "array",
-                                        "items": { "type": "string" }
-                                    },
-                                    "viaNodeId": { "type": "string" },
-                                    "targetOrgId": { "type": "string" }
+        actions: vec![
+            AssistantActionDescriptor {
+                action: "service.connect",
+                description: SERVICE_CONNECT_DESCRIPTION,
+                params_schema: json!({
+                    "oneOf": [
+                        {
+                            "type": "object",
+                            "additionalProperties": false,
+                            "required": ["catalogService"],
+                            "properties": {
+                                "catalogService": {
+                                    "type": "object",
+                                    "additionalProperties": false,
+                                    "required": ["serviceSlug"],
+                                    "properties": {
+                                        "serviceSlug": { "type": "string" },
+                                        "requestedScopes": {
+                                            "type": "array",
+                                            "items": { "type": "string" }
+                                        },
+                                        "viaNodeId": { "type": "string" },
+                                        "targetOrgId": { "type": "string" }
+                                    }
+                                }
+                            }
+                        },
+                        {
+                            "type": "object",
+                            "additionalProperties": false,
+                            "required": ["customService"],
+                            "properties": {
+                                "customService": {
+                                    "type": "object",
+                                    "additionalProperties": false,
+                                    "required": ["name", "endpointUrl", "authMethod"],
+                                    "properties": {
+                                        "name": { "type": "string" },
+                                        "endpointUrl": { "type": "string" },
+                                        "authMethod": { "type": "string" },
+                                        "authKeyName": { "type": "string" },
+                                        "viaNodeId": { "type": "string" },
+                                        "targetOrgId": { "type": "string" }
+                                    }
                                 }
                             }
                         }
-                    },
-                    {
-                        "type": "object",
-                        "additionalProperties": false,
-                        "required": ["customService"],
-                        "properties": {
-                            "customService": {
-                                "type": "object",
-                                "additionalProperties": false,
-                                "required": ["name", "endpointUrl", "authMethod"],
-                                "properties": {
-                                    "name": { "type": "string" },
-                                    "endpointUrl": { "type": "string" },
-                                    "authMethod": { "type": "string" },
-                                    "authKeyName": { "type": "string" },
-                                    "viaNodeId": { "type": "string" },
-                                    "targetOrgId": { "type": "string" }
-                                }
-                            }
+                    ]
+                }),
+                risk: "grant",
+                tier: "v1",
+                remember_eligible: true,
+            },
+            AssistantActionDescriptor {
+                action: "service.reauthorize",
+                description: SERVICE_REAUTHORIZE_DESCRIPTION,
+                params_schema: json!({
+                    "type": "object",
+                    "additionalProperties": false,
+                    "required": ["userServiceId", "requestedScopes"],
+                    "properties": {
+                        "userServiceId": { "type": "string" },
+                        "requestedScopes": {
+                            "type": "array",
+                            "items": { "type": "string" }
                         }
                     }
-                ]
-            }),
-            risk: "grant",
-            tier: "v1",
-            remember_eligible: true,
-        }],
+                }),
+                risk: "grant",
+                tier: "v1",
+                remember_eligible: false,
+            },
+            AssistantActionDescriptor {
+                action: "key.create",
+                description: KEY_CREATE_DESCRIPTION,
+                params_schema: json!({
+                    "type": "object",
+                    "additionalProperties": false,
+                    "required": ["name", "platform", "allowedServiceIds"],
+                    "properties": {
+                        "name": { "type": "string" },
+                        "platform": { "type": "string" },
+                        "allowedServiceIds": {
+                            "type": "array",
+                            "items": { "type": "string" }
+                        }
+                    }
+                }),
+                risk: "grant",
+                tier: "v1",
+                remember_eligible: false,
+            },
+            AssistantActionDescriptor {
+                action: "key.rotate",
+                description: KEY_ROTATE_DESCRIPTION,
+                params_schema: json!({
+                    "type": "object",
+                    "additionalProperties": false,
+                    "required": ["keyId"],
+                    "properties": {
+                        "keyId": { "type": "string" }
+                    }
+                }),
+                risk: "grant",
+                tier: "v1",
+                remember_eligible: false,
+            },
+        ],
     };
 
     serde_json::to_string(&manifest).expect("assistant actions manifest must serialize")
@@ -132,6 +191,13 @@ mod tests {
         "account.mfa_setup",
         "device.onboard",
     ];
+    const WAVE_ONE_ACTIONS: &[&str] = &[
+        "service.connect",
+        "service.reauthorize",
+        "key.create",
+        "key.rotate",
+    ];
+    const NEVER_REMEMBER_ACTIONS: &[&str] = &["service.reauthorize", "key.create", "key.rotate"];
     const FORBIDDEN_SECRET_NAMES: &[&str] = &[
         "token",
         "tokens",
@@ -153,7 +219,7 @@ mod tests {
         "credentials",
     ];
 
-    fn golden_params_schema() -> Value {
+    fn service_connect_params_schema() -> Value {
         json!({
             "oneOf": [
                 {
@@ -201,18 +267,84 @@ mod tests {
         })
     }
 
+    fn service_reauthorize_params_schema() -> Value {
+        json!({
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["userServiceId", "requestedScopes"],
+            "properties": {
+                "userServiceId": { "type": "string" },
+                "requestedScopes": {
+                    "type": "array",
+                    "items": { "type": "string" }
+                }
+            }
+        })
+    }
+
+    fn key_create_params_schema() -> Value {
+        json!({
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["name", "platform", "allowedServiceIds"],
+            "properties": {
+                "name": { "type": "string" },
+                "platform": { "type": "string" },
+                "allowedServiceIds": {
+                    "type": "array",
+                    "items": { "type": "string" }
+                }
+            }
+        })
+    }
+
+    fn key_rotate_params_schema() -> Value {
+        json!({
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["keyId"],
+            "properties": {
+                "keyId": { "type": "string" }
+            }
+        })
+    }
+
     fn golden_manifest() -> Value {
         json!({
             "schema_version": 4,
-            "revision": "nyxid-assistant-actions.v4",
+            "revision": "nyxid-assistant-actions.v5",
             "actions": [
                 {
                     "action": "service.connect",
                     "description": super::SERVICE_CONNECT_DESCRIPTION,
-                    "params_schema": golden_params_schema(),
+                    "params_schema": service_connect_params_schema(),
                     "risk": "grant",
                     "tier": "v1",
                     "remember_eligible": true
+                },
+                {
+                    "action": "service.reauthorize",
+                    "description": super::SERVICE_REAUTHORIZE_DESCRIPTION,
+                    "params_schema": service_reauthorize_params_schema(),
+                    "risk": "grant",
+                    "tier": "v1",
+                    "remember_eligible": false
+                },
+                {
+                    "action": "key.create",
+                    "description": super::KEY_CREATE_DESCRIPTION,
+                    "params_schema": key_create_params_schema(),
+                    "risk": "grant",
+                    "tier": "v1",
+                    "remember_eligible": false
+                },
+                {
+                    "action": "key.rotate",
+                    "description": super::KEY_ROTATE_DESCRIPTION,
+                    "params_schema": key_rotate_params_schema(),
+                    "risk": "grant",
+                    "tier": "v1",
+                    "remember_eligible": false
                 }
             ]
         })
@@ -254,6 +386,15 @@ mod tests {
                     .get("properties")
                     .and_then(Value::as_object)
                     .expect("object schemas must have a properties object");
+                if let Some(required) = object.get("required") {
+                    for name in required.as_array().expect("required must be an array") {
+                        let name = name.as_str().expect("required names must be strings");
+                        assert!(
+                            properties.contains_key(name),
+                            "required property is not declared: {name}"
+                        );
+                    }
+                }
                 for (name, property_schema) in properties {
                     let normalized = normalize_secret_name(name);
                     assert!(
@@ -314,6 +455,18 @@ mod tests {
             assert!(!description.trim().is_empty());
             assert!(description.chars().count() <= 2048);
             assert!(!description.chars().any(char::is_control));
+            assert!(
+                description.contains("Use when "),
+                "description must state its model-facing trigger: {action}"
+            );
+            assert!(
+                description.contains("NyxID owns "),
+                "description must state the browser trust boundary: {action}"
+            );
+            assert!(
+                description.contains("Never "),
+                "description must state its prohibition: {action}"
+            );
 
             let params_schema = entry
                 .get("params_schema")
@@ -335,12 +488,17 @@ mod tests {
                 .get("remember_eligible")
                 .and_then(Value::as_bool)
                 .expect("remember_eligible must be a boolean");
-            if risk == "destructive" {
+            if risk == "destructive" || NEVER_REMEMBER_ACTIONS.contains(&action) {
                 assert!(!remember_eligible);
             }
         }
 
-        assert!(seen_actions.contains("service.connect"));
+        for action in WAVE_ONE_ACTIONS {
+            assert!(
+                seen_actions.contains(action),
+                "missing Wave 1 action: {action}"
+            );
+        }
     }
 
     #[test]
@@ -349,13 +507,31 @@ mod tests {
         let actions = manifest["actions"].as_array().unwrap();
 
         assert_eq!(manifest["schema_version"], 4);
-        assert_eq!(manifest["revision"], "nyxid-assistant-actions.v4");
-        assert_eq!(actions.len(), 1);
+        assert_eq!(manifest["revision"], "nyxid-assistant-actions.v5");
+        assert_eq!(actions.len(), 4);
         assert_eq!(actions[0]["action"], "service.connect");
         assert_eq!(actions[0]["risk"], "grant");
         assert_eq!(actions[0]["tier"], "v1");
         assert_eq!(actions[0]["remember_eligible"], true);
-        assert_eq!(actions[0]["params_schema"], golden_params_schema());
+        assert_eq!(actions[0]["params_schema"], service_connect_params_schema());
+        assert_eq!(actions[1]["action"], "service.reauthorize");
+        assert_eq!(actions[1]["risk"], "grant");
+        assert_eq!(actions[1]["tier"], "v1");
+        assert_eq!(actions[1]["remember_eligible"], false);
+        assert_eq!(
+            actions[1]["params_schema"],
+            service_reauthorize_params_schema()
+        );
+        assert_eq!(actions[2]["action"], "key.create");
+        assert_eq!(actions[2]["risk"], "grant");
+        assert_eq!(actions[2]["tier"], "v1");
+        assert_eq!(actions[2]["remember_eligible"], false);
+        assert_eq!(actions[2]["params_schema"], key_create_params_schema());
+        assert_eq!(actions[3]["action"], "key.rotate");
+        assert_eq!(actions[3]["risk"], "grant");
+        assert_eq!(actions[3]["tier"], "v1");
+        assert_eq!(actions[3]["remember_eligible"], false);
+        assert_eq!(actions[3]["params_schema"], key_rotate_params_schema());
         assert_eq!(manifest, golden_manifest());
     }
 
