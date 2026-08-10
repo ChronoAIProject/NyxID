@@ -74,7 +74,11 @@ describe("assistant input schemas", () => {
         requestId: "input-1",
         prompt: "Choose a region",
         options: [
-          { optionId: "option-sg", label: "Singapore" },
+          {
+            optionId: "option-sg",
+            label: "Singapore",
+            additiveHint: "future-field",
+          },
           { optionId: "option-fra", label: "Frankfurt" },
         ],
         allowFreeText: false,
@@ -87,6 +91,28 @@ describe("assistant input schemas", () => {
         requestId: "input-1",
         prompt: "Choose a region",
         options: [],
+        allowFreeText: false,
+        multiSelect: false,
+      }).success,
+    ).toBe(false);
+  });
+
+  it("accepts the plan gate's single proceed option with free-text revision", () => {
+    expect(
+      assistantInputRequestSchema.safeParse({
+        requestId: "plan-gate-1",
+        prompt: "Proceed with this plan or describe a revision",
+        options: [{ optionId: "proceed", label: "Proceed" }],
+        allowFreeText: true,
+        multiSelect: false,
+      }).success,
+    ).toBe(true);
+
+    expect(
+      assistantInputRequestSchema.safeParse({
+        requestId: "invalid-single-choice-1",
+        prompt: "Choose an option",
+        options: [{ optionId: "only", label: "Only option" }],
         allowFreeText: false,
         multiSelect: false,
       }).success,

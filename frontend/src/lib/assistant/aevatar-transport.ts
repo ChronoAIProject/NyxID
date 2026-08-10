@@ -2770,8 +2770,6 @@ export class AevatarAssistantTransport implements AssistantTransport {
       if (preflight.committed) {
         this.applyCommittedApproval(
           conversationId,
-          stored,
-          card,
           blockId,
           preflight.approved!,
           preflight.stateVersion,
@@ -2825,8 +2823,6 @@ export class AevatarAssistantTransport implements AssistantTransport {
       }
       this.applyCommittedApproval(
         conversationId,
-        stored,
-        card,
         blockId,
         approved,
         committedStateVersion,
@@ -6495,8 +6491,6 @@ export class AevatarAssistantTransport implements AssistantTransport {
 
   private applyCommittedApproval(
     conversationId: string,
-    stored: StoredConversation,
-    card: ApprovalCardContentBlock,
     blockId: string,
     approved: boolean,
     stateVersion: number,
@@ -6510,47 +6504,6 @@ export class AevatarAssistantTransport implements AssistantTransport {
         decision_channel: "web",
         decision_submission: null,
         state_version: stateVersion,
-      },
-      onEvent,
-    );
-
-    // Settle only the ledger step fenced by this exact approval request.
-    const parkedLedger = [...stored.turnState.messages]
-      .flatMap((message) => message.blocks)
-      .reverse()
-      .find(
-        (candidate): candidate is RunContentBlock =>
-          candidate.type === "run" &&
-          candidate.state === "awaiting_approval" &&
-          candidate.steps.some(
-            (step) =>
-              step.status === "waiting" &&
-              step.approval_request_id === card.approval_request_id,
-          ),
-      );
-    if (!parkedLedger) return;
-
-    const steps = parkedLedger.steps.map((step) =>
-      step.status === "waiting" &&
-      step.approval_request_id === card.approval_request_id
-        ? {
-            ...step,
-            status: approved ? ("done" as const) : ("skipped" as const),
-          }
-        : step,
-    );
-    const stillWaiting = steps.some((step) => step.status === "waiting");
-    this.emitLocalBlockPatch(
-      conversationId,
-      parkedLedger.block_id,
-      {
-        state: stillWaiting
-          ? "awaiting_approval"
-          : approved
-            ? "completed"
-            : "cancelled",
-        steps,
-        steps_complete: steps.filter((step) => step.status === "done").length,
       },
       onEvent,
     );

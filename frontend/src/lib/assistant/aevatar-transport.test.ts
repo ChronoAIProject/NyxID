@@ -3931,10 +3931,7 @@ describe("live AG-UI frame taxonomy", () => {
     ).toHaveLength(1);
   });
 
-  it("settles the parked run ledger when the approval is decided", async () => {
-    // The prior turn's ledger froze in awaiting_approval with a waiting
-    // step; deciding must flip it (approved → done/completed) so the
-    // transient activity line doesn't show a stale approval clock forever.
+  it("does not treat a committed approval as tool-step completion", async () => {
     stubFetch(
       routeStream([
         { type: "RUN_STARTED", turnId: TURN_ID },
@@ -3978,24 +3975,23 @@ describe("live AG-UI frame taxonomy", () => {
       (event) => events.push(event),
     );
 
-    const ledgerFlip = events.find(
+    const ledgerPatch = events.find(
       (event): event is Extract<TurnEvent, { event: "block.updated" }> =>
         event.event === "block.updated" &&
-        (event.patch as { state?: string }).state === "completed",
+        (Array.isArray((event.patch as { steps?: unknown }).steps) ||
+          "state" in event.patch),
     );
-    expect(ledgerFlip).toBeDefined();
-    const steps = (
-      ledgerFlip?.patch as {
-        steps?: Array<{ status: string }>;
-      }
-    ).steps;
-    expect(steps?.[0]?.status).toBe("done");
+    expect(ledgerPatch).toBeUndefined();
+    expect(
+      events.some(
+        (event) =>
+          event.event === "block.updated" &&
+          (event.patch as { decision?: string }).decision === "approved",
+      ),
+    ).toBe(true);
   });
 
-  it("settles only the decided approval's step; other gates stay parked", async () => {
-    // Second-pass codex P2: ledger settlement is correlated by
-    // approval_request_id — deciding one card must not settle a step gated
-    // on a different pending approval, and the ledger stays parked.
+  it("leaves every multi-gate step parked until actor state advances", async () => {
     stubFetch(
       routeStream([
         { type: "RUN_STARTED", turnId: TURN_ID },
@@ -4051,24 +4047,22 @@ describe("live AG-UI frame taxonomy", () => {
       (event) => events.push(event),
     );
 
-    const ledgerPatch = events.find(
-      (event): event is Extract<TurnEvent, { event: "block.updated" }> =>
-        event.event === "block.updated" &&
-        Array.isArray((event.patch as { steps?: unknown }).steps),
-    );
-    const patch = ledgerPatch?.patch as {
-      state?: string;
-      steps?: Array<{ status: string; approval_request_id: string | null }>;
-    };
-    expect(patch.state).toBe("awaiting_approval");
-    const stepA = patch.steps?.find(
-      (step) => step.approval_request_id === "req-A",
-    );
-    const stepB = patch.steps?.find(
-      (step) => step.approval_request_id === "req-B",
-    );
-    expect(stepA?.status).toBe("waiting");
-    expect(stepB?.status).toBe("done");
+    expect(
+      events.some(
+        (event) =>
+          event.event === "block.updated" &&
+          Array.isArray((event.patch as { steps?: unknown }).steps),
+      ),
+    ).toBe(false);
+
+    const after = await transport.getHistory(CONVERSATION_ID);
+    const run = after.messages
+      .flatMap((message) => message.blocks)
+      .find((block) => block.type === "run");
+    expect(run?.type === "run" && run.state).toBe("awaiting_approval");
+    expect(
+      run?.type === "run" && run.steps.map((step) => step.status),
+    ).toEqual(["waiting", "waiting"]);
   });
 
   it("terminalizes waiting steps when the run dies at an approval gate", async () => {

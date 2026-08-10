@@ -52,7 +52,7 @@ const inputOptionSchema = z
     label: z.string().max(4_096),
     description: z.string().max(4_096).optional(),
   })
-  .strict();
+  .passthrough();
 
 export const assistantInputRequestSchema = z
   .object({
@@ -79,11 +79,12 @@ export const assistantInputRequestSchema = z
         message: "Input request has no answer mode",
       });
     }
-    if (request.options.length === 1) {
+    if (request.options.length === 1 && !request.allowFreeText) {
       context.addIssue({
         code: "custom",
         path: ["options"],
-        message: "Choice input requires at least two options",
+        message:
+          "Choice input requires at least two options or a free-text alternative",
       });
     }
     if (request.options.length === 0 && request.multiSelect) {
