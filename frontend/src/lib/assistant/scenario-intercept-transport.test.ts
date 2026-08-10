@@ -80,6 +80,7 @@ class StubTransport implements AssistantTransport {
   sendCalls = 0;
   cancelCalls = 0;
   approvalCalls = 0;
+  inputCalls = 0;
   progressCalls = 0;
   blockCalls = 0;
   continueCalls = 0;
@@ -208,6 +209,11 @@ class StubTransport implements AssistantTransport {
 
   async decideApproval(): Promise<TurnHandle | null> {
     this.approvalCalls += 1;
+    return null;
+  }
+
+  async resolveInput(): Promise<TurnHandle | null> {
+    this.inputCalls += 1;
     return null;
   }
 

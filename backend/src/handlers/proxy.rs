@@ -8994,9 +8994,10 @@ mod proxy_resolution_integration_tests {
         for body in [
             r#"{"type":"text","prompt":"connect api-github","clientRequestId":"00000000-0000-4000-8000-000000000001"}"#,
             r#"{"type":"text","prompt":"continue","clientRequestId":"00000000-0000-4000-8000-000000000002","conversationId":"nyxid-chat-4a1e60ebd1fd44f192bf4bb90e1812ae"}"#,
+            r#"{"type":"input.resolve","conversationId":"nyxid-chat-4a1e60ebd1fd44f192bf4bb90e1812ae","clientRequestId":"00000000-0000-4000-8000-000000000010","requestId":"input-1","answer":{"selectedOptionIds":["option-a","option-b"]},"expectedStateVersion":19}"#,
             r#"{"type":"action.continue","conversationId":"nyxid-chat-4a1e60ebd1fd44f192bf4bb90e1812ae","clientRequestId":"00000000-0000-4000-8000-000000000003","originTurnId":"turn-action-1","actions":[{"actionRequestId":"act-1","originTurnId":"turn-action-1","disposition":"completed","resource":{"userService":{"userServiceId":"00000000-0000-4000-8000-000000000123"}}}]}"#,
             r#"{"type":"action.continue","conversationId":"nyxid-chat-4a1e60ebd1fd44f192bf4bb90e1812ae","clientRequestId":"00000000-0000-4000-8000-000000000009","originTurnId":"turn-action-2","actions":[{"actionRequestId":"act-2","originTurnId":"turn-action-2","disposition":"failed"}]}"#,
-            r#"{"type":"approval.resolve","conversationId":"nyxid-chat-4a1e60ebd1fd44f192bf4bb90e1812ae","clientRequestId":"00000000-0000-4000-8000-000000000004","requestId":"approval-1","approved":true,"reason":"Approved by user"}"#,
+            r#"{"type":"approval.resolve","conversationId":"nyxid-chat-4a1e60ebd1fd44f192bf4bb90e1812ae","clientRequestId":"00000000-0000-4000-8000-000000000004","requestId":"approval-1","approved":true,"reason":"Approved by user","expectedStateVersion":21}"#,
             r#"{"type":"task.stop","conversationId":"nyxid-chat-4a1e60ebd1fd44f192bf4bb90e1812ae","turnId":"turn-1","stopRequestId":"stop-1","clientRequestId":"00000000-0000-4000-8000-000000000005","expectedStateVersion":0}"#,
             r#"{"type":"task.steer","conversationId":"nyxid-chat-4a1e60ebd1fd44f192bf4bb90e1812ae","turnId":"turn-1","steeringId":"steer-1","clientRequestId":"00000000-0000-4000-8000-000000000006","instruction":"Try again","expectedStateVersion":2}"#,
             r#"{"type":"step.retry","conversationId":"nyxid-chat-4a1e60ebd1fd44f192bf4bb90e1812ae","turnId":"turn-1","taskId":"task-1","stepId":"step-1","retryRequestId":"retry-1","clientRequestId":"00000000-0000-4000-8000-000000000007","expectedOperationGeneration":2,"expectedStateVersion":3}"#,
@@ -9271,6 +9272,16 @@ mod proxy_resolution_integration_tests {
                 "conversationId": "nyxid-chat-4a1e60ebd1fd44f192bf4bb90e1812ae",
             }),
             serde_json::json!({
+                "type": "input.resolve",
+                "conversationId": "nyxid-chat-4a1e60ebd1fd44f192bf4bb90e1812ae",
+                "clientRequestId": "00000000-0000-4000-8000-000000000010",
+                "requestId": "input-1",
+                "answer": {
+                    "selectedOptionIds": ["option-a", "option-b"]
+                },
+                "expectedStateVersion": 19,
+            }),
+            serde_json::json!({
                 "type": "action.continue",
                 "conversationId": "nyxid-chat-4a1e60ebd1fd44f192bf4bb90e1812ae",
                 "clientRequestId": "00000000-0000-4000-8000-000000000003",
@@ -9304,6 +9315,7 @@ mod proxy_resolution_integration_tests {
                 "requestId": "approval-1",
                 "approved": true,
                 "reason": "Approved by user",
+                "expectedStateVersion": 21,
             }),
             serde_json::json!({
                 "type": "task.stop",
@@ -9348,9 +9360,10 @@ mod proxy_resolution_integration_tests {
         let expected_accepts = [
             "text/event-stream",
             "text/event-stream",
+            "application/json",
             "text/event-stream",
             "text/event-stream",
-            "text/event-stream",
+            "application/json",
             "application/json",
             "application/json",
             "application/json",

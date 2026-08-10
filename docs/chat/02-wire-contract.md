@@ -122,7 +122,7 @@ The body matches Aevatar's own console client: create carries a create-only comm
 
 `POST /chat` accepts a discriminated command allowlist. NyxID parses each command with unknown-field denial, rejects secret-shaped keys and values, validates control identities, and rebuilds the exact upstream object. It never spreads an arbitrary caller object into the Aevatar body.
 
-Every typed command includes `clientRequestId`. NyxID copies that value into the outbound `Idempotency-Key` header. Text, action continuation, and approval resolution request `Accept: text/event-stream`. Stop, steer, retry, and skip request `Accept: application/json`.
+Every typed command includes `clientRequestId`. NyxID copies that value into the outbound `Idempotency-Key` header. Text and action continuation request `Accept: text/event-stream`. Input resolution, approval resolution, stop, steer, retry, and skip request `Accept: application/json`.
 
 ### `text`
 
@@ -149,6 +149,23 @@ Typed continuation:
 
 The prompt must be nonblank after trimming. Its 32,768-character maximum is measured on the original untrimmed string, and the submitted string is preserved in the rebuilt body. The Studio builder instead trims before both length validation and serialization. The current browser starts new conversations through Studio; typed create remains part of the backend contract and upstream actor protocol.
 
+### `input.resolve`
+
+```json
+{
+  "type": "input.resolve",
+  "conversationId": "nyxid-chat-f8369965a444433f92ec50e67ad8ee52",
+  "clientRequestId": "request-identity",
+  "requestId": "input-identity",
+  "answer": {
+    "selectedOptionIds": ["option-a", "option-b"]
+  },
+  "expectedStateVersion": 22
+}
+```
+
+`answer` is a closed union with exactly one of `freeText` or `selectedOptionIds`. Free text is trimmed, must remain nonblank, and is limited to 32,768 characters. A selection contains 1-6 distinct control identities. `expectedStateVersion` is required and must be positive. The browser reads it from the authoritative typed current-state envelope, verifies the exact pending input identity, and never derives it from AG-UI `sequence` (which is `progressSequence`). The command returns JSON transport acceptance; the matching `nyxid.input.changed` or current-state `latestInputResolution` proves commit.
+
 ### `action.continue`
 
 ```json
@@ -172,7 +189,7 @@ The prompt must be nonblank after trimming. Its 32,768-character maximum is meas
 }
 ```
 
-The report batch contains at most 64 entries. Action request IDs must be unique in the batch. When reports are present, the outer `originTurnId` is required and every report must match it. Allowed dispositions are `completed`, `declined`, `failed`, `cancelled`, and `expired`. The resource grammar is described in [Action cards](04-action-cards.md); the current backend requires a completed report to carry a `userService` resource.
+The report batch contains at most 64 entries. Action request IDs must be unique in the batch. When reports are present, the outer `originTurnId` is required and every report must match it. Allowed dispositions are `completed`, `declined`, `failed`, `cancelled`, and `expired`. The resource grammar is described in [Action cards](04-action-cards.md); every completed report requires exactly one allowlisted safe resource reference.
 
 An empty `actions` array is a typed actor wake and may omit `originTurnId`.
 
@@ -185,11 +202,12 @@ An empty `actions` array is a typed actor wake and may omit `originTurnId`.
   "clientRequestId": "request-identity",
   "requestId": "approval-identity",
   "approved": true,
-  "reason": "optional trimmed reason"
+  "reason": "optional trimmed reason",
+  "expectedStateVersion": 22
 }
 ```
 
-An empty reason is omitted. A nonempty reason is trimmed and limited to 2,048 characters.
+An empty reason is omitted. A nonempty reason is trimmed and limited to 2,048 characters. `expectedStateVersion` is required and must be positive. The browser reads it from the authoritative typed current-state envelope and verifies the exact pending approval identity. This command returns JSON transport acceptance; the matching `nyxid.approval.changed` or current-state `latestApprovalResolution` proves commit.
 
 ### `task.stop`
 

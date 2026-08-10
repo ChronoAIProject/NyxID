@@ -39,6 +39,13 @@ import {
   type AssistantActionRequest,
 } from "@/schemas/assistant-actions";
 import {
+  assistantInputRequestSchema,
+  buildInputResolveBody,
+  inputAnswerSchema,
+  type AssistantInputRequest,
+  type InputAnswer,
+} from "@/schemas/assistant-input";
+import {
   applyTurnEvent,
   EMPTY_TURN_STATE,
   toTerminalBlock,
@@ -53,6 +60,7 @@ import type {
   ContentBlock,
   Conversation,
   ConversationHistory,
+  InputCardContentBlock,
   RunContentBlock,
   TurnEvent,
   TurnHandle,
@@ -205,11 +213,12 @@ const assistantApi = {
       onResponse: wireLog.onResponse,
     });
   },
-  post<T>(endpoint: string, body?: unknown): Promise<T> {
+  post<T>(endpoint: string, body?: unknown, signal?: AbortSignal): Promise<T> {
     return apiClient<T>(endpoint, {
       method: "POST",
       body,
       preserveSessionOn401: true,
+      signal,
       ...assistantWireLogOptions(),
     });
   },
@@ -293,6 +302,7 @@ const PRE_START_STOP_WINDOW_MS = 5_000;
 // accepts the connection but never answers would pin the `pendingStops`
 // entry forever and tax every later send/delete with the full fence wait.
 const STOP_REQUEST_DEADLINE_MS = 10_000;
+const DECISION_OBSERVATION_DELAYS_MS = [0, 250, 750, 1_500] as const;
 
 // Hard deadline on the composite DELETE. The deletion reservation rejects
 // sends and approvals while it holds, so an unanswered DELETE without a
@@ -341,6 +351,13 @@ interface ToolApprovalPayload {
   readonly expires_at?: string;
   readonly commandId?: string;
   readonly stepId?: string;
+  readonly presentation?: {
+    readonly action?: string;
+    readonly target?: string;
+    readonly actorLabel?: string;
+    readonly reversibility?: string;
+    readonly grantBoundary?: string;
+  };
 }
 
 type AuthorizationReasonCode =
@@ -383,6 +400,8 @@ interface CustomEnvelope {
 
 interface AgUiFrame {
   readonly type?: string;
+  /** Actor-owned progress sequence. This is not the committed state version. */
+  readonly sequence?: string | number;
   readonly actorId?: string;
   readonly turnId?: string;
   readonly textMessageStart?: {
@@ -718,7 +737,7 @@ interface RunningTurn {
   /** tool `toolCallId` / workflow `stepId` → index into `runSteps`. */
   stepKeys: Map<string, number>;
   /** Open cards: block_id → kind, completed at turn finalization. */
-  openCards: Map<string, "approval" | "connect">;
+  openCards: Map<string, "approval" | "connect" | "input">;
   /** Dedupe guards, per reference client behavior. */
   promptedApprovalIds: Set<string>;
   /** Service dedupe key → connect card block_id (for in-place upgrades). */
@@ -726,6 +745,10 @@ interface RunningTurn {
   /** Action request id → action card block id. */
   promptedActionIds: Map<string, string>;
   waitingForApproval: boolean;
+  /** Exact approval request currently owning the human gate. */
+  pendingApprovalRequestId: string | null;
+  /** Exact typed input request currently owning the human gate. */
+  pendingInputRequestId: string | null;
   /**
    * Suspended on `aevatar.workflow.waiting_signal`. Distinct from
    * `waitingForApproval`: it silences the progress watchdog, but there is no
@@ -2693,14 +2716,7 @@ export class AevatarAssistantTransport implements AssistantTransport {
     }
   }
 
-  /**
-   * Send an approval decision. On the live contract the approve endpoint
-   * answers with an SSE continuation of the run (reference client behavior);
-   * the frames stream through the same adapter as the original turn, with
-   * cursors continuing past the previous turn's so at-least-once consumers
-   * never regress. Resolves once the continuation has started; the returned
-   * handle cancels it.
-   */
+  /** Submit a version-fenced approval decision and project JSON acceptance. */
   async decideApproval(
     conversationId: string,
     blockId: string,
@@ -2735,159 +2751,226 @@ export class AevatarAssistantTransport implements AssistantTransport {
     if (card.decision !== null) {
       throw new Error("This approval was already decided.");
     }
-    const active = this.running.get(conversationId);
-    if (active) {
-      if (!active.waitingForApproval) {
-        throw new AssistantTurnActiveError();
-      }
-      // The original stream is idle at the human gate; settle it quietly so
-      // the continuation below becomes the one live turn.
-      this.pauseForApproval(conversationId, active);
-    }
-
-    // Reserve the conversation BEFORE the network call: the whole approve
-    // exchange must read as one active turn, or the idle gap while awaiting
-    // response headers lets a concurrent send/approve/delete slip past the
-    // active-turn guards and interleave two streams into one reducer. The
-    // reservation's controller doubles as the fetch signal so Stop can
-    // abort an approve request hung before headers.
-    const run = this.newRun(
-      onEvent ?? noopEvent,
-      active?.turnId ?? stored.turnState.activeTurn?.turnId ?? null,
-    );
-    // Continuation cursors continue past the previous turn's: the reducer
-    // and any still-subscribed pump dedup by strictly-increasing cursor.
-    // (Read lastCursor only after pauseForApproval settled the prior turn.)
-    run.cursor = stored.turnState.lastCursor;
-    this.running.set(conversationId, run);
-
-    // Reservation first, THEN the fence: the approve must not overtake a
-    // prior turn's still-pending stop upstream, and the reservation keeps
-    // concurrent sends out while this waits. A cancel landing during the
-    // wait settles the run before anything was dispatched — bail with no
-    // continuation rather than posting a decision for a cancelled flow.
-    await this.awaitPendingStop(conversationId);
-    if (run.finished || run.controller.signal.aborted) {
-      return null;
-    }
-
-    const stream = this.startChatStream(
+    const run = this.reserveHumanDecision(
       conversationId,
-      run,
-      TYPED_CHAT_URL,
-      JSON.stringify({
-        type: "approval.resolve",
-        conversationId,
-        clientRequestId: crypto.randomUUID(),
-        requestId: card.approval_request_id,
-        approved,
-      }),
+      "approval",
+      blockId,
+      card.approval_request_id,
+      onEvent ?? noopEvent,
     );
-    const response = await stream.headers;
-    if (response.kind === "cancelled") {
-      // cancelTurn already emitted the terminal events when the user stopped
-      // this request before response headers arrived.
-      this.finishTurn(conversationId, run, "cancelled", null);
-      throw new AssistantTurnCancelledError();
-    }
-    if (response.kind === "network_error") {
-      const aborted = run.controller.signal.aborted;
-      // cancelTurn may already have settled the run; finishTurn is a no-op
-      // then. The card was never flipped, so the decision stays retryable.
-      // Pre-stream failures settle the turn with a NULL error: the thrown
-      // rejection is what surfaces (the mutation's onError toast) — a turn
-      // error here would double-toast the same failure.
-      this.finishTurn(
+    try {
+      await this.awaitPendingStop(conversationId);
+      this.throwIfControlCancelled(run);
+      const preflight = await this.readDecisionPreflight(
         conversationId,
-        run,
-        aborted ? "cancelled" : "failed",
-        null,
+        "approval",
+        card.approval_request_id,
+        run.controller.signal,
       );
-      throw aborted
-        ? new AssistantTurnCancelledError()
-        : new Error(response.message);
-    }
-    if (response.kind === "http_error") {
-      const failure = streamStartError(response.status, response.body);
-      // Null turn error for the same single-toast reason as above.
-      this.finishTurn(conversationId, run, "failed", null);
-      throw new Error(failure.message);
-    }
-
-    this.emit(conversationId, run, {
-      cursor: this.nextCursor(run),
-      event: "block.updated",
-      block_id: blockId,
-      patch: {
-        decision: approved ? "approved" : "denied",
-        decision_channel: "web",
-      },
-    });
-    // The prior turn's ledger parked with a step waiting on THIS approval;
-    // settle that step so the transient activity line doesn't show a stale
-    // approval clock (approved → the step proceeds; denied → skipped).
-    // Correlated by approval_request_id: deciding one card must not settle
-    // steps gated on a different pending approval, and a ledger with other
-    // approvals still waiting stays parked.
-    const parkedLedger = [...stored.turnState.messages]
-      .flatMap((message) => message.blocks)
-      .reverse()
-      .find(
-        (candidate): candidate is RunContentBlock =>
-          candidate.type === "run" &&
-          candidate.state === "awaiting_approval" &&
-          candidate.steps.some(
-            (step) =>
-              step.status === "waiting" &&
-              step.approval_request_id === card.approval_request_id,
-          ),
-      );
-    if (parkedLedger) {
-      const steps = parkedLedger.steps.map((step) =>
-        step.status === "waiting" &&
-        step.approval_request_id === card.approval_request_id
-          ? {
-              ...step,
-              status: approved ? ("done" as const) : ("skipped" as const),
-            }
-          : step,
-      );
-      const stillWaiting = steps.some((step) => step.status === "waiting");
-      this.emit(conversationId, run, {
-        cursor: this.nextCursor(run),
-        event: "block.updated",
-        block_id: parkedLedger.block_id,
-        patch: {
-          state: stillWaiting
-            ? "awaiting_approval"
-            : approved
-              ? "completed"
-              : "cancelled",
-          steps,
-          steps_complete: steps.filter((step) => step.status === "done").length,
+      if (preflight.committed) {
+        this.applyCommittedApproval(
+          conversationId,
+          blockId,
+          preflight.approved!,
+          preflight.stateVersion,
+          onEvent ?? noopEvent,
+        );
+        return null;
+      }
+      const expectedStateVersion = preflight.stateVersion;
+      this.throwIfControlCancelled(run);
+      await assistantApi.post<{ readonly status: string }>(
+        `${ASSISTANT_PREFIX}/chat`,
+        {
+          type: "approval.resolve",
+          conversationId,
+          clientRequestId: crypto.randomUUID(),
+          requestId: card.approval_request_id,
+          approved,
+          expectedStateVersion,
         },
-      });
-    }
+        run.controller.signal,
+      );
+      this.throwIfControlCancelled(run);
 
-    if (response.contentType.includes("text/event-stream")) {
-      void this.consumeApprovalContinuation(conversationId, run, stream);
-    } else {
-      // Older backend acknowledging with JSON: nothing further will stream,
-      // and there is no live continuation for the caller to hold a handle
-      // to — returning one would let a stale entry linger in the caller's
-      // handle registry after this turn already completed.
-      stream.cancel();
-      this.finishTurn(conversationId, run, "completed", null);
+      this.emitLocalBlockPatch(
+        conversationId,
+        blockId,
+        {
+          decision_submission: approved ? "approved" : "denied",
+          state_version: expectedStateVersion,
+        },
+        onEvent ?? noopEvent,
+      );
+      const committedStateVersion = await this.observeDecisionCommit(
+        conversationId,
+        "approval",
+        card.approval_request_id,
+        expectedStateVersion,
+        approved,
+        run.controller.signal,
+      );
+      if (committedStateVersion === null) {
+        this.emitLocalBlockPatch(
+          conversationId,
+          blockId,
+          { decision_submission: null },
+          onEvent ?? noopEvent,
+        );
+        throw new AssistantProtocolError(
+          "The approval decision was accepted for dispatch, but its committed result was not observed. The card is retryable and current state will be checked before another submission.",
+        );
+      }
+      this.applyCommittedApproval(
+        conversationId,
+        blockId,
+        approved,
+        committedStateVersion,
+        onEvent ?? noopEvent,
+      );
       return null;
+    } catch (error) {
+      if (run.controller.signal.aborted) {
+        throw new AssistantTurnCancelledError();
+      }
+      throw error;
+    } finally {
+      this.releaseHumanDecision(conversationId, run);
     }
-    return {
-      get turnId() {
-        return run.turnId;
-      },
-      cancel: () => {
-        this.cancelTurn(conversationId, run);
-      },
-    };
+  }
+
+  /** Submit a strict input answer against the exact committed request version. */
+  async resolveInput(
+    conversationId: string,
+    blockId: string,
+    answer: InputAnswer,
+    onEvent?: (event: TurnEvent) => void,
+  ): Promise<TurnHandle | null> {
+    this.ensureScope();
+    conversationId = this.canonicalConversationId(conversationId);
+    if (this.deletingConversations.has(conversationId)) {
+      throw new Error("This conversation is being deleted.");
+    }
+    if (!TYPED_SERVER_CONVERSATION_ID_PATTERN.test(conversationId)) {
+      throw new AssistantProtocolError(
+        "Input answers require a typed assistant conversation.",
+      );
+    }
+    const stored = this.conversations.get(conversationId);
+    const card = stored?.turnState.messages
+      .flatMap((message) => message.blocks)
+      .find(
+        (block): block is InputCardContentBlock =>
+          block.type === "input_card" && block.block_id === blockId,
+      );
+    if (!stored || !card) throw new Error("Input request was not found.");
+    if (card.status !== "pending") {
+      throw new Error("This input request was already resolved.");
+    }
+    const parsedAnswer = inputAnswerSchema.parse(answer);
+    if ("freeText" in parsedAnswer && !card.allow_free_text) {
+      throw new AssistantProtocolError(
+        "This input request does not allow a free-text answer.",
+      );
+    }
+    if ("selectedOptionIds" in parsedAnswer) {
+      const optionIds = new Set(card.options.map((option) => option.option_id));
+      if (
+        parsedAnswer.selectedOptionIds.some(
+          (optionId) => !optionIds.has(optionId),
+        )
+      ) {
+        throw new AssistantProtocolError(
+          "The answer selected an option that is not part of this request.",
+        );
+      }
+      if (!card.multi_select && parsedAnswer.selectedOptionIds.length !== 1) {
+        throw new AssistantProtocolError(
+          "This input request accepts exactly one selected option.",
+        );
+      }
+    }
+    const run = this.reserveHumanDecision(
+      conversationId,
+      "input",
+      blockId,
+      card.request_id,
+      onEvent ?? noopEvent,
+    );
+    try {
+      await this.awaitPendingStop(conversationId);
+      this.throwIfControlCancelled(run);
+      const preflight = await this.readDecisionPreflight(
+        conversationId,
+        "input",
+        card.request_id,
+        run.controller.signal,
+      );
+      if (preflight.committed) {
+        this.emitLocalBlockPatch(
+          conversationId,
+          blockId,
+          { status: "resolved", state_version: preflight.stateVersion },
+          onEvent ?? noopEvent,
+        );
+        return null;
+      }
+      const expectedStateVersion = preflight.stateVersion;
+      const body = buildInputResolveBody(
+        conversationId,
+        crypto.randomUUID(),
+        card.request_id,
+        parsedAnswer,
+        expectedStateVersion,
+      );
+      this.throwIfControlCancelled(run);
+      await assistantApi.post<{ readonly status: string }>(
+        `${ASSISTANT_PREFIX}/chat`,
+        body,
+        run.controller.signal,
+      );
+      this.throwIfControlCancelled(run);
+      this.emitLocalBlockPatch(
+        conversationId,
+        blockId,
+        { status: "submitted", state_version: expectedStateVersion },
+        onEvent ?? noopEvent,
+      );
+      const committedStateVersion = await this.observeDecisionCommit(
+        conversationId,
+        "input",
+        card.request_id,
+        expectedStateVersion,
+        undefined,
+        run.controller.signal,
+      );
+      if (committedStateVersion !== null) {
+        this.emitLocalBlockPatch(
+          conversationId,
+          blockId,
+          { status: "resolved", state_version: committedStateVersion },
+          onEvent ?? noopEvent,
+        );
+      } else {
+        this.emitLocalBlockPatch(
+          conversationId,
+          blockId,
+          { status: "pending" },
+          onEvent ?? noopEvent,
+        );
+        throw new AssistantProtocolError(
+          "The input answer was accepted for dispatch, but its committed result was not observed. The card is retryable and current state will be checked before another submission.",
+        );
+      }
+      return null;
+    } catch (error) {
+      if (run.controller.signal.aborted) {
+        throw new AssistantTurnCancelledError();
+      }
+      throw error;
+    } finally {
+      this.releaseHumanDecision(conversationId, run);
+    }
   }
 
   setActionCardInProgress(
@@ -3177,7 +3260,7 @@ export class AevatarAssistantTransport implements AssistantTransport {
   private emitLocalBlockPatch(
     conversationId: string,
     blockId: string,
-    patch: Partial<ActionCardContentBlock>,
+    patch: Partial<ContentBlock>,
     onEvent: (event: TurnEvent) => void,
   ): void {
     const stored = this.conversations.get(conversationId);
@@ -3637,6 +3720,8 @@ export class AevatarAssistantTransport implements AssistantTransport {
       promptedConnectSlugs: new Map(),
       promptedActionIds: new Map(),
       waitingForApproval: false,
+      pendingApprovalRequestId: null,
+      pendingInputRequestId: null,
       awaitingSignal: false,
       watchdog: null,
       deliveryStarted: false,
@@ -4458,18 +4543,6 @@ export class AevatarAssistantTransport implements AssistantTransport {
     }
   }
 
-  private async consumeApprovalContinuation(
-    conversationId: string,
-    run: RunningTurn,
-    stream: ChatStreamRequestHandle,
-  ): Promise<void> {
-    const result = await this.consumeTurnStream(conversationId, run, stream);
-    if (result.kind === "settled" || run.finished) return;
-    this.closeOpenMessage(conversationId, run);
-    this.finalizeActivity(conversationId, run, "failed");
-    this.finishTurn(conversationId, run, "failed", result.error);
-  }
-
   private startChatStream(
     conversationId: string,
     run: RunningTurn,
@@ -5053,6 +5126,29 @@ export class AevatarAssistantTransport implements AssistantTransport {
         }
         return;
       }
+      case "nyxid.input.request": {
+        const request = assistantInputRequestSchema.safeParse(payload);
+        if (request.success) {
+          this.addInputCard(conversationId, run, request.data);
+        }
+        return;
+      }
+      case "nyxid.input.changed":
+        this.applyInputChanged(conversationId, run, payload);
+        return;
+      case "nyxid.approval.request": {
+        if (payload && typeof payload === "object") {
+          this.addApprovalCard(
+            conversationId,
+            run,
+            payload as ToolApprovalPayload,
+          );
+        }
+        return;
+      }
+      case "nyxid.approval.changed":
+        this.applyApprovalChanged(conversationId, run, payload);
+        return;
       case "aevatar.tool_approval.pending":
         this.addApprovalCard(
           conversationId,
@@ -5679,12 +5775,20 @@ export class AevatarAssistantTransport implements AssistantTransport {
     if (!requestId || run.promptedApprovalIds.has(requestId)) return;
     run.promptedApprovalIds.add(requestId);
     run.waitingForApproval = true;
+    run.pendingApprovalRequestId = requestId;
     // A human gate has no client-imposed deadline; stop the watchdog.
     this.clearWatchdog(run);
 
+    const presentation = payload.presentation;
+    const presentationBody = [
+      presentation?.actorLabel,
+      presentation?.action,
+      presentation?.target ? `on ${presentation.target}` : "",
+    ]
+      .filter(Boolean)
+      .join(" ");
     const body =
-      payload.message ??
-      payload.body ??
+      (payload.message ?? payload.body ?? presentationBody) ||
       (payload.toolName
         ? `The assistant wants to run ${redactDisplayText(payload.toolName)}.`
         : "The assistant is requesting your approval to continue.");
@@ -5705,6 +5809,7 @@ export class AevatarAssistantTransport implements AssistantTransport {
       expires_at: payload.expiresAt ?? payload.expires_at ?? "",
       decision: null,
       decision_channel: null,
+      decision_submission: null,
     };
     this.appendActivityBlock(conversationId, run, block);
     run.openCards.set(block.block_id, "approval");
@@ -5722,6 +5827,117 @@ export class AevatarAssistantTransport implements AssistantTransport {
         turn_id: run.turnId,
         status: "waiting",
       });
+    }
+  }
+
+  private addInputCard(
+    conversationId: string,
+    run: RunningTurn,
+    request: AssistantInputRequest,
+  ): void {
+    const dedupeKey = `input:${request.requestId}`;
+    if (run.promptedApprovalIds.has(dedupeKey)) return;
+    run.promptedApprovalIds.add(dedupeKey);
+    run.awaitingSignal = true;
+    run.pendingInputRequestId = request.requestId;
+    this.clearWatchdog(run);
+
+    const block: InputCardContentBlock = {
+      type: "input_card",
+      block_id: newId("input-card"),
+      request_id: request.requestId,
+      prompt: redactDisplayText(request.prompt),
+      options: request.options.map((option) => ({
+        option_id: option.optionId,
+        label: redactDisplayText(option.label),
+        ...(option.description
+          ? { description: redactDisplayText(option.description) }
+          : {}),
+      })),
+      allow_free_text: request.allowFreeText,
+      multi_select: request.multiSelect,
+      status: "pending",
+    };
+    this.appendActivityBlock(conversationId, run, block);
+    run.openCards.set(block.block_id, "input");
+    this.markStepWaiting(
+      conversationId,
+      run,
+      protoString(request["stepId"]),
+      request.requestId,
+    );
+    if (run.runBlockId) this.patchRunBlock(conversationId, run);
+    if (run.turnId) {
+      this.emit(conversationId, run, {
+        cursor: this.nextCursor(run),
+        event: "turn.status",
+        turn_id: run.turnId,
+        status: "waiting",
+      });
+    }
+  }
+
+  private applyInputChanged(
+    conversationId: string,
+    run: RunningTurn,
+    payload: unknown,
+  ): void {
+    if (!payload || typeof payload !== "object") return;
+    const requestId = protoString(
+      (payload as Record<string, unknown>)["requestId"],
+    );
+    if (!requestId) return;
+    const card = this.conversations
+      .get(conversationId)
+      ?.turnState.messages.flatMap((message) => message.blocks)
+      .find(
+        (block): block is InputCardContentBlock =>
+          block.type === "input_card" && block.request_id === requestId,
+      );
+    if (!card) return;
+    this.emitLocalBlockPatch(
+      conversationId,
+      card.block_id,
+      { status: "resolved" },
+      run.onEvent,
+    );
+    if (run.pendingInputRequestId === requestId) {
+      run.pendingInputRequestId = null;
+      run.awaitingSignal = false;
+    }
+  }
+
+  private applyApprovalChanged(
+    conversationId: string,
+    run: RunningTurn,
+    payload: unknown,
+  ): void {
+    if (!payload || typeof payload !== "object") return;
+    const record = payload as Record<string, unknown>;
+    const requestId = protoString(record["requestId"]);
+    if (!requestId || typeof record["approved"] !== "boolean") return;
+    const card = this.conversations
+      .get(conversationId)
+      ?.turnState.messages.flatMap((message) => message.blocks)
+      .find(
+        (block): block is ApprovalCardContentBlock =>
+          block.type === "approval_card" &&
+          block.approval_request_id === requestId,
+      );
+    if (!card) return;
+    this.emitLocalBlockPatch(
+      conversationId,
+      card.block_id,
+      {
+        decision: record["approved"] ? "approved" : "denied",
+        decision_channel: "web",
+        decision_submission: null,
+      },
+      run.onEvent,
+    );
+    if (run.pendingApprovalRequestId === requestId) {
+      run.pendingApprovalRequestId = null;
+      run.waitingForApproval = false;
     }
   }
 
@@ -6182,12 +6398,234 @@ export class AevatarAssistantTransport implements AssistantTransport {
     });
   }
 
-  /**
-   * Quietly settle a turn idling at a human gate so an approval decision can
-   * become the live turn: no card is terminal-ized (the decision flow patches
-   * it), the ledger parks as awaiting-approval, and the fetch aborts.
-   */
-  private pauseForApproval(conversationId: string, run: RunningTurn): void {
+  private reserveHumanDecision(
+    conversationId: string,
+    expectedKind: "approval" | "input",
+    blockId: string,
+    requestId: string,
+    onEvent: (event: TurnEvent) => void,
+  ): RunningTurn {
+    this.pauseAtHumanGate(conversationId, expectedKind, blockId, requestId);
+    if (this.running.has(conversationId)) {
+      throw new AssistantTurnActiveError();
+    }
+    const stored = this.conversations.get(conversationId);
+    if (!stored) throw new AssistantConversationNotFoundError();
+    const run = this.newRun(onEvent, null, "actor");
+    run.cursor = stored.turnState.lastCursor;
+    this.running.set(conversationId, run);
+    return run;
+  }
+
+  private releaseHumanDecision(conversationId: string, run: RunningTurn): void {
+    if (this.running.get(conversationId) !== run) return;
+    run.finished = true;
+    this.clearWatchdog(run);
+    this.running.delete(conversationId);
+  }
+
+  private throwIfControlCancelled(run: RunningTurn): void {
+    if (run.finished || run.controller.signal.aborted) {
+      throw new AssistantTurnCancelledError();
+    }
+  }
+
+  private async readDecisionPreflight(
+    conversationId: string,
+    kind: "approval" | "input",
+    requestId: string,
+    signal: AbortSignal,
+  ): Promise<{
+    readonly stateVersion: number;
+    readonly committed: boolean;
+    readonly approved?: boolean;
+  }> {
+    const current = await this.readCurrentDecisionState(conversationId, signal);
+    const latest =
+      current.snapshot[
+        kind === "input" ? "latestInputResolution" : "latestApprovalResolution"
+      ];
+    if (latest && typeof latest === "object" && !Array.isArray(latest)) {
+      const latestRecord = latest as Record<string, unknown>;
+      if (
+        protoString(latestRecord["requestId"]) === requestId &&
+        latestRecord["outcome"] === "accepted"
+      ) {
+        if (kind === "input") {
+          return { stateVersion: current.stateVersion, committed: true };
+        }
+        if (typeof latestRecord["approved"] === "boolean") {
+          return {
+            stateVersion: current.stateVersion,
+            committed: true,
+            approved: latestRecord["approved"],
+          };
+        }
+      }
+    }
+    if (current.snapshot["attentionKind"] !== kind) {
+      throw new AssistantProtocolError(
+        `The assistant is no longer waiting for ${kind}.`,
+      );
+    }
+    const pending =
+      current.snapshot[kind === "input" ? "pendingInput" : "pendingApproval"];
+    if (!pending || typeof pending !== "object" || Array.isArray(pending)) {
+      throw new AssistantProtocolError(
+        `The pending ${kind} request is no longer current.`,
+      );
+    }
+    const pendingRecord = pending as Record<string, unknown>;
+    const observedRequestId = protoString(
+      kind === "input"
+        ? pendingRecord["requestId"]
+        : (pendingRecord["approvalRequestId"] ?? pendingRecord["requestId"]),
+    );
+    if (observedRequestId !== requestId) {
+      throw new AssistantProtocolError(
+        `The pending ${kind} request changed before it could be resolved.`,
+      );
+    }
+    return { stateVersion: current.stateVersion, committed: false };
+  }
+
+  private applyCommittedApproval(
+    conversationId: string,
+    blockId: string,
+    approved: boolean,
+    stateVersion: number,
+    onEvent: (event: TurnEvent) => void,
+  ): void {
+    this.emitLocalBlockPatch(
+      conversationId,
+      blockId,
+      {
+        decision: approved ? "approved" : "denied",
+        decision_channel: "web",
+        decision_submission: null,
+        state_version: stateVersion,
+      },
+      onEvent,
+    );
+  }
+
+  private async readCurrentDecisionState(
+    conversationId: string,
+    signal: AbortSignal,
+  ): Promise<{
+    readonly stateVersion: number;
+    readonly snapshot: Record<string, unknown>;
+  }> {
+    const response = await assistantApi.get<unknown>(
+      `${ASSISTANT_PREFIX}/conversations/${encodeURIComponent(conversationId)}/state`,
+      signal,
+    );
+    if (!response || typeof response !== "object" || Array.isArray(response)) {
+      throw new AssistantProtocolError(
+        "The assistant state response was not a valid current-state envelope.",
+      );
+    }
+    const envelope = response as Record<string, unknown>;
+    if (envelope["status"] !== "current") {
+      throw new AssistantProtocolError(
+        "The assistant state is not current. Refresh the conversation and try again.",
+      );
+    }
+    const stateVersion = positiveStateVersion(envelope["stateVersion"]);
+    const snapshot = envelope["snapshot"];
+    if (
+      stateVersion === undefined ||
+      !snapshot ||
+      typeof snapshot !== "object" ||
+      Array.isArray(snapshot)
+    ) {
+      throw new AssistantProtocolError(
+        "The assistant state did not include an authoritative positive version.",
+      );
+    }
+    const snapshotRecord = snapshot as Record<string, unknown>;
+    if (protoString(snapshotRecord["actorId"]) !== conversationId) {
+      throw new AssistantProtocolError(
+        "The assistant state snapshot belongs to a different conversation.",
+      );
+    }
+    if (positiveStateVersion(snapshotRecord["stateVersion"]) !== stateVersion) {
+      throw new AssistantProtocolError(
+        "The assistant state envelope and snapshot versions did not match.",
+      );
+    }
+    return { stateVersion, snapshot: snapshotRecord };
+  }
+
+  private async observeDecisionCommit(
+    conversationId: string,
+    kind: "approval" | "input",
+    requestId: string,
+    expectedStateVersion: number,
+    approved: boolean | undefined,
+    signal: AbortSignal,
+  ): Promise<number | null> {
+    for (const delayMs of DECISION_OBSERVATION_DELAYS_MS) {
+      await abortableDelay(delayMs, signal);
+      const current = await this.readCurrentDecisionState(
+        conversationId,
+        signal,
+      );
+      const latest =
+        current.snapshot[
+          kind === "input"
+            ? "latestInputResolution"
+            : "latestApprovalResolution"
+        ];
+      if (latest && typeof latest === "object" && !Array.isArray(latest)) {
+        const latestRecord = latest as Record<string, unknown>;
+        const matchesDecision =
+          protoString(latestRecord["requestId"]) === requestId &&
+          latestRecord["outcome"] === "accepted" &&
+          (kind === "input" || latestRecord["approved"] === approved);
+        if (matchesDecision && current.stateVersion > expectedStateVersion) {
+          return current.stateVersion;
+        }
+      }
+      const pending =
+        current.snapshot[kind === "input" ? "pendingInput" : "pendingApproval"];
+      if (pending && typeof pending === "object" && !Array.isArray(pending)) {
+        const pendingRecord = pending as Record<string, unknown>;
+        const pendingRequestId = protoString(
+          kind === "input"
+            ? pendingRecord["requestId"]
+            : (pendingRecord["approvalRequestId"] ??
+                pendingRecord["requestId"]),
+        );
+        if (pendingRequestId !== requestId) {
+          throw new AssistantProtocolError(
+            `A different pending ${kind} request replaced the submitted request.`,
+          );
+        }
+      }
+    }
+    return null;
+  }
+
+  /** Quietly settle a stream that is already parked at a human gate. */
+  private pauseAtHumanGate(
+    conversationId: string,
+    expectedKind: "approval" | "input",
+    blockId: string,
+    requestId: string,
+  ): void {
+    const run = this.running.get(conversationId);
+    if (!run) return;
+    const exactRequestId =
+      expectedKind === "approval"
+        ? run.pendingApprovalRequestId
+        : run.pendingInputRequestId;
+    if (
+      exactRequestId !== requestId ||
+      run.openCards.get(blockId) !== expectedKind
+    ) {
+      throw new AssistantTurnActiveError();
+    }
     if (run.finished) return;
     this.acceptActionBatch(conversationId, run);
     this.closeOpenMessage(conversationId, run);

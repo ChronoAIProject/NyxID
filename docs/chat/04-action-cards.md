@@ -251,7 +251,7 @@ The schema recognizes these strict one-variant resource references:
 
 Each object has exactly one variant and each payload has exactly one valid control identity. The builder copies only the allowlisted variant and ID into the wire body.
 
-The generic schema anticipates other registry actions, but the current backend requires every `completed` report to contain `resource.userService.userServiceId`. A completed report with no resource or any other resource variant is rejected by `backend/src/services/assistant_service.rs:parse_assistant_chat_command`. This is stricter than the generic frontend union and is the effective shipped contract.
+Every `completed` report must carry exactly one of these allowlisted resource variants. A completed report with no resource, multiple variants, an unknown variant, an extra payload member, an invalid control identity, or secret-shaped material is rejected by `backend/src/services/assistant_service.rs:parse_assistant_chat_command`.
 
 Declined, failed, cancelled, and expired reports may omit the resource.
 

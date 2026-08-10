@@ -2,6 +2,7 @@ import type {
   ActionCardParams,
   ActionReport,
 } from "@/schemas/assistant-actions";
+import type { InputAnswer } from "@/schemas/assistant-input";
 
 export type ConnectCardState =
   | "needs_connection"
@@ -91,6 +92,32 @@ export interface ApprovalCardContentBlock {
   readonly expires_at: string;
   readonly decision: ApprovalDecision | null;
   readonly decision_channel: ApprovalDecisionChannel | null;
+  /** 202 accepted, awaiting the matching committed resolution fact. */
+  readonly decision_submission?: "approved" | "denied" | null;
+  /** Authoritative current-state version, when rehydrated from `/state`. */
+  readonly state_version?: number;
+}
+
+export type InputCardStatus =
+  | "pending"
+  | "submitted"
+  | "resolved"
+  | "cancelled";
+
+export interface InputCardContentBlock {
+  readonly type: "input_card";
+  readonly block_id: string;
+  readonly request_id: string;
+  readonly prompt: string;
+  readonly options: readonly {
+    readonly option_id: string;
+    readonly label: string;
+    readonly description?: string;
+  }[];
+  readonly allow_free_text: boolean;
+  readonly multi_select: boolean;
+  readonly state_version?: number;
+  readonly status: InputCardStatus;
 }
 
 export interface ArtifactContentBlock {
@@ -134,6 +161,7 @@ export type ContentBlock =
   | ConnectCardContentBlock
   | RunContentBlock
   | ApprovalCardContentBlock
+  | InputCardContentBlock
   | ArtifactContentBlock
   | ActionCardContentBlock;
 
@@ -300,16 +328,19 @@ export interface AssistantTransport {
    */
   cancelActiveTurn(conversationId: string): void;
   /**
-   * Send an approval decision. On the live Aevatar contract the approve
-   * endpoint responds with an SSE continuation of the run; implementations
-   * that stream it return a cancellable handle for the continuation turn and
-   * deliver its events to `onEvent`. Implementations with no continuation
-   * (mock) return null.
+   * Send a version-fenced approval decision. The command returns JSON
+   * acceptance; later committed projection frames carry business progress.
    */
   decideApproval(
     conversationId: string,
     blockId: string,
     approved: boolean,
+    onEvent?: (event: TurnEvent) => void,
+  ): Promise<TurnHandle | null>;
+  resolveInput(
+    conversationId: string,
+    blockId: string,
+    answer: InputAnswer,
     onEvent?: (event: TurnEvent) => void,
   ): Promise<TurnHandle | null>;
   setActionCardInProgress(

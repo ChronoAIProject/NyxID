@@ -1727,6 +1727,7 @@ describe("AevatarAssistantTransport", () => {
     });
     let releaseStop: (() => void) | undefined;
     let approveCalls = 0;
+    let stateReads = 0;
     let streamCalls = 0;
     const mock = vi.fn(
       (input: RequestInfo | URL, init?: RequestInit): Promise<Response> => {
@@ -1745,9 +1746,41 @@ describe("AevatarAssistantTransport", () => {
               resolve(jsonResponse({ status: "accepted" }, 202));
           });
         }
+        if (url.endsWith("/state") && (init?.method ?? "GET") === "GET") {
+          stateReads += 1;
+          return Promise.resolve(
+            jsonResponse(
+              stateReads === 1
+                ? {
+                    status: "current",
+                    stateVersion: 70,
+                    snapshot: {
+                      actorId: CONVERSATION_ID,
+                      stateVersion: 70,
+                      attentionKind: "approval",
+                      pendingApproval: { approvalRequestId: "req-fence" },
+                    },
+                  }
+                : {
+                    status: "current",
+                    stateVersion: 71,
+                    snapshot: {
+                      actorId: CONVERSATION_ID,
+                      stateVersion: 71,
+                      attentionKind: "none",
+                      latestApprovalResolution: {
+                        requestId: "req-fence",
+                        outcome: "accepted",
+                        approved: true,
+                      },
+                    },
+                  },
+            ),
+          );
+        }
         if (url.endsWith("/approve") && init?.method === "POST") {
           approveCalls += 1;
-          return Promise.resolve(sseResponse(OBSERVED_FRAMES));
+          return Promise.resolve(jsonResponse({ status: "accepted" }, 202));
         }
         if (url.endsWith("/stream") && init?.method === "POST") {
           streamCalls += 1;
@@ -2509,12 +2542,51 @@ describe("live AG-UI frame taxonomy", () => {
       .map((event) => event.block);
   }
 
-  function routeApprove(response: () => Response): FetchRoute {
+  function decisionStateEnvelope(
+    kind: "approval" | "input",
+    requestId: string,
+    stateVersion: number,
+    snapshot: Record<string, unknown> = {},
+  ): Record<string, unknown> {
+    return {
+      status: "current",
+      stateVersion,
+      snapshot: {
+        actorId: CONVERSATION_ID,
+        stateVersion,
+        progressSequence: 9_999,
+        attentionKind: kind,
+        ...(kind === "input"
+          ? { pendingInput: { requestId } }
+          : { pendingApproval: { approvalRequestId: requestId } }),
+        ...snapshot,
+      },
+    };
+  }
+
+  function routeDecisionStates(
+    ...states: readonly Record<string, unknown>[]
+  ): FetchRoute {
+    let readIndex = 0;
+    return (url, init) => {
+      if (
+        url !== `${ASSISTANT_BASE}/conversations/${CONVERSATION_ID}/state` ||
+        (init?.method ?? "GET") !== "GET"
+      ) {
+        return undefined;
+      }
+      const state = states[Math.min(readIndex, states.length - 1)];
+      readIndex += 1;
+      return state ? jsonResponse(state) : undefined;
+    };
+  }
+
+  function routeJsonResolve(
+    type: "approval.resolve" | "input.resolve",
+    response: () => Response = () => jsonResponse({ status: "accepted" }, 202),
+  ): FetchRoute {
     return (url, init) =>
-      url === `${ASSISTANT_BASE}/conversations/${CONVERSATION_ID}/approve` &&
-      init?.method === "POST"
-        ? response()
-        : undefined;
+      isTypedCommandRequest(url, init, type) ? response() : undefined;
   }
 
   it("maps TOOL_CALL_START/END onto a run step ledger", async () => {
@@ -2867,7 +2939,17 @@ describe("live AG-UI frame taxonomy", () => {
     );
   });
 
-  it("streams the approve endpoint's SSE continuation as a follow-on turn", async () => {
+  it("resolves approval through current-state GET, JSON POST, then committed observation", async () => {
+    const pendingState = decisionStateEnvelope("approval", "req-1", 23);
+    const committedState = decisionStateEnvelope("approval", "req-1", 24, {
+      attentionKind: "none",
+      pendingApproval: null,
+      latestApprovalResolution: {
+        requestId: "req-1",
+        outcome: "accepted",
+        approved: true,
+      },
+    });
     const fetchMock = stubFetch(
       routeStream([
         { type: "RUN_STARTED", turnId: TURN_ID },
@@ -2876,27 +2958,13 @@ describe("live AG-UI frame taxonomy", () => {
           toolApprovalRequest: { requestId: "req-1", toolName: "lark_post" },
         },
       ]),
-      routeApprove(() =>
-        sseResponse([
-          { type: "RUN_STARTED", turnId: TURN_ID },
-          {
-            type: "TEXT_MESSAGE_START",
-            textMessageStart: { messageId: "m-2", role: "assistant" },
-          },
-          {
-            type: "TEXT_MESSAGE_CONTENT",
-            textMessageContent: { delta: "Posted to #eng-updates." },
-          },
-          { type: "TEXT_MESSAGE_END", textMessageEnd: { messageId: "m-2" } },
-          { type: "RUN_FINISHED" },
-        ]),
-      ),
+      routeDecisionStates(pendingState, committedState),
+      routeJsonResolve("approval.resolve"),
       routeHistory([]),
     );
     const transport = new AevatarAssistantTransport();
     await seedActorConversation(transport);
-    const firstTurn = await collectTurn(transport, "Post the digest");
-    const lastFirstCursor = firstTurn[firstTurn.length - 1]?.cursor ?? 0;
+    await collectTurn(transport, "Post the digest");
     const history = await transport.getHistory(CONVERSATION_ID);
     const card = history.messages
       .flatMap((message) => message.blocks)
@@ -2904,22 +2972,14 @@ describe("live AG-UI frame taxonomy", () => {
     expect(card).toBeDefined();
 
     const events: TurnEvent[] = [];
-    const done = new Promise<void>((resolve) => {
-      void transport
-        .decideApproval(
-          CONVERSATION_ID,
-          card?.block_id ?? "",
-          true,
-          (event) => {
-            events.push(event);
-            if (event.event === "turn.completed") resolve();
-          },
-        )
-        .then((handle) => {
-          expect(handle).not.toBeNull();
-        });
-    });
-    await done;
+    await expect(
+      transport.decideApproval(
+        CONVERSATION_ID,
+        card?.block_id ?? "",
+        true,
+        (event) => events.push(event),
+      ),
+    ).resolves.toBeNull();
 
     const approveCall = fetchMock.mock.calls.find(([input, init]) =>
       isTypedCommandRequest(
@@ -2936,89 +2996,680 @@ describe("live AG-UI frame taxonomy", () => {
       clientRequestId: string;
       requestId: string;
       approved: boolean;
+      expectedStateVersion: number;
       sessionId?: string;
     };
-    expect(approveBody.type).toBe("approval.resolve");
-    expect(approveBody.conversationId).toBe(CONVERSATION_ID);
-    expect(approveBody.clientRequestId).toMatch(/^[0-9a-f-]{36}$/);
-    expect(approveBody.requestId).toBe("req-1");
-    expect(approveBody.approved).toBe(true);
-    expect(approveBody.sessionId).toBeUndefined();
-
-    // Continuation cursors continue past the prior turn's, so a
-    // still-subscribed at-least-once consumer never drops them.
-    expect(events[0]?.cursor).toBeGreaterThan(lastFirstCursor);
-    const cursors = events.map((event) => event.cursor);
-    expect(cursors).toEqual([...cursors].sort((a, b) => a - b));
-    const flip = events.find(
-      (event): event is Extract<TurnEvent, { event: "block.updated" }> =>
-        event.event === "block.updated",
-    );
-    expect(flip?.patch).toMatchObject({
-      decision: "approved",
-      decision_channel: "web",
+    expect(approveBody).toEqual({
+      type: "approval.resolve",
+      conversationId: CONVERSATION_ID,
+      clientRequestId: approveBody.clientRequestId,
+      requestId: "req-1",
+      approved: true,
+      expectedStateVersion: 23,
     });
-    const text = blockCompletions(events).find(
-      (block) => block.type === "text",
+    expect(approveBody.clientRequestId).toMatch(/^[0-9a-f-]{36}$/);
+    expect(approveBody.sessionId).toBeUndefined();
+    const stateCallIndexes = fetchMock.mock.calls.flatMap(([input], index) =>
+      String(input).endsWith("/state") ? [index] : [],
     );
-    expect(text?.type === "text" && text.text).toBe("Posted to #eng-updates.");
-    const terminal = events[events.length - 1];
-    expect(terminal?.event === "turn.completed" && terminal.status).toBe(
-      "completed",
+    const postIndex = fetchMock.mock.calls.findIndex(([input, init]) =>
+      isTypedCommandRequest(
+        String(input),
+        init as RequestInit | undefined,
+        "approval.resolve",
+      ),
     );
+    expect(stateCallIndexes).toHaveLength(2);
+    expect(stateCallIndexes[0]).toBeLessThan(postIndex);
+    expect(postIndex).toBeLessThan(stateCallIndexes[1] ?? -1);
+    expect(events.map((event) => event.event)).toEqual([
+      "block.updated",
+      "block.updated",
+    ]);
+    expect(events[0]).toMatchObject({
+      patch: {
+        decision_submission: "approved",
+        state_version: 23,
+      },
+    });
+    expect(events[1]).toMatchObject({
+      patch: {
+        decision: "approved",
+        decision_channel: "web",
+        decision_submission: null,
+      },
+    });
   });
 
-  it("fails closed when an approval continuation ends without a terminal frame", async () => {
-    stubFetch(
+  it("requires the exact latest approval resolution and a version advance", async () => {
+    const fetchMock = stubFetch(
       routeStream([
         { type: "RUN_STARTED", turnId: TURN_ID },
         {
           type: "TOOL_APPROVAL_REQUEST",
-          toolApprovalRequest: { requestId: "req-truncated" },
+          toolApprovalRequest: { requestId: "req-exact" },
         },
       ]),
-      routeApprove(() =>
-        sseResponse([
-          { type: "RUN_STARTED", turnId: TURN_ID },
-          {
-            type: "TEXT_MESSAGE_START",
-            textMessageStart: { messageId: "m-truncated", role: "assistant" },
+      routeDecisionStates(
+        decisionStateEnvelope("approval", "req-exact", 30),
+        decisionStateEnvelope("approval", "req-exact", 31, {
+          latestApprovalResolution: {
+            requestId: "req-other",
+            outcome: "accepted",
+            approved: false,
           },
-          {
-            type: "TEXT_MESSAGE_CONTENT",
-            textMessageContent: { delta: "Partial continuation" },
+        }),
+        decisionStateEnvelope("approval", "req-exact", 30, {
+          latestApprovalResolution: {
+            requestId: "req-exact",
+            outcome: "accepted",
+            approved: false,
           },
-        ]),
+        }),
+        decisionStateEnvelope("approval", "req-exact", 31, {
+          attentionKind: "none",
+          pendingApproval: null,
+          latestApprovalResolution: {
+            requestId: "req-exact",
+            outcome: "accepted",
+            approved: false,
+          },
+        }),
       ),
+      routeJsonResolve("approval.resolve"),
       routeHistory([]),
     );
     const transport = new AevatarAssistantTransport();
     await seedActorConversation(transport);
-    await collectTurn(transport, "Run an approved action");
+    await collectTurn(transport, "Run an action");
     const history = await transport.getHistory(CONVERSATION_ID);
     const card = history.messages
       .flatMap((message) => message.blocks)
       .find((block) => block.type === "approval_card");
 
     const events: TurnEvent[] = [];
-    await new Promise<void>((resolve) => {
-      void transport.decideApproval(
+    await transport.decideApproval(
+      CONVERSATION_ID,
+      card?.block_id ?? "",
+      false,
+      (event) => events.push(event),
+    );
+
+    expect(
+      fetchMock.mock.calls.filter(([input]) =>
+        String(input).endsWith("/state"),
+      ),
+    ).toHaveLength(4);
+    expect(events.at(-1)).toMatchObject({
+      event: "block.updated",
+      patch: {
+        decision: "denied",
+        decision_channel: "web",
+      },
+    });
+  });
+
+  it("renders committed input, ignores AG-UI sequence as a version, and resolves selected options", async () => {
+    let releaseObservation: ((response: Response) => void) | undefined;
+    let stateReads = 0;
+    const fetchMock = stubFetch(
+      routeStream([
+        { type: "RUN_STARTED", turnId: TURN_ID, sequence: 8_888 },
+        {
+          type: "CUSTOM",
+          sequence: 8_889,
+          custom: {
+            name: "nyxid.input.request",
+            payload: {
+              requestId: "input-1",
+              prompt: "Choose regions",
+              options: [
+                { optionId: "region-sg", label: "Singapore" },
+                { optionId: "region-jp", label: "Japan" },
+              ],
+              allowFreeText: false,
+              multiSelect: true,
+            },
+          },
+        },
+      ]),
+      (url, init) => {
+        if (
+          url !== `${ASSISTANT_BASE}/conversations/${CONVERSATION_ID}/state` ||
+          (init?.method ?? "GET") !== "GET"
+        ) {
+          return undefined;
+        }
+        stateReads += 1;
+        if (stateReads === 1) {
+          return jsonResponse(decisionStateEnvelope("input", "input-1", 41));
+        }
+        return new Response(
+          new ReadableStream({
+            start(controller) {
+              releaseObservation = (response) => {
+                void response.json().then((body) => {
+                  controller.enqueue(
+                    new TextEncoder().encode(JSON.stringify(body)),
+                  );
+                  controller.close();
+                });
+              };
+            },
+          }),
+          { headers: { "Content-Type": "application/json" } },
+        );
+      },
+      routeJsonResolve("input.resolve"),
+      routeHistory([]),
+    );
+    const transport = new AevatarAssistantTransport();
+    await seedActorConversation(transport);
+    await collectTurn(transport, "Ask me");
+    const history = await transport.getHistory(CONVERSATION_ID);
+    const card = history.messages
+      .flatMap((message) => message.blocks)
+      .find((block) => block.type === "input_card");
+    expect(card).toMatchObject({
+      type: "input_card",
+      request_id: "input-1",
+      status: "pending",
+      multi_select: true,
+      options: [
+        { option_id: "region-sg", label: "Singapore" },
+        { option_id: "region-jp", label: "Japan" },
+      ],
+    });
+    expect(card?.type === "input_card" && card.state_version).toBeUndefined();
+
+    const events: TurnEvent[] = [];
+    const resolving = transport.resolveInput(
+      CONVERSATION_ID,
+      card?.block_id ?? "",
+      { selectedOptionIds: ["region-sg", "region-jp"] },
+      (event) => events.push(event),
+    );
+    while (!releaseObservation) {
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    }
+    const submitted = await transport.getHistory(CONVERSATION_ID);
+    const submittedCard = submitted.messages
+      .flatMap((message) => message.blocks)
+      .find((block) => block.type === "input_card");
+    expect(submittedCard).toMatchObject({
+      status: "submitted",
+      state_version: 41,
+    });
+    const resolveCall = fetchMock.mock.calls.find(([input, init]) =>
+      isTypedCommandRequest(
+        String(input),
+        init as RequestInit | undefined,
+        "input.resolve",
+      ),
+    );
+    const resolveBody = jsonRequestBody(
+      resolveCall?.[1] as RequestInit | undefined,
+    );
+    expect(resolveBody).toEqual({
+      type: "input.resolve",
+      conversationId: CONVERSATION_ID,
+      clientRequestId: resolveBody["clientRequestId"],
+      requestId: "input-1",
+      answer: { selectedOptionIds: ["region-sg", "region-jp"] },
+      expectedStateVersion: 41,
+    });
+    releaseObservation?.(
+      jsonResponse(
+        decisionStateEnvelope("input", "input-1", 42, {
+          attentionKind: "none",
+          pendingInput: null,
+          latestInputResolution: {
+            requestId: "input-1",
+            outcome: "accepted",
+          },
+        }),
+      ),
+    );
+    await resolving;
+    expect(events.at(-1)).toMatchObject({
+      event: "block.updated",
+      patch: { status: "resolved" },
+    });
+  });
+
+  it("sends the exact free-text input body and rejects mixed answers before POST", async () => {
+    const fetchMock = stubFetch(
+      routeStream([
+        { type: "RUN_STARTED", turnId: TURN_ID },
+        {
+          type: "CUSTOM",
+          custom: {
+            name: "nyxid.input.request",
+            payload: {
+              requestId: "input-text",
+              prompt: "Name the region",
+              options: [],
+              allowFreeText: true,
+              multiSelect: false,
+            },
+          },
+        },
+      ]),
+      routeDecisionStates(
+        decisionStateEnvelope("input", "input-text", 51),
+        decisionStateEnvelope("input", "input-text", 52, {
+          attentionKind: "none",
+          pendingInput: null,
+          latestInputResolution: {
+            requestId: "input-text",
+            outcome: "accepted",
+          },
+        }),
+      ),
+      routeJsonResolve("input.resolve"),
+      routeHistory([]),
+    );
+    const transport = new AevatarAssistantTransport();
+    await seedActorConversation(transport);
+    await collectTurn(transport, "Ask me");
+    const history = await transport.getHistory(CONVERSATION_ID);
+    const card = history.messages
+      .flatMap((message) => message.blocks)
+      .find((block) => block.type === "input_card");
+
+    await expect(
+      transport.resolveInput(CONVERSATION_ID, card?.block_id ?? "", {
+        freeText: "Singapore",
+        selectedOptionIds: ["region-sg"],
+      }),
+    ).rejects.toThrow();
+    expect(
+      fetchMock.mock.calls.filter(([input, init]) =>
+        isTypedCommandRequest(
+          String(input),
+          init as RequestInit | undefined,
+          "input.resolve",
+        ),
+      ),
+    ).toHaveLength(0);
+
+    await transport.resolveInput(CONVERSATION_ID, card?.block_id ?? "", {
+      freeText: "  Singapore  ",
+    });
+    const resolveCall = fetchMock.mock.calls.find(([input, init]) =>
+      isTypedCommandRequest(
+        String(input),
+        init as RequestInit | undefined,
+        "input.resolve",
+      ),
+    );
+    expect(
+      jsonRequestBody(resolveCall?.[1] as RequestInit | undefined),
+    ).toEqual({
+      type: "input.resolve",
+      conversationId: CONVERSATION_ID,
+      clientRequestId: expect.any(String),
+      requestId: "input-text",
+      answer: { freeText: "Singapore" },
+      expectedStateVersion: 51,
+    });
+  });
+
+  it.each([
+    [
+      "non-current status",
+      {
+        status: "stale",
+        stateVersion: 61,
+        snapshot: {
+          actorId: CONVERSATION_ID,
+          stateVersion: 61,
+          attentionKind: "input",
+          pendingInput: { requestId: "input-fence" },
+        },
+      },
+    ],
+    [
+      "missing authoritative version",
+      {
+        status: "current",
+        snapshot: {
+          actorId: CONVERSATION_ID,
+          stateVersion: 61,
+          attentionKind: "input",
+          pendingInput: { requestId: "input-fence" },
+        },
+      },
+    ],
+    [
+      "zero authoritative version",
+      {
+        status: "current",
+        stateVersion: 0,
+        snapshot: {
+          actorId: CONVERSATION_ID,
+          stateVersion: 0,
+          attentionKind: "input",
+          pendingInput: { requestId: "input-fence" },
+        },
+      },
+    ],
+    [
+      "envelope and snapshot version mismatch",
+      {
+        status: "current",
+        stateVersion: 61,
+        snapshot: {
+          actorId: CONVERSATION_ID,
+          stateVersion: 60,
+          attentionKind: "input",
+          pendingInput: { requestId: "input-fence" },
+        },
+      },
+    ],
+    [
+      "snapshot actor mismatch",
+      {
+        status: "current",
+        stateVersion: 61,
+        snapshot: {
+          actorId: "nyxid-chat-other",
+          stateVersion: 61,
+          attentionKind: "input",
+          pendingInput: { requestId: "input-fence" },
+        },
+      },
+    ],
+    [
+      "attention kind mismatch",
+      {
+        status: "current",
+        stateVersion: 61,
+        snapshot: {
+          actorId: CONVERSATION_ID,
+          stateVersion: 61,
+          attentionKind: "approval",
+          pendingInput: { requestId: "input-fence" },
+        },
+      },
+    ],
+    [
+      "pending request mismatch",
+      {
+        status: "current",
+        stateVersion: 61,
+        snapshot: {
+          actorId: CONVERSATION_ID,
+          stateVersion: 61,
+          attentionKind: "input",
+          pendingInput: { requestId: "input-other" },
+        },
+      },
+    ],
+  ])("blocks input POST on %s", async (_caseName, currentState) => {
+    const fetchMock = stubFetch(
+      routeStream([
+        { type: "RUN_STARTED", turnId: TURN_ID },
+        {
+          type: "CUSTOM",
+          custom: {
+            name: "nyxid.input.request",
+            payload: {
+              requestId: "input-fence",
+              prompt: "Choose one",
+              options: [
+                { optionId: "option-a", label: "A" },
+                { optionId: "option-b", label: "B" },
+              ],
+              allowFreeText: false,
+              multiSelect: false,
+            },
+          },
+        },
+      ]),
+      routeDecisionStates(currentState),
+      routeJsonResolve("input.resolve"),
+      routeHistory([]),
+    );
+    const transport = new AevatarAssistantTransport();
+    await seedActorConversation(transport);
+    await collectTurn(transport, "Ask me");
+    const history = await transport.getHistory(CONVERSATION_ID);
+    const card = history.messages
+      .flatMap((message) => message.blocks)
+      .find((block) => block.type === "input_card");
+
+    await expect(
+      transport.resolveInput(CONVERSATION_ID, card?.block_id ?? "", {
+        selectedOptionIds: ["option-a"],
+      }),
+    ).rejects.toThrow();
+    expect(
+      fetchMock.mock.calls.filter(([input, init]) =>
+        isTypedCommandRequest(
+          String(input),
+          init as RequestInit | undefined,
+          "input.resolve",
+        ),
+      ),
+    ).toHaveLength(0);
+  });
+
+  it("restores input to pending when committed observation times out", async () => {
+    const fetchMock = stubFetch(
+      routeStream([
+        { type: "RUN_STARTED", turnId: TURN_ID },
+        {
+          type: "CUSTOM",
+          custom: {
+            name: "nyxid.input.request",
+            payload: {
+              requestId: "input-timeout",
+              prompt: "Choose one",
+              options: [
+                { optionId: "option-a", label: "A" },
+                { optionId: "option-b", label: "B" },
+              ],
+              allowFreeText: false,
+              multiSelect: false,
+            },
+          },
+        },
+      ]),
+      routeDecisionStates(decisionStateEnvelope("input", "input-timeout", 62)),
+      routeJsonResolve("input.resolve"),
+      routeHistory([]),
+    );
+    const transport = new AevatarAssistantTransport();
+    await seedActorConversation(transport);
+    await collectTurn(transport, "Ask me");
+    const history = await transport.getHistory(CONVERSATION_ID);
+    const card = history.messages
+      .flatMap((message) => message.blocks)
+      .find((block) => block.type === "input_card");
+
+    await expect(
+      transport.resolveInput(CONVERSATION_ID, card?.block_id ?? "", {
+        selectedOptionIds: ["option-a"],
+      }),
+    ).rejects.toThrow("its committed result was not observed");
+
+    const after = await transport.getHistory(CONVERSATION_ID);
+    const cardAfter = after.messages
+      .flatMap((message) => message.blocks)
+      .find((block) => block.type === "input_card");
+    expect(cardAfter).toMatchObject({
+      status: "pending",
+      state_version: 62,
+    });
+    expect(
+      fetchMock.mock.calls.filter(([input]) =>
+        String(input).endsWith("/state"),
+      ),
+    ).toHaveLength(5);
+  });
+
+  it("absorbs a late committed input before retrying without a second POST", async () => {
+    const pendingState = decisionStateEnvelope("input", "input-late", 63);
+    const committedState = decisionStateEnvelope("input", "input-late", 64, {
+      attentionKind: "none",
+      pendingInput: null,
+      latestInputResolution: {
+        requestId: "input-late",
+        outcome: "accepted",
+      },
+    });
+    const fetchMock = stubFetch(
+      routeStream([
+        { type: "RUN_STARTED", turnId: TURN_ID },
+        {
+          type: "CUSTOM",
+          custom: {
+            name: "nyxid.input.request",
+            payload: {
+              requestId: "input-late",
+              prompt: "Choose one",
+              options: [
+                { optionId: "option-a", label: "A" },
+                { optionId: "option-b", label: "B" },
+              ],
+              allowFreeText: false,
+              multiSelect: false,
+            },
+          },
+        },
+      ]),
+      routeDecisionStates(
+        pendingState,
+        pendingState,
+        pendingState,
+        pendingState,
+        pendingState,
+        committedState,
+      ),
+      routeJsonResolve("input.resolve"),
+      routeHistory([]),
+    );
+    const transport = new AevatarAssistantTransport();
+    await seedActorConversation(transport);
+    await collectTurn(transport, "Ask me");
+    const history = await transport.getHistory(CONVERSATION_ID);
+    const card = history.messages
+      .flatMap((message) => message.blocks)
+      .find((block) => block.type === "input_card");
+    const answer = { selectedOptionIds: ["option-a"] };
+
+    await expect(
+      transport.resolveInput(CONVERSATION_ID, card?.block_id ?? "", answer),
+    ).rejects.toThrow("its committed result was not observed");
+    await expect(
+      transport.resolveInput(CONVERSATION_ID, card?.block_id ?? "", answer),
+    ).resolves.toBeNull();
+
+    const after = await transport.getHistory(CONVERSATION_ID);
+    const cardAfter = after.messages
+      .flatMap((message) => message.blocks)
+      .find((block) => block.type === "input_card");
+    expect(cardAfter).toMatchObject({ status: "resolved", state_version: 64 });
+    expect(
+      fetchMock.mock.calls.filter(([input, init]) =>
+        isTypedCommandRequest(
+          String(input),
+          init as RequestInit | undefined,
+          "input.resolve",
+        ),
+      ),
+    ).toHaveLength(1);
+  });
+
+  it("does not let an old input card pause a broad signal wait", async () => {
+    const fetchMock = stubFetch(
+      routeStream([
+        { type: "RUN_STARTED", turnId: TURN_ID },
+        {
+          type: "CUSTOM",
+          custom: {
+            name: "nyxid.input.request",
+            payload: {
+              requestId: "input-old",
+              prompt: "Old question",
+              options: [
+                { optionId: "old-a", label: "Old A" },
+                { optionId: "old-b", label: "Old B" },
+              ],
+              allowFreeText: false,
+              multiSelect: false,
+            },
+          },
+        },
+      ]),
+    );
+    const transport = new AevatarAssistantTransport();
+    await seedActorConversation(transport);
+    await collectTurn(transport, "Create old card");
+    const history = await transport.getHistory(CONVERSATION_ID);
+    const oldCard = history.messages
+      .flatMap((message) => message.blocks)
+      .find((block) => block.type === "input_card");
+
+    vi.spyOn(chatStreamClient, "start").mockImplementation(
+      (request): ChatStreamRequestHandle => {
+        void Promise.resolve().then(() => {
+          request.onFrames([
+            {
+              type: "RUN_STARTED",
+              turnId: "turn-broad-signal",
+            },
+            {
+              type: "CUSTOM",
+              custom: {
+                name: "aevatar.workflow.waiting_signal",
+                payload: { signalName: "unrelated", stepId: "wait-new" },
+              },
+            },
+          ] as ChatStreamFrame[]);
+        });
+        return {
+          headers: Promise.resolve({
+            kind: "response",
+            status: 200,
+            contentType: "text/event-stream",
+          }),
+          completion: new Promise<ChatStreamCompletionResult>(() => undefined),
+          cancel: vi.fn(),
+        };
+      },
+    );
+    const waiting = new Promise<void>((resolve) => {
+      transport.sendMessage(
         CONVERSATION_ID,
-        card?.block_id ?? "",
-        true,
+        "Start unrelated wait",
         (event) => {
-          events.push(event);
-          if (event.event === "turn.completed") resolve();
+          if (event.event === "turn.status" && event.status === "waiting")
+            resolve();
         },
       );
     });
+    await waiting;
 
-    expect(events.at(-1)).toMatchObject({
-      event: "turn.completed",
-      turn_id: TURN_ID,
-      status: "failed",
-      error: { code: "stream_closed" },
-    });
+    await expect(
+      transport.resolveInput(CONVERSATION_ID, oldCard?.block_id ?? "", {
+        selectedOptionIds: ["old-a"],
+      }),
+    ).rejects.toBeInstanceOf(AssistantTurnActiveError);
+    expect(
+      fetchMock.mock.calls.filter(([input, init]) =>
+        isTypedCommandRequest(
+          String(input),
+          init as RequestInit | undefined,
+          "input.resolve",
+        ),
+      ),
+    ).toHaveLength(0);
+    expect(() =>
+      transport.sendMessage(CONVERSATION_ID, "Still active", () => {}),
+    ).toThrow(AssistantTurnActiveError);
+    transport.cancelActiveTurn(CONVERSATION_ID);
   });
 
   it("reserves the conversation for the whole approve exchange", async () => {
@@ -3034,6 +3685,18 @@ describe("live AG-UI frame taxonomy", () => {
           toolApprovalRequest: { requestId: "req-slow" },
         },
       ]),
+      routeDecisionStates(
+        decisionStateEnvelope("approval", "req-slow", 60),
+        decisionStateEnvelope("approval", "req-slow", 61, {
+          attentionKind: "none",
+          pendingApproval: null,
+          latestApprovalResolution: {
+            requestId: "req-slow",
+            outcome: "accepted",
+            approved: true,
+          },
+        }),
+      ),
       routeHistory([]),
     );
     const transport = new AevatarAssistantTransport();
@@ -3054,7 +3717,7 @@ describe("live AG-UI frame taxonomy", () => {
           approveSignal = init?.signal;
           return new Promise<Response>((resolve) => {
             releaseApprove = () => {
-              resolve(jsonResponse({ accepted: true }));
+              resolve(jsonResponse({ status: "accepted" }, 202));
             };
           });
         }
@@ -3072,6 +3735,9 @@ describe("live AG-UI frame taxonomy", () => {
     expect(() => {
       transport.sendMessage(CONVERSATION_ID, "concurrent send", () => {});
     }).toThrow(AssistantTurnActiveError);
+    await expect(
+      transport.decideApproval(CONVERSATION_ID, card?.block_id ?? "", false),
+    ).rejects.toBeInstanceOf(AssistantTurnActiveError);
     // Stop must be able to abort the in-flight approve request.
     expect(approveSignal).toBeDefined();
     releaseApprove();
@@ -3143,8 +3809,8 @@ describe("live AG-UI frame taxonomy", () => {
     expect(list).toHaveLength(0);
   });
 
-  it("settles immediately when the approve endpoint acks with JSON", async () => {
-    stubFetch(
+  it("restores approval to retryable when committed observation times out", async () => {
+    const fetchMock = stubFetch(
       routeStream([
         { type: "RUN_STARTED", turnId: TURN_ID },
         {
@@ -3152,7 +3818,8 @@ describe("live AG-UI frame taxonomy", () => {
           toolApprovalRequest: { requestId: "req-2" },
         },
       ]),
-      routeApprove(() => jsonResponse({ accepted: true })),
+      routeDecisionStates(decisionStateEnvelope("approval", "req-2", 80)),
+      routeJsonResolve("approval.resolve"),
       routeHistory([]),
     );
     const transport = new AevatarAssistantTransport();
@@ -3164,31 +3831,107 @@ describe("live AG-UI frame taxonomy", () => {
       .find((block) => block.type === "approval_card");
 
     const events: TurnEvent[] = [];
-    const handle = await transport.decideApproval(
-      CONVERSATION_ID,
-      card?.block_id ?? "",
-      false,
-      (event) => events.push(event),
-    );
+    await expect(
+      transport.decideApproval(
+        CONVERSATION_ID,
+        card?.block_id ?? "",
+        false,
+        (event) => events.push(event),
+      ),
+    ).rejects.toThrow("its committed result was not observed");
 
-    // No live continuation — no handle to register (a stale entry would
-    // linger in the caller's registry after the turn completed).
-    expect(handle).toBeNull();
-    const flip = events.find(
-      (event): event is Extract<TurnEvent, { event: "block.updated" }> =>
-        event.event === "block.updated",
-    );
-    expect(flip?.patch).toMatchObject({ decision: "denied" });
-    const terminal = events[events.length - 1];
-    expect(terminal?.event === "turn.completed" && terminal.status).toBe(
-      "completed",
-    );
+    expect(events[0]).toMatchObject({
+      event: "block.updated",
+      patch: {
+        decision_submission: "denied",
+        state_version: 80,
+      },
+    });
+    expect(events.at(-1)).toMatchObject({
+      event: "block.updated",
+      patch: { decision_submission: null },
+    });
+    const after = await transport.getHistory(CONVERSATION_ID);
+    const cardAfter = after.messages
+      .flatMap((message) => message.blocks)
+      .find((block) => block.type === "approval_card");
+    expect(cardAfter).toMatchObject({
+      decision: null,
+      decision_submission: null,
+    });
+    expect(
+      fetchMock.mock.calls.filter(([input]) =>
+        String(input).endsWith("/state"),
+      ),
+    ).toHaveLength(5);
   });
 
-  it("settles the parked run ledger when the approval is decided", async () => {
-    // The prior turn's ledger froze in awaiting_approval with a waiting
-    // step; deciding must flip it (approved → done/completed) so the
-    // transient activity line doesn't show a stale approval clock forever.
+  it("absorbs a late committed approval before retrying without a second POST", async () => {
+    const pendingState = decisionStateEnvelope("approval", "req-late", 81);
+    const committedState = decisionStateEnvelope("approval", "req-late", 82, {
+      attentionKind: "none",
+      pendingApproval: null,
+      latestApprovalResolution: {
+        requestId: "req-late",
+        outcome: "accepted",
+        approved: true,
+      },
+    });
+    const fetchMock = stubFetch(
+      routeStream([
+        { type: "RUN_STARTED", turnId: TURN_ID },
+        {
+          type: "TOOL_APPROVAL_REQUEST",
+          toolApprovalRequest: { requestId: "req-late" },
+        },
+      ]),
+      routeDecisionStates(
+        pendingState,
+        pendingState,
+        pendingState,
+        pendingState,
+        pendingState,
+        committedState,
+      ),
+      routeJsonResolve("approval.resolve"),
+      routeHistory([]),
+    );
+    const transport = new AevatarAssistantTransport();
+    await seedActorConversation(transport);
+    await collectTurn(transport, "Do the thing");
+    const history = await transport.getHistory(CONVERSATION_ID);
+    const card = history.messages
+      .flatMap((message) => message.blocks)
+      .find((block) => block.type === "approval_card");
+
+    await expect(
+      transport.decideApproval(CONVERSATION_ID, card?.block_id ?? "", true),
+    ).rejects.toThrow("its committed result was not observed");
+    await expect(
+      transport.decideApproval(CONVERSATION_ID, card?.block_id ?? "", false),
+    ).resolves.toBeNull();
+
+    const after = await transport.getHistory(CONVERSATION_ID);
+    const cardAfter = after.messages
+      .flatMap((message) => message.blocks)
+      .find((block) => block.type === "approval_card");
+    expect(cardAfter).toMatchObject({
+      decision: "approved",
+      decision_submission: null,
+      state_version: 82,
+    });
+    expect(
+      fetchMock.mock.calls.filter(([input, init]) =>
+        isTypedCommandRequest(
+          String(input),
+          init as RequestInit | undefined,
+          "approval.resolve",
+        ),
+      ),
+    ).toHaveLength(1);
+  });
+
+  it("does not treat a committed approval as tool-step completion", async () => {
     stubFetch(
       routeStream([
         { type: "RUN_STARTED", turnId: TURN_ID },
@@ -3201,10 +3944,19 @@ describe("live AG-UI frame taxonomy", () => {
           toolApprovalRequest: { requestId: "req-ledger" },
         },
       ]),
-      (url, init) =>
-        url.endsWith("/approve") && init?.method === "POST"
-          ? jsonResponse({ accepted: true })
-          : undefined,
+      routeDecisionStates(
+        decisionStateEnvelope("approval", "req-ledger", 90),
+        decisionStateEnvelope("approval", "req-ledger", 91, {
+          attentionKind: "none",
+          pendingApproval: null,
+          latestApprovalResolution: {
+            requestId: "req-ledger",
+            outcome: "accepted",
+            approved: true,
+          },
+        }),
+      ),
+      routeJsonResolve("approval.resolve"),
       routeHistory([]),
     );
     const transport = new AevatarAssistantTransport();
@@ -3223,24 +3975,23 @@ describe("live AG-UI frame taxonomy", () => {
       (event) => events.push(event),
     );
 
-    const ledgerFlip = events.find(
+    const ledgerPatch = events.find(
       (event): event is Extract<TurnEvent, { event: "block.updated" }> =>
         event.event === "block.updated" &&
-        (event.patch as { state?: string }).state === "completed",
+        (Array.isArray((event.patch as { steps?: unknown }).steps) ||
+          "state" in event.patch),
     );
-    expect(ledgerFlip).toBeDefined();
-    const steps = (
-      ledgerFlip?.patch as {
-        steps?: Array<{ status: string }>;
-      }
-    ).steps;
-    expect(steps?.[0]?.status).toBe("done");
+    expect(ledgerPatch).toBeUndefined();
+    expect(
+      events.some(
+        (event) =>
+          event.event === "block.updated" &&
+          (event.patch as { decision?: string }).decision === "approved",
+      ),
+    ).toBe(true);
   });
 
-  it("settles only the decided approval's step; other gates stay parked", async () => {
-    // Second-pass codex P2: ledger settlement is correlated by
-    // approval_request_id — deciding one card must not settle a step gated
-    // on a different pending approval, and the ledger stays parked.
+  it("leaves every multi-gate step parked until actor state advances", async () => {
     stubFetch(
       routeStream([
         { type: "RUN_STARTED", turnId: TURN_ID },
@@ -3261,10 +4012,19 @@ describe("live AG-UI frame taxonomy", () => {
           toolApprovalRequest: { requestId: "req-B", toolCallId: "c2" },
         },
       ]),
-      (url, init) =>
-        url.endsWith("/approve") && init?.method === "POST"
-          ? jsonResponse({ accepted: true })
-          : undefined,
+      routeDecisionStates(
+        decisionStateEnvelope("approval", "req-B", 100),
+        decisionStateEnvelope("approval", "req-B", 101, {
+          attentionKind: "approval",
+          pendingApproval: { approvalRequestId: "req-A" },
+          latestApprovalResolution: {
+            requestId: "req-B",
+            outcome: "accepted",
+            approved: true,
+          },
+        }),
+      ),
+      routeJsonResolve("approval.resolve"),
       routeHistory([]),
     );
     const transport = new AevatarAssistantTransport();
@@ -3287,24 +4047,22 @@ describe("live AG-UI frame taxonomy", () => {
       (event) => events.push(event),
     );
 
-    const ledgerPatch = events.find(
-      (event): event is Extract<TurnEvent, { event: "block.updated" }> =>
-        event.event === "block.updated" &&
-        Array.isArray((event.patch as { steps?: unknown }).steps),
-    );
-    const patch = ledgerPatch?.patch as {
-      state?: string;
-      steps?: Array<{ status: string; approval_request_id: string | null }>;
-    };
-    expect(patch.state).toBe("awaiting_approval");
-    const stepA = patch.steps?.find(
-      (step) => step.approval_request_id === "req-A",
-    );
-    const stepB = patch.steps?.find(
-      (step) => step.approval_request_id === "req-B",
-    );
-    expect(stepA?.status).toBe("waiting");
-    expect(stepB?.status).toBe("done");
+    expect(
+      events.some(
+        (event) =>
+          event.event === "block.updated" &&
+          Array.isArray((event.patch as { steps?: unknown }).steps),
+      ),
+    ).toBe(false);
+
+    const after = await transport.getHistory(CONVERSATION_ID);
+    const run = after.messages
+      .flatMap((message) => message.blocks)
+      .find((block) => block.type === "run");
+    expect(run?.type === "run" && run.state).toBe("awaiting_approval");
+    expect(
+      run?.type === "run" && run.steps.map((step) => step.status),
+    ).toEqual(["waiting", "waiting"]);
   });
 
   it("terminalizes waiting steps when the run dies at an approval gate", async () => {
@@ -3490,6 +4248,7 @@ describe("live AG-UI frame taxonomy", () => {
           toolApprovalRequest: { requestId: "req-hung" },
         },
       ]),
+      routeDecisionStates(decisionStateEnvelope("approval", "req-hung", 110)),
       routeHistory([]),
     );
     const transport = new AevatarAssistantTransport();
@@ -3527,10 +4286,12 @@ describe("live AG-UI frame taxonomy", () => {
     transport.cancelActiveTurn(CONVERSATION_ID);
 
     await expect(pending).rejects.toThrow("The approval request was stopped.");
-    const terminal = events[events.length - 1];
-    expect(terminal?.event === "turn.completed" && terminal.status).toBe(
-      "cancelled",
-    );
+    expect(events).toHaveLength(1);
+    expect(events[0]).toMatchObject({
+      event: "turn.completed",
+      status: "cancelled",
+      error: null,
+    });
   });
 
   it("fails an approve rejection with a single messaging surface", async () => {
@@ -3545,10 +4306,10 @@ describe("live AG-UI frame taxonomy", () => {
           toolApprovalRequest: { requestId: "req-502" },
         },
       ]),
-      (url, init) =>
-        url.endsWith("/approve") && init?.method === "POST"
-          ? jsonResponse({ code: "UPSTREAM_DOWN", message: "bad gateway" }, 502)
-          : undefined,
+      routeDecisionStates(decisionStateEnvelope("approval", "req-502", 120)),
+      routeJsonResolve("approval.resolve", () =>
+        jsonResponse({ code: "UPSTREAM_DOWN", message: "bad gateway" }, 502),
+      ),
       routeHistory([]),
     );
     const transport = new AevatarAssistantTransport();
@@ -3569,13 +4330,7 @@ describe("live AG-UI frame taxonomy", () => {
       ),
     ).rejects.toThrow("bad gateway");
 
-    const terminal = events[events.length - 1];
-    expect(
-      terminal?.event === "turn.completed" && {
-        status: terminal.status,
-        error: terminal.error,
-      },
-    ).toEqual({ status: "failed", error: null });
+    expect(events).toHaveLength(0);
     // The card was never flipped — the decision stays retryable.
     const after = await transport.getHistory(CONVERSATION_ID);
     const cardAfter = after.messages
@@ -3584,6 +4339,9 @@ describe("live AG-UI frame taxonomy", () => {
     expect(cardAfter?.type === "approval_card" && cardAfter.decision).toBe(
       null,
     );
+    await expect(
+      transport.decideApproval(CONVERSATION_ID, card?.block_id ?? "", true),
+    ).rejects.toThrow("bad gateway");
   });
 
   it("mines a raw.observed completion for steps and fallback text, never reasoning", async () => {
@@ -6934,9 +7692,9 @@ describe("studio new chats and typed actor compatibility", () => {
       status: "completed",
     });
     // The turn is delivered, not swallowed: the run's answer reaches the UI.
-    expect(
-      created.some((event) => event.event === "message.completed"),
-    ).toBe(true);
+    expect(created.some((event) => event.event === "message.completed")).toBe(
+      true,
+    );
 
     // The elided watermark leaves no stored fence, so the next turn recovers
     // one from history rather than continuing at a fabricated version.
@@ -6975,50 +7733,50 @@ describe("studio new chats and typed actor compatibility", () => {
     ["a boolean", true],
     ["an array", []],
     ["a negative version", "-1"],
-  ])("fails closed on a present but non-int64 stateVersion: %s", async (
-    _label,
-    stateVersion,
-  ) => {
-    mockChatStreams((request) =>
-      request.url === WORKFLOW_URL
-        ? {
-            frames: [
-              {
-                timestamp: "1785297207163",
-                custom: {
-                  name: "aevatar.chat.context",
-                  payload: {
-                    "@type":
-                      "type.googleapis.com/aevatar.workflow.runs.WorkflowChatContextPayload",
-                    scopeId: USER_ID,
-                    conversationId: WORKFLOW_CONVERSATION,
-                    turnId: WORKFLOW_TURN,
-                    stateVersion,
+  ])(
+    "fails closed on a present but non-int64 stateVersion: %s",
+    async (_label, stateVersion) => {
+      mockChatStreams((request) =>
+        request.url === WORKFLOW_URL
+          ? {
+              frames: [
+                {
+                  timestamp: "1785297207163",
+                  custom: {
+                    name: "aevatar.chat.context",
+                    payload: {
+                      "@type":
+                        "type.googleapis.com/aevatar.workflow.runs.WorkflowChatContextPayload",
+                      scopeId: USER_ID,
+                      conversationId: WORKFLOW_CONVERSATION,
+                      turnId: WORKFLOW_TURN,
+                      stateVersion,
+                    },
                   },
                 },
-              },
-              { runStarted: { threadId: RUN_ACTOR, runId: RUN_ACTOR } },
-              ...WORKFLOW_TAIL,
-            ],
-          }
-        : undefined,
-    );
-    stubFetch();
-    const transport = new AevatarAssistantTransport();
-    const conversation = await transport.createConversation();
+                { runStarted: { threadId: RUN_ACTOR, runId: RUN_ACTOR } },
+                ...WORKFLOW_TAIL,
+              ],
+            }
+          : undefined,
+      );
+      stubFetch();
+      const transport = new AevatarAssistantTransport();
+      const conversation = await transport.createConversation();
 
-    const events = await collectWorkflowTurn(
-      transport,
-      conversation.id,
-      "create",
-    );
+      const events = await collectWorkflowTurn(
+        transport,
+        conversation.id,
+        "create",
+      );
 
-    expect(events.at(-1)).toMatchObject({
-      event: "turn.completed",
-      status: "failed",
-      error: { code: "stream_protocol_error" },
-    });
-  });
+      expect(events.at(-1)).toMatchObject({
+        event: "turn.completed",
+        status: "failed",
+        error: { code: "stream_protocol_error" },
+      });
+    },
+  );
 
   function customFrame(name: string, payload: unknown): ChatStreamFrame {
     return { custom: { name, payload } } as ChatStreamFrame;

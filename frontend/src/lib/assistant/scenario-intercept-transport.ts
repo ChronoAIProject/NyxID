@@ -18,6 +18,7 @@ import { applyTurnEvent, EMPTY_TURN_STATE } from "@/lib/assistant/stream";
 import { useAssistantMockScenariosStore } from "@/stores/assistant-mock-scenarios-store";
 import { useAuthStore } from "@/stores/auth-store";
 import type { ActionReport } from "@/schemas/assistant-actions";
+import type { InputAnswer } from "@/schemas/assistant-input";
 import type {
   AssistantMessage,
   AssistantTransport,
@@ -412,6 +413,15 @@ export class ScenarioInterceptTransport implements AssistantTransport {
       this.restoreOwnership(conversationId, priorOwnership);
       throw error;
     }
+  }
+
+  resolveInput(
+    conversationId: string,
+    blockId: string,
+    answer: InputAnswer,
+    onEvent: (event: TurnEvent) => void = () => undefined,
+  ): Promise<TurnHandle | null> {
+    return this.delegate.resolveInput(conversationId, blockId, answer, onEvent);
   }
 
   setActionCardInProgress(

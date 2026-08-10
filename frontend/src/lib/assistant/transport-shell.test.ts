@@ -76,6 +76,11 @@ class RecordingTransport implements AssistantTransport {
     return null;
   }
 
+  async resolveInput(): Promise<TurnHandle | null> {
+    this.calls.push("input");
+    return null;
+  }
+
   setActionCardInProgress(): void {
     this.calls.push("progress");
   }

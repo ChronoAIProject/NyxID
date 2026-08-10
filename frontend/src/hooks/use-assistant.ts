@@ -23,6 +23,7 @@ import {
 import { assistantMockStore } from "@/lib/assistant/mock-data";
 import { assistantTransport } from "@/lib/assistant/transport";
 import type { ActionReport } from "@/schemas/assistant-actions";
+import type { InputAnswer } from "@/schemas/assistant-input";
 import type {
   ActiveTurn,
   Conversation,
@@ -822,9 +823,8 @@ export function useDecideApproval(conversationId: string | undefined) {
       readonly approved: boolean;
     }): Promise<void> => {
       if (!conversationId) throw new Error("Select a conversation first.");
-      // On the live contract the approve endpoint streams an SSE
-      // continuation of the run; the pump projects its events and the
-      // handle makes the stop button work during it.
+      // Approval returns JSON acceptance. The transport keeps the conversation
+      // reserved while it observes the matching committed resolution.
       const pump = createTurnEventPump(queryClient, conversationId);
       try {
         const handle = await assistantTransport.decideApproval(
@@ -857,6 +857,48 @@ export function useDecideApproval(conversationId: string | undefined) {
         description:
           error instanceof AssistantTurnActiveError
             ? "Wait for the current reply to finish, then decide again."
+            : error instanceof Error && error.message
+              ? error.message
+              : "The assistant backend did not respond. Try again.",
+      });
+    },
+  });
+}
+
+export function useResolveInput(conversationId: string | undefined) {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: async ({
+      blockId,
+      answer,
+    }: {
+      readonly blockId: string;
+      readonly answer: InputAnswer;
+    }): Promise<void> => {
+      if (!conversationId) throw new Error("Select a conversation first.");
+      const pump = createTurnEventPump(queryClient, conversationId);
+      try {
+        const handle = await assistantTransport.resolveInput(
+          conversationId,
+          blockId,
+          answer,
+          pump.onEvent,
+        );
+        if (handle) activeHandles.set(conversationId, handle);
+        else if (!pump.receivedEvent()) pump.disown();
+        await projectTransportState(queryClient, conversationId);
+      } catch (error) {
+        if (!pump.receivedEvent() && !pump.expired()) pump.restorePrevious();
+        throw error;
+      }
+    },
+    onError: (error) => {
+      if (error instanceof AssistantTurnCancelledError) return;
+      toast.error("Input was not delivered", {
+        id: "assistant-input-failed",
+        description:
+          error instanceof AssistantTurnActiveError
+            ? "Wait for the current reply to finish, then try again."
             : error instanceof Error && error.message
               ? error.message
               : "The assistant backend did not respond. Try again.",

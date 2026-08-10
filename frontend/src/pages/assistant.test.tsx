@@ -18,6 +18,7 @@ const {
   mockCreateMutateAsync,
   mockCancelMutateAsync,
   mockDecideMutateAsync,
+  mockResolveInputMutateAsync,
   mockContinueAction,
   mockDeleteMutateAsync,
   mockSendMutateAsync,
@@ -28,6 +29,7 @@ const {
   mockCreateMutateAsync: vi.fn(),
   mockCancelMutateAsync: vi.fn(),
   mockDecideMutateAsync: vi.fn(),
+  mockResolveInputMutateAsync: vi.fn(),
   mockContinueAction: vi.fn(),
   mockDeleteMutateAsync: vi.fn(),
   mockSendMutateAsync: vi.fn(),
@@ -129,19 +131,19 @@ vi.mock("@/hooks/use-assistant", () => ({
     data:
       conversationId && !state.historyLoading
         ? {
-          conversation: {
-            ...(state.conversations?.find(
-              (conversation) => conversation.id === conversationId,
-            ) ?? {
-              id: conversationId,
-              title: "Loading",
-              created_at: "2026-07-29T00:00:00.000Z",
-              last_message_at: "2026-07-29T00:00:00.000Z",
-            }),
-            id: state.historyCanonicalId ?? conversationId,
-          },
-          messages: state.historyMessages,
-          has_more: false,
+            conversation: {
+              ...(state.conversations?.find(
+                (conversation) => conversation.id === conversationId,
+              ) ?? {
+                id: conversationId,
+                title: "Loading",
+                created_at: "2026-07-29T00:00:00.000Z",
+                last_message_at: "2026-07-29T00:00:00.000Z",
+              }),
+              id: state.historyCanonicalId ?? conversationId,
+            },
+            messages: state.historyMessages,
+            has_more: false,
             awaitingProjection: state.historyAwaitingProjection,
             projectionStalled: state.historyProjectionStalled,
           }
@@ -174,6 +176,10 @@ vi.mock("@/hooks/use-assistant", () => ({
   useDecideApproval: () => ({
     mutateAsync: mockDecideMutateAsync,
     isPending: state.decisionPending,
+  }),
+  useResolveInput: () => ({
+    mutateAsync: mockResolveInputMutateAsync,
+    isPending: false,
   }),
   useActionCardActions: () => ({
     setInProgress: vi.fn(),
@@ -591,9 +597,7 @@ describe("AssistantPage new chat", () => {
     expect(
       screen.queryByText(/no saved transcript yet/i),
     ).not.toBeInTheDocument();
-    expect(
-      screen.queryByText(/You can keep chatting/),
-    ).not.toBeInTheDocument();
+    expect(screen.queryByText(/You can keep chatting/)).not.toBeInTheDocument();
     expect(screen.getByText("still here")).toBeInTheDocument();
     expect(screen.getByRole("textbox")).toBeEnabled();
   });
