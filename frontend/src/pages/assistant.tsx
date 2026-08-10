@@ -30,6 +30,7 @@ import {
   useDecideApproval,
   useDeleteConversation,
   useSendMessage,
+  useResolveInput,
   useTurnEpisode,
 } from "@/hooks/use-assistant";
 import { ApiError } from "@/lib/api-client";
@@ -41,6 +42,7 @@ import {
 import { markChatActivity } from "@/lib/assistant/connect-watch";
 import { parseAssistantSearch } from "@/lib/assistant/search";
 import type { ActionReport } from "@/schemas/assistant-actions";
+import type { InputAnswer } from "@/schemas/assistant-input";
 import { useAssistantContextStore } from "@/stores/assistant-context-store";
 import { useAssistantDraftStore } from "@/stores/assistant-draft-store";
 import { useAuthStore } from "@/stores/auth-store";
@@ -189,6 +191,7 @@ export function AssistantPage({
   const sendMessage = useSendMessage(selectedId);
   const cancelTurn = useCancelTurn(selectedId);
   const decideApproval = useDecideApproval(selectedId);
+  const resolveInput = useResolveInput(selectedId);
   const actionCards = useActionCardActions(selectedId);
   const deleteConversation = useDeleteConversation();
   const turnStatus = turn.data?.status;
@@ -199,6 +202,7 @@ export function AssistantPage({
     sendMessage.isPending ||
     cancelTurn.isPending ||
     decideApproval.isPending ||
+    resolveInput.isPending ||
     episodeState?.open === true;
 
   // Effects queued by an earlier quiet render must observe a continuation
@@ -424,6 +428,15 @@ export function AssistantPage({
     }
   }
 
+  async function handleResolveInput(blockId: string, answer: InputAnswer) {
+    beginContinuation();
+    try {
+      await resolveInput.mutateAsync({ blockId, answer });
+    } finally {
+      endContinuation();
+    }
+  }
+
   async function handleResolveAction(report: ActionReport) {
     beginContinuation();
     try {
@@ -598,6 +611,7 @@ export function AssistantPage({
               episodeState?.projecting === true || sendMessage.isPending
             }
             onDecideApproval={handleDecideApproval}
+            onResolveInput={handleResolveInput}
             onActionProgress={actionCards.setInProgress}
             onBlockAction={actionCards.blockAction}
             onResolveAction={handleResolveAction}

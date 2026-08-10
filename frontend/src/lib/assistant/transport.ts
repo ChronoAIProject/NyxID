@@ -14,6 +14,7 @@ import {
   buildActionWakeBody,
   type ActionReport,
 } from "@/schemas/assistant-actions";
+import { inputAnswerSchema, type InputAnswer } from "@/schemas/assistant-input";
 import type {
   AssistantTransport,
   Conversation,
@@ -177,6 +178,29 @@ class MockAssistantTransport implements AssistantTransport {
     return null;
   }
 
+  async resolveInput(
+    conversationId: string,
+    blockId: string,
+    answer: InputAnswer,
+    onEvent: (event: TurnEvent) => void = () => undefined,
+  ): Promise<TurnHandle | null> {
+    inputAnswerSchema.parse(answer);
+    const block = assistantMockStore.findBlock(conversationId, blockId);
+    if (block?.type !== "input_card") {
+      throw new Error("Input request was not found.");
+    }
+    if (block.status !== "pending") {
+      throw new Error("This input request was already resolved.");
+    }
+    this.emitLocalActionPatch(
+      conversationId,
+      blockId,
+      { status: "resolved" },
+      onEvent,
+    );
+    return null;
+  }
+
   setActionCardInProgress(
     conversationId: string,
     blockId: string,
@@ -251,13 +275,13 @@ class MockAssistantTransport implements AssistantTransport {
             block.type === "action_card" &&
             block.action_request_id === report.actionRequestId,
         );
-      if (card?.type === "action_card") {
-        actionLookup.set(report.actionRequestId, card.action);
-      }
       const refusedByCardState =
         card?.type === "action_card" &&
         (card.status === "conflicted" ||
           (card.status === "blocked" && report.disposition === "completed"));
+      if (card?.type === "action_card") {
+        actionLookup.set(report.actionRequestId, card.action);
+      }
       if (refusedByCardState) {
         if (
           card?.type === "action_card" &&
@@ -635,6 +659,20 @@ export class DelegatingAssistantTransport implements AssistantTransport {
       conversationId,
       blockId,
       approved,
+      onEvent,
+    );
+  }
+
+  resolveInput(
+    conversationId: string,
+    blockId: string,
+    answer: InputAnswer,
+    onEvent?: (event: TurnEvent) => void,
+  ): Promise<TurnHandle | null> {
+    return this.transport.resolveInput(
+      conversationId,
+      blockId,
+      answer,
       onEvent,
     );
   }

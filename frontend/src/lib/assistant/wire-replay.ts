@@ -88,7 +88,9 @@ function safeErrorCode(value: unknown, fallback: string): string {
  * `aevatar.media.chunk` (`MediaContentEvent`) flattened to the fields `addMedia`
  * reads. `ChatContentPart` names the location `uri`, not `url`.
  */
-function mediaPartFields(body: Record<string, unknown>): Record<string, unknown> {
+function mediaPartFields(
+  body: Record<string, unknown>,
+): Record<string, unknown> {
   const part = unpackAny(body["part"]);
   return {
     mediaType: part["mediaType"],
@@ -636,6 +638,7 @@ class ReplayProjector {
         stringValue(body, "expiresAt") || stringValue(body, "expires_at"),
       decision: null,
       decision_channel: null,
+      decision_submission: null,
     };
     this.appendActivityBlock(block, frame);
     this.openCards.set(block.block_id, "approval");

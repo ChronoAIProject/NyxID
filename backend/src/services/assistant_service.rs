@@ -217,6 +217,8 @@ pub fn typed_chat_path() -> String {
 const TYPED_CHAT_PROMPT_MAX_CHARS: usize = 32_768;
 const ACTION_CONTINUATION_MAX_REPORTS: usize = 64;
 const APPROVAL_REASON_MAX_CHARS: usize = 2_048;
+const INPUT_ANSWER_MAX_CHARS: usize = 32_768;
+const INPUT_SELECTION_MAX_OPTIONS: usize = 6;
 
 static FORBIDDEN_COMMAND_KEY: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(
@@ -254,6 +256,7 @@ pub struct PreparedAssistantChatCommand {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum AssistantChatCommand {
     Text(TextChatCommand),
+    InputResolve(InputResolveCommand),
     ActionContinue(ActionContinueCommand),
     ApprovalResolve(ApprovalResolveCommand),
     TaskStop(TaskStopCommand),
@@ -267,6 +270,36 @@ pub struct TextChatCommand {
     pub prompt: String,
     pub client_request_id: String,
     pub conversation_id: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct InputResolveCommand {
+    pub conversation_id: String,
+    pub client_request_id: String,
+    pub request_id: String,
+    pub answer: InputAnswer,
+    pub expected_state_version: i64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum InputAnswer {
+    FreeText { free_text: String },
+    SelectedOptions { selected_option_ids: Vec<String> },
+}
+
+impl InputAnswer {
+    fn to_json(&self) -> serde_json::Value {
+        match self {
+            Self::FreeText { free_text } => serde_json::json!({
+                "freeText": free_text
+            }),
+            Self::SelectedOptions {
+                selected_option_ids,
+            } => serde_json::json!({
+                "selectedOptionIds": selected_option_ids
+            }),
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -284,6 +317,7 @@ pub struct ApprovalResolveCommand {
     pub request_id: String,
     pub approved: bool,
     pub reason: Option<String>,
+    pub expected_state_version: i64,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -404,10 +438,6 @@ impl ActionResource {
             }),
         }
     }
-
-    fn is_user_service(&self) -> bool {
-        matches!(self, Self::UserService { .. })
-    }
 }
 
 #[derive(Debug, serde::Deserialize)]
@@ -419,6 +449,27 @@ struct RawTextChatCommand {
     client_request_id: String,
     #[serde(default)]
     conversation_id: Option<String>,
+}
+
+#[derive(Debug, serde::Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct RawInputResolveCommand {
+    #[serde(rename = "type")]
+    _command_type: String,
+    conversation_id: String,
+    client_request_id: String,
+    request_id: String,
+    answer: RawInputAnswer,
+    expected_state_version: i64,
+}
+
+#[derive(Debug, serde::Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct RawInputAnswer {
+    #[serde(default)]
+    free_text: Option<String>,
+    #[serde(default)]
+    selected_option_ids: Option<Vec<String>>,
 }
 
 #[derive(Debug, serde::Deserialize)]
@@ -454,6 +505,7 @@ struct RawApprovalResolveCommand {
     approved: bool,
     #[serde(default)]
     reason: Option<String>,
+    expected_state_version: i64,
 }
 
 #[derive(Debug, serde::Deserialize)]
@@ -560,6 +612,41 @@ fn normalize_reason(reason: Option<String>) -> AppResult<Option<String>> {
     Ok(Some(trimmed.to_string()))
 }
 
+fn parse_input_answer(raw: RawInputAnswer) -> AppResult<InputAnswer> {
+    match (raw.free_text, raw.selected_option_ids) {
+        (Some(free_text), None) => {
+            let trimmed = free_text.trim();
+            if trimmed.is_empty() || free_text.chars().count() > INPUT_ANSWER_MAX_CHARS {
+                return Err(AppError::BadRequest("Invalid input answer.".to_string()));
+            }
+            Ok(InputAnswer::FreeText {
+                free_text: trimmed.to_string(),
+            })
+        }
+        (None, Some(selected_option_ids)) => {
+            if selected_option_ids.is_empty()
+                || selected_option_ids.len() > INPUT_SELECTION_MAX_OPTIONS
+            {
+                return Err(AppError::BadRequest("Invalid input answer.".to_string()));
+            }
+            let mut seen = HashSet::new();
+            let mut normalized = Vec::with_capacity(selected_option_ids.len());
+            for option_id in selected_option_ids {
+                let option_id = option_id.trim();
+                validate_control_identity(option_id, "selectedOptionId")?;
+                if !seen.insert(option_id.to_string()) {
+                    return Err(AppError::BadRequest("Invalid input answer.".to_string()));
+                }
+                normalized.push(option_id.to_string());
+            }
+            Ok(InputAnswer::SelectedOptions {
+                selected_option_ids: normalized,
+            })
+        }
+        _ => Err(AppError::BadRequest("Invalid input answer.".to_string())),
+    }
+}
+
 fn reject_secret_shaped_command(value: &serde_json::Value) -> AppResult<()> {
     if contains_secret_shaped_value(value) {
         return Err(AppError::BadRequest(
@@ -658,6 +745,23 @@ pub fn parse_assistant_chat_command(bytes: &[u8]) -> AppResult<AssistantChatComm
                 conversation_id: raw.conversation_id,
             }))
         }
+        "input.resolve" => {
+            let raw: RawInputResolveCommand = serde_json::from_value(value).map_err(|e| {
+                AppError::BadRequest(format!("Invalid input resolution request: {e}"))
+            })?;
+            validate_conversation_id(&raw.conversation_id)?;
+            validate_control_identity(&raw.client_request_id, "clientRequestId")?;
+            validate_control_identity(&raw.request_id, "requestId")?;
+            validate_positive(raw.expected_state_version, "expectedStateVersion")?;
+            let answer = parse_input_answer(raw.answer)?;
+            Ok(AssistantChatCommand::InputResolve(InputResolveCommand {
+                conversation_id: raw.conversation_id,
+                client_request_id: raw.client_request_id,
+                request_id: raw.request_id,
+                answer,
+                expected_state_version: raw.expected_state_version,
+            }))
+        }
         "action.continue" => {
             let raw: RawActionContinueCommand = serde_json::from_value(value).map_err(|e| {
                 AppError::BadRequest(format!("Invalid action continuation request: {e}"))
@@ -695,14 +799,9 @@ pub fn parse_assistant_chat_command(bytes: &[u8]) -> AppResult<AssistantChatComm
                 }
                 let disposition = ActionDisposition::parse(&report.disposition)?;
                 let resource = parse_action_resource(report.resource)?;
-                if disposition == ActionDisposition::Completed
-                    && !resource
-                        .as_ref()
-                        .is_some_and(ActionResource::is_user_service)
-                {
+                if disposition == ActionDisposition::Completed && resource.is_none() {
                     return Err(AppError::BadRequest(
-                        "Completed action reports require resource.userService.userServiceId."
-                            .to_string(),
+                        "Completed action reports require a resource reference.".to_string(),
                     ));
                 }
                 actions.push(ActionReport {
@@ -728,6 +827,7 @@ pub fn parse_assistant_chat_command(bytes: &[u8]) -> AppResult<AssistantChatComm
             validate_conversation_id(&raw.conversation_id)?;
             validate_control_identity(&raw.client_request_id, "clientRequestId")?;
             validate_control_identity(&raw.request_id, "requestId")?;
+            validate_positive(raw.expected_state_version, "expectedStateVersion")?;
             let reason = normalize_reason(raw.reason)?;
             Ok(AssistantChatCommand::ApprovalResolve(
                 ApprovalResolveCommand {
@@ -736,6 +836,7 @@ pub fn parse_assistant_chat_command(bytes: &[u8]) -> AppResult<AssistantChatComm
                     request_id: raw.request_id,
                     approved: raw.approved,
                     reason,
+                    expected_state_version: raw.expected_state_version,
                 },
             ))
         }
@@ -889,6 +990,18 @@ pub fn prepare_assistant_chat_command(
                 response_kind: AssistantChatResponseKind::Stream,
             })
         }
+        AssistantChatCommand::InputResolve(command) => Ok(PreparedAssistantChatCommand {
+            body: serde_json::json!({
+                "type": "input.resolve",
+                "conversationId": command.conversation_id,
+                "clientRequestId": command.client_request_id,
+                "requestId": command.request_id,
+                "answer": command.answer.to_json(),
+                "expectedStateVersion": command.expected_state_version,
+            }),
+            client_request_id: command.client_request_id.clone(),
+            response_kind: AssistantChatResponseKind::Json,
+        }),
         AssistantChatCommand::ActionContinue(command) => {
             let mut actions = Vec::with_capacity(command.actions.len());
             for report in &command.actions {
@@ -964,10 +1077,14 @@ pub fn prepare_assistant_chat_command(
                     serde_json::Value::String(reason.clone()),
                 );
             }
+            body.insert(
+                "expectedStateVersion".to_string(),
+                serde_json::Value::Number(command.expected_state_version.into()),
+            );
             Ok(PreparedAssistantChatCommand {
                 body: serde_json::Value::Object(body),
                 client_request_id: command.client_request_id.clone(),
-                response_kind: AssistantChatResponseKind::Stream,
+                response_kind: AssistantChatResponseKind::Json,
             })
         }
         AssistantChatCommand::TaskStop(command) => Ok(PreparedAssistantChatCommand {
@@ -1483,6 +1600,129 @@ mod tests {
     }
 
     #[test]
+    fn parses_and_rebuilds_both_closed_input_answer_variants() {
+        let selected = prepare_assistant_chat_command(&parse_command(json!({
+            "type": "input.resolve",
+            "conversationId": CONV,
+            "clientRequestId": "client-input-1",
+            "requestId": "input-1",
+            "answer": {
+                "selectedOptionIds": [" option-a ", "option-b"]
+            },
+            "expectedStateVersion": 19
+        })))
+        .unwrap();
+        let free_text = prepare_assistant_chat_command(&parse_command(json!({
+            "type": "input.resolve",
+            "conversationId": CONV,
+            "clientRequestId": "client-input-2",
+            "requestId": "input-2",
+            "answer": {
+                "freeText": "  Singapore  "
+            },
+            "expectedStateVersion": 20
+        })))
+        .unwrap();
+
+        assert_eq!(
+            selected,
+            PreparedAssistantChatCommand {
+                body: json!({
+                    "type": "input.resolve",
+                    "conversationId": CONV,
+                    "clientRequestId": "client-input-1",
+                    "requestId": "input-1",
+                    "answer": {
+                        "selectedOptionIds": ["option-a", "option-b"]
+                    },
+                    "expectedStateVersion": 19
+                }),
+                client_request_id: "client-input-1".to_string(),
+                response_kind: AssistantChatResponseKind::Json,
+            }
+        );
+        assert_eq!(
+            free_text.body,
+            json!({
+                "type": "input.resolve",
+                "conversationId": CONV,
+                "clientRequestId": "client-input-2",
+                "requestId": "input-2",
+                "answer": {
+                    "freeText": "Singapore"
+                },
+                "expectedStateVersion": 20
+            })
+        );
+        assert_eq!(
+            free_text.response_kind.accept_header_value(),
+            "application/json"
+        );
+    }
+
+    #[test]
+    fn rejects_invalid_input_resolutions_fail_closed() {
+        let command = |answer: serde_json::Value, expected_state_version: i64| {
+            json!({
+                "type": "input.resolve",
+                "conversationId": CONV,
+                "clientRequestId": "client-input-1",
+                "requestId": "input-1",
+                "answer": answer,
+                "expectedStateVersion": expected_state_version
+            })
+        };
+        let mut unknown_root = command(json!({ "freeText": "answer" }), 19);
+        unknown_root
+            .as_object_mut()
+            .unwrap()
+            .insert("scopeId".to_string(), json!("someone-else"));
+        let values = vec![
+            json!({
+                "type": "input.resolve",
+                "conversationId": CONV,
+                "clientRequestId": "client-input-1",
+                "requestId": "input-1",
+                "answer": { "freeText": "answer" }
+            }),
+            command(json!({ "freeText": "answer" }), 0),
+            command(json!({}), 19),
+            command(
+                json!({
+                    "freeText": "answer",
+                    "selectedOptionIds": ["option-a"]
+                }),
+                19,
+            ),
+            command(json!({ "freeText": "   " }), 19),
+            command(
+                json!({ "freeText": "x".repeat(INPUT_ANSWER_MAX_CHARS + 1) }),
+                19,
+            ),
+            command(json!({ "selectedOptionIds": [] }), 19),
+            command(
+                json!({
+                    "selectedOptionIds": [
+                        "option-a", "option-b", "option-c", "option-d",
+                        "option-e", "option-f", "option-g"
+                    ]
+                }),
+                19,
+            ),
+            command(
+                json!({ "selectedOptionIds": ["option-a", " option-a "] }),
+                19,
+            ),
+            command(json!({ "selectedOptionIds": ["bad/id"] }), 19),
+            command(json!({ "freeText": "answer", "label": "extra" }), 19),
+            unknown_root,
+        ];
+        for value in values {
+            assert!(parse_assistant_chat_command(&serde_json::to_vec(&value).unwrap()).is_err());
+        }
+    }
+
+    #[test]
     fn parses_action_continue_for_reports_and_resource_free_wakes() {
         let continuation = parse_command(json!({
             "type": "action.continue",
@@ -1546,6 +1786,40 @@ mod tests {
                 .accept_header_value(),
             "text/event-stream"
         );
+    }
+
+    #[test]
+    fn completed_action_reports_round_trip_each_safe_resource_variant() {
+        for (index, resource) in [
+            json!({ "userService": { "userServiceId": "service-1" } }),
+            json!({ "key": { "keyId": "key-1" } }),
+            json!({ "node": { "nodeId": "node-1" } }),
+            json!({ "serviceAccount": { "serviceAccountId": "sa-1" } }),
+            json!({ "developerApp": { "clientId": "app-1" } }),
+            json!({ "device": { "deviceId": "device-1" } }),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let action_request_id = format!("act-{index}");
+            let command = parse_command(json!({
+                "type": "action.continue",
+                "conversationId": CONV,
+                "clientRequestId": format!("client-{index}"),
+                "originTurnId": "turn-1",
+                "actions": [{
+                    "actionRequestId": action_request_id,
+                    "originTurnId": "turn-1",
+                    "disposition": "completed",
+                    "resource": resource.clone()
+                }]
+            }));
+
+            assert_eq!(
+                prepare_assistant_chat_command(&command).unwrap().body["actions"][0]["resource"],
+                resource
+            );
+        }
     }
 
     #[test]
@@ -1625,6 +1899,63 @@ mod tests {
                     }
                 ]
             }),
+            json!({
+                "type": "action.continue",
+                "conversationId": CONV,
+                "clientRequestId": "request-1",
+                "originTurnId": "turn-1",
+                "actions": [{
+                    "actionRequestId": "act-1",
+                    "originTurnId": "turn-1",
+                    "disposition": "completed",
+                    "resource": {
+                        "key": { "keyId": "key-1" },
+                        "node": { "nodeId": "node-1" }
+                    }
+                }]
+            }),
+            json!({
+                "type": "action.continue",
+                "conversationId": CONV,
+                "clientRequestId": "request-1",
+                "originTurnId": "turn-1",
+                "actions": [{
+                    "actionRequestId": "act-1",
+                    "originTurnId": "turn-1",
+                    "disposition": "completed",
+                    "resource": {
+                        "key": { "keyId": "key-1", "label": "extra" }
+                    }
+                }]
+            }),
+            json!({
+                "type": "action.continue",
+                "conversationId": CONV,
+                "clientRequestId": "request-1",
+                "originTurnId": "turn-1",
+                "actions": [{
+                    "actionRequestId": "act-1",
+                    "originTurnId": "turn-1",
+                    "disposition": "completed",
+                    "resource": {
+                        "workspace": { "workspaceId": "workspace-1" }
+                    }
+                }]
+            }),
+            json!({
+                "type": "action.continue",
+                "conversationId": CONV,
+                "clientRequestId": "request-1",
+                "originTurnId": "turn-1",
+                "actions": [{
+                    "actionRequestId": "act-1",
+                    "originTurnId": "turn-1",
+                    "disposition": "completed",
+                    "resource": {
+                        "key": { "nodeId": "node-1" }
+                    }
+                }]
+            }),
         ] {
             assert!(parse_assistant_chat_command(&serde_json::to_vec(&value).unwrap()).is_err());
         }
@@ -1638,10 +1969,43 @@ mod tests {
             "clientRequestId": "request-approval-1",
             "requestId": "approval-1",
             "approved": true,
-            "reason": "Bearer eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9"
+            "reason": "Bearer eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9",
+            "expectedStateVersion": 21
         });
 
         assert!(parse_assistant_chat_command(&serde_json::to_vec(&value).unwrap()).is_err());
+    }
+
+    #[test]
+    fn approval_resolution_requires_a_positive_observed_state_version() {
+        for value in [
+            json!({
+                "type": "approval.resolve",
+                "conversationId": CONV,
+                "clientRequestId": "request-approval-1",
+                "requestId": "approval-1",
+                "approved": true
+            }),
+            json!({
+                "type": "approval.resolve",
+                "conversationId": CONV,
+                "clientRequestId": "request-approval-1",
+                "requestId": "approval-1",
+                "approved": true,
+                "expectedStateVersion": 0
+            }),
+            json!({
+                "type": "approval.resolve",
+                "conversationId": CONV,
+                "clientRequestId": "request-approval-1",
+                "requestId": "approval-1",
+                "approved": true,
+                "expectedStateVersion": 21,
+                "stateVersion": 21
+            }),
+        ] {
+            assert!(parse_assistant_chat_command(&serde_json::to_vec(&value).unwrap()).is_err());
+        }
     }
 
     #[test]
@@ -1666,6 +2030,14 @@ mod tests {
                 "type": "text",
                 "prompt": "Bearer eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9",
                 "clientRequestId": "request-text-1"
+            }),
+            json!({
+                "type": "input.resolve",
+                "conversationId": CONV,
+                "clientRequestId": "client-input-1",
+                "requestId": "input-1",
+                "answer": { "freeText": "nyxid_secret_abcdefgh" },
+                "expectedStateVersion": 19
             }),
             json!({
                 "type": "action.continue",
@@ -1728,7 +2100,8 @@ mod tests {
             "clientRequestId": "request-approval-1",
             "requestId": "approval-1",
             "approved": true,
-            "reason": "Approved by user"
+            "reason": "Approved by user",
+            "expectedStateVersion": 21
         })))
         .unwrap();
         let stop = prepare_assistant_chat_command(&parse_command(json!({
@@ -1753,10 +2126,10 @@ mod tests {
         })))
         .unwrap();
 
-        assert_eq!(approval.response_kind, AssistantChatResponseKind::Stream);
+        assert_eq!(approval.response_kind, AssistantChatResponseKind::Json);
         assert_eq!(
             approval.response_kind.accept_header_value(),
-            "text/event-stream"
+            "application/json"
         );
         assert_eq!(
             approval.body,
@@ -1766,7 +2139,8 @@ mod tests {
                 "clientRequestId": "request-approval-1",
                 "requestId": "approval-1",
                 "approved": true,
-                "reason": "Approved by user"
+                "reason": "Approved by user",
+                "expectedStateVersion": 21
             })
         );
         assert_eq!(stop.response_kind, AssistantChatResponseKind::Json);

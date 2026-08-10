@@ -24,7 +24,8 @@ const requiredWireStringSchema = z
   .transform((value) => value.trim())
   .pipe(z.string().min(1));
 
-const SECRET_VALUE = /(Bearer\s+)[A-Za-z0-9._~+/-]+|nyx(?:id)?_[A-Za-z0-9_-]{8,}/gi;
+const SECRET_VALUE =
+  /(Bearer\s+)[A-Za-z0-9._~+/-]+|nyx(?:id)?_[A-Za-z0-9_-]{8,}/gi;
 const FORBIDDEN_ACTION_KEY =
   /(?:^|[_-])(authorization|api[-_]?key|token|secret|password|credential|cookie|user[-_]?code|device[-_]?code)(?:$|[_-])/i;
 
@@ -269,7 +270,6 @@ export type ActionWakeBody = z.infer<typeof actionWakeBodySchema>;
 export type ActionReportActionLookup =
   | ReadonlyMap<string, string>
   | Readonly<Record<string, string | undefined>>;
-
 function matchesSecretValue(value: string): boolean {
   SECRET_VALUE.lastIndex = 0;
   return SECRET_VALUE.test(value);
@@ -319,16 +319,20 @@ function assertReportMatchesAction(
   action: string | undefined,
 ): void {
   if (report.disposition !== "completed") return;
-  if (
-    action === "service.connect" &&
-    (!report.resource || !("userService" in report.resource))
-  ) {
+  if (!report.resource) {
     throw new Error(
-      "service.connect completed reports must include resource.userService.userServiceId",
+      "Completed action reports must include a resource reference",
     );
   }
-  if (!report.resource) {
-    throw new Error("Completed action reports must include a resource reference");
+  if (action?.startsWith("service.") && !("userService" in report.resource)) {
+    throw new Error(
+      `${action} completed reports must include resource.userService.userServiceId`,
+    );
+  }
+  if (action?.startsWith("key.") && !("key" in report.resource)) {
+    throw new Error(
+      `${action} completed reports must include resource.key.keyId`,
+    );
   }
 }
 

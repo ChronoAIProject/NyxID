@@ -132,7 +132,13 @@ describe("assistant action request schema", () => {
       },
     });
 
-    for (const request of [badSlug, httpUrl, queryUrl, fragmentUrl, badAuthKeyName]) {
+    for (const request of [
+      badSlug,
+      httpUrl,
+      queryUrl,
+      fragmentUrl,
+      badAuthKeyName,
+    ]) {
       expect(resolveAssistantAction(request)).toMatchObject({
         supported: false,
         params: { variant: "unknown" },
@@ -421,7 +427,7 @@ describe("action continuation schema", () => {
     ).toBe(false);
   });
 
-  it("rejects completed service.connect reports without a userService resource", () => {
+  it("requires the resource variant owned by service and key actions", () => {
     expect(() =>
       buildActionContinueBody(
         "nyxid-chat-actor-1",
@@ -436,9 +442,7 @@ describe("action continuation schema", () => {
         ],
         new Map([["act-1", "service.connect"]]),
       ),
-    ).toThrow(
-      "service.connect completed reports must include resource.userService.userServiceId",
-    );
+    ).toThrow("Completed action reports must include a resource reference");
     expect(() =>
       buildActionContinueBody(
         "nyxid-chat-actor-1",
@@ -452,14 +456,62 @@ describe("action continuation schema", () => {
             resource: { key: { keyId: "key-1" } },
           },
         ],
-        new Map([["act-1", "service.connect"]]),
+        new Map([["act-1", "service.reauthorize"]]),
       ),
     ).toThrow(
-      "service.connect completed reports must include resource.userService.userServiceId",
+      "service.reauthorize completed reports must include resource.userService.userServiceId",
     );
+    expect(() =>
+      buildActionContinueBody(
+        "nyxid-chat-actor-1",
+        "request-1",
+        "turn-origin-1",
+        [
+          {
+            actionRequestId: "act-1",
+            originTurnId: "turn-origin-1",
+            disposition: "completed",
+            resource: {
+              userService: { userServiceId: "service-1" },
+            },
+          },
+        ],
+        new Map([["act-1", "key.rotate"]]),
+      ),
+    ).toThrow("key.rotate completed reports must include resource.key.keyId");
   });
 
-  it("fails closed for completed reports without resources when the action lookup is missing", () => {
+  it("round-trips all six safe resource variants when the action is neutral", () => {
+    const resources = [
+      { userService: { userServiceId: "service-1" } },
+      { key: { keyId: "key-1" } },
+      { node: { nodeId: "node-1" } },
+      { serviceAccount: { serviceAccountId: "sa-1" } },
+      { developerApp: { clientId: "app-1" } },
+      { device: { deviceId: "device-1" } },
+    ] as const;
+
+    for (const [index, resource] of resources.entries()) {
+      const actionRequestId = `act-${String(index)}`;
+      const body = buildActionContinueBody(
+        "nyxid-chat-actor-1",
+        `request-${String(index)}`,
+        "turn-origin-1",
+        [
+          {
+            actionRequestId,
+            originTurnId: "turn-origin-1",
+            disposition: "completed",
+            resource,
+          },
+        ],
+        new Map([[actionRequestId, "node.inspect"]]),
+      );
+      expect(body.actions[0]?.resource).toEqual(resource);
+    }
+  });
+
+  it("fails closed for completed reports without resources", () => {
     expect(() =>
       buildActionContinueBody(
         "nyxid-chat-actor-1",

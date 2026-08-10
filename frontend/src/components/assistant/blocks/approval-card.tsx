@@ -150,6 +150,28 @@ function DecidedCard({ block }: { readonly block: ApprovalCardContentBlock }) {
   );
 }
 
+function SubmittedCard({
+  block,
+}: {
+  readonly block: ApprovalCardContentBlock;
+}) {
+  if (!block.decision_submission) return null;
+  return (
+    <section className="rounded-xl border border-warning/30 bg-warning/[0.06] p-4">
+      <div className="flex items-center gap-2 text-[12px] font-semibold text-foreground">
+        <Loader2 className="h-4 w-4 animate-spin text-warning" />
+        Decision sent
+      </div>
+      <p className="mt-2 text-[12px] leading-relaxed text-muted-foreground">
+        {block.body}
+      </p>
+      <p className="mt-1.5 text-[11px] text-text-tertiary">
+        Waiting for the committed {block.decision_submission} decision.
+      </p>
+    </section>
+  );
+}
+
 export function ApprovalCard({
   block,
   onDecide,
@@ -157,9 +179,9 @@ export function ApprovalCard({
   readonly block: ApprovalCardContentBlock;
   readonly onDecide: (approved: boolean) => Promise<void> | void;
 }) {
-  const [pendingAction, setPendingAction] = useState<
-    "approve" | "deny" | null
-  >(null);
+  const [pendingAction, setPendingAction] = useState<"approve" | "deny" | null>(
+    null,
+  );
   const [now, setNow] = useState(Date.now());
   const lastClick = useRef(Number.NEGATIVE_INFINITY);
 
@@ -172,6 +194,7 @@ export function ApprovalCard({
     const clickedAt = Date.now();
     if (
       block.decision !== null ||
+      block.decision_submission != null ||
       pendingAction !== null ||
       clickedAt - lastClick.current < CLICK_THROTTLE_MS
     ) {
@@ -193,6 +216,9 @@ export function ApprovalCard({
 
   if (block.decision !== null) {
     return <DecidedCard block={block} />;
+  }
+  if (block.decision_submission) {
+    return <SubmittedCard block={block} />;
   }
 
   const remainingMs = new Date(block.expires_at).getTime() - now;
@@ -238,8 +264,9 @@ export function ApprovalCard({
 
         {block.approval_mode === "grant" && (
           <p className="mt-2.5 text-[11px] leading-relaxed text-muted-foreground">
-            Approving also allows repeat {block.service_slug} writes for the next{" "}
-            {grantDurationLabel(block.grant_duration_sec)} without asking again.
+            Approving also allows repeat {block.service_slug} writes for the
+            next {grantDurationLabel(block.grant_duration_sec)} without asking
+            again.
           </p>
         )}
       </div>
