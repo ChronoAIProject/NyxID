@@ -148,13 +148,42 @@ describe("decodeTaskPlan", () => {
       plan({ steps: [step("step-a", 1), step("step-a", 2)] }),
     ],
     [
-      "operation identity mismatch",
+      "operation actor identity mismatch",
+      plan({
+        steps: [
+          step("step-a", 1, {
+            operation: {
+              conversationActorId: "nyxid-chat-actor-other",
+              taskId: "task-alpha",
+              stepId: "step-a",
+              operationGeneration: 1,
+            },
+          }),
+        ],
+      }),
+    ],
+    [
+      "operation task identity mismatch",
       plan({
         steps: [
           step("step-a", 1, {
             operation: {
               taskId: "task-other",
               stepId: "step-a",
+              operationGeneration: 1,
+            },
+          }),
+        ],
+      }),
+    ],
+    [
+      "operation step identity mismatch",
+      plan({
+        steps: [
+          step("step-a", 1, {
+            operation: {
+              taskId: "task-alpha",
+              stepId: "step-other",
               operationGeneration: 1,
             },
           }),

@@ -138,10 +138,12 @@ export function assertTaskPlanRelationships(plan: TaskPlan): void {
       }
     }
     const operation = step.operation;
+    // A same-task steering continuation advances the plan turn while retaining
+    // operations committed by earlier turns. Their actor, task, and step
+    // identities remain authoritative; the operation turn records provenance.
     if (
       (operation?.conversationActorId &&
         operation.conversationActorId !== plan.actorId) ||
-      (operation?.turnId && operation.turnId !== plan.turnId) ||
       (operation?.taskId && operation.taskId !== plan.taskId) ||
       (operation?.stepId && operation.stepId !== step.stepId)
     ) {
