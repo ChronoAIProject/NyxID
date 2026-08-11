@@ -1,8 +1,10 @@
 # NyxID#1408 — Migrate the default chat trunk to typed NyxIdChat
 
-Implementation plan. Author: Opus. **Revision 2, after adversarial review** (see
-`1408-typed-chat-trunk.review-codex.md`, verdict REJECT on revision 1). All nine findings
-verified as correct and addressed here; §7 maps finding → resolution.
+Implementation plan. Author: Opus. **Revision 3 — implementation-ready.**
+
+Two adversarial review rounds (`1408-typed-chat-trunk.review-codex.md`): revision 1 REJECTED
+on 9 findings, revision 2 APPROVED WITH CHANGES on 4 required changes. All 13 independently
+verified and addressed; §7 maps each finding → resolution.
 
 ## 0. Decision record
 
@@ -15,6 +17,8 @@ verified as correct and addressed here; §7 maps finding → resolution.
 | Aevatar contract revision | `aevatarAI/aevatar` @ `0a86713671fcf551dc19ad86b1b6aa8ae6cb980b` | Pinned by #1408 |
 | NyxID baseline | `ChronoAIProject/NyxID` @ `04602a740bc1c82c85b6794a5cbfecb7f4afc158` | Pinned by #1408 |
 | Projection reference | `StudioAssistant/actor-state.js` (522 lines) @ `0a867136` | **Port from it. Do not design the projection from canon prose.** |
+| Attachments / `inputParts` | **Out of scope.** Rejected at the Assistant UI boundary; documented limitation. | Calvin, 2026-08-11 |
+| Wire replay, workflow captures | **Remove the workflow parser, fixtures, and UI copy.** After PR 3 no workflow capture can ever be produced again (captures are session-only per `assistant-wire-log-panel.tsx:534-540`, and the send path is deleted), so retaining the parser preserves an unreachable branch. FI-007. | This plan |
 
 `chatc-*` inventory is captured in PR 0 and recorded here before PR 3 lands. If the inventory
 shows non-trivial active usage, that is a signal to revisit the policy with Calvin — not a
@@ -102,7 +106,9 @@ and ignored upstream. Assistant DTOs reject unknown fields. `Idempotency-Key` is
 `clientRequestId` (reference: `transport.js:394-423`).
 
 **Attachments.** The reference maps an attachment to typed `inputParts` and strips
-console-only `surface`/`attachment` fields. NyxID must make an explicit choice — see PR 3.
+console-only `surface`/`attachment` fields. **NyxID does not support attachments** (§0) —
+noted here only so an implementer does not mistake the reference's behaviour for a
+requirement.
 
 ### Control commands (all `POST /api/chat` → `202 Accepted`)
 
@@ -136,8 +142,19 @@ TaskPlan alone. It owns: `actorId`, `scopeId`, `stateVersion`, `progressSequence
 key/generation/phase, effect evidence, `availableActions`, `pendingInput`, approval
 presentation, latest safe input/approval resolution facts, typed `pendingActions`, bounded
 `recentActions`, control fences, continuation admission, actor-authored attention
-(`attentionKind`, `attentionSince`), `activeStepSummary`, `latestStepControlResult`, and
-bounded `recentStepControlResults`.
+(`attentionKind`, `attentionSince`), `activeStepSummary`, **`taskStatus`**,
+**`latestControlResult`**, `latestStepControlResult`, and bounded `recentStepControlResults`.
+
+`taskStatus` and `latestControlResult` are easy to miss and both are load-bearing:
+
+- **`taskStatus`** is actor-authored terminal task state (canon `:646`). The reference reads
+  `snapshot.taskStatus || snapshot.activeTask?.status` (`actor-state.js:201`) — it must not be
+  inferred from another field, or the browser is deriving task truth, which the contract
+  forbids.
+- **`latestControlResult`** (`actor-state.js:45-48`, `:205-207`) is **distinct from both**
+  `controlFence` and `latestStepControlResult`. It carries the committed outcome needed to
+  reconcile a stop/steer receipt after reload; without it a `202` receipt can never be
+  resolved to its committed result.
 
 Envelope statuses: `current` | `not_modified` | `reload_required` | `not_found`. Monotonic
 overwrite: newer replaces older; byte-equal same-version idempotent; same-version conflict
@@ -151,9 +168,20 @@ fails; older never overwrites newer.
 
 ## 4. PR sequence
 
-**Ordering rule (revision 2):** the trunk flip lands only after the projection is *wired and
-exercised*, not merely present. Revision 1's "PR 2 is inert, PR 3 flips" split was incoherent:
-it would have shipped command builders with no source for the facts they must send.
+**Ordering rule:** the trunk flip lands only after the projection is *wired and exercised*,
+not merely present. Revision 1's "PR 2 is inert, PR 3 flips" split was incoherent: it would
+have shipped command builders with no source for the facts they must send.
+
+**Merge matrix** — PR 0 answers Q1 first, then:
+
+| Q1 answer | Required merge order |
+|---|---|
+| `confirm` (gate pending) | PR 0 → **PR 1 → PR 2** (PR 2 carries the gate slice and cannot ship before the backend accepts `plan.resolve`) → PR 2's gate end-to-end test passes → PR 3 → PR 4 → PR 5 |
+| `auto` (no gate) | PR 0 → PR 1 and PR 2 may merge independently → PR 3 → PR 4 → PR 5 |
+
+The `confirm` row exists because `plan.resolve` does not exist server-side until PR 1
+(`assistant_service.rs:257-266` at baseline). A PR 2 gate slice merged first would render a
+gate the user can press and then submit into a `400 Unsupported assistant chat command`.
 
 ---
 
@@ -254,8 +282,24 @@ reduce; `/state` snapshot → same decode → reduce.
 required; nested `runStarted.threadId`/`runId` must match when present; exactly one adoption
 per stream; mismatch → terminal protocol error.
 
-**State the retirement explicitly:** which existing card reducer and which part of
-`preserveLocalStructuredMessages` the projection replaces.
+**Ownership map — decide this before writing code, not during.** The typed path already runs
+its own overlapping reducers, so an unstated boundary means two reducers race and history can
+overwrite actor state. Fill in and commit this table as the first commit of PR 2:
+
+| Question | Baseline mechanism it collides with | Decision |
+|---|---|---|
+| Which field owns `ActorProjection`? | per-conversation `StoredConversation` | *fill in* |
+| Which SSE dispatcher routes each custom frame to it? | `emit()` (`aevatar-transport.ts:3744-3810`), `applyInputChanged` (`:5880`), `applyApprovalChanged` (`:5910`), dispatch at `:5137-5150` | *fill in* |
+| Which mount/reload hook issues the conditional `/state` read? | `reconcileProjection` (`:2181-2254`) — history-oriented today | *fill in* |
+| Which `TurnEvent` card reducers are bypassed for typed conversations? | input/approval/action card reducers | *fill in* |
+| Which `preserveLocalStructuredMessages` branches are bypassed? | `:575`, `:3538-3610` | *fill in* |
+
+**Rule: for a typed conversation the actor projection is authoritative. History reconciliation
+may never overwrite it.**
+
+**Test:** reload a typed conversation with a pending input, approval, and action while a legacy
+transcript is also present; prove history cannot overwrite the actor projection and that the
+gate/card submits from projection state, never from stale card data.
 
 **If PR 0 answered Q1 = `confirm`, the plan gate ships here** — decode, render, submit,
 reload — not in PR 4.
@@ -275,9 +319,9 @@ not-found guard). First turn posts `{type:"text", prompt, clientRequestId}` to
 `/api/v1/assistant/chat`. Adopt authoritative identity from `RUN_STARTED` under the PR 2 rule;
 alias the draft in place. Follow-ups send the adopted `conversationId` + new `clientRequestId`.
 
-**Attachments:** make the explicit call — either reject at the UI boundary with a visible
-limitation, or add an audited typed `inputParts` schema + forwarder with tests. Do not leave
-it undefined.
+**Attachments:** settled — out of scope (§0). Reject at the Assistant UI boundary and
+document the limitation. No `inputParts` schema, forwarder, or composer affordance in this
+migration. There is no attachment UI at baseline, so nothing user-visible changes.
 
 **Legacy read-only:** `sendMessage` on `chatc-*` throws a typed read-only error with no
 network call; composer renders a disabled archived state. History read/list/delete keep
@@ -303,9 +347,11 @@ resource independently of the create-recovery endpoint (verified: `handlers/assi
 - `scenario-intercept-transport.ts:35, 94` — convert mock scenarios to `draft-*`, and update
   `use-assistant.mock-scenarios.test.tsx:129`. Otherwise "a fresh chat can never select
   `workflow-pending-*`" is false in scenario runs.
-- `wire-replay.ts` — **explicit product decision**: keep as a clearly-labelled historical
-  diagnostic with its own fixtures, or remove the workflow protocol and update the inspector.
-  Do not leave it ambiguous.
+- `wire-replay.ts` (17 workflow refs) — settled (§0): **remove** the workflow parser, its
+  fixtures (`__fixtures__/aevatar-workflow-create-stream.sse`), the `wire-replay.test.ts`
+  workflow-creation replay at `:437-482`, and any UI copy naming the workflow channel. After
+  PR 3 no workflow capture can be produced again, so the branch is unreachable by
+  construction.
 - **Keep:** `WORKFLOW_CONVERSATION_PREFIX`, `conversation_resource_family` — still needed for
   legacy reads and deletes.
 
@@ -388,3 +434,12 @@ rebuild with `npm --prefix frontend run build:wizard` if one appears.
 | 7 | Missed reference-client rules (attachments/`inputParts`, `Idempotency-Key`, envelope checks) | Attachment decision required in PR 3; envelope checks lifted into PR 2; no untyped `Record` after decode |
 | 8 | Tests proved non-use, not absence | PR 3 gains router 404 tests, no-fallback test, unknown-discriminator test, server-side echo assertions |
 | 9 | Line count stale (6,117 → 6,843) | Corrected; reproduce with `wc -l` / `rg -ic workflow` rather than trusting the number |
+
+### Revision 3 — round-2 required changes (verdict APPROVE WITH CHANGES)
+
+| # | Required change | Resolution |
+|---|---|---|
+| RC1 | Q1=`confirm` left PR 2's gate slice able to merge before the backend accepts `plan.resolve` | Explicit merge matrix in §4; `confirm` forces PR 1 → PR 2 |
+| RC2 | `/state` inventory dropped `taskStatus` and `latestControlResult` | Both added to §3 with why each is load-bearing, and to PR 2's schema/reducer + fixtures |
+| RC3 | Projection/legacy-reducer collision identified but integration left to the implementer | Ownership map table in PR 2, committed as its first commit, plus the actor-authoritative rule and a history-cannot-overwrite test |
+| RC4 | Attachment and wire-replay choices surfaced but undecided | Both settled in §0 — attachments out of scope (Calvin); wire-replay workflow parser removed (unreachable after PR 3) |
