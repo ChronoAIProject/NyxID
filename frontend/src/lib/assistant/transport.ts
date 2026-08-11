@@ -186,6 +186,42 @@ class MockAssistantTransport implements AssistantTransport {
     if (!stepId) throw new Error("Step identity is required.");
   }
 
+  async resolvePlan(
+    conversationId: string,
+    blockId: string,
+    confirmed: boolean,
+  ): Promise<void> {
+    const block = assistantMockStore.findBlock(conversationId, blockId);
+    if (block?.type !== "task_plan") {
+      throw new Error("Task plan was not found.");
+    }
+    const gate = block.plan.gate;
+    if (
+      gate?.mode !== "confirm" ||
+      gate.status !== "pending" ||
+      !gate.requestId ||
+      !gate.taskId ||
+      !gate.planId ||
+      gate.planRevision === undefined
+    ) {
+      throw new Error("This plan gate is no longer pending.");
+    }
+    this.emitLocalActionPatch(
+      conversationId,
+      blockId,
+      {
+        plan: {
+          ...block.plan,
+          gate: {
+            ...gate,
+            status: confirmed ? "satisfied" : "rejected",
+          },
+        },
+      },
+      () => undefined,
+    );
+  }
+
   async decideApproval(
     conversationId: string,
     blockId: string,
@@ -682,6 +718,14 @@ export class DelegatingAssistantTransport implements AssistantTransport {
 
   skipStep(conversationId: string, stepId: string): Promise<void> {
     return this.transport.skipStep(conversationId, stepId);
+  }
+
+  resolvePlan(
+    conversationId: string,
+    blockId: string,
+    confirmed: boolean,
+  ): Promise<void> {
+    return this.transport.resolvePlan(conversationId, blockId, confirmed);
   }
 
   decideApproval(

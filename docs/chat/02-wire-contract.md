@@ -122,7 +122,7 @@ The body matches Aevatar's own console client: create carries a create-only comm
 
 `POST /chat` accepts a discriminated command allowlist. NyxID parses each command with unknown-field denial, rejects secret-shaped keys and values, validates control identities, and rebuilds the exact upstream object. It never spreads an arbitrary caller object into the Aevatar body.
 
-Every typed command includes `clientRequestId`. NyxID copies that value into the outbound `Idempotency-Key` header. Text and action continuation request `Accept: text/event-stream`. Input resolution, approval resolution, stop, steer, retry, and skip request `Accept: application/json`.
+Every typed command includes `clientRequestId`. NyxID copies that value into the outbound `Idempotency-Key` header. Text and action continuation request `Accept: text/event-stream`. Input, approval, and plan resolution plus stop, steer, retry, and skip request `Accept: application/json`.
 
 ### `text`
 
@@ -208,6 +208,24 @@ An empty `actions` array is a typed actor wake and may omit `originTurnId`.
 ```
 
 An empty reason is omitted. A nonempty reason is trimmed and limited to 2,048 characters. `expectedStateVersion` is required and must be positive. The browser reads it from the authoritative typed current-state envelope and verifies the exact pending approval identity. This command returns JSON transport acceptance; the matching `nyxid.approval.changed` or current-state `latestApprovalResolution` proves commit.
+
+### `plan.resolve`
+
+```json
+{
+  "type": "plan.resolve",
+  "conversationId": "nyxid-chat-f8369965a444433f92ec50e67ad8ee52",
+  "taskId": "task-identity",
+  "planId": "plan-identity",
+  "requestId": "plan-gate-identity",
+  "clientRequestId": "request-identity",
+  "planRevision": 3,
+  "confirmed": true,
+  "expectedStateVersion": 23
+}
+```
+
+All four plan and gate identities are required and `planRevision` plus `expectedStateVersion` must be positive. At click time the browser re-reads authoritative current state, requires an exact `confirm` + `pending` gate match, and submits the state version from that same read. A pending Stop fence is observed before this preflight. JSON 202 is dispatch acceptance only; the browser refreshes current state once and changes the card only when the actor-owned TaskPlan gate changes.
 
 ### `task.stop`
 
@@ -407,6 +425,8 @@ The upstream response uses the typed reconnect envelope with `current`, `not_mod
 After loading a `nyxid-chat-...` transcript, the browser also reads this state resource and hydrates the current TaskPlan, input, approval, and action cards. It does not proactively hydrate `chatc-...` conversations. A state-resource `404` after a valid typed transcript preserves the richer local/history mirror for mixed deployments instead of erasing cards.
 
 `activeTask` carries the full published TaskPlan shape. Live `nyxid.task.snapshot`, live `nyxid.task.step.changed`, and `snapshot.activeTask` all enter the same task reducer. The reducer enforces actor identity, plan revision, monotonically increasing `progressSequence` and `stateVersion`, and exact task/step relationships. Unknown additive fields are ignored. `availableActions` is a closed object containing only `retry`, `skip`, and `stop`; an unknown action verb fails closed.
+
+Task-step approval observations retain the public decision mode, `approval_required` / `denied` receipt status, observation time, optional `rejected` / `expired` / `timed_out` terminal outcome, and optional non-sensitive `subjectKind`. The public read model deliberately reserves and omits `subjectId`; the browser does not recreate or display it.
 
 The hydrated cards live in one stable synthetic current-state message. Each hydration removes the prior managed TaskPlan/input/approval/action projections and rebuilds one copy of each current card, so repeated reloads cannot accumulate duplicates. A partial pending-input or pending-approval snapshot may retain the matching richer live card by request identity. Matching committed input and approval resolutions retain the local terminal card while advancing its state version.
 

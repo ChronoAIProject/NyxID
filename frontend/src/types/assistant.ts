@@ -129,6 +129,8 @@ export interface TaskApprovalObservation {
   readonly decisionMode: "unknown" | "per_request" | "grant";
   readonly receiptStatus: "approval_required" | "denied";
   readonly observedAt: string;
+  readonly terminalOutcome?: "rejected" | "expired" | "timed_out";
+  readonly subjectKind?: string;
 }
 
 export interface TaskStep {
@@ -524,6 +526,12 @@ export interface AssistantTransport {
   steerTask(conversationId: string, instruction: string): Promise<void>;
   retryStep(conversationId: string, stepId: string): Promise<void>;
   skipStep(conversationId: string, stepId: string): Promise<void>;
+  /** Resolve the exact pending plan gate against a fresh actor-state fence. */
+  resolvePlan(
+    conversationId: string,
+    blockId: string,
+    confirmed: boolean,
+  ): Promise<void>;
   /**
    * Send a version-fenced approval decision. The command returns JSON
    * acceptance; later committed projection frames carry business progress.

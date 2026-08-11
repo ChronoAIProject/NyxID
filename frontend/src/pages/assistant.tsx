@@ -31,6 +31,7 @@ import {
   useDeleteConversation,
   useSendMessage,
   useResolveInput,
+  useResolvePlan,
   useRetryStep,
   useTurnEpisode,
   useSkipStep,
@@ -217,6 +218,7 @@ export function AssistantPage({
   const cancelTurn = useCancelTurn(selectedId);
   const decideApproval = useDecideApproval(selectedId);
   const resolveInput = useResolveInput(selectedId);
+  const resolvePlan = useResolvePlan(selectedId);
   const actionCards = useActionCardActions(selectedId);
   const stopTask = useStopTask(selectedId);
   const steerTask = useSteerTask(selectedId);
@@ -234,6 +236,7 @@ export function AssistantPage({
     steerTask.isPending ||
     retryStep.isPending ||
     skipStep.isPending ||
+    resolvePlan.isPending ||
     decideApproval.isPending ||
     resolveInput.isPending ||
     episodeState?.open === true;
@@ -593,6 +596,15 @@ export function AssistantPage({
       endContinuation();
     }
   }
+
+  async function handleResolvePlan(blockId: string, confirmed: boolean) {
+    beginContinuation();
+    try {
+      await resolvePlan.mutateAsync({ blockId, confirmed });
+    } finally {
+      endContinuation();
+    }
+  }
   const awaitingFirstTurn =
     active || sendMessage.isPending || episodeState?.open === true;
 
@@ -697,6 +709,7 @@ export function AssistantPage({
             onStopTask={handleStopTask}
             onRetryStep={handleRetryStep}
             onSkipStep={handleSkipStep}
+            onResolvePlan={handleResolvePlan}
           />
         )}
         <div ref={composerRef} className="absolute inset-x-0 bottom-0 z-10">

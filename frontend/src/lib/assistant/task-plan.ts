@@ -266,6 +266,16 @@ function decodeApprovalObservation(input: unknown): TaskApprovalObservation {
       "approvalObservation.observedAt",
       128,
     ),
+    ...(value.terminalOutcome !== undefined
+      ? {
+          terminalOutcome: closed(
+            value.terminalOutcome,
+            ["rejected", "expired", "timed_out"] as const,
+            "approvalObservation.terminalOutcome",
+          ),
+        }
+      : {}),
+    ...optionalNamedString(value, "subjectKind"),
   };
 }
 

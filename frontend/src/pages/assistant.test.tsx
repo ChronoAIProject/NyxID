@@ -23,6 +23,7 @@ const {
   mockSteerTaskMutateAsync,
   mockRetryStepMutateAsync,
   mockSkipStepMutateAsync,
+  mockResolvePlanMutateAsync,
   mockContinueAction,
   mockDeleteMutateAsync,
   mockSendMutateAsync,
@@ -38,6 +39,7 @@ const {
   mockSteerTaskMutateAsync: vi.fn(),
   mockRetryStepMutateAsync: vi.fn(),
   mockSkipStepMutateAsync: vi.fn(),
+  mockResolvePlanMutateAsync: vi.fn(),
   mockContinueAction: vi.fn(),
   mockDeleteMutateAsync: vi.fn(),
   mockSendMutateAsync: vi.fn(),
@@ -203,6 +205,10 @@ vi.mock("@/hooks/use-assistant", () => ({
   }),
   useSkipStep: () => ({
     mutateAsync: mockSkipStepMutateAsync,
+    isPending: false,
+  }),
+  useResolvePlan: () => ({
+    mutateAsync: mockResolvePlanMutateAsync,
     isPending: false,
   }),
   useActionCardActions: () => ({
@@ -952,6 +958,14 @@ describe("AssistantPage typed task controls", () => {
               title: "Publish the release",
               status: "active",
               activeStepId: "step-alpha",
+              gate: {
+                mode: "confirm",
+                status: "pending",
+                requestId: "plan-gate-alpha",
+                taskId: "task-alpha",
+                planId: "plan-alpha",
+                planRevision: 2,
+              },
               steps: [
                 {
                   stepId: "step-alpha",
@@ -1001,6 +1015,16 @@ describe("AssistantPage typed task controls", () => {
     expect(mockStopTaskMutateAsync).toHaveBeenCalledOnce();
     expect(mockRetryStepMutateAsync).toHaveBeenCalledWith("step-alpha");
     expect(mockSkipStepMutateAsync).toHaveBeenCalledWith("step-alpha");
+    await event.click(screen.getByRole("button", { name: "Confirm plan" }));
+    await event.click(screen.getByRole("button", { name: "Reject plan" }));
+    expect(mockResolvePlanMutateAsync).toHaveBeenNthCalledWith(1, {
+      blockId: "current-task-plan:task-alpha",
+      confirmed: true,
+    });
+    expect(mockResolvePlanMutateAsync).toHaveBeenNthCalledWith(2, {
+      blockId: "current-task-plan:task-alpha",
+      confirmed: false,
+    });
     expect(mockCancelMutateAsync).not.toHaveBeenCalled();
   });
 });

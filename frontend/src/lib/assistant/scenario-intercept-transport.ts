@@ -393,6 +393,14 @@ export class ScenarioInterceptTransport implements AssistantTransport {
     return this.delegate.skipStep(conversationId, stepId);
   }
 
+  resolvePlan(
+    conversationId: string,
+    blockId: string,
+    confirmed: boolean,
+  ): Promise<void> {
+    return this.delegate.resolvePlan(conversationId, blockId, confirmed);
+  }
+
   async decideApproval(
     conversationId: string,
     blockId: string,

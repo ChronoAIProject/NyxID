@@ -80,6 +80,7 @@ function renderBlock(
   onStopTask: () => Promise<void>,
   onRetryStep: (stepId: string) => Promise<void>,
   onSkipStep: (stepId: string) => Promise<void>,
+  onResolvePlan: (blockId: string, confirmed: boolean) => Promise<void>,
   streaming = false,
 ) {
   if (typeof block !== "object" || block === null || !("type" in block)) {
@@ -100,6 +101,7 @@ function renderBlock(
           onStop={onStopTask}
           onRetry={onRetryStep}
           onSkip={onSkipStep}
+          onResolve={(confirmed) => onResolvePlan(typed.block_id, confirmed)}
         />
       );
     case "approval_card":
@@ -416,6 +418,7 @@ export function ChatThread({
   onStopTask = async () => undefined,
   onRetryStep = async () => undefined,
   onSkipStep = async () => undefined,
+  onResolvePlan = async () => undefined,
 }: {
   readonly messages: readonly AssistantMessage[];
   readonly thinking?: boolean;
@@ -461,6 +464,10 @@ export function ChatThread({
   readonly onStopTask?: () => Promise<void>;
   readonly onRetryStep?: (stepId: string) => Promise<void>;
   readonly onSkipStep?: (stepId: string) => Promise<void>;
+  readonly onResolvePlan?: (
+    blockId: string,
+    confirmed: boolean,
+  ) => Promise<void>;
 }) {
   const rootRef = useRef<HTMLDivElement>(null);
   const scrollRef = useRef<HTMLDivElement>(null);
@@ -682,6 +689,7 @@ export function ChatThread({
                                 onStopTask,
                                 onRetryStep,
                                 onSkipStep,
+                                onResolvePlan,
                               )}
                             </div>
                           ))}
@@ -741,6 +749,7 @@ export function ChatThread({
                                 onStopTask,
                                 onRetryStep,
                                 onSkipStep,
+                                onResolvePlan,
                                 streamingGroup &&
                                   isLastBlock &&
                                   isTextBlock(block),

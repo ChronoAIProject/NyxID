@@ -870,6 +870,25 @@ export function useSkipStep(conversationId: string | undefined) {
   });
 }
 
+export function useResolvePlan(conversationId: string | undefined) {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: async ({
+      blockId,
+      confirmed,
+    }: {
+      readonly blockId: string;
+      readonly confirmed: boolean;
+    }): Promise<void> => {
+      if (!conversationId) throw new Error("Select a conversation first.");
+      await assistantTransport.resolvePlan(conversationId, blockId, confirmed);
+      await projectTransportState(queryClient, conversationId);
+    },
+    onError: (error) =>
+      taskControlError("Plan decision was not delivered", error),
+  });
+}
+
 export function useDecideApproval(conversationId: string | undefined) {
   const queryClient = useQueryClient();
   return useMutation({

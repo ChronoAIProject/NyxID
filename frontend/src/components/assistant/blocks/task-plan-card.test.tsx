@@ -6,6 +6,11 @@ import { TaskPlanCard } from "./task-plan-card";
 
 function block(
   actions = { retry: true, skip: true, stop: true },
+  gate: Record<string, unknown> = {
+    mode: "auto",
+    status: "satisfied",
+    reason: "Read-only steps run automatically.",
+  },
 ): TaskPlanContentBlock {
   return {
     type: "task_plan",
@@ -22,11 +27,7 @@ function block(
       planRevisions: [],
       title: "Publish a weekly update",
       status: "active",
-      gate: {
-        mode: "auto",
-        status: "satisfied",
-        reason: "Read-only steps run automatically.",
-      },
+      gate,
       steps: [
         {
           stepId: "step-alpha",
@@ -66,12 +67,14 @@ describe("TaskPlanCard", () => {
     const onStop = vi.fn().mockResolvedValue(undefined);
     const onRetry = vi.fn().mockResolvedValue(undefined);
     const onSkip = vi.fn().mockResolvedValue(undefined);
+    const onResolve = vi.fn().mockResolvedValue(undefined);
     render(
       <TaskPlanCard
         block={block()}
         onStop={onStop}
         onRetry={onRetry}
         onSkip={onSkip}
+        onResolve={onResolve}
       />,
     );
 
@@ -111,6 +114,7 @@ describe("TaskPlanCard", () => {
         onStop={vi.fn()}
         onRetry={vi.fn()}
         onSkip={vi.fn()}
+        onResolve={vi.fn()}
       />,
     );
 
@@ -123,5 +127,37 @@ describe("TaskPlanCard", () => {
     expect(
       screen.queryByRole("button", { name: "Stop task" }),
     ).not.toBeInTheDocument();
+  });
+
+  it("offers only the exact pending confirm gate and dispatches both decisions", async () => {
+    const onResolve = vi.fn().mockResolvedValue(undefined);
+    render(
+      <TaskPlanCard
+        block={block(
+          { retry: false, skip: false, stop: false },
+          {
+            mode: "confirm",
+            status: "pending",
+            requestId: "plan-gate-alpha",
+            taskId: "task-alpha",
+            planId: "plan-alpha",
+            planRevision: 3,
+          },
+        )}
+        onStop={vi.fn()}
+        onRetry={vi.fn()}
+        onSkip={vi.fn()}
+        onResolve={onResolve}
+      />,
+    );
+
+    await act(async () => {
+      fireEvent.click(screen.getByRole("button", { name: "Confirm plan" }));
+    });
+    await act(async () => {
+      fireEvent.click(screen.getByRole("button", { name: "Reject plan" }));
+    });
+    expect(onResolve).toHaveBeenNthCalledWith(1, true);
+    expect(onResolve).toHaveBeenNthCalledWith(2, false);
   });
 });

@@ -728,6 +728,128 @@ describe("AevatarAssistantTransport", () => {
     ]);
   });
 
+  it("resolves the exact fresh plan gate and refreshes committed state after acceptance", async () => {
+    const pendingTask = {
+      ...taskPlanFixture(),
+      gate: {
+        mode: "confirm",
+        status: "pending",
+        requestId: "plan-gate-current-1",
+        taskId: "task-current-1",
+        planId: "plan-current-1",
+        planRevision: 2,
+      },
+    };
+    const satisfiedTask = {
+      ...pendingTask,
+      gate: { ...pendingTask.gate, status: "satisfied" },
+    };
+    let stateReads = 0;
+    const fetchMock = stubFetch(
+      routeHistory([]),
+      (url, init) => {
+        if (!url.endsWith("/state") || (init?.method ?? "GET") !== "GET") {
+          return undefined;
+        }
+        stateReads += 1;
+        const activeTask = stateReads <= 2 ? pendingTask : satisfiedTask;
+        return jsonResponse(
+          currentTaskState(50 + stateReads, {}, { activeTask }),
+        );
+      },
+      (url, init) =>
+        isTypedCommandRequest(url, init, "plan.resolve")
+          ? jsonResponse({ status: "accepted" }, 202)
+          : undefined,
+    );
+    const transport = new AevatarAssistantTransport();
+    await seedActorConversation(transport);
+    await transport.getHistory(CONVERSATION_ID);
+
+    await transport.resolvePlan(
+      CONVERSATION_ID,
+      "current-task-plan:task-current-1",
+      true,
+    );
+
+    const post = fetchMock.mock.calls.find(([input, init]) =>
+      isTypedCommandRequest(
+        String(input),
+        init as RequestInit | undefined,
+        "plan.resolve",
+      ),
+    );
+    expect(jsonRequestBody(post?.[1] as RequestInit | undefined)).toEqual({
+      type: "plan.resolve",
+      conversationId: CONVERSATION_ID,
+      taskId: "task-current-1",
+      planId: "plan-current-1",
+      requestId: "plan-gate-current-1",
+      clientRequestId: expect.any(String),
+      planRevision: 2,
+      confirmed: true,
+      expectedStateVersion: 52,
+    });
+    expect(stateReads).toBe(3);
+    const refreshed = await transport.getHistory(CONVERSATION_ID);
+    const plan = refreshed.messages
+      .flatMap((message) => message.blocks)
+      .find((block) => block.type === "task_plan");
+    expect(plan?.type === "task_plan" && plan.plan.gate?.status).toBe(
+      "satisfied",
+    );
+  });
+
+  it("rejects a stale clicked plan gate when fresh state has another request", async () => {
+    const clickedTask = {
+      ...taskPlanFixture(),
+      gate: {
+        mode: "confirm",
+        status: "pending",
+        requestId: "plan-gate-clicked",
+        taskId: "task-current-1",
+        planId: "plan-current-1",
+        planRevision: 2,
+      },
+    };
+    const freshTask = {
+      ...clickedTask,
+      gate: { ...clickedTask.gate, requestId: "plan-gate-fresh" },
+    };
+    let stateReads = 0;
+    const fetchMock = stubFetch(routeHistory([]), (url, init) => {
+      if (!url.endsWith("/state") || (init?.method ?? "GET") !== "GET") {
+        return undefined;
+      }
+      stateReads += 1;
+      return jsonResponse(
+        currentTaskState(60 + stateReads, {}, {
+          activeTask: stateReads === 1 ? clickedTask : freshTask,
+        }),
+      );
+    });
+    const transport = new AevatarAssistantTransport();
+    await seedActorConversation(transport);
+    await transport.getHistory(CONVERSATION_ID);
+
+    await expect(
+      transport.resolvePlan(
+        CONVERSATION_ID,
+        "current-task-plan:task-current-1",
+        false,
+      ),
+    ).rejects.toThrow("exact plan gate");
+    expect(
+      fetchMock.mock.calls.filter(([input, init]) =>
+        isTypedCommandRequest(
+          String(input),
+          init as RequestInit | undefined,
+          "plan.resolve",
+        ),
+      ),
+    ).toHaveLength(0);
+  });
+
   it.each([
     [
       "an unavailable Retry",

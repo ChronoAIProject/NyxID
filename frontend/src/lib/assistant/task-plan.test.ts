@@ -108,6 +108,35 @@ describe("decodeTaskPlan", () => {
     ).toThrow("unknown action verb");
   });
 
+  it("preserves the public approval terminal outcome and non-sensitive subject kind", () => {
+    const decoded = decodeTaskPlan(
+      plan({
+        steps: [
+          step("step-a", 1, {
+            approvalObservation: {
+              approvalRequestId: "approval-alpha",
+              decisionMode: "per_request",
+              receiptStatus: "denied",
+              observedAt: "2026-08-11T08:00:00Z",
+              terminalOutcome: "rejected",
+              subjectKind: "nyxid.user-service",
+              futureObservationField: "ignored",
+            },
+          }),
+        ],
+      }),
+    );
+
+    expect(decoded.steps[0]?.approvalObservation).toEqual({
+      approvalRequestId: "approval-alpha",
+      decisionMode: "per_request",
+      receiptStatus: "denied",
+      observedAt: "2026-08-11T08:00:00Z",
+      terminalOutcome: "rejected",
+      subjectKind: "nyxid.user-service",
+    });
+  });
+
   it.each([
     ["unknown task status", plan({ status: "paused" })],
     [

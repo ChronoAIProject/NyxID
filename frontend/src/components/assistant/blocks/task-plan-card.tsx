@@ -21,7 +21,12 @@ import type {
   TaskStepStatus,
 } from "@/types/assistant";
 
-type TaskControl = "stop" | `retry:${string}` | `skip:${string}`;
+type TaskControl =
+  | "stop"
+  | "plan:confirm"
+  | "plan:reject"
+  | `retry:${string}`
+  | `skip:${string}`;
 
 const STATUS_STYLE: Record<TaskStepStatus, string> = {
   planned: "text-text-tertiary",
@@ -178,15 +183,19 @@ export function TaskPlanCard({
   onStop,
   onRetry,
   onSkip,
+  onResolve,
 }: {
   readonly block: TaskPlanContentBlock;
   readonly onStop: () => Promise<void>;
   readonly onRetry: (stepId: string) => Promise<void>;
   readonly onSkip: (stepId: string) => Promise<void>;
+  readonly onResolve: (confirmed: boolean) => Promise<void>;
 }) {
   const [pending, setPending] = useState<TaskControl | null>(null);
   const plan = block.plan;
   const canStop = plan.steps.some((step) => step.availableActions.stop);
+  const pendingGate =
+    plan.gate?.mode === "confirm" && plan.gate.status === "pending";
 
   async function run(control: TaskControl, action: () => Promise<void>) {
     if (pending) return;
@@ -228,6 +237,40 @@ export function TaskPlanCard({
         <p className="border-b border-border px-3 py-2 text-[10px] leading-relaxed text-muted-foreground">
           {plan.gate.reason}
         </p>
+      ) : null}
+      {pendingGate ? (
+        <div className="flex flex-wrap items-center justify-end gap-1.5 border-b border-border px-3 py-2">
+          <Button
+            type="button"
+            size="sm"
+            variant="primary"
+            disabled={pending !== null}
+            onClick={() =>
+              void run("plan:confirm", () => onResolve(true))
+            }
+          >
+            {pending === "plan:confirm" ? (
+              <Loader2 className="animate-spin" />
+            ) : (
+              <Check />
+            )}
+            Confirm plan
+          </Button>
+          <Button
+            type="button"
+            size="sm"
+            variant="destructive"
+            disabled={pending !== null}
+            onClick={() => void run("plan:reject", () => onResolve(false))}
+          >
+            {pending === "plan:reject" ? (
+              <Loader2 className="animate-spin" />
+            ) : (
+              <X />
+            )}
+            Reject plan
+          </Button>
+        </div>
       ) : null}
       <ol className="divide-y divide-border">
         {plan.steps.map((step) => (

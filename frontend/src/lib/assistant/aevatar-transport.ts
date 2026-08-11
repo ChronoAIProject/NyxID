@@ -2814,6 +2814,7 @@ export class AevatarAssistantTransport implements AssistantTransport {
     }
     const controller = this.scopeController();
     try {
+      await this.awaitPendingStop(conversationId);
       const projection = await this.readTaskControlProjection(
         conversationId,
         controller.signal,
@@ -2849,6 +2850,86 @@ export class AevatarAssistantTransport implements AssistantTransport {
 
   async skipStep(conversationId: string, stepId: string): Promise<void> {
     await this.dispatchStepControl(conversationId, stepId, "skip");
+  }
+
+  async resolvePlan(
+    conversationId: string,
+    blockId: string,
+    confirmed: boolean,
+  ): Promise<void> {
+    this.ensureScope();
+    conversationId = this.canonicalConversationId(conversationId);
+    this.assertTypedTaskConversation(conversationId);
+    if (this.deletingConversations.has(conversationId)) {
+      throw new Error("This conversation is being deleted.");
+    }
+    const stored = this.conversations.get(conversationId);
+    const card = stored?.turnState.messages
+      .flatMap((message) => message.blocks)
+      .find(
+        (block): block is TaskPlanContentBlock =>
+          block.type === "task_plan" && block.block_id === blockId,
+      );
+    const clickedGate = card?.plan.gate;
+    if (
+      !card ||
+      clickedGate?.mode !== "confirm" ||
+      clickedGate.status !== "pending" ||
+      !clickedGate.requestId ||
+      !clickedGate.taskId ||
+      !clickedGate.planId ||
+      clickedGate.planRevision === undefined
+    ) {
+      throw new AssistantProtocolError("This plan gate is no longer pending.");
+    }
+
+    const controller = this.scopeController();
+    try {
+      await this.awaitPendingStop(conversationId);
+      const projection = await this.readTaskControlProjection(
+        conversationId,
+        controller.signal,
+      );
+      const gate = projection.task?.gate;
+      if (
+        gate?.mode !== "confirm" ||
+        gate.status !== "pending" ||
+        gate.requestId !== clickedGate.requestId ||
+        gate.taskId !== clickedGate.taskId ||
+        gate.planId !== clickedGate.planId ||
+        gate.planRevision !== clickedGate.planRevision
+      ) {
+        throw new AssistantProtocolError(
+          "The actor no longer offers this exact plan gate.",
+        );
+      }
+      await assistantApi.post<{ readonly status: string }>(
+        `${ASSISTANT_PREFIX}/chat`,
+        {
+          type: "plan.resolve",
+          conversationId,
+          taskId: gate.taskId,
+          planId: gate.planId,
+          requestId: gate.requestId,
+          clientRequestId: crypto.randomUUID(),
+          planRevision: gate.planRevision,
+          confirmed,
+          expectedStateVersion: projection.stateVersion,
+        },
+        controller.signal,
+      );
+
+      // JSON 202 means accepted for actor dispatch, not committed. Refresh the
+      // same projection once and let only actor-owned state settle the gate.
+      try {
+        await this.readTaskControlProjection(conversationId, controller.signal);
+      } catch (error) {
+        if (controller.signal.aborted) throw error;
+      }
+    } finally {
+      controller.abort();
+      this.releaseScopeController(controller);
+    }
   }
 
   /** Submit a version-fenced approval decision and project JSON acceptance. */
