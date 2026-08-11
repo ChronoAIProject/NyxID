@@ -11,7 +11,10 @@ use crate::models::agent_service_binding::{
 };
 use crate::models::api_key::{ApiKey, ApiKeyPurpose, COLLECTION_NAME as API_KEYS};
 use crate::redaction::RedactedLen;
-use crate::services::api_key_scope_service::{self, ScopeAuthorization};
+use crate::services::{
+    api_key_mutation_service as key_mutations,
+    api_key_scope_service::{self, ScopeAuthorization},
+};
 
 /// Result returned when a new API key is created.
 /// The `full_key` is shown once and never stored.
@@ -278,6 +281,53 @@ pub async fn create_api_key_with_scope_authorization_and_id(
     .await
 }
 
+/// Create a general-purpose key using an already-reserved UUID. Assistant
+/// action admission uses this to recover an interrupted create without ever
+/// persisting or replaying the one-time secret.
+#[allow(clippy::too_many_arguments)]
+pub async fn create_api_key_with_scope_authorization_and_id(
+    db: &mongodb::Database,
+    user_id: &str,
+    scope_actor_user_id: Option<&str>,
+    resource_id: &str,
+    name: &str,
+    scopes: &str,
+    expires_at: Option<chrono::DateTime<Utc>>,
+    description: Option<&str>,
+    allowed_service_ids: Option<&[String]>,
+    allowed_node_ids: Option<&[String]>,
+    allow_all_services: Option<bool>,
+    allow_all_nodes: Option<bool>,
+    rate_limit_per_second: Option<u32>,
+    rate_limit_burst: Option<u32>,
+    platform: Option<&str>,
+    callback_url: Option<&str>,
+    scope_plan_digest: Option<&str>,
+) -> AppResult<CreatedApiKey> {
+    create_api_key_with_security_class_and_id(
+        db,
+        user_id,
+        scope_actor_user_id,
+        Some(resource_id),
+        name,
+        scopes,
+        expires_at,
+        description,
+        allowed_service_ids,
+        allowed_node_ids,
+        allow_all_services,
+        allow_all_nodes,
+        rate_limit_per_second,
+        rate_limit_burst,
+        platform,
+        callback_url,
+        scope_plan_digest,
+        ApiKeyPurpose::General,
+        false,
+    )
+    .await
+}
+
 #[allow(clippy::too_many_arguments)]
 pub async fn create_api_key_with_security_class(
     db: &mongodb::Database,
@@ -457,9 +507,7 @@ async fn create_api_key_with_security_class_and_id(
         scheduled_write_enabled,
     };
 
-    db.collection::<ApiKey>(API_KEYS)
-        .insert_one(&new_key)
-        .await?;
+    key_mutations::insert_one(db, &new_key, None).await?;
 
     Ok(CreatedApiKey {
         id,
@@ -513,12 +561,13 @@ pub async fn delete_api_key(db: &mongodb::Database, user_id: &str, key_id: &str)
         .await?
         .ok_or_else(|| AppError::NotFound("API key not found".to_string()))?;
 
-    db.collection::<ApiKey>(API_KEYS)
-        .update_one(
-            doc! { "_id": &key.id },
-            doc! { "$set": { "is_active": false } },
-        )
-        .await?;
+    key_mutations::update_one(
+        db,
+        doc! { "_id": &key.id },
+        doc! { "$set": { "is_active": false } },
+        None,
+    )
+    .await?;
 
     tracing::info!(key_id = %key_id, user_id = %user_id, "API key deactivated");
 
@@ -794,12 +843,13 @@ pub async fn update_api_key_scope_with_scope_authorization(
         return Ok(existing);
     }
 
-    db.collection::<ApiKey>(API_KEYS)
-        .update_one(
-            doc! { "_id": key_id, "user_id": user_id },
-            doc! { "$set": update },
-        )
-        .await?;
+    key_mutations::update_one(
+        db,
+        doc! { "_id": key_id, "user_id": user_id },
+        doc! { "$set": update },
+        None,
+    )
+    .await?;
 
     db.collection::<ApiKey>(API_KEYS)
         .find_one(doc! { "_id": key_id, "user_id": user_id })
@@ -830,12 +880,13 @@ pub async fn validate_api_key(
     // Update last_used_at
     let user_id = key.user_id.clone();
     let now = Utc::now();
-    db.collection::<ApiKey>(API_KEYS)
-        .update_one(
-            doc! { "_id": &key.id },
-            doc! { "$set": { "last_used_at": bson::DateTime::from_chrono(now) } },
-        )
-        .await?;
+    key_mutations::update_one(
+        db,
+        doc! { "_id": &key.id },
+        doc! { "$set": { "last_used_at": bson::DateTime::from_chrono(now) } },
+        None,
+    )
+    .await?;
 
     Ok((user_id, key))
 }
@@ -1111,6 +1162,44 @@ mod tests {
         assert!(created.allow_all_services);
         assert!(created.allow_all_nodes);
         assert!(!created.full_key.is_empty());
+        assert_eq!(created.rotation_predecessor_id, None);
+        assert_eq!(created.state_version, 1);
+        assert_eq!(created.updated_at, created.created_at);
+    }
+
+    #[tokio::test]
+    async fn create_api_key_with_reserved_id_initializes_authority() {
+        let Some(db) = connect_test_database("key_svc_create_reserved").await else {
+            eprintln!("skipping: no MongoDB");
+            return;
+        };
+        let user_id = Uuid::new_v4().to_string();
+        let reserved_id = Uuid::new_v4().to_string();
+        let created = create_api_key_with_scope_authorization_and_id(
+            &db,
+            &user_id,
+            Some(&user_id),
+            &reserved_id,
+            "reserved",
+            "proxy",
+            None,
+            None,
+            None,
+            None,
+            Some(true),
+            Some(true),
+            None,
+            None,
+            Some("codex"),
+            None,
+            None,
+        )
+        .await
+        .expect("create reserved key");
+
+        assert_eq!(created.id, reserved_id);
+        assert_eq!(created.state_version, 1);
+        assert_eq!(created.updated_at, created.created_at);
     }
 
     #[tokio::test]
@@ -1414,6 +1503,19 @@ mod tests {
         delete_api_key(&db, &user_id, &created.id)
             .await
             .expect("should deactivate");
+        let deactivated = db
+            .collection::<ApiKey>(API_KEYS)
+            .find_one(doc! { "_id": &created.id })
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(!deactivated.is_active);
+        assert_eq!(deactivated.state_version, 2);
+        assert!(
+            deactivated
+                .updated_at
+                .is_some_and(|value| value >= created.updated_at)
+        );
         let result = get_api_key(&db, &user_id, &created.id).await;
         assert!(result.is_err());
         assert!(matches!(result.unwrap_err(), AppError::NotFound(_)));
@@ -1503,6 +1605,11 @@ mod tests {
             .expect("should validate");
         assert_eq!(returned_uid, user_id);
         assert_eq!(key.name, "validate-me");
+        let touched = get_api_key(&db, &user_id, &created.id)
+            .await
+            .expect("key remains active");
+        assert_eq!(touched.state_version, 2);
+        assert!(touched.last_used_at.is_some());
     }
 
     #[tokio::test]
@@ -1581,6 +1688,12 @@ mod tests {
         .await
         .expect("should update");
         assert_eq!(updated.name, "new-name");
+        assert_eq!(updated.state_version, 2);
+        assert!(
+            updated
+                .updated_at
+                .is_some_and(|value| value >= created.updated_at)
+        );
     }
 
     #[tokio::test]

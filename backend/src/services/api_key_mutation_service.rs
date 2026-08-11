@@ -91,20 +91,6 @@ pub async fn update_one(
     })
 }
 
-pub async fn update_many(
-    db: &Database,
-    filter: Document,
-    update: Document,
-    session: Option<&mut ClientSession>,
-) -> AppResult<UpdateResult> {
-    let collection = db.collection::<ApiKey>(API_KEYS);
-    let action = collection.update_many(filter, authoritative_update(update)?);
-    Ok(match session {
-        Some(session) => action.session(session).await?,
-        None => action.await?,
-    })
-}
-
 pub async fn insert_one(
     db: &Database,
     key: &ApiKey,
