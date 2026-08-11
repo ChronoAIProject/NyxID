@@ -61,27 +61,27 @@ pub const DIRECT_SKILLS: &[DirectSkill] = &[
     DirectSkill {
         slug: "nyxid",
         label: "NyxID",
-        body: include_str!("../../../skills/nyxid/SKILL.md"),
+        body: include_str!("../../prompts/direct/nyxid.md"),
     },
     DirectSkill {
         slug: "github-via-nyxid",
         label: "GitHub via NyxID",
-        body: include_str!("../../../skills/github-via-nyxid/SKILL.md"),
+        body: include_str!("../../prompts/direct/github-via-nyxid.md"),
     },
     DirectSkill {
         slug: "firecrawl-via-nyxid",
         label: "Firecrawl via NyxID",
-        body: include_str!("../../../skills/firecrawl-via-nyxid/SKILL.md"),
+        body: include_str!("../../prompts/direct/firecrawl-via-nyxid.md"),
     },
 ];
 
 const _: () =
-    assert!(include_str!("../../../skills/nyxid/SKILL.md").len() <= MAX_DIRECT_SKILL_BYTES);
+    assert!(include_str!("../../prompts/direct/nyxid.md").len() <= MAX_DIRECT_SKILL_BYTES);
 const _: () = assert!(
-    include_str!("../../../skills/github-via-nyxid/SKILL.md").len() <= MAX_DIRECT_SKILL_BYTES
+    include_str!("../../prompts/direct/github-via-nyxid.md").len() <= MAX_DIRECT_SKILL_BYTES
 );
 const _: () = assert!(
-    include_str!("../../../skills/firecrawl-via-nyxid/SKILL.md").len() <= MAX_DIRECT_SKILL_BYTES
+    include_str!("../../prompts/direct/firecrawl-via-nyxid.md").len() <= MAX_DIRECT_SKILL_BYTES
 );
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -388,15 +388,10 @@ mod tests {
     }
 
     #[test]
-    fn registry_has_one_default_and_bounded_skills() {
+    fn registry_has_one_default_model() {
         assert_eq!(
             DIRECT_MODELS.iter().filter(|model| model.default).count(),
             1
-        );
-        assert!(
-            DIRECT_SKILLS
-                .iter()
-                .all(|skill| skill.body.len() <= MAX_DIRECT_SKILL_BYTES)
         );
     }
 }

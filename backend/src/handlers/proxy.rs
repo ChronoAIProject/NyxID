@@ -2633,15 +2633,17 @@ async fn execute_proxy_inner(
         .is_some_and(crate::mw::security_headers::is_sse_media_type);
     let should_stream = should_stream_response(&downstream_response, status, is_sse);
     let usage_context =
-        (platform_metric == BillingMetric::Tokens).then(|| llm_usage_service::UsageAuditContext {
-            db: state.db.clone(),
-            user_id: user_id_str.clone(),
-            provider_slug: None,
-            service_id: Some(service_id.to_string()),
-            model: None,
-            path: path.to_string(),
-            api_key_id: auth_user.api_key_id.clone(),
-            api_key_name: auth_user.api_key_name.clone(),
+        should_capture_llm_usage(&target.service.slug, platform_metric).then(|| {
+            llm_usage_service::UsageAuditContext {
+                db: state.db.clone(),
+                user_id: user_id_str.clone(),
+                provider_slug: None,
+                service_id: Some(service_id.to_string()),
+                model: None,
+                path: path.to_string(),
+                api_key_id: auth_user.api_key_id.clone(),
+                api_key_name: auth_user.api_key_name.clone(),
+            }
         });
 
     let mut response_builder = Response::builder().status(status);
@@ -3150,6 +3152,10 @@ fn platform_metric_for_target(
     } else {
         BillingMetric::Requests
     }
+}
+
+fn should_capture_llm_usage(service_slug: &str, platform_metric: BillingMetric) -> bool {
+    platform_metric == BillingMetric::Tokens || service_slug.starts_with("llm-")
 }
 
 fn resale_usage_from_optional_reported(
@@ -5631,6 +5637,22 @@ mod tests {
             super::platform_metric_for_target(&target, true),
             BillingMetric::Tokens
         );
+    }
+
+    #[test]
+    fn llm_usage_capture_preserves_slug_allowlist_and_adds_token_metrics() {
+        assert!(super::should_capture_llm_usage(
+            "llm-admin-override",
+            BillingMetric::Requests
+        ));
+        assert!(super::should_capture_llm_usage(
+            "chrono-llm-public",
+            BillingMetric::Tokens
+        ));
+        assert!(!super::should_capture_llm_usage(
+            "ordinary-service",
+            BillingMetric::Requests
+        ));
     }
 
     #[test]

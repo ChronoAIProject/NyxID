@@ -42,10 +42,11 @@ RUN rm -rf backend/src cloud-auth/src \
     target/release/libnyxid_cloud_auth.* \
     target/release/nyxid-server
 
-# Copy the real source code, build script, docs, and catalog spec overlays
-# (docs and specs are embedded via include_str!)
+# Copy the real source code, build script, docs, prompts, and catalog spec overlays
+# (docs, prompts, and specs are embedded via include_str!)
 COPY backend/src backend/src
 COPY backend/build.rs backend/build.rs
+COPY backend/prompts backend/prompts
 COPY backend/specs backend/specs
 COPY cloud-auth/src cloud-auth/src
 COPY docs/AI_AGENT_PLAYBOOK.md docs/AI_AGENT_PLAYBOOK.md

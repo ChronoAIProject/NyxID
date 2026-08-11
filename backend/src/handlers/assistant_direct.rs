@@ -176,14 +176,36 @@ mod tests {
     const USER_ID: &str = "a026fd00-bd86-4284-9832-9e5e65fc8f50";
 
     #[tokio::test]
-    async fn raw_body_overflow_maps_to_bad_request() {
-        let result = to_bytes(
-            Body::from(vec![b'x'; assistant_direct::MAX_DIRECT_REQUEST_BYTES + 1]),
-            assistant_direct::MAX_DIRECT_REQUEST_BYTES,
+    async fn raw_body_overflow_reaches_completions_handler() {
+        use crate::services::feature_flag_service::{FlagTarget, set_platform_override};
+
+        let Some(db) =
+            crate::test_utils::connect_test_database("assistant_direct_body_overflow").await
+        else {
+            eprintln!("skipping direct assistant body overflow test: no local MongoDB available");
+            return;
+        };
+        set_platform_override(
+            &db,
+            feature_flag_service::DIRECT_CHAT_ENGINE_FLAG_KEY,
+            &FlagTarget::Global,
+            true,
+            "admin",
         )
         .await
-        .map_err(|_| AppError::BadRequest("Direct chat request body is too large.".to_string()));
-        assert!(matches!(result, Err(AppError::BadRequest(_))));
+        .unwrap();
+        let state = crate::test_utils::test_app_state(db);
+        let auth_user = crate::test_utils::test_auth_user(USER_ID);
+        let request = Request::builder()
+            .method("POST")
+            .uri("/api/v1/assistant/direct/completions")
+            .body(Body::from(vec![b'x'; 300 * 1024]))
+            .unwrap();
+
+        assert!(matches!(
+            completions(State(state), auth_user, request).await,
+            Err(AppError::BadRequest(_))
+        ));
     }
 
     #[tokio::test]
