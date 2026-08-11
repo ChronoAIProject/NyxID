@@ -198,6 +198,40 @@ macro_rules! mcp_billing_routes {
     };
 }
 
+macro_rules! exact_service_approval_billing_routes {
+    ($apply:ident, $router:expr) => {
+        $apply!($router;
+            (
+                "/approvals/exact-service/requests",
+                "/api/v1/approvals/exact-service/requests",
+                "handlers::exact_service_approvals::create_request",
+                post(handlers::exact_service_approvals::create_request),
+                crate::services::billing::route_inventory::BillingRoutePolicy::Exempt(
+                    "approval control plane; no downstream request"
+                )
+            ),
+            (
+                "/approvals/exact-service/requests/{request_id}/status",
+                "/api/v1/approvals/exact-service/requests/{request_id}/status",
+                "handlers::exact_service_approvals::observe_request",
+                get(handlers::exact_service_approvals::observe_request),
+                crate::services::billing::route_inventory::BillingRoutePolicy::Exempt(
+                    "approval observation; no downstream request"
+                )
+            ),
+            (
+                "/approvals/exact-service/requests/{request_id}/redeem",
+                "/api/v1/approvals/exact-service/requests/{request_id}/redeem",
+                "handlers::exact_service_approvals::redeem_request",
+                post(handlers::exact_service_approvals::redeem_request),
+                crate::services::billing::route_inventory::BillingRoutePolicy::Metered(
+                    crate::services::billing::BillingIngress::Mcp
+                )
+            ),
+        )
+    };
+}
+
 macro_rules! public_proxy_billing_routes {
     ($apply:ident, $router:expr) => {
         $apply!($router;
@@ -334,6 +368,10 @@ pub(crate) fn mounted_billing_route_inventory()
     routes.extend(proxy_billing_routes!(collect_billing_route_specs, ()));
     routes.extend(ssh_billing_routes!(collect_billing_route_specs, ()));
     routes.extend(mcp_billing_routes!(collect_billing_route_specs, ()));
+    routes.extend(exact_service_approval_billing_routes!(
+        collect_billing_route_specs,
+        ()
+    ));
     routes.extend(public_proxy_billing_routes!(
         collect_billing_route_specs,
         ()
@@ -1322,6 +1360,10 @@ pub fn build_router(
     let api_v1_delegated = Router::new()
         .nest("/llm", llm_routes)
         .nest("/delegation", delegation_routes)
+        .merge(exact_service_approval_billing_routes!(
+            register_billing_routes,
+            Router::new()
+        ))
         .route(
             "/approvals/requests/{request_id}/status",
             get(handlers::approvals::get_request_status),

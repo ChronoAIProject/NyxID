@@ -947,6 +947,22 @@ pub async fn ensure_indexes(db: &Database) -> Result<(), mongodb::error::Error> 
                 .build(),
         )
         .await?;
+    approval_requests
+        .create_index(
+            IndexModel::builder()
+                .keys(doc! { "exact_service.request_key": 1 })
+                .options(
+                    IndexOptions::builder()
+                        .name("exact_service_request_key_unique".to_string())
+                        .unique(true)
+                        .partial_filter_expression(
+                            doc! { "exact_service.request_key": { "$type": "string" } },
+                        )
+                        .build(),
+                )
+                .build(),
+        )
+        .await?;
 
     // ── approval_grants ──
     let approval_grants = db.collection::<mongodb::bson::Document>("approval_grants");
