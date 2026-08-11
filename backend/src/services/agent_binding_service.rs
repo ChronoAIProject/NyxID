@@ -1,6 +1,6 @@
 use chrono::Utc;
 use futures::TryStreamExt;
-use mongodb::bson::doc;
+use mongodb::bson::{Document, doc};
 use std::collections::{HashMap, HashSet};
 use uuid::Uuid;
 
@@ -11,6 +11,7 @@ use crate::models::agent_service_binding::{
 use crate::models::api_key::{ApiKey, COLLECTION_NAME as API_KEYS};
 use crate::models::user_api_key::{COLLECTION_NAME as USER_API_KEYS, UserApiKey};
 use crate::models::user_service::{COLLECTION_NAME as USER_SERVICES, UserService};
+use crate::services::api_key_mutation_service as key_mutations;
 
 /// Look up a credential override for a specific agent + service combination.
 /// Returns the UserApiKey ID to use, or None if no override exists.
@@ -40,42 +41,6 @@ pub async fn create_binding(
     user_service_id: &str,
     user_api_key_id: &str,
 ) -> AppResult<AgentServiceBinding> {
-    // Validate ownership: api_key must belong to user
-    let api_key = db
-        .collection::<ApiKey>(API_KEYS)
-        .find_one(doc! { "_id": api_key_id, "user_id": user_id, "is_active": true })
-        .await?
-        .ok_or_else(|| AppError::NotFound("API key not found".to_string()))?;
-
-    // Validate ownership: user_service must belong to user
-    let _user_service = db
-        .collection::<UserService>(USER_SERVICES)
-        .find_one(doc! { "_id": user_service_id, "user_id": user_id, "is_active": true })
-        .await?
-        .ok_or_else(|| AppError::NotFound("User service not found".to_string()))?;
-
-    // Validate ownership: user_api_key must belong to user
-    let _credential = db
-        .collection::<UserApiKey>(USER_API_KEYS)
-        .find_one(doc! { "_id": user_api_key_id, "user_id": user_id })
-        .await?
-        .ok_or_else(|| AppError::NotFound("External credential not found".to_string()))?;
-
-    // Check for existing binding (unique constraint will catch race, but give better error)
-    let existing = db
-        .collection::<AgentServiceBinding>(AGENT_BINDINGS)
-        .find_one(doc! {
-            "api_key_id": api_key_id,
-            "user_service_id": user_service_id,
-        })
-        .await?;
-
-    if existing.is_some() {
-        return Err(AppError::Conflict(
-            "Binding already exists for this API key and service".to_string(),
-        ));
-    }
-
     let now = Utc::now();
     let binding = AgentServiceBinding {
         id: Uuid::new_v4().to_string(),
@@ -87,24 +52,96 @@ pub async fn create_binding(
         updated_at: now,
     };
 
-    db.collection::<AgentServiceBinding>(AGENT_BINDINGS)
-        .insert_one(&binding)
-        .await?;
+    let db = db.clone();
+    let user_id = user_id.to_string();
+    let api_key_id = api_key_id.to_string();
+    let user_service_id = user_service_id.to_string();
+    let user_api_key_id = user_api_key_id.to_string();
+    let binding_for_transaction = binding.clone();
+    let mut session = db.client().start_session().await?;
+    session
+        .start_transaction()
+        .and_run2(async move |session| {
+            let operation: AppResult<()> = async {
+                let api_key = db
+                    .collection::<ApiKey>(API_KEYS)
+                    .find_one(doc! {
+                        "_id": &api_key_id,
+                        "user_id": &user_id,
+                        "is_active": true,
+                    })
+                    .session(&mut *session)
+                    .await?
+                    .ok_or_else(|| AppError::NotFound("API key not found".to_string()))?;
 
-    // If the key has explicit scope (allow_all_services: false), ensure the
-    // newly bound service is in allowed_service_ids so the proxy allows it.
-    if !api_key.allow_all_services
-        && !api_key
-            .allowed_service_ids
-            .contains(&user_service_id.to_string())
-    {
-        db.collection::<ApiKey>(API_KEYS)
-            .update_one(
-                doc! { "_id": api_key_id },
-                doc! { "$addToSet": { "allowed_service_ids": user_service_id } },
-            )
-            .await?;
-    }
+                db.collection::<UserService>(USER_SERVICES)
+                    .find_one(doc! {
+                        "_id": &user_service_id,
+                        "user_id": &user_id,
+                        "is_active": true,
+                    })
+                    .session(&mut *session)
+                    .await?
+                    .ok_or_else(|| AppError::NotFound("User service not found".to_string()))?;
+
+                db.collection::<UserApiKey>(USER_API_KEYS)
+                    .find_one(doc! { "_id": &user_api_key_id, "user_id": &user_id })
+                    .session(&mut *session)
+                    .await?
+                    .ok_or_else(|| {
+                        AppError::NotFound("External credential not found".to_string())
+                    })?;
+
+                if db
+                    .collection::<AgentServiceBinding>(AGENT_BINDINGS)
+                    .find_one(doc! {
+                        "api_key_id": &api_key_id,
+                        "user_service_id": &user_service_id,
+                    })
+                    .session(&mut *session)
+                    .await?
+                    .is_some()
+                {
+                    return Err(AppError::Conflict(
+                        "Binding already exists for this API key and service".to_string(),
+                    ));
+                }
+
+                db.collection::<AgentServiceBinding>(AGENT_BINDINGS)
+                    .insert_one(&binding_for_transaction)
+                    .session(&mut *session)
+                    .await?;
+
+                let key_update = if !api_key.allow_all_services
+                    && !api_key.allowed_service_ids.contains(&user_service_id)
+                {
+                    doc! { "$addToSet": { "allowed_service_ids": &user_service_id } }
+                } else {
+                    doc! {}
+                };
+                let key_result = key_mutations::update_one(
+                    &db,
+                    doc! {
+                        "_id": &api_key_id,
+                        "user_id": &user_id,
+                        "is_active": true,
+                    },
+                    key_update,
+                    Some(&mut *session),
+                )
+                .await?;
+                if key_result.matched_count != 1 {
+                    return Err(AppError::Conflict(
+                        "API key changed while creating the binding".to_string(),
+                    ));
+                }
+                Ok(())
+            }
+            .await;
+            key_mutations::transaction_result(operation)
+        })
+        .await
+        .map_err(key_mutations::map_transaction_error)?;
 
     Ok(binding)
 }
@@ -158,41 +195,75 @@ pub async fn delete_binding(
     api_key_id: &str,
     binding_id: &str,
 ) -> AppResult<()> {
-    let binding = db
-        .collection::<AgentServiceBinding>(AGENT_BINDINGS)
-        .find_one(doc! {
-            "_id": binding_id,
-            "api_key_id": api_key_id,
-            "user_id": user_id,
+    let db = db.clone();
+    let user_id = user_id.to_string();
+    let api_key_id = api_key_id.to_string();
+    let binding_id = binding_id.to_string();
+    let mut session = db.client().start_session().await?;
+    session
+        .start_transaction()
+        .and_run2(async move |session| {
+            let operation: AppResult<()> = async {
+                let api_key = db
+                    .collection::<ApiKey>(API_KEYS)
+                    .find_one(doc! {
+                        "_id": &api_key_id,
+                        "user_id": &user_id,
+                        "is_active": true,
+                    })
+                    .session(&mut *session)
+                    .await?
+                    .ok_or_else(|| AppError::NotFound("API key not found".to_string()))?;
+                let binding = db
+                    .collection::<AgentServiceBinding>(AGENT_BINDINGS)
+                    .find_one(doc! {
+                        "_id": &binding_id,
+                        "api_key_id": &api_key_id,
+                        "user_id": &user_id,
+                    })
+                    .session(&mut *session)
+                    .await?
+                    .ok_or_else(|| AppError::NotFound("Binding not found".to_string()))?;
+
+                let deleted = db
+                    .collection::<AgentServiceBinding>(AGENT_BINDINGS)
+                    .delete_one(doc! { "_id": &binding_id })
+                    .session(&mut *session)
+                    .await?;
+                if deleted.deleted_count != 1 {
+                    return Err(AppError::Conflict(
+                        "binding changed while deleting it".to_string(),
+                    ));
+                }
+
+                let key_update = if api_key.allow_all_services {
+                    doc! {}
+                } else {
+                    doc! { "$pull": { "allowed_service_ids": &binding.user_service_id } }
+                };
+                let key_result = key_mutations::update_one(
+                    &db,
+                    doc! {
+                        "_id": &api_key_id,
+                        "user_id": &user_id,
+                        "is_active": true,
+                    },
+                    key_update,
+                    Some(&mut *session),
+                )
+                .await?;
+                if key_result.matched_count != 1 {
+                    return Err(AppError::Conflict(
+                        "API key changed while deleting the binding".to_string(),
+                    ));
+                }
+                Ok(())
+            }
+            .await;
+            key_mutations::transaction_result(operation)
         })
-        .await?
-        .ok_or_else(|| AppError::NotFound("Binding not found".to_string()))?;
-
-    let result = db
-        .collection::<AgentServiceBinding>(AGENT_BINDINGS)
-        .delete_one(doc! { "_id": binding_id })
-        .await?;
-
-    if result.deleted_count == 0 {
-        return Err(AppError::NotFound("Binding not found".to_string()));
-    }
-
-    // If the key has explicit scope, remove the service from allowed_service_ids
-    let api_key = db
-        .collection::<ApiKey>(API_KEYS)
-        .find_one(doc! { "_id": api_key_id })
-        .await?;
-
-    if let Some(key) = api_key
-        && !key.allow_all_services
-    {
-        db.collection::<ApiKey>(API_KEYS)
-            .update_one(
-                doc! { "_id": api_key_id },
-                doc! { "$pull": { "allowed_service_ids": &binding.user_service_id } },
-            )
-            .await?;
-    }
+        .await
+        .map_err(key_mutations::map_transaction_error)?;
 
     Ok(())
 }
@@ -204,53 +275,101 @@ pub async fn delete_binding(
 /// Also pulls the service id from `allowed_service_ids` on every
 /// affected scoped `ApiKey`, mirroring the single-binding delete path.
 /// Returns the number of bindings removed.
+async fn cleanup_key_bindings(
+    db: &mongodb::Database,
+    user_id: &str,
+    api_key_id: &str,
+    mut binding_filter: Document,
+    service_ids: Vec<String>,
+) -> AppResult<u64> {
+    binding_filter.insert("api_key_id", api_key_id);
+    let db = db.clone();
+    let user_id = user_id.to_string();
+    let api_key_id = api_key_id.to_string();
+    let mut session = db.client().start_session().await?;
+    session
+        .start_transaction()
+        .and_run2(async move |session| {
+            let operation: AppResult<u64> = async {
+                let key = db
+                    .collection::<ApiKey>(API_KEYS)
+                    .find_one(doc! { "_id": &api_key_id, "user_id": &user_id })
+                    .session(&mut *session)
+                    .await?;
+                let deleted = db
+                    .collection::<AgentServiceBinding>(AGENT_BINDINGS)
+                    .delete_many(binding_filter.clone())
+                    .session(&mut *session)
+                    .await?;
+
+                if let Some(key) = key {
+                    let key_update = if key.allow_all_services || service_ids.is_empty() {
+                        doc! {}
+                    } else {
+                        doc! {
+                            "$pull": {
+                                "allowed_service_ids": { "$in": service_ids.clone() }
+                            }
+                        }
+                    };
+                    let updated = key_mutations::update_one(
+                        &db,
+                        doc! { "_id": &api_key_id, "user_id": &user_id },
+                        key_update,
+                        Some(&mut *session),
+                    )
+                    .await?;
+                    if updated.matched_count != 1 {
+                        return Err(AppError::Conflict(
+                            "API key changed while cleaning bindings".to_string(),
+                        ));
+                    }
+                }
+
+                Ok(deleted.deleted_count)
+            }
+            .await;
+            key_mutations::transaction_result(operation)
+        })
+        .await
+        .map_err(key_mutations::map_transaction_error)
+}
+
 pub async fn cleanup_bindings_for_user_service(
     db: &mongodb::Database,
     user_id: &str,
     user_service_id: &str,
 ) -> AppResult<u64> {
-    let bindings: Vec<AgentServiceBinding> = db
-        .collection::<AgentServiceBinding>(AGENT_BINDINGS)
-        .find(doc! {
-            "user_id": user_id,
-            "user_service_id": user_service_id,
-        })
-        .await?
-        .try_collect()
-        .await?;
-
-    if bindings.is_empty() {
-        return Ok(0);
-    }
-
-    let affected_keys: HashSet<String> = bindings.iter().map(|b| b.api_key_id.clone()).collect();
-
-    let result = db
-        .collection::<AgentServiceBinding>(AGENT_BINDINGS)
-        .delete_many(doc! {
-            "user_id": user_id,
-            "user_service_id": user_service_id,
-        })
-        .await?;
-
-    for key_id in affected_keys {
-        let api_key = db
-            .collection::<ApiKey>(API_KEYS)
-            .find_one(doc! { "_id": &key_id })
+    let mut removed = 0;
+    loop {
+        let affected_keys: HashSet<String> = db
+            .collection::<AgentServiceBinding>(AGENT_BINDINGS)
+            .find(doc! {
+                "user_id": user_id,
+                "user_service_id": user_service_id,
+            })
+            .await?
+            .map_ok(|binding| binding.api_key_id)
+            .try_collect()
             .await?;
-        if let Some(key) = api_key
-            && !key.allow_all_services
-        {
-            db.collection::<ApiKey>(API_KEYS)
-                .update_one(
-                    doc! { "_id": &key_id },
-                    doc! { "$pull": { "allowed_service_ids": user_service_id } },
-                )
-                .await?;
+        if affected_keys.is_empty() {
+            return Ok(removed);
+        }
+
+        for key_id in affected_keys {
+            removed += cleanup_key_bindings(
+                db,
+                user_id,
+                &key_id,
+                doc! {
+                    "user_id": user_id,
+                    "user_service_id": user_service_id,
+                },
+                vec![user_service_id.to_string()],
+            )
+            .await?;
         }
     }
-
-    Ok(result.deleted_count)
 }
 
 /// Delete all bindings that reference a specific external credential
@@ -266,63 +385,49 @@ pub async fn cleanup_bindings_for_credential(
     user_id: &str,
     user_api_key_id: &str,
 ) -> AppResult<u64> {
-    let bindings: Vec<AgentServiceBinding> = db
-        .collection::<AgentServiceBinding>(AGENT_BINDINGS)
-        .find(doc! {
-            "user_id": user_id,
-            "user_api_key_id": user_api_key_id,
-        })
-        .await?
-        .try_collect()
-        .await?;
-
-    if bindings.is_empty() {
-        return Ok(0);
-    }
-
-    // Group service ids per affected api key so each key gets a single
-    // `$pull` update rather than one per binding.
-    let mut per_key: HashMap<String, HashSet<String>> = HashMap::new();
-    for binding in &bindings {
-        per_key
-            .entry(binding.api_key_id.clone())
-            .or_default()
-            .insert(binding.user_service_id.clone());
-    }
-
-    let result = db
-        .collection::<AgentServiceBinding>(AGENT_BINDINGS)
-        .delete_many(doc! {
-            "user_id": user_id,
-            "user_api_key_id": user_api_key_id,
-        })
-        .await?;
-
-    for (key_id, service_ids) in per_key {
-        let api_key = db
-            .collection::<ApiKey>(API_KEYS)
-            .find_one(doc! { "_id": &key_id })
+    let mut removed = 0;
+    loop {
+        let bindings: Vec<AgentServiceBinding> = db
+            .collection::<AgentServiceBinding>(AGENT_BINDINGS)
+            .find(doc! {
+                "user_id": user_id,
+                "user_api_key_id": user_api_key_id,
+            })
+            .await?
+            .try_collect()
             .await?;
-        if let Some(key) = api_key
-            && !key.allow_all_services
-        {
-            let ids: Vec<String> = service_ids.into_iter().collect();
-            db.collection::<ApiKey>(API_KEYS)
-                .update_one(
-                    doc! { "_id": &key_id },
-                    doc! { "$pull": { "allowed_service_ids": { "$in": ids } } },
-                )
-                .await?;
+        if bindings.is_empty() {
+            return Ok(removed);
+        }
+
+        let mut per_key: HashMap<String, HashSet<String>> = HashMap::new();
+        for binding in bindings {
+            per_key
+                .entry(binding.api_key_id)
+                .or_default()
+                .insert(binding.user_service_id);
+        }
+        for (key_id, service_ids) in per_key {
+            removed += cleanup_key_bindings(
+                db,
+                user_id,
+                &key_id,
+                doc! {
+                    "user_id": user_id,
+                    "user_api_key_id": user_api_key_id,
+                },
+                service_ids.into_iter().collect(),
+            )
+            .await?;
         }
     }
-
-    Ok(result.deleted_count)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::models::user_api_key::UserApiKey;
+    use crate::services::key_service::{self, ApiKeyRotationOutcome};
     use crate::test_utils::*;
 
     fn make_api_key(id: &str, user_id: &str, allow_all: bool) -> ApiKey {
@@ -416,9 +521,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_create_binding_happy_path() {
-        let Some(db) = connect_test_database("agent_bind").await else {
-            return;
-        };
+        let db = connect_transaction_test_database("agent_bind").await;
         let user_id = Uuid::new_v4().to_string();
         let (ak_id, us_id, uak_id) = seed_fixtures(&db, &user_id).await;
 
@@ -430,13 +533,19 @@ mod tests {
         assert_eq!(binding.user_service_id, us_id);
         assert_eq!(binding.user_api_key_id, uak_id);
         assert_eq!(binding.user_id, user_id);
+        let key = db
+            .collection::<ApiKey>(API_KEYS)
+            .find_one(doc! { "_id": &ak_id })
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(key.state_version, 2);
+        assert!(key.updated_at.is_some());
     }
 
     #[tokio::test]
     async fn test_create_binding_rejects_duplicate() {
-        let Some(db) = connect_test_database("agent_bind").await else {
-            return;
-        };
+        let db = connect_transaction_test_database("agent_bind").await;
         let user_id = Uuid::new_v4().to_string();
         let (ak_id, us_id, uak_id) = seed_fixtures(&db, &user_id).await;
 
@@ -450,9 +559,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_create_binding_missing_api_key() {
-        let Some(db) = connect_test_database("agent_bind").await else {
-            return;
-        };
+        let db = connect_transaction_test_database("agent_bind").await;
         let user_id = Uuid::new_v4().to_string();
         let us_id = Uuid::new_v4().to_string();
         let uak_id = Uuid::new_v4().to_string();
@@ -472,9 +579,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_resolve_credential_override() {
-        let Some(db) = connect_test_database("agent_bind").await else {
-            return;
-        };
+        let db = connect_transaction_test_database("agent_bind").await;
         let user_id = Uuid::new_v4().to_string();
         let (ak_id, us_id, uak_id) = seed_fixtures(&db, &user_id).await;
 
@@ -495,9 +600,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_list_bindings() {
-        let Some(db) = connect_test_database("agent_bind").await else {
-            return;
-        };
+        let db = connect_transaction_test_database("agent_bind").await;
         let user_id = Uuid::new_v4().to_string();
         let (ak_id, us_id, uak_id) = seed_fixtures(&db, &user_id).await;
 
@@ -512,9 +615,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_delete_binding() {
-        let Some(db) = connect_test_database("agent_bind").await else {
-            return;
-        };
+        let db = connect_transaction_test_database("agent_bind").await;
         let user_id = Uuid::new_v4().to_string();
         let (ak_id, us_id, uak_id) = seed_fixtures(&db, &user_id).await;
 
@@ -527,13 +628,112 @@ mod tests {
 
         let bindings = list_bindings(&db, &user_id, &ak_id).await.unwrap();
         assert!(bindings.is_empty());
+        let key = db
+            .collection::<ApiKey>(API_KEYS)
+            .find_one(doc! { "_id": &ak_id })
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(key.state_version, 3);
+    }
+
+    #[tokio::test]
+    async fn concurrent_rotation_and_binding_create_never_lose_a_committed_binding() {
+        let db = connect_transaction_test_database("agent_bind_rotate_create").await;
+        crate::db::ensure_indexes(&db).await.unwrap();
+        let user_id = Uuid::new_v4().to_string();
+        let (predecessor_id, service_id, credential_id) = seed_fixtures(&db, &user_id).await;
+        let successor_id = Uuid::new_v4().to_string();
+
+        let (create_result, rotation_result) = tokio::join!(
+            create_binding(&db, &user_id, &predecessor_id, &service_id, &credential_id,),
+            key_service::rotate_api_key_with_scope_authorization_and_id(
+                &db,
+                &user_id,
+                Some(&user_id),
+                &predecessor_id,
+                &successor_id,
+            ),
+        );
+
+        assert!(matches!(
+            rotation_result.unwrap(),
+            ApiKeyRotationOutcome::Created(_)
+        ));
+        let successor_bindings: Vec<AgentServiceBinding> = db
+            .collection::<AgentServiceBinding>(AGENT_BINDINGS)
+            .find(doc! { "api_key_id": &successor_id })
+            .await
+            .unwrap()
+            .try_collect()
+            .await
+            .unwrap();
+        match create_result {
+            Ok(binding) => {
+                assert_eq!(successor_bindings.len(), 1);
+                assert_eq!(
+                    successor_bindings[0].user_service_id,
+                    binding.user_service_id
+                );
+                assert_eq!(
+                    successor_bindings[0].user_api_key_id,
+                    binding.user_api_key_id
+                );
+            }
+            Err(AppError::NotFound(_)) | Err(AppError::Conflict(_)) => {
+                assert!(successor_bindings.is_empty());
+            }
+            Err(error) => panic!("unexpected binding-create result: {error:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn concurrent_rotation_and_binding_delete_never_leave_a_stale_successor_clone() {
+        let db = connect_transaction_test_database("agent_bind_rotate_delete").await;
+        crate::db::ensure_indexes(&db).await.unwrap();
+        let user_id = Uuid::new_v4().to_string();
+        let (predecessor_id, service_id, credential_id) = seed_fixtures(&db, &user_id).await;
+        let binding = create_binding(&db, &user_id, &predecessor_id, &service_id, &credential_id)
+            .await
+            .unwrap();
+        let successor_id = Uuid::new_v4().to_string();
+
+        let (delete_result, rotation_result) = tokio::join!(
+            delete_binding(&db, &user_id, &predecessor_id, &binding.id),
+            key_service::rotate_api_key_with_scope_authorization_and_id(
+                &db,
+                &user_id,
+                Some(&user_id),
+                &predecessor_id,
+                &successor_id,
+            ),
+        );
+
+        assert!(matches!(
+            rotation_result.unwrap(),
+            ApiKeyRotationOutcome::Created(_)
+        ));
+        let successor_bindings: Vec<AgentServiceBinding> = db
+            .collection::<AgentServiceBinding>(AGENT_BINDINGS)
+            .find(doc! { "api_key_id": &successor_id })
+            .await
+            .unwrap()
+            .try_collect()
+            .await
+            .unwrap();
+        match delete_result {
+            Ok(()) => assert!(successor_bindings.is_empty()),
+            Err(AppError::NotFound(_)) | Err(AppError::Conflict(_)) => {
+                assert_eq!(successor_bindings.len(), 1);
+                assert_eq!(successor_bindings[0].user_service_id, service_id);
+            }
+            Err(error) => panic!("unexpected binding-delete result: {error:?}"),
+        }
     }
 
     #[tokio::test]
     async fn test_cleanup_bindings_for_user_service() {
-        let Some(db) = connect_test_database("agent_bind").await else {
-            return;
-        };
+        let db = connect_transaction_test_database("agent_bind").await;
         let user_id = Uuid::new_v4().to_string();
         let (ak_id, us_id, uak_id) = seed_fixtures(&db, &user_id).await;
 
@@ -548,10 +748,41 @@ mod tests {
 
         let bindings = list_bindings(&db, &user_id, &ak_id).await.unwrap();
         assert!(bindings.is_empty());
+        let key = db
+            .collection::<ApiKey>(API_KEYS)
+            .find_one(doc! { "_id": &ak_id })
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(key.state_version, 3);
 
         let zero = cleanup_bindings_for_user_service(&db, &user_id, &us_id)
             .await
             .unwrap();
         assert_eq!(zero, 0);
+    }
+
+    #[tokio::test]
+    async fn test_cleanup_bindings_for_credential_versions_the_key() {
+        let db = connect_transaction_test_database("agent_bind_cleanup_credential").await;
+        let user_id = Uuid::new_v4().to_string();
+        let (ak_id, us_id, uak_id) = seed_fixtures(&db, &user_id).await;
+        create_binding(&db, &user_id, &ak_id, &us_id, &uak_id)
+            .await
+            .unwrap();
+
+        let removed = cleanup_bindings_for_credential(&db, &user_id, &uak_id)
+            .await
+            .unwrap();
+        assert_eq!(removed, 1);
+        let bindings = list_bindings(&db, &user_id, &ak_id).await.unwrap();
+        assert!(bindings.is_empty());
+        let key = db
+            .collection::<ApiKey>(API_KEYS)
+            .find_one(doc! { "_id": &ak_id })
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(key.state_version, 3);
     }
 }

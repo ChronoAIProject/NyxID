@@ -192,6 +192,7 @@ jobs:
       - name: Start transaction-capable MongoDB
         run: |
           docker run --detach --name nyxid-test-mongodb --publish 27017:27017 \
+            --ulimit nofile=65536:65536 \
             mongo:8.0 --replSet rs0 --bind_ip_all
           for attempt in {1..30}; do
             if docker exec nyxid-test-mongodb mongosh --quiet \
@@ -430,6 +431,7 @@ jobs:
       - name: Start transaction-capable MongoDB
         run: |
           docker run --detach --name nyxid-test-mongodb --publish 27017:27017 \
+            --ulimit nofile=65536:65536 \
             mongo:8.0 --replSet rs0 --bind_ip_all
           for attempt in {1..30}; do
             if docker exec nyxid-test-mongodb mongosh --quiet \

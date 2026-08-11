@@ -434,8 +434,8 @@ mod tests {
     use crate::models::user::{COLLECTION_NAME as USERS, User, UserType};
     use crate::models::user_api_key::UserApiKey;
     use crate::test_utils::{
-        connect_test_database, test_app_state, test_auth_user, test_membership, test_user,
-        test_user_endpoint, test_user_service,
+        connect_test_database, connect_transaction_test_database, test_app_state, test_auth_user,
+        test_membership, test_user, test_user_endpoint, test_user_service,
     };
     use axum::extract::State;
     use chrono::Utc;
@@ -650,9 +650,7 @@ mod tests {
 
     #[tokio::test]
     async fn create_and_list_binding() {
-        let Some(db) = connect_test_database("h_agent_bind_create_list").await else {
-            return;
-        };
+        let db = connect_transaction_test_database("h_agent_bind_create_list").await;
         let f = seed_fixtures(&db).await;
         let state = test_app_state(db);
         let auth = test_auth_user(&f.user_id);
@@ -685,9 +683,7 @@ mod tests {
 
     #[tokio::test]
     async fn create_binding_duplicate_returns_conflict() {
-        let Some(db) = connect_test_database("h_agent_bind_dup").await else {
-            return;
-        };
+        let db = connect_transaction_test_database("h_agent_bind_dup").await;
         let f = seed_fixtures(&db).await;
         let state = test_app_state(db);
         let auth = test_auth_user(&f.user_id);
@@ -722,9 +718,7 @@ mod tests {
 
     #[tokio::test]
     async fn delete_binding_succeeds() {
-        let Some(db) = connect_test_database("h_agent_bind_delete").await else {
-            return;
-        };
+        let db = connect_transaction_test_database("h_agent_bind_delete").await;
         let f = seed_fixtures(&db).await;
         let state = test_app_state(db);
         let auth = test_auth_user(&f.user_id);
@@ -800,9 +794,7 @@ mod tests {
 
     #[tokio::test]
     async fn create_binding_invalid_service_returns_error() {
-        let Some(db) = connect_test_database("h_agent_bind_bad_svc").await else {
-            return;
-        };
+        let db = connect_transaction_test_database("h_agent_bind_bad_svc").await;
         let f = seed_fixtures(&db).await;
         let state = test_app_state(db);
         let auth = test_auth_user(&f.user_id);
@@ -824,9 +816,7 @@ mod tests {
 
     #[tokio::test]
     async fn create_binding_invalid_credential_returns_error() {
-        let Some(db) = connect_test_database("h_agent_bind_bad_cred").await else {
-            return;
-        };
+        let db = connect_transaction_test_database("h_agent_bind_bad_cred").await;
         let f = seed_fixtures(&db).await;
         let state = test_app_state(db);
         let auth = test_auth_user(&f.user_id);
