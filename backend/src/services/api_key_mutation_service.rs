@@ -12,6 +12,27 @@ use crate::{
 
 const AUTHORITY_FIELDS: [&str; 2] = ["state_version", "updated_at"];
 
+#[derive(Debug)]
+struct TransactionAppError(std::sync::Mutex<Option<AppError>>);
+
+pub fn abort_transaction(error: AppError) -> mongodb::error::Error {
+    mongodb::error::Error::custom(TransactionAppError(std::sync::Mutex::new(Some(error))))
+}
+
+pub fn map_transaction_error(error: mongodb::error::Error) -> AppError {
+    let app_error = error
+        .get_custom::<TransactionAppError>()
+        .and_then(|custom| custom.0.lock().ok()?.take());
+    app_error.unwrap_or(AppError::DatabaseError(error))
+}
+
+pub fn transaction_result<T>(result: AppResult<T>) -> mongodb::error::Result<T> {
+    result.map_err(|error| match error {
+        AppError::DatabaseError(error) => error,
+        error => abort_transaction(error),
+    })
+}
+
 fn operator_document<'a>(update: &'a mut Document, operator: &str) -> AppResult<&'a mut Document> {
     if !update.contains_key(operator) {
         update.insert(operator, Document::new());
