@@ -820,15 +820,6 @@ class ReplayProjector {
       case "aevatar.tool_approval.pending":
         this.addApproval(unpackAny(payload), frame);
         return;
-      case "aevatar.step.request": {
-        const body = unpackAny(payload);
-        const key =
-          stringValue(body, "stepId") ||
-          stringValue(body, "stepType") ||
-          this.nextId("step");
-        this.startStep(key, key, frame);
-        return;
-      }
       case "aevatar.step.completed": {
         const body = unpackAny(payload);
         // proto3 elides a `false` bool, so an absent `success` IS a failure.

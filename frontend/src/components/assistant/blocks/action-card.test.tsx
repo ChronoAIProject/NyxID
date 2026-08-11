@@ -1,5 +1,11 @@
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import { act, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import {
+  act,
+  fireEvent,
+  render,
+  screen,
+  waitFor,
+} from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { ReactElement, ReactNode } from "react";
@@ -133,6 +139,62 @@ vi.mock("@/components/dashboard/add-key-dialog", () => ({
     ) : null,
 }));
 
+vi.mock("@/components/assistant/assistant-key-create-dialog", () => ({
+  AssistantKeyCreateDialog: ({
+    open,
+    actionRequestId,
+    params,
+    onComplete,
+  }: {
+    readonly open: boolean;
+    readonly actionRequestId: string;
+    readonly params: {
+      readonly name: string;
+      readonly platform: string;
+      readonly allowedServiceIds: readonly string[];
+    };
+    readonly onComplete: (keyId: string) => void;
+  }) =>
+    open ? (
+      <div
+        role="dialog"
+        data-action-request-id={actionRequestId}
+        data-name={params.name}
+        data-platform={params.platform}
+        data-service-ids={params.allowedServiceIds.join(",")}
+      >
+        <button type="button" onClick={() => onComplete("key-created")}>
+          Finish mock key creation
+        </button>
+      </div>
+    ) : null,
+}));
+
+vi.mock("@/components/assistant/assistant-key-rotate-dialog", () => ({
+  AssistantKeyRotateDialog: ({
+    open,
+    actionRequestId,
+    params,
+    onComplete,
+  }: {
+    readonly open: boolean;
+    readonly actionRequestId: string;
+    readonly params: { readonly keyId: string };
+    readonly onComplete: (keyId: string) => void;
+  }) =>
+    open ? (
+      <div
+        role="dialog"
+        data-action-request-id={actionRequestId}
+        data-key-id={params.keyId}
+      >
+        <button type="button" onClick={() => onComplete("key-replacement")}>
+          Finish mock key rotation
+        </button>
+      </div>
+    ) : null,
+}));
+
 function catalogBlock(
   overrides: Partial<ActionCardContentBlock> = {},
 ): ActionCardContentBlock {
@@ -157,6 +219,50 @@ function catalogBlock(
   };
 }
 
+function keyCreateBlock(
+  overrides: Partial<ActionCardContentBlock> = {},
+): ActionCardContentBlock {
+  return {
+    type: "action_card",
+    block_id: "action-card-key-create",
+    action: "key.create",
+    action_request_id: "act-key-create",
+    origin_turn_id: "turn-origin-1",
+    task_id: "task-1",
+    step_id: "step-1",
+    params: {
+      variant: "key_create",
+      name: "coding-agent",
+      platform: "codex",
+      allowed_service_ids: ["service-alpha"],
+    },
+    status: "pending",
+    outcome_note: "",
+    ...overrides,
+  };
+}
+
+function keyRotateBlock(
+  overrides: Partial<ActionCardContentBlock> = {},
+): ActionCardContentBlock {
+  return {
+    type: "action_card",
+    block_id: "action-card-key-rotate",
+    action: "key.rotate",
+    action_request_id: "act-key-rotate",
+    origin_turn_id: "turn-origin-1",
+    task_id: "task-1",
+    step_id: "step-1",
+    params: {
+      variant: "key_rotate",
+      key_id: "key-predecessor",
+    },
+    status: "pending",
+    outcome_note: "",
+    ...overrides,
+  };
+}
+
 function expectNoBlueAccent(card: HTMLElement | null) {
   const classNames = [card, ...(card?.querySelectorAll("[class]") ?? [])]
     .map((element) => element?.getAttribute("class") ?? "")
@@ -167,6 +273,78 @@ function expectNoBlueAccent(card: HTMLElement | null) {
 }
 
 describe("ActionCard", () => {
+  it("opens the key.create journey and reports only the safe key identity", async () => {
+    const onProgress = vi.fn();
+    const onResolve = vi.fn();
+    renderCard(
+      <ActionCard
+        block={keyCreateBlock()}
+        onProgress={onProgress}
+        onBlock={vi.fn()}
+        onResolve={onResolve}
+      />,
+    );
+
+    expect(
+      screen.getByRole("heading", { name: "Create API key" }),
+    ).toBeInTheDocument();
+    expect(screen.getByText("service-alpha")).toBeInTheDocument();
+    await userEvent.click(screen.getByRole("button", { name: "Create key" }));
+    expect(onProgress).toHaveBeenCalledWith("action-card-key-create", true);
+    expect(screen.getByRole("dialog")).toHaveAttribute(
+      "data-action-request-id",
+      "act-key-create",
+    );
+
+    await userEvent.click(
+      screen.getByRole("button", { name: "Finish mock key creation" }),
+    );
+    expect(onResolve).toHaveBeenCalledWith({
+      actionRequestId: "act-key-create",
+      originTurnId: "turn-origin-1",
+      disposition: "completed",
+      resource: { key: { keyId: "key-created" } },
+    });
+  });
+
+  it("opens the key.rotate journey and reports only the replacement identity", async () => {
+    const onProgress = vi.fn();
+    const onResolve = vi.fn();
+    renderCard(
+      <ActionCard
+        block={keyRotateBlock()}
+        onProgress={onProgress}
+        onBlock={vi.fn()}
+        onResolve={onResolve}
+      />,
+    );
+
+    expect(
+      screen.getByRole("heading", { name: "Rotate API key" }),
+    ).toBeInTheDocument();
+    expect(screen.getByText("key-predecessor")).toBeInTheDocument();
+    await userEvent.click(screen.getByRole("button", { name: "Rotate key" }));
+    expect(onProgress).toHaveBeenCalledWith("action-card-key-rotate", true);
+    expect(screen.getByRole("dialog")).toHaveAttribute(
+      "data-action-request-id",
+      "act-key-rotate",
+    );
+    expect(screen.getByRole("dialog")).toHaveAttribute(
+      "data-key-id",
+      "key-predecessor",
+    );
+
+    await userEvent.click(
+      screen.getByRole("button", { name: "Finish mock key rotation" }),
+    );
+    expect(onResolve).toHaveBeenCalledWith({
+      actionRequestId: "act-key-rotate",
+      originTurnId: "turn-origin-1",
+      disposition: "completed",
+      resource: { key: { keyId: "key-replacement" } },
+    });
+  });
+
   it("renders owned consent copy and opens the prefilled connect journey", async () => {
     const user = userEvent.setup();
     const onProgress = vi.fn();
@@ -364,7 +542,8 @@ describe("ActionCard", () => {
     );
 
     function expectPurpleAndNeutralPalette(status: "pending" | "in_progress") {
-      const statusLabel = status === "pending" ? "Action required" : "In progress";
+      const statusLabel =
+        status === "pending" ? "Action required" : "In progress";
       const card = screen.getByRole("heading").closest("section");
       expectNoBlueAccent(card);
       expect(screen.getByText(statusLabel).closest("div")).toHaveClass(
@@ -523,7 +702,9 @@ describe("ActionCard", () => {
     );
 
     expect(screen.queryByText(new RegExp(injected))).not.toBeInTheDocument();
-    expect(screen.queryByText(/personal access token/i)).not.toBeInTheDocument();
+    expect(
+      screen.queryByText(/personal access token/i),
+    ).not.toBeInTheDocument();
     const heading = screen.getByRole("heading");
     expect(heading.textContent ?? "").toMatch(/^Connect GitHub \(official\)/);
     expect((heading.textContent ?? "").length).toBeLessThanOrEqual(40);
@@ -593,9 +774,13 @@ describe("ActionCard", () => {
       />,
     );
 
-    expect(screen.getByRole("button", { name: "Connect GitHub" })).toBeDisabled();
+    expect(
+      screen.getByRole("button", { name: "Connect GitHub" }),
+    ).toBeDisabled();
     expect(screen.getByRole("button", { name: "Decline" })).toBeEnabled();
-    expect(screen.getByRole("button", { name: "Report failure" })).toBeEnabled();
+    expect(
+      screen.getByRole("button", { name: "Report failure" }),
+    ).toBeEnabled();
 
     await user.click(screen.getByRole("button", { name: "Decline" }));
     expect(onResolve).toHaveBeenCalledWith({
@@ -621,14 +806,13 @@ describe("ActionCard", () => {
       onBlock,
       onResolve: vi.fn(),
     };
-    const { rerender } = renderCard(<ActionCard block={catalogBlock()} {...props} />);
+    const { rerender } = renderCard(
+      <ActionCard block={catalogBlock()} {...props} />,
+    );
 
     await user.click(screen.getByRole("button", { name: "Connect GitHub" }));
     rerender(
-      <ActionCard
-        block={catalogBlock({ status: "in_progress" })}
-        {...props}
-      />,
+      <ActionCard block={catalogBlock({ status: "in_progress" })} {...props} />,
     );
     await user.click(
       screen.getByRole("button", { name: "Finish without service id" }),
@@ -652,10 +836,7 @@ describe("ActionCard", () => {
     await user.click(screen.getByRole("button", { name: "Connect GitHub" }));
     expect(onProgress).toHaveBeenCalledWith("action-card-1", true);
     rerender(
-      <ActionCard
-        block={catalogBlock({ status: "in_progress" })}
-        {...props}
-      />,
+      <ActionCard block={catalogBlock({ status: "in_progress" })} {...props} />,
     );
     await user.click(
       screen.getByRole("button", { name: "Dismiss mock connection" }),
@@ -680,7 +861,9 @@ describe("ActionCard", () => {
 
     await user.click(screen.getByRole("button", { name: "Connect GitHub" }));
     await expect(
-      user.click(screen.getByRole("button", { name: "Finish without service id" })),
+      user.click(
+        screen.getByRole("button", { name: "Finish without service id" }),
+      ),
     ).resolves.toBeUndefined();
     expect(onBlock).toHaveBeenCalledTimes(1);
   });
@@ -829,7 +1012,9 @@ describe("ActionCard background authorization watch", () => {
     rerender(
       <ActionCard block={catalogBlock({ status: "in_progress" })} {...props} />,
     );
-    fireEvent.click(screen.getByRole("button", { name: "Hand off to provider" }));
+    fireEvent.click(
+      screen.getByRole("button", { name: "Hand off to provider" }),
+    );
     fireEvent.click(
       screen.getByRole("button", { name: "Dismiss mock connection" }),
     );

@@ -85,6 +85,7 @@ class StubTransport implements AssistantTransport {
   blockCalls = 0;
   continueCalls = 0;
   wakeCalls = 0;
+  resolvePlanCalls = 0;
   lastDelegateEvent: ((event: TurnEvent) => void) | null = null;
   private cursor = 0;
 
@@ -207,6 +208,26 @@ class StubTransport implements AssistantTransport {
     this.cancelCalls += 1;
   }
 
+  async stopTask(): Promise<void> {
+    this.cancelCalls += 1;
+  }
+
+  async steerTask(): Promise<void> {
+    return Promise.resolve();
+  }
+
+  async retryStep(): Promise<void> {
+    return Promise.resolve();
+  }
+
+  async skipStep(): Promise<void> {
+    return Promise.resolve();
+  }
+
+  async resolvePlan(): Promise<void> {
+    this.resolvePlanCalls += 1;
+  }
+
   async decideApproval(): Promise<TurnHandle | null> {
     this.approvalCalls += 1;
     return null;
@@ -235,11 +256,6 @@ class StubTransport implements AssistantTransport {
     return { turnId: "delegate-wake", cancel: () => undefined };
   }
 
-  async resolvePlan(): Promise<void> {}
-  async stopTask(): Promise<void> {}
-  async steerTask(): Promise<void> {}
-  async retryStep(): Promise<void> {}
-  async skipStep(): Promise<void> {}
 }
 
 function resetScenarioStore(): void {

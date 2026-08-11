@@ -12,7 +12,10 @@ use crate::models::api_key::{ApiKey, COLLECTION_NAME as API_KEYS};
 use crate::models::device_code::{COLLECTION_NAME as DEVICE_CODES, DeviceCode, DeviceCodeStatus};
 use crate::models::node::{COLLECTION_NAME as NODES, Node};
 use crate::services::node_service::{DEVICE_CODE_PROVISIONING_SOURCE, DeviceNodeInput};
-use crate::services::{key_service, node_service, org_service, user_service_service};
+use crate::services::{
+    api_key_mutation_service as key_mutations, key_service, node_service, org_service,
+    user_service_service,
+};
 
 use super::{
     DEVICE_CODE_API_KEY_SCOPES, DEVICE_CODE_DELIVERY_EXPIRES_IN_SECS, DeviceCodeApprove,
@@ -237,18 +240,18 @@ pub(super) async fn scope_api_key_to_node(
     api_key_id: &str,
     node_id: &str,
 ) -> AppResult<()> {
-    let result = db
-        .collection::<ApiKey>(API_KEYS)
-        .update_one(
-            doc! { "_id": api_key_id, "user_id": owner_user_id, "is_active": true },
-            doc! {
-                "$set": {
-                    "allow_all_nodes": false,
-                    "allowed_node_ids": vec![node_id.to_string()],
-                }
-            },
-        )
-        .await?;
+    let result = key_mutations::update_one(
+        db,
+        doc! { "_id": api_key_id, "user_id": owner_user_id, "is_active": true },
+        doc! {
+            "$set": {
+                "allow_all_nodes": false,
+                "allowed_node_ids": vec![node_id.to_string()],
+            }
+        },
+        None,
+    )
+    .await?;
 
     if result.matched_count == 0 {
         return Err(AppError::Internal(
@@ -259,6 +262,10 @@ pub(super) async fn scope_api_key_to_node(
     Ok(())
 }
 
+/// Physically remove resources created by an approval attempt that never
+/// committed the DeviceCode's `approved` transition. This is intentionally not
+/// an ApiKey authority mutation: no device received the one-time secret, so the
+/// incomplete key must not remain as a visible revoked credential.
 pub(super) async fn cleanup_partial_approval(
     db: &Database,
     owner_user_id: &str,
@@ -350,6 +357,8 @@ mod tests {
         assert!(api_key.allowed_service_ids.is_empty());
         assert!(!api_key.allow_all_nodes);
         assert_eq!(api_key.allowed_node_ids, vec![approval.node_id.clone()]);
+        assert_eq!(api_key.state_version, 2);
+        assert!(api_key.updated_at.is_some());
 
         let node = db
             .collection::<Node>(NODES)
@@ -808,7 +817,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn cleanup_partial_approval_deletes_key_and_node() {
+    async fn cleanup_partial_uncommitted_approval_physically_deletes_key_and_node() {
         let Some(db) = connect_test_database("device_code_approve_cleanup").await else {
             return;
         };
@@ -851,6 +860,15 @@ mod tests {
         )
         .await
         .expect("create node");
+
+        let uncommitted_key = db
+            .collection::<ApiKey>(API_KEYS)
+            .find_one(doc! { "_id": &created_key.id })
+            .await
+            .unwrap()
+            .expect("uncommitted API key");
+        assert_eq!(uncommitted_key.state_version, 1);
+        assert!(uncommitted_key.updated_at.is_some());
 
         cleanup_partial_approval(&db, &owner_user_id, Some(&created_key.id), Some(&node.id)).await;
 

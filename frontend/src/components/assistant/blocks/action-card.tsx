@@ -2,11 +2,14 @@ import { useEffect, useRef, useState } from "react";
 import {
   AlertTriangle,
   Globe,
+  KeyRound,
   Loader2,
   Server,
   ShieldCheck,
   X,
 } from "lucide-react";
+import { AssistantKeyCreateDialog } from "@/components/assistant/assistant-key-create-dialog";
+import { AssistantKeyRotateDialog } from "@/components/assistant/assistant-key-rotate-dialog";
 import { AddKeyDialog } from "@/components/dashboard/add-key-dialog";
 import { ServiceIcon } from "@/components/service-icon";
 import { Badge } from "@/components/ui/badge";
@@ -18,7 +21,7 @@ import {
   descriptorForAction,
 } from "@/lib/assistant/action-registry";
 import { connectWatchDeadline } from "@/lib/assistant/connect-watch";
-import type { ActionReport } from "@/schemas/assistant-actions";
+import type { ActionReport, ActionResource } from "@/schemas/assistant-actions";
 import { usePendingConnectStore } from "@/stores/pending-connect-store";
 import type { ActionCardContentBlock } from "@/types/assistant";
 
@@ -49,6 +52,51 @@ function ParameterSummary({
 }) {
   const params = block.params;
   if (params.variant === "unknown") return null;
+  if (params.variant === "key_create") {
+    return (
+      <div className="space-y-2.5 border-y border-border bg-muted px-4 py-3">
+        <div className="flex flex-wrap items-center gap-1.5">
+          <span className="text-[10px] font-semibold uppercase tracking-[1px] text-muted-foreground">
+            Key
+          </span>
+          <Badge variant="secondary" className="max-w-full truncate">
+            {params.name}
+          </Badge>
+          <Badge variant="secondary" className="max-w-full truncate">
+            {params.platform}
+          </Badge>
+        </div>
+        <div className="flex flex-wrap items-center gap-1.5">
+          <span className="text-[10px] font-semibold uppercase tracking-[1px] text-muted-foreground">
+            Allowed services
+          </span>
+          {params.allowed_service_ids.map((serviceId) => (
+            <Badge
+              key={serviceId}
+              variant="secondary"
+              className="max-w-full truncate font-mono"
+            >
+              {serviceId}
+            </Badge>
+          ))}
+        </div>
+      </div>
+    );
+  }
+  if (params.variant === "key_rotate") {
+    return (
+      <div className="border-y border-border bg-muted px-4 py-3">
+        <div className="flex flex-wrap items-center gap-1.5">
+          <span className="text-[10px] font-semibold uppercase tracking-[1px] text-muted-foreground">
+            Predecessor
+          </span>
+          <Badge variant="secondary" className="max-w-full truncate font-mono">
+            {params.key_id}
+          </Badge>
+        </div>
+      </div>
+    );
+  }
   const scopes =
     params.variant === "catalog" ? params.requested_scopes.filter(Boolean) : [];
   let endpointHost = "";
@@ -101,7 +149,10 @@ function ParameterSummary({
           {/* Ids are wire-supplied and only length-capped at 256 chars, so they
               stay inside the card instead of widening the chat column. */}
           {params.via_node_id ? (
-            <Badge variant="secondary" className="max-w-full truncate font-mono">
+            <Badge
+              variant="secondary"
+              className="max-w-full truncate font-mono"
+            >
               <Server className="mr-1 h-3 w-3" />
               <span className="min-w-0 truncate">
                 Node {params.via_node_id}
@@ -109,7 +160,10 @@ function ParameterSummary({
             </Badge>
           ) : null}
           {params.target_org_id ? (
-            <Badge variant="secondary" className="max-w-full truncate font-mono">
+            <Badge
+              variant="secondary"
+              className="max-w-full truncate font-mono"
+            >
               <span className="min-w-0 truncate">
                 Org {params.target_org_id}
               </span>
@@ -310,7 +364,25 @@ export function ActionCard({
     block.status !== "unsupported",
   );
 
-  const verdict = settled ? SETTLED[block.status as SettledStatus] : null;
+  const baseVerdict = settled ? SETTLED[block.status as SettledStatus] : null;
+  const verdict =
+    baseVerdict && block.status === "completed" && block.action === "key.create"
+      ? {
+          ...baseVerdict,
+          badge: "Created",
+          footer:
+            "The assistant received only the verified key reference. Key material stayed in NyxID.",
+        }
+      : baseVerdict &&
+          block.status === "completed" &&
+          block.action === "key.rotate"
+        ? {
+            ...baseVerdict,
+            badge: "Rotated",
+            footer:
+              "The assistant received only the verified replacement key reference. Replacement key material stayed in NyxID.",
+          }
+        : baseVerdict;
   const VerdictIcon = verdict?.icon;
 
   // Trust the descriptor too: a card whose verb has no journey behind it must
@@ -349,14 +421,14 @@ export function ActionCard({
 
   function report(
     disposition: "completed" | "declined" | "failed",
-    userServiceId?: string,
+    resource?: ActionResource,
   ) {
     // A manual outcome supersedes any watch still running for this card.
     if (pendingAuth) {
       watchSettledRef.current = authorizationAttemptId;
       endPendingAuth(block.block_id);
     }
-    if (disposition === "completed" && !userServiceId?.trim()) {
+    if (disposition === "completed" && !resource) {
       resolvingRef.current = true;
       void Promise.resolve()
         .then(() => onBlock(block.block_id, VERIFICATION_BLOCKED_NOTE))
@@ -375,11 +447,8 @@ export function ActionCard({
     void Promise.resolve()
       .then(() =>
         onResolve(
-          disposition === "completed" && userServiceId
-            ? {
-                ...base,
-                resource: { userService: { userServiceId } },
-              }
+          disposition === "completed" && resource
+            ? { ...base, resource }
             : base,
         ),
       )
@@ -410,6 +479,9 @@ export function ActionCard({
             <ServiceIcon slug={params.service_slug} size="sm" />
           ) : params.variant === "custom" ? (
             <Globe className="h-4 w-4 text-muted-foreground" />
+          ) : params.variant === "key_create" ||
+            params.variant === "key_rotate" ? (
+            <KeyRound className="h-4 w-4 text-muted-foreground" />
           ) : (
             <AlertTriangle className="h-4 w-4 text-destructive" />
           )}
@@ -471,8 +543,11 @@ export function ActionCard({
         <div className="flex items-start gap-2 px-4 py-3">
           <ShieldCheck className="mt-0.5 h-3.5 w-3.5 shrink-0 text-nyx-secondary-400" />
           <p className="text-[11px] leading-relaxed text-muted-foreground">
-            You choose the account, routing, and credential. The assistant
-            receives only brokered access after you finish.
+            {params.variant === "key_create"
+              ? "NyxID creates and verifies the key here. The assistant receives only the safe key reference after you finish."
+              : params.variant === "key_rotate"
+                ? "NyxID rotates and verifies the exact lineage here. The assistant receives only the replacement key reference after you finish."
+                : "You choose the account, routing, and credential. The assistant receives only brokered access after you finish."}
           </p>
         </div>
       ) : null}
@@ -494,7 +569,10 @@ export function ActionCard({
               {awaitingAuthorization
                 ? "Waiting for authorization"
                 : busy
-                  ? "Connecting"
+                  ? params.variant === "key_create" ||
+                    params.variant === "key_rotate"
+                    ? "Working"
+                    : "Connecting"
                   : descriptor.cta(params)}
             </Button>
           ) : null}
@@ -528,7 +606,9 @@ export function ActionCard({
 
       {/* A settled card unmounts the dialog: its journey is over, and leaving
           it mounted would let a stale flow write onto a reported outcome. */}
-      {!verdict && !unsupported ? (
+      {!verdict &&
+      !unsupported &&
+      (params.variant === "catalog" || params.variant === "custom") ? (
         <AddKeyDialog
           open={dialogOpen}
           onOpenChange={setOpen}
@@ -536,16 +616,8 @@ export function ActionCard({
             params.variant === "catalog" ? params.service_slug : undefined
           }
           prefillIncludeAllCatalog={params.variant === "catalog"}
-          prefillNodeId={
-            params.variant === "unknown"
-              ? undefined
-              : (params.via_node_id ?? undefined)
-          }
-          prefillTargetOrgId={
-            params.variant === "unknown"
-              ? undefined
-              : (params.target_org_id ?? undefined)
-          }
+          prefillNodeId={params.via_node_id ?? undefined}
+          prefillTargetOrgId={params.target_org_id ?? undefined}
           prefillCustom={
             params.variant === "custom"
               ? {
@@ -571,7 +643,13 @@ export function ActionCard({
             setOpen(false);
             return true;
           }}
-          onSuccess={({ userServiceId }) => report("completed", userServiceId)}
+          onSuccess={({ userServiceId }) => {
+            if (!userServiceId.trim()) {
+              report("completed");
+              return;
+            }
+            report("completed", { userService: { userServiceId } });
+          }}
           // Deliberately no onAuthorizationAborted: closing this short-lived
           // dialog is not abandonment. The store-backed watch must survive
           // dismissal/remount and settle the busy card (#1384).
@@ -582,6 +660,28 @@ export function ActionCard({
               startedAt: Date.now(),
             });
           }}
+        />
+      ) : null}
+      {!verdict && !unsupported && params.variant === "key_create" ? (
+        <AssistantKeyCreateDialog
+          open={dialogOpen}
+          onOpenChange={setOpen}
+          actionRequestId={block.action_request_id}
+          params={{
+            name: params.name,
+            platform: params.platform,
+            allowedServiceIds: params.allowed_service_ids,
+          }}
+          onComplete={(keyId) => report("completed", { key: { keyId } })}
+        />
+      ) : null}
+      {!verdict && !unsupported && params.variant === "key_rotate" ? (
+        <AssistantKeyRotateDialog
+          open={dialogOpen}
+          onOpenChange={setOpen}
+          actionRequestId={block.action_request_id}
+          params={{ keyId: params.key_id }}
+          onComplete={(keyId) => report("completed", { key: { keyId } })}
         />
       ) : null}
     </section>

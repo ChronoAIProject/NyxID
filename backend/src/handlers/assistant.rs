@@ -704,8 +704,9 @@ async fn forward(
     response
 }
 
-/// `GET /api/v1/assistant/conversations` -- fully drained shared Chat History
-/// index, filtered to the typed and workflow conversation families.
+/// `GET /api/v1/assistant/conversations` -- fully drain the canonical typed
+/// index and the legacy `chatc-*` history index, then merge their disjoint
+/// resource families for the sidebar.
 pub async fn list_conversations(
     State(state): State<AppState>,
     auth_user: AuthUser,
@@ -717,78 +718,101 @@ pub async fn list_conversations(
     let mut response_parts = None;
     let mut conversations = Vec::new();
     let mut seen_ids = HashSet::new();
-    let mut seen_cursors = HashSet::new();
-    let mut cursor: Option<String> = None;
     let mut aggregate_page_bytes = 0usize;
 
-    for _ in 0..MAX_HISTORY_INDEX_PAGES {
-        let mut page_request =
-            synthetic_request(Method::GET, authorization.as_ref()).map_err(|_| {
-                AppError::Internal(
-                    "assistant: failed to build the history list request".to_string(),
-                )
-            })?;
-        page_request
-            .headers_mut()
-            .insert(header::ACCEPT, HeaderValue::from_static("application/json"));
-        if let Some(cursor) = cursor.as_deref() {
-            *page_request.uri_mut() = format!("/?cursor={}", urlencoding::encode(cursor))
-                .parse()
-                .map_err(|_| {
-                    AppError::Internal("assistant: failed to encode the history cursor".to_string())
-                })?;
-        }
-        let response = forward(
-            &state,
-            &auth_user,
+    let sources = [
+        (
+            assistant_service::canonical_conversations_path(),
+            assistant_service::ConversationResourceFamily::Typed,
+            true,
+        ),
+        (
             assistant_service::history_index_path(&user_id),
-            page_request,
-            Vec::new(),
-            ForwardEcho::enabled(None, None, echoes.as_mut()),
-        )
-        .await?;
-        if !response.status().is_success() {
-            return Ok(attach_upstream_echoes(response, echoes.as_deref()));
+            assistant_service::ConversationResourceFamily::Legacy,
+            false,
+        ),
+    ];
+
+    'sources: for (path, family, canonical) in sources {
+        let mut seen_cursors = HashSet::new();
+        let mut cursor: Option<String> = None;
+        for _ in 0..MAX_HISTORY_INDEX_PAGES {
+            let mut page_request =
+                synthetic_request(Method::GET, authorization.as_ref()).map_err(|_| {
+                    AppError::Internal(
+                        "assistant: failed to build the conversation list request".to_string(),
+                    )
+                })?;
+            page_request
+                .headers_mut()
+                .insert(header::ACCEPT, HeaderValue::from_static("application/json"));
+            let mut query = if canonical {
+                vec!["pageSize=50".to_string()]
+            } else {
+                Vec::new()
+            };
+            if let Some(cursor) = cursor.as_deref() {
+                query.push(format!("cursor={}", urlencoding::encode(cursor)));
+            }
+            if !query.is_empty() {
+                *page_request.uri_mut() =
+                    format!("/?{}", query.join("&")).parse().map_err(|_| {
+                        AppError::Internal(
+                            "assistant: failed to encode the conversation cursor".to_string(),
+                        )
+                    })?;
+            }
+            let response = forward(
+                &state,
+                &auth_user,
+                path.clone(),
+                page_request,
+                Vec::new(),
+                ForwardEcho::enabled(None, None, echoes.as_mut()),
+            )
+            .await?;
+            if !response.status().is_success() {
+                return Ok(attach_upstream_echoes(response, echoes.as_deref()));
+            }
+            let (parts, body) = response.into_parts();
+            if response_parts.is_none() {
+                response_parts = Some(parts);
+            }
+            let bytes = to_bytes(body, MAX_CONVERSATION_INDEX_RESPONSE_BYTES)
+                .await
+                .map_err(|_| {
+                    AppError::Internal(
+                        "assistant: conversation index page exceeded the buffer cap".to_string(),
+                    )
+                })?;
+            let Some(next_aggregate_bytes) = aggregate_page_bytes.checked_add(bytes.len()) else {
+                break 'sources;
+            };
+            if next_aggregate_bytes > MAX_HISTORY_INDEX_AGGREGATE_BYTES {
+                break 'sources;
+            }
+            aggregate_page_bytes = next_aggregate_bytes;
+            let Ok(page) = serde_json::from_slice::<serde_json::Value>(&bytes) else {
+                // Preserve rows already collected from this or the other
+                // source across a mixed-version response shape.
+                break;
+            };
+            let next_cursor = assistant_service::append_conversation_family_page(
+                &page,
+                family,
+                &mut conversations,
+                &mut seen_ids,
+            )?;
+            let Some(next_cursor) = next_cursor else {
+                break;
+            };
+            if !seen_cursors.insert(next_cursor.clone()) {
+                return Err(AppError::Internal(
+                    "assistant: conversation index repeated a cursor".to_string(),
+                ));
+            }
+            cursor = Some(next_cursor);
         }
-        let (parts, body) = response.into_parts();
-        if response_parts.is_none() {
-            response_parts = Some(parts);
-        }
-        let bytes = to_bytes(body, MAX_CONVERSATION_INDEX_RESPONSE_BYTES)
-            .await
-            .map_err(|_| {
-                AppError::Internal(
-                    "assistant: conversation index page exceeded the buffer cap".to_string(),
-                )
-            })?;
-        let Some(next_aggregate_bytes) = aggregate_page_bytes.checked_add(bytes.len()) else {
-            break;
-        };
-        if next_aggregate_bytes > MAX_HISTORY_INDEX_AGGREGATE_BYTES {
-            break;
-        }
-        aggregate_page_bytes = next_aggregate_bytes;
-        let Ok(page) = serde_json::from_slice::<serde_json::Value>(&bytes) else {
-            // Preserve already-collected rows across a mixed-version or
-            // partially deployed upstream response shape. On the first page,
-            // the same deploy-independent posture intentionally degrades to an
-            // empty successful index using that upstream response's metadata.
-            break;
-        };
-        let next_cursor = assistant_service::append_addressable_history_page(
-            &page,
-            &mut conversations,
-            &mut seen_ids,
-        )?;
-        let Some(next_cursor) = next_cursor else {
-            break;
-        };
-        if !seen_cursors.insert(next_cursor.clone()) {
-            return Err(AppError::Internal(
-                "assistant: chat history index repeated a cursor".to_string(),
-            ));
-        }
-        cursor = Some(next_cursor);
     }
 
     assistant_service::sort_conversation_rows_newest_first(&mut conversations);

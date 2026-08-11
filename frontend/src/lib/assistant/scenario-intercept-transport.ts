@@ -377,6 +377,30 @@ export class ScenarioInterceptTransport implements AssistantTransport {
     this.delegate.cancelActiveTurn(conversationId);
   }
 
+  stopTask(conversationId: string): Promise<void> {
+    return this.delegate.stopTask(conversationId);
+  }
+
+  steerTask(conversationId: string, instruction: string): Promise<void> {
+    return this.delegate.steerTask(conversationId, instruction);
+  }
+
+  retryStep(conversationId: string, stepId: string): Promise<void> {
+    return this.delegate.retryStep(conversationId, stepId);
+  }
+
+  skipStep(conversationId: string, stepId: string): Promise<void> {
+    return this.delegate.skipStep(conversationId, stepId);
+  }
+
+  resolvePlan(
+    conversationId: string,
+    blockId: string,
+    confirmed: boolean,
+  ): Promise<void> {
+    return this.delegate.resolvePlan(conversationId, blockId, confirmed);
+  }
+
   async decideApproval(
     conversationId: string,
     blockId: string,
@@ -528,26 +552,6 @@ export class ScenarioInterceptTransport implements AssistantTransport {
       this.restoreOwnership(conversationId, priorOwnership);
       throw error;
     }
-  }
-
-  resolvePlan(conversationId: string, confirmed: boolean): Promise<void> {
-    return this.delegate.resolvePlan(conversationId, confirmed);
-  }
-
-  stopTask(conversationId: string): Promise<void> {
-    return this.delegate.stopTask(conversationId);
-  }
-
-  steerTask(conversationId: string, instruction: string): Promise<void> {
-    return this.delegate.steerTask(conversationId, instruction);
-  }
-
-  retryStep(conversationId: string, stepId: string): Promise<void> {
-    return this.delegate.retryStep(conversationId, stepId);
-  }
-
-  skipStep(conversationId: string, stepId: string): Promise<void> {
-    return this.delegate.skipStep(conversationId, stepId);
   }
 
   private startVerification(

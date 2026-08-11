@@ -32,6 +32,21 @@ pub struct ApiKey {
     #[serde(with = "bson::serde_helpers::chrono_datetime_as_bson_datetime")]
     pub created_at: DateTime<Utc>,
 
+    /// Immutable lineage edge for a rotated successor. Directly-created and
+    /// legacy keys have no predecessor.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rotation_predecessor_id: Option<String>,
+
+    /// Authoritative monotonic version for this key row. Legacy rows without
+    /// the field deserialize as zero; every newly-created key starts at one.
+    #[serde(default)]
+    pub state_version: i64,
+
+    /// Authoritative timestamp of the latest committed mutation. Legacy rows
+    /// without the field deserialize as `None`.
+    #[serde(default, with = "bson_datetime::optional")]
+    pub updated_at: Option<DateTime<Utc>>,
+
     // --- Service Scope (absorbed from AgentGroup) ---
     /// Optional description of what this key is used for
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -111,6 +126,9 @@ mod tests {
             expires_at: None,
             is_active: true,
             created_at: Utc::now(),
+            rotation_predecessor_id: None,
+            state_version: 1,
+            updated_at: Some(Utc::now()),
             description: None,
             allowed_service_ids: vec![],
             allowed_node_ids: vec![],
@@ -170,6 +188,9 @@ mod tests {
         doc.remove("callback_url");
         doc.remove("purpose");
         doc.remove("scheduled_write_enabled");
+        doc.remove("rotation_predecessor_id");
+        doc.remove("state_version");
+        doc.remove("updated_at");
         let restored: ApiKey = bson::from_document(doc).expect("deserialize");
         assert_eq!(restored.rate_limit_per_second, None);
         assert_eq!(restored.rate_limit_burst, None);
@@ -177,6 +198,9 @@ mod tests {
         assert_eq!(restored.callback_url, None);
         assert_eq!(restored.purpose, ApiKeyPurpose::General);
         assert!(!restored.scheduled_write_enabled);
+        assert_eq!(restored.rotation_predecessor_id, None);
+        assert_eq!(restored.state_version, 0);
+        assert_eq!(restored.updated_at, None);
     }
 
     #[test]

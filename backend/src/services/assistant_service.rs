@@ -93,10 +93,14 @@ pub fn validate_typed_conversation_id(conversation_id: &str) -> AppResult<()> {
     Ok(())
 }
 
-/// Shared Chat History index. Both supported conversation families are
-/// projected here, so callers can drain one cursor sequence for the sidebar.
+/// Legacy scoped Chat History index retained for `chatc-*` list/read/delete.
 pub fn history_index_path(user_id: &str) -> String {
     format!("api/scopes/{user_id}/chat-history")
+}
+
+/// Canonical typed NyxIdChat conversation index.
+pub fn canonical_conversations_path() -> String {
+    "api/chat/conversations".to_string()
 }
 
 /// Actor-id prefix of a `nyxid-chat` conversation (upstream
@@ -128,10 +132,12 @@ pub fn conversation_resource_family(
     Err(AppError::NotFound("Conversation not found".to_string()))
 }
 
-/// Add one shared-index page to a drained result, filtering to the two
-/// addressable families and keeping the first occurrence of each id.
-pub fn append_addressable_history_page(
+/// Add one index page to a drained result, accepting only the source's
+/// authoritative conversation family and keeping the first occurrence of
+/// each id across both sources.
+pub fn append_conversation_family_page(
     index: &serde_json::Value,
+    family: ConversationResourceFamily,
     conversations: &mut Vec<serde_json::Value>,
     seen: &mut HashSet<String>,
 ) -> AppResult<Option<String>> {
@@ -148,9 +154,7 @@ pub fn append_addressable_history_page(
         let Some(id) = row.get("id").and_then(serde_json::Value::as_str) else {
             continue;
         };
-        if (id.starts_with(NYXID_CHAT_ACTOR_PREFIX) || id.starts_with(LEGACY_CONVERSATION_PREFIX))
-            && seen.insert(id.to_string())
-        {
+        if conversation_resource_family(id).ok() == Some(family) && seen.insert(id.to_string()) {
             conversations.push(row.clone());
         }
     }
@@ -259,10 +263,10 @@ pub struct PreparedAssistantChatCommand {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum AssistantChatCommand {
     Text(TextChatCommand),
-    PlanResolve(PlanResolveCommand),
     InputResolve(InputResolveCommand),
     ActionContinue(ActionContinueCommand),
     ApprovalResolve(ApprovalResolveCommand),
+    PlanResolve(PlanResolveCommand),
     TaskStop(TaskStopCommand),
     TaskSteer(TaskSteerCommand),
     StepRetry(StepRetryCommand),
@@ -274,18 +278,6 @@ pub struct TextChatCommand {
     pub prompt: String,
     pub client_request_id: String,
     pub conversation_id: Option<String>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct PlanResolveCommand {
-    pub conversation_id: String,
-    pub task_id: String,
-    pub plan_id: String,
-    pub request_id: String,
-    pub client_request_id: String,
-    pub plan_revision: i64,
-    pub confirmed: bool,
-    pub expected_state_version: i64,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -333,6 +325,18 @@ pub struct ApprovalResolveCommand {
     pub request_id: String,
     pub approved: bool,
     pub reason: Option<String>,
+    pub expected_state_version: i64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PlanResolveCommand {
+    pub conversation_id: String,
+    pub task_id: String,
+    pub plan_id: String,
+    pub request_id: String,
+    pub client_request_id: String,
+    pub plan_revision: i64,
+    pub confirmed: bool,
     pub expected_state_version: i64,
 }
 
@@ -469,21 +473,6 @@ struct RawTextChatCommand {
 
 #[derive(Debug, serde::Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
-struct RawPlanResolveCommand {
-    #[serde(rename = "type")]
-    _command_type: String,
-    conversation_id: String,
-    task_id: String,
-    plan_id: String,
-    request_id: String,
-    client_request_id: String,
-    plan_revision: i64,
-    confirmed: bool,
-    expected_state_version: i64,
-}
-
-#[derive(Debug, serde::Deserialize)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct RawInputResolveCommand {
     #[serde(rename = "type")]
     _command_type: String,
@@ -536,6 +525,21 @@ struct RawApprovalResolveCommand {
     approved: bool,
     #[serde(default)]
     reason: Option<String>,
+    expected_state_version: i64,
+}
+
+#[derive(Debug, serde::Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct RawPlanResolveCommand {
+    #[serde(rename = "type")]
+    _command_type: String,
+    conversation_id: String,
+    task_id: String,
+    plan_id: String,
+    request_id: String,
+    client_request_id: String,
+    plan_revision: i64,
+    confirmed: bool,
     expected_state_version: i64,
 }
 
@@ -1043,21 +1047,6 @@ pub fn prepare_assistant_chat_command(
                 response_kind: AssistantChatResponseKind::Stream,
             })
         }
-        AssistantChatCommand::PlanResolve(command) => Ok(PreparedAssistantChatCommand {
-            body: serde_json::json!({
-                "type": "plan.resolve",
-                "conversationId": command.conversation_id,
-                "taskId": command.task_id,
-                "planId": command.plan_id,
-                "requestId": command.request_id,
-                "clientRequestId": command.client_request_id,
-                "planRevision": command.plan_revision,
-                "confirmed": command.confirmed,
-                "expectedStateVersion": command.expected_state_version,
-            }),
-            client_request_id: command.client_request_id.clone(),
-            response_kind: AssistantChatResponseKind::Json,
-        }),
         AssistantChatCommand::InputResolve(command) => Ok(PreparedAssistantChatCommand {
             body: serde_json::json!({
                 "type": "input.resolve",
@@ -1155,6 +1144,21 @@ pub fn prepare_assistant_chat_command(
                 response_kind: AssistantChatResponseKind::Json,
             })
         }
+        AssistantChatCommand::PlanResolve(command) => Ok(PreparedAssistantChatCommand {
+            body: serde_json::json!({
+                "type": "plan.resolve",
+                "conversationId": command.conversation_id,
+                "taskId": command.task_id,
+                "planId": command.plan_id,
+                "requestId": command.request_id,
+                "clientRequestId": command.client_request_id,
+                "planRevision": command.plan_revision,
+                "confirmed": command.confirmed,
+                "expectedStateVersion": command.expected_state_version,
+            }),
+            client_request_id: command.client_request_id.clone(),
+            response_kind: AssistantChatResponseKind::Json,
+        }),
         AssistantChatCommand::TaskStop(command) => Ok(PreparedAssistantChatCommand {
             body: serde_json::json!({
                 "type": "task.stop",
@@ -1373,7 +1377,7 @@ mod tests {
     );
 
     #[test]
-    fn drains_index_pages_to_the_addressable_families_only() {
+    fn drains_each_index_to_its_authoritative_family_only() {
         let index = json!({
             "conversations": [
                 { "id": WORKFLOW_CONV, "updatedAt": "2026-07-29T12:00:00.000Z" },
@@ -1387,7 +1391,13 @@ mod tests {
         let mut seen = HashSet::new();
 
         assert_eq!(
-            append_addressable_history_page(&index, &mut conversations, &mut seen).unwrap(),
+            append_conversation_family_page(
+                &index,
+                ConversationResourceFamily::Typed,
+                &mut conversations,
+                &mut seen,
+            )
+            .unwrap(),
             Some("page-2".to_string())
         );
         assert_eq!(
@@ -1395,7 +1405,22 @@ mod tests {
                 .iter()
                 .map(|row| row.get("id").and_then(serde_json::Value::as_str))
                 .collect::<Vec<_>>(),
-            vec![Some(WORKFLOW_CONV), Some(CONV)]
+            vec![Some(CONV)]
+        );
+
+        append_conversation_family_page(
+            &index,
+            ConversationResourceFamily::Legacy,
+            &mut conversations,
+            &mut seen,
+        )
+        .unwrap();
+        assert_eq!(
+            conversations
+                .iter()
+                .map(|row| row.get("id").and_then(serde_json::Value::as_str))
+                .collect::<Vec<_>>(),
+            vec![Some(CONV), Some(WORKFLOW_CONV)]
         );
     }
 
@@ -1423,7 +1448,20 @@ mod tests {
         let mut conversations = Vec::new();
         let mut seen = HashSet::new();
 
-        append_addressable_history_page(&page, &mut conversations, &mut seen).unwrap();
+        append_conversation_family_page(
+            &page,
+            ConversationResourceFamily::Typed,
+            &mut conversations,
+            &mut seen,
+        )
+        .unwrap();
+        append_conversation_family_page(
+            &page,
+            ConversationResourceFamily::Legacy,
+            &mut conversations,
+            &mut seen,
+        )
+        .unwrap();
         sort_conversation_rows_newest_first(&mut conversations);
         assert_eq!(
             conversations
@@ -2211,6 +2249,92 @@ mod tests {
                 "approved": true,
                 "expectedStateVersion": 21,
                 "stateVersion": 21
+            }),
+        ] {
+            assert!(parse_assistant_chat_command(&serde_json::to_vec(&value).unwrap()).is_err());
+        }
+    }
+
+    #[test]
+    fn parses_and_rebuilds_exact_plan_resolution() {
+        let prepared = prepare_assistant_chat_command(&parse_command(json!({
+            "type": "plan.resolve",
+            "conversationId": CONV,
+            "taskId": "task-alpha",
+            "planId": "plan-alpha",
+            "requestId": "plan-gate-alpha",
+            "clientRequestId": "client-plan-alpha",
+            "planRevision": 3,
+            "confirmed": true,
+            "expectedStateVersion": 23
+        })))
+        .unwrap();
+
+        assert_eq!(prepared.response_kind, AssistantChatResponseKind::Json);
+        assert_eq!(prepared.client_request_id, "client-plan-alpha");
+        assert_eq!(
+            prepared.body,
+            json!({
+                "type": "plan.resolve",
+                "conversationId": CONV,
+                "taskId": "task-alpha",
+                "planId": "plan-alpha",
+                "requestId": "plan-gate-alpha",
+                "clientRequestId": "client-plan-alpha",
+                "planRevision": 3,
+                "confirmed": true,
+                "expectedStateVersion": 23
+            })
+        );
+    }
+
+    #[test]
+    fn plan_resolution_requires_exact_positive_identities_and_versions() {
+        for value in [
+            json!({
+                "type": "plan.resolve",
+                "conversationId": CONV,
+                "taskId": "task-alpha",
+                "planId": "plan-alpha",
+                "requestId": "plan-gate-alpha",
+                "clientRequestId": "client-plan-alpha",
+                "planRevision": 0,
+                "confirmed": true,
+                "expectedStateVersion": 23
+            }),
+            json!({
+                "type": "plan.resolve",
+                "conversationId": CONV,
+                "taskId": "task-alpha",
+                "planId": "bad/plan",
+                "requestId": "plan-gate-alpha",
+                "clientRequestId": "client-plan-alpha",
+                "planRevision": 3,
+                "confirmed": false,
+                "expectedStateVersion": 23
+            }),
+            json!({
+                "type": "plan.resolve",
+                "conversationId": CONV,
+                "taskId": "task-alpha",
+                "planId": "plan-alpha",
+                "requestId": "plan-gate-alpha",
+                "clientRequestId": "client-plan-alpha",
+                "planRevision": 3,
+                "confirmed": true,
+                "expectedStateVersion": 0
+            }),
+            json!({
+                "type": "plan.resolve",
+                "conversationId": CONV,
+                "taskId": "task-alpha",
+                "planId": "plan-alpha",
+                "requestId": "plan-gate-alpha",
+                "clientRequestId": "client-plan-alpha",
+                "planRevision": 3,
+                "confirmed": true,
+                "expectedStateVersion": 23,
+                "stateVersion": 23
             }),
         ] {
             assert!(parse_assistant_chat_command(&serde_json::to_vec(&value).unwrap()).is_err());

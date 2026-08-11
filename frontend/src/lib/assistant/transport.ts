@@ -167,6 +167,61 @@ class MockAssistantTransport implements AssistantTransport {
     }
   }
 
+  async stopTask(conversationId: string): Promise<void> {
+    this.cancelActiveTurn(conversationId);
+  }
+
+  async steerTask(conversationId: string, instruction: string): Promise<void> {
+    void conversationId;
+    if (!instruction.trim()) throw new Error("Steering cannot be empty.");
+  }
+
+  async retryStep(conversationId: string, stepId: string): Promise<void> {
+    void conversationId;
+    if (!stepId) throw new Error("Step identity is required.");
+  }
+
+  async skipStep(conversationId: string, stepId: string): Promise<void> {
+    void conversationId;
+    if (!stepId) throw new Error("Step identity is required.");
+  }
+
+  async resolvePlan(
+    conversationId: string,
+    blockId: string,
+    confirmed: boolean,
+  ): Promise<void> {
+    const block = assistantMockStore.findBlock(conversationId, blockId);
+    if (block?.type !== "task_plan") {
+      throw new Error("Task plan was not found.");
+    }
+    const gate = block.plan.gate;
+    if (
+      gate?.mode !== "confirm" ||
+      gate.status !== "pending" ||
+      !gate.requestId ||
+      !gate.taskId ||
+      !gate.planId ||
+      gate.planRevision === undefined
+    ) {
+      throw new Error("This plan gate is no longer pending.");
+    }
+    this.emitLocalActionPatch(
+      conversationId,
+      blockId,
+      {
+        plan: {
+          ...block.plan,
+          gate: {
+            ...gate,
+            status: confirmed ? "satisfied" : "rejected",
+          },
+        },
+      },
+      () => undefined,
+    );
+  }
+
   async decideApproval(
     conversationId: string,
     blockId: string,
@@ -364,26 +419,6 @@ class MockAssistantTransport implements AssistantTransport {
     const handle = this.startPendingAction(conversationId);
     if (!handle) throw new AssistantTurnActiveError();
     return handle;
-  }
-
-  async resolvePlan(): Promise<void> {
-    throw new Error("Plan controls are unavailable in mock chat.");
-  }
-
-  async stopTask(): Promise<void> {
-    throw new Error("Task controls are unavailable in mock chat.");
-  }
-
-  async steerTask(): Promise<void> {
-    throw new Error("Task controls are unavailable in mock chat.");
-  }
-
-  async retryStep(): Promise<void> {
-    throw new Error("Step controls are unavailable in mock chat.");
-  }
-
-  async skipStep(): Promise<void> {
-    throw new Error("Step controls are unavailable in mock chat.");
   }
 
   reset(now: () => number = Date.now): void {
@@ -669,6 +704,30 @@ export class DelegatingAssistantTransport implements AssistantTransport {
     this.transport.cancelActiveTurn(conversationId);
   }
 
+  stopTask(conversationId: string): Promise<void> {
+    return this.transport.stopTask(conversationId);
+  }
+
+  steerTask(conversationId: string, instruction: string): Promise<void> {
+    return this.transport.steerTask(conversationId, instruction);
+  }
+
+  retryStep(conversationId: string, stepId: string): Promise<void> {
+    return this.transport.retryStep(conversationId, stepId);
+  }
+
+  skipStep(conversationId: string, stepId: string): Promise<void> {
+    return this.transport.skipStep(conversationId, stepId);
+  }
+
+  resolvePlan(
+    conversationId: string,
+    blockId: string,
+    confirmed: boolean,
+  ): Promise<void> {
+    return this.transport.resolvePlan(conversationId, blockId, confirmed);
+  }
+
   decideApproval(
     conversationId: string,
     blockId: string,
@@ -742,25 +801,6 @@ export class DelegatingAssistantTransport implements AssistantTransport {
     return this.transport.wakeActions(conversationId, originTurnId, onEvent);
   }
 
-  resolvePlan(conversationId: string, confirmed: boolean): Promise<void> {
-    return this.transport.resolvePlan(conversationId, confirmed);
-  }
-
-  stopTask(conversationId: string): Promise<void> {
-    return this.transport.stopTask(conversationId);
-  }
-
-  steerTask(conversationId: string, instruction: string): Promise<void> {
-    return this.transport.steerTask(conversationId, instruction);
-  }
-
-  retryStep(conversationId: string, stepId: string): Promise<void> {
-    return this.transport.retryStep(conversationId, stepId);
-  }
-
-  skipStep(conversationId: string, stepId: string): Promise<void> {
-    return this.transport.skipStep(conversationId, stepId);
-  }
 }
 
 export interface AssistantTransportFactories {

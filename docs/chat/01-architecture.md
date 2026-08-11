@@ -136,16 +136,18 @@ and gate shape because a different deployment may require an explicit gate.
 
 The typed actor currently terminates a connected-service inventory request with
 `RUN_ERROR / USE_SKILL_ACCESS_DENIED`: its tool set omits the legacy
-`nyxid_services` capability. That Aevatar provisioning defect is the gate on
-removing the legacy send path. It is not a reason to add a typed-to-workflow
-fallback or to claim feature parity from record counts; the observed legacy
+`nyxid_services` capability. That Aevatar provisioning defect blocks feature-
+complete connected-service rollout, not deletion of the already-retired legacy
+send path. It is not a reason to add a typed-to-workflow fallback or to claim
+feature parity from record counts; the observed legacy
 "117 connected services" count includes 75 inactive records.
 
 ## Persistence ownership
 
 Aevatar exposes separate resource families:
 
-- Both families appear in the scoped history index.
+- Typed rows are listed by canonical `/api/chat/conversations`; the scoped
+  history index is authoritative only for retained legacy `chatc-*` rows.
 - Typed history and delete use `/api/chat/conversations/{id}`.
 - Legacy `chatc-*` history and delete use `/api/scopes/{scope}/chat-history/conversations/{id}`.
 - Typed state is available only from `/api/chat/conversations/{id}/state`.

@@ -6,10 +6,6 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 import { TooltipProvider } from "@/components/ui/tooltip";
 import { assistantKeys } from "@/hooks/use-assistant";
 import { ApiError } from "@/lib/api-client";
-import {
-  createActorProjection,
-  type ActorProjection,
-} from "@/lib/assistant/actor-state";
 import { AssistantConversationNotFoundError } from "@/lib/assistant/errors";
 import { useAssistantContextStore } from "@/stores/assistant-context-store";
 import { useAssistantDraftStore } from "@/stores/assistant-draft-store";
@@ -23,6 +19,11 @@ const {
   mockCancelMutateAsync,
   mockDecideMutateAsync,
   mockResolveInputMutateAsync,
+  mockStopTaskMutateAsync,
+  mockSteerTaskMutateAsync,
+  mockRetryStepMutateAsync,
+  mockSkipStepMutateAsync,
+  mockResolvePlanMutateAsync,
   mockContinueAction,
   mockDeleteMutateAsync,
   mockSendMutateAsync,
@@ -34,6 +35,11 @@ const {
   mockCancelMutateAsync: vi.fn(),
   mockDecideMutateAsync: vi.fn(),
   mockResolveInputMutateAsync: vi.fn(),
+  mockStopTaskMutateAsync: vi.fn(),
+  mockSteerTaskMutateAsync: vi.fn(),
+  mockRetryStepMutateAsync: vi.fn(),
+  mockSkipStepMutateAsync: vi.fn(),
+  mockResolvePlanMutateAsync: vi.fn(),
   mockContinueAction: vi.fn(),
   mockDeleteMutateAsync: vi.fn(),
   mockSendMutateAsync: vi.fn(),
@@ -61,7 +67,6 @@ const {
     cancelPending: false,
     decisionPending: false,
     historyMessages: [] as unknown[],
-    actorProjection: undefined as ActorProjection | undefined,
     episode: null as {
       open: boolean;
       printed: boolean;
@@ -148,7 +153,6 @@ vi.mock("@/hooks/use-assistant", () => ({
               id: state.historyCanonicalId ?? conversationId,
             },
             messages: state.historyMessages,
-            actorProjection: state.actorProjection,
             has_more: false,
             awaitingProjection: state.historyAwaitingProjection,
             projectionStalled: state.historyProjectionStalled,
@@ -187,17 +191,30 @@ vi.mock("@/hooks/use-assistant", () => ({
     mutateAsync: mockResolveInputMutateAsync,
     isPending: false,
   }),
+  useStopTask: () => ({
+    mutateAsync: mockStopTaskMutateAsync,
+    isPending: false,
+  }),
+  useSteerTask: () => ({
+    mutateAsync: mockSteerTaskMutateAsync,
+    isPending: false,
+  }),
+  useRetryStep: () => ({
+    mutateAsync: mockRetryStepMutateAsync,
+    isPending: false,
+  }),
+  useSkipStep: () => ({
+    mutateAsync: mockSkipStepMutateAsync,
+    isPending: false,
+  }),
+  useResolvePlan: () => ({
+    mutateAsync: mockResolvePlanMutateAsync,
+    isPending: false,
+  }),
   useActionCardActions: () => ({
     setInProgress: vi.fn(),
     blockAction: vi.fn(),
     continueAction: mockContinueAction,
-  }),
-  useActorControls: () => ({
-    resolvePlan: { mutateAsync: vi.fn(), isPending: false },
-    stop: { mutateAsync: vi.fn(), isPending: false },
-    steer: { mutateAsync: vi.fn(), isPending: false },
-    retry: { mutateAsync: vi.fn(), isPending: false },
-    skip: { mutateAsync: vi.fn(), isPending: false },
   }),
   useDeleteConversation: () => ({
     mutateAsync: mockDeleteMutateAsync,
@@ -301,7 +318,6 @@ beforeEach(() => {
   state.cancelPending = false;
   state.decisionPending = false;
   state.historyMessages = [];
-  state.actorProjection = undefined;
   state.episode = null;
   useAuthStore.setState({
     user,
@@ -331,28 +347,6 @@ describe("AssistantPage typed conversation controls", () => {
     expect(screen.getByRole("button", { name: "Send message" })).toBeDisabled();
   });
 
-  it("disables ordinary text while the typed actor has active work", () => {
-    state.search = { c: existingConversation.id };
-    state.actorProjection = {
-      ...createActorProjection(existingConversation.id),
-      activeTurn: { turnId: "turn-1", status: "active" },
-      task: {
-        taskId: "task-1",
-        planId: "plan-1",
-        planRevision: 1,
-        status: "active",
-        title: "Active task",
-      },
-    };
-
-    renderPage();
-
-    expect(screen.getByText("Active task")).toBeInTheDocument();
-    expect(
-      screen.getByPlaceholderText("This conversation is read-only."),
-    ).toBeDisabled();
-    expect(screen.getByRole("button", { name: "Send message" })).toBeDisabled();
-  });
 });
 
 describe("AssistantPage projection status", () => {
@@ -949,5 +943,105 @@ describe("AssistantPage canonical conversation resolution", () => {
     renderPage();
 
     expect(mockNavigate).not.toHaveBeenCalled();
+  });
+});
+
+describe("AssistantPage typed task controls", () => {
+  it("routes active-task input and TaskPlan actions through actor controls", async () => {
+    const event = userEvent.setup();
+    const conversationId = "nyxid-chat-f8369965a444433f92ec50e67ad8ee52";
+    state.search = { c: conversationId };
+    state.conversations = [{ ...existingConversation, id: conversationId }];
+    state.historyMessages = [
+      {
+        id: "assistant-current-state",
+        role: "assistant",
+        schema_version: 1,
+        created_at: "2026-08-11T00:00:00.000Z",
+        blocks: [
+          {
+            type: "task_plan",
+            block_id: "current-task-plan:task-alpha",
+            state_version: 47,
+            progress_sequence: 12,
+            plan: {
+              schemaVersion: 4,
+              actorId: conversationId,
+              taskId: "task-alpha",
+              turnId: "turn-alpha",
+              planId: "plan-alpha",
+              planRevision: 2,
+              planRevisions: [],
+              title: "Publish the release",
+              status: "active",
+              activeStepId: "step-alpha",
+              gate: {
+                mode: "confirm",
+                status: "pending",
+                requestId: "plan-gate-alpha",
+                taskId: "task-alpha",
+                planId: "plan-alpha",
+                planRevision: 2,
+              },
+              steps: [
+                {
+                  stepId: "step-alpha",
+                  order: 1,
+                  kind: "tool",
+                  status: "running",
+                  required: true,
+                  description: "Publish release notes",
+                  source: { kind: "tool", label: "github_release" },
+                  mayChangeExternalState: true,
+                  externalEffect: "not_started",
+                  availableActions: {
+                    retry: true,
+                    skip: true,
+                    stop: true,
+                  },
+                  dependsOn: [],
+                  substeps: [],
+                  operation: { operationGeneration: 2 },
+                },
+              ],
+            },
+          },
+        ],
+      },
+    ];
+    renderPage();
+
+    const composer = screen.getByRole("textbox");
+    expect(composer).toBeEnabled();
+    await event.type(composer, "Use the release branch");
+    await event.click(
+      screen.getByRole("button", { name: "Send steering instruction" }),
+    );
+    expect(mockSteerTaskMutateAsync).toHaveBeenCalledWith(
+      "Use the release branch",
+    );
+    expect(mockSendMutateAsync).not.toHaveBeenCalled();
+
+    await event.click(screen.getByRole("button", { name: "Stop task" }));
+    await event.click(
+      screen.getByRole("button", { name: "Retry Publish release notes" }),
+    );
+    await event.click(
+      screen.getByRole("button", { name: "Skip Publish release notes" }),
+    );
+    expect(mockStopTaskMutateAsync).toHaveBeenCalledOnce();
+    expect(mockRetryStepMutateAsync).toHaveBeenCalledWith("step-alpha");
+    expect(mockSkipStepMutateAsync).toHaveBeenCalledWith("step-alpha");
+    await event.click(screen.getByRole("button", { name: "Confirm plan" }));
+    await event.click(screen.getByRole("button", { name: "Reject plan" }));
+    expect(mockResolvePlanMutateAsync).toHaveBeenNthCalledWith(1, {
+      blockId: "current-task-plan:task-alpha",
+      confirmed: true,
+    });
+    expect(mockResolvePlanMutateAsync).toHaveBeenNthCalledWith(2, {
+      blockId: "current-task-plan:task-alpha",
+      confirmed: false,
+    });
+    expect(mockCancelMutateAsync).not.toHaveBeenCalled();
   });
 });

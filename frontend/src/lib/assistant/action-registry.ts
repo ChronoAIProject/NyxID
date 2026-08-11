@@ -1,12 +1,20 @@
 import {
   ACTION_SCHEMA_VERSION,
   ACTION_SERVICE_SLUG_PATTERN,
+  keyCreateActionParamsSchema,
+  keyRotateActionParamsSchema,
+  serviceConnectActionParamsSchema,
   type ActionCardParams,
   type AssistantActionRequest,
 } from "@/schemas/assistant-actions";
 
 export type ActionRisk = "credential_access" | "unsupported";
-export type ActionJourney = "catalog_service" | "custom_service" | null;
+export type ActionJourney =
+  | "catalog_service"
+  | "custom_service"
+  | "key_create"
+  | "key_rotate"
+  | null;
 
 export interface ActionDescriptor {
   readonly title: (params: ActionCardParams) => string;
@@ -79,6 +87,28 @@ const serviceConnectDescriptor: ActionDescriptor = {
   },
 };
 
+const keyCreateDescriptor: ActionDescriptor = {
+  title: () => "Create API key",
+  body: (params) =>
+    params.variant === "key_create"
+      ? `NyxID will create ${clampServiceLabel(params.name) || "an API key"} with proxy access limited to the listed services.`
+      : "NyxID will create a least-scope API key.",
+  cta: () => "Create key",
+  risk: "credential_access",
+  journey: (params) => (params.variant === "key_create" ? "key_create" : null),
+};
+
+const keyRotateDescriptor: ActionDescriptor = {
+  title: () => "Rotate API key",
+  body: (params) =>
+    params.variant === "key_rotate"
+      ? "NyxID will replace this exact API key, preserve its authority, and commit an immutable predecessor link."
+      : "NyxID will rotate one exact API key.",
+  cta: () => "Rotate key",
+  risk: "credential_access",
+  journey: (params) => (params.variant === "key_rotate" ? "key_rotate" : null),
+};
+
 const unsupportedDescriptor: ActionDescriptor = {
   title: () => "Unsupported action request",
   body: () =>
@@ -90,6 +120,8 @@ const unsupportedDescriptor: ActionDescriptor = {
 
 export const ACTION_REGISTRY: Readonly<Record<string, ActionDescriptor>> = {
   "service.connect": serviceConnectDescriptor,
+  "key.create": keyCreateDescriptor,
+  "key.rotate": keyRotateDescriptor,
 };
 
 export interface ResolvedAction {
@@ -131,8 +163,30 @@ function safeAuthKeyName(value: string): string | null {
 }
 
 function normalizeParams(request: AssistantActionRequest): ActionCardParams {
-  const catalog = request.params.catalogService;
-  const custom = request.params.customService;
+  if (request.action === "key.create") {
+    const parsed = keyCreateActionParamsSchema.safeParse(request.params);
+    if (!parsed.success) return { variant: "unknown" };
+    return {
+      variant: "key_create",
+      name: parsed.data.name,
+      platform: parsed.data.platform,
+      allowed_service_ids: parsed.data.allowedServiceIds,
+    };
+  }
+
+  if (request.action === "key.rotate") {
+    const parsed = keyRotateActionParamsSchema.safeParse(request.params);
+    if (!parsed.success) return { variant: "unknown" };
+    return {
+      variant: "key_rotate",
+      key_id: parsed.data.keyId,
+    };
+  }
+
+  const connected = serviceConnectActionParamsSchema.safeParse(request.params);
+  if (!connected.success) return { variant: "unknown" };
+  const catalog = connected.data.catalogService;
+  const custom = connected.data.customService;
   if (catalog && !custom) {
     const serviceSlug = safeCatalogServiceSlug(catalog.serviceSlug);
     if (!serviceSlug) return { variant: "unknown" };

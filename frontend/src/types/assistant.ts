@@ -3,7 +3,6 @@ import type {
   ActionReport,
 } from "@/schemas/assistant-actions";
 import type { InputAnswer } from "@/schemas/assistant-input";
-import type { ActorProjection } from "@/lib/assistant/actor-state";
 
 export type ConnectCardState =
   | "needs_connection"
@@ -27,6 +26,190 @@ export type RunStepStatus =
   | "waiting"
   | "failed"
   | "skipped";
+
+export type TaskStatus =
+  | "active"
+  | "succeeded"
+  | "failed"
+  | "stopped"
+  | "blocked";
+
+export type TaskStepStatus =
+  | "planned"
+  | "waiting"
+  | "running"
+  | "done"
+  | "failed"
+  | "skipped"
+  | "cancelled"
+  | "uncertain";
+
+export type TaskExternalEffect =
+  | "not_started"
+  | "not_applied"
+  | "confirmed"
+  | "may_have_changed";
+
+export type TaskStepKind =
+  | "llm"
+  | "tool"
+  | "browser_action"
+  | "postcondition"
+  | "input"
+  | "approval"
+  | "web"
+  | "condition";
+
+export interface TaskAvailableActions {
+  readonly retry: boolean;
+  readonly skip: boolean;
+  readonly stop: boolean;
+}
+
+export interface TaskSubstep {
+  readonly substepId: string;
+  readonly title: string;
+  readonly status: "running" | "done" | "failed";
+}
+
+export interface TaskNumericCondition {
+  readonly conditionId: string;
+  readonly sourceInputRequestId: string;
+  readonly suggestedThreshold: number;
+  readonly effectiveThreshold: number;
+  readonly thresholdOrigin: "suggested" | "user_override";
+  readonly observedValue: number;
+  readonly comparison: "gte";
+  readonly outcome: "true" | "false";
+  readonly evaluatedAt?: string;
+  readonly guardedToolName: string;
+}
+
+export type TaskStepSource =
+  | { readonly kind: "llm"; readonly label: string }
+  | {
+      readonly kind: "tool";
+      readonly label: string;
+      readonly serviceSlug?: string;
+      readonly serviceId?: string;
+    }
+  | { readonly kind: "browserAction"; readonly label: string }
+  | { readonly kind: "postcondition"; readonly label: string }
+  | { readonly kind: "input"; readonly label: string }
+  | { readonly kind: "approval"; readonly label: string }
+  | { readonly kind: "web"; readonly label: string }
+  | {
+      readonly kind: "condition";
+      readonly label: string;
+      readonly condition: TaskNumericCondition;
+    };
+
+export interface TaskOperation {
+  readonly conversationActorId?: string;
+  readonly turnId?: string;
+  readonly taskId?: string;
+  readonly stepId?: string;
+  readonly operationId?: string;
+  readonly operationGeneration?: number;
+  readonly kind?: string;
+  readonly phase?: string;
+  readonly latestProgressSequence?: number;
+  readonly safeMessage?: string;
+  readonly failureCode?: string;
+  readonly progressMessage?: string;
+  readonly startedAt?: string;
+  readonly updatedAt?: string;
+  readonly completedAt?: string;
+  readonly lastProgressAt?: string;
+  readonly stalledAt?: string;
+}
+
+export interface TaskApprovalObservation {
+  readonly approvalRequestId: string;
+  readonly decisionMode: "unknown" | "per_request" | "grant";
+  readonly receiptStatus: "approval_required" | "denied";
+  readonly observedAt: string;
+  readonly terminalOutcome?: "rejected" | "expired" | "timed_out";
+  readonly subjectKind?: string;
+}
+
+export interface TaskStep {
+  readonly stepId: string;
+  readonly order: number;
+  readonly kind: TaskStepKind;
+  readonly status: TaskStepStatus;
+  readonly required: boolean;
+  readonly description: string;
+  readonly source: TaskStepSource;
+  readonly mayChangeExternalState: boolean;
+  readonly externalEffect: TaskExternalEffect;
+  readonly availableActions: TaskAvailableActions;
+  readonly updatedAt?: string;
+  readonly addedBy?:
+    | "initial"
+    | "scope_resolution"
+    | "replan"
+    | "steering"
+    | "user_revision";
+  readonly addedInPlanRevision?: number;
+  readonly cancelledInPlanRevision?: number;
+  readonly dependsOn: readonly string[];
+  readonly estimate?: { readonly kind: "duration"; readonly seconds: number };
+  readonly substeps: readonly TaskSubstep[];
+  readonly operation?: TaskOperation | null;
+  readonly approvalObservation?: TaskApprovalObservation;
+  readonly guard?: {
+    readonly conditionStepId: string;
+    readonly requiredOutcome: "true" | "false";
+  };
+  readonly actionRequestId?: string;
+  readonly approvalRequestId?: string;
+  readonly failureCode?: string;
+  readonly safeMessage?: string;
+  readonly safeToSkip?: boolean;
+}
+
+export interface TaskPlanGate {
+  readonly mode: "auto" | "confirm";
+  readonly status?: "pending" | "satisfied" | "rejected";
+  readonly requestId?: string;
+  readonly taskId?: string;
+  readonly planId?: string;
+  readonly planRevision?: number;
+  readonly reason?: string;
+  readonly decidedAt?: string;
+}
+
+export interface TaskPlan {
+  readonly schemaVersion: number;
+  readonly actorId: string;
+  readonly taskId: string;
+  readonly turnId: string;
+  readonly planId: string;
+  readonly planRevision: number;
+  readonly planRevisionHistoryStart?: number;
+  readonly planRevisions: readonly {
+    readonly planRevision: number;
+    readonly revisionCause:
+      | "initial"
+      | "scope_resolution"
+      | "failure_recovery"
+      | "steering"
+      | "user_revision";
+    readonly committedAt?: string;
+    readonly addedStepIds: readonly string[];
+    readonly cancelledStepIds: readonly string[];
+  }[];
+  readonly title: string;
+  readonly status: TaskStatus;
+  readonly activeStepId?: string;
+  readonly failureCode?: string;
+  readonly safeMessage?: string;
+  readonly createdAt?: string;
+  readonly updatedAt?: string;
+  readonly gate?: TaskPlanGate | null;
+  readonly steps: readonly TaskStep[];
+}
 
 export type ApprovalDecision = "approved" | "denied" | "expired" | "cancelled";
 
@@ -79,6 +262,14 @@ export interface RunContentBlock {
     readonly artifact_id: string | null;
     readonly approval_request_id: string | null;
   }>;
+}
+
+export interface TaskPlanContentBlock {
+  readonly type: "task_plan";
+  readonly block_id: string;
+  readonly state_version: number;
+  readonly progress_sequence: number;
+  readonly plan: TaskPlan;
 }
 
 export interface ApprovalCardContentBlock {
@@ -161,6 +352,7 @@ export type ContentBlock =
   | TextContentBlock
   | ConnectCardContentBlock
   | RunContentBlock
+  | TaskPlanContentBlock
   | ApprovalCardContentBlock
   | InputCardContentBlock
   | ArtifactContentBlock
@@ -200,8 +392,6 @@ export interface ConversationHistory {
   readonly conversation: Conversation;
   readonly messages: AssistantMessage[];
   readonly has_more: boolean;
-  /** Actor-owned task and control facts; authoritative for typed UI state. */
-  readonly actorProjection?: ActorProjection;
   /** The local stream mirror is authoritative while identity/history catches up. */
   readonly awaitingProjection?: boolean;
   /** Background reconciliation reached its deadline without proving absence. */
@@ -330,6 +520,18 @@ export interface AssistantTransport {
    * on response headers. No-op when nothing is running.
    */
   cancelActiveTurn(conversationId: string): void;
+  /** Stop the actor-owned task against the latest committed state version. */
+  stopTask(conversationId: string): Promise<void>;
+  /** Steer active actor work without opening a competing text turn. */
+  steerTask(conversationId: string, instruction: string): Promise<void>;
+  retryStep(conversationId: string, stepId: string): Promise<void>;
+  skipStep(conversationId: string, stepId: string): Promise<void>;
+  /** Resolve the exact pending plan gate against a fresh actor-state fence. */
+  resolvePlan(
+    conversationId: string,
+    blockId: string,
+    confirmed: boolean,
+  ): Promise<void>;
   /**
    * Send a version-fenced approval decision. The command returns JSON
    * acceptance; later committed projection frames carry business progress.
@@ -370,11 +572,6 @@ export interface AssistantTransport {
     originTurnId: string,
     onEvent?: (event: TurnEvent) => void,
   ): TurnHandle;
-  resolvePlan(conversationId: string, confirmed: boolean): Promise<void>;
-  stopTask(conversationId: string): Promise<void>;
-  steerTask(conversationId: string, instruction: string): Promise<void>;
-  retryStep(conversationId: string, stepId: string): Promise<void>;
-  skipStep(conversationId: string, stepId: string): Promise<void>;
 }
 
 export function isTurnActive(status: TurnStatus | undefined): boolean {

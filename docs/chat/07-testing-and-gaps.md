@@ -272,8 +272,9 @@ The integration-style assistant tests live with proxy handler tests in `backend/
 The test-only upstream echo facility in `backend/src/handlers/assistant.rs` captures method, path, safe body, selected headers, and identity-mode metadata. It redacts credential material and is enabled only through the controlled debug/test path.
 
 `assistant_list_drains_mixed_history_pages_and_captures_every_upstream_call`
-verifies cursor draining across typed, legacy `chatc-*`, and unrelated history
-rows, including every upstream page request.
+verifies independent cursor draining of canonical typed conversations and the
+legacy scoped index, wrong-family rejection at both sources, the merged newest-
+first result, and every upstream page request.
 
 `assistant_deleted_scoped_command_routes_are_unroutable` verifies obsolete scoped typed-command routes are not mounted.
 
@@ -310,6 +311,22 @@ cargo test -p nyxid-cli --test wizard_bundle_freshness
 
 Playwright is available separately through the frontend's `test:e2e` script. The deterministic E2E harness does not require a backend, but the full Vitest run and Rust assistant-filtered tests remain required because most wire and identity invariants are below the browser flow layer.
 
+## Issue #1408 conformance
+
+1. Fresh and follow-up text tests require typed `POST /api/chat`, stable
+   `clientRequestId`, authoritative `RUN_STARTED` identity adoption, and no
+   workflow body fields.
+2. Backend list/detail/delete/state tests require canonical typed resources;
+   mixed-list tests separately prove `chatc-*` is legacy read/delete only.
+3. Task-state and transport reload tests feed live task frames and `/state`
+   snapshots through the same strict TaskPlan reducer.
+4. Typed command tests cover every decision/control discriminator and exact
+   actor identities and fences. Page tests route active-task input to
+   `task.steer`, never ordinary text.
+5. Router absence tests and wire-body assertions reject workflow fallback.
+6. An authenticated deployed smoke remains an operational release gate; local
+   tests and synthetic fixtures do not claim to satisfy it.
+
 ## Known gaps
 
 - The production typed path is live-verified for `RUN_STARTED` identity echo,
@@ -318,9 +335,9 @@ Playwright is available separately through the frontend's `test:e2e` script. The
   field absent from the pinned canon; fixtures must retain that decoder case.
 - The typed actor cannot complete a connected-service inventory request. It
   terminates `RUN_ERROR / USE_SKILL_ACCESS_DENIED` because its provisioned tool
-  set omits `nyxid_services`. That Aevatar capability gap blocks deletion of the
-  legacy send path; historical record counts are not evidence of active-service
-  parity.
+  set omits `nyxid_services`. That Aevatar capability gap blocks feature-
+  complete connected-service rollout; it does not permit restoring the deleted
+  legacy send path. Historical record counts are not evidence of active-service parity.
 - Aevatar history remains text-oriented. Typed pending input, approval, action,
   task, control, and continuation facts must rehydrate from `/state`, not from
   text history or an in-memory merge.

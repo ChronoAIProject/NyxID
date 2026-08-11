@@ -19,7 +19,6 @@ import {
   describeSendFailure,
   describeTransportError,
   useAssistantTurn,
-  useActorControls,
   useCancelTurn,
   useConversation,
   useCreateConversation,
@@ -627,34 +626,6 @@ describe("assistant hooks", () => {
     },
   );
 
-  it("refreshes the actor projection after an accepted control", async () => {
-    const { queryClient, Wrapper } = createHarness();
-    const stopSpy = vi
-      .spyOn(assistantTransport, "stopTask")
-      .mockResolvedValue(undefined);
-    const historySpy = vi.spyOn(assistantTransport, "getHistory");
-    const { result, unmount } = renderHook(
-      () => useActorControls("conversation-stripe"),
-      { wrapper: Wrapper },
-    );
-
-    await act(async () => {
-      await result.current.stop.mutateAsync();
-    });
-
-    expect(stopSpy).toHaveBeenCalledWith("conversation-stripe");
-    expect(historySpy).toHaveBeenCalledWith("conversation-stripe");
-    expect(
-      queryClient.getQueryData(
-        assistantKeys.history("conversation-stripe"),
-      ),
-    ).toBeDefined();
-
-    stopSpy.mockRestore();
-    historySpy.mockRestore();
-    unmount();
-    queryClient.clear();
-  });
 });
 
 describe("describeTransportError", () => {

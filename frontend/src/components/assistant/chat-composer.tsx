@@ -85,6 +85,8 @@ export function ChatComposer({
 
 interface ChatComposerProps {
   readonly active: boolean;
+  /** Keep the composer writable while a typed actor task accepts steering. */
+  readonly allowActiveInput?: boolean;
   readonly sending: boolean;
   readonly disabled?: boolean;
   readonly ownerUserId: string | null;
@@ -113,6 +115,7 @@ interface PendingDraftTransition {
 
 function DraftedChatComposer({
   active,
+  allowActiveInput = false,
   sending,
   disabled = false,
   ownerUserId,
@@ -121,6 +124,7 @@ function DraftedChatComposer({
   onSend,
   onStop,
 }: ChatComposerProps) {
+  const locked = active && !allowActiveInput;
   const [content, setContent] = useState(() =>
     readOwnedDraft(ownerUserId, draftKey),
   );
@@ -339,14 +343,14 @@ function DraftedChatComposer({
    * and there is nothing new to learn.
    */
   const composerHeldFocusRef = useRef(false);
-  const renderedActiveRef = useRef(active);
-  if (renderedActiveRef.current !== active) {
-    if (active && textareaRef.current?.disabled !== true) {
+  const renderedActiveRef = useRef(locked);
+  if (renderedActiveRef.current !== locked) {
+    if (locked && textareaRef.current?.disabled !== true) {
       composerHeldFocusRef.current = Boolean(
         composerRef.current?.contains(document.activeElement),
       );
     }
-    renderedActiveRef.current = active;
+    renderedActiveRef.current = locked;
   }
 
   /**
@@ -418,7 +422,7 @@ function DraftedChatComposer({
    */
   const focusPendingRef = useRef(true);
   const seenFocusRequestRef = useRef(focusRequest);
-  const previouslyActiveRef = useRef(active);
+  const previouslyActiveRef = useRef(locked);
   const previousDraftKeyRef = useRef(draftKey);
   useEffect(() => {
     const element = textareaRef.current;
@@ -426,18 +430,17 @@ function DraftedChatComposer({
 
     const requested = seenFocusRequestRef.current !== focusRequest;
     const draftKeyMoved = previousDraftKeyRef.current !== draftKey;
-    const turnJustEnded = previouslyActiveRef.current && !active;
+    const turnJustEnded = previouslyActiveRef.current && !locked;
     seenFocusRequestRef.current = focusRequest;
     previousDraftKeyRef.current = draftKey;
-    previouslyActiveRef.current = active;
+    previouslyActiveRef.current = locked;
 
     if (requested) {
       // They just asked for this composer; nothing before it still counts.
       readerMovedOnRef.current = false;
       focusPendingRef.current = true;
     } else if (
-      (draftKeyMoved ||
-        (turnJustEnded && composerHeldFocusRef.current)) &&
+      (draftKeyMoved || (turnJustEnded && composerHeldFocusRef.current)) &&
       focusIsParked(element)
     ) {
       focusPendingRef.current = true;
@@ -463,7 +466,7 @@ function DraftedChatComposer({
     // start of what the reader was last writing.
     const caret = element.value.length;
     element.setSelectionRange(caret, caret);
-  }, [active, draftKey, focusRequest]);
+  }, [draftKey, focusRequest, locked]);
 
   function updateContent(nextContent: string) {
     contentRef.current = nextContent;
@@ -476,7 +479,7 @@ function DraftedChatComposer({
 
   async function submit() {
     const message = content.trim();
-    if (!message || active || sending || disabled) return;
+    if (!message || locked || disabled || sending) return;
     cancelScheduledSave();
     const userId = ownerUserIdRef.current;
     const key = draftKeyRef.current;
@@ -551,15 +554,17 @@ function DraftedChatComposer({
                 scheduleDraftSave();
               }}
               onScroll={handleScroll}
-              disabled={active || disabled}
+              disabled={locked || disabled}
               rows={1}
               maxLength={32_768}
               placeholder={
-                active
+                locked
                   ? "Assistant is working..."
                   : disabled
                     ? "This conversation is read-only."
-                  : "Message NyxID Assistant..."
+                    : allowActiveInput
+                     ? "Steer active task..."
+                     : "Message NyxID Assistant..."
               }
               className="assistant-scrollbar block min-h-8 w-full resize-none overflow-hidden bg-transparent px-0 py-1 text-[13px] leading-relaxed text-foreground outline-none transition-[height] duration-150 ease-out placeholder:text-text-tertiary disabled:cursor-not-allowed disabled:opacity-50 motion-reduce:transition-none"
             />
@@ -580,7 +585,7 @@ function DraftedChatComposer({
             ref={controlsRef}
             className={`flex shrink-0 items-center ${multiline ? "self-end" : ""}`}
           >
-            {active ? (
+            {locked ? (
               <Button
                 type="button"
                 variant="outline"
@@ -597,7 +602,11 @@ function DraftedChatComposer({
                 size="icon"
                 disabled={!content.trim() || sending || disabled}
                 onClick={() => void submit()}
-                aria-label="Send message"
+                aria-label={
+                  allowActiveInput
+                    ? "Send steering instruction"
+                    : "Send message"
+                }
               >
                 <Send />
               </Button>

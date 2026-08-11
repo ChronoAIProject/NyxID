@@ -7452,6 +7452,16 @@ mod proxy_resolution_integration_tests {
         .expect("enable the wire-log flag globally");
     }
 
+    async fn disable_wire_log_flag(db: &mongodb::Database) {
+        crate::services::feature_flag_service::clear_platform_override(
+            db,
+            crate::services::feature_flag_service::AEVATAR_CHAT_WIRE_LOG_FLAG_KEY,
+            &crate::services::feature_flag_service::FlagTarget::Global,
+        )
+        .await
+        .expect("clear the wire-log flag override");
+    }
+
     fn assistant_echoes(response: &Response) -> Vec<serde_json::Value> {
         let Some(value) = response.headers().get("x-nyxid-debug-upstream-log") else {
             return Vec::new();
@@ -8824,13 +8834,16 @@ mod proxy_resolution_integration_tests {
                         parts.headers.clone(),
                     ));
                     match (parts.method, parts.uri.path()) {
+                        (Method::GET, "/api/chat/conversations") => axum::Json(serde_json::json!({
+                            "conversations": [{
+                                "id": "nyxid-chat-4a1e60ebd1fd44f192bf4bb90e1812ae",
+                                "updatedAt": "2026-07-29T13:00:00.000Z"
+                            }]
+                        }))
+                        .into_response(),
                         (Method::GET, path) if path.ends_with("/chat-history") => {
                             axum::Json(serde_json::json!({
                                 "conversations": [
-                                    {
-                                        "id": "nyxid-chat-4a1e60ebd1fd44f192bf4bb90e1812ae",
-                                        "updatedAt": "2026-07-29T13:00:00.000Z"
-                                    },
                                     {
                                         "id": "chatc-8bd999c402fb37d60cdcd81e3b78cfd",
                                         "updatedAt": "2026-07-29T12:00:00.000Z"
@@ -9229,6 +9242,7 @@ mod proxy_resolution_integration_tests {
                 "/api/chat".to_string(),
                 "/api/chat".to_string(),
                 "/api/chat".to_string(),
+                "/api/chat/conversations".to_string(),
                 format!("/api/scopes/{user_id}/chat-history"),
                 "/api/chat/conversations/nyxid-chat-4a1e60ebd1fd44f192bf4bb90e1812ae".to_string(),
                 "/api/chat/conversations/nyxid-chat-4a1e60ebd1fd44f192bf4bb90e1812ae/state"
@@ -9239,7 +9253,7 @@ mod proxy_resolution_integration_tests {
             ]
         );
         assert!(paths.iter().any(|path| path.contains("chat-history")));
-        assert_eq!(debug_echoes.last().map(Vec::len), Some(1));
+        assert_eq!(debug_echoes.last().map(Vec::len), Some(2));
 
         let expected_chat_bodies = [
             serde_json::json!({
@@ -9430,10 +9444,15 @@ mod proxy_resolution_integration_tests {
         }
 
         let list_echoes = &debug_echoes[11];
-        assert_eq!(list_echoes.len(), 1);
-        for (envelope, call) in list_echoes.iter().zip(&calls[11..12]) {
+        assert_eq!(list_echoes.len(), 2);
+        for (envelope, call) in list_echoes.iter().zip(&calls[11..13]) {
             assert_eq!(envelope["method"], "GET");
-            assert_eq!(envelope["path"], call.1.trim_start_matches('/'));
+            let expected_path = if call.1 == "/api/chat/conversations" {
+                "api/chat/conversations?pageSize=50"
+            } else {
+                call.1.trim_start_matches('/')
+            };
+            assert_eq!(envelope["path"], expected_path);
             assert!(envelope["commandType"].is_null());
             assert!(envelope["body"].is_null());
             assert_eq!(envelope["truncated"], false);
@@ -9458,11 +9477,75 @@ mod proxy_resolution_integration_tests {
             );
         }
 
-        for (_, _, _, headers) in [&calls[0], &calls[10], &calls[11], &calls[12], &calls[13]] {
+        for (_, _, _, headers) in [
+            &calls[0], &calls[10], &calls[11], &calls[12], &calls[13], &calls[14],
+        ] {
             assert!(headers.get(axum::http::header::AUTHORIZATION).is_none());
             assert!(headers.get("x-nyxid-identity-token").is_some());
             assert!(headers.get("x-nyxid-delegation-token").is_some());
         }
+
+        let no_opt_in = crate::handlers::assistant::typed_chat(
+            axum::extract::State(state.clone()),
+            auth.clone(),
+            request(
+                Method::POST,
+                "/api/v1/assistant/chat",
+                Some(r#"{"type":"text","prompt":"no capture","clientRequestId":"wire-no-opt-in"}"#),
+            ),
+        )
+        .await
+        .expect("typed chat without debug opt-in must forward");
+        assert!(assistant_echoes(&no_opt_in).is_empty());
+        let no_opt_in_calls = std::mem::take(&mut *captured.lock().unwrap());
+        assert_eq!(no_opt_in_calls.len(), 1);
+        assert!(no_opt_in_calls[0].3.get("x-nyxid-debug-upstream").is_none());
+
+        disable_wire_log_flag(&db).await;
+        let mut flag_off_request = request(
+            Method::POST,
+            "/api/v1/assistant/chat",
+            Some(r#"{"type":"text","prompt":"flag off","clientRequestId":"wire-flag-off"}"#),
+        );
+        flag_off_request.headers_mut().insert(
+            HeaderName::from_static("x-nyxid-debug-upstream"),
+            HeaderValue::from_static("1"),
+        );
+        let flag_off = crate::handlers::assistant::typed_chat(
+            axum::extract::State(state.clone()),
+            auth.clone(),
+            flag_off_request,
+        )
+        .await
+        .expect("feature-disabled typed chat must forward");
+        assert!(assistant_echoes(&flag_off).is_empty());
+        let flag_off_calls = std::mem::take(&mut *captured.lock().unwrap());
+        assert_eq!(flag_off_calls.len(), 1);
+        assert!(flag_off_calls[0].3.get("x-nyxid-debug-upstream").is_none());
+
+        enable_wire_log_flag(&db).await;
+        let non_admin_id = Uuid::new_v4().to_string();
+        db.collection::<crate::models::user::User>(USERS)
+            .insert_one(test_user(&non_admin_id, UserType::Person))
+            .await
+            .unwrap();
+        let mut non_admin_request = request(
+            Method::POST,
+            "/api/v1/assistant/chat",
+            Some(r#"{"type":"text","prompt":"non admin","clientRequestId":"wire-non-admin"}"#),
+        );
+        non_admin_request.headers_mut().insert(
+            HeaderName::from_static("x-nyxid-debug-upstream"),
+            HeaderValue::from_static("1"),
+        );
+        let non_admin = crate::handlers::assistant::typed_chat(
+            axum::extract::State(state),
+            access_token_auth(&non_admin_id),
+            non_admin_request,
+        )
+        .await
+        .expect("authenticated non-admin must capture their own exchange");
+        assert_eq!(assistant_echoes(&non_admin).len(), 1);
 
         server.abort();
     }
@@ -9494,13 +9577,19 @@ mod proxy_resolution_integration_tests {
                         .path_and_query()
                         .map(ToString::to_string)
                         .unwrap_or_default();
-                    let cursor = request.uri().query();
+                    let cursor = request.uri().query().and_then(|query| {
+                        query
+                            .split('&')
+                            .find_map(|part| part.strip_prefix("cursor="))
+                    });
                     let accepts_json = request.headers().get(axum::http::header::ACCEPT)
                         == Some(&HeaderValue::from_static("application/json"));
                     sink.lock()
                         .unwrap()
                         .push((method.clone(), path_and_query, accepts_json));
-                    if method != Method::GET || !request.uri().path().ends_with("/chat-history") {
+                    let is_typed_index = request.uri().path() == "/api/chat/conversations";
+                    let is_legacy_index = request.uri().path().ends_with("/chat-history");
+                    if method != Method::GET || (!is_typed_index && !is_legacy_index) {
                         return StatusCode::NOT_FOUND.into_response();
                     }
 
@@ -9525,7 +9614,7 @@ mod proxy_resolution_integration_tests {
                         })
                     } else if mode == 2 {
                         let page_number = cursor
-                            .and_then(|query| query.strip_prefix("cursor=page-"))
+                            .and_then(|value| value.strip_prefix("page-"))
                             .and_then(|value| value.parse::<usize>().ok())
                             .unwrap_or(0);
                         serde_json::json!({
@@ -9537,7 +9626,7 @@ mod proxy_resolution_integration_tests {
                         })
                     } else if mode == 5 {
                         let page_number = cursor
-                            .and_then(|query| query.strip_prefix("cursor=page-"))
+                            .and_then(|value| value.strip_prefix("page-"))
                             .and_then(|value| value.parse::<usize>().ok())
                             .unwrap_or(0);
                         serde_json::json!({
@@ -9574,7 +9663,7 @@ mod proxy_resolution_integration_tests {
                             "nextCursor": "page-2"
                         })
                     } else {
-                        assert_eq!(cursor, Some("cursor=page-2"));
+                        assert_eq!(cursor, Some("page-2"));
                         let mut rows = (30..52)
                             .map(|i| {
                                 serde_json::json!({
@@ -9692,11 +9781,21 @@ mod proxy_resolution_integration_tests {
         assert_eq!(
             calls,
             vec![
+                (
+                    Method::GET,
+                    "/api/chat/conversations?pageSize=50".to_string(),
+                    true,
+                ),
+                (
+                    Method::GET,
+                    "/api/chat/conversations?pageSize=50&cursor=page-2".to_string(),
+                    true,
+                ),
                 (Method::GET, history_path.clone(), true),
                 (Method::GET, format!("{history_path}?cursor=page-2"), true,),
             ]
         );
-        assert_eq!(echoes.len(), 2);
+        assert_eq!(echoes.len(), 4);
         for (envelope, (method, path, accepts_json)) in echoes.iter().zip(&calls) {
             assert_eq!(envelope["method"], method.as_str());
             // The drained page's cursor rides along in the echo: without it
@@ -9722,7 +9821,7 @@ mod proxy_resolution_integration_tests {
         assert!(matches!(repeated_cursor_error, AppError::Internal(_)));
         let repeated_calls = std::mem::take(&mut *captured.lock().unwrap());
         assert_eq!(repeated_calls.len(), 2);
-        assert!(repeated_calls[1].1.ends_with("?cursor=repeated"));
+        assert!(repeated_calls[1].1.ends_with("cursor=repeated"));
         assert!(repeated_calls.iter().all(|call| call.2));
 
         response_mode.store(2, Ordering::Relaxed);
@@ -9741,7 +9840,7 @@ mod proxy_resolution_integration_tests {
         assert_eq!(capped_body["conversations"].as_array().unwrap().len(), 40);
         assert!(capped_body.get("nextCursor").is_none());
         let capped_calls = std::mem::take(&mut *captured.lock().unwrap());
-        assert_eq!(capped_calls.len(), 40);
+        assert_eq!(capped_calls.len(), 80);
         assert!(capped_calls.iter().all(|call| call.2));
 
         for mode in [3, 4] {
@@ -9760,7 +9859,7 @@ mod proxy_resolution_integration_tests {
             let degraded_body: serde_json::Value = serde_json::from_slice(&degraded_body).unwrap();
             assert_eq!(degraded_body["conversations"].as_array().unwrap().len(), 1);
             let degraded_calls = std::mem::take(&mut *captured.lock().unwrap());
-            assert_eq!(degraded_calls.len(), 2);
+            assert_eq!(degraded_calls.len(), 4);
             assert!(degraded_calls.iter().all(|call| call.2));
         }
 
@@ -9802,8 +9901,8 @@ mod proxy_resolution_integration_tests {
         );
         assert!(malformed_first_body.get("nextCursor").is_none());
         let malformed_first_calls = std::mem::take(&mut *captured.lock().unwrap());
-        assert_eq!(malformed_first_calls.len(), 1);
-        assert!(malformed_first_calls[0].2);
+        assert_eq!(malformed_first_calls.len(), 2);
+        assert!(malformed_first_calls.iter().all(|call| call.2));
         server.abort();
     }
 
