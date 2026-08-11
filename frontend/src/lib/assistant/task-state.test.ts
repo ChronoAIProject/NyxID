@@ -95,6 +95,39 @@ describe("assistant task projection", () => {
     expect(reloaded.pendingActions).toHaveLength(1);
   });
 
+  it("hydrates retained operations from an earlier turn after same-task steering", () => {
+    const steered = currentState();
+    const snapshot = steered.snapshot as Record<string, unknown>;
+    snapshot.activeTurn = {
+      turnId: "turn-continuation",
+      taskId: "task-alpha",
+      status: "active",
+    };
+    snapshot.activeTask = {
+      ...plan({
+        operation: {
+          conversationActorId: ACTOR_ID,
+          turnId: "turn-origin",
+          taskId: "task-alpha",
+          stepId: "step-alpha",
+          operationId: "operation-origin",
+          operationGeneration: 1,
+        },
+      }),
+      turnId: "turn-continuation",
+    };
+
+    const reloaded = applyCurrentTaskState(
+      createTaskProjection(ACTOR_ID),
+      steered,
+    ).projection;
+
+    expect(reloaded.task?.turnId).toBe("turn-continuation");
+    expect(reloaded.steps.get("step-alpha")?.operation?.turnId).toBe(
+      "turn-origin",
+    );
+  });
+
   it("applies only newer exact-plan step changes", () => {
     const snapshot = reduceTaskFrame(
       createTaskProjection(ACTOR_ID),
