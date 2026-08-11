@@ -377,6 +377,22 @@ export class ScenarioInterceptTransport implements AssistantTransport {
     this.delegate.cancelActiveTurn(conversationId);
   }
 
+  stopTask(conversationId: string): Promise<void> {
+    return this.delegate.stopTask(conversationId);
+  }
+
+  steerTask(conversationId: string, instruction: string): Promise<void> {
+    return this.delegate.steerTask(conversationId, instruction);
+  }
+
+  retryStep(conversationId: string, stepId: string): Promise<void> {
+    return this.delegate.retryStep(conversationId, stepId);
+  }
+
+  skipStep(conversationId: string, stepId: string): Promise<void> {
+    return this.delegate.skipStep(conversationId, stepId);
+  }
+
   async decideApproval(
     conversationId: string,
     blockId: string,

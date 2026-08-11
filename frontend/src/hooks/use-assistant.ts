@@ -812,6 +812,64 @@ export function useCancelTurn(conversationId: string | undefined) {
   });
 }
 
+function taskControlError(title: string, error: unknown): void {
+  toast.error(title, {
+    description:
+      error instanceof Error && error.message
+        ? error.message
+        : "The actor did not accept this control. Refresh the conversation and try again.",
+  });
+}
+
+export function useStopTask(conversationId: string | undefined) {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: async (): Promise<void> => {
+      if (!conversationId) throw new Error("Select a conversation first.");
+      await assistantTransport.stopTask(conversationId);
+      activeHandles.delete(conversationId);
+      await projectTransportState(queryClient, conversationId);
+    },
+    onError: (error) => taskControlError("Task was not stopped", error),
+  });
+}
+
+export function useSteerTask(conversationId: string | undefined) {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: async (instruction: string): Promise<void> => {
+      if (!conversationId) throw new Error("Select a conversation first.");
+      await assistantTransport.steerTask(conversationId, instruction);
+      await projectTransportState(queryClient, conversationId);
+    },
+    onError: (error) => taskControlError("Steering was not delivered", error),
+  });
+}
+
+export function useRetryStep(conversationId: string | undefined) {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: async (stepId: string): Promise<void> => {
+      if (!conversationId) throw new Error("Select a conversation first.");
+      await assistantTransport.retryStep(conversationId, stepId);
+      await projectTransportState(queryClient, conversationId);
+    },
+    onError: (error) => taskControlError("Step was not retried", error),
+  });
+}
+
+export function useSkipStep(conversationId: string | undefined) {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: async (stepId: string): Promise<void> => {
+      if (!conversationId) throw new Error("Select a conversation first.");
+      await assistantTransport.skipStep(conversationId, stepId);
+      await projectTransportState(queryClient, conversationId);
+    },
+    onError: (error) => taskControlError("Step was not skipped", error),
+  });
+}
+
 export function useDecideApproval(conversationId: string | undefined) {
   const queryClient = useQueryClient();
   return useMutation({

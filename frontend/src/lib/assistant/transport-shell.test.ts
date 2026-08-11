@@ -71,6 +71,22 @@ class RecordingTransport implements AssistantTransport {
     this.calls.push("cancel");
   }
 
+  async stopTask(): Promise<void> {
+    this.calls.push("stop-task");
+  }
+
+  async steerTask(): Promise<void> {
+    this.calls.push("steer-task");
+  }
+
+  async retryStep(): Promise<void> {
+    this.calls.push("retry-step");
+  }
+
+  async skipStep(): Promise<void> {
+    this.calls.push("skip-step");
+  }
+
   async decideApproval(): Promise<TurnHandle | null> {
     this.calls.push("approval");
     return null;

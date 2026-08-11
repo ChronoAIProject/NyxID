@@ -77,13 +77,39 @@ describe("ChatComposer drafts", () => {
     expect(screen.getByRole("textbox")).toHaveValue("");
   });
 
+  it("keeps the composer writable for an active typed task and sends steering", async () => {
+    const onSend = vi.fn().mockResolvedValue(undefined);
+    render(
+      <ChatComposer
+        {...baseProps}
+        active
+        allowActiveInput
+        draftKey="conv:typed-task"
+        onSend={onSend}
+      />,
+    );
+
+    const input = screen.getByRole("textbox");
+    expect(input).toBeEnabled();
+    expect(input).toHaveAttribute("placeholder", "Steer active task...");
+    fireEvent.change(input, {
+      target: { value: "Keep the completed search results" },
+    });
+    await act(async () => {
+      fireEvent.click(
+        screen.getByRole("button", { name: "Send steering instruction" }),
+      );
+    });
+
+    expect(onSend).toHaveBeenCalledWith("Keep the completed search results");
+    expect(baseProps.onStop).not.toHaveBeenCalled();
+  });
+
   it("restores the typed text and draft when the send rejects [guard]", async () => {
     // A dead backend must not eat the message: a rejected send puts the text
     // back in the field and re-saves the draft, so retry is one keypress.
     const onSend = vi.fn().mockRejectedValue(new Error("backend down"));
-    render(
-      <ChatComposer {...baseProps} onSend={onSend} draftKey="conv:one" />,
-    );
+    render(<ChatComposer {...baseProps} onSend={onSend} draftKey="conv:one" />);
     fireEvent.change(screen.getByRole("textbox"), {
       target: { value: "Keep me" },
     });
@@ -288,7 +314,12 @@ describe("ChatComposer focus", () => {
     // one render. Reading that as "a turn just ended" would apply the
     // leave-focus-alone rule to the sidebar row the reader just clicked.
     const { rerender } = render(
-      <ChatComposer {...baseProps} active draftKey="conv:one" focusRequest={1} />,
+      <ChatComposer
+        {...baseProps}
+        active
+        draftKey="conv:one"
+        focusRequest={1}
+      />,
     );
     const sidebarRow = document.createElement("button");
     document.body.append(sidebarRow);
@@ -306,10 +337,20 @@ describe("ChatComposer focus", () => {
     // A conversation selected while its own turn is still running cannot take
     // focus yet — the request has to survive until the field comes back.
     const { rerender } = render(
-      <ChatComposer {...baseProps} active draftKey="conv:one" focusRequest={1} />,
+      <ChatComposer
+        {...baseProps}
+        active
+        draftKey="conv:one"
+        focusRequest={1}
+      />,
     );
     rerender(
-      <ChatComposer {...baseProps} active draftKey="conv:two" focusRequest={2} />,
+      <ChatComposer
+        {...baseProps}
+        active
+        draftKey="conv:two"
+        focusRequest={2}
+      />,
     );
     expect(screen.getByRole("textbox")).not.toHaveFocus();
 
@@ -332,7 +373,11 @@ describe("ChatComposer focus", () => {
     themeToggle.focus();
 
     rerender(
-      <ChatComposer {...baseProps} draftKey="conv:canonical" focusRequest={1} />,
+      <ChatComposer
+        {...baseProps}
+        draftKey="conv:canonical"
+        focusRequest={1}
+      />,
     );
 
     expect(themeToggle).toHaveFocus();
@@ -380,10 +425,20 @@ describe("ChatComposer focus", () => {
     // the field comes back; honouring it would yank focus off whatever the
     // reader picked up in the meantime.
     const { rerender } = render(
-      <ChatComposer {...baseProps} active draftKey="conv:one" focusRequest={1} />,
+      <ChatComposer
+        {...baseProps}
+        active
+        draftKey="conv:one"
+        focusRequest={1}
+      />,
     );
     rerender(
-      <ChatComposer {...baseProps} active draftKey="conv:two" focusRequest={2} />,
+      <ChatComposer
+        {...baseProps}
+        active
+        draftKey="conv:two"
+        focusRequest={2}
+      />,
     );
 
     const accountMenu = document.createElement("button");

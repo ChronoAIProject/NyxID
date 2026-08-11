@@ -14,6 +14,7 @@ import { ArtifactBlock } from "@/components/assistant/blocks/artifact-block";
 import { ConnectCard } from "@/components/assistant/blocks/connect-card";
 import { InputCard } from "@/components/assistant/blocks/input-card";
 import { RunCard } from "@/components/assistant/blocks/run-card";
+import { TaskPlanCard } from "@/components/assistant/blocks/task-plan-card";
 import { TextBlock } from "@/components/assistant/blocks/text-block";
 import { useFadingPresence } from "@/hooks/use-fading-presence";
 import haloSheet from "@/assets/halo-sheet.webp";
@@ -76,6 +77,9 @@ function renderBlock(
   onActionProgress: (blockId: string, inProgress: boolean) => void,
   onBlockAction: (blockId: string, note: string) => void,
   onResolveAction: (report: ActionReport) => Promise<void>,
+  onStopTask: () => Promise<void>,
+  onRetryStep: (stepId: string) => Promise<void>,
+  onSkipStep: (stepId: string) => Promise<void>,
   streaming = false,
 ) {
   if (typeof block !== "object" || block === null || !("type" in block)) {
@@ -89,6 +93,15 @@ function renderBlock(
       return <ConnectCard block={typed} />;
     case "run":
       return <RunCard block={typed} />;
+    case "task_plan":
+      return (
+        <TaskPlanCard
+          block={typed}
+          onStop={onStopTask}
+          onRetry={onRetryStep}
+          onSkip={onSkipStep}
+        />
+      );
     case "approval_card":
       return (
         <ApprovalCard
@@ -400,6 +413,9 @@ export function ChatThread({
   onActionProgress = () => undefined,
   onBlockAction = () => undefined,
   onResolveAction = async () => undefined,
+  onStopTask = async () => undefined,
+  onRetryStep = async () => undefined,
+  onSkipStep = async () => undefined,
 }: {
   readonly messages: readonly AssistantMessage[];
   readonly thinking?: boolean;
@@ -442,6 +458,9 @@ export function ChatThread({
   readonly onActionProgress?: (blockId: string, inProgress: boolean) => void;
   readonly onBlockAction?: (blockId: string, note: string) => void;
   readonly onResolveAction?: (report: ActionReport) => Promise<void>;
+  readonly onStopTask?: () => Promise<void>;
+  readonly onRetryStep?: (stepId: string) => Promise<void>;
+  readonly onSkipStep?: (stepId: string) => Promise<void>;
 }) {
   const rootRef = useRef<HTMLDivElement>(null);
   const scrollRef = useRef<HTMLDivElement>(null);
@@ -660,6 +679,9 @@ export function ChatThread({
                                 onActionProgress,
                                 onBlockAction,
                                 onResolveAction,
+                                onStopTask,
+                                onRetryStep,
+                                onSkipStep,
                               )}
                             </div>
                           ))}
@@ -716,6 +738,9 @@ export function ChatThread({
                                 onActionProgress,
                                 onBlockAction,
                                 onResolveAction,
+                                onStopTask,
+                                onRetryStep,
+                                onSkipStep,
                                 streamingGroup &&
                                   isLastBlock &&
                                   isTextBlock(block),

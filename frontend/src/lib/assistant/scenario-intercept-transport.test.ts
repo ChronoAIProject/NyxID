@@ -207,6 +207,22 @@ class StubTransport implements AssistantTransport {
     this.cancelCalls += 1;
   }
 
+  async stopTask(): Promise<void> {
+    this.cancelCalls += 1;
+  }
+
+  async steerTask(): Promise<void> {
+    return Promise.resolve();
+  }
+
+  async retryStep(): Promise<void> {
+    return Promise.resolve();
+  }
+
+  async skipStep(): Promise<void> {
+    return Promise.resolve();
+  }
+
   async decideApproval(): Promise<TurnHandle | null> {
     this.approvalCalls += 1;
     return null;
