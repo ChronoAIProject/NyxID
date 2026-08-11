@@ -108,12 +108,19 @@ export const keyCreateActionParamsSchema = z
   })
   .strict();
 
+export const keyRotateActionParamsSchema = z
+  .object({
+    keyId: requiredActionIdentitySchema,
+  })
+  .strict();
+
 const emptyActionParamsSchema = z.object({}).strict();
 
 export const assistantActionParamsSchema = z
   .union([
     serviceConnectActionParamsSchema,
     keyCreateActionParamsSchema,
+    keyRotateActionParamsSchema,
     emptyActionParamsSchema,
   ])
   .optional()
@@ -215,6 +222,10 @@ export type ActionCardParams =
       readonly name: string;
       readonly platform: string;
       readonly allowed_service_ids: readonly string[];
+    }
+  | {
+      readonly variant: "key_rotate";
+      readonly key_id: string;
     }
   | { readonly variant: "unknown" };
 

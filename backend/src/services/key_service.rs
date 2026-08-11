@@ -331,54 +331,6 @@ pub async fn create_api_key_with_scope_authorization_and_id(
     .await
 }
 
-/// Create a general-purpose key using an already-reserved UUID. Assistant
-/// action admission uses this to recover an interrupted create without ever
-/// persisting or replaying the one-time secret.
-#[allow(clippy::too_many_arguments)]
-#[allow(dead_code)]
-pub async fn create_api_key_with_scope_authorization_and_id(
-    db: &mongodb::Database,
-    user_id: &str,
-    scope_actor_user_id: Option<&str>,
-    resource_id: &str,
-    name: &str,
-    scopes: &str,
-    expires_at: Option<chrono::DateTime<Utc>>,
-    description: Option<&str>,
-    allowed_service_ids: Option<&[String]>,
-    allowed_node_ids: Option<&[String]>,
-    allow_all_services: Option<bool>,
-    allow_all_nodes: Option<bool>,
-    rate_limit_per_second: Option<u32>,
-    rate_limit_burst: Option<u32>,
-    platform: Option<&str>,
-    callback_url: Option<&str>,
-    scope_plan_digest: Option<&str>,
-) -> AppResult<CreatedApiKey> {
-    create_api_key_with_security_class_and_id(
-        db,
-        user_id,
-        scope_actor_user_id,
-        Some(resource_id),
-        name,
-        scopes,
-        expires_at,
-        description,
-        allowed_service_ids,
-        allowed_node_ids,
-        allow_all_services,
-        allow_all_nodes,
-        rate_limit_per_second,
-        rate_limit_burst,
-        platform,
-        callback_url,
-        scope_plan_digest,
-        ApiKeyPurpose::General,
-        false,
-    )
-    .await
-}
-
 #[allow(clippy::too_many_arguments)]
 pub async fn create_api_key_with_security_class(
     db: &mongodb::Database,

@@ -108,6 +108,47 @@ describe("assistant action request schema", () => {
     });
   });
 
+  it("parses only an exact key.rotate predecessor identity", () => {
+    const request = assistantActionRequestSchema.parse({
+      ...BASE_REQUEST,
+      action: "key.rotate",
+      params: { keyId: "key-predecessor-alpha" },
+    });
+
+    expect(resolveAssistantAction(request)).toMatchObject({
+      supported: true,
+      journey: "key_rotate",
+      params: {
+        variant: "key_rotate",
+        key_id: "key-predecessor-alpha",
+      },
+    });
+
+    const missing = assistantActionRequestSchema.parse({
+      ...BASE_REQUEST,
+      actionRequestId: "missing-rotate-params",
+      action: "key.rotate",
+      params: {},
+    });
+    expect(resolveAssistantAction(missing).supported).toBe(false);
+
+    for (const params of [
+      { keyId: "" },
+      { keyId: "invalid/key" },
+      { keyId: "key-alpha", successorId: "key-beta" },
+      { keyId: "key-alpha", fullKey: "nyxid_ag_forbidden" },
+    ]) {
+      expect(
+        assistantActionRequestSchema.safeParse({
+          ...BASE_REQUEST,
+          actionRequestId: `invalid-rotate-${JSON.stringify(params)}`,
+          action: "key.rotate",
+          params,
+        }).success,
+      ).toBe(false);
+    }
+  });
+
   it("rejects missing, empty, duplicate, malformed, and widened key.create params", () => {
     const invalidParams = [
       { name: "agent", platform: "codex" },

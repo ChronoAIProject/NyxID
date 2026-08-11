@@ -170,6 +170,31 @@ vi.mock("@/components/assistant/assistant-key-create-dialog", () => ({
     ) : null,
 }));
 
+vi.mock("@/components/assistant/assistant-key-rotate-dialog", () => ({
+  AssistantKeyRotateDialog: ({
+    open,
+    actionRequestId,
+    params,
+    onComplete,
+  }: {
+    readonly open: boolean;
+    readonly actionRequestId: string;
+    readonly params: { readonly keyId: string };
+    readonly onComplete: (keyId: string) => void;
+  }) =>
+    open ? (
+      <div
+        role="dialog"
+        data-action-request-id={actionRequestId}
+        data-key-id={params.keyId}
+      >
+        <button type="button" onClick={() => onComplete("key-replacement")}>
+          Finish mock key rotation
+        </button>
+      </div>
+    ) : null,
+}));
+
 function catalogBlock(
   overrides: Partial<ActionCardContentBlock> = {},
 ): ActionCardContentBlock {
@@ -210,6 +235,27 @@ function keyCreateBlock(
       name: "coding-agent",
       platform: "codex",
       allowed_service_ids: ["service-alpha"],
+    },
+    status: "pending",
+    outcome_note: "",
+    ...overrides,
+  };
+}
+
+function keyRotateBlock(
+  overrides: Partial<ActionCardContentBlock> = {},
+): ActionCardContentBlock {
+  return {
+    type: "action_card",
+    block_id: "action-card-key-rotate",
+    action: "key.rotate",
+    action_request_id: "act-key-rotate",
+    origin_turn_id: "turn-origin-1",
+    task_id: "task-1",
+    step_id: "step-1",
+    params: {
+      variant: "key_rotate",
+      key_id: "key-predecessor",
     },
     status: "pending",
     outcome_note: "",
@@ -258,6 +304,44 @@ describe("ActionCard", () => {
       originTurnId: "turn-origin-1",
       disposition: "completed",
       resource: { key: { keyId: "key-created" } },
+    });
+  });
+
+  it("opens the key.rotate journey and reports only the replacement identity", async () => {
+    const onProgress = vi.fn();
+    const onResolve = vi.fn();
+    renderCard(
+      <ActionCard
+        block={keyRotateBlock()}
+        onProgress={onProgress}
+        onBlock={vi.fn()}
+        onResolve={onResolve}
+      />,
+    );
+
+    expect(
+      screen.getByRole("heading", { name: "Rotate API key" }),
+    ).toBeInTheDocument();
+    expect(screen.getByText("key-predecessor")).toBeInTheDocument();
+    await userEvent.click(screen.getByRole("button", { name: "Rotate key" }));
+    expect(onProgress).toHaveBeenCalledWith("action-card-key-rotate", true);
+    expect(screen.getByRole("dialog")).toHaveAttribute(
+      "data-action-request-id",
+      "act-key-rotate",
+    );
+    expect(screen.getByRole("dialog")).toHaveAttribute(
+      "data-key-id",
+      "key-predecessor",
+    );
+
+    await userEvent.click(
+      screen.getByRole("button", { name: "Finish mock key rotation" }),
+    );
+    expect(onResolve).toHaveBeenCalledWith({
+      actionRequestId: "act-key-rotate",
+      originTurnId: "turn-origin-1",
+      disposition: "completed",
+      resource: { key: { keyId: "key-replacement" } },
     });
   });
 

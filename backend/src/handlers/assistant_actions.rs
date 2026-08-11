@@ -6,10 +6,11 @@ use serde::Serialize;
 use serde_json::{Value, json};
 
 pub const ASSISTANT_ACTIONS_SCHEMA_VERSION: u32 = 4;
-pub const ASSISTANT_ACTIONS_REVISION: &str = "nyxid-assistant-actions.v6";
+pub const ASSISTANT_ACTIONS_REVISION: &str = "nyxid-assistant-actions.v7";
 
 const SERVICE_CONNECT_DESCRIPTION: &str = "Ask the user's browser to connect a service through NyxID. Use when a task needs a catalog service (by slug) or a custom HTTPS endpoint that the user has not connected yet. NyxID owns the entire journey - auth modality, consent copy, and credential storage - and reports back only completion or decline with a safe resource reference. Never ask the user for keys, tokens, or passwords in chat.";
 const KEY_CREATE_DESCRIPTION: &str = "Ask the user's browser to create a scoped NyxID API key for the named platform and allowed services. Use when the user wants a new agent identity bounded to specific user-service IDs. NyxID owns key creation and one-time key display, and reports only a safe key reference. Never request, expose, or repeat key material in chat.";
+const KEY_ROTATE_DESCRIPTION: &str = "Ask the user's browser to rotate one exact NyxID API key. Use when the user needs a replacement credential for the identified key. NyxID commits an authoritative predecessor-successor relation, displays replacement key material once in the browser, and reports only the replacement key reference. Never request, expose, or repeat key material in chat.";
 
 #[derive(Serialize)]
 struct AssistantActionsManifest {
@@ -103,6 +104,21 @@ static MANIFEST_BODY: LazyLock<String> = LazyLock::new(|| {
                             "uniqueItems": true,
                             "items": { "type": "string" }
                         }
+                    }
+                }),
+                risk: "grant",
+                tier: "v1",
+                remember_eligible: false,
+            },
+            AssistantActionDescriptor {
+                action: "key.rotate",
+                description: KEY_ROTATE_DESCRIPTION,
+                params_schema: json!({
+                    "type": "object",
+                    "additionalProperties": false,
+                    "required": ["keyId"],
+                    "properties": {
+                        "keyId": { "type": "string" }
                     }
                 }),
                 risk: "grant",
@@ -246,10 +262,21 @@ mod tests {
         })
     }
 
+    fn key_rotate_params_schema() -> Value {
+        json!({
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["keyId"],
+            "properties": {
+                "keyId": { "type": "string" }
+            }
+        })
+    }
+
     fn golden_manifest() -> Value {
         json!({
             "schema_version": 4,
-            "revision": "nyxid-assistant-actions.v6",
+            "revision": "nyxid-assistant-actions.v7",
             "actions": [
                 {
                     "action": "service.connect",
@@ -263,6 +290,14 @@ mod tests {
                     "action": "key.create",
                     "description": super::KEY_CREATE_DESCRIPTION,
                     "params_schema": key_create_params_schema(),
+                    "risk": "grant",
+                    "tier": "v1",
+                    "remember_eligible": false
+                },
+                {
+                    "action": "key.rotate",
+                    "description": super::KEY_ROTATE_DESCRIPTION,
+                    "params_schema": key_rotate_params_schema(),
                     "risk": "grant",
                     "tier": "v1",
                     "remember_eligible": false
@@ -418,6 +453,7 @@ mod tests {
 
         assert!(seen_actions.contains("service.connect"));
         assert!(seen_actions.contains("key.create"));
+        assert!(seen_actions.contains("key.rotate"));
     }
 
     #[test]
@@ -426,8 +462,8 @@ mod tests {
         let actions = manifest["actions"].as_array().unwrap();
 
         assert_eq!(manifest["schema_version"], 4);
-        assert_eq!(manifest["revision"], "nyxid-assistant-actions.v6");
-        assert_eq!(actions.len(), 2);
+        assert_eq!(manifest["revision"], "nyxid-assistant-actions.v7");
+        assert_eq!(actions.len(), 3);
         assert_eq!(actions[0]["action"], "service.connect");
         assert_eq!(actions[0]["risk"], "grant");
         assert_eq!(actions[0]["tier"], "v1");
@@ -446,6 +482,11 @@ mod tests {
             actions[1]["params_schema"]["properties"]["allowedServiceIds"]["uniqueItems"],
             true
         );
+        assert_eq!(actions[2]["action"], "key.rotate");
+        assert_eq!(actions[2]["risk"], "grant");
+        assert_eq!(actions[2]["tier"], "v1");
+        assert_eq!(actions[2]["remember_eligible"], false);
+        assert_eq!(actions[2]["params_schema"], key_rotate_params_schema());
         assert_eq!(manifest, golden_manifest());
     }
 

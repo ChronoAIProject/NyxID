@@ -1,4 +1,4 @@
-use chrono::Utc;
+use chrono::{DateTime, Utc};
 use mongodb::bson::{doc, to_bson};
 use sha2::{Digest, Sha256};
 use uuid::Uuid;
@@ -10,11 +10,18 @@ use crate::models::assistant_action_receipt::{
     COLLECTION_NAME as ASSISTANT_ACTION_RECEIPTS,
 };
 use crate::models::user_service::{COLLECTION_NAME as USER_SERVICES, UserService};
-use crate::services::key_service::{self, CreatedApiKey};
+use crate::services::key_service::{self, ApiKeyRotationOutcome, CreatedApiKey};
+use crate::services::org_service;
 
 const KEY_CREATE_ACTION: &str = "key.create";
+const KEY_ROTATE_ACTION: &str = "key.rotate";
 const MAX_ACTION_REQUEST_ID_LEN: usize = 256;
 const MAX_SERVICE_IDS: usize = 64;
+
+fn utc_now_at_bson_precision() -> DateTime<Utc> {
+    DateTime::from_timestamp_millis(Utc::now().timestamp_millis())
+        .expect("current UTC timestamp must fit BSON precision")
+}
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct KeyCreateActionRequest {
@@ -30,6 +37,24 @@ pub enum KeyCreateActionResult {
     Replayed { key_id: String },
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct KeyRotateActionRequest {
+    pub action_request_id: String,
+    pub key_id: String,
+}
+
+#[derive(Debug)]
+pub enum KeyRotateActionResult {
+    Created {
+        created: Box<CreatedApiKey>,
+        requested_at: DateTime<Utc>,
+    },
+    Replayed {
+        key_id: String,
+        requested_at: DateTime<Utc>,
+    },
+}
+
 #[derive(serde::Serialize)]
 #[serde(rename_all = "camelCase")]
 struct KeyCreateFingerprint<'a> {
@@ -42,13 +67,33 @@ struct KeyCreateFingerprint<'a> {
     allow_all_nodes: bool,
 }
 
-fn normalize_request(request: KeyCreateActionRequest) -> AppResult<KeyCreateActionRequest> {
-    let action_request_id = request.action_request_id.trim().to_string();
-    if action_request_id.is_empty() || action_request_id.len() > MAX_ACTION_REQUEST_ID_LEN {
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+struct KeyRotateFingerprint<'a> {
+    action: &'static str,
+    key_id: &'a str,
+}
+
+fn normalize_action_request_id(value: String) -> AppResult<String> {
+    let value = value.trim().to_string();
+    if value.is_empty()
+        || value.len() > MAX_ACTION_REQUEST_ID_LEN
+        || value.chars().any(|character| {
+            character.is_whitespace()
+                || character.is_control()
+                || matches!(character, '/' | '\\' | '?' | '#')
+        })
+    {
         return Err(AppError::ValidationError(
-            "actionRequestId must be between 1 and 256 characters".to_string(),
+            "actionRequestId must be a valid control identity of at most 256 characters"
+                .to_string(),
         ));
     }
+    Ok(value)
+}
+
+fn normalize_request(request: KeyCreateActionRequest) -> AppResult<KeyCreateActionRequest> {
+    let action_request_id = normalize_action_request_id(request.action_request_id)?;
 
     let name = request.name.trim().to_string();
     let platform = request.platform.trim().to_string();
@@ -87,6 +132,19 @@ fn normalize_request(request: KeyCreateActionRequest) -> AppResult<KeyCreateActi
     })
 }
 
+fn normalize_rotation_request(
+    request: KeyRotateActionRequest,
+) -> AppResult<KeyRotateActionRequest> {
+    let action_request_id = normalize_action_request_id(request.action_request_id)?;
+    let key_id = Uuid::parse_str(request.key_id.trim())
+        .map_err(|_| AppError::ValidationError("keyId must be a UUID".to_string()))?
+        .to_string();
+    Ok(KeyRotateActionRequest {
+        action_request_id,
+        key_id,
+    })
+}
+
 fn request_fingerprint(request: &KeyCreateActionRequest) -> AppResult<String> {
     let canonical = serde_json::to_vec(&KeyCreateFingerprint {
         action: KEY_CREATE_ACTION,
@@ -96,6 +154,15 @@ fn request_fingerprint(request: &KeyCreateActionRequest) -> AppResult<String> {
         scopes: "proxy",
         allow_all_services: false,
         allow_all_nodes: false,
+    })
+    .map_err(|error| AppError::Internal(format!("failed to fingerprint action: {error}")))?;
+    Ok(hex::encode(Sha256::digest(canonical)))
+}
+
+fn rotation_request_fingerprint(request: &KeyRotateActionRequest) -> AppResult<String> {
+    let canonical = serde_json::to_vec(&KeyRotateFingerprint {
+        action: KEY_ROTATE_ACTION,
+        key_id: &request.key_id,
     })
     .map_err(|error| AppError::Internal(format!("failed to fingerprint action: {error}")))?;
     Ok(hex::encode(Sha256::digest(canonical)))
@@ -145,6 +212,21 @@ async fn find_receipt(
         .await?)
 }
 
+async fn find_rotation_receipt(
+    db: &mongodb::Database,
+    actor_user_id: &str,
+    action_request_id: &str,
+) -> AppResult<Option<AssistantActionReceipt>> {
+    Ok(db
+        .collection::<AssistantActionReceipt>(ASSISTANT_ACTION_RECEIPTS)
+        .find_one(doc! {
+            "user_id": actor_user_id,
+            "action": KEY_ROTATE_ACTION,
+            "action_request_id": action_request_id,
+        })
+        .await?)
+}
+
 async fn reserve_receipt(
     db: &mongodb::Database,
     user_id: &str,
@@ -155,7 +237,7 @@ async fn reserve_receipt(
         return Ok(existing);
     }
 
-    let now = Utc::now();
+    let now = utc_now_at_bson_precision();
     let receipt = AssistantActionReceipt {
         id: Uuid::new_v4().to_string(),
         user_id: user_id.to_string(),
@@ -175,6 +257,46 @@ async fn reserve_receipt(
         Ok(_) => Ok(receipt),
         Err(error) if duplicate_key(&error) => {
             find_receipt(db, user_id, &request.action_request_id)
+                .await?
+                .ok_or_else(|| {
+                    AppError::Conflict("assistant action receipt reservation raced".to_string())
+                })
+        }
+        Err(error) => Err(error.into()),
+    }
+}
+
+async fn reserve_rotation_receipt(
+    db: &mongodb::Database,
+    actor_user_id: &str,
+    request: &KeyRotateActionRequest,
+    fingerprint: &str,
+) -> AppResult<AssistantActionReceipt> {
+    if let Some(existing) =
+        find_rotation_receipt(db, actor_user_id, &request.action_request_id).await?
+    {
+        return Ok(existing);
+    }
+
+    let receipt = AssistantActionReceipt {
+        id: Uuid::new_v4().to_string(),
+        user_id: actor_user_id.to_string(),
+        action: KEY_ROTATE_ACTION.to_string(),
+        action_request_id: request.action_request_id.clone(),
+        request_fingerprint: fingerprint.to_string(),
+        resource_id: Uuid::new_v4().to_string(),
+        status: AssistantActionReceiptStatus::Pending,
+        created_at: utc_now_at_bson_precision(),
+        completed_at: None,
+    };
+    match db
+        .collection::<AssistantActionReceipt>(ASSISTANT_ACTION_RECEIPTS)
+        .insert_one(&receipt)
+        .await
+    {
+        Ok(_) => Ok(receipt),
+        Err(error) if duplicate_key(&error) => {
+            find_rotation_receipt(db, actor_user_id, &request.action_request_id)
                 .await?
                 .ok_or_else(|| {
                     AppError::Conflict("assistant action receipt reservation raced".to_string())
@@ -301,6 +423,87 @@ pub async fn create_key(
     create_reserved_key(db, user_id, &request, &receipt).await
 }
 
+async fn resolve_rotation_owner(
+    db: &mongodb::Database,
+    actor_user_id: &str,
+    predecessor_id: &str,
+) -> AppResult<String> {
+    let predecessor = db
+        .collection::<ApiKey>(API_KEYS)
+        .find_one(doc! { "_id": predecessor_id })
+        .await?
+        .ok_or_else(|| AppError::NotFound("API key not found".to_string()))?;
+    let access = org_service::resolve_owner_access(db, actor_user_id, &predecessor.user_id).await?;
+    if !access.can_read() {
+        return Err(AppError::NotFound("API key not found".to_string()));
+    }
+    if !access.can_write() {
+        return Err(AppError::OrgRoleInsufficient(
+            "you do not have permission to rotate this API key".to_string(),
+        ));
+    }
+    Ok(predecessor.user_id)
+}
+
+async fn rotate_reserved_key(
+    db: &mongodb::Database,
+    actor_user_id: &str,
+    owner_user_id: &str,
+    request: &KeyRotateActionRequest,
+    receipt: &AssistantActionReceipt,
+) -> AppResult<KeyRotateActionResult> {
+    let outcome = key_service::rotate_api_key_with_scope_authorization_and_id(
+        db,
+        owner_user_id,
+        Some(actor_user_id),
+        &request.key_id,
+        &receipt.resource_id,
+    )
+    .await?;
+    mark_completed(db, receipt).await?;
+    Ok(match outcome {
+        ApiKeyRotationOutcome::Created(created) => KeyRotateActionResult::Created {
+            created: Box::new(created),
+            requested_at: receipt.created_at,
+        },
+        ApiKeyRotationOutcome::AlreadyCommitted(successor) => KeyRotateActionResult::Replayed {
+            key_id: successor.id,
+            requested_at: receipt.created_at,
+        },
+    })
+}
+
+pub async fn rotate_key(
+    db: &mongodb::Database,
+    actor_user_id: &str,
+    request: KeyRotateActionRequest,
+) -> AppResult<KeyRotateActionResult> {
+    let request = normalize_rotation_request(request)?;
+    let fingerprint = rotation_request_fingerprint(&request)?;
+
+    if let Some(receipt) =
+        find_rotation_receipt(db, actor_user_id, &request.action_request_id).await?
+    {
+        if receipt.request_fingerprint != fingerprint {
+            return Err(AppError::Conflict(
+                "actionRequestId was already used with a different rotation predecessor"
+                    .to_string(),
+            ));
+        }
+        let owner_user_id = resolve_rotation_owner(db, actor_user_id, &request.key_id).await?;
+        return rotate_reserved_key(db, actor_user_id, &owner_user_id, &request, &receipt).await;
+    }
+
+    let owner_user_id = resolve_rotation_owner(db, actor_user_id, &request.key_id).await?;
+    let receipt = reserve_rotation_receipt(db, actor_user_id, &request, &fingerprint).await?;
+    if receipt.request_fingerprint != fingerprint {
+        return Err(AppError::Conflict(
+            "actionRequestId was already used with a different rotation predecessor".to_string(),
+        ));
+    }
+    rotate_reserved_key(db, actor_user_id, &owner_user_id, &request, &receipt).await
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -343,6 +546,45 @@ mod tests {
             normalize_request(request(&["svc-a", "svc-a"])),
             Err(AppError::ValidationError(_))
         ));
+    }
+
+    #[test]
+    fn rotation_fingerprint_pins_exact_predecessor_and_control_identity() {
+        let predecessor_id = Uuid::new_v4().to_string();
+        let normalized = normalize_rotation_request(KeyRotateActionRequest {
+            action_request_id: "  action-rotate-alpha  ".to_string(),
+            key_id: predecessor_id.clone(),
+        })
+        .expect("normalize exact rotation");
+        assert_eq!(normalized.action_request_id, "action-rotate-alpha");
+        assert_eq!(normalized.key_id, predecessor_id);
+
+        let fingerprint = rotation_request_fingerprint(&normalized).expect("fingerprint");
+        let other = normalize_rotation_request(KeyRotateActionRequest {
+            action_request_id: normalized.action_request_id.clone(),
+            key_id: Uuid::new_v4().to_string(),
+        })
+        .expect("normalize other predecessor");
+        assert_ne!(
+            fingerprint,
+            rotation_request_fingerprint(&other).expect("other fingerprint")
+        );
+
+        for request in [
+            KeyRotateActionRequest {
+                action_request_id: "invalid/control".to_string(),
+                key_id: Uuid::new_v4().to_string(),
+            },
+            KeyRotateActionRequest {
+                action_request_id: "action-valid".to_string(),
+                key_id: "not-a-uuid".to_string(),
+            },
+        ] {
+            assert!(matches!(
+                normalize_rotation_request(request),
+                Err(AppError::ValidationError(_))
+            ));
+        }
     }
 
     async fn prepare_database(prefix: &str) -> Option<(mongodb::Database, String, String)> {

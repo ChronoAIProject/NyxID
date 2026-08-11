@@ -1,6 +1,6 @@
 # Assistant Actions Registry
 
-Last verified against `f608b33c` (2026-08-01).
+Last verified against `feat/2026-08-11_assistant-key-rotate` (2026-08-11).
 
 `GET /api/v1/assistant/actions` publishes the immutable action vocabulary that Aevatar may compose into typed NyxIdChat turns. It is a public, static JSON endpoint with an exact-path exemption from the global rate limiter. It does not depend on a session, database row, user scope, or model state.
 
@@ -13,7 +13,7 @@ The response content type is `application/json`. The current body is equivalent 
 ```json
 {
   "schema_version": 4,
-  "revision": "nyxid-assistant-actions.v4",
+  "revision": "nyxid-assistant-actions.v7",
   "actions": [
     {
       "action": "service.connect",
@@ -66,6 +66,44 @@ The response content type is `application/json`. The current body is equivalent 
       "risk": "grant",
       "tier": "v1",
       "remember_eligible": true
+    },
+    {
+      "action": "key.create",
+      "description": "Ask the user's browser to create a scoped NyxID API key for the named platform and allowed services. Use when the user wants a new agent identity bounded to specific user-service IDs. NyxID owns key creation and one-time key display, and reports only a safe key reference. Never request, expose, or repeat key material in chat.",
+      "params_schema": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["name", "platform", "allowedServiceIds"],
+        "properties": {
+          "name": { "type": "string" },
+          "platform": { "type": "string" },
+          "allowedServiceIds": {
+            "type": "array",
+            "minItems": 1,
+            "maxItems": 64,
+            "uniqueItems": true,
+            "items": { "type": "string" }
+          }
+        }
+      },
+      "risk": "grant",
+      "tier": "v1",
+      "remember_eligible": false
+    },
+    {
+      "action": "key.rotate",
+      "description": "Ask the user's browser to rotate one exact NyxID API key. Use when the user needs a replacement credential for the identified key. NyxID commits an authoritative predecessor-successor relation, displays replacement key material once in the browser, and reports only the replacement key reference. Never request, expose, or repeat key material in chat.",
+      "params_schema": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["keyId"],
+        "properties": {
+          "keyId": { "type": "string" }
+        }
+      },
+      "risk": "grant",
+      "tier": "v1",
+      "remember_eligible": false
     }
   ]
 }
@@ -78,21 +116,20 @@ The serialized body is created once through `LazyLock<String>` and reused. The h
 | Field | Value | Meaning |
 | --- | --- | --- |
 | `schema_version` | `4` | action request/report envelope generation |
-| `revision` | `nyxid-assistant-actions.v4` | exact composition snapshot expected by the pinned Aevatar client |
+| `revision` | `nyxid-assistant-actions.v7` | exact composition snapshot expected by the pinned Aevatar client |
 | `actions` | descriptor array | actions that are both shipped by NyxID and executable by this Aevatar composition |
 
 Schema version and revision are independent checks. Aevatar rejects a version mismatch and rejects a revision mismatch. The registry is startup-pinned; a running host does not periodically refresh or replace it.
 
-## `service.connect`
+## Shipped actions
 
-The only shipped descriptor is:
+The registry ships these descriptors:
 
-| Property | Value |
-| --- | --- |
-| `action` | `service.connect` |
-| `risk` | `grant` |
-| `tier` | `v1` |
-| `remember_eligible` | `true` |
+| Action | Parameters | Risk | Remember eligible |
+| --- | --- | --- | --- |
+| `service.connect` | strict catalog-service or custom-service variant | `grant` | `true` |
+| `key.create` | `name`, `platform`, exact nonempty unique `allowedServiceIds` | `grant` | `false` |
+| `key.rotate` | exact predecessor `keyId` | `grant` | `false` |
 
 The description is composition guidance. It states the trust boundary: NyxID owns authentication modality, consent, and credential storage; the model receives only a safe outcome; the assistant must never request a key, token, or password in chat.
 
@@ -102,6 +139,16 @@ The description is composition guidance. It states the trust boundary: NyxID own
 - `customService`, requiring `name`, `endpointUrl`, and `authMethod`, and optionally carrying `authKeyName`, `viaNodeId`, and `targetOrgId`.
 
 The manifest schema defines structure. Aevatar and the browser apply additional semantic bounds, URL normalization, control-identity checks, exact-one-variant rules, secret rejection, and supported-auth-method checks before a request can execute. Those rules are specified in [Action cards](04-action-cards.md).
+
+`key.create` executes through `POST /api/v1/assistant/actions/key-create`.
+The effect reserves one key UUID in a durable, secret-free action receipt,
+validates the exact personal service set, and makes exact retries return only
+the committed key ID. `key.rotate` uses the matching `key-rotate` route and
+reserves one successor UUID before entering the transactional rotation path.
+The authoritative successor read exposes `created_at`, exact
+`rotation_predecessor_id`, positive `state_version`, and `updated_at` without
+key material. Both browser journeys display a newly committed secret once and
+submit only `{ "key": { "keyId": "..." } }` to Aevatar.
 
 ## `params_schema` loader grammar
 
@@ -140,12 +187,12 @@ Startup then parses the JSON and validates at least:
 
 - valid JSON object shape;
 - `schema_version == 4`;
-- `revision == "nyxid-assistant-actions.v4"`;
+- `revision == "nyxid-assistant-actions.v7"`;
 - `actions` is an array;
 - action names, tier, risk, remember policy, description, and parameter-schema shape;
 - no duplicate action descriptor;
 - supported schema constructs; and
-- presence of every action this Aevatar version marks executable, currently `service.connect`.
+- presence of every action this Aevatar version marks executable: `service.connect`, `key.create`, and `key.rotate` for the v7 composition.
 
 Enabled startup fails if fetch, size, JSON, schema, revision, or required-action validation fails. The host therefore does not accept typed chat work with a partially loaded or ambiguous registry.
 
