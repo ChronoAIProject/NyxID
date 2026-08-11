@@ -85,3 +85,53 @@ The plan is correct on one important legacy point: deleting `get_create_recovery
 VERDICT: REJECT
 
 The target architecture and the legacy read-only decision are defensible, but this is not an implementation-ready plan. Its PR sequencing makes a confirmed plan gate unusable, PR 2 omits substantial canonical state, and PR 3's deletion inventory cannot pass the claimed independent test gate. It also treats raw production data as commit-ready fixtures and leaves fail-closed identity work incomplete. Repair the boundaries and turn the omitted coupling into explicit, testable work before implementation begins.
+
+## Revision 2 verification
+
+Reviewed Revision 2 at `c24af2d5` against the same NyxID base and Aevatar revision. The revision is materially better; the original review was not merely acknowledged.
+
+### Resolved: the PR 3 handler-deletion/test-compilation blocker is now planned correctly.
+
+**Evidence:** The plan now names the eight `backend/src/handlers/proxy.rs` call sites, `mw/auth.rs:1485`, and explicitly preserves/narrows the legacy history/delete proof ([plan](1408-typed-chat-trunk.md:288-297), [plan](1408-typed-chat-trunk.md:382)). Those references match the baseline direct calls, including `workflow_chat` at `backend/src/handlers/proxy.rs:8985`, `get_create_recovery` at `:9144`, and `workflow_chat_ws` at `:9582`.
+
+**Result:** Resolved. The router-absence tests at [plan](1408-typed-chat-trunk.md:312-320) also correct the earlier non-use-only test gap.
+
+### Partially resolved: the plan-gate ordering is now sound in concept, but its backend dependency is unstated.
+
+**Evidence:** Revision 2 correctly moves the full decode/render/submit/reload gate slice to PR 2 when Q1 is `confirm` ([plan](1408-typed-chat-trunk.md:177-181), [plan](1408-typed-chat-trunk.md:260-266)); this fixes the former builder-without-facts failure. However, `plan.resolve` does not exist until PR 1 ([plan](1408-typed-chat-trunk.md:195-207), baseline `backend/src/services/assistant_service.rs:257-266`). PR 1 is described as parallel with PR 0 ([plan](1408-typed-chat-trunk.md:191-193), but the plan never says that a Q1=`confirm` PR 2 must merge after PR 1. PR 2 could therefore present and submit a gate against a backend that returns `400 Unsupported assistant chat command`.
+
+**Why it matters:** The new ordering rule prevents PR 3 from flipping too early, but does not establish an independently working PR 2 in the confirmed-gate case.
+
+**Required change 1:** Add an explicit merge matrix: with Q1=`confirm`, PR 0 answers Q1, then PR 1 merges before PR 2's gate slice, then PR 2's gate E2E test passes before PR 3 may merge. With Q1=`auto`, PR 1 and PR 2 may merge independently after PR 0.
+
+### Partially resolved: PR 2 is no longer TaskPlan-only, but its claimed full `/state` inventory still drops actor-owned fields.
+
+**Evidence:** The new scope correctly covers input, approval, actions, controls, continuation, envelope checks, and both adapters ([plan](1408-typed-chat-trunk.md:223-266)); it is a real response to the prior finding. But its full-snapshot inventory omits `taskStatus` and `latestControlResult` ([plan](1408-typed-chat-trunk.md:131-140). `taskStatus` is explicitly present in the canonical current-state example (canon `docs/canon/nyxid-chat-api.md:646`) and the working reference preserves it as `snapshot.taskStatus || snapshot.activeTask?.status` (`StudioAssistant/actor-state.js:201`). The reference also preserves `latestControlResult` (`actor-state.js:45-48`, `:205-207`); it is distinct from `controlFence` and from `latestStepControlResult`.
+
+**Why it matters:** Dropping `taskStatus` invites the browser to infer terminal task state from another field, contrary to the actor-owned-state rule. Dropping `latestControlResult` loses the committed outcome required to reconcile stop/steer control receipts after reload.
+
+**Required change 2:** Add `taskStatus` and `latestControlResult` to §3's snapshot list and PR 2's projection schema/reducer. Add state-reload fixtures where `activeTask` is absent or differs from the actor-authored `taskStatus`, and where a control receipt is reconstructed from `latestControlResult`.
+
+### Partially resolved: the plan identifies the old/new projection collision but still leaves the integration design to the implementer.
+
+**Evidence:** The plan says to "state the retirement explicitly" ([plan](1408-typed-chat-trunk.md:257-258); that is an instruction to finish the plan, not the missing decision itself. The current typed path already reduces a separate `TurnEvent`/card model in `AevatarAssistantTransport.emit()` (`frontend/src/lib/assistant/aevatar-transport.ts:3744-3810`), translates input/approval custom frames through `applyInputChanged`/`applyApprovalChanged` (`:5137-5150`, `:5880-5940`), and reload reconciliation is history-oriented (`reconcileProjection`, `:2181-2254`). Those mechanisms overlap with the proposed actor projection and `preserveLocalStructuredMessages` (`:575`, `:3538-3610`).
+
+**Why it matters:** Without an exact ownership map, PR 2 can silently run two reducers, let history overwrite actor state, or make a Q1=`confirm` gate visible in one projection but submit from stale card data. "Port from actor-state.js" is correct, but it does not identify where the port becomes authoritative in NyxID.
+
+**Required change 3:** Before coding, name the exact destination and retirement boundary: which field on the transport/conversation owns `ActorProjection`; which SSE dispatcher sends each custom frame to it; which mounted-conversation/reload hook issues the conditional `/state` read; and which existing `TurnEvent` card reducers, history reconciliation writes, and `preserveLocalStructuredMessages` branches are bypassed for typed conversations. Add a test that reloads a typed pending input/approval/action while the legacy transcript is also present and proves history cannot overwrite the actor projection.
+
+### Partially resolved: attachment and workflow-replay choices are surfaced but not decided.
+
+**Evidence:** Revision 2 correctly discovers the reference transport's attachment normalization and requires an attachment choice ([plan](1408-typed-chat-trunk.md:278-280). It likewise requires a wire-replay decision ([plan](1408-typed-chat-trunk.md:306-308). Neither selects an outcome or names the decision owner. The current reference deliberately maps attachment to `inputParts` while stripping console-only fields (`StudioAssistant/transport.js:394-423`), and NyxID's typed DTO currently rejects unknown input fields (`backend/src/services/assistant_service.rs:443-452`).
+
+**Why it matters:** These are functional and user-visible choices, not cleanup details. An implementing agent cannot decide whether to remove attachment capability or expand the backend contract, nor whether an existing diagnostic remains supported, without changing product scope.
+
+**Required change 4:** Record one owner-approved choice before PR 3 begins: either (a) reject attachments at the Assistant UI boundary and remove/disable any related affordance, or (b) add `inputParts` end-to-end with its schema, secret review, and body-shape tests. Separately choose whether wire replay retains workflow captures as an explicitly historical diagnostic or removes its workflow parser/fixtures/UI copy, then list the exact files/tests for that choice.
+
+### Resolved: fixture safety, resource-ID fail-closed work, and the deletion blast radius are now adequate.
+
+**Evidence:** PR 0 now requires a disposable account, synthetic structural fixtures, removal of unknown fields, and a sanitizer test ([plan](1408-typed-chat-trunk.md:160-187). PR 1 applies validation to the typed resource selectors as well as command bodies and adds no-upstream-call tests ([plan](1408-typed-chat-trunk.md:199-207). PR 2 gives an explicit `RUN_STARTED` identity consistency matrix ([plan](1408-typed-chat-trunk.md:253-255), and PR 3 accounts for receipt-store, scenario, and replay coupling ([plan](1408-typed-chat-trunk.md:298-310). These address findings 4-9 substantively, subject only to Required change 4's two pending product choices.
+
+VERDICT: APPROVE WITH CHANGES
+
+Revision 2 has repaired the original structural failures: it no longer flips before a projection exists, it preserves the legacy read/delete proof while deleting sends, and it turns fixture capture into a controlled artifact. The four remaining changes above are narrow, unambiguous additions to make before implementation. Without them, a confirmed plan gate has an unspecified backend ordering, the projection is not actually complete, and two product-visible behavior choices are still delegated to the implementer.
