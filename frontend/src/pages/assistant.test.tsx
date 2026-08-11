@@ -121,6 +121,22 @@ vi.mock("@/hooks/use-assistant", () => ({
       conversationId,
     ],
   },
+  assistantKeysFor: () => ({
+    conversations: ["assistant", "conversations"],
+    history: (conversationId: string) => [
+      "assistant",
+      "history",
+      conversationId,
+    ],
+    turn: (conversationId: string) => ["assistant", "turn", conversationId],
+    episode: (conversationId: string) => [
+      "assistant",
+      "episode",
+      conversationId,
+    ],
+    workspace: ["assistant", "workspace"],
+  }),
+  useAssistantEngine: () => undefined,
   useConversations: () => ({
     data: state.conversations,
     isSuccess: state.conversationsResolved,
@@ -129,19 +145,19 @@ vi.mock("@/hooks/use-assistant", () => ({
     data:
       conversationId && !state.historyLoading
         ? {
-          conversation: {
-            ...(state.conversations?.find(
-              (conversation) => conversation.id === conversationId,
-            ) ?? {
-              id: conversationId,
-              title: "Loading",
-              created_at: "2026-07-29T00:00:00.000Z",
-              last_message_at: "2026-07-29T00:00:00.000Z",
-            }),
-            id: state.historyCanonicalId ?? conversationId,
-          },
-          messages: state.historyMessages,
-          has_more: false,
+            conversation: {
+              ...(state.conversations?.find(
+                (conversation) => conversation.id === conversationId,
+              ) ?? {
+                id: conversationId,
+                title: "Loading",
+                created_at: "2026-07-29T00:00:00.000Z",
+                last_message_at: "2026-07-29T00:00:00.000Z",
+              }),
+              id: state.historyCanonicalId ?? conversationId,
+            },
+            messages: state.historyMessages,
+            has_more: false,
             awaitingProjection: state.historyAwaitingProjection,
             projectionStalled: state.historyProjectionStalled,
           }
@@ -194,6 +210,18 @@ vi.mock("@/hooks/use-assistant", () => ({
 
 vi.mock("sonner", () => ({
   toast: { error: mockToastError },
+}));
+
+vi.mock("@/components/assistant/direct-chat-controls", () => ({
+  DIRECT_MODE_COPY:
+    "Direct model chat — no tools, no approvals, and conversations are not saved.",
+  DirectModeBanner: () => (
+    <div>
+      Direct model chat — no tools, no approvals, and conversations are not
+      saved.
+    </div>
+  ),
+  DirectChatControls: () => <div>Direct model controls</div>,
 }));
 
 import { AssistantPage } from "./assistant";
@@ -294,6 +322,42 @@ beforeEach(() => {
     lastScreen: null,
   });
   useAssistantDraftStore.setState({ ownerUserId: user.id, drafts: {} });
+});
+
+describe("AssistantPage direct mode", () => {
+  it("keeps the current Aevatar empty-state copy when the flag is off", () => {
+    state.conversations = [];
+    renderPage();
+
+    expect(
+      screen.getByText("Ask NyxID to work with your connected services."),
+    ).toBeVisible();
+    expect(screen.queryByText(/Direct model chat/)).not.toBeInTheDocument();
+    expect(screen.queryByText("Direct model controls")).not.toBeInTheDocument();
+  });
+
+  it("shows the advisory banner, empty-state copy, and pickers when flagged on", () => {
+    state.conversations = [];
+    useAuthStore.setState({
+      user: {
+        ...user,
+        capabilities: {
+          enabled_features: ["experimental:direct-chat-engine"],
+        },
+      },
+    });
+    renderPage();
+
+    expect(
+      screen.getAllByText(
+        "Direct model chat — no tools, no approvals, and conversations are not saved.",
+      ),
+    ).toHaveLength(2);
+    expect(screen.getByText("Direct model controls")).toBeVisible();
+    expect(
+      screen.queryByText("Ask NyxID to work with your connected services."),
+    ).not.toBeInTheDocument();
+  });
 });
 
 describe("AssistantPage projection status", () => {
@@ -591,9 +655,7 @@ describe("AssistantPage new chat", () => {
     expect(
       screen.queryByText(/no saved transcript yet/i),
     ).not.toBeInTheDocument();
-    expect(
-      screen.queryByText(/You can keep chatting/),
-    ).not.toBeInTheDocument();
+    expect(screen.queryByText(/You can keep chatting/)).not.toBeInTheDocument();
     expect(screen.getByText("still here")).toBeInTheDocument();
     expect(screen.getByRole("textbox")).toBeEnabled();
   });
