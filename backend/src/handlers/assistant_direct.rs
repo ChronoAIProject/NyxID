@@ -7,12 +7,14 @@ use axum::{
     http::{HeaderValue, Request, header},
     response::Response,
 };
+use futures::StreamExt;
 use serde::Serialize;
 
 use crate::AppState;
 use crate::errors::{AppError, AppResult};
 use crate::handlers::proxy::execute_admin_proxy;
 use crate::mw::auth::AuthUser;
+use crate::mw::rate_limit::DirectChatPermit;
 use crate::services::{assistant_direct, assistant_service, feature_flag_service};
 
 #[derive(Serialize)]
@@ -79,6 +81,9 @@ pub async fn completions(
     request: Request<Body>,
 ) -> AppResult<Response> {
     require_direct_chat_enabled(&state, &auth_user).await?;
+    let permit = state
+        .direct_chat_limiter
+        .try_acquire(&auth_user.user_id.to_string())?;
 
     let (mut parts, body) = request.into_parts();
     let bytes = to_bytes(body, assistant_direct::MAX_DIRECT_REQUEST_BYTES)
@@ -147,12 +152,26 @@ pub async fn completions(
         status = response.status().as_u16(),
         "assistant_direct_response"
     );
-    Ok(response)
+    Ok(attach_in_flight_permit(response, permit))
+}
+
+fn attach_in_flight_permit(response: Response, permit: DirectChatPermit) -> Response {
+    let (parts, body) = response.into_parts();
+    let stream = async_stream::stream! {
+        let _permit = permit;
+        let mut body = body.into_data_stream();
+        while let Some(chunk) = body.next().await {
+            yield chunk;
+        }
+    };
+    Response::from_parts(parts, Body::from_stream(stream))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use bytes::Bytes;
+    use std::convert::Infallible;
 
     const USER_ID: &str = "a026fd00-bd86-4284-9832-9e5e65fc8f50";
 
@@ -241,5 +260,28 @@ mod tests {
                 .collect::<Vec<_>>(),
             vec![(assistant_direct::DEFAULT_DIRECT_MODEL, "GPT-5.5")]
         );
+    }
+
+    #[test]
+    fn response_body_holds_in_flight_slot_until_drop_and_isolates_users() {
+        let limiter =
+            std::sync::Arc::new(crate::mw::rate_limit::DirectChatRateLimiter::new(10, 60, 2));
+        let response = || {
+            Response::new(Body::from_stream(futures::stream::pending::<
+                Result<Bytes, Infallible>,
+            >()))
+        };
+
+        let first = attach_in_flight_permit(response(), limiter.try_acquire("user-a").unwrap());
+        let second = attach_in_flight_permit(response(), limiter.try_acquire("user-a").unwrap());
+        assert!(matches!(
+            limiter.try_acquire("user-a"),
+            Err(AppError::RateLimited)
+        ));
+        assert!(limiter.try_acquire("user-b").is_ok());
+
+        drop(first);
+        assert!(limiter.try_acquire("user-a").is_ok());
+        drop(second);
     }
 }

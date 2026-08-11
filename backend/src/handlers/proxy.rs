@@ -2633,20 +2633,16 @@ async fn execute_proxy_inner(
         .is_some_and(crate::mw::security_headers::is_sse_media_type);
     let should_stream = should_stream_response(&downstream_response, status, is_sse);
     let usage_context =
-        target
-            .service
-            .slug
-            .starts_with("llm-")
-            .then(|| llm_usage_service::UsageAuditContext {
-                db: state.db.clone(),
-                user_id: user_id_str.clone(),
-                provider_slug: None,
-                service_id: Some(service_id.to_string()),
-                model: None,
-                path: path.to_string(),
-                api_key_id: auth_user.api_key_id.clone(),
-                api_key_name: auth_user.api_key_name.clone(),
-            });
+        (platform_metric == BillingMetric::Tokens).then(|| llm_usage_service::UsageAuditContext {
+            db: state.db.clone(),
+            user_id: user_id_str.clone(),
+            provider_slug: None,
+            service_id: Some(service_id.to_string()),
+            model: None,
+            path: path.to_string(),
+            api_key_id: auth_user.api_key_id.clone(),
+            api_key_name: auth_user.api_key_name.clone(),
+        });
 
     let mut response_builder = Response::builder().status(status);
 
