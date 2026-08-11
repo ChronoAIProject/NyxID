@@ -9,6 +9,7 @@ import {
   X,
 } from "lucide-react";
 import { AssistantKeyCreateDialog } from "@/components/assistant/assistant-key-create-dialog";
+import { AssistantKeyRotateDialog } from "@/components/assistant/assistant-key-rotate-dialog";
 import { AddKeyDialog } from "@/components/dashboard/add-key-dialog";
 import { ServiceIcon } from "@/components/service-icon";
 import { Badge } from "@/components/ui/badge";
@@ -78,6 +79,20 @@ function ParameterSummary({
               {serviceId}
             </Badge>
           ))}
+        </div>
+      </div>
+    );
+  }
+  if (params.variant === "key_rotate") {
+    return (
+      <div className="border-y border-border bg-muted px-4 py-3">
+        <div className="flex flex-wrap items-center gap-1.5">
+          <span className="text-[10px] font-semibold uppercase tracking-[1px] text-muted-foreground">
+            Predecessor
+          </span>
+          <Badge variant="secondary" className="max-w-full truncate font-mono">
+            {params.key_id}
+          </Badge>
         </div>
       </div>
     );
@@ -358,7 +373,16 @@ export function ActionCard({
           footer:
             "The assistant received only the verified key reference. Key material stayed in NyxID.",
         }
-      : baseVerdict;
+      : baseVerdict &&
+          block.status === "completed" &&
+          block.action === "key.rotate"
+        ? {
+            ...baseVerdict,
+            badge: "Rotated",
+            footer:
+              "The assistant received only the verified replacement key reference. Replacement key material stayed in NyxID.",
+          }
+        : baseVerdict;
   const VerdictIcon = verdict?.icon;
 
   // Trust the descriptor too: a card whose verb has no journey behind it must
@@ -455,7 +479,8 @@ export function ActionCard({
             <ServiceIcon slug={params.service_slug} size="sm" />
           ) : params.variant === "custom" ? (
             <Globe className="h-4 w-4 text-muted-foreground" />
-          ) : params.variant === "key_create" ? (
+          ) : params.variant === "key_create" ||
+            params.variant === "key_rotate" ? (
             <KeyRound className="h-4 w-4 text-muted-foreground" />
           ) : (
             <AlertTriangle className="h-4 w-4 text-destructive" />
@@ -520,7 +545,9 @@ export function ActionCard({
           <p className="text-[11px] leading-relaxed text-muted-foreground">
             {params.variant === "key_create"
               ? "NyxID creates and verifies the key here. The assistant receives only the safe key reference after you finish."
-              : "You choose the account, routing, and credential. The assistant receives only brokered access after you finish."}
+              : params.variant === "key_rotate"
+                ? "NyxID rotates and verifies the exact lineage here. The assistant receives only the replacement key reference after you finish."
+                : "You choose the account, routing, and credential. The assistant receives only brokered access after you finish."}
           </p>
         </div>
       ) : null}
@@ -542,7 +569,8 @@ export function ActionCard({
               {awaitingAuthorization
                 ? "Waiting for authorization"
                 : busy
-                  ? params.variant === "key_create"
+                  ? params.variant === "key_create" ||
+                    params.variant === "key_rotate"
                     ? "Working"
                     : "Connecting"
                   : descriptor.cta(params)}
@@ -644,6 +672,15 @@ export function ActionCard({
             platform: params.platform,
             allowedServiceIds: params.allowed_service_ids,
           }}
+          onComplete={(keyId) => report("completed", { key: { keyId } })}
+        />
+      ) : null}
+      {!verdict && !unsupported && params.variant === "key_rotate" ? (
+        <AssistantKeyRotateDialog
+          open={dialogOpen}
+          onOpenChange={setOpen}
+          actionRequestId={block.action_request_id}
+          params={{ keyId: params.key_id }}
           onComplete={(keyId) => report("completed", { key: { keyId } })}
         />
       ) : null}

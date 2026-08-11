@@ -242,6 +242,22 @@ pub async fn ensure_indexes(db: &Database) -> Result<(), mongodb::error::Error> 
     api_keys
         .create_index(IndexModel::builder().keys(doc! { "user_id": 1 }).build())
         .await?;
+    api_keys
+        .create_index(
+            IndexModel::builder()
+                .keys(doc! { "rotation_predecessor_id": 1 })
+                .options(
+                    IndexOptions::builder()
+                        .name("api_keys_rotation_predecessor_unique".to_string())
+                        .unique(true)
+                        .partial_filter_expression(doc! {
+                            "rotation_predecessor_id": { "$type": "string" }
+                        })
+                        .build(),
+                )
+                .build(),
+        )
+        .await?;
 
     // ── assistant_action_receipts ──
     // A user/action/request identity admits exactly one durable reservation.

@@ -1123,14 +1123,17 @@ function fingerprintStableRequestInput(
 
 function fingerprintActionRequest(request: AssistantActionRequest): string {
   const params = resolveAssistantAction(request).params;
-  if (params.variant !== "key_create") {
-    return fingerprintStableRequestInput(request.params);
+  if (params.variant === "key_create") {
+    return fingerprintStableRequestInput({
+      name: params.name,
+      platform: params.platform,
+      allowedServiceIds: [...params.allowed_service_ids].sort(),
+    });
   }
-  return fingerprintStableRequestInput({
-    name: params.name,
-    platform: params.platform,
-    allowedServiceIds: [...params.allowed_service_ids].sort(),
-  });
+  if (params.variant === "key_rotate") {
+    return fingerprintStableRequestInput({ keyId: params.key_id });
+  }
+  return fingerprintStableRequestInput(request.params);
 }
 
 function sameStringArray(
@@ -1184,6 +1187,8 @@ function sameActionCardParams(
         left.platform === right.platform &&
         sameStringSet(left.allowed_service_ids, right.allowed_service_ids)
       );
+    case "key_rotate":
+      return right.variant === "key_rotate" && left.key_id === right.key_id;
     case "unknown":
       return right.variant === "unknown";
   }

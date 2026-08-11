@@ -31,6 +31,11 @@ env:
   CARGO_TERM_COLOR: always
   RUSTFLAGS: -Dwarnings
 
+# Both backend jobs start an explicit single-node replica set and use this
+# authoritative URI. Multi-document transaction tests must never fall back to a
+# standalone developer mongod or silently skip because topology is unsupported.
+  NYXID_TEST_DATABASE_URL: mongodb://127.0.0.1:27017/?replicaSet=rs0&directConnection=true
+
 jobs:
   # ---------------------------------------------------------------------------
   # Detect which areas of the monorepo changed so downstream jobs can skip
@@ -173,31 +178,46 @@ jobs:
 
   # ---------------------------------------------------------------------------
   # Rust: backend build + test
-  # Handler + service tests call `connect_test_database`, which probes the dev
-  # docker-compose mongod on 27018 first, then this CI service container on 27017,
-  # and skips when neither is reachable. A fast TCP pre-check in the harness skips
-  # the absent 27018 port (no dev override in CI) in milliseconds instead of
-  # stalling ~10s on the mongo server-selection timeout per test. The 27017
-  # service container below satisfies the probe so those tests actually run
-  # instead of silently skipping.
+  # Handler + service tests use the explicit NYXID_TEST_DATABASE_URL above. The
+  # container is started as a single-node replica set so atomic rotation/binding
+  # tests exercise real transactions rather than silently skipping.
   # ---------------------------------------------------------------------------
   backend-test:
     name: Backend Test
     needs: changes
     if: inputs.force-all || needs.changes.outputs.ci == 'true' || needs.changes.outputs.backend == 'true'
     runs-on: ubuntu-latest
-    services:
-      mongodb:
-        image: mongo:8.0
-        ports:
-          - 27017:27017
-        options: >-
-          --health-cmd "mongosh --quiet --eval 'db.adminCommand({ ping: 1 })'"
-          --health-interval 10s
-          --health-timeout 5s
-          --health-retries 5
     steps:
       - uses: actions/checkout@v6
+      - name: Start transaction-capable MongoDB
+        run: |
+          docker run --detach --name nyxid-test-mongodb --publish 27017:27017 \
+            --ulimit nofile=65536:65536 \
+            mongo:8.0 --replSet rs0 --bind_ip_all
+          for attempt in {1..30}; do
+            if docker exec nyxid-test-mongodb mongosh --quiet \
+              --eval 'db.adminCommand({ ping: 1 }).ok' >/dev/null 2>&1; then
+              break
+            fi
+            if [ "$attempt" -eq 30 ]; then
+              docker logs nyxid-test-mongodb
+              exit 1
+            fi
+            sleep 1
+          done
+          docker exec nyxid-test-mongodb mongosh --quiet --eval \
+            'rs.initiate({_id:"rs0",members:[{_id:0,host:"127.0.0.1:27017"}]})'
+          for attempt in {1..30}; do
+            if docker exec nyxid-test-mongodb mongosh --quiet \
+              --eval 'db.hello().isWritablePrimary' | grep -q true; then
+              break
+            fi
+            if [ "$attempt" -eq 30 ]; then
+              docker logs nyxid-test-mongodb
+              exit 1
+            fi
+            sleep 1
+          done
       - name: Install system dependencies
         run: sudo apt-get update && sudo apt-get install -y libdbus-1-dev pkg-config
       - uses: dtolnay/rust-toolchain@stable
@@ -393,31 +413,50 @@ jobs:
   # ===========================================================================
 
   # ---------------------------------------------------------------------------
-  # Backend (nyxid) line coverage. Mirrors `backend-test`: needs MongoDB on
-  # 27017 so DB-gated handler/service tests run instead of skipping (otherwise
-  # coverage would be understated). The instrumented run is slow (~15 min); the
-  # base-branch comparison adds a second run, so it is gated to pull_request
-  # only and allowed to fail without blocking the gate.
+  # Backend (nyxid) line coverage. Mirrors `backend-test`: uses the same explicit
+  # single-node replica set so DB and transaction tests run (otherwise coverage
+  # would be understated). The instrumented run is slow (~15 min); the base-branch
+  # comparison adds a second run, so it is gated to pull_request only and allowed
+  # to fail without blocking the gate.
   # ---------------------------------------------------------------------------
   coverage-backend:
     name: Coverage (Backend)
     needs: changes
     if: inputs.force-all || needs.changes.outputs.ci == 'true' || needs.changes.outputs.backend == 'true'
     runs-on: ubuntu-latest
-    services:
-      mongodb:
-        image: mongo:8.0
-        ports:
-          - 27017:27017
-        options: >-
-          --health-cmd "mongosh --quiet --eval 'db.adminCommand({ ping: 1 })'"
-          --health-interval 10s
-          --health-timeout 5s
-          --health-retries 5
     steps:
       - uses: actions/checkout@v6
         with:
           fetch-depth: 0
+      - name: Start transaction-capable MongoDB
+        run: |
+          docker run --detach --name nyxid-test-mongodb --publish 27017:27017 \
+            --ulimit nofile=65536:65536 \
+            mongo:8.0 --replSet rs0 --bind_ip_all
+          for attempt in {1..30}; do
+            if docker exec nyxid-test-mongodb mongosh --quiet \
+              --eval 'db.adminCommand({ ping: 1 }).ok' >/dev/null 2>&1; then
+              break
+            fi
+            if [ "$attempt" -eq 30 ]; then
+              docker logs nyxid-test-mongodb
+              exit 1
+            fi
+            sleep 1
+          done
+          docker exec nyxid-test-mongodb mongosh --quiet --eval \
+            'rs.initiate({_id:"rs0",members:[{_id:0,host:"127.0.0.1:27017"}]})'
+          for attempt in {1..30}; do
+            if docker exec nyxid-test-mongodb mongosh --quiet \
+              --eval 'db.hello().isWritablePrimary' | grep -q true; then
+              break
+            fi
+            if [ "$attempt" -eq 30 ]; then
+              docker logs nyxid-test-mongodb
+              exit 1
+            fi
+            sleep 1
+          done
       - name: Install system dependencies
         run: sudo apt-get update && sudo apt-get install -y libdbus-1-dev pkg-config
       - uses: dtolnay/rust-toolchain@stable

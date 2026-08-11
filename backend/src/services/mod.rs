@@ -4,6 +4,7 @@ pub mod admin_user_service;
 pub mod agent_binding_service;
 pub mod anonymous_endpoint_service;
 pub mod api_docs_service;
+pub mod api_key_mutation_service;
 pub mod api_key_scope_service;
 pub mod approval_policy;
 pub mod approval_service;

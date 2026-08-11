@@ -262,9 +262,10 @@ pub async fn create_binding(
     if !access.allows_resource(&body.user_service_id) {
         return Err(AppError::NotFound("User service not found".to_string()));
     }
-    let binding = agent_binding_service::create_binding(
+    let binding = agent_binding_service::create_binding_with_scope_authorization(
         &state.db,
         &user_id,
+        Some(&actor),
         &key_id,
         &body.user_service_id,
         &body.user_api_key_id,
@@ -392,7 +393,14 @@ pub async fn delete_binding(
         .flatten()
         .map(|svc| svc.slug)
         .unwrap_or_else(|| binding.user_service_id.clone());
-    agent_binding_service::delete_binding(&state.db, &user_id, &key_id, &binding_id).await?;
+    agent_binding_service::delete_binding_with_scope_authorization(
+        &state.db,
+        &user_id,
+        Some(&actor),
+        &key_id,
+        &binding_id,
+    )
+    .await?;
 
     audit_service::log_for_user(
         state.db.clone(),
@@ -434,8 +442,8 @@ mod tests {
     use crate::models::user::{COLLECTION_NAME as USERS, User, UserType};
     use crate::models::user_api_key::UserApiKey;
     use crate::test_utils::{
-        connect_test_database, test_app_state, test_auth_user, test_membership, test_user,
-        test_user_endpoint, test_user_service,
+        connect_test_database, connect_transaction_test_database, test_app_state, test_auth_user,
+        test_membership, test_user, test_user_endpoint, test_user_service,
     };
     use axum::extract::State;
     use chrono::Utc;
@@ -456,6 +464,9 @@ mod tests {
             expires_at: None,
             is_active: true,
             created_at: Utc::now(),
+            rotation_predecessor_id: None,
+            state_version: 1,
+            updated_at: Some(Utc::now()),
             description: None,
             allowed_service_ids: vec![],
             allowed_node_ids: vec![],
@@ -647,9 +658,7 @@ mod tests {
 
     #[tokio::test]
     async fn create_and_list_binding() {
-        let Some(db) = connect_test_database("h_agent_bind_create_list").await else {
-            return;
-        };
+        let db = connect_transaction_test_database("h_agent_bind_create_list").await;
         let f = seed_fixtures(&db).await;
         let state = test_app_state(db);
         let auth = test_auth_user(&f.user_id);
@@ -682,9 +691,7 @@ mod tests {
 
     #[tokio::test]
     async fn create_binding_duplicate_returns_conflict() {
-        let Some(db) = connect_test_database("h_agent_bind_dup").await else {
-            return;
-        };
+        let db = connect_transaction_test_database("h_agent_bind_dup").await;
         let f = seed_fixtures(&db).await;
         let state = test_app_state(db);
         let auth = test_auth_user(&f.user_id);
@@ -719,9 +726,7 @@ mod tests {
 
     #[tokio::test]
     async fn delete_binding_succeeds() {
-        let Some(db) = connect_test_database("h_agent_bind_delete").await else {
-            return;
-        };
+        let db = connect_transaction_test_database("h_agent_bind_delete").await;
         let f = seed_fixtures(&db).await;
         let state = test_app_state(db);
         let auth = test_auth_user(&f.user_id);
@@ -797,9 +802,7 @@ mod tests {
 
     #[tokio::test]
     async fn create_binding_invalid_service_returns_error() {
-        let Some(db) = connect_test_database("h_agent_bind_bad_svc").await else {
-            return;
-        };
+        let db = connect_transaction_test_database("h_agent_bind_bad_svc").await;
         let f = seed_fixtures(&db).await;
         let state = test_app_state(db);
         let auth = test_auth_user(&f.user_id);
@@ -821,9 +824,7 @@ mod tests {
 
     #[tokio::test]
     async fn create_binding_invalid_credential_returns_error() {
-        let Some(db) = connect_test_database("h_agent_bind_bad_cred").await else {
-            return;
-        };
+        let db = connect_transaction_test_database("h_agent_bind_bad_cred").await;
         let f = seed_fixtures(&db).await;
         let state = test_app_state(db);
         let auth = test_auth_user(&f.user_id);

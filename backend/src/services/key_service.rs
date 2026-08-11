@@ -1,7 +1,10 @@
 use chrono::Utc;
 use futures::TryStreamExt;
 use mongodb::bson::{self, doc};
-use std::fmt;
+use std::{
+    fmt,
+    sync::{Arc, Mutex},
+};
 use uuid::Uuid;
 
 use crate::crypto::token::{generate_api_key, hash_token};
@@ -11,7 +14,10 @@ use crate::models::agent_service_binding::{
 };
 use crate::models::api_key::{ApiKey, ApiKeyPurpose, COLLECTION_NAME as API_KEYS};
 use crate::redaction::RedactedLen;
-use crate::services::api_key_scope_service::{self, ScopeAuthorization};
+use crate::services::{
+    api_key_mutation_service as key_mutations,
+    api_key_scope_service::{self, ScopeAuthorization},
+};
 
 /// Result returned when a new API key is created.
 /// The `full_key` is shown once and never stored.
@@ -22,6 +28,9 @@ pub struct CreatedApiKey {
     pub full_key: String,
     pub scopes: String,
     pub created_at: chrono::DateTime<Utc>,
+    pub rotation_predecessor_id: Option<String>,
+    pub state_version: i64,
+    pub updated_at: chrono::DateTime<Utc>,
     pub description: Option<String>,
     pub allowed_service_ids: Vec<String>,
     pub allowed_node_ids: Vec<String>,
@@ -43,6 +52,9 @@ impl fmt::Debug for CreatedApiKey {
             .field("full_key", &RedactedLen(self.full_key.len()))
             .field("scopes", &self.scopes)
             .field("created_at", &self.created_at)
+            .field("rotation_predecessor_id", &self.rotation_predecessor_id)
+            .field("state_version", &self.state_version)
+            .field("updated_at", &self.updated_at)
             .field("description", &self.description)
             .field("allowed_service_ids", &self.allowed_service_ids)
             .field("allowed_node_ids", &self.allowed_node_ids)
@@ -55,6 +67,53 @@ impl fmt::Debug for CreatedApiKey {
             .field("scheduled_write_enabled", &self.scheduled_write_enabled)
             .finish()
     }
+}
+
+#[derive(Debug)]
+#[allow(dead_code)]
+pub enum ApiKeyRotationOutcome {
+    Created(CreatedApiKey),
+    AlreadyCommitted(ApiKey),
+}
+
+#[derive(Clone)]
+struct RotationMaterial {
+    key_prefix: String,
+    full_key: String,
+    key_hash: String,
+    created_at: chrono::DateTime<Utc>,
+}
+
+enum RotationTransactionOutcome {
+    Created(ApiKey),
+    AlreadyCommitted(ApiKey),
+}
+
+fn created_api_key_from_model(key: ApiKey, full_key: String) -> AppResult<CreatedApiKey> {
+    let updated_at = key.updated_at.ok_or_else(|| {
+        AppError::Internal("created API key lacks authoritative updated_at".to_string())
+    })?;
+    Ok(CreatedApiKey {
+        id: key.id,
+        name: key.name,
+        key_prefix: key.key_prefix,
+        full_key,
+        scopes: key.scopes,
+        created_at: key.created_at,
+        rotation_predecessor_id: key.rotation_predecessor_id,
+        state_version: key.state_version,
+        updated_at,
+        description: key.description,
+        allowed_service_ids: key.allowed_service_ids,
+        allowed_node_ids: key.allowed_node_ids,
+        allow_all_services: key.allow_all_services,
+        allow_all_nodes: key.allow_all_nodes,
+        rate_limit_per_second: key.rate_limit_per_second,
+        rate_limit_burst: key.rate_limit_burst,
+        platform: key.platform,
+        purpose: key.purpose,
+        scheduled_write_enabled: key.scheduled_write_enabled,
+    })
 }
 
 /// Valid scopes that can be assigned to API keys.
@@ -428,6 +487,9 @@ async fn create_api_key_with_security_class_and_id(
         expires_at,
         is_active: true,
         created_at: now,
+        rotation_predecessor_id: None,
+        state_version: 1,
+        updated_at: Some(now),
         description: description.map(|s| s.to_string()),
         allowed_service_ids: svc_ids.clone(),
         allowed_node_ids: node_ids.clone(),
@@ -448,9 +510,7 @@ async fn create_api_key_with_security_class_and_id(
         scheduled_write_enabled,
     };
 
-    db.collection::<ApiKey>(API_KEYS)
-        .insert_one(&new_key)
-        .await?;
+    key_mutations::insert_one(db, &new_key, None).await?;
 
     Ok(CreatedApiKey {
         id,
@@ -459,6 +519,9 @@ async fn create_api_key_with_security_class_and_id(
         full_key,
         scopes: scopes.to_string(),
         created_at: now,
+        rotation_predecessor_id: None,
+        state_version: 1,
+        updated_at: now,
         description: description.map(|s| s.to_string()),
         allowed_service_ids: svc_ids,
         allowed_node_ids: node_ids,
@@ -501,12 +564,13 @@ pub async fn delete_api_key(db: &mongodb::Database, user_id: &str, key_id: &str)
         .await?
         .ok_or_else(|| AppError::NotFound("API key not found".to_string()))?;
 
-    db.collection::<ApiKey>(API_KEYS)
-        .update_one(
-            doc! { "_id": &key.id },
-            doc! { "$set": { "is_active": false } },
-        )
-        .await?;
+    key_mutations::update_one(
+        db,
+        doc! { "_id": &key.id },
+        doc! { "$set": { "is_active": false } },
+        None,
+    )
+    .await?;
 
     tracing::info!(key_id = %key_id, user_id = %user_id, "API key deactivated");
 
@@ -514,6 +578,7 @@ pub async fn delete_api_key(db: &mongodb::Database, user_id: &str, key_id: &str)
 }
 
 /// Rotate an API key: deactivate the old one and create a new one preserving name, scopes, and scope fields.
+#[allow(dead_code)]
 pub async fn rotate_api_key(
     db: &mongodb::Database,
     user_id: &str,
@@ -528,90 +593,328 @@ pub async fn rotate_api_key_with_scope_authorization(
     scope_actor_user_id: Option<&str>,
     key_id: &str,
 ) -> AppResult<CreatedApiKey> {
-    let old_key = db
-        .collection::<ApiKey>(API_KEYS)
-        .find_one(doc! { "_id": key_id, "user_id": user_id })
-        .await?
-        .ok_or_else(|| AppError::NotFound("API key not found".to_string()))?;
-
-    if old_key.purpose == ApiKeyPurpose::ScheduledInvocation {
-        return Err(AppError::DurableGrantMismatch(
-            "scheduled_invocation keys must be reprovisioned from a fresh scope plan".to_string(),
-        ));
-    }
-
-    // Snapshot old bindings BEFORE deactivating so we can clone them onto the new key.
-    let old_bindings: Vec<AgentServiceBinding> = db
-        .collection::<AgentServiceBinding>(AGENT_BINDINGS)
-        .find(doc! { "api_key_id": &old_key.id, "user_id": user_id })
-        .await?
-        .try_collect()
-        .await?;
-
-    // Deactivate old key
-    db.collection::<ApiKey>(API_KEYS)
-        .update_one(
-            doc! { "_id": &old_key.id },
-            doc! { "$set": { "is_active": false } },
-        )
-        .await?;
-
-    // Create new key preserving all fields
-    let new_key = create_api_key_with_scope_authorization(
+    let successor_id = Uuid::new_v4().to_string();
+    match rotate_api_key_with_scope_authorization_and_id(
         db,
         user_id,
         scope_actor_user_id,
-        &old_key.name,
-        &old_key.scopes,
-        old_key.expires_at,
-        old_key.description.as_deref(),
-        Some(&old_key.allowed_service_ids),
-        Some(&old_key.allowed_node_ids),
-        Some(old_key.allow_all_services),
-        Some(old_key.allow_all_nodes),
-        old_key.rate_limit_per_second,
-        old_key.rate_limit_burst,
-        old_key.platform.as_deref(),
-        old_key.callback_url.as_deref(),
+        key_id,
+        &successor_id,
+    )
+    .await?
+    {
+        ApiKeyRotationOutcome::Created(created) => Ok(created),
+        ApiKeyRotationOutcome::AlreadyCommitted(_) => Err(AppError::Internal(
+            "fresh rotation successor unexpectedly already existed".to_string(),
+        )),
+    }
+}
+
+/// Atomically rotate an exact predecessor to a caller-reserved successor UUID.
+/// Replaying the same pair returns safe committed metadata and never replays
+/// the one-time successor secret.
+pub async fn rotate_api_key_with_scope_authorization_and_id(
+    db: &mongodb::Database,
+    user_id: &str,
+    scope_actor_user_id: Option<&str>,
+    predecessor_id: &str,
+    successor_id: &str,
+) -> AppResult<ApiKeyRotationOutcome> {
+    rotate_api_key_with_scope_authorization_and_id_inner(
+        db,
+        user_id,
+        scope_actor_user_id,
+        predecessor_id,
+        successor_id,
+        #[cfg(test)]
         None,
     )
-    .await?;
+    .await
+}
 
-    // Clone agent_service_bindings from the old key to the new key so per-service
-    // credential overrides survive rotation. The (api_key_id, user_service_id)
-    // unique index is satisfied because new_key.id differs from old_key.id.
-    let cloned_count = if old_bindings.is_empty() {
-        0
-    } else {
-        let now = Utc::now();
-        let new_bindings: Vec<AgentServiceBinding> = old_bindings
-            .iter()
-            .map(|b| AgentServiceBinding {
-                id: Uuid::new_v4().to_string(),
-                api_key_id: new_key.id.clone(),
-                user_service_id: b.user_service_id.clone(),
-                user_api_key_id: b.user_api_key_id.clone(),
-                user_id: user_id.to_string(),
-                created_at: now,
-                updated_at: now,
-            })
-            .collect();
-        let count = new_bindings.len();
-        db.collection::<AgentServiceBinding>(AGENT_BINDINGS)
-            .insert_many(&new_bindings)
-            .await?;
-        count
-    };
+#[cfg(test)]
+pub(crate) async fn rotate_api_key_with_scope_authorization_and_id_with_collision_hook(
+    db: &mongodb::Database,
+    user_id: &str,
+    scope_actor_user_id: Option<&str>,
+    predecessor_id: &str,
+    successor_id: &str,
+    collision_hook: key_mutations::TransactionCollisionHook,
+) -> AppResult<ApiKeyRotationOutcome> {
+    rotate_api_key_with_scope_authorization_and_id_inner(
+        db,
+        user_id,
+        scope_actor_user_id,
+        predecessor_id,
+        successor_id,
+        Some(collision_hook),
+    )
+    .await
+}
 
-    tracing::info!(
-        old_key_id = %key_id,
-        new_key_id = %new_key.id,
-        user_id = %user_id,
-        cloned_bindings = cloned_count,
-        "API key rotated"
-    );
+async fn rotate_api_key_with_scope_authorization_and_id_inner(
+    db: &mongodb::Database,
+    user_id: &str,
+    scope_actor_user_id: Option<&str>,
+    predecessor_id: &str,
+    successor_id: &str,
+    #[cfg(test)] collision_hook: Option<key_mutations::TransactionCollisionHook>,
+) -> AppResult<ApiKeyRotationOutcome> {
+    let successor_id = Uuid::parse_str(successor_id)
+        .map_err(|_| AppError::ValidationError("successor_id must be a UUID".to_string()))?
+        .to_string();
+    if predecessor_id == successor_id {
+        return Err(AppError::ValidationError(
+            "rotation predecessor and successor must differ".to_string(),
+        ));
+    }
 
-    Ok(new_key)
+    let db = db.clone();
+    let user_id = user_id.to_string();
+    let predecessor_id = predecessor_id.to_string();
+    let tracing_user_id = user_id.clone();
+    let tracing_predecessor_id = predecessor_id.clone();
+    let actor_id = scope_actor_user_id.map(str::to_string);
+    let material: Arc<Mutex<Option<RotationMaterial>>> = Arc::new(Mutex::new(None));
+    let material_for_transaction = Arc::clone(&material);
+    let successor_for_transaction = successor_id.clone();
+    let mut session = db.client().start_session().await?;
+
+    let transaction = session
+        .start_transaction()
+        .and_run2(async move |session| {
+            #[cfg(test)]
+            if let Some(hook) = collision_hook.as_ref() {
+                hook.begin_attempt();
+            }
+            let operation: AppResult<RotationTransactionOutcome> = async {
+                let api_keys = db.collection::<ApiKey>(API_KEYS);
+
+                let replay_successor = if let Some(existing) = api_keys
+                    .find_one(doc! { "_id": &successor_for_transaction })
+                    .session(&mut *session)
+                    .await?
+                {
+                    if existing.user_id != user_id {
+                        return Err(AppError::NotFound("API key not found".to_string()));
+                    }
+                    if existing.rotation_predecessor_id.as_deref() == Some(predecessor_id.as_str())
+                        && existing.state_version > 0
+                        && existing.updated_at.is_some()
+                    {
+                        Some(existing)
+                    } else {
+                        return Err(AppError::Conflict(
+                            "reserved rotation successor is already in use".to_string(),
+                        ));
+                    }
+                } else {
+                    None
+                };
+
+                let old_key = api_keys
+                    .find_one(doc! {
+                        "_id": &predecessor_id,
+                        "user_id": &user_id,
+                    })
+                    .session(&mut *session)
+                    .await?
+                    .ok_or_else(|| AppError::NotFound("API key not found".to_string()))?;
+                if old_key.purpose == ApiKeyPurpose::ScheduledInvocation {
+                    return Err(AppError::DurableGrantMismatch(
+                        "scheduled_invocation keys must be reprovisioned from a fresh scope plan"
+                            .to_string(),
+                    ));
+                }
+
+                let authorization = ScopeAuthorization::for_actor(actor_id.as_deref());
+                api_key_scope_service::validate_owner_write_with_session(
+                    &db,
+                    &user_id,
+                    authorization,
+                    &mut *session,
+                )
+                .await?;
+                if !old_key.allow_all_services {
+                    api_key_scope_service::validate_service_ids_with_session(
+                        &db,
+                        &user_id,
+                        &old_key.allowed_service_ids,
+                        authorization,
+                        &mut *session,
+                    )
+                    .await?;
+                }
+                if !old_key.allow_all_nodes {
+                    api_key_scope_service::validate_node_ids_with_session(
+                        &db,
+                        &user_id,
+                        &old_key.allowed_node_ids,
+                        authorization,
+                        &mut *session,
+                    )
+                    .await?;
+                }
+
+                if let Some(existing) = replay_successor {
+                    if old_key.is_active {
+                        return Err(AppError::Conflict(
+                            "rotation lineage is not committed".to_string(),
+                        ));
+                    }
+                    return Ok(RotationTransactionOutcome::AlreadyCommitted(existing));
+                }
+
+                if let Some(existing_successor) = api_keys
+                    .find_one(doc! {
+                        "user_id": &user_id,
+                        "rotation_predecessor_id": &predecessor_id,
+                    })
+                    .session(&mut *session)
+                    .await?
+                {
+                    return Err(AppError::Conflict(format!(
+                        "API key was already rotated to successor {}",
+                        existing_successor.id
+                    )));
+                }
+                if !old_key.is_active {
+                    return Err(AppError::NotFound("API key not found".to_string()));
+                }
+
+                let mut cursor = db
+                    .collection::<AgentServiceBinding>(AGENT_BINDINGS)
+                    .find(doc! { "api_key_id": &old_key.id, "user_id": &user_id })
+                    .session(&mut *session)
+                    .await?;
+                let old_bindings: Vec<AgentServiceBinding> =
+                    cursor.stream(&mut *session).try_collect().await?;
+
+                #[cfg(test)]
+                if let Some(hook) = collision_hook.as_ref() {
+                    hook.after_reads().await;
+                }
+
+                let rotation_material = {
+                    let mut guard = material_for_transaction.lock().map_err(|_| {
+                        AppError::Internal("rotation material lock poisoned".to_string())
+                    })?;
+                    guard
+                        .get_or_insert_with(|| {
+                            let (key_prefix, full_key, key_hash) = if is_scoped_key(
+                                old_key.allow_all_services,
+                                old_key.allow_all_nodes,
+                            ) {
+                                generate_scoped_api_key()
+                            } else {
+                                generate_api_key()
+                            };
+                            RotationMaterial {
+                                key_prefix,
+                                full_key,
+                                key_hash,
+                                created_at: Utc::now(),
+                            }
+                        })
+                        .clone()
+                };
+                let successor = ApiKey {
+                    id: successor_for_transaction.clone(),
+                    user_id: old_key.user_id.clone(),
+                    name: old_key.name.clone(),
+                    key_prefix: rotation_material.key_prefix,
+                    key_hash: rotation_material.key_hash,
+                    scopes: old_key.scopes.clone(),
+                    last_used_at: None,
+                    expires_at: old_key.expires_at,
+                    is_active: true,
+                    created_at: rotation_material.created_at,
+                    rotation_predecessor_id: Some(old_key.id.clone()),
+                    state_version: 1,
+                    updated_at: Some(rotation_material.created_at),
+                    description: old_key.description.clone(),
+                    allowed_service_ids: old_key.allowed_service_ids.clone(),
+                    allowed_node_ids: old_key.allowed_node_ids.clone(),
+                    allow_all_services: old_key.allow_all_services,
+                    allow_all_nodes: old_key.allow_all_nodes,
+                    rate_limit_per_second: old_key.rate_limit_per_second,
+                    rate_limit_burst: old_key.rate_limit_burst,
+                    platform: old_key.platform.clone(),
+                    callback_url: old_key.callback_url.clone(),
+                    purpose: old_key.purpose,
+                    scheduled_write_enabled: old_key.scheduled_write_enabled,
+                };
+
+                let deactivated = key_mutations::update_one(
+                    &db,
+                    doc! {
+                        "_id": &old_key.id,
+                        "user_id": &user_id,
+                        "is_active": true,
+                    },
+                    doc! { "$set": { "is_active": false } },
+                    Some(&mut *session),
+                )
+                .await?;
+                if deactivated.matched_count != 1 {
+                    return Err(AppError::Conflict(
+                        "rotation predecessor changed concurrently".to_string(),
+                    ));
+                }
+                key_mutations::insert_one(&db, &successor, Some(&mut *session)).await?;
+
+                if !old_bindings.is_empty() {
+                    let now = rotation_material.created_at;
+                    let replacements: Vec<AgentServiceBinding> = old_bindings
+                        .into_iter()
+                        .map(|binding| AgentServiceBinding {
+                            id: Uuid::new_v4().to_string(),
+                            api_key_id: successor.id.clone(),
+                            user_service_id: binding.user_service_id,
+                            user_api_key_id: binding.user_api_key_id,
+                            user_id: user_id.clone(),
+                            created_at: now,
+                            updated_at: now,
+                        })
+                        .collect();
+                    db.collection::<AgentServiceBinding>(AGENT_BINDINGS)
+                        .insert_many(replacements)
+                        .session(&mut *session)
+                        .await?;
+                }
+
+                Ok(RotationTransactionOutcome::Created(successor))
+            }
+            .await;
+            key_mutations::transaction_result(operation)
+        })
+        .await
+        .map_err(key_mutations::map_transaction_error)?;
+
+    match transaction {
+        RotationTransactionOutcome::AlreadyCommitted(key) => {
+            Ok(ApiKeyRotationOutcome::AlreadyCommitted(key))
+        }
+        RotationTransactionOutcome::Created(key) => {
+            let full_key = material
+                .lock()
+                .map_err(|_| AppError::Internal("rotation material lock poisoned".to_string()))?
+                .as_ref()
+                .map(|material| material.full_key.clone())
+                .ok_or_else(|| {
+                    AppError::Internal("rotation committed without key material".to_string())
+                })?;
+            tracing::info!(
+                old_key_id = %tracing_predecessor_id,
+                new_key_id = %key.id,
+                user_id = %tracing_user_id,
+                "API key rotated"
+            );
+            Ok(ApiKeyRotationOutcome::Created(created_api_key_from_model(
+                key, full_key,
+            )?))
+        }
+    }
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -782,12 +1085,13 @@ pub async fn update_api_key_scope_with_scope_authorization(
         return Ok(existing);
     }
 
-    db.collection::<ApiKey>(API_KEYS)
-        .update_one(
-            doc! { "_id": key_id, "user_id": user_id },
-            doc! { "$set": update },
-        )
-        .await?;
+    key_mutations::update_one(
+        db,
+        doc! { "_id": key_id, "user_id": user_id },
+        doc! { "$set": update },
+        None,
+    )
+    .await?;
 
     db.collection::<ApiKey>(API_KEYS)
         .find_one(doc! { "_id": key_id, "user_id": user_id })
@@ -818,12 +1122,13 @@ pub async fn validate_api_key(
     // Update last_used_at
     let user_id = key.user_id.clone();
     let now = Utc::now();
-    db.collection::<ApiKey>(API_KEYS)
-        .update_one(
-            doc! { "_id": &key.id },
-            doc! { "$set": { "last_used_at": bson::DateTime::from_chrono(now) } },
-        )
-        .await?;
+    key_mutations::update_one(
+        db,
+        doc! { "_id": &key.id },
+        doc! { "$set": { "last_used_at": bson::DateTime::from_chrono(now) } },
+        None,
+    )
+    .await?;
 
     Ok((user_id, key))
 }
@@ -837,7 +1142,7 @@ mod tests {
     };
     use crate::models::user::{COLLECTION_NAME as USERS, UserType};
     use crate::models::user_service::{COLLECTION_NAME as USER_SERVICES, UserService};
-    use crate::test_utils::connect_test_database;
+    use crate::test_utils::{connect_test_database, connect_transaction_test_database};
     use crate::test_utils::{test_membership, test_user, test_user_service};
 
     fn test_node(owner_id: &str, name: &str) -> Node {
@@ -1099,6 +1404,44 @@ mod tests {
         assert!(created.allow_all_services);
         assert!(created.allow_all_nodes);
         assert!(!created.full_key.is_empty());
+        assert_eq!(created.rotation_predecessor_id, None);
+        assert_eq!(created.state_version, 1);
+        assert_eq!(created.updated_at, created.created_at);
+    }
+
+    #[tokio::test]
+    async fn create_api_key_with_reserved_id_initializes_authority() {
+        let Some(db) = connect_test_database("key_svc_create_reserved").await else {
+            eprintln!("skipping: no MongoDB");
+            return;
+        };
+        let user_id = Uuid::new_v4().to_string();
+        let reserved_id = Uuid::new_v4().to_string();
+        let created = create_api_key_with_scope_authorization_and_id(
+            &db,
+            &user_id,
+            Some(&user_id),
+            &reserved_id,
+            "reserved",
+            "proxy",
+            None,
+            None,
+            None,
+            None,
+            Some(true),
+            Some(true),
+            None,
+            None,
+            Some("codex"),
+            None,
+            None,
+        )
+        .await
+        .expect("create reserved key");
+
+        assert_eq!(created.id, reserved_id);
+        assert_eq!(created.state_version, 1);
+        assert_eq!(created.updated_at, created.created_at);
     }
 
     #[tokio::test]
@@ -1402,6 +1745,19 @@ mod tests {
         delete_api_key(&db, &user_id, &created.id)
             .await
             .expect("should deactivate");
+        let deactivated = db
+            .collection::<ApiKey>(API_KEYS)
+            .find_one(doc! { "_id": &created.id })
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(!deactivated.is_active);
+        assert_eq!(deactivated.state_version, 2);
+        assert!(
+            deactivated
+                .updated_at
+                .is_some_and(|value| value >= created.updated_at)
+        );
         let result = get_api_key(&db, &user_id, &created.id).await;
         assert!(result.is_err());
         assert!(matches!(result.unwrap_err(), AppError::NotFound(_)));
@@ -1421,10 +1777,7 @@ mod tests {
 
     #[tokio::test]
     async fn rotate_api_key_preserves_fields() {
-        let Some(db) = connect_test_database("key_svc_rotate").await else {
-            eprintln!("skipping: no MongoDB");
-            return;
-        };
+        let db = connect_transaction_test_database("key_svc_rotate").await;
         let user_id = Uuid::new_v4().to_string();
         let original = create_api_key(
             &db,
@@ -1462,6 +1815,305 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn rotate_with_reserved_successor_is_atomic_and_replay_safe() {
+        let db = connect_transaction_test_database("key_svc_rotate_reserved").await;
+        crate::db::ensure_indexes(&db)
+            .await
+            .expect("create lineage index");
+
+        let user_id = Uuid::new_v4().to_string();
+        let original = create_api_key(
+            &db,
+            &user_id,
+            "rotate-reserved",
+            "read write",
+            None,
+            Some("lineage evidence"),
+            None,
+            None,
+            None,
+            None,
+            Some(50),
+            Some(100),
+            Some("codex"),
+            None,
+        )
+        .await
+        .expect("create predecessor");
+        let successor_id = Uuid::new_v4().to_string();
+
+        let rotated = match rotate_api_key_with_scope_authorization_and_id(
+            &db,
+            &user_id,
+            Some(&user_id),
+            &original.id,
+            &successor_id,
+        )
+        .await
+        .expect("rotate exact lineage")
+        {
+            ApiKeyRotationOutcome::Created(created) => created,
+            ApiKeyRotationOutcome::AlreadyCommitted(_) => {
+                panic!("first rotation must return the one-time secret")
+            }
+        };
+        assert_eq!(rotated.id, successor_id);
+        assert_eq!(
+            rotated.rotation_predecessor_id.as_deref(),
+            Some(original.id.as_str())
+        );
+        assert_eq!(rotated.state_version, 1);
+        assert_eq!(rotated.updated_at, rotated.created_at);
+        assert_ne!(rotated.full_key, original.full_key);
+
+        let predecessor = db
+            .collection::<ApiKey>(API_KEYS)
+            .find_one(doc! { "_id": &original.id })
+            .await
+            .expect("read predecessor")
+            .expect("predecessor remains as lineage evidence");
+        assert!(!predecessor.is_active);
+        assert_eq!(predecessor.state_version, 2);
+        assert!(
+            predecessor
+                .updated_at
+                .is_some_and(|at| at >= original.updated_at)
+        );
+
+        let replay = rotate_api_key_with_scope_authorization_and_id(
+            &db,
+            &user_id,
+            Some(&user_id),
+            &original.id,
+            &successor_id,
+        )
+        .await
+        .expect("replay committed lineage");
+        let replayed = match replay {
+            ApiKeyRotationOutcome::AlreadyCommitted(key) => key,
+            ApiKeyRotationOutcome::Created(_) => panic!("replay must not expose a second secret"),
+        };
+        assert_eq!(replayed.id, successor_id);
+        assert_eq!(
+            replayed.rotation_predecessor_id.as_deref(),
+            Some(original.id.as_str())
+        );
+        assert_eq!(replayed.state_version, 1);
+
+        let owner_isolation = rotate_api_key_with_scope_authorization_and_id(
+            &db,
+            &Uuid::new_v4().to_string(),
+            None,
+            &original.id,
+            &successor_id,
+        )
+        .await
+        .expect_err("another owner must not learn that the successor exists");
+        assert!(matches!(owner_isolation, AppError::NotFound(_)));
+
+        let conflict = rotate_api_key_with_scope_authorization_and_id(
+            &db,
+            &user_id,
+            Some(&user_id),
+            &original.id,
+            &Uuid::new_v4().to_string(),
+        )
+        .await
+        .expect_err("one predecessor cannot acquire another successor");
+        assert!(matches!(conflict, AppError::Conflict(_)));
+
+        delete_api_key(&db, &user_id, &successor_id)
+            .await
+            .expect("deactivate committed successor");
+        let historical_replay = rotate_api_key_with_scope_authorization_and_id(
+            &db,
+            &user_id,
+            Some(&user_id),
+            &original.id,
+            &successor_id,
+        )
+        .await
+        .expect("committed lineage remains replayable after successor deactivation");
+        let historical = match historical_replay {
+            ApiKeyRotationOutcome::AlreadyCommitted(key) => key,
+            ApiKeyRotationOutcome::Created(_) => {
+                panic!("historical replay must not mint or expose another secret")
+            }
+        };
+        assert!(!historical.is_active);
+        assert_eq!(historical.state_version, 2);
+    }
+
+    #[tokio::test]
+    async fn reserved_rotation_is_owner_isolated() {
+        let db = connect_transaction_test_database("key_svc_rotate_owner_isolation").await;
+        let owner_id = Uuid::new_v4().to_string();
+        let other_user_id = Uuid::new_v4().to_string();
+        let original = create_api_key(
+            &db,
+            &owner_id,
+            "owner-key",
+            "proxy",
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+        )
+        .await
+        .expect("create owner key");
+
+        let error = rotate_api_key_with_scope_authorization_and_id(
+            &db,
+            &other_user_id,
+            Some(&other_user_id),
+            &original.id,
+            &Uuid::new_v4().to_string(),
+        )
+        .await
+        .expect_err("another owner cannot rotate the key");
+        assert!(matches!(error, AppError::NotFound(_)));
+
+        let untouched = get_api_key(&db, &owner_id, &original.id)
+            .await
+            .expect("failed rotation leaves predecessor active");
+        assert_eq!(untouched.state_version, 1);
+    }
+
+    #[tokio::test]
+    async fn rotation_revalidates_revoked_org_admin_authority() {
+        let db = connect_transaction_test_database("key_svc_rotate_revoked_admin").await;
+        let actor_id = Uuid::new_v4().to_string();
+        let org_id = Uuid::new_v4().to_string();
+        insert_scope_fixture_user(&db, &actor_id, UserType::Person).await;
+        insert_scope_fixture_user(&db, &org_id, UserType::Org).await;
+        let service = insert_scope_fixture_service(&db, &org_id, "org-service", false).await;
+        let membership = test_membership(&org_id, &actor_id, OrgRole::Admin, None);
+        db.collection::<OrgMembership>(ORG_MEMBERSHIPS)
+            .insert_one(&membership)
+            .await
+            .expect("insert admin membership");
+
+        let service_ids = [service.id];
+        let original = create_api_key_with_scope_authorization(
+            &db,
+            &org_id,
+            Some(&actor_id),
+            "org-key",
+            "proxy",
+            None,
+            None,
+            Some(&service_ids),
+            None,
+            Some(false),
+            Some(true),
+            None,
+            None,
+            Some("codex"),
+            None,
+            None,
+        )
+        .await
+        .expect("admin creates org key");
+        db.collection::<OrgMembership>(ORG_MEMBERSHIPS)
+            .update_one(
+                doc! { "_id": &membership.id },
+                doc! { "$set": { "revoked_at": bson::DateTime::now() } },
+            )
+            .await
+            .expect("revoke membership");
+
+        let error = rotate_api_key_with_scope_authorization_and_id(
+            &db,
+            &org_id,
+            Some(&actor_id),
+            &original.id,
+            &Uuid::new_v4().to_string(),
+        )
+        .await
+        .expect_err("rotation must revalidate current org authority");
+        assert!(matches!(error, AppError::OrgRoleInsufficient(_)));
+
+        let untouched = get_api_key(&db, &org_id, &original.id)
+            .await
+            .expect("revoked rotation leaves predecessor active");
+        assert_eq!(untouched.state_version, 1);
+    }
+
+    #[tokio::test]
+    async fn rotation_replay_revalidates_revoked_org_admin_authority() {
+        let db = connect_transaction_test_database("key_svc_rotate_replay_revoked_admin").await;
+        let actor_id = Uuid::new_v4().to_string();
+        let org_id = Uuid::new_v4().to_string();
+        insert_scope_fixture_user(&db, &actor_id, UserType::Person).await;
+        insert_scope_fixture_user(&db, &org_id, UserType::Org).await;
+        let service = insert_scope_fixture_service(&db, &org_id, "org-replay-service", false).await;
+        let membership = test_membership(&org_id, &actor_id, OrgRole::Admin, None);
+        db.collection::<OrgMembership>(ORG_MEMBERSHIPS)
+            .insert_one(&membership)
+            .await
+            .expect("insert admin membership");
+
+        let service_ids = [service.id];
+        let original = create_api_key_with_scope_authorization(
+            &db,
+            &org_id,
+            Some(&actor_id),
+            "org-replay-key",
+            "proxy",
+            None,
+            None,
+            Some(&service_ids),
+            None,
+            Some(false),
+            Some(true),
+            None,
+            None,
+            Some("codex"),
+            None,
+            None,
+        )
+        .await
+        .expect("admin creates org key");
+        let successor_id = Uuid::new_v4().to_string();
+        assert!(matches!(
+            rotate_api_key_with_scope_authorization_and_id(
+                &db,
+                &org_id,
+                Some(&actor_id),
+                &original.id,
+                &successor_id,
+            )
+            .await
+            .expect("initial rotation"),
+            ApiKeyRotationOutcome::Created(_)
+        ));
+
+        db.collection::<OrgMembership>(ORG_MEMBERSHIPS)
+            .update_one(
+                doc! { "_id": &membership.id },
+                doc! { "$set": { "revoked_at": bson::DateTime::now() } },
+            )
+            .await
+            .expect("revoke membership");
+        let error = rotate_api_key_with_scope_authorization_and_id(
+            &db,
+            &org_id,
+            Some(&actor_id),
+            &original.id,
+            &successor_id,
+        )
+        .await
+        .expect_err("replay must revalidate current org authority");
+        assert!(matches!(error, AppError::OrgRoleInsufficient(_)));
+    }
+
+    #[tokio::test]
     async fn validate_api_key_happy_path() {
         let Some(db) = connect_test_database("key_svc_val_ok").await else {
             eprintln!("skipping: no MongoDB");
@@ -1491,6 +2143,11 @@ mod tests {
             .expect("should validate");
         assert_eq!(returned_uid, user_id);
         assert_eq!(key.name, "validate-me");
+        let touched = get_api_key(&db, &user_id, &created.id)
+            .await
+            .expect("key remains active");
+        assert_eq!(touched.state_version, 2);
+        assert!(touched.last_used_at.is_some());
     }
 
     #[tokio::test]
@@ -1569,6 +2226,12 @@ mod tests {
         .await
         .expect("should update");
         assert_eq!(updated.name, "new-name");
+        assert_eq!(updated.state_version, 2);
+        assert!(
+            updated
+                .updated_at
+                .is_some_and(|value| value >= created.updated_at)
+        );
     }
 
     #[tokio::test]

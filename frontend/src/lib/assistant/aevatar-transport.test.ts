@@ -5420,6 +5420,37 @@ describe("chat action cards", () => {
     });
   });
 
+  it("deduplicates a replayed key.rotate frame by exact normalized predecessor", async () => {
+    stubFetch(
+      routeStream([
+        { type: "RUN_STARTED", turnId: TURN_ID },
+        actionRequestFrame({
+          action: "key.rotate",
+          params: { keyId: " key-predecessor-alpha " },
+        }),
+        actionRequestFrame({
+          action: "key.rotate",
+          params: { keyId: "key-predecessor-alpha" },
+        }),
+        { type: "RUN_FINISHED", runFinished: { status: "blocked" } },
+      ]),
+    );
+    const transport = new AevatarAssistantTransport();
+    await seedActorConversation(transport);
+    await collectTurn(transport, "Rotate the exact key");
+
+    const cards = await actionCardsOf(transport);
+    expect(cards).toHaveLength(1);
+    expect(cards[0]).toMatchObject({
+      action: "key.rotate",
+      status: "pending",
+      params: {
+        variant: "key_rotate",
+        key_id: "key-predecessor-alpha",
+      },
+    });
+  });
+
   it("patches conflicted cards when a connected service could not be reported", async () => {
     const fetchMock = stubFetch(
       routeStream([
