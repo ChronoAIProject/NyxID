@@ -24,6 +24,78 @@ verified and addressed; §7 maps each finding → resolution.
 shows non-trivial active usage, that is a signal to revisit the policy with Calvin — not a
 reason to silently soften it.
 
+## 0a. PR 0 live findings — VERIFIED 2026-08-11
+
+Run against production (`https://nyx-api.chrono-ai.fun`) by **two independent agents** (Opus
+and a blind GPT Sol verifier given no prior results). Findings agreed on every point.
+
+### Q1 — plan gate: **`auto`** ✅
+
+`nyxid.task.snapshot.gate` = `{"mode":"auto"}`, transitioning to
+`{"mode":"auto","status":"satisfied","reason":"This plan contains only locally auto-admitted
+operations."}`.
+
+**Consequence:** `plan.resolve` is *not* a PR 3 blocker. The merge matrix takes its **`auto`**
+row — PR 1 and PR 2 may merge independently. The gate slice stays in PR 4.
+
+### Q2 — capability parity: **FAILS. PR 3 is blocked.** ❌
+
+The typed path is a real capability regression today. Identical prompt, both surfaces:
+
+| | Legacy (Studio) | Typed |
+|---|---|---|
+| *"List my connected services…"* | Calls `nyxid_services`, returns 117 records grouped by service | **No assistant text.** `RUN_ERROR` / `USE_SKILL_ACCESS_DENIED` |
+
+- Typed tool set (11, self-reported): `nyxid_catalog`, `nyxid_llm_status`,
+  `nyxid_require_service`, `web_search`, `ask_user`, `condition_evaluate`, `use_skill`,
+  `ornn_search_skills`, `aevatar_start_workflow`, `aevatar_observe_run`,
+  `aevatar_read_workflow_run_artifact`.
+- **Legacy's `nyxid_services` is absent from the typed composition.** That named tool is the
+  concrete parity ask for Aevatar.
+- Typed's fallback attempt — `use_skill` for `nyxid-service-discovery` — returned
+  `TOOL_CALL_END.result: "The skill could not be loaded."` then terminated the turn.
+- Typed advertises `use_skill` as callable while the real invocation is denied, so its own
+  enumeration is misleading under current production authorization.
+
+**This is Aevatar-side provisioning, not NyxID code.** NyxID's facade authenticated,
+forwarded, and streamed both surfaces correctly.
+
+### What the contract got right
+
+Everything mechanical passed on both runs, which is why PR 1/PR 2 are safe to build:
+
+- `RUN_STARTED` carries authoritative `actorId` + `turnId`, echoed in
+  `runStarted.threadId`/`runId`; follow-ups reuse the actor and mint a new turn.
+- Custom frame order: `nyxid.task.snapshot` → `nyxid.task.step.changed`, repeated.
+- `/state` → `status: current` with the full snapshot; `?afterStateVersion=<v>` →
+  `not_modified`. Both `taskStatus` and `latestControlResult` present, confirming review RC2.
+- **The typed failure was itself contract-correct**: it committed a final task snapshot with
+  `status: "failed"` and `failureCode: "USE_SKILL_ACCESS_DENIED"` *before* the terminal. State
+  and terminal stayed consistent even as the capability failed.
+- Conversation ids are `nyxid-chat-{32 lowercase hex}` — matching PR 1's strict validator.
+
+### Two facts neither the plan nor the canon predicted
+
+1. **`canaryEffectFault`** is a live top-level `snapshot` key, absent from canon `0a867136`.
+   Direct evidence for PR 2's "tolerate unknown additive fields" rule — a strict decoder that
+   rejected unknown keys would break on production today.
+2. **Legacy's answer is correct but misleading.** All 117 rows are `connected: true`, but only
+   **42** are `is_active: true` (verified independently against `GET /api/v1/keys`). Parity
+   with legacy is therefore the floor, not the goal — do not treat its phrasing as a target.
+
+### Full `/state` snapshot keys (production, 24)
+
+```text
+activeStepSummary, activeTask, activeTurn, actorId, attentionKind, attentionSince,
+canaryEffectFault, continuationAdmission, controlFence, latestApprovalResolution,
+latestControlResult, latestInputResolution, latestStepControlResult, latestTurn,
+pendingActions, pendingApproval, pendingInput, progressSequence, recentActions,
+recentStepControlResults, recentTerminalTurns, scopeId, stateVersion, taskStatus, updatedAt
+```
+
+**Gate on PR 3: Aevatar must expose `nyxid_services` (or equivalent) to the typed actor, or
+grant it `use_skill` access.** Re-run this matrix to confirm before flipping.
+
 ## 1. Objective
 
 Every **new** Assistant conversation runs end to end on Aevatar's typed `NyxIdChat` actor
