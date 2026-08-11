@@ -266,8 +266,25 @@ pub async fn create_key(
     request: KeyCreateActionRequest,
 ) -> AppResult<KeyCreateActionResult> {
     let request = normalize_request(request)?;
-    validate_personal_service_ids(db, user_id, &request.allowed_service_ids).await?;
     let fingerprint = request_fingerprint(&request)?;
+    if let Some(receipt) = find_receipt(db, user_id, &request.action_request_id).await? {
+        if receipt.request_fingerprint != fingerprint {
+            return Err(AppError::Conflict(
+                "actionRequestId was already used with different key parameters".to_string(),
+            ));
+        }
+        if let Some(key_id) = recover_reserved_key(db, user_id, &receipt).await? {
+            if receipt.status != AssistantActionReceiptStatus::Completed {
+                mark_completed(db, &receipt).await?;
+            }
+            return Ok(KeyCreateActionResult::Replayed { key_id });
+        }
+
+        validate_personal_service_ids(db, user_id, &request.allowed_service_ids).await?;
+        return create_reserved_key(db, user_id, &request, &receipt).await;
+    }
+
+    validate_personal_service_ids(db, user_id, &request.allowed_service_ids).await?;
     let receipt = reserve_receipt(db, user_id, &request, &fingerprint).await?;
     if receipt.request_fingerprint != fingerprint {
         return Err(AppError::Conflict(
@@ -505,6 +522,44 @@ mod tests {
         assert!(matches!(
             create_key(&db, &user_id, changed).await,
             Err(AppError::Conflict(_))
+        ));
+        assert_eq!(
+            db.collection::<ApiKey>(API_KEYS)
+                .count_documents(doc! { "user_id": &user_id })
+                .await
+                .expect("count keys"),
+            1
+        );
+    }
+
+    #[tokio::test]
+    async fn exact_replay_survives_service_deactivation() {
+        let Some((db, user_id, service_id)) =
+            prepare_database("assistant_key_create_deactivated_replay").await
+        else {
+            return;
+        };
+        let created = create_key(&db, &user_id, exact_request(&service_id))
+            .await
+            .expect("initial execution");
+        let KeyCreateActionResult::Created(created) = created else {
+            panic!("initial execution must create the key");
+        };
+
+        db.collection::<UserService>(USER_SERVICES)
+            .update_one(
+                doc! { "_id": &service_id, "user_id": &user_id },
+                doc! { "$set": { "is_active": false } },
+            )
+            .await
+            .expect("deactivate service");
+
+        let replayed = create_key(&db, &user_id, exact_request(&service_id))
+            .await
+            .expect("durable exact replay");
+        assert!(matches!(
+            replayed,
+            KeyCreateActionResult::Replayed { key_id } if key_id == created.id
         ));
         assert_eq!(
             db.collection::<ApiKey>(API_KEYS)

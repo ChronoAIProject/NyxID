@@ -43,7 +43,7 @@ const assistantKeyCreateResponseSchema = z.discriminatedUnion("replayed", [
 const serviceSnapshotSchema = z
   .object({
     id: actionControlIdentitySchema,
-    is_active: z.literal(true),
+    is_active: z.boolean(),
     credential_source: z.object({ type: z.literal("personal") }).passthrough(),
   })
   .passthrough();

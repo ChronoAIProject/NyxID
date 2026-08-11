@@ -252,6 +252,37 @@ describe("AssistantKeyCreateDialog", () => {
     expect(onComplete).toHaveBeenCalledWith("key-created");
   });
 
+  it("recovers a durable replay after an allowed service is deactivated", async () => {
+    installSuccessfulReads();
+    mockGet.mockImplementation((path: string) => {
+      if (path === "/keys/service-alpha") {
+        return Promise.resolve({
+          id: "service-alpha",
+          is_active: false,
+          credential_source: { type: "personal" },
+        });
+      }
+      if (path === "/api-keys/key-created") {
+        return Promise.resolve(keySnapshot());
+      }
+      return Promise.reject(new Error(`unexpected GET ${path}`));
+    });
+    mockPost.mockResolvedValue({
+      resource: { keyId: "key-created" },
+      replayed: true,
+    });
+    const { onComplete } = renderDialog();
+
+    await userEvent.click(screen.getByRole("button", { name: "Create key" }));
+    expect(
+      await screen.findByText("Exact least-scope access verified."),
+    ).toBeInTheDocument();
+    await userEvent.click(
+      screen.getByRole("button", { name: "Report existing key" }),
+    );
+    expect(onComplete).toHaveBeenCalledWith("key-created");
+  });
+
   it("rejects a replay response that includes secret material", async () => {
     mockGet.mockResolvedValue({
       id: "service-alpha",
