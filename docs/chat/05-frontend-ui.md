@@ -1,6 +1,6 @@
 # Assistant Chat Frontend Contract
 
-Last verified against `fcb79b18` (2026-08-01).
+Last verified against the typed-default architecture (2026-08-11).
 
 The assistant page presents one continuous transcript, an anchored composer, and a conversation sidebar. Network and stream states change the same surface in place; loading, thinking, streaming, terminal, and recovery states do not replace the application shell.
 
@@ -8,9 +8,19 @@ The page coordinator is `frontend/src/pages/assistant.tsx`. Query and turn owner
 
 ## Conversation selection
 
-The route may select a durable conversation or the entry screen. The current conversation is the history query result's canonical ID when available, otherwise the selected route ID. Placeholder-to-durable alias adoption repairs navigation without treating that repair as a new user selection.
+The route may select a durable conversation or the entry screen. The current
+conversation is the history query result's canonical ID when available,
+otherwise the selected route ID. A typed conversation becomes addressable only
+after a valid `RUN_STARTED` adopts its server-owned `nyxid-chat-*` identity.
 
-Selecting a sidebar row changes the active conversation and requests composer focus. Selecting New chat navigates to the empty chat screen and requests focus. New chat issues no create request. A first send allocates the local workflow placeholder and begins the Studio create turn lazily.
+Selecting a sidebar row changes the active conversation and requests composer
+focus. Selecting New chat navigates to the empty chat screen and requests focus.
+New chat issues no create request. A first send posts typed `text` lazily; it
+does not allocate a workflow placeholder or invoke a second engine.
+
+A selected `chatc-*` row is historical. Its transcript can be read and deleted,
+but its composer and actor controls are disabled. It cannot be continued,
+stopped, steered, approved, or used as an action-continuation target.
 
 A stale or missing conversation returns to a usable new-chat state. It does not retain a composer bound to a nonexistent durable ID.
 
@@ -104,7 +114,7 @@ Consecutive messages with the same role render as one visual group. Aevatar can 
 Supported blocks are:
 
 - `text`, rendered as formatted assistant text;
-- `run`, rendered as tool/workflow activity;
+- `run`, rendered as typed actor tool activity;
 - `approval_card`, rendered as a human decision card;
 - `connect_card`, rendered as credential recovery;
 - `action_card`, rendered as a v4 browser action;
@@ -148,7 +158,10 @@ The idle placeholder is `Message NyxID Assistant...`. During an active turn it i
 
 When idle, the control is an icon button named `Send message`. It is disabled for blank content or while the send mutation is still starting. Once the turn is active, it is replaced in the same control slot by an icon button named `Stop assistant turn`.
 
-Stop requests cancellation through `useCancelTurn`. Typed runs use their server turn identity when available. Workflow cancellation aborts the client stream and uses create recovery when a first-turn durable identity may have been created upstream.
+Stop requests typed `task.stop` through `useCancelTurn` only after the transport
+has adopted the server actor and turn identities. A missing or conflicting
+identity disables the control and reports a protocol error; it does not abort or
+recover through a legacy path.
 
 The controls have stable dimensions, so the send-to-stop transition does not resize the composer.
 
@@ -203,7 +216,9 @@ The description names the conversation and states that its history is removed pe
 
 One shared dialog serves the list. Pending delete identities are stored as a set, allowing a request to outlive a dismissed dialog and preventing duplicate submission for the same conversation even if another conversation is deleted concurrently. A failed request leaves the dialog open and retryable. A successful request closes the matching dialog and removes the row through query updates.
 
-The transport tombstones the durable identity during deletion, blocks sends and continuations, and prevents late stream or create-recovery adoption. The UI navigates to a safe remaining or empty state when the active conversation is deleted.
+The transport tombstones the durable identity during deletion, blocks typed sends
+and continuations, and prevents late stream adoption. The UI navigates to a safe
+remaining or empty state when the active conversation is deleted.
 
 Implementation: `frontend/src/components/assistant/assistant-sidebar.tsx`, `frontend/src/pages/assistant.tsx:handleDelete`, and `frontend/src/lib/assistant/aevatar-transport.ts:deleteConversation`.
 
@@ -217,7 +232,9 @@ Loading conversation...
 
 It does not briefly show the new-conversation empty state.
 
-A transcript read failure appears as a status notice above the still-usable thread and composer. The notice explains that new messages remain available. It does not replace the entire chat surface because actor/workflow streaming and history materialization are different upstream resources.
+A transcript read failure appears as a status notice above the still-usable
+typed thread and composer. It does not replace the entire chat surface because
+actor state and text-history materialization are different upstream resources.
 
 Conversation-list transport failures use the shared assistant transport error reporting. Query keys remain scoped to the current authenticated user and transport instance so stale data does not cross auth changes or mock/real transport switches.
 

@@ -1,6 +1,6 @@
 # Assistant Chat Testing and Gaps
 
-Last verified against `fix-new-chat-timing` (2026-08-04).
+Last verified against the typed-default architecture (2026-08-11).
 
 The assistant surface is covered at four levels: browser flow tests against a deterministic transport, React hook and component probes, transport/protocol unit tests, and Rust handler/service tests against reconstructed upstream calls. Live deployment capture remains a separate operational requirement.
 
@@ -130,15 +130,19 @@ This suite uses the real Aevatar transport with controlled history/stream respon
 - keepalive-insensitive watchdog behavior;
 - error and tool-result redaction;
 - v4 action-card validation, duplicate/conflict behavior, blocked re-arm, report batching, post-report copy, and delivery requeue;
-- Studio create body, continuation body, stable session ID, and positive fence;
-- reservation-specific 503 refresh and retry;
-- no Studio continuation replay after accepted stream truncation;
-- create recovery entry points, poll validation, history reconciliation, scope guard, alias adoption, terminal-kind preservation, and fail-closed exhaustion;
-- workflow client-only cancellation and workflow delete;
-- account-scope reset and abandoned-retry settlement, receipt-backed cold reads, raw-index evidence, active/pending mirror suppression, projection materialization, and pre-alias deletion intents;
-- new-chat keep-max convergence and retention at current, missing-turn, below-fence, legacy, and live-turn boundaries;
-- receiptless placeholder-alias DELETE, delete-before-context canonical cleanup, and persisted-intent reload sweeping; and
-- refusal to send typed actor approval/wake controls to a `chatc-...` identity.
+- typed `RUN_STARTED` outer/nested identity agreement and immutable adoption;
+- actor snapshot, step, input, approval, action, control, continuation, and
+  TaskPlan convergence across SSE and `/state`;
+- envelope outcomes, conditional `not_modified`, additive unknown snapshot
+  fields, safe-integer rejection, and no state advance on stale evidence;
+- plan-gate, input, approval, action, stop, steer, retry, and skip command
+  bodies built only from exact actor-owned facts;
+- one-replay typed delivery, terminal/timeout handling, and no fallback to a
+  workflow route after any typed failure;
+- legacy `chatc-*` transcript/list/delete compatibility with disabled send and
+  control affordances; and
+- typed pending input, approval, and action surviving a mixed text-history
+  reload without history overwriting the ActorProjection.
 
 Captured fixtures in `frontend/src/lib/assistant/__fixtures__/aevatar-nyxid-chat-stream.sse` and `aevatar-chat-history.json` are replayed through awkward byte chunks to exercise incremental parsing and history mapping.
 
@@ -152,7 +156,8 @@ Supporting unit suites isolate the components:
 - `transport.test.ts` and `mock-data.test.ts`: transport selection and deterministic mock behavior;
 - component tests for thread, composer, sidebar, text, run, approval, connect, action, and artifact rendering;
 - draft, context, and wire-log store tests;
-- `assistant-receipts.test.ts` and `assistant-receipt-store.test.ts`: corrupt entry rejection, positive fences, timestamp skew, per-account namespaces, independent caps, storage fallback, cross-tab rehydration, and materialization-timer deduplication;
+- ActorProjection/reload tests: corrupt or mismatched envelope rejection,
+  current-state convergence, and transcript non-overwrite;
 - `backoff.test.ts`: nonzero jitter floor and capped deadline-spanning delays; and
 - `frontend/src/pages/assistant.test.tsx`: page-level selection, send, and state composition.
 
@@ -241,7 +246,9 @@ reconciler into that flag without making the accounting outcome-aware.
 - conversation path-segment safety and prefix family selection;
 - shared-index filtering, dedupe, cursor handling, and newest-first sorting;
 - typed command discrimination, unknown-field rejection, control identities, secret rejection, bounds, exact reconstruction, response kind, and action resources;
-- create-only `commandId`, continuation-only positive `minimumStateVersion`, prompt trimming, exact Studio body order, and optional `sessionId`; and
+- typed text create/continuation, all nine command discriminators, strict
+  typed-ID validation on command and resource routes, and rejection of unknown
+  attachment or `inputParts` fields; and
 - all canonical upstream path builders.
 
 The test `migration_guard_keeps_scoped_typed_commands_and_per_conversation_commands_out` prevents removed routing shapes from returning. Typed commands stay on `POST /api/chat`; command routes are not reintroduced beneath scoped or per-conversation paths. This guard protects the upstream dispatch contract from an accidental return to older endpoint families.
@@ -253,7 +260,7 @@ The integration-style assistant tests live with proxy handler tests in `backend/
 `assistant_chat_handlers_rebuild_bodies_for_the_admin_service` provisions a controlled platform service and observes upstream requests. It verifies:
 
 - requests resolve the admin-managed row;
-- typed and workflow bodies are rebuilt rather than passed through;
+- typed bodies are rebuilt rather than passed through;
 - `Accept`, content type, and idempotency headers match the command;
 - the upstream path is canonical;
 - caller-supplied fields do not survive reconstruction;
@@ -264,7 +271,9 @@ The integration-style assistant tests live with proxy handler tests in `backend/
 
 The test-only upstream echo facility in `backend/src/handlers/assistant.rs` captures method, path, safe body, selected headers, and identity-mode metadata. It redacts credential material and is enabled only through the controlled debug/test path.
 
-`assistant_list_drains_mixed_history_pages_and_captures_every_upstream_call` verifies cursor draining across typed, workflow, and unrelated history rows, including every upstream page request.
+`assistant_list_drains_mixed_history_pages_and_captures_every_upstream_call`
+verifies cursor draining across typed, legacy `chatc-*`, and unrelated history
+rows, including every upstream page request.
 
 `assistant_deleted_scoped_command_routes_are_unroutable` verifies obsolete scoped typed-command routes are not mounted.
 
@@ -303,14 +312,18 @@ Playwright is available separately through the frontend's `test:e2e` script. The
 
 ## Known gaps
 
-- Live production request/response capture is outstanding. The available capture tokens are rotated or invalid, so no current capture proves the deployed end-to-end request, identity headers, stream context, and terminal sequence.
-- The deployed Aevatar composition is unproven. Source and checked-in Mainnet configuration enable the action registry and define the identity assertion, but a live host has not demonstrated that the expected composition and service registration are active.
-- The workflow `scopeId` guard is enforce-when-known. When the frontend auth store has not hydrated, context adoption validates conversation, state, and turn but cannot require an exact local user match. Requiring scope unconditionally waits on the live capture to prove deployed frame ordering and field presence.
-- `nyxid.action.request` and `service.connect` are emitted only by the typed NyxIdChat producer. Normal new browser conversations use the Studio workflow engine, so action/connect cards are not produced on that path.
-- Workflow approval decisions are unsupported in this assistant mount. The client refuses to send the typed actor approval route for a `chatc-...` conversation.
-- Workflow runs have no server-side stop route in this mount. Stop aborts the browser stream; first-turn cancellation also performs background create recovery so an upstream-created conversation is not lost.
-- Aevatar Chat History is text-oriented. Structured action, approval, run, connect, and artifact blocks are retained in the browser mirror and merged around materialized text, but they are not yet a complete durable server transcript.
-- Pending action cards do not survive a full page reload. Durable history is text-only, the history merge can preserve only cards still held in memory, and no state-based card rehydration exists. A reload before the actor re-emits or verifies the action loses the pending card.
-- Create recovery does not inspect the recovered `status`. A terminal-failure status such as `failed`, `abandoned`, or `append_rejected` is adoptable whenever the identity fields validate and transcript reconciliation passes. See [Wire contract](02-wire-contract.md).
-- The frontend accepts the legacy flat transcript array and the wrapped `{messages, stateVersion}` form. This compatibility form remains until every supported Aevatar environment is confirmed on the wrapped contract.
-- The steady-state identity-token service-row cutover is code- and configuration-verified but not live-verified. In particular, no current production capture proves `forward_access_token=false` with both identity assertion and delegated capability present at Aevatar.
+- The production typed path is live-verified for `RUN_STARTED` identity echo,
+  task snapshot/step-change order, conditional `not_modified`, and automatic
+  plan-gate satisfaction. Its snapshot has an additive `canaryEffectFault`
+  field absent from the pinned canon; fixtures must retain that decoder case.
+- The typed actor cannot complete a connected-service inventory request. It
+  terminates `RUN_ERROR / USE_SKILL_ACCESS_DENIED` because its provisioned tool
+  set omits `nyxid_services`. That Aevatar capability gap blocks deletion of the
+  legacy send path; historical record counts are not evidence of active-service
+  parity.
+- Aevatar history remains text-oriented. Typed pending input, approval, action,
+  task, control, and continuation facts must rehydrate from `/state`, not from
+  text history or an in-memory merge.
+- The frontend accepts legacy flat and wrapped transcript forms for historical
+  `chatc-*` display only. Neither shape grants a legacy conversation a send or
+  control capability.
