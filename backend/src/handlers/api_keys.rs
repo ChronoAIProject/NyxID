@@ -1806,11 +1806,52 @@ pub async fn reauthorize_durable_grants(
 #[cfg(test)]
 mod tests {
     use super::{
-        UpdateApiKeyRequest, extract_response_status, is_error_event, parse_expires_at,
-        usage_date_range,
+        ApiKeyResponse, UpdateApiKeyRequest, extract_response_status, is_error_event,
+        parse_expires_at, usage_date_range,
     };
     use chrono::{Duration, NaiveDate, Utc};
     use serde_json::json;
+
+    #[test]
+    fn api_key_read_response_exposes_lineage_without_secret_material() {
+        let response = ApiKeyResponse {
+            id: "successor-id".to_string(),
+            name: "rotated-key".to_string(),
+            description: None,
+            key_prefix: "nyxid_ag_public".to_string(),
+            scopes: "proxy".to_string(),
+            last_used_at: None,
+            expires_at: None,
+            is_active: true,
+            created_at: "2026-08-11T00:00:00Z".to_string(),
+            rotation_predecessor_id: Some("predecessor-id".to_string()),
+            state_version: 1,
+            updated_at: Some("2026-08-11T00:00:00Z".to_string()),
+            allowed_service_ids: Vec::new(),
+            allowed_node_ids: Vec::new(),
+            allow_all_services: true,
+            allow_all_nodes: true,
+            allowed_services: Vec::new(),
+            allowed_nodes: Vec::new(),
+            rate_limit_per_second: None,
+            rate_limit_burst: None,
+            platform: Some("codex".to_string()),
+            callback_url: None,
+            purpose: Default::default(),
+            scheduled_write_enabled: false,
+            bindings_count: 0,
+            credential_source:
+                crate::handlers::user_services_handler::CredentialSourceResponse::Personal,
+        };
+
+        let json = serde_json::to_value(response).expect("serialize API key read response");
+        assert_eq!(json["rotation_predecessor_id"], "predecessor-id");
+        assert_eq!(json["state_version"], 1);
+        assert_eq!(json["updated_at"], "2026-08-11T00:00:00Z");
+        assert!(json.get("full_key").is_none());
+        assert!(json.get("key_hash").is_none());
+        assert!(json.get("secret").is_none());
+    }
 
     #[test]
     fn parse_expires_at_accepts_future_rfc3339() {

@@ -691,44 +691,33 @@ pub async fn rotate_api_key_with_scope_authorization_and_id(
             let operation: AppResult<RotationTransactionOutcome> = async {
                 let api_keys = db.collection::<ApiKey>(API_KEYS);
 
-                if let Some(existing) = api_keys
+                let replay_successor = if let Some(existing) = api_keys
                     .find_one(doc! { "_id": &successor_for_transaction })
                     .session(&mut *session)
                     .await?
                 {
-                    if existing.user_id == user_id
-                        && existing.rotation_predecessor_id.as_deref()
-                            == Some(predecessor_id.as_str())
+                    if existing.user_id != user_id {
+                        return Err(AppError::NotFound("API key not found".to_string()));
+                    }
+                    if existing.rotation_predecessor_id.as_deref() == Some(predecessor_id.as_str())
                         && existing.is_active
                         && existing.state_version > 0
                         && existing.updated_at.is_some()
                     {
-                        return Ok(RotationTransactionOutcome::AlreadyCommitted(existing));
+                        Some(existing)
+                    } else {
+                        return Err(AppError::Conflict(
+                            "reserved rotation successor is already in use".to_string(),
+                        ));
                     }
-                    return Err(AppError::Conflict(
-                        "reserved rotation successor is already in use".to_string(),
-                    ));
-                }
-
-                if let Some(existing_successor) = api_keys
-                    .find_one(doc! {
-                        "user_id": &user_id,
-                        "rotation_predecessor_id": &predecessor_id,
-                    })
-                    .session(&mut *session)
-                    .await?
-                {
-                    return Err(AppError::Conflict(format!(
-                        "API key was already rotated to successor {}",
-                        existing_successor.id
-                    )));
-                }
+                } else {
+                    None
+                };
 
                 let old_key = api_keys
                     .find_one(doc! {
                         "_id": &predecessor_id,
                         "user_id": &user_id,
-                        "is_active": true,
                     })
                     .session(&mut *session)
                     .await?
@@ -767,6 +756,32 @@ pub async fn rotate_api_key_with_scope_authorization_and_id(
                         &mut *session,
                     )
                     .await?;
+                }
+
+                if let Some(existing) = replay_successor {
+                    if old_key.is_active {
+                        return Err(AppError::Conflict(
+                            "rotation lineage is not committed".to_string(),
+                        ));
+                    }
+                    return Ok(RotationTransactionOutcome::AlreadyCommitted(existing));
+                }
+
+                if let Some(existing_successor) = api_keys
+                    .find_one(doc! {
+                        "user_id": &user_id,
+                        "rotation_predecessor_id": &predecessor_id,
+                    })
+                    .session(&mut *session)
+                    .await?
+                {
+                    return Err(AppError::Conflict(format!(
+                        "API key was already rotated to successor {}",
+                        existing_successor.id
+                    )));
+                }
+                if !old_key.is_active {
+                    return Err(AppError::NotFound("API key not found".to_string()));
                 }
 
                 let mut cursor = db
@@ -1882,6 +1897,17 @@ mod tests {
         );
         assert_eq!(replayed.state_version, 1);
 
+        let owner_isolation = rotate_api_key_with_scope_authorization_and_id(
+            &db,
+            &Uuid::new_v4().to_string(),
+            None,
+            &original.id,
+            &successor_id,
+        )
+        .await
+        .expect_err("another owner must not learn that the successor exists");
+        assert!(matches!(owner_isolation, AppError::NotFound(_)));
+
         let conflict = rotate_api_key_with_scope_authorization_and_id(
             &db,
             &user_id,
@@ -1993,6 +2019,74 @@ mod tests {
             .await
             .expect("revoked rotation leaves predecessor active");
         assert_eq!(untouched.state_version, 1);
+    }
+
+    #[tokio::test]
+    async fn rotation_replay_revalidates_revoked_org_admin_authority() {
+        let db = connect_transaction_test_database("key_svc_rotate_replay_revoked_admin").await;
+        let actor_id = Uuid::new_v4().to_string();
+        let org_id = Uuid::new_v4().to_string();
+        insert_scope_fixture_user(&db, &actor_id, UserType::Person).await;
+        insert_scope_fixture_user(&db, &org_id, UserType::Org).await;
+        let service = insert_scope_fixture_service(&db, &org_id, "org-replay-service", false).await;
+        let membership = test_membership(&org_id, &actor_id, OrgRole::Admin, None);
+        db.collection::<OrgMembership>(ORG_MEMBERSHIPS)
+            .insert_one(&membership)
+            .await
+            .expect("insert admin membership");
+
+        let service_ids = [service.id];
+        let original = create_api_key_with_scope_authorization(
+            &db,
+            &org_id,
+            Some(&actor_id),
+            "org-replay-key",
+            "proxy",
+            None,
+            None,
+            Some(&service_ids),
+            None,
+            Some(false),
+            Some(true),
+            None,
+            None,
+            Some("codex"),
+            None,
+            None,
+        )
+        .await
+        .expect("admin creates org key");
+        let successor_id = Uuid::new_v4().to_string();
+        assert!(matches!(
+            rotate_api_key_with_scope_authorization_and_id(
+                &db,
+                &org_id,
+                Some(&actor_id),
+                &original.id,
+                &successor_id,
+            )
+            .await
+            .expect("initial rotation"),
+            ApiKeyRotationOutcome::Created(_)
+        ));
+
+        db.collection::<OrgMembership>(ORG_MEMBERSHIPS)
+            .update_one(
+                doc! { "_id": &membership.id },
+                doc! { "$set": { "revoked_at": bson::DateTime::now() } },
+            )
+            .await
+            .expect("revoke membership");
+        let error = rotate_api_key_with_scope_authorization_and_id(
+            &db,
+            &org_id,
+            Some(&actor_id),
+            &original.id,
+            &successor_id,
+        )
+        .await
+        .expect_err("replay must revalidate current org authority");
+        assert!(matches!(error, AppError::OrgRoleInsufficient(_)));
     }
 
     #[tokio::test]
