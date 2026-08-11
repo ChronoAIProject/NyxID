@@ -23,6 +23,9 @@ use tower::ServiceExt;
 use uuid::Uuid;
 
 use crate::errors::{AppError, AppResult};
+use crate::models::approval_request::{
+    ApprovalRequest, COLLECTION_NAME as APPROVAL_REQUESTS, ExactServiceApprovalBinding,
+};
 use crate::models::billing_rate_cache::{BillingRateCache, COLLECTION_NAME as BILLING_RATE_CACHE};
 use crate::models::billing_wallet::{
     BillingWallet, COLLECTION_NAME as BILLING_WALLET, CollectionState, PlanKind,
@@ -31,7 +34,11 @@ use crate::models::downstream_service::{
     COLLECTION_NAME as DOWNSTREAM_SERVICES, DownstreamService,
 };
 use crate::models::node::{COLLECTION_NAME as NODES, Node, NodeMetrics, NodeStatus};
+use crate::models::notification_channel::{
+    COLLECTION_NAME as NOTIFICATION_CHANNELS, NotificationChannel,
+};
 use crate::models::provider_config::{COLLECTION_NAME as PROVIDER_CONFIGS, ProviderConfig};
+use crate::models::service_approval_config::ApprovalMode;
 use crate::models::service_billing::{BillingMetric, PlatformUsage};
 use crate::models::ssh_auth_mode::SshAuthMode;
 use crate::models::usage_meter::{
@@ -473,6 +480,149 @@ async fn billing_route_coverage_smoke() {
     );
     assert_route_settled(&db, &mcp.slug, BillingMetric::Requests).await;
     exercised_routes.insert("/mcp (POST)");
+
+    let now = Utc::now();
+    db.collection::<NotificationChannel>(NOTIFICATION_CHANNELS)
+        .insert_one(NotificationChannel {
+            id: Uuid::new_v4().to_string(),
+            user_id: owner_id.clone(),
+            telegram_chat_id: None,
+            telegram_username: None,
+            telegram_enabled: false,
+            telegram_link_code: None,
+            telegram_link_code_expires_at: None,
+            approval_timeout_secs: 300,
+            grant_expiry_days: 30,
+            approval_required: true,
+            push_enabled: false,
+            push_devices: vec![],
+            created_at: now,
+            updated_at: now,
+        })
+        .await
+        .expect("enable per-request approval for exact redemption smoke");
+    let exact_arguments = serde_json::json!({
+        "method": "GET",
+        "path": "/exact-billing?source=approval",
+    });
+    let exact_catalog = crate::services::mcp_service::load_operation_catalog(
+        &db,
+        state.node_ws_manager.as_ref(),
+        &owner_id,
+        crate::services::mcp_service::NodeScope::Unrestricted,
+        crate::services::mcp_service::ServiceScope::Unrestricted,
+    )
+    .await
+    .expect("load exact redemption catalog");
+    let exact_service = exact_catalog
+        .services
+        .iter()
+        .find(|service| service.service_id == mcp.id)
+        .expect("billing MCP service is present in exact catalog");
+    let exact_endpoint = exact_service
+        .endpoints
+        .iter()
+        .find(|endpoint| endpoint.endpoint_id == "nyx_generic_proxy_v1")
+        .expect("generic billing MCP request endpoint");
+    let endpoint_id = exact_endpoint.endpoint_id.clone();
+    let endpoint_contract_digest =
+        crate::services::mcp_service::endpoint_contract_digest(exact_endpoint);
+    let operation_digest = crate::services::mcp_service::exact_operation_digest(
+        &mcp.id,
+        exact_endpoint,
+        &exact_arguments,
+    );
+    let catalog_digest =
+        crate::services::mcp_service::operation_catalog_digest(&exact_catalog.services);
+    let request_id = Uuid::new_v4().to_string();
+    let operation_id = "billing-exact-operation".to_string();
+    let operation_generation = 1;
+    let effect_idempotency_key = "billing-exact-idempotency".to_string();
+    let request_key = crate::services::mcp_service::canonical_sha256(serde_json::json!({
+        "contract_version": "nyxid-exact-approval-request.v1",
+        "requester_type": "access_token",
+        "requester_id": owner_id,
+        "actor_user_id": owner_id,
+        "operation_id": operation_id,
+        "operation_generation": operation_generation,
+        "idempotency_key": effect_idempotency_key,
+    }));
+    db.collection::<ApprovalRequest>(APPROVAL_REQUESTS)
+        .insert_one(ApprovalRequest {
+            id: request_id.clone(),
+            user_id: owner_id.clone(),
+            service_id: mcp.id.clone(),
+            service_name: exact_service.service_name.clone(),
+            service_slug: exact_service.service_slug.clone(),
+            requester_type: "access_token".to_string(),
+            requester_id: owner_id.clone(),
+            requester_label: None,
+            operation_summary: "GET /exact-billing".to_string(),
+            action_description: None,
+            http_method: Some("GET".to_string()),
+            resource: Some("/exact-billing".to_string()),
+            verb: Some("read".to_string()),
+            grant_scope: None,
+            tool_name: None,
+            tool_call_id: None,
+            tool_arguments: None,
+            is_destructive: None,
+            approval_mode: ApprovalMode::PerRequest,
+            status: "approved".to_string(),
+            idempotency_key: request_key.clone(),
+            notification_channel: None,
+            telegram_message_id: None,
+            telegram_chat_id: None,
+            expires_at: now + Duration::minutes(5),
+            decided_at: Some(now),
+            decision_channel: Some("web".to_string()),
+            decision_idempotency_key: Some("billing-exact-decision".to_string()),
+            notify_user_ids: vec![owner_id.clone()],
+            from_org_policy: false,
+            exact_service: Some(ExactServiceApprovalBinding {
+                request_key,
+                actor_user_id: owner_id.clone(),
+                user_service_id: mcp.id.clone(),
+                endpoint_id,
+                catalog_digest: catalog_digest.clone(),
+                endpoint_contract_digest,
+                operation_digest: operation_digest.clone(),
+                operation_id: operation_id.clone(),
+                operation_generation,
+                effect_idempotency_key: effect_idempotency_key.clone(),
+                arguments: exact_arguments,
+                redemption: None,
+            }),
+            created_at: now,
+        })
+        .await
+        .expect("insert approved exact-service authority");
+    let redeem_body = serde_json::json!({
+        "catalog_digest": catalog_digest,
+        "operation_digest": operation_digest,
+        "operation_id": operation_id,
+        "operation_generation": operation_generation,
+        "idempotency_key": effect_idempotency_key,
+    });
+    let redeem_response = call_mounted_route(
+        &app,
+        route_request(
+            Method::POST,
+            &format!("/api/v1/approvals/exact-service/requests/{request_id}/redeem"),
+            &token,
+            Body::from(redeem_body.to_string()),
+        ),
+    )
+    .await;
+    let redeemed: serde_json::Value =
+        serde_json::from_slice(&redeem_response).expect("parse exact redemption response");
+    assert_eq!(redeemed["state"], "redeemed");
+    assert_route_settled_count(&db, &mcp.slug, BillingMetric::Requests, 2).await;
+    exercised_routes.insert("/api/v1/approvals/exact-service/requests/{request_id}/redeem");
+    db.collection::<NotificationChannel>(NOTIFICATION_CHANNELS)
+        .delete_one(doc! { "user_id": &owner_id })
+        .await
+        .expect("clear exact redemption approval policy before later route smoke cases");
 
     let node_mcp = insert_route_service(
         &db,
