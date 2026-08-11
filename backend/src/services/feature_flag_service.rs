@@ -1259,6 +1259,7 @@ mod tests {
                 "experimental:ai-assistant",
                 "experimental:billing",
                 "experimental:aevatar-chat-wire-log",
+                "experimental:direct-chat-engine",
             ]
         );
         assert_eq!(
