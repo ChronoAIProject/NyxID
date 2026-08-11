@@ -46,7 +46,11 @@ import {
   AssistantTurnCancelledError,
 } from "@/lib/assistant/errors";
 import { markChatActivity } from "@/lib/assistant/connect-watch";
-import { assistantTransport } from "@/lib/assistant/transport";
+import {
+  assistantEngineForConversationId,
+  assistantTransport,
+  selectAssistantTransportKind,
+} from "@/lib/assistant/transport";
 import { parseAssistantSearch } from "@/lib/assistant/search";
 import { FEATURE_FLAG } from "@/lib/feature-flags";
 import type { ActionReport } from "@/schemas/assistant-actions";
@@ -126,12 +130,8 @@ function belongsToOtherEngine(
   engine: "aevatar" | "direct",
 ): boolean {
   if (!conversationId) return false;
-  if (engine === "direct") {
-    return /^(?:nyxid-chat-|chatc-|workflow-pending-|nyxid-pending-)/.test(
-      conversationId,
-    );
-  }
-  return conversationId.startsWith("direct-");
+  const conversationEngine = assistantEngineForConversationId(conversationId);
+  return conversationEngine !== null && conversationEngine !== engine;
 }
 
 export function AssistantPage({
@@ -142,7 +142,13 @@ export function AssistantPage({
   const navigate = useNavigate();
   const queryClient = useQueryClient();
   const user = useAuthStore((state) => state.user);
-  const directChatEnabled = useFeature(FEATURE_FLAG.DIRECT_CHAT_ENGINE);
+  const directChatFlagEnabled = useFeature(FEATURE_FLAG.DIRECT_CHAT_ENGINE);
+  const transportKind = selectAssistantTransportKind({
+    mode: import.meta.env.MODE,
+    dev: import.meta.env.DEV,
+    search: typeof window === "undefined" ? "" : window.location.search,
+  });
+  const directChatEnabled = directChatFlagEnabled && transportKind !== "mock";
   const engine = directChatEnabled ? "direct" : "aevatar";
   const keys = assistantKeysFor(engine);
   useAssistantEngine(engine);
@@ -232,15 +238,25 @@ export function AssistantPage({
     episodeState?.open === true;
 
   useEffect(() => {
-    const engineChanged = previousEngineRef.current !== engine;
+    const retiredEngine = previousEngineRef.current;
+    const engineChanged = retiredEngine !== engine;
     previousEngineRef.current = engine;
     if (!engineChanged && !otherEngineSelected) return;
 
     if (selectedFromSearch && otherEngineSelected) {
       assistantTransport.cancelActiveTurn(selectedFromSearch);
     }
-    if (engineChanged) {
-      useAssistantDraftStore.getState().clear();
+    if (engineChanged && user) {
+      const draftStore = useAssistantDraftStore.getState();
+      for (const key of Object.keys(draftStore.drafts)) {
+        if (!key.startsWith("conv:")) continue;
+        const conversationId = key.slice("conv:".length);
+        if (
+          assistantEngineForConversationId(conversationId) === retiredEngine
+        ) {
+          draftStore.clearDraft(user.id, key);
+        }
+      }
     } else if (user && selectedFromSearch) {
       useAssistantDraftStore
         .getState()

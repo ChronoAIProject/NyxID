@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useReducer } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { api } from "@/lib/api-client";
 import {
@@ -39,28 +39,28 @@ export function useDirectModels() {
 
 export function useDirectConversationSettings(
   conversationId: string | undefined,
+  defaultModel: string | undefined,
 ): {
   readonly settings: DirectConversationSettings;
   readonly setModel: (model: string) => void;
   readonly setSkill: (skillSlug: string | null) => void;
 } {
-  const [settings, setSettings] = useState(() =>
-    directAssistantTransport.getSettings(conversationId),
-  );
+  const [, forceRender] = useReducer((revision: number) => revision + 1, 0);
 
-  useEffect(() => {
-    setSettings(directAssistantTransport.getSettings(conversationId));
-  }, [conversationId]);
+  if (defaultModel) {
+    directAssistantTransport.seedDefaultModel(conversationId, defaultModel);
+  }
+  const settings = directAssistantTransport.getSettings(conversationId);
 
   return {
     settings,
     setModel: (model) => {
       directAssistantTransport.setModel(conversationId, model);
-      setSettings((current) => ({ ...current, model }));
+      forceRender();
     },
     setSkill: (skillSlug) => {
       directAssistantTransport.setSkill(conversationId, skillSlug);
-      setSettings((current) => ({ ...current, skillSlug }));
+      forceRender();
     },
   };
 }

@@ -14,6 +14,7 @@ import type {
 
 class EngineProbe implements AssistantTransport {
   readonly calls: string[] = [];
+  readonly handleCancel = vi.fn();
   private readonly label: string;
 
   constructor(label: string) {
@@ -70,7 +71,7 @@ class EngineProbe implements AssistantTransport {
     void content;
     void onEvent;
     this.calls.push(`send:${conversationId}`);
-    return { turnId: `${this.label}-turn`, cancel: vi.fn() };
+    return { turnId: `${this.label}-turn`, cancel: this.handleCancel };
   }
 
   cancelActiveTurn(conversationId: string): void {
@@ -145,6 +146,24 @@ describe("AssistantEngineRouter", () => {
       "send:nyxid-chat-live-1",
       "cancel:nyxid-chat-live-1",
     ]);
+    expect(direct.calls).toEqual([]);
+  });
+
+  it("returns the delegate handle with its own cancellation semantics", () => {
+    const aevatar = new EngineProbe("aevatar");
+    const direct = new EngineProbe("direct");
+    const router = new AssistantEngineRouter(aevatar, direct);
+
+    const handle = router.sendMessage(
+      "nyxid-chat-live-1",
+      "hello",
+      () => undefined,
+    );
+    router.setSelectedEngine("direct");
+    handle.cancel();
+
+    expect(aevatar.handleCancel).toHaveBeenCalledOnce();
+    expect(aevatar.calls).toEqual(["send:nyxid-chat-live-1"]);
     expect(direct.calls).toEqual([]);
   });
 });

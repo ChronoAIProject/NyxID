@@ -124,7 +124,9 @@ export function useAssistantEngine(engine: AssistantEngine): void {
   const previousEngine = useRef(engine);
 
   // Query functions may start during this render. Keep selection synchronous
-  // with the key namespace instead of waiting for an effect after commit.
+  // with the key namespace instead of waiting for an effect after commit; a
+  // discarded render leaves the selection set; the next committed render
+  // re-asserts it.
   setAssistantTransportEngine(engine);
 
   useEffect(() => {

@@ -45,7 +45,8 @@ describe("DirectChatControls", () => {
     const get = vi.spyOn(api, "get").mockImplementation(async (endpoint) => {
       if (endpoint === "/assistant/direct/models") {
         return [
-          { id: "gpt-5.5", label: "GPT-5.5", default: true },
+          { id: "gpt-5.5", label: "GPT-5.5", default: false },
+          { id: "gpt-5.4", label: "GPT-5.4", default: true },
           { id: "gpt-5.2", label: "GPT-5.2", default: false },
         ] as never;
       }
@@ -65,6 +66,12 @@ describe("DirectChatControls", () => {
         "A skill teaches the model about NyxID; it cannot take actions here.",
       ),
     ).toBeVisible();
+    await waitFor(() =>
+      expect(directAssistantTransport.getSettings()).toEqual({
+        model: "gpt-5.4",
+        skillSlug: null,
+      }),
+    );
 
     await event.click(screen.getByRole("combobox", { name: "Model" }));
     await event.click(screen.getByRole("option", { name: "GPT-5.2" }));
@@ -81,6 +88,47 @@ describe("DirectChatControls", () => {
     expect(directAssistantTransport.getSettings(conversation.id)).toEqual({
       model: "gpt-5.2",
       skillSlug: "nyxid",
+    });
+  });
+
+  it("falls back to the first published model when none is marked default", async () => {
+    vi.spyOn(api, "get").mockImplementation(async (endpoint) => {
+      if (endpoint === "/assistant/direct/models") {
+        return [
+          { id: "server-first", label: "Server First", default: false },
+          { id: "server-second", label: "Server Second", default: false },
+        ] as never;
+      }
+      return [] as never;
+    });
+
+    renderWithQuery(<DirectChatControls conversationId={undefined} />);
+
+    await waitFor(() =>
+      expect(directAssistantTransport.getSettings().model).toBe("server-first"),
+    );
+  });
+
+  it("does not replace an explicit model when the catalog arrives", async () => {
+    directAssistantTransport.setModel(undefined, "user-choice");
+    const get = vi.spyOn(api, "get").mockImplementation(async (endpoint) => {
+      if (endpoint === "/assistant/direct/models") {
+        return [
+          { id: "server-default", label: "Server Default", default: true },
+          { id: "user-choice", label: "User Choice", default: false },
+        ] as never;
+      }
+      return [] as never;
+    });
+
+    renderWithQuery(<DirectChatControls conversationId={undefined} />);
+
+    await waitFor(() => expect(get).toHaveBeenCalledTimes(2));
+    await waitFor(() => {
+      expect(screen.getByRole("combobox", { name: "Model" })).toHaveTextContent(
+        "User Choice",
+      );
+      expect(directAssistantTransport.getSettings().model).toBe("user-choice");
     });
   });
 });

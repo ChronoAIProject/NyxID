@@ -96,6 +96,56 @@ describe("DirectAssistantTransport streaming", () => {
     });
   });
 
+  it("keeps a 70-message transcript inside the server request caps", async () => {
+    let responseIndex = 0;
+    const fetchMock = vi.fn(async (...args: Parameters<typeof fetch>) => {
+      void args;
+      responseIndex += 1;
+      return sseResponse(
+        `data: {"id":"assistant-${String(responseIndex)}","choices":[{"delta":{"content":"reply-${String(responseIndex)}"},"finish_reason":"stop"}]}\n\ndata: [DONE]\n\n`,
+      );
+    });
+    const transport = new DirectAssistantTransport({ fetch: fetchMock });
+    const conversationId = await startedConversation(transport);
+
+    for (let index = 0; index < 35; index += 1) {
+      const events: TurnEvent[] = [];
+      transport.sendMessage(
+        conversationId,
+        `${String(index).padStart(2, "0")}:${"x".repeat(9_997)}`,
+        (event) => events.push(event),
+      );
+      await waitForTerminal(events);
+    }
+    expect((await transport.getHistory(conversationId)).messages).toHaveLength(
+      70,
+    );
+
+    fetchMock.mockClear();
+    const events: TurnEvent[] = [];
+    transport.sendMessage(conversationId, "newest user turn", (event) =>
+      events.push(event),
+    );
+    await waitForTerminal(events);
+
+    const requestBody = String(fetchMock.mock.calls[0]?.[1]?.body);
+    const request = JSON.parse(requestBody) as {
+      messages: Array<{ role: string; content: string }>;
+    };
+    const aggregateBytes = encoder.encode(
+      request.messages.map((message) => message.content).join(""),
+    ).byteLength;
+    expect(request.messages.length).toBeLessThanOrEqual(63);
+    expect(aggregateBytes).toBeLessThanOrEqual(256 * 1024);
+    expect(encoder.encode(requestBody).byteLength).toBeLessThanOrEqual(
+      256 * 1024,
+    );
+    expect(request.messages.at(-1)).toEqual({
+      role: "user",
+      content: "newest user turn",
+    });
+  });
+
   it("keeps reading after finish_reason through usage and [DONE]", async () => {
     const frames = [
       'data: {"id":"m","choices":[{"delta":{"content":"answer"},"finish_reason":"stop"}]}\n\n',
@@ -268,9 +318,46 @@ describe("DirectAssistantTransport authentication boundaries", () => {
       ),
     });
     const conversationId = await startedConversation(transport);
+    const events: TurnEvent[] = [];
 
-    transport.sendMessage(conversationId, "go", () => undefined);
+    transport.sendMessage(conversationId, "go", (event) => events.push(event));
+    await waitForTerminal(events);
     await vi.waitFor(() => expect(useAuthStore.getState().user).toBeNull());
+    expect(events.at(-1)).toMatchObject({
+      event: "turn.completed",
+      status: "failed",
+      error: { code: "http_401", message: "Session expired" },
+    });
+  });
+
+  it("surfaces a structured NyxID 4xx message for residual cap failures", async () => {
+    const transport = new DirectAssistantTransport({
+      fetch: vi.fn(
+        async () =>
+          new Response(
+            JSON.stringify({
+              error: "bad_request",
+              error_code: 1000,
+              message: "Conversation too long. Start a new chat.",
+            }),
+            { status: 400, headers: { "Content-Type": "application/json" } },
+          ),
+      ),
+    });
+    const conversationId = await startedConversation(transport);
+    const events: TurnEvent[] = [];
+
+    transport.sendMessage(conversationId, "go", (event) => events.push(event));
+    await waitForTerminal(events);
+
+    expect(events.at(-1)).toMatchObject({
+      event: "turn.completed",
+      status: "failed",
+      error: {
+        code: "http_400",
+        message: "Conversation too long. Start a new chat.",
+      },
+    });
   });
 
   it.each([

@@ -29,9 +29,13 @@ import type { ApiErrorResponse } from "@/types/api";
 const DIRECT_COMPLETIONS_URL = "/api/v1/assistant/direct/completions";
 const DEFAULT_DIRECT_MODEL = "gpt-5.5";
 const MAX_MESSAGE_CHARS = 32_768;
+const MAX_OUTGOING_MESSAGES = 63;
+const MAX_OUTGOING_CONTENT_BYTES = 256 * 1024;
+const MAX_OUTGOING_REQUEST_BYTES = 256 * 1024;
 const TITLE_CHARS = 40;
 const FIRST_BYTE_TIMEOUT_MS = 30_000;
 const IDLE_TIMEOUT_MS = 120_000;
+const UTF8_ENCODER = new TextEncoder();
 
 interface CompletionChunk {
   readonly id?: string;
@@ -62,6 +66,7 @@ interface StoredConversation {
   conversation: Conversation;
   turnState: TurnReducerState;
   settings: DirectConversationSettings;
+  modelSelected: boolean;
 }
 
 interface RunningTurn {
@@ -120,6 +125,29 @@ function toDirectMessages(
   return payload;
 }
 
+function toBoundedDirectMessages(
+  messages: readonly AssistantMessage[],
+): DirectMessage[] {
+  const transcript = toDirectMessages(messages);
+  const newestFirst: DirectMessage[] = [];
+  let contentBytes = 0;
+
+  for (
+    let index = transcript.length - 1;
+    index >= 0 && newestFirst.length < MAX_OUTGOING_MESSAGES;
+    index -= 1
+  ) {
+    const message = transcript[index];
+    if (!message) continue;
+    const messageBytes = UTF8_ENCODER.encode(message.content).byteLength;
+    if (contentBytes + messageBytes > MAX_OUTGOING_CONTENT_BYTES) break;
+    newestFirst.push(message);
+    contentBytes += messageBytes;
+  }
+
+  return newestFirst.reverse();
+}
+
 function isNyxidErrorEnvelope(value: unknown): value is ApiErrorResponse {
   return Boolean(
     value &&
@@ -166,6 +194,7 @@ export class DirectAssistantTransport implements AssistantTransport {
     model: DEFAULT_DIRECT_MODEL,
     skillSlug: null,
   };
+  private draftModelSelected = false;
 
   constructor(options: DirectTransportOptions = {}) {
     this.fetchFn = options.fetch ?? fetch;
@@ -184,6 +213,7 @@ export class DirectAssistantTransport implements AssistantTransport {
     this.running.clear();
     this.conversations.clear();
     this.draftSettings = { model: DEFAULT_DIRECT_MODEL, skillSlug: null };
+    this.draftModelSelected = false;
     this.ownerUserId = userId;
   }
 
@@ -204,6 +234,26 @@ export class DirectAssistantTransport implements AssistantTransport {
 
   setModel(conversationId: string | undefined, model: string): void {
     this.updateSettings(conversationId, { model });
+    if (!conversationId) {
+      this.draftModelSelected = true;
+      return;
+    }
+    const stored = this.conversations.get(conversationId);
+    if (stored) stored.modelSelected = true;
+  }
+
+  seedDefaultModel(conversationId: string | undefined, model: string): void {
+    this.ensureSignedInOwner();
+    if (!conversationId) {
+      if (this.draftModelSelected) return;
+      this.draftSettings = { ...this.draftSettings, model };
+      return;
+    }
+    const stored = this.conversations.get(conversationId);
+    if (!stored) throw new AssistantConversationNotFoundError();
+    if (stored.modelSelected) return;
+    stored.settings = { ...stored.settings, model };
+    stored.conversation = { ...stored.conversation, llm_model: model };
   }
 
   setSkill(conversationId: string | undefined, skillSlug: string | null): void {
@@ -233,8 +283,10 @@ export class DirectAssistantTransport implements AssistantTransport {
       conversation,
       turnState: EMPTY_TURN_STATE,
       settings: { ...this.draftSettings },
+      modelSelected: this.draftModelSelected,
     });
     this.draftSettings = { model: DEFAULT_DIRECT_MODEL, skillSlug: null };
+    this.draftModelSelected = false;
     return conversation;
   }
 
@@ -321,13 +373,20 @@ export class DirectAssistantTransport implements AssistantTransport {
       llm_model: stored.settings.model,
     };
 
-    const request: DirectRequest = {
-      messages: toDirectMessages(stored.turnState.messages),
+    let request: DirectRequest = {
+      messages: toBoundedDirectMessages(stored.turnState.messages),
       model: stored.settings.model,
       ...(stored.settings.skillSlug
         ? { skill_slug: stored.settings.skillSlug }
         : {}),
     };
+    while (
+      request.messages.length > 1 &&
+      UTF8_ENCODER.encode(JSON.stringify(request)).byteLength >
+        MAX_OUTGOING_REQUEST_BYTES
+    ) {
+      request = { ...request, messages: request.messages.slice(1) };
+    }
     const run: RunningTurn = {
       turnId: newId("turn"),
       controller: new AbortController(),
@@ -481,13 +540,17 @@ export class DirectAssistantTransport implements AssistantTransport {
       );
       if (!response.ok) {
         const body = await parseJsonError(response);
-        if (response.status === 401 && isNyxidErrorEnvelope(body)) {
-          useAuthStore.getState().setUser(null);
+        if (
+          response.status >= 400 &&
+          response.status < 500 &&
+          isNyxidErrorEnvelope(body)
+        ) {
           this.finishUi(conversationId, run, "failed", {
             code: `http_${String(response.status)}`,
             message: body.message,
           });
           this.finishDrain(conversationId, run);
+          if (response.status === 401) useAuthStore.getState().setUser(null);
           return;
         }
         this.finishUi(conversationId, run, "failed", {

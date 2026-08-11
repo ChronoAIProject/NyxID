@@ -51,8 +51,12 @@ export function DirectChatControls({
 }) {
   const models = useDirectModels();
   const skills = useDirectSkills();
-  const { settings, setModel, setSkill } =
-    useDirectConversationSettings(conversationId);
+  const defaultModel =
+    models.data?.find((model) => model.default)?.id ?? models.data?.[0]?.id;
+  const { settings, setModel, setSkill } = useDirectConversationSettings(
+    conversationId,
+    defaultModel,
+  );
 
   return (
     <div className="ml-[30px] flex min-w-0 flex-wrap items-start gap-2 pb-1.5">

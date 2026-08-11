@@ -579,15 +579,21 @@ const AEVATAR_CONVERSATION_IDS = [
   /^nyxid-pending-[A-Za-z0-9_-]{1,160}$/,
 ] as const;
 
-interface OriginatingTurn {
-  readonly delegate: AssistantTransport;
-  readonly token: symbol;
+export function assistantEngineForConversationId(
+  conversationId: string,
+): AssistantEngine | null {
+  if (DIRECT_CONVERSATION_ID.test(conversationId)) return "direct";
+  if (
+    AEVATAR_CONVERSATION_IDS.some((pattern) => pattern.test(conversationId))
+  ) {
+    return "aevatar";
+  }
+  return null;
 }
 
 /** Permanently owns both live engines; selection never consumes install(). */
 export class AssistantEngineRouter implements AssistantTransport {
   private selectedEngine: AssistantEngine = "aevatar";
-  private readonly running = new Map<string, OriginatingTurn>();
   private readonly aevatar: AssistantTransport;
   private readonly direct: AssistantTransport;
 
@@ -644,27 +650,17 @@ export class AssistantEngineRouter implements AssistantTransport {
     content: string,
     onEvent: (event: TurnEvent) => void,
   ): TurnHandle {
-    const delegate = this.delegateForConversation(conversationId);
-    const token = Symbol(conversationId);
-    this.running.set(conversationId, { delegate, token });
-    try {
-      const handle = delegate.sendMessage(
-        conversationId,
-        content,
-        this.ownedEvents(conversationId, token, onEvent),
-      );
-      return this.wrapHandle(conversationId, token, delegate, handle);
-    } catch (error) {
-      this.releaseOrigin(conversationId, token);
-      throw error;
-    }
+    return this.delegateForConversation(conversationId).sendMessage(
+      conversationId,
+      content,
+      onEvent,
+    );
   }
 
   cancelActiveTurn(conversationId: string): void {
-    const origin = this.running.get(conversationId);
-    (
-      origin?.delegate ?? this.delegateForConversation(conversationId)
-    ).cancelActiveTurn(conversationId);
+    this.delegateForConversation(conversationId).cancelActiveTurn(
+      conversationId,
+    );
   }
 
   async decideApproval(
@@ -673,25 +669,12 @@ export class AssistantEngineRouter implements AssistantTransport {
     approved: boolean,
     onEvent: (event: TurnEvent) => void = () => undefined,
   ): Promise<TurnHandle | null> {
-    const delegate = this.delegateForConversation(conversationId);
-    const token = Symbol(conversationId);
-    this.running.set(conversationId, { delegate, token });
-    try {
-      const handle = await delegate.decideApproval(
-        conversationId,
-        blockId,
-        approved,
-        this.ownedEvents(conversationId, token, onEvent),
-      );
-      if (!handle) {
-        this.releaseOrigin(conversationId, token);
-        return null;
-      }
-      return this.wrapHandle(conversationId, token, delegate, handle);
-    } catch (error) {
-      this.releaseOrigin(conversationId, token);
-      throw error;
-    }
+    return this.delegateForConversation(conversationId).decideApproval(
+      conversationId,
+      blockId,
+      approved,
+      onEvent,
+    );
   }
 
   setActionCardInProgress(
@@ -728,25 +711,12 @@ export class AssistantEngineRouter implements AssistantTransport {
     reports: readonly ActionReport[],
     onEvent: (event: TurnEvent) => void = () => undefined,
   ): TurnHandle | null {
-    const delegate = this.delegateForConversation(conversationId);
-    const token = Symbol(conversationId);
-    this.running.set(conversationId, { delegate, token });
-    try {
-      const handle = delegate.continueActions(
-        conversationId,
-        originTurnId,
-        reports,
-        this.ownedEvents(conversationId, token, onEvent),
-      );
-      if (!handle) {
-        this.releaseOrigin(conversationId, token);
-        return null;
-      }
-      return this.wrapHandle(conversationId, token, delegate, handle);
-    } catch (error) {
-      this.releaseOrigin(conversationId, token);
-      throw error;
-    }
+    return this.delegateForConversation(conversationId).continueActions(
+      conversationId,
+      originTurnId,
+      reports,
+      onEvent,
+    );
   }
 
   wakeActions(
@@ -754,20 +724,11 @@ export class AssistantEngineRouter implements AssistantTransport {
     originTurnId: string,
     onEvent: (event: TurnEvent) => void = () => undefined,
   ): TurnHandle {
-    const delegate = this.delegateForConversation(conversationId);
-    const token = Symbol(conversationId);
-    this.running.set(conversationId, { delegate, token });
-    try {
-      const handle = delegate.wakeActions(
-        conversationId,
-        originTurnId,
-        this.ownedEvents(conversationId, token, onEvent),
-      );
-      return this.wrapHandle(conversationId, token, delegate, handle);
-    } catch (error) {
-      this.releaseOrigin(conversationId, token);
-      throw error;
-    }
+    return this.delegateForConversation(conversationId).wakeActions(
+      conversationId,
+      originTurnId,
+      onEvent,
+    );
   }
 
   private selectedDelegate(): AssistantTransport {
@@ -775,50 +736,10 @@ export class AssistantEngineRouter implements AssistantTransport {
   }
 
   private delegateForConversation(conversationId: string): AssistantTransport {
-    if (DIRECT_CONVERSATION_ID.test(conversationId)) return this.direct;
-    if (
-      AEVATAR_CONVERSATION_IDS.some((pattern) => pattern.test(conversationId))
-    ) {
-      return this.aevatar;
-    }
+    const engine = assistantEngineForConversationId(conversationId);
+    if (engine === "direct") return this.direct;
+    if (engine === "aevatar") return this.aevatar;
     throw new Error("Unknown assistant conversation id.");
-  }
-
-  private ownedEvents(
-    conversationId: string,
-    token: symbol,
-    onEvent: (event: TurnEvent) => void,
-  ): (event: TurnEvent) => void {
-    return (event) => {
-      onEvent(event);
-      if (event.event === "turn.completed") {
-        this.releaseOrigin(conversationId, token);
-      }
-    };
-  }
-
-  private wrapHandle(
-    conversationId: string,
-    token: symbol,
-    delegate: AssistantTransport,
-    handle: TurnHandle,
-  ): TurnHandle {
-    return {
-      get turnId() {
-        return handle.turnId;
-      },
-      cancel: () => {
-        const origin = this.running.get(conversationId);
-        if (origin?.token === token) delegate.cancelActiveTurn(conversationId);
-        else handle.cancel();
-      },
-    };
-  }
-
-  private releaseOrigin(conversationId: string, token: symbol): void {
-    if (this.running.get(conversationId)?.token === token) {
-      this.running.delete(conversationId);
-    }
   }
 }
 

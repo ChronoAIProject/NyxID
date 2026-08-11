@@ -1,6 +1,12 @@
 import type { AnchorHTMLAttributes, ReactNode } from "react";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import { fireEvent, render, screen, waitFor } from "@testing-library/react";
+import {
+  act,
+  fireEvent,
+  render,
+  screen,
+  waitFor,
+} from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { TooltipProvider } from "@/components/ui/tooltip";
@@ -60,6 +66,7 @@ const {
       printed: boolean;
       projecting: boolean;
     } | null,
+    transportKind: "aevatar" as "aevatar" | "mock",
   },
 }));
 
@@ -212,6 +219,25 @@ vi.mock("sonner", () => ({
   toast: { error: mockToastError },
 }));
 
+vi.mock("@/lib/assistant/transport", () => ({
+  assistantTransport: { cancelActiveTurn: vi.fn() },
+  selectAssistantTransportKind: () => state.transportKind,
+  assistantEngineForConversationId: (conversationId: string) => {
+    if (/^direct-[A-Za-z0-9_-]{1,160}$/.test(conversationId)) return "direct";
+    if (
+      [
+        /^nyxid-chat-[A-Za-z0-9_-]{1,117}$/,
+        /^chatc-[A-Za-z0-9_-]{1,120}$/,
+        /^workflow-pending-[A-Za-z0-9_-]{1,160}$/,
+        /^nyxid-pending-[A-Za-z0-9_-]{1,160}$/,
+      ].some((pattern) => pattern.test(conversationId))
+    ) {
+      return "aevatar";
+    }
+    return null;
+  },
+}));
+
 vi.mock("@/components/assistant/direct-chat-controls", () => ({
   DIRECT_MODE_COPY:
     "Direct model chat — no tools, no approvals, and conversations are not saved.",
@@ -311,6 +337,7 @@ beforeEach(() => {
   state.decisionPending = false;
   state.historyMessages = [];
   state.episode = null;
+  state.transportKind = "aevatar";
   useAuthStore.setState({
     user,
     isAuthenticated: true,
@@ -357,6 +384,58 @@ describe("AssistantPage direct mode", () => {
     expect(
       screen.queryByText("Ask NyxID to work with your connected services."),
     ).not.toBeInTheDocument();
+  });
+
+  it("keeps mock chrome unchanged when the direct flag is on", () => {
+    state.conversations = [];
+    state.transportKind = "mock";
+    useAuthStore.setState({
+      user: {
+        ...user,
+        capabilities: {
+          enabled_features: ["experimental:direct-chat-engine"],
+        },
+      },
+    });
+
+    renderPage();
+
+    expect(
+      screen.getByText("Ask NyxID to work with your connected services."),
+    ).toBeVisible();
+    expect(screen.queryByText(/Direct model chat/)).not.toBeInTheDocument();
+    expect(screen.queryByText("Direct model controls")).not.toBeInTheDocument();
+  });
+
+  it("clears only conversation drafts owned by the retired engine", async () => {
+    useAuthStore.setState({
+      user: {
+        ...user,
+        capabilities: {
+          enabled_features: ["experimental:direct-chat-engine"],
+        },
+      },
+    });
+    renderPage();
+    act(() => {
+      const drafts = useAssistantDraftStore.getState();
+      drafts.saveDraft(user.id, "conv:direct-retired-1", "retired");
+      drafts.saveDraft(user.id, "conv:nyxid-chat-active-1", "active");
+      drafts.saveDraft(user.id, "conv:unrecognized", "unknown");
+      drafts.saveDraft(user.id, "screen:/keys", "screen");
+    });
+
+    act(() => {
+      useAuthStore.setState({ user });
+    });
+
+    await waitFor(() => {
+      expect(useAssistantDraftStore.getState().drafts).toEqual({
+        "conv:nyxid-chat-active-1": expect.objectContaining({ text: "active" }),
+        "conv:unrecognized": expect.objectContaining({ text: "unknown" }),
+        "screen:/keys": expect.objectContaining({ text: "screen" }),
+      });
+    });
   });
 });
 
