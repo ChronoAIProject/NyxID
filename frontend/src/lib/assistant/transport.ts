@@ -167,6 +167,61 @@ class MockAssistantTransport implements AssistantTransport {
     }
   }
 
+  async stopTask(conversationId: string): Promise<void> {
+    this.cancelActiveTurn(conversationId);
+  }
+
+  async steerTask(conversationId: string, instruction: string): Promise<void> {
+    void conversationId;
+    if (!instruction.trim()) throw new Error("Steering cannot be empty.");
+  }
+
+  async retryStep(conversationId: string, stepId: string): Promise<void> {
+    void conversationId;
+    if (!stepId) throw new Error("Step identity is required.");
+  }
+
+  async skipStep(conversationId: string, stepId: string): Promise<void> {
+    void conversationId;
+    if (!stepId) throw new Error("Step identity is required.");
+  }
+
+  async resolvePlan(
+    conversationId: string,
+    blockId: string,
+    confirmed: boolean,
+  ): Promise<void> {
+    const block = assistantMockStore.findBlock(conversationId, blockId);
+    if (block?.type !== "task_plan") {
+      throw new Error("Task plan was not found.");
+    }
+    const gate = block.plan.gate;
+    if (
+      gate?.mode !== "confirm" ||
+      gate.status !== "pending" ||
+      !gate.requestId ||
+      !gate.taskId ||
+      !gate.planId ||
+      gate.planRevision === undefined
+    ) {
+      throw new Error("This plan gate is no longer pending.");
+    }
+    this.emitLocalActionPatch(
+      conversationId,
+      blockId,
+      {
+        plan: {
+          ...block.plan,
+          gate: {
+            ...gate,
+            status: confirmed ? "satisfied" : "rejected",
+          },
+        },
+      },
+      () => undefined,
+    );
+  }
+
   async decideApproval(
     conversationId: string,
     blockId: string,
@@ -647,6 +702,30 @@ export class DelegatingAssistantTransport implements AssistantTransport {
 
   cancelActiveTurn(conversationId: string): void {
     this.transport.cancelActiveTurn(conversationId);
+  }
+
+  stopTask(conversationId: string): Promise<void> {
+    return this.transport.stopTask(conversationId);
+  }
+
+  steerTask(conversationId: string, instruction: string): Promise<void> {
+    return this.transport.steerTask(conversationId, instruction);
+  }
+
+  retryStep(conversationId: string, stepId: string): Promise<void> {
+    return this.transport.retryStep(conversationId, stepId);
+  }
+
+  skipStep(conversationId: string, stepId: string): Promise<void> {
+    return this.transport.skipStep(conversationId, stepId);
+  }
+
+  resolvePlan(
+    conversationId: string,
+    blockId: string,
+    confirmed: boolean,
+  ): Promise<void> {
+    return this.transport.resolvePlan(conversationId, blockId, confirmed);
   }
 
   decideApproval(

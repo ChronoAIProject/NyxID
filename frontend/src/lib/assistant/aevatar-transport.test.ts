@@ -136,6 +136,78 @@ function actionRequestFrame(
   };
 }
 
+function taskStepFixture(
+  overrides: Record<string, unknown> = {},
+): Record<string, unknown> {
+  return {
+    stepId: "step-task-1",
+    order: 1,
+    kind: "tool",
+    status: "running",
+    required: true,
+    description: "Run the connected service operation",
+    source: { tool: { toolName: "connected_service_operation" } },
+    mayChangeExternalState: false,
+    externalEffect: "not_started",
+    availableActions: { retry: false, skip: false, stop: true },
+    dependsOn: [],
+    substeps: [],
+    operation: {
+      turnId: TURN_ID,
+      taskId: "task-current-1",
+      stepId: "step-task-1",
+      operationId: "operation-task-1",
+      operationGeneration: 2,
+      kind: "tool",
+      phase: "running",
+    },
+    ...overrides,
+  };
+}
+
+function taskPlanFixture(
+  stepOverrides: Record<string, unknown> = {},
+): Record<string, unknown> {
+  return {
+    schemaVersion: 4,
+    actorId: CONVERSATION_ID,
+    taskId: "task-current-1",
+    turnId: TURN_ID,
+    planId: "plan-current-1",
+    planRevision: 2,
+    planRevisions: [],
+    title: "Current actor task",
+    status: "active",
+    activeStepId: "step-task-1",
+    gate: { mode: "auto", status: "satisfied" },
+    steps: [taskStepFixture(stepOverrides)],
+  };
+}
+
+function currentTaskState(
+  stateVersion: number,
+  stepOverrides: Record<string, unknown> = {},
+  snapshotOverrides: Record<string, unknown> = {},
+): Record<string, unknown> {
+  return {
+    status: "current",
+    stateVersion,
+    snapshot: {
+      actorId: CONVERSATION_ID,
+      stateVersion,
+      progressSequence: 12,
+      activeTurn: { turnId: TURN_ID, status: "active" },
+      latestTurn: { turnId: TURN_ID, status: "active" },
+      activeTask: taskPlanFixture(stepOverrides),
+      pendingInput: null,
+      pendingApproval: null,
+      pendingActions: [],
+      recentActions: [],
+      ...snapshotOverrides,
+    },
+  };
+}
+
 type FetchRoute = (
   url: string,
   init: RequestInit | undefined,
@@ -344,6 +416,7 @@ function routeStream(frames: unknown[]): FetchRoute {
 function routeHistory(body: unknown): FetchRoute {
   return (url, init) =>
     url.startsWith(`${ASSISTANT_BASE}/conversations/`) &&
+    !url.endsWith("/state") &&
     (init?.method ?? "GET") === "GET"
       ? jsonResponse(body)
       : undefined;
@@ -469,6 +542,342 @@ describe("AevatarAssistantTransport", () => {
         error: terminal.error,
       },
     ).toEqual({ status: "completed", error: null });
+  });
+
+  it("hydrates one current TaskPlan, input, approval, and action card across reloads", async () => {
+    const action = {
+      schemaVersion: 4,
+      actorId: CONVERSATION_ID,
+      originTurnId: TURN_ID,
+      taskId: "task-current-1",
+      stepId: "step-task-1",
+      actionRequestId: "action-current-1",
+      action: "service.connect",
+      params: {
+        catalogService: {
+          serviceSlug: "api-github",
+          requestedScopes: ["repo"],
+        },
+      },
+    };
+    stubFetch(routeHistory([]), (url, init) =>
+      url.endsWith("/state") && (init?.method ?? "GET") === "GET"
+        ? jsonResponse(
+            currentTaskState(
+              41,
+              {},
+              {
+                pendingInput: {
+                  requestId: "input-current-1",
+                  prompt: "Choose an environment",
+                  options: [
+                    { optionId: "staging", label: "Staging" },
+                    { optionId: "production", label: "Production" },
+                  ],
+                  allowFreeText: false,
+                  multiSelect: false,
+                },
+                pendingApproval: {
+                  approvalRequestId: "approval-current-1",
+                  toolName: "deploy_release",
+                  message: "Deploy the selected release?",
+                },
+                pendingActions: [
+                  { actionRequestId: "action-current-1", request: action },
+                ],
+                recentActions: [
+                  { actionRequestId: "action-current-1", request: action },
+                ],
+              },
+            ),
+          )
+        : undefined,
+    );
+    const transport = new AevatarAssistantTransport();
+
+    for (let reload = 0; reload < 2; reload += 1) {
+      const history = await transport.getHistory(CONVERSATION_ID);
+      const managed = history.messages
+        .flatMap((message) => message.blocks)
+        .filter((block) =>
+          ["task_plan", "input_card", "approval_card", "action_card"].includes(
+            block.type,
+          ),
+        );
+      expect(managed.map((block) => block.type)).toEqual([
+        "task_plan",
+        "input_card",
+        "approval_card",
+        "action_card",
+      ]);
+      expect(
+        managed.every((block) => block.block_id.startsWith("current-")),
+      ).toBe(true);
+    }
+  });
+
+  it("projects the same TaskPlan from a live snapshot and a reloaded state", async () => {
+    stubFetch(
+      routeStream([
+        { type: "RUN_STARTED", turnId: TURN_ID, actorId: CONVERSATION_ID },
+        {
+          type: "CUSTOM",
+          sequence: 12,
+          custom: { name: "nyxid.task.snapshot", payload: taskPlanFixture() },
+        },
+        { type: "RUN_FINISHED" },
+      ]),
+      routeHistory([]),
+      (url, init) =>
+        url.endsWith("/state") && (init?.method ?? "GET") === "GET"
+          ? jsonResponse(currentTaskState(42))
+          : undefined,
+    );
+    const liveTransport = new AevatarAssistantTransport();
+    await seedActorConversation(liveTransport);
+    const liveEvents = await collectTurn(liveTransport, "Run the current task");
+    const livePlan = liveEvents
+      .filter(
+        (event): event is Extract<TurnEvent, { event: "block.started" }> =>
+          event.event === "block.started",
+      )
+      .map((event) => event.block)
+      .find((block) => block.type === "task_plan");
+
+    const reloadedTransport = new AevatarAssistantTransport();
+    await seedActorConversation(reloadedTransport);
+    const reloadedPlan = (
+      await reloadedTransport.getHistory(CONVERSATION_ID)
+    ).messages
+      .flatMap((message) => message.blocks)
+      .find((block) => block.type === "task_plan");
+
+    expect(livePlan?.type === "task_plan" && livePlan.plan).toEqual(
+      reloadedPlan?.type === "task_plan" && reloadedPlan.plan,
+    );
+  });
+
+  it("sends actor controls with exact state and operation fences", async () => {
+    const fetchMock = stubFetch(
+      (url, init) =>
+        url.endsWith("/state") && (init?.method ?? "GET") === "GET"
+          ? jsonResponse(
+              currentTaskState(47, {
+                availableActions: { retry: true, skip: true, stop: true },
+              }),
+            )
+          : undefined,
+      (url, init) =>
+        isTypedCommandRequest(url, init)
+          ? jsonResponse({ status: "accepted" }, 202)
+          : undefined,
+    );
+    const transport = new AevatarAssistantTransport();
+    await seedActorConversation(transport);
+
+    await transport.stopTask(CONVERSATION_ID);
+    await transport.steerTask(CONVERSATION_ID, "Focus on the release branch");
+    await transport.retryStep(CONVERSATION_ID, "step-task-1");
+    await transport.skipStep(CONVERSATION_ID, "step-task-1");
+
+    const bodies = fetchMock.mock.calls
+      .filter(([input, init]) =>
+        isTypedCommandRequest(String(input), init as RequestInit | undefined),
+      )
+      .map(([, init]) => jsonRequestBody(init as RequestInit | undefined));
+    expect(bodies).toEqual([
+      {
+        type: "task.stop",
+        conversationId: CONVERSATION_ID,
+        turnId: TURN_ID,
+        stopRequestId: expect.any(String),
+        clientRequestId: expect.any(String),
+        expectedStateVersion: 47,
+      },
+      {
+        type: "task.steer",
+        conversationId: CONVERSATION_ID,
+        turnId: TURN_ID,
+        steeringId: expect.any(String),
+        clientRequestId: expect.any(String),
+        instruction: "Focus on the release branch",
+        expectedStateVersion: 47,
+      },
+      {
+        type: "step.retry",
+        conversationId: CONVERSATION_ID,
+        turnId: TURN_ID,
+        taskId: "task-current-1",
+        stepId: "step-task-1",
+        retryRequestId: expect.any(String),
+        clientRequestId: expect.any(String),
+        expectedOperationGeneration: 2,
+        expectedStateVersion: 47,
+      },
+      {
+        type: "step.skip",
+        conversationId: CONVERSATION_ID,
+        turnId: TURN_ID,
+        taskId: "task-current-1",
+        stepId: "step-task-1",
+        skipRequestId: expect.any(String),
+        clientRequestId: expect.any(String),
+        expectedOperationGeneration: 2,
+        expectedStateVersion: 47,
+      },
+    ]);
+  });
+
+  it("resolves the exact fresh plan gate and refreshes committed state after acceptance", async () => {
+    const pendingTask = {
+      ...taskPlanFixture(),
+      gate: {
+        mode: "confirm",
+        status: "pending",
+        requestId: "plan-gate-current-1",
+        taskId: "task-current-1",
+        planId: "plan-current-1",
+        planRevision: 2,
+      },
+    };
+    const satisfiedTask = {
+      ...pendingTask,
+      gate: { ...pendingTask.gate, status: "satisfied" },
+    };
+    let stateReads = 0;
+    const fetchMock = stubFetch(
+      routeHistory([]),
+      (url, init) => {
+        if (!url.endsWith("/state") || (init?.method ?? "GET") !== "GET") {
+          return undefined;
+        }
+        stateReads += 1;
+        const activeTask = stateReads <= 2 ? pendingTask : satisfiedTask;
+        return jsonResponse(
+          currentTaskState(50 + stateReads, {}, { activeTask }),
+        );
+      },
+      (url, init) =>
+        isTypedCommandRequest(url, init, "plan.resolve")
+          ? jsonResponse({ status: "accepted" }, 202)
+          : undefined,
+    );
+    const transport = new AevatarAssistantTransport();
+    await seedActorConversation(transport);
+    await transport.getHistory(CONVERSATION_ID);
+
+    await transport.resolvePlan(
+      CONVERSATION_ID,
+      "current-task-plan:task-current-1",
+      true,
+    );
+
+    const post = fetchMock.mock.calls.find(([input, init]) =>
+      isTypedCommandRequest(
+        String(input),
+        init as RequestInit | undefined,
+        "plan.resolve",
+      ),
+    );
+    expect(jsonRequestBody(post?.[1] as RequestInit | undefined)).toEqual({
+      type: "plan.resolve",
+      conversationId: CONVERSATION_ID,
+      taskId: "task-current-1",
+      planId: "plan-current-1",
+      requestId: "plan-gate-current-1",
+      clientRequestId: expect.any(String),
+      planRevision: 2,
+      confirmed: true,
+      expectedStateVersion: 52,
+    });
+    expect(stateReads).toBe(3);
+    const refreshed = await transport.getHistory(CONVERSATION_ID);
+    const plan = refreshed.messages
+      .flatMap((message) => message.blocks)
+      .find((block) => block.type === "task_plan");
+    expect(plan?.type === "task_plan" && plan.plan.gate?.status).toBe(
+      "satisfied",
+    );
+  });
+
+  it("rejects a stale clicked plan gate when fresh state has another request", async () => {
+    const clickedTask = {
+      ...taskPlanFixture(),
+      gate: {
+        mode: "confirm",
+        status: "pending",
+        requestId: "plan-gate-clicked",
+        taskId: "task-current-1",
+        planId: "plan-current-1",
+        planRevision: 2,
+      },
+    };
+    const freshTask = {
+      ...clickedTask,
+      gate: { ...clickedTask.gate, requestId: "plan-gate-fresh" },
+    };
+    let stateReads = 0;
+    const fetchMock = stubFetch(routeHistory([]), (url, init) => {
+      if (!url.endsWith("/state") || (init?.method ?? "GET") !== "GET") {
+        return undefined;
+      }
+      stateReads += 1;
+      return jsonResponse(
+        currentTaskState(60 + stateReads, {}, {
+          activeTask: stateReads === 1 ? clickedTask : freshTask,
+        }),
+      );
+    });
+    const transport = new AevatarAssistantTransport();
+    await seedActorConversation(transport);
+    await transport.getHistory(CONVERSATION_ID);
+
+    await expect(
+      transport.resolvePlan(
+        CONVERSATION_ID,
+        "current-task-plan:task-current-1",
+        false,
+      ),
+    ).rejects.toThrow("exact plan gate");
+    expect(
+      fetchMock.mock.calls.filter(([input, init]) =>
+        isTypedCommandRequest(
+          String(input),
+          init as RequestInit | undefined,
+          "plan.resolve",
+        ),
+      ),
+    ).toHaveLength(0);
+  });
+
+  it.each([
+    [
+      "an unavailable Retry",
+      currentTaskState(49),
+      (transport: AevatarAssistantTransport) =>
+        transport.retryStep(CONVERSATION_ID, "step-task-1"),
+    ],
+    [
+      "reload_required state",
+      { status: "reload_required" },
+      (transport: AevatarAssistantTransport) =>
+        transport.stopTask(CONVERSATION_ID),
+    ],
+  ])("rejects %s without posting a command", async (_label, state, invoke) => {
+    const fetchMock = stubFetch((url, init) =>
+      url.endsWith("/state") && (init?.method ?? "GET") === "GET"
+        ? jsonResponse(state)
+        : undefined,
+    );
+    const transport = new AevatarAssistantTransport();
+    await seedActorConversation(transport);
+
+    await expect(invoke(transport)).rejects.toThrow();
+    expect(
+      fetchMock.mock.calls.filter(([input, init]) =>
+        isTypedCommandRequest(String(input), init as RequestInit | undefined),
+      ),
+    ).toHaveLength(0);
   });
 
   it("serves the streamed transcript from the local mirror during and after the turn", async () => {
@@ -670,7 +1079,7 @@ describe("AevatarAssistantTransport", () => {
     const getCalls = fetchMock.mock.calls.filter(
       ([, init]) => (init?.method ?? "GET") === "GET",
     );
-    expect(getCalls).toHaveLength(2);
+    expect(getCalls).toHaveLength(3);
     for (const [, init] of getCalls) {
       expect(init?.headers).toMatchObject({ Accept: "application/json" });
     }
@@ -951,6 +1360,10 @@ describe("AevatarAssistantTransport", () => {
     const stopBodies: Array<Record<string, unknown>> = [];
     let streamClientRequestId: string | undefined;
     stubFetch(
+      (url, init) =>
+        url.endsWith("/state") && (init?.method ?? "GET") === "GET"
+          ? jsonResponse(currentTaskState(17))
+          : undefined,
       (url, init) => {
         if (
           url === `${ASSISTANT_BASE}/conversations/${CONVERSATION_ID}/stop` &&
@@ -995,7 +1408,7 @@ describe("AevatarAssistantTransport", () => {
     expect(stopBodies).toHaveLength(1);
     const stop = stopBodies[0];
     expect(stop?.turnId).toBe(TURN_ID);
-    expect(stop?.expectedStateVersion).toBe(0);
+    expect(stop?.expectedStateVersion).toBe(17);
     // Fresh control identities: neither reuses the turn's clientRequestId.
     expect(stop?.stopRequestId).toMatch(/^[0-9a-f-]{36}$/);
     expect(stop?.clientRequestId).toMatch(/^[0-9a-f-]{36}$/);
@@ -1053,6 +1466,10 @@ describe("AevatarAssistantTransport", () => {
     });
     const stopBodies: Array<Record<string, unknown>> = [];
     stubFetch(
+      (url, init) =>
+        url.endsWith("/state") && (init?.method ?? "GET") === "GET"
+          ? jsonResponse(currentTaskState(18))
+          : undefined,
       (url, init) => {
         if (url.endsWith("/stop") && init?.method === "POST") {
           stopBodies.push(
@@ -1094,7 +1511,7 @@ describe("AevatarAssistantTransport", () => {
 
     expect(stopBodies).toHaveLength(1);
     expect(stopBodies[0]?.turnId).toBe(TURN_ID);
-    expect(stopBodies[0]?.expectedStateVersion).toBe(0);
+    expect(stopBodies[0]?.expectedStateVersion).toBe(18);
   });
 
   it("fences a follow-up send behind a pre-start cancel until the deferred stop settles", async () => {
@@ -1121,6 +1538,9 @@ describe("AevatarAssistantTransport", () => {
           return Promise.resolve(
             jsonResponse({ status: "accepted", actorId: CONVERSATION_ID }),
           );
+        }
+        if (url.endsWith("/state") && (init?.method ?? "GET") === "GET") {
+          return Promise.resolve(jsonResponse(currentTaskState(19)));
         }
         if (url.endsWith("/stop") && init?.method === "POST") {
           stopCalls += 1;
@@ -1201,6 +1621,9 @@ describe("AevatarAssistantTransport", () => {
           return Promise.resolve(
             jsonResponse({ status: "accepted", actorId: CONVERSATION_ID }),
           );
+        }
+        if (url.endsWith("/state") && (init?.method ?? "GET") === "GET") {
+          return Promise.resolve(jsonResponse(currentTaskState(20)));
         }
         if (url.endsWith("/stop") && init?.method === "POST") {
           stopCalls += 1;
@@ -1289,6 +1712,9 @@ describe("AevatarAssistantTransport", () => {
           return Promise.resolve(
             jsonResponse({ status: "accepted", actorId: CONVERSATION_ID }),
           );
+        }
+        if (url.endsWith("/state") && (init?.method ?? "GET") === "GET") {
+          return Promise.resolve(jsonResponse(currentTaskState(21)));
         }
         if (url.endsWith("/stop") && init?.method === "POST") {
           stopCalls += 1;
@@ -1389,6 +1815,9 @@ describe("AevatarAssistantTransport", () => {
             jsonResponse({ status: "accepted", actorId: CONVERSATION_ID }),
           );
         }
+        if (url.endsWith("/state") && (init?.method ?? "GET") === "GET") {
+          return Promise.resolve(jsonResponse(currentTaskState(22)));
+        }
         if (url.endsWith("/stop") && init?.method === "POST") {
           return new Promise<Response>((resolve) => {
             releaseStop = () =>
@@ -1474,6 +1903,9 @@ describe("AevatarAssistantTransport", () => {
           return Promise.resolve(
             jsonResponse({ status: "accepted", actorId: CONVERSATION_ID }),
           );
+        }
+        if (url.endsWith("/state") && (init?.method ?? "GET") === "GET") {
+          return Promise.resolve(jsonResponse(currentTaskState(23)));
         }
         if (url.endsWith("/stop") && init?.method === "POST") {
           return Promise.resolve(jsonResponse({ status: "accepted" }, 202));
@@ -1750,17 +2182,17 @@ describe("AevatarAssistantTransport", () => {
           stateReads += 1;
           return Promise.resolve(
             jsonResponse(
-              stateReads === 1
-                ? {
-                    status: "current",
-                    stateVersion: 70,
-                    snapshot: {
-                      actorId: CONVERSATION_ID,
-                      stateVersion: 70,
+              stateReads <= 2
+                ? currentTaskState(
+                    70,
+                    {},
+                    {
+                      activeTurn: { turnId: "turn-2", status: "active" },
+                      latestTurn: { turnId: "turn-2", status: "active" },
                       attentionKind: "approval",
                       pendingApproval: { approvalRequestId: "req-fence" },
                     },
-                  }
+                  )
                 : {
                     status: "current",
                     stateVersion: 71,
@@ -1881,6 +2313,9 @@ describe("AevatarAssistantTransport", () => {
             jsonResponse({ status: "accepted", actorId: CONVERSATION_ID }),
           );
         }
+        if (url.endsWith("/state") && (init?.method ?? "GET") === "GET") {
+          return Promise.resolve(jsonResponse(currentTaskState(24)));
+        }
         if (url.endsWith("/stop") && init?.method === "POST") {
           return new Promise<Response>((resolve) => {
             releaseStop = () =>
@@ -1954,6 +2389,10 @@ describe("AevatarAssistantTransport", () => {
       },
     });
     stubFetch(
+      (url, init) =>
+        url.endsWith("/state") && (init?.method ?? "GET") === "GET"
+          ? jsonResponse(currentTaskState(25))
+          : undefined,
       (url, init) =>
         url.endsWith("/stop") && init?.method === "POST"
           ? jsonResponse(
@@ -2568,12 +3007,17 @@ describe("live AG-UI frame taxonomy", () => {
     ...states: readonly Record<string, unknown>[]
   ): FetchRoute {
     let readIndex = 0;
+    let hydrationPending = true;
     return (url, init) => {
       if (
         url !== `${ASSISTANT_BASE}/conversations/${CONVERSATION_ID}/state` ||
         (init?.method ?? "GET") !== "GET"
       ) {
         return undefined;
+      }
+      if (hydrationPending) {
+        hydrationPending = false;
+        return jsonResponse({ message: "not materialized" }, 404);
       }
       const state = states[Math.min(readIndex, states.length - 1)];
       readIndex += 1;
@@ -3019,9 +3463,9 @@ describe("live AG-UI frame taxonomy", () => {
         "approval.resolve",
       ),
     );
-    expect(stateCallIndexes).toHaveLength(2);
-    expect(stateCallIndexes[0]).toBeLessThan(postIndex);
-    expect(postIndex).toBeLessThan(stateCallIndexes[1] ?? -1);
+    expect(stateCallIndexes).toHaveLength(3);
+    expect(stateCallIndexes[1]).toBeLessThan(postIndex);
+    expect(postIndex).toBeLessThan(stateCallIndexes[2] ?? -1);
     expect(events.map((event) => event.event)).toEqual([
       "block.updated",
       "block.updated",
@@ -3099,7 +3543,7 @@ describe("live AG-UI frame taxonomy", () => {
       fetchMock.mock.calls.filter(([input]) =>
         String(input).endsWith("/state"),
       ),
-    ).toHaveLength(4);
+    ).toHaveLength(5);
     expect(events.at(-1)).toMatchObject({
       event: "block.updated",
       patch: {
@@ -3142,6 +3586,9 @@ describe("live AG-UI frame taxonomy", () => {
         }
         stateReads += 1;
         if (stateReads === 1) {
+          return jsonResponse({ message: "not materialized" }, 404);
+        }
+        if (stateReads === 2) {
           return jsonResponse(decisionStateEnvelope("input", "input-1", 41));
         }
         return new Response(
@@ -3506,7 +3953,7 @@ describe("live AG-UI frame taxonomy", () => {
       fetchMock.mock.calls.filter(([input]) =>
         String(input).endsWith("/state"),
       ),
-    ).toHaveLength(5);
+    ).toHaveLength(7);
   });
 
   it("absorbs a late committed input before retrying without a second POST", async () => {
@@ -3863,7 +4310,7 @@ describe("live AG-UI frame taxonomy", () => {
       fetchMock.mock.calls.filter(([input]) =>
         String(input).endsWith("/state"),
       ),
-    ).toHaveLength(5);
+    ).toHaveLength(7);
   });
 
   it("absorbs a late committed approval before retrying without a second POST", async () => {
@@ -6288,6 +6735,7 @@ describe("assistant prose fences stay inert", () => {
   it("renders wrapped history responses with fences as plain text", async () => {
     stubFetch((url, init) =>
       url.startsWith(`${ASSISTANT_BASE}/conversations/`) &&
+      !url.endsWith("/state") &&
       (init?.method ?? "GET") === "GET"
         ? jsonResponse({
             messages: [

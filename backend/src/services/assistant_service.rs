@@ -259,6 +259,7 @@ pub enum AssistantChatCommand {
     InputResolve(InputResolveCommand),
     ActionContinue(ActionContinueCommand),
     ApprovalResolve(ApprovalResolveCommand),
+    PlanResolve(PlanResolveCommand),
     TaskStop(TaskStopCommand),
     TaskSteer(TaskSteerCommand),
     StepRetry(StepRetryCommand),
@@ -317,6 +318,18 @@ pub struct ApprovalResolveCommand {
     pub request_id: String,
     pub approved: bool,
     pub reason: Option<String>,
+    pub expected_state_version: i64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PlanResolveCommand {
+    pub conversation_id: String,
+    pub task_id: String,
+    pub plan_id: String,
+    pub request_id: String,
+    pub client_request_id: String,
+    pub plan_revision: i64,
+    pub confirmed: bool,
     pub expected_state_version: i64,
 }
 
@@ -505,6 +518,21 @@ struct RawApprovalResolveCommand {
     approved: bool,
     #[serde(default)]
     reason: Option<String>,
+    expected_state_version: i64,
+}
+
+#[derive(Debug, serde::Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct RawPlanResolveCommand {
+    #[serde(rename = "type")]
+    _command_type: String,
+    conversation_id: String,
+    task_id: String,
+    plan_id: String,
+    request_id: String,
+    client_request_id: String,
+    plan_revision: i64,
+    confirmed: bool,
     expected_state_version: i64,
 }
 
@@ -840,6 +868,28 @@ pub fn parse_assistant_chat_command(bytes: &[u8]) -> AppResult<AssistantChatComm
                 },
             ))
         }
+        "plan.resolve" => {
+            let raw: RawPlanResolveCommand = serde_json::from_value(value).map_err(|e| {
+                AppError::BadRequest(format!("Invalid plan resolution request: {e}"))
+            })?;
+            validate_conversation_id(&raw.conversation_id)?;
+            validate_control_identity(&raw.task_id, "taskId")?;
+            validate_control_identity(&raw.plan_id, "planId")?;
+            validate_control_identity(&raw.request_id, "requestId")?;
+            validate_control_identity(&raw.client_request_id, "clientRequestId")?;
+            validate_positive(raw.plan_revision, "planRevision")?;
+            validate_positive(raw.expected_state_version, "expectedStateVersion")?;
+            Ok(AssistantChatCommand::PlanResolve(PlanResolveCommand {
+                conversation_id: raw.conversation_id,
+                task_id: raw.task_id,
+                plan_id: raw.plan_id,
+                request_id: raw.request_id,
+                client_request_id: raw.client_request_id,
+                plan_revision: raw.plan_revision,
+                confirmed: raw.confirmed,
+                expected_state_version: raw.expected_state_version,
+            }))
+        }
         "task.stop" => {
             let raw: RawTaskStopCommand = serde_json::from_value(value)
                 .map_err(|e| AppError::BadRequest(format!("Invalid stop request: {e}")))?;
@@ -1087,6 +1137,21 @@ pub fn prepare_assistant_chat_command(
                 response_kind: AssistantChatResponseKind::Json,
             })
         }
+        AssistantChatCommand::PlanResolve(command) => Ok(PreparedAssistantChatCommand {
+            body: serde_json::json!({
+                "type": "plan.resolve",
+                "conversationId": command.conversation_id,
+                "taskId": command.task_id,
+                "planId": command.plan_id,
+                "requestId": command.request_id,
+                "clientRequestId": command.client_request_id,
+                "planRevision": command.plan_revision,
+                "confirmed": command.confirmed,
+                "expectedStateVersion": command.expected_state_version,
+            }),
+            client_request_id: command.client_request_id.clone(),
+            response_kind: AssistantChatResponseKind::Json,
+        }),
         AssistantChatCommand::TaskStop(command) => Ok(PreparedAssistantChatCommand {
             body: serde_json::json!({
                 "type": "task.stop",
@@ -2002,6 +2067,92 @@ mod tests {
                 "approved": true,
                 "expectedStateVersion": 21,
                 "stateVersion": 21
+            }),
+        ] {
+            assert!(parse_assistant_chat_command(&serde_json::to_vec(&value).unwrap()).is_err());
+        }
+    }
+
+    #[test]
+    fn parses_and_rebuilds_exact_plan_resolution() {
+        let prepared = prepare_assistant_chat_command(&parse_command(json!({
+            "type": "plan.resolve",
+            "conversationId": CONV,
+            "taskId": "task-alpha",
+            "planId": "plan-alpha",
+            "requestId": "plan-gate-alpha",
+            "clientRequestId": "client-plan-alpha",
+            "planRevision": 3,
+            "confirmed": true,
+            "expectedStateVersion": 23
+        })))
+        .unwrap();
+
+        assert_eq!(prepared.response_kind, AssistantChatResponseKind::Json);
+        assert_eq!(prepared.client_request_id, "client-plan-alpha");
+        assert_eq!(
+            prepared.body,
+            json!({
+                "type": "plan.resolve",
+                "conversationId": CONV,
+                "taskId": "task-alpha",
+                "planId": "plan-alpha",
+                "requestId": "plan-gate-alpha",
+                "clientRequestId": "client-plan-alpha",
+                "planRevision": 3,
+                "confirmed": true,
+                "expectedStateVersion": 23
+            })
+        );
+    }
+
+    #[test]
+    fn plan_resolution_requires_exact_positive_identities_and_versions() {
+        for value in [
+            json!({
+                "type": "plan.resolve",
+                "conversationId": CONV,
+                "taskId": "task-alpha",
+                "planId": "plan-alpha",
+                "requestId": "plan-gate-alpha",
+                "clientRequestId": "client-plan-alpha",
+                "planRevision": 0,
+                "confirmed": true,
+                "expectedStateVersion": 23
+            }),
+            json!({
+                "type": "plan.resolve",
+                "conversationId": CONV,
+                "taskId": "task-alpha",
+                "planId": "bad/plan",
+                "requestId": "plan-gate-alpha",
+                "clientRequestId": "client-plan-alpha",
+                "planRevision": 3,
+                "confirmed": false,
+                "expectedStateVersion": 23
+            }),
+            json!({
+                "type": "plan.resolve",
+                "conversationId": CONV,
+                "taskId": "task-alpha",
+                "planId": "plan-alpha",
+                "requestId": "plan-gate-alpha",
+                "clientRequestId": "client-plan-alpha",
+                "planRevision": 3,
+                "confirmed": true,
+                "expectedStateVersion": 0
+            }),
+            json!({
+                "type": "plan.resolve",
+                "conversationId": CONV,
+                "taskId": "task-alpha",
+                "planId": "plan-alpha",
+                "requestId": "plan-gate-alpha",
+                "clientRequestId": "client-plan-alpha",
+                "planRevision": 3,
+                "confirmed": true,
+                "expectedStateVersion": 23,
+                "stateVersion": 23
             }),
         ] {
             assert!(parse_assistant_chat_command(&serde_json::to_vec(&value).unwrap()).is_err());

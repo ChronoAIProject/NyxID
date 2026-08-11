@@ -1,6 +1,6 @@
 # Assistant Chat Wire Contract
 
-Last verified against `fix-new-chat-timing` (2026-08-04).
+Last verified against support-contract revision `f45febb057a7182dab2495d4c739d2bb8d7026f5` (2026-08-11).
 
 This document specifies the browser-to-NyxID contract and the Aevatar request NyxID produces. It is the canonical API reference for the assistant chat surface.
 
@@ -122,7 +122,7 @@ The body matches Aevatar's own console client: create carries a create-only comm
 
 `POST /chat` accepts a discriminated command allowlist. NyxID parses each command with unknown-field denial, rejects secret-shaped keys and values, validates control identities, and rebuilds the exact upstream object. It never spreads an arbitrary caller object into the Aevatar body.
 
-Every typed command includes `clientRequestId`. NyxID copies that value into the outbound `Idempotency-Key` header. Text and action continuation request `Accept: text/event-stream`. Input resolution, approval resolution, stop, steer, retry, and skip request `Accept: application/json`.
+Every typed command includes `clientRequestId`. NyxID copies that value into the outbound `Idempotency-Key` header. Text and action continuation request `Accept: text/event-stream`. Input, approval, and plan resolution plus stop, steer, retry, and skip request `Accept: application/json`.
 
 ### `text`
 
@@ -209,6 +209,24 @@ An empty `actions` array is a typed actor wake and may omit `originTurnId`.
 
 An empty reason is omitted. A nonempty reason is trimmed and limited to 2,048 characters. `expectedStateVersion` is required and must be positive. The browser reads it from the authoritative typed current-state envelope and verifies the exact pending approval identity. This command returns JSON transport acceptance; the matching `nyxid.approval.changed` or current-state `latestApprovalResolution` proves commit.
 
+### `plan.resolve`
+
+```json
+{
+  "type": "plan.resolve",
+  "conversationId": "nyxid-chat-f8369965a444433f92ec50e67ad8ee52",
+  "taskId": "task-identity",
+  "planId": "plan-identity",
+  "requestId": "plan-gate-identity",
+  "clientRequestId": "request-identity",
+  "planRevision": 3,
+  "confirmed": true,
+  "expectedStateVersion": 23
+}
+```
+
+All four plan and gate identities are required and `planRevision` plus `expectedStateVersion` must be positive. At click time the browser re-reads authoritative current state, requires an exact `confirm` + `pending` gate match, and submits the state version from that same read. A pending Stop fence is observed before this preflight. JSON 202 is dispatch acceptance only; the browser refreshes current state once and changes the card only when the actor-owned TaskPlan gate changes.
+
 ### `task.stop`
 
 ```json
@@ -222,7 +240,7 @@ An empty reason is omitted. A nonempty reason is trimmed and limited to 2,048 ch
 }
 ```
 
-`expectedStateVersion` must be nonnegative. This command returns JSON. The typed transport waits for any pending stop ordering fence before later turn or action delivery.
+The backend accepts a nonnegative `expectedStateVersion`, but the browser never submits zero. It first reads authoritative current state, requires a positive exact version and the matching active turn, and verifies that at least one current TaskPlan step offers `availableActions.stop`. This command returns JSON. The typed transport waits for any pending stop ordering fence before later turn or action delivery.
 
 ### `task.steer`
 
@@ -238,7 +256,7 @@ An empty reason is omitted. A nonempty reason is trimmed and limited to 2,048 ch
 }
 ```
 
-The instruction must be nonblank after trimming. The preserved wire value is not normalized. `expectedStateVersion` must be nonnegative. This command returns JSON.
+The instruction must be nonblank after trimming. The preserved wire value is not normalized. The browser reads the current active turn and requires a positive exact `expectedStateVersion`; it never opens a competing text turn to steer active work. This command returns JSON.
 
 ### `step.retry` and `step.skip`
 
@@ -256,7 +274,7 @@ The instruction must be nonblank after trimming. The preserved wire value is not
 }
 ```
 
-`step.skip` has the same fields except `type` is `step.skip` and `skipRequestId` replaces `retryRequestId`. `expectedOperationGeneration` must be positive; `expectedStateVersion` must be nonnegative. Both return JSON.
+`step.skip` has the same fields except `type` is `step.skip` and `skipRequestId` replaces `retryRequestId`. The browser submits either command only when that exact step offers the corresponding `availableActions.retry` or `availableActions.skip`. It copies the positive `expectedOperationGeneration` from the step's current operation and a positive exact `expectedStateVersion` from the same current-state read. Both return JSON.
 
 Typed command parsing and reconstruction are implemented by `backend/src/services/assistant_service.rs:parse_assistant_chat_command` and `prepare_assistant_chat_command`. Header enforcement is in `backend/src/handlers/assistant.rs:typed_chat`.
 
@@ -403,6 +421,16 @@ GET /api/chat/conversations/{id}/state
 ```
 
 The upstream response uses the typed reconnect envelope with `current`, `not_modified`, `reload_required`, or `not_found` outcomes. A `chatc-...` state request returns a not-found-shaped error without calling the typed state resource. Workflow state is learned from Chat History and `aevatar.chat.context`.
+
+After loading a `nyxid-chat-...` transcript, the browser also reads this state resource and hydrates the current TaskPlan, input, approval, and action cards. It does not proactively hydrate `chatc-...` conversations. A state-resource `404` after a valid typed transcript preserves the richer local/history mirror for mixed deployments instead of erasing cards.
+
+`activeTask` carries the full published TaskPlan shape. Live `nyxid.task.snapshot`, live `nyxid.task.step.changed`, and `snapshot.activeTask` all enter the same task reducer. The reducer enforces actor identity, plan revision, monotonically increasing `progressSequence` and `stateVersion`, and exact task/step relationships. Unknown additive fields are ignored. `availableActions` is a closed object containing only `retry`, `skip`, and `stop`; an unknown action verb fails closed.
+
+Task-step approval observations retain the public decision mode, `approval_required` / `denied` receipt status, observation time, optional `rejected` / `expired` / `timed_out` terminal outcome, and optional non-sensitive `subjectKind`. The public read model deliberately reserves and omits `subjectId`; the browser does not recreate or display it.
+
+The hydrated cards live in one stable synthetic current-state message. Each hydration removes the prior managed TaskPlan/input/approval/action projections and rebuilds one copy of each current card, so repeated reloads cannot accumulate duplicates. A partial pending-input or pending-approval snapshot may retain the matching richer live card by request identity. Matching committed input and approval resolutions retain the local terminal card while advancing its state version.
+
+`reload_required`, actor mismatch, invalid versions, unavailable controls, and stale operation generations fail before a control POST. Stop, steer, retry, and skip always preflight this resource; the browser never fabricates `expectedStateVersion: 0`.
 
 Implementation: `backend/src/handlers/assistant.rs:get_state`.
 

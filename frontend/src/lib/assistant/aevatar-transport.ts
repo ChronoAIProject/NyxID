@@ -50,6 +50,13 @@ import {
   EMPTY_TURN_STATE,
   toTerminalBlock,
 } from "@/lib/assistant/stream";
+import {
+  applyCurrentTaskState,
+  createTaskProjection,
+  reduceTaskFrame,
+  taskCan,
+  type AssistantTaskProjection,
+} from "@/lib/assistant/task-state";
 import type {
   ActionCardContentBlock,
   ActionCardStatus,
@@ -62,6 +69,8 @@ import type {
   ConversationHistory,
   InputCardContentBlock,
   RunContentBlock,
+  TaskPlanContentBlock,
+  TaskStep,
   TurnEvent,
   TurnHandle,
   TurnReducerState,
@@ -617,6 +626,8 @@ interface StoredConversation {
   actionRequestFingerprints: Map<string, string>;
   /** Server turn ownership for client-only activity messages. */
   activityMessageTurnIds: Map<string, string | null>;
+  /** Actor-owned task projection shared by live CUSTOM and `/state`. */
+  taskProjection?: AssistantTaskProjection;
   /** Epoch milliseconds of the latest turn.completed applied to this mirror. */
   lastLocalTurnCompletedAt?: number;
   /**
@@ -1702,6 +1713,7 @@ export class AevatarAssistantTransport implements AssistantTransport {
       turnState: EMPTY_TURN_STATE,
       actionRequestFingerprints: new Map(),
       activityMessageTurnIds: new Map(),
+      taskProjection: undefined,
     });
     this.activeConversationId = conversation.id;
     return conversation;
@@ -2099,6 +2111,15 @@ export class AevatarAssistantTransport implements AssistantTransport {
     ) {
       throw new AssistantConversationNotFoundError();
     }
+    if (TYPED_SERVER_CONVERSATION_ID_PATTERN.test(conversationId)) {
+      await this.hydrateTaskState(conversationId, stored);
+      if (
+        scopeId !== this.ensureScope() ||
+        this.deletedConversationIds.has(conversationId)
+      ) {
+        throw new AssistantConversationNotFoundError();
+      }
+    }
     this.activateConversation(conversationId, stored);
     return this.historyFromStored(stored);
   }
@@ -2153,6 +2174,7 @@ export class AevatarAssistantTransport implements AssistantTransport {
       turnState: EMPTY_TURN_STATE,
       actionRequestFingerprints: new Map(),
       activityMessageTurnIds: new Map(),
+      taskProjection: undefined,
       ...facts,
     };
   }
@@ -2742,6 +2764,171 @@ export class AevatarAssistantTransport implements AssistantTransport {
         this.cancelTurn(key, run);
         return;
       }
+    }
+  }
+
+  async stopTask(conversationId: string): Promise<void> {
+    this.ensureScope();
+    const requestedId = conversationId;
+    conversationId = this.canonicalConversationId(conversationId);
+    this.assertTypedTaskConversation(conversationId);
+    if (this.deletingConversations.has(conversationId)) {
+      throw new Error("This conversation is being deleted.");
+    }
+    const controller = this.scopeController();
+    const operation = this.dispatchTaskStop(
+      conversationId,
+      crypto.randomUUID(),
+      controller.signal,
+    );
+    this.trackFence(
+      conversationId,
+      operation.then(
+        () => undefined,
+        () => undefined,
+      ),
+    );
+    try {
+      await operation;
+      const run =
+        this.running.get(requestedId) ?? this.running.get(conversationId);
+      if (run) {
+        this.closeOpenMessage(conversationId, run);
+        this.finalizeActivity(conversationId, run, "cancelled");
+        this.finishTurn(conversationId, run, "cancelled", null);
+        run.controller.abort();
+      }
+    } finally {
+      controller.abort();
+      this.releaseScopeController(controller);
+    }
+  }
+
+  async steerTask(conversationId: string, instruction: string): Promise<void> {
+    this.ensureScope();
+    conversationId = this.canonicalConversationId(conversationId);
+    this.assertTypedTaskConversation(conversationId);
+    const normalized = instruction.trim();
+    if (!normalized || instruction.length > MAX_MESSAGE_CHARS) {
+      throw new Error("Steering must contain between 1 and 32768 characters.");
+    }
+    const controller = this.scopeController();
+    try {
+      await this.awaitPendingStop(conversationId);
+      const projection = await this.readTaskControlProjection(
+        conversationId,
+        controller.signal,
+      );
+      const turnId = protoString(projection.activeTurn?.["turnId"]);
+      if (!turnId) {
+        throw new AssistantProtocolError(
+          "The assistant no longer has active work to steer.",
+        );
+      }
+      await assistantApi.post(
+        `${ASSISTANT_PREFIX}/chat`,
+        {
+          type: "task.steer",
+          conversationId,
+          turnId,
+          steeringId: crypto.randomUUID(),
+          clientRequestId: crypto.randomUUID(),
+          instruction,
+          expectedStateVersion: projection.stateVersion,
+        },
+        controller.signal,
+      );
+    } finally {
+      controller.abort();
+      this.releaseScopeController(controller);
+    }
+  }
+
+  async retryStep(conversationId: string, stepId: string): Promise<void> {
+    await this.dispatchStepControl(conversationId, stepId, "retry");
+  }
+
+  async skipStep(conversationId: string, stepId: string): Promise<void> {
+    await this.dispatchStepControl(conversationId, stepId, "skip");
+  }
+
+  async resolvePlan(
+    conversationId: string,
+    blockId: string,
+    confirmed: boolean,
+  ): Promise<void> {
+    this.ensureScope();
+    conversationId = this.canonicalConversationId(conversationId);
+    this.assertTypedTaskConversation(conversationId);
+    if (this.deletingConversations.has(conversationId)) {
+      throw new Error("This conversation is being deleted.");
+    }
+    const stored = this.conversations.get(conversationId);
+    const card = stored?.turnState.messages
+      .flatMap((message) => message.blocks)
+      .find(
+        (block): block is TaskPlanContentBlock =>
+          block.type === "task_plan" && block.block_id === blockId,
+      );
+    const clickedGate = card?.plan.gate;
+    if (
+      !card ||
+      clickedGate?.mode !== "confirm" ||
+      clickedGate.status !== "pending" ||
+      !clickedGate.requestId ||
+      !clickedGate.taskId ||
+      !clickedGate.planId ||
+      clickedGate.planRevision === undefined
+    ) {
+      throw new AssistantProtocolError("This plan gate is no longer pending.");
+    }
+
+    const controller = this.scopeController();
+    try {
+      await this.awaitPendingStop(conversationId);
+      const projection = await this.readTaskControlProjection(
+        conversationId,
+        controller.signal,
+      );
+      const gate = projection.task?.gate;
+      if (
+        gate?.mode !== "confirm" ||
+        gate.status !== "pending" ||
+        gate.requestId !== clickedGate.requestId ||
+        gate.taskId !== clickedGate.taskId ||
+        gate.planId !== clickedGate.planId ||
+        gate.planRevision !== clickedGate.planRevision
+      ) {
+        throw new AssistantProtocolError(
+          "The actor no longer offers this exact plan gate.",
+        );
+      }
+      await assistantApi.post<{ readonly status: string }>(
+        `${ASSISTANT_PREFIX}/chat`,
+        {
+          type: "plan.resolve",
+          conversationId,
+          taskId: gate.taskId,
+          planId: gate.planId,
+          requestId: gate.requestId,
+          clientRequestId: crypto.randomUUID(),
+          planRevision: gate.planRevision,
+          confirmed,
+          expectedStateVersion: projection.stateVersion,
+        },
+        controller.signal,
+      );
+
+      // JSON 202 means accepted for actor dispatch, not committed. Refresh the
+      // same projection once and let only actor-owned state settle the gate.
+      try {
+        await this.readTaskControlProjection(conversationId, controller.signal);
+      } catch (error) {
+        if (controller.signal.aborted) throw error;
+      }
+    } finally {
+      controller.abort();
+      this.releaseScopeController(controller);
     }
   }
 
@@ -3542,6 +3729,7 @@ export class AevatarAssistantTransport implements AssistantTransport {
       actionRequestFingerprints:
         existing?.actionRequestFingerprints ?? new Map(),
       activityMessageTurnIds: existing?.activityMessageTurnIds ?? new Map(),
+      taskProjection: existing?.taskProjection,
       lastLocalTurnCompletedAt: existing?.lastLocalTurnCompletedAt,
       stateVersion: existing?.stateVersion,
       identityPending: existing?.identityPending,
@@ -3562,6 +3750,459 @@ export class AevatarAssistantTransport implements AssistantTransport {
       `${ASSISTANT_PREFIX}/conversations/${conversationId}`,
     );
     return this.applyHistoryResponse(conversationId, body);
+  }
+
+  private async hydrateTaskState(
+    conversationId: string,
+    stored: StoredConversation,
+  ): Promise<void> {
+    let response: unknown;
+    try {
+      response = await assistantApi.get<unknown>(
+        `${ASSISTANT_PREFIX}/conversations/${encodeURIComponent(conversationId)}/state`,
+      );
+    } catch (error) {
+      if (!(error instanceof ApiError && error.status === 404)) throw error;
+      // Older typed conversations can have a valid transcript while their
+      // actor current-state projection is unavailable. Keep the richer local
+      // live/history mirror in that case; treating 404 as an authoritative
+      // empty snapshot would erase input, approval, and action cards.
+      if (stored.turnState.messages.length > 0) return;
+      response = { status: "not_found" };
+    }
+    const current = applyCurrentTaskState(
+      stored.taskProjection ?? createTaskProjection(conversationId),
+      response,
+    );
+    if (current.reload) {
+      throw new AssistantProtocolError(
+        "The assistant requested an unconditional state reload for an unconditional request.",
+      );
+    }
+    stored.taskProjection = current.projection;
+    if (current.projection.stateVersion > 0) {
+      stored.stateVersion = Math.max(
+        stored.stateVersion ?? 0,
+        current.projection.stateVersion,
+      );
+      advanceReceiptFence(conversationId, current.projection.stateVersion);
+    }
+    this.materializeCurrentStateBlocks(stored);
+  }
+
+  private assertTypedTaskConversation(conversationId: string): void {
+    if (!TYPED_SERVER_CONVERSATION_ID_PATTERN.test(conversationId)) {
+      throw new AssistantProtocolError(
+        "Task controls require a typed assistant conversation.",
+      );
+    }
+  }
+
+  private async readTaskControlProjection(
+    conversationId: string,
+    signal: AbortSignal,
+  ): Promise<AssistantTaskProjection> {
+    const stored = this.conversations.get(conversationId);
+    if (!stored) throw new AssistantConversationNotFoundError();
+    const response = await assistantApi.get<unknown>(
+      `${ASSISTANT_PREFIX}/conversations/${encodeURIComponent(conversationId)}/state`,
+      signal,
+    );
+    const current = applyCurrentTaskState(
+      stored.taskProjection ?? createTaskProjection(conversationId),
+      response,
+    );
+    if (
+      current.reload ||
+      current.projection.stateVersion <= 0 ||
+      current.projection.actorId !== conversationId
+    ) {
+      throw new AssistantProtocolError(
+        "The assistant state is not current. Refresh the conversation and try again.",
+      );
+    }
+    stored.taskProjection = current.projection;
+    stored.stateVersion = Math.max(
+      stored.stateVersion ?? 0,
+      current.projection.stateVersion,
+    );
+    this.materializeCurrentStateBlocks(stored);
+    return current.projection;
+  }
+
+  private async dispatchTaskStop(
+    conversationId: string,
+    stopRequestId: string,
+    signal: AbortSignal,
+    expectedTurnId?: string,
+  ): Promise<void> {
+    const projection = await this.readTaskControlProjection(
+      conversationId,
+      signal,
+    );
+    const turnId = protoString(projection.activeTurn?.["turnId"]);
+    if (
+      !turnId ||
+      (expectedTurnId && expectedTurnId !== turnId) ||
+      !taskCan(projection, "stop")
+    ) {
+      throw new AssistantProtocolError(
+        "The actor no longer offers Stop for this task version.",
+      );
+    }
+    await assistantApi.post(
+      `${ASSISTANT_PREFIX}/chat`,
+      {
+        type: "task.stop",
+        conversationId,
+        turnId,
+        stopRequestId,
+        clientRequestId: crypto.randomUUID(),
+        expectedStateVersion: projection.stateVersion,
+      },
+      signal,
+    );
+  }
+
+  private async dispatchStepControl(
+    conversationId: string,
+    stepId: string,
+    action: "retry" | "skip",
+  ): Promise<void> {
+    this.ensureScope();
+    conversationId = this.canonicalConversationId(conversationId);
+    this.assertTypedTaskConversation(conversationId);
+    if (this.deletingConversations.has(conversationId)) {
+      throw new Error("This conversation is being deleted.");
+    }
+    const controller = this.scopeController();
+    try {
+      const projection = await this.readTaskControlProjection(
+        conversationId,
+        controller.signal,
+      );
+      const step: TaskStep | undefined = projection.steps.get(stepId);
+      const turnId =
+        step?.operation?.turnId ??
+        protoString(projection.activeTurn?.["turnId"]);
+      const taskId = step?.operation?.taskId ?? projection.task?.taskId;
+      const operationGeneration = step?.operation?.operationGeneration;
+      if (
+        !step ||
+        !turnId ||
+        !taskId ||
+        !Number.isSafeInteger(operationGeneration) ||
+        (operationGeneration ?? 0) <= 0 ||
+        !taskCan(projection, action, stepId)
+      ) {
+        throw new AssistantProtocolError(
+          `The actor no longer offers ${action === "retry" ? "Retry" : "Skip"} for this step version.`,
+        );
+      }
+      const requestId = crypto.randomUUID();
+      await assistantApi.post(
+        `${ASSISTANT_PREFIX}/chat`,
+        action === "retry"
+          ? {
+              type: "step.retry",
+              conversationId,
+              turnId,
+              taskId,
+              stepId,
+              retryRequestId: requestId,
+              clientRequestId: crypto.randomUUID(),
+              expectedOperationGeneration: operationGeneration,
+              expectedStateVersion: projection.stateVersion,
+            }
+          : {
+              type: "step.skip",
+              conversationId,
+              turnId,
+              taskId,
+              stepId,
+              skipRequestId: requestId,
+              clientRequestId: crypto.randomUUID(),
+              expectedOperationGeneration: operationGeneration,
+              expectedStateVersion: projection.stateVersion,
+            },
+        controller.signal,
+      );
+    } finally {
+      controller.abort();
+      this.releaseScopeController(controller);
+    }
+  }
+
+  private materializeCurrentStateBlocks(stored: StoredConversation): void {
+    const projection = stored.taskProjection;
+    if (!projection) return;
+    const existingBlocks = stored.turnState.messages.flatMap(
+      (message) => message.blocks,
+    );
+    const blocks: ContentBlock[] = [];
+    if (projection.task) {
+      blocks.push({
+        type: "task_plan",
+        block_id: `current-task-plan:${projection.task.taskId}`,
+        state_version: projection.stateVersion,
+        progress_sequence: projection.progressSequence,
+        plan: projection.task,
+      });
+    }
+
+    if (projection.pendingInput) {
+      const request = assistantInputRequestSchema.safeParse(
+        projection.pendingInput,
+      );
+      if (request.success) {
+        blocks.push(
+          this.inputCardBlock(
+            request.data,
+            projection.stateVersion,
+            `current-input:${request.data.requestId}`,
+          ),
+        );
+      } else {
+        const requestId = protoString(projection.pendingInput["requestId"]);
+        const existing = existingBlocks.find(
+          (block): block is InputCardContentBlock =>
+            block.type === "input_card" && block.request_id === requestId,
+        );
+        if (existing) {
+          blocks.push({
+            ...existing,
+            state_version: projection.stateVersion,
+          });
+        }
+      }
+    } else if (projection.latestInputResolution?.["outcome"] === "accepted") {
+      const requestId = protoString(
+        projection.latestInputResolution["requestId"],
+      );
+      const existing = existingBlocks.find(
+        (block): block is InputCardContentBlock =>
+          block.type === "input_card" && block.request_id === requestId,
+      );
+      if (existing) {
+        blocks.push({
+          ...existing,
+          status: "resolved",
+          state_version: projection.stateVersion,
+        });
+      }
+    }
+    if (projection.pendingApproval) {
+      const pending = projection.pendingApproval;
+      const presentation =
+        pending["presentation"] &&
+        typeof pending["presentation"] === "object" &&
+        !Array.isArray(pending["presentation"])
+          ? (pending["presentation"] as ToolApprovalPayload["presentation"])
+          : undefined;
+      const payload = {
+        ...(pending as ToolApprovalPayload),
+        ...(presentation ?? {}),
+        presentation,
+      };
+      const requestId =
+        payload.requestId ?? payload.approvalRequestId ?? payload.commandId;
+      if (requestId) {
+        const existing = existingBlocks.find(
+          (block): block is ApprovalCardContentBlock =>
+            block.type === "approval_card" &&
+            block.approval_request_id === requestId,
+        );
+        blocks.push(
+          existing
+            ? { ...existing, state_version: projection.stateVersion }
+            : this.approvalCardBlock(
+                payload,
+                projection.stateVersion,
+                `current-approval:${requestId}`,
+              ),
+        );
+      }
+    } else if (
+      projection.latestApprovalResolution?.["outcome"] === "accepted"
+    ) {
+      const requestId = protoString(
+        projection.latestApprovalResolution["requestId"],
+      );
+      const approved = projection.latestApprovalResolution["approved"];
+      const existing = existingBlocks.find(
+        (block): block is ApprovalCardContentBlock =>
+          block.type === "approval_card" &&
+          block.approval_request_id === requestId,
+      );
+      if (existing && typeof approved === "boolean") {
+        blocks.push({
+          ...existing,
+          decision: approved ? "approved" : "denied",
+          decision_channel: "web",
+          decision_submission: null,
+          state_version: projection.stateVersion,
+        });
+      }
+    }
+    for (const summary of projection.pendingActions) {
+      const requestPayload = summary["request"];
+      const parsed = assistantActionRequestSchema.safeParse(requestPayload);
+      const request = parsed.success
+        ? parsed.data
+        : recoverUnsupportedAssistantActionRequest(requestPayload);
+      if (!request || request.actorId !== projection.actorId) continue;
+      const resolved = resolveAssistantAction(request);
+      const reports = Array.isArray(summary["reports"])
+        ? summary["reports"]
+        : [];
+      const disposition = reports
+        .slice()
+        .reverse()
+        .map((report) =>
+          report && typeof report === "object" && !Array.isArray(report)
+            ? (report as Record<string, unknown>)["disposition"]
+            : undefined,
+        )
+        .find((value): value is string => typeof value === "string");
+      const status: ActionCardStatus =
+        summary["conflicted"] === true
+          ? "conflicted"
+          : disposition === "completed"
+            ? "completed"
+            : disposition === "declined"
+              ? "declined"
+              : disposition === "failed" ||
+                  disposition === "cancelled" ||
+                  disposition === "expired"
+                ? "failed"
+                : resolved.supported
+                  ? "pending"
+                  : "unsupported";
+      blocks.push({
+        type: "action_card",
+        block_id: `current-action:${request.actionRequestId}`,
+        action: request.action,
+        action_request_id: request.actionRequestId,
+        origin_turn_id: request.originTurnId,
+        actor_id: request.actorId || undefined,
+        task_id: request.taskId,
+        step_id: request.stepId,
+        params: resolved.params,
+        status,
+        outcome_note:
+          status === "completed"
+            ? "Reported — awaiting assistant verification."
+            : "",
+      });
+      stored.actionRequestFingerprints.set(
+        request.actionRequestId,
+        fingerprintStableRequestInput(request.params),
+      );
+    }
+
+    const managedTypes = new Set<ContentBlock["type"]>([
+      "task_plan",
+      "input_card",
+      "approval_card",
+      "action_card",
+    ]);
+    const stateMessageId = `assistant-current-state:${projection.actorId ?? stored.conversation.id}`;
+    const retainedMessages = stored.turnState.messages.flatMap((message) => {
+      if (message.id === stateMessageId) return [];
+      const retainedBlocks = message.blocks.filter(
+        (block) => !managedTypes.has(block.type),
+      );
+      if (retainedBlocks.length === 0 && message.blocks.length > 0) return [];
+      return retainedBlocks.length === message.blocks.length
+        ? [message]
+        : [{ ...message, blocks: retainedBlocks }];
+    });
+    stored.turnState = {
+      ...stored.turnState,
+      messages:
+        blocks.length === 0
+          ? retainedMessages
+          : [
+              ...retainedMessages,
+              {
+                id: stateMessageId,
+                role: "assistant",
+                schema_version: 1,
+                blocks,
+                created_at:
+                  projection.task?.updatedAt ??
+                  projection.task?.createdAt ??
+                  new Date(0).toISOString(),
+                turnId:
+                  projection.task?.turnId ??
+                  protoString(projection.activeTurn?.["turnId"]),
+              },
+            ],
+    };
+  }
+
+  private inputCardBlock(
+    request: AssistantInputRequest,
+    stateVersion?: number,
+    blockId = newId("input-card"),
+  ): InputCardContentBlock {
+    return {
+      type: "input_card",
+      block_id: blockId,
+      request_id: request.requestId,
+      prompt: redactDisplayText(request.prompt),
+      options: request.options.map((option) => ({
+        option_id: option.optionId,
+        label: redactDisplayText(option.label),
+        ...(option.description
+          ? { description: redactDisplayText(option.description) }
+          : {}),
+      })),
+      allow_free_text: request.allowFreeText,
+      multi_select: request.multiSelect,
+      ...(stateVersion !== undefined ? { state_version: stateVersion } : {}),
+      status: "pending",
+    };
+  }
+
+  private approvalCardBlock(
+    payload: ToolApprovalPayload,
+    stateVersion?: number,
+    blockId = newId("approval-card"),
+  ): ApprovalCardContentBlock {
+    const requestId =
+      payload.requestId ?? payload.approvalRequestId ?? payload.commandId ?? "";
+    const presentation = payload.presentation;
+    const presentationBody = [
+      presentation?.actorLabel,
+      presentation?.action,
+      presentation?.target ? `on ${presentation.target}` : "",
+    ]
+      .filter(Boolean)
+      .join(" ");
+    const body =
+      (payload.message ?? payload.body ?? presentationBody) ||
+      (payload.toolName
+        ? `The assistant wants to run ${redactDisplayText(payload.toolName)}.`
+        : "The assistant is requesting your approval to continue.");
+    return {
+      type: "approval_card",
+      block_id: blockId,
+      approval_request_id: requestId,
+      body: redactDisplayText(body),
+      service_slug: payload.serviceSlug ?? payload.service_slug ?? "",
+      agent_key_prefix: payload.agentKeyPrefix ?? "aevatar",
+      approval_mode: payload.approvalMode === "grant" ? "grant" : "per_request",
+      grant_duration_sec:
+        typeof payload.grantDurationSec === "number"
+          ? payload.grantDurationSec
+          : null,
+      expires_at: payload.expiresAt ?? payload.expires_at ?? "",
+      decision: null,
+      decision_channel: null,
+      decision_submission: null,
+      ...(stateVersion !== undefined ? { state_version: stateVersion } : {}),
+    };
   }
 
   private applyHistoryResponse(
@@ -3662,6 +4303,7 @@ export class AevatarAssistantTransport implements AssistantTransport {
       actionRequestFingerprints:
         existing?.actionRequestFingerprints ?? new Map(),
       activityMessageTurnIds: existing?.activityMessageTurnIds ?? new Map(),
+      taskProjection: existing?.taskProjection,
       lastLocalTurnCompletedAt: existing?.lastLocalTurnCompletedAt,
       stateVersion:
         freshStateVersion === undefined
@@ -5073,7 +5715,12 @@ export class AevatarAssistantTransport implements AssistantTransport {
         // Workflow projection state; telemetry only, never rendered.
         return;
       case "CUSTOM": {
-        this.handleCustomFrame(conversationId, run, frame.custom ?? {});
+        this.handleCustomFrame(
+          conversationId,
+          run,
+          frame.custom ?? {},
+          frame.sequence,
+        );
         return;
       }
       default:
@@ -5117,6 +5764,7 @@ export class AevatarAssistantTransport implements AssistantTransport {
     conversationId: string,
     run: RunningTurn,
     custom: CustomEnvelope,
+    sequence?: string | number,
   ): void {
     const name = custom.name ?? "";
     const payload = unpackAny(custom.payload);
@@ -5155,6 +5803,10 @@ export class AevatarAssistantTransport implements AssistantTransport {
         }
         return;
       }
+      case "nyxid.task.snapshot":
+      case "nyxid.task.step.changed":
+        this.applyLiveTaskFrame(conversationId, run, name, payload, sequence);
+        return;
       case "nyxid.input.request": {
         const request = assistantInputRequestSchema.safeParse(payload);
         if (request.success) {
@@ -5278,6 +5930,52 @@ export class AevatarAssistantTransport implements AssistantTransport {
       default:
         return;
     }
+  }
+
+  private applyLiveTaskFrame(
+    conversationId: string,
+    run: RunningTurn,
+    name: "nyxid.task.snapshot" | "nyxid.task.step.changed",
+    payload: unknown,
+    sequence: unknown,
+  ): void {
+    const stored = this.conversations.get(conversationId);
+    if (!stored) return;
+    const projection = reduceTaskFrame(
+      stored.taskProjection ?? createTaskProjection(conversationId),
+      name,
+      payload,
+      sequence,
+    );
+    if (projection === stored.taskProjection || !projection.task) return;
+    stored.taskProjection = projection;
+    const existing = stored.turnState.messages
+      .flatMap((message) => message.blocks)
+      .find(
+        (block): block is TaskPlanContentBlock =>
+          block.type === "task_plan" &&
+          block.plan.taskId === projection.task?.taskId,
+      );
+    if (existing) {
+      this.emit(conversationId, run, {
+        cursor: this.nextCursor(run),
+        event: "block.updated",
+        block_id: existing.block_id,
+        patch: {
+          state_version: projection.stateVersion,
+          progress_sequence: projection.progressSequence,
+          plan: projection.task,
+        },
+      });
+      return;
+    }
+    this.appendActivityBlock(conversationId, run, {
+      type: "task_plan",
+      block_id: `live-task-plan:${projection.task.taskId}`,
+      state_version: projection.stateVersion,
+      progress_sequence: projection.progressSequence,
+      plan: projection.task,
+    });
   }
 
   /**
@@ -5808,38 +6506,7 @@ export class AevatarAssistantTransport implements AssistantTransport {
     // A human gate has no client-imposed deadline; stop the watchdog.
     this.clearWatchdog(run);
 
-    const presentation = payload.presentation;
-    const presentationBody = [
-      presentation?.actorLabel,
-      presentation?.action,
-      presentation?.target ? `on ${presentation.target}` : "",
-    ]
-      .filter(Boolean)
-      .join(" ");
-    const body =
-      (payload.message ?? payload.body ?? presentationBody) ||
-      (payload.toolName
-        ? `The assistant wants to run ${redactDisplayText(payload.toolName)}.`
-        : "The assistant is requesting your approval to continue.");
-    const block: ApprovalCardContentBlock = {
-      type: "approval_card",
-      block_id: newId("approval-card"),
-      approval_request_id: requestId,
-      body: redactDisplayText(body),
-      service_slug: payload.serviceSlug ?? payload.service_slug ?? "",
-      agent_key_prefix: payload.agentKeyPrefix ?? "aevatar",
-      approval_mode: payload.approvalMode === "grant" ? "grant" : "per_request",
-      grant_duration_sec:
-        typeof payload.grantDurationSec === "number"
-          ? payload.grantDurationSec
-          : null,
-      // Empty when upstream sends none: the card omits the countdown for an
-      // unparseable expiry rather than inventing a deadline.
-      expires_at: payload.expiresAt ?? payload.expires_at ?? "",
-      decision: null,
-      decision_channel: null,
-      decision_submission: null,
-    };
+    const block = this.approvalCardBlock(payload);
     this.appendActivityBlock(conversationId, run, block);
     run.openCards.set(block.block_id, "approval");
     this.markStepWaiting(
@@ -5871,22 +6538,7 @@ export class AevatarAssistantTransport implements AssistantTransport {
     run.pendingInputRequestId = request.requestId;
     this.clearWatchdog(run);
 
-    const block: InputCardContentBlock = {
-      type: "input_card",
-      block_id: newId("input-card"),
-      request_id: request.requestId,
-      prompt: redactDisplayText(request.prompt),
-      options: request.options.map((option) => ({
-        option_id: option.optionId,
-        label: redactDisplayText(option.label),
-        ...(option.description
-          ? { description: redactDisplayText(option.description) }
-          : {}),
-      })),
-      allow_free_text: request.allowFreeText,
-      multi_select: request.multiSelect,
-      status: "pending",
-    };
+    const block = this.inputCardBlock(request);
     this.appendActivityBlock(conversationId, run, block);
     run.openCards.set(block.block_id, "input");
     this.markStepWaiting(
@@ -6776,9 +7428,9 @@ export class AevatarAssistantTransport implements AssistantTransport {
   /**
    * Best-effort server-side stop (the `feature/integrate` `:stop` control
    * contract): a fresh `stopRequestId` per intent keeps the command
-   * idempotent upstream, and `expectedStateVersion: 0` skips the
-   * optimistic-concurrency fence — the transport does not track actor
-   * state versions. Requires the server-announced `turnId` (a
+   * idempotent upstream. The transport first reads actor-owned current state
+   * and sends that exact version; Stop never bypasses the stale-state fence.
+   * Requires the server-announced `turnId` (a
    * pre-RUN_STARTED cancel defers here via `stopPendingStart`). Failures
    * are swallowed — stop is an upgrade over the previous client-only
    * cancel, never a new failure mode — but the in-flight request is
@@ -6804,20 +7456,12 @@ export class AevatarAssistantTransport implements AssistantTransport {
       () => deadline.abort(),
       STOP_REQUEST_DEADLINE_MS,
     );
-    const pending = apiClient<unknown>(`${ASSISTANT_PREFIX}/chat`, {
-      method: "POST",
-      body: {
-        type: "task.stop",
-        conversationId: actorConversationId,
-        turnId: run.turnId,
-        stopRequestId: crypto.randomUUID(),
-        clientRequestId: crypto.randomUUID(),
-        expectedStateVersion: 0,
-      },
-      preserveSessionOn401: true,
-      signal: deadline.signal,
-      ...assistantWireLogOptions(),
-    }).then(
+    const pending = this.dispatchTaskStop(
+      actorConversationId,
+      crypto.randomUUID(),
+      deadline.signal,
+      run.turnId,
+    ).then(
       () => {
         clearTimeout(deadlineTimer);
         this.releaseScopeController(deadline);
