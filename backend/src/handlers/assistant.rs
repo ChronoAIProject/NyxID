@@ -618,14 +618,6 @@ impl<'a> ForwardEcho<'a> {
             collector,
         }
     }
-
-    fn disabled() -> Self {
-        Self {
-            command_type: None,
-            body: None,
-            collector: None,
-        }
-    }
 }
 
 async fn forward(
@@ -837,7 +829,7 @@ pub async fn get_history(
         assistant_service::ConversationResourceFamily::Typed => {
             assistant_service::canonical_conversation_path(&conversation_id)?
         }
-        assistant_service::ConversationResourceFamily::Workflow => {
+        assistant_service::ConversationResourceFamily::Legacy => {
             assistant_service::history_conversation_path(&user_id, &conversation_id)?
         }
     };
@@ -868,7 +860,7 @@ pub async fn delete_conversation(
         assistant_service::ConversationResourceFamily::Typed => {
             assistant_service::canonical_conversation_path(&conversation_id)?
         }
-        assistant_service::ConversationResourceFamily::Workflow => {
+        assistant_service::ConversationResourceFamily::Legacy => {
             assistant_service::history_conversation_path(&user_id, &conversation_id)?
         }
     };
@@ -881,7 +873,7 @@ pub async fn delete_conversation(
         ForwardEcho::enabled(None, None, echoes.as_mut()),
     )
     .await?;
-    if family == assistant_service::ConversationResourceFamily::Workflow
+    if family == assistant_service::ConversationResourceFamily::Legacy
         && response.status().is_success()
     {
         let (mut parts, _) = response.into_parts();
@@ -908,7 +900,7 @@ pub async fn get_state(
     request: Request<Body>,
 ) -> AppResult<Response> {
     if assistant_service::conversation_resource_family(&conversation_id)?
-        == assistant_service::ConversationResourceFamily::Workflow
+        == assistant_service::ConversationResourceFamily::Legacy
     {
         return Err(AppError::NotFound(
             "Conversation state not found.".to_string(),
@@ -916,31 +908,6 @@ pub async fn get_state(
     }
     let mut echoes = upstream_echo_collector(&state, &auth_user, request.headers()).await;
     let path = assistant_service::canonical_state_path(&conversation_id)?;
-    let response = forward(
-        &state,
-        &auth_user,
-        path,
-        request,
-        Vec::new(),
-        ForwardEcho::enabled(None, None, echoes.as_mut()),
-    )
-    .await?;
-    Ok(attach_upstream_echoes(response, echoes.as_deref()))
-}
-
-/// `GET /api/v1/assistant/conversations/create-recovery/{commandId}` --
-/// workflow create identity recovery from scoped Chat History.
-pub async fn get_create_recovery(
-    State(state): State<AppState>,
-    auth_user: AuthUser,
-    Path(command_id): Path<String>,
-    request: Request<Body>,
-) -> AppResult<Response> {
-    let mut echoes = upstream_echo_collector(&state, &auth_user, request.headers()).await;
-    let path = assistant_service::history_create_recovery_path(
-        &auth_user.user_id.to_string(),
-        &command_id,
-    )?;
     let response = forward(
         &state,
         &auth_user,
@@ -1032,80 +999,6 @@ pub async fn typed_chat(
     )
     .await?;
     Ok(attach_upstream_echoes(response, echoes.as_deref()))
-}
-
-/// `POST /api/v1/assistant/workflow-chat` -- workflow ("studio") chat turn,
-/// answered as the upstream SSE stream.
-///
-/// The caller body is the typed `WorkflowChatTurnRequest`: prompt, session,
-/// create-only command id, or a conversation id plus observed state fence.
-/// The upstream `/api/chat` body is built server-side with the workflow pinned
-/// to `studio` and the `conversation` object always present, so every turn
-/// persists to chat history and no caller can select another engine or smuggle
-/// fields into Aevatar's strict `HttpChatInput`. Scope comes from the
-/// propagated identity token (Aevatar ignores any body scope).
-///
-/// Streams Aevatar's raw workflow engine events (`aevatar.raw.observed`
-/// envelopes carrying workflow YAML, system prompts, and kernel state) to the
-/// authenticated session. PRD §5.8 excludes that telemetry from the chat UI;
-/// exposing it on this surface was accepted explicitly (2026-07-17), so the
-/// filtering, if any, is the client's choice.
-pub async fn workflow_chat(
-    State(state): State<AppState>,
-    auth_user: AuthUser,
-    request: Request<Body>,
-) -> AppResult<Response> {
-    let (mut parts, body) = request.into_parts();
-    let bytes = to_bytes(body, MAX_ASSISTANT_CHAT_REQUEST_BYTES)
-        .await
-        .map_err(|_| {
-            AppError::BadRequest("Workflow chat request body is too large.".to_string())
-        })?;
-    let turn: assistant_service::WorkflowChatTurnRequest = serde_json::from_slice(&bytes)
-        .map_err(|e| AppError::BadRequest(format!("Invalid workflow chat request: {e}")))?;
-    let upstream = assistant_service::workflow_chat_body(&turn)?;
-    let payload = serde_json::to_vec(&upstream).map_err(|_| {
-        AppError::Internal("assistant: failed to encode the workflow chat body".to_string())
-    })?;
-    // The upstream length is the rebuilt body's, not the caller's.
-    parts.headers.remove(header::CONTENT_LENGTH);
-    parts.headers.insert(
-        header::CONTENT_TYPE,
-        HeaderValue::from_static("application/json"),
-    );
-    let request = Request::from_parts(parts, Body::from(payload));
-    let mut echoes = upstream_echo_collector(&state, &auth_user, request.headers()).await;
-    let echoed_body = echoes.as_ref().map(|_| upstream.clone());
-    let response = forward(
-        &state,
-        &auth_user,
-        assistant_service::workflow_chat_path(),
-        request,
-        Vec::new(),
-        ForwardEcho::enabled(Some("workflow.studio"), echoed_body, echoes.as_mut()),
-    )
-    .await?;
-    Ok(attach_upstream_echoes(response, echoes.as_deref()))
-}
-
-/// `GET /api/v1/assistant/workflow-chat/ws` -- WebSocket twin of the workflow
-/// chat. The proxy detects the upgrade headers and bridges the socket;
-/// browser callers authenticate via the session cookie since WebSocket
-/// clients cannot set an `Authorization` header.
-pub async fn workflow_chat_ws(
-    State(state): State<AppState>,
-    auth_user: AuthUser,
-    request: Request<Body>,
-) -> AppResult<Response> {
-    forward(
-        &state,
-        &auth_user,
-        assistant_service::workflow_chat_ws_path(),
-        request,
-        Vec::new(),
-        ForwardEcho::disabled(),
-    )
-    .await
 }
 
 #[cfg(test)]

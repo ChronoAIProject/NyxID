@@ -1482,7 +1482,7 @@ mod tests {
             "/api/v1/admin/users",
             "/api/v1/ssh/service-id",
             "/api/v1/ssh/service-id/terminal",
-            "/api/v1/assistant/workflow-chat/ws",
+            "/api/v1/assistant/conversations/nyxid-chat-4a1e60ebd1fd44f192bf4bb90e1812ae/state",
             "/api/v1/auth/social/github",
             "/api/v1/devices/code/poll",
             "/api/v1/cli-pairings/pairing-id/poll",

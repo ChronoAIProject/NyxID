@@ -366,6 +366,26 @@ class MockAssistantTransport implements AssistantTransport {
     return handle;
   }
 
+  async resolvePlan(): Promise<void> {
+    throw new Error("Plan controls are unavailable in mock chat.");
+  }
+
+  async stopTask(): Promise<void> {
+    throw new Error("Task controls are unavailable in mock chat.");
+  }
+
+  async steerTask(): Promise<void> {
+    throw new Error("Task controls are unavailable in mock chat.");
+  }
+
+  async retryStep(): Promise<void> {
+    throw new Error("Step controls are unavailable in mock chat.");
+  }
+
+  async skipStep(): Promise<void> {
+    throw new Error("Step controls are unavailable in mock chat.");
+  }
+
   reset(now: () => number = Date.now): void {
     for (const script of this.running.values()) {
       script.cancelled = true;
@@ -720,6 +740,26 @@ export class DelegatingAssistantTransport implements AssistantTransport {
     onEvent?: (event: TurnEvent) => void,
   ): TurnHandle {
     return this.transport.wakeActions(conversationId, originTurnId, onEvent);
+  }
+
+  resolvePlan(conversationId: string, confirmed: boolean): Promise<void> {
+    return this.transport.resolvePlan(conversationId, confirmed);
+  }
+
+  stopTask(conversationId: string): Promise<void> {
+    return this.transport.stopTask(conversationId);
+  }
+
+  steerTask(conversationId: string, instruction: string): Promise<void> {
+    return this.transport.steerTask(conversationId, instruction);
+  }
+
+  retryStep(conversationId: string, stepId: string): Promise<void> {
+    return this.transport.retryStep(conversationId, stepId);
+  }
+
+  skipStep(conversationId: string, stepId: string): Promise<void> {
+    return this.transport.skipStep(conversationId, stepId);
   }
 }
 

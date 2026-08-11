@@ -103,14 +103,15 @@ pub fn history_index_path(user_id: &str) -> String {
 /// `NyxIdChatServiceDefaults.ActorIdPrefix`; ids are `nyxid-chat-{guid:N}`).
 const NYXID_CHAT_ACTOR_PREFIX: &str = "nyxid-chat-";
 
-/// Conversation-id prefix of a workflow-chat conversation (upstream
-/// `ChatHistoryActorIds.CreateConversationId`; ids are `chatc-{hash[..32]}`).
-const WORKFLOW_CHAT_CONVERSATION_PREFIX: &str = "chatc-";
+/// Conversation-id prefix retained for historical list/read/delete support
+/// (upstream `ChatHistoryActorIds.CreateConversationId`; ids are
+/// `chatc-{hash[..32]}`).
+const LEGACY_CONVERSATION_PREFIX: &str = "chatc-";
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ConversationResourceFamily {
     Typed,
-    Workflow,
+    Legacy,
 }
 
 pub fn conversation_resource_family(
@@ -121,8 +122,8 @@ pub fn conversation_resource_family(
         validate_typed_conversation_id(conversation_id)?;
         return Ok(ConversationResourceFamily::Typed);
     }
-    if conversation_id.starts_with(WORKFLOW_CHAT_CONVERSATION_PREFIX) {
-        return Ok(ConversationResourceFamily::Workflow);
+    if conversation_id.starts_with(LEGACY_CONVERSATION_PREFIX) {
+        return Ok(ConversationResourceFamily::Legacy);
     }
     Err(AppError::NotFound("Conversation not found".to_string()))
 }
@@ -147,8 +148,7 @@ pub fn append_addressable_history_page(
         let Some(id) = row.get("id").and_then(serde_json::Value::as_str) else {
             continue;
         };
-        if (id.starts_with(NYXID_CHAT_ACTOR_PREFIX)
-            || id.starts_with(WORKFLOW_CHAT_CONVERSATION_PREFIX))
+        if (id.starts_with(NYXID_CHAT_ACTOR_PREFIX) || id.starts_with(LEGACY_CONVERSATION_PREFIX))
             && seen.insert(id.to_string())
         {
             conversations.push(row.clone());
@@ -193,15 +193,6 @@ pub fn history_conversation_path(user_id: &str, conversation_id: &str) -> AppRes
     ))
 }
 
-/// Scoped create identity recovery resource.
-pub fn history_create_recovery_path(user_id: &str, command_id: &str) -> AppResult<String> {
-    validate_client_token(command_id, "commandId")?;
-    Ok(format!(
-        "{}/create-recovery/{command_id}",
-        history_index_path(user_id)
-    ))
-}
-
 /// `api/chat/conversations/{id}/state` -- canonical reconnect surface.
 pub fn canonical_state_path(conversation_id: &str) -> AppResult<String> {
     Ok(format!(
@@ -214,13 +205,6 @@ pub fn canonical_state_path(conversation_id: &str) -> AppResult<String> {
 /// endpoint is stateless and carries its history in the request body.
 pub fn completions_path() -> String {
     "v1/chat/completions".to_string()
-}
-
-/// `api/chat` -- ad-hoc workflow chat (`StartWorkflowChat`). Scope-free on
-/// the wire: Aevatar derives the scope from the propagated identity JWT, so
-/// the server-owned-scope invariant holds with nothing in the path.
-pub fn workflow_chat_path() -> String {
-    "api/chat".to_string()
 }
 
 /// `api/chat` -- typed NyxIdChat create-and-first-turn stream.
@@ -1229,166 +1213,6 @@ pub fn prepare_assistant_chat_command(
     }
 }
 
-/// The one workflow the assistant surface may start. Pinned server-side:
-/// Aevatar's `/api/chat` runs whatever catalog workflow the body names
-/// (`direct`, `auto`, `auto_review`, file-loaded definitions, …), and which
-/// engine backs the platform chat is a platform decision, not a caller input.
-pub const WORKFLOW_CHAT_WORKFLOW: &str = "studio";
-
-/// Matches the client cap in `aevatar-transport.ts` (`MAX_MESSAGE_CHARS`).
-const WORKFLOW_CHAT_PROMPT_MAX_CHARS: usize = 32_768;
-
-/// The caller half of the workflow-chat turn contract. Everything else in
-/// Aevatar's `HttpChatInput` (workflow selection, inline YAML, llmControl,
-/// toolContext, metadata, headers) is deliberately not expressible here.
-///
-/// `deny_unknown_fields` keeps client drift loud: Aevatar rejects unknown
-/// body members (`JsonUnmappedMemberHandling.Disallow`), and a field that
-/// silently vanished here would surface as a confusing upstream 400 instead.
-#[derive(Debug, serde::Deserialize)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
-pub struct WorkflowChatTurnRequest {
-    pub prompt: String,
-    /// `chatc-…` conversation to continue; absent starts a new conversation.
-    #[serde(default)]
-    pub conversation_id: Option<String>,
-    /// Chat-history read fence for continuations: the `stateVersion` the
-    /// client last observed. Aevatar requires `> 0` alongside a conversation
-    /// id (`CHAT_HISTORY_RESERVATION_UNAVAILABLE` otherwise).
-    #[serde(default)]
-    pub minimum_state_version: Option<i64>,
-    /// Client idempotency identity for a create. Continuations omit it so the
-    /// upstream workflow engine owns their delivery identity.
-    #[serde(default)]
-    pub command_id: Option<String>,
-    /// Client-controlled session correlation handle, stable for the life of
-    /// one conversation. Aevatar's `HttpChatInput.SessionId` is optional and
-    /// falls back to the run's correlation id
-    /// (`WorkflowChatRequestEnvelopeFactory`), so this is correlation
-    /// plumbing, not conversation identity — chat continuity is carried by
-    /// `conversation.conversationId` + `minimumStateVersion`.
-    ///
-    /// It IS part of Aevatar's create-replay fingerprint
-    /// (`WorkflowChatCreateRequestFingerprint`), so a retry of the same
-    /// `commandId` MUST repeat the same value or the replay 409s.
-    #[serde(default)]
-    pub session_id: Option<String>,
-}
-
-/// Opaque client token (command ids): UUID-shaped material only, so nothing
-/// structural or attacker-shaped rides through to the upstream body.
-fn validate_client_token(value: &str, label: &str) -> AppResult<()> {
-    let valid = !value.is_empty()
-        && value.len() <= 64
-        && value.chars().all(|c| c.is_ascii_alphanumeric() || c == '-');
-    if !valid {
-        return Err(AppError::BadRequest(format!("Invalid {label}.")));
-    }
-    Ok(())
-}
-
-/// Build the upstream `/api/chat` body for a caller turn request.
-///
-/// The `conversation` object is always present: without it Aevatar runs the
-/// turn ephemerally and **persists nothing** to chat history, which would
-/// silently drop the conversation from the sidebar contract. `workflow` is
-/// pinned to [`WORKFLOW_CHAT_WORKFLOW`]. A body `scopeId` is ignored by
-/// Aevatar (trusted scope wins), so none is sent.
-pub fn workflow_chat_body(request: &WorkflowChatTurnRequest) -> AppResult<serde_json::Value> {
-    let prompt = request.prompt.trim();
-    if prompt.is_empty() || prompt.chars().count() > WORKFLOW_CHAT_PROMPT_MAX_CHARS {
-        return Err(AppError::BadRequest(format!(
-            "Prompt must contain between 1 and {WORKFLOW_CHAT_PROMPT_MAX_CHARS} characters."
-        )));
-    }
-
-    if request.conversation_id.is_some() && request.command_id.is_some() {
-        return Err(AppError::BadRequest(
-            "commandId is only valid when creating a conversation.".to_string(),
-        ));
-    }
-
-    let conversation = match (&request.conversation_id, request.minimum_state_version) {
-        (None, None) => serde_json::json!({ "conversationId": null }),
-        (None, Some(_)) => {
-            return Err(AppError::BadRequest(
-                "minimumStateVersion requires a conversationId.".to_string(),
-            ));
-        }
-        (Some(id), version) => {
-            validate_conversation_id(id)?;
-            if !id.starts_with(WORKFLOW_CHAT_CONVERSATION_PREFIX) {
-                // A `nyxid-chat-…` actor id is a different surface; failing
-                // fast beats an upstream CONVERSATION_NOT_FOUND after a run
-                // was already admitted.
-                return Err(AppError::BadRequest(
-                    "Only workflow conversations can be continued here.".to_string(),
-                ));
-            }
-            let Some(version) = version.filter(|v| *v > 0) else {
-                return Err(AppError::BadRequest(
-                    "Continuing a conversation requires the last observed minimumStateVersion."
-                        .to_string(),
-                ));
-            };
-            serde_json::json!({ "conversationId": id, "minimumStateVersion": version })
-        }
-    };
-
-    let command_id = if request.conversation_id.is_none() {
-        Some(match &request.command_id {
-            Some(id) => {
-                validate_client_token(id, "commandId")?;
-                id.clone()
-            }
-            None => uuid::Uuid::new_v4().to_string(),
-        })
-    } else {
-        None
-    };
-
-    let session_id = if let Some(session_id) = &request.session_id {
-        validate_client_token(session_id, "sessionId")?;
-        Some(session_id.clone())
-    } else {
-        None
-    };
-
-    // Preserve the console's JSON insertion order exactly. Aevatar rejects
-    // unknown members, and the parity fixtures intentionally compare bytes.
-    let mut body = serde_json::Map::new();
-    if let Some(command_id) = command_id {
-        body.insert(
-            "commandId".to_string(),
-            serde_json::Value::String(command_id),
-        );
-    }
-    body.insert("conversation".to_string(), conversation);
-    body.insert(
-        "prompt".to_string(),
-        serde_json::Value::String(prompt.to_string()),
-    );
-    // Omitted rather than sent null when the caller has none.
-    if let Some(session_id) = session_id {
-        body.insert(
-            "sessionId".to_string(),
-            serde_json::Value::String(session_id),
-        );
-    }
-    body.insert(
-        "workflow".to_string(),
-        serde_json::Value::String(WORKFLOW_CHAT_WORKFLOW.to_string()),
-    );
-
-    Ok(serde_json::Value::Object(body))
-}
-
-/// `api/ws/chat` -- WebSocket twin of the workflow chat
-/// (`StartWorkflowChatWebSocket`).
-pub fn workflow_chat_ws_path() -> String {
-    "api/ws/chat".to_string()
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1548,10 +1372,6 @@ mod tests {
         AssistantChatResponseKind::Json
     );
 
-    fn workflow_turn_request(value: serde_json::Value) -> WorkflowChatTurnRequest {
-        serde_json::from_value(value).unwrap()
-    }
-
     #[test]
     fn drains_index_pages_to_the_addressable_families_only() {
         let index = json!({
@@ -1664,22 +1484,14 @@ mod tests {
             format!("api/scopes/{USER}/chat-history/conversations/{WORKFLOW_CONV}")
         );
         assert_eq!(
-            history_create_recovery_path(USER, "4380055d-e9c3-468e-bc93-64719a9f4658").unwrap(),
-            format!(
-                "api/scopes/{USER}/chat-history/create-recovery/4380055d-e9c3-468e-bc93-64719a9f4658"
-            )
-        );
-        assert_eq!(
             conversation_resource_family(CONV).unwrap(),
             ConversationResourceFamily::Typed
         );
         assert_eq!(
             conversation_resource_family(WORKFLOW_CONV).unwrap(),
-            ConversationResourceFamily::Workflow
+            ConversationResourceFamily::Legacy
         );
         assert_eq!(typed_chat_path(), "api/chat");
-        assert_eq!(workflow_chat_path(), "api/chat");
-        assert_eq!(workflow_chat_ws_path(), "api/ws/chat");
         assert_eq!(completions_path(), "v1/chat/completions");
     }
 
@@ -1718,7 +1530,7 @@ mod tests {
         );
         assert_eq!(
             conversation_resource_family(WORKFLOW_CONV).unwrap(),
-            ConversationResourceFamily::Workflow
+            ConversationResourceFamily::Legacy
         );
         assert!(history_conversation_path(USER, WORKFLOW_CONV).is_ok());
     }
@@ -1879,7 +1691,6 @@ mod tests {
             assert!(canonical_state_path(bad).is_err());
             assert!(history_conversation_path(USER, bad).is_err());
         }
-        assert!(history_create_recovery_path(USER, "not a token!").is_err());
     }
 
     #[test]
@@ -1896,7 +1707,7 @@ mod tests {
         );
         let typed_detail = match conversation_resource_family(CONV).unwrap() {
             ConversationResourceFamily::Typed => canonical_conversation_path(CONV).unwrap(),
-            ConversationResourceFamily::Workflow => history_conversation_path(USER, CONV).unwrap(),
+            ConversationResourceFamily::Legacy => history_conversation_path(USER, CONV).unwrap(),
         };
         assert!(
             !typed_detail.contains("/chat-history/conversations"),
@@ -2572,183 +2383,6 @@ mod tests {
                 "expectedOperationGeneration": 2,
                 "expectedStateVersion": 3
             })
-        );
-    }
-
-    #[test]
-    fn workflow_body_creates_a_conversation_with_the_pinned_workflow() {
-        let body = workflow_chat_body(&workflow_turn_request(json!({
-            "prompt": "hi",
-            "commandId": "0d4b0a52-3d5f-4d2e-9f10-8f6f9b1c2d3e",
-        })))
-        .unwrap();
-        assert_eq!(
-            body,
-            json!({
-                "commandId": "0d4b0a52-3d5f-4d2e-9f10-8f6f9b1c2d3e",
-                "conversation": { "conversationId": null },
-                "prompt": "hi",
-                "workflow": "studio",
-            })
-        );
-    }
-
-    /// Byte-for-byte parity with the console's create fixture.
-    #[test]
-    fn workflow_body_matches_the_reference_create_payload() {
-        let body = workflow_chat_body(&workflow_turn_request(json!({
-            "prompt": "1",
-            "commandId": "4380055d-e9c3-468e-bc93-64719a9f4658",
-            "sessionId": "91927706-e174-4544-8570-61fd263b6c87",
-        })))
-        .unwrap();
-        assert_eq!(
-            serde_json::to_vec(&body).unwrap(),
-            br#"{"commandId":"4380055d-e9c3-468e-bc93-64719a9f4658","conversation":{"conversationId":null},"prompt":"1","sessionId":"91927706-e174-4544-8570-61fd263b6c87","workflow":"studio"}"#
-        );
-    }
-
-    /// Byte-for-byte parity with the console's continuation fixture. Unknown
-    /// member paranoia matters here because upstream disallows unmapped JSON.
-    #[test]
-    fn workflow_body_matches_the_reference_continuation_payload() {
-        let body = workflow_chat_body(&workflow_turn_request(json!({
-            "prompt": "2",
-            "conversationId": "chatc-bd3fc31745343dc910773dad977eb24b",
-            "minimumStateVersion": 1,
-            "sessionId": "775668ff-d9fd-4023-a007-a9db572a4b3f",
-        })))
-        .unwrap();
-        assert_eq!(
-            serde_json::to_vec(&body).unwrap(),
-            br#"{"conversation":{"conversationId":"chatc-bd3fc31745343dc910773dad977eb24b","minimumStateVersion":1},"prompt":"2","sessionId":"775668ff-d9fd-4023-a007-a9db572a4b3f","workflow":"studio"}"#
-        );
-    }
-
-    #[test]
-    fn workflow_body_omits_an_absent_session_id_and_rejects_a_malformed_one() {
-        let body = workflow_chat_body(&workflow_turn_request(json!({ "prompt": "hi" }))).unwrap();
-        assert!(body.get("sessionId").is_none());
-        assert!(
-            workflow_chat_body(&workflow_turn_request(json!({
-                "prompt": "hi",
-                "sessionId": "not a token/../",
-            })))
-            .is_err()
-        );
-    }
-
-    #[test]
-    fn workflow_body_continues_with_the_observed_state_version() {
-        let body = workflow_chat_body(&workflow_turn_request(json!({
-            "prompt": "and then?",
-            "conversationId": WORKFLOW_CONV,
-            "minimumStateVersion": 18,
-        })))
-        .unwrap();
-        assert_eq!(body["conversation"]["conversationId"], WORKFLOW_CONV);
-        assert_eq!(body["conversation"]["minimumStateVersion"], 18);
-        assert_eq!(body["workflow"], "studio");
-        assert!(body.get("commandId").is_none());
-    }
-
-    #[test]
-    fn workflow_body_trims_before_boundary_validation_and_serialization() {
-        let boundary = format!("  {}\n", "a".repeat(WORKFLOW_CHAT_PROMPT_MAX_CHARS));
-        let body = workflow_chat_body(&workflow_turn_request(json!({
-            "prompt": boundary,
-            "commandId": "4380055d-e9c3-468e-bc93-64719a9f4658",
-        })))
-        .unwrap();
-        assert_eq!(
-            body["prompt"].as_str().unwrap().chars().count(),
-            WORKFLOW_CHAT_PROMPT_MAX_CHARS
-        );
-        assert!(body["prompt"].as_str().unwrap().chars().all(|c| c == 'a'));
-
-        let over_boundary = format!(" \t{}\n", "a".repeat(WORKFLOW_CHAT_PROMPT_MAX_CHARS + 1));
-        assert!(matches!(
-            workflow_chat_body(&workflow_turn_request(json!({
-                "prompt": over_boundary,
-                "commandId": "4380055d-e9c3-468e-bc93-64719a9f4658",
-            }))),
-            Err(AppError::BadRequest(_))
-        ));
-    }
-
-    #[test]
-    fn workflow_body_rejects_a_command_id_on_continuation() {
-        assert!(
-            workflow_chat_body(&workflow_turn_request(json!({
-                "prompt": "continue",
-                "conversationId": WORKFLOW_CONV,
-                "minimumStateVersion": 4,
-                "commandId": "4380055d-e9c3-468e-bc93-64719a9f4658",
-            })))
-            .is_err()
-        );
-    }
-
-    #[test]
-    fn workflow_body_rejects_out_of_contract_turns() {
-        assert!(workflow_chat_body(&workflow_turn_request(json!({ "prompt": "  " }))).is_err());
-        assert!(
-            workflow_chat_body(&workflow_turn_request(json!({
-                "prompt": "a".repeat(32_769)
-            })))
-            .is_err()
-        );
-        assert!(
-            workflow_chat_body(&workflow_turn_request(json!({
-                "prompt": "hi",
-                "conversationId": WORKFLOW_CONV
-            })))
-            .is_err()
-        );
-        assert!(
-            workflow_chat_body(&workflow_turn_request(json!({
-                "prompt": "hi",
-                "conversationId": WORKFLOW_CONV,
-                "minimumStateVersion": 0
-            })))
-            .is_err()
-        );
-        assert!(
-            workflow_chat_body(&workflow_turn_request(json!({
-                "prompt": "hi",
-                "minimumStateVersion": 3
-            })))
-            .is_err()
-        );
-        assert!(
-            workflow_chat_body(&workflow_turn_request(json!({
-                "prompt": "hi",
-                "conversationId": CONV,
-                "minimumStateVersion": 3
-            })))
-            .is_err()
-        );
-        assert!(
-            workflow_chat_body(&workflow_turn_request(json!({
-                "prompt": "hi",
-                "conversationId": "chatc-a/b",
-                "minimumStateVersion": 3
-            })))
-            .is_err()
-        );
-        assert!(
-            workflow_chat_body(&workflow_turn_request(json!({
-                "prompt": "hi",
-                "commandId": "not a token!"
-            })))
-            .is_err()
-        );
-        assert!(
-            serde_json::from_value::<WorkflowChatTurnRequest>(json!({
-                "prompt": "hi",
-                "workflow": "direct"
-            }))
-            .is_err()
         );
     }
 }

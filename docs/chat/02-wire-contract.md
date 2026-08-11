@@ -319,7 +319,8 @@ resource.
 
 `current` carries an actor-authored snapshot. Its recognised fields include
 `activeTurn`, `latestTurn`, `recentTerminalTurns`, `activeTask`, `taskStatus`,
-`pendingInput`, `pendingApproval`, `pendingActions`, `latestInputResolution`,
+`pendingInput`, `pendingApproval`, `pendingActions`, `recentActions`,
+`latestInputResolution`,
 `latestApprovalResolution`, `latestControlResult`, `latestStepControlResult`,
 `recentStepControlResults`, `controlFence`, `continuationAdmission`,
 `attentionKind`, `attentionSince`, `activeStepSummary`, `scopeId`,

@@ -3,6 +3,7 @@ import type {
   ActionReport,
 } from "@/schemas/assistant-actions";
 import type { InputAnswer } from "@/schemas/assistant-input";
+import type { ActorProjection } from "@/lib/assistant/actor-state";
 
 export type ConnectCardState =
   | "needs_connection"
@@ -199,6 +200,8 @@ export interface ConversationHistory {
   readonly conversation: Conversation;
   readonly messages: AssistantMessage[];
   readonly has_more: boolean;
+  /** Actor-owned task and control facts; authoritative for typed UI state. */
+  readonly actorProjection?: ActorProjection;
   /** The local stream mirror is authoritative while identity/history catches up. */
   readonly awaitingProjection?: boolean;
   /** Background reconciliation reached its deadline without proving absence. */
@@ -367,6 +370,11 @@ export interface AssistantTransport {
     originTurnId: string,
     onEvent?: (event: TurnEvent) => void,
   ): TurnHandle;
+  resolvePlan(conversationId: string, confirmed: boolean): Promise<void>;
+  stopTask(conversationId: string): Promise<void>;
+  steerTask(conversationId: string, instruction: string): Promise<void>;
+  retryStep(conversationId: string, stepId: string): Promise<void>;
+  skipStep(conversationId: string, stepId: string): Promise<void>;
 }
 
 export function isTurnActive(status: TurnStatus | undefined): boolean {

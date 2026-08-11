@@ -126,7 +126,7 @@ describe("assistant mock-scenario hook integration", () => {
     const parkedHistory =
       queryClient.getQueryData<ConversationHistory>(historyKey);
     const parkedCard = findActionCard(parkedHistory);
-    expect(conversationId).toMatch(/^workflow-pending-/);
+    expect(conversationId).toMatch(/^draft-/);
     expect(hook.result.current.turn.data?.status).toBe("blocked");
     expect(parkedCard).toMatchObject({
       action: "service.connect",

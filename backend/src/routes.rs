@@ -1393,20 +1393,11 @@ pub fn build_router(
             get(handlers::assistant::get_history).delete(handlers::assistant::delete_conversation),
         )
         .route(
-            "/conversations/create-recovery/{command_id}",
-            get(handlers::assistant::get_create_recovery),
-        )
-        .route(
             "/conversations/{conversation_id}/state",
             get(handlers::assistant::get_state),
         )
         .route("/completions", post(handlers::assistant::completions))
         .route("/chat", post(handlers::assistant::typed_chat))
-        .route("/workflow-chat", post(handlers::assistant::workflow_chat))
-        .route(
-            "/workflow-chat/ws",
-            get(handlers::assistant::workflow_chat_ws),
-        )
         .route_layer(axum::Extension(
             crate::services::billing::route_inventory::BillingRoutePolicy::Metered(
                 crate::services::billing::BillingIngress::Proxy,

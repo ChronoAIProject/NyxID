@@ -51,7 +51,7 @@ const PENDING_APPROVALS_PAGE_SIZE = 50;
 const APPROVAL_HISTORY_PAGE_SIZE = 20;
 // A turn that never emits a first event is failed rather than left hanging.
 // The deadline has to tolerate slow first-frame delivery from the upstream
-// workflow engine: at 8s it was cancelling healthy-but-slow SSE turns, so it
+// typed actor: at 8s it was cancelling healthy-but-slow SSE turns, so it
 // sits well above the observed worst-case time-to-first-event.
 const STREAM_START_DEADLINE_MS = 30_000;
 const PROJECTION_DEADLINE_MS = 5_000;
@@ -970,4 +970,50 @@ export function useActionCardActions(conversationId: string | undefined) {
       }
     },
   };
+}
+
+export function useActorControls(conversationId: string | undefined) {
+  const queryClient = useQueryClient();
+  const run = async (operation: () => Promise<void>): Promise<void> => {
+    if (!conversationId) throw new Error("Select a conversation first.");
+    await operation();
+    await projectTransportState(queryClient, conversationId);
+  };
+  const onError = (error: unknown) => {
+    toast.error("Actor control was not delivered", {
+      id: "assistant-actor-control-failed",
+      description:
+        error instanceof Error && error.message
+          ? error.message
+          : "The assistant backend did not respond. Try again.",
+    });
+  };
+
+  const resolvePlan = useMutation({
+    mutationFn: (confirmed: boolean) =>
+      run(() => assistantTransport.resolvePlan(conversationId ?? "", confirmed)),
+    onError,
+  });
+  const stop = useMutation({
+    mutationFn: () =>
+      run(() => assistantTransport.stopTask(conversationId ?? "")),
+    onError,
+  });
+  const steer = useMutation({
+    mutationFn: (instruction: string) =>
+      run(() => assistantTransport.steerTask(conversationId ?? "", instruction)),
+    onError,
+  });
+  const retry = useMutation({
+    mutationFn: (stepId: string) =>
+      run(() => assistantTransport.retryStep(conversationId ?? "", stepId)),
+    onError,
+  });
+  const skip = useMutation({
+    mutationFn: (stepId: string) =>
+      run(() => assistantTransport.skipStep(conversationId ?? "", stepId)),
+    onError,
+  });
+
+  return { resolvePlan, stop, steer, retry, skip };
 }

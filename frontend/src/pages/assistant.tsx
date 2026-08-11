@@ -16,6 +16,7 @@ import { AssistantShell } from "@/components/assistant/assistant-shell";
 import { AssistantSidebar } from "@/components/assistant/assistant-sidebar";
 import { ChatComposer } from "@/components/assistant/chat-composer";
 import { ChatThread } from "@/components/assistant/chat-thread";
+import { ActorTaskPanel } from "@/components/assistant/actor-task-panel";
 import { ApprovalsView } from "@/components/assistant/approvals-view";
 import { PluginsView } from "@/components/assistant/plugins-view";
 import { AssistantWireLogAction } from "@/components/assistant/assistant-wire-log-panel";
@@ -23,6 +24,7 @@ import {
   assistantKeys,
   describeSendFailure,
   useAssistantTurn,
+  useActorControls,
   useActionCardActions,
   useCancelTurn,
   useConversation,
@@ -193,6 +195,7 @@ export function AssistantPage({
   const decideApproval = useDecideApproval(selectedId);
   const resolveInput = useResolveInput(selectedId);
   const actionCards = useActionCardActions(selectedId);
+  const actorControls = useActorControls(selectedId);
   const deleteConversation = useDeleteConversation();
   const turnStatus = turn.data?.status;
   const active = isTurnActive(turnStatus);
@@ -516,6 +519,19 @@ export function AssistantPage({
   }, [history.data?.messages, pendingEcho]);
   const awaitingFirstTurn =
     active || sendMessage.isPending || episodeState?.open === true;
+  const actorProjection = history.data?.actorProjection;
+  const actorTaskActive =
+    actorProjection?.activeTurn?.["status"] === "active" ||
+    actorProjection?.task?.["status"] === "active";
+  const legacyReadOnly = selectedId?.startsWith("chatc-") === true;
+  const actorControlBusy =
+    actorControls.resolvePlan.isPending ||
+    actorControls.stop.isPending ||
+    actorControls.steer.isPending ||
+    actorControls.retry.isPending ||
+    actorControls.skip.isPending ||
+    decideApproval.isPending ||
+    resolveInput.isPending;
 
   /**
    * Whether THIS episode has closed, per the pump that served it.
@@ -592,6 +608,27 @@ export function AssistantPage({
             fired from `useConversation`): every stream/turn error on this
             surface goes through toasts, and none of them blocks the thread
             or the composer. */}
+        {actorProjection ? (
+          <ActorTaskPanel
+            projection={actorProjection}
+            busy={actorControlBusy}
+            onResolvePlan={(confirmed) =>
+              actorControls.resolvePlan.mutateAsync(confirmed)
+            }
+            onResolveInput={(requestId, answer) =>
+              resolveInput.mutateAsync({ blockId: requestId, answer })
+            }
+            onResolveApproval={(requestId, approved) =>
+              decideApproval.mutateAsync({ blockId: requestId, approved })
+            }
+            onStop={() => actorControls.stop.mutateAsync()}
+            onSteer={(instruction) =>
+              actorControls.steer.mutateAsync(instruction)
+            }
+            onRetry={(stepId) => actorControls.retry.mutateAsync(stepId)}
+            onSkip={(stepId) => actorControls.skip.mutateAsync(stepId)}
+          />
+        ) : null}
         {history.isLoading && messages.length === 0 ? (
           <div className="flex flex-1 items-center justify-center text-[12px] text-text-tertiary">
             Loading conversation...
@@ -621,6 +658,7 @@ export function AssistantPage({
           <ChatComposer
             active={active}
             sending={sendMessage.isPending}
+            disabled={legacyReadOnly || actorTaskActive}
             ownerUserId={user?.id ?? null}
             draftKey={draftKey}
             focusRequest={composerFocusRequest}

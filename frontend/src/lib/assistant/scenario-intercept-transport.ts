@@ -32,7 +32,7 @@ import type {
 import type { KeyInfo } from "@/types/keys";
 
 const MOCK_ID_PREFIX = "mockchat-";
-const PENDING_WORKFLOW_CONVERSATION_PREFIX = "workflow-pending-";
+const PENDING_TYPED_CONVERSATION_PREFIX = "draft-";
 const CLAIMED_FALLBACK_TEXT = "No scenario matched — this is a mock-only chat";
 const SUPERSEDED_NOTE = "Superseded by a newer message.";
 
@@ -91,7 +91,7 @@ function isMockId(value: string): boolean {
 }
 
 function isPlaceholderConversation(value: string): boolean {
-  return value.startsWith(PENDING_WORKFLOW_CONVERSATION_PREFIX);
+  return value.startsWith(PENDING_TYPED_CONVERSATION_PREFIX);
 }
 
 function maxIso(left: string, right: string): string {
@@ -528,6 +528,26 @@ export class ScenarioInterceptTransport implements AssistantTransport {
       this.restoreOwnership(conversationId, priorOwnership);
       throw error;
     }
+  }
+
+  resolvePlan(conversationId: string, confirmed: boolean): Promise<void> {
+    return this.delegate.resolvePlan(conversationId, confirmed);
+  }
+
+  stopTask(conversationId: string): Promise<void> {
+    return this.delegate.stopTask(conversationId);
+  }
+
+  steerTask(conversationId: string, instruction: string): Promise<void> {
+    return this.delegate.steerTask(conversationId, instruction);
+  }
+
+  retryStep(conversationId: string, stepId: string): Promise<void> {
+    return this.delegate.retryStep(conversationId, stepId);
+  }
+
+  skipStep(conversationId: string, stepId: string): Promise<void> {
+    return this.delegate.skipStep(conversationId, stepId);
   }
 
   private startVerification(

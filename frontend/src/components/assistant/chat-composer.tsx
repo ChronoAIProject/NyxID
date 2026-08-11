@@ -86,6 +86,7 @@ export function ChatComposer({
 interface ChatComposerProps {
   readonly active: boolean;
   readonly sending: boolean;
+  readonly disabled?: boolean;
   readonly ownerUserId: string | null;
   readonly draftKey: string | null;
   /**
@@ -113,6 +114,7 @@ interface PendingDraftTransition {
 function DraftedChatComposer({
   active,
   sending,
+  disabled = false,
   ownerUserId,
   draftKey,
   focusRequest = 0,
@@ -474,7 +476,7 @@ function DraftedChatComposer({
 
   async function submit() {
     const message = content.trim();
-    if (!message || active || sending) return;
+    if (!message || active || sending || disabled) return;
     cancelScheduledSave();
     const userId = ownerUserIdRef.current;
     const key = draftKeyRef.current;
@@ -549,12 +551,14 @@ function DraftedChatComposer({
                 scheduleDraftSave();
               }}
               onScroll={handleScroll}
-              disabled={active}
+              disabled={active || disabled}
               rows={1}
               maxLength={32_768}
               placeholder={
                 active
                   ? "Assistant is working..."
+                  : disabled
+                    ? "This conversation is read-only."
                   : "Message NyxID Assistant..."
               }
               className="assistant-scrollbar block min-h-8 w-full resize-none overflow-hidden bg-transparent px-0 py-1 text-[13px] leading-relaxed text-foreground outline-none transition-[height] duration-150 ease-out placeholder:text-text-tertiary disabled:cursor-not-allowed disabled:opacity-50 motion-reduce:transition-none"
@@ -591,7 +595,7 @@ function DraftedChatComposer({
                 type="button"
                 variant="primary"
                 size="icon"
-                disabled={!content.trim() || sending}
+                disabled={!content.trim() || sending || disabled}
                 onClick={() => void submit()}
                 aria-label="Send message"
               >

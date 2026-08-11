@@ -6,6 +6,10 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 import { TooltipProvider } from "@/components/ui/tooltip";
 import { assistantKeys } from "@/hooks/use-assistant";
 import { ApiError } from "@/lib/api-client";
+import {
+  createActorProjection,
+  type ActorProjection,
+} from "@/lib/assistant/actor-state";
 import { AssistantConversationNotFoundError } from "@/lib/assistant/errors";
 import { useAssistantContextStore } from "@/stores/assistant-context-store";
 import { useAssistantDraftStore } from "@/stores/assistant-draft-store";
@@ -57,6 +61,7 @@ const {
     cancelPending: false,
     decisionPending: false,
     historyMessages: [] as unknown[],
+    actorProjection: undefined as ActorProjection | undefined,
     episode: null as {
       open: boolean;
       printed: boolean;
@@ -143,6 +148,7 @@ vi.mock("@/hooks/use-assistant", () => ({
               id: state.historyCanonicalId ?? conversationId,
             },
             messages: state.historyMessages,
+            actorProjection: state.actorProjection,
             has_more: false,
             awaitingProjection: state.historyAwaitingProjection,
             projectionStalled: state.historyProjectionStalled,
@@ -185,6 +191,13 @@ vi.mock("@/hooks/use-assistant", () => ({
     setInProgress: vi.fn(),
     blockAction: vi.fn(),
     continueAction: mockContinueAction,
+  }),
+  useActorControls: () => ({
+    resolvePlan: { mutateAsync: vi.fn(), isPending: false },
+    stop: { mutateAsync: vi.fn(), isPending: false },
+    steer: { mutateAsync: vi.fn(), isPending: false },
+    retry: { mutateAsync: vi.fn(), isPending: false },
+    skip: { mutateAsync: vi.fn(), isPending: false },
   }),
   useDeleteConversation: () => ({
     mutateAsync: mockDeleteMutateAsync,
@@ -288,6 +301,7 @@ beforeEach(() => {
   state.cancelPending = false;
   state.decisionPending = false;
   state.historyMessages = [];
+  state.actorProjection = undefined;
   state.episode = null;
   useAuthStore.setState({
     user,
@@ -300,6 +314,45 @@ beforeEach(() => {
     lastScreen: null,
   });
   useAssistantDraftStore.setState({ ownerUserId: user.id, drafts: {} });
+});
+
+describe("AssistantPage typed conversation controls", () => {
+  it("makes legacy chatc history proactively read-only", () => {
+    const legacy: Conversation = {
+      ...existingConversation,
+      id: "chatc-8bd999c402fb37d60cdcd81e3b78cfd",
+    };
+    state.conversations = [legacy];
+    state.search = { c: legacy.id };
+
+    renderPage();
+
+    expect(screen.getByRole("textbox")).toBeDisabled();
+    expect(screen.getByRole("button", { name: "Send message" })).toBeDisabled();
+  });
+
+  it("disables ordinary text while the typed actor has active work", () => {
+    state.search = { c: existingConversation.id };
+    state.actorProjection = {
+      ...createActorProjection(existingConversation.id),
+      activeTurn: { turnId: "turn-1", status: "active" },
+      task: {
+        taskId: "task-1",
+        planId: "plan-1",
+        planRevision: 1,
+        status: "active",
+        title: "Active task",
+      },
+    };
+
+    renderPage();
+
+    expect(screen.getByText("Active task")).toBeInTheDocument();
+    expect(
+      screen.getByPlaceholderText("This conversation is read-only."),
+    ).toBeDisabled();
+    expect(screen.getByRole("button", { name: "Send message" })).toBeDisabled();
+  });
 });
 
 describe("AssistantPage projection status", () => {

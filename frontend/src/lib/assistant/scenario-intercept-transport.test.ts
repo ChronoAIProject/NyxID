@@ -95,7 +95,7 @@ class StubTransport implements AssistantTransport {
 
   async createConversation(): Promise<Conversation> {
     this.createCalls += 1;
-    const id = `workflow-pending-${String(this.createCalls)}`;
+    const id = `draft-${String(this.createCalls)}`;
     const conversation = baseConversation(id, {
       title: "New chat",
       message_count: undefined,
@@ -234,6 +234,12 @@ class StubTransport implements AssistantTransport {
     this.wakeCalls += 1;
     return { turnId: "delegate-wake", cancel: () => undefined };
   }
+
+  async resolvePlan(): Promise<void> {}
+  async stopTask(): Promise<void> {}
+  async steerTask(): Promise<void> {}
+  async retryStep(): Promise<void> {}
+  async skipStep(): Promise<void> {}
 }
 
 function resetScenarioStore(): void {

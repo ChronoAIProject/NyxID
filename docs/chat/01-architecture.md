@@ -158,7 +158,8 @@ overwrite that projection.
 
 The projection recognises the complete public snapshot contract, including
 `activeTurn`, `latestTurn`, `recentTerminalTurns`, `activeTask`, `taskStatus`,
-`pendingInput`, `pendingApproval`, `pendingActions`, `latestInputResolution`,
+`pendingInput`, `pendingApproval`, `pendingActions`, `recentActions`,
+`latestInputResolution`,
 `latestApprovalResolution`, `latestControlResult`, `latestStepControlResult`,
 `recentStepControlResults`, `controlFence`, `continuationAdmission`,
 `attentionKind`, `attentionSince`, `activeStepSummary`, `scopeId`,
