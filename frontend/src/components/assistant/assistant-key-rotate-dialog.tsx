@@ -61,17 +61,26 @@ type ApiKeySnapshot = z.infer<typeof apiKeySnapshotSchema>;
 
 const FORBIDDEN_READ_BACK_FIELDS = new Set([
   "accesstoken",
+  "apikey",
   "authorization",
   "cookie",
+  "credential",
   "fullkey",
   "keyhash",
+  "password",
   "rawbody",
   "rawupstreambody",
   "refreshtoken",
   "secret",
+  "token",
 ]);
+const SECRET_READ_BACK_VALUE =
+  /(?:Bearer\s+\S+|nyxid_(?:ag_)?[A-Za-z0-9_-]{16,})/i;
 
 function assertSecretFreeReadBack(value: unknown): void {
+  if (typeof value === "string" && SECRET_READ_BACK_VALUE.test(value)) {
+    throw new Error("NyxID returned secret-bearing verification data.");
+  }
   if (Array.isArray(value)) {
     for (const entry of value) assertSecretFreeReadBack(entry);
     return;

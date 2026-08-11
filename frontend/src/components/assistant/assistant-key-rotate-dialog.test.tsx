@@ -143,6 +143,7 @@ describe("AssistantKeyRotateDialog", () => {
       replacementSnapshot({ updated_at: "2026-08-11T07:59:59Z" }),
       replacementSnapshot({ full_key: "nyxid_ag_must_not_escape" }),
       replacementSnapshot({ ignored: { Authorization: "Bearer hidden" } }),
+      replacementSnapshot({ note: "nyxid_ag_must_not_escape_value" }),
     ];
 
     for (const snapshot of invalidSnapshots) {
