@@ -4060,9 +4060,9 @@ describe("live AG-UI frame taxonomy", () => {
       .flatMap((message) => message.blocks)
       .find((block) => block.type === "run");
     expect(run?.type === "run" && run.state).toBe("awaiting_approval");
-    expect(
-      run?.type === "run" && run.steps.map((step) => step.status),
-    ).toEqual(["waiting", "waiting"]);
+    expect(run?.type === "run" && run.steps.map((step) => step.status)).toEqual(
+      ["waiting", "waiting"],
+    );
   });
 
   it("terminalizes waiting steps when the run dies at an approval gate", async () => {
@@ -4932,6 +4932,45 @@ describe("chat action cards", () => {
         return body.type === "action.continue";
       }),
     ).toBe(false);
+  });
+
+  it("treats a reordered key.create service set as the same request", async () => {
+    stubFetch(
+      routeStream([
+        { type: "RUN_STARTED", turnId: TURN_ID },
+        actionRequestFrame({
+          action: "key.create",
+          params: {
+            name: "coding-agent",
+            platform: "codex",
+            allowedServiceIds: ["service-alpha", "service-beta"],
+          },
+        }),
+        actionRequestFrame({
+          action: "key.create",
+          params: {
+            name: "coding-agent",
+            platform: "codex",
+            allowedServiceIds: ["service-beta", "service-alpha"],
+          },
+        }),
+        { type: "RUN_FINISHED", runFinished: { status: "blocked" } },
+      ]),
+    );
+    const transport = new AevatarAssistantTransport();
+    await seedActorConversation(transport);
+    await collectTurn(transport, "Create a scoped key");
+
+    const cards = await actionCardsOf(transport);
+    expect(cards).toHaveLength(1);
+    expect(cards[0]).toMatchObject({
+      action: "key.create",
+      status: "pending",
+      params: {
+        variant: "key_create",
+        allowed_service_ids: ["service-alpha", "service-beta"],
+      },
+    });
   });
 
   it("patches conflicted cards when a connected service could not be reported", async () => {

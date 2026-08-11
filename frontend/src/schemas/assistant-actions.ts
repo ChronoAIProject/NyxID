@@ -23,6 +23,28 @@ const requiredWireStringSchema = z
   .max(4_096)
   .transform((value) => value.trim())
   .pipe(z.string().min(1));
+const requiredActionIdentitySchema = z
+  .string()
+  .transform((value) => value.trim())
+  .pipe(actionControlIdentitySchema);
+
+const allowedServiceIdsSchema = z
+  .array(requiredActionIdentitySchema)
+  .min(1)
+  .max(64)
+  .superRefine((values, context) => {
+    const seen = new Set<string>();
+    for (const [index, value] of values.entries()) {
+      if (seen.has(value)) {
+        context.addIssue({
+          code: "custom",
+          path: [index],
+          message: "Duplicate allowed service id",
+        });
+      }
+      seen.add(value);
+    }
+  });
 
 const SECRET_VALUE =
   /(Bearer\s+)[A-Za-z0-9._~+/-]+|nyx(?:id)?_[A-Za-z0-9_-]{8,}/gi;
@@ -63,12 +85,37 @@ export const customServiceActionParamsSchema = z
   })
   .strict();
 
-export const assistantActionParamsSchema = z
+export const serviceConnectActionParamsSchema = z
   .object({
     catalogService: catalogServiceActionParamsSchema.optional(),
     customService: customServiceActionParamsSchema.optional(),
   })
-  .strict()
+  .strict();
+
+export const keyCreateActionParamsSchema = z
+  .object({
+    name: z
+      .string()
+      .max(200)
+      .transform((value) => value.trim())
+      .pipe(z.string().min(1)),
+    platform: z
+      .string()
+      .max(100)
+      .transform((value) => value.trim())
+      .pipe(z.string().min(1)),
+    allowedServiceIds: allowedServiceIdsSchema,
+  })
+  .strict();
+
+const emptyActionParamsSchema = z.object({}).strict();
+
+export const assistantActionParamsSchema = z
+  .union([
+    serviceConnectActionParamsSchema,
+    keyCreateActionParamsSchema,
+    emptyActionParamsSchema,
+  ])
   .optional()
   .default({});
 
@@ -162,6 +209,12 @@ export type ActionCardParams =
       readonly auth_key_name: string;
       readonly via_node_id: string | null;
       readonly target_org_id: string | null;
+    }
+  | {
+      readonly variant: "key_create";
+      readonly name: string;
+      readonly platform: string;
+      readonly allowed_service_ids: readonly string[];
     }
   | { readonly variant: "unknown" };
 
