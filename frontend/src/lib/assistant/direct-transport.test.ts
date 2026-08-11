@@ -96,6 +96,41 @@ describe("DirectAssistantTransport streaming", () => {
     });
   });
 
+  it("calls the global fetch without rebinding this (default fetch path)", async () => {
+    // Regression: the transport defaulted `fetchFn` to the bare global
+    // `fetch`, then invoked it as `this.fetchFn(...)`. Real browsers throw
+    // "Illegal invocation" because `fetch` must run bound to `window`; jsdom
+    // does not enforce this, so the stub below reproduces the guard itself,
+    // rejecting any call whose `this` is not the global. Every other test
+    // injects a fetch mock, so only the default path exercises this.
+    const realFetch = globalThis.fetch;
+    const guardedFetch = vi
+      .spyOn(globalThis, "fetch")
+      .mockImplementation(function (this: unknown, ...args) {
+        if (this !== undefined && this !== globalThis) {
+          throw new TypeError("Illegal invocation");
+        }
+        void args;
+        return Promise.resolve(sseResponse(fixture));
+      });
+    try {
+      const transport = new DirectAssistantTransport();
+      const conversationId = await startedConversation(transport);
+      const events: TurnEvent[] = [];
+      transport.sendMessage(conversationId, "Hello", (event) =>
+        events.push(event),
+      );
+      await waitForTerminal(events);
+      expect(events.at(-1)).toMatchObject({
+        event: "turn.completed",
+        status: "completed",
+      });
+      expect(guardedFetch).toHaveBeenCalledTimes(1);
+    } finally {
+      globalThis.fetch = realFetch;
+    }
+  });
+
   it("keeps a 70-message transcript inside the server request caps", async () => {
     let responseIndex = 0;
     const fetchMock = vi.fn(async (...args: Parameters<typeof fetch>) => {

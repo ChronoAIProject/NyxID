@@ -197,7 +197,11 @@ export class DirectAssistantTransport implements AssistantTransport {
   private draftModelSelected = false;
 
   constructor(options: DirectTransportOptions = {}) {
-    this.fetchFn = options.fetch ?? fetch;
+    // Wrap rather than alias the global: a detached `fetch` reference
+    // invoked as `this.fetchFn(...)` runs with the transport as `this` and
+    // real Chrome rejects that ("Illegal invocation"). Test-injected fetches
+    // are used as-is.
+    this.fetchFn = options.fetch ?? ((input, init) => fetch(input, init));
     this.firstByteTimeoutMs =
       options.firstByteTimeoutMs ?? FIRST_BYTE_TIMEOUT_MS;
     this.idleTimeoutMs = options.idleTimeoutMs ?? IDLE_TIMEOUT_MS;
