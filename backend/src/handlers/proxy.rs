@@ -8991,9 +8991,32 @@ mod proxy_resolution_integration_tests {
         .expect("workflow chat handler must forward");
         debug_echoes.push(assistant_echoes(&workflow_response));
 
+        let calls_before_unknown_type = captured.lock().unwrap().len();
+        let unknown_type_error = crate::handlers::assistant::typed_chat(
+            axum::extract::State(state.clone()),
+            auth.clone(),
+            request(
+                Method::POST,
+                "/api/v1/assistant/chat",
+                Some(r#"{"type":"workflow.studio","prompt":"do not fall through"}"#),
+            ),
+        )
+        .await
+        .expect_err("an unknown typed command must fail locally");
+        assert_eq!(
+            unknown_type_error.into_response().status(),
+            StatusCode::BAD_REQUEST
+        );
+        assert_eq!(
+            captured.lock().unwrap().len(),
+            calls_before_unknown_type,
+            "an unknown typed command must not reach either upstream chat path"
+        );
+
         for body in [
             r#"{"type":"text","prompt":"connect api-github","clientRequestId":"00000000-0000-4000-8000-000000000001"}"#,
             r#"{"type":"text","prompt":"continue","clientRequestId":"00000000-0000-4000-8000-000000000002","conversationId":"nyxid-chat-4a1e60ebd1fd44f192bf4bb90e1812ae"}"#,
+            r#"{"type":"plan.resolve","conversationId":"nyxid-chat-4a1e60ebd1fd44f192bf4bb90e1812ae","taskId":"task-1","planId":"plan-1","requestId":"plan-gate-1","clientRequestId":"00000000-0000-4000-8000-000000000011","planRevision":3,"confirmed":true,"expectedStateVersion":23}"#,
             r#"{"type":"input.resolve","conversationId":"nyxid-chat-4a1e60ebd1fd44f192bf4bb90e1812ae","clientRequestId":"00000000-0000-4000-8000-000000000010","requestId":"input-1","answer":{"selectedOptionIds":["option-a","option-b"]},"expectedStateVersion":19}"#,
             r#"{"type":"action.continue","conversationId":"nyxid-chat-4a1e60ebd1fd44f192bf4bb90e1812ae","clientRequestId":"00000000-0000-4000-8000-000000000003","originTurnId":"turn-action-1","actions":[{"actionRequestId":"act-1","originTurnId":"turn-action-1","disposition":"completed","resource":{"userService":{"userServiceId":"00000000-0000-4000-8000-000000000123"}}}]}"#,
             r#"{"type":"action.continue","conversationId":"nyxid-chat-4a1e60ebd1fd44f192bf4bb90e1812ae","clientRequestId":"00000000-0000-4000-8000-000000000009","originTurnId":"turn-action-2","actions":[{"actionRequestId":"act-2","originTurnId":"turn-action-2","disposition":"failed"}]}"#,
@@ -9041,6 +9064,62 @@ mod proxy_resolution_integration_tests {
         .expect("list conversations handler must forward");
         assert_eq!(list_response.status(), StatusCode::OK);
         debug_echoes.push(assistant_echoes(&list_response));
+
+        let malformed_typed_id = "nyxid-chat-not-a-guid";
+        let calls_before_malformed_resources = captured.lock().unwrap().len();
+        let malformed_history_error = crate::handlers::assistant::get_history(
+            axum::extract::State(state.clone()),
+            auth.clone(),
+            Path(malformed_typed_id.to_string()),
+            request(
+                Method::GET,
+                &format!("/api/v1/assistant/conversations/{malformed_typed_id}"),
+                None,
+            ),
+        )
+        .await
+        .expect_err("malformed typed history id must fail locally");
+        assert_eq!(
+            malformed_history_error.into_response().status(),
+            StatusCode::BAD_REQUEST
+        );
+        let malformed_delete_error = crate::handlers::assistant::delete_conversation(
+            axum::extract::State(state.clone()),
+            auth.clone(),
+            Path(malformed_typed_id.to_string()),
+            request(
+                Method::DELETE,
+                &format!("/api/v1/assistant/conversations/{malformed_typed_id}"),
+                None,
+            ),
+        )
+        .await
+        .expect_err("malformed typed delete id must fail locally");
+        assert_eq!(
+            malformed_delete_error.into_response().status(),
+            StatusCode::BAD_REQUEST
+        );
+        let malformed_state_error = crate::handlers::assistant::get_state(
+            axum::extract::State(state.clone()),
+            auth.clone(),
+            Path(malformed_typed_id.to_string()),
+            request(
+                Method::GET,
+                &format!("/api/v1/assistant/conversations/{malformed_typed_id}/state"),
+                None,
+            ),
+        )
+        .await
+        .expect_err("malformed typed state id must fail locally");
+        assert_eq!(
+            malformed_state_error.into_response().status(),
+            StatusCode::BAD_REQUEST
+        );
+        assert_eq!(
+            captured.lock().unwrap().len(),
+            calls_before_malformed_resources,
+            "malformed typed resource ids must not reach upstream"
+        );
 
         let typed_history_response = crate::handlers::assistant::get_history(
             axum::extract::State(state.clone()),
@@ -9233,6 +9312,7 @@ mod proxy_resolution_integration_tests {
                 "/api/chat".to_string(),
                 "/api/chat".to_string(),
                 "/api/chat".to_string(),
+                "/api/chat".to_string(),
                 format!("/api/scopes/{user_id}/chat-history"),
                 "/api/chat/conversations/nyxid-chat-4a1e60ebd1fd44f192bf4bb90e1812ae".to_string(),
                 "/api/chat/conversations/nyxid-chat-4a1e60ebd1fd44f192bf4bb90e1812ae/state"
@@ -9271,6 +9351,17 @@ mod proxy_resolution_integration_tests {
                 "prompt": "continue",
                 "clientRequestId": "00000000-0000-4000-8000-000000000002",
                 "conversationId": "nyxid-chat-4a1e60ebd1fd44f192bf4bb90e1812ae",
+            }),
+            serde_json::json!({
+                "type": "plan.resolve",
+                "conversationId": "nyxid-chat-4a1e60ebd1fd44f192bf4bb90e1812ae",
+                "taskId": "task-1",
+                "planId": "plan-1",
+                "requestId": "plan-gate-1",
+                "clientRequestId": "00000000-0000-4000-8000-000000000011",
+                "planRevision": 3,
+                "confirmed": true,
+                "expectedStateVersion": 23,
             }),
             serde_json::json!({
                 "type": "input.resolve",
@@ -9362,6 +9453,7 @@ mod proxy_resolution_integration_tests {
             "text/event-stream",
             "text/event-stream",
             "application/json",
+            "application/json",
             "text/event-stream",
             "text/event-stream",
             "application/json",
@@ -9396,8 +9488,8 @@ mod proxy_resolution_integration_tests {
             );
         }
 
-        assert_eq!(debug_echoes.len(), 12);
-        for (call_index, envelope_array) in debug_echoes[..11].iter().enumerate() {
+        assert_eq!(debug_echoes.len(), 13);
+        for (call_index, envelope_array) in debug_echoes[..12].iter().enumerate() {
             assert_eq!(envelope_array.len(), 1);
             let envelope = &envelope_array[0];
             let (method, path, body, _) = &calls[call_index];
@@ -9446,9 +9538,9 @@ mod proxy_resolution_integration_tests {
             }
         }
 
-        let list_echoes = &debug_echoes[11];
+        let list_echoes = &debug_echoes[12];
         assert_eq!(list_echoes.len(), 1);
-        for (envelope, call) in list_echoes.iter().zip(&calls[11..12]) {
+        for (envelope, call) in list_echoes.iter().zip(&calls[12..13]) {
             assert_eq!(envelope["method"], "GET");
             assert_eq!(envelope["path"], call.1.trim_start_matches('/'));
             assert!(envelope["commandType"].is_null());
@@ -9475,7 +9567,7 @@ mod proxy_resolution_integration_tests {
             );
         }
 
-        for (_, _, _, headers) in [&calls[0], &calls[10], &calls[11], &calls[12], &calls[13]] {
+        for (_, _, _, headers) in [&calls[0], &calls[11], &calls[12], &calls[13], &calls[14]] {
             assert!(headers.get(axum::http::header::AUTHORIZATION).is_none());
             assert!(headers.get("x-nyxid-identity-token").is_some());
             assert!(headers.get("x-nyxid-delegation-token").is_some());
