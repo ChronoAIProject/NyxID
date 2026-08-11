@@ -1626,17 +1626,13 @@ pub async fn rotate_key(
 
     let actor = auth_user.user_id.to_string();
     let user_id_str = resolve_api_key_write_owner(&state, &actor, &key_id).await?;
-    let created = if user_id_str == actor {
-        key_service::rotate_api_key_with_scope_authorization(
-            &state.db,
-            &user_id_str,
-            Some(&actor),
-            &key_id,
-        )
-        .await?
-    } else {
-        key_service::rotate_api_key(&state.db, &user_id_str, &key_id).await?
-    };
+    let created = key_service::rotate_api_key_with_scope_authorization(
+        &state.db,
+        &user_id_str,
+        Some(&actor),
+        &key_id,
+    )
+    .await?;
 
     // Telemetry: api_key.rotated.
     emit_event(
@@ -1851,6 +1847,94 @@ mod tests {
         assert!(json.get("full_key").is_none());
         assert!(json.get("key_hash").is_none());
         assert!(json.get("secret").is_none());
+    }
+
+    #[tokio::test]
+    async fn org_rotation_passes_actor_scope_into_the_transaction() {
+        use crate::errors::AppError;
+        use crate::models::api_key::{ApiKey, COLLECTION_NAME as API_KEYS};
+        use crate::models::org_membership::{COLLECTION_NAME as ORG_MEMBERSHIPS, OrgRole};
+        use crate::models::user::{COLLECTION_NAME as USERS, User, UserType};
+        use crate::models::user_service::{COLLECTION_NAME as USER_SERVICES, UserService};
+        use crate::test_utils::{
+            connect_transaction_test_database, test_app_state, test_auth_user, test_membership,
+            test_user, test_user_service,
+        };
+        use axum::extract::{Path, State};
+
+        let db = connect_transaction_test_database("api_keys_org_rotate_actor_scope").await;
+        let actor_id = uuid::Uuid::new_v4().to_string();
+        let org_id = uuid::Uuid::new_v4().to_string();
+        let service_id = uuid::Uuid::new_v4().to_string();
+        let endpoint_id = uuid::Uuid::new_v4().to_string();
+        let key_id = uuid::Uuid::new_v4().to_string();
+        db.collection::<User>(USERS)
+            .insert_many([
+                test_user(&actor_id, UserType::Person),
+                test_user(&org_id, UserType::Org),
+            ])
+            .await
+            .unwrap();
+        db.collection(ORG_MEMBERSHIPS)
+            .insert_one(test_membership(
+                &org_id,
+                &actor_id,
+                OrgRole::Admin,
+                Some(vec!["different-service".to_string()]),
+            ))
+            .await
+            .unwrap();
+        db.collection::<UserService>(USER_SERVICES)
+            .insert_one(test_user_service(
+                &service_id,
+                &org_id,
+                "org-service",
+                &endpoint_id,
+                None,
+                None,
+            ))
+            .await
+            .unwrap();
+        let now = Utc::now();
+        db.collection::<ApiKey>(API_KEYS)
+            .insert_one(ApiKey {
+                id: key_id.clone(),
+                user_id: org_id,
+                name: "org-agent".to_string(),
+                key_prefix: "nyxid_ag_public".to_string(),
+                key_hash: "secret-hash-not-returned".to_string(),
+                scopes: "proxy".to_string(),
+                last_used_at: None,
+                expires_at: None,
+                is_active: true,
+                created_at: now,
+                rotation_predecessor_id: None,
+                state_version: 1,
+                updated_at: Some(now),
+                description: None,
+                allowed_service_ids: vec![service_id],
+                allowed_node_ids: Vec::new(),
+                allow_all_services: false,
+                allow_all_nodes: true,
+                rate_limit_per_second: None,
+                rate_limit_burst: None,
+                platform: Some("codex".to_string()),
+                callback_url: None,
+                purpose: Default::default(),
+                scheduled_write_enabled: false,
+            })
+            .await
+            .unwrap();
+
+        let error = super::rotate_key(
+            State(test_app_state(db)),
+            test_auth_user(&actor_id),
+            crate::telemetry::TelemetryContext::default(),
+            Path(key_id),
+        )
+        .await
+        .expect_err("transaction must enforce the actor's current service scope");
+        assert!(matches!(error, AppError::ValidationError(_)));
     }
 
     #[test]

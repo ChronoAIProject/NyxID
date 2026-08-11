@@ -1,7 +1,7 @@
 use chrono::{DateTime, Utc};
 use mongodb::{
     ClientSession, Database,
-    bson::{self, Bson, Document, doc},
+    bson::{self, Bson, Document},
     results::{InsertOneResult, UpdateResult},
 };
 
@@ -10,10 +10,44 @@ use crate::{
     models::api_key::{ApiKey, COLLECTION_NAME as API_KEYS},
 };
 
-const AUTHORITY_FIELDS: [&str; 2] = ["state_version", "updated_at"];
+const AUTHORITY_FIELDS: [&str; 3] = ["rotation_predecessor_id", "state_version", "updated_at"];
 
 #[derive(Debug)]
 struct TransactionAppError(std::sync::Mutex<Option<AppError>>);
+
+#[cfg(test)]
+#[derive(Clone)]
+pub struct TransactionCollisionHook {
+    barrier: std::sync::Arc<tokio::sync::Barrier>,
+    attempts: std::sync::Arc<std::sync::atomic::AtomicUsize>,
+    waited: std::sync::Arc<std::sync::atomic::AtomicBool>,
+}
+
+#[cfg(test)]
+impl TransactionCollisionHook {
+    pub fn new(barrier: std::sync::Arc<tokio::sync::Barrier>) -> Self {
+        Self {
+            barrier,
+            attempts: std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+            waited: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+        }
+    }
+
+    pub fn begin_attempt(&self) {
+        self.attempts
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+    }
+
+    pub async fn after_reads(&self) {
+        if !self.waited.swap(true, std::sync::atomic::Ordering::SeqCst) {
+            self.barrier.wait().await;
+        }
+    }
+
+    pub fn attempts(&self) -> usize {
+        self.attempts.load(std::sync::atomic::Ordering::SeqCst)
+    }
+}
 
 pub fn abort_transaction(error: AppError) -> mongodb::error::Error {
     mongodb::error::Error::custom(TransactionAppError(std::sync::Mutex::new(Some(error))))
@@ -112,6 +146,20 @@ pub async fn update_one(
     })
 }
 
+pub async fn update_many(
+    db: &Database,
+    filter: Document,
+    update: Document,
+    session: Option<&mut ClientSession>,
+) -> AppResult<UpdateResult> {
+    let collection = db.collection::<ApiKey>(API_KEYS);
+    let action = collection.update_many(filter, authoritative_update(update)?);
+    Ok(match session {
+        Some(session) => action.session(session).await?,
+        None => action.await?,
+    })
+}
+
 pub async fn insert_one(
     db: &Database,
     key: &ApiKey,
@@ -133,6 +181,7 @@ pub async fn insert_one(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use mongodb::bson::doc;
 
     #[test]
     fn authoritative_update_preserves_business_operators_and_adds_authority() {
@@ -163,7 +212,9 @@ mod tests {
         for update in [
             doc! { "$set": { "updated_at": bson::DateTime::now() } },
             doc! { "$inc": { "state_version": 10 } },
+            doc! { "$unset": { "rotation_predecessor_id": "" } },
             doc! { "$rename": { "legacy_version": "state_version" } },
+            doc! { "$rename": { "legacy_parent": "rotation_predecessor_id" } },
         ] {
             assert!(authoritative_update(update).is_err());
         }

@@ -70,6 +70,7 @@ impl fmt::Debug for CreatedApiKey {
 }
 
 #[derive(Debug)]
+#[allow(dead_code)]
 pub enum ApiKeyRotationOutcome {
     Created(CreatedApiKey),
     AlreadyCommitted(ApiKey),
@@ -334,6 +335,7 @@ pub async fn create_api_key_with_scope_authorization_and_id(
 /// action admission uses this to recover an interrupted create without ever
 /// persisting or replaying the one-time secret.
 #[allow(clippy::too_many_arguments)]
+#[allow(dead_code)]
 pub async fn create_api_key_with_scope_authorization_and_id(
     db: &mongodb::Database,
     user_id: &str,
@@ -624,6 +626,7 @@ pub async fn delete_api_key(db: &mongodb::Database, user_id: &str, key_id: &str)
 }
 
 /// Rotate an API key: deactivate the old one and create a new one preserving name, scopes, and scope fields.
+#[allow(dead_code)]
 pub async fn rotate_api_key(
     db: &mongodb::Database,
     user_id: &str,
@@ -665,6 +668,46 @@ pub async fn rotate_api_key_with_scope_authorization_and_id(
     predecessor_id: &str,
     successor_id: &str,
 ) -> AppResult<ApiKeyRotationOutcome> {
+    rotate_api_key_with_scope_authorization_and_id_inner(
+        db,
+        user_id,
+        scope_actor_user_id,
+        predecessor_id,
+        successor_id,
+        #[cfg(test)]
+        None,
+    )
+    .await
+}
+
+#[cfg(test)]
+pub(crate) async fn rotate_api_key_with_scope_authorization_and_id_with_collision_hook(
+    db: &mongodb::Database,
+    user_id: &str,
+    scope_actor_user_id: Option<&str>,
+    predecessor_id: &str,
+    successor_id: &str,
+    collision_hook: key_mutations::TransactionCollisionHook,
+) -> AppResult<ApiKeyRotationOutcome> {
+    rotate_api_key_with_scope_authorization_and_id_inner(
+        db,
+        user_id,
+        scope_actor_user_id,
+        predecessor_id,
+        successor_id,
+        Some(collision_hook),
+    )
+    .await
+}
+
+async fn rotate_api_key_with_scope_authorization_and_id_inner(
+    db: &mongodb::Database,
+    user_id: &str,
+    scope_actor_user_id: Option<&str>,
+    predecessor_id: &str,
+    successor_id: &str,
+    #[cfg(test)] collision_hook: Option<key_mutations::TransactionCollisionHook>,
+) -> AppResult<ApiKeyRotationOutcome> {
     let successor_id = Uuid::parse_str(successor_id)
         .map_err(|_| AppError::ValidationError("successor_id must be a UUID".to_string()))?
         .to_string();
@@ -688,6 +731,10 @@ pub async fn rotate_api_key_with_scope_authorization_and_id(
     let transaction = session
         .start_transaction()
         .and_run2(async move |session| {
+            #[cfg(test)]
+            if let Some(hook) = collision_hook.as_ref() {
+                hook.begin_attempt();
+            }
             let operation: AppResult<RotationTransactionOutcome> = async {
                 let api_keys = db.collection::<ApiKey>(API_KEYS);
 
@@ -700,7 +747,6 @@ pub async fn rotate_api_key_with_scope_authorization_and_id(
                         return Err(AppError::NotFound("API key not found".to_string()));
                     }
                     if existing.rotation_predecessor_id.as_deref() == Some(predecessor_id.as_str())
-                        && existing.is_active
                         && existing.state_version > 0
                         && existing.updated_at.is_some()
                     {
@@ -791,6 +837,11 @@ pub async fn rotate_api_key_with_scope_authorization_and_id(
                     .await?;
                 let old_bindings: Vec<AgentServiceBinding> =
                     cursor.stream(&mut *session).try_collect().await?;
+
+                #[cfg(test)]
+                if let Some(hook) = collision_hook.as_ref() {
+                    hook.after_reads().await;
+                }
 
                 let rotation_material = {
                     let mut guard = material_for_transaction.lock().map_err(|_| {
@@ -1918,6 +1969,27 @@ mod tests {
         .await
         .expect_err("one predecessor cannot acquire another successor");
         assert!(matches!(conflict, AppError::Conflict(_)));
+
+        delete_api_key(&db, &user_id, &successor_id)
+            .await
+            .expect("deactivate committed successor");
+        let historical_replay = rotate_api_key_with_scope_authorization_and_id(
+            &db,
+            &user_id,
+            Some(&user_id),
+            &original.id,
+            &successor_id,
+        )
+        .await
+        .expect("committed lineage remains replayable after successor deactivation");
+        let historical = match historical_replay {
+            ApiKeyRotationOutcome::AlreadyCommitted(key) => key,
+            ApiKeyRotationOutcome::Created(_) => {
+                panic!("historical replay must not mint or expose another secret")
+            }
+        };
+        assert!(!historical.is_active);
+        assert_eq!(historical.state_version, 2);
     }
 
     #[tokio::test]

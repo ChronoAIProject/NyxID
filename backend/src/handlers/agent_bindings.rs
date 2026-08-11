@@ -262,9 +262,10 @@ pub async fn create_binding(
     if !access.allows_resource(&body.user_service_id) {
         return Err(AppError::NotFound("User service not found".to_string()));
     }
-    let binding = agent_binding_service::create_binding(
+    let binding = agent_binding_service::create_binding_with_scope_authorization(
         &state.db,
         &user_id,
+        Some(&actor),
         &key_id,
         &body.user_service_id,
         &body.user_api_key_id,
@@ -392,7 +393,14 @@ pub async fn delete_binding(
         .flatten()
         .map(|svc| svc.slug)
         .unwrap_or_else(|| binding.user_service_id.clone());
-    agent_binding_service::delete_binding(&state.db, &user_id, &key_id, &binding_id).await?;
+    agent_binding_service::delete_binding_with_scope_authorization(
+        &state.db,
+        &user_id,
+        Some(&actor),
+        &key_id,
+        &binding_id,
+    )
+    .await?;
 
     audit_service::log_for_user(
         state.db.clone(),

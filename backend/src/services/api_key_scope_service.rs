@@ -361,6 +361,34 @@ pub async fn validate_owner_write_with_session(
     ))
 }
 
+/// Revalidate write authority for one owner-scoped service resource without
+/// requiring the service row itself to remain active. Binding deletion uses
+/// this so an authorized actor can remove a stale binding while a revoked or
+/// re-scoped actor cannot mutate it during a transaction retry.
+pub async fn validate_owner_service_write_with_session(
+    db: &mongodb::Database,
+    key_owner_user_id: &str,
+    service_id: &str,
+    authorization: ScopeAuthorization<'_>,
+    session: &mut ClientSession,
+) -> AppResult<()> {
+    let ScopeAuthorization::ActorPermissions { actor_user_id } = authorization else {
+        return Ok(());
+    };
+    let access =
+        resolve_owner_access_with_session(db, actor_user_id, key_owner_user_id, &mut *session)
+            .await?;
+    if !access.can_write() {
+        return Err(AppError::OrgRoleInsufficient(
+            "you must be an admin of the API key owner".to_string(),
+        ));
+    }
+    if !access.allows_resource(service_id) {
+        return Err(service_scope_error(service_id));
+    }
+    Ok(())
+}
+
 /// Transaction-scoped counterpart of [`validate_service_ids`]. Rotation uses
 /// this after loading the predecessor so authority is re-evaluated from the
 /// same MongoDB snapshot that commits the lineage transition.
