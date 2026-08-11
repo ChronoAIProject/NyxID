@@ -26,11 +26,13 @@ describe("assistant action request schema", () => {
       params: { catalogService: { serviceSlug: "api-github" } },
     });
 
-    expect(request.params.catalogService).toEqual({
-      serviceSlug: "api-github",
-      requestedScopes: [],
-      viaNodeId: "",
-      targetOrgId: "",
+    expect(request.params).toMatchObject({
+      catalogService: {
+        serviceSlug: "api-github",
+        requestedScopes: [],
+        viaNodeId: "",
+        targetOrgId: "",
+      },
     });
     expect(resolveAssistantAction(request)).toMatchObject({
       supported: true,
@@ -81,6 +83,63 @@ describe("assistant action request schema", () => {
         auth_key_name: "X-Build-Key",
       },
     });
+  });
+
+  it("parses an exact nonempty key.create service set", () => {
+    const request = assistantActionRequestSchema.parse({
+      ...BASE_REQUEST,
+      action: "key.create",
+      params: {
+        name: " coding-agent ",
+        platform: " codex ",
+        allowedServiceIds: ["service-alpha", "service-beta"],
+      },
+    });
+
+    expect(resolveAssistantAction(request)).toMatchObject({
+      supported: true,
+      journey: "key_create",
+      params: {
+        variant: "key_create",
+        name: "coding-agent",
+        platform: "codex",
+        allowed_service_ids: ["service-alpha", "service-beta"],
+      },
+    });
+  });
+
+  it("rejects missing, empty, duplicate, malformed, and widened key.create params", () => {
+    const invalidParams = [
+      { name: "agent", platform: "codex" },
+      { name: "agent", platform: "codex", allowedServiceIds: [] },
+      {
+        name: "agent",
+        platform: "codex",
+        allowedServiceIds: ["service-alpha", "service-alpha"],
+      },
+      {
+        name: "agent",
+        platform: "codex",
+        allowedServiceIds: ["invalid/service"],
+      },
+      {
+        name: "agent",
+        platform: "codex",
+        allowedServiceIds: ["service-alpha"],
+        allowAllServices: true,
+      },
+    ];
+
+    for (const [index, params] of invalidParams.entries()) {
+      expect(
+        assistantActionRequestSchema.safeParse({
+          ...BASE_REQUEST,
+          actionRequestId: `invalid-key-create-${String(index)}`,
+          action: "key.create",
+          params,
+        }).success,
+      ).toBe(false);
+    }
   });
 
   it("resolves bad catalog slugs and insecure custom urls as unsupported", () => {

@@ -6,9 +6,10 @@ use serde::Serialize;
 use serde_json::{Value, json};
 
 pub const ASSISTANT_ACTIONS_SCHEMA_VERSION: u32 = 4;
-pub const ASSISTANT_ACTIONS_REVISION: &str = "nyxid-assistant-actions.v4";
+pub const ASSISTANT_ACTIONS_REVISION: &str = "nyxid-assistant-actions.v6";
 
 const SERVICE_CONNECT_DESCRIPTION: &str = "Ask the user's browser to connect a service through NyxID. Use when a task needs a catalog service (by slug) or a custom HTTPS endpoint that the user has not connected yet. NyxID owns the entire journey - auth modality, consent copy, and credential storage - and reports back only completion or decline with a safe resource reference. Never ask the user for keys, tokens, or passwords in chat.";
+const KEY_CREATE_DESCRIPTION: &str = "Ask the user's browser to create a scoped NyxID API key for the named platform and allowed services. Use when the user wants a new agent identity bounded to specific user-service IDs. NyxID owns key creation and one-time key display, and reports only a safe key reference. Never request, expose, or repeat key material in chat.";
 
 #[derive(Serialize)]
 struct AssistantActionsManifest {
@@ -32,58 +33,83 @@ static MANIFEST_BODY: LazyLock<String> = LazyLock::new(|| {
     let manifest = AssistantActionsManifest {
         schema_version: ASSISTANT_ACTIONS_SCHEMA_VERSION,
         revision: ASSISTANT_ACTIONS_REVISION,
-        actions: vec![AssistantActionDescriptor {
-            action: "service.connect",
-            description: SERVICE_CONNECT_DESCRIPTION,
-            params_schema: json!({
-                "oneOf": [
-                    {
-                        "type": "object",
-                        "additionalProperties": false,
-                        "required": ["catalogService"],
-                        "properties": {
-                            "catalogService": {
-                                "type": "object",
-                                "additionalProperties": false,
-                                "required": ["serviceSlug"],
-                                "properties": {
-                                    "serviceSlug": { "type": "string" },
-                                    "requestedScopes": {
-                                        "type": "array",
-                                        "items": { "type": "string" }
-                                    },
-                                    "viaNodeId": { "type": "string" },
-                                    "targetOrgId": { "type": "string" }
+        actions: vec![
+            AssistantActionDescriptor {
+                action: "service.connect",
+                description: SERVICE_CONNECT_DESCRIPTION,
+                params_schema: json!({
+                    "oneOf": [
+                        {
+                            "type": "object",
+                            "additionalProperties": false,
+                            "required": ["catalogService"],
+                            "properties": {
+                                "catalogService": {
+                                    "type": "object",
+                                    "additionalProperties": false,
+                                    "required": ["serviceSlug"],
+                                    "properties": {
+                                        "serviceSlug": { "type": "string" },
+                                        "requestedScopes": {
+                                            "type": "array",
+                                            "items": { "type": "string" }
+                                        },
+                                        "viaNodeId": { "type": "string" },
+                                        "targetOrgId": { "type": "string" }
+                                    }
+                                }
+                            }
+                        },
+                        {
+                            "type": "object",
+                            "additionalProperties": false,
+                            "required": ["customService"],
+                            "properties": {
+                                "customService": {
+                                    "type": "object",
+                                    "additionalProperties": false,
+                                    "required": ["name", "endpointUrl", "authMethod"],
+                                    "properties": {
+                                        "name": { "type": "string" },
+                                        "endpointUrl": { "type": "string" },
+                                        "authMethod": { "type": "string" },
+                                        "authKeyName": { "type": "string" },
+                                        "viaNodeId": { "type": "string" },
+                                        "targetOrgId": { "type": "string" }
+                                    }
                                 }
                             }
                         }
-                    },
-                    {
-                        "type": "object",
-                        "additionalProperties": false,
-                        "required": ["customService"],
-                        "properties": {
-                            "customService": {
-                                "type": "object",
-                                "additionalProperties": false,
-                                "required": ["name", "endpointUrl", "authMethod"],
-                                "properties": {
-                                    "name": { "type": "string" },
-                                    "endpointUrl": { "type": "string" },
-                                    "authMethod": { "type": "string" },
-                                    "authKeyName": { "type": "string" },
-                                    "viaNodeId": { "type": "string" },
-                                    "targetOrgId": { "type": "string" }
-                                }
-                            }
+                    ]
+                }),
+                risk: "grant",
+                tier: "v1",
+                remember_eligible: true,
+            },
+            AssistantActionDescriptor {
+                action: "key.create",
+                description: KEY_CREATE_DESCRIPTION,
+                params_schema: json!({
+                    "type": "object",
+                    "additionalProperties": false,
+                    "required": ["name", "platform", "allowedServiceIds"],
+                    "properties": {
+                        "name": { "type": "string" },
+                        "platform": { "type": "string" },
+                        "allowedServiceIds": {
+                            "type": "array",
+                            "minItems": 1,
+                            "maxItems": 64,
+                            "uniqueItems": true,
+                            "items": { "type": "string" }
                         }
                     }
-                ]
-            }),
-            risk: "grant",
-            tier: "v1",
-            remember_eligible: true,
-        }],
+                }),
+                risk: "grant",
+                tier: "v1",
+                remember_eligible: false,
+            },
+        ],
     };
 
     serde_json::to_string(&manifest).expect("assistant actions manifest must serialize")
@@ -153,7 +179,7 @@ mod tests {
         "credentials",
     ];
 
-    fn golden_params_schema() -> Value {
+    fn service_connect_params_schema() -> Value {
         json!({
             "oneOf": [
                 {
@@ -201,18 +227,45 @@ mod tests {
         })
     }
 
+    fn key_create_params_schema() -> Value {
+        json!({
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["name", "platform", "allowedServiceIds"],
+            "properties": {
+                "name": { "type": "string" },
+                "platform": { "type": "string" },
+                "allowedServiceIds": {
+                    "type": "array",
+                    "minItems": 1,
+                    "maxItems": 64,
+                    "uniqueItems": true,
+                    "items": { "type": "string" }
+                }
+            }
+        })
+    }
+
     fn golden_manifest() -> Value {
         json!({
             "schema_version": 4,
-            "revision": "nyxid-assistant-actions.v4",
+            "revision": "nyxid-assistant-actions.v6",
             "actions": [
                 {
                     "action": "service.connect",
                     "description": super::SERVICE_CONNECT_DESCRIPTION,
-                    "params_schema": golden_params_schema(),
+                    "params_schema": service_connect_params_schema(),
                     "risk": "grant",
                     "tier": "v1",
                     "remember_eligible": true
+                },
+                {
+                    "action": "key.create",
+                    "description": super::KEY_CREATE_DESCRIPTION,
+                    "params_schema": key_create_params_schema(),
+                    "risk": "grant",
+                    "tier": "v1",
+                    "remember_eligible": false
                 }
             ]
         })
@@ -254,6 +307,15 @@ mod tests {
                     .get("properties")
                     .and_then(Value::as_object)
                     .expect("object schemas must have a properties object");
+                if let Some(required) = object.get("required") {
+                    for name in required.as_array().expect("required must be an array") {
+                        let name = name.as_str().expect("required names must be strings");
+                        assert!(
+                            properties.contains_key(name),
+                            "required property is not declared: {name}"
+                        );
+                    }
+                }
                 for (name, property_schema) in properties {
                     let normalized = normalize_secret_name(name);
                     assert!(
@@ -263,11 +325,25 @@ mod tests {
                     validate_schema_node(property_schema);
                 }
             }
-            "array" => validate_schema_node(
-                object
-                    .get("items")
-                    .expect("array schemas must have an items schema"),
-            ),
+            "array" => {
+                if let Some(min_items) = object.get("minItems") {
+                    assert!(min_items.as_u64().is_some(), "minItems must be an integer");
+                }
+                if let Some(max_items) = object.get("maxItems") {
+                    assert!(max_items.as_u64().is_some(), "maxItems must be an integer");
+                }
+                if let Some(unique_items) = object.get("uniqueItems") {
+                    assert!(
+                        unique_items.as_bool().is_some(),
+                        "uniqueItems must be a boolean"
+                    );
+                }
+                validate_schema_node(
+                    object
+                        .get("items")
+                        .expect("array schemas must have an items schema"),
+                );
+            }
             "string" => {}
             other => panic!("unsupported schema type: {other}"),
         }
@@ -341,6 +417,7 @@ mod tests {
         }
 
         assert!(seen_actions.contains("service.connect"));
+        assert!(seen_actions.contains("key.create"));
     }
 
     #[test]
@@ -349,13 +426,26 @@ mod tests {
         let actions = manifest["actions"].as_array().unwrap();
 
         assert_eq!(manifest["schema_version"], 4);
-        assert_eq!(manifest["revision"], "nyxid-assistant-actions.v4");
-        assert_eq!(actions.len(), 1);
+        assert_eq!(manifest["revision"], "nyxid-assistant-actions.v6");
+        assert_eq!(actions.len(), 2);
         assert_eq!(actions[0]["action"], "service.connect");
         assert_eq!(actions[0]["risk"], "grant");
         assert_eq!(actions[0]["tier"], "v1");
         assert_eq!(actions[0]["remember_eligible"], true);
-        assert_eq!(actions[0]["params_schema"], golden_params_schema());
+        assert_eq!(actions[0]["params_schema"], service_connect_params_schema());
+        assert_eq!(actions[1]["action"], "key.create");
+        assert_eq!(actions[1]["risk"], "grant");
+        assert_eq!(actions[1]["tier"], "v1");
+        assert_eq!(actions[1]["remember_eligible"], false);
+        assert_eq!(actions[1]["params_schema"], key_create_params_schema());
+        assert_eq!(
+            actions[1]["params_schema"]["properties"]["allowedServiceIds"]["minItems"],
+            1
+        );
+        assert_eq!(
+            actions[1]["params_schema"]["properties"]["allowedServiceIds"]["uniqueItems"],
+            true
+        );
         assert_eq!(manifest, golden_manifest());
     }
 

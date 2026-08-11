@@ -1417,6 +1417,10 @@ pub fn build_router(
             "/readiness",
             get(handlers::assistant_readiness::get_readiness),
         )
+        .route(
+            "/actions/key-create",
+            post(handlers::assistant_action_effects::create_key),
+        )
         .merge(assistant_proxy_routes);
 
     let ssh_billing_routes = ssh_billing_routes!(register_billing_routes, Router::new());

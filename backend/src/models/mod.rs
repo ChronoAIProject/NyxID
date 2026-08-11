@@ -3,6 +3,7 @@ pub mod anonymous_endpoint_usage;
 pub mod api_key;
 pub mod approval_grant;
 pub mod approval_request;
+pub mod assistant_action_receipt;
 pub mod audit_log;
 pub mod auth_device_code;
 pub mod authorization_code;

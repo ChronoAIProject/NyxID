@@ -243,6 +243,19 @@ pub async fn ensure_indexes(db: &Database) -> Result<(), mongodb::error::Error> 
         .create_index(IndexModel::builder().keys(doc! { "user_id": 1 }).build())
         .await?;
 
+    // ── assistant_action_receipts ──
+    // A user/action/request identity admits exactly one durable reservation.
+    // The receipt is secret-free and reserves the eventual resource UUID.
+    let action_receipts = db.collection::<mongodb::bson::Document>("assistant_action_receipts");
+    action_receipts
+        .create_index(
+            IndexModel::builder()
+                .keys(doc! { "user_id": 1, "action": 1, "action_request_id": 1 })
+                .options(IndexOptions::builder().unique(true).build())
+                .build(),
+        )
+        .await?;
+
     // ── mfa_factors ──
     let mfa = db.collection::<mongodb::bson::Document>("mfa_factors");
     mfa.create_index(IndexModel::builder().keys(doc! { "user_id": 1 }).build())

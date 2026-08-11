@@ -1110,6 +1110,18 @@ function fingerprintStableRequestInput(
   return fnv1aHex(stableJsonText(value));
 }
 
+function fingerprintActionRequest(request: AssistantActionRequest): string {
+  const params = resolveAssistantAction(request).params;
+  if (params.variant !== "key_create") {
+    return fingerprintStableRequestInput(request.params);
+  }
+  return fingerprintStableRequestInput({
+    name: params.name,
+    platform: params.platform,
+    allowedServiceIds: [...params.allowed_service_ids].sort(),
+  });
+}
+
 function sameStringArray(
   left: readonly string[],
   right: readonly string[],
@@ -1118,6 +1130,16 @@ function sameStringArray(
     left.length === right.length &&
     left.every((value, index) => value === right[index])
   );
+}
+
+function sameStringSet(
+  left: readonly string[],
+  right: readonly string[],
+): boolean {
+  if (left.length !== right.length) return false;
+  const sortedLeft = [...left].sort();
+  const sortedRight = [...right].sort();
+  return sortedLeft.every((value, index) => value === sortedRight[index]);
 }
 
 function sameActionCardParams(
@@ -1143,6 +1165,13 @@ function sameActionCardParams(
         left.auth_key_name === right.auth_key_name &&
         left.via_node_id === right.via_node_id &&
         left.target_org_id === right.target_org_id
+      );
+    case "key_create":
+      return (
+        right.variant === "key_create" &&
+        left.name === right.name &&
+        left.platform === right.platform &&
+        sameStringSet(left.allowed_service_ids, right.allowed_service_ids)
       );
     case "unknown":
       return right.variant === "unknown";
@@ -5111,7 +5140,7 @@ export class AevatarAssistantTransport implements AssistantTransport {
             conversationId,
             run,
             request.data,
-            fingerprintStableRequestInput(request.data.params),
+            fingerprintActionRequest(request.data),
           );
         } else {
           const unsupported = recoverUnsupportedAssistantActionRequest(payload);

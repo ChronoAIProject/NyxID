@@ -12,6 +12,7 @@ pub mod agent_bindings;
 pub mod api_keys;
 pub mod approvals;
 pub mod assistant;
+pub mod assistant_action_effects;
 pub mod assistant_actions;
 pub mod assistant_readiness;
 pub mod auth;
