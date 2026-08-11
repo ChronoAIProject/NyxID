@@ -238,3 +238,42 @@ Only after this passes does the PR go up.
 - PR open against `main`, DRAFT, body: what/why, endpoint table, flag
   rollout note (default off; Calvin flips per-user first), test evidence,
   residual risks.
+
+## PM verification results (2026-08-12, executed)
+
+Ran the full independent check against a local stack (backend on :3021,
+Mongo :27018, a mock OpenAI-SSE upstream on :3099 replaying the prod
+fixture, seeded chrono-llm-public admin row, FE dev on :3020).
+
+- Flag OFF → all three direct routes return 404 (code 1003); Aevatar path
+  untouched. PASS
+- Flag ON (user-target override) → `GET /direct/skills` and
+  `/direct/models` serve the curated tables (gpt-5.5 default). PASS
+- Streamed turn end-to-end via CLI/curl: OpenAI SSE deltas → finish → usage
+  frame → [DONE]. PASS
+- Upstream body capture: single `system` message = base prompt + nyxid
+  SKILL.md + override suffix (18,323 chars), `stream:true`,
+  `stream_options.include_usage:true`, path `chat/completions`, master
+  credential injected server-side. PASS
+- Validation matrix: unknown model / unknown skill / `system` role / 65
+  messages all → 400 with precise messages. PASS
+- Rate limit: 7th rapid turn → 429; skills/models unaffected. PASS
+- Billing (BILLING_ENABLED=true): `usage_meter` row metric=tokens
+  quantity=149 slug=chrono-llm-public; `llm_usage_reported` audit with
+  30/119 prompt/completion — reported provenance, not byte estimate. PASS
+- Prompt behavior against the REAL prod gpt-5.5: "connect github for me" →
+  copyable `nyxid service add github` + "chat can't run it", no execution
+  claim; "is my github connected?" → "I can't check from here" +
+  `nyxid service list`. Matches the SS Class-L + cannot-check contract.
+  PASS
+- Browser (gstack browse): login → /assistant renders direct chrome
+  (banner, model/skill pickers), streamed reply rendered in-thread, reload
+  wipes the conversation (stateless). PASS after fixing one bug:
+
+**Bug found & fixed (commit 43e2bed9):** the transport defaulted `fetchFn`
+to the bare global `fetch` and called it as `this.fetchFn(...)`; real Chrome
+throws "Illegal invocation", jsdom does not — so all fetch-injected unit
+tests were green while the live browser turn failed. Wrapped the global and
+added a regression test that reproduces the window-binding guard (red
+without the wrap). This is exactly the gap an agent test-suite structurally
+could not catch, which is why the independent browser pass was required.
