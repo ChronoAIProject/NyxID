@@ -316,6 +316,7 @@ fn api_key_management_write_requires_scope(method: &Method, path: &str) -> bool 
         "/api/v1/llm",
         "/api/v1/proxy",
         "/api/v1/ssh",
+        "/api/v1/approvals/exact-service",
     ]
     .iter()
     .any(|prefix| path_matches_prefix(path, prefix))
@@ -376,6 +377,7 @@ fn is_delegated_native_path(path: &str) -> bool {
     }
 
     matches!(segments.as_slice(), ["approvals", "requests", _, "status"])
+        || segments.starts_with(&["approvals", "exact-service"])
 }
 
 /// Return true for management GET classes that delegated account reads must

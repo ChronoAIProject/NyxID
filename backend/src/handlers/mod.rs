@@ -37,6 +37,7 @@ pub mod device_tokens;
 pub mod devices;
 pub mod docs;
 pub mod endpoints;
+pub mod exact_service_approvals;
 pub mod health;
 pub mod invite_codes;
 pub mod keys;
