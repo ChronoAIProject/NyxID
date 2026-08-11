@@ -30,21 +30,24 @@ use std::sync::LazyLock;
 /// Catalog slug of the admin-seeded Aevatar service.
 pub const AEVATAR_SLUG: &str = "aevatar";
 
-/// Resolve the admin-managed Aevatar service.
+/// Resolve an active admin-managed service by its platform catalog slug.
 ///
 /// Deliberately reads `downstream_services` (the admin catalog) directly:
 /// this is the "admin service" path, and it must resolve identically for
 /// every caller. See the module invariants.
-pub async fn resolve_admin_service(db: &mongodb::Database) -> AppResult<DownstreamService> {
+pub async fn resolve_admin_service_by_slug(
+    db: &mongodb::Database,
+    slug: &str,
+) -> AppResult<DownstreamService> {
     let service = db
         .collection::<DownstreamService>(DOWNSTREAM_SERVICES)
-        .find_one(doc! { "slug": AEVATAR_SLUG, "is_active": true })
+        .find_one(doc! { "slug": slug, "is_active": true })
         .await?
         // Absent/inactive is a platform provisioning fault, not a caller
         // error: `Internal` keeps the detail server-side.
         .ok_or_else(|| {
             AppError::Internal(format!(
-                "assistant: no active downstream service with slug '{AEVATAR_SLUG}'"
+                "assistant: no active downstream service with slug '{slug}'"
             ))
         })?;
 
@@ -53,11 +56,17 @@ pub async fn resolve_admin_service(db: &mongodb::Database) -> AppResult<Downstre
     // way would degrade into per-user connections without any visible error.
     if service.requires_user_credential {
         return Err(AppError::Internal(format!(
-            "assistant: service '{AEVATAR_SLUG}' requires a user credential and cannot back the platform assistant surface"
+            "assistant: service '{slug}' requires a user credential and cannot back the platform assistant surface"
         )));
     }
 
     Ok(service)
+}
+
+/// Resolve the admin-managed Aevatar service without changing its established
+/// call sites or behavior.
+pub async fn resolve_admin_service(db: &mongodb::Database) -> AppResult<DownstreamService> {
+    resolve_admin_service_by_slug(db, AEVATAR_SLUG).await
 }
 
 /// Reject ids that could escape the upstream path segment they are
@@ -1204,6 +1213,49 @@ mod tests {
 
     fn workflow_turn_request(value: serde_json::Value) -> WorkflowChatTurnRequest {
         serde_json::from_value(value).unwrap()
+    }
+
+    #[tokio::test]
+    async fn admin_service_by_slug_rejects_inactive_and_user_credential_rows() {
+        let Some(db) =
+            crate::test_utils::connect_test_database("assistant_admin_service_guard").await
+        else {
+            eprintln!("skipping assistant service guard test: no local MongoDB available");
+            return;
+        };
+        let collection = db.collection::<DownstreamService>(DOWNSTREAM_SERVICES);
+
+        let mut inactive = crate::models::downstream_service::test_helpers::dummy_service();
+        inactive.id = uuid::Uuid::new_v4().to_string();
+        inactive.slug = "inactive-assistant".to_string();
+        inactive.is_active = false;
+        collection.insert_one(&inactive).await.unwrap();
+        assert!(matches!(
+            resolve_admin_service_by_slug(&db, &inactive.slug).await,
+            Err(AppError::Internal(_))
+        ));
+
+        let mut user_credential = crate::models::downstream_service::test_helpers::dummy_service();
+        user_credential.id = uuid::Uuid::new_v4().to_string();
+        user_credential.slug = "credentialed-assistant".to_string();
+        user_credential.requires_user_credential = true;
+        collection.insert_one(&user_credential).await.unwrap();
+        assert!(matches!(
+            resolve_admin_service_by_slug(&db, &user_credential.slug).await,
+            Err(AppError::Internal(_))
+        ));
+
+        let mut active = crate::models::downstream_service::test_helpers::dummy_service();
+        active.id = uuid::Uuid::new_v4().to_string();
+        active.slug = "active-assistant".to_string();
+        collection.insert_one(&active).await.unwrap();
+        assert_eq!(
+            resolve_admin_service_by_slug(&db, &active.slug)
+                .await
+                .unwrap()
+                .id,
+            active.id
+        );
     }
 
     #[test]

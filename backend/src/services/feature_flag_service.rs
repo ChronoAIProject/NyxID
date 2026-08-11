@@ -106,9 +106,23 @@ const AEVATAR_CHAT_WIRE_LOG_FLAG: FeatureFlagDef = FeatureFlagDef {
     default_enabled: false,
 };
 
+/// Operator-selected engine for the human assistant surface. The backend
+/// direct routes enforce this independently of the frontend selection.
+pub const DIRECT_CHAT_ENGINE_FLAG_KEY: &str = "experimental:direct-chat-engine";
+
+const DIRECT_CHAT_ENGINE_FLAG: FeatureFlagDef = FeatureFlagDef {
+    key: DIRECT_CHAT_ENGINE_FLAG_KEY,
+    description: "Selects direct Chrono-LLM instead of Aevatar for assistant chat.",
+    default_enabled: false,
+};
+
 #[cfg(not(test))]
-pub const FEATURE_FLAGS: &[FeatureFlagDef] =
-    &[AI_ASSISTANT_FLAG, BILLING_FLAG, AEVATAR_CHAT_WIRE_LOG_FLAG];
+pub const FEATURE_FLAGS: &[FeatureFlagDef] = &[
+    AI_ASSISTANT_FLAG,
+    BILLING_FLAG,
+    AEVATAR_CHAT_WIRE_LOG_FLAG,
+    DIRECT_CHAT_ENGINE_FLAG,
+];
 
 /// Test builds carry a placeholder flag so the resolution / override pipeline
 /// can exercise multiple definitions alongside the production registry entry.
@@ -117,6 +131,7 @@ pub const FEATURE_FLAGS: &[FeatureFlagDef] = &[
     AI_ASSISTANT_FLAG,
     BILLING_FLAG_TEST,
     AEVATAR_CHAT_WIRE_LOG_FLAG,
+    DIRECT_CHAT_ENGINE_FLAG,
     FeatureFlagDef {
         key: "example_ui",
         description: "Test-only placeholder flag.",

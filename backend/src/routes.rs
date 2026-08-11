@@ -1328,6 +1328,10 @@ pub fn build_router(
             get(handlers::assistant::get_state),
         )
         .route("/completions", post(handlers::assistant::completions))
+        .route(
+            "/direct/completions",
+            post(handlers::assistant_direct::completions),
+        )
         .route("/chat", post(handlers::assistant::typed_chat))
         .route("/workflow-chat", post(handlers::assistant::workflow_chat))
         .route(
@@ -1344,6 +1348,8 @@ pub fn build_router(
             "/readiness",
             get(handlers::assistant_readiness::get_readiness),
         )
+        .route("/direct/skills", get(handlers::assistant_direct::skills))
+        .route("/direct/models", get(handlers::assistant_direct::models))
         .merge(assistant_proxy_routes);
 
     let ssh_billing_routes = ssh_billing_routes!(register_billing_routes, Router::new());
