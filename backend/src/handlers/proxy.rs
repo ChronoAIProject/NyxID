@@ -9232,6 +9232,7 @@ mod proxy_resolution_integration_tests {
                 "/api/chat".to_string(),
                 "/api/chat".to_string(),
                 "/api/chat".to_string(),
+                "/api/chat".to_string(),
                 format!("/api/scopes/{user_id}/chat-history"),
                 "/api/chat/conversations/nyxid-chat-4a1e60ebd1fd44f192bf4bb90e1812ae".to_string(),
                 "/api/chat/conversations/nyxid-chat-4a1e60ebd1fd44f192bf4bb90e1812ae/state"
@@ -9395,8 +9396,8 @@ mod proxy_resolution_integration_tests {
             );
         }
 
-        assert_eq!(debug_echoes.len(), 11);
-        for (call_index, envelope_array) in debug_echoes[..10].iter().enumerate() {
+        assert_eq!(debug_echoes.len(), 12);
+        for (call_index, envelope_array) in debug_echoes[..11].iter().enumerate() {
             assert_eq!(envelope_array.len(), 1);
             let envelope = &envelope_array[0];
             let (method, path, body, _) = &calls[call_index];
@@ -9445,9 +9446,9 @@ mod proxy_resolution_integration_tests {
             }
         }
 
-        let list_echoes = &debug_echoes[10];
+        let list_echoes = &debug_echoes[11];
         assert_eq!(list_echoes.len(), 1);
-        for (envelope, call) in list_echoes.iter().zip(&calls[10..11]) {
+        for (envelope, call) in list_echoes.iter().zip(&calls[11..12]) {
             assert_eq!(envelope["method"], "GET");
             assert_eq!(envelope["path"], call.1.trim_start_matches('/'));
             assert!(envelope["commandType"].is_null());
