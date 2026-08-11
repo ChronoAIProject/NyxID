@@ -9,6 +9,7 @@ use crate::models::assistant_action_receipt::{
     AssistantActionReceipt, AssistantActionReceiptStatus,
     COLLECTION_NAME as ASSISTANT_ACTION_RECEIPTS,
 };
+use crate::models::user_service::{COLLECTION_NAME as USER_SERVICES, UserService};
 use crate::services::key_service::{self, CreatedApiKey};
 
 const KEY_CREATE_ACTION: &str = "key.create";
@@ -25,7 +26,7 @@ pub struct KeyCreateActionRequest {
 
 #[derive(Debug)]
 pub enum KeyCreateActionResult {
-    Created(CreatedApiKey),
+    Created(Box<CreatedApiKey>),
     Replayed { key_id: String },
 }
 
@@ -98,6 +99,27 @@ fn request_fingerprint(request: &KeyCreateActionRequest) -> AppResult<String> {
     })
     .map_err(|error| AppError::Internal(format!("failed to fingerprint action: {error}")))?;
     Ok(hex::encode(Sha256::digest(canonical)))
+}
+
+async fn validate_personal_service_ids(
+    db: &mongodb::Database,
+    user_id: &str,
+    allowed_service_ids: &[String],
+) -> AppResult<()> {
+    let matching = db
+        .collection::<UserService>(USER_SERVICES)
+        .count_documents(doc! {
+            "_id": { "$in": allowed_service_ids },
+            "user_id": user_id,
+            "is_active": true,
+        })
+        .await?;
+    if matching != allowed_service_ids.len() as u64 {
+        return Err(AppError::ValidationError(
+            "allowedServiceIds must identify active services owned by this account".to_string(),
+        ));
+    }
+    Ok(())
 }
 
 fn duplicate_key(error: &mongodb::error::Error) -> bool {
@@ -194,31 +216,17 @@ async fn mark_completed(db: &mongodb::Database, receipt: &AssistantActionReceipt
     Ok(())
 }
 
-pub async fn create_key(
+async fn create_reserved_key(
     db: &mongodb::Database,
     user_id: &str,
-    request: KeyCreateActionRequest,
+    request: &KeyCreateActionRequest,
+    receipt: &AssistantActionReceipt,
 ) -> AppResult<KeyCreateActionResult> {
-    let request = normalize_request(request)?;
-    let fingerprint = request_fingerprint(&request)?;
-    let receipt = reserve_receipt(db, user_id, &request, &fingerprint).await?;
-    if receipt.request_fingerprint != fingerprint {
-        return Err(AppError::Conflict(
-            "actionRequestId was already used with different key parameters".to_string(),
-        ));
-    }
-    if let Some(key_id) = recover_reserved_key(db, user_id, &receipt).await? {
-        if receipt.status != AssistantActionReceiptStatus::Completed {
-            mark_completed(db, &receipt).await?;
-        }
-        return Ok(KeyCreateActionResult::Replayed { key_id });
-    }
-
     let no_nodes: Vec<String> = Vec::new();
     let created = key_service::create_api_key_with_scope_authorization_and_id(
         db,
         user_id,
-        Some(user_id),
+        None,
         &receipt.resource_id,
         &request.name,
         "proxy",
@@ -238,22 +246,42 @@ pub async fn create_key(
 
     match created {
         Ok(created) => {
-            mark_completed(db, &receipt).await?;
-            Ok(KeyCreateActionResult::Created(created))
+            mark_completed(db, receipt).await?;
+            Ok(KeyCreateActionResult::Created(Box::new(created)))
         }
         Err(AppError::DatabaseError(error)) if duplicate_key(&error) => {
-            let key_id = recover_reserved_key(db, user_id, &receipt)
-                .await?
-                .ok_or_else(|| {
-                    AppError::Conflict(
-                        "reserved key id collided without a recoverable effect".to_string(),
-                    )
-                })?;
-            mark_completed(db, &receipt).await?;
+            let Some(key_id) = recover_reserved_key(db, user_id, receipt).await? else {
+                return Err(AppError::DatabaseError(error));
+            };
+            mark_completed(db, receipt).await?;
             Ok(KeyCreateActionResult::Replayed { key_id })
         }
         Err(error) => Err(error),
     }
+}
+
+pub async fn create_key(
+    db: &mongodb::Database,
+    user_id: &str,
+    request: KeyCreateActionRequest,
+) -> AppResult<KeyCreateActionResult> {
+    let request = normalize_request(request)?;
+    validate_personal_service_ids(db, user_id, &request.allowed_service_ids).await?;
+    let fingerprint = request_fingerprint(&request)?;
+    let receipt = reserve_receipt(db, user_id, &request, &fingerprint).await?;
+    if receipt.request_fingerprint != fingerprint {
+        return Err(AppError::Conflict(
+            "actionRequestId was already used with different key parameters".to_string(),
+        ));
+    }
+    if let Some(key_id) = recover_reserved_key(db, user_id, &receipt).await? {
+        if receipt.status != AssistantActionReceiptStatus::Completed {
+            mark_completed(db, &receipt).await?;
+        }
+        return Ok(KeyCreateActionResult::Replayed { key_id });
+    }
+
+    create_reserved_key(db, user_id, &request, &receipt).await
 }
 
 #[cfg(test)]
@@ -262,8 +290,11 @@ mod tests {
     use futures::TryStreamExt;
     use mongodb::{IndexModel, options::IndexOptions};
 
-    use crate::models::user_service::{COLLECTION_NAME as USER_SERVICES, UserService};
-    use crate::test_utils::{connect_test_database, test_user_service};
+    use crate::models::org_membership::{
+        COLLECTION_NAME as ORG_MEMBERSHIPS, OrgMembership, OrgRole,
+    };
+    use crate::models::user::{COLLECTION_NAME as USERS, User, UserType};
+    use crate::test_utils::{connect_test_database, test_membership, test_user, test_user_service};
 
     fn request(ids: &[&str]) -> KeyCreateActionRequest {
         KeyCreateActionRequest {
@@ -309,6 +340,10 @@ mod tests {
             .await
             .expect("create receipt uniqueness index");
         let user_id = Uuid::new_v4().to_string();
+        db.collection::<User>(USERS)
+            .insert_one(test_user(&user_id, UserType::Person))
+            .await
+            .expect("insert key owner");
         let service_id = Uuid::new_v4().to_string();
         let service = test_user_service(
             &service_id,
@@ -325,6 +360,65 @@ mod tests {
         Some((db, user_id, service_id))
     }
 
+    #[tokio::test]
+    async fn org_visible_services_are_rejected_before_receipt_reservation() {
+        let Some((db, user_id, _)) = prepare_database("assistant_key_create_org_owner").await
+        else {
+            return;
+        };
+
+        for (index, role) in [OrgRole::Member, OrgRole::Admin].into_iter().enumerate() {
+            let org_id = Uuid::new_v4().to_string();
+            let org_service_id = Uuid::new_v4().to_string();
+            db.collection::<User>(USERS)
+                .insert_one(test_user(&org_id, UserType::Org))
+                .await
+                .expect("insert org owner");
+            db.collection::<UserService>(USER_SERVICES)
+                .insert_one(test_user_service(
+                    &org_service_id,
+                    &org_id,
+                    &format!("org-service-{index}"),
+                    &Uuid::new_v4().to_string(),
+                    None,
+                    None,
+                ))
+                .await
+                .expect("insert org service");
+            db.collection::<OrgMembership>(ORG_MEMBERSHIPS)
+                .insert_one(test_membership(
+                    &org_id,
+                    &user_id,
+                    role,
+                    Some(vec![org_service_id.clone()]),
+                ))
+                .await
+                .expect("insert visible org membership");
+
+            let mut org_request = exact_request(&org_service_id);
+            org_request.action_request_id = format!("action-org-{index}");
+            assert!(matches!(
+                create_key(&db, &user_id, org_request).await,
+                Err(AppError::ValidationError(_))
+            ));
+        }
+
+        assert_eq!(
+            db.collection::<ApiKey>(API_KEYS)
+                .count_documents(doc! { "user_id": &user_id })
+                .await
+                .expect("count keys"),
+            0
+        );
+        assert_eq!(
+            db.collection::<AssistantActionReceipt>(ASSISTANT_ACTION_RECEIPTS)
+                .count_documents(doc! { "user_id": &user_id })
+                .await
+                .expect("count receipts"),
+            0
+        );
+    }
+
     fn exact_request(service_id: &str) -> KeyCreateActionRequest {
         KeyCreateActionRequest {
             action_request_id: "action-exactly-once".to_string(),
@@ -335,14 +429,22 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn concurrent_replay_creates_exactly_one_least_scope_key() {
+    async fn concurrent_reserved_effect_creates_once_and_recovers_duplicate_insert() {
         let Some((db, user_id, service_id)) = prepare_database("assistant_key_create_once").await
         else {
             return;
         };
 
-        let first = create_key(&db, &user_id, exact_request(&service_id));
-        let second = create_key(&db, &user_id, exact_request(&service_id));
+        let request = normalize_request(exact_request(&service_id)).expect("normalize request");
+        let fingerprint = request_fingerprint(&request).expect("fingerprint request");
+        let receipt = reserve_receipt(&db, &user_id, &request, &fingerprint)
+            .await
+            .expect("reserve action receipt");
+
+        // Both executions deliberately skip recovery and attempt the same reserved UUID.
+        // The unique key insert selects the one caller allowed to receive key material.
+        let first = create_reserved_key(&db, &user_id, &request, &receipt);
+        let second = create_reserved_key(&db, &user_id, &request, &receipt);
         let (first, second) = tokio::join!(first, second);
         let first = first.expect("first execution");
         let second = second.expect("second execution");
