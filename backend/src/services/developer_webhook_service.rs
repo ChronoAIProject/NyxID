@@ -79,10 +79,10 @@ impl DeveloperWebhookDispatcher {
         event_type: &str,
         data: Value,
     ) -> Result<(), DeliveryFailure> {
-        if !data
+        if data
             .get("user_id")
             .and_then(serde_json::Value::as_str)
-            .is_some_and(|value| !value.is_empty())
+            .is_none_or(|value| value.is_empty())
         {
             return Err(DeliveryFailure {
                 attempts: 0,
