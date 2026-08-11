@@ -22,6 +22,9 @@ pub struct CreatedApiKey {
     pub full_key: String,
     pub scopes: String,
     pub created_at: chrono::DateTime<Utc>,
+    pub rotation_predecessor_id: Option<String>,
+    pub state_version: i64,
+    pub updated_at: chrono::DateTime<Utc>,
     pub description: Option<String>,
     pub allowed_service_ids: Vec<String>,
     pub allowed_node_ids: Vec<String>,
@@ -43,6 +46,9 @@ impl fmt::Debug for CreatedApiKey {
             .field("full_key", &RedactedLen(self.full_key.len()))
             .field("scopes", &self.scopes)
             .field("created_at", &self.created_at)
+            .field("rotation_predecessor_id", &self.rotation_predecessor_id)
+            .field("state_version", &self.state_version)
+            .field("updated_at", &self.updated_at)
             .field("description", &self.description)
             .field("allowed_service_ids", &self.allowed_service_ids)
             .field("allowed_node_ids", &self.allowed_node_ids)
@@ -428,6 +434,9 @@ async fn create_api_key_with_security_class_and_id(
         expires_at,
         is_active: true,
         created_at: now,
+        rotation_predecessor_id: None,
+        state_version: 1,
+        updated_at: Some(now),
         description: description.map(|s| s.to_string()),
         allowed_service_ids: svc_ids.clone(),
         allowed_node_ids: node_ids.clone(),
@@ -459,6 +468,9 @@ async fn create_api_key_with_security_class_and_id(
         full_key,
         scopes: scopes.to_string(),
         created_at: now,
+        rotation_predecessor_id: None,
+        state_version: 1,
+        updated_at: now,
         description: description.map(|s| s.to_string()),
         allowed_service_ids: svc_ids,
         allowed_node_ids: node_ids,
