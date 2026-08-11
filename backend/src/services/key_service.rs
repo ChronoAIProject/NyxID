@@ -200,10 +200,59 @@ pub async fn create_api_key_with_scope_authorization(
     callback_url: Option<&str>,
     scope_plan_digest: Option<&str>,
 ) -> AppResult<CreatedApiKey> {
-    create_api_key_with_security_class(
+    create_api_key_with_security_class_and_id(
         db,
         user_id,
         scope_actor_user_id,
+        None,
+        name,
+        scopes,
+        expires_at,
+        description,
+        allowed_service_ids,
+        allowed_node_ids,
+        allow_all_services,
+        allow_all_nodes,
+        rate_limit_per_second,
+        rate_limit_burst,
+        platform,
+        callback_url,
+        scope_plan_digest,
+        ApiKeyPurpose::General,
+        false,
+    )
+    .await
+}
+
+/// Create an API key at a caller-reserved UUID.
+///
+/// The assistant action receipt owns this identifier before the effect starts,
+/// so a retry can recover an already-created key without minting another one.
+#[allow(clippy::too_many_arguments)]
+pub async fn create_api_key_with_scope_authorization_and_id(
+    db: &mongodb::Database,
+    user_id: &str,
+    scope_actor_user_id: Option<&str>,
+    resource_id: &str,
+    name: &str,
+    scopes: &str,
+    expires_at: Option<chrono::DateTime<Utc>>,
+    description: Option<&str>,
+    allowed_service_ids: Option<&[String]>,
+    allowed_node_ids: Option<&[String]>,
+    allow_all_services: Option<bool>,
+    allow_all_nodes: Option<bool>,
+    rate_limit_per_second: Option<u32>,
+    rate_limit_burst: Option<u32>,
+    platform: Option<&str>,
+    callback_url: Option<&str>,
+    scope_plan_digest: Option<&str>,
+) -> AppResult<CreatedApiKey> {
+    create_api_key_with_security_class_and_id(
+        db,
+        user_id,
+        scope_actor_user_id,
+        Some(resource_id),
         name,
         scopes,
         expires_at,
@@ -228,6 +277,52 @@ pub async fn create_api_key_with_security_class(
     db: &mongodb::Database,
     user_id: &str,
     scope_actor_user_id: Option<&str>,
+    name: &str,
+    scopes: &str,
+    expires_at: Option<chrono::DateTime<Utc>>,
+    description: Option<&str>,
+    allowed_service_ids: Option<&[String]>,
+    allowed_node_ids: Option<&[String]>,
+    allow_all_services: Option<bool>,
+    allow_all_nodes: Option<bool>,
+    rate_limit_per_second: Option<u32>,
+    rate_limit_burst: Option<u32>,
+    platform: Option<&str>,
+    callback_url: Option<&str>,
+    scope_plan_digest: Option<&str>,
+    purpose: ApiKeyPurpose,
+    scheduled_write_enabled: bool,
+) -> AppResult<CreatedApiKey> {
+    create_api_key_with_security_class_and_id(
+        db,
+        user_id,
+        scope_actor_user_id,
+        None,
+        name,
+        scopes,
+        expires_at,
+        description,
+        allowed_service_ids,
+        allowed_node_ids,
+        allow_all_services,
+        allow_all_nodes,
+        rate_limit_per_second,
+        rate_limit_burst,
+        platform,
+        callback_url,
+        scope_plan_digest,
+        purpose,
+        scheduled_write_enabled,
+    )
+    .await
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn create_api_key_with_security_class_and_id(
+    db: &mongodb::Database,
+    user_id: &str,
+    scope_actor_user_id: Option<&str>,
+    resource_id: Option<&str>,
     name: &str,
     scopes: &str,
     expires_at: Option<chrono::DateTime<Utc>>,
@@ -312,7 +407,14 @@ pub async fn create_api_key_with_security_class(
         generate_api_key()
     };
 
-    let id = Uuid::new_v4().to_string();
+    let id = match resource_id {
+        Some(value) => Uuid::parse_str(value)
+            .map_err(|_| {
+                AppError::ValidationError("reserved API key id must be a UUID".to_string())
+            })?
+            .to_string(),
+        None => Uuid::new_v4().to_string(),
+    };
     let now = Utc::now();
 
     let new_key = ApiKey {
