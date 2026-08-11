@@ -203,6 +203,31 @@ request/picker/draft state.
   raises PR with a work-done narrative (spec links, review dispositions,
   gates evidence).
 
+## PM independent verification (owner directive 2026-08-11)
+
+After Opus review + fixes, the PM (Fable) runs its OWN end-to-end test —
+not a re-run of the agents' suites:
+
+1. Boot the local stack (Mongo via docker compose :27018; backend
+   `cargo run --bin nyxid-server`; seed a chrono-llm-public-shaped row +
+   mock OpenAI-SSE upstream, or point the row at the real llm.aelf.dev if
+   a master credential is available locally).
+2. Flag OFF: all three direct routes 404; aevatar chat path untouched.
+3. Flag ON (per-user override): drive
+   `POST /api/v1/assistant/direct/completions` with a real session —
+   streamed turn end-to-end; skills/models GETs; skill-injected turn.
+4. Behavioral spot-check of the SS-derived prompt: ask an actionable
+   question ("connect github for me") → expect a copyable `nyxid` command
+   + explicit cannot-execute note, NO execution claim; ask a live-state
+   question → expect "cannot check from here" + the checking command.
+5. Billing: assert the settled row for the streamed turn carries
+   reported-token provenance (not byte estimate).
+6. Browser pass (gstack browse): flag-driven engine switch, direct chat
+   renders streamed turn, banner copy, reload wipes, logout wipes.
+7. Full gate re-run on the final tree.
+
+Only after this passes does the PR go up.
+
 ## Definition of done
 
 - All BE/FE tasks landed on `chat-chronollm-direct`; both review files'
