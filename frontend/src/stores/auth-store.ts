@@ -8,6 +8,7 @@ import {
 import { useAssistantContextStore } from "@/stores/assistant-context-store";
 import { useAssistantDraftStore } from "@/stores/assistant-draft-store";
 import { useAssistantWireLogStore } from "@/stores/assistant-wire-log-store";
+import { transitionAssistantIdentity } from "@/lib/assistant/identity";
 
 const MFA_REQUIRED_ERROR_CODE = 2002;
 
@@ -15,6 +16,15 @@ function clearAssistantLocalState(): void {
   useAssistantContextStore.getState().clear();
   useAssistantDraftStore.getState().clear();
   useAssistantWireLogStore.getState().reset();
+}
+
+function applyIdentityTransition(
+  previousUser: User | null,
+  nextUser: User | null,
+): void {
+  if (previousUser?.id === nextUser?.id) return;
+  if (previousUser !== null) clearAssistantLocalState();
+  transitionAssistantIdentity(nextUser?.id ?? null);
 }
 
 interface LoginResult {
@@ -41,7 +51,7 @@ interface AuthActions {
 
 type AuthStore = AuthState & AuthActions;
 
-export const useAuthStore = create<AuthStore>((set) => ({
+export const useAuthStore = create<AuthStore>((set, get) => ({
   user: null,
   isAuthenticated: false,
   isLoading: true,
@@ -89,6 +99,7 @@ export const useAuthStore = create<AuthStore>((set) => ({
       // the app emits already carries a fresh anon distinct_id.
       telemetryReset();
       clearAssistantLocalState();
+      transitionAssistantIdentity(null);
       set({
         user: null,
         isAuthenticated: false,
@@ -102,6 +113,7 @@ export const useAuthStore = create<AuthStore>((set) => ({
     set({ isLoading: true });
     try {
       const user = await api.get<User>("/users/me");
+      applyIdentityTransition(get().user, user);
       set({ user, isAuthenticated: true, isLoading: false });
       // Associate the restored session with its user_id so pageviews
       // captured after boot attribute correctly. Safe no-op when
@@ -115,6 +127,7 @@ export const useAuthStore = create<AuthStore>((set) => ({
         // ex-user. Parity with the explicit `logout()` branch above.
         telemetryReset();
         clearAssistantLocalState();
+        transitionAssistantIdentity(null);
         set({ user: null, isAuthenticated: false, isLoading: false });
       } else {
         set({ isLoading: false });
@@ -123,7 +136,13 @@ export const useAuthStore = create<AuthStore>((set) => ({
   },
 
   setUser: (user: User | null): void => {
-    if (user === null) clearAssistantLocalState();
+    const previousUser = get().user;
+    if (user === null) {
+      clearAssistantLocalState();
+      transitionAssistantIdentity(null);
+    } else {
+      applyIdentityTransition(previousUser, user);
+    }
     set({ user, isAuthenticated: user !== null });
     if (user !== null) {
       telemetryIdentify(user.id);

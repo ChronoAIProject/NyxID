@@ -8,6 +8,7 @@ import { useConsentStore } from "./stores/consent-store";
 import { usePublicConfig } from "./hooks/use-public-config";
 import { initTelemetry, identify as telemetryIdentify } from "./lib/telemetry";
 import { isPublicPath } from "./lib/public-paths";
+import { subscribeAssistantIdentity } from "./lib/assistant/identity";
 import { ConsentBanner } from "./components/consent-banner";
 import "./app.css";
 
@@ -34,13 +35,15 @@ const queryClient = new QueryClient({
   },
 });
 
+subscribeAssistantIdentity(() => {
+  queryClient.removeQueries({ queryKey: ["assistant", "direct"] });
+});
+
 // Dev-only handle for the e2e harness (frontend/e2e/): flow specs assert on
 // cache slots nothing renders yet (e.g. the per-conversation turn episode).
 // Stripped from production builds with the rest of the DEV branch.
 if (import.meta.env.DEV) {
-  (
-    window as { __nyxQueryClient?: QueryClient }
-  ).__nyxQueryClient = queryClient;
+  (window as { __nyxQueryClient?: QueryClient }).__nyxQueryClient = queryClient;
 }
 
 function Root() {
@@ -62,7 +65,9 @@ function Root() {
   // on pages that genuinely need public config (settings, login,
   // MCP tabs) still fetch it via their own hook invocations.
   const telemetryMightInit = !consentAsked || consentEnabled;
-  const { data: publicConfig } = usePublicConfig({ enabled: telemetryMightInit });
+  const { data: publicConfig } = usePublicConfig({
+    enabled: telemetryMightInit,
+  });
 
   useEffect(() => {
     useAuthStore

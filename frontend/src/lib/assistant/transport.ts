@@ -1,4 +1,5 @@
 import { AevatarAssistantTransport } from "@/lib/assistant/aevatar-transport";
+import { directAssistantTransport } from "@/lib/assistant/direct-transport";
 import { ApiError } from "@/lib/api-client";
 import { composeUnreportedCompletedNote } from "@/lib/assistant/action-notes";
 import { AssistantTurnActiveError } from "@/lib/assistant/errors";
@@ -568,6 +569,265 @@ export function selectAssistantTransportKind(env: {
   return "aevatar";
 }
 
+export type AssistantEngine = "aevatar" | "direct";
+
+const DIRECT_CONVERSATION_ID = /^direct-[A-Za-z0-9_-]{1,160}$/;
+const AEVATAR_CONVERSATION_IDS = [
+  /^nyxid-chat-[A-Za-z0-9_-]{1,117}$/,
+  /^chatc-[A-Za-z0-9_-]{1,120}$/,
+  /^workflow-pending-[A-Za-z0-9_-]{1,160}$/,
+  /^nyxid-pending-[A-Za-z0-9_-]{1,160}$/,
+] as const;
+
+interface OriginatingTurn {
+  readonly delegate: AssistantTransport;
+  readonly token: symbol;
+}
+
+/** Permanently owns both live engines; selection never consumes install(). */
+export class AssistantEngineRouter implements AssistantTransport {
+  private selectedEngine: AssistantEngine = "aevatar";
+  private readonly running = new Map<string, OriginatingTurn>();
+  private readonly aevatar: AssistantTransport;
+  private readonly direct: AssistantTransport;
+
+  constructor(aevatar: AssistantTransport, direct: AssistantTransport) {
+    this.aevatar = aevatar;
+    this.direct = direct;
+  }
+
+  setSelectedEngine(engine: AssistantEngine): void {
+    this.selectedEngine = engine;
+  }
+
+  getSelectedEngine(): AssistantEngine {
+    return this.selectedEngine;
+  }
+
+  listConversations(): Promise<Conversation[]> {
+    return this.selectedDelegate().listConversations();
+  }
+
+  createConversation(): Promise<Conversation> {
+    return this.selectedDelegate().createConversation();
+  }
+
+  getHistory(conversationId: string): Promise<ConversationHistory> {
+    return this.delegateForConversation(conversationId).getHistory(
+      conversationId,
+    );
+  }
+
+  reconcileProjection(
+    conversationId: string,
+  ): Promise<ProjectionReconcileOutcome> {
+    return this.delegateForConversation(conversationId).reconcileProjection(
+      conversationId,
+    );
+  }
+
+  releaseProjectionWaiter(conversationId: string): void {
+    this.delegateForConversation(conversationId).releaseProjectionWaiter(
+      conversationId,
+    );
+  }
+
+  async deleteConversation(conversationId: string): Promise<void> {
+    this.cancelActiveTurn(conversationId);
+    await this.delegateForConversation(conversationId).deleteConversation(
+      conversationId,
+    );
+  }
+
+  sendMessage(
+    conversationId: string,
+    content: string,
+    onEvent: (event: TurnEvent) => void,
+  ): TurnHandle {
+    const delegate = this.delegateForConversation(conversationId);
+    const token = Symbol(conversationId);
+    this.running.set(conversationId, { delegate, token });
+    try {
+      const handle = delegate.sendMessage(
+        conversationId,
+        content,
+        this.ownedEvents(conversationId, token, onEvent),
+      );
+      return this.wrapHandle(conversationId, token, delegate, handle);
+    } catch (error) {
+      this.releaseOrigin(conversationId, token);
+      throw error;
+    }
+  }
+
+  cancelActiveTurn(conversationId: string): void {
+    const origin = this.running.get(conversationId);
+    (
+      origin?.delegate ?? this.delegateForConversation(conversationId)
+    ).cancelActiveTurn(conversationId);
+  }
+
+  async decideApproval(
+    conversationId: string,
+    blockId: string,
+    approved: boolean,
+    onEvent: (event: TurnEvent) => void = () => undefined,
+  ): Promise<TurnHandle | null> {
+    const delegate = this.delegateForConversation(conversationId);
+    const token = Symbol(conversationId);
+    this.running.set(conversationId, { delegate, token });
+    try {
+      const handle = await delegate.decideApproval(
+        conversationId,
+        blockId,
+        approved,
+        this.ownedEvents(conversationId, token, onEvent),
+      );
+      if (!handle) {
+        this.releaseOrigin(conversationId, token);
+        return null;
+      }
+      return this.wrapHandle(conversationId, token, delegate, handle);
+    } catch (error) {
+      this.releaseOrigin(conversationId, token);
+      throw error;
+    }
+  }
+
+  setActionCardInProgress(
+    conversationId: string,
+    blockId: string,
+    inProgress: boolean,
+    onEvent?: (event: TurnEvent) => void,
+  ): void {
+    this.delegateForConversation(conversationId).setActionCardInProgress(
+      conversationId,
+      blockId,
+      inProgress,
+      onEvent,
+    );
+  }
+
+  blockActionCard(
+    conversationId: string,
+    blockId: string,
+    note: string,
+    onEvent?: (event: TurnEvent) => void,
+  ): void {
+    this.delegateForConversation(conversationId).blockActionCard(
+      conversationId,
+      blockId,
+      note,
+      onEvent,
+    );
+  }
+
+  continueActions(
+    conversationId: string,
+    originTurnId: string,
+    reports: readonly ActionReport[],
+    onEvent: (event: TurnEvent) => void = () => undefined,
+  ): TurnHandle | null {
+    const delegate = this.delegateForConversation(conversationId);
+    const token = Symbol(conversationId);
+    this.running.set(conversationId, { delegate, token });
+    try {
+      const handle = delegate.continueActions(
+        conversationId,
+        originTurnId,
+        reports,
+        this.ownedEvents(conversationId, token, onEvent),
+      );
+      if (!handle) {
+        this.releaseOrigin(conversationId, token);
+        return null;
+      }
+      return this.wrapHandle(conversationId, token, delegate, handle);
+    } catch (error) {
+      this.releaseOrigin(conversationId, token);
+      throw error;
+    }
+  }
+
+  wakeActions(
+    conversationId: string,
+    originTurnId: string,
+    onEvent: (event: TurnEvent) => void = () => undefined,
+  ): TurnHandle {
+    const delegate = this.delegateForConversation(conversationId);
+    const token = Symbol(conversationId);
+    this.running.set(conversationId, { delegate, token });
+    try {
+      const handle = delegate.wakeActions(
+        conversationId,
+        originTurnId,
+        this.ownedEvents(conversationId, token, onEvent),
+      );
+      return this.wrapHandle(conversationId, token, delegate, handle);
+    } catch (error) {
+      this.releaseOrigin(conversationId, token);
+      throw error;
+    }
+  }
+
+  private selectedDelegate(): AssistantTransport {
+    return this.selectedEngine === "direct" ? this.direct : this.aevatar;
+  }
+
+  private delegateForConversation(conversationId: string): AssistantTransport {
+    if (DIRECT_CONVERSATION_ID.test(conversationId)) return this.direct;
+    if (
+      AEVATAR_CONVERSATION_IDS.some((pattern) => pattern.test(conversationId))
+    ) {
+      return this.aevatar;
+    }
+    throw new Error("Unknown assistant conversation id.");
+  }
+
+  private ownedEvents(
+    conversationId: string,
+    token: symbol,
+    onEvent: (event: TurnEvent) => void,
+  ): (event: TurnEvent) => void {
+    return (event) => {
+      onEvent(event);
+      if (event.event === "turn.completed") {
+        this.releaseOrigin(conversationId, token);
+      }
+    };
+  }
+
+  private wrapHandle(
+    conversationId: string,
+    token: symbol,
+    delegate: AssistantTransport,
+    handle: TurnHandle,
+  ): TurnHandle {
+    return {
+      get turnId() {
+        return handle.turnId;
+      },
+      cancel: () => {
+        const origin = this.running.get(conversationId);
+        if (origin?.token === token) delegate.cancelActiveTurn(conversationId);
+        else handle.cancel();
+      },
+    };
+  }
+
+  private releaseOrigin(conversationId: string, token: symbol): void {
+    if (this.running.get(conversationId)?.token === token) {
+      this.running.delete(conversationId);
+    }
+  }
+}
+
+let activeEngineRouter: AssistantEngineRouter | null = null;
+
+export function setAssistantTransportEngine(engine: AssistantEngine): void {
+  activeEngineRouter?.setSelectedEngine(engine);
+}
+
 export class DelegatingAssistantTransport implements AssistantTransport {
   private transport: AssistantTransport;
   private interceptorInstalled = false;
@@ -688,6 +948,7 @@ export class DelegatingAssistantTransport implements AssistantTransport {
 export interface AssistantTransportFactories {
   readonly createMock: () => AssistantTransport;
   readonly createAevatar: () => AssistantTransport;
+  readonly createDirect: () => AssistantTransport;
 }
 
 export interface AssistantInterceptorModule {
@@ -731,7 +992,13 @@ export function createAssistantTransportForEnvironment(
 ): AssistantTransport {
   const kind = selectAssistantTransportKind(env);
   if (kind === "mock") return factories.createMock();
-  const shell = new DelegatingAssistantTransport(factories.createAevatar());
+  const router = new AssistantEngineRouter(
+    factories.createAevatar(),
+    factories.createDirect(),
+  );
+  activeEngineRouter = router;
+  if (!env.dev) return router;
+  const shell = new DelegatingAssistantTransport(router);
   if (env.dev && interceptorLoader) {
     reportInterceptorState?.("loading");
     void installAssistantTransportInterceptor(shell, interceptorLoader).catch(
@@ -750,6 +1017,7 @@ function createAssistantTransport(): AssistantTransport {
   const factories: AssistantTransportFactories = {
     createMock: () => new MockAssistantTransport(),
     createAevatar: () => new AevatarAssistantTransport(),
+    createDirect: () => directAssistantTransport,
   };
   if (import.meta.env.DEV) {
     const setState = (state: "loading" | "error") =>
