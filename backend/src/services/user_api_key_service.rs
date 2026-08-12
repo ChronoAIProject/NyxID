@@ -102,10 +102,23 @@ pub async fn get_api_key(
     user_id: &str,
     key_id: &str,
 ) -> AppResult<UserApiKey> {
-    db.collection::<UserApiKey>(COLLECTION_NAME)
-        .find_one(doc! { "_id": key_id, "user_id": user_id })
+    find_api_key(db, user_id, key_id)
         .await?
         .ok_or_else(|| AppError::NotFound("API key not found".to_string()))
+}
+
+/// Look up an API key without turning a missing child row into an error.
+/// Aggregate management paths use this to keep a `UserService` recoverable
+/// when a legacy `api_key_id` no longer resolves.
+pub async fn find_api_key(
+    db: &mongodb::Database,
+    user_id: &str,
+    key_id: &str,
+) -> AppResult<Option<UserApiKey>> {
+    Ok(db
+        .collection::<UserApiKey>(COLLECTION_NAME)
+        .find_one(doc! { "_id": key_id, "user_id": user_id })
+        .await?)
 }
 
 /// Create a new API key with an encrypted credential.
@@ -1550,6 +1563,10 @@ pub async fn cleanup_claimed_api_key(
     user_id: &str,
     key_id: &str,
 ) -> AppResult<()> {
+    // Active references are rejected before a key can be claimed. Preserve
+    // inactive references: the UserService aggregate still requires a
+    // credential, and retaining the id lets management paths expose the
+    // explicit degraded state and block Enable until it is reconnected.
     agent_binding_service::cleanup_bindings_for_credential(db, user_id, key_id).await?;
     Ok(())
 }
@@ -6418,5 +6435,17 @@ mod tests {
             .await
             .expect_err("key should be gone");
         assert!(matches!(err, crate::errors::AppError::NotFound(_)));
+
+        let updated_service = db
+            .collection::<crate::models::user_service::UserService>(super::USER_SERVICES)
+            .find_one(doc! { "_id": &svc.id })
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            updated_service.api_key_id.as_deref(),
+            Some(key.id.as_str()),
+            "deleting an inactive credential must preserve the degraded aggregate reference"
+        );
     }
 }

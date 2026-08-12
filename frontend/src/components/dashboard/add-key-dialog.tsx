@@ -4,6 +4,7 @@ import {
   KEY_AUTH_FAILED,
   useCatalog,
   useCreateKey,
+  useUpdateKey,
   useKeyAuthorizationStatus,
 } from "@/hooks/use-keys";
 import { useNodes } from "@/hooks/use-nodes";
@@ -2886,6 +2887,7 @@ export function AddKeyDialog({
   readonly onPopupViewResult?: (keyId: string) => boolean;
 }) {
   const createKey = useCreateKey();
+  const updateKey = useUpdateKey();
   const { data: catalogEntries } = useCatalog({
     includeAll: prefillIncludeAllCatalog,
   });
@@ -3175,6 +3177,17 @@ export function AddKeyDialog({
 
   async function ensureAuthKey(): Promise<KeyInfo> {
     if (reconnectKey) {
+      if (reconnectKey.credential_missing) {
+        const repaired = await updateKey.mutateAsync({
+          keyId: reconnectKey.id,
+          auth_method:
+            reconnectKey.auth_method === "none"
+              ? selectedEntry?.auth_method ?? reconnectKey.auth_method
+              : reconnectKey.auth_method,
+        });
+        setAuthKey(repaired);
+        return repaired;
+      }
       return reconnectKey;
     }
     if (authKey) {

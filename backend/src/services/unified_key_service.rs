@@ -397,6 +397,9 @@ pub struct KeyView {
     pub endpoint_url: String,
     pub endpoint_id: String,
     pub api_key_id: Option<String>,
+    /// True when the service stores an `api_key_id` whose `UserApiKey` row is
+    /// missing. This is a recoverable degraded state, not a no-auth service.
+    pub credential_missing: bool,
     pub credential_type: String,
     pub auth_method: String,
     pub auth_key_name: String,
@@ -2117,7 +2120,7 @@ pub async fn get_key(
     let svc = user_service_service::get_user_service(db, user_id, service_id).await?;
     let ep = user_endpoint_service::get_endpoint(db, user_id, &svc.endpoint_id).await?;
     let ak = if let Some(ref ak_id) = svc.api_key_id {
-        Some(user_api_key_service::get_api_key(db, user_id, ak_id).await?)
+        user_api_key_service::find_api_key(db, user_id, ak_id).await?
     } else {
         None
     };
@@ -2468,11 +2471,9 @@ pub async fn ensure_user_api_key_for_update(
     // linked — the classifier needs it to distinguish node_managed from
     // direct types (promote vs rotate).
     let current_credential_type: Option<String> = if let Some(ref ak_id) = service.api_key_id {
-        Some(
-            user_api_key_service::get_api_key(db, user_id, ak_id)
-                .await?
-                .credential_type,
-        )
+        user_api_key_service::find_api_key(db, user_id, ak_id)
+            .await?
+            .map(|key| key.credential_type)
     } else {
         None
     };
@@ -2560,7 +2561,7 @@ pub async fn ensure_user_api_key_for_update(
 
     let mut action = classify_update_credential_action(
         &service.auth_method,
-        service.api_key_id.is_some(),
+        current_credential_type.is_some(),
         current_credential_type.as_deref(),
         new_auth_method,
         new_credential,
@@ -3024,9 +3025,7 @@ async fn build_disconnect_plan(
         DisconnectTarget::UserService(service_id) => {
             let service = user_service_service::get_user_service(db, owner_id, service_id).await?;
             let key = match service.api_key_id.as_deref() {
-                Some(key_id) => {
-                    Some(user_api_key_service::get_api_key(db, owner_id, key_id).await?)
-                }
+                Some(key_id) => user_api_key_service::find_api_key(db, owner_id, key_id).await?,
                 None => None,
             };
             let provider_id = key.as_ref().and_then(|key| key.provider_config_id.clone());
@@ -3639,9 +3638,10 @@ pub async fn revoke_key_if_pending(
     let Some(ak_id) = svc.api_key_id.as_deref() else {
         return Ok(false);
     };
-    let api_key_provider_config_id = user_api_key_service::get_api_key(db, user_id, ak_id)
-        .await?
-        .provider_config_id;
+    let Some(api_key) = user_api_key_service::find_api_key(db, user_id, ak_id).await? else {
+        return Ok(false);
+    };
+    let api_key_provider_config_id = api_key.provider_config_id;
 
     // Atomic gate: flips pending_auth -> revoked in one write. If
     // the provider callback already flipped to `active`, the filter
@@ -3727,6 +3727,7 @@ fn build_key_view(
         endpoint_url: ep.url.clone(),
         endpoint_id: ep.id.clone(),
         api_key_id: ak.map(|k| k.id.clone()),
+        credential_missing: svc.api_key_id.is_some() && ak.is_none(),
         credential_type: ak
             .map(|k| k.credential_type.clone())
             .unwrap_or_else(|| "none".to_string()),
@@ -5509,6 +5510,42 @@ mod tests {
         assert_eq!(view.credential_type, "none");
         assert_eq!(view.status, "active");
         assert!(view.auto_connected);
+    }
+
+    #[test]
+    fn build_key_view_marks_dangling_api_key_reference() {
+        let service = sample_service("bearer");
+        let endpoint = sample_endpoint();
+        let view = build_key_view(
+            &service,
+            &endpoint,
+            None,
+            &HashMap::new(),
+            &HashMap::new(),
+            crate::services::user_service_service::CredentialSource::Personal,
+        );
+
+        assert!(view.credential_missing);
+        assert_eq!(view.api_key_id, None);
+        assert_eq!(view.credential_type, "none");
+    }
+
+    #[test]
+    fn build_key_view_does_not_mark_credentialless_service_as_dangling() {
+        let mut service = sample_service("none");
+        service.api_key_id = None;
+        let endpoint = sample_endpoint();
+        let view = build_key_view(
+            &service,
+            &endpoint,
+            None,
+            &HashMap::new(),
+            &HashMap::new(),
+            crate::services::user_service_service::CredentialSource::Personal,
+        );
+
+        assert!(!view.credential_missing);
+        assert_eq!(view.credential_type, "none");
     }
 
     #[test]
@@ -8796,6 +8833,103 @@ mod tests {
                 .unwrap();
         assert_eq!(api_key.credential_type, "bearer");
         assert_eq!(api_key.status, "active");
+    }
+
+    #[tokio::test]
+    async fn ensure_api_key_for_update_replaces_dangling_oauth_reference() {
+        let Some(db) = connect_test_database("uks_ensure_repair_dangling_oauth").await else {
+            eprintln!("skipping: no MongoDB");
+            return;
+        };
+        let enc = test_encryption_keys();
+        let user_id = uuid::Uuid::new_v4().to_string();
+        let provider = multi_conn_provider("oauth2");
+        let catalog = multi_conn_catalog(&provider);
+        db.collection::<ProviderConfig>(PROVIDER_CONFIGS)
+            .insert_one(&provider)
+            .await
+            .unwrap();
+        db.collection::<DownstreamService>(DOWNSTREAM_SERVICES)
+            .insert_one(&catalog)
+            .await
+            .unwrap();
+
+        let created = create_catalog_key(&db, &enc, &user_id, &catalog.slug, "OAuth repair")
+            .await
+            .unwrap();
+        let missing_key_id = created.api_key.unwrap().id;
+        db.collection::<UserService>(USER_SERVICES)
+            .update_one(
+                doc! { "_id": &created.service.id },
+                doc! { "$set": { "is_active": false } },
+            )
+            .await
+            .unwrap();
+        // Reproduce legacy drift without using the production deletion path,
+        // which now clears inactive references.
+        db.collection::<UserApiKey>(USER_API_KEYS)
+            .delete_one(doc! { "_id": &missing_key_id })
+            .await
+            .unwrap();
+
+        let dangling_service = crate::services::user_service_service::get_user_service(
+            &db,
+            &user_id,
+            &created.service.id,
+        )
+        .await
+        .unwrap();
+        crate::services::user_service_service::validate_update_inputs(
+            &db,
+            &user_id,
+            &dangling_service,
+            Some(&catalog.auth_method),
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+        )
+        .await
+        .expect("reconnect pre-validation must tolerate the missing child row");
+
+        let replacement_id = ensure_user_api_key_for_update(
+            &db,
+            &enc,
+            &user_id,
+            &created.service.id,
+            Some(&catalog.auth_method),
+            None,
+            None,
+            "OAuth repair",
+            OauthClientCredentialsInput::None,
+        )
+        .await
+        .unwrap()
+        .expect("reconnect should attach a replacement credential");
+
+        assert_ne!(replacement_id, missing_key_id);
+        let replacement =
+            crate::services::user_api_key_service::get_api_key(&db, &user_id, &replacement_id)
+                .await
+                .unwrap();
+        assert_eq!(replacement.credential_type, "oauth2");
+        assert_eq!(replacement.status, "pending_auth");
+        let repaired_service = crate::services::user_service_service::get_user_service(
+            &db,
+            &user_id,
+            &created.service.id,
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            repaired_service.api_key_id.as_deref(),
+            Some(replacement_id.as_str())
+        );
+        assert!(!repaired_service.is_active);
     }
 
     #[tokio::test]
