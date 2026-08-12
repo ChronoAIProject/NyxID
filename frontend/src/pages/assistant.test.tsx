@@ -255,24 +255,15 @@ vi.mock("sonner", () => ({
   toast: { error: mockToastError },
 }));
 
-vi.mock("@/lib/assistant/transport", () => ({
-  assistantTransport: { cancelActiveTurn: vi.fn() },
-  selectAssistantTransportKind: () => state.transportKind,
-  assistantEngineForConversationId: (conversationId: string) => {
-    if (/^direct-[A-Za-z0-9_-]{1,160}$/.test(conversationId)) return "direct";
-    if (
-      [
-        /^nyxid-chat-[A-Za-z0-9_-]{1,117}$/,
-        /^chatc-[A-Za-z0-9_-]{1,120}$/,
-        /^workflow-pending-[A-Za-z0-9_-]{1,160}$/,
-        /^nyxid-pending-[A-Za-z0-9_-]{1,160}$/,
-      ].some((pattern) => pattern.test(conversationId))
-    ) {
-      return "aevatar";
-    }
-    return null;
-  },
-}));
+vi.mock("@/lib/assistant/transport", async (importOriginal) => {
+  const actual =
+    await importOriginal<typeof import("@/lib/assistant/transport")>();
+  return {
+    ...actual,
+    assistantTransport: { cancelActiveTurn: vi.fn() },
+    selectAssistantTransportKind: () => state.transportKind,
+  };
+});
 
 vi.mock("@/components/assistant/direct-chat-controls", () => ({
   DIRECT_MODE_COPY:

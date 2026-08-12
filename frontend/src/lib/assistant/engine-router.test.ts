@@ -1,8 +1,12 @@
 import { describe, expect, it, vi } from "vitest";
+import { AevatarAssistantTransport } from "@/lib/assistant/aevatar-transport";
+import { AssistantConversationNotFoundError } from "@/lib/assistant/errors";
 import {
   AssistantEngineRouter,
   DelegatingAssistantTransport,
   createAssistantTransportForEnvironment,
+  registerAssistantEngineRouter,
+  setAssistantTransportEngine,
 } from "@/lib/assistant/transport";
 import type {
   AssistantTransport,
@@ -140,21 +144,34 @@ describe("AssistantEngineRouter", () => {
 
     await router.getHistory("nyxid-chat-server-1");
     await router.getHistory("chatc-server-2");
-    await router.getHistory("workflow-pending-local-3");
+    await router.getHistory("nyxid-pending-local-3");
     await router.getHistory("direct-local-4");
 
     expect(aevatar.calls).toEqual([
       "history:nyxid-chat-server-1",
       "history:chatc-server-2",
-      "history:workflow-pending-local-3",
+      "history:nyxid-pending-local-3",
     ]);
     expect(direct.calls).toEqual(["history:direct-local-4"]);
     expect(() => router.getHistory("untrusted-id")).toThrow(
-      "Unknown assistant conversation id",
+      AssistantConversationNotFoundError,
     );
     expect(() => router.cancelActiveTurn("untrusted-id")).toThrow(
-      "Unknown assistant conversation id",
+      AssistantConversationNotFoundError,
     );
+  });
+
+  it("routes a draft id minted by the real Aevatar transport", async () => {
+    const aevatar = new AevatarAssistantTransport();
+    const direct = new EngineProbe("direct");
+    const router = new AssistantEngineRouter(aevatar, direct);
+    const draft = await router.createConversation();
+
+    const history = await router.getHistory(draft.id);
+
+    expect(draft.id).toMatch(/^draft-/);
+    expect(history.conversation.id).toBe(draft.id);
+    expect(direct.calls).toEqual([]);
   });
 
   it("cancels through the originating delegate after a mid-stream flag flip", () => {
@@ -230,5 +247,54 @@ describe("assistant transport environment layering", () => {
     expect((dev as DelegatingAssistantTransport).current()).toBeInstanceOf(
       AssistantEngineRouter,
     );
+  });
+
+  it("does not let generic factory calls retarget the registered engine selector", async () => {
+    const registeredAevatar = new EngineProbe("registered-aevatar");
+    const registeredDirect = new EngineProbe("registered-direct");
+    let restoreRegistration: () => void = () => undefined;
+    const registered = createAssistantTransportForEnvironment(
+      { mode: "production", dev: false, search: "" },
+      {
+        createMock: () => new EngineProbe("registered-mock"),
+        createAevatar: () => registeredAevatar,
+        createDirect: () => registeredDirect,
+      },
+      undefined,
+      undefined,
+      (router) => {
+        restoreRegistration = registerAssistantEngineRouter(router);
+      },
+    );
+    const genericProduction = createAssistantTransportForEnvironment(
+      { mode: "production", dev: false, search: "" },
+      factories(),
+    );
+    const genericDev = createAssistantTransportForEnvironment(
+      { mode: "development", dev: true, search: "" },
+      factories(),
+    );
+
+    try {
+      setAssistantTransportEngine("direct");
+      await registered.createConversation();
+      await genericProduction.createConversation();
+      await genericDev.createConversation();
+
+      expect(registeredAevatar.calls).toEqual([]);
+      expect(registeredDirect.calls).toEqual(["create"]);
+      expect(
+        (genericProduction as AssistantEngineRouter).getSelectedEngine(),
+      ).toBe("aevatar");
+      expect(
+        (
+          (
+            genericDev as DelegatingAssistantTransport
+          ).current() as AssistantEngineRouter
+        ).getSelectedEngine(),
+      ).toBe("aevatar");
+    } finally {
+      restoreRegistration();
+    }
   });
 });

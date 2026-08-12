@@ -250,20 +250,28 @@ const TYPED_CHAT_URL = "/api/v1/assistant/chat";
 // authoritative actor. New chats no longer mint one; it survives only so a
 // stale `?c=nyxid-pending-…` URL from a pre-studio session still resolves to
 // a clean not-found instead of a network error.
-const LEGACY_PENDING_TYPED_CONVERSATION_PREFIX = "nyxid-pending-";
+export const AEVATAR_LEGACY_PENDING_CONVERSATION_PREFIX = "nyxid-pending-";
 
 // Legacy Studio conversation ids retained for historical read/delete only.
-const LEGACY_CONVERSATION_PREFIX = "chatc-";
+export const AEVATAR_LEGACY_CONVERSATION_PREFIX = "chatc-";
 
 // Client-local id for a typed conversation before authoritative RUN_STARTED
 // adoption. A reload forgets the placeholder and lists the server row instead.
-const PENDING_TYPED_CONVERSATION_PREFIX = "draft-";
+export const AEVATAR_DRAFT_CONVERSATION_PREFIX = "draft-";
+
+export const AEVATAR_TYPED_CONVERSATION_PREFIX = "nyxid-chat-";
 
 export function isLegacyConversationId(id: string): boolean {
-  return id.startsWith(LEGACY_CONVERSATION_PREFIX);
+  return id.startsWith(AEVATAR_LEGACY_CONVERSATION_PREFIX);
 }
 
-const TYPED_SERVER_CONVERSATION_ID_PATTERN = /^nyxid-chat-[0-9a-f]{32}$/;
+function escapeRegexLiteral(value: string): string {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+const TYPED_SERVER_CONVERSATION_ID_PATTERN = new RegExp(
+  `^${escapeRegexLiteral(AEVATAR_TYPED_CONVERSATION_PREFIX)}[0-9a-f]{32}$`,
+);
 
 const MAX_MESSAGE_CHARS = 32_768;
 
@@ -672,10 +680,7 @@ interface RunningTurn {
   activeWireTelemetry: StreamWireTelemetry | null;
 }
 
-type ReconcileOrigin =
-  | "post_terminal"
-  | "cold_observed"
-  | "explicit_retry";
+type ReconcileOrigin = "post_terminal" | "cold_observed" | "explicit_retry";
 
 interface ReconcileEntry {
   readonly promise: Promise<ProjectionReconcileOutcome>;
@@ -1495,7 +1500,7 @@ export class AevatarAssistantTransport implements AssistantTransport {
     // the authoritative nyxid-chat-* identity.
     const createdAt = new Date().toISOString();
     const conversation: Conversation = {
-      id: `${PENDING_TYPED_CONVERSATION_PREFIX}${crypto.randomUUID()}`,
+      id: `${AEVATAR_DRAFT_CONVERSATION_PREFIX}${crypto.randomUUID()}`,
       title: "New chat",
       created_at: createdAt,
       last_message_at: createdAt,
@@ -1516,7 +1521,7 @@ export class AevatarAssistantTransport implements AssistantTransport {
     const requestedId = conversationId;
     const aliasedConversationId = this.conversationAliases.get(conversationId);
     if (
-      conversationId.startsWith(PENDING_TYPED_CONVERSATION_PREFIX) &&
+      conversationId.startsWith(AEVATAR_DRAFT_CONVERSATION_PREFIX) &&
       !aliasedConversationId
     ) {
       const run = this.running.get(conversationId);
@@ -1619,8 +1624,8 @@ export class AevatarAssistantTransport implements AssistantTransport {
     const existing = this.conversations.get(conversationId);
     if (
       !existing &&
-      (conversationId.startsWith(LEGACY_PENDING_TYPED_CONVERSATION_PREFIX) ||
-        conversationId.startsWith(PENDING_TYPED_CONVERSATION_PREFIX))
+      (conversationId.startsWith(AEVATAR_LEGACY_PENDING_CONVERSATION_PREFIX) ||
+        conversationId.startsWith(AEVATAR_DRAFT_CONVERSATION_PREFIX))
     ) {
       throw new AssistantConversationNotFoundError();
     }
@@ -1644,11 +1649,11 @@ export class AevatarAssistantTransport implements AssistantTransport {
     // keeps serving the stalled mirror via the fallback below.
     if (
       existing &&
-      (existing.projectionPending &&
-          existing.projectionStalledAt === undefined &&
-          (existing.turnState.messages.length > 0 ||
-            existing.requiredTurnId != null ||
-            existing.lastLocalTurnCompletedAt !== undefined))
+      existing.projectionPending &&
+      existing.projectionStalledAt === undefined &&
+      (existing.turnState.messages.length > 0 ||
+        existing.requiredTurnId != null ||
+        existing.lastLocalTurnCompletedAt !== undefined)
     ) {
       this.activateConversation(conversationId);
       return this.historyFromStored(existing);
@@ -1659,8 +1664,8 @@ export class AevatarAssistantTransport implements AssistantTransport {
     // the round trip.
     if (
       existing &&
-      (conversationId.startsWith(LEGACY_PENDING_TYPED_CONVERSATION_PREFIX) ||
-        conversationId.startsWith(PENDING_TYPED_CONVERSATION_PREFIX))
+      (conversationId.startsWith(AEVATAR_LEGACY_PENDING_CONVERSATION_PREFIX) ||
+        conversationId.startsWith(AEVATAR_DRAFT_CONVERSATION_PREFIX))
     ) {
       this.activateConversation(conversationId);
       return this.historyFromStored(existing);
@@ -1683,7 +1688,7 @@ export class AevatarAssistantTransport implements AssistantTransport {
       // transient and protocol failures retain their original type.
       if (!existing) {
         if (error instanceof ApiError && error.status === 404) {
-          if (!conversationId.startsWith(LEGACY_CONVERSATION_PREFIX)) {
+          if (!conversationId.startsWith(AEVATAR_LEGACY_CONVERSATION_PREFIX)) {
             throw new AssistantConversationNotFoundError();
           }
           const membership = await this.fetchRawIndexMembership(conversationId);
@@ -1710,7 +1715,7 @@ export class AevatarAssistantTransport implements AssistantTransport {
           error instanceof ApiError && error.status === 404;
         if (
           noServerTranscriptYet &&
-          conversationId.startsWith(LEGACY_CONVERSATION_PREFIX) &&
+          conversationId.startsWith(AEVATAR_LEGACY_CONVERSATION_PREFIX) &&
           existing.turnState.messages.length === 0 &&
           !existing.projectionPending
         ) {
@@ -1779,10 +1784,7 @@ export class AevatarAssistantTransport implements AssistantTransport {
 
   private syntheticPendingConversation(
     conversationId: string,
-    facts: Pick<
-      StoredConversation,
-      "projectionPending" | "stateVersion"
-    >,
+    facts: Pick<StoredConversation, "projectionPending" | "stateVersion">,
   ): StoredConversation {
     const nowIso = new Date(this.now()).toISOString();
     return {
@@ -1851,7 +1853,7 @@ export class AevatarAssistantTransport implements AssistantTransport {
     const scopeId = this.ensureScope();
     const conversationId = this.canonicalConversationId(requestedId);
     const stored = this.conversations.get(conversationId);
-    if (conversationId.startsWith(PENDING_TYPED_CONVERSATION_PREFIX)) {
+    if (conversationId.startsWith(AEVATAR_DRAFT_CONVERSATION_PREFIX)) {
       return Promise.resolve({ status: "timed_out", conversationId });
     }
 
@@ -1875,10 +1877,10 @@ export class AevatarAssistantTransport implements AssistantTransport {
       createdAt - stored.lastWireObservationAt <=
         PROJECTION_BACKOFF_POLICY.floorMs;
     const origin: ReconcileOrigin = wasStalled
-        ? "explicit_retry"
-        : coldObservationIsCurrent
-          ? "cold_observed"
-          : "post_terminal";
+      ? "explicit_retry"
+      : coldObservationIsCurrent
+        ? "cold_observed"
+        : "post_terminal";
     if (origin === "cold_observed" && stored) {
       stored.lastWireObservationAt = undefined;
     }
@@ -2009,8 +2011,7 @@ export class AevatarAssistantTransport implements AssistantTransport {
           (postFetchTurnInFlight ||
             isTurnActive(postFetchStored.turnState.activeTurn?.status))
         ) {
-          entry.deadlineAt =
-            this.now() + PROJECTION_BACKOFF_POLICY.deadlineMs;
+          entry.deadlineAt = this.now() + PROJECTION_BACKOFF_POLICY.deadlineMs;
           rescheduleAfterTurn = true;
           return;
         }
@@ -2206,7 +2207,7 @@ export class AevatarAssistantTransport implements AssistantTransport {
       );
     }
     if (
-      !stored.conversation.id.startsWith(PENDING_TYPED_CONVERSATION_PREFIX) &&
+      !stored.conversation.id.startsWith(AEVATAR_DRAFT_CONVERSATION_PREFIX) &&
       !TYPED_SERVER_CONVERSATION_ID_PATTERN.test(stored.conversation.id)
     ) {
       throw new AssistantProtocolError(
@@ -2582,9 +2583,7 @@ export class AevatarAssistantTransport implements AssistantTransport {
       );
     }
     if ("selectedOptionIds" in parsedAnswer) {
-      const optionIds = new Set(
-        card.options.map((option) => option.option_id),
-      );
+      const optionIds = new Set(card.options.map((option) => option.option_id));
       if (
         parsedAnswer.selectedOptionIds.some(
           (optionId) => !optionIds.has(optionId),
@@ -3985,7 +3984,7 @@ export class AevatarAssistantTransport implements AssistantTransport {
 
     const stored = this.conversations.get(conversationId);
     const isFirstTurn =
-      stored?.conversation.id.startsWith(PENDING_TYPED_CONVERSATION_PREFIX) ===
+      stored?.conversation.id.startsWith(AEVATAR_DRAFT_CONVERSATION_PREFIX) ===
       true;
     const target = {
       url: TYPED_CHAT_URL,
@@ -4515,11 +4514,12 @@ export class AevatarAssistantTransport implements AssistantTransport {
         if (
           !stored ||
           (currentActorId !== authoritativeActorId &&
-            !currentActorId?.startsWith(PENDING_TYPED_CONVERSATION_PREFIX))
+            !currentActorId?.startsWith(AEVATAR_DRAFT_CONVERSATION_PREFIX))
         ) {
           run.deliveryProtocolError = {
             code: "stream_protocol_error",
-            message: "The assistant stream belongs to a different conversation actor.",
+            message:
+              "The assistant stream belongs to a different conversation actor.",
           };
           return;
         }

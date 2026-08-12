@@ -1,4 +1,5 @@
 import { apiClient } from "@/lib/api-client";
+import { AEVATAR_DRAFT_CONVERSATION_PREFIX } from "@/lib/assistant/aevatar-transport";
 import {
   AssistantConversationNotFoundError,
   AssistantTurnActiveError,
@@ -32,7 +33,6 @@ import type {
 import type { KeyInfo } from "@/types/keys";
 
 const MOCK_ID_PREFIX = "mockchat-";
-const PENDING_TYPED_CONVERSATION_PREFIX = "draft-";
 const CLAIMED_FALLBACK_TEXT = "No scenario matched — this is a mock-only chat";
 const SUPERSEDED_NOTE = "Superseded by a newer message.";
 
@@ -91,7 +91,7 @@ function isMockId(value: string): boolean {
 }
 
 function isPlaceholderConversation(value: string): boolean {
-  return value.startsWith(PENDING_TYPED_CONVERSATION_PREFIX);
+  return value.startsWith(AEVATAR_DRAFT_CONVERSATION_PREFIX);
 }
 
 function maxIso(left: string, right: string): string {

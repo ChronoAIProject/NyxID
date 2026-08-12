@@ -1,8 +1,20 @@
-import { AevatarAssistantTransport } from "@/lib/assistant/aevatar-transport";
-import { directAssistantTransport } from "@/lib/assistant/direct-transport";
+import {
+  AEVATAR_DRAFT_CONVERSATION_PREFIX,
+  AEVATAR_LEGACY_CONVERSATION_PREFIX,
+  AEVATAR_LEGACY_PENDING_CONVERSATION_PREFIX,
+  AEVATAR_TYPED_CONVERSATION_PREFIX,
+  AevatarAssistantTransport,
+} from "@/lib/assistant/aevatar-transport";
+import {
+  DIRECT_CONVERSATION_PREFIX,
+  directAssistantTransport,
+} from "@/lib/assistant/direct-transport";
 import { ApiError } from "@/lib/api-client";
 import { composeUnreportedCompletedNote } from "@/lib/assistant/action-notes";
-import { AssistantTurnActiveError } from "@/lib/assistant/errors";
+import {
+  AssistantConversationNotFoundError,
+  AssistantTurnActiveError,
+} from "@/lib/assistant/errors";
 import {
   assistantMockStore,
   createScriptedTurn,
@@ -650,20 +662,44 @@ export function selectAssistantTransportKind(env: {
 
 export type AssistantEngine = "aevatar" | "direct";
 
-const DIRECT_CONVERSATION_ID = /^direct-[A-Za-z0-9_-]{1,160}$/;
+const CONVERSATION_ID_SUFFIX = /^[A-Za-z0-9_-]+$/;
 const AEVATAR_CONVERSATION_IDS = [
-  /^nyxid-chat-[A-Za-z0-9_-]{1,117}$/,
-  /^chatc-[A-Za-z0-9_-]{1,120}$/,
-  /^workflow-pending-[A-Za-z0-9_-]{1,160}$/,
-  /^nyxid-pending-[A-Za-z0-9_-]{1,160}$/,
+  [AEVATAR_TYPED_CONVERSATION_PREFIX, 117],
+  [AEVATAR_LEGACY_CONVERSATION_PREFIX, 120],
+  [AEVATAR_DRAFT_CONVERSATION_PREFIX, 160],
+  [AEVATAR_LEGACY_PENDING_CONVERSATION_PREFIX, 160],
 ] as const;
+
+function hasBoundedConversationSuffix(
+  conversationId: string,
+  prefix: string,
+  maxLength: number,
+): boolean {
+  if (!conversationId.startsWith(prefix)) return false;
+  const suffix = conversationId.slice(prefix.length);
+  return (
+    suffix.length >= 1 &&
+    suffix.length <= maxLength &&
+    CONVERSATION_ID_SUFFIX.test(suffix)
+  );
+}
 
 export function assistantEngineForConversationId(
   conversationId: string,
 ): AssistantEngine | null {
-  if (DIRECT_CONVERSATION_ID.test(conversationId)) return "direct";
   if (
-    AEVATAR_CONVERSATION_IDS.some((pattern) => pattern.test(conversationId))
+    hasBoundedConversationSuffix(
+      conversationId,
+      DIRECT_CONVERSATION_PREFIX,
+      160,
+    )
+  ) {
+    return "direct";
+  }
+  if (
+    AEVATAR_CONVERSATION_IDS.some(([prefix, maxLength]) =>
+      hasBoundedConversationSuffix(conversationId, prefix, maxLength),
+    )
   ) {
     return "aevatar";
   }
@@ -871,11 +907,21 @@ export class AssistantEngineRouter implements AssistantTransport {
     const engine = assistantEngineForConversationId(conversationId);
     if (engine === "direct") return this.direct;
     if (engine === "aevatar") return this.aevatar;
-    throw new Error("Unknown assistant conversation id.");
+    throw new AssistantConversationNotFoundError();
   }
 }
 
 let activeEngineRouter: AssistantEngineRouter | null = null;
+
+export function registerAssistantEngineRouter(
+  router: AssistantEngineRouter,
+): () => void {
+  const previous = activeEngineRouter;
+  activeEngineRouter = router;
+  return () => {
+    if (activeEngineRouter === router) activeEngineRouter = previous;
+  };
+}
 
 export function setAssistantTransportEngine(engine: AssistantEngine): void {
   activeEngineRouter?.setSelectedEngine(engine);
@@ -1034,7 +1080,6 @@ export class DelegatingAssistantTransport implements AssistantTransport {
   ): TurnHandle {
     return this.transport.wakeActions(conversationId, originTurnId, onEvent);
   }
-
 }
 
 export interface AssistantTransportFactories {
@@ -1081,6 +1126,7 @@ export function createAssistantTransportForEnvironment(
   factories: AssistantTransportFactories,
   interceptorLoader?: AssistantInterceptorLoader,
   reportInterceptorState?: AssistantInterceptorStateReporter,
+  registerEngineRouter?: (router: AssistantEngineRouter) => void,
 ): AssistantTransport {
   const kind = selectAssistantTransportKind(env);
   if (kind === "mock") return factories.createMock();
@@ -1088,7 +1134,7 @@ export function createAssistantTransportForEnvironment(
     factories.createAevatar(),
     factories.createDirect(),
   );
-  activeEngineRouter = router;
+  registerEngineRouter?.(router);
   if (!env.dev) return router;
   const shell = new DelegatingAssistantTransport(router);
   if (env.dev && interceptorLoader) {
@@ -1125,9 +1171,16 @@ function createAssistantTransport(): AssistantTransport {
       factories,
       () => import("@/lib/assistant/scenario-intercept-transport"),
       setState,
+      registerAssistantEngineRouter,
     );
   }
-  return createAssistantTransportForEnvironment(env, factories);
+  return createAssistantTransportForEnvironment(
+    env,
+    factories,
+    undefined,
+    undefined,
+    registerAssistantEngineRouter,
+  );
 }
 
 export const assistantTransport: AssistantTransport =
