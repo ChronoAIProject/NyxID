@@ -11,8 +11,15 @@ export const directModelSchema = z.object({
   default: z.boolean(),
 });
 
+export const directEffortSchema = z.object({
+  id: z.string().min(1),
+  label: z.string().min(1),
+});
+
 export const directSkillsSchema = z.array(directSkillSchema);
 export const directModelsSchema = z.array(directModelSchema);
+export const directEffortsSchema = z.array(directEffortSchema);
 
 export type DirectSkill = z.infer<typeof directSkillSchema>;
 export type DirectModel = z.infer<typeof directModelSchema>;
+export type DirectEffort = z.infer<typeof directEffortSchema>;

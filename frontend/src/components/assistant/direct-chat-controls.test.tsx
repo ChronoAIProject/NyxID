@@ -52,6 +52,12 @@ describe("DirectChatControls", () => {
           { id: "gpt-5.2", label: "GPT-5.2", default: false },
         ] as never;
       }
+      if (endpoint === "/assistant/direct/efforts") {
+        return [
+          { id: "high", label: "High" },
+          { id: "xhigh", label: "Extra high" },
+        ] as never;
+      }
       return [
         { slug: "nyxid", label: "NyxID" },
         { slug: "github-via-nyxid", label: "GitHub via NyxID" },
@@ -60,9 +66,10 @@ describe("DirectChatControls", () => {
     const event = userEvent.setup();
     renderWithQuery(<DirectChatControls conversationId={undefined} />);
 
-    await waitFor(() => expect(get).toHaveBeenCalledTimes(2));
+    await waitFor(() => expect(get).toHaveBeenCalledTimes(3));
     expect(get).toHaveBeenCalledWith("/assistant/direct/models");
     expect(get).toHaveBeenCalledWith("/assistant/direct/skills");
+    expect(get).toHaveBeenCalledWith("/assistant/direct/efforts");
     expect(
       screen.getByText(
         "A skill teaches the model about NyxID; it cannot take actions here.",
@@ -72,6 +79,7 @@ describe("DirectChatControls", () => {
       expect(directAssistantTransport.getSettings()).toEqual({
         model: "gpt-5.4",
         skillSlug: null,
+        effort: null,
       }),
     );
 
@@ -81,15 +89,21 @@ describe("DirectChatControls", () => {
       screen.getByRole("combobox", { name: "NyxID knowledge" }),
     );
     await event.click(screen.getByRole("option", { name: "NyxID" }));
+    await event.click(
+      screen.getByRole("combobox", { name: "Reasoning effort" }),
+    );
+    await event.click(screen.getByRole("option", { name: "Extra high" }));
 
     expect(directAssistantTransport.getSettings()).toEqual({
       model: "gpt-5.2",
       skillSlug: "nyxid",
+      effort: "xhigh",
     });
     const conversation = await directAssistantTransport.createConversation();
     expect(directAssistantTransport.getSettings(conversation.id)).toEqual({
       model: "gpt-5.2",
       skillSlug: "nyxid",
+      effort: "xhigh",
     });
   });
 
@@ -125,7 +139,7 @@ describe("DirectChatControls", () => {
 
     renderWithQuery(<DirectChatControls conversationId={undefined} />);
 
-    await waitFor(() => expect(get).toHaveBeenCalledTimes(2));
+    await waitFor(() => expect(get).toHaveBeenCalledTimes(3));
     await waitFor(() => {
       expect(screen.getByRole("combobox", { name: "Model" })).toHaveTextContent(
         "User Choice",
@@ -165,6 +179,7 @@ describe("DirectChatControls", () => {
     expect(directAssistantTransport.getSettings("direct-missing")).toEqual({
       model: "gpt-5.5",
       skillSlug: null,
+      effort: null,
     });
   });
 

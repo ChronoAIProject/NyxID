@@ -9,6 +9,7 @@ import {
 } from "@/components/ui/select";
 import {
   useDirectConversationSettings,
+  useDirectEfforts,
   useDirectModels,
   useDirectSkills,
 } from "@/hooks/use-assistant-direct";
@@ -51,9 +52,10 @@ export function DirectChatControls({
 }) {
   const models = useDirectModels();
   const skills = useDirectSkills();
+  const efforts = useDirectEfforts();
   const defaultModel =
     models.data?.find((model) => model.default)?.id ?? models.data?.[0]?.id;
-  const { settings, canUpdate, setModel, setSkill } =
+  const { settings, canUpdate, setModel, setSkill, setEffort } =
     useDirectConversationSettings(conversationId, defaultModel);
 
   return (
@@ -77,6 +79,36 @@ export function DirectChatControls({
             {(models.data ?? []).map((model) => (
               <SelectItem key={model.id} value={model.id}>
                 {model.label}
+              </SelectItem>
+            ))}
+          </SelectContent>
+        </Select>
+      </div>
+      <div className="w-[150px] min-w-0">
+        <label
+          htmlFor="direct-chat-effort"
+          className="mb-1 block text-[10px] font-medium text-text-tertiary"
+        >
+          Reasoning effort
+        </label>
+        <Select
+          value={settings.effort ?? "default"}
+          onValueChange={(value) =>
+            setEffort(value === "default" ? null : value)
+          }
+          disabled={disabled || !canUpdate || efforts.isLoading}
+        >
+          <SelectTrigger
+            id="direct-chat-effort"
+            className="h-7 rounded-md px-2"
+          >
+            <SelectValue placeholder="Model default" />
+          </SelectTrigger>
+          <SelectContent>
+            <SelectItem value="default">Model default</SelectItem>
+            {(efforts.data ?? []).map((effort) => (
+              <SelectItem key={effort.id} value={effort.id}>
+                {effort.label}
               </SelectItem>
             ))}
           </SelectContent>
