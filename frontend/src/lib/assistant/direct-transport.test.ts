@@ -1,4 +1,5 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
+import errorThenDeltaFixture from "@/lib/assistant/__fixtures__/chrono-llm-direct-error-then-delta.sse?raw";
 import fixture from "@/lib/assistant/__fixtures__/chrono-llm-direct-stream.sse?raw";
 import { DirectAssistantTransport } from "@/lib/assistant/direct-transport";
 import { transitionAssistantIdentity } from "@/lib/assistant/identity";
@@ -28,6 +29,32 @@ function sseResponse(body: string, status = 200): Response {
     status,
     headers: { "Content-Type": "text/event-stream" },
   });
+}
+
+function chunkedSseResponse(body: string, onCancel?: () => void): Response {
+  const chunks = body
+    .trim()
+    .split("\n\n")
+    .map((chunk) => encoder.encode(`${chunk}\n\n`));
+  let nextChunk = 0;
+  return new Response(
+    new ReadableStream<Uint8Array>({
+      pull(controller) {
+        const chunk = chunks[nextChunk];
+        if (!chunk) {
+          controller.close();
+          return;
+        }
+        nextChunk += 1;
+        controller.enqueue(chunk);
+        if (nextChunk === chunks.length) controller.close();
+      },
+      cancel() {
+        onCancel?.();
+      },
+    }),
+    { status: 200, headers: { "Content-Type": "text/event-stream" } },
+  );
 }
 
 async function waitForTerminal(events: readonly TurnEvent[]): Promise<void> {
@@ -94,6 +121,41 @@ describe("DirectAssistantTransport streaming", () => {
       event: "turn.completed",
       status: "completed",
     });
+  });
+
+  it("keeps later replies when the upstream reuses a completion id", async () => {
+    const transport = new DirectAssistantTransport({
+      fetch: vi.fn(async () => sseResponse(fixture)),
+    });
+    const conversationId = await startedConversation(transport);
+
+    for (const prompt of ["first", "second"]) {
+      const events: TurnEvent[] = [];
+      transport.sendMessage(conversationId, prompt, (event) =>
+        events.push(event),
+      );
+      await waitForTerminal(events);
+    }
+
+    const history = await transport.getHistory(conversationId);
+    expect(history.messages).toHaveLength(4);
+    expect(
+      history.messages
+        .filter((message) => message.role === "assistant")
+        .map((message) =>
+          message.blocks
+            .filter((block) => block.type === "text")
+            .map((block) => (block.type === "text" ? block.text : ""))
+            .join(""),
+        ),
+    ).toEqual([
+      "Hello, friend, welcome here SKILLMARK",
+      "Hello, friend, welcome here SKILLMARK",
+    ]);
+    const assistantIds = history.messages
+      .filter((message) => message.role === "assistant")
+      .map((message) => message.id);
+    expect(new Set(assistantIds).size).toBe(2);
   });
 
   it("calls the global fetch without rebinding this (default fetch path)", async () => {
@@ -244,6 +306,35 @@ describe("DirectAssistantTransport streaming", () => {
       event: "turn.completed",
       status,
     });
+  });
+
+  it("ignores payloads after an upstream error frame", async () => {
+    const streamCancelled = vi.fn();
+    const transport = new DirectAssistantTransport({
+      fetch: vi.fn(async () =>
+        chunkedSseResponse(errorThenDeltaFixture, streamCancelled),
+      ),
+    });
+    const conversationId = await startedConversation(transport);
+    const events: TurnEvent[] = [];
+
+    transport.sendMessage(conversationId, "go", (event) => events.push(event));
+    await waitForTerminal(events);
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    expect(events.filter((event) => event.event === "turn.completed")).toEqual([
+      expect.objectContaining({
+        status: "failed",
+        error: { code: "upstream_failed", message: "Upstream failed" },
+      }),
+    ]);
+    expect(events.filter((event) => event.event === "message.started")).toEqual(
+      [],
+    );
+    expect(events.findIndex((event) => event.event === "turn.completed")).toBe(
+      events.length - 1,
+    );
+    expect(streamCancelled).toHaveBeenCalledOnce();
   });
 
   it("aborts and emits cancellation exactly once", async () => {

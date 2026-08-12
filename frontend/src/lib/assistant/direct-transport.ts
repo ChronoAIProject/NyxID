@@ -27,6 +27,7 @@ import { isTurnActive } from "@/types/assistant";
 import type { ApiErrorResponse } from "@/types/api";
 
 const DIRECT_COMPLETIONS_URL = "/api/v1/assistant/direct/completions";
+export const DIRECT_CONVERSATION_PREFIX = "direct-";
 const DEFAULT_DIRECT_MODEL = "gpt-5.5";
 const MAX_MESSAGE_CHARS = 32_768;
 const MAX_OUTGOING_MESSAGES = 63;
@@ -81,6 +82,7 @@ interface RunningTurn {
   drained: boolean;
   discarded: boolean;
   sawFinishReason: boolean;
+  sawUpstreamError: boolean;
   sawDone: boolean;
 }
 
@@ -236,8 +238,15 @@ export class DirectAssistantTransport implements AssistantTransport {
     );
   }
 
+  canUpdateSettings(conversationId?: string): boolean {
+    this.ensureOwner();
+    if (!this.ownerUserId) return false;
+    return !conversationId || this.conversations.has(conversationId);
+  }
+
   setModel(conversationId: string | undefined, model: string): void {
-    this.updateSettings(conversationId, { model });
+    const applied = this.updateSettings(conversationId, { model });
+    if (!applied) return;
     if (!conversationId) {
       this.draftModelSelected = true;
       return;
@@ -247,14 +256,15 @@ export class DirectAssistantTransport implements AssistantTransport {
   }
 
   seedDefaultModel(conversationId: string | undefined, model: string): void {
-    this.ensureSignedInOwner();
+    this.ensureOwner();
+    if (!this.ownerUserId) return;
     if (!conversationId) {
       if (this.draftModelSelected) return;
       this.draftSettings = { ...this.draftSettings, model };
       return;
     }
     const stored = this.conversations.get(conversationId);
-    if (!stored) throw new AssistantConversationNotFoundError();
+    if (!stored) return;
     if (stored.modelSelected) return;
     stored.settings = { ...stored.settings, model };
     stored.conversation = { ...stored.conversation, llm_model: model };
@@ -277,7 +287,7 @@ export class DirectAssistantTransport implements AssistantTransport {
     this.ensureSignedInOwner();
     const createdAt = new Date(this.now()).toISOString();
     const conversation: Conversation = {
-      id: newId("direct"),
+      id: `${DIRECT_CONVERSATION_PREFIX}${crypto.randomUUID()}`,
       title: "New chat",
       created_at: createdAt,
       last_message_at: createdAt,
@@ -403,6 +413,7 @@ export class DirectAssistantTransport implements AssistantTransport {
       drained: false,
       discarded: false,
       sawFinishReason: false,
+      sawUpstreamError: false,
       sawDone: false,
     };
     this.running.set(conversationId, run);
@@ -484,19 +495,24 @@ export class DirectAssistantTransport implements AssistantTransport {
   private updateSettings(
     conversationId: string | undefined,
     patch: Partial<DirectConversationSettings>,
-  ): void {
-    this.ensureSignedInOwner();
+  ): boolean {
+    this.ensureOwner();
+    // Picker controls can briefly outlive their memory-only conversation
+    // during reload and identity transitions. Treat those writes as stale;
+    // explicit conversation and turn operations remain strict.
+    if (!this.ownerUserId) return false;
     if (!conversationId) {
       this.draftSettings = { ...this.draftSettings, ...patch };
-      return;
+      return true;
     }
     const stored = this.conversations.get(conversationId);
-    if (!stored) throw new AssistantConversationNotFoundError();
+    if (!stored) return false;
     stored.settings = { ...stored.settings, ...patch };
     stored.conversation = {
       ...stored.conversation,
       llm_model: stored.settings.model,
     };
+    return true;
   }
 
   private nextCursor(run: RunningTurn): number {
@@ -627,10 +643,18 @@ export class DirectAssistantTransport implements AssistantTransport {
         for (const payload of drained.payloads) {
           if (this.handlePayload(conversationId, run, payload)) break;
         }
-        if (run.sawDone) break;
+        if (run.sawDone || run.sawUpstreamError) break;
       }
 
-      if (!run.sawDone) {
+      if (run.sawUpstreamError) {
+        // The error event settles the UI, but the upstream may keep streaming.
+        // Cancel before draining so the server-side in-flight permit is not
+        // left to browser garbage collection.
+        run.controller.abort();
+        await reader.cancel().catch(() => undefined);
+      }
+
+      if (!run.sawDone && !run.sawUpstreamError) {
         buffer += decoder.decode();
         for (const payload of flushSseBuffer(buffer)) {
           this.handlePayload(conversationId, run, payload);
@@ -686,6 +710,7 @@ export class DirectAssistantTransport implements AssistantTransport {
       return false;
     }
     if (chunk.error) {
+      run.sawUpstreamError = true;
       this.closeOpenMessage(conversationId, run);
       this.finishUi(conversationId, run, "failed", {
         code: chunk.error.code ?? "direct_model_error",
@@ -697,7 +722,7 @@ export class DirectAssistantTransport implements AssistantTransport {
     const choice = chunk.choices?.[0];
     const delta = choice?.delta?.content;
     if (delta && !run.sawFinishReason) {
-      this.openMessage(conversationId, run, chunk.id);
+      this.openMessage(conversationId, run);
       run.accumulatedText += delta;
       this.emit(conversationId, run, {
         cursor: this.nextCursor(run),
@@ -719,10 +744,14 @@ export class DirectAssistantTransport implements AssistantTransport {
   private openMessage(
     conversationId: string,
     run: RunningTurn,
-    upstreamMessageId?: string,
   ): void {
     if (run.currentBlockId) return;
-    const messageId = upstreamMessageId ?? newId("assistant-message");
+    // OpenAI-compatible `id` values identify upstream responses, but they are
+    // not a safe key for our in-memory transcript: gateways and deterministic
+    // test fixtures may reuse one across requests. Every local turn must own a
+    // distinct message/block identity or the reducer will treat later replies
+    // as duplicate `message.started` events and discard their text deltas.
+    const messageId = `${run.turnId}-assistant-message`;
     run.currentMessageId = messageId;
     run.currentBlockId = `${messageId}-text`;
     run.accumulatedText = "";

@@ -24,10 +24,12 @@ const owner: User = {
   created_at: "2026-08-11T00:00:00.000Z",
 };
 
-function renderWithQuery(ui: React.ReactNode) {
-  const queryClient = new QueryClient({
+function renderWithQuery(
+  ui: React.ReactNode,
+  queryClient = new QueryClient({
     defaultOptions: { queries: { retry: false } },
-  });
+  }),
+) {
   return render(
     <QueryClientProvider client={queryClient}>{ui}</QueryClientProvider>,
   );
@@ -130,6 +132,64 @@ describe("DirectChatControls", () => {
       );
       expect(directAssistantTransport.getSettings().model).toBe("user-choice");
     });
+  });
+
+  it("renders but disables picker writes when the direct conversation is missing", () => {
+    const queryClient = new QueryClient({
+      defaultOptions: { queries: { retry: false } },
+    });
+    queryClient.setQueryData(
+      ["assistant", "direct", "models"],
+      [
+        { id: "gpt-5.5", label: "Server Default", default: true },
+        { id: "gpt-5.4", label: "Other Model", default: false },
+      ],
+    );
+    queryClient.setQueryData(
+      ["assistant", "direct", "skills"],
+      [{ slug: "nyxid", label: "NyxID" }],
+    );
+    vi.spyOn(api, "get").mockResolvedValue([] as never);
+    expect(() =>
+      renderWithQuery(
+        <DirectChatControls conversationId="direct-missing" />,
+        queryClient,
+      ),
+    ).not.toThrow();
+
+    expect(screen.getByRole("combobox", { name: "Model" })).toBeDisabled();
+    expect(
+      screen.getByRole("combobox", { name: "NyxID knowledge" }),
+    ).toBeDisabled();
+
+    expect(directAssistantTransport.getSettings("direct-missing")).toEqual({
+      model: "gpt-5.5",
+      skillSlug: null,
+    });
+  });
+
+  it("disables draft picker controls while signed out", () => {
+    useAuthStore.getState().setUser(null);
+    const queryClient = new QueryClient({
+      defaultOptions: { queries: { retry: false } },
+    });
+    queryClient.setQueryData(
+      ["assistant", "direct", "models"],
+      [{ id: "gpt-5.5", label: "Server Default", default: true }],
+    );
+    vi.spyOn(api, "get").mockResolvedValue([] as never);
+
+    expect(() =>
+      renderWithQuery(
+        <DirectChatControls conversationId={undefined} />,
+        queryClient,
+      ),
+    ).not.toThrow();
+
+    expect(screen.getByRole("combobox", { name: "Model" })).toBeDisabled();
+    expect(
+      screen.getByRole("combobox", { name: "NyxID knowledge" }),
+    ).toBeDisabled();
   });
 });
 

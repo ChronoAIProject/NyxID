@@ -42,6 +42,7 @@ export function useDirectConversationSettings(
   defaultModel: string | undefined,
 ): {
   readonly settings: DirectConversationSettings;
+  readonly canUpdate: boolean;
   readonly setModel: (model: string) => void;
   readonly setSkill: (skillSlug: string | null) => void;
 } {
@@ -54,6 +55,7 @@ export function useDirectConversationSettings(
 
   return {
     settings,
+    canUpdate: directAssistantTransport.canUpdateSettings(conversationId),
     setModel: (model) => {
       directAssistantTransport.setModel(conversationId, model);
       forceRender();

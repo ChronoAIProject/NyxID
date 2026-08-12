@@ -53,10 +53,8 @@ export function DirectChatControls({
   const skills = useDirectSkills();
   const defaultModel =
     models.data?.find((model) => model.default)?.id ?? models.data?.[0]?.id;
-  const { settings, setModel, setSkill } = useDirectConversationSettings(
-    conversationId,
-    defaultModel,
-  );
+  const { settings, canUpdate, setModel, setSkill } =
+    useDirectConversationSettings(conversationId, defaultModel);
 
   return (
     <div className="ml-[30px] flex min-w-0 flex-wrap items-start gap-2 pb-1.5">
@@ -70,7 +68,7 @@ export function DirectChatControls({
         <Select
           value={settings.model}
           onValueChange={setModel}
-          disabled={disabled || models.isLoading}
+          disabled={disabled || !canUpdate || models.isLoading}
         >
           <SelectTrigger id="direct-chat-model" className="h-7 rounded-md px-2">
             <SelectValue placeholder="Choose model" />
@@ -94,7 +92,7 @@ export function DirectChatControls({
         <Select
           value={settings.skillSlug ?? "none"}
           onValueChange={(value) => setSkill(value === "none" ? null : value)}
-          disabled={disabled || skills.isLoading}
+          disabled={disabled || !canUpdate || skills.isLoading}
         >
           <SelectTrigger id="direct-chat-skill" className="h-7 rounded-md px-2">
             <SelectValue placeholder="No skill" />

@@ -1,0 +1,6 @@
+data: {"error":{"code":"upstream_failed","message":"Upstream failed"}}
+
+data: {"id":"late-message","choices":[{"delta":{"content":"late"},"finish_reason":"stop"}]}
+
+data: [DONE]
+
