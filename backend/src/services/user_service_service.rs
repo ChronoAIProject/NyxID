@@ -871,6 +871,17 @@ pub async fn update_user_service(
         set_doc.insert("node_priority", np);
     }
     if let Some(active) = is_active {
+        if active
+            && let Some(api_key_id) = current.api_key_id.as_deref()
+            && crate::services::user_api_key_service::find_api_key(db, user_id, api_key_id)
+                .await?
+                .is_none()
+        {
+            return Err(AppError::BadRequest(
+                "Cannot enable this service because its stored credential is missing. Reconnect or delete the service first."
+                    .to_string(),
+            ));
+        }
         set_doc.insert("is_active", active);
     }
     if let Some(admin_only) = admin_only {
@@ -1212,19 +1223,18 @@ pub async fn validate_update_inputs(
     if changes_injection_params
         && !caller_is_promoting
         && let Some(ref ak_id) = current.api_key_id
+        && let Some(ak) =
+            crate::services::user_api_key_service::find_api_key(db, &current.user_id, ak_id).await?
+        && ak.credential_type == "node_managed"
     {
-        let ak =
-            crate::services::user_api_key_service::get_api_key(db, &current.user_id, ak_id).await?;
-        if ak.credential_type == "node_managed" {
-            return Err(AppError::BadRequest(
-                "Cannot change auth_method/auth_key_name/endpoint_url/node_id on a \
+        return Err(AppError::BadRequest(
+            "Cannot change auth_method/auth_key_name/endpoint_url/node_id on a \
                  node-managed service via `PUT /keys` without also supplying a \
                  new `credential` to promote the key to a server-held record. \
                  Either include `credential` in the same request, or run \
                  `nyxid node credentials add <slug> …` on the node directly."
-                    .to_string(),
-            ));
-        }
+                .to_string(),
+        ));
     }
 
     // Endpoint URL format: mirror `user_endpoint_service::validate_endpoint_url`.
@@ -1431,17 +1441,38 @@ pub async fn link_api_key(
     // round Codex P2). We also accept a re-attach of the same
     // `api_key_id` so an idempotent retry of a single request doesn't
     // return Conflict.
+    let current = db
+        .collection::<UserService>(COLLECTION_NAME)
+        .find_one(doc! { "_id": service_id, "user_id": user_id })
+        .await?
+        .ok_or_else(|| AppError::NotFound("User service not found".to_string()))?;
+    let stale_api_key_id = match current.api_key_id.as_deref() {
+        Some(current_id) if current_id != api_key_id => {
+            let exists = db
+                .collection::<mongodb::bson::Document>(USER_API_KEYS)
+                .count_documents(doc! { "_id": current_id, "user_id": user_id })
+                .await?
+                > 0;
+            (!exists).then_some(current_id.to_string())
+        }
+        _ => None,
+    };
+    let mut binding_options = vec![
+        doc! { "api_key_id": null },
+        doc! { "api_key_id": { "$exists": false } },
+        doc! { "api_key_id": api_key_id },
+    ];
+    if let Some(stale_id) = stale_api_key_id {
+        binding_options.push(doc! { "api_key_id": stale_id });
+    }
+
     let result = db
         .collection::<UserService>(COLLECTION_NAME)
         .update_one(
             doc! {
                 "_id": service_id,
                 "user_id": user_id,
-                "$or": [
-                    { "api_key_id": null },
-                    { "api_key_id": { "$exists": false } },
-                    { "api_key_id": api_key_id },
-                ],
+                "$or": binding_options,
             },
             doc! {
                 "$set": {

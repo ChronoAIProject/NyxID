@@ -98,7 +98,9 @@ function isReconnectableKey(
 ): boolean {
   if (keyInfo.auto_connected || isNonAdminOrgSource(source)) return false;
   const effectiveStatus = keyInfo.connection_status ?? keyInfo.status;
-  if (!RECONNECTABLE_STATUSES.has(effectiveStatus)) return false;
+  if (!keyInfo.credential_missing && !RECONNECTABLE_STATUSES.has(effectiveStatus)) {
+    return false;
+  }
   return (
     keyInfo.credential_type === "oauth2" ||
     keyInfo.auth_method === "oauth2" ||
@@ -202,6 +204,9 @@ function KeyCardContent({
           <Badge variant={statusVariant(displayStatus)}>
             {displayStatusLabel}
           </Badge>
+          {keyInfo.credential_missing && (
+            <Badge variant="warning">Credential Missing</Badge>
+          )}
           {isSsh && <Badge variant="secondary">SSH</Badge>}
           {/* Auth-method pill — moved to top so it aligns across cards */}
           <Badge variant="secondary">
@@ -413,6 +418,9 @@ function ServiceTableRow({
             <Badge variant={statusVariant(displayStatus)}>
               {displayStatusLabel}
             </Badge>
+            {keyInfo.credential_missing && (
+              <Badge variant="warning">Credential Missing</Badge>
+            )}
             {isSsh && <Badge variant="secondary">SSH</Badge>}
           </div>
           {showReconnect && (

@@ -424,6 +424,9 @@ pub struct KeyResponse {
     pub endpoint_id: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub api_key_id: Option<String>,
+    /// True when the service's stored `api_key_id` no longer resolves to a
+    /// credential row. The service remains manageable for recovery.
+    pub credential_missing: bool,
     pub credential_type: String,
     pub auth_method: String,
     pub auth_key_name: String,
@@ -2168,6 +2171,7 @@ fn key_response_from_result(result: &unified_key_service::CreateKeyResult) -> Ke
         endpoint_url: result.endpoint.url.clone(),
         endpoint_id: result.endpoint.id.clone(),
         api_key_id: result.api_key.as_ref().map(|api_key| api_key.id.clone()),
+        credential_missing: false,
         credential_type: result
             .api_key
             .as_ref()
@@ -2294,6 +2298,7 @@ fn key_response_from_view(view: unified_key_service::KeyView) -> KeyResponse {
         endpoint_url: view.endpoint_url,
         endpoint_id: view.endpoint_id,
         api_key_id: view.api_key_id,
+        credential_missing: view.credential_missing,
         credential_type: view.credential_type,
         auth_method: view.auth_method,
         auth_key_name: view.auth_key_name,
@@ -3265,6 +3270,83 @@ mod tests {
 
         assert!(!response.keys.is_empty());
         assert!(response.keys.iter().any(|k| k.id == service_id));
+    }
+
+    #[tokio::test]
+    async fn inactive_dangling_api_key_remains_readable_recoverable_and_deletable() {
+        let Some(db) = connect_test_database("keys_ext_dangling_api_key").await else {
+            eprintln!("skipping keys handler integration test: no local MongoDB available");
+            return;
+        };
+        let state = test_app_state(db.clone());
+        let actor_id = uuid::Uuid::new_v4().to_string();
+        let service_id = uuid::Uuid::new_v4().to_string();
+        insert_user(&db, &actor_id, UserType::Person).await;
+        insert_key_fixture(&db, &actor_id, &service_id, "dangling-key", "Dangling Key").await;
+        db.collection::<UserService>(USER_SERVICES)
+            .update_one(
+                doc! { "_id": &service_id },
+                doc! { "$set": {
+                    "api_key_id": "missing-api-key",
+                    "auth_method": "bearer",
+                    "auth_key_name": "Authorization",
+                    "is_active": false,
+                } },
+            )
+            .await
+            .unwrap();
+
+        let Json(view) = super::get_key(
+            State(state.clone()),
+            test_auth_user(&actor_id),
+            Path(service_id.clone()),
+        )
+        .await
+        .unwrap();
+        assert!(view.credential_missing);
+        assert_eq!(view.credential_type, "none");
+        assert!(!view.is_active);
+
+        let mut enable = empty_update_request();
+        enable.is_active = Some(true);
+        let enable_error = super::update_key(
+            State(state.clone()),
+            test_auth_user(&actor_id),
+            Path(service_id.clone()),
+            Json(enable),
+        )
+        .await
+        .expect_err("a missing credential must be replaced before enabling");
+        assert!(matches!(
+            enable_error,
+            AppError::BadRequest(message) if message.contains("Reconnect or delete")
+        ));
+
+        let Json(deleted) = super::delete_key(
+            State(state),
+            test_auth_user(&actor_id),
+            TelemetryContext::default(),
+            Path(service_id.clone()),
+            axum::extract::Query(super::DeleteKeyQuery::default()),
+        )
+        .await
+        .unwrap();
+        assert!(deleted.deleted);
+
+        let tombstone = db
+            .collection::<UserService>(USER_SERVICES)
+            .find_one(doc! { "_id": &service_id })
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(!tombstone.is_active);
+        assert!(
+            db.collection::<UserEndpoint>(USER_ENDPOINTS)
+                .find_one(doc! { "_id": &tombstone.endpoint_id })
+                .await
+                .unwrap()
+                .is_none()
+        );
     }
 
     #[tokio::test]
