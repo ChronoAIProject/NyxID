@@ -5,10 +5,13 @@ import {
   composeUnreportedCompletedNote,
 } from "@/lib/assistant/action-notes";
 import {
+  ASSISTANT_SESSION_EXPIRED_MESSAGE,
+  ASSISTANT_UPSTREAM_AUTH_MESSAGE,
   AssistantConversationNotFoundError,
   AssistantProtocolError,
   AssistantTurnActiveError,
   AssistantTurnCancelledError,
+  isNyxIdSessionAuthFailure,
 } from "@/lib/assistant/errors";
 import { resolveAssistantAction } from "@/lib/assistant/action-registry";
 import {
@@ -1063,10 +1066,9 @@ function matchesCommittedActionRequest(
  * Map a pre-stream rejection to a turn error. Errors before the SSE stream
  * starts arrive as a JSON envelope — NyxID's `{error, error_code, message}`
  * or Aevatar's `{code, message}` — and must not collapse to a bare
- * `http_<status>`. A 401/403 here means the downstream rejected the
- * identity NyxID forwarded, not that the NyxID session died — this raw
- * fetch never touches auth state, so it cannot trigger a sign-out; the
- * copy says so explicitly.
+ * `http_<status>`. A 401/403 is attributed to whichever side actually
+ * rejected it (see `isNyxIdSessionAuthFailure`); this raw fetch never touches
+ * auth state, so it cannot trigger a sign-out on its own.
  */
 function streamStartError(
   status: number,
@@ -1076,6 +1078,7 @@ function streamStartError(
     readonly error?: unknown;
     readonly code?: unknown;
     readonly message?: unknown;
+    readonly error_code?: unknown;
   }
   let envelope: ErrorEnvelope | null = null;
   try {
@@ -1096,8 +1099,9 @@ function streamStartError(
   if (status === 401 || status === 403) {
     return {
       code: envelopeCode ?? "unauthorized",
-      message:
-        "NyxID could not authenticate you to the chat backend. You are still signed in — reconnect the aevatar service and try again.",
+      message: isNyxIdSessionAuthFailure(envelope?.error_code)
+        ? ASSISTANT_SESSION_EXPIRED_MESSAGE
+        : ASSISTANT_UPSTREAM_AUTH_MESSAGE,
     };
   }
   return {

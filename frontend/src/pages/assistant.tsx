@@ -518,7 +518,7 @@ export function AssistantPage({
         selectConversation(sent.conversationId);
       }
     } catch (error) {
-      const { message, description } = describeSendFailure(error, engine);
+      const { message, description } = describeSendFailure(error);
       toast.error(message, { description });
       throw error;
     } finally {

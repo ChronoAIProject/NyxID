@@ -1928,12 +1928,32 @@ pub async fn update_service(
 
     tracing::info!(service_id = %service_id, updated_by = %auth_user.user_id, "Service updated");
 
-    // CR-1: Audit log for service update
+    // CR-1: Audit log for service update.
+    //
+    // Field NAMES only, never values — a service row carries credential-shaped
+    // config and the audit store is not the place for it (same discipline as
+    // `service_default_headers_updated` below). Names alone answer "which field
+    // changed?", which a bare `service_id` payload cannot: when a
+    // `forward_access_token` regression on the `aevatar` row took assistant
+    // chat down on 2026-08-12, the audit trail could name the row and the actor
+    // but not the field, so the outage could not be attributed from it.
+    // `updated_at` is stamped on every update, so it carries no signal about
+    // what the admin actually touched; excluding it keeps the list readable.
+    let mut changed_fields: Vec<&str> = set_doc
+        .keys()
+        .map(String::as_str)
+        .filter(|field| *field != "updated_at")
+        .collect();
+    changed_fields.sort_unstable();
+
     audit_service::log_for_user(
         state.db.clone(),
         &auth_user,
         "service_updated",
-        Some(serde_json::json!({ "service_id": &service_id })),
+        Some(serde_json::json!({
+            "service_id": &service_id,
+            "changed_fields": changed_fields,
+        })),
     );
 
     // Per-change audit for default_request_headers mutations. Values are

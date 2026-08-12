@@ -10,11 +10,21 @@ import { initTelemetry, identify as telemetryIdentify } from "./lib/telemetry";
 import { isPublicPath } from "./lib/public-paths";
 import { subscribeAssistantIdentity } from "./lib/assistant/identity";
 import { ConsentBanner } from "./components/consent-banner";
+import { recoverFromAssetError } from "./lib/chunk-recovery";
 import "./app.css";
 
-// Clear the chunk-reload guard on successful app bootstrap.
-// This ensures future deploys can auto-reload again.
-sessionStorage.removeItem("nyxid_chunk_reload");
+// Vite raises this from `__vitePreload` when a chunk (or its CSS) cannot be
+// fetched, *before* the failure becomes a React.lazy rejection — so it catches
+// dependency-preload failures that never reach a render boundary at all.
+//
+// Cancelling suppresses the rethrow, which is only safe once we have committed
+// to navigating away. On "exhausted" we deliberately let it propagate so the
+// route error component can render a message instead of leaving a dead screen.
+window.addEventListener("vite:preloadError", (event) => {
+  if (recoverFromAssetError() === "reloading") {
+    event.preventDefault();
+  }
+});
 
 const queryClient = new QueryClient({
   defaultOptions: {

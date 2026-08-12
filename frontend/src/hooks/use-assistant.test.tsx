@@ -629,11 +629,12 @@ describe("assistant hooks", () => {
 });
 
 describe("describeTransportError", () => {
-  // A downstream 401 from `/proxy/s/aevatar` means aevatar rejected the
-  // forwarded identity, NOT that the NyxID session died. The copy must say
-  // "you are still signed in" — the whole point of the fix is that we no
-  // longer bounce to /login here.
-  it("explains a downstream 401 without implying the session died", () => {
+  // An upstream 401 is passed through from Aevatar, whose body never carries
+  // NyxID's numeric `error_code` (the api-client falls back to -1). The NyxID
+  // session really is fine here, but the copy must not send the user off to
+  // reconnect a service — the cause is the platform's `aevatar` row, which no
+  // end user can reach.
+  it("attributes a 401 with no NyxID error code to the chat backend", () => {
     const { message, description } = describeTransportError(
       new ApiError(401, {
         error: "unknown_error",
@@ -642,7 +643,25 @@ describe("describeTransportError", () => {
       }),
     );
     expect(message).toBe("Assistant chat is unavailable");
-    expect(description).toContain("still signed in");
+    expect(description).toContain("chat backend rejected");
+    expect(description).toContain("platform admin");
+    expect(description).not.toContain("reconnect");
+  });
+
+  // Regression: the assistant transport opts out of the global sign-out, so a
+  // genuinely dead session used to render as "you are still signed in" — false,
+  // and it hid an expired session behind an Aevatar-shaped complaint.
+  it("attributes a 401 carrying a NyxID auth code to the expired session", () => {
+    const { message, description } = describeTransportError(
+      new ApiError(401, {
+        error: "token_expired",
+        error_code: 2001,
+        message: "Token expired",
+      }),
+    );
+    expect(message).toBe("Your session has expired");
+    expect(description).toContain("Sign in again");
+    expect(description).not.toContain("still signed in");
   });
 
   it("falls back to a generic message for non-401 failures", () => {
@@ -652,7 +671,20 @@ describe("describeTransportError", () => {
 });
 
 describe("describeSendFailure", () => {
-  it("explains a downstream 401/403 without implying the session died", () => {
+  it("attributes a 401 with no NyxID error code to the chat backend", () => {
+    const { message, description } = describeSendFailure(
+      new ApiError(401, {
+        error: "unknown_error",
+        error_code: -1,
+        message: "Request failed with status 401",
+      }),
+    );
+    expect(message).toBe("Message not sent");
+    expect(description).toContain("chat backend rejected");
+    expect(description).not.toContain("still signed in");
+  });
+
+  it("attributes a 401 carrying a NyxID auth code to the expired session", () => {
     const { message, description } = describeSendFailure(
       new ApiError(401, {
         error: "unauthorized",
@@ -661,7 +693,7 @@ describe("describeSendFailure", () => {
       }),
     );
     expect(message).toBe("Message not sent");
-    expect(description).toContain("still signed in");
+    expect(description).toContain("Sign in again");
   });
 
   it("asks the user to wait when a turn is already active", () => {
