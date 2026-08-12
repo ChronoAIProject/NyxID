@@ -31,6 +31,7 @@ import {
   subscribeAssistantIdentity,
 } from "@/lib/assistant/identity";
 import type { ActionReport } from "@/schemas/assistant-actions";
+import type { InputAnswer } from "@/schemas/assistant-input";
 import type {
   ActiveTurn,
   Conversation,
@@ -158,31 +159,18 @@ const PENDING_APPROVALS_PAGE_SIZE = 50;
 const APPROVAL_HISTORY_PAGE_SIZE = 20;
 // A turn that never emits a first event is failed rather than left hanging.
 // The deadline has to tolerate slow first-frame delivery from the upstream
-// workflow engine: at 8s it was cancelling healthy-but-slow SSE turns, so it
+// typed actor: at 8s it was cancelling healthy-but-slow SSE turns, so it
 // sits well above the observed worst-case time-to-first-event.
 const STREAM_START_DEADLINE_MS = 30_000;
 const PROJECTION_DEADLINE_MS = 5_000;
-// Streaming events update the transport mirror synchronously. Sparse text can
-// arrive at a relaxed cadence, while a growing backlog needs shorter samples
-// to avoid landing as large Markdown jumps. The lower bound still limits a
-// busy stream to about 42 projections per second on the main thread.
-const STREAM_PROJECTION_MIN_INTERVAL_MS = 24;
-const STREAM_PROJECTION_MAX_INTERVAL_MS = 90;
+// Streaming events update the transport mirror synchronously; a projection is
+// what publishes the mirror to React. This used to shorten under text backlog
+// (down to 24 ms) so that arriving prose would not land as large Markdown
+// jumps — a job the view layer now does properly, pacing the reveal against
+// the frame clock in `useSmoothReveal`. Sampling faster than that only bought
+// re-renders nobody could see, so the cadence is a flat interval again: fewer
+// projections, more frame budget left for the block actually being written.
 const STREAM_PROJECTION_INTERVAL_MS = 50;
-const STREAM_PROJECTION_FAST_BACKLOG_CHARS = 120;
-
-function streamProjectionInterval(pendingTextChars: number): number {
-  if (pendingTextChars <= 0) return STREAM_PROJECTION_INTERVAL_MS;
-  const pressure = Math.min(
-    pendingTextChars / STREAM_PROJECTION_FAST_BACKLOG_CHARS,
-    1,
-  );
-  return Math.round(
-    STREAM_PROJECTION_MAX_INTERVAL_MS -
-      pressure *
-        (STREAM_PROJECTION_MAX_INTERVAL_MS - STREAM_PROJECTION_MIN_INTERVAL_MS),
-  );
-}
 
 const activeHandles = new Map<string, TurnHandle>();
 const episodeOwners = new WeakMap<QueryClient, Map<string, symbol>>();
@@ -728,7 +716,6 @@ function createTurnEventPump(
   let startDeadline: ReturnType<typeof setTimeout> | undefined;
   let projectionTimer: ReturnType<typeof setTimeout> | undefined;
   let projectionDueAt: number | undefined;
-  let pendingTextChars = 0;
   const ownsEpisode = () => owners.get(targetId) === owner;
   const clearStartDeadline = () => {
     if (startDeadline !== undefined) {
@@ -753,7 +740,6 @@ function createTurnEventPump(
   const project = () => {
     projectionTimer = undefined;
     projectionDueAt = undefined;
-    pendingTextChars = 0;
     if (!ownsEpisode()) return;
     projections += 1;
     publish();
@@ -772,7 +758,7 @@ function createTurnEventPump(
       project();
       return;
     }
-    const delay = streamProjectionInterval(pendingTextChars);
+    const delay = STREAM_PROJECTION_INTERVAL_MS;
     const dueAt = Date.now() + delay;
     if (
       projectionTimer !== undefined &&
@@ -819,7 +805,6 @@ function createTurnEventPump(
     clearStartDeadline();
     if (event.cursor <= lastSeenCursor) return;
     lastSeenCursor = event.cursor;
-    if (event.event === "block.delta") pendingTextChars += event.text.length;
     if (eventPrintsContent(event)) printed = true;
     if (event.event === "turn.completed") open = false;
     const turn = turnFromEvent(event);
@@ -1003,6 +988,83 @@ export function useCancelTurn(
   });
 }
 
+function taskControlError(title: string, error: unknown): void {
+  toast.error(title, {
+    description:
+      error instanceof Error && error.message
+        ? error.message
+        : "The actor did not accept this control. Refresh the conversation and try again.",
+  });
+}
+
+export function useStopTask(conversationId: string | undefined) {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: async (): Promise<void> => {
+      if (!conversationId) throw new Error("Select a conversation first.");
+      await assistantTransport.stopTask(conversationId);
+      activeHandles.delete(conversationId);
+      await projectTransportState(queryClient, conversationId);
+    },
+    onError: (error) => taskControlError("Task was not stopped", error),
+  });
+}
+
+export function useSteerTask(conversationId: string | undefined) {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: async (instruction: string): Promise<void> => {
+      if (!conversationId) throw new Error("Select a conversation first.");
+      await assistantTransport.steerTask(conversationId, instruction);
+      await projectTransportState(queryClient, conversationId);
+    },
+    onError: (error) => taskControlError("Steering was not delivered", error),
+  });
+}
+
+export function useRetryStep(conversationId: string | undefined) {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: async (stepId: string): Promise<void> => {
+      if (!conversationId) throw new Error("Select a conversation first.");
+      await assistantTransport.retryStep(conversationId, stepId);
+      await projectTransportState(queryClient, conversationId);
+    },
+    onError: (error) => taskControlError("Step was not retried", error),
+  });
+}
+
+export function useSkipStep(conversationId: string | undefined) {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: async (stepId: string): Promise<void> => {
+      if (!conversationId) throw new Error("Select a conversation first.");
+      await assistantTransport.skipStep(conversationId, stepId);
+      await projectTransportState(queryClient, conversationId);
+    },
+    onError: (error) => taskControlError("Step was not skipped", error),
+  });
+}
+
+export function useResolvePlan(conversationId: string | undefined) {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: async ({
+      blockId,
+      confirmed,
+    }: {
+      readonly blockId: string;
+      readonly confirmed: boolean;
+    }): Promise<void> => {
+      if (!conversationId) throw new Error("Select a conversation first.");
+      await assistantTransport.resolvePlan(conversationId, blockId, confirmed);
+      await projectTransportState(queryClient, conversationId);
+    },
+    onError: (error) =>
+      taskControlError("Plan decision was not delivered", error),
+  });
+}
+
 export function useDecideApproval(
   conversationId: string | undefined,
   engine: AssistantEngine = "aevatar",
@@ -1018,9 +1080,8 @@ export function useDecideApproval(
       readonly approved: boolean;
     }): Promise<void> => {
       if (!conversationId) throw new Error("Select a conversation first.");
-      // On the live contract the approve endpoint streams an SSE
-      // continuation of the run; the pump projects its events and the
-      // handle makes the stop button work during it.
+      // Approval returns JSON acceptance. The transport keeps the conversation
+      // reserved while it observes the matching committed resolution.
       const pump = createTurnEventPump(
         queryClient,
         conversationId,
@@ -1063,6 +1124,62 @@ export function useDecideApproval(
         description:
           error instanceof AssistantTurnActiveError
             ? "Wait for the current reply to finish, then decide again."
+            : error instanceof Error && error.message
+              ? error.message
+              : "The assistant backend did not respond. Try again.",
+      });
+    },
+  });
+}
+
+export function useResolveInput(
+  conversationId: string | undefined,
+  engine: AssistantEngine = "aevatar",
+) {
+  const queryClient = useQueryClient();
+  const ownerUserId = getAssistantIdentityUserId();
+  return useMutation({
+    mutationFn: async ({
+      blockId,
+      answer,
+    }: {
+      readonly blockId: string;
+      readonly answer: InputAnswer;
+    }): Promise<void> => {
+      if (!conversationId) throw new Error("Select a conversation first.");
+      const pump = createTurnEventPump(
+        queryClient,
+        conversationId,
+        engine,
+        ownerUserId,
+      );
+      try {
+        const handle = await assistantTransport.resolveInput(
+          conversationId,
+          blockId,
+          answer,
+          pump.onEvent,
+        );
+        if (handle) activeHandles.set(conversationId, handle);
+        else if (!pump.receivedEvent()) pump.disown();
+        await projectTransportState(
+          queryClient,
+          conversationId,
+          engine,
+          ownerUserId,
+        );
+      } catch (error) {
+        if (!pump.receivedEvent() && !pump.expired()) pump.restorePrevious();
+        throw error;
+      }
+    },
+    onError: (error) => {
+      if (error instanceof AssistantTurnCancelledError) return;
+      toast.error("Input was not delivered", {
+        id: "assistant-input-failed",
+        description:
+          error instanceof AssistantTurnActiveError
+            ? "Wait for the current reply to finish, then try again."
             : error instanceof Error && error.message
               ? error.message
               : "The assistant backend did not respond. Try again.",

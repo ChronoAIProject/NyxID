@@ -23,6 +23,14 @@ export const LoginDevicePage = lazy(() =>
     default: m.LoginDevicePage,
   })),
 );
+export const ConnectLinkPage = lazy(() =>
+  import("@/pages/connect-link").then((m) => ({ default: m.ConnectLinkPage })),
+);
+export const ConnectLinkReturnPage = lazy(() =>
+  import("@/pages/connect-link").then((m) => ({
+    default: m.ConnectLinkReturnPage,
+  })),
+);
 export const OAuthLaunchingPage = lazy(() =>
   import("@/pages/oauth-launching").then((m) => ({
     default: m.OAuthLaunchingPage,
@@ -152,6 +160,9 @@ export const DeveloperAppDetailPage = lazy(() =>
   import("@/pages/developer-app-detail").then((m) => ({
     default: m.DeveloperAppDetailPage,
   })),
+);
+export const TriggersPage = lazy(() =>
+  import("@/pages/triggers").then((m) => ({ default: m.TriggersPage })),
 );
 export const IntegrationGuidePage = lazy(() =>
   import("@/pages/integration-guide").then((m) => ({

@@ -12,12 +12,15 @@ import { ActionCard } from "@/components/assistant/blocks/action-card";
 import { ApprovalCard } from "@/components/assistant/blocks/approval-card";
 import { ArtifactBlock } from "@/components/assistant/blocks/artifact-block";
 import { ConnectCard } from "@/components/assistant/blocks/connect-card";
+import { InputCard } from "@/components/assistant/blocks/input-card";
 import { RunCard } from "@/components/assistant/blocks/run-card";
+import { TaskPlanCard } from "@/components/assistant/blocks/task-plan-card";
 import { TextBlock } from "@/components/assistant/blocks/text-block";
 import { useFadingPresence } from "@/hooks/use-fading-presence";
 import haloSheet from "@/assets/halo-sheet.webp";
 import { formatClockTime } from "@/lib/utils";
 import type { ActionReport } from "@/schemas/assistant-actions";
+import type { InputAnswer } from "@/schemas/assistant-input";
 import type { AssistantMessage, ContentBlock } from "@/types/assistant";
 
 function UnsupportedContent() {
@@ -70,9 +73,14 @@ function isTextBlock(block: unknown): boolean {
 function renderBlock(
   block: unknown,
   onDecideApproval: (blockId: string, approved: boolean) => Promise<void>,
+  onResolveInput: (blockId: string, answer: InputAnswer) => Promise<void>,
   onActionProgress: (blockId: string, inProgress: boolean) => void,
   onBlockAction: (blockId: string, note: string) => void,
   onResolveAction: (report: ActionReport) => Promise<void>,
+  onStopTask: () => Promise<void>,
+  onRetryStep: (stepId: string) => Promise<void>,
+  onSkipStep: (stepId: string) => Promise<void>,
+  onResolvePlan: (blockId: string, confirmed: boolean) => Promise<void>,
   streaming = false,
 ) {
   if (typeof block !== "object" || block === null || !("type" in block)) {
@@ -86,11 +94,28 @@ function renderBlock(
       return <ConnectCard block={typed} />;
     case "run":
       return <RunCard block={typed} />;
+    case "task_plan":
+      return (
+        <TaskPlanCard
+          block={typed}
+          onStop={onStopTask}
+          onRetry={onRetryStep}
+          onSkip={onSkipStep}
+          onResolve={(confirmed) => onResolvePlan(typed.block_id, confirmed)}
+        />
+      );
     case "approval_card":
       return (
         <ApprovalCard
           block={typed}
           onDecide={(approved) => onDecideApproval(typed.block_id, approved)}
+        />
+      );
+    case "input_card":
+      return (
+        <InputCard
+          block={typed}
+          onResolve={(answer) => onResolveInput(typed.block_id, answer)}
         />
       );
     case "action_card":
@@ -387,9 +412,14 @@ export function ChatThread({
   emptyDescription = "Ask NyxID to work with your connected services.",
   bottomInset = 0,
   onDecideApproval,
+  onResolveInput = async () => undefined,
   onActionProgress = () => undefined,
   onBlockAction = () => undefined,
   onResolveAction = async () => undefined,
+  onStopTask = async () => undefined,
+  onRetryStep = async () => undefined,
+  onSkipStep = async () => undefined,
+  onResolvePlan = async () => undefined,
 }: {
   readonly messages: readonly AssistantMessage[];
   readonly thinking?: boolean;
@@ -426,12 +456,24 @@ export function ChatThread({
     blockId: string,
     approved: boolean,
   ) => Promise<void>;
+  readonly onResolveInput?: (
+    blockId: string,
+    answer: InputAnswer,
+  ) => Promise<void>;
   readonly onActionProgress?: (blockId: string, inProgress: boolean) => void;
   readonly onBlockAction?: (blockId: string, note: string) => void;
   readonly onResolveAction?: (report: ActionReport) => Promise<void>;
+  readonly onStopTask?: () => Promise<void>;
+  readonly onRetryStep?: (stepId: string) => Promise<void>;
+  readonly onSkipStep?: (stepId: string) => Promise<void>;
+  readonly onResolvePlan?: (
+    blockId: string,
+    confirmed: boolean,
+  ) => Promise<void>;
 }) {
   const rootRef = useRef<HTMLDivElement>(null);
   const scrollRef = useRef<HTMLDivElement>(null);
+  const contentRef = useRef<HTMLDivElement>(null);
   const [scrolledFromTop, setScrolledFromTop] = useState(false);
   const thinkingPresence = useFadingPresence(thinking, 500);
   const following = useRef(true);
@@ -453,7 +495,10 @@ export function ChatThread({
     setScrolledFromTop(element.scrollTop > 1);
   }, []);
 
-  useEffect(() => {
+  // Before paint, not after: adjusting the scroll in a passive effect lets the
+  // browser paint one frame at the stale offset first, and that one-frame
+  // rebound at every update is a large part of what reads as juddering.
+  useLayoutEffect(() => {
     const element = scrollRef.current;
     if (!element) return;
     // Sending always pulls the view back to the tail; assistant streaming still
@@ -466,6 +511,23 @@ export function ChatThread({
     if (following.current) element.scrollTop = element.scrollHeight;
     setScrolledFromTop(element.scrollTop > 1);
   }, [messages, thinking, streaming, bottomInset]);
+
+  // Streamed text grows INSIDE a memoized block, so the thread does not
+  // re-render as the answer writes itself and the effect above never fires for
+  // it. Following the tail is therefore driven off the content box itself,
+  // which is the thing that actually changes height.
+  useEffect(() => {
+    const element = scrollRef.current;
+    const content = contentRef.current;
+    if (!element || !content || typeof ResizeObserver === "undefined") return;
+    const observer = new ResizeObserver(() => {
+      if (following.current) element.scrollTop = element.scrollHeight;
+    });
+    observer.observe(content);
+    return () => {
+      observer.disconnect();
+    };
+  }, [hasMessages]);
 
   useLayoutEffect(() => {
     const root = rootRef.current;
@@ -592,6 +654,7 @@ export function ChatThread({
         style={{ maskImage: fadeMask, WebkitMaskImage: fadeMask }}
       >
         <div
+          ref={contentRef}
           className="mx-auto flex w-full max-w-[758px] flex-col gap-6 px-4 py-6 sm:px-6 sm:py-8"
           style={{ paddingBottom: `calc(${String(bottomInset)}px + 1.5rem)` }}
         >
@@ -621,9 +684,14 @@ export function ChatThread({
                               {renderBlock(
                                 block,
                                 onDecideApproval,
+                                onResolveInput,
                                 onActionProgress,
                                 onBlockAction,
                                 onResolveAction,
+                                onStopTask,
+                                onRetryStep,
+                                onSkipStep,
+                                onResolvePlan,
                               )}
                             </div>
                           ))}
@@ -676,9 +744,14 @@ export function ChatThread({
                               {renderBlock(
                                 block,
                                 onDecideApproval,
+                                onResolveInput,
                                 onActionProgress,
                                 onBlockAction,
                                 onResolveAction,
+                                onStopTask,
+                                onRetryStep,
+                                onSkipStep,
+                                onResolvePlan,
                                 streamingGroup &&
                                   isLastBlock &&
                                   isTextBlock(block),

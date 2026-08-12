@@ -51,6 +51,13 @@ pub struct BillingUsageRow {
     pub metric: BillingMetric,
     pub lago_metric_code: String,
     pub layer: String,
+    /// Downstream model for LLM-shaped usage; None for other services.
+    pub model: Option<String>,
+    /// Agent (API key) the usage is attributed to; None for session auth.
+    pub api_key_id: Option<String>,
+    /// Resolved display name for `api_key_id`. The ledger stores only the id,
+    /// so this is looked up per response — never render the bare UUID.
+    pub api_key_name: Option<String>,
     pub quantity: i64,
     pub requests: i64,
     pub bytes: i64,
@@ -60,6 +67,10 @@ pub struct BillingUsageRow {
     /// observability only, no cost, never pushed to Lago.
     pub billable: bool,
     pub estimated_credits_micros: Option<i64>,
+    /// Provider-reported token classes summed over the group (LLM traffic
+    /// only). None when no row in the group carried a breakdown.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub token_breakdown: Option<crate::models::service_billing::TokenBreakdown>,
 }
 
 #[derive(Debug, Serialize, ToSchema)]
@@ -217,6 +228,11 @@ pub async fn get_usage(
                     "lago_metric_code": "$lago_metric_code",
                     "layer": "$layer",
                     "lago_acked": "$lago_acked",
+                    // Model and agent split the per-service total into the
+                    // breakdown the billing page expands into. Both are
+                    // optional on the ledger, so absent values group together.
+                    "model": "$model",
+                    "api_key_id": "$api_key_id",
                     // Rows without a wallet were metered for observability
                     // only (service not platform_billable); they carry no
                     // cost and are never pushed to Lago.
@@ -224,6 +240,12 @@ pub async fn get_usage(
                 },
                 "quantity": { "$sum": "$quantity" },
                 "events": { "$sum": 1 },
+                // Token-class observability sums; absent on non-LLM rows
+                // and rows written before breakdown capture shipped.
+                "prompt_tokens": { "$sum": { "$ifNull": ["$token_breakdown.prompt_tokens", 0] } },
+                "completion_tokens": { "$sum": { "$ifNull": ["$token_breakdown.completion_tokens", 0] } },
+                "cached_tokens": { "$sum": { "$ifNull": ["$token_breakdown.cached_tokens", 0] } },
+                "cache_creation_tokens": { "$sum": { "$ifNull": ["$token_breakdown.cache_creation_tokens", 0] } },
             }
         },
         doc! { "$sort": { "_id.service_slug": 1, "_id.layer": 1, "_id.metric": 1 } },
@@ -260,6 +282,9 @@ pub async fn get_usage(
             metric,
             lago_metric_code,
             layer: id_doc.get_str("layer").unwrap_or("platform").to_string(),
+            model: id_doc.get_str("model").ok().map(ToString::to_string),
+            api_key_id: id_doc.get_str("api_key_id").ok().map(ToString::to_string),
+            api_key_name: None,
             quantity,
             requests: if metric == BillingMetric::Requests {
                 quantity
@@ -275,8 +300,11 @@ pub async fn get_usage(
             lago_acked: id_doc.get_bool("lago_acked").unwrap_or(false),
             billable,
             estimated_credits_micros,
+            token_breakdown: usage_row_breakdown(&doc),
         });
     }
+
+    resolve_api_key_names(&state.db, &owner_id, &mut rows).await?;
 
     let totals = BillingUsageTotals {
         quantity: rows.iter().map(|row| row.quantity).sum(),
@@ -733,6 +761,44 @@ async fn find_rate(
         .map_err(Into::into)
 }
 
+/// Fill `api_key_name` on usage rows with one batched lookup.
+///
+/// The ledger stores only `api_key_id`, so the page would otherwise render raw
+/// UUIDs. The lookup is scoped to keys owned by `owner_id`: a row referencing
+/// anything else keeps `None` and the UI falls back to a neutral label rather
+/// than leaking another owner's key name. Deleted keys resolve to `None` too.
+async fn resolve_api_key_names(
+    db: &mongodb::Database,
+    owner_id: &str,
+    rows: &mut [BillingUsageRow],
+) -> AppResult<()> {
+    let key_ids: Vec<&str> = rows
+        .iter()
+        .filter_map(|row| row.api_key_id.as_deref())
+        .collect::<std::collections::BTreeSet<_>>()
+        .into_iter()
+        .collect();
+    if key_ids.is_empty() {
+        return Ok(());
+    }
+
+    let mut names: std::collections::HashMap<String, String> = std::collections::HashMap::new();
+    let mut cursor = db
+        .collection::<crate::models::api_key::ApiKey>(crate::models::api_key::COLLECTION_NAME)
+        .find(doc! { "_id": { "$in": &key_ids }, "user_id": owner_id })
+        .await?;
+    while let Some(key) = cursor.try_next().await? {
+        names.insert(key.id, key.name);
+    }
+
+    for row in rows.iter_mut() {
+        if let Some(id) = row.api_key_id.as_deref() {
+            row.api_key_name = names.get(id).cloned();
+        }
+    }
+    Ok(())
+}
+
 fn parse_metric(value: &str) -> Option<BillingMetric> {
     match value {
         "tokens" => Some(BillingMetric::Tokens),
@@ -740,6 +806,18 @@ fn parse_metric(value: &str) -> Option<BillingMetric> {
         "bytes" => Some(BillingMetric::Bytes),
         _ => None,
     }
+}
+
+/// Summed token-class breakdown for one aggregation group; None when every
+/// class summed to zero (non-LLM rows, or rows predating breakdown capture).
+fn usage_row_breakdown(doc: &Document) -> Option<crate::models::service_billing::TokenBreakdown> {
+    let breakdown = crate::models::service_billing::TokenBreakdown {
+        prompt_tokens: doc_i64(doc, "prompt_tokens").unwrap_or(0),
+        completion_tokens: doc_i64(doc, "completion_tokens").unwrap_or(0),
+        cached_tokens: doc_i64(doc, "cached_tokens").unwrap_or(0),
+        cache_creation_tokens: doc_i64(doc, "cache_creation_tokens").unwrap_or(0),
+    };
+    (!breakdown.is_empty()).then_some(breakdown)
 }
 
 fn doc_i64(doc: &Document, key: &str) -> Option<i64> {

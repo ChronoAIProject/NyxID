@@ -13,6 +13,7 @@ export const OAUTH_ERROR_CODES = [
   "exchange_failed",
   "server_error",
 ] as const;
+/** `session_required` and `server_error` are reserved for future popup flows. */
 export type OAuthErrorCode = (typeof OAUTH_ERROR_CODES)[number];
 export type OAuthCompletionStatus = "complete" | "error";
 
@@ -54,4 +55,5 @@ export interface OAuthLaunchNavigateMessage {
   readonly launchId: string;
   readonly nonce: string;
   readonly url: string;
+  readonly serviceName?: string;
 }

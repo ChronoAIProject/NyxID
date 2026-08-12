@@ -31,6 +31,8 @@ pub enum Commands {
     Whoami(AuthArgs),
     /// Show account overview (services, keys, nodes)
     Status(AuthArgs),
+    /// Create a hosted link for connecting a service credential
+    Connect(ConnectArgs),
     /// Run local CLI health checks
     Doctor(DoctorArgs),
     /// Manage user profile
@@ -62,6 +64,11 @@ pub enum Commands {
     Pool {
         #[command(subcommand)]
         command: PoolCommands,
+    },
+    /// Manage inbound event triggers
+    Trigger {
+        #[command(subcommand)]
+        command: TriggerCommands,
     },
     /// Manage billing wallet, usage, and top-ups
     Billing {
@@ -199,6 +206,23 @@ pub enum Commands {
     },
     /// Show CLI version and project links
     Info,
+}
+
+#[derive(Args, Clone)]
+pub struct ConnectArgs {
+    /// Catalog service slug to connect
+    pub service_slug: String,
+    /// Human-readable label shown on the hosted connection page
+    #[arg(long)]
+    pub label: Option<String>,
+    /// Return immediately after creating the link
+    #[arg(long)]
+    pub no_wait: bool,
+    /// Maximum seconds to wait for completion
+    #[arg(long, default_value_t = 900, value_parser = clap::value_parser!(u64).range(1..=3600))]
+    pub timeout: u64,
+    #[command(flatten)]
+    pub auth: AuthArgs,
 }
 
 #[derive(Subcommand)]
@@ -1137,6 +1161,115 @@ pub enum PoolCommands {
     },
 }
 
+#[derive(Clone, Copy, Debug, ValueEnum)]
+pub enum TriggerVerificationArg {
+    Bearer,
+    Query,
+    Hmac,
+}
+
+#[derive(Clone, Copy, Debug, ValueEnum)]
+pub enum TriggerDeliveryArg {
+    Webhook,
+    Agent,
+    Notification,
+}
+
+#[derive(Clone, Copy, Debug, ValueEnum)]
+pub enum TriggerStatusArg {
+    Active,
+    Disabled,
+}
+
+#[derive(Subcommand)]
+pub enum TriggerCommands {
+    /// Create an inbound trigger
+    Create {
+        #[arg(long)]
+        label: String,
+        #[arg(long)]
+        user_service_id: Option<String>,
+        #[arg(long, value_enum, default_value = "bearer")]
+        verification: TriggerVerificationArg,
+        #[arg(long, default_value = "X-Hub-Signature-256")]
+        signature_header: String,
+        #[arg(long, value_enum)]
+        delivery: TriggerDeliveryArg,
+        #[arg(long)]
+        delivery_url: Option<String>,
+        #[arg(long)]
+        conversation_id: Option<String>,
+        #[arg(long, value_name = "ID|SLUG|NAME")]
+        org: Option<String>,
+        #[command(flatten)]
+        auth: AuthArgs,
+    },
+    /// List triggers
+    List {
+        #[arg(long, value_name = "ID|SLUG|NAME")]
+        org: Option<String>,
+        #[command(flatten)]
+        auth: AuthArgs,
+    },
+    /// Show trigger details
+    Show {
+        id: String,
+        #[command(flatten)]
+        auth: AuthArgs,
+    },
+    /// Update a trigger
+    Update {
+        id: String,
+        #[arg(long)]
+        label: Option<String>,
+        #[arg(long, value_enum)]
+        status: Option<TriggerStatusArg>,
+        #[arg(long, value_enum)]
+        delivery: Option<TriggerDeliveryArg>,
+        #[arg(long)]
+        delivery_url: Option<String>,
+        #[arg(long)]
+        conversation_id: Option<String>,
+        #[command(flatten)]
+        auth: AuthArgs,
+    },
+    /// Delete a trigger
+    Delete {
+        id: String,
+        #[command(flatten)]
+        auth: AuthArgs,
+    },
+    /// Rotate the inbound secret
+    RotateSecret {
+        id: String,
+        #[command(flatten)]
+        auth: AuthArgs,
+    },
+    /// List webhook delivery records
+    Deliveries {
+        id: String,
+        #[arg(long, default_value_t = 1)]
+        page: u64,
+        #[arg(long, default_value_t = 20)]
+        per_page: u64,
+        #[command(flatten)]
+        auth: AuthArgs,
+    },
+    /// Redeliver a retained webhook event
+    Redeliver {
+        id: String,
+        event_id: String,
+        #[command(flatten)]
+        auth: AuthArgs,
+    },
+    /// Rotate the outbound webhook signing secret
+    RotateDeliverySecret {
+        id: String,
+        #[command(flatten)]
+        auth: AuthArgs,
+    },
+}
+
 // ---- Billing ----
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, ValueEnum)]
@@ -1360,6 +1493,62 @@ pub enum ApiKeyCommands {
         /// External credential label (auto-resolved from service if omitted)
         #[arg(long)]
         credential: Option<String>,
+        #[command(flatten)]
+        auth: AuthArgs,
+    },
+    /// Preview an exact v2 scope plan for scheduled durable writes
+    DurablePlan {
+        /// JSON file containing the scope-plan request, including
+        /// selected_operations and key_expires_at
+        #[arg(long, value_name = "FILE")]
+        file: PathBuf,
+        #[command(flatten)]
+        auth: AuthArgs,
+    },
+    /// Provision a scheduled-invocation key and its durable grants
+    DurableCreate {
+        /// JSON file containing the confirmed create request, including the
+        /// v2 scope_plan_digest and the same selected_operations
+        #[arg(long, value_name = "FILE")]
+        file: PathBuf,
+        /// Confirm provisioning without an interactive prompt
+        #[arg(long)]
+        yes: bool,
+        #[command(flatten)]
+        auth: AuthArgs,
+    },
+    /// List durable grants for a scheduled-invocation key
+    DurableGrants {
+        /// Scheduled API key ID
+        id: String,
+        /// Include revoked grant receipts
+        #[arg(long)]
+        include_revoked: bool,
+        #[command(flatten)]
+        auth: AuthArgs,
+    },
+    /// Revoke one durable grant immediately
+    DurableRevoke {
+        /// Scheduled API key ID
+        id: String,
+        /// Durable grant ID
+        grant_id: String,
+        /// Confirm revocation without an interactive prompt
+        #[arg(long)]
+        yes: bool,
+        #[command(flatten)]
+        auth: AuthArgs,
+    },
+    /// Replace active grants from a freshly confirmed v2 scope plan
+    DurableReauthorize {
+        /// Scheduled API key ID
+        id: String,
+        /// JSON file containing selected_operations and scope_plan_digest
+        #[arg(long, value_name = "FILE")]
+        file: PathBuf,
+        /// Confirm replacement without an interactive prompt
+        #[arg(long)]
+        yes: bool,
         #[command(flatten)]
         auth: AuthArgs,
     },

@@ -2,7 +2,7 @@ use std::collections::{BTreeMap, BTreeSet, HashSet};
 
 use chrono::Utc;
 use futures::TryStreamExt;
-use mongodb::bson::doc;
+use mongodb::{ClientSession, bson::doc};
 use serde::Serialize;
 use sha2::{Digest, Sha256};
 use utoipa::ToSchema;
@@ -12,13 +12,27 @@ use crate::models::node::{COLLECTION_NAME as NODES, Node};
 use crate::models::node_service_binding::{
     COLLECTION_NAME as NODE_SERVICE_BINDINGS, NodeServiceBinding,
 };
+use crate::models::org_membership::{
+    COLLECTION_NAME as ORG_MEMBERSHIPS, MemberScopeSource, OrgMembership, OrgRole,
+};
+use crate::models::org_role_scope::{COLLECTION_NAME as ORG_ROLE_SCOPES, OrgRoleScope};
 use crate::models::user::{COLLECTION_NAME as USERS, User, UserType};
 use crate::models::user_service::{COLLECTION_NAME as USER_SERVICES, UserService};
-use crate::services::{node_service, org_service, user_service_service};
+use crate::models::{
+    api_key::ApiKeyPurpose,
+    durable_operation_grant::{DurableOperationPlan, DurableOperationSelection},
+};
+use crate::services::node_ws_manager::NodeWsManager;
+use crate::services::org_service::OwnerAccess;
+use crate::services::{
+    durable_operation_grant_service, node_service, org_service, user_service_service,
+};
 
 pub const SCOPE_PLAN_AUTHORITY: &str = "nyxid";
 pub const SCOPE_PLAN_CONTRACT_VERSION: &str = "1";
 pub const SCOPE_PLAN_POLICY_VERSION: &str = "api-key-scope-v1";
+pub const DURABLE_SCOPE_PLAN_CONTRACT_VERSION: &str = "2";
+pub const DURABLE_SCOPE_PLAN_POLICY_VERSION: &str = "durable-operation-grant-v1";
 
 #[derive(Clone, Copy)]
 pub enum ScopeAuthorization<'a> {
@@ -110,6 +124,11 @@ pub struct EffectiveScopePlan {
     pub normalized_grant_digest: String,
     pub freshness: ScopePlanFreshness,
     pub completeness: ScopePlanCompleteness,
+    pub key_purpose: ApiKeyPurpose,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub key_expires_at: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub durable_operations: Vec<DurableOperationPlan>,
 }
 
 fn service_scope_error(service_id: &str) -> AppError {
@@ -245,6 +264,235 @@ pub async fn validate_node_ids(
             ScopeAuthorization::OwnerOnly => {
                 if node.user_id != key_owner_user_id {
                     return Err(node_scope_error(nid));
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+async fn resolve_owner_access_with_session(
+    db: &mongodb::Database,
+    actor_user_id: &str,
+    target_owner_id: &str,
+    session: &mut ClientSession,
+) -> AppResult<OwnerAccess> {
+    if actor_user_id == target_owner_id {
+        return Ok(OwnerAccess::Direct);
+    }
+
+    let owner = db
+        .collection::<User>(USERS)
+        .find_one(doc! { "_id": target_owner_id })
+        .session(&mut *session)
+        .await?;
+    let Some(owner) = owner.filter(|owner| owner.user_type.is_org()) else {
+        return Ok(OwnerAccess::Forbidden);
+    };
+
+    let membership = db
+        .collection::<OrgMembership>(ORG_MEMBERSHIPS)
+        .find_one(doc! {
+            "org_user_id": &owner.id,
+            "member_user_id": actor_user_id,
+            "revoked_at": bson::Bson::Null,
+        })
+        .session(&mut *session)
+        .await?;
+    let Some(membership) = membership else {
+        return Ok(OwnerAccess::Forbidden);
+    };
+    let effective_scope = match membership.scope_source {
+        MemberScopeSource::Override => membership.allowed_service_ids.clone(),
+        MemberScopeSource::Inherit => db
+            .collection::<OrgRoleScope>(ORG_ROLE_SCOPES)
+            .find_one(doc! {
+                "org_user_id": &membership.org_user_id,
+                "role": membership.role.as_str(),
+            })
+            .session(&mut *session)
+            .await?
+            .and_then(|scope| scope.allowed_service_ids),
+    };
+
+    Ok(match membership.role {
+        OrgRole::Admin => OwnerAccess::AsOrgAdmin {
+            org_user_id: owner.id,
+            membership_id: membership.id,
+            allowed_service_ids: effective_scope,
+        },
+        OrgRole::Member | OrgRole::Viewer => OwnerAccess::AsOrgMember {
+            org_user_id: owner.id,
+            membership_id: membership.id,
+            role: membership.role,
+            allowed_service_ids: effective_scope,
+        },
+    })
+}
+
+fn actor_can_scope_service(access: &OwnerAccess, service_id: &str) -> bool {
+    let role_allows = match access {
+        OwnerAccess::Direct | OwnerAccess::AsOrgAdmin { .. } => true,
+        OwnerAccess::AsOrgMember { role, .. } => role.can_proxy(),
+        OwnerAccess::Forbidden => false,
+    };
+    role_allows && access.allows_resource(service_id)
+}
+
+/// Revalidate that the authenticated actor can still mutate the key owner
+/// inside the transaction snapshot used for rotation.
+pub async fn validate_owner_write_with_session(
+    db: &mongodb::Database,
+    key_owner_user_id: &str,
+    authorization: ScopeAuthorization<'_>,
+    session: &mut ClientSession,
+) -> AppResult<()> {
+    let ScopeAuthorization::ActorPermissions { actor_user_id } = authorization else {
+        return Ok(());
+    };
+    let access =
+        resolve_owner_access_with_session(db, actor_user_id, key_owner_user_id, &mut *session)
+            .await?;
+    if access.can_write() {
+        return Ok(());
+    }
+    Err(AppError::OrgRoleInsufficient(
+        "you must be an admin of the API key owner".to_string(),
+    ))
+}
+
+/// Revalidate write authority for one owner-scoped service resource without
+/// requiring the service row itself to remain active. Binding deletion uses
+/// this so an authorized actor can remove a stale binding while a revoked or
+/// re-scoped actor cannot mutate it during a transaction retry.
+pub async fn validate_owner_service_write_with_session(
+    db: &mongodb::Database,
+    key_owner_user_id: &str,
+    service_id: &str,
+    authorization: ScopeAuthorization<'_>,
+    session: &mut ClientSession,
+) -> AppResult<()> {
+    let ScopeAuthorization::ActorPermissions { actor_user_id } = authorization else {
+        return Ok(());
+    };
+    let access =
+        resolve_owner_access_with_session(db, actor_user_id, key_owner_user_id, &mut *session)
+            .await?;
+    if !access.can_write() {
+        return Err(AppError::OrgRoleInsufficient(
+            "you must be an admin of the API key owner".to_string(),
+        ));
+    }
+    if !access.allows_resource(service_id) {
+        return Err(service_scope_error(service_id));
+    }
+    Ok(())
+}
+
+/// Transaction-scoped counterpart of [`validate_service_ids`]. Rotation uses
+/// this after loading the predecessor so authority is re-evaluated from the
+/// same MongoDB snapshot that commits the lineage transition.
+pub async fn validate_service_ids_with_session(
+    db: &mongodb::Database,
+    key_owner_user_id: &str,
+    service_ids: &[String],
+    authorization: ScopeAuthorization<'_>,
+    session: &mut ClientSession,
+) -> AppResult<()> {
+    for service_id in service_ids {
+        let service = db
+            .collection::<UserService>(USER_SERVICES)
+            .find_one(doc! { "_id": service_id, "is_active": true })
+            .session(&mut *session)
+            .await?
+            .ok_or_else(|| service_scope_error(service_id))?;
+
+        match authorization {
+            ScopeAuthorization::ActorPermissions { actor_user_id }
+                if actor_user_id == key_owner_user_id =>
+            {
+                let access = resolve_owner_access_with_session(
+                    db,
+                    actor_user_id,
+                    &service.user_id,
+                    &mut *session,
+                )
+                .await?;
+                if !actor_can_scope_service(&access, service_id) {
+                    return Err(service_scope_error(service_id));
+                }
+            }
+            ScopeAuthorization::ActorPermissions { actor_user_id } => {
+                let access = resolve_owner_access_with_session(
+                    db,
+                    actor_user_id,
+                    key_owner_user_id,
+                    &mut *session,
+                )
+                .await?;
+                if service.user_id != key_owner_user_id
+                    || !access.can_write()
+                    || !access.allows_resource(service_id)
+                {
+                    return Err(service_scope_error(service_id));
+                }
+            }
+            ScopeAuthorization::OwnerOnly => {
+                if service.user_id != key_owner_user_id {
+                    return Err(service_scope_error(service_id));
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Transaction-scoped counterpart of [`validate_node_ids`].
+pub async fn validate_node_ids_with_session(
+    db: &mongodb::Database,
+    key_owner_user_id: &str,
+    node_ids: &[String],
+    authorization: ScopeAuthorization<'_>,
+    session: &mut ClientSession,
+) -> AppResult<()> {
+    for node_id in node_ids {
+        let node = db
+            .collection::<Node>(NODES)
+            .find_one(doc! { "_id": node_id, "is_active": true })
+            .session(&mut *session)
+            .await?
+            .ok_or_else(|| node_scope_error(node_id))?;
+
+        match authorization {
+            ScopeAuthorization::ActorPermissions { actor_user_id }
+                if actor_user_id == key_owner_user_id =>
+            {
+                let access = resolve_owner_access_with_session(
+                    db,
+                    actor_user_id,
+                    &node.user_id,
+                    &mut *session,
+                )
+                .await?;
+                if !node_service::node_access_can_read(&access) {
+                    return Err(node_scope_error(node_id));
+                }
+            }
+            ScopeAuthorization::ActorPermissions { actor_user_id } => {
+                let access = resolve_owner_access_with_session(
+                    db,
+                    actor_user_id,
+                    key_owner_user_id,
+                    &mut *session,
+                )
+                .await?;
+                if node.user_id != key_owner_user_id || !access.can_write() {
+                    return Err(node_scope_error(node_id));
+                }
+            }
+            ScopeAuthorization::OwnerOnly => {
+                if node.user_id != key_owner_user_id {
+                    return Err(node_scope_error(node_id));
                 }
             }
         }
@@ -561,7 +809,7 @@ fn normalized_grant_digest(
 /// set of `UserService` resources. Node liveness and WS connectivity are
 /// intentionally excluded: a route that is offline now may become selectable
 /// later and therefore still needs an authorization grant.
-pub async fn build_scope_plan(
+async fn build_base_scope_plan(
     db: &mongodb::Database,
     actor_user_id: &str,
     target_owner_id: Option<&str>,
@@ -638,7 +886,124 @@ pub async fn build_scope_plan(
             route_candidate_basis: ScopePlanRouteCandidateBasis::ActiveConfiguredRoutes,
             transient_node_state_excluded: true,
         },
+        key_purpose: ApiKeyPurpose::General,
+        key_expires_at: None,
+        durable_operations: Vec::new(),
     })
+}
+
+pub async fn build_scope_plan(
+    db: &mongodb::Database,
+    actor_user_id: &str,
+    target_owner_id: Option<&str>,
+    selected_service_ids: &[String],
+) -> AppResult<EffectiveScopePlan> {
+    build_base_scope_plan(db, actor_user_id, target_owner_id, selected_service_ids).await
+}
+
+pub async fn build_scope_plan_with_operations(
+    db: &mongodb::Database,
+    node_ws_manager: &NodeWsManager,
+    actor_user_id: &str,
+    target_owner_id: Option<&str>,
+    selected_service_ids: &[String],
+    selected_operations: &[DurableOperationSelection],
+    key_expires_at: Option<chrono::DateTime<Utc>>,
+) -> AppResult<EffectiveScopePlan> {
+    if selected_operations.is_empty() {
+        return build_scope_plan(db, actor_user_id, target_owner_id, selected_service_ids).await;
+    }
+
+    let mut operation_service_ids: Vec<String> = selected_operations
+        .iter()
+        .map(|operation| operation.user_service_id.clone())
+        .collect();
+    operation_service_ids.sort();
+    operation_service_ids.dedup();
+    let mut submitted_service_ids = normalized_set(selected_service_ids, "selected_service_ids")?;
+    if submitted_service_ids.is_empty() {
+        submitted_service_ids = operation_service_ids.clone();
+    }
+    if submitted_service_ids != operation_service_ids {
+        return Err(AppError::ValidationError(
+            "selected_service_ids must exactly match selected_operations UserService IDs"
+                .to_string(),
+        ));
+    }
+
+    let mut plan =
+        build_base_scope_plan(db, actor_user_id, target_owner_id, &submitted_service_ids).await?;
+    let operations = durable_operation_grant_service::build_operation_plans(
+        db,
+        node_ws_manager,
+        &plan.intended_key_owner.id,
+        &plan.allowed_node_ids,
+        selected_operations,
+        key_expires_at,
+    )
+    .await?;
+    let expires_at = key_expires_at.ok_or_else(|| {
+        AppError::ValidationError(
+            "scheduled_invocation scope plans require key_expires_at".to_string(),
+        )
+    })?;
+
+    let digest_input = serde_json::json!({
+        "authority": SCOPE_PLAN_AUTHORITY,
+        "contract_version": DURABLE_SCOPE_PLAN_CONTRACT_VERSION,
+        "policy_version": DURABLE_SCOPE_PLAN_POLICY_VERSION,
+        "base_scope_digest": plan.normalized_grant_digest,
+        "owner_id": plan.intended_key_owner.id,
+        "key_purpose": ApiKeyPurpose::ScheduledInvocation,
+        "key_expires_at": expires_at.to_rfc3339(),
+        "durable_operations": durable_operation_grant_service::plan_digest_component(&operations),
+    });
+    let digest_bytes = serde_json::to_vec(&digest_input)
+        .map_err(|error| AppError::Internal(format!("scope plan serialization failed: {error}")))?;
+    plan.normalized_grant_digest = format!("sha256:{}", hex::encode(Sha256::digest(digest_bytes)));
+    plan.contract_version = DURABLE_SCOPE_PLAN_CONTRACT_VERSION.to_string();
+    plan.policy_version = DURABLE_SCOPE_PLAN_POLICY_VERSION.to_string();
+    plan.key_purpose = ApiKeyPurpose::ScheduledInvocation;
+    plan.key_expires_at = Some(expires_at.to_rfc3339());
+    plan.durable_operations = operations;
+    Ok(plan)
+}
+
+#[allow(clippy::too_many_arguments)]
+pub async fn verify_durable_scope_plan_precondition(
+    db: &mongodb::Database,
+    node_ws_manager: &NodeWsManager,
+    actor_user_id: &str,
+    key_owner_user_id: &str,
+    allowed_service_ids: &[String],
+    allowed_node_ids: &[String],
+    selected_operations: &[DurableOperationSelection],
+    key_expires_at: chrono::DateTime<Utc>,
+    expected_digest: &str,
+) -> AppResult<EffectiveScopePlan> {
+    let target_owner_id = (key_owner_user_id != actor_user_id).then_some(key_owner_user_id);
+    let plan = build_scope_plan_with_operations(
+        db,
+        node_ws_manager,
+        actor_user_id,
+        target_owner_id,
+        allowed_service_ids,
+        selected_operations,
+        Some(key_expires_at),
+    )
+    .await?;
+    let submitted_services = normalized_set(allowed_service_ids, "allowed_service_ids")?;
+    let submitted_nodes = normalized_set(allowed_node_ids, "allowed_node_ids")?;
+    if plan.normalized_grant_digest != expected_digest
+        || plan.allowed_service_ids != submitted_services
+        || plan.allowed_node_ids != submitted_nodes
+    {
+        return Err(AppError::ApiKeyScopePlanStale(
+            "durable scope plan no longer matches the current authorization, routes, or endpoint contracts"
+                .to_string(),
+        ));
+    }
+    Ok(plan)
 }
 
 fn normalized_set(values: &[String], field_name: &str) -> AppResult<Vec<String>> {

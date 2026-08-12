@@ -424,8 +424,35 @@ export class DirectAssistantTransport implements AssistantTransport {
     if (run) this.cancelRun(conversationId, run);
   }
 
+  // Task/plan/input controls belong to the Aevatar typed actor. Direct chat is
+  // a stateless completion stream with no actor-owned task to stop, steer, or
+  // step through, so these reject rather than silently doing nothing.
+  async stopTask(): Promise<void> {
+    throw new Error("Task controls are not available in direct model chat.");
+  }
+
+  async steerTask(): Promise<void> {
+    throw new Error("Task controls are not available in direct model chat.");
+  }
+
+  async retryStep(): Promise<void> {
+    throw new Error("Task controls are not available in direct model chat.");
+  }
+
+  async skipStep(): Promise<void> {
+    throw new Error("Task controls are not available in direct model chat.");
+  }
+
+  async resolvePlan(): Promise<void> {
+    throw new Error("Plans are not available in direct model chat.");
+  }
+
   async decideApproval(): Promise<TurnHandle | null> {
     throw new Error("Approvals are not available in direct model chat.");
+  }
+
+  async resolveInput(): Promise<TurnHandle | null> {
+    throw new Error("Input requests are not available in direct model chat.");
   }
 
   setActionCardInProgress(): void {

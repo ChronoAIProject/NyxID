@@ -214,6 +214,40 @@ macro_rules! mcp_billing_routes {
     };
 }
 
+macro_rules! exact_service_approval_billing_routes {
+    ($apply:ident, $router:expr) => {
+        $apply!($router;
+            (
+                "/approvals/exact-service/requests",
+                "/api/v1/approvals/exact-service/requests",
+                "handlers::exact_service_approvals::create_request",
+                post(handlers::exact_service_approvals::create_request),
+                crate::services::billing::route_inventory::BillingRoutePolicy::Exempt(
+                    "approval control plane; no downstream request"
+                )
+            ),
+            (
+                "/approvals/exact-service/requests/{request_id}/status",
+                "/api/v1/approvals/exact-service/requests/{request_id}/status",
+                "handlers::exact_service_approvals::observe_request",
+                get(handlers::exact_service_approvals::observe_request),
+                crate::services::billing::route_inventory::BillingRoutePolicy::Exempt(
+                    "approval observation; no downstream request"
+                )
+            ),
+            (
+                "/approvals/exact-service/requests/{request_id}/redeem",
+                "/api/v1/approvals/exact-service/requests/{request_id}/redeem",
+                "handlers::exact_service_approvals::redeem_request",
+                post(handlers::exact_service_approvals::redeem_request),
+                crate::services::billing::route_inventory::BillingRoutePolicy::Metered(
+                    crate::services::billing::BillingIngress::Mcp
+                )
+            ),
+        )
+    };
+}
+
 macro_rules! public_proxy_billing_routes {
     ($apply:ident, $router:expr) => {
         $apply!($router;
@@ -354,6 +388,10 @@ pub(crate) fn mounted_billing_route_inventory()
     ));
     routes.extend(ssh_billing_routes!(collect_billing_route_specs, ()));
     routes.extend(mcp_billing_routes!(collect_billing_route_specs, ()));
+    routes.extend(exact_service_approval_billing_routes!(
+        collect_billing_route_specs,
+        ()
+    ));
     routes.extend(public_proxy_billing_routes!(
         collect_billing_route_specs,
         ()
@@ -454,6 +492,18 @@ pub fn build_router(
         .route("/{key_id}/usage", get(handlers::api_keys::get_key_usage))
         .route("/{key_id}/rotate", post(handlers::api_keys::rotate_key))
         .route(
+            "/{key_id}/durable-grants",
+            get(handlers::api_keys::list_durable_grants),
+        )
+        .route(
+            "/{key_id}/durable-grants/reauthorize",
+            post(handlers::api_keys::reauthorize_durable_grants),
+        )
+        .route(
+            "/{key_id}/durable-grants/{grant_id}/revoke",
+            post(handlers::api_keys::revoke_durable_grant),
+        )
+        .route(
             "/{key_id}/bindings",
             get(handlers::agent_bindings::list_bindings)
                 .post(handlers::agent_bindings::create_binding),
@@ -469,6 +519,10 @@ pub fn build_router(
         .route("/{service_id}", get(handlers::services::get_service))
         .route("/{service_id}", put(handlers::services::update_service))
         .route("/{service_id}", delete(handlers::services::delete_service))
+        .route(
+            "/{service_id}/resync-identity",
+            post(handlers::services::resync_service_identity),
+        )
         .route(
             "/{service_id}/oidc-credentials",
             get(handlers::services::get_oidc_credentials),
@@ -1008,6 +1062,48 @@ pub fn build_router(
                 .delete(handlers::keys::delete_key),
         );
 
+    let connect_link_routes = Router::new()
+        .route("/", post(handlers::connect_links::create_connect_link))
+        .route("/{id}", get(handlers::connect_links::get_connect_link))
+        .route(
+            "/{id}/cancel",
+            post(handlers::connect_links::cancel_connect_link),
+        )
+        .layer(middleware::from_fn(reject_delegated_tokens))
+        .layer(middleware::from_fn(reject_service_account_tokens))
+        .layer(middleware::from_fn(reject_relay_tokens));
+
+    let trigger_routes = Router::new()
+        .route(
+            "/",
+            get(handlers::triggers::list_triggers).post(handlers::triggers::create_trigger),
+        )
+        .route(
+            "/{id}",
+            get(handlers::triggers::get_trigger)
+                .patch(handlers::triggers::update_trigger)
+                .delete(handlers::triggers::delete_trigger),
+        )
+        .route(
+            "/{id}/rotate-secret",
+            post(handlers::triggers::rotate_trigger_secret),
+        )
+        .route(
+            "/{id}/rotate-delivery-secret",
+            post(handlers::triggers::rotate_trigger_delivery_secret),
+        )
+        .route(
+            "/{id}/deliveries",
+            get(handlers::triggers::list_trigger_deliveries),
+        )
+        .route(
+            "/{id}/deliveries/{event_id}/redeliver",
+            post(handlers::triggers::redeliver_trigger_delivery),
+        )
+        .layer(middleware::from_fn(reject_delegated_tokens))
+        .layer(middleware::from_fn(reject_service_account_tokens))
+        .layer(middleware::from_fn(reject_relay_tokens));
+
     let user_endpoint_routes = Router::new()
         .route("/", get(handlers::user_endpoints::list_endpoints))
         .route(
@@ -1224,6 +1320,15 @@ pub fn build_router(
         .route(
             "/oauth-clients/{client_id}/rotate-secret",
             post(handlers::developer_apps::rotate_my_oauth_client_secret),
+        )
+        .route(
+            "/oauth-clients/{client_id}/connection-webhook",
+            put(handlers::developer_apps::configure_connection_webhook)
+                .delete(handlers::developer_apps::disable_connection_webhook),
+        )
+        .route(
+            "/oauth-clients/{client_id}/connection-webhook/rotate-secret",
+            post(handlers::developer_apps::rotate_connection_webhook_secret),
         );
 
     // Proxy pass-through routes allow larger request bodies than the rest of the API.
@@ -1263,6 +1368,10 @@ pub fn build_router(
             get(handlers::docs::catalog_spec_json),
         )
         .nest("/auth/device", auth_device_public_routes)
+        .route(
+            "/connect-links/preview",
+            post(handlers::connect_links::preview_connect_link),
+        )
         .nest("/devices/code", device_code_public_routes)
         .nest("/devices/onboard", device_onboard_public_routes);
 
@@ -1271,6 +1380,10 @@ pub fn build_router(
     let api_v1_delegated = Router::new()
         .nest("/llm", llm_routes)
         .nest("/delegation", delegation_routes)
+        .merge(exact_service_approval_billing_routes!(
+            register_billing_routes,
+            Router::new()
+        ))
         .route(
             "/approvals/requests/{request_id}/status",
             get(handlers::approvals::get_request_status),
@@ -1321,6 +1434,8 @@ pub fn build_router(
         .nest("/providers", provider_routes)
         .nest("/nodes", node_registration_routes)
         .nest("/oracle", oracle_consumer_routes)
+        .nest("/connect-links", connect_link_routes)
+        .nest("/triggers", trigger_routes)
         .layer(middleware::from_fn(reject_delegated_tokens))
         .layer(middleware::from_fn(reject_relay_tokens));
 
@@ -1343,20 +1458,11 @@ pub fn build_router(
                     .delete(handlers::assistant::delete_conversation),
             )
             .route(
-                "/conversations/create-recovery/{command_id}",
-                get(handlers::assistant::get_create_recovery),
-            )
-            .route(
                 "/conversations/{conversation_id}/state",
                 get(handlers::assistant::get_state),
             )
             .route("/completions", post(handlers::assistant::completions))
             .route("/chat", post(handlers::assistant::typed_chat))
-            .route("/workflow-chat", post(handlers::assistant::workflow_chat))
-            .route(
-                "/workflow-chat/ws",
-                get(handlers::assistant::workflow_chat_ws),
-            )
     )
     .route_layer(axum::Extension(
         crate::services::billing::route_inventory::BillingRoutePolicy::Metered(
@@ -1370,6 +1476,14 @@ pub fn build_router(
         )
         .route("/direct/skills", get(handlers::assistant_direct::skills))
         .route("/direct/models", get(handlers::assistant_direct::models))
+        .route(
+            "/actions/key-create",
+            post(handlers::assistant_action_effects::create_key),
+        )
+        .route(
+            "/actions/key-rotate",
+            post(handlers::assistant_action_effects::rotate_key),
+        )
         .merge(assistant_proxy_routes);
 
     let ssh_billing_routes = ssh_billing_routes!(register_billing_routes, Router::new());
@@ -1385,6 +1499,14 @@ pub fn build_router(
         .route(
             "/auth/device/approve",
             post(handlers::auth_device::approve_auth_device),
+        )
+        .route(
+            "/connect-links/complete",
+            post(handlers::connect_links::complete_connect_link),
+        )
+        .route(
+            "/connect-links/cancel",
+            post(handlers::connect_links::cancel_hosted_connect_link),
         )
         .route("/devices/onboard", post(handlers::devices::onboard_device))
         .route(
@@ -1460,6 +1582,12 @@ pub fn build_router(
     let webhook_routes = Router::new()
         .route("/telegram", post(handlers::webhooks::telegram_webhook))
         .route("/lago", post(handlers::billing::lago_webhook));
+    let trigger_webhook_routes = Router::new()
+        .route(
+            "/{trigger_id}",
+            post(handlers::trigger_webhooks::receive_trigger),
+        )
+        .layer(DefaultBodyLimit::disable());
 
     // Integration webhook routes -- unauthenticated (verified by HMAC signature)
     let integration_routes = Router::new().route(
@@ -1484,6 +1612,7 @@ pub fn build_router(
             get(handlers::credential_accept::asset),
         )
         .nest("/api/v1/webhooks", webhook_routes)
+        .nest("/api/v1/webhooks/triggers", trigger_webhook_routes)
         // Channel bot webhook routes -- unauthenticated (per-bot signature verified)
         .route(
             "/api/v1/webhooks/channel/telegram/{bot_id}",

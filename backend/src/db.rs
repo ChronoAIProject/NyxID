@@ -11,6 +11,7 @@ use crate::config::AppConfig;
 use crate::models::anonymous_endpoint_usage::COLLECTION_NAME as ANONYMOUS_ENDPOINT_USAGE;
 use crate::models::auth_device_code::{AuthDeviceCode, COLLECTION_NAME as AUTH_DEVICE_CODES};
 use crate::models::billing_topup_session::COLLECTION_NAME as BILLING_TOPUP_SESSIONS;
+use crate::models::connect_link::{COLLECTION_NAME as CONNECT_LINKS, ConnectLink};
 use crate::models::device_code::COLLECTION_NAME as DEVICE_CODES;
 use crate::models::device_onboard_credential::COLLECTION_NAME as DEVICE_ONBOARD_CREDENTIALS;
 use crate::models::downstream_service::{
@@ -25,6 +26,10 @@ use crate::models::oauth_broker_binding::{
 use crate::models::provider_config::{COLLECTION_NAME as PROVIDER_CONFIGS, ProviderConfig};
 use crate::models::pushed_authorization_request::COLLECTION_NAME as PAR_COLLECTION;
 use crate::models::ssh_auth_mode::SshAuthMode;
+use crate::models::trigger::{COLLECTION_NAME as TRIGGERS, Trigger};
+use crate::models::trigger_delivery::{
+    COLLECTION_NAME as TRIGGER_DELIVERIES, TriggerDeliveryRecord,
+};
 use crate::models::user_api_key::{COLLECTION_NAME as USER_API_KEYS, UserApiKey};
 use crate::models::user_endpoint::{COLLECTION_NAME as USER_ENDPOINTS, UserEndpoint};
 use crate::models::user_provider_credentials::{
@@ -236,6 +241,35 @@ pub async fn ensure_indexes(db: &Database) -> Result<(), mongodb::error::Error> 
         .await?;
     api_keys
         .create_index(IndexModel::builder().keys(doc! { "user_id": 1 }).build())
+        .await?;
+    api_keys
+        .create_index(
+            IndexModel::builder()
+                .keys(doc! { "rotation_predecessor_id": 1 })
+                .options(
+                    IndexOptions::builder()
+                        .name("api_keys_rotation_predecessor_unique".to_string())
+                        .unique(true)
+                        .partial_filter_expression(doc! {
+                            "rotation_predecessor_id": { "$type": "string" }
+                        })
+                        .build(),
+                )
+                .build(),
+        )
+        .await?;
+
+    // ── assistant_action_receipts ──
+    // A user/action/request identity admits exactly one durable reservation.
+    // The receipt is secret-free and reserves the eventual resource UUID.
+    let action_receipts = db.collection::<mongodb::bson::Document>("assistant_action_receipts");
+    action_receipts
+        .create_index(
+            IndexModel::builder()
+                .keys(doc! { "user_id": 1, "action": 1, "action_request_id": 1 })
+                .options(IndexOptions::builder().unique(true).build())
+                .build(),
+        )
         .await?;
 
     // ── mfa_factors ──
@@ -610,6 +644,46 @@ pub async fn ensure_indexes(db: &Database) -> Result<(), mongodb::error::Error> 
         )
         .await?;
 
+    // ── durable operation grants / operation-id ledger ──
+    let durable_grants = db.collection::<mongodb::bson::Document>("durable_operation_grants");
+    durable_grants
+        .create_index(
+            IndexModel::builder()
+                .keys(doc! { "user_id": 1, "api_key_id": 1, "created_at": -1 })
+                .build(),
+        )
+        .await?;
+    durable_grants
+        .create_index(
+            IndexModel::builder()
+                .keys(doc! {
+                    "api_key_id": 1,
+                    "user_service_id": 1,
+                    "endpoint_id": 1,
+                    "revoked_at": 1,
+                })
+                .build(),
+        )
+        .await?;
+
+    let durable_executions =
+        db.collection::<mongodb::bson::Document>("durable_operation_executions");
+    durable_executions
+        .create_index(
+            IndexModel::builder()
+                .keys(doc! { "grant_id": 1, "operation_id": 1 })
+                .options(IndexOptions::builder().unique(true).build())
+                .build(),
+        )
+        .await?;
+    durable_executions
+        .create_index(
+            IndexModel::builder()
+                .keys(doc! { "api_key_id": 1, "created_at": -1 })
+                .build(),
+        )
+        .await?;
+
     // ── provider_configs ──
     let provider_configs = db.collection::<mongodb::bson::Document>("provider_configs");
     provider_configs
@@ -873,6 +947,22 @@ pub async fn ensure_indexes(db: &Database) -> Result<(), mongodb::error::Error> 
                 .build(),
         )
         .await?;
+    approval_requests
+        .create_index(
+            IndexModel::builder()
+                .keys(doc! { "exact_service.request_key": 1 })
+                .options(
+                    IndexOptions::builder()
+                        .name("exact_service_request_key_unique".to_string())
+                        .unique(true)
+                        .partial_filter_expression(
+                            doc! { "exact_service.request_key": { "$type": "string" } },
+                        )
+                        .build(),
+                )
+                .build(),
+        )
+        .await?;
 
     // ── approval_grants ──
     let approval_grants = db.collection::<mongodb::bson::Document>("approval_grants");
@@ -1120,6 +1210,103 @@ pub async fn ensure_indexes(db: &Database) -> Result<(), mongodb::error::Error> 
                         .expire_after(Duration::from_secs(0))
                         .build(),
                 )
+                .build(),
+        )
+        .await?;
+
+    // ── connect_links ──
+    let connect_links = db.collection::<ConnectLink>(CONNECT_LINKS);
+    connect_links
+        .create_index(
+            IndexModel::builder()
+                .keys(doc! { "token_hash": 1 })
+                .options(IndexOptions::builder().unique(true).build())
+                .build(),
+        )
+        .await?;
+    connect_links
+        .create_index(
+            IndexModel::builder()
+                .keys(doc! { "user_id": 1, "created_at": -1 })
+                .build(),
+        )
+        .await?;
+    // Keep expired rows long enough to surface the terminal state to pollers.
+    // Expiration is claimed atomically at read/complete time instead of using
+    // a Mongo TTL index that could erase the status before the agent sees it.
+    connect_links
+        .create_index(IndexModel::builder().keys(doc! { "expires_at": 1 }).build())
+        .await?;
+    connect_links
+        .create_index(
+            IndexModel::builder()
+                .keys(doc! {
+                    "webhook_event_status": 1,
+                    "webhook_event_reserved_at": 1,
+                    "webhook_event_attempts": 1,
+                })
+                .build(),
+        )
+        .await?;
+
+    // ── triggers ──
+    let triggers = db.collection::<Trigger>(TRIGGERS);
+    triggers
+        .create_index(
+            IndexModel::builder()
+                .keys(doc! { "secret_hash": 1 })
+                .options(IndexOptions::builder().unique(true).build())
+                .build(),
+        )
+        .await?;
+
+    // ── trigger_deliveries ──
+    let trigger_deliveries = db.collection::<TriggerDeliveryRecord>(TRIGGER_DELIVERIES);
+    trigger_deliveries
+        .create_index(
+            IndexModel::builder()
+                .keys(doc! { "trigger_id": 1, "event_id": 1 })
+                .options(
+                    IndexOptions::builder()
+                        .name("trigger_delivery_event_unique".to_string())
+                        .unique(true)
+                        .build(),
+                )
+                .build(),
+        )
+        .await?;
+    trigger_deliveries
+        .create_index(
+            IndexModel::builder()
+                .keys(doc! { "trigger_id": 1, "created_at": -1, "_id": -1 })
+                .build(),
+        )
+        .await?;
+    trigger_deliveries
+        .create_index(
+            IndexModel::builder()
+                .keys(doc! { "expires_at": 1 })
+                .options(
+                    IndexOptions::builder()
+                        .name("trigger_deliveries_expiry_ttl".to_string())
+                        .expire_after(Duration::from_secs(0))
+                        .build(),
+                )
+                .build(),
+        )
+        .await?;
+    triggers
+        .create_index(
+            IndexModel::builder()
+                .keys(doc! { "user_id": 1, "created_at": -1 })
+                .build(),
+        )
+        .await?;
+    triggers
+        .create_index(
+            IndexModel::builder()
+                .keys(doc! { "user_service_id": 1 })
+                .options(IndexOptions::builder().sparse(true).build())
                 .build(),
         )
         .await?;

@@ -1715,6 +1715,7 @@ mod tests {
             decision_idempotency_key: None,
             notify_user_ids: vec![],
             from_org_policy: false,
+            exact_service: None,
             created_at: Utc::now(),
         }
     }

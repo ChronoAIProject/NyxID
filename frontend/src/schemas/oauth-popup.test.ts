@@ -3,6 +3,7 @@ import {
   isOAuthRetryMessage,
   oauthCompletionSearchSchema,
   validateAuthorizationUrl,
+  validateHttpAuthorizationUrl,
 } from "./oauth-popup";
 import { OAUTH_ERROR_CODES, OAUTH_FLOW_TOKENS } from "@/types/oauth-popup";
 
@@ -56,6 +57,34 @@ describe("OAuth popup schemas", () => {
       `https://github.com/login/oauth/authorize?state=1cc_00000000-0000-4000-8000-000000000000`,
     ]) {
       expect(validateAuthorizationUrl(url, NONCE)).toBeNull();
+    }
+  });
+
+  it("accepts only credential-free HTTP URLs for a manual fallback", () => {
+    expect(
+      validateHttpAuthorizationUrl("https://github.com/login/oauth/authorize")
+        ?.href,
+    ).toBe("https://github.com/login/oauth/authorize");
+    expect(validateHttpAuthorizationUrl("javascript:alert(1)")).toBeNull();
+    expect(
+      validateHttpAuthorizationUrl("https://user:pass@github.com/oauth"),
+    ).toBeNull();
+  });
+
+  it("rejects non-absolute URLs instead of base-resolving them to NyxID", () => {
+    // The nonce-free fallback renders this as a user-facing anchor with no
+    // state binding left to catch nonsense — junk must fail, not resolve to
+    // a same-origin link.
+    for (const url of [
+      "",
+      "not a url",
+      "/relative/path",
+      "//evil.example/protocol-relative",
+    ]) {
+      expect(validateHttpAuthorizationUrl(url)).toBeNull();
+      expect(
+        validateAuthorizationUrl(`${url}?state=1cc_${NONCE}`, NONCE),
+      ).toBeNull();
     }
   });
 

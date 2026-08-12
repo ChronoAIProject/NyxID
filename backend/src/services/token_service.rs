@@ -476,20 +476,37 @@ pub async fn refresh_tokens(
         .await?;
     let rbac_data =
         crate::services::rbac_helpers::build_rbac_claim_data(db, &user_id_str, scope).await?;
-    let new_access = jwt::generate_access_token(
-        jwt_keys,
-        config,
-        &user_id,
-        scope,
-        Some(&rbac_data),
-        None,
-        None,
-        None,
+    let restrictions =
         (!token_resource_scope.allow_all_services).then_some(jwt::AccessTokenRestrictions {
             resources: &token_resource_scope.resource_uris,
             allowed_service_ids: &token_resource_scope.allowed_service_ids,
-        }),
-    )?;
+        });
+    let new_access = if active_token.client_id == Uuid::nil().to_string() {
+        jwt::generate_access_token(
+            jwt_keys,
+            config,
+            &user_id,
+            scope,
+            Some(&rbac_data),
+            None,
+            None,
+            None,
+            restrictions,
+        )?
+    } else {
+        jwt::generate_oauth_access_token(
+            jwt_keys,
+            config,
+            &user_id,
+            scope,
+            Some(&rbac_data),
+            None,
+            None,
+            None,
+            restrictions,
+            &active_token.client_id,
+        )?
+    };
 
     if reuse_existing_refresh_token {
         touch_session_last_active(db, session_id.as_deref(), now).await?;
@@ -841,6 +858,10 @@ mod tests {
                 broker_capability_enabled: false,
                 revocation_webhook_url: None,
                 revocation_webhook_secret_encrypted: None,
+                connection_webhook_url: None,
+                connection_webhook_secret_encrypted: None,
+                connection_webhook_key_id: None,
+                connection_webhook_enabled: false,
                 created_by: Some(user_id.clone()),
                 created_at: now,
                 updated_at: now,
@@ -878,6 +899,7 @@ mod tests {
         let access_claims =
             crate::crypto::jwt::verify_token(&jwt_keys, &config, &refreshed.access_token).unwrap();
         assert_eq!(access_claims.scope, "openid proxy");
+        assert_eq!(access_claims.client_id.as_deref(), Some(client_id.as_str()));
         assert_eq!(access_claims.allow_all_services, Some(false));
         assert_eq!(access_claims.allowed_service_ids, Some(allowed_service_ids));
 
@@ -994,6 +1016,10 @@ mod tests {
                 broker_capability_enabled: false,
                 revocation_webhook_url: None,
                 revocation_webhook_secret_encrypted: None,
+                connection_webhook_url: None,
+                connection_webhook_secret_encrypted: None,
+                connection_webhook_key_id: None,
+                connection_webhook_enabled: false,
                 created_by: Some(user_id.clone()),
                 default_service_catalog_slugs: Vec::new(),
                 created_at: now,

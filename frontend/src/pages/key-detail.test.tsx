@@ -476,11 +476,11 @@ describe("KeyDetailPage — edit flows", () => {
     expect(mockToastSuccess).toHaveBeenCalledWith("Credential rotated");
   });
 
-  it("toggles the service inactive via useUpdateUserService and surfaces an error toast on failure", async () => {
+  it("toggles the service disabled via useUpdateUserService and surfaces an error toast on failure", async () => {
     const user = userEvent.setup();
     render(<KeyDetailPage />);
 
-    await user.click(screen.getByRole("button", { name: /Deactivate/i }));
+    await user.click(screen.getByRole("button", { name: /Disable/i }));
 
     expect(hooks.updateUserService).toHaveBeenCalledTimes(1);
     expect(hooks.updateUserService.mock.calls[0]![0]).toEqual({
@@ -536,7 +536,7 @@ describe("KeyDetailPage — delete flow", () => {
 
     // Dialog renders in a portal under document.body.
     const dialog = await screen.findByRole("dialog");
-    expect(within(dialog).getByText("Delete Service")).toBeInTheDocument();
+    expect(within(dialog).getByText("Delete service")).toBeInTheDocument();
 
     await user.click(within(dialog).getByRole("button", { name: "Delete" }));
 
@@ -665,7 +665,7 @@ describe("KeyDetailPage — org read-only branch", () => {
       screen.queryByRole("button", { name: /^Delete$/i }),
     ).not.toBeInTheDocument();
     expect(
-      screen.queryByRole("button", { name: /Deactivate/i }),
+      screen.queryByRole("button", { name: /Disable/i }),
     ).not.toBeInTheDocument();
     await user.click(screen.getByRole("tab", { name: "Advanced" }));
     expect(screen.getByTestId("routing-section")).toHaveAttribute(

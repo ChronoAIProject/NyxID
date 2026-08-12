@@ -5,7 +5,7 @@ use uuid::Uuid;
 
 use crate::errors::{AppError, AppResult};
 use crate::models::service_endpoint::{
-    COLLECTION_NAME, OperationResponseContract, ServiceEndpoint,
+    COLLECTION_NAME, EndpointRisk, OperationResponseContract, ServiceEndpoint,
 };
 use crate::services::content_type::normalize_content_type;
 
@@ -21,6 +21,8 @@ pub struct EndpointInput {
     pub request_body_required: bool,
     pub response_description: Option<String>,
     pub response: OperationResponseContract,
+    pub risk: Option<EndpointRisk>,
+    pub supports_idempotency_key: bool,
 }
 
 /// Fields that can be updated on an existing endpoint.
@@ -35,6 +37,8 @@ pub struct EndpointUpdate {
     pub request_body_required: Option<bool>,
     pub response_description: Option<Option<String>>,
     pub response: Option<OperationResponseContract>,
+    pub risk: Option<Option<EndpointRisk>>,
+    pub supports_idempotency_key: Option<bool>,
     pub is_active: Option<bool>,
 }
 
@@ -113,6 +117,8 @@ pub async fn create_endpoint(
         request_body_required: input.request_body_required,
         response_description: input.response_description,
         response: normalize_response(input.response),
+        risk: input.risk,
+        supports_idempotency_key: input.supports_idempotency_key,
         is_active: true,
         created_at: now,
         updated_at: now,
@@ -198,6 +204,24 @@ pub async fn update_endpoint(
         let bson_val = bson::to_bson(&response)
             .map_err(|e| AppError::Internal(format!("BSON serialization error: {e}")))?;
         set_doc.insert("response", bson_val);
+    }
+    if let Some(risk) = updates.risk {
+        match risk {
+            Some(risk) => {
+                set_doc.insert(
+                    "risk",
+                    bson::to_bson(&risk).map_err(|error| {
+                        AppError::Internal(format!("BSON serialization error: {error}"))
+                    })?,
+                );
+            }
+            None => {
+                set_doc.insert("risk", bson::Bson::Null);
+            }
+        }
+    }
+    if let Some(supports_idempotency_key) = updates.supports_idempotency_key {
+        set_doc.insert("supports_idempotency_key", supports_idempotency_key);
     }
     if let Some(is_active) = updates.is_active {
         set_doc.insert("is_active", is_active);
@@ -345,6 +369,20 @@ async fn upsert_one_endpoint(
         let response_bson = bson::to_bson(&response)
             .map_err(|e| AppError::Internal(format!("BSON serialization error: {e}")))?;
         set_doc.insert("response", response_bson);
+        match input.risk {
+            Some(risk) => {
+                set_doc.insert(
+                    "risk",
+                    bson::to_bson(&risk).map_err(|error| {
+                        AppError::Internal(format!("BSON serialization error: {error}"))
+                    })?,
+                );
+            }
+            None => {
+                set_doc.insert("risk", bson::Bson::Null);
+            }
+        }
+        set_doc.insert("supports_idempotency_key", input.supports_idempotency_key);
 
         coll.update_one(doc! { "_id": &existing.id }, doc! { "$set": set_doc })
             .await?;
@@ -363,6 +401,8 @@ async fn upsert_one_endpoint(
             request_body_required: input.request_body_required,
             response_description: input.response_description,
             response,
+            risk: input.risk,
+            supports_idempotency_key: input.supports_idempotency_key,
             is_active: true,
             created_at: existing.created_at,
             updated_at: now,
@@ -383,6 +423,8 @@ async fn upsert_one_endpoint(
             request_body_required: input.request_body_required,
             response_description: input.response_description,
             response: normalize_response(input.response),
+            risk: input.risk,
+            supports_idempotency_key: input.supports_idempotency_key,
             is_active: true,
             created_at: now,
             updated_at: now,
@@ -409,6 +451,8 @@ mod tests {
             request_body_required: false,
             response_description: None,
             response: OperationResponseContract::default(),
+            risk: None,
+            supports_idempotency_key: false,
         }
     }
 
@@ -482,6 +526,8 @@ mod tests {
                 request_body_required: None,
                 response_description: None,
                 response: None,
+                risk: None,
+                supports_idempotency_key: None,
                 is_active: None,
             },
         )
@@ -520,6 +566,8 @@ mod tests {
                 request_body_required: None,
                 response_description: None,
                 response: None,
+                risk: None,
+                supports_idempotency_key: None,
                 is_active: None,
             },
         )

@@ -1,4 +1,5 @@
 use std::io::Write;
+use std::path::Path;
 
 use anyhow::Result;
 use comfy_table::{Table, presets::UTF8_FULL_CONDENSED};
@@ -404,7 +405,111 @@ pub async fn run(command: ApiKeyCommands) -> Result<()> {
             credential,
             auth,
         } => bind_credential(&auth, &id, &service, credential.as_deref()).await,
+        ApiKeyCommands::DurablePlan { file, auth } => {
+            let body = read_json_contract(&file)?;
+            let mut api = ApiClient::from_auth_checked(&auth).await?;
+            let plan: Value = api.post("/api-keys/scope-plan", &body).await?;
+            print_durable_value(&auth.output, &plan, "Durable scope plan")?;
+            if matches!(auth.output, OutputFormat::Table) {
+                eprintln!(
+                    "Confirm by placing normalized_grant_digest in scope_plan_digest without changing the selected operations or expiry."
+                );
+            }
+            Ok(())
+        }
+        ApiKeyCommands::DurableCreate { file, yes, auth } => {
+            confirm_durable_action(
+                yes,
+                "Provision this scheduled-invocation key and its exact durable grants?",
+            )?;
+            let body = read_json_contract(&file)?;
+            let mut api = ApiClient::from_auth_checked(&auth).await?;
+            let result: Value = api.post("/api-keys", &body).await?;
+            print_durable_value(&auth.output, &result, "Scheduled API key provisioned")?;
+            if matches!(auth.output, OutputFormat::Table) {
+                eprintln!("The full_key above is shown once. Grant receipts contain no secret.");
+            }
+            Ok(())
+        }
+        ApiKeyCommands::DurableGrants {
+            id,
+            include_revoked,
+            auth,
+        } => {
+            let mut api = ApiClient::from_auth_checked(&auth).await?;
+            let path = format!("/api-keys/{id}/durable-grants?include_revoked={include_revoked}");
+            let result: Value = api.get(&path).await?;
+            print_durable_value(&auth.output, &result, "Durable grants")?;
+            Ok(())
+        }
+        ApiKeyCommands::DurableRevoke {
+            id,
+            grant_id,
+            yes,
+            auth,
+        } => {
+            confirm_durable_action(yes, "Revoke this durable grant immediately?")?;
+            let mut api = ApiClient::from_auth_checked(&auth).await?;
+            let result: Value = api
+                .post(
+                    &format!("/api-keys/{id}/durable-grants/{grant_id}/revoke"),
+                    &serde_json::json!({}),
+                )
+                .await?;
+            print_durable_value(&auth.output, &result, "Durable grant revoked")?;
+            Ok(())
+        }
+        ApiKeyCommands::DurableReauthorize {
+            id,
+            file,
+            yes,
+            auth,
+        } => {
+            confirm_durable_action(
+                yes,
+                "Replace all active durable grants with this confirmed plan?",
+            )?;
+            let body = read_json_contract(&file)?;
+            let mut api = ApiClient::from_auth_checked(&auth).await?;
+            let result: Value = api
+                .post(&format!("/api-keys/{id}/durable-grants/reauthorize"), &body)
+                .await?;
+            print_durable_value(&auth.output, &result, "Durable grants reauthorized")?;
+            Ok(())
+        }
     }
+}
+
+fn read_json_contract(path: &Path) -> Result<Value> {
+    let bytes = std::fs::read(path)
+        .map_err(|error| anyhow::anyhow!("Failed to read {}: {error}", path.display()))?;
+    serde_json::from_slice(&bytes)
+        .map_err(|error| anyhow::anyhow!("Invalid JSON in {}: {error}", path.display()))
+}
+
+fn confirm_durable_action(yes: bool, prompt: &str) -> Result<()> {
+    if yes {
+        return Ok(());
+    }
+    eprint!("{prompt} [y/N] ");
+    std::io::stderr().flush()?;
+    let mut answer = String::new();
+    std::io::stdin().read_line(&mut answer)?;
+    if answer.trim().eq_ignore_ascii_case("y") {
+        return Ok(());
+    }
+    anyhow::bail!("Cancelled")
+}
+
+fn print_durable_value(output: &OutputFormat, value: &Value, label: &str) -> Result<()> {
+    match output {
+        OutputFormat::Json => println!("{}", serde_json::to_string_pretty(value)?),
+        OutputFormat::Table => {
+            eprintln!("{label}:");
+            eprintln!("{}", serde_json::to_string_pretty(value)?);
+        }
+    }
+    Ok(())
 }
 
 fn array_from_response<'a>(

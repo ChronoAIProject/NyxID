@@ -301,6 +301,24 @@ describe("KeysPage", () => {
     });
   });
 
+  it("badges an OAuth credential with known expired connection health", () => {
+    state.keys = [
+      makeKey({
+        id: "expired-oauth",
+        label: "Expired OAuth",
+        credential_type: "oauth2",
+        auth_method: "oauth2",
+        status: "active",
+        connection_status: "expired",
+      }),
+    ];
+
+    render(<KeysPage />);
+
+    expect(screen.getByText("Expired")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: /reconnect/i })).toBeInTheDocument();
+  });
+
   it("labels pending OAuth service cards as continue authentication", async () => {
     const user = userEvent.setup();
     state.keys = [

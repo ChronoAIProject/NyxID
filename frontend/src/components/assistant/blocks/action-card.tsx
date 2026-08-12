@@ -2,28 +2,27 @@ import { useEffect, useRef, useState } from "react";
 import {
   AlertTriangle,
   Globe,
+  KeyRound,
   Loader2,
   Server,
   ShieldCheck,
   X,
 } from "lucide-react";
+import { AssistantKeyCreateDialog } from "@/components/assistant/assistant-key-create-dialog";
+import { AssistantKeyRotateDialog } from "@/components/assistant/assistant-key-rotate-dialog";
 import { AddKeyDialog } from "@/components/dashboard/add-key-dialog";
 import { ServiceIcon } from "@/components/service-icon";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { useChatPresence } from "@/hooks/use-chat-presence";
+import { KEY_AUTH_FAILED, useKeyAuthorizationWatch } from "@/hooks/use-keys";
 import {
-  KEY_AUTH_ACTIVE,
-  KEY_AUTH_FAILED,
-  useKeyAuthorizationWatch,
-} from "@/hooks/use-keys";
-import {
-  actionServiceLabel,
   clampServiceLabel,
   descriptorForAction,
 } from "@/lib/assistant/action-registry";
 import { connectWatchDeadline } from "@/lib/assistant/connect-watch";
-import type { ActionReport } from "@/schemas/assistant-actions";
+import type { ActionReport, ActionResource } from "@/schemas/assistant-actions";
+import { usePendingConnectStore } from "@/stores/pending-connect-store";
 import type { ActionCardContentBlock } from "@/types/assistant";
 
 interface ActionCardProps {
@@ -53,6 +52,51 @@ function ParameterSummary({
 }) {
   const params = block.params;
   if (params.variant === "unknown") return null;
+  if (params.variant === "key_create") {
+    return (
+      <div className="space-y-2.5 border-y border-border bg-muted px-4 py-3">
+        <div className="flex flex-wrap items-center gap-1.5">
+          <span className="text-[10px] font-semibold uppercase tracking-[1px] text-muted-foreground">
+            Key
+          </span>
+          <Badge variant="secondary" className="max-w-full truncate">
+            {params.name}
+          </Badge>
+          <Badge variant="secondary" className="max-w-full truncate">
+            {params.platform}
+          </Badge>
+        </div>
+        <div className="flex flex-wrap items-center gap-1.5">
+          <span className="text-[10px] font-semibold uppercase tracking-[1px] text-muted-foreground">
+            Allowed services
+          </span>
+          {params.allowed_service_ids.map((serviceId) => (
+            <Badge
+              key={serviceId}
+              variant="secondary"
+              className="max-w-full truncate font-mono"
+            >
+              {serviceId}
+            </Badge>
+          ))}
+        </div>
+      </div>
+    );
+  }
+  if (params.variant === "key_rotate") {
+    return (
+      <div className="border-y border-border bg-muted px-4 py-3">
+        <div className="flex flex-wrap items-center gap-1.5">
+          <span className="text-[10px] font-semibold uppercase tracking-[1px] text-muted-foreground">
+            Predecessor
+          </span>
+          <Badge variant="secondary" className="max-w-full truncate font-mono">
+            {params.key_id}
+          </Badge>
+        </div>
+      </div>
+    );
+  }
   const scopes =
     params.variant === "catalog" ? params.requested_scopes.filter(Boolean) : [];
   let endpointHost = "";
@@ -105,7 +149,10 @@ function ParameterSummary({
           {/* Ids are wire-supplied and only length-capped at 256 chars, so they
               stay inside the card instead of widening the chat column. */}
           {params.via_node_id ? (
-            <Badge variant="secondary" className="max-w-full truncate font-mono">
+            <Badge
+              variant="secondary"
+              className="max-w-full truncate font-mono"
+            >
               <Server className="mr-1 h-3 w-3" />
               <span className="min-w-0 truncate">
                 Node {params.via_node_id}
@@ -113,7 +160,10 @@ function ParameterSummary({
             </Badge>
           ) : null}
           {params.target_org_id ? (
-            <Badge variant="secondary" className="max-w-full truncate font-mono">
+            <Badge
+              variant="secondary"
+              className="max-w-full truncate font-mono"
+            >
               <span className="min-w-0 truncate">
                 Org {params.target_org_id}
               </span>
@@ -125,52 +175,40 @@ function ParameterSummary({
   );
 }
 
-const RECEIPT = {
+/**
+ * A settled card keeps the whole connect card — service icon, title, scopes,
+ * routing — and swaps only its verdict surfaces. Collapsing it to a bare
+ * receipt used to erase what the user had just agreed to.
+ */
+const SETTLED = {
   completed: {
-    title: "Reported — awaiting assistant verification",
+    badge: "Connected",
+    badgeVariant: "success",
+    frame: "border-success/30 bg-success/10",
     icon: ShieldCheck,
-    container: "border-border bg-overlay",
-    iconClass: "text-nyx-secondary-400",
+    iconClass: "text-success",
+    footer:
+      "Your credential stays in NyxID. The assistant only received a reference to this service.",
   },
   declined: {
-    title: "Action declined",
+    badge: "Declined",
+    badgeVariant: "secondary",
+    frame: "border-border bg-overlay",
     icon: X,
-    container: "border-border bg-overlay",
     iconClass: "text-muted-foreground",
+    footer: null,
   },
   failed: {
-    title: "Connection failed",
+    badge: "Failed",
+    badgeVariant: "destructive",
+    frame: "border-destructive/30 bg-destructive/10",
     icon: AlertTriangle,
-    container: "border-destructive/30 bg-destructive/[0.06]",
     iconClass: "text-destructive",
+    footer: null,
   },
 } as const;
 
-function Receipt({ block }: { readonly block: ActionCardContentBlock }) {
-  if (
-    block.status !== "completed" &&
-    block.status !== "declined" &&
-    block.status !== "failed"
-  ) {
-    return null;
-  }
-  const receipt = RECEIPT[block.status];
-  const Icon = receipt.icon;
-  return (
-    <section className={`rounded-xl border p-4 ${receipt.container}`}>
-      <div className="flex items-center gap-2 text-[12px] font-semibold text-foreground">
-        <Icon className={`h-4 w-4 ${receipt.iconClass}`} />
-        {receipt.title}
-      </div>
-      <p className="mt-2 text-[12px] leading-relaxed text-muted-foreground">
-        {block.outcome_note}
-      </p>
-      <p className="mt-1.5 text-[10px] text-text-tertiary">
-        {actionServiceLabel(block.params)}
-      </p>
-    </section>
-  );
-}
+type SettledStatus = keyof typeof SETTLED;
 
 function StatusNotice({ block }: { readonly block: ActionCardContentBlock }) {
   if (block.status !== "blocked" && block.status !== "conflicted") {
@@ -195,17 +233,23 @@ export function ActionCard({
   const [dialogOpen, setDialogOpen] = useState(false);
   const resolvingRef = useRef(false);
   /**
-   * An out-of-band authorization handed to a provider, still settling. Held on
-   * the card rather than in the dialog because the dialog is the short-lived
-   * surface: the user goes to GitHub, comes back to the chat, and never
-   * reopens it. `startedAt` anchors both the poll cadence and the deadline.
+   * An out-of-band authorization handed to a provider, still settling. Held
+   * outside React (keyed by block id) rather than in the dialog or in this
+   * component: the dialog is the short-lived surface — the user goes to
+   * GitHub, comes back to the chat, and never reopens it — and the card
+   * itself outlives neither a conversation switch nor a history refetch that
+   * re-keys message groups. The busy projection it clears lives in the
+   * transport mirror and survives both, so the watch has to as well.
    */
-  const [pendingAuth, setPendingAuth] = useState<{
-    readonly keyId: string;
-    readonly startedAt: number;
-  } | null>(null);
-  /** Guards one auto-settlement per watched key against effect re-entry. */
+  const pendingAuth = usePendingConnectStore(
+    (state) => state.attempts[block.block_id] ?? null,
+  );
+  const beginPendingAuth = usePendingConnectStore((state) => state.begin);
+  const endPendingAuth = usePendingConnectStore((state) => state.end);
+  /** Guards one auto-settlement per authorization attempt against effect re-entry. */
   const watchSettledRef = useRef<string | null>(null);
+  /** One mount-time reconciliation, whatever the deps churn afterwards. */
+  const reconciledRef = useRef(false);
   const { visible, lastActivityAt } = useChatPresence();
 
   useEffect(() => {
@@ -214,12 +258,31 @@ export function ActionCard({
     }
   }, [block.status]);
 
+  // A card that mounts busy with no authorization behind it and no dialog open
+  // was stranded: `in_progress` disables every control, and its only writers
+  // (dialog dismissal, the watch, an explicit report) are all gone. Roll it
+  // back to actionable instead of leaving a "Connecting" spinner nobody can
+  // clear. Fresh cards mount `pending`, and a remount mid-authorization finds
+  // its attempt in the store, so neither is touched.
+  useEffect(() => {
+    if (reconciledRef.current) return;
+    reconciledRef.current = true;
+    if (block.status !== "in_progress" || pendingAuth !== null) return;
+    onProgress(block.block_id, false);
+  }, [block.block_id, block.status, pendingAuth, onProgress]);
+
   const settled =
     block.status === "completed" ||
     block.status === "declined" ||
     block.status === "failed";
 
+  // Typed, non-persisted records always carry an attempt id. Keep malformed
+  // runtime data settleable anyway, with a fallback isolated to this card.
+  const authorizationAttemptId =
+    pendingAuth?.attemptId ?? `missing:${block.block_id}`;
   const watch = useKeyAuthorizationWatch(pendingAuth?.keyId ?? null, {
+    attemptId: authorizationAttemptId,
+    previousAuthorizationAt: pendingAuth?.previousAuthorizationAt,
     // Presence gate: a hidden tab stops polling and resumes on focus.
     enabled: pendingAuth !== null && !settled && visible,
     deadlineAt: pendingAuth
@@ -233,16 +296,24 @@ export function ActionCard({
   // surface on the card rather than leaving it waiting in silence.
   useEffect(() => {
     const keyId = pendingAuth?.keyId;
-    if (!keyId || settled || watchSettledRef.current === keyId) return;
+    const attemptId = pendingAuth ? authorizationAttemptId : null;
+    if (
+      !keyId ||
+      !attemptId ||
+      settled ||
+      watchSettledRef.current === attemptId
+    ) {
+      return;
+    }
 
     // The ref is the synchronous re-entry guard; the state clear rides the
     // microtask so this effect never sets the state it depends on inline.
-    if (watch.status === KEY_AUTH_ACTIVE) {
-      watchSettledRef.current = keyId;
+    if (watch.authorized) {
+      watchSettledRef.current = attemptId;
       resolvingRef.current = true;
       void Promise.resolve()
         .then(() => {
-          setPendingAuth(null);
+          endPendingAuth(block.block_id);
           return onResolve({
             actionRequestId: block.action_request_id,
             originTurnId: block.origin_turn_id,
@@ -258,27 +329,30 @@ export function ActionCard({
     }
 
     if (watch.status === KEY_AUTH_FAILED || watch.timedOut) {
-      watchSettledRef.current = keyId;
+      watchSettledRef.current = attemptId;
       const note =
         watch.status === KEY_AUTH_FAILED
           ? authorizationFailedNote(watch.errorMessage)
           : AUTHORIZATION_TIMEOUT_NOTE;
       void Promise.resolve()
         .then(() => {
-          setPendingAuth(null);
+          endPendingAuth(block.block_id);
           return onBlock(block.block_id, note);
         })
         .catch(() => undefined);
     }
   }, [
     pendingAuth,
+    authorizationAttemptId,
     settled,
     watch.status,
+    watch.authorized,
     watch.timedOut,
     watch.errorMessage,
     block.block_id,
     block.action_request_id,
     block.origin_turn_id,
+    endPendingAuth,
     onResolve,
     onBlock,
     onProgress,
@@ -290,9 +364,26 @@ export function ActionCard({
     block.status !== "unsupported",
   );
 
-  if (settled) {
-    return <Receipt block={block} />;
-  }
+  const baseVerdict = settled ? SETTLED[block.status as SettledStatus] : null;
+  const verdict =
+    baseVerdict && block.status === "completed" && block.action === "key.create"
+      ? {
+          ...baseVerdict,
+          badge: "Created",
+          footer:
+            "The assistant received only the verified key reference. Key material stayed in NyxID.",
+        }
+      : baseVerdict &&
+          block.status === "completed" &&
+          block.action === "key.rotate"
+        ? {
+            ...baseVerdict,
+            badge: "Rotated",
+            footer:
+              "The assistant received only the verified replacement key reference. Replacement key material stayed in NyxID.",
+          }
+        : baseVerdict;
+  const VerdictIcon = verdict?.icon;
 
   // Trust the descriptor too: a card whose verb has no journey behind it must
   // never render a CTA, whatever status the block carries.
@@ -304,7 +395,12 @@ export function ActionCard({
   const blocked = block.status === "blocked";
   const conflicted = block.status === "conflicted";
   const primaryDisabled = busy || blocked || conflicted;
-  const secondaryDisabled = busy || conflicted;
+  // Decline stays live through `in_progress`. Abandoning a connection the user
+  // started is always their call, and it is the manual floor under every
+  // automatic settlement: with it disabled, a busy card that lost its watch
+  // had no reachable control at all. `report` supersedes any watch still
+  // running, and the transport de-duplicates a report already queued.
+  const secondaryDisabled = conflicted;
   const params = block.params;
 
   function setOpen(next: boolean) {
@@ -325,14 +421,14 @@ export function ActionCard({
 
   function report(
     disposition: "completed" | "declined" | "failed",
-    userServiceId?: string,
+    resource?: ActionResource,
   ) {
     // A manual outcome supersedes any watch still running for this card.
     if (pendingAuth) {
-      watchSettledRef.current = pendingAuth.keyId;
-      setPendingAuth(null);
+      watchSettledRef.current = authorizationAttemptId;
+      endPendingAuth(block.block_id);
     }
-    if (disposition === "completed" && !userServiceId?.trim()) {
+    if (disposition === "completed" && !resource) {
       resolvingRef.current = true;
       void Promise.resolve()
         .then(() => onBlock(block.block_id, VERIFICATION_BLOCKED_NOTE))
@@ -351,11 +447,8 @@ export function ActionCard({
     void Promise.resolve()
       .then(() =>
         onResolve(
-          disposition === "completed" && userServiceId
-            ? {
-                ...base,
-                resource: { userService: { userServiceId } },
-              }
+          disposition === "completed" && resource
+            ? { ...base, resource }
             : base,
         ),
       )
@@ -375,15 +468,20 @@ export function ActionCard({
       <div className="flex items-start gap-3 px-4 py-3.5">
         <div
           className={`flex h-9 w-9 shrink-0 items-center justify-center rounded-lg border ${
-            unsupported
-              ? "border-destructive/30 bg-destructive/10"
-              : "border-nyx-secondary-400/30 bg-nyx-secondary-400/10"
+            verdict
+              ? verdict.frame
+              : unsupported
+                ? "border-destructive/30 bg-destructive/10"
+                : "border-nyx-secondary-400/30 bg-nyx-secondary-400/10"
           }`}
         >
           {params.variant === "catalog" ? (
             <ServiceIcon slug={params.service_slug} size="sm" />
           ) : params.variant === "custom" ? (
             <Globe className="h-4 w-4 text-muted-foreground" />
+          ) : params.variant === "key_create" ||
+            params.variant === "key_rotate" ? (
+            <KeyRound className="h-4 w-4 text-muted-foreground" />
           ) : (
             <AlertTriangle className="h-4 w-4 text-destructive" />
           )}
@@ -395,28 +493,34 @@ export function ActionCard({
             </h3>
             <Badge
               variant={
-                unsupported || conflicted
-                  ? "destructive"
-                  : blocked
-                    ? "warning"
-                    : "accent"
+                verdict
+                  ? verdict.badgeVariant
+                  : unsupported || conflicted
+                    ? "destructive"
+                    : blocked
+                      ? "warning"
+                      : "accent"
               }
             >
-              {unsupported
-                ? "Unsupported"
-                : conflicted
-                  ? "Conflict"
-                  : blocked
-                    ? "Blocked"
-                    : awaitingAuthorization
-                      ? "Authorizing"
-                      : busy
-                        ? "In progress"
-                        : "Action required"}
+              {verdict
+                ? verdict.badge
+                : unsupported
+                  ? "Unsupported"
+                  : conflicted
+                    ? "Conflict"
+                    : blocked
+                      ? "Blocked"
+                      : awaitingAuthorization
+                        ? "Authorizing"
+                        : busy
+                          ? "In progress"
+                          : "Action required"}
             </Badge>
           </div>
           <p className="mt-1.5 text-[12px] leading-relaxed text-muted-foreground">
-            {descriptor.body(params)}
+            {/* A settled card states its outcome; the pitch for an action the
+                user already answered would only read as stale. */}
+            {verdict ? block.outcome_note : descriptor.body(params)}
           </p>
         </div>
       </div>
@@ -424,64 +528,87 @@ export function ActionCard({
       <ParameterSummary block={block} />
       <StatusNotice block={block} />
 
-      {!unsupported ? (
-        <div className="flex items-start gap-2 px-4 py-3">
-          <ShieldCheck className="mt-0.5 h-3.5 w-3.5 shrink-0 text-nyx-secondary-400" />
+      {verdict?.footer && VerdictIcon ? (
+        <div className="flex items-start gap-2 border-t border-border bg-muted px-4 py-3">
+          <VerdictIcon
+            className={`mt-0.5 h-3.5 w-3.5 shrink-0 ${verdict.iconClass}`}
+          />
           <p className="text-[11px] leading-relaxed text-muted-foreground">
-            You choose the account, routing, and credential. The assistant
-            receives only brokered access after you finish.
+            {verdict.footer}
           </p>
         </div>
       ) : null}
 
-      <div className="flex flex-wrap items-center gap-2 border-t border-border bg-muted px-4 py-3">
-        {!unsupported ? (
-          <Button
-            type="button"
-            variant="primary"
-            size="sm"
-            disabled={primaryDisabled}
-            onClick={() => {
-              onProgress(block.block_id, true);
-              setDialogOpen(true);
-            }}
-          >
-            {busy ? <Loader2 className="animate-spin" /> : <ShieldCheck />}
-            {awaitingAuthorization
-              ? "Waiting for authorization"
-              : busy
-                ? "Connecting"
-                : descriptor.cta(params)}
-          </Button>
-        ) : null}
-        <Button
-          type="button"
-          variant="outline"
-          size="sm"
-          disabled={secondaryDisabled}
-          onClick={() => report("declined")}
-        >
-          <X />
-          Decline
-        </Button>
-        {blocked ? (
+      {!verdict && !unsupported ? (
+        <div className="flex items-start gap-2 px-4 py-3">
+          <ShieldCheck className="mt-0.5 h-3.5 w-3.5 shrink-0 text-nyx-secondary-400" />
+          <p className="text-[11px] leading-relaxed text-muted-foreground">
+            {params.variant === "key_create"
+              ? "NyxID creates and verifies the key here. The assistant receives only the safe key reference after you finish."
+              : params.variant === "key_rotate"
+                ? "NyxID rotates and verifies the exact lineage here. The assistant receives only the replacement key reference after you finish."
+                : "You choose the account, routing, and credential. The assistant receives only brokered access after you finish."}
+          </p>
+        </div>
+      ) : null}
+
+      {!verdict ? (
+        <div className="flex flex-wrap items-center gap-2 border-t border-border bg-muted px-4 py-3">
+          {!unsupported ? (
+            <Button
+              type="button"
+              variant="primary"
+              size="sm"
+              disabled={primaryDisabled}
+              onClick={() => {
+                onProgress(block.block_id, true);
+                setDialogOpen(true);
+              }}
+            >
+              {busy ? <Loader2 className="animate-spin" /> : <ShieldCheck />}
+              {awaitingAuthorization
+                ? "Waiting for authorization"
+                : busy
+                  ? params.variant === "key_create" ||
+                    params.variant === "key_rotate"
+                    ? "Working"
+                    : "Connecting"
+                  : descriptor.cta(params)}
+            </Button>
+          ) : null}
           <Button
             type="button"
             variant="outline"
             size="sm"
             disabled={secondaryDisabled}
-            onClick={() => report("failed")}
+            onClick={() => report("declined")}
           >
-            <AlertTriangle />
-            Report failure
+            <X />
+            Decline
           </Button>
-        ) : null}
-        <span className="ml-auto text-[10px] text-muted-foreground">
-          Nothing is shared until you finish.
-        </span>
-      </div>
+          {blocked ? (
+            <Button
+              type="button"
+              variant="outline"
+              size="sm"
+              disabled={secondaryDisabled}
+              onClick={() => report("failed")}
+            >
+              <AlertTriangle />
+              Report failure
+            </Button>
+          ) : null}
+          <span className="ml-auto text-[10px] text-muted-foreground">
+            Nothing is shared until you finish.
+          </span>
+        </div>
+      ) : null}
 
-      {!unsupported ? (
+      {/* A settled card unmounts the dialog: its journey is over, and leaving
+          it mounted would let a stale flow write onto a reported outcome. */}
+      {!verdict &&
+      !unsupported &&
+      (params.variant === "catalog" || params.variant === "custom") ? (
         <AddKeyDialog
           open={dialogOpen}
           onOpenChange={setOpen}
@@ -489,16 +616,8 @@ export function ActionCard({
             params.variant === "catalog" ? params.service_slug : undefined
           }
           prefillIncludeAllCatalog={params.variant === "catalog"}
-          prefillNodeId={
-            params.variant === "unknown"
-              ? undefined
-              : (params.via_node_id ?? undefined)
-          }
-          prefillTargetOrgId={
-            params.variant === "unknown"
-              ? undefined
-              : (params.target_org_id ?? undefined)
-          }
+          prefillNodeId={params.via_node_id ?? undefined}
+          prefillTargetOrgId={params.target_org_id ?? undefined}
           prefillCustom={
             params.variant === "custom"
               ? {
@@ -509,11 +628,60 @@ export function ActionCard({
                 }
               : undefined
           }
-          onSuccess={({ userServiceId }) => report("completed", userServiceId)}
-          onAuthorizationPending={(keyId) => {
-            watchSettledRef.current = null;
-            setPendingAuth({ keyId, startedAt: Date.now() });
+          // Provider consent pages can never be iframed, so a top-level popup
+          // is the only handoff that keeps this conversation alive underneath
+          // it. Without this the action card fell back to the legacy path — a
+          // `target="_blank"` link needing a second click, and a callback that
+          // redirects to the key page, taking the chat tab with it.
+          launch="popup"
+          flow="cc"
+          onPopupViewResult={() => {
+            // The popup is done and the user asked to come back. Close the
+            // dialog and let the card settle itself from the key's terminal
+            // status — the outcome belongs in the transcript, not on a
+            // detour to the keys page.
+            setOpen(false);
+            return true;
           }}
+          onSuccess={({ userServiceId }) => {
+            if (!userServiceId.trim()) {
+              report("completed");
+              return;
+            }
+            report("completed", { userService: { userServiceId } });
+          }}
+          // Deliberately no onAuthorizationAborted: closing this short-lived
+          // dialog is not abandonment. The store-backed watch must survive
+          // dismissal/remount and settle the busy card (#1384).
+          onAuthorizationPending={(attempt) => {
+            watchSettledRef.current = null;
+            beginPendingAuth(block.block_id, {
+              ...attempt,
+              startedAt: Date.now(),
+            });
+          }}
+        />
+      ) : null}
+      {!verdict && !unsupported && params.variant === "key_create" ? (
+        <AssistantKeyCreateDialog
+          open={dialogOpen}
+          onOpenChange={setOpen}
+          actionRequestId={block.action_request_id}
+          params={{
+            name: params.name,
+            platform: params.platform,
+            allowedServiceIds: params.allowed_service_ids,
+          }}
+          onComplete={(keyId) => report("completed", { key: { keyId } })}
+        />
+      ) : null}
+      {!verdict && !unsupported && params.variant === "key_rotate" ? (
+        <AssistantKeyRotateDialog
+          open={dialogOpen}
+          onOpenChange={setOpen}
+          actionRequestId={block.action_request_id}
+          params={{ keyId: params.key_id }}
+          onComplete={(keyId) => report("completed", { key: { keyId } })}
         />
       ) : null}
     </section>

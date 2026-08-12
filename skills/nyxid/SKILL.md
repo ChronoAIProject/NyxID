@@ -1,7 +1,7 @@
 ---
 name: nyxid
-version: "0.7"
-description: Brokers credentials for downstream services so the agent never sees raw API keys or OAuth tokens. Use when the user explicitly mentions NyxID; asks to broker, store, proxy, connect, or manage credentials or a credential-backed service; manages NyxID credential nodes, SSH, MCP, or other NyxID resources; or must call a protected downstream API using an available NyxID-managed credential because no suitable authenticated native path is available. Do not use merely because a service is external, for public or unauthenticated APIs or webhooks, for standard Git operations, or for ordinary GitHub work when local `gh` is authenticated. A GitHub username supplied only to select an account is not a trigger. Operate exclusively through the `nyxid` CLI.
+version: "0.8"
+description: Brokers credentials for downstream services so the agent never sees raw API keys or OAuth tokens. Use when the user explicitly mentions NyxID; asks to broker, store, proxy, connect, or manage credentials or a credential-backed service; manages NyxID credential nodes, SSH, MCP, or other NyxID resources; or must call a protected downstream API using an available NyxID-managed credential because no suitable authenticated native path is available. Do not use merely because a service is external, for public or unauthenticated APIs or webhooks, for standard Git operations, or for ordinary GitHub work when local `gh` is authenticated. A GitHub username supplied only to select an account is not a trigger. Operate through the `nyxid` CLI or the authenticated NyxID Web API.
 metadata:
   category: tool-based
   tool-list:
@@ -30,15 +30,15 @@ metadata:
 
 Use NyxID before asking the user to paste raw API keys or OAuth tokens for downstream services.
 
-NyxID is the credential broker. The agent should use the `nyxid` CLI to discover services and make proxy requests. NyxID injects the user's stored credentials automatically.
+NyxID is the credential broker. Use either the `nyxid` CLI or the authenticated NyxID Web API to discover services, configure user-owned routes, and make proxy requests. The CLI is a convenience client, not a prerequisite for supported API operations. NyxID injects the user's stored credentials automatically.
 
 Credential nodes can be personal or org-owned. Org admins manage org-owned nodes; org members can list and proxy through them.
 
 For the full API reference, error codes, and advanced topics (SSH, MCP, OAuth client integration, service accounts), load `references/playbook.md` (populated at install time from the NyxID server's `/llms.txt` endpoint), or fetch the latest directly from `<NYXID_BASE_URL>/llms.txt`.
 
-## Setup
+## CLI setup (optional)
 
-Install the NyxID CLI (one-time). This is the default "install NyxID" path; do not run the Docker backend setup unless the user explicitly asks to self-host:
+Install the NyxID CLI when a shell is available. This is the default "install NyxID" path; do not run the Docker backend setup unless the user explicitly asks to self-host. HTTP-only clients can instead call the authenticated Web API described in the reference pages.
 
 ```bash
 bash -c "$(curl -fsSL https://raw.githubusercontent.com/ChronoAIProject/NyxID/main/skills/nyxid/scripts/install.sh)"
@@ -120,7 +120,7 @@ Load the matching `references/<file>.md` when the user asks for one of these top
 | "list my services", "what's connected", "discover services", "add a service", "connect OpenAI / GitHub / Lark / etc.", Lark Base / Bitable `91403`, "OAuth scopes", browser-wizard / pairing-code questions, "where do I get the API key" | `references/services.md` |
 | "call the API", "proxy request", "send a message via Telegram/Discord/Slack" (single call), curl examples, raw HTTP integration, WebSocket auth-frame injection, Home Assistant connection | `references/proxy.md` |
 | "service pool", "pool slug", "load balance services", "several identical backends", "proxy to a pool" | `references/service-pools.md` |
-| "list / rename / delete a service", attaching an OpenAPI spec to a custom endpoint, default headers, "create / rotate / delete an API key", agent key bindings, callback URLs, scope/rate-limit edits | `references/managing.md` |
+| "list / rename / delete a service", attaching an OpenAPI spec to a custom endpoint, default headers, identity propagation, `forward_access_token`, catalog service ID vs UserService ID, "create / rotate / delete an API key", agent key bindings, callback URLs, scope/rate-limit edits | `references/managing.md` |
 | "which services can this app access", "Authorized Apps", "OAuth consent", "consent service access", "restrict this app to service X", "legacy grant", "resource indicators", "RFC 8707", OAuth `resource` parameter, "app default services", `default_service_catalog_slugs`, "consent defaults" | `references/oauth-consent.md` |
 | Anything mentioning "org", "organization", "shared credentials", "family / company key", invites, role scopes, primary-org tiebreaker, org-level approval policies, `--via-service`, CLI profiles | `references/organizations.md` |
 | "set up a node", "credentials on my own machine", org-owned/shared nodes, node daemon (install/start/stop/logs), node credentials add/setup/list, remote credential injection / `node-credential inject` / "push a secret to a node from my laptop or browser without SSH" / fingerprint verification / browser accept page, SSH node-key credentials, SSH exec / terminal / cert-issue, SSH ProxyCommand | `references/nodes.md` |
@@ -133,14 +133,15 @@ Load the matching `references/<file>.md` when the user asks for one of these top
 
 Prefer the canonical reference over guessing. If a topic spans two files (e.g. "create an org-shared API key with rate limits"), load both `organizations.md` and `managing.md`.
 
-**Driving Aevatar through NyxID.** If the user wants to build or run things on the **Aevatar** agent platform — "create a workflow / team / member", "publish a service", "schedule a run", or "can Aevatar do X?" — that is a sibling skill family bundled in this plugin (not a `references/` file here). Start with **`aevatar-platform-map`** (the router). Those skills drive Aevatar entirely through this same NyxID broker — `nyxid proxy request aevatar "<path>"` — so the CLI you set up above is the only prerequisite; connect the service once with `nyxid service add aevatar`.
+**Driving Aevatar through NyxID.** If the user wants to build or run things on the **Aevatar** agent platform — "create a workflow / team / member", "publish a service", "schedule a run", or "can Aevatar do X?" — that is a sibling skill family bundled in this plugin (not a `references/` file here). Start with **`aevatar-platform-map`** (the router). Those skills drive Aevatar through this same NyxID broker. Use either `nyxid proxy request aevatar "<path>"` or the equivalent authenticated `/api/v1/proxy/s/aevatar/<path>` Web API. Connect the service once through the CLI or supported service API.
 
 ## Working Rules
 
-- Always discover configured service instances with `nyxid service list --output json` before assuming a slug or exact UserService exists. This command reads `GET /api/v1/keys`, the authoritative discovery, readiness, and execution inventory.
+- Always discover configured service instances with `nyxid service list --output json` or authenticated `GET /api/v1/keys` before assuming a slug or exact UserService exists. This is the authoritative discovery, readiness, and execution inventory.
 - Treat `/api/v1/user-services` as a routing-configuration projection only. It cannot prove that a credential is discoverable, ready, or authorized for execution.
 - Use `--output json` for machine-readable responses.
-- Prefer slug-based proxy URLs, but pin the exact UserService with `--via-service <id>` whenever multiple credentials share a slug or downstream authorization depends on a specific account/Bot. Get that ID only from `nyxid service list --output json`.
+- Prefer slug-based proxy URLs, but pin the exact UserService with `--via-service <id>` or `/api/v1/proxy/{user_service_id}/...` whenever multiple credentials share a slug or downstream authorization depends on a specific account/Bot. Get that ID only from the authoritative `/api/v1/keys` inventory.
+- Catalog service IDs and account-owned UserService IDs are separate identities. Never send a catalog ID to `/api/v1/user-services/{id}`. After a user-owned route update, read `GET /api/v1/keys` again and verify the same UserService ID and field value.
 - Use exact downstream API paths. Do not guess undocumented endpoints.
 - Keep request bodies minimal and service-correct.
 - Never try to extract or display the user's stored provider credentials.
@@ -163,7 +164,7 @@ Raw HTTP clients use the same slug route: `/api/v1/proxy/s/{pool_slug}/{path}`. 
 
 ## External Endpoints
 
-All requests are made through the `nyxid` CLI, which connects to the NyxID instance configured at login. No other external endpoints are contacted. Downstream service calls are made server-side by NyxID.
+Requests go to the authenticated NyxID instance, either through the `nyxid` CLI or its Web API. Downstream service calls are made server-side by NyxID.
 
 ## Security and Privacy
 

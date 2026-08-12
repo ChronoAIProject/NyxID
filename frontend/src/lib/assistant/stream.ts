@@ -43,6 +43,10 @@ export function toTerminalBlock(block: ContentBlock): ContentBlock {
       return block.decision === null
         ? { ...block, decision: "cancelled" }
         : block;
+    case "input_card":
+      return block.status === "pending"
+        ? { ...block, status: "cancelled" }
+        : block;
     case "connect_card":
       if (
         block.state === "connected" ||

@@ -226,6 +226,8 @@ fn endpoint_inputs_from_spec(spec: &serde_json::Value) -> AppResult<Vec<Endpoint
             request_body_required: endpoint.request_body_required,
             response_description: None,
             response: endpoint.response,
+            risk: endpoint.risk,
+            supports_idempotency_key: endpoint.supports_idempotency_key,
         });
     }
     Ok(inputs)

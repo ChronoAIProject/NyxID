@@ -7,6 +7,9 @@ export interface NyxIDClientConfig {
   readonly fetchFn?: typeof fetch;
 }
 
+export * from "./services.js";
+export * from "./webhooks.js";
+
 export interface LoginRedirectOptions {
   readonly scope?: string;
   readonly redirectUri?: string;
@@ -83,7 +86,10 @@ function resolveStorage(explicit?: StorageLike): StorageLike {
 function base64UrlEncode(input: Uint8Array): string {
   let binary = "";
   for (const byte of input) binary += String.fromCharCode(byte);
-  return btoa(binary).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/g, "");
+  return btoa(binary)
+    .replace(/\+/g, "-")
+    .replace(/\//g, "_")
+    .replace(/=+$/g, "");
 }
 
 function randomUrlSafeString(bytes = 32): string {
@@ -162,12 +168,15 @@ export class NyxIDClient {
     window.location.assign(url);
   }
 
-  async handleRedirectCallback(currentUrl = window.location.href): Promise<NyxIDTokenSet> {
+  async handleRedirectCallback(
+    currentUrl = window.location.href,
+  ): Promise<NyxIDTokenSet> {
     const callback = new URL(currentUrl);
     const oauthError = callback.searchParams.get("error");
     if (oauthError) {
       throw new Error(
-        callback.searchParams.get("error_description") ?? `OAuth error: ${oauthError}`,
+        callback.searchParams.get("error_description") ??
+          `OAuth error: ${oauthError}`,
       );
     }
 
@@ -208,11 +217,12 @@ export class NyxIDClient {
 
     if (!response.ok) {
       this.storage.removeItem(this.pendingKey);
-      const errBody = await response.json().catch(() => null) as {
+      const errBody = (await response.json().catch(() => null)) as {
         error?: string;
         error_description?: string;
       } | null;
-      const detail = errBody?.error_description ?? errBody?.error ?? response.statusText;
+      const detail =
+        errBody?.error_description ?? errBody?.error ?? response.statusText;
       throw new Error(`Token exchange failed: ${detail}`);
     }
 

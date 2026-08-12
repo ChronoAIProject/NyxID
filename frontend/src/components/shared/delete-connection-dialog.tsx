@@ -11,20 +11,27 @@ import {
 import { grantRevocationDescription } from "@/schemas/oauth-revocation";
 
 /**
- * Confirmation for revoking a single connection.
+ * Confirmation for deleting a single connection.
  *
  * This exists because the explanation has to be read before the click, and
  * the connection modal had nowhere to put it: its footer confirm was a slot
- * sized for the three words "Revoke this connection?", so the grant-revoking
- * copy introduced with upstream revocation wrapped into two lines of prose
- * sitting inside the card the user was already looking at — indistinguishable
- * from an error the app had just raised at them.
+ * sized for three words, so the grant-revoking copy introduced with upstream
+ * revocation wrapped into two lines of prose sitting inside the card the user
+ * was already looking at — indistinguishable from an error the app had just
+ * raised at them.
+ *
+ * Named for the user-facing verb, not the backend mechanism: "delete" is the
+ * one destructive action in this vocabulary, paired against the reversible
+ * "disable". Upstream *revocation* is a consequence explained in the body
+ * copy, and "revoked" separately survives as a credential *status* the same
+ * card can display (`lib/credential-status.ts`) — keeping the button verb off
+ * that word stops the two meanings colliding.
  *
  * `GrantCascadeDialog` is the sibling of this dialog for the case where the
  * backend reports other services sharing the same upstream grant; between
- * them every revoke path now confirms in a modal.
+ * them every delete path now confirms in a modal.
  */
-export function RevokeConnectionDialog({
+export function DeleteConnectionDialog({
   providerName,
   connectionLabel,
   revokesGrant,
@@ -51,7 +58,7 @@ export function RevokeConnectionDialog({
               <AlertTriangle className="h-4 w-4" />
             </span>
             <div className="space-y-1.5">
-              <DialogTitle>Revoke {providerName} connection?</DialogTitle>
+              <DialogTitle>Delete {providerName} connection?</DialogTitle>
               <DialogDescription>
                 {revokesGrant
                   ? grantRevocationDescription(providerName)
@@ -71,7 +78,8 @@ export function RevokeConnectionDialog({
             </p>
           )}
           <p className="text-text-tertiary">
-            The assistant loses access to this service immediately.
+            The assistant loses access to this service immediately, and this
+            cannot be undone. To stop it temporarily instead, disable it.
           </p>
         </div>
 
@@ -84,7 +92,7 @@ export function RevokeConnectionDialog({
             isLoading={isPending}
             onClick={onConfirm}
           >
-            Revoke
+            Delete
           </Button>
         </DialogFooter>
       </DialogContent>

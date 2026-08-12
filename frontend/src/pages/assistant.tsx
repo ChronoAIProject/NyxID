@@ -36,7 +36,13 @@ import {
   useDecideApproval,
   useDeleteConversation,
   useSendMessage,
+  useResolveInput,
+  useResolvePlan,
+  useRetryStep,
   useTurnEpisode,
+  useSkipStep,
+  useSteerTask,
+  useStopTask,
 } from "@/hooks/use-assistant";
 import { useFeature } from "@/hooks/use-feature-flag";
 import { ApiError } from "@/lib/api-client";
@@ -46,6 +52,7 @@ import {
   AssistantTurnCancelledError,
 } from "@/lib/assistant/errors";
 import { markChatActivity } from "@/lib/assistant/connect-watch";
+import { isLegacyConversationId } from "@/lib/assistant/aevatar-transport";
 import {
   assistantEngineForConversationId,
   assistantTransport,
@@ -54,10 +61,15 @@ import {
 import { parseAssistantSearch } from "@/lib/assistant/search";
 import { FEATURE_FLAG } from "@/lib/feature-flags";
 import type { ActionReport } from "@/schemas/assistant-actions";
+import type { InputAnswer } from "@/schemas/assistant-input";
 import { useAssistantContextStore } from "@/stores/assistant-context-store";
 import { useAssistantDraftStore } from "@/stores/assistant-draft-store";
 import { useAuthStore } from "@/stores/auth-store";
-import { isTurnActive, type AssistantMessage } from "@/types/assistant";
+import {
+  isTurnActive,
+  type AssistantMessage,
+  type TaskPlanContentBlock,
+} from "@/types/assistant";
 
 const MockScenariosAction = import.meta.env.DEV
   ? lazy(() =>
@@ -117,6 +129,23 @@ function optimisticUserMessage(text: string): AssistantMessage {
     blocks: [{ type: "text", block_id: "optimistic-user-block", text }],
     created_at: new Date().toISOString(),
   };
+}
+
+function latestTaskPlanBlock(
+  messages: readonly AssistantMessage[],
+): TaskPlanContentBlock | undefined {
+  for (
+    let messageIndex = messages.length - 1;
+    messageIndex >= 0;
+    messageIndex -= 1
+  ) {
+    const blocks = messages[messageIndex]?.blocks ?? [];
+    for (let blockIndex = blocks.length - 1; blockIndex >= 0; blockIndex -= 1) {
+      const block = blocks[blockIndex];
+      if (block?.type === "task_plan") return block;
+    }
+  }
+  return undefined;
 }
 
 interface PendingSendEcho {
@@ -225,7 +254,13 @@ export function AssistantPage({
   const sendMessage = useSendMessage(selectedId, engine);
   const cancelTurn = useCancelTurn(selectedId, engine);
   const decideApproval = useDecideApproval(selectedId, engine);
+  const resolveInput = useResolveInput(selectedId, engine);
+  const resolvePlan = useResolvePlan(selectedId);
   const actionCards = useActionCardActions(selectedId, engine);
+  const stopTask = useStopTask(selectedId);
+  const steerTask = useSteerTask(selectedId);
+  const retryStep = useRetryStep(selectedId);
+  const skipStep = useSkipStep(selectedId);
   const deleteConversation = useDeleteConversation(engine);
   const turnStatus = turn.data?.status;
   const active = isTurnActive(turnStatus);
@@ -234,7 +269,13 @@ export function AssistantPage({
     active ||
     sendMessage.isPending ||
     cancelTurn.isPending ||
+    stopTask.isPending ||
+    steerTask.isPending ||
+    retryStep.isPending ||
+    skipStep.isPending ||
+    resolvePlan.isPending ||
     decideApproval.isPending ||
+    resolveInput.isPending ||
     episodeState?.open === true;
 
   useEffect(() => {
@@ -494,6 +535,15 @@ export function AssistantPage({
     }
   }
 
+  async function handleResolveInput(blockId: string, answer: InputAnswer) {
+    beginContinuation();
+    try {
+      await resolveInput.mutateAsync({ blockId, answer });
+    } finally {
+      endContinuation();
+    }
+  }
+
   async function handleResolveAction(report: ActionReport) {
     beginContinuation();
     try {
@@ -571,8 +621,66 @@ export function AssistantPage({
       ? transcript
       : [...transcript, optimisticUserMessage(pendingEcho.content)];
   }, [history.data?.messages, pendingEcho]);
+  const taskPlanBlock = useMemo(
+    () => latestTaskPlanBlock(messages),
+    [messages],
+  );
+  const typedTaskActive = Boolean(
+    selectedId?.startsWith("nyxid-chat-") &&
+    taskPlanBlock?.plan.actorId === selectedId &&
+    taskPlanBlock.plan.status === "active",
+  );
+
+  async function handleComposerSend(content: string) {
+    if (!typedTaskActive) return handleSend(content);
+    beginContinuation();
+    try {
+      await steerTask.mutateAsync(content);
+    } finally {
+      endContinuation();
+    }
+  }
+
+  async function handleStopTask() {
+    beginContinuation();
+    try {
+      await stopTask.mutateAsync();
+    } finally {
+      endContinuation();
+    }
+  }
+
+  async function handleRetryStep(stepId: string) {
+    beginContinuation();
+    try {
+      await retryStep.mutateAsync(stepId);
+    } finally {
+      endContinuation();
+    }
+  }
+
+  async function handleSkipStep(stepId: string) {
+    beginContinuation();
+    try {
+      await skipStep.mutateAsync(stepId);
+    } finally {
+      endContinuation();
+    }
+  }
+
+  async function handleResolvePlan(blockId: string, confirmed: boolean) {
+    beginContinuation();
+    try {
+      await resolvePlan.mutateAsync({ blockId, confirmed });
+    } finally {
+      endContinuation();
+    }
+  }
   const awaitingFirstTurn =
     active || sendMessage.isPending || episodeState?.open === true;
+  const legacyReadOnly = selectedId
+    ? isLegacyConversationId(selectedId)
+    : false;
 
   /**
    * Whether THIS episode has closed, per the pump that served it.
@@ -672,15 +780,22 @@ export function AssistantPage({
             }
             emptyDescription={directChatEnabled ? DIRECT_MODE_COPY : undefined}
             onDecideApproval={handleDecideApproval}
+            onResolveInput={handleResolveInput}
             onActionProgress={actionCards.setInProgress}
             onBlockAction={actionCards.blockAction}
             onResolveAction={handleResolveAction}
+            onStopTask={handleStopTask}
+            onRetryStep={handleRetryStep}
+            onSkipStep={handleSkipStep}
+            onResolvePlan={handleResolvePlan}
           />
         )}
         <div ref={composerRef} className="absolute inset-x-0 bottom-0 z-10">
           <ChatComposer
-            active={active}
-            sending={sendMessage.isPending}
+            active={active || typedTaskActive}
+            allowActiveInput={typedTaskActive}
+            sending={sendMessage.isPending || steerTask.isPending}
+            disabled={legacyReadOnly}
             ownerUserId={user?.id ?? null}
             draftKey={draftKey}
             focusRequest={composerFocusRequest}
@@ -692,8 +807,12 @@ export function AssistantPage({
                 />
               ) : undefined
             }
-            onSend={handleSend}
-            onStop={() => cancelTurn.mutateAsync()}
+            onSend={handleComposerSend}
+            onStop={() =>
+              typedTaskActive
+                ? stopTask.mutateAsync()
+                : cancelTurn.mutateAsync()
+            }
           />
         </div>
       </div>

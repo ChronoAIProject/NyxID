@@ -53,6 +53,33 @@ struct RenderedDeviceNotification {
     data: HashMap<String, String>,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ConnectionExpiredNotificationContext {
+    pub service_label: String,
+    pub service_slug: String,
+    pub user_service_id: String,
+    pub api_key_id: String,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct RenderedConnectionExpiredNotification {
+    title: String,
+    body: String,
+    data: HashMap<String, String>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct RenderedTriggerNotification {
+    title: String,
+    telegram_message: String,
+    push_body: String,
+    push_data: HashMap<String, String>,
+}
+
+const TELEGRAM_TRIGGER_PREVIEW_MAX_CHARS: usize = 2_800;
+const PUSH_TRIGGER_PREVIEW_MAX_CHARS: usize = 512;
+const TRUNCATION_MARKER: &str = "\n...[truncated]";
+
 /// Result of sending push to a single device.
 enum PushResult {
     Success,
@@ -176,6 +203,245 @@ pub async fn send_device_notification(
         telegram_chat_id,
         telegram_message_id,
     })
+}
+
+/// Send a dead-connection notice through the user's enabled channels.
+/// Missing channels and individual delivery failures are treated as a no-op;
+/// credential refresh and proxy execution must never depend on notification
+/// infrastructure availability.
+#[allow(clippy::too_many_arguments)]
+pub async fn send_connection_expired_notification(
+    db: &Database,
+    config: &AppConfig,
+    http_client: &Client,
+    fcm_auth: Option<&FcmAuth>,
+    apns_auth: Option<&ApnsAuth>,
+    user_id: &str,
+    context: &ConnectionExpiredNotificationContext,
+) -> AppResult<NotificationResult> {
+    let Some(channel) = db
+        .collection::<NotificationChannel>(COLLECTION_NAME)
+        .find_one(doc! { "user_id": user_id })
+        .await?
+    else {
+        return Ok(NotificationResult {
+            channels: Vec::new(),
+            telegram_chat_id: None,
+            telegram_message_id: None,
+        });
+    };
+    let rendered = render_connection_expired_notification(config, context);
+    let mut channels_used = Vec::new();
+    let mut telegram_chat_id = None;
+    let mut tokens_to_remove = Vec::new();
+
+    if channel.telegram_enabled
+        && let Some(chat_id) = channel.telegram_chat_id
+        && let Some(bot_token) = config.telegram_bot_token.as_deref()
+    {
+        let telegram_text = format!(
+            "<b>{}</b>\n\n{}",
+            html_escape(&rendered.title),
+            html_escape(&rendered.body)
+        );
+        match telegram_service::send_text_message(http_client, bot_token, chat_id, &telegram_text)
+            .await
+        {
+            Ok(()) => {
+                channels_used.push("telegram".to_string());
+                telegram_chat_id = Some(chat_id);
+            }
+            Err(error) => tracing::warn!(
+                user_id = %user_id,
+                error = %error,
+                "Telegram connection expiry notification failed"
+            ),
+        }
+    }
+
+    if channel.push_enabled && !channel.push_devices.is_empty() {
+        let unique_devices = unique_devices_by_token(&channel.push_devices);
+        let push_futures: Vec<_> = unique_devices
+            .iter()
+            .map(|device| {
+                send_push_to_device(
+                    http_client,
+                    fcm_auth,
+                    apns_auth,
+                    config,
+                    device,
+                    &rendered.title,
+                    &rendered.body,
+                    &rendered.data,
+                )
+            })
+            .collect();
+        let results = futures::future::join_all(push_futures).await;
+        let mut successful_device_ids = Vec::new();
+        for (index, result) in results.into_iter().enumerate() {
+            match result {
+                Ok(PushResult::Success) => {
+                    let platform = &unique_devices[index].platform;
+                    if !channels_used.contains(platform) {
+                        channels_used.push(platform.clone());
+                    }
+                    successful_device_ids.push(unique_devices[index].device_id.clone());
+                }
+                Ok(PushResult::TokenInvalid) => {
+                    tokens_to_remove.push(unique_devices[index].device_id.clone());
+                }
+                Err(error) => tracing::warn!(
+                    user_id = %user_id,
+                    device_id = %unique_devices[index].device_id,
+                    error = %error,
+                    "Push connection expiry notification failed"
+                ),
+            }
+        }
+        if !successful_device_ids.is_empty() {
+            let db = db.clone();
+            let channel_id = channel.id.clone();
+            tokio::spawn(async move {
+                update_device_last_used(&db, &channel_id, &successful_device_ids).await;
+            });
+        }
+    }
+
+    if !tokens_to_remove.is_empty() {
+        let db = db.clone();
+        let channel_id = channel.id;
+        tokio::spawn(async move {
+            remove_stale_device_tokens(&db, &channel_id, &tokens_to_remove).await;
+        });
+    }
+
+    Ok(NotificationResult {
+        channels: channels_used,
+        telegram_chat_id,
+        telegram_message_id: None,
+    })
+}
+
+/// Deliver an inbound trigger envelope through the user's configured
+/// notification channels. The payload is not persisted.
+#[allow(clippy::too_many_arguments)]
+pub async fn send_trigger_notification(
+    db: &Database,
+    config: &AppConfig,
+    http_client: &Client,
+    fcm_auth: Option<&FcmAuth>,
+    apns_auth: Option<&ApnsAuth>,
+    user_id: &str,
+    trigger_label: &str,
+    envelope: &serde_json::Value,
+) -> AppResult<()> {
+    let Some(channel) = db
+        .collection::<NotificationChannel>(COLLECTION_NAME)
+        .find_one(doc! { "user_id": user_id })
+        .await?
+    else {
+        return Err(AppError::TriggerDeliveryUnsupported);
+    };
+    let rendered = render_trigger_notification(trigger_label, envelope)?;
+    let mut delivered = false;
+    let mut attempted = false;
+
+    if channel.telegram_enabled
+        && let Some(chat_id) = channel.telegram_chat_id
+        && let Some(bot_token) = config.telegram_bot_token.as_deref()
+    {
+        attempted = true;
+        if telegram_service::send_text_message(
+            http_client,
+            bot_token,
+            chat_id,
+            &rendered.telegram_message,
+        )
+        .await
+        .is_ok()
+        {
+            delivered = true;
+        }
+    }
+
+    if channel.push_enabled && !channel.push_devices.is_empty() {
+        attempted = true;
+        for device in unique_devices_by_token(&channel.push_devices) {
+            if send_push_to_device(
+                http_client,
+                fcm_auth,
+                apns_auth,
+                config,
+                device,
+                &rendered.title,
+                &rendered.push_body,
+                &rendered.push_data,
+            )
+            .await
+            .is_ok()
+            {
+                delivered = true;
+            }
+        }
+    }
+
+    if delivered {
+        Ok(())
+    } else if attempted {
+        Err(AppError::TriggerDeliveryFailed)
+    } else {
+        Err(AppError::TriggerDeliveryUnsupported)
+    }
+}
+
+fn render_trigger_notification(
+    trigger_label: &str,
+    envelope: &serde_json::Value,
+) -> AppResult<RenderedTriggerNotification> {
+    let title = format!("Trigger: {trigger_label}");
+    let event_id = envelope
+        .get("event_id")
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or("unknown");
+    let preview_value = envelope.get("payload").unwrap_or(envelope);
+    let pretty_preview = serde_json::to_string_pretty(preview_value)
+        .map_err(|_| AppError::TriggerDeliveryUnsupported)?;
+    let telegram_preview = truncate_chars(
+        &html_escape(&pretty_preview),
+        TELEGRAM_TRIGGER_PREVIEW_MAX_CHARS,
+    );
+    let push_preview = truncate_chars(&pretty_preview, PUSH_TRIGGER_PREVIEW_MAX_CHARS);
+    let telegram_message = format!(
+        "<b>{}</b>\n\n<pre>{}</pre>",
+        html_escape(&title),
+        telegram_preview
+    );
+    let push_body = format!("Event {event_id}\n{push_preview}");
+    let mut push_data = HashMap::new();
+    push_data.insert("type".to_string(), "trigger_event".to_string());
+    push_data.insert(
+        "trigger_label".to_string(),
+        truncate_chars(trigger_label, 128),
+    );
+    push_data.insert("event_id".to_string(), truncate_chars(event_id, 128));
+    push_data.insert("preview".to_string(), push_preview);
+    Ok(RenderedTriggerNotification {
+        title,
+        telegram_message,
+        push_body,
+        push_data,
+    })
+}
+
+fn truncate_chars(value: &str, max_chars: usize) -> String {
+    if value.chars().count() <= max_chars {
+        return value.to_string();
+    }
+    let marker_len = TRUNCATION_MARKER.chars().count();
+    let retained = max_chars.saturating_sub(marker_len);
+    let mut truncated: String = value.chars().take(retained).collect();
+    truncated.push_str(TRUNCATION_MARKER);
+    truncated
 }
 
 /// Send an approval notification to the user via all enabled channels.
@@ -565,6 +831,31 @@ fn render_device_notification(
     }
 
     RenderedDeviceNotification { title, body, data }
+}
+
+fn render_connection_expired_notification(
+    config: &AppConfig,
+    context: &ConnectionExpiredNotificationContext,
+) -> RenderedConnectionExpiredNotification {
+    let keys_url = format!("{}/keys", config.frontend_url.trim_end_matches('/'));
+    let body = format!(
+        "{} ({}) needs to be reconnected. Open {} or run nyxid connect {}.",
+        context.service_label, context.service_slug, keys_url, context.service_slug
+    );
+    let mut data = HashMap::new();
+    data.insert("type".to_string(), "connection_expired".to_string());
+    data.insert("service_slug".to_string(), context.service_slug.clone());
+    data.insert(
+        "user_service_id".to_string(),
+        context.user_service_id.clone(),
+    );
+    data.insert("api_key_id".to_string(), context.api_key_id.clone());
+    data.insert("reconnect_url".to_string(), keys_url);
+    RenderedConnectionExpiredNotification {
+        title: "Connection expired".to_string(),
+        body,
+        data,
+    }
 }
 
 fn html_escape(value: &str) -> String {
@@ -1320,5 +1611,68 @@ mod tests {
             html_escape("Kitchen <Cam> & Lab"),
             "Kitchen &lt;Cam&gt; &amp; Lab"
         );
+    }
+
+    #[test]
+    fn render_connection_expired_includes_reconnect_paths_and_metadata() {
+        let config = crate::test_utils::test_app_config();
+        let context = ConnectionExpiredNotificationContext {
+            service_label: "GitHub work".to_string(),
+            service_slug: "github-work".to_string(),
+            user_service_id: "service-id".to_string(),
+            api_key_id: "key-id".to_string(),
+        };
+        let rendered = render_connection_expired_notification(&config, &context);
+        assert_eq!(rendered.title, "Connection expired");
+        assert!(rendered.body.contains("GitHub work (github-work)"));
+        assert!(rendered.body.contains("/keys"));
+        assert!(rendered.body.contains("nyxid connect github-work"));
+        assert_eq!(
+            rendered.data.get("type").map(String::as_str),
+            Some("connection_expired")
+        );
+        assert_eq!(
+            rendered.data.get("user_service_id").map(String::as_str),
+            Some("service-id")
+        );
+    }
+
+    #[test]
+    fn oversized_trigger_payload_renders_deliverable_bounded_notifications() {
+        let envelope = serde_json::json!({
+            "event_id": "provider-event-123",
+            "trigger_id": "trigger-id",
+            "source": "inbound_webhook",
+            "received_at": "2026-08-06T09:30:00Z",
+            "payload": {
+                "content": "<private>".repeat(40_000),
+            },
+        });
+
+        let rendered = render_trigger_notification("Repository activity", &envelope)
+            .expect("oversized payload still renders");
+        assert!(rendered.telegram_message.chars().count() < 4_096);
+        assert!(rendered.telegram_message.contains(TRUNCATION_MARKER));
+        assert!(rendered.push_body.chars().count() < 1_024);
+        assert!(rendered.push_body.contains(TRUNCATION_MARKER));
+        assert_eq!(
+            rendered.push_data.get("type").map(String::as_str),
+            Some("trigger_event")
+        );
+        assert_eq!(
+            rendered.push_data.get("trigger_label").map(String::as_str),
+            Some("Repository activity")
+        );
+        assert_eq!(
+            rendered.push_data.get("event_id").map(String::as_str),
+            Some("provider-event-123")
+        );
+        assert!(
+            rendered
+                .push_data
+                .get("preview")
+                .is_some_and(|preview| preview.chars().count() <= PUSH_TRIGGER_PREVIEW_MAX_CHARS)
+        );
+        assert!(!rendered.push_data.contains_key("envelope"));
     }
 }

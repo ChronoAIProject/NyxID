@@ -10,13 +10,50 @@ import type {
   OAuthRetryMessage,
 } from "@/types/oauth-popup";
 
-const POPUP_READY_TIMEOUT_MS = 2_000;
-export const OAUTH_PROVIDER_ORIGIN_KEY = "nyxid.oauth.provider-origin";
+// Allow a cold/no-cache SPA interstitial to load. Expiry only switches the
+// dialog to its non-destructive manual-link fallback.
+const POPUP_READY_TIMEOUT_MS = 5_000;
+const MAX_SERVICE_NAME_LENGTH = 64;
+export const OAUTH_LAUNCH_CONTEXT_KEY = "nyxid.oauth.launch-context";
+
+export interface PopupLaunchMetadata {
+  readonly providerOrigin: string;
+  readonly correlationId: string;
+  readonly serviceName?: string;
+}
+
+const POPUP_WIDTH = 760;
+const POPUP_HEIGHT = 820;
+
+/**
+ * Center the popup over the window that opened it, not the primary display:
+ * `screenX`/`outerWidth` are what put it on the same monitor as the chat on a
+ * multi-screen desk. Sizes are clamped so a small window still gets a popup
+ * that fits on screen, and the offsets are floored at the window origin so a
+ * clamped popup can never land off-screen.
+ */
+function popupFeatures(view: Window = window): string {
+  const screenWidth = view.screen?.availWidth || view.screen?.width || 0;
+  const screenHeight = view.screen?.availHeight || view.screen?.height || 0;
+  const frameWidth = view.outerWidth || view.innerWidth || screenWidth;
+  const frameHeight = view.outerHeight || view.innerHeight || screenHeight;
+  const originX = view.screenX ?? view.screenLeft ?? 0;
+  const originY = view.screenY ?? view.screenTop ?? 0;
+
+  const width = frameWidth ? Math.min(POPUP_WIDTH, frameWidth) : POPUP_WIDTH;
+  const height = frameHeight
+    ? Math.min(POPUP_HEIGHT, frameHeight)
+    : POPUP_HEIGHT;
+  const left = Math.round(originX + Math.max(0, (frameWidth - width) / 2));
+  const top = Math.round(originY + Math.max(0, (frameHeight - height) / 2));
+
+  return `popup,width=${width},height=${height},left=${left},top=${top}`;
+}
 
 export interface OAuthPopupHandle {
   readonly launchId: string;
   readonly ready: Promise<void>;
-  navigate(url: string, nonce: string): Promise<void>;
+  navigate(url: string, nonce: string, serviceName?: string): Promise<void>;
   close(): void;
   /** A soft hint only: COOP can make a live popup appear closed. */
   isClosed(): boolean;
@@ -34,12 +71,73 @@ export function openOAuthChannel(nonce: string): BroadcastChannel | null {
   return new BroadcastChannel(name);
 }
 
+function validServiceName(value: unknown): value is string {
+  return (
+    typeof value === "string" &&
+    value.length > 0 &&
+    value.length <= MAX_SERVICE_NAME_LENGTH
+  );
+}
+
+export function writePopupLaunchMetadata(metadata: PopupLaunchMetadata): void {
+  sessionStorage.setItem(OAUTH_LAUNCH_CONTEXT_KEY, JSON.stringify(metadata));
+}
+
+export function readPopupLaunchMetadata(): PopupLaunchMetadata | null {
+  const raw = sessionStorage.getItem(OAUTH_LAUNCH_CONTEXT_KEY);
+  if (raw === null) return null;
+  try {
+    const value = JSON.parse(raw) as unknown;
+    if (typeof value !== "object" || value === null) return null;
+    const record = value as Record<string, unknown>;
+    if (
+      typeof record.providerOrigin !== "string" ||
+      typeof record.correlationId !== "string" ||
+      !oauthAttemptNonceSchema.safeParse(record.correlationId).success ||
+      (record.serviceName !== undefined &&
+        !validServiceName(record.serviceName))
+    ) {
+      return null;
+    }
+    const providerUrl = new URL(record.providerOrigin);
+    if (
+      (providerUrl.protocol !== "https:" && providerUrl.protocol !== "http:") ||
+      providerUrl.username !== "" ||
+      providerUrl.password !== "" ||
+      providerUrl.origin !== record.providerOrigin
+    ) {
+      return null;
+    }
+    return {
+      providerOrigin: providerUrl.origin,
+      correlationId: record.correlationId,
+      ...(record.serviceName !== undefined
+        ? { serviceName: record.serviceName }
+        : {}),
+    };
+  } catch {
+    return null;
+  }
+}
+
+export function popupLaunchMetadataForNavigation(
+  providerUrl: URL,
+  correlationId: string,
+  serviceName: unknown,
+): PopupLaunchMetadata {
+  return {
+    providerOrigin: providerUrl.origin,
+    correlationId,
+    ...(validServiceName(serviceName) ? { serviceName } : {}),
+  };
+}
+
 export function openOAuthPopup(): OAuthPopupHandle | null {
   const launchId = crypto.randomUUID();
   const popup = window.open(
     "/oauth-launching",
     `nyxid_oauth_${launchId}`,
-    "popup,width=760,height=820",
+    popupFeatures(),
   );
   if (!popup) return null;
 
@@ -77,7 +175,7 @@ export function openOAuthPopup(): OAuthPopupHandle | null {
   return {
     launchId,
     ready,
-    async navigate(url, nonce) {
+    async navigate(url, nonce, serviceName) {
       const authorizationUrl = validateAuthorizationUrl(url, nonce);
       if (authorizationUrl === null) {
         throw new Error("Invalid OAuth authorization URL");
@@ -89,6 +187,7 @@ export function openOAuthPopup(): OAuthPopupHandle | null {
           launchId,
           nonce,
           url: authorizationUrl.href,
+          ...(serviceName !== undefined ? { serviceName } : {}),
         },
         window.location.origin,
       );

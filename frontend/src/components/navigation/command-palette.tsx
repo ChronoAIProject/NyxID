@@ -24,6 +24,7 @@ import {
   Layers,
   Server,
   Plug,
+  Webhook,
 } from "lucide-react";
 import { cn } from "@/lib/utils";
 
@@ -52,6 +53,7 @@ export const ALL_ITEMS: readonly CommandItem[] = [
   { icon: ClipboardList, label: "Approval History", to: "/approvals/history", group: "navigation" },
   { icon: Lock, label: "Active Grants", to: "/approvals/grants", group: "navigation" },
   { icon: Code, label: "Developer Apps", to: "/developer/apps", group: "navigation" },
+  { icon: Webhook, label: "Triggers", to: "/triggers", group: "navigation" },
   { icon: Sparkles, label: "AI Setup", to: "/ai-setup", group: "navigation" },
   { icon: BookMarked, label: "Integration Guide", to: "/integration-guide", group: "navigation" },
   { icon: BookOpen, label: "Docs", to: "/docs", group: "navigation" },

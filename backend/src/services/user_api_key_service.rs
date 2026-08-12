@@ -1054,6 +1054,59 @@ pub async fn mark_provider_connection_pending(
     reset_provider_api_key_state(db, user_id, key_id, credential_type, "pending_auth").await
 }
 
+/// Reset a retryable provider connection after its replacement authorization
+/// state has been persisted. The status filter prevents a fast callback that
+/// already activated the key from being overwritten by the initiating request.
+pub async fn mark_provider_connection_pending_by_connection_id(
+    db: &mongodb::Database,
+    user_id: &str,
+    connection_id: &str,
+    credential_type: &str,
+) -> AppResult<()> {
+    let result = db
+        .collection::<UserApiKey>(COLLECTION_NAME)
+        .update_one(
+            doc! {
+                "user_id": user_id,
+                "connection_id": connection_id,
+                "status": { "$in": ["failed", "refresh_failed", "expired", "pending_auth"] },
+            },
+            doc! {
+                "$set": {
+                    "credential_type": credential_type,
+                    "credential_encrypted": bson::Bson::Null,
+                    "access_token_encrypted": bson::Bson::Null,
+                    "refresh_token_encrypted": bson::Bson::Null,
+                    "token_scopes": bson::Bson::Null,
+                    "expires_at": bson::Bson::Null,
+                    "status": "pending_auth",
+                    "error_message": bson::Bson::Null,
+                    "updated_at": bson::DateTime::from_chrono(Utc::now()),
+                }
+            },
+        )
+        .await?;
+
+    if result.matched_count == 0 {
+        let active = db
+            .collection::<UserApiKey>(COLLECTION_NAME)
+            .count_documents(doc! {
+                "user_id": user_id,
+                "connection_id": connection_id,
+                "status": "active",
+            })
+            .await?
+            > 0;
+        if !active {
+            return Err(AppError::NotFound(
+                "Provider connection not found for this user".to_string(),
+            ));
+        }
+    }
+
+    Ok(())
+}
+
 /// Promote a `node_managed` `UserApiKey` to a direct credential type and
 /// store a fresh encrypted credential. Used by PUT /keys when the caller
 /// supplies a `credential` on a service whose backing key was previously
@@ -2302,6 +2355,7 @@ mod tests {
             flow_kind: None,
             attempt_nonce: None,
             connection_id: None,
+            connect_link_id: None,
             consumed: false,
             expires_at: now + Duration::minutes(10),
             created_at: now,
@@ -5105,6 +5159,102 @@ mod tests {
             .await
             .expect_err("missing key should 404");
         assert!(matches!(err, crate::errors::AppError::NotFound(_)));
+    }
+
+    #[tokio::test]
+    async fn mark_provider_connection_pending_by_connection_id_retries_failed_key() {
+        let Some(db) = connect_test_database("user_api_key_svc_retry_failed_connection").await
+        else {
+            return;
+        };
+        let enc = test_encryption_keys();
+        let user_id = uuid::Uuid::new_v4().to_string();
+        let connection_id = uuid::Uuid::new_v4().to_string();
+        let key = super::create_api_key(
+            &db,
+            &enc,
+            &user_id,
+            super::CreateApiKeyParams {
+                label: "Failed connection",
+                credential_type: "oauth2",
+                credential: "",
+                access_token: None,
+                refresh_token: None,
+                token_scopes: None,
+                expires_at: None,
+                provider_config_id: None,
+                connection_id: Some(connection_id.as_str()),
+                oauth_client_id: None,
+                oauth_client_secret: None,
+                status: "failed",
+                source: None,
+                source_id: None,
+            },
+        )
+        .await
+        .unwrap();
+
+        super::mark_provider_connection_pending_by_connection_id(
+            &db,
+            &user_id,
+            &connection_id,
+            "oauth2",
+        )
+        .await
+        .unwrap();
+
+        let after = super::get_api_key(&db, &user_id, &key.id).await.unwrap();
+        assert_eq!(after.status, "pending_auth");
+        assert!(after.error_message.is_none());
+    }
+
+    #[tokio::test]
+    async fn mark_provider_connection_pending_by_connection_id_preserves_active_key() {
+        let Some(db) = connect_test_database("user_api_key_svc_preserve_active_connection").await
+        else {
+            return;
+        };
+        let enc = test_encryption_keys();
+        let user_id = uuid::Uuid::new_v4().to_string();
+        let connection_id = uuid::Uuid::new_v4().to_string();
+        let key = super::create_api_key(
+            &db,
+            &enc,
+            &user_id,
+            super::CreateApiKeyParams {
+                label: "Active connection",
+                credential_type: "oauth2",
+                credential: "",
+                access_token: Some("access-token"),
+                refresh_token: Some("refresh-token"),
+                token_scopes: Some("repo"),
+                expires_at: Some(Utc::now() + Duration::hours(1)),
+                provider_config_id: None,
+                connection_id: Some(connection_id.as_str()),
+                oauth_client_id: None,
+                oauth_client_secret: None,
+                status: "active",
+                source: None,
+                source_id: None,
+            },
+        )
+        .await
+        .unwrap();
+
+        super::mark_provider_connection_pending_by_connection_id(
+            &db,
+            &user_id,
+            &connection_id,
+            "oauth2",
+        )
+        .await
+        .unwrap();
+
+        let after = super::get_api_key(&db, &user_id, &key.id).await.unwrap();
+        assert_eq!(after.status, "active");
+        assert!(after.access_token_encrypted.is_some());
+        assert!(after.refresh_token_encrypted.is_some());
+        assert_eq!(after.token_scopes.as_deref(), Some("repo"));
     }
 
     #[tokio::test]

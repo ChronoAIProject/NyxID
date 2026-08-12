@@ -15,19 +15,43 @@ const mocks = vi.hoisted(() => ({
   catalogEntry: null as Record<string, unknown> | null,
   catalogError: null as unknown,
   addDialogProps: null as Record<string, unknown> | null,
+  invalidateQueries: vi.fn(),
+  watch: {
+    status: undefined as string | undefined,
+    authorized: false,
+    errorMessage: undefined as string | undefined,
+    timedOut: false,
+  },
 }));
+
+vi.mock("@tanstack/react-query", async () => {
+  const actual = await vi.importActual<typeof import("@tanstack/react-query")>(
+    "@tanstack/react-query",
+  );
+  return {
+    ...actual,
+    useQueryClient: () => ({ invalidateQueries: mocks.invalidateQueries }),
+  };
+});
 
 vi.mock("@tanstack/react-router", () => ({
   useNavigate: () => mocks.navigate,
 }));
 
 vi.mock("@/hooks/use-keys", () => ({
+  KEY_AUTH_ACTIVE: "active",
+  KEY_AUTH_FAILED: "failed",
   useKeys: () => ({ data: mocks.keys }),
+  useKeyAuthorizationWatch: () => mocks.watch,
   useCatalogEntry: () => ({
     data: mocks.catalogEntry ?? undefined,
     error: mocks.catalogError ?? null,
     isError: mocks.catalogError !== null,
   }),
+}));
+
+vi.mock("@/hooks/use-chat-presence", () => ({
+  useChatPresence: () => ({ visible: true, lastActivityAt: 0 }),
 }));
 
 vi.mock("@/components/service-icon", () => ({
@@ -47,21 +71,30 @@ vi.mock("@/components/dashboard/add-key-dialog", () => ({
     readonly launch?: "popup";
     readonly flow?: "cc";
     readonly onPopupViewResult?: (keyId: string) => boolean;
-  }) =>
-    (mocks.addDialogProps = { open, prefillSlug, reconnectKey, ...props },
+    readonly onAuthorizationPending?: (attempt: {
+      readonly keyId: string;
+      readonly attemptId: string;
+      readonly previousAuthorizationAt: string | null | undefined;
+    }) => void;
+    readonly onAuthorizationAborted?: (attemptId: string) => void;
+  }) => (
+    (mocks.addDialogProps = { open, prefillSlug, reconnectKey, ...props }),
     open ? (
       <div
         data-testid="add-key-dialog"
         data-prefill={prefillSlug ?? ""}
         data-reconnect={reconnectKey?.id ?? ""}
       />
-    ) : null),
+    ) : null
+  ),
 }));
 
 vi.mock("@/components/assistant/manage-connection-modal", () => ({
-  ManageConnectionModal: ({ keyIds }: { readonly keyIds: readonly string[] }) => (
-    <div data-testid="manage-connection-modal" data-key-id={keyIds[0]} />
-  ),
+  ManageConnectionModal: ({
+    keyIds,
+  }: {
+    readonly keyIds: readonly string[];
+  }) => <div data-testid="manage-connection-modal" data-key-id={keyIds[0]} />,
 }));
 
 function blocker(
@@ -99,12 +132,23 @@ beforeEach(() => {
   mocks.catalogEntry = null;
   mocks.catalogError = null;
   mocks.addDialogProps = null;
+  mocks.invalidateQueries.mockReset();
+  mocks.watch = {
+    status: undefined,
+    authorized: false,
+    errorMessage: undefined,
+    timedOut: false,
+  };
   mocks.navigate.mockReset();
 });
 
 describe("ConnectCard authorization actions", () => {
   it("opts chat OAuth into popup mode and replaces the add dialog for result view", async () => {
-    mocks.catalogEntry = { slug: "api-github", name: "GitHub", provider_type: "oauth2" };
+    mocks.catalogEntry = {
+      slug: "api-github",
+      name: "GitHub",
+      provider_type: "oauth2",
+    };
     const user = userEvent.setup();
     render(<ConnectCard block={blocker("NYXID_SERVICE_NOT_CONNECTED")} />);
 
@@ -190,7 +234,11 @@ describe("ConnectCard authorization actions", () => {
   });
 
   it("opens the canonical add-service flow for a disconnected service", async () => {
-    mocks.catalogEntry = { slug: "api-github", name: "GitHub", provider_type: "oauth2" };
+    mocks.catalogEntry = {
+      slug: "api-github",
+      name: "GitHub",
+      provider_type: "oauth2",
+    };
     const user = userEvent.setup();
     render(<ConnectCard block={blocker("NYXID_SERVICE_NOT_CONNECTED")} />);
 
@@ -225,6 +273,263 @@ describe("ConnectCard authorization actions", () => {
   });
 });
 
+describe("ConnectCard authorization settlement", () => {
+  it("shows authorizing immediately and settles active, failed, and timed-out attempts", async () => {
+    mocks.catalogEntry = {
+      slug: "api-github",
+      name: "GitHub",
+      provider_type: "oauth2",
+    };
+    const user = userEvent.setup();
+    const block = blocker("NYXID_SERVICE_NOT_CONNECTED");
+    const { rerender } = render(<ConnectCard block={block} />);
+    await user.click(screen.getByRole("button", { name: "Connect" }));
+    const pending = mocks.addDialogProps?.onAuthorizationPending as
+      | ((attempt: {
+          keyId: string;
+          attemptId: string;
+          previousAuthorizationAt: undefined;
+        }) => void)
+      | undefined;
+
+    act(() =>
+      pending?.({
+        keyId: "key-1",
+        attemptId: "attempt-active",
+        previousAuthorizationAt: undefined,
+      }),
+    );
+    expect(screen.getByText("Authorizing")).toBeInTheDocument();
+    expect(
+      screen.queryByRole("button", { name: "Connect" }),
+    ).not.toBeInTheDocument();
+
+    mocks.watch = {
+      status: "active",
+      authorized: true,
+      errorMessage: undefined,
+      timedOut: false,
+    };
+    rerender(<ConnectCard block={block} />);
+    expect(await screen.findByText("Connected")).toBeInTheDocument();
+
+    mocks.watch = {
+      status: undefined,
+      authorized: false,
+      errorMessage: undefined,
+      timedOut: false,
+    };
+    act(() =>
+      pending?.({
+        keyId: "key-1",
+        attemptId: "attempt-failed",
+        previousAuthorizationAt: undefined,
+      }),
+    );
+    expect(screen.getByText("Authorizing")).toBeInTheDocument();
+    mocks.watch = {
+      status: "failed",
+      authorized: false,
+      errorMessage: "Authorization was declined",
+      timedOut: false,
+    };
+    rerender(<ConnectCard block={block} />);
+    expect(await screen.findByText("Failed")).toBeInTheDocument();
+    expect(screen.getByText("Authorization was declined")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Connect" })).toBeInTheDocument();
+
+    mocks.watch = {
+      status: undefined,
+      authorized: false,
+      errorMessage: undefined,
+      timedOut: false,
+    };
+    act(() =>
+      pending?.({
+        keyId: "key-1",
+        attemptId: "attempt-timeout",
+        previousAuthorizationAt: undefined,
+      }),
+    );
+    expect(screen.getByText("Authorizing")).toBeInTheDocument();
+    mocks.watch = {
+      status: "pending_auth",
+      authorized: false,
+      errorMessage: undefined,
+      timedOut: true,
+    };
+    rerender(<ConnectCard block={block} />);
+    expect(await screen.findByText("Timed out")).toBeInTheDocument();
+  });
+
+  it("keeps reconnect authorizing until its baseline advances", async () => {
+    mocks.keys = [
+      {
+        id: "key-github",
+        catalog_service_slug: "api-github",
+        is_active: true,
+        status: "active",
+        last_authorized_at: "2026-08-06T10:00:00Z",
+        auto_connected: false,
+        credential_type: "oauth2",
+        auth_method: "oauth2",
+      },
+    ];
+    const user = userEvent.setup();
+    const block = blocker("NYXID_UNAUTHORIZED");
+    const { rerender } = render(<ConnectCard block={block} />);
+    await user.click(screen.getByRole("button", { name: "Reconnect" }));
+    const pending = mocks.addDialogProps?.onAuthorizationPending as
+      | ((attempt: {
+          keyId: string;
+          attemptId: string;
+          previousAuthorizationAt: string;
+        }) => void)
+      | undefined;
+    act(() =>
+      pending?.({
+        keyId: "key-github",
+        attemptId: "attempt-reconnect",
+        previousAuthorizationAt: "2026-08-06T10:00:00Z",
+      }),
+    );
+
+    mocks.watch = {
+      status: "active",
+      authorized: false,
+      errorMessage: undefined,
+      timedOut: false,
+    };
+    rerender(<ConnectCard block={block} />);
+    expect(screen.getByText("Authorizing")).toBeInTheDocument();
+
+    mocks.watch = { ...mocks.watch, authorized: true };
+    rerender(<ConnectCard block={block} />);
+    expect(await screen.findByText("Connected")).toBeInTheDocument();
+    expect(
+      screen.queryByText("Reauthorization required"),
+    ).not.toBeInTheDocument();
+  });
+
+  it("renders a matching abort as neutral cancellation and ignores stale aborts", async () => {
+    mocks.catalogEntry = {
+      slug: "api-github",
+      name: "GitHub",
+      provider_type: "oauth2",
+    };
+    const user = userEvent.setup();
+    const block = blocker("NYXID_SERVICE_NOT_CONNECTED");
+    const { rerender } = render(<ConnectCard block={block} />);
+    await user.click(screen.getByRole("button", { name: "Connect" }));
+    const pending = mocks.addDialogProps?.onAuthorizationPending as
+      | ((attempt: {
+          keyId: string;
+          attemptId: string;
+          previousAuthorizationAt: undefined;
+        }) => void)
+      | undefined;
+    act(() => {
+      pending?.({
+        keyId: "key-1",
+        attemptId: "attempt-a",
+        previousAuthorizationAt: undefined,
+      });
+      pending?.({
+        keyId: "key-1",
+        attemptId: "attempt-b",
+        previousAuthorizationAt: undefined,
+      });
+    });
+    mocks.keys = [
+      {
+        id: "key-1",
+        catalog_service_slug: "api-github",
+        // GET /keys only returns enabled UserService rows; authorization state
+        // is carried independently by UserApiKey.status.
+        is_active: true,
+        auto_connected: false,
+        status: "pending_auth",
+        credential_type: "oauth2",
+        auth_method: "oauth2",
+      },
+    ];
+    rerender(<ConnectCard block={block} />);
+    const aborted = mocks.addDialogProps?.onAuthorizationAborted as
+      | ((attemptId: string) => void)
+      | undefined;
+    act(() => aborted?.("attempt-a"));
+    expect(screen.getByText("Authorizing")).toBeInTheDocument();
+
+    act(() => aborted?.("attempt-b"));
+    expect(screen.getByText(/Connection cancelled/i)).toBeInTheDocument();
+    expect(screen.queryByText("Failed")).not.toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Connect" })).toBeInTheDocument();
+    expect(mocks.invalidateQueries).toHaveBeenCalledTimes(2);
+    expect(mocks.invalidateQueries).toHaveBeenCalledWith({
+      queryKey: ["keys"],
+      exact: true,
+    });
+    expect(mocks.invalidateQueries).toHaveBeenCalledWith({
+      queryKey: ["keys", "key-1"],
+      exact: true,
+    });
+  });
+
+  it("lets an advanced reconnect authorization override a simultaneous cancellation", async () => {
+    mocks.catalogEntry = {
+      slug: "api-github",
+      name: "GitHub",
+      provider_type: "oauth2",
+    };
+    mocks.keys = [
+      {
+        id: "key-1",
+        catalog_service_slug: "api-github",
+        is_active: true,
+        auto_connected: false,
+        status: "active",
+        credential_type: "oauth2",
+        auth_method: "oauth2",
+        last_authorized_at: "2026-08-06T10:00:00Z",
+      },
+    ];
+    const user = userEvent.setup();
+    const block = blocker("NYXID_UNAUTHORIZED");
+    const { rerender } = render(<ConnectCard block={block} />);
+    await user.click(screen.getByRole("button", { name: "Reconnect" }));
+    const pending = mocks.addDialogProps?.onAuthorizationPending as
+      | ((attempt: {
+          keyId: string;
+          attemptId: string;
+          previousAuthorizationAt: string;
+        }) => void)
+      | undefined;
+    act(() =>
+      pending?.({
+        keyId: "key-1",
+        attemptId: "attempt-reconnect",
+        previousAuthorizationAt: "2026-08-06T10:00:00Z",
+      }),
+    );
+    const aborted = mocks.addDialogProps?.onAuthorizationAborted as
+      | ((attemptId: string) => void)
+      | undefined;
+    act(() => aborted?.("attempt-reconnect"));
+    expect(screen.getByText(/Connection cancelled/i)).toBeInTheDocument();
+
+    mocks.keys = [
+      {
+        ...mocks.keys[0],
+        last_authorized_at: "2026-08-06T10:05:00Z",
+      },
+    ];
+    rerender(<ConnectCard block={block} />);
+
+    expect(screen.getByText("Connected")).toBeInTheDocument();
+    expect(screen.queryByText(/Connection cancelled/i)).not.toBeInTheDocument();
+  });
+});
+
 describe("ConnectCard catalog resolution", () => {
   it("keeps the action available when the catalog is merely unreachable", () => {
     // A 500 is not evidence the service is missing; removing the user's only
@@ -237,17 +542,23 @@ describe("ConnectCard catalog resolution", () => {
     render(<ConnectCard block={blocker("NYXID_SERVICE_NOT_CONNECTED")} />);
 
     expect(screen.getByRole("button", { name: "Connect" })).toBeInTheDocument();
-    expect(screen.getByText(/Couldn't reach the NyxID catalog/i)).toBeInTheDocument();
+    expect(
+      screen.getByText(/Couldn't reach the NyxID catalog/i),
+    ).toBeInTheDocument();
   });
 
   it("hides the action while an authorization is already in flight", () => {
     // A second click would mint a second placeholder key for one service.
-    mocks.catalogEntry = { slug: "api-github", name: "GitHub", provider_type: "oauth2" };
+    mocks.catalogEntry = {
+      slug: "api-github",
+      name: "GitHub",
+      provider_type: "oauth2",
+    };
     mocks.keys = [
       {
         id: "key-github",
         catalog_service_slug: "api-github",
-        is_active: false,
+        is_active: true,
         auto_connected: false,
         status: "pending_auth",
         credential_type: "oauth2",
@@ -256,7 +567,9 @@ describe("ConnectCard catalog resolution", () => {
     ];
     render(<ConnectCard block={blocker("NYXID_SERVICE_NOT_CONNECTED")} />);
 
-    expect(screen.queryByRole("button", { name: "Connect" })).not.toBeInTheDocument();
+    expect(
+      screen.queryByRole("button", { name: "Connect" }),
+    ).not.toBeInTheDocument();
   });
 
   it("uses the catalog's modality and name, not the block's hint", () => {
@@ -268,7 +581,10 @@ describe("ConnectCard catalog resolution", () => {
       name: "GitHub (catalog)",
       provider_type: "oauth2",
     };
-    const block = { ...blocker("NYXID_SERVICE_NOT_CONNECTED"), auth_kind: "api_key" as const };
+    const block = {
+      ...blocker("NYXID_SERVICE_NOT_CONNECTED"),
+      auth_kind: "api_key" as const,
+    };
     render(<ConnectCard block={block} />);
 
     expect(screen.getByText("GitHub (catalog)")).toBeInTheDocument();
@@ -294,12 +610,12 @@ describe("ConnectCard catalog resolution", () => {
     ).toBeInTheDocument();
   });
 
-  it("streams authorization progress while the placeholder key is pending", () => {
+  it("never renders a real pending placeholder as Connected", () => {
     mocks.keys = [
       {
         id: "key-github",
         catalog_service_slug: "api-github",
-        is_active: false,
+        is_active: true,
         auto_connected: false,
         status: "pending_auth",
         credential_type: "oauth2",
@@ -310,6 +626,7 @@ describe("ConnectCard catalog resolution", () => {
 
     expect(screen.getByRole("status")).toHaveTextContent(/Waiting for GitHub/i);
     expect(screen.getByText("Authorizing")).toBeInTheDocument();
+    expect(screen.queryByText("Connected")).not.toBeInTheDocument();
   });
 });
 

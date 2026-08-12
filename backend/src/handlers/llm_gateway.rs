@@ -70,6 +70,7 @@ pub(crate) fn llm_platform_usage(
         fallback_bytes,
         llm_usage_service::token_quantity_or_estimate(usage, fallback_bytes),
     )
+    .with_token_breakdown(usage.map(llm_usage_service::ReportedLlmUsage::token_breakdown))
 }
 
 pub(crate) fn enforce_llm_billing_classification(
@@ -295,6 +296,7 @@ pub async fn llm_proxy_request(
             &user_id_str,
             None,
             Some(&service_id),
+            Some(&state.connection_expiry_notifier),
         )
         .await?
         {
@@ -403,6 +405,7 @@ pub async fn llm_proxy_request(
             &state.encryption_keys,
             &user_id_str,
             &service_id,
+            Some(&state.connection_expiry_notifier),
         )
         .await
         .map_err(|e| {
@@ -654,6 +657,7 @@ pub async fn gateway_request(
             &user_id_str,
             None,
             Some(&service_id),
+            Some(&state.connection_expiry_notifier),
         )
         .await?
         {
@@ -812,6 +816,7 @@ pub async fn gateway_request(
             &state.encryption_keys,
             &user_id_str,
             &service_id,
+            Some(&state.connection_expiry_notifier),
         )
         .await
         .map_err(|e| {
@@ -1762,6 +1767,8 @@ mod tests {
             prompt_tokens: 8,
             completion_tokens: 12,
             total_tokens: 20,
+            cached_tokens: 3,
+            cache_creation_tokens: 0,
             reported_cost: None,
         };
 

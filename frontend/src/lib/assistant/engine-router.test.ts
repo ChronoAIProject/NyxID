@@ -78,7 +78,31 @@ class EngineProbe implements AssistantTransport {
     this.calls.push(`cancel:${conversationId}`);
   }
 
+  async stopTask(conversationId: string): Promise<void> {
+    this.calls.push(`stop:${conversationId}`);
+  }
+
+  async steerTask(conversationId: string): Promise<void> {
+    this.calls.push(`steer:${conversationId}`);
+  }
+
+  async retryStep(conversationId: string): Promise<void> {
+    this.calls.push(`retry:${conversationId}`);
+  }
+
+  async skipStep(conversationId: string): Promise<void> {
+    this.calls.push(`skip:${conversationId}`);
+  }
+
+  async resolvePlan(conversationId: string): Promise<void> {
+    this.calls.push(`plan:${conversationId}`);
+  }
+
   async decideApproval(): Promise<TurnHandle | null> {
+    return null;
+  }
+
+  async resolveInput(): Promise<TurnHandle | null> {
     return null;
   }
 

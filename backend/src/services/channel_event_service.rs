@@ -398,6 +398,70 @@ pub async fn forward_event(
     }
 }
 
+/// Trusted trigger injection into the existing device-event pipeline. The
+/// trigger owner and target conversation are matched in one query before the
+/// normal API-key binding checks and delivery code run.
+#[allow(clippy::too_many_arguments)]
+pub async fn forward_trigger_event(
+    db: &mongodb::Database,
+    http_client: &reqwest::Client,
+    config: &AppConfig,
+    keys: &crate::crypto::jwt::JwtKeys,
+    rate_limiter: &PerChannelEventLimiter,
+    dedup_cache: &Arc<EventDedupCache>,
+    owner_user_id: &str,
+    conversation_id: &str,
+    envelope: &EventEnvelope,
+) -> AppResult<ForwardOutcome> {
+    let conversation = db
+        .collection::<ChannelConversation>(CHANNEL_CONVERSATIONS)
+        .find_one(doc! {
+            "_id": conversation_id,
+            "user_id": owner_user_id,
+            "is_active": true,
+            "platform": "device",
+        })
+        .await?
+        .ok_or(AppError::TriggerDeliveryUnsupported)?;
+    let user_id =
+        uuid::Uuid::parse_str(owner_user_id).map_err(|_| AppError::TriggerDeliveryUnsupported)?;
+    let auth_user = AuthUser {
+        user_id,
+        session_id: None,
+        scope: String::new(),
+        acting_client_id: None,
+        oauth_client_id: None,
+        approval_owner_user_id: None,
+        auth_method: AuthMethod::ApiKey,
+        allow_all_services: false,
+        allow_all_nodes: false,
+        allowed_service_ids: Vec::new(),
+        resource_uris: None,
+        allowed_node_ids: Vec::new(),
+        api_key_id: Some(conversation.agent_api_key_id),
+        api_key_name: None,
+        api_key_purpose: crate::models::api_key::ApiKeyPurpose::General,
+        rate_limit_per_second: None,
+        rate_limit_burst: None,
+        ip_address: None,
+        user_agent: None,
+    };
+    forward_event(
+        db,
+        http_client,
+        config,
+        keys,
+        rate_limiter,
+        dedup_cache,
+        None,
+        &TelemetryContext::default(),
+        &auth_user,
+        conversation_id,
+        envelope,
+    )
+    .await
+}
+
 /// Build the filter used to look up the target conversation for a device
 /// event.
 ///
@@ -661,6 +725,9 @@ mod tests {
             description: None,
             is_active: true,
             created_at: Utc::now(),
+            rotation_predecessor_id: None,
+            state_version: 1,
+            updated_at: Some(Utc::now()),
             last_used_at: None,
             expires_at: None,
             allow_all_services: true,
@@ -670,6 +737,8 @@ mod tests {
             rate_limit_per_second: None,
             rate_limit_burst: None,
             platform: None,
+            purpose: Default::default(),
+            scheduled_write_enabled: false,
         }
     }
 

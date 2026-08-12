@@ -1,7 +1,7 @@
 {
   "name": "nyxid",
-  "version": "0.7.5",
-  "description": "Brokers credentials for downstream services so agents never see raw keys or tokens, and bundles the synchronized Aevatar platform skill family. Operates through the nyxid CLI.",
+  "version": "0.7.7",
+  "description": "Brokers credentials for downstream services so agents never see raw keys or tokens, and bundles the synchronized Aevatar platform skill family. Operates through the NyxID CLI or authenticated Web API.",
   "author": {
     "name": "ChronoAIProject",
     "url": "https://github.com/ChronoAIProject"
@@ -23,7 +23,7 @@
   "interface": {
     "displayName": "NyxID",
     "shortDescription": "Credential broker so agents never see raw API keys or tokens.",
-    "longDescription": "NyxID brokers credentials for downstream services through the nyxid CLI: discover and configure services, proxy requests with credential injection, manage credential nodes, expose MCP tools, and issue scoped agent keys. The plugin also bundles the synchronized Aevatar platform skill family.",
+    "longDescription": "NyxID brokers credentials for downstream services through the CLI or authenticated Web API: discover and configure services, proxy requests with credential injection, manage credential nodes, expose MCP tools, and issue scoped agent keys. The plugin also bundles the synchronized Aevatar platform skill family.",
     "developerName": "ChronoAIProject",
     "category": "Coding",
     "capabilities": [

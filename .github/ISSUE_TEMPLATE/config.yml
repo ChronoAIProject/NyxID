@@ -1,0 +1,9 @@
+# fkst-issue-templates-version: 13
+# Managed by fkst-hosted. Do not edit by hand — changes are overwritten on the
+# next reconcile. Bump the version marker above only by changing the bundled
+# templates in fkst-hosted.
+blank_issues_enabled: false
+contact_links:
+  - name: fkst docs & help
+    url: https://github.com/ChronoAIProject/fkst-hosted
+    about: How fkst agent sessions work, and where to get help.

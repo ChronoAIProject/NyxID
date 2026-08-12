@@ -184,28 +184,7 @@ fn is_duplicate_slug_app_error(error: &AppError) -> bool {
 fn identity_config_from_downstream_service(
     service: &DownstreamService,
 ) -> user_service_service::IdentityConfig {
-    // When the catalog entry enables identity propagation but has all include
-    // flags off (a common misconfiguration when seeding services), default to
-    // including user_id and email so the mode is not a silent no-op.
-    let has_active_mode = matches!(
-        service.identity_propagation_mode.as_str(),
-        "headers" | "jwt" | "both"
-    );
-    let all_flags_off = !service.identity_include_user_id
-        && !service.identity_include_email
-        && !service.identity_include_name;
-    let apply_defaults = has_active_mode && all_flags_off;
-
-    user_service_service::IdentityConfig {
-        identity_propagation_mode: service.identity_propagation_mode.clone(),
-        identity_include_user_id: service.identity_include_user_id || apply_defaults,
-        identity_include_email: service.identity_include_email || apply_defaults,
-        identity_include_name: service.identity_include_name || apply_defaults,
-        identity_jwt_audience: service.identity_jwt_audience.clone(),
-        forward_access_token: service.forward_access_token,
-        inject_delegation_token: service.inject_delegation_token,
-        delegation_token_scope: service.delegation_token_scope.clone(),
-    }
+    crate::services::catalog_identity_service::effective_identity_config(service)
 }
 
 fn is_public_internal_master_credential_service(service: &DownstreamService) -> bool {
@@ -422,6 +401,9 @@ pub struct KeyView {
     pub auth_method: String,
     pub auth_key_name: String,
     pub status: String,
+    /// Cheap OAuth connection health derived from the stored expiry/status.
+    /// `None` for non-OAuth credentials or OAuth rows without a known expiry.
+    pub connection_status: Option<String>,
     pub catalog_service_id: Option<String>,
     pub catalog_service_slug: Option<String>,
     pub catalog_service_name: Option<String>,
@@ -2010,7 +1992,14 @@ pub async fn list_keys(
     encryption_keys: &EncryptionKeys,
     user_id: &str,
 ) -> AppResult<Vec<KeyView>> {
-    let tagged = user_service_service::list_user_services_with_sources(db, user_id).await?;
+    // Disabled services are included here and nowhere else: `/keys` is the
+    // management surface that owns the Enable control, so a paused row has to
+    // stay visible for the pause to be reversible. Each `KeyView` carries
+    // `is_active` for the UI to badge them. Enforcement consumers keep using
+    // the active-only `list_user_services_with_sources`.
+    let tagged =
+        user_service_service::list_user_services_with_sources_including_disabled(db, user_id)
+            .await?;
     if tagged.is_empty() {
         return Ok(vec![]);
     }
@@ -3746,6 +3735,7 @@ fn build_key_view(
         status: ak
             .map(|k| k.status.clone())
             .unwrap_or_else(|| "active".to_string()),
+        connection_status: ak.and_then(oauth_connection_status),
         catalog_service_id: svc.catalog_service_id.clone(),
         catalog_service_slug: catalog_ds.map(|ds| ds.slug.clone()),
         catalog_service_name: catalog_ds.map(|ds| ds.name.clone()),
@@ -3807,6 +3797,26 @@ fn build_key_view(
         recommended_skills: ep.recommended_skills.clone(),
         credential_source,
     }
+}
+
+pub(crate) fn oauth_connection_status(api_key: &UserApiKey) -> Option<String> {
+    if api_key.credential_type != "oauth2" {
+        return None;
+    }
+    if matches!(
+        api_key.status.as_str(),
+        "expired" | "revoked" | "failed" | "refresh_failed"
+    ) {
+        return Some("expired".to_string());
+    }
+    api_key.expires_at.map(|expires_at| {
+        if expires_at <= Utc::now() && api_key.refresh_token_encrypted.is_none() {
+            "expired"
+        } else {
+            "active"
+        }
+        .to_string()
+    })
 }
 
 /// Async post-pass for `build_key_view`: decrypt
@@ -3874,9 +3884,9 @@ mod tests {
         direct_credential_type_for_service, direct_credential_type_from_auth_method,
         ensure_user_api_key_for_update, exact_slug_conflict, generate_slug_from_label, get_key,
         identity_config_from_downstream_service, is_duplicate_slug_app_error, list_keys,
-        random_slug_suffix, reconcile_provider_key_for_service_routing, resolve_openapi_spec_url,
-        resolve_unique_slug, revoke_key_if_pending, slug_candidate_with_suffix,
-        validate_token_exchange_catalog_credential,
+        oauth_connection_status, random_slug_suffix, reconcile_provider_key_for_service_routing,
+        resolve_openapi_spec_url, resolve_unique_slug, revoke_key_if_pending,
+        slug_candidate_with_suffix, validate_token_exchange_catalog_credential,
     };
     use crate::errors::{AppError, AppResult};
     use crate::models::downstream_service::{
@@ -3969,6 +3979,26 @@ mod tests {
             created_at: Utc::now(),
             updated_at: Utc::now(),
         }
+    }
+
+    #[test]
+    fn oauth_connection_health_uses_stored_status_expiry_and_refreshability() {
+        let mut key = sample_api_key("oauth2");
+        assert!(oauth_connection_status(&key).is_none());
+
+        key.expires_at = Some(Utc::now() + chrono::Duration::minutes(5));
+        assert_eq!(oauth_connection_status(&key).as_deref(), Some("active"));
+
+        key.expires_at = Some(Utc::now() - chrono::Duration::minutes(5));
+        assert_eq!(oauth_connection_status(&key).as_deref(), Some("expired"));
+
+        key.refresh_token_encrypted = Some(vec![1, 2, 3]);
+        assert_eq!(oauth_connection_status(&key).as_deref(), Some("active"));
+
+        key.status = "refresh_failed".to_string();
+        assert_eq!(oauth_connection_status(&key).as_deref(), Some("expired"));
+
+        assert!(oauth_connection_status(&sample_api_key("api_key")).is_none());
     }
 
     fn sample_service(auth_method: &str) -> UserService {

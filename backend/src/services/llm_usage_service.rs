@@ -15,6 +15,11 @@ pub struct ReportedLlmUsage {
     pub prompt_tokens: u64,
     pub completion_tokens: u64,
     pub total_tokens: u64,
+    /// Cache-read tokens (OpenAI `prompt_tokens_details.cached_tokens`,
+    /// Anthropic `cache_read_input_tokens`).
+    pub cached_tokens: u64,
+    /// Cache-write tokens (Anthropic `cache_creation_input_tokens`).
+    pub cache_creation_tokens: u64,
     pub reported_cost: Option<f64>,
 }
 
@@ -23,7 +28,23 @@ impl ReportedLlmUsage {
         self.prompt_tokens == 0
             && self.completion_tokens == 0
             && self.total_tokens == 0
+            && self.cached_tokens == 0
+            && self.cache_creation_tokens == 0
             && self.reported_cost.is_none()
+    }
+
+    /// Per-class breakdown for the usage meter row, following each
+    /// provider's own accounting (see `TokenBreakdown`).
+    pub fn token_breakdown(&self) -> crate::models::service_billing::TokenBreakdown {
+        fn clamp(value: u64) -> i64 {
+            value.min(i64::MAX as u64) as i64
+        }
+        crate::models::service_billing::TokenBreakdown {
+            prompt_tokens: clamp(self.prompt_tokens),
+            completion_tokens: clamp(self.completion_tokens),
+            cached_tokens: clamp(self.cached_tokens),
+            cache_creation_tokens: clamp(self.cache_creation_tokens),
+        }
     }
 }
 
@@ -32,6 +53,8 @@ pub struct ReportedLlmUsageAccumulator {
     prompt_tokens: u64,
     completion_tokens: u64,
     total_tokens: u64,
+    cached_tokens: u64,
+    cache_creation_tokens: u64,
     reported_cost: Option<f64>,
 }
 
@@ -200,6 +223,8 @@ impl ReportedLlmUsageAccumulator {
         self.prompt_tokens = self.prompt_tokens.max(usage.prompt_tokens);
         self.completion_tokens = self.completion_tokens.max(usage.completion_tokens);
         self.total_tokens = self.total_tokens.max(usage.total_tokens);
+        self.cached_tokens = self.cached_tokens.max(usage.cached_tokens);
+        self.cache_creation_tokens = self.cache_creation_tokens.max(usage.cache_creation_tokens);
 
         if let Some(cost) = usage.reported_cost {
             self.reported_cost = Some(
@@ -216,6 +241,10 @@ impl ReportedLlmUsageAccumulator {
             .completion_tokens
             .saturating_add(usage.completion_tokens);
         self.total_tokens = self.total_tokens.saturating_add(usage.total_tokens);
+        self.cached_tokens = self.cached_tokens.saturating_add(usage.cached_tokens);
+        self.cache_creation_tokens = self
+            .cache_creation_tokens
+            .saturating_add(usage.cache_creation_tokens);
 
         if let Some(cost) = usage.reported_cost {
             self.reported_cost = Some(self.reported_cost.unwrap_or(0.0) + cost);
@@ -240,6 +269,8 @@ impl ReportedLlmUsageAccumulator {
             prompt_tokens: self.prompt_tokens,
             completion_tokens: self.completion_tokens,
             total_tokens,
+            cached_tokens: self.cached_tokens,
+            cache_creation_tokens: self.cache_creation_tokens,
             reported_cost: self.reported_cost,
         };
 
@@ -368,6 +399,32 @@ pub fn extract_reported_usage(value: &serde_json::Value) -> Option<ReportedLlmUs
     )
     .unwrap_or_else(|| prompt_tokens + completion_tokens);
 
+    let cached_tokens = token_at(
+        value,
+        &[
+            "/usage/prompt_tokens_details/cached_tokens",
+            "/usage/input_tokens_details/cached_tokens",
+            "/usage/cache_read_input_tokens",
+            "/cache_read_input_tokens",
+            "/response/usage/prompt_tokens_details/cached_tokens",
+            "/response/usage/input_tokens_details/cached_tokens",
+            "/response/usage/cache_read_input_tokens",
+            "/message/usage/cache_read_input_tokens",
+        ],
+    )
+    .unwrap_or(0);
+
+    let cache_creation_tokens = token_at(
+        value,
+        &[
+            "/usage/cache_creation_input_tokens",
+            "/cache_creation_input_tokens",
+            "/response/usage/cache_creation_input_tokens",
+            "/message/usage/cache_creation_input_tokens",
+        ],
+    )
+    .unwrap_or(0);
+
     let reported_cost = [
         "/usage/reported_cost",
         "/usage/cost_usd",
@@ -392,6 +449,8 @@ pub fn extract_reported_usage(value: &serde_json::Value) -> Option<ReportedLlmUs
         prompt_tokens,
         completion_tokens,
         total_tokens,
+        cached_tokens,
+        cache_creation_tokens,
         reported_cost,
     };
 
@@ -507,6 +566,8 @@ mod tests {
                 prompt_tokens: 12,
                 completion_tokens: 7,
                 total_tokens: 19,
+                cached_tokens: 0,
+                cache_creation_tokens: 0,
                 reported_cost: Some(0.0042),
             }
         );
@@ -670,12 +731,16 @@ mod tests {
             prompt_tokens: 10,
             completion_tokens: 0,
             total_tokens: 0,
+            cached_tokens: 0,
+            cache_creation_tokens: 0,
             reported_cost: None,
         });
         accumulator.observe_snapshot(ReportedLlmUsage {
             prompt_tokens: 10,
             completion_tokens: 20,
             total_tokens: 30,
+            cached_tokens: 0,
+            cache_creation_tokens: 0,
             reported_cost: Some(0.012),
         });
 
@@ -739,12 +804,16 @@ mod tests {
             prompt_tokens: 10,
             completion_tokens: 5,
             total_tokens: 15,
+            cached_tokens: 0,
+            cache_creation_tokens: 0,
             reported_cost: Some(0.001),
         });
         accumulator.observe_delta(ReportedLlmUsage {
             prompt_tokens: 3,
             completion_tokens: 7,
             total_tokens: 10,
+            cached_tokens: 0,
+            cache_creation_tokens: 0,
             reported_cost: Some(0.002),
         });
 
@@ -782,6 +851,8 @@ mod tests {
             prompt_tokens: 20,
             completion_tokens: 10,
             total_tokens: 30,
+            cached_tokens: 0,
+            cache_creation_tokens: 0,
             reported_cost: None,
         };
 
@@ -803,6 +874,8 @@ mod tests {
             prompt_tokens: 0,
             completion_tokens: 0,
             total_tokens: 0,
+            cached_tokens: 0,
+            cache_creation_tokens: 0,
             reported_cost: Some(0.01),
         };
 
@@ -833,5 +906,101 @@ mod tests {
         // Also with whitespace
         let result2 = extract_reported_usage_from_sse_event(Some("message"), "  [DONE]  ");
         assert!(result2.is_none());
+    }
+
+    #[test]
+    fn extracts_openai_cached_tokens() {
+        let value = serde_json::json!({
+            "usage": {
+                "prompt_tokens": 120,
+                "completion_tokens": 40,
+                "total_tokens": 160,
+                "prompt_tokens_details": { "cached_tokens": 100 }
+            }
+        });
+
+        let usage = extract_reported_usage(&value).expect("usage");
+        assert_eq!(usage.prompt_tokens, 120);
+        assert_eq!(usage.completion_tokens, 40);
+        assert_eq!(usage.cached_tokens, 100);
+        assert_eq!(usage.cache_creation_tokens, 0);
+    }
+
+    #[test]
+    fn extracts_anthropic_cache_read_and_creation_tokens() {
+        let value = serde_json::json!({
+            "usage": {
+                "input_tokens": 25,
+                "output_tokens": 60,
+                "cache_read_input_tokens": 900,
+                "cache_creation_input_tokens": 300
+            }
+        });
+
+        let usage = extract_reported_usage(&value).expect("usage");
+        assert_eq!(usage.prompt_tokens, 25);
+        assert_eq!(usage.completion_tokens, 60);
+        assert_eq!(usage.cached_tokens, 900);
+        assert_eq!(usage.cache_creation_tokens, 300);
+    }
+
+    #[test]
+    fn extracts_anthropic_stream_message_usage_cache_tokens() {
+        let value = serde_json::json!({
+            "type": "message_start",
+            "message": {
+                "usage": {
+                    "input_tokens": 10,
+                    "output_tokens": 1,
+                    "cache_read_input_tokens": 500
+                }
+            }
+        });
+
+        let usage = extract_reported_usage(&value).expect("usage");
+        assert_eq!(usage.cached_tokens, 500);
+    }
+
+    #[test]
+    fn accumulator_sums_cache_tokens_across_deltas() {
+        let mut accumulator = ReportedLlmUsageAccumulator::default();
+        accumulator.observe_delta(ReportedLlmUsage {
+            prompt_tokens: 10,
+            completion_tokens: 5,
+            total_tokens: 15,
+            cached_tokens: 8,
+            cache_creation_tokens: 2,
+            reported_cost: None,
+        });
+        accumulator.observe_delta(ReportedLlmUsage {
+            prompt_tokens: 4,
+            completion_tokens: 6,
+            total_tokens: 10,
+            cached_tokens: 3,
+            cache_creation_tokens: 0,
+            reported_cost: None,
+        });
+
+        let usage = accumulator.finalize().expect("usage");
+        assert_eq!(usage.cached_tokens, 11);
+        assert_eq!(usage.cache_creation_tokens, 2);
+    }
+
+    #[test]
+    fn token_breakdown_maps_all_classes() {
+        let usage = ReportedLlmUsage {
+            prompt_tokens: 1,
+            completion_tokens: 2,
+            total_tokens: 3,
+            cached_tokens: 4,
+            cache_creation_tokens: 5,
+            reported_cost: None,
+        };
+        let breakdown = usage.token_breakdown();
+        assert_eq!(breakdown.prompt_tokens, 1);
+        assert_eq!(breakdown.completion_tokens, 2);
+        assert_eq!(breakdown.cached_tokens, 4);
+        assert_eq!(breakdown.cache_creation_tokens, 5);
+        assert!(!breakdown.is_empty());
     }
 }

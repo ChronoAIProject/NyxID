@@ -273,6 +273,33 @@ pub enum AppError {
     #[error("API key scope plan stale: {0}")]
     ApiKeyScopePlanStale(String),
 
+    #[error("Durable operation grant missing: {0}")]
+    DurableGrantMissing(String),
+
+    #[error("Durable operation grant mismatch: {0}")]
+    DurableGrantMismatch(String),
+
+    #[error("Durable operation grant expired")]
+    DurableGrantExpired,
+
+    #[error("Durable operation grant revoked")]
+    DurableGrantRevoked,
+
+    #[error("Durable operation contract drifted")]
+    DurableGrantContractDrift,
+
+    #[error("Durable operation grant quota exhausted")]
+    DurableGrantQuotaExhausted,
+
+    #[error("Durable operation ID already used")]
+    DurableOperationDuplicate,
+
+    #[error("Durable operation ID conflicts with an existing request")]
+    DurableOperationConflict,
+
+    #[error("Durable operation outcome is uncertain")]
+    DurableOperationOutcomeUncertain,
+
     #[error("Device code not found")]
     DeviceCodeNotFound,
 
@@ -323,6 +350,45 @@ pub enum AppError {
 
     #[error("Auth device user code invalid")]
     AuthDeviceUserCodeInvalid,
+
+    #[error("Connect link not found")]
+    ConnectLinkNotFound,
+
+    #[error("Connect link expired")]
+    ConnectLinkExpired,
+
+    #[error("Connect link already completed")]
+    ConnectLinkAlreadyCompleted,
+
+    #[error("Connect link cancelled")]
+    ConnectLinkCancelled,
+
+    #[error("Connect link rate limited")]
+    ConnectLinkRateLimited,
+
+    #[error("Connect link completion is already in progress")]
+    ConnectLinkCompletionInProgress,
+
+    #[error("Trigger not found")]
+    TriggerNotFound,
+
+    #[error("Trigger secret invalid")]
+    TriggerSecretInvalid,
+
+    #[error("Trigger rate limited")]
+    TriggerRateLimited,
+
+    #[error("Trigger payload too large")]
+    TriggerPayloadTooLarge,
+
+    #[error("Trigger delivery unsupported")]
+    TriggerDeliveryUnsupported,
+
+    #[error("Trigger delivery failed")]
+    TriggerDeliveryFailed,
+
+    #[error("Trigger delivery record not found")]
+    TriggerDeliveryRecordNotFound,
 
     #[error("Channel bot not found: {0}")]
     ChannelBotNotFound(String),
@@ -519,6 +585,14 @@ impl AppError {
             Self::ApiKeyScopePlanRouteUnresolved(_) | Self::ApiKeyScopePlanStale(_) => {
                 StatusCode::CONFLICT
             }
+            Self::DurableGrantMissing(_) | Self::DurableGrantMismatch(_) => StatusCode::FORBIDDEN,
+            Self::DurableGrantExpired => StatusCode::GONE,
+            Self::DurableGrantRevoked => StatusCode::FORBIDDEN,
+            Self::DurableGrantContractDrift
+            | Self::DurableOperationDuplicate
+            | Self::DurableOperationConflict
+            | Self::DurableOperationOutcomeUncertain => StatusCode::CONFLICT,
+            Self::DurableGrantQuotaExhausted => StatusCode::TOO_MANY_REQUESTS,
             Self::DeviceCodeNotFound => StatusCode::BAD_REQUEST,
             Self::DeviceCodeExpired => StatusCode::GONE,
             Self::DevicePollSignatureInvalid(_) => StatusCode::FORBIDDEN,
@@ -536,6 +610,19 @@ impl AppError {
             Self::AuthDeviceCodeAlreadyDelivered => StatusCode::GONE,
             Self::AuthDeviceCodeRateLimited => StatusCode::TOO_MANY_REQUESTS,
             Self::AuthDeviceUserCodeInvalid => StatusCode::BAD_REQUEST,
+            Self::ConnectLinkNotFound => StatusCode::NOT_FOUND,
+            Self::ConnectLinkExpired => StatusCode::GONE,
+            Self::ConnectLinkAlreadyCompleted => StatusCode::CONFLICT,
+            Self::ConnectLinkCancelled => StatusCode::GONE,
+            Self::ConnectLinkRateLimited => StatusCode::TOO_MANY_REQUESTS,
+            Self::ConnectLinkCompletionInProgress => StatusCode::CONFLICT,
+            Self::TriggerNotFound => StatusCode::NOT_FOUND,
+            Self::TriggerSecretInvalid => StatusCode::UNAUTHORIZED,
+            Self::TriggerRateLimited => StatusCode::TOO_MANY_REQUESTS,
+            Self::TriggerPayloadTooLarge => StatusCode::PAYLOAD_TOO_LARGE,
+            Self::TriggerDeliveryUnsupported => StatusCode::BAD_REQUEST,
+            Self::TriggerDeliveryFailed => StatusCode::BAD_GATEWAY,
+            Self::TriggerDeliveryRecordNotFound => StatusCode::NOT_FOUND,
             Self::ChannelBotNotFound(_) => StatusCode::NOT_FOUND,
             Self::ChannelBotInactive(_) => StatusCode::BAD_REQUEST,
             Self::ChannelBotLimitReached(_) => StatusCode::TOO_MANY_REQUESTS,
@@ -654,6 +741,15 @@ impl AppError {
             Self::ApiKeyScopePlanOwnerUnsupported(_) => 9005,
             Self::ApiKeyScopePlanRouteUnresolved(_) => 9006,
             Self::ApiKeyScopePlanStale(_) => 9007,
+            Self::DurableGrantMissing(_) => 9008,
+            Self::DurableGrantMismatch(_) => 9009,
+            Self::DurableGrantExpired => 9010,
+            Self::DurableGrantRevoked => 9011,
+            Self::DurableGrantContractDrift => 9012,
+            Self::DurableGrantQuotaExhausted => 9013,
+            Self::DurableOperationDuplicate => 9014,
+            Self::DurableOperationConflict => 9015,
+            Self::DurableOperationOutcomeUncertain => 9016,
             Self::DeviceCodeNotFound => 9500,
             Self::DeviceCodeExpired => 9501,
             Self::DevicePollSignatureInvalid(_) => 9502,
@@ -671,6 +767,19 @@ impl AppError {
             Self::AuthDeviceCodeAlreadyDelivered => 11205,
             Self::AuthDeviceCodeRateLimited => 11206,
             Self::AuthDeviceUserCodeInvalid => 11207,
+            Self::ConnectLinkNotFound => 11300,
+            Self::ConnectLinkExpired => 11301,
+            Self::ConnectLinkAlreadyCompleted => 11302,
+            Self::ConnectLinkCancelled => 11303,
+            Self::ConnectLinkRateLimited => 11304,
+            Self::ConnectLinkCompletionInProgress => 11305,
+            Self::TriggerNotFound => 11600,
+            Self::TriggerSecretInvalid => 11601,
+            Self::TriggerRateLimited => 11602,
+            Self::TriggerPayloadTooLarge => 11603,
+            Self::TriggerDeliveryUnsupported => 11604,
+            Self::TriggerDeliveryFailed => 11605,
+            Self::TriggerDeliveryRecordNotFound => 11606,
             Self::ChannelBotNotFound(_) => 10000,
             Self::ChannelBotInactive(_) => 10001,
             Self::ChannelBotLimitReached(_) => 10002,
@@ -825,6 +934,15 @@ impl AppError {
             Self::ApiKeyScopePlanOwnerUnsupported(_) => "api_key_scope_plan_owner_unsupported",
             Self::ApiKeyScopePlanRouteUnresolved(_) => "api_key_scope_plan_route_unresolved",
             Self::ApiKeyScopePlanStale(_) => "api_key_scope_plan_stale",
+            Self::DurableGrantMissing(_) => "durable_grant_missing",
+            Self::DurableGrantMismatch(_) => "durable_grant_mismatch",
+            Self::DurableGrantExpired => "durable_grant_expired",
+            Self::DurableGrantRevoked => "durable_grant_revoked",
+            Self::DurableGrantContractDrift => "durable_grant_contract_drift",
+            Self::DurableGrantQuotaExhausted => "durable_grant_quota_exhausted",
+            Self::DurableOperationDuplicate => "durable_operation_duplicate",
+            Self::DurableOperationConflict => "durable_operation_conflict",
+            Self::DurableOperationOutcomeUncertain => "durable_operation_outcome_uncertain",
             Self::DeviceCodeNotFound => "device_code_not_found",
             Self::DeviceCodeExpired => "device_code_expired",
             Self::DevicePollSignatureInvalid(_) => "device_poll_signature_invalid",
@@ -842,6 +960,19 @@ impl AppError {
             Self::AuthDeviceCodeAlreadyDelivered => "auth_device_already_delivered",
             Self::AuthDeviceCodeRateLimited => "auth_device_rate_limited",
             Self::AuthDeviceUserCodeInvalid => "auth_device_user_code_invalid",
+            Self::ConnectLinkNotFound => "connect_link_not_found",
+            Self::ConnectLinkExpired => "connect_link_expired",
+            Self::ConnectLinkAlreadyCompleted => "connect_link_already_completed",
+            Self::ConnectLinkCancelled => "connect_link_cancelled",
+            Self::ConnectLinkRateLimited => "connect_link_rate_limited",
+            Self::ConnectLinkCompletionInProgress => "connect_link_completion_in_progress",
+            Self::TriggerNotFound => "trigger_not_found",
+            Self::TriggerSecretInvalid => "trigger_secret_invalid",
+            Self::TriggerRateLimited => "trigger_rate_limited",
+            Self::TriggerPayloadTooLarge => "trigger_payload_too_large",
+            Self::TriggerDeliveryUnsupported => "trigger_delivery_unsupported",
+            Self::TriggerDeliveryFailed => "trigger_delivery_failed",
+            Self::TriggerDeliveryRecordNotFound => "trigger_delivery_record_not_found",
             Self::ChannelBotNotFound(_) => "channel_bot_not_found",
             Self::ChannelBotInactive(_) => "channel_bot_inactive",
             Self::ChannelBotLimitReached(_) => "channel_bot_limit_reached",
@@ -1242,6 +1373,14 @@ mod tests {
     }
 
     #[test]
+    fn connect_link_completion_in_progress_contract() {
+        let error = AppError::ConnectLinkCompletionInProgress;
+        assert_eq!(error.status_code(), StatusCode::CONFLICT);
+        assert_eq!(error.error_code(), 11305);
+        assert_eq!(error.error_key(), "connect_link_completion_in_progress");
+    }
+
+    #[test]
     fn error_codes_unique() {
         let codes = vec![
             AppError::BadRequest("".into()).error_code(),
@@ -1327,6 +1466,19 @@ mod tests {
             AppError::AuthDeviceCodeAlreadyDelivered.error_code(),
             AppError::AuthDeviceCodeRateLimited.error_code(),
             AppError::AuthDeviceUserCodeInvalid.error_code(),
+            AppError::ConnectLinkNotFound.error_code(),
+            AppError::ConnectLinkExpired.error_code(),
+            AppError::ConnectLinkAlreadyCompleted.error_code(),
+            AppError::ConnectLinkCancelled.error_code(),
+            AppError::ConnectLinkRateLimited.error_code(),
+            AppError::ConnectLinkCompletionInProgress.error_code(),
+            AppError::TriggerNotFound.error_code(),
+            AppError::TriggerSecretInvalid.error_code(),
+            AppError::TriggerRateLimited.error_code(),
+            AppError::TriggerPayloadTooLarge.error_code(),
+            AppError::TriggerDeliveryUnsupported.error_code(),
+            AppError::TriggerDeliveryFailed.error_code(),
+            AppError::TriggerDeliveryRecordNotFound.error_code(),
             AppError::ChannelBotNotFound("".into()).error_code(),
             AppError::ChannelBotInactive("".into()).error_code(),
             AppError::ChannelBotLimitReached("".into()).error_code(),

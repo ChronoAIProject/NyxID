@@ -11,7 +11,7 @@ use crate::models::downstream_service::{
 };
 use crate::models::service_billing::{BillingMetric, PlatformUsage};
 use crate::models::service_endpoint::{
-    COLLECTION_NAME as SERVICE_ENDPOINTS, OperationResponseContract, ServiceEndpoint,
+    COLLECTION_NAME as SERVICE_ENDPOINTS, EndpointRisk, OperationResponseContract, ServiceEndpoint,
 };
 use crate::models::usage_meter::CredentialClass;
 use crate::models::user_api_key::{COLLECTION_NAME as USER_API_KEYS, UserApiKey};
@@ -26,8 +26,8 @@ use crate::services::content_type::{
 };
 use crate::services::node_ws_manager::NodeWsManager;
 use crate::services::{
-    api_docs_service, connection_service, node_routing_service, openapi_parser,
-    operation_descriptor, proxy_service,
+    api_docs_service, connect_link_service, connection_service, node_routing_service,
+    openapi_parser, operation_descriptor, proxy_service,
 };
 
 // ---------------------------------------------------------------------------
@@ -159,6 +159,10 @@ pub struct McpToolService {
     pub description: Option<String>,
     pub service_category: String,
     pub endpoints: Vec<McpToolEndpoint>,
+    /// Durable-authorization metadata keyed by the exact endpoint identity
+    /// published in `endpoints`. Keeping it on the canonical catalog result
+    /// preserves instance-spec precedence for security consumers.
+    pub durable_endpoint_metadata: HashMap<String, McpDurableEndpointMetadata>,
     pub source: McpToolSource,
     /// Whether the service can currently execute requests with its configured
     /// credential and routing state.
@@ -172,6 +176,12 @@ pub struct McpToolService {
     /// service: the instance's `UserEndpoint.recommended_skills` when set,
     /// else the catalog template's `DownstreamService.recommended_skills`.
     pub recommended_skills: Vec<String>,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct McpDurableEndpointMetadata {
+    pub risk: Option<EndpointRisk>,
+    pub supports_idempotency_key: bool,
 }
 
 fn mcp_credential_class(
@@ -233,6 +243,123 @@ pub struct McpCatalogDiagnostics {
 pub struct McpOperationCatalog {
     pub services: Vec<McpToolService>,
     pub diagnostics: McpCatalogDiagnostics,
+}
+
+/// Digest of the exact normalized endpoint contract published by NyxID.
+/// Descriptive labels are excluded; every execution-relevant selector and
+/// schema field is included.
+pub fn endpoint_contract_digest(endpoint: &McpToolEndpoint) -> String {
+    canonical_sha256(serde_json::json!({
+        "contract_version": "nyxid-exact-endpoint.v1",
+        "endpoint_id": endpoint.endpoint_id,
+        "method": endpoint.method,
+        "path": endpoint.path,
+        "parameters": endpoint.parameters,
+        "request_body_schema": endpoint.request_body_schema,
+        "request_content_type": endpoint.request_content_type,
+        "request_body_required": endpoint.request_body_required,
+        "response": endpoint.response,
+    }))
+}
+
+/// Digest of one exact invocation. This binds the server-published endpoint
+/// contract to the canonical argument object that NyxID validates and later
+/// redeems.
+pub fn exact_operation_digest(
+    user_service_id: &str,
+    endpoint: &McpToolEndpoint,
+    arguments: &serde_json::Value,
+) -> String {
+    canonical_sha256(serde_json::json!({
+        "contract_version": "nyxid-exact-operation.v1",
+        "user_service_id": user_service_id,
+        "endpoint_id": endpoint.endpoint_id,
+        "endpoint_contract_digest": endpoint_contract_digest(endpoint),
+        "arguments": arguments,
+    }))
+}
+
+/// Digest of the complete caller-visible MCP catalog. The shape is identical
+/// to `/api/v1/mcp/config`'s contract-bearing service descriptors.
+pub fn operation_catalog_digest(services: &[McpToolService]) -> String {
+    let mut service_values: Vec<_> = services
+        .iter()
+        .map(|service| {
+            let mut endpoint_values: Vec<_> = service
+                .endpoints
+                .iter()
+                .map(|endpoint| {
+                    serde_json::json!({
+                        "endpoint_id": endpoint.endpoint_id,
+                        "name": endpoint.name,
+                        "description": endpoint.description,
+                        "method": endpoint.method,
+                        "path": endpoint.path,
+                        "parameters": endpoint.parameters,
+                        "request_body_schema": endpoint.request_body_schema,
+                        "request_content_type": endpoint.request_content_type,
+                        "request_body_required": endpoint.request_body_required,
+                        "response_description": endpoint.response_description,
+                        "response": endpoint.response,
+                        "operation_digest": endpoint_contract_digest(endpoint),
+                    })
+                })
+                .collect();
+            endpoint_values.sort_by(|left, right| {
+                left["endpoint_id"]
+                    .as_str()
+                    .cmp(&right["endpoint_id"].as_str())
+            });
+            let mut value = serde_json::json!({
+                "service_id": service.service_id,
+                "service_name": service.service_name,
+                "service_slug": service.service_slug,
+                "description": service.description,
+                "service_category": service.service_category,
+                "is_user_service": service.source.is_user_service(),
+                "is_generic_proxy": service.is_generic_proxy,
+                "endpoints": endpoint_values,
+            });
+            if !service.recommended_skills.is_empty() {
+                value["recommended_skills"] = serde_json::json!(service.recommended_skills);
+            }
+            value
+        })
+        .collect();
+    service_values.sort_by(|left, right| {
+        left["service_id"]
+            .as_str()
+            .cmp(&right["service_id"].as_str())
+    });
+    canonical_sha256(serde_json::json!({
+        "contract_version": "1.0",
+        "services": service_values,
+    }))
+}
+
+pub fn canonical_sha256(value: serde_json::Value) -> String {
+    let encoded =
+        serde_json::to_vec(&canonical_json(value)).expect("serializing JSON values cannot fail");
+    format!("sha256:{}", hex::encode(Sha256::digest(encoded)))
+}
+
+pub fn canonical_json(value: serde_json::Value) -> serde_json::Value {
+    match value {
+        serde_json::Value::Array(values) => {
+            serde_json::Value::Array(values.into_iter().map(canonical_json).collect())
+        }
+        serde_json::Value::Object(values) => {
+            let mut entries: Vec<_> = values.into_iter().collect();
+            entries.sort_by(|left, right| left.0.cmp(&right.0));
+            serde_json::Value::Object(
+                entries
+                    .into_iter()
+                    .map(|(key, value)| (key, canonical_json(value)))
+                    .collect(),
+            )
+        }
+        other => other,
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -845,7 +972,7 @@ async fn load_user_tools_inner(
             .unwrap_or(&us.slug);
 
         let user_spec_url = user_endpoint.and_then(|ep| ep.openapi_spec_url.as_deref());
-        let (endpoints, is_generic, invalid_openapi_contract) = if let Some(catalog_id) =
+        let (published, is_generic, invalid_openapi_contract) = if let Some(catalog_id) =
             us.catalog_service_id.as_deref()
         {
             // Catalog-backed: the instance's user-mounted spec is a
@@ -857,13 +984,19 @@ async fn load_user_tools_inner(
             // generic proxy tool exactly like a custom endpoint (#1290).
             let template_rows = eps_by_svc
                 .get(catalog_id)
-                .map(|eps| service_endpoints_to_mcp(eps))
-                .unwrap_or_default();
+                .map(|eps| ParsedMcpEndpoints {
+                    endpoints: service_endpoints_to_mcp(eps),
+                    durable_metadata: service_endpoint_durable_metadata(eps),
+                })
+                .unwrap_or_else(|| ParsedMcpEndpoints {
+                    endpoints: Vec::new(),
+                    durable_metadata: HashMap::new(),
+                });
             match user_spec_url {
                 Some(spec_url) => {
                     match try_user_spec_endpoints(spec_url, &r.effective_owner_id, &us.id).await {
                         Some(instance_endpoints) => (instance_endpoints, false, false),
-                        None if !template_rows.is_empty() => {
+                        None if !template_rows.endpoints.is_empty() => {
                             tracing::warn!(
                                 user_service_id = %us.id,
                                 spec_url = %api_docs_service::redact_url_for_logs(spec_url),
@@ -872,7 +1005,10 @@ async fn load_user_tools_inner(
                             (template_rows, false, false)
                         }
                         None => (
-                            vec![build_generic_proxy_endpoint(endpoint_label)],
+                            ParsedMcpEndpoints {
+                                endpoints: vec![build_generic_proxy_endpoint(endpoint_label)],
+                                durable_metadata: HashMap::new(),
+                            },
                             true,
                             true,
                         ),
@@ -887,7 +1023,14 @@ async fn load_user_tools_inner(
             user_spec_endpoints(spec_url, &r.effective_owner_id, &us.id, endpoint_label).await
         } else {
             let generic_ep = build_generic_proxy_endpoint(endpoint_label);
-            (vec![generic_ep], true, false)
+            (
+                ParsedMcpEndpoints {
+                    endpoints: vec![generic_ep],
+                    durable_metadata: HashMap::new(),
+                },
+                true,
+                false,
+            )
         };
 
         let recommended_skills = user_endpoint
@@ -905,7 +1048,8 @@ async fn load_user_tools_inner(
             service_slug: us.slug.clone(),
             description: None,
             service_category: "user_service".to_string(),
-            endpoints,
+            endpoints: published.endpoints,
+            durable_endpoint_metadata: published.durable_metadata,
             recommended_skills,
             source: McpToolSource::UserManaged {
                 user_service_id: us.id.clone(),
@@ -929,10 +1073,9 @@ async fn load_user_tools_inner(
             continue;
         }
 
-        let endpoints = eps_by_svc
-            .get(svc.id.as_str())
-            .map(|eps| service_endpoints_to_mcp(eps))
-            .unwrap_or_default();
+        let endpoint_rows = eps_by_svc.get(svc.id.as_str()).cloned().unwrap_or_default();
+        let endpoints = service_endpoints_to_mcp(&endpoint_rows);
+        let durable_endpoint_metadata = service_endpoint_durable_metadata(&endpoint_rows);
 
         result.push(McpToolService {
             service_id: svc.id.clone(),
@@ -941,6 +1084,7 @@ async fn load_user_tools_inner(
             description: svc.description.clone(),
             service_category: svc.service_category.clone(),
             endpoints,
+            durable_endpoint_metadata,
             recommended_skills: svc.recommended_skills.clone().unwrap_or_default(),
             source: McpToolSource::Platform {
                 downstream_service_id: svc.id.clone(),
@@ -973,33 +1117,71 @@ fn service_endpoints_to_mcp(eps: &[&ServiceEndpoint]) -> Vec<McpToolEndpoint> {
         .collect()
 }
 
+fn service_endpoint_durable_metadata(
+    eps: &[&ServiceEndpoint],
+) -> HashMap<String, McpDurableEndpointMetadata> {
+    eps.iter()
+        .map(|endpoint| {
+            (
+                endpoint.id.clone(),
+                McpDurableEndpointMetadata {
+                    risk: endpoint.risk,
+                    supports_idempotency_key: endpoint.supports_idempotency_key,
+                },
+            )
+        })
+        .collect()
+}
+
+struct ParsedMcpEndpoints {
+    endpoints: Vec<McpToolEndpoint>,
+    durable_metadata: HashMap<String, McpDurableEndpointMetadata>,
+}
+
 /// Fetch the user-supplied OpenAPI spec through the hardened cache (scoped
 /// by the owning user id), parse it, and convert to MCP tool endpoints.
 async fn fetch_and_parse_user_spec(
     spec_url: &str,
     owner_id: &str,
-) -> AppResult<Vec<McpToolEndpoint>> {
+) -> AppResult<ParsedMcpEndpoints> {
     let spec = api_docs_service::fetch_spec_json_scoped(spec_url, owner_id).await?;
     let parsed = openapi_parser::parse_openapi_spec_value(&spec)?;
-    Ok(parsed
-        .into_iter()
-        .map(|p| McpToolEndpoint {
+    let mut endpoints = Vec::with_capacity(parsed.len());
+    let mut durable_metadata = HashMap::with_capacity(parsed.len());
+    for parsed_endpoint in parsed {
+        let endpoint_id = opaque_operation_id(
+            parsed_endpoint.source_operation_id.as_deref(),
+            &parsed_endpoint.method,
+            &parsed_endpoint.path,
+        );
+        durable_metadata.insert(
+            endpoint_id.clone(),
+            McpDurableEndpointMetadata {
+                risk: parsed_endpoint.risk,
+                supports_idempotency_key: parsed_endpoint.supports_idempotency_key,
+            },
+        );
+        endpoints.push(McpToolEndpoint {
             // Dynamic operations have no persisted row. Hash the producer's
             // OpenAPI operationId, falling back to canonical method/path, so
             // callers receive a stable opaque ID and never derive identity.
-            endpoint_id: opaque_operation_id(p.source_operation_id.as_deref(), &p.method, &p.path),
-            name: p.name,
-            description: p.description,
-            method: p.method,
-            path: p.path,
-            parameters: p.parameters,
-            request_body_schema: p.request_body_schema,
-            request_content_type: p.request_content_type,
-            request_body_required: p.request_body_required,
+            endpoint_id,
+            name: parsed_endpoint.name,
+            description: parsed_endpoint.description,
+            method: parsed_endpoint.method,
+            path: parsed_endpoint.path,
+            parameters: parsed_endpoint.parameters,
+            request_body_schema: parsed_endpoint.request_body_schema,
+            request_content_type: parsed_endpoint.request_content_type,
+            request_body_required: parsed_endpoint.request_body_required,
             response_description: None,
-            response: p.response,
-        })
-        .collect())
+            response: parsed_endpoint.response,
+        });
+    }
+    Ok(ParsedMcpEndpoints {
+        endpoints,
+        durable_metadata,
+    })
 }
 
 /// Fetch and parse a user-mounted OpenAPI spec, returning `Some(endpoints)`
@@ -1010,9 +1192,9 @@ async fn try_user_spec_endpoints(
     spec_url: &str,
     owner_id: &str,
     user_service_id: &str,
-) -> Option<Vec<McpToolEndpoint>> {
+) -> Option<ParsedMcpEndpoints> {
     match fetch_and_parse_user_spec(spec_url, owner_id).await {
-        Ok(mcp_endpoints) if !mcp_endpoints.is_empty() => Some(mcp_endpoints),
+        Ok(parsed) if !parsed.endpoints.is_empty() => Some(parsed),
         Ok(_) => {
             tracing::debug!(
                 user_service_id = %user_service_id,
@@ -1042,11 +1224,14 @@ async fn user_spec_endpoints(
     owner_id: &str,
     user_service_id: &str,
     endpoint_label: &str,
-) -> (Vec<McpToolEndpoint>, bool, bool) {
+) -> (ParsedMcpEndpoints, bool, bool) {
     match try_user_spec_endpoints(spec_url, owner_id, user_service_id).await {
-        Some(mcp_endpoints) => (mcp_endpoints, false, false),
+        Some(parsed) => (parsed, false, false),
         None => (
-            vec![build_generic_proxy_endpoint(endpoint_label)],
+            ParsedMcpEndpoints {
+                endpoints: vec![build_generic_proxy_endpoint(endpoint_label)],
+                durable_metadata: HashMap::new(),
+            },
             true,
             true,
         ),
@@ -1535,8 +1720,8 @@ pub fn generate_tool_definitions(
 
     tools.push(McpToolDefinition {
         name: "nyx__connect_service".to_string(),
-        description: "Connect to an available service. For services requiring credentials \
-            (connection type), provide your API key or token."
+        description: "Connect to an available service. If a credential is required and omitted, \
+            returns a hosted connection URL that the user can open."
             .to_string(),
         input_schema: serde_json::json!({
             "type": "object",
@@ -1555,6 +1740,30 @@ pub fn generate_tool_definitions(
                 }
             },
             "required": ["service_id"]
+        }),
+    });
+
+    tools.push(McpToolDefinition {
+        name: "nyx__wait_for_connection".to_string(),
+        description: "Wait for a hosted service connection to complete. Call this after \
+            nyx__connect_service returns pending_connection, then retry the original tool call."
+            .to_string(),
+        input_schema: serde_json::json!({
+            "type": "object",
+            "properties": {
+                "connect_link_id": {
+                    "type": "string",
+                    "description": "Connect link ID returned by nyx__connect_service"
+                },
+                "timeout_secs": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "maximum": 120,
+                    "default": 30,
+                    "description": "Maximum seconds to wait before returning the current status"
+                }
+            },
+            "required": ["connect_link_id"]
         }),
     });
 
@@ -1851,6 +2060,7 @@ pub async fn load_public_tools(db: &mongodb::Database) -> AppResult<Vec<McpToolS
             service_category: "public".to_string(),
             recommended_skills: Vec::new(),
             endpoints,
+            durable_endpoint_metadata: HashMap::new(),
             source: McpToolSource::Platform {
                 downstream_service_id: svc.id,
             },
@@ -2839,6 +3049,8 @@ pub async fn execute_tool(
     arguments: &serde_json::Value,
     jwt_keys: &crate::crypto::jwt::JwtKeys,
     config: &crate::config::AppConfig,
+    connection_expiry_notifier:
+        &crate::services::connection_expiry_service::ConnectionExpiryNotifier,
     token_exchange_cache: &crate::services::provider_token_exchange_service::TokenExchangeCache,
     cloud_response_cache: &crate::services::cloud_response_cache::CloudResponseCache,
     exec_ctx: &McpExecContext<'_>,
@@ -2870,6 +3082,7 @@ pub async fn execute_tool(
                 user_service_id,
                 Some(&service.service_slug),
                 None,
+                Some(connection_expiry_notifier),
             )
             .await?
             .ok_or_else(|| {
@@ -2887,6 +3100,7 @@ pub async fn execute_tool(
                     user_id,
                     ak_id,
                     user_service_id,
+                    Some(connection_expiry_notifier),
                 )
                 .await?
             {
@@ -3139,6 +3353,7 @@ pub async fn execute_tool(
                 encryption_keys,
                 user_id,
                 downstream_service_id,
+                Some(connection_expiry_notifier),
             )
             .await
             {
@@ -3665,6 +3880,7 @@ pub async fn discover_services(
 // ---------------------------------------------------------------------------
 
 /// Connect the user to a service from within the MCP client.
+#[allow(clippy::too_many_arguments)]
 pub async fn connect_service(
     db: &mongodb::Database,
     encryption_keys: &EncryptionKeys,
@@ -3673,7 +3889,42 @@ pub async fn connect_service(
     service_id: &str,
     credential: Option<&str>,
     credential_label: Option<&str>,
+    frontend_url: &str,
+    requested_by: Option<&str>,
 ) -> AppResult<serde_json::Value> {
+    let service = db
+        .collection::<DownstreamService>(DOWNSTREAM_SERVICES)
+        .find_one(doc! { "_id": service_id, "is_active": true })
+        .await?
+        .ok_or_else(|| AppError::NotFound("Service not found".to_string()))?;
+
+    if service.requires_user_credential && credential.is_none_or(|value| value.trim().is_empty()) {
+        let created = connect_link_service::create(
+            db,
+            connect_link_service::CreateInput {
+                user_id: user_id.to_string(),
+                service_slug: service.slug,
+                label: credential_label.map(str::to_string),
+                requested_by: requested_by.map(str::to_string),
+                callback_url: None,
+                ttl_secs: None,
+                oauth_client_id: None,
+            },
+        )
+        .await?;
+        let connect_url =
+            connect_link_service::build_connect_url(frontend_url, &created.raw_token)?;
+        return Ok(serde_json::json!({
+            "status": "pending_connection",
+            "connect_url": connect_url,
+            "connect_link_id": created.link.id,
+            "expires_at": created.link.expires_at.to_rfc3339(),
+            "service_id": created.link.service_id,
+            "service_slug": created.link.service_slug,
+            "instructions": "Open this URL in a browser to connect the service, then call nyx__wait_for_connection with connect_link_id.",
+        }));
+    }
+
     let result = connection_service::connect_user(
         db,
         encryption_keys,
@@ -3700,7 +3951,9 @@ pub async fn connect_service(
 mod tests {
     use super::*;
     use crate::models::downstream_service::test_helpers::dummy_service;
-    use crate::test_utils::{connect_test_database, test_user_endpoint, test_user_service};
+    use crate::test_utils::{
+        connect_test_database, test_encryption_keys, test_user_endpoint, test_user_service,
+    };
 
     fn make_endpoint(name: &str, description: &str) -> McpToolEndpoint {
         McpToolEndpoint {
@@ -3732,6 +3985,7 @@ mod tests {
             service_category: "connection".to_string(),
             recommended_skills: Vec::new(),
             endpoints,
+            durable_endpoint_metadata: HashMap::new(),
             source: McpToolSource::Platform {
                 downstream_service_id: id.to_string(),
             },
@@ -3739,6 +3993,22 @@ mod tests {
             is_generic_proxy: false,
             invalid_openapi_contract: false,
         }
+    }
+
+    #[test]
+    fn exact_operation_digest_matches_cross_language_unicode_fixture() {
+        let digest = canonical_sha256(serde_json::json!({
+            "contract_version": "nyxid-exact-operation.v1",
+            "user_service_id": "us-alpha",
+            "endpoint_id": "message.create",
+            "endpoint_contract_digest": "sha256:contract",
+            "arguments": { "message": "你好 <team>" },
+        }));
+
+        assert_eq!(
+            digest,
+            "sha256:1bcaa1b49841edd6af5c6787659938cfe47196f3c6d2e38b460d955c4ccad4e3"
+        );
     }
 
     #[test]
@@ -4065,6 +4335,8 @@ mod tests {
                 request_body_required: false,
                 response_description: None,
                 response: OperationResponseContract::default(),
+                risk: None,
+                supports_idempotency_key: false,
                 is_active: true,
                 created_at: chrono::Utc::now(),
                 updated_at: chrono::Utc::now(),
@@ -4162,6 +4434,8 @@ mod tests {
                 request_body_required: false,
                 response_description: None,
                 response: OperationResponseContract::default(),
+                risk: None,
+                supports_idempotency_key: false,
                 is_active: true,
                 created_at: chrono::Utc::now(),
                 updated_at: chrono::Utc::now(),
@@ -4350,6 +4624,8 @@ mod tests {
                 request_body_required: false,
                 response_description: None,
                 response: OperationResponseContract::default(),
+                risk: None,
+                supports_idempotency_key: false,
                 is_active: true,
                 created_at: chrono::Utc::now(),
                 updated_at: chrono::Utc::now(),
@@ -4462,6 +4738,8 @@ mod tests {
                 request_body_required: false,
                 response_description: None,
                 response: OperationResponseContract::default(),
+                risk: None,
+                supports_idempotency_key: false,
                 is_active: true,
                 created_at: chrono::Utc::now(),
                 updated_at: chrono::Utc::now(),
@@ -4596,6 +4874,53 @@ mod tests {
         assert!(connected_ids.is_disjoint(&discover_ids));
     }
 
+    #[tokio::test]
+    async fn connect_service_without_credential_returns_hosted_pending_link() {
+        let Some(db) = connect_test_database("mcp_connect_link_pending").await else {
+            return;
+        };
+        let user_id = uuid::Uuid::new_v4().to_string();
+        let mut service = dummy_service();
+        service.id = uuid::Uuid::new_v4().to_string();
+        service.slug = format!("mcp-connect-{}", uuid::Uuid::new_v4());
+        service.requires_user_credential = true;
+        db.collection::<DownstreamService>(DOWNSTREAM_SERVICES)
+            .insert_one(&service)
+            .await
+            .expect("insert service");
+        let node_ws_manager = NodeWsManager::new(30, 100);
+
+        let result = connect_service(
+            &db,
+            &test_encryption_keys(),
+            &node_ws_manager,
+            &user_id,
+            &service.id,
+            None,
+            Some("Coding agent"),
+            "https://app.example.test",
+            Some("codex"),
+        )
+        .await
+        .expect("create hosted connect link");
+
+        assert_eq!(result["status"], "pending_connection");
+        assert_eq!(result["service_slug"], service.slug);
+        assert!(
+            result["connect_url"]
+                .as_str()
+                .is_some_and(|url| url.starts_with("https://app.example.test/connect/nyx_clk_"))
+        );
+        let link_id = result["connect_link_id"].as_str().expect("link id");
+        let view = connect_link_service::wait_for_status(&db, &user_id, link_id, 1)
+            .await
+            .expect("read pending link");
+        assert_eq!(
+            view.link.status,
+            crate::models::connect_link::ConnectLinkStatus::Pending
+        );
+    }
+
     // -- generate_tool_definitions tests --
 
     #[test]
@@ -4610,8 +4935,8 @@ mod tests {
         let empty_set = HashSet::new();
         let tools = generate_tool_definitions(&services, Some(&empty_set));
 
-        // Should only have the 13 meta-tools (5 core + 2 SSH + 6 oracle)
-        assert_eq!(tools.len(), 13);
+        // Should only have the 14 meta-tools (6 core + 2 SSH + 6 oracle)
+        assert_eq!(tools.len(), 14);
         assert!(tools.iter().all(|t| t.name.starts_with("nyx__")));
     }
 
@@ -4636,8 +4961,8 @@ mod tests {
         activated.insert("svc-1".to_string());
         let tools = generate_tool_definitions(&services, Some(&activated));
 
-        // 13 meta-tools + 1 weather tool (news excluded)
-        assert_eq!(tools.len(), 14);
+        // 14 meta-tools + 1 weather tool (news excluded)
+        assert_eq!(tools.len(), 15);
         assert!(tools.iter().any(|t| t.name == "weather__get_forecast"));
         assert!(!tools.iter().any(|t| t.name == "news__headlines"));
     }
@@ -4661,8 +4986,8 @@ mod tests {
 
         let tools = generate_tool_definitions(&services, None);
 
-        // 13 meta-tools + 2 service tools
-        assert_eq!(tools.len(), 15);
+        // 14 meta-tools + 2 service tools
+        assert_eq!(tools.len(), 16);
         assert!(tools.iter().any(|t| t.name == "weather__get_forecast"));
         assert!(tools.iter().any(|t| t.name == "news__headlines"));
     }

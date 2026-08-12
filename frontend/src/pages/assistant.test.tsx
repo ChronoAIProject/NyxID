@@ -24,6 +24,12 @@ const {
   mockCreateMutateAsync,
   mockCancelMutateAsync,
   mockDecideMutateAsync,
+  mockResolveInputMutateAsync,
+  mockStopTaskMutateAsync,
+  mockSteerTaskMutateAsync,
+  mockRetryStepMutateAsync,
+  mockSkipStepMutateAsync,
+  mockResolvePlanMutateAsync,
   mockContinueAction,
   mockDeleteMutateAsync,
   mockSendMutateAsync,
@@ -34,6 +40,12 @@ const {
   mockCreateMutateAsync: vi.fn(),
   mockCancelMutateAsync: vi.fn(),
   mockDecideMutateAsync: vi.fn(),
+  mockResolveInputMutateAsync: vi.fn(),
+  mockStopTaskMutateAsync: vi.fn(),
+  mockSteerTaskMutateAsync: vi.fn(),
+  mockRetryStepMutateAsync: vi.fn(),
+  mockSkipStepMutateAsync: vi.fn(),
+  mockResolvePlanMutateAsync: vi.fn(),
   mockContinueAction: vi.fn(),
   mockDeleteMutateAsync: vi.fn(),
   mockSendMutateAsync: vi.fn(),
@@ -197,6 +209,30 @@ vi.mock("@/hooks/use-assistant", () => ({
   useDecideApproval: () => ({
     mutateAsync: mockDecideMutateAsync,
     isPending: state.decisionPending,
+  }),
+  useResolveInput: () => ({
+    mutateAsync: mockResolveInputMutateAsync,
+    isPending: false,
+  }),
+  useStopTask: () => ({
+    mutateAsync: mockStopTaskMutateAsync,
+    isPending: false,
+  }),
+  useSteerTask: () => ({
+    mutateAsync: mockSteerTaskMutateAsync,
+    isPending: false,
+  }),
+  useRetryStep: () => ({
+    mutateAsync: mockRetryStepMutateAsync,
+    isPending: false,
+  }),
+  useSkipStep: () => ({
+    mutateAsync: mockSkipStepMutateAsync,
+    isPending: false,
+  }),
+  useResolvePlan: () => ({
+    mutateAsync: mockResolvePlanMutateAsync,
+    isPending: false,
   }),
   useActionCardActions: () => ({
     setInProgress: vi.fn(),
@@ -436,6 +472,22 @@ describe("AssistantPage direct mode", () => {
         "screen:/keys": expect.objectContaining({ text: "screen" }),
       });
     });
+  });
+});
+
+describe("AssistantPage typed conversation controls", () => {
+  it("makes legacy chatc history proactively read-only", () => {
+    const legacy: Conversation = {
+      ...existingConversation,
+      id: "chatc-8bd999c402fb37d60cdcd81e3b78cfd",
+    };
+    state.conversations = [legacy];
+    state.search = { c: legacy.id };
+
+    renderPage();
+
+    expect(screen.getByRole("textbox")).toBeDisabled();
+    expect(screen.getByRole("button", { name: "Send message" })).toBeDisabled();
   });
 });
 
@@ -1033,5 +1085,105 @@ describe("AssistantPage canonical conversation resolution", () => {
     renderPage();
 
     expect(mockNavigate).not.toHaveBeenCalled();
+  });
+});
+
+describe("AssistantPage typed task controls", () => {
+  it("routes active-task input and TaskPlan actions through actor controls", async () => {
+    const event = userEvent.setup();
+    const conversationId = "nyxid-chat-f8369965a444433f92ec50e67ad8ee52";
+    state.search = { c: conversationId };
+    state.conversations = [{ ...existingConversation, id: conversationId }];
+    state.historyMessages = [
+      {
+        id: "assistant-current-state",
+        role: "assistant",
+        schema_version: 1,
+        created_at: "2026-08-11T00:00:00.000Z",
+        blocks: [
+          {
+            type: "task_plan",
+            block_id: "current-task-plan:task-alpha",
+            state_version: 47,
+            progress_sequence: 12,
+            plan: {
+              schemaVersion: 4,
+              actorId: conversationId,
+              taskId: "task-alpha",
+              turnId: "turn-alpha",
+              planId: "plan-alpha",
+              planRevision: 2,
+              planRevisions: [],
+              title: "Publish the release",
+              status: "active",
+              activeStepId: "step-alpha",
+              gate: {
+                mode: "confirm",
+                status: "pending",
+                requestId: "plan-gate-alpha",
+                taskId: "task-alpha",
+                planId: "plan-alpha",
+                planRevision: 2,
+              },
+              steps: [
+                {
+                  stepId: "step-alpha",
+                  order: 1,
+                  kind: "tool",
+                  status: "running",
+                  required: true,
+                  description: "Publish release notes",
+                  source: { kind: "tool", label: "github_release" },
+                  mayChangeExternalState: true,
+                  externalEffect: "not_started",
+                  availableActions: {
+                    retry: true,
+                    skip: true,
+                    stop: true,
+                  },
+                  dependsOn: [],
+                  substeps: [],
+                  operation: { operationGeneration: 2 },
+                },
+              ],
+            },
+          },
+        ],
+      },
+    ];
+    renderPage();
+
+    const composer = screen.getByRole("textbox");
+    expect(composer).toBeEnabled();
+    await event.type(composer, "Use the release branch");
+    await event.click(
+      screen.getByRole("button", { name: "Send steering instruction" }),
+    );
+    expect(mockSteerTaskMutateAsync).toHaveBeenCalledWith(
+      "Use the release branch",
+    );
+    expect(mockSendMutateAsync).not.toHaveBeenCalled();
+
+    await event.click(screen.getByRole("button", { name: "Stop task" }));
+    await event.click(
+      screen.getByRole("button", { name: "Retry Publish release notes" }),
+    );
+    await event.click(
+      screen.getByRole("button", { name: "Skip Publish release notes" }),
+    );
+    expect(mockStopTaskMutateAsync).toHaveBeenCalledOnce();
+    expect(mockRetryStepMutateAsync).toHaveBeenCalledWith("step-alpha");
+    expect(mockSkipStepMutateAsync).toHaveBeenCalledWith("step-alpha");
+    await event.click(screen.getByRole("button", { name: "Confirm plan" }));
+    await event.click(screen.getByRole("button", { name: "Reject plan" }));
+    expect(mockResolvePlanMutateAsync).toHaveBeenNthCalledWith(1, {
+      blockId: "current-task-plan:task-alpha",
+      confirmed: true,
+    });
+    expect(mockResolvePlanMutateAsync).toHaveBeenNthCalledWith(2, {
+      blockId: "current-task-plan:task-alpha",
+      confirmed: false,
+    });
+    expect(mockCancelMutateAsync).not.toHaveBeenCalled();
   });
 });

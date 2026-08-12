@@ -676,6 +676,8 @@ mod tests {
             request_content_type: None,
             request_body_required: false,
             response: Default::default(),
+            risk: None,
+            supports_idempotency_key: false,
         };
         let resp = parsed_endpoint_to_response(parsed);
         assert_eq!(resp.name, "list_users");
@@ -699,6 +701,8 @@ mod tests {
             request_content_type: Some("application/json".into()),
             request_body_required: true,
             response: Default::default(),
+            risk: None,
+            supports_idempotency_key: false,
         };
         let resp = parsed_endpoint_to_response(parsed);
         assert_eq!(resp.name, "create_user");

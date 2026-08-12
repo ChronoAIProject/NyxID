@@ -1,7 +1,7 @@
 ---
 name: aevatar-service-publisher
 description: Publish an Aevatar member, team, or workflow as an invocable service and (host permitting) register it with NyxID, then verify, invoke, or wire external HTTP triggers such as Lark Base automation — all over the REST API. Use when a user wants to "publish/bind a service", "expose my workflow/team as a service", "register it with NyxID", "make it callable", "get the service slug/URL", "invoke my service", "let Lark Base call my workflow", "trigger this workflow from an external webhook", or "version/deploy/roll out a service". It covers the simple scope binding, reading back a member's published service, the full account-level service lifecycle (revision → publish → deploy → rollout), how to confirm the NyxID registration (slug + status), how to invoke an endpoint, and how to distinguish direct NyxID proxy triggering from host-gated externalExposure. Build the team/member first with the team-builder skill.
-version: "1.7"
+version: "1.8"
 metadata:
   category: plain
   tag:
@@ -234,8 +234,17 @@ Trade-offs:
 For Lark Base, `bitable:app:readonly` is only an application API scope. The exact Base document
 must also grant the selected Bot application access. Error `91403` is a document ACL denial, not
 evidence that the API scope is missing. In the current Base UI, open `...`/More, choose **Add
-Applications**, and add the exact Bot application used by the selected NyxID UserService; view
-access is enough for a read-only workflow.
+Applications** (the document-application entry), and add the exact Bot application used by the
+selected NyxID UserService. If advanced permissions are enabled, ensure that application is
+associated with a role that covers the target table; `1254302 RolePermNotAllow` means that role
+coverage is still insufficient.
+
+There is no generic Aevatar "Test connection" response implied by binding or publication. Before
+enabling the real trigger, run one explicitly authorized **read-only** probe against a known sample
+`record_id`, using the same UserService, Base/app token, table, and admitted read contract. Require
+the expected record fields, not only HTTP 2xx. This proves downstream document/role access only; it
+does not prove durable workflow admission, trigger delivery, or a later write. Do not use a create,
+approval, send, or update call as a connection test.
 
 ### Adapter path
 

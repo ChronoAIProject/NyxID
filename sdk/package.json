@@ -8,6 +8,7 @@
   ],
   "scripts": {
     "build": "npm run -ws build",
+    "test": "npm run -w @nyxids/oauth-core test",
     "clean": "npm run -ws clean",
     "prepublish:all": "npm run -ws prepublishOnly"
   }

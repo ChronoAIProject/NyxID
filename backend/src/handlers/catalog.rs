@@ -1091,6 +1091,8 @@ mod tests {
             request_content_type: None,
             request_body_required: false,
             response: Default::default(),
+            risk: None,
+            supports_idempotency_key: false,
         };
         let resp = super::parsed_endpoint_to_response(parsed);
         assert_eq!(resp.name, "listWidgets");
@@ -1118,6 +1120,8 @@ mod tests {
             request_content_type: Some("application/json".to_string()),
             request_body_required: true,
             response: Default::default(),
+            risk: None,
+            supports_idempotency_key: false,
         };
         let resp = super::parsed_endpoint_to_response(parsed);
         assert_eq!(resp.name, "createWidget");

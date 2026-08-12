@@ -6,6 +6,7 @@ import {
   topUpBillingRequestSchema,
   topUpBillingResponseSchema,
   billingUsageResponseSchema,
+  billingUsageRowSchema,
 } from "./billing";
 
 describe("billing schemas", () => {
@@ -107,5 +108,41 @@ describe("billing schemas", () => {
         reused: false,
       }).success,
     ).toBe(true);
+  });
+});
+
+describe("billing token breakdown", () => {
+  it("accepts rows with a token breakdown and defaults cache fields", () => {
+    const row = billingUsageRowSchema.parse({
+      metric: "tokens",
+      lago_metric_code: "platform_tokens",
+      layer: "platform",
+      quantity: 160,
+      requests: 0,
+      bytes: 0,
+      events: 1,
+      lago_acked: true,
+      token_breakdown: { prompt_tokens: 120, completion_tokens: 40 },
+    });
+    expect(row.token_breakdown).toEqual({
+      prompt_tokens: 120,
+      completion_tokens: 40,
+      cached_tokens: 0,
+      cache_creation_tokens: 0,
+    });
+  });
+
+  it("accepts rows without a breakdown", () => {
+    const row = billingUsageRowSchema.parse({
+      metric: "requests",
+      lago_metric_code: "platform_requests",
+      layer: "platform",
+      quantity: 3,
+      requests: 3,
+      bytes: 0,
+      events: 3,
+      lago_acked: true,
+    });
+    expect(row.token_breakdown).toBeUndefined();
   });
 });

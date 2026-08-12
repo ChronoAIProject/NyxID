@@ -43,7 +43,7 @@ function getPasswordStrength(password: string): {
   if (/[^A-Za-z0-9]/.test(password)) score += 1;
 
   if (score <= 2) return { score, label: "Weak", color: "bg-destructive" };
-  if (score <= 4) return { score, label: "Fair", color: "bg-amber-400" };
+  if (score <= 4) return { score, label: "Fair", color: "bg-warning" };
   return { score, label: "Strong", color: "bg-success" };
 }
 
@@ -344,9 +344,9 @@ export function AuthFlow({
                     const url = `${window.location.origin}/api/v1/auth/social/${encodeURIComponent(provider.id)}${qs ? `?${qs}` : ""}`;
                     void openExternal(url);
                   }}
-                  className="flex h-[46px] w-full cursor-pointer items-center gap-3 rounded-lg border border-border bg-background px-4 text-[13.5px] font-medium text-foreground transition-colors duration-300 hover:border-border/80 hover:bg-white/[0.03] active:scale-[0.99]"
+                  className="flex h-[46px] w-full cursor-pointer items-center gap-3 rounded-lg border border-border bg-background px-4 text-[13.5px] font-medium text-foreground transition-colors duration-300 hover:border-border/80 hover:bg-overlay active:scale-[0.99]"
                 >
-                  <span className="flex h-7 w-7 shrink-0 items-center justify-center rounded-[8px] bg-white/[0.06]">
+                  <span className="flex h-7 w-7 shrink-0 items-center justify-center rounded-[8px] bg-overlay-strong">
                     {provider.icon}
                   </span>
                   {provider.label}
@@ -581,7 +581,7 @@ export function AuthFlow({
                   key={provider.id}
                   type="button"
                   onClick={() => handleRegisterSocialLogin(provider.id)}
-                  className="flex h-[44px] w-full cursor-pointer items-center justify-center gap-2.5 rounded-lg border border-border bg-transparent text-[13px] font-medium text-foreground transition-colors duration-200 hover:border-white/[0.15] hover:bg-white/[0.03] active:scale-[0.99]"
+                  className="flex h-[44px] w-full cursor-pointer items-center justify-center gap-2.5 rounded-lg border border-border bg-transparent text-[13px] font-medium text-foreground transition-colors duration-200 hover:border-hairline-strong hover:bg-overlay active:scale-[0.99]"
                 >
                   {provider.icon}
                   {provider.label}
@@ -592,7 +592,7 @@ export function AuthFlow({
                 <button
                   type="button"
                   onClick={() => { if (requireInviteCode()) slideToPanel(2); }}
-                  className="flex h-[44px] w-full cursor-pointer items-center justify-center gap-2.5 rounded-lg border border-border bg-transparent text-[13px] font-medium text-foreground transition-colors duration-200 hover:border-white/[0.15] hover:bg-white/[0.03] active:scale-[0.99]"
+                  className="flex h-[44px] w-full cursor-pointer items-center justify-center gap-2.5 rounded-lg border border-border bg-transparent text-[13px] font-medium text-foreground transition-colors duration-200 hover:border-hairline-strong hover:bg-overlay active:scale-[0.99]"
                 >
                   <svg
                     className="h-4 w-4"
@@ -637,7 +637,7 @@ export function AuthFlow({
             <button
               type="button"
               onClick={() => slideToPanel(1)}
-              className="flex h-8 w-8 shrink-0 items-center justify-center rounded-lg border border-border bg-transparent text-muted-foreground transition-colors duration-300 hover:border-border/80 hover:bg-white/[0.03] hover:text-foreground"
+              className="flex h-8 w-8 shrink-0 items-center justify-center rounded-lg border border-border bg-transparent text-muted-foreground transition-colors duration-300 hover:border-border/80 hover:bg-overlay hover:text-foreground"
               aria-label="Back to sign-up methods"
             >
               <svg
@@ -784,7 +784,7 @@ export function AuthFlow({
                               className={`h-[2.5px] flex-1 rounded-full ${
                                 i < strength.score
                                   ? strength.color
-                                  : "bg-white/[0.06]"
+                                  : "bg-overlay-strong"
                               }`}
                             />
                           ))}

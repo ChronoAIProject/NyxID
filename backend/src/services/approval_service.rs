@@ -10,7 +10,9 @@ use std::sync::Arc;
 use crate::config::AppConfig;
 use crate::errors::{AppError, AppResult};
 use crate::models::approval_grant::{ApprovalGrant, COLLECTION_NAME as GRANTS};
-use crate::models::approval_request::{ApprovalRequest, COLLECTION_NAME as REQUESTS};
+use crate::models::approval_request::{
+    ApprovalRequest, COLLECTION_NAME as REQUESTS, ExactServiceApprovalBinding,
+};
 use crate::models::notification_channel::{COLLECTION_NAME as CHANNELS, NotificationChannel};
 use crate::models::service_approval_config::{
     ApprovalEffect, ApprovalMode, ApprovalRule, COLLECTION_NAME as SERVICE_APPROVAL_CONFIGS,
@@ -397,6 +399,7 @@ pub struct ApprovalRequestOperation {
     pub resource: Option<String>,
     pub verb: Option<String>,
     pub grant_scope: Option<String>,
+    pub exact_service: Option<ExactServiceApprovalBinding>,
 }
 
 impl ApprovalRequestOperation {
@@ -408,7 +411,13 @@ impl ApprovalRequestOperation {
             resource: descriptor.resource.clone(),
             verb: Some(descriptor.verb.as_str().to_string()),
             grant_scope,
+            exact_service: None,
         }
+    }
+
+    pub fn with_exact_service(mut self, binding: ExactServiceApprovalBinding) -> Self {
+        self.exact_service = Some(binding);
+        self
     }
 }
 
@@ -439,16 +448,41 @@ pub async fn create_approval_request(
     };
 
     let collection = db.collection::<ApprovalRequest>(REQUESTS);
-    let idempotency_key = compute_pending_request_idempotency_key(
-        &approval_mode,
-        user_id,
-        service_id,
-        requester_type,
-        requester_id,
-        from_org_policy,
-    );
+    let idempotency_key = operation
+        .exact_service
+        .as_ref()
+        .map(|binding| binding.request_key.clone())
+        .unwrap_or_else(|| {
+            compute_pending_request_idempotency_key(
+                &approval_mode,
+                user_id,
+                service_id,
+                requester_type,
+                requester_id,
+                from_org_policy,
+            )
+        });
     let mut inserted_request: Option<ApprovalRequest> = None;
     for _attempt in 0..2 {
+        if let Some(binding) = operation.exact_service.as_ref()
+            && let Some(existing) = collection
+                .find_one(doc! { "exact_service.request_key": &binding.request_key })
+                .await?
+        {
+            if existing
+                .exact_service
+                .as_ref()
+                .is_some_and(|existing| same_exact_service_authority(existing, binding))
+                && existing.requester_type == requester_type
+                && existing.requester_id == requester_id
+            {
+                return Ok(existing);
+            }
+            return Err(AppError::Conflict(
+                "exact_service_request_conflict".to_string(),
+            ));
+        }
+
         // Check for existing pending request with the same idempotency key.
         // This handles normal idempotent retries and the winner in concurrent inserts.
         if let Some(existing) = collection
@@ -495,6 +529,7 @@ pub async fn create_approval_request(
             decision_idempotency_key: None,
             notify_user_ids: notify_user_ids.clone(),
             from_org_policy,
+            exact_service: operation.exact_service.clone(),
             created_at: now,
         };
 
@@ -620,6 +655,23 @@ pub async fn create_approval_request(
     Ok(updated)
 }
 
+fn same_exact_service_authority(
+    left: &ExactServiceApprovalBinding,
+    right: &ExactServiceApprovalBinding,
+) -> bool {
+    left.request_key == right.request_key
+        && left.actor_user_id == right.actor_user_id
+        && left.user_service_id == right.user_service_id
+        && left.endpoint_id == right.endpoint_id
+        && left.catalog_digest == right.catalog_digest
+        && left.endpoint_contract_digest == right.endpoint_contract_digest
+        && left.operation_digest == right.operation_digest
+        && left.operation_id == right.operation_id
+        && left.operation_generation == right.operation_generation
+        && left.effect_idempotency_key == right.effect_idempotency_key
+        && left.arguments == right.arguments
+}
+
 /// Create a tool approval request (from an external caller such as Aevatar).
 ///
 /// Uses sentinel `service_id: "tool_approval"` and maps the tool name into
@@ -696,6 +748,7 @@ pub async fn create_tool_approval_request(
         // approve a specific tool invocation. Org cascade does not apply.
         notify_user_ids: vec![user_id.to_string()],
         from_org_policy: false,
+        exact_service: None,
         created_at: now,
     };
 
@@ -1897,6 +1950,7 @@ mod tests {
             approval_mode: ApprovalMode::PerRequest,
             notify_user_ids: vec![],
             from_org_policy: false,
+            exact_service: None,
             created_at: now,
         }
     }
@@ -2556,6 +2610,7 @@ mod tests {
             decision_idempotency_key: None,
             notify_user_ids: vec![user_id.to_string()],
             from_org_policy: false,
+            exact_service: None,
             created_at: now,
         }
     }

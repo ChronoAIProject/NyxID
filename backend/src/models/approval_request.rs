@@ -6,6 +6,59 @@ use crate::models::service_approval_config::{ApprovalMode, legacy_approval_mode_
 
 pub const COLLECTION_NAME: &str = "approval_requests";
 
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ExactServiceRedemptionStatus {
+    Executing,
+    Completed,
+    Drifted,
+    Revoked,
+    Failed,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ExactServiceApprovalReceipt {
+    pub http_status: u16,
+    pub response_body: String,
+    pub response_digest: String,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ExactServiceApprovalRedemption {
+    pub status: ExactServiceRedemptionStatus,
+    #[serde(with = "bson::serde_helpers::chrono_datetime_as_bson_datetime")]
+    pub admitted_at: DateTime<Utc>,
+    #[serde(default, with = "bson_datetime::optional")]
+    pub completed_at: Option<DateTime<Utc>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub receipt: Option<ExactServiceApprovalReceipt>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub failure_code: Option<String>,
+}
+
+/// Server-authoritative binding for a connected-service approval.
+///
+/// This is deliberately absent on generic tool approvals. Redemption requires
+/// every field in this binding, so a `tool_approval` sentinel request can never
+/// authorize a connected-service effect.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct ExactServiceApprovalBinding {
+    /// Stable hash over requester + operation identity. Uniquely indexed.
+    pub request_key: String,
+    pub actor_user_id: String,
+    pub user_service_id: String,
+    pub endpoint_id: String,
+    pub catalog_digest: String,
+    pub endpoint_contract_digest: String,
+    pub operation_digest: String,
+    pub operation_id: String,
+    pub operation_generation: i64,
+    pub effect_idempotency_key: String,
+    pub arguments: serde_json::Value,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub redemption: Option<ExactServiceApprovalRedemption>,
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct ApprovalRequest {
     /// UUID v4 string
@@ -145,6 +198,11 @@ pub struct ApprovalRequest {
     #[serde(default)]
     pub from_org_policy: bool,
 
+    /// Exact connected-service approval authority. `None` for every legacy,
+    /// proxy-blocking, and generic tool approval request.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub exact_service: Option<ExactServiceApprovalBinding>,
+
     #[serde(with = "bson::serde_helpers::chrono_datetime_as_bson_datetime")]
     pub created_at: DateTime<Utc>,
 }
@@ -192,6 +250,7 @@ mod tests {
             decision_idempotency_key: None,
             notify_user_ids: vec![],
             from_org_policy: false,
+            exact_service: None,
             created_at: Utc::now(),
         }
     }

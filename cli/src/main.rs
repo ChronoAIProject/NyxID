@@ -145,6 +145,7 @@ fn command_names(command: &Commands) -> (&'static str, &'static str) {
         Commands::ResetPassword(_) => ("auth", "reset_password"),
         Commands::Whoami(_) => ("user", "whoami"),
         Commands::Status(_) => ("user", "status"),
+        Commands::Connect(_) => ("service", "connect"),
         Commands::Doctor(_) => ("cli", "doctor"),
         Commands::Profile { .. } => ("user", "profile"),
         Commands::Mfa { .. } => ("user", "mfa"),
@@ -152,6 +153,7 @@ fn command_names(command: &Commands) -> (&'static str, &'static str) {
         Commands::Catalog { .. } => ("catalog", "subcommand"),
         Commands::Service { .. } => ("service", "subcommand"),
         Commands::Pool { .. } => ("pool", "subcommand"),
+        Commands::Trigger { .. } => ("trigger", "subcommand"),
         Commands::Billing { .. } => ("billing", "subcommand"),
         Commands::Provider { .. } => ("provider", "subcommand"),
         Commands::ApiKey { .. } => ("api_key", "subcommand"),
@@ -205,6 +207,7 @@ async fn run(cli: Cli) -> Result<()> {
             let mut api = api::ApiClient::from_auth_checked(&auth).await?;
             commands::status::run(&mut api, auth.output).await
         }
+        Commands::Connect(args) => commands::connect::run(args).await,
         Commands::Doctor(args) => commands::doctor::run(args).await,
 
         // C5, I1-I3: Profile
@@ -219,6 +222,7 @@ async fn run(cli: Cli) -> Result<()> {
         Commands::Catalog { command } => commands::catalog::run(command).await,
         Commands::Service { command } => commands::service::run(command).await,
         Commands::Pool { command } => commands::pool::run(command).await,
+        Commands::Trigger { command } => commands::trigger::run(command).await,
         Commands::Billing { command } => commands::billing::run(command).await,
         Commands::Provider { command } => commands::provider::run(command).await,
         Commands::ApiKey { command } => commands::api_key::run(command).await,

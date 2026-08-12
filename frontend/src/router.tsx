@@ -54,6 +54,7 @@ import {
   ConsentsPage,
   DeveloperAppsPage,
   DeveloperAppDetailPage,
+  TriggersPage,
   IntegrationGuidePage,
   OAuthConsentPage,
   OAuthErrorPage,
@@ -72,6 +73,8 @@ import {
   CliAuthPage,
   CliPairPage,
   LoginDevicePage,
+  ConnectLinkPage,
+  ConnectLinkReturnPage,
   OAuthLaunchingPage,
   OAuthCompletePage,
   SshTerminalPage,
@@ -187,8 +190,8 @@ const oauthLaunchingRoute = createRoute({
   component: OAuthLaunchingPage,
 });
 
-const oauthCompleteRoute = createRoute({
-  path: "/oauth",
+export const oauthCompleteRoute = createRoute({
+  path: "/oauth-complete",
   getParentRoute: () => rootRoute,
   component: OAuthCompletePage,
 });
@@ -258,6 +261,19 @@ const loginDeviceRoute = createRoute({
   getParentRoute: () => rootRoute,
   validateSearch: (): Record<string, never> => ({}),
   component: LoginDevicePage,
+});
+
+const connectLinkRoute = createRoute({
+  path: "/connect/$token",
+  getParentRoute: () => rootRoute,
+  validateSearch: (): Record<string, never> => ({}),
+  component: ConnectLinkPage,
+});
+
+const connectLinkReturnRoute = createRoute({
+  path: "/connect/return/$linkId",
+  getParentRoute: () => rootRoute,
+  component: ConnectLinkReturnPage,
 });
 
 const sshTerminalRoute = createRoute({
@@ -573,6 +589,12 @@ const developerAppDetailRoute = createRoute({
   component: DeveloperAppDetailPage,
 });
 
+const triggersRoute = createRoute({
+  path: "/triggers",
+  getParentRoute: () => dashboardLayout,
+  component: TriggersPage,
+});
+
 const integrationGuideRoute = createRoute({
   path: "/integration-guide",
   getParentRoute: () => dashboardLayout,
@@ -861,6 +883,8 @@ const routeTree = rootRoute.addChildren([
   cliAuthRoute,
   cliPairRoute,
   loginDeviceRoute,
+  connectLinkRoute,
+  connectLinkReturnRoute,
   sshTerminalRoute,
   assistantRoute,
   assistantPluginsRoute,
@@ -891,6 +915,7 @@ const routeTree = rootRoute.addChildren([
     guideRoute,
     developerAppsRoute,
     developerAppDetailRoute,
+    triggersRoute,
     integrationGuideRoute,
     aiSetupRoute,
     notificationSettingsRoute,

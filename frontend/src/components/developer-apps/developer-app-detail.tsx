@@ -32,6 +32,8 @@ import { parseRedirectUris } from "@/lib/oauth";
 import { ApiError } from "@/lib/api-client";
 import { toast } from "sonner";
 import { useCatalog } from "@/hooks/use-keys";
+import { useBreadcrumbLabel } from "@/components/layout/dashboard-layout";
+import { ConnectionWebhookSection } from "./connection-webhook-section";
 
 const OIDC_SCOPES = [
   { id: "openid", label: "openid", required: true },
@@ -74,6 +76,7 @@ export function DeveloperAppDetail({
 }: DeveloperAppDetailProps) {
   const navigate = useNavigate();
   const { data: app, isLoading } = useDeveloperApp(clientId);
+  useBreadcrumbLabel(app?.client_name);
   const updateMutation = useUpdateDeveloperApp();
   const deleteMutation = useDeleteDeveloperApp();
   const rotateMutation = useRotateDeveloperAppSecret();
@@ -321,6 +324,12 @@ export function DeveloperAppDetail({
           )}
         </CardContent>
       </Card>
+
+      <ConnectionWebhookSection
+        clientId={app.id}
+        webhookUrl={app.connection_webhook_url}
+        enabled={app.connection_webhook_enabled}
+      />
 
       <Dialog open={editOpen} onOpenChange={setEditOpen}>
         <DialogContent>

@@ -1,4 +1,5 @@
-import { useState } from "react";
+import { useEffect, useRef, useState } from "react";
+import { useQueryClient } from "@tanstack/react-query";
 import { useNavigate } from "@tanstack/react-router";
 import { ExternalLink, KeyRound, Loader2, RefreshCw } from "lucide-react";
 import { AddKeyDialog } from "@/components/dashboard/add-key-dialog";
@@ -6,9 +7,17 @@ import { ManageConnectionModal } from "@/components/assistant/manage-connection-
 import { ServiceIcon } from "@/components/service-icon";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
-import { useCatalogEntry, useKeys } from "@/hooks/use-keys";
+import {
+  KEY_AUTH_ACTIVE,
+  KEY_AUTH_FAILED,
+  useCatalogEntry,
+  useKeyAuthorizationWatch,
+  useKeys,
+} from "@/hooks/use-keys";
+import { useChatPresence } from "@/hooks/use-chat-presence";
 import { ApiError } from "@/lib/api-client";
 import { catalogAuthKind } from "@/lib/assistant/plugins";
+import { connectWatchDeadline } from "@/lib/assistant/connect-watch";
 import type { ConnectCardContentBlock } from "@/types/assistant";
 
 const STATE_LABEL: Record<ConnectCardContentBlock["state"], string> = {
@@ -18,6 +27,21 @@ const STATE_LABEL: Record<ConnectCardContentBlock["state"], string> = {
   connected: "Connected",
   error: "Failed",
   timed_out: "Timed out",
+};
+
+type LocalVerdict = {
+  readonly attemptId: string;
+  readonly kind: "authorized" | "failed" | "timed_out" | "cancelled";
+  readonly message?: string;
+  readonly keyId?: string;
+  readonly previousAuthorizationAt?: string | null;
+};
+
+type PendingAuthorization = {
+  readonly keyId: string;
+  readonly attemptId: string;
+  readonly previousAuthorizationAt: string | null | undefined;
+  readonly startedAt: number;
 };
 
 /**
@@ -36,8 +60,16 @@ export function ConnectCard({
   readonly block: ConnectCardContentBlock;
 }) {
   const navigate = useNavigate();
+  const queryClient = useQueryClient();
   const [dialogOpen, setDialogOpen] = useState(false);
   const [managedKeyId, setManagedKeyId] = useState<string | null>(null);
+  const [pendingAuth, setPendingAuth] = useState<PendingAuthorization | null>(
+    null,
+  );
+  const pendingAuthRef = useRef<PendingAuthorization | null>(null);
+  const [localVerdict, setLocalVerdict] = useState<LocalVerdict | null>(null);
+  const settledAttemptRef = useRef<string | null>(null);
+  const { visible, lastActivityAt } = useChatPresence();
   const { data: keys } = useKeys();
   // Resolve the real connect modality from the catalog. `block.auth_kind` is
   // display data the live authorization frame can't populate — the transport
@@ -87,43 +119,124 @@ export function ConnectCard({
     !needsReauthorization &&
     block.catalog_slug !== "custom" &&
     (keys ?? []).some(
-      (key) => key.is_active && key.catalog_service_slug === block.catalog_slug,
+      (key) =>
+        key.status === KEY_AUTH_ACTIVE &&
+        key.catalog_service_slug === block.catalog_slug,
     );
-  const connected = connectedNow || block.state === "connected";
+  const cancelledAuthorizationAdvanced =
+    localVerdict?.kind === "cancelled" &&
+    matchingKey !== undefined &&
+    matchingKey.id === localVerdict.keyId &&
+    matchingKey.status === KEY_AUTH_ACTIVE &&
+    (localVerdict.previousAuthorizationAt === undefined ||
+      (matchingKey.last_authorized_at != null &&
+        matchingKey.last_authorized_at !==
+          localVerdict.previousAuthorizationAt));
+  const connected =
+    connectedNow ||
+    block.state === "connected" ||
+    localVerdict?.kind === "authorized" ||
+    cancelledAuthorizationAdvanced;
   // An authorization is in flight for this service: the placeholder key
   // exists but the provider callback hasn't landed. Surfaced live so the
   // transcript reflects the handoff happening in the other tab.
   const authorizing =
     !connected &&
-    matchingKey !== undefined &&
-    matchingKey.status === "pending_auth";
+    localVerdict === null &&
+    (pendingAuth !== null || matchingKey?.status === "pending_auth");
   const failed =
-    !connected && (block.state === "error" || block.state === "timed_out");
+    !connected &&
+    (localVerdict?.kind === "failed" ||
+      (localVerdict === null && block.state === "error"));
+  const timedOut =
+    !connected &&
+    (localVerdict?.kind === "timed_out" ||
+      (localVerdict === null && block.state === "timed_out"));
   const guidance = connected
     ? "Connected — send your request again."
     : authorizing
       ? `Waiting for ${serviceName}…`
-      : unresolvableSlug
-        ? "This service isn't in your NyxID catalog — add it in AI Services."
-        : catalogUnavailable
-          ? "Couldn't reach the NyxID catalog — retry in a moment."
-          : (block.error_message ?? block.steps[0]?.body ?? block.subtitle);
+      : localVerdict?.kind === "failed"
+        ? (localVerdict.message ??
+          "Authorization failed. Try the connection again.")
+        : localVerdict?.kind === "timed_out"
+          ? "Authorization timed out. Start the connection again when ready."
+          : localVerdict?.kind === "cancelled"
+            ? "Connection cancelled — you can start again."
+            : unresolvableSlug
+              ? "This service isn't in your NyxID catalog — add it in AI Services."
+              : catalogUnavailable
+                ? "Couldn't reach the NyxID catalog — retry in a moment."
+                : (block.error_message ??
+                  block.steps[0]?.body ??
+                  block.subtitle);
   const actionLabel = reconnectKey
     ? "Reconnect"
     : needsReauthorization && matchingKey
       ? "Manage"
       : "Connect";
-  const stateLabel = needsReauthorization
-    ? "Reauthorization required"
-    : authorizing
-      ? STATE_LABEL.waiting_for_provider
-      : STATE_LABEL[block.state];
+  const stateLabel =
+    localVerdict?.kind === "failed"
+      ? STATE_LABEL.error
+      : localVerdict?.kind === "timed_out"
+        ? STATE_LABEL.timed_out
+        : authorizing
+          ? STATE_LABEL.waiting_for_provider
+          : needsReauthorization
+            ? "Reauthorization required"
+            : STATE_LABEL[block.state];
   // Catalog state gates only a *fresh* connect, where picking the wrong
   // modality from the block's hint is the risk. Reconnect and Manage key off
   // an existing NyxID row and need no catalog — hiding them on a 404 would
   // strip the only recovery path from a key the user still owns.
   const awaitingCatalog = catalogPending && matchingKey === undefined;
   const blockedByCatalog = unresolvableSlug && matchingKey === undefined;
+
+  const watch = useKeyAuthorizationWatch(pendingAuth?.keyId ?? null, {
+    attemptId: pendingAuth?.attemptId ?? "idle",
+    previousAuthorizationAt: pendingAuth?.previousAuthorizationAt,
+    enabled: pendingAuth !== null && visible,
+    deadlineAt: pendingAuth
+      ? connectWatchDeadline(pendingAuth.startedAt, lastActivityAt)
+      : 0,
+  });
+
+  useEffect(() => {
+    const attempt = pendingAuth;
+    if (!attempt || settledAttemptRef.current === attempt.attemptId) return;
+
+    let verdict: LocalVerdict | null = null;
+    if (watch.authorized) {
+      verdict = { attemptId: attempt.attemptId, kind: "authorized" };
+    } else if (watch.status === KEY_AUTH_FAILED) {
+      verdict = {
+        attemptId: attempt.attemptId,
+        kind: "failed",
+        ...(watch.errorMessage ? { message: watch.errorMessage } : {}),
+      };
+    } else if (watch.timedOut) {
+      verdict = { attemptId: attempt.attemptId, kind: "timed_out" };
+    }
+    if (!verdict) return;
+
+    settledAttemptRef.current = attempt.attemptId;
+    void Promise.resolve().then(() => {
+      if (settledAttemptRef.current !== attempt.attemptId) return;
+      setLocalVerdict(verdict);
+      if (pendingAuthRef.current?.attemptId === attempt.attemptId) {
+        pendingAuthRef.current = null;
+      }
+      setPendingAuth((current) =>
+        current?.attemptId === attempt.attemptId ? null : current,
+      );
+    });
+  }, [
+    pendingAuth,
+    watch.authorized,
+    watch.errorMessage,
+    watch.status,
+    watch.timedOut,
+  ]);
 
   // Contract fields the compact row has no place for. Rendered plainly —
   // deliberately unstyled for now — so a block carrying them is not silently
@@ -134,66 +247,79 @@ export function ConnectCard({
     !connected &&
     Boolean(block.device_user_code ?? block.device_verification_url);
   const showScopes =
-    block.requested_scopes.length > 0 || (block.granted_scopes?.length ?? 0) > 0;
+    block.requested_scopes.length > 0 ||
+    (block.granted_scopes?.length ?? 0) > 0;
   const hasDetail =
-    showDeviceCode || extraSteps.length > 0 || showScopes || Boolean(block.footer);
+    showDeviceCode ||
+    extraSteps.length > 0 ||
+    showScopes ||
+    Boolean(block.footer);
 
   return (
     <section className="rounded-xl border border-border/70 bg-card">
       <div className="flex items-center gap-3 px-4 py-3">
-      <div className="flex h-8 w-8 shrink-0 items-center justify-center rounded-lg border border-hairline bg-overlay-strong">
-        <ServiceIcon slug={block.catalog_slug} size="sm" />
-      </div>
-      <div className="min-w-0 flex-1">
-        <div className="flex items-center gap-2">
-          <p className="truncate text-[13px] font-semibold text-foreground">
-            {serviceName}
-          </p>
-          <Badge
-            variant={connected ? "success" : failed ? "destructive" : "warning"}
-          >
-            {connected ? "Connected" : stateLabel}
-          </Badge>
+        <div className="flex h-8 w-8 shrink-0 items-center justify-center rounded-lg border border-hairline bg-overlay-strong">
+          <ServiceIcon slug={block.catalog_slug} size="sm" />
         </div>
-        <p
-          className="flex items-center gap-1.5 truncate text-[11px] text-muted-foreground"
-          role={authorizing ? "status" : undefined}
-          aria-live={authorizing ? "polite" : undefined}
-        >
-          {authorizing && (
-            <Loader2 className="h-3 w-3 shrink-0 animate-spin text-text-tertiary" />
-          )}
-          {guidance}
-        </p>
-      </div>
-      {/* Hidden while an authorization is already in flight: a second click
+        <div className="min-w-0 flex-1">
+          <div className="flex items-center gap-2">
+            <p className="truncate text-[13px] font-semibold text-foreground">
+              {serviceName}
+            </p>
+            <Badge
+              variant={
+                connected ? "success" : failed ? "destructive" : "warning"
+              }
+            >
+              {connected
+                ? "Connected"
+                : timedOut
+                  ? STATE_LABEL.timed_out
+                  : stateLabel}
+            </Badge>
+          </div>
+          <p
+            className="flex items-center gap-1.5 truncate text-[11px] text-muted-foreground"
+            role={authorizing ? "status" : undefined}
+            aria-live={authorizing ? "polite" : undefined}
+          >
+            {authorizing && (
+              <Loader2 className="h-3 w-3 shrink-0 animate-spin text-text-tertiary" />
+            )}
+            {guidance}
+          </p>
+        </div>
+        {/* Hidden while an authorization is already in flight: a second click
           would mint a second placeholder key for the same service. */}
-      {!connected && !blockedByCatalog && !authorizing && !awaitingCatalog && (
-        <Button
-          variant="primary"
-          size="sm"
-          className="shrink-0"
-          onClick={() => {
-            if (needsReauthorization && matchingKey && !reconnectKey) {
-              void navigate({
-                to: "/keys/$keyId",
-                params: { keyId: matchingKey.id },
-              });
-              return;
-            }
-            setDialogOpen(true);
-          }}
-        >
-          {reconnectKey ? (
-            <RefreshCw />
-          ) : authKind === "api_key" ? (
-            <KeyRound />
-          ) : (
-            <ExternalLink />
+        {!connected &&
+          !blockedByCatalog &&
+          !authorizing &&
+          !awaitingCatalog && (
+            <Button
+              variant="primary"
+              size="sm"
+              className="shrink-0"
+              onClick={() => {
+                if (needsReauthorization && matchingKey && !reconnectKey) {
+                  void navigate({
+                    to: "/keys/$keyId",
+                    params: { keyId: matchingKey.id },
+                  });
+                  return;
+                }
+                setDialogOpen(true);
+              }}
+            >
+              {reconnectKey ? (
+                <RefreshCw />
+              ) : authKind === "api_key" ? (
+                <KeyRound />
+              ) : (
+                <ExternalLink />
+              )}
+              {actionLabel}
+            </Button>
           )}
-          {actionLabel}
-        </Button>
-      )}
       </div>
 
       {hasDetail && (
@@ -261,6 +387,39 @@ export function ConnectCard({
             : undefined
         }
         reconnectKey={reconnectKey}
+        onAuthorizationPending={(attempt) => {
+          const pending = { ...attempt, startedAt: Date.now() };
+          settledAttemptRef.current = null;
+          pendingAuthRef.current = pending;
+          setPendingAuth(pending);
+          setLocalVerdict(null);
+        }}
+        onAuthorizationAborted={(attemptId) => {
+          const current = pendingAuthRef.current;
+          if (
+            current?.attemptId !== attemptId ||
+            settledAttemptRef.current === attemptId
+          ) {
+            return;
+          }
+          settledAttemptRef.current = attemptId;
+          pendingAuthRef.current = null;
+          setPendingAuth(null);
+          setLocalVerdict({
+            attemptId,
+            kind: "cancelled",
+            keyId: current.keyId,
+            previousAuthorizationAt: current.previousAuthorizationAt,
+          });
+          void queryClient.invalidateQueries({
+            queryKey: ["keys"],
+            exact: true,
+          });
+          void queryClient.invalidateQueries({
+            queryKey: ["keys", current.keyId],
+            exact: true,
+          });
+        }}
       />
       {managedKeyId && (
         <ManageConnectionModal

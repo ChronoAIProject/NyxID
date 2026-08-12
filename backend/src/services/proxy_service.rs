@@ -23,6 +23,7 @@ use crate::models::user_service_connection::{
 };
 use crate::models::ws_frame_injection::WsFrameInjection;
 use crate::services::cloud_response_cache::{self, CloudResponseCache};
+use crate::services::connection_expiry_service::ConnectionExpiryNotifier;
 use crate::services::delegation_service::DelegatedCredential;
 use crate::services::node_ws_manager::NodeWsManager;
 use crate::services::provider_token_exchange_service::{self, TokenExchangeCache};
@@ -84,8 +85,66 @@ pub(crate) struct PreparedDelegatedRequest {
     pub delegated_headers: Vec<(String, String)>,
 }
 
-/// Headers that are safe to forward to downstream services.
-/// Uses an allowlist approach to prevent leaking sensitive headers.
+/// Resolve the non-authentication headers that will be sent by either HTTP
+/// transport. Callers supply an already allowlisted base list; this function
+/// applies the shared user-agent, identity, default, delegated, and
+/// server-owned precedence rules.
+pub(crate) fn build_effective_outbound_headers(
+    target: &ProxyTarget,
+    mut outbound_headers: Vec<(String, String)>,
+    identity_headers: &[(String, String)],
+    delegated_headers: &[(String, String)],
+    extra_outbound_headers: &[(String, String)],
+) -> Vec<(String, String)> {
+    if let Some(ref user_agent) = target.service.custom_user_agent {
+        outbound_headers.retain(|(name, _)| !name.eq_ignore_ascii_case("user-agent"));
+        outbound_headers.push(("user-agent".to_string(), user_agent.clone()));
+    } else if !outbound_headers
+        .iter()
+        .any(|(name, _)| name.eq_ignore_ascii_case("user-agent"))
+    {
+        outbound_headers.push((
+            "user-agent".to_string(),
+            DEFAULT_PROXY_USER_AGENT.to_string(),
+        ));
+    }
+    outbound_headers.extend(identity_headers.iter().cloned());
+    outbound_headers = default_request_header::merge_into_header_list(
+        outbound_headers,
+        &[
+            target.catalog_default_headers.as_slice(),
+            target.user_service_default_headers.as_slice(),
+        ],
+    );
+
+    if let Some(credential_name) = credential_header_name(target) {
+        outbound_headers.retain(|(name, _)| !name.eq_ignore_ascii_case(&credential_name));
+    }
+    for (delegated_name, _) in delegated_headers {
+        outbound_headers.retain(|(name, _)| !name.eq_ignore_ascii_case(delegated_name));
+    }
+    if target.auth_method == "aws_sigv4" {
+        outbound_headers.retain(|(name, _)| {
+            !matches!(
+                name.to_ascii_lowercase().as_str(),
+                "x-amz-date" | "x-amz-content-sha256" | "x-amz-security-token" | "authorization"
+            )
+        });
+    }
+    outbound_headers.extend(delegated_headers.iter().cloned());
+    for (name, value) in extra_outbound_headers {
+        outbound_headers.retain(|(existing, _)| !existing.eq_ignore_ascii_case(name));
+        outbound_headers.push((name.clone(), value.clone()));
+    }
+    outbound_headers
+}
+
+/// Caller headers that are safe to forward to downstream HTTP services.
+///
+/// This is the single admission policy for both direct and node-routed HTTP
+/// requests. Framing, hop-by-hop, authentication, and NyxID trust-boundary
+/// headers stay outside the allowlist and are generated or injected by the
+/// component that owns them.
 ///
 /// In addition to the explicit list below, any caller-supplied header whose
 /// lowercased name starts with `x-openclaw-` is forwarded. OpenClaw gateways
@@ -105,6 +164,8 @@ const ALLOWED_FORWARD_HEADERS: &[&str] = &[
     "user-agent",
     "x-request-id",
     "x-correlation-id",
+    "idempotency-key",
+    "x-trace-id",
     "range",
     "if-range",
     "if-none-match",
@@ -146,13 +207,39 @@ const ALLOWED_FORWARD_HEADERS: &[&str] = &[
 const ALLOWED_FORWARD_HEADER_PREFIXES: &[&str] =
     &["x-openclaw-", "x-amz-", "x-goog-", "x-openrouter-"];
 
-/// Returns `true` when the header name is in the allowlist or matches an
+/// Returns `true` when the lowercased header name matches a downstream-owned
+/// namespace that is safe to forward.
+pub(crate) fn is_allowed_forward_header_prefix(name_lower: &str) -> bool {
+    ALLOWED_FORWARD_HEADER_PREFIXES
+        .iter()
+        .any(|prefix| name_lower.starts_with(prefix))
+}
+
+/// Returns `true` when the header name is in the HTTP allowlist or matches an
 /// allowlisted prefix. Caller must lowercase the name before calling.
 fn is_allowed_forward_header(name_lower: &str) -> bool {
-    ALLOWED_FORWARD_HEADERS.contains(&name_lower)
-        || ALLOWED_FORWARD_HEADER_PREFIXES
-            .iter()
-            .any(|prefix| name_lower.starts_with(prefix))
+    ALLOWED_FORWARD_HEADERS.contains(&name_lower) || is_allowed_forward_header_prefix(name_lower)
+}
+
+/// Collect caller headers admitted by the shared downstream HTTP policy.
+///
+/// Header names are normalized by `HeaderMap`, matching remains
+/// case-insensitive, and repeated values retain their map iteration order for
+/// the existing deterministic merge rules in `merge_into_header_list`.
+pub(crate) fn collect_forward_headers(headers: &http::HeaderMap) -> Vec<(String, String)> {
+    headers
+        .iter()
+        .filter_map(|(name, value)| {
+            let name_lower = name.as_str().to_ascii_lowercase();
+            if !is_allowed_forward_header(&name_lower) {
+                return None;
+            }
+            value
+                .to_str()
+                .ok()
+                .map(|value| (name.to_string(), value.to_string()))
+        })
+        .collect()
 }
 
 /// Header name the current `auth_method` will inject via
@@ -860,6 +947,7 @@ pub async fn resolve_proxy_target_from_user_service(
     user_id: &str,
     slug: Option<&str>,
     catalog_service_id: Option<&str>,
+    connection_expiry_notifier: Option<&ConnectionExpiryNotifier>,
 ) -> AppResult<Option<UserServiceResolution>> {
     // NyxID#974 routing boundary: identical-instance service pools belong
     // here, before `finish_resolution()`, because this function is the
@@ -871,7 +959,16 @@ pub async fn resolve_proxy_target_from_user_service(
     let personal = lookup_user_service(db, user_id, slug, catalog_service_id).await?;
     if let Some(us) = personal {
         return Ok(Some(
-            finish_resolution(db, encryption_keys, user_id, us, None, None).await?,
+            finish_resolution(
+                db,
+                encryption_keys,
+                user_id,
+                us,
+                None,
+                None,
+                connection_expiry_notifier,
+            )
+            .await?,
         ));
     }
     if catalog_service_id.is_none()
@@ -886,7 +983,16 @@ pub async fn resolve_proxy_target_from_user_service(
             "Resolved proxy target via service pool"
         );
         return Ok(Some(
-            finish_resolution(db, encryption_keys, user_id, us, None, Some(pool_selection)).await?,
+            finish_resolution(
+                db,
+                encryption_keys,
+                user_id,
+                us,
+                None,
+                Some(pool_selection),
+                connection_expiry_notifier,
+            )
+            .await?,
         ));
     }
 
@@ -986,6 +1092,7 @@ pub async fn resolve_proxy_target_from_user_service(
                 org_us,
                 Some(routing),
                 pool_selection,
+                connection_expiry_notifier,
             )
             .await?,
         ));
@@ -1279,6 +1386,7 @@ pub async fn resolve_proxy_target_by_user_service_id(
     user_service_id: &str,
     expected_slug: Option<&str>,
     expected_catalog_service_id: Option<&str>,
+    connection_expiry_notifier: Option<&ConnectionExpiryNotifier>,
 ) -> AppResult<Option<UserServiceResolution>> {
     let svc = match user_service_service::find_user_service_by_id(db, user_service_id).await? {
         Some(s) => s,
@@ -1358,7 +1466,16 @@ pub async fn resolve_proxy_target_by_user_service_id(
 
     let owner_id = svc.user_id.clone();
     Ok(Some(
-        finish_resolution(db, encryption_keys, &owner_id, svc, org_routing, None).await?,
+        finish_resolution(
+            db,
+            encryption_keys,
+            &owner_id,
+            svc,
+            org_routing,
+            None,
+            connection_expiry_notifier,
+        )
+        .await?,
     ))
 }
 
@@ -1788,6 +1905,7 @@ async fn finish_resolution(
     user_service: crate::models::user_service::UserService,
     org_routing: Option<OrgRouting>,
     pool_selection: Option<service_pool_service::PoolSelection>,
+    connection_expiry_notifier: Option<&ConnectionExpiryNotifier>,
 ) -> AppResult<UserServiceResolution> {
     // For auto-provisioned services, verify the catalog entry is still eligible
     // before allowing the proxy request through.
@@ -1935,9 +2053,14 @@ async fn finish_resolution(
             AppError::Internal("Data integrity error: API key not found".to_string())
         })?;
 
-    let api_key =
-        maybe_refresh_provider_backed_api_key(db, encryption_keys, effective_owner_id, api_key)
-            .await?;
+    let api_key = maybe_refresh_provider_backed_api_key(
+        db,
+        encryption_keys,
+        effective_owner_id,
+        api_key,
+        connection_expiry_notifier,
+    )
+    .await?;
 
     // Node-routed services: resolve what we can but don't block on API key status
     // since the node agent handles credential injection locally.
@@ -2167,6 +2290,7 @@ pub async fn resolve_agent_credential_override(
     user_id: &str,
     api_key_id: &str,
     user_service_id: &str,
+    connection_expiry_notifier: Option<&ConnectionExpiryNotifier>,
 ) -> AppResult<Option<String>> {
     let override_key_id = agent_binding_service::resolve_credential_override(
         db,
@@ -2192,8 +2316,14 @@ pub async fn resolve_agent_credential_override(
             AppError::Internal("Bound credential not found".to_string())
         })?;
 
-    let api_key =
-        maybe_refresh_provider_backed_api_key(db, encryption_keys, user_id, api_key).await?;
+    let api_key = maybe_refresh_provider_backed_api_key(
+        db,
+        encryption_keys,
+        user_id,
+        api_key,
+        connection_expiry_notifier,
+    )
+    .await?;
 
     if api_key.status != "active" {
         return Err(AppError::BadRequest(format!(
@@ -2221,6 +2351,7 @@ async fn maybe_refresh_provider_backed_api_key(
     encryption_keys: &EncryptionKeys,
     user_id: &str,
     api_key: UserApiKey,
+    connection_expiry_notifier: Option<&ConnectionExpiryNotifier>,
 ) -> AppResult<UserApiKey> {
     // GCP service account: mint a fresh Google access token from the
     // stored SA key when the cached token is missing or within the
@@ -2284,6 +2415,7 @@ async fn maybe_refresh_provider_backed_api_key(
             db,
             encryption_keys,
             &api_key,
+            connection_expiry_notifier,
         )
         .await
         {
@@ -2309,8 +2441,14 @@ async fn maybe_refresh_provider_backed_api_key(
     // Legacy single-tenant path: refresh runs against
     // `user_provider_tokens`, then `sync_provider_token_to_api_keys`
     // fans the new token out to all legacy keys for `(user, provider)`.
-    match user_token_service::get_active_token(db, encryption_keys, user_id, provider_config_id)
-        .await
+    match user_token_service::get_active_token(
+        db,
+        encryption_keys,
+        user_id,
+        provider_config_id,
+        connection_expiry_notifier,
+    )
+    .await
     {
         Ok(_) => {
             user_api_key_service::sync_provider_token_to_api_keys(db, user_id, provider_config_id)
@@ -2643,125 +2781,28 @@ pub(crate) async fn forward_request_with_extra_outbound_headers(
     // append-by-default `RequestBuilder::header()` doesn't produce
     // duplicate entries when defaults collide with caller headers.
     //
-    // Order of precedence (low → high, per NyxID#356, NyxID#514):
+    // Order of precedence (low -> high, per NyxID#356, NyxID#514):
     //   1. Default UA fallback (`NyxID-Proxy/{version}`) — only when no UA otherwise
     //   2. Caller-supplied headers (filtered by the forward allowlist)
     //   3. Service `custom_user_agent` override (User-Agent only)
     //   4. Identity propagation headers
-    //   5. Delegated provider credential headers (`prepared.delegated_headers`)
-    //   6. `DownstreamService.default_request_headers` (admin catalog)
-    //   7. `UserService.default_request_headers`       (per-user override)
+    //   5. `DownstreamService.default_request_headers` (admin catalog)
+    //   6. `UserService.default_request_headers`       (per-user override)
+    //   7. Delegated provider credential headers (`prepared.delegated_headers`)
+    //   8. Server-owned extra headers
     //
-    // Layers 2–5 must all sit in `outbound_headers` BEFORE the merge so a
-    // non-overridable default collides with them inside
-    // `merge_into_header_list` and wins. The node-routed path in
-    // `handlers/proxy.rs` puts delegated headers in the same lower-precedence
-    // bucket; the two paths must agree here.
-    let has_custom_ua = target.service.custom_user_agent.is_some();
-    let mut outbound_headers: Vec<(String, String)> = Vec::new();
-    let mut caller_supplied_ua = false;
-    for (name, value) in headers.iter() {
-        let name_lower = name.as_str().to_ascii_lowercase();
-        if has_custom_ua && name_lower == "user-agent" {
-            continue;
-        }
-        if !is_allowed_forward_header(&name_lower) {
-            continue;
-        }
-        if let Ok(v) = value.to_str() {
-            if name_lower == "user-agent" {
-                caller_supplied_ua = true;
-            }
-            outbound_headers.push((name.as_str().to_string(), v.to_string()));
-        }
-    }
-    if let Some(ref ua) = target.service.custom_user_agent {
-        outbound_headers.push(("user-agent".to_string(), ua.clone()));
-    } else if !caller_supplied_ua {
-        // NyxID#514: inject a benign default UA when neither the caller
-        // nor the service supplies one. Prevents silent 403s from
-        // UA-required APIs (e.g. GitHub) when the client SDK omits UA
-        // by default (.NET HttpClient, Python urllib, Java
-        // HttpURLConnection, etc.). The service `custom_user_agent`
-        // and any caller-supplied UA still win.
-        outbound_headers.push((
-            "user-agent".to_string(),
-            DEFAULT_PROXY_USER_AGENT.to_string(),
-        ));
-    }
-    for (name, value) in &identity_headers {
-        outbound_headers.push((name.clone(), value.clone()));
-    }
-    outbound_headers = default_request_header::merge_into_header_list(
+    // The shared builder applies this exact sequence for both direct and
+    // node-routed HTTP requests.
+    let outbound_headers = collect_forward_headers(&headers);
+    let outbound_headers = build_effective_outbound_headers(
+        target,
         outbound_headers,
-        &[
-            target.catalog_default_headers.as_slice(),
-            target.user_service_default_headers.as_slice(),
-        ],
+        &identity_headers,
+        &prepared.delegated_headers,
+        &extra_outbound_headers,
     );
-    append_extra_outbound_headers(&mut outbound_headers, extra_outbound_headers);
-
-    // `reqwest::RequestBuilder::header` appends — it does NOT replace an
-    // existing value for the same name. Credential injection (including
-    // delegated provider headers and the service `auth_method`) also
-    // appends, so a default with the same name as the credential would
-    // ride alongside it on the wire.
-    //
-    // Two separate credential classes must win over defaults:
-    //
-    //   1. The service's own `auth_method` credential — `header` auth
-    //      uses `auth_key_name`, `bearer`/`basic`/... use `authorization`,
-    //      `token_exchange` parses its `injection` format. Resolved by
-    //      `credential_header_name(target)`.
-    //
-    //   2. Delegated provider credentials in `prepared.delegated_headers`
-    //      — these are how `auth_method = "none"` services combined with
-    //      `ServiceProviderRequirement` surface real downstream tokens
-    //      (e.g. Anthropic `x-api-key`, Google `x-goog-api-key`). A
-    //      non-overridable default with the same name would otherwise
-    //      *replace* the real token via `merge_into_header_list`, so we
-    //      explicitly strip those names before defaults could have
-    //      overwritten them, then apply the delegated headers last.
-    //
-    // Also strip `authorization` when `forward_access_token` is going to
-    // inject a NyxID bearer on top. The WS path uses
-    // `HeaderMap::insert` which replaces, so it doesn't need any of this
-    // filtering.
-    if let Some(cred_name) = credential_header_name(target) {
-        outbound_headers.retain(|(n, _)| !n.eq_ignore_ascii_case(&cred_name));
-    }
-    for (delegated_name, _) in &prepared.delegated_headers {
-        outbound_headers.retain(|(n, _)| !n.eq_ignore_ascii_case(delegated_name));
-    }
-    if target.service.forward_access_token && caller_token.is_some() {
-        outbound_headers.retain(|(n, _)| !n.eq_ignore_ascii_case("authorization"));
-    }
-    // SigV4 attaches its own X-Amz-Date / X-Amz-Content-Sha256 / X-Amz-
-    // Security-Token after the auth dispatch. `reqwest::header()` appends
-    // rather than replaces, so a caller-supplied value for any of these
-    // would ride alongside the signer's value on the wire — AWS rejects
-    // the request with a signature-mismatch error and the body hash
-    // disagreement is a latent integrity bug regardless. Codex review
-    // BLOCKER 8: strip them from `outbound_headers` before attaching.
-    if target.auth_method == "aws_sigv4" {
-        outbound_headers.retain(|(n, _)| {
-            let lower = n.to_ascii_lowercase();
-            !matches!(
-                lower.as_str(),
-                "x-amz-date" | "x-amz-content-sha256" | "x-amz-security-token" | "authorization"
-            )
-        });
-    }
 
     for (name, value) in &outbound_headers {
-        request = request.header(name, value);
-    }
-
-    // Delegated provider credential headers are applied here, AFTER
-    // defaults have been attached, so a colliding non-overridable
-    // default cannot replace the real downstream token. See comment
-    // block above for the rationale.
-    for (name, value) in &prepared.delegated_headers {
         request = request.header(name, value);
     }
 
@@ -2815,12 +2856,8 @@ pub(crate) async fn forward_request_with_extra_outbound_headers(
                 None => prepared.path.clone(),
             };
             // Headers that have actually been attached to the outgoing
-            // request, plus any prepared delegated headers. Both feed
-            // the cache key's header digest.
-            let mut key_headers: Vec<(String, String)> = outbound_headers.to_vec();
-            for (n, v) in &prepared.delegated_headers {
-                key_headers.push((n.clone(), v.clone()));
-            }
+            // request feed the cache key's header digest.
+            let key_headers: Vec<(String, String)> = outbound_headers.to_vec();
             let fingerprint = CloudResponseCache::credential_fingerprint(&target.credential);
             let key = CloudResponseCache::key(
                 &target.auth_method,
@@ -2927,10 +2964,7 @@ pub(crate) async fn forward_request_with_extra_outbound_headers(
             // exactly the bytes that will be sent. `prepared.delegated_headers`
             // are typically empty for cloud-billing services but signed if
             // present for consistency with the direct-header path.
-            let mut signed_input: Vec<(String, String)> = outbound_headers.clone();
-            for (name, value) in &prepared.delegated_headers {
-                signed_input.push((name.clone(), value.clone()));
-            }
+            let signed_input: Vec<(String, String)> = outbound_headers.clone();
             let body_bytes: &[u8] = match &body {
                 ProxyBody::Buffered(Some(b)) => b.as_ref(),
                 ProxyBody::Buffered(None) => &[][..],
@@ -3027,16 +3061,6 @@ pub(crate) async fn forward_request_with_extra_outbound_headers(
     }
 
     Ok(response)
-}
-
-fn append_extra_outbound_headers(
-    outbound_headers: &mut Vec<(String, String)>,
-    extra_outbound_headers: Vec<(String, String)>,
-) {
-    for (name, value) in extra_outbound_headers {
-        outbound_headers.retain(|(existing_name, _)| !existing_name.eq_ignore_ascii_case(&name));
-        outbound_headers.push((name, value));
-    }
 }
 
 /// Whether an HTTP method semantically supports a request body.
@@ -3209,6 +3233,8 @@ mod tests {
         assert!(is_allowed_forward_header("content-type"));
         assert!(is_allowed_forward_header("user-agent"));
         assert!(is_allowed_forward_header("range"));
+        assert!(is_allowed_forward_header("idempotency-key"));
+        assert!(is_allowed_forward_header("x-trace-id"));
     }
 
     #[test]
@@ -3245,10 +3271,11 @@ mod tests {
         // infrastructure headers.
         assert!(!is_allowed_forward_header("authorization"));
         assert!(!is_allowed_forward_header("cookie"));
-        assert!(!is_allowed_forward_header("idempotency-key"));
         assert!(!is_allowed_forward_header("x-nyxid-internal"));
         assert!(!is_allowed_forward_header("x-forwarded-for"));
         assert!(!is_allowed_forward_header("host"));
+        assert!(!is_allowed_forward_header("content-length"));
+        assert!(!is_allowed_forward_header("connection"));
         // Standard browser `Referer` stays blocked — only OpenRouter's
         // deliberate `HTTP-Referer` spelling passes.
         assert!(!is_allowed_forward_header("referer"));
@@ -3260,6 +3287,7 @@ mod tests {
         query: Option<String>,
         content_type: Option<String>,
         idempotency_key: Option<String>,
+        trace_id: Option<String>,
         user_agent: Option<String>,
         body: Vec<u8>,
     }
@@ -3279,6 +3307,10 @@ mod tests {
                 .map(ToString::to_string),
             idempotency_key: headers
                 .get("idempotency-key")
+                .and_then(|value| value.to_str().ok())
+                .map(ToString::to_string),
+            trace_id: headers
+                .get("x-trace-id")
                 .and_then(|value| value.to_str().ok())
                 .map(ToString::to_string),
             user_agent: headers
@@ -3378,6 +3410,7 @@ mod tests {
             &member_id,
             Some("svc-a"),
             None,
+            None,
         )
         .await
         .expect("service A should resolve")
@@ -3397,6 +3430,7 @@ mod tests {
             &node_manager,
             &member_id,
             Some("svc-c"),
+            None,
             None,
         )
         .await
@@ -3425,6 +3459,7 @@ mod tests {
             &node_manager,
             &member_id,
             Some("svc-a"),
+            None,
             None,
         )
         .await
@@ -3496,6 +3531,7 @@ mod tests {
             &member_id,
             Some("admin-svc"),
             None,
+            None,
         )
         .await
         {
@@ -3510,6 +3546,7 @@ mod tests {
             &member_id,
             &service_id,
             Some("admin-svc"),
+            None,
             None,
         )
         .await
@@ -3534,6 +3571,7 @@ mod tests {
             &node_manager,
             &admin_id,
             Some("admin-svc"),
+            None,
             None,
         )
         .await
@@ -3592,6 +3630,9 @@ mod tests {
                 expires_at: None,
                 is_active: true,
                 created_at: Utc::now(),
+                rotation_predecessor_id: None,
+                state_version: 1,
+                updated_at: Some(Utc::now()),
                 description: None,
                 allowed_service_ids: vec![],
                 allowed_node_ids: vec![],
@@ -3601,6 +3642,8 @@ mod tests {
                 rate_limit_burst: None,
                 platform: Some("claude-code".to_string()),
                 callback_url: None,
+                purpose: Default::default(),
+                scheduled_write_enabled: false,
             })
             .await
             .unwrap();
@@ -3646,10 +3689,16 @@ mod tests {
             .unwrap();
 
         // Branch 1: no binding -> None (proxy uses the service default).
-        let no_override =
-            resolve_agent_credential_override(&db, &keys, &user_id, &api_key_id, &user_service_id)
-                .await
-                .unwrap();
+        let no_override = resolve_agent_credential_override(
+            &db,
+            &keys,
+            &user_id,
+            &api_key_id,
+            &user_service_id,
+            None,
+        )
+        .await
+        .unwrap();
         assert!(
             no_override.is_none(),
             "with no binding the agent must fall back to the service default credential"
@@ -3667,10 +3716,16 @@ mod tests {
         .await
         .unwrap();
 
-        let override_value =
-            resolve_agent_credential_override(&db, &keys, &user_id, &api_key_id, &user_service_id)
-                .await
-                .unwrap();
+        let override_value = resolve_agent_credential_override(
+            &db,
+            &keys,
+            &user_id,
+            &api_key_id,
+            &user_service_id,
+            None,
+        )
+        .await
+        .unwrap();
         assert_eq!(
             override_value.as_deref(),
             Some(override_secret),
@@ -3921,7 +3976,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn forward_request_strips_caller_supplied_idempotency_key() {
+    async fn forward_request_preserves_request_scoped_headers_and_json_content_type() {
         let (sender, mut receiver) = mpsc::unbounded_channel();
         let app = Router::new()
             .route("/api/v1/test", post(capture_request))
@@ -3936,7 +3991,9 @@ mod tests {
         });
 
         let mut headers = reqwest::header::HeaderMap::new();
+        headers.insert("content-type", "application/json".parse().unwrap());
         headers.insert("idempotency-key", "caller-supplied-key".parse().unwrap());
+        headers.insert("x-trace-id", "trace-001".parse().unwrap());
 
         let response = forward_request(
             &Client::new(),
@@ -3945,7 +4002,7 @@ mod tests {
             "api/v1/test",
             None,
             headers,
-            ProxyBody::Buffered(Some(Bytes::from_static(b"{}"))),
+            ProxyBody::Buffered(Some(Bytes::from_static(br#"{"operation":"probe"}"#))),
             vec![],
             vec![],
             None,
@@ -3957,10 +4014,13 @@ mod tests {
 
         assert_eq!(response.status(), StatusCode::OK);
         let captured = receiver.recv().await.expect("captured request");
+        assert_eq!(captured.content_type.as_deref(), Some("application/json"));
         assert_eq!(
-            captured.idempotency_key, None,
-            "caller-supplied idempotency keys must not reach shared downstreams"
+            captured.idempotency_key.as_deref(),
+            Some("caller-supplied-key")
         );
+        assert_eq!(captured.trace_id.as_deref(), Some("trace-001"));
+        assert_eq!(captured.body, br#"{"operation":"probe"}"#);
 
         server.abort();
     }
@@ -5901,6 +5961,86 @@ mod tests {
     fn credential_header_name_header_custom() {
         let t = make_proxy_target_with_auth("header", "X-Api-Key");
         assert_eq!(credential_header_name(&t), Some("X-Api-Key".into()));
+    }
+
+    #[test]
+    fn effective_headers_include_non_overridable_operation_defaults() {
+        let mut target = make_proxy_target_with_auth("none", "");
+        target.catalog_default_headers = vec![DefaultRequestHeader {
+            name: "X-Amz-Target".to_string(),
+            value: "Catalog.Write".to_string(),
+            overridable: false,
+            sensitive: false,
+        }];
+        let headers = build_effective_outbound_headers(
+            &target,
+            vec![("x-amz-target".to_string(), "Caller.Write".to_string())],
+            &[],
+            &[],
+            &[],
+        );
+        let operation_headers: Vec<_> = headers
+            .iter()
+            .filter(|(name, _)| name.eq_ignore_ascii_case("x-amz-target"))
+            .collect();
+        assert_eq!(operation_headers.len(), 1);
+        assert_eq!(operation_headers[0].1, "Catalog.Write");
+    }
+
+    #[test]
+    fn effective_headers_apply_caller_and_default_precedence_after_shared_admission() {
+        let mut target = make_proxy_target_with_auth("none", "");
+        target.catalog_default_headers = vec![
+            DefaultRequestHeader {
+                name: "Content-Type".to_string(),
+                value: "application/octet-stream".to_string(),
+                overridable: true,
+                sensitive: false,
+            },
+            DefaultRequestHeader {
+                name: "Idempotency-Key".to_string(),
+                value: "catalog-key".to_string(),
+                overridable: true,
+                sensitive: false,
+            },
+            DefaultRequestHeader {
+                name: "X-Trace-ID".to_string(),
+                value: "catalog-trace".to_string(),
+                overridable: false,
+                sensitive: false,
+            },
+        ];
+        target.user_service_default_headers = vec![DefaultRequestHeader {
+            name: "x-trace-id".to_string(),
+            value: "user-service-trace".to_string(),
+            overridable: false,
+            sensitive: false,
+        }];
+
+        let mut caller = http::HeaderMap::new();
+        caller.insert("content-type", "application/json".parse().unwrap());
+        caller.insert("idempotency-key", "caller-key".parse().unwrap());
+        caller.insert("x-trace-id", "caller-trace".parse().unwrap());
+
+        let effective = build_effective_outbound_headers(
+            &target,
+            collect_forward_headers(&caller),
+            &[],
+            &[],
+            &[],
+        );
+        for (name, expected) in [
+            ("content-type", "application/json"),
+            ("idempotency-key", "caller-key"),
+            ("x-trace-id", "user-service-trace"),
+        ] {
+            let matching: Vec<_> = effective
+                .iter()
+                .filter(|(actual_name, _)| actual_name.eq_ignore_ascii_case(name))
+                .collect();
+            assert_eq!(matching.len(), 1, "{name} must be single-valued");
+            assert_eq!(matching[0].1, expected);
+        }
     }
 
     #[test]

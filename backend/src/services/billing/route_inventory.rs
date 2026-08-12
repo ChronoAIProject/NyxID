@@ -144,6 +144,21 @@ pub const BILLING_ROUTE_INVENTORY: &[BillingRouteSpec] = &[
         policy: BillingRoutePolicy::Metered(BillingIngress::Proxy),
     },
     BillingRouteSpec {
+        handler: "handlers::exact_service_approvals::create_request",
+        route: "/api/v1/approvals/exact-service/requests",
+        policy: BillingRoutePolicy::Exempt("approval control plane; no downstream request"),
+    },
+    BillingRouteSpec {
+        handler: "handlers::exact_service_approvals::observe_request",
+        route: "/api/v1/approvals/exact-service/requests/{request_id}/status",
+        policy: BillingRoutePolicy::Exempt("approval observation; no downstream request"),
+    },
+    BillingRouteSpec {
+        handler: "handlers::exact_service_approvals::redeem_request",
+        route: "/api/v1/approvals/exact-service/requests/{request_id}/redeem",
+        policy: BillingRoutePolicy::Metered(BillingIngress::Mcp),
+    },
+    BillingRouteSpec {
         handler: "handlers::mcp_transport::mcp_post",
         route: "/mcp (POST)",
         policy: BillingRoutePolicy::Metered(BillingIngress::Mcp),

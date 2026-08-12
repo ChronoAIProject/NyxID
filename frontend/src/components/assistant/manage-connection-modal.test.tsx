@@ -188,14 +188,14 @@ describe("ManageConnectionModal", () => {
     });
   });
 
-  describe("revoke confirmation", () => {
+  describe("delete confirmation", () => {
     it("confirms in a dialog rather than swapping the card footer", async () => {
       const user = userEvent.setup();
       renderModal();
-      await user.click(screen.getByRole("button", { name: "Revoke" }));
+      await user.click(screen.getByRole("button", { name: "Delete" }));
 
       const confirm = await screen.findByRole("dialog", {
-        name: /Revoke GitHub OAuth connection\?/,
+        name: /Delete GitHub OAuth connection\?/,
       });
       expect(
         within(confirm).getByRole("button", { name: "Cancel" }),
@@ -209,9 +209,9 @@ describe("ManageConnectionModal", () => {
       // is what made it read as an error rather than a prompt.
       expect(screen.queryByText(/de-authorizes NyxID/)).toBeNull();
 
-      await user.click(screen.getByRole("button", { name: "Revoke" }));
+      await user.click(screen.getByRole("button", { name: "Delete" }));
       const confirm = await screen.findByRole("dialog", {
-        name: /Revoke GitHub OAuth connection\?/,
+        name: /Delete GitHub OAuth connection\?/,
       });
       expect(
         within(confirm).getByText(/de-authorizes NyxID/),
@@ -224,13 +224,13 @@ describe("ManageConnectionModal", () => {
       const user = userEvent.setup();
       renderModal();
 
-      await user.click(screen.getByRole("button", { name: "Revoke" }));
+      await user.click(screen.getByRole("button", { name: "Delete" }));
       expect(mutate).not.toHaveBeenCalled();
 
       const confirm = await screen.findByRole("dialog", {
-        name: /Revoke GitHub OAuth connection\?/,
+        name: /Delete GitHub OAuth connection\?/,
       });
-      await user.click(within(confirm).getByRole("button", { name: "Revoke" }));
+      await user.click(within(confirm).getByRole("button", { name: "Delete" }));
       expect(mutate).toHaveBeenCalledWith("key-1", expect.anything());
     });
 
@@ -240,16 +240,16 @@ describe("ManageConnectionModal", () => {
       const user = userEvent.setup();
       renderModal();
 
-      await user.click(screen.getByRole("button", { name: "Revoke" }));
+      await user.click(screen.getByRole("button", { name: "Delete" }));
       const confirm = await screen.findByRole("dialog", {
-        name: /Revoke GitHub OAuth connection\?/,
+        name: /Delete GitHub OAuth connection\?/,
       });
       await user.click(within(confirm).getByRole("button", { name: "Cancel" }));
 
       expect(mutate).not.toHaveBeenCalled();
       expect(
         screen.queryByRole("dialog", {
-          name: /Revoke GitHub OAuth connection\?/,
+          name: /Delete GitHub OAuth connection\?/,
         }),
       ).toBeNull();
     });
@@ -276,10 +276,10 @@ describe("ManageConnectionModal", () => {
       );
 
       await user.click(
-        screen.getAllByRole("button", { name: "Revoke" })[0] as HTMLElement,
+        screen.getAllByRole("button", { name: "Delete" })[0] as HTMLElement,
       );
       const confirm = await screen.findByRole("dialog", {
-        name: /Revoke GitHub OAuth connection\?/,
+        name: /Delete GitHub OAuth connection\?/,
       });
       expect(within(confirm).getByText("Work account")).toBeInTheDocument();
     });

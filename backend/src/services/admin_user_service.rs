@@ -6,7 +6,7 @@ use crate::crypto::password;
 use crate::errors::{AppError, AppResult};
 use crate::models::session::{COLLECTION_NAME as SESSIONS, Session};
 use crate::models::user::{COLLECTION_NAME as USERS, PlatformRole, User};
-use crate::services::role_service;
+use crate::services::{api_key_mutation_service as key_mutations, role_service};
 
 /// Maximum password length to prevent Argon2 DoS via extremely long passwords.
 const MAX_PASSWORD_LENGTH: usize = 128;
@@ -376,12 +376,13 @@ pub async fn set_user_active(
     if !is_active {
         revoke_all_user_sessions(db, target_user_id).await?;
 
-        db.collection::<bson::Document>(API_KEYS)
-            .update_many(
-                doc! { "user_id": target_user_id, "is_active": true },
-                doc! { "$set": { "is_active": false } },
-            )
-            .await?;
+        key_mutations::update_many(
+            db,
+            doc! { "user_id": target_user_id, "is_active": true },
+            doc! { "$set": { "is_active": false } },
+            None,
+        )
+        .await?;
     }
 
     Ok(())
@@ -911,6 +912,24 @@ mod tests {
             .insert_one(&session)
             .await
             .unwrap();
+        let api_key = crate::services::key_service::create_api_key(
+            &db,
+            &target_id,
+            "disable-me",
+            "read",
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+        )
+        .await
+        .unwrap();
 
         set_user_active(&db, &admin_id, &target_id, false)
             .await
@@ -931,6 +950,20 @@ mod tests {
             .unwrap()
             .unwrap();
         assert!(sess.revoked);
+
+        let disabled_key = db
+            .collection::<crate::models::api_key::ApiKey>(API_KEYS)
+            .find_one(doc! { "_id": &api_key.id })
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(!disabled_key.is_active);
+        assert_eq!(disabled_key.state_version, 2);
+        assert!(
+            disabled_key
+                .updated_at
+                .is_some_and(|value| value >= api_key.updated_at)
+        );
     }
 
     #[tokio::test]

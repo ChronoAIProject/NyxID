@@ -289,6 +289,7 @@ pub async fn initiate_oauth_for_sa(
         &[],
         None, // no scope_override: SA-connect picker is a later pass (NyxID#917)
         None, // admin-on-behalf-of flow stays single-tenant per SA
+        None, // not a hosted connect-link flow
         None, // legacy-routed flow; SA popup migration is out of scope
     )
     .await?;

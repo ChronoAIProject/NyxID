@@ -15,23 +15,34 @@ const mocks = vi.hoisted(() => ({
   useUpdateKey: vi.fn(),
   useDeleteKey: vi.fn(),
   useUpdateExternalApiKey: vi.fn(),
+  addDialogProps: null as {
+    readonly launch?: "popup";
+    readonly flow?: "cc";
+    readonly onPopupViewResult?: (keyId: string) => boolean;
+  } | null,
 }));
 
 // The full add-service dialog has its own test suite and many hooks; stub it
-// to a marker so this test only asserts Connect opens it with the right slug.
+// to a marker so this test only asserts Connect opens it with the right slug
+// and hands it the popup contract.
 vi.mock("@/components/dashboard/add-key-dialog", () => ({
   AddKeyDialog: ({
     open,
     prefillSlug,
+    ...props
   }: {
     readonly open: boolean;
     readonly prefillSlug?: string;
+    readonly launch?: "popup";
+    readonly flow?: "cc";
+    readonly onPopupViewResult?: (keyId: string) => boolean;
   }) =>
+    ((mocks.addDialogProps = props),
     open ? (
       <div role="dialog" aria-label="Add service" data-prefill={prefillSlug}>
         Add service dialog
       </div>
-    ) : null,
+    ) : null),
 }));
 
 vi.mock("@/hooks/use-keys", () => ({
@@ -155,6 +166,7 @@ describe("PluginsView", () => {
     vi.clearAllMocks();
     resetSkillCatalog();
     mockLoaded();
+    mocks.addDialogProps = null;
     // Manage-modal hooks: a fully-shaped key + no-op mutations.
     mocks.useKey.mockReturnValue({
       data: {
@@ -202,6 +214,32 @@ describe("PluginsView", () => {
     await user.click(screen.getByRole("button", { name: "Connect GitHub" }));
     const dialog = await screen.findByRole("dialog", { name: "Add service" });
     expect(dialog).toHaveAttribute("data-prefill", "github");
+  });
+
+  it("runs plugin OAuth in the managed popup and opens the result in place", async () => {
+    const user = userEvent.setup();
+    render(<PluginsView />);
+    await user.click(screen.getByRole("button", { name: "Connect GitHub" }));
+    await screen.findByRole("dialog", { name: "Add service" });
+    // Both props are load-bearing: the backend mints an attempt nonce only for
+    // `cc`, and without one the popup opens and immediately closes again.
+    expect(mocks.addDialogProps).toMatchObject({ launch: "popup", flow: "cc" });
+
+    const onPopupViewResult = mocks.addDialogProps?.onPopupViewResult;
+    expect(onPopupViewResult).toBeTypeOf("function");
+    let handled = false;
+    act(() => {
+      handled = onPopupViewResult?.("key-popup") ?? false;
+    });
+    // Handled === true is what makes the popup ack and stop waiting.
+    expect(handled).toBe(true);
+
+    expect(
+      screen.queryByRole("dialog", { name: "Add service" }),
+    ).not.toBeInTheDocument();
+    // Falls through to the same manage modal an Added card opens.
+    expect(await screen.findByRole("dialog")).toBeInTheDocument();
+    expect(mocks.useKey).toHaveBeenCalledWith("key-popup");
   });
 
   it("connects from the keyboard", async () => {
@@ -260,20 +298,20 @@ describe("PluginsView", () => {
     );
   });
 
-  it("requires an explicit confirmation before revoking", async () => {
+  it("requires an explicit confirmation before deleting", async () => {
     const mutate = vi.fn();
     mocks.useDeleteKey.mockReturnValue({ mutate, isPending: false });
     const user = userEvent.setup();
     render(<PluginsView />);
     await user.click(screen.getByRole("button", { name: "Manage OpenAI" }));
-    // First Revoke click only opens the confirmation dialog — no delete yet.
+    // First Delete click only opens the confirmation dialog — no delete yet.
     // (Dialog copy and cancel behaviour are covered in
     // manage-connection-modal.test.tsx.)
-    await user.click(await screen.findByRole("button", { name: "Revoke" }));
+    await user.click(await screen.findByRole("button", { name: "Delete" }));
     expect(mutate).not.toHaveBeenCalled();
     // The confirm click sends the delete with the key id.
     const confirm = screen
-      .getAllByRole("button", { name: "Revoke" })
+      .getAllByRole("button", { name: "Delete" })
       .at(-1) as HTMLElement;
     await user.click(confirm);
     expect(mutate).toHaveBeenCalledWith("key-1", expect.anything());
@@ -305,9 +343,9 @@ describe("PluginsView", () => {
     const user = userEvent.setup();
     render(<PluginsView />);
     await user.click(screen.getByRole("button", { name: "Manage OpenAI" }));
-    await user.click(await screen.findByRole("button", { name: "Revoke" }));
+    await user.click(await screen.findByRole("button", { name: "Delete" }));
     const confirm = screen
-      .getAllByRole("button", { name: "Revoke" })
+      .getAllByRole("button", { name: "Delete" })
       .at(-1) as HTMLElement;
     await user.click(confirm);
 
@@ -363,7 +401,7 @@ describe("PluginsView", () => {
     expect(await screen.findByRole("dialog")).toBeInTheDocument();
     expect(screen.queryByRole("switch")).not.toBeInTheDocument();
     expect(
-      screen.queryByRole("button", { name: "Revoke" }),
+      screen.queryByRole("button", { name: "Delete" }),
     ).not.toBeInTheDocument();
     expect(
       screen.queryByRole("button", { name: "Replace" }),

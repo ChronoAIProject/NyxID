@@ -18,6 +18,15 @@ Branch: `feature/oauth-chat-popup-flow`, 15 commits, rebased onto
 (CodeQL-driven refactor of `validateAuthorizationUrl`; see §5 CodeQL entry
 and §8).
 
+Completion-state repair: `fix/oauth-popup-completion-state` moves the shipped
+completion surface out of the backend-owned `/oauth/` namespace, makes chat
+cards settle from attempt-aware authenticated reads, and keeps the completion
+page outcome-neutral. Design and adversarial review:
+`OAUTH_POPUP_COMPLETION_FIX_PLAN.md` v2 and
+`OAUTH_POPUP_COMPLETION_FIX_SOL_REVIEW.md`. The implementation review and its
+round-two corrections are recorded in
+`OAUTH_POPUP_COMPLETION_FIX_OPUS_REVIEW.md` and §5 below.
+
 ---
 
 ## 1. What shipped and why
@@ -43,13 +52,13 @@ ConnectCard (chat) — click "Connect"
 /oauth-launching (interstitial, public route, same origin)
   │ installs validated postMessage listener → sets window.opener = null
   │ → posts {type:"oauth_launch_ready", launchId} to the captured opener
-  │ opener replies {type:"oauth_launch_navigate", launchId, nonce, url}
-  │ interstitial validates and self-navigates to the provider
+  │ opener replies {type:"oauth_launch_navigate", launchId, nonce, url, serviceName?}
+  │ interstitial validates, stores tab-local display context, and self-navigates
   ▼
 Provider consent → GET /api/v1/providers/callback?code&state=1cc_<nonce>
   │ nonce-guarded token exchange & write
   ▼
-302 → /oauth?status=…&flow=cc&code=…&nonce=…   (completion page, public route)
+302 → /oauth-complete?status=…&flow=cc&code=…&nonce=…   (public completion route)
   │ history.replaceState scrubs the query on mount
   │ BroadcastChannel "nyxid.oauth.<nonce>" → wakeup only
   ▼
@@ -91,9 +100,9 @@ The chat OAuth `state` parameter is `1cc_<attempt_nonce>` — self-discriminatin
 DB read. `attempt_nonce` is a canonical lowercase UUID v4; the parser rejects
 uppercase/braced/non-v4 forms.
 
-### `/oauth` completion query contract
+### `/oauth-complete` completion query contract
 
-`GET /oauth?status=…&flow=…&code=…&nonce=…` — all params optional, validated
+`GET /oauth-complete?status=…&flow=…&code=…&nonce=…` — all params optional, validated
 by `frontend/src/schemas/oauth-popup.ts` (`oauthCompletionSearchSchema`,
 zod `.catch(undefined)` — bad values degrade to generic copy, never throw):
 
@@ -108,8 +117,11 @@ Broadcast messages (`frontend/src/types/oauth-popup.ts`): `oauth_result`
 (status/flow/code — wakeup only), `oauth_action` (view_result | retry |
 dismiss), `oauth_ack`, `oauth_retry` ({nextNonce, url}); plus the launch
 handshake pair `oauth_launch_ready` / `oauth_launch_navigate` over
-postMessage. **No message ever carries tokens, key material, or the current
-channel's own nonce.**
+postMessage. The navigate message may carry a length-capped `serviceName` used
+only for display. The interstitial stores `{providerOrigin, correlationId,
+serviceName?}` under `nyxid.oauth.launch-context` in the popup's
+sessionStorage. **No message or launch-context record ever carries tokens,
+key material, or credential material.**
 
 ---
 
@@ -152,13 +164,16 @@ All in `backend/src/services/user_api_key_service.rs`:
    `popup.location`. No provider document ever holds a live opener.
 2. **`attempt_nonce` is a correlation identifier and channel selector, NOT a
    secret capability or authorization boundary.** It transits the provider as
-   `state` and appears in the `/oauth` query (and hence provider/edge logs) by
+   `state` and appears in the `/oauth-complete` query (and hence provider/edge logs) by
    design. Everything that mutates server state is independently
    authenticated and nonce-generation-guarded; broadcast payloads carry no
    secrets.
 3. **Retry URLs are triple-bound** (`validateAuthorizationUrl`): http(s), no
    embedded credentials, `state == 1cc_<nextNonce>`, and origin equal to the
-   provider origin recorded in sessionStorage by the trusted interstitial.
+   provider origin recorded in the parsed launch metadata by the trusted
+   interstitial. Context reads, display enrichment, and retry updates require
+   `flow=cc` plus `correlationId === nonce`; that match is correlation, never
+   outcome proof.
    Retry is not offered at all when that recorded origin is absent.
    Since `403f6fc3` the validator returns the parsed `URL` object (`URL |
    null`) instead of a boolean, and every navigation sink (`window.location.
@@ -172,15 +187,22 @@ All in `backend/src/services/user_api_key_service.rs`:
    authenticated `/keys/:id` reads (+ `last_authorized_at` advancement for
    reconnects). The completion page renders only fixed copy selected by
    enum-validated tokens; a forged `status=complete` shows neutral
-   "Authorization response received / being verified" copy and flips nothing.
+   "Authorization response received" copy and flips nothing. Even with a
+   matching tab-local service label, the page only directs the user back to
+   the chat where authenticated reads show the result; it never says connected
+   or authorized.
+   `KeyInfo.is_active` is the `UserService` enabled flag and is not
+   authorization evidence; `GET /keys` only returns rows where it is true.
+   Every card settlement branch must require `UserApiKey.status == active`
+   (and timestamp advancement for reconnects).
 5. **Initiate is non-destructive** (§3). Credential-clearing writes happen
    only under the legacy unhealthy-status gate or after a nonce-guarded
    exchange/denial on a `pending_auth` row.
 6. **Legacy flows stay byte-identical**: BSON shapes (skip_serializing_if),
    redirects, and the DB-free missing-code fast path are pinned by tests.
    Malformed/legacy state strings keep the legacy dashboard redirect; only
-   canonical `1cc_<uuid-v4>` states route to `/oauth`.
-7. **`/oauth` and `/oauth-launching` are exact-match public routes**
+   canonical `1cc_<uuid-v4>` states route to `/oauth-complete`.
+7. **`/oauth-complete` and `/oauth-launching` are exact-match public routes**
    (`lib/public-paths.ts`) that render before auth and issue no authenticated
    requests. Never broaden to `/oauth/*` — those are the backend IdP surface.
 8. **Popup-closed detection is client-only.** The 1s `isClosed()` watchdog
@@ -213,8 +235,8 @@ All in `backend/src/services/user_api_key_service.rs`:
 | F-2 | P1 | Denial with TTL-reaped state escaped popup routing (dashboard rendered inside popup) | **Fixed** — the `Err` arm of the denial peek falls back to `chat_attempt_nonce_from_state` (`handlers/user_tokens.rs:546-554`); regression test `generic_oauth_callback_denial_chat_with_reaped_state_stays_popup_routed`. |
 | F-3 | P1 | Generation guard was one-directional; legacy writes left stale nonces live | **Fixed** — all five legacy mutation paths `$unset` the nonce (§3). Residual: `reconcile_pending_oauth_placeholder` Pass 2 sets `failed` without unsetting — **inert**, every nonce-consuming write excludes `failed` or only unsets. |
 | F-4 | P2 | State insert + nonce stamp are two writes; two-tab race can orphan an exchanged upstream grant | **Consciously accepted** (impl plan §0.2.8) — NyxID data stays correct via the nonce guard; upstream revocation of the discarded grant belongs to all-flow retry work. |
-| F-5 | P2 | Nonce appears in the `/oauth` URL and provider/edge logs | **Consciously accepted, reframed** — correlation identifier, not a capability (§4.2); edge log/query policy is deployment-owned. |
-| F-6 | P2 | Completion success state fully attacker-assertable | **Partially fixed, remainder accepted** — copy neutralized to "response received / being verified" + neutral icon; wakeup-only + server-settled state bounds the blast radius; "Try again" is no longer destructive given F-1. Query-asserted *display* remains by design. |
+| F-5 | P2 | Nonce appears in the `/oauth-complete` URL and provider/edge logs | **Consciously accepted, reframed** — correlation identifier, not a capability (§4.2); edge log/query policy is deployment-owned. |
+| F-6 | P2 | Completion success state fully attacker-assertable | **Fixed for outcome claims** — success stays neutral ("Authorization response received"), the optional tab-local service label only points back to the authoritative chat card, and no popup copy says connected/authorized. A provider can forge neutral completion/error display, but cannot cause an outcome claim. Signed outcome receipts remain a universal-design follow-up. |
 | F-7 | P2 | No popup-closed watchdog; `isClosed()` dead code | **Fixed** — 1s poll → hint + "Start again" reset; deliberately client-only (§4.8). |
 | F-8 | P2 | Retry silently dead when provider origin absent from sessionStorage | **Fixed** — `canRetryHere` gates the button; neutral "return to your NyxID tab" copy instead of a dead CTA; no destructive re-initiate fires. |
 | F-9 | P2 | `focus` listener likely cancels the success auto-close | **Fixed** — focus listener removed; pointerdown/keydown remain. Real-browser confirmation stays on the manual matrix (§7). |
@@ -224,6 +246,40 @@ All in `backend/src/services/user_api_key_service.rs`:
 **Tally: Sol 7/7 fixed-and-holding (one disposition revised, accepted). Opus:
 8 fixed, 2 consciously accepted (F-4, F-5), 1 partially fixed with the
 remainder accepted by design (F-6). Nothing unaddressed.**
+
+### Completion-state fix review (2026-08-06)
+
+`OAUTH_POPUP_COMPLETION_FIX_SOL_REVIEW.md` found four P1 blockers and four
+lower-severity issues in the first repair plan. V2
+(`OAUTH_POPUP_COMPLETION_FIX_PLAN.md`) accepted all eight: neutral completion
+copy replaced the forgeable outcome claim; watches became attempt- and
+reconnect-aware; dialog close became explicit neutral cancellation; rollout
+became frontend-first with an exact temporary alias and executable smoke;
+enrichment became `cc`-only; real-query lifecycle tests and unconditional
+wizard rebuilding were added. Implementation also generation-isolates the
+dialog-scoped status query, closing the same-key retry cache hole on both the
+card and dialog surfaces.
+
+### Completion-state implementation review, round 2 (2026-08-07)
+
+`OAUTH_POPUP_COMPLETION_FIX_OPUS_REVIEW.md` returned REWORK after reproducing
+two false-Connected card states and finding three test gaps plus a destructive
+popup-handoff regression. All findings were accepted and corrected:
+
+| # | Sev | Finding | Disposition |
+|---|---|---|---|
+| F-1 | P1 | Cancelled fresh connect became Connected because `is_active` was treated as authorization | **Fixed** — the cancelled escape hatch remains, but requires matching key id plus `status == active`; reconnects also require `last_authorized_at` advancement. |
+| F-2 | P1 | `connectedNow` had the same defect, hiding all pending/failed/timed-out states | **Fixed** — catalog matching now requires `status == active`; a real `pending_auth` placeholder remains Authorizing. |
+| F-3 | P2 | Pending fixtures used the impossible `is_active: false` server shape | **Fixed** — fixtures now mirror `GET /keys` (`is_active: true`, `status: pending_auth`) and explicitly reject Connected copy. |
+| F-4 | P2 | Dialog query generation isolation was mocked out of its tests | **Fixed** — a real QueryClient test retries the same key under a new attempt id and proves no stale terminal result is exposed. |
+| F-5 | P2 | Reverting the registered route to `/oauth` left the suite green | **Fixed** — a route-table test observes the exported route object's exact `/oauth-complete` path. |
+| F-6 | P2 | Popup readiness/handoff failure deleted the placeholder and removed the manual link; destructive cleanup lacked a generation guard | **Fixed** — validated handoff failures retain polling, the announced attempt, and the manual link; old backends without a nonce degrade through a credential-free HTTP(S) URL validator; fatal cleanup is generation-guarded. The ready budget is 5s for a cold/no-cache interstitial, after which fallback is non-destructive. |
+
+Each correction was mutation-checked: locally reverting the production line
+made its new focused regression test fail, then restoring it returned the
+six-file focused suite to **70/70 passing**. In particular, removing the outer
+generation guard caused a reproduced
+`DELETE /keys/fresh-service-1?only_if_pending=true` after unmount.
 
 ### CodeQL on PR #1349 (post-realignment) — fixed in `403f6fc3`
 
@@ -248,6 +304,10 @@ remainder accepted by design (F-6). Nothing unaddressed.**
   "Cancel" — OAuth-state cancellation transactions are out of the pilot.
 - Upstream token revocation for orphaned grants (F-4 residual).
 - Edge/CDN access-log query-string policy (F-5 residual) — deployment-owned.
+- Backend-authenticated completion receipts for outcome-specific popup copy —
+  deferred to the universal six-flow design; the `cc` pilot stays neutral.
+- Remove the temporary nginx exact `/oauth` → `/oauth-complete` compatibility
+  alias after one full release cycle with no pre-rename backend callbacks.
 
 ## 7. Known residuals — manual browser matrix required before production enablement
 
@@ -264,8 +324,71 @@ mobile browser:
 4. **F-9 follow-through**: success auto-close actually fires (no stray focus
    /interaction event cancelling it) and pointer/keyboard still cancels.
 5. Popup-blocked fallback anchor (`noopener noreferrer`) end-to-end.
+6. Completion/cancellation states: service-labelled neutral success, every
+   emitted error-code message, query scrubbing, card auto-settlement, and
+   dialog-close rendering neutral Cancelled rather than Failed.
 
-## 8. Gate results — independently re-run 2026-08-05
+## 8. Gate results
+
+### Completion-state repair, round 2 — re-run 2026-08-07
+
+| Gate | Result |
+|---|---|
+| `npm --prefix frontend run build` | passed: `tsc -b`, main and credential-accept Vite builds, and mock-footprint assertion; one pre-existing lightningcss pseudo-class warning |
+| `npm --prefix frontend run lint` | passed: 0 errors, 23 pre-existing warnings outside the changed files |
+| `npm --prefix frontend test` | host-contention run: **2659 passed, 1 unrelated 5s timeout** (`AddKeyDialog — custom endpoint path`) |
+| `npm --prefix frontend test -- --maxWorkers=2` | **2660/2660 passed** in 223 files (282.91s) |
+| `cargo test -p nyxid` | final exact rerun: **4997/4997 passed** (317.58s) |
+
+The first exact Cargo run had 4996 passes and one unrelated elapsed-time
+failure in `approve_handler_returns_before_slow_notification_dispatch_finishes`.
+The test passed alone (1/1 in 7.64s); the exact full command then passed on
+rerun. Host load during diagnosis was 18.90 on 12 cores. No timeout or runner
+configuration was changed. Wizard build/freshness remains sequenced last,
+after this documentation and all source edits.
+
+### Completion-state repair — independently re-run 2026-08-06
+
+The frontend dependency tree was restored from the committed lockfile before
+any source edit (`frontend/node_modules` removed, then
+`npm --prefix frontend ci`: 608 packages, exit 0). The required unmodified
+baseline `npm --prefix frontend run build` then passed. Neither
+`frontend/package.json` nor a lockfile changed.
+
+| Gate | Result |
+|---|---|
+| `npm --prefix frontend run build` | passed: `tsc -b`, main Vite build, credential-accept build, and mock-footprint check all completed (one existing lightningcss pseudo-class warning) |
+| `npm --prefix frontend run lint` | passed: 0 errors, 23 pre-existing warnings outside the changed files |
+| `npm --prefix frontend test -- --maxWorkers=2` | **2654/2654 passed** in 222 files (225.31s) |
+| `cargo test -p nyxid -- --test-threads=8` | **4997/4997 passed**, 0 ignored (320.91s) |
+| `cargo fmt --all -- --check` | clean |
+| `git diff --check` | clean |
+
+The exact unconstrained `npm --prefix frontend test` command was attempted
+twice on the shared host. It produced four unrelated timeout failures after
+2649 passes on the first run and 19 different unrelated timeout failures
+after 2634 passes on the second. The same complete suite passed with two
+workers and normal test assertions/timeouts; the changing failures and the
+green constrained run identify shared-host scheduling pressure rather than a
+deterministic product failure.
+
+The executable smoke failed before the route fix by construction:
+
+- Vite `/oauth-complete?...` rendered `404 / Page not found`, with
+  `hasExpectedCopy: false` and the query still present.
+- Production `/oauth?...` navigation failed with
+  `net::ERR_HTTP_RESPONSE_CODE_FAILURE` after the nginx prefix redirect.
+
+After the fix, a built Vite preview and a container using the production nginx
+template both rendered `Authorization declined` at `/oauth-complete`, scrubbed
+`window.location.search` to the empty string, and returned 200. The production
+template's exact `/oauth?...` alias returned 302 with the query preserved in
+`Location: /oauth-complete?...`; the final HTML returned
+`Cache-Control: no-cache` plus the expected frame, content-type, and referrer
+security headers. `nginx -t` passed. Wizard-bundle build/freshness results are
+recorded by the final packaging commit that follows all source edits.
+
+### PR #1349 realignment — independently re-run 2026-08-05
 
 Rust gates ran at `87599c59` (realignment pass); the only commit since,
 `403f6fc3`, is frontend-only (verified from its diff: all 8 touched files are

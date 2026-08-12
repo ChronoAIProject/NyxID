@@ -80,10 +80,12 @@ class StubTransport implements AssistantTransport {
   sendCalls = 0;
   cancelCalls = 0;
   approvalCalls = 0;
+  inputCalls = 0;
   progressCalls = 0;
   blockCalls = 0;
   continueCalls = 0;
   wakeCalls = 0;
+  resolvePlanCalls = 0;
   lastDelegateEvent: ((event: TurnEvent) => void) | null = null;
   private cursor = 0;
 
@@ -94,7 +96,7 @@ class StubTransport implements AssistantTransport {
 
   async createConversation(): Promise<Conversation> {
     this.createCalls += 1;
-    const id = `workflow-pending-${String(this.createCalls)}`;
+    const id = `draft-${String(this.createCalls)}`;
     const conversation = baseConversation(id, {
       title: "New chat",
       message_count: undefined,
@@ -206,8 +208,33 @@ class StubTransport implements AssistantTransport {
     this.cancelCalls += 1;
   }
 
+  async stopTask(): Promise<void> {
+    this.cancelCalls += 1;
+  }
+
+  async steerTask(): Promise<void> {
+    return Promise.resolve();
+  }
+
+  async retryStep(): Promise<void> {
+    return Promise.resolve();
+  }
+
+  async skipStep(): Promise<void> {
+    return Promise.resolve();
+  }
+
+  async resolvePlan(): Promise<void> {
+    this.resolvePlanCalls += 1;
+  }
+
   async decideApproval(): Promise<TurnHandle | null> {
     this.approvalCalls += 1;
+    return null;
+  }
+
+  async resolveInput(): Promise<TurnHandle | null> {
+    this.inputCalls += 1;
     return null;
   }
 
@@ -228,6 +255,7 @@ class StubTransport implements AssistantTransport {
     this.wakeCalls += 1;
     return { turnId: "delegate-wake", cancel: () => undefined };
   }
+
 }
 
 function resetScenarioStore(): void {
@@ -814,7 +842,7 @@ describe("ScenarioInterceptTransport journey verification", () => {
         event: "block.updated",
         patch: {
           status: "completed",
-          outcome_note: "Reported — awaiting assistant verification.",
+          outcome_note: "Connected. The assistant can use this service now.",
         },
       });
       await flushAsync();

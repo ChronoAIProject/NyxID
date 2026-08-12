@@ -410,7 +410,7 @@ pub async fn exchange_authorization_code(
             .await?;
 
     // Generate tokens with RBAC claims
-    let access_token = crate::crypto::jwt::generate_access_token(
+    let access_token = crate::crypto::jwt::generate_oauth_access_token(
         jwt_keys,
         config,
         &user_uuid,
@@ -427,6 +427,7 @@ pub async fn exchange_authorization_code(
                 allowed_service_ids: &token_resource_scope.allowed_service_ids,
             },
         ),
+        &stored.client_id,
     )?;
 
     let issued_refresh = issue_oauth_refresh_token(
@@ -554,6 +555,10 @@ mod tests {
             broker_capability_enabled: false,
             revocation_webhook_url: None,
             revocation_webhook_secret_encrypted: None,
+            connection_webhook_url: None,
+            connection_webhook_secret_encrypted: None,
+            connection_webhook_key_id: None,
+            connection_webhook_enabled: false,
             created_by: Some("test".to_string()),
             created_at: now,
             updated_at: now,
@@ -837,6 +842,7 @@ mod tests {
         assert_eq!(claims.allow_all_services, Some(false));
         assert_eq!(claims.allowed_service_ids, Some(Vec::new()));
         assert_eq!(claims.resources, Some(Vec::new()));
+        assert_eq!(claims.client_id.as_deref(), Some(client.id.as_str()));
 
         let stored_refresh = db
             .collection::<RefreshToken>(REFRESH_TOKENS)

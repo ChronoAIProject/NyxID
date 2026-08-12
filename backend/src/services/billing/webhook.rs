@@ -442,6 +442,7 @@ mod tests {
             lago_metric_code: "platform_requests".to_string(),
             credential_class: CredentialClass::UserOwned,
             model: None,
+            token_breakdown: None,
             reserved_credits: 1,
             quantity: Some(1),
             pending_resale_quantity: None,

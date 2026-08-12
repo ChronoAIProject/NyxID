@@ -23,8 +23,31 @@ const requiredWireStringSchema = z
   .max(4_096)
   .transform((value) => value.trim())
   .pipe(z.string().min(1));
+const requiredActionIdentitySchema = z
+  .string()
+  .transform((value) => value.trim())
+  .pipe(actionControlIdentitySchema);
 
-const SECRET_VALUE = /(Bearer\s+)[A-Za-z0-9._~+/-]+|nyx(?:id)?_[A-Za-z0-9_-]{8,}/gi;
+const allowedServiceIdsSchema = z
+  .array(requiredActionIdentitySchema)
+  .min(1)
+  .max(64)
+  .superRefine((values, context) => {
+    const seen = new Set<string>();
+    for (const [index, value] of values.entries()) {
+      if (seen.has(value)) {
+        context.addIssue({
+          code: "custom",
+          path: [index],
+          message: "Duplicate allowed service id",
+        });
+      }
+      seen.add(value);
+    }
+  });
+
+const SECRET_VALUE =
+  /(Bearer\s+)[A-Za-z0-9._~+/-]+|nyx(?:id)?_[A-Za-z0-9_-]{8,}/gi;
 const FORBIDDEN_ACTION_KEY =
   /(?:^|[_-])(authorization|api[-_]?key|token|secret|password|credential|cookie|user[-_]?code|device[-_]?code)(?:$|[_-])/i;
 
@@ -62,12 +85,44 @@ export const customServiceActionParamsSchema = z
   })
   .strict();
 
-export const assistantActionParamsSchema = z
+export const serviceConnectActionParamsSchema = z
   .object({
     catalogService: catalogServiceActionParamsSchema.optional(),
     customService: customServiceActionParamsSchema.optional(),
   })
-  .strict()
+  .strict();
+
+export const keyCreateActionParamsSchema = z
+  .object({
+    name: z
+      .string()
+      .max(200)
+      .transform((value) => value.trim())
+      .pipe(z.string().min(1)),
+    platform: z
+      .string()
+      .max(100)
+      .transform((value) => value.trim())
+      .pipe(z.string().min(1)),
+    allowedServiceIds: allowedServiceIdsSchema,
+  })
+  .strict();
+
+export const keyRotateActionParamsSchema = z
+  .object({
+    keyId: requiredActionIdentitySchema,
+  })
+  .strict();
+
+const emptyActionParamsSchema = z.object({}).strict();
+
+export const assistantActionParamsSchema = z
+  .union([
+    serviceConnectActionParamsSchema,
+    keyCreateActionParamsSchema,
+    keyRotateActionParamsSchema,
+    emptyActionParamsSchema,
+  ])
   .optional()
   .default({});
 
@@ -161,6 +216,16 @@ export type ActionCardParams =
       readonly auth_key_name: string;
       readonly via_node_id: string | null;
       readonly target_org_id: string | null;
+    }
+  | {
+      readonly variant: "key_create";
+      readonly name: string;
+      readonly platform: string;
+      readonly allowed_service_ids: readonly string[];
+    }
+  | {
+      readonly variant: "key_rotate";
+      readonly key_id: string;
     }
   | { readonly variant: "unknown" };
 
@@ -269,7 +334,6 @@ export type ActionWakeBody = z.infer<typeof actionWakeBodySchema>;
 export type ActionReportActionLookup =
   | ReadonlyMap<string, string>
   | Readonly<Record<string, string | undefined>>;
-
 function matchesSecretValue(value: string): boolean {
   SECRET_VALUE.lastIndex = 0;
   return SECRET_VALUE.test(value);
@@ -319,16 +383,20 @@ function assertReportMatchesAction(
   action: string | undefined,
 ): void {
   if (report.disposition !== "completed") return;
-  if (
-    action === "service.connect" &&
-    (!report.resource || !("userService" in report.resource))
-  ) {
+  if (!report.resource) {
     throw new Error(
-      "service.connect completed reports must include resource.userService.userServiceId",
+      "Completed action reports must include a resource reference",
     );
   }
-  if (!report.resource) {
-    throw new Error("Completed action reports must include a resource reference");
+  if (action?.startsWith("service.") && !("userService" in report.resource)) {
+    throw new Error(
+      `${action} completed reports must include resource.userService.userServiceId`,
+    );
+  }
+  if (action?.startsWith("key.") && !("key" in report.resource)) {
+    throw new Error(
+      `${action} completed reports must include resource.key.keyId`,
+    );
   }
 }
 

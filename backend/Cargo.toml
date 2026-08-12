@@ -1,6 +1,6 @@
 [package]
 name = "nyxid"
-version = "0.9.0"
+version = "0.10.0"
 edition = "2024"
 rust-version.workspace = true
 license.workspace = true
@@ -97,6 +97,7 @@ axum-extra = { version = "0.12.6", features = ["form", "query"] }
 # `atexit` hook that drops the per-test databases at process exit. Already in
 # the dependency tree transitively, so this adds no new compilation.
 libc = "0.2"
+nyxid-node-proxy-test = { package = "nyxid-cli", path = "../cli", features = ["node-proxy-test"] }
 
 [features]
 default = []

@@ -44,6 +44,14 @@ vi.mock("@/components/shared/client-secret-dialog", () => ({
     open ? <div data-testid="client-secret-dialog" /> : null,
 }));
 
+vi.mock("./connection-webhook-section", () => ({
+  ConnectionWebhookSection: ({
+    clientId,
+  }: {
+    readonly clientId: string;
+  }) => <div data-testid="connection-webhook-section">{clientId}</div>,
+}));
+
 vi.mock("sonner", () => ({
   toast: {
     error: mocks.toastError,
@@ -61,6 +69,9 @@ const oauthClient: OAuthClient = {
   allowed_scopes: "openid profile email",
   delegation_scopes: "",
   broker_capability_enabled: false,
+  revocation_webhook_url: null,
+  connection_webhook_url: null,
+  connection_webhook_enabled: false,
   is_active: true,
   default_service_catalog_slugs: [],
   client_secret: null,

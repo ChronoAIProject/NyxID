@@ -27,6 +27,7 @@ This document describes every HTTP endpoint exposed by the NyxID backend. All en
   - [User Endpoints](#user-endpoints)
   - [External API Keys](#external-api-keys)
   - [User Services](#user-services)
+  - [Third-party Connector Integration](#third-party-connector-integration)
   - [Service Catalog](#service-catalog)
   - [Sessions](#sessions)
   - [Service Endpoints](#service-endpoints)
@@ -447,6 +448,81 @@ curl -X POST http://localhost:3001/api/v1/auth/refresh \
     "refresh_token": "eyJhbGciOiJSUzI1NiIsInR5cCI6IkpXVCJ9..."
   }'
 ```
+
+---
+
+#### POST /api/v1/auth/device/request
+
+Start a first-party device login for a CLI, desktop app, or other input-constrained client. This public contract is stable and versioned with `/api/v1`.
+
+**Auth:** None
+
+**Request Body:**
+
+| Field | Type | Required | Description |
+|-------|------|----------|-------------|
+| `client_label` | string | No | Short client name shown to the approving user |
+| `client_user_agent` | string | No | Sanitized client context shown during review |
+
+```json
+{
+  "client_label": "Desktop workstation",
+  "client_user_agent": "desktop-app/1.4"
+}
+```
+
+**Response (200):**
+
+```json
+{
+  "device_code": "nyx_adc_<opaque-secret>",
+  "user_code": "7KM2RQ9D",
+  "verification_uri": "https://app.nyxid.dev/login/device",
+  "verification_uri_complete": "https://app.nyxid.dev/login/device?user_code=7KM2RQ9D",
+  "expires_in": 600,
+  "interval": 5
+}
+```
+
+The `device_code` is a secret and must not be logged or displayed. The `user_code` is for manual entry at `verification_uri`. Codes expire 10 minutes after issuance.
+
+#### POST /api/v1/auth/device/poll
+
+Poll for approval and atomically receive the first-party token pair once. This public contract is stable and versioned with `/api/v1`.
+
+**Auth:** None
+
+```json
+{
+  "device_code": "nyx_adc_<opaque-secret>"
+}
+```
+
+**Response (200, approved):**
+
+```json
+{
+  "access_token": "eyJhbGciOiJSUzI1NiIsInR5cCI6IkpXVCJ9...",
+  "refresh_token": "eyJhbGciOiJSUzI1NiIsInR5cCI6IkpXVCJ9...",
+  "token_type": "Bearer",
+  "expires_in": 900
+}
+```
+
+Poll no faster than the `interval` returned by `/request`. A `11202` response means approval is still pending. On `11203`, add 5 seconds to the client's current interval before polling again; each additional premature poll increases the server-side interval by another 5 seconds. Stop on denied, expired, or already-delivered responses. Token delivery is single-use: the first approved poll receives the tokens and every later poll returns `11205`.
+
+| Code | Key | HTTP | Meaning |
+|------|-----|------|---------|
+| `11200` | `auth_device_code_not_found` | 404 | Device code does not exist |
+| `11201` | `auth_device_expired_token` | 410 | Device code reached its 10-minute TTL |
+| `11202` | `auth_device_authorization_pending` | 400 | User decision is still pending |
+| `11203` | `auth_device_slow_down` | 429 | Client polled before the current interval elapsed |
+| `11204` | `auth_device_access_denied` | 403 | User denied the login request |
+| `11205` | `auth_device_already_delivered` | 410 | The token pair was already delivered to one poller |
+| `11206` | `auth_device_rate_limited` | 429 | Endpoint rate limit was exceeded |
+| `11207` | `auth_device_user_code_invalid` | 400 | The first-party review UI supplied an invalid user code |
+
+`POST /api/v1/auth/device/preview` and `POST /api/v1/auth/device/approve` support the first-party browser review surface. Integrators should direct users to `verification_uri`; they should not call those UI endpoints. Approval requires a human session and rejects API-key, service-account, delegated, and relay credentials.
 
 ---
 
@@ -3056,6 +3132,78 @@ List user's service bindings.
 
 **Auth:** Required
 
+**Response (200):**
+
+```json
+{
+  "services": [
+    {
+      "id": "6fd22b58-0261-4b86-8ce7-73a255a0619d",
+      "slug": "github",
+      "label": "Work GitHub",
+      "catalog_service_name": "GitHub",
+      "resource_uri": "https://api.nyxid.dev/api/v1/proxy/s/github",
+      "endpoint_id": "985fba62-f4fb-4c71-ae19-e669ae86ca19",
+      "api_key_id": "b306c83f-a1f8-4117-a28e-ac1ab84385c0",
+      "auth_method": "bearer",
+      "auth_key_name": "Authorization",
+      "catalog_service_id": "33ab1178-c9d5-40ec-86a2-fc542a97120e",
+      "node_priority": 0,
+      "ssh_auth_mode": "proxy_only",
+      "ssh_node_keys_stale": false,
+      "admin_only": false,
+      "is_active": true,
+      "identity_propagation_mode": "none",
+      "identity_include_user_id": false,
+      "identity_include_email": false,
+      "identity_include_name": false,
+      "forward_access_token": false,
+      "inject_delegation_token": false,
+      "delegation_token_scope": "",
+      "ws_frame_injections": [],
+      "created_at": "2026-08-05T10:00:00+00:00",
+      "updated_at": "2026-08-05T10:00:00+00:00",
+      "credential_source": { "type": "personal" }
+    }
+  ]
+}
+```
+
+| Field | Type | Notes |
+|-------|------|-------|
+| `id` | UUID string | Stable UserService identifier |
+| `slug` | string | Stable proxy slug; used by `/api/v1/proxy/s/{slug}` |
+| `is_active` | boolean | Stable active/inactive contract for the binding |
+| `label` | string, omitted | Human-readable endpoint label |
+| `catalog_service_name` | string, omitted | Catalog display name |
+| `resource_uri` | absolute URI | RFC 8707 resource identifier for this service |
+| `endpoint_id` | UUID string | Bound user endpoint |
+| `api_key_id` | UUID string, omitted | Bound external credential |
+| `auth_method` | string | Credential injection method |
+| `auth_key_name` | string | Header or parameter name used for credential injection |
+| `catalog_service_id` | UUID string, omitted | Source catalog service |
+| `node_id` | UUID string, omitted | Selected credential node |
+| `node_priority` | integer | Node routing priority |
+| `ssh_auth_mode` | string | `cert`, `node_key`, or `proxy_only` |
+| `ssh_node_keys_stale` | boolean | Whether node-key material needs refresh |
+| `admin_only` | boolean | Whether the service is restricted to administrators |
+| `identity_propagation_mode` | string | `none`, `headers`, `jwt`, or `both` |
+| `identity_include_user_id` | boolean | Include user ID in propagated identity |
+| `identity_include_email` | boolean | Include email in propagated identity |
+| `identity_include_name` | boolean | Include display name in propagated identity |
+| `identity_jwt_audience` | string, omitted | Audience for propagated identity JWTs |
+| `forward_access_token` | boolean | Forward the caller's access token |
+| `inject_delegation_token` | boolean | Inject a delegated NyxID token |
+| `delegation_token_scope` | string | Delegated token scope string |
+| `custom_user_agent` | string, omitted | Per-service User-Agent override |
+| `default_request_headers` | array, omitted | User-owned default request headers |
+| `ws_frame_injections` | array | WebSocket frame injection rules |
+| `created_at` | RFC 3339 string | Creation timestamp |
+| `updated_at` | RFC 3339 string | Last-update timestamp |
+| `credential_source` | object | `{ "type": "personal" }` or org provenance with `org_id`, `org_name`, `avatar_url`, `role`, and `allowed` |
+
+The integration contract guarantees `services[].id`, `services[].slug`, and `services[].is_active` across compatible `/api/v1` releases. Other fields are documented for current clients but may evolve additively; clients should ignore unknown fields.
+
 #### PUT /api/v1/user-services/{id}
 
 Update auth config or node routing.
@@ -3067,6 +3215,146 @@ Update auth config or node routing.
 Deactivate a service binding.
 
 **Auth:** Required
+
+---
+
+### Third-party Connector Integration
+
+Registered developer apps should use connect links for browser-based connector setup instead of inferring an attempt from changes to `/user-services`.
+
+1. Obtain a normal user OAuth access token through the authorization-code flow.
+2. Create a link with `POST /api/v1/connect-links`. When the access token belongs to a registered app, `callback_url` must satisfy that app's registered OAuth redirect URI matching policy. Registered custom schemes and public-client loopback redirects are supported.
+3. Open the returned `connect_url` in the user's browser. Credential submission and provider authorization remain human-session-only.
+4. On a terminal outcome, the browser returns to the stored callback URI after NyxID adds `status=completed|cancelled|expired` and `connect_link_id=<id>`. Existing query parameters are preserved; reserved status parameters are replaced. Fragments and userinfo are rejected, and the raw connect token is never included.
+5. Use `GET /api/v1/connect-links/{id}` as the polling fallback. `POST /api/v1/connect-links/{id}/cancel` cancels an attempt from the creating app.
+
+**Create request:**
+
+```http
+POST /api/v1/connect-links
+Authorization: Bearer <developer-app-user-access-token>
+Content-Type: application/json
+```
+
+```json
+{
+  "service_slug": "github",
+  "label": "Work account",
+  "callback_url": "desktop-app://connect/return",
+  "expires_in": 900
+}
+```
+
+**Create response:**
+
+```json
+{
+  "id": "6c02c84a-3d97-430f-8468-c96b609d9563",
+  "connect_url": "https://app.nyxid.dev/connect/nyx_clk_<opaque-secret>",
+  "expires_at": "2026-08-05T10:15:00.000Z"
+}
+```
+
+Treat `connect_url` as a single-use secret and hand it only to the browser. The authenticated app ID and display name are recorded on the link; a request-body `requested_by` value cannot override that identity.
+
+**Polling response:**
+
+```json
+{
+  "id": "6c02c84a-3d97-430f-8468-c96b609d9563",
+  "status": "pending",
+  "service_name": "GitHub",
+  "service_slug": "github",
+  "expires_at": "2026-08-05T10:15:00.000Z",
+  "requesting_app_id": "desktop-client-id",
+  "requesting_app_name": "Desktop App",
+  "last_error": "provider_access_denied",
+  "last_error_at": "2026-08-05T10:04:12.000Z"
+}
+```
+
+`status` is one of `pending`, `completed`, `expired`, or `cancelled`. A completed response includes `connected_service: { "id", "slug" }`. Terminal responses with a callback include the fully merged `callback_url`.
+
+`last_error` is an optional short, stable, metadata-only code. `provider_access_denied` means the provider consent screen was declined, but the link remains `pending` and may be retried within its TTL and finalization grace. The field is cleared when a later attempt succeeds. Its absence means no provider decline has been recorded; it does not prove that the browser is still open.
+
+#### Connection lifecycle webhooks
+
+A developer app can register one HTTPS webhook for server-side lifecycle delivery. The target must resolve only to public IP addresses. Configure and rotate endpoints return the signing secret exactly once; normal app reads never include it.
+
+```http
+PUT /api/v1/developer/oauth-clients/{client_id}/connection-webhook
+Authorization: Bearer <human-session-access-token>
+Content-Type: application/json
+
+{"url":"https://desktop.example.com/nyxid/events"}
+```
+
+```json
+{
+  "client_id": "desktop-client-id",
+  "connection_webhook_url": "https://desktop.example.com/nyxid/events",
+  "connection_webhook_enabled": true,
+  "signing_secret": "nyx_cwh_<opaque-secret>",
+  "key_id": "key_0123456789abcdef"
+}
+```
+
+- `POST /api/v1/developer/oauth-clients/{client_id}/connection-webhook/rotate-secret` rotates and returns a new secret plus its non-secret `key_id`.
+- `DELETE /api/v1/developer/oauth-clients/{client_id}/connection-webhook` disables delivery and removes the stored encrypted secret.
+
+Events are `connect_link.completed`, `connect_link.cancelled`, `connect_link.expired`, and `connection.expired`. Only links created by the app produce connect-link events. Connection expiry routes through the `source_app_id` recorded when that link provisions its service.
+
+Abandoned app-bound links are expired by a background sweep, so `connect_link.expired` delivery does not require the app to poll or revisit the hosted page.
+
+```json
+{
+  "event_id": "3cc24472-c0b4-436c-a42a-17f43087f3e7",
+  "event_type": "connect_link.completed",
+  "occurred_at": "2026-08-06T09:30:00.123Z",
+  "data": {
+    "user_id": "user-uuid",
+    "connect_link_id": "6c02c84a-3d97-430f-8468-c96b609d9563",
+    "service_id": "catalog-service-id",
+    "service_slug": "service-slug",
+    "status": "completed",
+    "user_service_id": "user-service-id",
+    "completed_at": "2026-08-06T09:29:59.000Z",
+    "expires_at": "2026-08-06T09:45:00.000Z"
+  }
+}
+```
+
+Every event's `data.user_id` is the NyxID subject whose connection changed. `connection.expired` also includes `connect_link_id` when the service was provisioned through a connect link; legacy and manually provisioned services omit that field.
+
+The following request headers are a stable contract for connection and outbound trigger webhooks:
+
+- `X-NyxID-Event`: event type, such as `connect_link.completed` or `trigger.event`.
+- `X-NyxID-Delivery-Id`: the envelope event ID. Retries and connect-link outbox redispatches retain the same value.
+- `X-NyxID-Key-Id`: non-secret signing-key identifier returned with the one-time secret.
+- `X-NyxID-Timestamp`: Unix seconds included in the signed content.
+- `X-NyxID-Signature`: `sha256=<hex>` HMAC-SHA256 signature.
+
+Verify HMAC-SHA256 over the exact bytes `timestamp + "." + raw_request_body`, reject stale timestamps, select the held secret using `X-NyxID-Key-Id`, and compare in constant time:
+
+```python
+import hashlib
+import hmac
+
+signing_secret = secrets_by_key_id[key_id]
+signed = timestamp.encode() + b"." + raw_body
+expected = hmac.new(signing_secret.encode(), signed, hashlib.sha256).hexdigest()
+valid = hmac.compare_digest(signature.removeprefix("sha256="), expected)
+```
+
+For zero-gap rotation, keep the current and previous secrets in a receiver map keyed by `key_id`, call the rotate endpoint, accept either key, and remove the old slot only after observing deliveries with the new `X-NyxID-Key-Id`.
+
+Connect-link terminal events use the link document as a durable outbox. Each dispatch cycle makes up to three attempts with short timeouts and bounded backoff. A stale undelivered reservation is reclaimed by the expiry sweep after 120 seconds, for at most five dispatch cycles. Delivery is at least once: a process crash after the receiver accepts but before NyxID records success can produce a duplicate with the same event ID. After the cap, the outbox is marked `abandoned` and a metadata-only final-failure audit is emitted.
+
+`connection.expired` is best effort because it has no durable outbox: it receives one bounded three-attempt cycle and is not redelivered after process loss or final failure. Integrations should periodically reconcile with authenticated `GET /api/v1/user-services`; its cheap `connection_status` field is `active` or `expired` when credential expiry is knowable.
+
+Connection webhook bodies are metadata-only and enforced at a maximum of 16 KiB. Delivery never rolls back a link or credential transition, and event bodies and secrets are never logged.
+
+Envelope timestamps use RFC 3339 UTC serialization. The wire-format assertion emits the example above byte-for-byte, including `2026-08-06T09:30:00.123Z`.
 
 ---
 
@@ -7025,6 +7313,94 @@ curl -X DELETE -H "Authorization: Bearer $TOKEN" \
 ---
 
 ## Webhooks
+
+### Inbound Triggers
+
+Triggers provide a provider-neutral inbound event relay. Management routes accept a normal user token or agent API key and reject delegated, relay, and service-account tokens.
+
+#### Create and manage
+
+```http
+POST /api/v1/triggers
+Authorization: Bearer <access-token-or-agent-key>
+Content-Type: application/json
+```
+
+```json
+{
+  "label": "Repository activity",
+  "user_service_id": "optional-user-service-id",
+  "verification": {"mode":"token","location":"bearer"},
+  "delivery": {"type":"agent","conversation_id":"device-conversation-id"},
+  "target_org_id": null
+}
+```
+
+`verification` supports:
+
+- `{"mode":"token","location":"bearer"}` for `Authorization: Bearer nyx_trg_...`.
+- `{"mode":"token","location":"query"}` for `?token=nyx_trg_...`.
+- `{"mode":"hmac_sha256","header_name":"X-Hub-Signature-256"}` for `sha256=<hex>` over the exact raw body.
+
+Prefer bearer or HMAC verification. Query tokens are supported only for senders that cannot set headers; URLs commonly leak into reverse-proxy logs, browser history, monitoring systems, and referrer data.
+
+`delivery` supports:
+
+- `{"type":"webhook","url":"https://receiver.example.com/events"}`. The create/update response includes a separate `delivery_signing_secret` once and `delivery_signing_key_id`; outbound delivery uses the timestamp-bound signature and stable-header contract above.
+- `{"type":"agent","conversation_id":"..."}`. The conversation must be an active NyxID device conversation owned by the trigger owner; events enter the channel-event gateway and its conversation-bound agent routing. This target does not invoke an external application's agent runtime. Use `webhook` when events must reach external infrastructure; it is also the only target with durable cross-replica dedup and the delivery-history/replay contract described below.
+- `{"type":"notification"}`. The envelope is delivered through the owner's configured notification channels.
+
+Create returns `trigger`, the one-time inbound `secret`, and optional one-time `delivery_signing_secret` plus `delivery_signing_key_id`. Other routes are:
+
+- `GET /api/v1/triggers` and `GET /api/v1/triggers/{id}`
+- `PATCH /api/v1/triggers/{id}` for `label`, `status`, or `delivery`
+- `DELETE /api/v1/triggers/{id}`
+- `POST /api/v1/triggers/{id}/rotate-secret`
+- `POST /api/v1/triggers/{id}/rotate-delivery-secret` for webhook targets; returns a replacement `delivery_signing_secret` and `key_id` once.
+- `GET /api/v1/triggers/{id}/deliveries?page=1&per_page=20` for metadata-only delivery history, newest first (`per_page` maximum 100).
+- `POST /api/v1/triggers/{id}/deliveries/{event_id}/redeliver` to replay a retained encrypted envelope.
+
+Changing a trigger's `delivery` through `PATCH` intentionally mints a replacement delivery secret. Use `rotate-delivery-secret` when only key rotation is intended. Receivers should follow the two-key `X-NyxID-Key-Id` rotation procedure documented above.
+
+The CLI adds `nyxid trigger deliveries <id>`, `nyxid trigger redeliver <id> <event_id>`, and `nyxid trigger rotate-delivery-secret <id>` alongside the existing management commands; use `--org` for org-owned triggers.
+
+#### Public ingress
+
+```http
+POST /api/v1/webhooks/triggers/{trigger_id}
+Authorization: Bearer nyx_trg_<opaque-secret>
+X-NyxID-Event-Id: provider-event-123
+Content-Type: application/json
+
+{"action":"opened","resource":{"id":"42"}}
+```
+
+The forwarded envelope is:
+
+```json
+{
+  "event_id": "provider-event-123",
+  "trigger_id": "trigger-uuid",
+  "source": "inbound_webhook",
+  "received_at": "2026-08-06T09:30:00.123Z",
+  "payload": {"action":"opened","resource":{"id":"42"}}
+}
+```
+
+Event identity is taken from `X-NyxID-Event-Id`, then a top-level payload `event_id`, then the SHA-256 body hash. Unknown and disabled trigger IDs both return the same not-found-shaped response. The per-trigger rate limit is applied before the body is read or an HMAC secret is decrypted. Envelope timestamps use the same RFC 3339 UTC format as connection webhooks; the wire fixture emits exactly `2026-08-06T09:30:00.123Z`.
+
+Delivery and dedup semantics depend on the target:
+
+- `webhook`: an atomic `trigger_deliveries` insert provides exactly-once admission and durable dedup across replicas and restarts. NyxID then returns `{"status":"accepted","event_id":"..."}` immediately and performs up to three bounded delivery attempts in the background. A sender retry returns `duplicate` even when delivery failed; use the delivery history and replay endpoint for recovery. Final failure creates a metadata-only audit event.
+- `agent` and `notification`: delivery completes before the ingress response, and the event ID enters a best-effort in-memory dedup cache only after success. Dedup is per process, bounded to the configured cache capacity and a five-minute default window, and does not coordinate replicas. Concurrent or cross-replica duplicates are possible, so senders should retry failures and consumers should remain idempotent.
+
+Webhook-target envelopes are encrypted at rest with the configured encryption keys and removed by a database TTL index after `TRIGGER_DELIVERY_RETENTION_HOURS` (72 hours by default). Delivery list responses never contain payloads. Setting retention to `0` stores metadata for the default 72-hour bounded window but no envelope, makes `replay_available` false, and causes redelivery to return `trigger_delivery_record_not_found` (11606). Agent and notification payloads are never persisted.
+
+Delivery history entries contain `event_id`, `status` (`pending`, `delivered`, or `failed`), `attempts`, optional `last_status_code`, `replay_available`, and timestamps. Pagination responses also contain `page`, `per_page`, and `total`.
+
+Unsupported or unconfigured agent/notification targets return HTTP 400 with `trigger_delivery_unsupported`; synchronous delivery failures return HTTP 502 with `trigger_delivery_failed`. Trigger notifications contain bounded previews rather than the full provider payload so they fit Telegram and mobile push limits.
+
+Default ingress limits are 10 events/second per trigger, burst 20, and 256 KiB per raw request body. Outbound trigger webhook bodies are enforced at `TRIGGER_PAYLOAD_MAX_BYTES + 4096` bytes, 266240 bytes with the default configuration. See `TRIGGER_RATE_LIMIT_PER_SECOND`, `TRIGGER_RATE_LIMIT_BURST`, `TRIGGER_PAYLOAD_MAX_BYTES`, and `TRIGGER_DELIVERY_RETENTION_HOURS`.
 
 ### Telegram Webhook
 

@@ -85,6 +85,33 @@ async fn verify_cloud_credential_against_catalog(
 /// walking org membership in the same priority order as the proxy's
 /// effective-owner lookup. Returns the row so callers can continue with the
 /// canonical service id even when the request used a slug.
+///
+/// The `_id` branch deliberately does NOT filter on `is_active`, so a
+/// **disabled** service stays readable, re-enablable, and deletable through
+/// `/keys/{id}`. Disabling is advertised in the UI as a reversible pause; when
+/// this lookup filtered actives only, `GET`/`PUT`/`DELETE /keys/{id}` all
+/// 404'd the moment a service was disabled, which stranded the row — the
+/// detail page hosting the Enable button could no longer load, so nothing in
+/// the product could undo the pause.
+///
+/// The slug branches keep the `is_active` filter: a slug is not unique across
+/// disabled rows (the partial unique index only covers active ones), so
+/// matching disabled rows by slug would be ambiguous. Resolution by slug is
+/// therefore still active-only, and every credential-resolving path (proxy,
+/// MCP catalog, discovery, scope enforcement) is untouched by this — those go
+/// through `user_service_service`, not this function.
+///
+/// NOTE for anyone tidying this up: the resulting asymmetry (UUID resolves a
+/// disabled row, slug does not) is deliberate, and was removed once before.
+/// `c63ab733` added `is_active: true` here to make all three branches agree,
+/// reasoning "tightening, not a regression: any inactive row was already
+/// invisible to the proxy / list / slug paths". The paths it enumerated were
+/// indeed already closed — which is exactly why this one was load-bearing: it
+/// was the last route to the detail page that hosts the Enable control, so
+/// closing it turned Disable into a one-way door for five months. Symmetry
+/// here is not the goal; the management path and the execution paths want
+/// different answers. See the paired assertions in
+/// `get_key_resolves_disabled_service_by_uuid_but_not_by_slug`.
 async fn find_user_service_for_actor(
     state: &AppState,
     actor: &str,
@@ -93,7 +120,7 @@ async fn find_user_service_for_actor(
     if let Some(svc) = state
         .db
         .collection::<UserService>(USER_SERVICES)
-        .find_one(doc! { "_id": id_or_slug, "is_active": true })
+        .find_one(doc! { "_id": id_or_slug })
         .await?
     {
         return Ok(Some(svc));
@@ -401,6 +428,8 @@ pub struct KeyResponse {
     pub auth_method: String,
     pub auth_key_name: String,
     pub status: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub connection_status: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub catalog_service_id: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -2151,6 +2180,10 @@ fn key_response_from_result(result: &unified_key_service::CreateKeyResult) -> Ke
             .as_ref()
             .map(|api_key| api_key.status.clone())
             .unwrap_or_else(|| "active".to_string()),
+        connection_status: result
+            .api_key
+            .as_ref()
+            .and_then(unified_key_service::oauth_connection_status),
         catalog_service_id: result.service.catalog_service_id.clone(),
         catalog_service_slug: None,
         catalog_service_name: None,
@@ -2265,6 +2298,7 @@ fn key_response_from_view(view: unified_key_service::KeyView) -> KeyResponse {
         auth_method: view.auth_method,
         auth_key_name: view.auth_key_name,
         status: view.status,
+        connection_status: view.connection_status,
         catalog_service_id: view.catalog_service_id,
         catalog_service_slug: view.catalog_service_slug,
         catalog_service_name: view.catalog_service_name,
@@ -3017,8 +3051,19 @@ mod tests {
         assert_eq!(response.slug, "routeros");
     }
 
+    /// A disabled service stays addressable by UUID, and stays hidden by slug.
+    ///
+    /// The UUID half is what makes "Disable" a reversible pause rather than a
+    /// one-way door: `/keys/{id}` is the detail page that owns the Enable
+    /// control, so 404ing a disabled row there stranded it — the screen that
+    /// could undo the pause was the screen that would no longer load.
+    ///
+    /// The slug half must stay filtered. Slugs are only unique among *active*
+    /// rows (the `user_services` unique index is partial on `is_active: true`),
+    /// so resolving a disabled row by slug would be ambiguous, and slug is the
+    /// shape the proxy path uses.
     #[tokio::test]
-    async fn get_key_by_uuid_returns_not_found_for_inactive_service() {
+    async fn get_key_resolves_disabled_service_by_uuid_but_not_by_slug() {
         let Some(db) = connect_test_database("keys_get_uuid_inactive").await else {
             eprintln!("skipping keys handler integration test: no local MongoDB available");
             return;
@@ -3036,14 +3081,26 @@ mod tests {
             .await
             .unwrap();
 
-        let err = super::get_key(
-            State(state),
+        let Json(response) = super::get_key(
+            State(state.clone()),
             test_auth_user(&actor_id),
             Path(service_id.clone()),
         )
         .await
-        .expect_err("inactive service should not resolve by uuid");
+        .expect("a disabled service must stay readable by uuid so it can be re-enabled");
+        assert_eq!(response.id, service_id);
+        assert!(
+            !response.is_active,
+            "the response must report the disabled state rather than look healthy"
+        );
 
+        let err = super::get_key(
+            State(state),
+            test_auth_user(&actor_id),
+            Path("routeros".to_string()),
+        )
+        .await
+        .expect_err("a disabled service must not resolve by slug");
         assert!(matches!(
             err,
             AppError::NotFound(message) if message == "Key not found"

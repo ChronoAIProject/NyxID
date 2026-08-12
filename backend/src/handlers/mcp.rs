@@ -1,6 +1,5 @@
 use axum::{Json, extract::State};
 use serde::Serialize;
-use sha2::{Digest, Sha256};
 
 use crate::AppState;
 use crate::errors::AppResult;
@@ -76,6 +75,7 @@ pub struct McpEndpointConfig {
     pub request_body_required: bool,
     pub response_description: Option<String>,
     pub response: crate::models::service_endpoint::OperationResponseContract,
+    pub operation_digest: String,
 }
 
 // --- Handler ---
@@ -122,7 +122,7 @@ pub async fn get_mcp_config(
 
     let total_endpoints: usize = mcp_services.iter().map(|s| s.endpoints.len()).sum();
     let total_services = mcp_services.len();
-    let catalog_digest = catalog_digest(&mcp_services);
+    let catalog_digest = mcp_service::operation_catalog_digest(&catalog.services);
 
     Ok(Json(McpConfigResponse {
         contract_version: "1.0",
@@ -190,6 +190,7 @@ fn config_services(tool_services: &[mcp_service::McpToolService]) -> Vec<McpServ
                     request_body_required: ep.request_body_required,
                     response_description: ep.response_description.clone(),
                     response: ep.response.clone(),
+                    operation_digest: mcp_service::endpoint_contract_digest(ep),
                 })
                 .collect();
 
@@ -211,35 +212,6 @@ fn config_services(tool_services: &[mcp_service::McpToolService]) -> Vec<McpServ
 /// SHA-256 of canonical JSON containing only `contract_version` and the sorted
 /// normalized service descriptors. Caller identity, observation time,
 /// diagnostics, and deployment URL are deliberately excluded.
-fn catalog_digest(services: &[McpServiceConfig]) -> String {
-    let value = serde_json::json!({
-        "contract_version": "1.0",
-        "services": services,
-    });
-    let canonical = canonical_json(value);
-    let encoded = serde_json::to_vec(&canonical).expect("serializing JSON values cannot fail");
-    format!("sha256:{}", hex::encode(Sha256::digest(encoded)))
-}
-
-fn canonical_json(value: serde_json::Value) -> serde_json::Value {
-    match value {
-        serde_json::Value::Array(values) => {
-            serde_json::Value::Array(values.into_iter().map(canonical_json).collect())
-        }
-        serde_json::Value::Object(values) => {
-            let mut entries: Vec<_> = values.into_iter().collect();
-            entries.sort_by(|left, right| left.0.cmp(&right.0));
-            serde_json::Value::Object(
-                entries
-                    .into_iter()
-                    .map(|(key, value)| (key, canonical_json(value)))
-                    .collect(),
-            )
-        }
-        other => other,
-    }
-}
-
 /// Build the proxy base URL from the backend's base_url config.
 fn build_proxy_base_url(base_url: &str) -> String {
     format!("{}/api/v1/proxy", base_url.trim_end_matches('/'))
@@ -249,7 +221,7 @@ fn build_proxy_base_url(base_url: &str) -> String {
 mod tests {
     use super::{
         McpCatalogDiagnostics, McpEndpointConfig, McpServiceConfig, build_proxy_base_url,
-        catalog_digest, config_services,
+        config_services,
     };
     use crate::models::service_endpoint::OperationResponseContract;
     use crate::services::mcp_service::{self, McpToolEndpoint, McpToolService, McpToolSource};
@@ -291,6 +263,7 @@ mod tests {
                     content_types: vec!["application/json".to_string()],
                     binary_artifact: Some(false),
                 },
+                operation_digest: "sha256:endpoint".to_string(),
             }],
         }
     }
@@ -306,7 +279,10 @@ mod tests {
             "type": "object"
         }));
 
-        assert_eq!(catalog_digest(&[first]), catalog_digest(&[second]));
+        assert_eq!(
+            mcp_service::canonical_sha256(serde_json::json!(first)),
+            mcp_service::canonical_sha256(serde_json::json!(second))
+        );
     }
 
     #[test]
@@ -326,6 +302,7 @@ mod tests {
                 path: "/items/{id}".to_string(),
                 ..Default::default()
             }],
+            durable_endpoint_metadata: Default::default(),
             source: McpToolSource::UserManaged {
                 user_service_id: "user-service-1".to_string(),
                 effective_owner_id: "owner-1".to_string(),

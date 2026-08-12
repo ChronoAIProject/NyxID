@@ -58,7 +58,11 @@ import type { CatalogEntry, KeyInfo } from "@/types/keys";
 import type { DeviceCodePollResponse } from "@/types/api";
 import { isValidHttpUrl } from "@/schemas/http-url";
 import { openOAuthPopup, type OAuthPopupHandle } from "@/lib/oauth-popup";
-import { oauthAttemptNonceSchema, validateAuthorizationUrl } from "@/schemas/oauth-popup";
+import {
+  oauthAttemptNonceSchema,
+  validateAuthorizationUrl,
+  validateHttpAuthorizationUrl,
+} from "@/schemas/oauth-popup";
 import { useOAuthPopupStore } from "@/stores/oauth-popup-store";
 import { useOAuthPopupReceiver } from "@/hooks/use-oauth-popup";
 import type { OAuthFlowKind } from "@/types/oauth-popup";
@@ -1449,6 +1453,12 @@ function isDevMockMode(): boolean {
   );
 }
 
+export interface AuthorizationAttempt {
+  readonly keyId: string;
+  readonly attemptId: string;
+  readonly previousAuthorizationAt: string | null | undefined;
+}
+
 function OAuthStep({
   catalogEntry,
   ensureKey,
@@ -1456,6 +1466,7 @@ function OAuthStep({
   onBack,
   onComplete,
   onAuthorizationPending,
+  onAuthorizationAborted,
   platformScopeAllowlist,
   targetOrgId,
   reconnectMode,
@@ -1472,7 +1483,8 @@ function OAuthStep({
   readonly onBack: () => void;
   readonly onComplete: (keyId: string) => void;
   /** See `AddKeyDialog`'s prop of the same name. */
-  readonly onAuthorizationPending?: (keyId: string) => void;
+  readonly onAuthorizationPending?: (attempt: AuthorizationAttempt) => void;
+  readonly onAuthorizationAborted?: (attemptId: string) => void;
   /**
    * When this connection rides the shared platform app, the scopes it may
    * request (`platform_scope_allowlist`). Passed only on the platform path so
@@ -1497,10 +1509,8 @@ function OAuthStep({
   readonly onPopupViewResult?: (keyId: string) => boolean;
   readonly onPopupDismiss: () => void;
 }) {
-  const {
-    mutateAsync: initiateOAuthAsync,
-    isPending: oauthInitiatePending,
-  } = useInitiateOAuth();
+  const { mutateAsync: initiateOAuthAsync, isPending: oauthInitiatePending } =
+    useInitiateOAuth();
   const [error, setError] = useState<string | null>(null);
   // Scope picker (NyxID#917): seed from the connection's granted scopes when
   // editing an existing connection, otherwise the provider's defaults (all
@@ -1520,6 +1530,9 @@ function OAuthStep({
   // provider callback lands. Same shape DeviceCodeStep already uses.
   const [authorizationUrl, setAuthorizationUrl] = useState<string | null>(null);
   const [pendingKeyId, setPendingKeyId] = useState<string | null>(null);
+  const [authorizationAttemptId, setAuthorizationAttemptId] = useState<
+    string | null
+  >(null);
   const [previousAuthorizationAt, setPreviousAuthorizationAt] = useState<
     string | null | undefined
   >(undefined);
@@ -1529,6 +1542,7 @@ function OAuthStep({
     pendingKeyId,
     authorizing,
     previousAuthorizationAt,
+    authorizationAttemptId ?? undefined,
   );
   const authorizationStatus = pendingKey.data?.status;
   const authorizationAdvanced =
@@ -1541,6 +1555,9 @@ function OAuthStep({
   const popupRef = useRef<OAuthPopupHandle | null>(null);
   const launchIdRef = useRef<string | null>(null);
   const generationRef = useRef(0);
+  const announcedAttemptIdRef = useRef<string | null>(null);
+  const authorizationTerminalRef = useRef(false);
+  const authorizationAbortedRef = useRef(onAuthorizationAborted);
   const [activeLaunchId, setActiveLaunchId] = useState<string | null>(null);
   const submittedScopes = useMemo(
     () =>
@@ -1552,11 +1569,46 @@ function OAuthStep({
     [platformScopeAllowlist, selectedScopes],
   );
 
+  useEffect(() => {
+    authorizationAbortedRef.current = onAuthorizationAborted;
+  }, [onAuthorizationAborted]);
+
+  useEffect(() => {
+    if (authorized || authorizationFailed) {
+      authorizationTerminalRef.current = true;
+      announcedAttemptIdRef.current = null;
+    }
+  }, [authorizationFailed, authorized]);
+
+  const announceAuthorization = useCallback(
+    (keyId: string, baseline: string | null | undefined) => {
+      const attemptId = crypto.randomUUID();
+      authorizationTerminalRef.current = false;
+      announcedAttemptIdRef.current = attemptId;
+      setAuthorizationAttemptId(attemptId);
+      onAuthorizationPending?.({
+        keyId,
+        attemptId,
+        previousAuthorizationAt: baseline,
+      });
+      return attemptId;
+    },
+    [onAuthorizationPending],
+  );
+
+  const abortAnnouncedAuthorization = useCallback(() => {
+    const attemptId = announcedAttemptIdRef.current;
+    if (!attemptId || authorizationTerminalRef.current) return;
+    announcedAttemptIdRef.current = null;
+    authorizationAbortedRef.current?.(attemptId);
+  }, []);
+
   const retryPopup = useCallback(async () => {
     if (!catalogEntry.provider_config_id || !pendingKeyId || !flow) {
       throw new Error("OAuth retry is unavailable");
     }
     setError(null);
+    let announcedAttemptId: string | null = null;
     try {
       const response = await initiateOAuthAsync({
         providerId: catalogEntry.provider_config_id,
@@ -1573,9 +1625,16 @@ function OAuthStep({
       ) {
         throw new Error("OAuth retry returned an invalid authorization URL");
       }
+      announcedAttemptId = announceAuthorization(
+        pendingKeyId,
+        previousAuthorizationAt,
+      );
       setAuthorizationUrl(response.authorization_url);
       return { nextNonce, url: response.authorization_url };
     } catch (retryError) {
+      if (announcedAttemptIdRef.current === announcedAttemptId) {
+        abortAnnouncedAuthorization();
+      }
       setError(
         retryError instanceof ApiError
           ? retryError.message
@@ -1584,10 +1643,13 @@ function OAuthStep({
       throw retryError;
     }
   }, [
+    abortAnnouncedAuthorization,
+    announceAuthorization,
     catalogEntry.provider_config_id,
     flow,
     initiateOAuthAsync,
     pendingKeyId,
+    previousAuthorizationAt,
     submittedScopes,
     targetOrgId,
   ]);
@@ -1619,11 +1681,12 @@ function OAuthStep({
   useEffect(() => {
     return () => {
       generationRef.current += 1;
+      abortAnnouncedAuthorization();
       popupRef.current?.close();
       const launchId = launchIdRef.current;
       if (launchId) useOAuthPopupStore.getState().end(launchId);
     };
-  }, []);
+  }, [abortAnnouncedAuthorization]);
 
   useEffect(() => {
     if (!authorizing || launch !== "popup" || !popupRef.current) return;
@@ -1637,6 +1700,7 @@ function OAuthStep({
   }, [authorizing, launch]);
 
   const startOverAfterClosedHint = useCallback(() => {
+    abortAnnouncedAuthorization();
     const launchId = launchIdRef.current;
     popupRef.current?.close();
     popupRef.current = null;
@@ -1646,8 +1710,9 @@ function OAuthStep({
     setPopupMayBeClosed(false);
     setAuthorizationUrl(null);
     setPendingKeyId(null);
+    setAuthorizationAttemptId(null);
     setPreviousAuthorizationAt(undefined);
-  }, []);
+  }, [abortAnnouncedAuthorization]);
 
   async function handleConnect() {
     const popup = launch === "popup" ? openOAuthPopup() : null;
@@ -1711,55 +1776,91 @@ function OAuthStep({
         ...(targetOrgId ? { targetOrgId } : {}),
       });
       if (generationRef.current !== generation) return;
-      setPendingKeyId(key.id);
-      setPreviousAuthorizationAt(
-        reconnectMode ? (key.last_authorized_at ?? null) : undefined,
-      );
-      setAuthorizationUrl(response.authorization_url);
-      // The handoff to the provider is the point of no return for this
-      // dialog's callbacks: from here the user may never come back to it.
-      onAuthorizationPending?.(key.id);
+      const baseline = reconnectMode
+        ? (key.last_authorized_at ?? null)
+        : undefined;
+      let nonce: string | undefined;
+      let validatedAuthorizationUrl: URL | null = null;
       if (launch === "popup") {
-        const nonce = response.attempt_nonce;
-        if (!nonce) {
-          popup?.close();
-          if (popup) {
-            useOAuthPopupStore.getState().end(popup.launchId);
-            popupRef.current = null;
-            launchIdRef.current = null;
-            setActiveLaunchId(null);
+        nonce = response.attempt_nonce;
+        validatedAuthorizationUrl = validateHttpAuthorizationUrl(
+          response.authorization_url,
+        );
+        if (validatedAuthorizationUrl === null) {
+          throw new Error(
+            "OAuth provider returned an invalid authorization URL",
+          );
+        }
+        // Present-but-malformed is a broken contract and throws; absent means
+        // a pre-nonce backend and degrades to the manual link below. An empty
+        // string counts as malformed on purpose — a backend that sends the
+        // field must send a valid one.
+        if (nonce !== undefined) {
+          if (!oauthAttemptNonceSchema.safeParse(nonce).success) {
+            throw new Error("OAuth provider returned an invalid attempt nonce");
           }
-          return;
-        }
-        if (!oauthAttemptNonceSchema.safeParse(nonce).success) {
-          throw new Error("OAuth provider returned an invalid attempt nonce");
-        }
-        if (
-          validateAuthorizationUrl(response.authorization_url, nonce) === null
-        ) {
-          throw new Error("OAuth provider returned an invalid authorization URL");
-        }
-        if (popup) {
-          useOAuthPopupStore.getState().setNonce(popup.launchId, nonce);
-          try {
-            await popup.navigate(response.authorization_url, nonce);
-          } catch {
-            if (generationRef.current !== generation) return;
-            popup.close();
-            popupRef.current = null;
-            launchIdRef.current = null;
-            setActiveLaunchId(null);
-            useOAuthPopupStore.getState().end(popup.launchId);
+          if (
+            validateAuthorizationUrl(response.authorization_url, nonce) ===
+            null
+          ) {
+            throw new Error(
+              "OAuth provider returned an invalid authorization URL",
+            );
           }
         }
       }
+      // Normalized only on the popup path; the legacy (non-popup) anchor still
+      // renders the backend's raw string, unvalidated, as it always has.
+      const authorizationHref =
+        validatedAuthorizationUrl?.href ?? response.authorization_url;
+      setPendingKeyId(key.id);
+      setPreviousAuthorizationAt(baseline);
+      setAuthorizationUrl(authorizationHref);
+      // The handoff to the provider is the point of no return for this
+      // dialog's callbacks: from here the user may never come back to it.
+      announceAuthorization(key.id, baseline);
+      if (launch === "popup" && popup) {
+        const releasePopupToManualLink = () => {
+          popup.close();
+          useOAuthPopupStore.getState().end(popup.launchId);
+          if (popupRef.current?.launchId === popup.launchId) {
+            popupRef.current = null;
+          }
+          if (launchIdRef.current === popup.launchId) {
+            launchIdRef.current = null;
+            setActiveLaunchId(null);
+          }
+        };
+        // Frontend-first rollout can briefly pair this UI with a backend that
+        // predates the nonce contract. Keep the validated manual link usable.
+        if (!nonce) {
+          releasePopupToManualLink();
+          return;
+        }
+        useOAuthPopupStore.getState().setNonce(popup.launchId, nonce);
+        try {
+          await popup.navigate(
+            authorizationHref,
+            nonce,
+            catalogEntry.name,
+          );
+        } catch {
+          if (generationRef.current !== generation) return;
+          // A cold interstitial or detached popup does not invalidate the
+          // server-side attempt. Poll it and retain the explicit manual link.
+          releasePopupToManualLink();
+        }
+      }
     } catch (err) {
+      if (generationRef.current !== generation) return;
+      abortAnnouncedAuthorization();
       popup?.close();
       if (popup) useOAuthPopupStore.getState().end(popup.launchId);
       popupRef.current = null;
       launchIdRef.current = null;
       setActiveLaunchId(null);
       setPendingKeyId(null);
+      setAuthorizationAttemptId(null);
       setPreviousAuthorizationAt(undefined);
       setAuthorizationUrl(null);
       await cleanupPendingAuthKey(key, { protectExistingKey: reconnectMode });
@@ -1814,8 +1915,8 @@ function OAuthStep({
             <>
               <AlertCircle className="h-3.5 w-3.5 shrink-0 text-warning" />
               <span className="text-foreground">
-                The provider window may have closed. If it is still open,
-                finish there; otherwise start again.
+                The provider window may have closed. If it is still open, finish
+                there; otherwise start again.
               </span>
             </>
           ) : (
@@ -1947,6 +2048,7 @@ function DeviceCodeStep({
   onBack: parentOnBack,
   onComplete,
   onAuthorizationPending,
+  onAuthorizationAborted,
   targetOrgId,
   reconnectMode,
   lockedScopes = [],
@@ -1958,7 +2060,8 @@ function DeviceCodeStep({
   readonly onBack: () => void;
   readonly onComplete: (keyId: string) => void;
   /** See `AddKeyDialog`'s prop of the same name. */
-  readonly onAuthorizationPending?: (keyId: string) => void;
+  readonly onAuthorizationPending?: (attempt: AuthorizationAttempt) => void;
+  readonly onAuthorizationAborted?: (attemptId: string) => void;
   /** When set, initiate the device-code flow under this org's scope. */
   readonly targetOrgId: string | null;
   readonly reconnectMode: boolean;
@@ -1989,9 +2092,39 @@ function DeviceCodeStep({
   // useEffect's cleanup can only see values captured at mount, so a ref is the
   // only way to reach the *current* placeholder id at teardown (NyxID#706).
   const createdKeyIdRef = useRef<string | null>(null);
+  const announcedAttemptIdRef = useRef<string | null>(null);
+  const authorizationTerminalRef = useRef(false);
+  const authorizationAbortedRef = useRef(onAuthorizationAborted);
 
   const initiateMutation = useInitiateDeviceCode();
   const pollMutation = usePollDeviceCode();
+
+  useEffect(() => {
+    authorizationAbortedRef.current = onAuthorizationAborted;
+  }, [onAuthorizationAborted]);
+
+  const abortAnnouncedAuthorization = useCallback(() => {
+    const attemptId = announcedAttemptIdRef.current;
+    if (!attemptId || authorizationTerminalRef.current) return;
+    announcedAttemptIdRef.current = null;
+    authorizationAbortedRef.current?.(attemptId);
+  }, []);
+
+  const announceAuthorization = useCallback(
+    (key: KeyInfo) => {
+      const attemptId = crypto.randomUUID();
+      authorizationTerminalRef.current = false;
+      announcedAttemptIdRef.current = attemptId;
+      onAuthorizationPending?.({
+        keyId: key.id,
+        attemptId,
+        previousAuthorizationAt: reconnectMode
+          ? (key.last_authorized_at ?? null)
+          : undefined,
+      });
+    },
+    [onAuthorizationPending, reconnectMode],
+  );
 
   useEffect(() => {
     createdKeyIdRef.current = createdKeyId;
@@ -2001,6 +2134,7 @@ function DeviceCodeStep({
     isMountedRef.current = true;
     return () => {
       isMountedRef.current = false;
+      abortAnnouncedAuthorization();
       if (pollTimerRef.current) {
         clearTimeout(pollTimerRef.current);
         pollTimerRef.current = null;
@@ -2025,7 +2159,7 @@ function DeviceCodeStep({
           });
       }
     };
-  }, [reconnectMode]);
+  }, [abortAnnouncedAuthorization, reconnectMode]);
 
   // User-driven exit paths (Back / Cancel buttons, `expired`/`denied` poll
   // outcomes). Awaits the DELETE so the parent's `authKey` state is consistent
@@ -2134,6 +2268,8 @@ function DeviceCodeStep({
                   break;
                 case "complete":
                   // Suppress unmount cleanup — placeholder is now `active`.
+                  authorizationTerminalRef.current = true;
+                  announcedAttemptIdRef.current = null;
                   createdKeyIdRef.current = null;
                   setFlowStep("success");
                   break;
@@ -2188,9 +2324,6 @@ function DeviceCodeStep({
       key = await ensureKey();
       if (!isMountedRef.current) return;
       setCreatedKeyId(key.id);
-      // Same rationale as the OAuth step: the user is about to leave for the
-      // provider's verification page and may never return to this dialog.
-      onAuthorizationPending?.(key.id);
       // Only forward scopes for formats that accept them. OpenAI device-code
       // providers reject a `scope` parameter at the backend, so omit the
       // override there entirely. Otherwise send the picker's complete set.
@@ -2210,6 +2343,9 @@ function DeviceCodeStep({
         ...(targetOrgId ? { targetOrgId } : {}),
       });
       if (!isMountedRef.current) return;
+
+      // The provider journey exists only after the initiation request succeeds.
+      announceAuthorization(key);
 
       setUserCode(response.user_code);
       setVerificationUri(response.verification_uri);
@@ -2243,6 +2379,7 @@ function DeviceCodeStep({
   }
 
   function handleRetry() {
+    abortAnnouncedAuthorization();
     if (pollTimerRef.current) {
       clearTimeout(pollTimerRef.current);
       pollTimerRef.current = null;
@@ -2705,6 +2842,7 @@ export function AddKeyDialog({
   reconnectKey,
   onSuccess,
   onAuthorizationPending,
+  onAuthorizationAborted,
   launch,
   flow,
   onPopupViewResult,
@@ -2739,7 +2877,9 @@ export function AddKeyDialog({
    * takes this id and watches the key to its terminal status itself, so a
    * dismissed dialog stops meaning a lost outcome.
    */
-  readonly onAuthorizationPending?: (keyId: string) => void;
+  readonly onAuthorizationPending?: (attempt: AuthorizationAttempt) => void;
+  /** Fires when an announced authorization ends without a server verdict. */
+  readonly onAuthorizationAborted?: (attemptId: string) => void;
   /** Assistant chat opts into the managed popup; all other callers stay legacy. */
   readonly launch?: "popup";
   readonly flow?: OAuthFlowKind;
@@ -3329,6 +3469,7 @@ export function AddKeyDialog({
             onKeyCleared={() => setAuthKey(null)}
             onComplete={handleAuthComplete}
             onAuthorizationPending={onAuthorizationPending}
+            onAuthorizationAborted={onAuthorizationAborted}
             targetOrgId={targetOrgId}
             reconnectMode={isReconnect}
             grantedScopes={
@@ -3396,6 +3537,7 @@ export function AddKeyDialog({
             }}
             onComplete={handleAuthComplete}
             onAuthorizationPending={onAuthorizationPending}
+            onAuthorizationAborted={onAuthorizationAborted}
           />
         )}
 

@@ -67,6 +67,10 @@ pub struct UsageMeterRow {
     pub credential_class: CredentialClass,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub model: Option<String>,
+    /// Provider-reported token classes (LLM traffic only; observability,
+    /// not priced separately). Follows each provider's own accounting.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub token_breakdown: Option<crate::models::service_billing::TokenBreakdown>,
     #[serde(default)]
     pub reserved_credits: i64,
     #[serde(default, skip_serializing_if = "Option::is_none")]

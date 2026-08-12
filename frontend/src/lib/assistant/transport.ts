@@ -15,6 +15,7 @@ import {
   buildActionWakeBody,
   type ActionReport,
 } from "@/schemas/assistant-actions";
+import { inputAnswerSchema, type InputAnswer } from "@/schemas/assistant-input";
 import type {
   AssistantTransport,
   Conversation,
@@ -167,6 +168,61 @@ class MockAssistantTransport implements AssistantTransport {
     }
   }
 
+  async stopTask(conversationId: string): Promise<void> {
+    this.cancelActiveTurn(conversationId);
+  }
+
+  async steerTask(conversationId: string, instruction: string): Promise<void> {
+    void conversationId;
+    if (!instruction.trim()) throw new Error("Steering cannot be empty.");
+  }
+
+  async retryStep(conversationId: string, stepId: string): Promise<void> {
+    void conversationId;
+    if (!stepId) throw new Error("Step identity is required.");
+  }
+
+  async skipStep(conversationId: string, stepId: string): Promise<void> {
+    void conversationId;
+    if (!stepId) throw new Error("Step identity is required.");
+  }
+
+  async resolvePlan(
+    conversationId: string,
+    blockId: string,
+    confirmed: boolean,
+  ): Promise<void> {
+    const block = assistantMockStore.findBlock(conversationId, blockId);
+    if (block?.type !== "task_plan") {
+      throw new Error("Task plan was not found.");
+    }
+    const gate = block.plan.gate;
+    if (
+      gate?.mode !== "confirm" ||
+      gate.status !== "pending" ||
+      !gate.requestId ||
+      !gate.taskId ||
+      !gate.planId ||
+      gate.planRevision === undefined
+    ) {
+      throw new Error("This plan gate is no longer pending.");
+    }
+    this.emitLocalActionPatch(
+      conversationId,
+      blockId,
+      {
+        plan: {
+          ...block.plan,
+          gate: {
+            ...gate,
+            status: confirmed ? "satisfied" : "rejected",
+          },
+        },
+      },
+      () => undefined,
+    );
+  }
+
   async decideApproval(
     conversationId: string,
     blockId: string,
@@ -175,6 +231,29 @@ class MockAssistantTransport implements AssistantTransport {
     assistantMockStore.decideApproval(conversationId, blockId, approved);
     // The scripted store settles the card synchronously; there is no
     // continuation stream to hand back.
+    return null;
+  }
+
+  async resolveInput(
+    conversationId: string,
+    blockId: string,
+    answer: InputAnswer,
+    onEvent: (event: TurnEvent) => void = () => undefined,
+  ): Promise<TurnHandle | null> {
+    inputAnswerSchema.parse(answer);
+    const block = assistantMockStore.findBlock(conversationId, blockId);
+    if (block?.type !== "input_card") {
+      throw new Error("Input request was not found.");
+    }
+    if (block.status !== "pending") {
+      throw new Error("This input request was already resolved.");
+    }
+    this.emitLocalActionPatch(
+      conversationId,
+      blockId,
+      { status: "resolved" },
+      onEvent,
+    );
     return null;
   }
 
@@ -252,13 +331,13 @@ class MockAssistantTransport implements AssistantTransport {
             block.type === "action_card" &&
             block.action_request_id === report.actionRequestId,
         );
-      if (card?.type === "action_card") {
-        actionLookup.set(report.actionRequestId, card.action);
-      }
       const refusedByCardState =
         card?.type === "action_card" &&
         (card.status === "conflicted" ||
           (card.status === "blocked" && report.disposition === "completed"));
+      if (card?.type === "action_card") {
+        actionLookup.set(report.actionRequestId, card.action);
+      }
       if (refusedByCardState) {
         if (
           card?.type === "action_card" &&
@@ -307,10 +386,10 @@ class MockAssistantTransport implements AssistantTransport {
             : "failed";
       const outcomeNote =
         report.disposition === "completed"
-          ? "Reported — awaiting assistant verification."
+          ? "Connected. The assistant can use this service now."
           : report.disposition === "declined"
-            ? "You declined this request. No service was connected and no credential was shared."
-            : "The connection could not be completed. Ask the assistant to request it again.";
+            ? "You declined. Nothing was connected and no credential was shared."
+            : "The connection did not complete. Ask the assistant to request this service again.";
       this.emitLocalActionPatch(
         conversationId,
         card.block_id,
@@ -663,6 +742,45 @@ export class AssistantEngineRouter implements AssistantTransport {
     );
   }
 
+  stopTask(conversationId: string): Promise<void> {
+    return this.delegateForConversation(conversationId).stopTask(
+      conversationId,
+    );
+  }
+
+  steerTask(conversationId: string, instruction: string): Promise<void> {
+    return this.delegateForConversation(conversationId).steerTask(
+      conversationId,
+      instruction,
+    );
+  }
+
+  retryStep(conversationId: string, stepId: string): Promise<void> {
+    return this.delegateForConversation(conversationId).retryStep(
+      conversationId,
+      stepId,
+    );
+  }
+
+  skipStep(conversationId: string, stepId: string): Promise<void> {
+    return this.delegateForConversation(conversationId).skipStep(
+      conversationId,
+      stepId,
+    );
+  }
+
+  resolvePlan(
+    conversationId: string,
+    blockId: string,
+    confirmed: boolean,
+  ): Promise<void> {
+    return this.delegateForConversation(conversationId).resolvePlan(
+      conversationId,
+      blockId,
+      confirmed,
+    );
+  }
+
   async decideApproval(
     conversationId: string,
     blockId: string,
@@ -673,6 +791,20 @@ export class AssistantEngineRouter implements AssistantTransport {
       conversationId,
       blockId,
       approved,
+      onEvent,
+    );
+  }
+
+  async resolveInput(
+    conversationId: string,
+    blockId: string,
+    answer: InputAnswer,
+    onEvent: (event: TurnEvent) => void = () => undefined,
+  ): Promise<TurnHandle | null> {
+    return this.delegateForConversation(conversationId).resolveInput(
+      conversationId,
+      blockId,
+      answer,
       onEvent,
     );
   }
@@ -806,6 +938,30 @@ export class DelegatingAssistantTransport implements AssistantTransport {
     this.transport.cancelActiveTurn(conversationId);
   }
 
+  stopTask(conversationId: string): Promise<void> {
+    return this.transport.stopTask(conversationId);
+  }
+
+  steerTask(conversationId: string, instruction: string): Promise<void> {
+    return this.transport.steerTask(conversationId, instruction);
+  }
+
+  retryStep(conversationId: string, stepId: string): Promise<void> {
+    return this.transport.retryStep(conversationId, stepId);
+  }
+
+  skipStep(conversationId: string, stepId: string): Promise<void> {
+    return this.transport.skipStep(conversationId, stepId);
+  }
+
+  resolvePlan(
+    conversationId: string,
+    blockId: string,
+    confirmed: boolean,
+  ): Promise<void> {
+    return this.transport.resolvePlan(conversationId, blockId, confirmed);
+  }
+
   decideApproval(
     conversationId: string,
     blockId: string,
@@ -816,6 +972,20 @@ export class DelegatingAssistantTransport implements AssistantTransport {
       conversationId,
       blockId,
       approved,
+      onEvent,
+    );
+  }
+
+  resolveInput(
+    conversationId: string,
+    blockId: string,
+    answer: InputAnswer,
+    onEvent?: (event: TurnEvent) => void,
+  ): Promise<TurnHandle | null> {
+    return this.transport.resolveInput(
+      conversationId,
+      blockId,
+      answer,
       onEvent,
     );
   }
@@ -864,6 +1034,7 @@ export class DelegatingAssistantTransport implements AssistantTransport {
   ): TurnHandle {
     return this.transport.wakeActions(conversationId, originTurnId, onEvent);
   }
+
 }
 
 export interface AssistantTransportFactories {

@@ -351,6 +351,9 @@ mod tests {
             expires_at: None,
             is_active: true,
             created_at: Utc::now(),
+            rotation_predecessor_id: None,
+            state_version: 1,
+            updated_at: Some(Utc::now()),
             description: None,
             allowed_service_ids: vec![],
             allowed_node_ids: vec![],
@@ -360,6 +363,8 @@ mod tests {
             rate_limit_burst: None,
             platform: None,
             callback_url: callback_url.map(String::from),
+            purpose: Default::default(),
+            scheduled_write_enabled: false,
         }
     }
 

@@ -4,9 +4,10 @@ import { NyxidIcon } from "@/components/brand/nyxid-icon";
 import { Button } from "@/components/ui/button";
 import {
   openOAuthChannel,
-  OAUTH_PROVIDER_ORIGIN_KEY,
   postOAuthAction,
   postOAuthResult,
+  readPopupLaunchMetadata,
+  writePopupLaunchMetadata,
 } from "@/lib/oauth-popup";
 import {
   isOAuthAckMessage,
@@ -65,9 +66,14 @@ export function OAuthCompletePage() {
       Object.fromEntries(new URLSearchParams(window.location.search)),
     ),
   );
-  const [expectedProviderOrigin] = useState(() =>
-    sessionStorage.getItem(OAUTH_PROVIDER_ORIGIN_KEY),
+  const [launchMetadata] = useState(() =>
+    search.flow === "cc" ? readPopupLaunchMetadata() : null,
   );
+  const displayContext =
+    search.flow === "cc" && launchMetadata?.correlationId === search.nonce
+      ? launchMetadata
+      : null;
+  const expectedProviderOrigin = displayContext?.providerOrigin ?? null;
   const [manualReturn, setManualReturn] = useState(false);
   const [staying, setStaying] = useState(false);
   const [pendingAction, setPendingAction] = useState<
@@ -87,7 +93,7 @@ export function OAuthCompletePage() {
         ...(search.code ? { code: search.code } : {}),
       });
     }
-    window.history.replaceState(null, "", "/oauth");
+    window.history.replaceState(null, "", "/oauth-complete");
     return () => {
       channelRef.current = null;
       channel?.close();
@@ -133,16 +139,21 @@ export function OAuthCompletePage() {
           expectedProviderOrigin !== null &&
           isOAuthRetryMessage(event.data, expectedProviderOrigin)
         ) {
-          const authorizationUrl = validateAuthorizationUrl(
+          const providerUrl = validateAuthorizationUrl(
             event.data.url,
             event.data.nextNonce,
             expectedProviderOrigin,
           );
-          if (authorizationUrl === null) return;
+          if (providerUrl === null) return;
+          writePopupLaunchMetadata({
+            ...displayContext,
+            providerOrigin: providerUrl.origin,
+            correlationId: event.data.nextNonce,
+          });
           window.clearTimeout(timeout);
           channel.removeEventListener("message", onMessage);
           channel.close();
-          window.location.assign(authorizationUrl.href);
+          window.location.assign(providerUrl.href);
         } else if (action !== "retry" && isOAuthAckMessage(event.data)) {
           window.clearTimeout(timeout);
           channel.removeEventListener("message", onMessage);
@@ -152,13 +163,17 @@ export function OAuthCompletePage() {
       };
       channel.addEventListener("message", onMessage);
     },
-    [expectedProviderOrigin, pendingAction],
+    [displayContext, expectedProviderOrigin, pendingAction],
   );
 
   if (!validCompletion) {
     return (
       <OAuthResultShell icon="neutral" title="Nothing to complete">
-        <p>Return to NyxID to start a connection.</p>
+        <p>
+          This window isn't part of an active connection attempt. If you were
+          connecting a service, its status appears in your NyxID chat — this
+          window can be closed.
+        </p>
         <Button asChild className="mt-5 w-full">
           <a href="/">Back to NyxID</a>
         </Button>
@@ -173,19 +188,21 @@ export function OAuthCompletePage() {
     search.code !== "session_required" &&
     search.code !== "state_invalid";
   const canRetryHere = retryable && expectedProviderOrigin !== null;
+  const serviceName = displayContext?.serviceName;
+  const title = success
+    ? "Authorization response received"
+    : (errorCopy?.[0] ?? "Authorization failed");
 
   return (
     <OAuthResultShell
       icon={success ? "neutral" : "error"}
-      title={
-        success
-          ? "Authorization response received"
-          : (errorCopy?.[0] ?? "Authorization failed")
-      }
+      title={!success && serviceName ? `${serviceName}: ${title}` : title}
     >
       <p role="status" aria-live="polite">
         {success
-          ? "Return to NyxID while the connection is verified."
+          ? serviceName
+            ? `Return to your NyxID chat — the ${serviceName} connection's status appears there and updates automatically.`
+            : "Return to NyxID while the connection is verified."
           : (errorCopy?.[1] ?? "Return to NyxID and try again.")}
       </p>
       {!success && retryable && expectedProviderOrigin === null ? (

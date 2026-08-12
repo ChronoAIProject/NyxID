@@ -38,6 +38,49 @@ nyxid service delete <id> --yes                                # remove service 
 
 > Identity and delegation flags update the resolved UserService route. Use `forward_access_token` only when the downstream validates the caller's NyxID bearer; keep `delegation_token_scope` to the minimum scopes that downstream requires.
 
+### Managing a UserService through the Web API
+
+The CLI is optional. An authenticated owner can inspect and update the same account-owned
+UserService through the supported Web API. A user access token or an agent key with `write` or
+`admin` scope is required for the update.
+
+```http
+GET /api/v1/keys
+Authorization: Bearer <nyxid-token>
+```
+
+Resolve the exact entry from this authoritative inventory and retain both identifiers:
+
+- `id` (or `user_service_id` on clients that expose that alias) is the account-owned
+  **UserService ID** used for routing and owner writes.
+- `catalog_service_id` identifies the shared catalog definition from which the service was
+  provisioned. It is intentionally different and must not be sent to a UserService endpoint.
+
+For example, enable access-token forwarding on the exact account-owned route:
+
+```http
+PUT /api/v1/user-services/{userServiceId}
+Authorization: Bearer <nyxid-token>
+Content-Type: application/json
+
+{"forward_access_token":true}
+```
+
+Then call `GET /api/v1/keys` again and verify that the entry with that same UserService ID now has
+`forward_access_token: true`. Matching only by slug is insufficient when more than one service
+instance exists. Do not use `PUT /api/v1/keys/{catalogServiceId}` for identity settings.
+
+Catalog defaults are platform-owned. An administrator may explicitly reapply a catalog
+definition's identity settings to its inherited UserServices with:
+
+```http
+POST /api/v1/services/{catalogServiceId}/resync-identity
+Authorization: Bearer <admin-token>
+```
+
+That admin recovery operation is separate from owner self-service. It takes a catalog service ID;
+`PUT /api/v1/user-services/{userServiceId}` takes the account-owned UserService ID.
+
 > Node commands accept names (e.g., `--via-node test-server`) in addition to UUIDs.
 > For org-owned node operations, the two-machine VM playbook, and transfer cleanup behavior, see [`nodes.md`](nodes.md#two-machine-org-node-setup).
 > For remote credential provisioning, use `nyxid node-credential push/list/cancel` on the admin laptop and `nyxid node credentials pending/accept/decline` on the VM. See [`nodes.md`](nodes.md#remote-credential-provisioning).

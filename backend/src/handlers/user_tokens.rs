@@ -415,6 +415,7 @@ pub async fn initiate_oauth_connect(
         &additional_scopes,
         scope_override.as_deref(),
         connection_id.as_deref(),
+        None,
         flow_kind,
     )
     .await?;
@@ -525,18 +526,40 @@ async fn generic_oauth_callback_impl(
         let msg = safe_provider_error_message(error, query.error_description.as_deref());
 
         let mut failed_placeholders = 0_u64;
+        let mut connect_link_error_recorded = false;
         let mut state_lookup_error: Option<String> = None;
+        let mut redirect_path: Option<String> = None;
         let mut chat_completion = false;
         let mut chat_nonce: Option<String> = None;
         if let Some(state_param) = query.state.as_deref().filter(|s| !s.is_empty()) {
             match user_token_service::peek_oauth_state(&state.db, state_param).await {
                 Ok(oauth_state) => {
+                    redirect_path = oauth_state.redirect_path.clone();
                     chat_completion = is_chat_connect_state(&oauth_state);
                     chat_nonce = oauth_state.attempt_nonce.clone();
                     let owner_id = oauth_state
                         .target_user_id
                         .as_deref()
                         .unwrap_or(&oauth_state.user_id);
+                    if let Some(connect_link_id) = oauth_state.connect_link_id.as_deref() {
+                        let stable_error =
+                            format!("provider_{}", normalized_oauth_error_code(error));
+                        match crate::services::connect_link_service::record_provider_error(
+                            &state.db,
+                            connect_link_id,
+                            owner_id,
+                            &stable_error,
+                        )
+                        .await
+                        {
+                            Ok(recorded) => connect_link_error_recorded = recorded,
+                            Err(record_error) => tracing::warn!(
+                                connect_link_id,
+                                %record_error,
+                                "failed to record connect-link provider decline"
+                            ),
+                        }
+                    }
                     match fail_callback_placeholders(&state.db, &oauth_state, owner_id, &msg).await
                     {
                         Ok(count) => failed_placeholders = count,
@@ -566,6 +589,7 @@ async fn generic_oauth_callback_impl(
                 "error": normalized_oauth_error_code(error),
                 "error_description_present": query.error_description.is_some(),
                 "failed_placeholders": failed_placeholders,
+                "connect_link_error_recorded": connect_link_error_recorded,
                 "state_lookup_error": state_lookup_error,
             })),
             auth_user.as_ref().and_then(|u| u.ip_address.clone()),
@@ -587,7 +611,11 @@ async fn generic_oauth_callback_impl(
                 chat_nonce.as_deref(),
             );
         }
-        return redirect_callback(frontend_url, "error", Some(&msg));
+        return if let Some(path) = redirect_path {
+            redirect_to_path(frontend_url, &path, "error", Some(&msg))
+        } else {
+            redirect_callback(frontend_url, "error", Some(&msg))
+        };
     }
 
     let code = match query.code.as_deref() {
@@ -823,6 +851,60 @@ async fn generic_oauth_callback_impl(
                 return redirect_callback(frontend_url, "error", Some(&user_msg));
             }
 
+            if let (Some(connect_link_id), Some(connection_id)) = (
+                oauth_state.connect_link_id.as_deref(),
+                outcome.connection_id.as_deref(),
+            ) {
+                match crate::services::connect_link_service::complete_oauth_callback(
+                    &state.db,
+                    connect_link_id,
+                    &outcome.user_id,
+                    connection_id,
+                )
+                .await
+                {
+                    Ok(view) => {
+                        audit_service::log_async(
+                            state.db.clone(),
+                            Some(outcome.user_id.clone()),
+                            "connect_link_completed".to_string(),
+                            Some(serde_json::json!({
+                                "connect_link_id": &view.link.id,
+                                "service_id": &view.link.service_id,
+                                "service_slug": &view.link.service_slug,
+                                "user_service_id": &view.link.completed_user_service_id,
+                            })),
+                            auth_user.as_ref().and_then(|user| user.ip_address.clone()),
+                            auth_user.as_ref().and_then(|user| user.user_agent.clone()),
+                            auth_user.as_ref().and_then(|user| user.api_key_id.clone()),
+                            auth_user
+                                .as_ref()
+                                .and_then(|user| user.api_key_name.clone()),
+                        );
+                        crate::services::connect_link_service::dispatch_terminal_webhook_if_needed(
+                            &state.db,
+                            &state.developer_webhook_dispatcher,
+                            &view.link.id,
+                        )
+                        .await;
+                    }
+                    Err(error) => {
+                        crate::services::connect_link_service::dispatch_terminal_webhook_if_needed(
+                            &state.db,
+                            &state.developer_webhook_dispatcher,
+                            connect_link_id,
+                        )
+                        .await;
+                        tracing::warn!(
+                            connect_link_id,
+                            connection_id,
+                            %error,
+                            "OAuth connection succeeded but connect-link completion failed"
+                        );
+                    }
+                }
+            }
+
             if chat_completion {
                 redirect_to_oauth_completion(
                     frontend_url,
@@ -997,7 +1079,7 @@ fn redirect_to_oauth_completion(
     code: Option<&str>,
     nonce: Option<&str>,
 ) -> axum::response::Redirect {
-    let mut url = url::Url::parse(&format!("{frontend_url}/oauth"))
+    let mut url = url::Url::parse(&format!("{frontend_url}/oauth-complete"))
         .expect("frontend_url should be a valid URL");
     let mut query = url.query_pairs_mut();
     query
@@ -1114,6 +1196,7 @@ pub async fn manual_refresh(
         &state.encryption_keys,
         effective_user_id,
         &provider_id,
+        Some(&state.connection_expiry_notifier),
     )
     .await?;
     sync_provider_credentials_to_unified_keys(&state, effective_user_id, &provider_id, true, false)
@@ -1452,6 +1535,9 @@ fn ensure_callback_user_matches_state(
 mod tests {
     use super::*;
     use crate::models::audit_log::{AuditLog, COLLECTION_NAME as AUDIT_LOG};
+    use crate::models::connect_link::{
+        COLLECTION_NAME as CONNECT_LINKS, ConnectLink, ConnectLinkStatus,
+    };
     use crate::models::oauth_state::{COLLECTION_NAME as OAUTH_STATES, OAuthState};
     use crate::models::org_membership::COLLECTION_NAME as ORG_MEMBERSHIPS;
     use crate::models::provider_config::{
@@ -1481,6 +1567,7 @@ mod tests {
             session_id: None,
             scope: String::new(),
             acting_client_id: None,
+            oauth_client_id: None,
             approval_owner_user_id: None,
             auth_method: AuthMethod::Session,
             allow_all_services: true,
@@ -1490,6 +1577,7 @@ mod tests {
             allowed_node_ids: vec![],
             api_key_id: None,
             api_key_name: None,
+            api_key_purpose: crate::models::api_key::ApiKeyPurpose::General,
             rate_limit_per_second: None,
             rate_limit_burst: None,
             ip_address: None,
@@ -1577,6 +1665,7 @@ mod tests {
             flow_kind: None,
             attempt_nonce: None,
             connection_id: None,
+            connect_link_id: None,
             consumed: false,
             expires_at: now + Duration::minutes(10),
             created_at: now,
@@ -2239,7 +2328,10 @@ mod tests {
             .await,
         );
 
-        assert!(location.starts_with(&format!("{}/oauth?", frontend_url.trim_end_matches('/'))));
+        assert!(location.starts_with(&format!(
+            "{}/oauth-complete?",
+            frontend_url.trim_end_matches('/')
+        )));
         assert_eq!(
             redirect_query_param(&location, "status").as_deref(),
             Some("error")
@@ -2328,7 +2420,10 @@ mod tests {
             .await,
         );
 
-        assert!(location.starts_with(&format!("{}/oauth?", frontend_url.trim_end_matches('/'))));
+        assert!(location.starts_with(&format!(
+            "{}/oauth-complete?",
+            frontend_url.trim_end_matches('/')
+        )));
         assert_eq!(
             redirect_query_param(&location, "status").as_deref(),
             Some("error")
@@ -2346,6 +2441,83 @@ mod tests {
             Some(nonce.as_str())
         );
         assert!(!location.contains("/providers/callback"));
+    }
+
+    #[tokio::test]
+    async fn generic_oauth_callback_denial_preserves_custom_return_path() {
+        let Some(db) = connect_test_database("oauth_callback_denial_custom_return").await else {
+            return;
+        };
+        let state = test_app_state(db.clone());
+        let user_id = Uuid::new_v4().to_string();
+        let provider_id = Uuid::new_v4().to_string();
+        let state_id = Uuid::new_v4().to_string();
+        let link_id = Uuid::new_v4().to_string();
+        let mut oauth_state = test_oauth_state(&state_id, &user_id, &provider_id);
+        oauth_state.redirect_path = Some(format!("/connect/return/{link_id}"));
+        oauth_state.connect_link_id = Some(link_id.clone());
+        db.collection::<OAuthState>(OAUTH_STATES)
+            .insert_one(oauth_state)
+            .await
+            .unwrap();
+        let now = Utc::now();
+        db.collection::<ConnectLink>(CONNECT_LINKS)
+            .insert_one(ConnectLink {
+                id: link_id.clone(),
+                user_id: user_id.clone(),
+                service_slug: "provider-service".to_string(),
+                service_id: Uuid::new_v4().to_string(),
+                label: None,
+                requested_by: None,
+                requesting_app_id: None,
+                requesting_app_name: None,
+                token_hash: "ab".repeat(32),
+                status: ConnectLinkStatus::Pending,
+                callback_url: None,
+                created_at: now,
+                completed_at: None,
+                expires_at: now + Duration::minutes(15),
+                completed_user_service_id: None,
+                completion_claim_id: None,
+                completion_claim_at: None,
+                last_error: None,
+                last_error_at: None,
+                webhook_event_reserved_at: None,
+                webhook_event_id: None,
+                webhook_event_status: None,
+                webhook_event_attempts: 0,
+                webhook_event_delivered_at: None,
+            })
+            .await
+            .expect("insert connect link");
+
+        let redirect = generic_oauth_callback_impl(
+            state,
+            None,
+            GenericOAuthCallbackQuery {
+                code: None,
+                state: Some(state_id),
+                error: Some("access_denied".to_string()),
+                error_description: None,
+            },
+        )
+        .await;
+
+        let location = redirect_location(redirect);
+        assert!(location.contains(&format!("/connect/return/{link_id}")));
+        assert_eq!(
+            redirect_query_param(&location, "provider_status").as_deref(),
+            Some("error")
+        );
+        let link = db
+            .collection::<ConnectLink>(CONNECT_LINKS)
+            .find_one(doc! { "_id": &link_id })
+            .await
+            .expect("read connect link")
+            .expect("connect link remains");
+        assert_eq!(link.status, ConnectLinkStatus::Pending);
+        assert_eq!(link.last_error.as_deref(), Some("provider_access_denied"));
+        assert!(link.last_error_at.is_some());
     }
 
     #[tokio::test]

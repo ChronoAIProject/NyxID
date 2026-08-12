@@ -358,7 +358,7 @@ describe("assistant hooks", () => {
     queryClient.clear();
   });
 
-  it("projects a large text backlog sooner than a sparse text delta", async () => {
+  it("projects on a flat interval whatever the text backlog", async () => {
     const { queryClient, Wrapper } = createHarness();
     const historySpy = vi.spyOn(assistantTransport, "getHistory");
     const sendSpy = vi
@@ -385,8 +385,9 @@ describe("assistant hooks", () => {
     });
     historySpy.mockClear();
 
+    // A single sparse character.
     await act(async () => {
-      await vi.advanceTimersByTimeAsync(88);
+      await vi.advanceTimersByTimeAsync(49);
     });
     expect(historySpy).not.toHaveBeenCalled();
     await act(async () => {
@@ -407,8 +408,12 @@ describe("assistant hooks", () => {
     });
     historySpy.mockClear();
 
+    // A backlog 120x larger projects on the SAME interval. Sampling React
+    // faster under load used to be how arriving prose was kept from landing in
+    // large jumps; `useSmoothReveal` now paces the reveal against the frame
+    // clock, so the projection cadence no longer carries that job.
     await act(async () => {
-      await vi.advanceTimersByTimeAsync(23);
+      await vi.advanceTimersByTimeAsync(49);
     });
     expect(historySpy).not.toHaveBeenCalled();
     await act(async () => {
@@ -453,7 +458,7 @@ describe("assistant hooks", () => {
     historySpy.mockClear();
 
     await act(async () => {
-      await vi.advanceTimersByTimeAsync(23);
+      await vi.advanceTimersByTimeAsync(49);
     });
     expect(historySpy).not.toHaveBeenCalled();
 
@@ -620,6 +625,7 @@ describe("assistant hooks", () => {
       queryClient.clear();
     },
   );
+
 });
 
 describe("describeTransportError", () => {
@@ -707,8 +713,8 @@ describe("conversation not-found resolution", () => {
 });
 
 describe("conversation projection reconciliation", () => {
-  const conversationId = "workflow-pending-reconcile";
-  const canonicalId = "chatc-reconciled";
+  const conversationId = "draft-reconcile";
+  const canonicalId = "nyxid-chat-f8369965a444433f92ec50e67ad8ee52";
   const syncingHistory: ConversationHistory = {
     conversation: {
       id: conversationId,

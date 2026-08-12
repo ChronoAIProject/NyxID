@@ -537,7 +537,7 @@ export function AssistantWireLogPanel() {
             verbatim without the chat renderer's credential redaction,
             including in replay placeholders.
           </p>
-          <p>The WebSocket workflow channel is not captured.</p>
+          <p>WebSocket exchanges are not captured.</p>
           <p>
             Final AppError responses do not carry debug echoes, including errors
             after an upstream response was observed.

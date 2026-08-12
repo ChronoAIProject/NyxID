@@ -122,7 +122,7 @@ const SENSITIVE_PATH_PATTERNS: RegExp[] = [
   /\/verify-email\/[^/]+/,
   /\/reset-password\/[^/]+/,
   /\/oauth\/callback/,
-  /^\/oauth$/,
+  /^\/oauth-complete$/,
   /\/approve\/[^/]+/,
 ];
 

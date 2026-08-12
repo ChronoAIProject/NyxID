@@ -177,6 +177,10 @@ pub struct AppConfig {
     /// Interval in seconds between approval expiry sweeps (default: 5).
     pub approval_expiry_interval_secs: u64,
 
+    /// Interval in seconds between abandoned app connect-link expiry sweeps
+    /// (default: 60). Set to 0 to disable the sweep.
+    pub connect_link_expiry_sweep_interval_secs: u64,
+
     /// Interval in seconds between proactive OAuth token-refresh sweeps
     /// (default: 600 = 10 min). Set to 0 to disable the sweep entirely
     /// (lazy proxy-time refresh still applies). The sweep refreshes
@@ -190,6 +194,10 @@ pub struct AppConfig {
     /// larger than the proxy-time 5-min buffer so the sweep wins the
     /// race for idle services.
     pub oauth_refresh_sweep_window_secs: i64,
+
+    /// Notify users when an OAuth connection changes from healthy to dead.
+    /// Audit events remain enabled regardless of this setting. Default: true.
+    pub connection_expiry_notifications: bool,
 
     // -- FCM (Firebase Cloud Messaging) --
     /// Path to FCM service account JSON file.
@@ -293,6 +301,15 @@ pub struct AppConfig {
     pub channel_event_dedup_capacity: usize,
     /// Event dedup TTL in seconds (default 300 = 5 minutes).
     pub channel_event_dedup_ttl_secs: u64,
+    /// Per-trigger ingress rate limit (events per second, default 10).
+    pub trigger_rate_limit_per_second: u32,
+    /// Per-trigger ingress burst capacity (default 20).
+    pub trigger_rate_limit_burst: u32,
+    /// Maximum trigger ingress body size in bytes (default 256 KiB).
+    pub trigger_payload_max_bytes: usize,
+    /// Hours to retain encrypted webhook-target trigger envelopes (default 72).
+    /// Zero keeps bounded metadata but does not persist replayable payloads.
+    pub trigger_delivery_retention_hours: u64,
 
     // Oracle relay (browser worker pools)
     /// Days to retain terminal oracle tasks (prompt + response bodies)
@@ -472,12 +489,20 @@ impl std::fmt::Debug for AppConfig {
                 &self.approval_expiry_interval_secs,
             )
             .field(
+                "connect_link_expiry_sweep_interval_secs",
+                &self.connect_link_expiry_sweep_interval_secs,
+            )
+            .field(
                 "oauth_refresh_sweep_interval_secs",
                 &self.oauth_refresh_sweep_interval_secs,
             )
             .field(
                 "oauth_refresh_sweep_window_secs",
                 &self.oauth_refresh_sweep_window_secs,
+            )
+            .field(
+                "connection_expiry_notifications",
+                &self.connection_expiry_notifications,
             )
             .field("fcm_service_account_path", &self.fcm_service_account_path)
             .field("fcm_project_id", &self.fcm_project_id)
@@ -606,6 +631,16 @@ impl std::fmt::Debug for AppConfig {
                 "channel_event_dedup_ttl_secs",
                 &self.channel_event_dedup_ttl_secs,
             )
+            .field(
+                "trigger_rate_limit_per_second",
+                &self.trigger_rate_limit_per_second,
+            )
+            .field("trigger_rate_limit_burst", &self.trigger_rate_limit_burst)
+            .field(
+                "trigger_delivery_retention_hours",
+                &self.trigger_delivery_retention_hours,
+            )
+            .field("trigger_payload_max_bytes", &self.trigger_payload_max_bytes)
             .field(
                 "oracle_task_retention_days",
                 &self.oracle_task_retention_days,
@@ -874,6 +909,13 @@ impl AppConfig {
                 .and_then(|v| v.parse().ok())
                 .unwrap_or(5),
 
+            connect_link_expiry_sweep_interval_secs: env::var(
+                "CONNECT_LINK_EXPIRY_SWEEP_INTERVAL_SECS",
+            )
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(60),
+
             oauth_refresh_sweep_interval_secs: env::var("OAUTH_REFRESH_SWEEP_INTERVAL_SECS")
                 .ok()
                 .and_then(|v| v.parse().ok())
@@ -883,6 +925,11 @@ impl AppConfig {
                 .ok()
                 .and_then(|v| v.parse().ok())
                 .unwrap_or(900),
+
+            connection_expiry_notifications: parse_bool_env(
+                "CONNECTION_EXPIRY_NOTIFICATIONS",
+                true,
+            ),
 
             fcm_service_account_path: env::var("FCM_SERVICE_ACCOUNT_PATH")
                 .ok()
@@ -1030,6 +1077,22 @@ impl AppConfig {
                 .ok()
                 .and_then(|v| v.parse().ok())
                 .unwrap_or(300),
+            trigger_rate_limit_per_second: env::var("TRIGGER_RATE_LIMIT_PER_SECOND")
+                .ok()
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(10),
+            trigger_rate_limit_burst: env::var("TRIGGER_RATE_LIMIT_BURST")
+                .ok()
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(20),
+            trigger_payload_max_bytes: env::var("TRIGGER_PAYLOAD_MAX_BYTES")
+                .ok()
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(256 * 1024),
+            trigger_delivery_retention_hours: env::var("TRIGGER_DELIVERY_RETENTION_HOURS")
+                .ok()
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(72),
             oracle_task_retention_days: env::var("ORACLE_TASK_RETENTION_DAYS")
                 .ok()
                 .and_then(|v| v.parse().ok())
@@ -1392,8 +1455,10 @@ mod tests {
             telegram_webhook_url: None,
             telegram_bot_username: None,
             approval_expiry_interval_secs: 5,
+            connect_link_expiry_sweep_interval_secs: 60,
             oauth_refresh_sweep_interval_secs: 600,
             oauth_refresh_sweep_window_secs: 900,
+            connection_expiry_notifications: true,
             fcm_service_account_path: None,
             fcm_project_id: None,
             apns_key_path: None,
@@ -1436,6 +1501,10 @@ mod tests {
             channel_event_rate_limit_burst: 200,
             channel_event_dedup_capacity: 32_768,
             channel_event_dedup_ttl_secs: 300,
+            trigger_rate_limit_per_second: 10,
+            trigger_rate_limit_burst: 20,
+            trigger_payload_max_bytes: 256 * 1024,
+            trigger_delivery_retention_hours: 72,
             oracle_task_retention_days: 30,
             cloud_response_cache_ttl_secs: 0,
             cloud_response_cache_max_entry_bytes:

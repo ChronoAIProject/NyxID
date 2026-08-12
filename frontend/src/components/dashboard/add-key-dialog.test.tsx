@@ -1,4 +1,4 @@
-import { render, screen, waitFor } from "@testing-library/react";
+import { act, render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { CatalogEntry, KeyInfo } from "@/types/keys";
@@ -20,6 +20,7 @@ const {
   mockNavigate,
   pendingKeyStatus,
   pendingLastAuthorizedAt,
+  popupReceiverOptions,
   toastFns,
 } = vi.hoisted(() => ({
   catalog: {
@@ -31,6 +32,9 @@ const {
   // `pending_auth` (the user hasn't finished at the provider yet).
   pendingKeyStatus: { value: null as string | null },
   pendingLastAuthorizedAt: { value: null as string | null },
+  popupReceiverOptions: {
+    current: null as null | { onRetry?: () => Promise<unknown> },
+  },
   createKeyMutate: vi.fn(),
   createKeyMutateAsync: vi.fn(),
   // Wave-aha-1 A4+ — the verify step auto-mints an Agent Key. The mock
@@ -102,7 +106,9 @@ vi.mock("@/hooks/use-providers", () => ({
 // Popup protocol behavior has focused hook/page coverage. These legacy dialog
 // tests intentionally render without a QueryClientProvider.
 vi.mock("@/hooks/use-oauth-popup", () => ({
-  useOAuthPopupReceiver: () => undefined,
+  useOAuthPopupReceiver: (options: { onRetry?: () => Promise<unknown> }) => {
+    popupReceiverOptions.current = options;
+  },
 }));
 
 vi.mock("@/lib/api-client", async () => {
@@ -220,6 +226,7 @@ beforeEach(() => {
   catalog.requests = [];
   pendingKeyStatus.value = null;
   pendingLastAuthorizedAt.value = null;
+  popupReceiverOptions.current = null;
   createKeyMutateAsync.mockResolvedValue({ id: "created-service-1" });
   initiateOAuthMutateAsync.mockResolvedValue({
     authorization_url: "https://provider.example/oauth",
@@ -768,9 +775,13 @@ describe("AddKeyDialog — reconnect path", () => {
     );
 
     await waitFor(() => {
-      expect(screen.getByRole("status")).toHaveTextContent(/Waiting for GitHub/i);
+      expect(screen.getByRole("status")).toHaveTextContent(
+        /Waiting for GitHub/i,
+      );
     });
-    expect(screen.queryByRole("button", { name: "Continue" })).not.toBeInTheDocument();
+    expect(
+      screen.queryByRole("button", { name: "Continue" }),
+    ).not.toBeInTheDocument();
   });
 
   it("offers a retry when the provider denies authorization", async () => {
@@ -895,6 +906,32 @@ describe("AddKeyDialog — reconnect path", () => {
     expect(mockApiDelete).not.toHaveBeenCalled();
   });
 
+  it("does not announce a device-code attempt when initiation fails", async () => {
+    catalog.entries = [DEVICE_CODE_ENTRY];
+    initiateDeviceCodeMutateAsync.mockRejectedValue(
+      new Error("device unavailable"),
+    );
+    const onAuthorizationPending = vi.fn();
+    const user = userEvent.setup();
+    render(
+      <AddKeyDialog
+        open
+        onOpenChange={vi.fn()}
+        reconnectKey={makeReconnectKey({
+          catalog_service_slug: "codex",
+          catalog_service_name: "Codex",
+        })}
+        onAuthorizationPending={onAuthorizationPending}
+      />,
+    );
+
+    await user.click(screen.getByRole("button", { name: "Continue" }));
+    expect(
+      await screen.findByText("Failed to request device code"),
+    ).toBeInTheDocument();
+    expect(onAuthorizationPending).not.toHaveBeenCalled();
+  });
+
   it("does not delete an existing device-code key on Back or unmount during reconnect", async () => {
     catalog.entries = [DEVICE_CODE_ENTRY];
     const onOpenChange = vi.fn();
@@ -946,8 +983,7 @@ describe("AddKeyDialog — reconnect path", () => {
 
 describe("AddKeyDialog — managed OAuth popup", () => {
   const nonce = "8e1fcf2a-e679-4da2-9f54-2d90cd5f0085";
-  const authorizationUrl =
-    `https://github.com/login/oauth/authorize?state=1cc_${nonce}`;
+  const authorizationUrl = `https://github.com/login/oauth/authorize?state=1cc_${nonce}`;
 
   function popupWindow() {
     return {
@@ -1027,10 +1063,9 @@ describe("AddKeyDialog — managed OAuth popup", () => {
       screen.getByRole("button", { name: /Connect with GitHub/i }),
     );
 
-    expect(await screen.findByRole("link", { name: /Open GitHub/i })).toHaveAttribute(
-      "href",
-      authorizationUrl,
-    );
+    expect(
+      await screen.findByRole("link", { name: /Open GitHub/i }),
+    ).toHaveAttribute("href", authorizationUrl);
     expect(useOAuthPopupStore.getState().attempt).toBeNull();
   });
 
@@ -1059,6 +1094,245 @@ describe("AddKeyDialog — managed OAuth popup", () => {
     ).toBeInTheDocument();
     expect(popup.close).toHaveBeenCalled();
     expect(useOAuthPopupStore.getState().attempt).toBeNull();
+  });
+
+  it("falls back to the manual link when popup handoff fails", async () => {
+    catalog.entries = [OAUTH_ENTRY];
+    const popup = popupWindow();
+    vi.mocked(popup.postMessage).mockImplementation(() => {
+      throw new Error("popup detached");
+    });
+    vi.spyOn(window, "open").mockReturnValue(popup);
+    initiateOAuthMutateAsync.mockResolvedValue({
+      authorization_url: authorizationUrl,
+      attempt_nonce: nonce,
+    });
+    const onAuthorizationPending = vi.fn();
+    const onAuthorizationAborted = vi.fn();
+    const user = userEvent.setup();
+    render(
+      <AddKeyDialog
+        open
+        onOpenChange={vi.fn()}
+        reconnectKey={makeReconnectKey()}
+        launch="popup"
+        flow="cc"
+        onAuthorizationPending={onAuthorizationPending}
+        onAuthorizationAborted={onAuthorizationAborted}
+      />,
+    );
+
+    await user.click(
+      screen.getByRole("button", { name: /Connect with GitHub/i }),
+    );
+    await waitFor(() => expect(initiateOAuthMutateAsync).toHaveBeenCalled());
+    const launchId = useOAuthPopupStore.getState().attempt?.launchId;
+    window.dispatchEvent(
+      new MessageEvent("message", {
+        origin: window.location.origin,
+        source: popup,
+        data: { type: "oauth_launch_ready", launchId },
+      }),
+    );
+
+    expect(
+      await screen.findByRole("link", { name: /Open GitHub/i }),
+    ).toHaveAttribute("href", authorizationUrl);
+    expect(onAuthorizationPending).toHaveBeenCalledTimes(1);
+    expect(onAuthorizationAborted).not.toHaveBeenCalled();
+    expect(mockApiDelete).not.toHaveBeenCalled();
+    expect(useOAuthPopupStore.getState().attempt).toBeNull();
+    expect(
+      screen.queryByText("Failed to start OAuth flow"),
+    ).not.toBeInTheDocument();
+  });
+
+  it("falls back to a safe manual link when an older backend omits the popup nonce", async () => {
+    catalog.entries = [OAUTH_ENTRY];
+    const popup = popupWindow();
+    vi.spyOn(window, "open").mockReturnValue(popup);
+    initiateOAuthMutateAsync.mockResolvedValue({
+      authorization_url: "https://github.com/login/oauth/authorize",
+    });
+    const onAuthorizationPending = vi.fn();
+    const user = userEvent.setup();
+    render(
+      <AddKeyDialog
+        open
+        onOpenChange={vi.fn()}
+        reconnectKey={makeReconnectKey()}
+        launch="popup"
+        flow="cc"
+        onAuthorizationPending={onAuthorizationPending}
+      />,
+    );
+
+    await user.click(
+      screen.getByRole("button", { name: /Connect with GitHub/i }),
+    );
+
+    expect(
+      await screen.findByRole("link", { name: /Open GitHub/i }),
+    ).toHaveAttribute("href", "https://github.com/login/oauth/authorize");
+    expect(onAuthorizationPending).toHaveBeenCalledTimes(1);
+    expect(mockApiDelete).not.toHaveBeenCalled();
+    expect(useOAuthPopupStore.getState().attempt).toBeNull();
+  });
+
+  it("does not clean up a fresh placeholder when initiation rejects post-unmount", async () => {
+    catalog.entries = [OAUTH_ENTRY];
+    const popup = popupWindow();
+    vi.spyOn(window, "open").mockReturnValue(popup);
+    createKeyMutateAsync.mockResolvedValue(
+      makeReconnectKey({
+        id: "fresh-service-1",
+        status: "pending_auth",
+        last_authorized_at: null,
+      }),
+    );
+    let rejectInitiation: ((reason: Error) => void) | undefined;
+    initiateOAuthMutateAsync.mockImplementation(
+      () =>
+        new Promise((_, reject) => {
+          rejectInitiation = reject;
+        }),
+    );
+    const user = userEvent.setup();
+    const view = render(
+      <AddKeyDialog
+        open
+        onOpenChange={vi.fn()}
+        prefillSlug="github"
+        launch="popup"
+        flow="cc"
+      />,
+    );
+    await user.click(
+      await screen.findByRole("button", { name: "Next: Connect" }),
+    );
+    await user.click(
+      screen.getByRole("button", { name: /Connect with GitHub/i }),
+    );
+    await waitFor(() => expect(initiateOAuthMutateAsync).toHaveBeenCalled());
+
+    view.unmount();
+    rejectInitiation?.(new Error("request completed after unmount"));
+    await waitFor(() => expect(popup.close).toHaveBeenCalled());
+
+    expect(mockApiDelete).not.toHaveBeenCalled();
+  });
+
+  it("announces a fresh attempt generation when the popup retries", async () => {
+    const nextNonce = "23f1c824-960c-4b5c-8e12-71f1dbce5b20";
+    catalog.entries = [OAUTH_ENTRY];
+    vi.spyOn(window, "open").mockReturnValue(null);
+    initiateOAuthMutateAsync
+      .mockResolvedValueOnce({
+        authorization_url: authorizationUrl,
+        attempt_nonce: nonce,
+      })
+      .mockResolvedValueOnce({
+        authorization_url: `https://github.com/login/oauth/authorize?state=1cc_${nextNonce}`,
+        attempt_nonce: nextNonce,
+      });
+    const onAuthorizationPending = vi.fn();
+    const user = userEvent.setup();
+    render(
+      <AddKeyDialog
+        open
+        onOpenChange={vi.fn()}
+        reconnectKey={makeReconnectKey()}
+        launch="popup"
+        flow="cc"
+        onAuthorizationPending={onAuthorizationPending}
+      />,
+    );
+
+    await user.click(
+      screen.getByRole("button", { name: /Connect with GitHub/i }),
+    );
+    await waitFor(() =>
+      expect(onAuthorizationPending).toHaveBeenCalledTimes(1),
+    );
+    await act(async () => {
+      await popupReceiverOptions.current?.onRetry?.();
+    });
+
+    expect(onAuthorizationPending).toHaveBeenCalledTimes(2);
+    expect(onAuthorizationPending.mock.calls[1]?.[0].keyId).toBe(
+      onAuthorizationPending.mock.calls[0]?.[0].keyId,
+    );
+    expect(onAuthorizationPending.mock.calls[1]?.[0].attemptId).not.toBe(
+      onAuthorizationPending.mock.calls[0]?.[0].attemptId,
+    );
+  });
+
+  it("aborts on dialog close before terminal status but not after authorization", async () => {
+    catalog.entries = [OAUTH_ENTRY];
+    vi.spyOn(window, "open").mockReturnValue(null);
+    initiateOAuthMutateAsync.mockResolvedValue({
+      authorization_url: authorizationUrl,
+      attempt_nonce: nonce,
+    });
+    const pendingBeforeClose = vi.fn();
+    const abortedBeforeClose = vi.fn();
+    const user = userEvent.setup();
+    const pending = render(
+      <AddKeyDialog
+        open
+        onOpenChange={vi.fn()}
+        reconnectKey={makeReconnectKey()}
+        launch="popup"
+        flow="cc"
+        onAuthorizationPending={pendingBeforeClose}
+        onAuthorizationAborted={abortedBeforeClose}
+      />,
+    );
+    await user.click(
+      screen.getByRole("button", { name: /Connect with GitHub/i }),
+    );
+    await waitFor(() => expect(pendingBeforeClose).toHaveBeenCalledTimes(1));
+    pending.unmount();
+    expect(abortedBeforeClose).toHaveBeenCalledWith(
+      pendingBeforeClose.mock.calls[0]?.[0].attemptId,
+    );
+
+    pendingKeyStatus.value = null;
+    const pendingAfterSuccess = vi.fn();
+    const abortedAfterSuccess = vi.fn();
+    const completed = render(
+      <AddKeyDialog
+        open
+        onOpenChange={vi.fn()}
+        reconnectKey={makeReconnectKey()}
+        launch="popup"
+        flow="cc"
+        onAuthorizationPending={pendingAfterSuccess}
+        onAuthorizationAborted={abortedAfterSuccess}
+      />,
+    );
+    await user.click(
+      screen.getByRole("button", { name: /Connect with GitHub/i }),
+    );
+    await waitFor(() => expect(pendingAfterSuccess).toHaveBeenCalledTimes(1));
+    pendingKeyStatus.value = "active";
+    pendingLastAuthorizedAt.value = "2026-08-06T12:00:00Z";
+    completed.rerender(
+      <AddKeyDialog
+        open
+        onOpenChange={vi.fn()}
+        reconnectKey={makeReconnectKey()}
+        launch="popup"
+        flow="cc"
+        onAuthorizationPending={pendingAfterSuccess}
+        onAuthorizationAborted={abortedAfterSuccess}
+      />,
+    );
+    expect(
+      await screen.findByText(/Connected\. Credential sealed/i),
+    ).toBeInTheDocument();
+    completed.unmount();
+    expect(abortedAfterSuccess).not.toHaveBeenCalled();
   });
 
   it("treats popup closure as a soft hint and mutates nothing automatically", async () => {
@@ -1091,7 +1365,11 @@ describe("AddKeyDialog — managed OAuth popup", () => {
     popup.closed = true;
 
     expect(
-      await screen.findByText(/provider window may have closed/i, {}, { timeout: 2_500 }),
+      await screen.findByText(
+        /provider window may have closed/i,
+        {},
+        { timeout: 2_500 },
+      ),
     ).toBeInTheDocument();
     expect(mockApiDelete).not.toHaveBeenCalled();
     expect(initiateOAuthMutateAsync).toHaveBeenCalledTimes(1);

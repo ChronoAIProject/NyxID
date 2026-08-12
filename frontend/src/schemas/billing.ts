@@ -20,12 +20,24 @@ export const billingReadOnlyBlockSchema = z.object({
   rates_are_approximate: z.literal(true),
 });
 
+export const billingTokenBreakdownSchema = z.object({
+  prompt_tokens: z.number().int().nonnegative(),
+  completion_tokens: z.number().int().nonnegative(),
+  cached_tokens: z.number().int().nonnegative().optional().default(0),
+  cache_creation_tokens: z.number().int().nonnegative().optional().default(0),
+});
+
 export const billingUsageRowSchema = z.object({
   service_slug: z.string().nullable().optional(),
   service_id: z.string().nullable().optional(),
   metric: billingMetricSchema,
   lago_metric_code: z.string(),
   layer: z.string(),
+  // Optional so an older backend without the model/agent breakdown still
+  // parses; the UI degrades to a service-level row.
+  model: z.string().nullable().optional(),
+  api_key_id: z.string().nullable().optional(),
+  api_key_name: z.string().nullable().optional(),
   quantity: z.number().int(),
   requests: z.number().int(),
   bytes: z.number().int(),
@@ -33,6 +45,7 @@ export const billingUsageRowSchema = z.object({
   lago_acked: z.boolean(),
   billable: z.boolean().optional().default(true),
   estimated_credits_micros: z.number().int().nullable().optional(),
+  token_breakdown: billingTokenBreakdownSchema.nullable().optional(),
 });
 
 export const billingUsageTotalsSchema = z.object({
@@ -99,6 +112,7 @@ export type BillingPlanKind = z.infer<typeof billingPlanKindSchema>;
 export type BillingCollectionState = z.infer<typeof billingCollectionStateSchema>;
 export type BillingTopUpStatus = z.infer<typeof billingTopUpStatusSchema>;
 export type BillingReadOnlyBlock = z.infer<typeof billingReadOnlyBlockSchema>;
+export type BillingTokenBreakdown = z.infer<typeof billingTokenBreakdownSchema>;
 export type BillingUsageRow = z.infer<typeof billingUsageRowSchema>;
 export type BillingUsageTotals = z.infer<typeof billingUsageTotalsSchema>;
 export type BillingUsageResponse = z.infer<typeof billingUsageResponseSchema>;
