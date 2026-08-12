@@ -58,7 +58,7 @@ NyxID authenticates the human, selects the platform row, and supplies two differ
 
 The delegated capability scope comes from the service row's `delegation_token_scope` when that scope can call the REST proxy. An empty or LLM-only scope that cannot authorize the required REST surface falls back to `proxy` and emits one warning. The live token lifetime is the compile-time constant `backend/src/crypto/jwt.rs:MCP_DELEGATION_TOKEN_TTL_SECS`, fixed at 300 seconds. It is not an environment variable or an `AppConfig` field; changing it requires a code change.
 
-The stable service-row intent is therefore:
+The required live service-row configuration is therefore:
 
 ```text
 slug:                         aevatar
@@ -68,16 +68,18 @@ identity_propagation_mode:    jwt or both
 identity_jwt_audience:        urn:aevatar:api
 inject_delegation_token:      true
 delegation_token_scope:       proxy or another REST-capable scope
-forward_access_token:         false
+forward_access_token:         true    <-- REQUIRED. Setting this false takes chat down.
 ```
 
 Identity and delegated-capability construction live in `backend/src/handlers/proxy.rs`; assistant-specific forwarding and fallback scope selection live in `backend/src/handlers/assistant.rs:resolve_forward_scope` and `build_forward_authorization`.
 
 ### Authorization is not caller passthrough
 
-The configured steady state sets `forward_access_token` to `false`. The browser's inbound Authorization value is not copied to Aevatar. NyxID generates the identity assertion and delegated capability from the verified authentication context.
+`forward_access_token` must be `true` on the live row. That flag does not mean "copy the browser's inbound Authorization value" — it never does that. It is the enable switch for the bridge in `backend/src/handlers/assistant.rs:needs_forward_token_bridge`, which for a cookie-authenticated session mints a NyxID delegated token server-side and *overwrites* the upstream `Authorization` header. A verified bearer caller keeps its own verified bearer; the assistant route policy excludes API keys, service accounts, delegated tokens, and relay tokens before the handler runs.
 
-There is a compatibility bridge when `forward_access_token` is enabled on the service row. For a cookie-authenticated session, NyxID mints a standard delegated token and overwrites the upstream `Authorization` header; it does not forward an arbitrary browser-supplied value. A verified bearer caller can retain its verified bearer on that configuration, but the assistant route policy excludes API keys, service accounts, delegated tokens, and relay tokens before the handler runs.
+Deployed Aevatar authenticates **only** `Authorization: Bearer <NyxID JWT>`. It does not yet validate the `X-NyxID-Identity-Token` or `X-NyxID-Delegation-Token` headers that NyxID also sends. Because the bridge is gated on `Session && forward_access_token`, setting the flag to `false` both stops the bearer forward *and* disarms the mint, so NyxID sends no `Authorization` at all and **every** Aevatar surface returns 401 `authentication_required` — the typed `/api/chat`, `/api/chat/conversations`, and legacy `v1/chat/completions` alike. This is not a theoretical failure mode: it took production chat down on 2026-08-12 and was resolved only by setting the flag back to `true`.
+
+`forward_access_token: false` becomes correct **only after** Aevatar ships identity-assertion validation (the TD-3 cutover). Until that is verified live against the deployed Aevatar, do not set it. The bridge is designed to retire itself with no code change on that day; flipping the flag ahead of the upstream capability is what breaks it.
 
 `JWT_ASSISTANT_FORWARD_TTL_SECS`, `crypto/jwt.rs:generate_assistant_forward_access_token`, and the `assistant_forward` claim are compatibility tombstones. They preserve rejection behavior for a prior token shape and do not control live assistant authentication. New code must not depend on them.
 

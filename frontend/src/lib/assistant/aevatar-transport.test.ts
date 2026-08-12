@@ -1179,7 +1179,7 @@ describe("AevatarAssistantTransport", () => {
     expect(error?.message).toBe("Aevatar timed out.");
   });
 
-  it("gives a stream 401 an auth-specific message, not a bare status", async () => {
+  it("blames the chat backend for a stream 401 carrying no NyxID error code", async () => {
     stubFetch((url, init) =>
       url.endsWith("/stream") && init?.method === "POST"
         ? jsonResponse({ error: "unauthorized" }, 401)
@@ -1194,7 +1194,36 @@ describe("AevatarAssistantTransport", () => {
     const error =
       terminal?.event === "turn.completed" ? terminal.error : undefined;
     expect(error?.code).toBe("unauthorized");
-    expect(error?.message).toContain("still signed in");
+    expect(error?.message).toContain("chat backend rejected");
+    expect(error?.message).not.toContain("still signed in");
+  });
+
+  // The same status with NyxID's numeric `error_code` is the opposite
+  // diagnosis: our session died, and telling the user they are still signed in
+  // would send them chasing an upstream that is healthy.
+  it("blames the expired session for a stream 401 carrying a NyxID auth code", async () => {
+    stubFetch((url, init) =>
+      url.endsWith("/stream") && init?.method === "POST"
+        ? jsonResponse(
+            {
+              error: "token_expired",
+              error_code: 2001,
+              message: "Token expired",
+            },
+            401,
+          )
+        : undefined,
+    );
+    const transport = new AevatarAssistantTransport();
+    await seedActorConversation(transport);
+
+    const events = await collectTurn(transport, "Hello");
+
+    const terminal = events[events.length - 1];
+    const error =
+      terminal?.event === "turn.completed" ? terminal.error : undefined;
+    expect(error?.code).toBe("token_expired");
+    expect(error?.message).toContain("Sign in again");
   });
 
   it("reports EOF without a terminal frame as a truncated run, keeping partial text", async () => {
