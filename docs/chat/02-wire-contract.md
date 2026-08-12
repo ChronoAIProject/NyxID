@@ -4,7 +4,9 @@ Last verified against Aevatar `0a86713671fcf551dc19ad86b1b6aa8ae6cb980b` and the
 production typed-chat probe (2026-08-11), with NyxID support-contract revision
 `f45febb057a7182dab2495d4c739d2bb8d7026f5`.
 
-This document specifies the browser-to-NyxID contract and the Aevatar request NyxID produces. It is the canonical API reference for the assistant chat surface.
+This document specifies the browser-to-NyxID contract and the upstream request
+NyxID produces for both implemented assistant engines. It is the canonical API
+reference for the assistant chat surface.
 
 ## Conventions
 
@@ -18,6 +20,7 @@ Conversation prefixes are protocol discriminators:
 | --- | --- | --- |
 | `nyxid-chat-` | durable typed conversation | NyxIdChat actor |
 | `chatc-` | legacy historical conversation | scoped Chat History read/delete only |
+| `direct-` | memory-only conversation | flag-gated Direct Chrono-LLM frontend transport |
 
 Typed conversation IDs are exactly `nyxid-chat-{32 lowercase hex}`. An unknown,
 malformed, or wrong-family ID is not guessed. Family-aware browser routes return
@@ -32,10 +35,80 @@ a not-found-shaped error after syntactic validation and make no upstream call.
 | `DELETE /conversations/{id}` | durable delete | typed or legacy historical delete, selected by ID |
 | `GET /conversations/{id}/state` | typed reconnect state | `GET /api/chat/conversations/{id}/state` |
 | `POST /chat` | typed command | `POST /api/chat` with top-level `type` |
+| `GET /direct/skills` | curated Direct skill metadata | no upstream call |
+| `GET /direct/models` | curated Direct model metadata | no upstream call |
+| `GET /direct/efforts` | curated Direct reasoning-effort metadata | no upstream call |
+| `POST /direct/completions` | stateless Direct text turn | `POST /chat/completions` on `chrono-llm-public` |
 
-The browser sends every new and continuing turn through `POST /chat`. It may list,
+With the default-off `experimental:direct-chat-engine` flag disabled, the
+browser sends every new and continuing turn through `POST /chat`. It may list,
 read, and delete a legacy `chatc-...` row, but it has no legacy send, create
-recovery, WebSocket, completion, local-placeholder, or fallback route.
+recovery, WebSocket, local-placeholder, or fallback route in the Aevatar
+engine. With the flag enabled for the user, the browser instead creates local
+`direct-...` conversations and sends their turns through
+`POST /direct/completions`. Engine selection is exclusive; neither path is a
+failure fallback for the other.
+
+The current API has no `/assistant/chat-config` endpoint. The typed endpoint
+selector and replacement routes in the
+[endpoint selector addendum](direct-chronollm-endpoints-addendum.md) are spec v4
+follow-up work, not this implemented wire contract.
+
+## Stateless Direct Chrono-LLM API
+
+All three Direct routes use the same human-only assistant mount and resolve the
+caller's effective feature grants on every request. When
+`experimental:direct-chat-engine` is off they return a not-found-shaped error
+without contacting an upstream.
+
+`GET /direct/skills` returns the server's curated `slug` and `label` rows;
+`GET /direct/models` returns curated `id`, `label`, and `default` rows;
+`GET /direct/efforts` returns curated `id` and `label` rows. No metadata route
+accepts a caller-selected service or calls Chrono LLM.
+
+`POST /direct/completions` accepts only:
+
+```json
+{
+  "messages": [
+    { "role": "user", "content": "message" },
+    { "role": "assistant", "content": "prior reply" }
+  ],
+  "model": "gpt-5.5",
+  "skill_slug": "nyxid",
+  "effort": "xhigh"
+}
+```
+
+`messages` contains 1-64 user/assistant messages; `model`, `skill_slug`, and
+`effort` are optional but, when present, must name a curated row. The server
+rejects unknown fields and client-supplied system roles, validates the 256 KiB
+body and aggregate-content limits, then rebuilds the upstream body. The rebuilt
+body prepends the server-owned base system prompt and optional curated skill,
+forces `stream: true` and `stream_options.include_usage: true`, and is sent to
+the fixed admin-managed `chrono-llm-public` service at upstream path
+`chat/completions`.
+
+`effort` is the only optional field that is **omitted rather than defaulted**:
+absent `effort` sends no `reasoning_effort` key at all, leaving the upstream
+model's own default and reproducing the pre-effort request byte for byte. When
+present it is emitted as `reasoning_effort`. The effort table is curated
+server-side and unverified against the live Chrono-LLM contract — the upstream
+publishes no effort catalog, so a value the deployed model rejects surfaces as a
+4xx on that turn rather than being caught at validation.
+
+The completion route is limited per user to 10 requests per rolling 60 seconds
+and 2 concurrent streams. Exceeding either limit returns `429 Too Many
+Requests`; the skills, models, and efforts metadata routes do not consume this
+limiter.
+
+The response is OpenAI-compatible SSE passed through without creating a NyxID
+conversation resource. The frontend interprets content deltas, terminal finish
+reasons, error frames, and `[DONE]`, while keeping the local transcript in
+memory. `direct-*` IDs are frontend protocol discriminators only: there is no
+Direct list, history, state, continuation, or delete HTTP resource. Reload,
+logout, or identity change discards the transcript. Direct chat supports no
+tools, action cards, approvals, task controls, or attachments.
 
 ## Typed NyxIdChat commands
 

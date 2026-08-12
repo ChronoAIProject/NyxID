@@ -16,12 +16,18 @@ import { AssistantShell } from "@/components/assistant/assistant-shell";
 import { AssistantSidebar } from "@/components/assistant/assistant-sidebar";
 import { ChatComposer } from "@/components/assistant/chat-composer";
 import { ChatThread } from "@/components/assistant/chat-thread";
+import {
+  DirectChatControls,
+  DirectModeBanner,
+  DIRECT_MODE_COPY,
+} from "@/components/assistant/direct-chat-controls";
 import { ApprovalsView } from "@/components/assistant/approvals-view";
 import { PluginsView } from "@/components/assistant/plugins-view";
 import { AssistantWireLogAction } from "@/components/assistant/assistant-wire-log-panel";
 import {
-  assistantKeys,
+  assistantKeysFor,
   describeSendFailure,
+  useAssistantEngine,
   useAssistantTurn,
   useActionCardActions,
   useCancelTurn,
@@ -38,6 +44,7 @@ import {
   useSteerTask,
   useStopTask,
 } from "@/hooks/use-assistant";
+import { useFeature } from "@/hooks/use-feature-flag";
 import { ApiError } from "@/lib/api-client";
 import {
   AssistantConversationNotFoundError,
@@ -46,7 +53,13 @@ import {
 } from "@/lib/assistant/errors";
 import { markChatActivity } from "@/lib/assistant/connect-watch";
 import { isLegacyConversationId } from "@/lib/assistant/aevatar-transport";
+import {
+  assistantEngineForConversationId,
+  assistantTransport,
+  selectAssistantTransportKind,
+} from "@/lib/assistant/transport";
 import { parseAssistantSearch } from "@/lib/assistant/search";
+import { FEATURE_FLAG } from "@/lib/feature-flags";
 import type { ActionReport } from "@/schemas/assistant-actions";
 import type { InputAnswer } from "@/schemas/assistant-input";
 import { useAssistantContextStore } from "@/stores/assistant-context-store";
@@ -141,6 +154,15 @@ interface PendingSendEcho {
   readonly matchingMessagesBeforeSend: number;
 }
 
+function belongsToOtherEngine(
+  conversationId: string | undefined,
+  engine: "aevatar" | "direct",
+): boolean {
+  if (!conversationId) return false;
+  const conversationEngine = assistantEngineForConversationId(conversationId);
+  return conversationEngine !== null && conversationEngine !== engine;
+}
+
 export function AssistantPage({
   view = "chat",
 }: {
@@ -149,6 +171,16 @@ export function AssistantPage({
   const navigate = useNavigate();
   const queryClient = useQueryClient();
   const user = useAuthStore((state) => state.user);
+  const directChatFlagEnabled = useFeature(FEATURE_FLAG.DIRECT_CHAT_ENGINE);
+  const transportKind = selectAssistantTransportKind({
+    mode: import.meta.env.MODE,
+    dev: import.meta.env.DEV,
+    search: typeof window === "undefined" ? "" : window.location.search,
+  });
+  const directChatEnabled = directChatFlagEnabled && transportKind !== "mock";
+  const engine = directChatEnabled ? "direct" : "aevatar";
+  const keys = assistantKeysFor(engine);
+  useAssistantEngine(engine);
   const [entryScreen] = useState(() => {
     const context = useAssistantContextStore.getState();
     const currentUser = useAuthStore.getState().user;
@@ -170,7 +202,7 @@ export function AssistantPage({
   const currentPathname = useRouterState({
     select: (state) => state.location.pathname,
   });
-  const conversations = useConversations();
+  const conversations = useConversations(engine);
 
   // The composer floats over the thread, so the thread has to know how tall it
   // currently is — it grows with the draft — to reserve the matching tail room
@@ -181,6 +213,7 @@ export function AssistantPage({
   // cannot follow the reader into a different thread. State rather than a ref:
   // it is read during render to build the message list.
   const [pendingSendEcho, setPendingSendEcho] = useState<PendingSendEcho>();
+  const previousEngineRef = useRef(engine);
   /**
    * Bumped only by an explicit "put me in this chat" action — a sidebar row or
    * New Chat. The composer takes focus on every bump.
@@ -210,22 +243,25 @@ export function AssistantPage({
   // A conversation is selected only when the URL explicitly addresses it.
   // Keep that id through list/history failures so the history query can prove
   // a real 404; `?draft=true` is the same empty state as bare `/assistant`.
+  const otherEngineSelected = belongsToOtherEngine(selectedFromSearch, engine);
   const selectedId =
-    !drafting && selectedFromSearch ? selectedFromSearch : undefined;
-  const history = useConversation(selectedId);
-  const turn = useAssistantTurn(selectedId);
-  const episode = useTurnEpisode(selectedId);
-  const sendMessage = useSendMessage(selectedId);
-  const cancelTurn = useCancelTurn(selectedId);
-  const decideApproval = useDecideApproval(selectedId);
-  const resolveInput = useResolveInput(selectedId);
+    !drafting && selectedFromSearch && !otherEngineSelected
+      ? selectedFromSearch
+      : undefined;
+  const history = useConversation(selectedId, engine);
+  const turn = useAssistantTurn(selectedId, engine);
+  const episode = useTurnEpisode(selectedId, engine);
+  const sendMessage = useSendMessage(selectedId, engine);
+  const cancelTurn = useCancelTurn(selectedId, engine);
+  const decideApproval = useDecideApproval(selectedId, engine);
+  const resolveInput = useResolveInput(selectedId, engine);
   const resolvePlan = useResolvePlan(selectedId);
-  const actionCards = useActionCardActions(selectedId);
+  const actionCards = useActionCardActions(selectedId, engine);
   const stopTask = useStopTask(selectedId);
   const steerTask = useSteerTask(selectedId);
   const retryStep = useRetryStep(selectedId);
   const skipStep = useSkipStep(selectedId);
-  const deleteConversation = useDeleteConversation();
+  const deleteConversation = useDeleteConversation(engine);
   const turnStatus = turn.data?.status;
   const active = isTurnActive(turnStatus);
   const episodeState = episode.data ?? undefined;
@@ -241,6 +277,39 @@ export function AssistantPage({
     decideApproval.isPending ||
     resolveInput.isPending ||
     episodeState?.open === true;
+
+  useEffect(() => {
+    const retiredEngine = previousEngineRef.current;
+    const engineChanged = retiredEngine !== engine;
+    previousEngineRef.current = engine;
+    if (!engineChanged && !otherEngineSelected) return;
+
+    if (selectedFromSearch && otherEngineSelected) {
+      assistantTransport.cancelActiveTurn(selectedFromSearch);
+    }
+    if (engineChanged && user) {
+      const draftStore = useAssistantDraftStore.getState();
+      for (const key of Object.keys(draftStore.drafts)) {
+        if (!key.startsWith("conv:")) continue;
+        const conversationId = key.slice("conv:".length);
+        if (
+          assistantEngineForConversationId(conversationId) === retiredEngine
+        ) {
+          draftStore.clearDraft(user.id, key);
+        }
+      }
+    } else if (user && selectedFromSearch) {
+      useAssistantDraftStore
+        .getState()
+        .clearDraft(user.id, `conv:${selectedFromSearch}`);
+    }
+    setPendingSendEcho(undefined);
+    void navigate({
+      to: "/assistant" as never,
+      search: {} as never,
+      replace: true,
+    });
+  }, [engine, navigate, otherEngineSelected, selectedFromSearch, user]);
 
   // Effects queued by an earlier quiet render must observe a continuation
   // that starts before they fire. The counter covers the synchronous window
@@ -332,15 +401,15 @@ export function AssistantPage({
     // projection before changing the query key so the canonical render has a
     // complete transcript and terminal turn state on its very first frame.
     queryClient.setQueryData(
-      assistantKeys.history(canonicalConversationId),
+      keys.history(canonicalConversationId),
       history.data,
     );
     queryClient.setQueryData(
-      assistantKeys.episode(canonicalConversationId),
+      keys.episode(canonicalConversationId),
       episode.data ?? null,
     );
     queryClient.setQueryData(
-      assistantKeys.turn(canonicalConversationId),
+      keys.turn(canonicalConversationId),
       turn.data ?? null,
     );
     void navigate({
@@ -353,6 +422,7 @@ export function AssistantPage({
     episode.data,
     explicitConversationIsConfirmedStale,
     history.data,
+    keys,
     navigate,
     queryClient,
     reactiveTurnLive,
@@ -629,7 +699,9 @@ export function AssistantPage({
   const draftKey = selectedId
     ? `conv:${selectedId}`
     : entryScreen
-      ? `screen:${entryScreen}`
+      ? engine === "direct"
+        ? `screen:direct:${entryScreen}`
+        : `screen:${entryScreen}`
       : null;
   const sidebar = (
     <AssistantSidebar
@@ -674,6 +746,7 @@ export function AssistantPage({
       headerActions={<AssistantHeaderActions />}
     >
       <div className="relative flex h-full min-h-0 flex-col bg-background">
+        {directChatEnabled ? <DirectModeBanner /> : null}
         {/* Projection provenance (`awaitingProjection` / `projectionStalled`)
             deliberately renders NOTHING here. The transcript demonstrably
             materializes on its own — the reconciler projects it into the
@@ -705,6 +778,7 @@ export function AssistantPage({
             transcriptSettling={
               episodeState?.projecting === true || sendMessage.isPending
             }
+            emptyDescription={directChatEnabled ? DIRECT_MODE_COPY : undefined}
             onDecideApproval={handleDecideApproval}
             onResolveInput={handleResolveInput}
             onActionProgress={actionCards.setInProgress}
@@ -725,6 +799,14 @@ export function AssistantPage({
             ownerUserId={user?.id ?? null}
             draftKey={draftKey}
             focusRequest={composerFocusRequest}
+            controls={
+              directChatEnabled ? (
+                <DirectChatControls
+                  conversationId={selectedId}
+                  disabled={active || sendMessage.isPending}
+                />
+              ) : undefined
+            }
             onSend={handleComposerSend}
             onStop={() =>
               typedTaskActive

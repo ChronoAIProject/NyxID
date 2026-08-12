@@ -5,6 +5,7 @@ import {
   useRef,
   useState,
   type KeyboardEvent,
+  type ReactNode,
   type UIEvent,
 } from "react";
 import { Send, Square } from "lucide-react";
@@ -99,6 +100,7 @@ interface ChatComposerProps {
    * are a request to start typing.
    */
   readonly focusRequest?: number;
+  readonly controls?: ReactNode;
   readonly onSend: (content: string) => Promise<void>;
   readonly onStop: () => Promise<void>;
 }
@@ -121,6 +123,7 @@ function DraftedChatComposer({
   ownerUserId,
   draftKey,
   focusRequest = 0,
+  controls,
   onSend,
   onStop,
 }: ChatComposerProps) {
@@ -522,6 +525,7 @@ function DraftedChatComposer({
         className="mx-auto w-full max-w-[758px] px-4 pt-2 sm:px-6"
         style={{ paddingBottom: "max(1rem, var(--sab))" }}
       >
+        {controls}
         <div
           ref={composerRef}
           className={`relative ml-[30px] flex gap-1.5 rounded-xl border border-hairline bg-card px-3 py-2 transition-colors focus-within:border-hairline-strong ${

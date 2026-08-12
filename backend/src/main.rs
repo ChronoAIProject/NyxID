@@ -102,6 +102,8 @@ pub struct AppState {
     pub ssh_session_manager: Arc<SshSessionManager>,
     /// Per-agent rate limiter keyed by API key ID
     pub per_agent_limiter: mw::rate_limit::SharedPerAgentRateLimiter,
+    /// Per-user request and in-flight limiter for direct assistant streams.
+    pub direct_chat_limiter: mw::rate_limit::SharedDirectChatRateLimiter,
     /// Per-device-code public key limiter for headless provisioning.
     pub device_code_pubkey_limiter: mw::rate_limit::SharedPerPubkeyRateLimiter,
     /// Per-IP limiter for `/api/v1/devices/code/*`.
@@ -706,6 +708,7 @@ async fn main() {
         node_ws_manager,
         ssh_session_manager,
         per_agent_limiter: Arc::new(mw::rate_limit::PerAgentRateLimiter::new()),
+        direct_chat_limiter: mw::rate_limit::create_direct_chat_rate_limiter(),
         device_code_pubkey_limiter: mw::rate_limit::create_per_pubkey_rate_limiter(),
         device_code_ip_limiter: mw::rate_limit::create_per_ip_rate_limiter(5, 60),
         auth_device_request_limiter: mw::rate_limit::create_per_ip_rate_limiter(5, 60),
@@ -815,6 +818,14 @@ async fn main() {
         loop {
             interval.tick().await;
             cleanup_agent_limiter.cleanup();
+        }
+    });
+    let cleanup_direct_chat_limiter = state.direct_chat_limiter.clone();
+    tokio::spawn(async move {
+        let mut interval = tokio::time::interval(std::time::Duration::from_secs(60));
+        loop {
+            interval.tick().await;
+            cleanup_direct_chat_limiter.cleanup();
         }
     });
     let cleanup_device_code_pubkey_limiter = state.device_code_pubkey_limiter.clone();

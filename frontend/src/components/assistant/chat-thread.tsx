@@ -409,6 +409,7 @@ export function ChatThread({
   turnEnded = false,
   turnPrinted,
   transcriptSettling = false,
+  emptyDescription = "Ask NyxID to work with your connected services.",
   bottomInset = 0,
   onDecideApproval,
   onResolveInput = async () => undefined,
@@ -444,6 +445,7 @@ export function ChatThread({
    * answer from being reported as a turn that printed nothing.
    */
   readonly transcriptSettling?: boolean;
+  readonly emptyDescription?: string;
   /**
    * Height in px of the composer floating over the thread. Turns are allowed to
    * scroll behind it (ChatGPT-style), so the thread reserves this much room at
@@ -632,7 +634,7 @@ export function ChatThread({
             Start a new conversation
           </p>
           <p className="mt-1 text-[11px] text-muted-foreground">
-            Ask NyxID to work with your connected services.
+            {emptyDescription}
           </p>
         </div>
       </div>

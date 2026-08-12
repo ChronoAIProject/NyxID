@@ -637,6 +637,7 @@ pub(crate) fn test_app_state_with_config(db: mongodb::Database, config: AppConfi
         )),
         ssh_session_manager: Arc::new(SshSessionManager::new(config.ssh_max_sessions_per_user)),
         per_agent_limiter: Arc::new(crate::mw::rate_limit::PerAgentRateLimiter::new()),
+        direct_chat_limiter: crate::mw::rate_limit::create_direct_chat_rate_limiter(),
         device_code_pubkey_limiter: crate::mw::rate_limit::create_per_pubkey_rate_limiter(),
         device_code_ip_limiter: crate::mw::rate_limit::create_per_ip_rate_limiter(5, 60),
         auth_device_request_limiter: crate::mw::rate_limit::create_per_ip_rate_limiter(5, 60),

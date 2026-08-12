@@ -126,6 +126,98 @@ impl PerKeyRateLimiter {
 
 pub type SharedPerKeyRateLimiter = Arc<PerKeyRateLimiter>;
 
+/// Cost control for the human-only direct assistant endpoint. A successful
+/// acquisition consumes one request from the fixed window and one in-flight
+/// slot until the returned permit is dropped.
+#[derive(Clone)]
+pub struct DirectChatRateLimiter {
+    state: Arc<Mutex<HashMap<String, DirectChatUserState>>>,
+    max_requests: u32,
+    window_secs: u64,
+    max_in_flight: u32,
+}
+
+#[derive(Clone, Debug)]
+struct DirectChatUserState {
+    request_count: u32,
+    window_start: Instant,
+    in_flight: u32,
+}
+
+impl DirectChatRateLimiter {
+    pub fn new(max_requests: u32, window_secs: u64, max_in_flight: u32) -> Self {
+        Self {
+            state: Arc::new(Mutex::new(HashMap::new())),
+            max_requests,
+            window_secs,
+            max_in_flight,
+        }
+    }
+
+    pub fn try_acquire(self: &Arc<Self>, user_id: &str) -> Result<DirectChatPermit, AppError> {
+        let now = Instant::now();
+        let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
+        let entry = state
+            .entry(user_id.to_string())
+            .or_insert(DirectChatUserState {
+                request_count: 0,
+                window_start: now,
+                in_flight: 0,
+            });
+
+        if now.duration_since(entry.window_start).as_secs() >= self.window_secs {
+            entry.request_count = 0;
+            entry.window_start = now;
+        }
+
+        if entry.request_count >= self.max_requests || entry.in_flight >= self.max_in_flight {
+            return Err(AppError::RateLimited);
+        }
+
+        entry.request_count += 1;
+        entry.in_flight += 1;
+        drop(state);
+
+        Ok(DirectChatPermit {
+            limiter: self.clone(),
+            user_id: user_id.to_string(),
+        })
+    }
+
+    pub fn cleanup(&self) {
+        let now = Instant::now();
+        let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
+        state.retain(|_, entry| {
+            entry.in_flight > 0
+                || now.duration_since(entry.window_start).as_secs() < self.window_secs * 2
+        });
+    }
+
+    fn release(&self, user_id: &str) {
+        let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some(entry) = state.get_mut(user_id) {
+            entry.in_flight = entry.in_flight.saturating_sub(1);
+        }
+    }
+}
+
+pub struct DirectChatPermit {
+    limiter: Arc<DirectChatRateLimiter>,
+    user_id: String,
+}
+
+impl Drop for DirectChatPermit {
+    fn drop(&mut self) {
+        self.limiter.release(&self.user_id);
+    }
+}
+
+pub type SharedDirectChatRateLimiter = Arc<DirectChatRateLimiter>;
+
+pub fn create_direct_chat_rate_limiter() -> SharedDirectChatRateLimiter {
+    Arc::new(DirectChatRateLimiter::new(10, 60, 2))
+}
+
 /// Per-agent rate limiter keyed by API key ID.
 /// Each agent gets its own token bucket keyed by API key ID.
 /// `rate_limit_per_second` controls refill rate and `burst` controls capacity.
@@ -764,6 +856,18 @@ mod tests {
     #[test]
     fn create_per_ip_rate_limiter_does_not_panic() {
         let _limiter = create_per_ip_rate_limiter(30, 1);
+    }
+
+    #[test]
+    fn direct_chat_request_window_is_per_user() {
+        let limiter = Arc::new(DirectChatRateLimiter::new(2, 60, 2));
+        drop(limiter.try_acquire("user-a").unwrap());
+        drop(limiter.try_acquire("user-a").unwrap());
+        assert!(matches!(
+            limiter.try_acquire("user-a"),
+            Err(AppError::RateLimited)
+        ));
+        assert!(limiter.try_acquire("user-b").is_ok());
     }
 
     #[test]

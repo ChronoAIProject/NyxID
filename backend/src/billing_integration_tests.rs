@@ -26,6 +26,7 @@ use crate::errors::{AppError, AppResult};
 use crate::models::approval_request::{
     ApprovalRequest, COLLECTION_NAME as APPROVAL_REQUESTS, ExactServiceApprovalBinding,
 };
+use crate::models::audit_log::{AuditLog, COLLECTION_NAME as AUDIT_LOG};
 use crate::models::billing_rate_cache::{BillingRateCache, COLLECTION_NAME as BILLING_RATE_CACHE};
 use crate::models::billing_wallet::{
     BillingWallet, COLLECTION_NAME as BILLING_WALLET, CollectionState, PlanKind,
@@ -39,7 +40,7 @@ use crate::models::notification_channel::{
 };
 use crate::models::provider_config::{COLLECTION_NAME as PROVIDER_CONFIGS, ProviderConfig};
 use crate::models::service_approval_config::ApprovalMode;
-use crate::models::service_billing::{BillingMetric, PlatformUsage};
+use crate::models::service_billing::{BillingMetric, PlatformUsage, ServiceBilling};
 use crate::models::ssh_auth_mode::SshAuthMode;
 use crate::models::usage_meter::{
     COLLECTION_NAME as USAGE_METER, CredentialClass, UsageMeterRow, UsageStatus,
@@ -280,6 +281,31 @@ async fn billing_route_coverage_smoke() {
     )
     .await;
     let llm_catalog = insert_llm_route_service(&db, &owner_id, &downstream_url).await;
+    let mut direct_catalog = crate::models::downstream_service::test_helpers::dummy_service();
+    direct_catalog.id = Uuid::new_v4().to_string();
+    direct_catalog.slug = crate::services::assistant_direct::DIRECT_LLM_SLUG.to_string();
+    direct_catalog.name = "Direct Chrono-LLM route boundary".to_string();
+    direct_catalog.base_url = format!("{downstream_url}/direct");
+    direct_catalog.service_category = "internal".to_string();
+    direct_catalog.streaming_supported = true;
+    direct_catalog.billing = Some(ServiceBilling {
+        platform_billable: true,
+        platform_metric: Some(BillingMetric::Tokens),
+        ..Default::default()
+    });
+    db.collection::<DownstreamService>(DOWNSTREAM_SERVICES)
+        .insert_one(&direct_catalog)
+        .await
+        .expect("insert direct assistant catalog service");
+    crate::services::feature_flag_service::set_platform_override(
+        &db,
+        crate::services::feature_flag_service::DIRECT_CHAT_ENGINE_FLAG_KEY,
+        &crate::services::feature_flag_service::FlagTarget::Global,
+        true,
+        "billing-route-test",
+    )
+    .await
+    .expect("enable direct assistant route for billing smoke");
 
     let state = billing_route_state(db.clone(), lago, 100);
     let token = route_access_token(&state, &owner_id);
@@ -288,6 +314,25 @@ async fn billing_route_coverage_smoke() {
         state.config.public_proxy_max_body_size,
     );
     let app = private.with_state(state.clone());
+
+    let direct_body = serde_json::json!({
+        "messages": [{"role": "user", "content": "route boundary"}],
+        "model": "gpt-5.5",
+        "skill_slug": "nyxid",
+    });
+    let direct_response = call_mounted_route(
+        &app,
+        route_request(
+            Method::POST,
+            "/api/v1/assistant/direct/completions",
+            &token,
+            Body::from(direct_body.to_string()),
+        ),
+    )
+    .await;
+    assert!(String::from_utf8_lossy(&direct_response).contains("\"total_tokens\":149"));
+    exercised_routes.insert("/api/v1/assistant/direct/completions");
+    assert_direct_reported_usage(&db, &direct_catalog).await;
 
     call_mounted_route(
         &app,
@@ -1259,14 +1304,33 @@ async fn lago_webhook_signature_is_verified_at_the_mounted_route() {
 
 async fn start_billing_downstream() -> (String, tokio::task::JoinHandle<()>) {
     async fn respond(request: Request<Body>) -> axum::response::Response {
-        if request.uri().path() == "/mcp-query" {
+        let path = request.uri().path().to_string();
+        if path == "/mcp-query" {
             assert_eq!(
                 request.uri().query(),
                 Some("tag=a&tag=b&name=Nyx%20ID&empty=")
             );
         }
 
-        if request.uri().path().contains("stream") {
+        if path == "/direct/chat/completions" {
+            let body = to_bytes(request.into_body(), 512 * 1024)
+                .await
+                .expect("read direct assistant upstream request");
+            let body: serde_json::Value =
+                serde_json::from_slice(&body).expect("parse direct assistant upstream request");
+            assert_eq!(body["stream"], true);
+            assert_eq!(body["stream_options"]["include_usage"], true);
+            assert_eq!(body["messages"][0]["role"], "system");
+            return (
+                [(axum::http::header::CONTENT_TYPE, "text/event-stream")],
+                include_str!(
+                    "../../frontend/src/lib/assistant/__fixtures__/chrono-llm-direct-stream.sse"
+                ),
+            )
+                .into_response();
+        }
+
+        if path.contains("stream") {
             return (
                 [(axum::http::header::CONTENT_TYPE, "text/event-stream")],
                 concat!(
@@ -1299,6 +1363,42 @@ async fn start_billing_downstream() -> (String, tokio::task::JoinHandle<()>) {
             .expect("serve billing downstream");
     });
     (format!("http://{address}"), server)
+}
+
+async fn assert_direct_reported_usage(db: &mongodb::Database, service: &DownstreamService) {
+    for _ in 0..100 {
+        let usage = db
+            .collection::<UsageMeterRow>(USAGE_METER)
+            .find_one(doc! {
+                "service_slug": &service.slug,
+                "metric": "tokens",
+                "status": "finalized",
+                "forwarded": true,
+                "released": true,
+            })
+            .await
+            .expect("query direct assistant usage row");
+        let provenance = db
+            .collection::<AuditLog>(AUDIT_LOG)
+            .find_one(doc! {
+                "event_type": "llm_usage_reported",
+                "event_data.service_id": &service.id,
+            })
+            .await
+            .expect("query direct assistant reported-usage audit");
+
+        if let (Some(usage), Some(provenance)) = (usage, provenance) {
+            assert_eq!(usage.quantity, Some(149));
+            let data = provenance.event_data.expect("reported usage audit data");
+            assert_eq!(data["prompt_tokens"], 30);
+            assert_eq!(data["completion_tokens"], 119);
+            assert_eq!(data["total_tokens"], 149);
+            assert_eq!(data["path"], "chat/completions");
+            return;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+    }
+    panic!("direct assistant route did not settle from the fixture's reported usage provenance");
 }
 
 async fn start_controlled_billing_downstream() -> (

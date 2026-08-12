@@ -1,6 +1,7 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { installScenarioInterceptor } from "@/lib/assistant/scenario-intercept-transport";
 import {
+  AssistantEngineRouter,
   DelegatingAssistantTransport,
   createAssistantTransportForEnvironment,
   installAssistantTransportInterceptor,
@@ -170,6 +171,7 @@ describe("DelegatingAssistantTransport dev installation", () => {
       {
         createMock: () => new RecordingTransport("mock"),
         createAevatar: () => live,
+        createDirect: () => new RecordingTransport("direct"),
       },
       loader,
       (state) =>
@@ -207,6 +209,7 @@ describe("DelegatingAssistantTransport dev installation", () => {
       {
         createMock: () => new RecordingTransport("mock"),
         createAevatar: () => live,
+        createDirect: () => new RecordingTransport("direct"),
       },
       loader,
       (state) =>
@@ -224,7 +227,7 @@ describe("DelegatingAssistantTransport dev installation", () => {
     ).rejects.toThrow("chunk failed");
     await shell.listConversations();
 
-    expect(shell.current()).toBe(live);
+    expect(shell.current()).toBeInstanceOf(AssistantEngineRouter);
     expect(live.calls).toEqual(["list"]);
     expect(useAssistantMockScenariosStore.getState().engineState).toBe("error");
   });
@@ -261,6 +264,7 @@ describe("DelegatingAssistantTransport dev installation", () => {
     const factories = {
       createMock: () => mock,
       createAevatar: () => new RecordingTransport("live"),
+      createDirect: () => new RecordingTransport("direct"),
     };
 
     const fullMock = createAssistantTransportForEnvironment(

@@ -84,6 +84,9 @@ jobs:
               - 'backend/**'
               - 'cloud-auth/**'
               - 'nyxid-crypto/**'
+              - 'docs/AI_AGENT_PLAYBOOK.md'
+              - '.dockerignore'
+              - 'scripts/check-backend-docker-embeds.py'
               - 'scripts/check-rci-backend-boundary.sh'
               - 'Cargo.toml'
               - 'Cargo.lock'
@@ -110,6 +113,9 @@ jobs:
               - 'cloud-auth/**'
               - 'nyxid-crypto/**'
               - 'mcp-demo/**'
+              - 'docs/AI_AGENT_PLAYBOOK.md'
+              - '.dockerignore'
+              - 'scripts/check-backend-docker-embeds.py'
               - 'scripts/check-rci-backend-boundary.sh'
               - 'Cargo.toml'
               - 'Cargo.lock'
@@ -232,8 +238,13 @@ jobs:
       - name: Billing route coverage smoke
         run: cargo test -p nyxid billing_route_coverage_smoke -- --nocapture
 
-      - name: Build backend
-        run: cargo build -p nyxid
+      # Keep this feature/profile aligned with backend/Dockerfile so the
+      # dep-info guard covers every compile-time input of the image build.
+      - name: Build backend image binary
+        run: cargo build --release -p nyxid --bin nyxid-server --features gcp-kms
+
+      - name: Check backend Docker embedded assets
+        run: python3 scripts/check-backend-docker-embeds.py
 
       - name: Run backend tests
         run: cargo nextest run -p nyxid --profile ci

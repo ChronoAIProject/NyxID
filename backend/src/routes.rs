@@ -121,6 +121,22 @@ macro_rules! proxy_billing_routes {
     };
 }
 
+macro_rules! assistant_direct_billing_routes {
+    ($apply:ident, $router:expr) => {
+        $apply!($router;
+            (
+                "/direct/completions",
+                "/api/v1/assistant/direct/completions",
+                "handlers::assistant_direct::completions",
+                post(handlers::assistant_direct::completions),
+                crate::services::billing::route_inventory::BillingRoutePolicy::Metered(
+                    crate::services::billing::BillingIngress::Proxy
+                )
+            ),
+        )
+    };
+}
+
 macro_rules! ssh_billing_routes {
     ($apply:ident, $router:expr) => {
         $apply!($router;
@@ -366,6 +382,10 @@ pub(crate) fn mounted_billing_route_inventory()
 -> Vec<crate::services::billing::route_inventory::BillingRouteSpec> {
     let mut routes = llm_billing_routes!(collect_billing_route_specs, ());
     routes.extend(proxy_billing_routes!(collect_billing_route_specs, ()));
+    routes.extend(assistant_direct_billing_routes!(
+        collect_billing_route_specs,
+        ()
+    ));
     routes.extend(ssh_billing_routes!(collect_billing_route_specs, ()));
     routes.extend(mcp_billing_routes!(collect_billing_route_specs, ()));
     routes.extend(exact_service_approval_billing_routes!(
@@ -1425,31 +1445,38 @@ pub fn build_router(
     // the human-only router below: the chat surface -- approvals above all --
     // is a human session surface, so API-key, service-account, delegated, and
     // relay callers are rejected by that router's layers.
-    let assistant_proxy_routes = Router::new()
-        .route(
-            "/conversations",
-            get(handlers::assistant::list_conversations),
-        )
-        .route(
-            "/conversations/{conversation_id}",
-            get(handlers::assistant::get_history).delete(handlers::assistant::delete_conversation),
-        )
-        .route(
-            "/conversations/{conversation_id}/state",
-            get(handlers::assistant::get_state),
-        )
-        .route("/completions", post(handlers::assistant::completions))
-        .route("/chat", post(handlers::assistant::typed_chat))
-        .route_layer(axum::Extension(
-            crate::services::billing::route_inventory::BillingRoutePolicy::Metered(
-                crate::services::billing::BillingIngress::Proxy,
-            ),
-        ));
+    let assistant_proxy_routes = assistant_direct_billing_routes!(
+        register_billing_routes,
+        Router::new()
+            .route(
+                "/conversations",
+                get(handlers::assistant::list_conversations),
+            )
+            .route(
+                "/conversations/{conversation_id}",
+                get(handlers::assistant::get_history)
+                    .delete(handlers::assistant::delete_conversation),
+            )
+            .route(
+                "/conversations/{conversation_id}/state",
+                get(handlers::assistant::get_state),
+            )
+            .route("/completions", post(handlers::assistant::completions))
+            .route("/chat", post(handlers::assistant::typed_chat))
+    )
+    .route_layer(axum::Extension(
+        crate::services::billing::route_inventory::BillingRoutePolicy::Metered(
+            crate::services::billing::BillingIngress::Proxy,
+        ),
+    ));
     let assistant_routes = Router::new()
         .route(
             "/readiness",
             get(handlers::assistant_readiness::get_readiness),
         )
+        .route("/direct/skills", get(handlers::assistant_direct::skills))
+        .route("/direct/models", get(handlers::assistant_direct::models))
+        .route("/direct/efforts", get(handlers::assistant_direct::efforts))
         .route(
             "/actions/key-create",
             post(handlers::assistant_action_effects::create_key),
