@@ -839,6 +839,7 @@ mod tests {
             return;
         };
         let user_id = uuid::Uuid::new_v4().to_string();
+        let service_id = uuid::Uuid::new_v4().to_string();
         db.collection::<crate::models::user::User>(crate::models::user::COLLECTION_NAME)
             .insert_one(test_user(&user_id, UserType::Person))
             .await
@@ -869,6 +870,14 @@ mod tests {
         )
         .await
         .unwrap();
+        seed_service_for_key(&db, &user_id, &service_id, &created.id).await;
+        db.collection::<UserService>(USER_SERVICES)
+            .update_one(
+                doc! { "_id": &service_id },
+                doc! { "$set": { "is_active": false } },
+            )
+            .await
+            .unwrap();
 
         let resp = delete_external_api_key(
             State(state.clone()),
@@ -886,6 +895,40 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(remaining, 0);
+
+        let view = crate::services::unified_key_service::get_key(
+            &db,
+            &state.encryption_keys,
+            &user_id,
+            &service_id,
+        )
+        .await
+        .unwrap();
+        assert!(view.credential_missing);
+        assert_eq!(view.auth_method, "bearer");
+
+        let enable_error = crate::services::user_service_service::update_user_service(
+            &db,
+            &user_id,
+            &user_id,
+            &service_id,
+            None,
+            None,
+            None,
+            None,
+            Some(true),
+            None,
+            None,
+            None,
+            None,
+            None,
+        )
+        .await
+        .expect_err("deleting the credential must keep Enable blocked");
+        assert!(matches!(
+            enable_error,
+            AppError::BadRequest(message) if message.contains("Reconnect or delete")
+        ));
     }
 
     #[tokio::test]

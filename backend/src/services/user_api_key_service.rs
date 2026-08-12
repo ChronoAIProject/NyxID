@@ -1563,19 +1563,10 @@ pub async fn cleanup_claimed_api_key(
     user_id: &str,
     key_id: &str,
 ) -> AppResult<()> {
-    // Active references are rejected before a key can be claimed. Clear the
-    // remaining inactive references so credential deletion cannot create a
-    // new dangling aggregate.
-    db.collection::<mongodb::bson::Document>(USER_SERVICES)
-        .update_many(
-            doc! {
-                "user_id": user_id,
-                "api_key_id": key_id,
-                "is_active": false,
-            },
-            doc! { "$unset": { "api_key_id": "" } },
-        )
-        .await?;
+    // Active references are rejected before a key can be claimed. Preserve
+    // inactive references: the UserService aggregate still requires a
+    // credential, and retaining the id lets management paths expose the
+    // explicit degraded state and block Enable until it is reconnected.
     agent_binding_service::cleanup_bindings_for_credential(db, user_id, key_id).await?;
     Ok(())
 }
@@ -6451,9 +6442,10 @@ mod tests {
             .await
             .unwrap()
             .unwrap();
-        assert!(
-            updated_service.api_key_id.is_none(),
-            "deleting an inactive credential must clear its aggregate reference"
+        assert_eq!(
+            updated_service.api_key_id.as_deref(),
+            Some(key.id.as_str()),
+            "deleting an inactive credential must preserve the degraded aggregate reference"
         );
     }
 }
