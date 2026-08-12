@@ -800,6 +800,7 @@ export class DelegatingAssistantTransport implements AssistantTransport {
   ): TurnHandle {
     return this.transport.wakeActions(conversationId, originTurnId, onEvent);
   }
+
 }
 
 export interface AssistantTransportFactories {

@@ -1,6 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import aevatarNyxidChatStream from "@/lib/assistant/__fixtures__/aevatar-nyxid-chat-stream.sse?raw";
-import aevatarWorkflowCreateStream from "@/lib/assistant/__fixtures__/aevatar-workflow-create-stream.sse?raw";
 import { AevatarAssistantTransport } from "@/lib/assistant/aevatar-transport";
 import {
   chatStreamClient,
@@ -19,9 +18,8 @@ import type { AssistantWireLine } from "@/schemas/assistant-wire-log";
 import type { TurnEvent, TurnReducerState } from "@/types/assistant";
 import type { User } from "@/types/api";
 
-const ACTOR_ID = "nyxid-chat-wire-replay-actor";
+const ACTOR_ID = "nyxid-chat-f8369965a444433f92ec50e67ad8ee52";
 const TURN_ID = "turn-wire-replay";
-const WORKFLOW_CONVERSATION = "chatc-1234567890abcdef1234567890abcdef";
 const SCOPE_ID = "user-wire-replay";
 
 interface ReplayCase {
@@ -225,23 +223,8 @@ const cases: readonly ReplayCase[] = [
 ];
 
 function startFrames(protocol: WireReplayProtocol): ChatStreamFrame[] {
-  if (protocol === "actor") {
-    return [{ type: "RUN_STARTED", turnId: TURN_ID, actorId: ACTOR_ID }];
-  }
-  return [
-    {
-      custom: {
-        name: "aevatar.chat.context",
-        payload: {
-          scopeId: SCOPE_ID,
-          conversationId: WORKFLOW_CONVERSATION,
-          turnId: TURN_ID,
-          stateVersion: "1",
-        },
-      },
-    },
-    { runStarted: { runId: "workflow-run-1" } },
-  ];
+  void protocol;
+  return [{ type: "RUN_STARTED", turnId: TURN_ID, actorId: ACTOR_ID }];
 }
 
 function fixtureFrames(
@@ -258,7 +241,11 @@ function fixtureFrames(
     ...fixture.body,
     ...(terminal ? [terminal] : []),
     ...(fixture.afterTerminal ?? []),
-  ];
+  ].map((frame, index) =>
+    frame["type"] === "CUSTOM" && frame["sequence"] === undefined
+      ? { ...frame, sequence: index + 1 }
+      : frame,
+  );
 }
 
 function jsonResponse(body: unknown): Response {
@@ -345,10 +332,9 @@ async function projectThroughLiveTransport(
     }),
   );
   const transport = new AevatarAssistantTransport();
-  const conversation =
-    protocol === "actor"
-      ? (await seedActor(transport), { id: ACTOR_ID })
-      : await transport.createConversation();
+  void protocol;
+  await seedActor(transport);
+  const conversation = { id: ACTOR_ID };
   return new Promise<TurnEvent[]>((resolve) => {
     const events: TurnEvent[] = [];
     transport.sendMessage(conversation.id, "Replay this", (event) => {
@@ -369,9 +355,7 @@ afterEach(() => {
 });
 
 describe("wire replay projector parity", () => {
-  const matrix = (["actor", "workflow"] as const).flatMap((protocol) =>
-    cases.map((fixture) => ({ protocol, fixture })),
-  );
+  const matrix = cases.map((fixture) => ({ protocol: "actor" as const, fixture }));
 
   it.each(matrix)(
     "$protocol: $fixture.name matches live TurnEvents and reduced messages",
@@ -426,53 +410,6 @@ describe("wire replay projector parity", () => {
       truncated: false,
     });
 
-    expect(normalizeGeneratedIds(replay.events)).toEqual(
-      normalizeGeneratedIds(liveEvents),
-    );
-    expect(normalizeGeneratedIds(replay.state.messages)).toEqual(
-      normalizeGeneratedIds(reduce(liveEvents).messages),
-    );
-  });
-
-  // Sanitized capture of a real workflow CREATE turn (production, 2026-08-06).
-  // Every synthetic workflow fixture models a continuation, which always
-  // carries a `stateVersion`; a create turn's context frame omits the member
-  // entirely because proto3 JSON elides the version-0 default. That divergence
-  // is invisible to the replay projector — it never reads the watermark — so
-  // only a live-transport replay of the real bytes catches a transport that
-  // rejects the create shape.
-  it("matches the live workflow transport for the real create-turn SSE fixture", async () => {
-    const framer = new WireLineFramer(64 * 1024);
-    const pushed = framer.push(
-      new TextEncoder().encode(aevatarWorkflowCreateStream),
-    );
-    const finished = framer.finish();
-    const frames = parseCapturedWireLines([
-      ...pushed.lines,
-      ...finished.lines,
-    ]);
-
-    const liveEvents = await projectThroughLiveTransport("workflow", frames);
-
-    expect(liveEvents.at(-1)).toMatchObject({
-      event: "turn.completed",
-      status: "completed",
-    });
-    expect(
-      reduce(liveEvents).messages.some((message) =>
-        message.blocks.some(
-          (block) =>
-            block.type === "text" &&
-            block.text.includes("What would you like to build"),
-        ),
-      ),
-    ).toBe(true);
-
-    const replay = projectReplayFrames(frames, {
-      protocol: "workflow",
-      captureOutcome: "complete",
-      truncated: false,
-    });
     expect(normalizeGeneratedIds(replay.events)).toEqual(
       normalizeGeneratedIds(liveEvents),
     );
@@ -540,8 +477,9 @@ describe("wire replay projector parity", () => {
   });
 
   it("keeps original frame JSON in the block source sidecar", () => {
-    const sourceFrame = cases.find((fixture) => fixture.name === "connect card")
-      ?.body[0];
+    const sourceFrame = fixtureFrames("actor", cases[2]!).find(
+      (frame) => frame.type === "CUSTOM",
+    );
     if (!sourceFrame) throw new Error("missing connect fixture");
     const projection = projectReplayFrames(fixtureFrames("actor", cases[2]!), {
       protocol: "actor",

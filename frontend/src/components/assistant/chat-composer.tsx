@@ -88,6 +88,7 @@ interface ChatComposerProps {
   /** Keep the composer writable while a typed actor task accepts steering. */
   readonly allowActiveInput?: boolean;
   readonly sending: boolean;
+  readonly disabled?: boolean;
   readonly ownerUserId: string | null;
   readonly draftKey: string | null;
   /**
@@ -116,6 +117,7 @@ function DraftedChatComposer({
   active,
   allowActiveInput = false,
   sending,
+  disabled = false,
   ownerUserId,
   draftKey,
   focusRequest = 0,
@@ -477,7 +479,7 @@ function DraftedChatComposer({
 
   async function submit() {
     const message = content.trim();
-    if (!message || locked || sending) return;
+    if (!message || locked || disabled || sending) return;
     cancelScheduledSave();
     const userId = ownerUserIdRef.current;
     const key = draftKeyRef.current;
@@ -552,15 +554,17 @@ function DraftedChatComposer({
                 scheduleDraftSave();
               }}
               onScroll={handleScroll}
-              disabled={locked}
+              disabled={locked || disabled}
               rows={1}
               maxLength={32_768}
               placeholder={
                 locked
                   ? "Assistant is working..."
-                  : allowActiveInput
-                    ? "Steer active task..."
-                    : "Message NyxID Assistant..."
+                  : disabled
+                    ? "This conversation is read-only."
+                    : allowActiveInput
+                     ? "Steer active task..."
+                     : "Message NyxID Assistant..."
               }
               className="assistant-scrollbar block min-h-8 w-full resize-none overflow-hidden bg-transparent px-0 py-1 text-[13px] leading-relaxed text-foreground outline-none transition-[height] duration-150 ease-out placeholder:text-text-tertiary disabled:cursor-not-allowed disabled:opacity-50 motion-reduce:transition-none"
             />
@@ -596,7 +600,7 @@ function DraftedChatComposer({
                 type="button"
                 variant="primary"
                 size="icon"
-                disabled={!content.trim() || sending}
+                disabled={!content.trim() || sending || disabled}
                 onClick={() => void submit()}
                 aria-label={
                   allowActiveInput

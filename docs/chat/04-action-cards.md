@@ -16,11 +16,16 @@ Action requests arrive only as this AG-UI frame:
 CUSTOM name=nyxid.action.request
 ```
 
-The pinned Aevatar source emits that frame from the typed NyxIdChat conversation producer. Aevatar's `/api/chat` dispatcher selects that producer only when the request has a top-level `type`. The Studio workflow request has no `type`, executes the workflow engine instead, and does not emit `nyxid.action.request`.
+The pinned Aevatar source emits that frame from the typed NyxIdChat conversation
+producer. Aevatar's `/api/chat` dispatcher selects that producer only when the
+request has a top-level `type`. NyxID sends every browser turn through that typed
+producer; a legacy `chatc-*` history row is never an action origin or target.
 
 The upstream anchors are `MainnetChatEndpoints.cs:ClassifyRequestAsync`, `NyxIdChatPublicEndpoints.cs`, and `NyxIdChatConversationAguiFrameBuilder.cs`. Action-result continuation likewise uses the typed `action.continue` command and a `nyxid-chat-...` actor identity. A visible Studio `chatc-...` identity is never substituted as the typed actor ID.
 
-This means action cards may be present in typed histories and may be retained locally while histories materialize, but a normal Studio workflow turn cannot originate a new action/connect card. This limitation is tracked in [Testing and gaps](07-testing-and-gaps.md).
+Action cards may be present in typed histories and remain actor-projected while
+text history materializes. A transcript reload must not replace the pending
+action state with a text-only history response.
 
 ## Envelope v4
 

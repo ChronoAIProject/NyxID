@@ -332,6 +332,23 @@ beforeEach(() => {
   useAssistantDraftStore.setState({ ownerUserId: user.id, drafts: {} });
 });
 
+describe("AssistantPage typed conversation controls", () => {
+  it("makes legacy chatc history proactively read-only", () => {
+    const legacy: Conversation = {
+      ...existingConversation,
+      id: "chatc-8bd999c402fb37d60cdcd81e3b78cfd",
+    };
+    state.conversations = [legacy];
+    state.search = { c: legacy.id };
+
+    renderPage();
+
+    expect(screen.getByRole("textbox")).toBeDisabled();
+    expect(screen.getByRole("button", { name: "Send message" })).toBeDisabled();
+  });
+
+});
+
 describe("AssistantPage projection status", () => {
   // Projection provenance is background reconciliation: the transcript
   // demonstrably materializes into the open thread on its own, so narrating

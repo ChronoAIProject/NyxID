@@ -625,6 +625,7 @@ describe("assistant hooks", () => {
       queryClient.clear();
     },
   );
+
 });
 
 describe("describeTransportError", () => {
@@ -712,8 +713,8 @@ describe("conversation not-found resolution", () => {
 });
 
 describe("conversation projection reconciliation", () => {
-  const conversationId = "workflow-pending-reconcile";
-  const canonicalId = "chatc-reconciled";
+  const conversationId = "draft-reconcile";
+  const canonicalId = "nyxid-chat-f8369965a444433f92ec50e67ad8ee52";
   const syncingHistory: ConversationHistory = {
     conversation: {
       id: conversationId,

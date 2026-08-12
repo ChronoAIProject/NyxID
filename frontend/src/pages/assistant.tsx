@@ -45,6 +45,7 @@ import {
   AssistantTurnCancelledError,
 } from "@/lib/assistant/errors";
 import { markChatActivity } from "@/lib/assistant/connect-watch";
+import { isLegacyConversationId } from "@/lib/assistant/aevatar-transport";
 import { parseAssistantSearch } from "@/lib/assistant/search";
 import type { ActionReport } from "@/schemas/assistant-actions";
 import type { InputAnswer } from "@/schemas/assistant-input";
@@ -607,6 +608,9 @@ export function AssistantPage({
   }
   const awaitingFirstTurn =
     active || sendMessage.isPending || episodeState?.open === true;
+  const legacyReadOnly = selectedId
+    ? isLegacyConversationId(selectedId)
+    : false;
 
   /**
    * Whether THIS episode has closed, per the pump that served it.
@@ -717,6 +721,7 @@ export function AssistantPage({
             active={active || typedTaskActive}
             allowActiveInput={typedTaskActive}
             sending={sendMessage.isPending || steerTask.isPending}
+            disabled={legacyReadOnly}
             ownerUserId={user?.id ?? null}
             draftKey={draftKey}
             focusRequest={composerFocusRequest}

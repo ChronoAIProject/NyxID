@@ -118,6 +118,7 @@ class RecordingTransport implements AssistantTransport {
     this.calls.push("wake");
     return { turnId: `${this.label}-wake`, cancel: () => undefined };
   }
+
 }
 
 function user(id: string): User {

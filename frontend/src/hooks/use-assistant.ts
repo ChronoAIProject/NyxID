@@ -51,7 +51,7 @@ const PENDING_APPROVALS_PAGE_SIZE = 50;
 const APPROVAL_HISTORY_PAGE_SIZE = 20;
 // A turn that never emits a first event is failed rather than left hanging.
 // The deadline has to tolerate slow first-frame delivery from the upstream
-// workflow engine: at 8s it was cancelling healthy-but-slow SSE turns, so it
+// typed actor: at 8s it was cancelling healthy-but-slow SSE turns, so it
 // sits well above the observed worst-case time-to-first-event.
 const STREAM_START_DEADLINE_MS = 30_000;
 const PROJECTION_DEADLINE_MS = 5_000;
