@@ -5,22 +5,35 @@ production typed-chat probe (2026-08-11).
 
 ## System boundary
 
-The browser assistant is a three-hop system:
+The browser assistant is a three-hop system with two mutually exclusive send
+engines:
 
 ```text
 React browser
   -> NyxID /api/v1/assistant/**
-     -> admin-managed DownstreamService slug "aevatar"
+     -> default: admin-managed DownstreamService slug "aevatar"
         -> Aevatar /api/chat and conversation-history resources
+     -> experimental: admin-managed DownstreamService slug "chrono-llm-public"
+        -> Chrono LLM /v1/chat/completions (relative to the service base_url)
 ```
 
 The browser owns presentation state, optimistic turns, stream consumption, and
-the local mirror of actor-projected UI state. NyxID owns caller authentication,
-platform-target selection, scope derivation, strict body reconstruction, identity
-and capability injection, and response normalization. Aevatar owns typed actor
-execution, persistent history, committed state versions, and turn identities.
+engine selection from the effective feature flags. For Aevatar it also owns the
+local mirror of actor-projected UI state. NyxID owns caller authentication,
+platform-target selection, strict body reconstruction, and response
+normalization. Aevatar owns typed actor execution, persistent history,
+committed state versions, and turn identities. The Direct engine is stateless:
+its `direct-*` conversations and transcripts exist only in browser memory, and
+each turn resends the bounded local transcript.
 
-The route graph is defined in `backend/src/routes.rs:build_router`. The forwarding and resource-family switch are in `backend/src/handlers/assistant.rs`. Request grammar and exact upstream paths are in `backend/src/services/assistant_service.rs`. Browser orchestration is in `frontend/src/lib/assistant/aevatar-transport.ts` and `frontend/src/hooks/use-assistant.ts`.
+The route graph is defined in `backend/src/routes.rs:build_router`. Aevatar
+forwarding and resource-family switching are in
+`backend/src/handlers/assistant.rs`; Direct forwarding is in
+`backend/src/handlers/assistant_direct.rs`. Their request grammars live in
+`backend/src/services/assistant_service.rs` and
+`backend/src/services/assistant_direct.rs`. Browser orchestration is in the two
+engine transports, `frontend/src/lib/assistant/transport.ts`, and
+`frontend/src/hooks/use-assistant.ts`.
 
 ## Authentication boundary
 
@@ -39,7 +52,11 @@ The route placement and rejection layers are authoritative: `backend/src/routes.
 
 ## Platform service selection
 
-Assistant handlers do not resolve a user-owned `UserService`. They resolve the active admin-managed `DownstreamService` whose slug is `aevatar`, require it not to need a per-user credential, and call the administrative proxy path. This has several consequences:
+Assistant handlers do not resolve a user-owned `UserService`. The default
+Aevatar handlers resolve the active admin-managed `DownstreamService` whose
+slug is `aevatar`; the Direct handler uses `chrono-llm-public`. Both require the
+row not to need a per-user credential and call the administrative proxy path.
+This has several consequences:
 
 - The caller cannot choose the upstream base URL.
 - A personal or organization service with the same slug does not override the platform target.
@@ -47,7 +64,18 @@ Assistant handlers do not resolve a user-owned `UserService`. They resolve the a
 - User service scopes, node pins, and agent credential bindings do not select the assistant upstream.
 - The upstream URL comes from the service row's `base_url`; NyxID has no assistant-specific Aevatar URL environment variable.
 
-The selection is implemented by `backend/src/handlers/assistant.rs:forward` through `proxy_service::execute_admin_proxy`. The service row must be active and must set `requires_user_credential` to `false`.
+The selection is implemented by `backend/src/handlers/assistant.rs:forward` and
+`backend/src/handlers/assistant_direct.rs:completions` through
+`proxy_service::execute_admin_proxy`. The selected service row must be active
+and must set `requires_user_credential` to `false`.
+
+The Direct surface is default-off and independently enforced on every direct
+route through the effective per-user feature resolution for
+`experimental:direct-chat-engine`. When disabled, all three routes are
+not-found-shaped and the frontend remains on Aevatar. The current implementation
+does not include the endpoint selector, consolidated wire-log flag,
+`/assistant/chat-config`, or gear panel proposed by the
+[endpoint selector addendum](direct-chronollm-endpoints-addendum.md).
 
 ## Identity and capability chain
 
@@ -94,7 +122,7 @@ The pinned Mainnet configuration expects `urn:aevatar:api`. NyxID tool callbacks
 
 The upstream source anchors are `src/Aevatar.Mainnet.Host.Api/appsettings.json`, `src/Aevatar.AI.ToolProviders.NyxId/NyxIdToolOptions.cs`, `agents/Aevatar.GAgents.NyxidChat/NyxIdAssistantActionsOptions.cs`, and `NyxIdAssistantActionRegistryStartup.cs` in Aevatar.
 
-## Typed default and legacy history
+## Default Aevatar engine and legacy history
 
 Aevatar's `POST /api/chat` classifies every request by the presence of a top-level `type` property. This dispatch rule is implemented in upstream `src/Aevatar.Mainnet.Host.Api/Chat/MainnetChatEndpoints.cs:ClassifyRequestAsync`.
 
@@ -123,9 +151,27 @@ The typed actor creates its public identity upstream as
 The identity is immutable for that delivery; a missing or conflicting identity
 is a protocol error, not a cache rekey or recovery opportunity.
 
-The typed actor, Studio workflow, and any future engine remain mutually exclusive
-upstream. The browser only exposes the typed path. Retaining legacy read/delete
-does not permit a second send path.
+The typed actor and Studio workflow remain mutually exclusive upstream. Within
+the default Aevatar engine, the browser exposes only the typed send path;
+retaining legacy read/delete does not permit a second Aevatar send path. The
+separately feature-gated Direct engine is selected before dispatch and never
+acts as a fallback after an Aevatar failure.
+
+## Experimental stateless Direct engine
+
+The implemented Direct engine is an internal-testing surface described in the
+[Direct Chrono-LLM spec](direct-chronollm-spec.md). Its browser calls use
+`POST /api/v1/assistant/direct/completions`; model and skill choices come from
+the two flag-gated metadata routes. NyxID validates a closed text-only request,
+prepends its server-owned base prompt and optional curated skill, forces
+streaming with usage reporting, and forwards `chat/completions` to the
+admin-managed `chrono-llm-public` row.
+
+Direct conversations have `direct-*` identifiers used only by the frontend
+engine router. They have no server-side list, history, state, or delete
+resource. Reload, logout, or a verified identity change clears them. They do
+not support tools, actions, approvals, task controls, attachments, Aevatar
+actor state, or cross-engine fallback.
 
 ### Cutover gate
 

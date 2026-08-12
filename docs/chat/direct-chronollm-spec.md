@@ -1,4 +1,4 @@
-# Direct Chrono-LLM Chat Mode — Spec (Draft v3.1)
+# Direct Chrono-LLM Chat Mode — Spec (Draft v3.2)
 
 Status: implementation-ready (adversarially reviewed).
 Branch: `chat-chronollm-direct`.
@@ -8,6 +8,7 @@ Calvin chose the new-endpoints design over v2's FE-only recommendation.
 **v3.1 same day — reconciled against Sol's adversarial review**
 (`direct-chronollm-plan.review.md`: 3 BLOCKER / 7 MAJOR / 2 MINOR, all
 accepted or dispositioned; changed sections marked `[v3.1]`).
+**v3.2 same day — prompt content reconciled with the Aevatar support contract.**
 
 ## 0a. Owner directive (v3, verbatim intent)
 

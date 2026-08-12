@@ -1,6 +1,6 @@
 # Direct Chrono-LLM Chat — Implementation Plan (v2)
 
-Companion to `docs/chat/direct-chronollm-spec.md` (Draft v3.1 — the SSOT
+Companion to `docs/chat/direct-chronollm-spec.md` (Draft v3.2 — the SSOT
 for WHAT to build; this file is HOW and WHO). Branch:
 `chat-chronollm-direct`.
 
@@ -239,7 +239,18 @@ Only after this passes does the PR go up.
   rollout note (default off; Calvin flips per-user first), test evidence,
   residual risks.
 
-## PM verification results (2026-08-12, executed)
+## PM verification results (2026-08-12, executed; historical)
+
+> **Evidence status: superseded; rerun required.** This verification block was
+> recorded in commit `12dd7da4e94a0c2d98d18ae18b0c4f93fc70be89` at
+> `2026-08-12T02:21:12+08:00`, immediately after the browser-only fix
+> `43e2bed938021ec6c3f45d83ae6d999cb1e27a90` at `02:20:53+08:00`. It applies
+> to that pre-merge tree. The current merged tree includes
+> `b2eaa109db59454773ca1450c74c8f773a51938a` and the later
+> `8cfec9c8776a1e3a30c57c8aa7851af69c1cc4ea` auth-event fix. No independent
+> browser or end-to-end rerun after those changes is recorded here. Re-run PM
+> verification steps 1-7 above against current HEAD `8cfec9c8` before treating
+> the Definition of Done or PR gate as satisfied.
 
 Ran the full independent check against a local stack (backend on :3021,
 Mongo :27018, a mock OpenAI-SSE upstream on :3099 replaying the prod
