@@ -115,6 +115,14 @@ pub async fn completions(
         header::ACCEPT,
         HeaderValue::from_static("text/event-stream"),
     );
+    // The direct route owns the complete upstream contract. Caller query
+    // parameters from the NyxID endpoint must not cross this platform-
+    // credentialed boundary; only the fixed `chat/completions` path below is
+    // forwarded. Retained Aevatar handlers continue to preserve their query
+    // strings through the shared proxy path.
+    parts.uri = parts.uri.path().parse().map_err(|_| {
+        AppError::Internal("assistant: failed to rebuild direct chat URI".to_string())
+    })?;
     let request = Request::from_parts(parts, Body::from(payload));
     let service = assistant_service::resolve_admin_service_by_slug(
         &state.db,
@@ -170,8 +178,10 @@ fn attach_in_flight_permit(response: Response, permit: DirectChatPermit) -> Resp
 #[cfg(test)]
 mod tests {
     use super::*;
+    use axum::{Router, routing::post};
     use bytes::Bytes;
     use std::convert::Infallible;
+    use tokio::net::TcpListener;
 
     const USER_ID: &str = "a026fd00-bd86-4284-9832-9e5e65fc8f50";
 
@@ -206,6 +216,105 @@ mod tests {
             completions(State(state), auth_user, request).await,
             Err(AppError::BadRequest(_))
         ));
+    }
+
+    #[tokio::test]
+    async fn direct_completion_does_not_forward_caller_query_string() {
+        use crate::models::downstream_service::{
+            COLLECTION_NAME as DOWNSTREAM_SERVICES, DownstreamService,
+        };
+        use crate::models::user::{COLLECTION_NAME as USERS, UserType};
+        use crate::services::billing::{BillingIngress, route_inventory::BillingRoutePolicy};
+        use crate::services::feature_flag_service::{FlagTarget, set_platform_override};
+
+        let Some(db) =
+            crate::test_utils::connect_test_database("assistant_direct_query_strip").await
+        else {
+            eprintln!("skipping direct assistant query test: no local MongoDB available");
+            return;
+        };
+
+        let (uri_tx, uri_rx) = tokio::sync::oneshot::channel();
+        let uri_tx = std::sync::Arc::new(std::sync::Mutex::new(Some(uri_tx)));
+        let sink = uri_tx.clone();
+        let downstream = Router::new().route(
+            "/{*path}",
+            post(move |uri: axum::http::Uri| {
+                let sink = sink.clone();
+                async move {
+                    if let Some(tx) = sink.lock().unwrap().take() {
+                        let _ = tx.send(uri);
+                    }
+                    (
+                        [(header::CONTENT_TYPE, "text/event-stream")],
+                        "data: [DONE]\n\n",
+                    )
+                }
+            }),
+        );
+        let listener = TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind direct assistant downstream");
+        let addr = listener
+            .local_addr()
+            .expect("direct assistant downstream addr");
+        let server = tokio::spawn(async move {
+            axum::serve(listener, downstream)
+                .await
+                .expect("serve direct assistant downstream");
+        });
+
+        set_platform_override(
+            &db,
+            feature_flag_service::DIRECT_CHAT_ENGINE_FLAG_KEY,
+            &FlagTarget::Global,
+            true,
+            "admin",
+        )
+        .await
+        .unwrap();
+        db.collection(USERS)
+            .insert_one(crate::test_utils::test_user(USER_ID, UserType::Person))
+            .await
+            .expect("insert direct assistant user");
+        let mut service = crate::models::downstream_service::test_helpers::dummy_service();
+        service.id = uuid::Uuid::new_v4().to_string();
+        service.slug = assistant_direct::DIRECT_LLM_SLUG.to_string();
+        service.name = "Direct Chrono LLM".to_string();
+        service.base_url = format!("http://{addr}/v1");
+        service.service_category = "internal".to_string();
+        db.collection::<DownstreamService>(DOWNSTREAM_SERVICES)
+            .insert_one(service)
+            .await
+            .expect("insert direct assistant platform service");
+
+        let state = crate::test_utils::test_app_state(db);
+        let auth_user = crate::test_utils::test_auth_user(USER_ID);
+        let mut request = Request::builder()
+            .method("POST")
+            .uri("/api/v1/assistant/direct/completions?api_key=caller-secret&stream=false")
+            .header(header::CONTENT_TYPE, "application/json")
+            .body(Body::from(
+                r#"{"messages":[{"role":"user","content":"hello"}]}"#,
+            ))
+            .unwrap();
+        request
+            .extensions_mut()
+            .insert(BillingRoutePolicy::Metered(BillingIngress::Proxy));
+
+        let response = completions(State(state), auth_user, request)
+            .await
+            .expect("direct completion should reach downstream");
+        assert_eq!(response.status(), axum::http::StatusCode::OK);
+        let forwarded_uri = tokio::time::timeout(std::time::Duration::from_secs(10), uri_rx)
+            .await
+            .expect("timed out after 10s waiting for downstream direct request")
+            .expect("downstream URI sender should stay open");
+        assert_eq!(forwarded_uri.path(), "/v1/chat/completions");
+        assert_eq!(forwarded_uri.query(), None);
+
+        drop(response);
+        server.abort();
     }
 
     #[tokio::test]
