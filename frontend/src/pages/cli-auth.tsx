@@ -4,7 +4,8 @@ import { useAuthStore } from "@/stores/auth-store";
 import { api } from "@/lib/api-client";
 import { Skeleton } from "@/components/ui/skeleton";
 import { Button } from "@/components/ui/button";
-import { AlertCircle, Terminal } from "lucide-react";
+import { AlertCircle } from "lucide-react";
+import { NyxidIcon } from "@/components/brand/nyxid-icon";
 import { buildCliAuthReturnPath, type CliAuthSearch } from "./cli-auth.helpers";
 
 interface TokenResponse {
@@ -77,7 +78,7 @@ export function CliAuthPage() {
   return (
     <div className="flex min-h-screen items-center justify-center">
       <div className="flex max-w-sm flex-col items-center gap-4 text-center">
-        <Terminal className="h-12 w-12 text-primary/60" />
+        <NyxidIcon className="h-12 w-12" />
         <h2 className="text-lg font-semibold">
           CLI Authentication
         </h2>
