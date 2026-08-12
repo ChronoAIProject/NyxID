@@ -8,9 +8,12 @@ import {
 import { toast } from "sonner";
 import { ApiError } from "@/lib/api-client";
 import {
+  ASSISTANT_SESSION_EXPIRED_MESSAGE,
+  ASSISTANT_UPSTREAM_AUTH_MESSAGE,
   AssistantConversationNotFoundError,
   AssistantTurnActiveError,
   AssistantTurnCancelledError,
+  isNyxIdSessionAuthFailure,
 } from "@/lib/assistant/errors";
 import {
   useApprovalRequests,
@@ -247,22 +250,31 @@ const TRANSPORT_TOAST_ID = "assistant-transport-unavailable";
 
 /**
  * Chat reaches aevatar through NyxID's `/api/v1/assistant/*` pass-through,
- * which forwards the DOWNSTREAM's status straight through. A 401 there means
- * aevatar rejected the identity NyxID forwarded — the NyxID session itself is
- * fine — so the transport opts those requests out of the global sign-out
- * (`preserveSessionOn401` in aevatar-transport) and the route stays put.
- * Without a toast that failure is invisible: the sidebar just renders empty,
- * which reads as "no chats yet" rather than "chat is down".
+ * which forwards the DOWNSTREAM's status straight through. The transport opts
+ * those requests out of the global sign-out (`preserveSessionOn401` in
+ * aevatar-transport) so the route stays put. Without a toast that failure is
+ * invisible: the sidebar just renders empty, which reads as "no chats yet"
+ * rather than "chat is down".
+ *
+ * A 401 can come from either side, so attribute it by `errorCode` rather than
+ * assuming — see `isNyxIdSessionAuthFailure`. Guessing "aevatar rejected it"
+ * is what made an admin-only config outage look like a user's broken
+ * connection.
  */
 export function describeTransportError(error: unknown): {
   readonly message: string;
   readonly description: string;
 } {
   if (error instanceof ApiError && error.status === 401) {
+    if (isNyxIdSessionAuthFailure(error.errorCode)) {
+      return {
+        message: "Your session has expired",
+        description: ASSISTANT_SESSION_EXPIRED_MESSAGE,
+      };
+    }
     return {
       message: "Assistant chat is unavailable",
-      description:
-        "NyxID could not authenticate you to the chat backend. You are still signed in — reconnect the aevatar service and try again.",
+      description: ASSISTANT_UPSTREAM_AUTH_MESSAGE,
     };
   }
   return {
@@ -778,8 +790,9 @@ export function describeSendFailure(error: unknown): {
   ) {
     return {
       message: "Message not sent",
-      description:
-        "NyxID could not authenticate you to the chat backend. You are still signed in — reconnect the aevatar service and try again.",
+      description: isNyxIdSessionAuthFailure(error.errorCode)
+        ? ASSISTANT_SESSION_EXPIRED_MESSAGE
+        : ASSISTANT_UPSTREAM_AUTH_MESSAGE,
     };
   }
   if (error instanceof AssistantTurnActiveError) {
