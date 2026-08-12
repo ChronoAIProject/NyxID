@@ -230,6 +230,13 @@ rendering status, since `status` is the *credential's* status and stays healthy
 `commands::service::display_status`; the frontend renders a `Disabled` badge in
 the card, table and chat-plugin surfaces.
 
+Both `GET /keys` and `GET /keys/{id}` keep a service visible when its stored
+`api_key_id` no longer resolves. Such rows return `credential_missing: true`;
+consumers must present that separately from `credential_type: "none"`, which is
+also the healthy representation for a service that requires no credential.
+The degraded row may be reconnected or deleted, but it cannot be enabled until
+a replacement credential has been attached.
+
 Because a disabled row keeps its slug while a new active service may reuse it,
 this listing can contain two rows with the same slug. Consumers that resolve by
 slug should prefer the active row.

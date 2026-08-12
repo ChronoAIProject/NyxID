@@ -14,6 +14,8 @@ export interface KeyInfo {
   readonly endpoint_url: string;
   readonly endpoint_id: string;
   readonly api_key_id?: string | null;
+  /** The service references a credential row that no longer exists. */
+  readonly credential_missing?: boolean;
   readonly credential_type: string;
   readonly auth_method: string;
   readonly auth_key_name: string;

@@ -301,6 +301,31 @@ describe("KeysPage", () => {
     });
   });
 
+  it("badges and reconnects an OAuth service whose credential row is missing", async () => {
+    const user = userEvent.setup();
+    state.keys = [
+      makeKey({
+        id: "missing-oauth-key",
+        label: "Missing OAuth",
+        api_key_id: null,
+        credential_type: "none",
+        auth_method: "oauth2",
+        status: "active",
+        is_active: false,
+        credential_missing: true,
+      }),
+    ];
+
+    render(<KeysPage />);
+
+    expect(screen.getByText("Credential Missing")).toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: /reconnect/i }));
+    expect(screen.getByTestId("add-key-dialog")).toHaveAttribute(
+      "data-reconnect",
+      "missing-oauth-key",
+    );
+  });
+
   it("badges an OAuth credential with known expired connection health", () => {
     state.keys = [
       makeKey({

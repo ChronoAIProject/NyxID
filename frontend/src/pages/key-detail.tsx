@@ -85,6 +85,7 @@ import {
   Power,
   Link2,
   SlidersHorizontal,
+  AlertTriangle,
 } from "lucide-react";
 import { toast } from "sonner";
 import type { SshServiceConfig } from "@/types/api";
@@ -680,6 +681,7 @@ function ServiceSection({
   isActive,
   credentialStatus,
   hasCredential,
+  credentialMissing,
   serviceId,
   nodeId,
   nodeStatus,
@@ -697,6 +699,8 @@ function ServiceSection({
    *  credential (e.g. auto-connected or no-auth downstreams) skip the
    *  credential-readiness check entirely. */
   readonly hasCredential: boolean;
+  /** Whether the service's stored credential reference is dangling. */
+  readonly credentialMissing: boolean;
   readonly serviceId: string;
   readonly nodeId?: string | null;
   readonly nodeStatus?: string | null;
@@ -811,7 +815,7 @@ function ServiceSection({
               <Button
                 variant="primary"
                 onClick={toggleActive}
-                disabled={updateService.isPending}
+                disabled={updateService.isPending || credentialMissing}
               >
                 <ButtonIcon variant="primary">
                   <Power className="h-3 w-3" />
@@ -837,6 +841,12 @@ function ServiceSection({
               {credentialStatus}
             </span>
             . Real requests will fail until the credential is restored.
+          </p>
+        )}
+
+        {credentialMissing && (
+          <p className="text-xs font-medium text-warning">
+            Reconnect or delete this service before enabling it.
           </p>
         )}
 
@@ -2245,7 +2255,7 @@ export function KeyDetailPage() {
   const canReconnect =
     !readOnly &&
     !keyInfo.auto_connected &&
-    isReconnectableStatus(keyInfo.status) &&
+    (keyInfo.credential_missing || isReconnectableStatus(keyInfo.status)) &&
     (keyInfo.credential_type === "oauth2" ||
       catalogEntry?.provider_type === "oauth2" ||
       catalogEntry?.provider_type === "device_code");
@@ -2268,6 +2278,7 @@ export function KeyDetailPage() {
   const canEditScopes =
     !readOnly &&
     !keyInfo.auto_connected &&
+    !keyInfo.credential_missing &&
     keyInfo.status === "active" &&
     !isOpenAiDeviceCode &&
     (keyInfo.credential_type === "oauth2" ||
@@ -2390,6 +2401,19 @@ export function KeyDetailPage() {
                 {source.allowed
                   ? " use this credential through the proxy, but only admins can modify it."
                   : " see this service but not use it. Ask an admin to grant you member access."}
+              </p>
+            </div>
+          </div>
+        )}
+        {keyInfo.credential_missing && (
+          <div className="flex items-start gap-3 rounded-xl border border-warning/15 bg-warning/[0.04] px-4 py-3">
+            <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0 text-warning" />
+            <div className="space-y-1">
+              <p className="text-[13px] font-semibold text-foreground">
+                Credential missing
+              </p>
+              <p className="text-[12px] text-warning">
+                The stored credential no longer exists. Reconnect or delete this service.
               </p>
             </div>
           </div>
@@ -2519,9 +2543,11 @@ export function KeyDetailPage() {
                 isActive={keyInfo.is_active}
                 credentialStatus={keyInfo.status}
                 hasCredential={
+                  keyInfo.credential_missing ||
                   keyInfo.api_key_id !== null &&
                   keyInfo.api_key_id !== undefined
                 }
+                credentialMissing={Boolean(keyInfo.credential_missing)}
                 serviceId={keyInfo.id}
                 nodeId={keyInfo.node_id}
                 nodeStatus={keyInfo.node_status}

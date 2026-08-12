@@ -11,6 +11,7 @@ const {
   catalog,
   createKeyMutate,
   createKeyMutateAsync,
+  updateKeyMutateAsync,
   createApiKeyMutate,
   initiateOAuthMutateAsync,
   initiateDeviceCodeMutateAsync,
@@ -37,6 +38,7 @@ const {
   },
   createKeyMutate: vi.fn(),
   createKeyMutateAsync: vi.fn(),
+  updateKeyMutateAsync: vi.fn(),
   // Wave-aha-1 A4+ — the verify step auto-mints an Agent Key. The mock
   // intentionally swallows the call without firing onSuccess so the
   // dialog stays in the "minting" phase; the test only needs to assert
@@ -65,6 +67,10 @@ vi.mock("@/hooks/use-keys", () => ({
   useCreateKey: () => ({
     mutate: createKeyMutate,
     mutateAsync: createKeyMutateAsync,
+    isPending: false,
+  }),
+  useUpdateKey: () => ({
+    mutateAsync: updateKeyMutateAsync,
     isPending: false,
   }),
   KEY_AUTH_ACTIVE: "active",
@@ -228,6 +234,7 @@ beforeEach(() => {
   pendingLastAuthorizedAt.value = null;
   popupReceiverOptions.current = null;
   createKeyMutateAsync.mockResolvedValue({ id: "created-service-1" });
+  updateKeyMutateAsync.mockResolvedValue(makeReconnectKey());
   initiateOAuthMutateAsync.mockResolvedValue({
     authorization_url: "https://provider.example/oauth",
   });
@@ -874,6 +881,44 @@ describe("AddKeyDialog — reconnect path", () => {
 
     expect(mockApiDelete).not.toHaveBeenCalled();
     expect(onOpenChange).toHaveBeenCalledWith(false);
+  });
+
+  it("reattaches a missing credential before starting OAuth reconnect", async () => {
+    catalog.entries = [OAUTH_ENTRY];
+    const repaired = makeReconnectKey({
+      api_key_id: "replacement-key-1",
+      credential_missing: false,
+      status: "pending_auth",
+    });
+    updateKeyMutateAsync.mockResolvedValue(repaired);
+    const user = userEvent.setup();
+    render(
+      <AddKeyDialog
+        open
+        onOpenChange={vi.fn()}
+        reconnectKey={makeReconnectKey({
+          api_key_id: null,
+          credential_type: "none",
+          credential_missing: true,
+          is_active: false,
+          status: "active",
+        })}
+      />,
+    );
+
+    await user.click(
+      screen.getByRole("button", { name: /Connect with GitHub/i }),
+    );
+    await waitFor(() => expect(initiateOAuthMutateAsync).toHaveBeenCalled());
+
+    expect(updateKeyMutateAsync).toHaveBeenCalledWith({
+      keyId: "existing-service-1",
+      auth_method: "oauth2",
+    });
+    expect(initiateOAuthMutateAsync).toHaveBeenCalledWith(
+      expect.objectContaining({ keyId: repaired.id }),
+    );
+    expect(createKeyMutateAsync).not.toHaveBeenCalled();
   });
 
   it("starts device-code reconnect with the existing key id and never creates a key", async () => {

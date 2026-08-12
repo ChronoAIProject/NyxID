@@ -498,6 +498,36 @@ describe("KeyDetailPage — edit flows", () => {
     expect(mockToastError).toHaveBeenCalledWith("Not allowed");
   });
 
+  it("shows missing-credential recovery and blocks direct enable", async () => {
+    const user = userEvent.setup();
+    hooks.catalogEntry = { provider_type: "oauth2", name: "OpenAI" };
+    hooks.key.data = makeKey({
+      api_key_id: null,
+      credential_type: "none",
+      credential_missing: true,
+      is_active: false,
+      status: "active",
+    });
+
+    render(<KeyDetailPage />);
+
+    expect(screen.getByText("Credential missing")).toBeInTheDocument();
+    expect(
+      screen.getByText(/The stored credential no longer exists/i),
+    ).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Enable" })).toBeDisabled();
+    expect(
+      screen.queryByRole("button", { name: "Manage permissions" }),
+    ).not.toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: /Reconnect/ }));
+    expect(screen.getByTestId("add-key-dialog")).toHaveAttribute(
+      "data-reconnect",
+      "key-1",
+    );
+    expect(screen.getByRole("button", { name: "Delete" })).toBeInTheDocument();
+    expect(hooks.updateUserService).not.toHaveBeenCalled();
+  });
+
   it("saves a custom User-Agent via useUpdateUserService", async () => {
     const user = userEvent.setup();
     render(<KeyDetailPage />);

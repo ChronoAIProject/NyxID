@@ -134,6 +134,31 @@ describe("ManageConnectionModal", () => {
       );
     });
 
+    it("distinguishes a missing credential and keeps recovery actions reachable", async () => {
+      const user = userEvent.setup();
+      renderModal({
+        api_key_id: null,
+        credential_type: "none",
+        credential_missing: true,
+        status: "active",
+        is_active: false,
+      });
+
+      expect(
+        screen.getByText(/The stored credential is missing/i),
+      ).toBeInTheDocument();
+      expect(screen.getByText("Missing - reconnect or delete")).toBeInTheDocument();
+      await user.click(screen.getByRole("button", { name: /Reconnect/ }));
+      expect(screen.getByTestId("reconnect-dialog")).toHaveAttribute(
+        "data-key",
+        "key-1",
+      );
+      expect(
+        screen.getByRole("switch", { name: "Toggle connection enabled" }),
+      ).toBeDisabled();
+      expect(screen.getByRole("button", { name: "Delete" })).toBeInTheDocument();
+    });
+
     it("calls a half-finished authorization what it is", () => {
       renderModal({ status: "pending_auth", error_message: null });
       expect(
