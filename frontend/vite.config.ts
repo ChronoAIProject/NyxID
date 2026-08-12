@@ -211,8 +211,19 @@ function docsSync(): Plugin {
   }
 }
 
+// Build identity for the asset-load recovery guard (`src/lib/chunk-recovery.ts`).
+// It only has to change on every production build: the guard stores the build it
+// already reloaded for, so a reload landing on a NEW build re-arms the one-shot
+// reload, while a reload landing on the SAME build stops instead of looping.
+// `SOURCE_COMMIT` lets a build pipeline pin it to a commit; otherwise the config
+// evaluation time is enough, since a new evaluation means a new build.
+const BUILD_ID = process.env.SOURCE_COMMIT || Date.now().toString(36)
+
 export default defineConfig({
   plugins: [react(), tailwindcss(), docsSync()],
+  define: {
+    __BUILD_ID__: JSON.stringify(BUILD_ID),
+  },
   resolve: {
     alias: {
       "@": path.resolve(__dirname, "./src"),
