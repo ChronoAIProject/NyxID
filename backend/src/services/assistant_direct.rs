@@ -114,6 +114,42 @@ pub const DIRECT_MODELS: &[DirectModel] = &[
     },
 ];
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct DirectEffort {
+    pub id: &'static str,
+    pub label: &'static str,
+}
+
+/// Reasoning-effort levels offered to the picker. Absent effort means "send
+/// no `reasoning_effort` at all", which keeps the upstream's own default and
+/// leaves the historical request shape byte-identical.
+///
+/// This table is curated, not discovered: the upstream advertises no effort
+/// catalog, so an entry the deployed model rejects surfaces as a 4xx on that
+/// turn. Adjust the list here when the live Chrono-LLM contract is confirmed.
+pub const DIRECT_EFFORTS: &[DirectEffort] = &[
+    DirectEffort {
+        id: "low",
+        label: "Low",
+    },
+    DirectEffort {
+        id: "medium",
+        label: "Medium",
+    },
+    DirectEffort {
+        id: "high",
+        label: "High",
+    },
+    DirectEffort {
+        id: "xhigh",
+        label: "Extra high",
+    },
+    DirectEffort {
+        id: "max",
+        label: "Max",
+    },
+];
+
 #[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "lowercase")]
 pub enum DirectMessageRole {
@@ -134,6 +170,7 @@ pub struct DirectChatRequest {
     pub messages: Vec<DirectMessage>,
     pub model: Option<String>,
     pub skill_slug: Option<String>,
+    pub effort: Option<String>,
 }
 
 pub fn validate_direct_request(bytes: &[u8]) -> AppResult<DirectChatRequest> {
@@ -181,6 +218,16 @@ pub fn validate_direct_request(bytes: &[u8]) -> AppResult<DirectChatRequest> {
             allowed_skills()
         )));
     }
+    if let Some(effort) = request.effort.as_deref()
+        && !DIRECT_EFFORTS
+            .iter()
+            .any(|candidate| candidate.id == effort)
+    {
+        return Err(AppError::BadRequest(format!(
+            "Unknown effort. Allowed values: {}.",
+            allowed_efforts()
+        )));
+    }
 
     Ok(request)
 }
@@ -200,12 +247,19 @@ pub fn build_upstream_body(request: DirectChatRequest) -> serde_json::Value {
             .map(|message| serde_json::to_value(message).expect("direct message serializes")),
     );
 
-    serde_json::json!({
+    let mut body = serde_json::json!({
         "model": model,
         "stream": true,
         "stream_options": { "include_usage": true },
         "messages": messages,
-    })
+    });
+    // Omitted rather than defaulted: no effort means the upstream keeps its
+    // own default and the request shape is unchanged from before this option
+    // existed.
+    if let Some(effort) = request.effort.as_deref().and_then(find_effort) {
+        body["reasoning_effort"] = serde_json::Value::String(effort.id.to_string());
+    }
+    body
 }
 
 fn compose_system_prompt(skill_slug: Option<&str>) -> String {
@@ -223,6 +277,10 @@ fn find_skill(slug: &str) -> Option<&'static DirectSkill> {
     DIRECT_SKILLS.iter().find(|skill| skill.slug == slug)
 }
 
+fn find_effort(id: &str) -> Option<&'static DirectEffort> {
+    DIRECT_EFFORTS.iter().find(|effort| effort.id == id)
+}
+
 fn allowed_models() -> String {
     DIRECT_MODELS
         .iter()
@@ -235,6 +293,14 @@ fn allowed_skills() -> String {
     DIRECT_SKILLS
         .iter()
         .map(|skill| skill.slug)
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
+fn allowed_efforts() -> String {
+    DIRECT_EFFORTS
+        .iter()
+        .map(|effort| effort.id)
         .collect::<Vec<_>>()
         .join(", ")
 }
@@ -311,6 +377,34 @@ mod tests {
             )
             .is_err()
         );
+    }
+
+    #[test]
+    fn rejects_unknown_effort_and_omits_the_field_when_unset() {
+        let effort_error = validate_direct_request(
+            &serde_json::to_vec(&json!({
+                "messages": [{"role": "user", "content": "hi"}],
+                "effort": "ultra",
+            }))
+            .unwrap(),
+        )
+        .unwrap_err();
+        assert!(effort_error.to_string().contains("xhigh"));
+
+        let without = build_upstream_body(valid_request(json!({
+            "messages": [{"role": "user", "content": "hi"}],
+        })));
+        assert!(without.get("reasoning_effort").is_none());
+        assert_eq!(without.as_object().unwrap().len(), 4);
+
+        for effort in DIRECT_EFFORTS {
+            let with = build_upstream_body(valid_request(json!({
+                "messages": [{"role": "user", "content": "hi"}],
+                "effort": effort.id,
+            })));
+            assert_eq!(with["reasoning_effort"], effort.id);
+            assert_eq!(with.as_object().unwrap().len(), 5);
+        }
     }
 
     #[test]

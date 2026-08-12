@@ -1476,6 +1476,7 @@ pub fn build_router(
         )
         .route("/direct/skills", get(handlers::assistant_direct::skills))
         .route("/direct/models", get(handlers::assistant_direct::models))
+        .route("/direct/efforts", get(handlers::assistant_direct::efforts))
         .route(
             "/actions/key-create",
             post(handlers::assistant_action_effects::create_key),

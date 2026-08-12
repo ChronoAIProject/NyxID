@@ -56,12 +56,26 @@ interface DirectRequest {
   readonly messages: readonly DirectMessage[];
   readonly model: string;
   readonly skill_slug?: string;
+  readonly effort?: string;
 }
 
 export interface DirectConversationSettings {
   readonly model: string;
   readonly skillSlug: string | null;
+  /** `null` sends no `effort`, leaving the upstream default in place. */
+  readonly effort: string | null;
 }
+
+/**
+ * One definition of "nothing chosen yet", shared by the draft seed, both
+ * identity resets, and the unknown-conversation fallback — so a new setting
+ * cannot be added to some of those four and forgotten in the rest.
+ */
+const DEFAULT_DIRECT_SETTINGS: DirectConversationSettings = {
+  model: DEFAULT_DIRECT_MODEL,
+  skillSlug: null,
+  effort: null,
+};
 
 interface StoredConversation {
   conversation: Conversation;
@@ -193,8 +207,7 @@ export class DirectAssistantTransport implements AssistantTransport {
   private readonly now: () => number;
   private ownerUserId: string | null = getAssistantIdentityUserId();
   private draftSettings: DirectConversationSettings = {
-    model: DEFAULT_DIRECT_MODEL,
-    skillSlug: null,
+    ...DEFAULT_DIRECT_SETTINGS,
   };
   private draftModelSelected = false;
 
@@ -218,7 +231,7 @@ export class DirectAssistantTransport implements AssistantTransport {
     }
     this.running.clear();
     this.conversations.clear();
-    this.draftSettings = { model: DEFAULT_DIRECT_MODEL, skillSlug: null };
+    this.draftSettings = { ...DEFAULT_DIRECT_SETTINGS };
     this.draftModelSelected = false;
     this.ownerUserId = userId;
   }
@@ -232,8 +245,7 @@ export class DirectAssistantTransport implements AssistantTransport {
     if (!conversationId) return this.draftSettings;
     return (
       this.conversations.get(conversationId)?.settings ?? {
-        model: DEFAULT_DIRECT_MODEL,
-        skillSlug: null,
+        ...DEFAULT_DIRECT_SETTINGS,
       }
     );
   }
@@ -274,6 +286,10 @@ export class DirectAssistantTransport implements AssistantTransport {
     this.updateSettings(conversationId, { skillSlug });
   }
 
+  setEffort(conversationId: string | undefined, effort: string | null): void {
+    this.updateSettings(conversationId, { effort });
+  }
+
   async listConversations(): Promise<Conversation[]> {
     this.ensureOwner();
     return [...this.conversations.values()]
@@ -299,7 +315,7 @@ export class DirectAssistantTransport implements AssistantTransport {
       settings: { ...this.draftSettings },
       modelSelected: this.draftModelSelected,
     });
-    this.draftSettings = { model: DEFAULT_DIRECT_MODEL, skillSlug: null };
+    this.draftSettings = { ...DEFAULT_DIRECT_SETTINGS };
     this.draftModelSelected = false;
     return conversation;
   }
@@ -393,6 +409,7 @@ export class DirectAssistantTransport implements AssistantTransport {
       ...(stored.settings.skillSlug
         ? { skill_slug: stored.settings.skillSlug }
         : {}),
+      ...(stored.settings.effort ? { effort: stored.settings.effort } : {}),
     };
     while (
       request.messages.length > 1 &&
@@ -741,10 +758,7 @@ export class DirectAssistantTransport implements AssistantTransport {
     return false;
   }
 
-  private openMessage(
-    conversationId: string,
-    run: RunningTurn,
-  ): void {
+  private openMessage(conversationId: string, run: RunningTurn): void {
     if (run.currentBlockId) return;
     // OpenAI-compatible `id` values identify upstream responses, but they are
     // not a safe key for our in-memory transcript: gateways and deterministic

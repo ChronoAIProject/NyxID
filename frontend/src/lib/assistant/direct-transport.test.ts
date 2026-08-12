@@ -123,6 +123,45 @@ describe("DirectAssistantTransport streaming", () => {
     });
   });
 
+  it("sends the selected effort and omits it entirely when unset", async () => {
+    const fetchMock = vi.fn(async (...args: Parameters<typeof fetch>) => {
+      void args;
+      return sseResponse(fixture);
+    });
+    const transport = new DirectAssistantTransport({ fetch: fetchMock });
+    const conversationId = await startedConversation(transport);
+    const events: TurnEvent[] = [];
+
+    transport.sendMessage(conversationId, "no effort", (event) =>
+      events.push(event),
+    );
+    await waitForTerminal(events);
+    const withoutEffort = JSON.parse(
+      String(fetchMock.mock.calls[0]?.[1]?.body),
+    ) as Record<string, unknown>;
+    expect(withoutEffort).not.toHaveProperty("effort");
+
+    transport.setEffort(conversationId, "xhigh");
+    const second: TurnEvent[] = [];
+    transport.sendMessage(conversationId, "with effort", (event) =>
+      second.push(event),
+    );
+    await waitForTerminal(second);
+    expect(
+      JSON.parse(String(fetchMock.mock.calls[1]?.[1]?.body)),
+    ).toMatchObject({ effort: "xhigh" });
+
+    transport.setEffort(conversationId, null);
+    const third: TurnEvent[] = [];
+    transport.sendMessage(conversationId, "cleared", (event) =>
+      third.push(event),
+    );
+    await waitForTerminal(third);
+    expect(
+      JSON.parse(String(fetchMock.mock.calls[2]?.[1]?.body)),
+    ).not.toHaveProperty("effort");
+  });
+
   it("keeps later replies when the upstream reuses a completion id", async () => {
     const transport = new DirectAssistantTransport({
       fetch: vi.fn(async () => sseResponse(fixture)),
@@ -575,6 +614,7 @@ describe("DirectAssistantTransport identity isolation", () => {
     expect(transport.getSettings()).toEqual({
       model: "gpt-5.5",
       skillSlug: null,
+      effort: null,
     });
     expect(useAssistantDraftStore.getState().drafts).toEqual({});
     await expect(transport.getHistory(conversationId)).rejects.toThrow(

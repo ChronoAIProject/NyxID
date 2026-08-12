@@ -30,6 +30,12 @@ pub struct DirectModelResponse {
     default: bool,
 }
 
+#[derive(Serialize)]
+pub struct DirectEffortResponse {
+    id: &'static str,
+    label: &'static str,
+}
+
 async fn require_direct_chat_enabled(state: &AppState, auth_user: &AuthUser) -> AppResult<()> {
     let enabled =
         feature_flag_service::resolve_personal_features(&state.db, &auth_user.user_id.to_string())
@@ -75,6 +81,22 @@ pub async fn models(
     ))
 }
 
+pub async fn efforts(
+    State(state): State<AppState>,
+    auth_user: AuthUser,
+) -> AppResult<Json<Vec<DirectEffortResponse>>> {
+    require_direct_chat_enabled(&state, &auth_user).await?;
+    Ok(Json(
+        assistant_direct::DIRECT_EFFORTS
+            .iter()
+            .map(|effort| DirectEffortResponse {
+                id: effort.id,
+                label: effort.label,
+            })
+            .collect(),
+    ))
+}
+
 pub async fn completions(
     State(state): State<AppState>,
     auth_user: AuthUser,
@@ -101,6 +123,7 @@ pub async fn completions(
         .clone()
         .unwrap_or_else(|| assistant_direct::DEFAULT_DIRECT_MODEL.to_string());
     let skill_slug = direct_request.skill_slug.clone();
+    let effort = direct_request.effort.clone();
     let upstream_body = assistant_direct::build_upstream_body(direct_request);
     let payload = serde_json::to_vec(&upstream_body).map_err(|_| {
         AppError::Internal("assistant: failed to encode direct chat request".to_string())
@@ -134,6 +157,7 @@ pub async fn completions(
         user_id = %auth_user.user_id,
         model = %model,
         skill_slug = skill_slug.as_deref().unwrap_or("none"),
+        effort = effort.as_deref().unwrap_or("default"),
         message_count,
         content_bytes,
         "assistant_direct_request"
@@ -155,6 +179,7 @@ pub async fn completions(
         user_id = %auth_user.user_id,
         model = %model,
         skill_slug = skill_slug.as_deref().unwrap_or("none"),
+        effort = effort.as_deref().unwrap_or("default"),
         message_count,
         content_bytes,
         status = response.status().as_u16(),
@@ -335,6 +360,10 @@ mod tests {
             models(State(state.clone()), auth_user.clone()).await,
             Err(AppError::NotFound(_))
         ));
+        assert!(matches!(
+            efforts(State(state.clone()), auth_user.clone()).await,
+            Err(AppError::NotFound(_))
+        ));
         let request = Request::builder()
             .method("POST")
             .uri("/api/v1/assistant/direct/completions")
@@ -373,9 +402,20 @@ mod tests {
             .await
             .unwrap()
             .0;
-        let model_rows = models(State(state), auth_user).await.unwrap().0;
+        let model_rows = models(State(state.clone()), auth_user.clone())
+            .await
+            .unwrap()
+            .0;
+        let effort_rows = efforts(State(state), auth_user).await.unwrap().0;
         assert_eq!(skill_rows.len(), assistant_direct::DIRECT_SKILLS.len());
         assert_eq!(model_rows.len(), assistant_direct::DIRECT_MODELS.len());
+        assert_eq!(
+            effort_rows.iter().map(|row| row.id).collect::<Vec<_>>(),
+            assistant_direct::DIRECT_EFFORTS
+                .iter()
+                .map(|row| row.id)
+                .collect::<Vec<_>>()
+        );
         assert_eq!(
             skill_rows.iter().map(|row| row.slug).collect::<Vec<_>>(),
             assistant_direct::DIRECT_SKILLS

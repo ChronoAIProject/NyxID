@@ -6,6 +6,7 @@ import {
   type DirectConversationSettings,
 } from "@/lib/assistant/direct-transport";
 import {
+  directEffortsSchema,
   directModelsSchema,
   directSkillsSchema,
 } from "@/schemas/assistant-direct";
@@ -13,6 +14,7 @@ import {
 const directCatalogKeys = {
   skills: ["assistant", "direct", "skills"] as const,
   models: ["assistant", "direct", "models"] as const,
+  efforts: ["assistant", "direct", "efforts"] as const,
 };
 
 export function useDirectSkills() {
@@ -37,6 +39,17 @@ export function useDirectModels() {
   });
 }
 
+export function useDirectEfforts() {
+  return useQuery({
+    queryKey: directCatalogKeys.efforts,
+    queryFn: async () =>
+      directEffortsSchema.parse(
+        await api.get<unknown>("/assistant/direct/efforts"),
+      ),
+    staleTime: Number.POSITIVE_INFINITY,
+  });
+}
+
 export function useDirectConversationSettings(
   conversationId: string | undefined,
   defaultModel: string | undefined,
@@ -45,6 +58,7 @@ export function useDirectConversationSettings(
   readonly canUpdate: boolean;
   readonly setModel: (model: string) => void;
   readonly setSkill: (skillSlug: string | null) => void;
+  readonly setEffort: (effort: string | null) => void;
 } {
   const [, forceRender] = useReducer((revision: number) => revision + 1, 0);
 
@@ -62,6 +76,10 @@ export function useDirectConversationSettings(
     },
     setSkill: (skillSlug) => {
       directAssistantTransport.setSkill(conversationId, skillSlug);
+      forceRender();
+    },
+    setEffort: (effort) => {
+      directAssistantTransport.setEffort(conversationId, effort);
       forceRender();
     },
   };
