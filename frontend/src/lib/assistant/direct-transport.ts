@@ -581,7 +581,12 @@ export class DirectAssistantTransport implements AssistantTransport {
             message: body.message,
           });
           this.finishDrain(conversationId, run);
-          if (response.status === 401) useAuthStore.getState().setUser(null);
+          // Deliver the terminal event before invalidating identity. The auth
+          // transition aborts and discards active direct runs, so clearing the
+          // session first would swallow this failure from the UI.
+          if (response.status === 401) {
+            queueMicrotask(() => useAuthStore.getState().setUser(null));
+          }
           return;
         }
         this.finishUi(conversationId, run, "failed", {
