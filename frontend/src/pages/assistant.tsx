@@ -746,7 +746,9 @@ export function AssistantPage({
       headerActions={<AssistantHeaderActions />}
     >
       <div className="relative flex h-full min-h-0 flex-col bg-background">
-        {directChatEnabled ? <DirectModeBanner /> : null}
+        {directChatEnabled ? (
+          <DirectModeBanner conversationId={selectedId} />
+        ) : null}
         {/* Projection provenance (`awaitingProjection` / `projectionStalled`)
             deliberately renders NOTHING here. The transcript demonstrably
             materializes on its own — the reconciler projects it into the

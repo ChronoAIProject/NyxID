@@ -133,6 +133,15 @@ macro_rules! assistant_direct_billing_routes {
                     crate::services::billing::BillingIngress::Proxy
                 )
             ),
+            (
+                "/direct/agent",
+                "/api/v1/assistant/direct/agent",
+                "handlers::assistant_direct_agent_poc::agent_completions",
+                post(handlers::assistant_direct_agent_poc::agent_completions),
+                crate::services::billing::route_inventory::BillingRoutePolicy::Metered(
+                    crate::services::billing::BillingIngress::Proxy
+                )
+            ),
         )
     };
 }

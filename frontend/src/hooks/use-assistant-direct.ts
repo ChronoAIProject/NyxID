@@ -1,4 +1,4 @@
-import { useReducer } from "react";
+import { useSyncExternalStore } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { api } from "@/lib/api-client";
 import {
@@ -59,28 +59,31 @@ export function useDirectConversationSettings(
   readonly setModel: (model: string) => void;
   readonly setSkill: (skillSlug: string | null) => void;
   readonly setEffort: (effort: string | null) => void;
+  readonly setAgentPocMode: (enabled: boolean) => void;
 } {
-  const [, forceRender] = useReducer((revision: number) => revision + 1, 0);
-
   if (defaultModel) {
     directAssistantTransport.seedDefaultModel(conversationId, defaultModel);
   }
-  const settings = directAssistantTransport.getSettings(conversationId);
+  const settings = useSyncExternalStore(
+    directAssistantTransport.subscribeSettings,
+    () => directAssistantTransport.getSettings(conversationId),
+    () => directAssistantTransport.getSettings(conversationId),
+  );
 
   return {
     settings,
     canUpdate: directAssistantTransport.canUpdateSettings(conversationId),
     setModel: (model) => {
       directAssistantTransport.setModel(conversationId, model);
-      forceRender();
     },
     setSkill: (skillSlug) => {
       directAssistantTransport.setSkill(conversationId, skillSlug);
-      forceRender();
     },
     setEffort: (effort) => {
       directAssistantTransport.setEffort(conversationId, effort);
-      forceRender();
+    },
+    setAgentPocMode: (enabled) => {
+      directAssistantTransport.setAgentPocMode(conversationId, enabled);
     },
   };
 }

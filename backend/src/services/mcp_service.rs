@@ -1601,7 +1601,7 @@ fn build_generic_proxy_endpoint(service_label: &str) -> McpToolEndpoint {
     }
 }
 
-const GENERIC_PROXY_ENDPOINT_ID: &str = "nyx_generic_proxy_v1";
+pub(crate) const GENERIC_PROXY_ENDPOINT_ID: &str = "nyx_generic_proxy_v1";
 
 fn opaque_operation_id(source_operation_id: Option<&str>, method: &str, path: &str) -> String {
     let canonical = match source_operation_id {
@@ -2153,7 +2153,7 @@ fn sanitize_tool_segment(value: &str) -> String {
 
 /// Build a JSON Schema `inputSchema` from endpoint parameters and body schema.
 /// Ported from the TypeScript `buildInputSchema()` in `mcp-proxy/src/tools.ts`.
-fn build_input_schema(endpoint: &McpToolEndpoint) -> serde_json::Value {
+pub(crate) fn build_input_schema(endpoint: &McpToolEndpoint) -> serde_json::Value {
     let mut properties = serde_json::Map::new();
     let mut required: Vec<serde_json::Value> = Vec::new();
 
@@ -2733,17 +2733,22 @@ pub fn build_mcp_operation_descriptor(
     endpoint: &McpToolEndpoint,
     args: &serde_json::Value,
 ) -> AppResult<operation_descriptor::OperationDescriptor> {
-    let (method, path, _query, _parameter_headers, body) = if service.is_generic_proxy {
-        build_generic_proxy_args(args)?
-    } else {
-        build_proxy_args(endpoint, args)?
-    };
+    let (method, path, _query, _parameter_headers, body) =
+        if is_generic_proxy_dispatch(service, endpoint) {
+            build_generic_proxy_args(args)?
+        } else {
+            build_proxy_args(endpoint, args)?
+        };
 
     Ok(operation_descriptor::build_mcp_descriptor(
         method.as_str(),
         &path,
         body.as_ref().map(|bytes| bytes.as_ref()),
     ))
+}
+
+fn is_generic_proxy_dispatch(service: &McpToolService, endpoint: &McpToolEndpoint) -> bool {
+    service.is_generic_proxy && endpoint.endpoint_id == GENERIC_PROXY_ENDPOINT_ID
 }
 
 fn build_request_body(
@@ -3062,7 +3067,8 @@ pub async fn execute_tool(
     use crate::services::{delegation_service, identity_service, node_service};
 
     // Build proxy arguments: generic proxy tools extract method/path from args
-    let (method, path, query, parameter_headers, body) = if service.is_generic_proxy {
+    let is_generic_proxy_endpoint = is_generic_proxy_dispatch(service, endpoint);
+    let (method, path, query, parameter_headers, body) = if is_generic_proxy_endpoint {
         build_generic_proxy_args(arguments)?
     } else {
         build_proxy_args(endpoint, arguments)?
@@ -3377,7 +3383,7 @@ pub async fn execute_tool(
     };
 
     // Content-Type header
-    let req_headers = if service.is_generic_proxy {
+    let req_headers = if is_generic_proxy_endpoint {
         let mut h = reqwest::header::HeaderMap::new();
         if body.is_some() {
             h.insert(
@@ -4161,6 +4167,42 @@ mod tests {
         assert!(
             matches!(error, AppError::BadRequest(msg) if msg.contains("Unsupported HTTP method: DESTROY"))
         );
+    }
+
+    #[test]
+    fn generic_proxy_dispatch_requires_service_and_endpoint_identity() {
+        let sentinel = build_generic_proxy_endpoint("custom");
+        let mut fixed = make_endpoint("fixed_read", "Fixed read");
+        fixed.path = "/fixed".to_string();
+        let generic_args = serde_json::json!({
+            "method": "PATCH",
+            "path": "v1/arbitrary"
+        });
+
+        let mut generic_service = make_service("svc-g", "Generic", "generic", vec![]);
+        generic_service.is_generic_proxy = true;
+        let ordinary_service = make_service("svc-o", "Ordinary", "ordinary", vec![]);
+
+        assert!(is_generic_proxy_dispatch(&generic_service, &sentinel));
+        assert!(!is_generic_proxy_dispatch(&ordinary_service, &sentinel));
+        assert!(!is_generic_proxy_dispatch(&generic_service, &fixed));
+        assert!(!is_generic_proxy_dispatch(&ordinary_service, &fixed));
+
+        let generic = build_mcp_operation_descriptor(&generic_service, &sentinel, &generic_args)
+            .expect("generic service sentinel accepts generic arguments");
+        assert_eq!(generic.method.as_deref(), Some("PATCH"));
+        assert_eq!(generic.resource.as_deref(), Some("/v1/arbitrary"));
+
+        let typed_sentinel =
+            build_mcp_operation_descriptor(&ordinary_service, &sentinel, &generic_args)
+                .expect_err("a sentinel on a non-generic service remains a typed endpoint");
+        assert!(matches!(typed_sentinel, AppError::BadRequest(_)));
+
+        let typed_fixed =
+            build_mcp_operation_descriptor(&generic_service, &fixed, &serde_json::json!({}))
+                .expect("a fixed descriptor on a generic-only service remains typed");
+        assert_eq!(typed_fixed.method.as_deref(), Some("GET"));
+        assert_eq!(typed_fixed.resource.as_deref(), Some("/fixed"));
     }
 
     #[test]
