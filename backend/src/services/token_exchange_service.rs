@@ -708,14 +708,14 @@ async fn resolve_catalog_resources(
         canonical_resources.push(mcp_resource);
     }
     canonical_resources.sort();
-    let services = if resolved.service_ids.is_empty() {
-        AuthorityBound::All
-    } else {
-        AuthorityBound::Restricted(resolved.service_ids.into_iter().collect())
-    };
+    // The NyxID MCP endpoint is an audience for this server, not a connected
+    // service. An MCP-only resource request is therefore narrowing-neutral,
+    // just like an omitted resource indicator, and must not become `All`.
+    let services = (!resolved.service_ids.is_empty())
+        .then(|| AuthorityBound::Restricted(resolved.service_ids.into_iter().collect()));
     Ok(CatalogResourceScope {
         resources: canonical_resources,
-        services: Some(services),
+        services,
     })
 }
 
@@ -1012,7 +1012,33 @@ mod tests {
             .expect("verify delegated catalog token");
         assert_eq!(claims.resources, Some(Vec::new()));
         assert_eq!(claims.allow_all_services, Some(false));
-        assert_eq!(claims.allowed_service_ids, Some(service_ids));
+        assert_eq!(claims.allowed_service_ids, Some(service_ids.clone()));
+
+        let mcp_resource = oauth_resource_service::mcp_resource_uri(&state.config);
+        let exchanged_mcp = exchange_token_with_authority(
+            &db,
+            &state.config,
+            &state.jwt_keys,
+            client_id,
+            client_secret,
+            &source_token,
+            "urn:ietf:params:oauth:token-type:access_token",
+            Some(catalog_delegation_service::MCP_CATALOG_READ_SCOPE),
+            std::slice::from_ref(&mcp_resource),
+            Some(false),
+            &service_ids,
+            Some(true),
+            &[],
+        )
+        .await
+        .expect("exchange restricted source with MCP-only resource");
+
+        let mcp_claims =
+            jwt::verify_token(&state.jwt_keys, &state.config, &exchanged_mcp.access_token)
+                .expect("verify MCP-only delegated catalog token");
+        assert_eq!(mcp_claims.resources, Some(vec![mcp_resource]));
+        assert_eq!(mcp_claims.allow_all_services, Some(false));
+        assert_eq!(mcp_claims.allowed_service_ids, Some(service_ids));
     }
 
     #[test]
