@@ -3369,6 +3369,10 @@ mod tests {
             broker_capability_enabled: false,
             revocation_webhook_url: None,
             revocation_webhook_secret_encrypted: None,
+            connection_webhook_url: None,
+            connection_webhook_secret_encrypted: None,
+            connection_webhook_key_id: None,
+            connection_webhook_enabled: false,
             created_by: Some(actor_id.clone()),
             created_at: now,
             updated_at: now,
@@ -3595,6 +3599,7 @@ mod tests {
             &Arc::new(NodeWsManager::new(30, 100)),
             &user_id,
             Some(&service.slug),
+            None,
             None,
         )
         .await

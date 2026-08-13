@@ -32,3 +32,48 @@ Closes a structural credential-authorization gap in the proxy, independent of an
 **Deferred, tracked in `docs/PR_A_VERIFICATION.md`:** ciphertext-length vs secret-presence check (N1), private-row escape hatch (N2, by design), `EffectiveActor` constructor exposure for PR-B (N7 — blocks the resource-token exchange route as designed; resolve at PR-B design time), twin-predicate comment (N14).
 
 🤖 Generated with [Claude Code](https://claude.com/claude-code)
+
+## Post-rebase census against `origin/main` (`62add35b`)
+
+Re-verified after rebasing the eight PR commits from the stale `21297220` base. The
+intervening mainline work changed both proxy files substantially, but introduced no new
+read or decrypt of a catalog master credential. The current-tree census is:
+
+- **Six production reads of `DownstreamService.credential_encrypted`:** two are the
+  authorization constructors (`proxy_service.rs:211,242`); three only test ciphertext
+  presence for master-credential/auto-provision eligibility
+  (`proxy_service.rs:252,1957`, `unified_key_service.rs:198`); one is the documented,
+  admin/creator-gated OIDC client-secret endpoint (`handlers/services.rs:2090`). The
+  OIDC endpoint requires `auth_method == "oidc"`, returns the client secret to its
+  authorized administrator, and is not a proxy credential-producing path.
+- **One raw proxy master decrypt:** `AuthorizedMasterCredential::decrypt`
+  (`proxy_service.rs:110`). Its ciphertext field and constructor are private. The only
+  production call chain into it receives an `AuthorizedMasterCredential`; the other raw
+  decrypts in the module are a legacy user's `UserServiceConnection` credential
+  (`proxy_service.rs:125`) and a user-owned `UserApiKey` credential
+  (`proxy_service.rs:2667`), not catalog master credentials.
+- **Four catalog-master plaintext-producing resolver branches, all gated:**
+  server-chosen/admin calls `authorize_master_credential_server_chosen` before decrypt
+  (`proxy_service.rs:751-753`); strict legacy calls `authorize_master_credential`
+  (`:874-881`); lenient legacy does the same (`:1013-1021`); auto-provisioned
+  `UserService` resolution does the same in `finish_resolution` (`:2173-2180`). No
+  branch reads or clones `service.credential_encrypted` outside the gate.
+- **Entry-point convergence:** REST UUID/slug, `_nyxid_via`, direct WebSocket, and node
+  fallback resolve through the strict, lenient, or `finish_resolution` branches
+  (`handlers/proxy.rs:647,708,869,930,1195,1218`). Both LLM gateway paths use
+  `finish_resolution` then strict fallback (`handlers/llm_gateway.rs:292,328,653,726`).
+  MCP user-managed and platform execution uses `finish_resolution` or strict/lenient
+  legacy resolution (`mcp_service.rs:3084,3226,3234`). Assistant and direct-chat use
+  the server-chosen resolver through `execute_admin_proxy`
+  (`handlers/assistant.rs:693`, `handlers/assistant_direct.rs:170`,
+  `handlers/proxy.rs:1626`). Public proxy explicitly forces `auth_method = "none"` and
+  an empty credential (`handlers/public_proxy.rs:145-160`).
+- **Established properties survived:** `master_credential_required` remains exactly
+  `auth_method != "none"` and is shared by validity/auto-provision checks
+  (`proxy_service.rs:144,247,1952`); additive delegation/access-token flags cannot
+  suppress the catalog credential. `EffectiveActor.user_id` and `from_user_id` remain
+  private with no `Default`/`From` constructor (`proxy_service.rs:86-95`). Upstream
+  error logging accepts only service id, status, response size, and request id
+  (`handlers/proxy.rs:117-130`); no response-body preview or `/responses` request-body
+  preview exists in either proxy file. The end-to-end sentinel test remains at
+  `handlers/proxy.rs:7544-7623`.
