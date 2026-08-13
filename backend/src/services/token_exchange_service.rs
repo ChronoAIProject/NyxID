@@ -556,9 +556,9 @@ async fn attenuate_catalog_authority(
     reject_duplicates(requested_resources, "resource")?;
     let source_resources =
         resolve_catalog_resources(db, config, user_id, &source.resources).await?;
-    source_resources
-        .services
-        .ensure_within(&source_services, "source resource service")?;
+    if let Some(resource_services) = &source_resources.services {
+        resource_services.ensure_within(&source_services, "source resource service")?;
+    }
     let requested_resource_scope = if requested_resources.is_empty() {
         source_resources
     } else {
@@ -572,13 +572,18 @@ async fn attenuate_catalog_authority(
         }
         requested
     };
-    if !matches!(requested_resource_scope.services, AuthorityBound::All) {
-        requested_resource_scope
-            .services
-            .ensure_within(&service_ceiling, "resource service")?;
+    if let Some(resource_services) = &requested_resource_scope.services
+        && !matches!(resource_services, AuthorityBound::All)
+    {
+        resource_services.ensure_within(&service_ceiling, "resource service")?;
     }
 
-    let final_services = requested_services.intersection(&requested_resource_scope.services);
+    let final_services = requested_resource_scope
+        .services
+        .as_ref()
+        .map_or(requested_services.clone(), |resource_services| {
+            requested_services.intersection(resource_services)
+        });
     validate_service_bound(db, user_id, &final_services, "effective").await?;
 
     let (allow_all_services, allowed_service_ids) = final_services.into_parts();
@@ -678,7 +683,8 @@ impl AuthorityBound {
 
 struct CatalogResourceScope {
     resources: Vec<String>,
-    services: AuthorityBound,
+    /// `None` means the resource indicator was omitted and contributes no narrowing.
+    services: Option<AuthorityBound>,
 }
 
 async fn resolve_catalog_resources(
@@ -690,7 +696,7 @@ async fn resolve_catalog_resources(
     if resources.is_empty() {
         return Ok(CatalogResourceScope {
             resources: Vec::new(),
-            services: AuthorityBound::All,
+            services: None,
         });
     }
     let resolved =
@@ -709,7 +715,7 @@ async fn resolve_catalog_resources(
     };
     Ok(CatalogResourceScope {
         resources: canonical_resources,
-        services,
+        services: Some(services),
     })
 }
 
@@ -808,10 +814,10 @@ async fn validate_refresh_catalog_authority(
     validate_node_bound(db, user_id, &nodes).await?;
     let resource_scope =
         resolve_catalog_resources(db, config, user_id, &authority.resources).await?;
-    if !matches!(resource_scope.services, AuthorityBound::All) {
-        resource_scope
-            .services
-            .ensure_within(&services, "resource service")?;
+    if let Some(resource_services) = &resource_scope.services
+        && !matches!(resource_services, AuthorityBound::All)
+    {
+        resource_services.ensure_within(&services, "resource service")?;
     }
     Ok(())
 }
@@ -892,6 +898,121 @@ mod tests {
                 .expect("explicit empty request"),
             restricted(&[])
         );
+    }
+
+    #[tokio::test]
+    async fn catalog_exchange_without_resources_preserves_restricted_source_services() {
+        let Some(db) =
+            crate::test_utils::connect_test_database("token_exchange_catalog_no_resources").await
+        else {
+            return;
+        };
+        let state = crate::test_utils::test_app_state(db.clone());
+        let user_id = Uuid::new_v4();
+        let client_id = "catalog-resource-neutral-client";
+        let client_secret = "secret";
+        let service_id = Uuid::new_v4().to_string();
+        let service_ids = vec![service_id.clone()];
+        let now = Utc::now();
+
+        db.collection::<User>(USERS)
+            .insert_one(crate::test_utils::test_user(
+                &user_id.to_string(),
+                crate::models::user::UserType::Person,
+            ))
+            .await
+            .expect("insert user");
+        db.collection::<OauthClient>(OAUTH_CLIENTS)
+            .insert_one(OauthClient {
+                id: client_id.to_string(),
+                client_name: "Catalog resource-neutral client".to_string(),
+                client_secret_hash: crate::crypto::token::hash_token(client_secret),
+                redirect_uris: vec!["https://example.com/callback".to_string()],
+                allowed_scopes: "openid".to_string(),
+                scope_provenance: Default::default(),
+                grant_types: "authorization_code refresh_token".to_string(),
+                client_type: "confidential".to_string(),
+                is_active: true,
+                delegation_scopes: catalog_delegation_service::MCP_CATALOG_READ_SCOPE.to_string(),
+                default_service_catalog_slugs: Vec::new(),
+                broker_capability_enabled: false,
+                revocation_webhook_url: None,
+                revocation_webhook_secret_encrypted: None,
+                connection_webhook_url: None,
+                connection_webhook_secret_encrypted: None,
+                connection_webhook_key_id: None,
+                connection_webhook_enabled: false,
+                created_by: None,
+                created_at: now,
+                updated_at: now,
+            })
+            .await
+            .expect("insert OAuth client");
+        db.collection::<crate::models::user_service::UserService>(
+            crate::models::user_service::COLLECTION_NAME,
+        )
+        .insert_one(crate::test_utils::test_user_service(
+            &service_id,
+            &user_id.to_string(),
+            "restricted-service",
+            &Uuid::new_v4().to_string(),
+            None,
+            None,
+        ))
+        .await
+        .expect("insert user service");
+        consent_service::grant_consent_with_services(
+            &db,
+            &user_id.to_string(),
+            client_id,
+            "openid",
+            Some(service_ids.clone()),
+        )
+        .await
+        .expect("grant restricted consent");
+
+        let source_token = jwt::generate_oauth_access_token(
+            &state.jwt_keys,
+            &state.config,
+            &user_id,
+            "openid",
+            None,
+            None,
+            None,
+            None,
+            Some(jwt::AccessTokenRestrictions {
+                resources: &[],
+                allowed_service_ids: &service_ids,
+                allowed_node_ids: &[],
+                allow_all_nodes: true,
+            }),
+            client_id,
+        )
+        .expect("generate restricted source token");
+
+        let exchanged = exchange_token_with_authority(
+            &db,
+            &state.config,
+            &state.jwt_keys,
+            client_id,
+            client_secret,
+            &source_token,
+            "urn:ietf:params:oauth:token-type:access_token",
+            Some(catalog_delegation_service::MCP_CATALOG_READ_SCOPE),
+            &[],
+            Some(false),
+            &service_ids,
+            Some(true),
+            &[],
+        )
+        .await
+        .expect("exchange restricted source without resource narrowing");
+
+        let claims = jwt::verify_token(&state.jwt_keys, &state.config, &exchanged.access_token)
+            .expect("verify delegated catalog token");
+        assert_eq!(claims.resources, Some(Vec::new()));
+        assert_eq!(claims.allow_all_services, Some(false));
+        assert_eq!(claims.allowed_service_ids, Some(service_ids));
     }
 
     #[test]
