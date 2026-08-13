@@ -117,7 +117,6 @@ fn proxy_client_disconnected(service_id: &str) -> AppError {
 fn log_upstream_error(
     service_id: &str,
     status: StatusCode,
-    _response_body: &[u8],
     response_size: usize,
     upstream_request_id: &str,
 ) {
@@ -3446,7 +3445,6 @@ async fn execute_proxy_inner(
             log_upstream_error(
                 service_id,
                 status,
-                &response_body,
                 response_body.len(),
                 &upstream_request_id,
             );
@@ -5223,8 +5221,8 @@ mod tests {
         apply_agent_attribution_headers, auth_kind_label, caller_bearer_token_for_downstream,
         collect_ws_forward_headers, compose_pre_resolved_node_ids, enforce_node_route_scope,
         final_credential_class, is_chat_completions_proxy_path, is_codex_transport_path,
-        is_ws_upgrade_request, log_upstream_error, should_enforce_runtime_approval,
-        single_system_header, strip_durable_idempotency_defaults, validate_range_header,
+        is_ws_upgrade_request, should_enforce_runtime_approval, single_system_header,
+        strip_durable_idempotency_defaults, validate_range_header,
         websocket_realtime_usage_enabled, websocket_resale_usage,
     };
     use crate::models::service_billing::{BillingMetric, ServiceBilling};
@@ -5244,60 +5242,11 @@ mod tests {
         routing::get,
     };
     use futures::{SinkExt, StreamExt};
-    use std::io;
-    use std::sync::Mutex;
     use std::sync::{
         Arc,
         atomic::{AtomicUsize, Ordering},
     };
     use tower::ServiceExt;
-
-    #[derive(Clone)]
-    struct TraceCapture(Arc<Mutex<Vec<u8>>>);
-
-    impl io::Write for TraceCapture {
-        fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
-            self.0
-                .lock()
-                .expect("trace capture lock")
-                .extend_from_slice(bytes);
-            Ok(bytes.len())
-        }
-
-        fn flush(&mut self) -> io::Result<()> {
-            Ok(())
-        }
-    }
-
-    #[test]
-    fn upstream_error_log_excludes_response_body() {
-        let captured = Arc::new(Mutex::new(Vec::new()));
-        let writer = {
-            let captured = captured.clone();
-            move || TraceCapture(captured.clone())
-        };
-        let subscriber = tracing_subscriber::fmt()
-            .with_ansi(false)
-            .with_writer(writer)
-            .finish();
-
-        tracing::subscriber::with_default(subscriber, || {
-            log_upstream_error(
-                "duffel",
-                StatusCode::BAD_GATEWAY,
-                b"SENTINEL_UPSTREAM_BODY",
-                37,
-                "upstream-123",
-            );
-        });
-
-        let output = String::from_utf8(captured.lock().expect("trace capture lock").clone())
-            .expect("trace output is utf8");
-        assert!(output.contains("status=502"));
-        assert!(output.contains("response_size=37"));
-        assert!(output.contains("upstream-123"));
-        assert!(!output.contains("SENTINEL_UPSTREAM_BODY"));
-    }
 
     // ---- validate_range_header tests ----
 
@@ -7484,7 +7433,10 @@ mod tests {
 
 #[cfg(test)]
 mod proxy_resolution_integration_tests {
-    use super::{enforce_node_route_scope, proxy_request_by_slug_inner, proxy_request_inner};
+    use super::{
+        enforce_node_route_scope, execute_admin_proxy, proxy_request_by_slug_inner,
+        proxy_request_inner,
+    };
     use crate::AppState;
     use crate::crypto::token::hash_token;
     use crate::errors::AppError;
@@ -7523,6 +7475,8 @@ mod proxy_resolution_integration_tests {
     use futures::{SinkExt, StreamExt};
     use mongodb::bson::doc;
     use nyxid_node_proxy_test::{NodeMetrics as AgentNodeMetrics, ReplayGuard};
+    use std::io;
+    use std::sync::{Arc, Mutex};
     use tokio::net::TcpListener;
     use tokio::sync::mpsc;
 
@@ -7568,6 +7522,105 @@ mod proxy_resolution_integration_tests {
     }
     use tower::ServiceExt;
     use uuid::Uuid;
+
+    #[derive(Clone)]
+    struct TraceCapture(Arc<Mutex<Vec<u8>>>);
+
+    impl io::Write for TraceCapture {
+        fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+            self.0
+                .lock()
+                .expect("trace capture lock")
+                .extend_from_slice(bytes);
+            Ok(bytes.len())
+        }
+
+        fn flush(&mut self) -> io::Result<()> {
+            Ok(())
+        }
+    }
+
+    #[tokio::test]
+    async fn upstream_error_body_is_redacted_end_to_end() {
+        let Some(db) = connect_test_database("proxy_upstream_error_redaction").await else {
+            panic!("MongoDB is required for upstream redaction test");
+        };
+        let app = Router::new().route(
+            "/{*path}",
+            any(|| async {
+                (
+                    StatusCode::UNPROCESSABLE_ENTITY,
+                    [("x-request-id", "upstream-redaction-1")],
+                    "SENTINEL_PASSENGER_NAME",
+                )
+            }),
+        );
+        let listener = TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind redaction server");
+        let addr = listener.local_addr().expect("redaction server addr");
+        let server = tokio::spawn(async move {
+            axum::serve(listener, app)
+                .await
+                .expect("serve redaction server");
+        });
+
+        let user_id = Uuid::new_v4().to_string();
+        db.collection::<crate::models::user::User>(USERS)
+            .insert_one(test_user(&user_id, UserType::Person))
+            .await
+            .expect("insert redaction test user");
+        let encryption_keys = crate::test_utils::test_encryption_keys();
+        let mut service = crate::models::downstream_service::test_helpers::dummy_service();
+        service.id = Uuid::new_v4().to_string();
+        service.slug = "redaction-test".to_string();
+        service.base_url = format!("http://{addr}");
+        service.service_category = "internal".to_string();
+        service.auth_method = "bearer".to_string();
+        service.credential_encrypted = encryption_keys
+            .encrypt(b"test-master-credential")
+            .await
+            .expect("encrypt test credential");
+        db.collection::<crate::models::downstream_service::DownstreamService>(
+            crate::models::downstream_service::COLLECTION_NAME,
+        )
+        .insert_one(&service)
+        .await
+        .expect("insert redaction test service");
+
+        let state = test_app_state(db);
+        let capture = Arc::new(Mutex::new(Vec::new()));
+        let writer = {
+            let capture = capture.clone();
+            move || TraceCapture(capture.clone())
+        };
+        let subscriber = tracing_subscriber::fmt()
+            .with_ansi(false)
+            .with_writer(writer)
+            .finish();
+        let auth = access_token_auth(&user_id);
+        let mut resolved_slug = String::new();
+        let default_guard = tracing::subscriber::set_default(subscriber);
+        let response = execute_admin_proxy(
+            &state,
+            &auth,
+            &service.id,
+            "error",
+            proxy_request("/assistant/error"),
+            Vec::new(),
+            &mut resolved_slug,
+        )
+        .await
+        .expect("upstream response should be returned");
+        drop(default_guard);
+        assert_eq!(response.status(), StatusCode::UNPROCESSABLE_ENTITY);
+        let output = String::from_utf8(capture.lock().expect("trace capture lock").clone())
+            .expect("trace output is utf8");
+        assert!(output.contains("upstream-redaction-1"));
+        assert!(output.contains("response_size"));
+        assert!(!output.contains("SENTINEL_PASSENGER_NAME"));
+        server.abort();
+    }
 
     async fn downstream_ok(uri: Uri) -> (StatusCode, String) {
         (StatusCode::OK, format!("ok:{}", uri.path()))

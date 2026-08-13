@@ -84,7 +84,15 @@ pub struct ProxyTarget {
 /// surfaces use `authorize_master_credential_server_chosen` instead.
 #[derive(Clone, Debug)]
 pub struct EffectiveActor {
-    pub user_id: String,
+    user_id: String,
+}
+
+impl EffectiveActor {
+    fn from_user_id(user_id: impl Into<String>) -> Self {
+        Self {
+            user_id: user_id.into(),
+        }
+    }
 }
 
 /// Encrypted bytes for a catalog-owned platform credential. The private
@@ -95,13 +103,48 @@ impl AuthorizedMasterCredential {
     fn new(ciphertext: &[u8]) -> Self {
         Self(ciphertext.to_vec())
     }
+
+    /// Decrypt a catalog credential only after the authorization wrapper has
+    /// been constructed by one of the gate functions.
+    pub async fn decrypt(&self, encryption_keys: &EncryptionKeys) -> AppResult<Vec<u8>> {
+        encryption_keys.decrypt(&self.0).await
+    }
 }
 
 async fn decrypt_authorized_master_credential(
     encryption_keys: &EncryptionKeys,
     credential: &AuthorizedMasterCredential,
 ) -> AppResult<Vec<u8>> {
-    encryption_keys.decrypt(&credential.0).await
+    credential.decrypt(encryption_keys).await
+}
+
+async fn decrypt_user_credential(
+    encryption_keys: &EncryptionKeys,
+    encrypted: &[u8],
+) -> AppResult<String> {
+    let decrypted_bytes = Zeroizing::new(encryption_keys.decrypt(encrypted).await?);
+    String::from_utf8((*decrypted_bytes).clone()).map_err(|e| {
+        tracing::error!("Credential UTF-8 decode failed: {e}");
+        AppError::Internal("Failed to decode credential".to_string())
+    })
+}
+
+async fn decrypt_master_credential_string(
+    encryption_keys: &EncryptionKeys,
+    credential: &AuthorizedMasterCredential,
+) -> AppResult<String> {
+    let decrypted_bytes =
+        Zeroizing::new(decrypt_authorized_master_credential(encryption_keys, credential).await?);
+    String::from_utf8((*decrypted_bytes).clone()).map_err(|e| {
+        tracing::error!("Credential UTF-8 decode failed: {e}");
+        AppError::Internal("Failed to decode credential".to_string())
+    })
+}
+
+fn master_credential_required(service: &DownstreamService) -> bool {
+    service.auth_method != "none"
+        && !service.inject_delegation_token
+        && !service.forward_access_token
 }
 
 /// Authorize and wrap a catalog master credential before decryption.
@@ -111,6 +154,12 @@ pub async fn authorize_master_credential(
     actor: &EffectiveActor,
 ) -> AppResult<AuthorizedMasterCredential> {
     if !is_valid_master_credential_service(service) {
+        tracing::warn!(
+            service_id = %service.id,
+            service_slug = %service.slug,
+            reason = "invalid_master_credential_service",
+            "Catalog master credential authorization denied"
+        );
         return Err(AppError::NotFound("Service not found".to_string()));
     }
 
@@ -122,6 +171,12 @@ pub async fn authorize_master_credential(
                 .as_ref()
                 .filter(|ids| !ids.is_empty())
             else {
+                tracing::warn!(
+                    service_id = %service.id,
+                    service_slug = %service.slug,
+                    reason = "private_service_missing_developer_app_ids",
+                    "Catalog master credential authorization denied"
+                );
                 return Err(AppError::NotFound("Service not found".to_string()));
             };
             let app_refs: Vec<&str> = app_ids.iter().map(String::as_str).collect();
@@ -132,10 +187,24 @@ pub async fn authorize_master_credential(
             )
             .await?;
             if !app_ids.iter().any(|id| consented.contains(id.as_str())) {
+                tracing::warn!(
+                    service_id = %service.id,
+                    service_slug = %service.slug,
+                    reason = "missing_valid_developer_app_consent",
+                    "Catalog master credential authorization denied"
+                );
                 return Err(AppError::NotFound("Service not found".to_string()));
             }
         }
-        _ => return Err(AppError::NotFound("Service not found".to_string())),
+        _ => {
+            tracing::warn!(
+                service_id = %service.id,
+                service_slug = %service.slug,
+                reason = "unknown_visibility",
+                "Catalog master credential authorization denied"
+            );
+            return Err(AppError::NotFound("Service not found".to_string()));
+        }
     }
 
     Ok(AuthorizedMasterCredential::new(
@@ -149,7 +218,24 @@ pub async fn authorize_master_credential_server_chosen(
     _db: &mongodb::Database,
     service: &DownstreamService,
 ) -> AppResult<AuthorizedMasterCredential> {
+    if !master_credential_required(service) {
+        tracing::error!(
+            service_id = %service.id,
+            service_slug = %service.slug,
+            reason = "master_credential_not_required",
+            "Server-chosen catalog credential gate reached for a non-credentialed service"
+        );
+        return Err(AppError::Internal(
+            "platform service does not require a master credential".to_string(),
+        ));
+    }
     if service.visibility != "public" || !is_valid_master_credential_service(service) {
+        tracing::error!(
+            service_id = %service.id,
+            service_slug = %service.slug,
+            reason = "invalid_server_chosen_master_credential_service",
+            "Server-chosen catalog master credential authorization denied"
+        );
         return Err(AppError::NotFound("Service not found".to_string()));
     }
     Ok(AuthorizedMasterCredential::new(
@@ -158,7 +244,8 @@ pub async fn authorize_master_credential_server_chosen(
 }
 
 fn is_valid_master_credential_service(service: &DownstreamService) -> bool {
-    service.is_active
+    master_credential_required(service)
+        && service.is_active
         && service.service_type == "http"
         && service.service_category == "internal"
         && !service.requires_user_credential
@@ -773,44 +860,28 @@ pub async fn resolve_proxy_target(
     }
 
     // Determine which credential to use
-    let authorized_master = if service.requires_user_credential {
-        None
-    } else {
-        Some(
-            authorize_master_credential(
-                db,
-                &service,
-                &EffectiveActor {
-                    user_id: user_id.to_string(),
-                },
-            )
-            .await?,
+    let credential = if service.requires_user_credential {
+        let credential_encrypted =
+            user_conn
+                .and_then(|c| c.credential_encrypted)
+                .ok_or_else(|| {
+                    AppError::BadRequest(
+                        "Connection is missing credential. Please reconnect with your API key."
+                            .to_string(),
+                    )
+                })?;
+        decrypt_user_credential(encryption_keys, &credential_encrypted).await?
+    } else if master_credential_required(&service) {
+        let authorized = authorize_master_credential(
+            db,
+            &service,
+            &EffectiveActor::from_user_id(user_id.to_string()),
         )
-    };
-    let credential_encrypted = if service.requires_user_credential {
-        // Connection services: must have per-user credential
-        user_conn
-            .and_then(|c| c.credential_encrypted)
-            .ok_or_else(|| {
-                AppError::BadRequest(
-                    "Connection is missing credential. Please reconnect with your API key."
-                        .to_string(),
-                )
-            })?
+        .await?;
+        decrypt_master_credential_string(encryption_keys, &authorized).await?
     } else {
-        Vec::new()
+        String::new()
     };
-
-    // SEC-M3: Wrap raw decrypted bytes in Zeroizing so they are zeroed on drop
-    let decrypted_bytes = Zeroizing::new(if let Some(authorized) = authorized_master {
-        decrypt_authorized_master_credential(encryption_keys, &authorized).await?
-    } else {
-        encryption_keys.decrypt(&credential_encrypted).await?
-    });
-    let credential = String::from_utf8((*decrypted_bytes).clone()).map_err(|e| {
-        tracing::error!("Credential UTF-8 decode failed: {e}");
-        AppError::Internal("Failed to decode credential".to_string())
-    })?;
 
     let base_url = resolve_gateway_url_override(db, user_id, &service)
         .await?
@@ -931,50 +1002,27 @@ pub async fn resolve_proxy_target_lenient(
         ));
     }
 
-    let authorized_master = if service.requires_user_credential {
-        None
-    } else {
-        Some(
-            authorize_master_credential(
-                db,
-                &service,
-                &EffectiveActor {
-                    user_id: user_id.to_string(),
-                },
-            )
-            .await?,
+    let (credential, has_credential) = if service.requires_user_credential {
+        match user_conn.and_then(|c| c.credential_encrypted) {
+            Some(encrypted) => (
+                decrypt_user_credential(encryption_keys, &encrypted).await?,
+                true,
+            ),
+            None => (String::new(), false),
+        }
+    } else if master_credential_required(&service) {
+        let authorized = authorize_master_credential(
+            db,
+            &service,
+            &EffectiveActor::from_user_id(user_id.to_string()),
         )
-    };
-    let credential_encrypted = if service.requires_user_credential {
-        user_conn.and_then(|c| c.credential_encrypted)
+        .await?;
+        (
+            decrypt_master_credential_string(encryption_keys, &authorized).await?,
+            true,
+        )
     } else {
-        None
-    };
-
-    let (credential, has_credential) = match credential_encrypted {
-        Some(enc) => {
-            let decrypted_bytes = Zeroizing::new(encryption_keys.decrypt(&enc).await?);
-            let cred = String::from_utf8((*decrypted_bytes).clone()).map_err(|e| {
-                tracing::error!("Credential UTF-8 decode failed: {e}");
-                AppError::Internal("Failed to decode credential".to_string())
-            })?;
-            (cred, true)
-        }
-        None if authorized_master.is_some() => {
-            let decrypted_bytes = Zeroizing::new(
-                decrypt_authorized_master_credential(
-                    encryption_keys,
-                    authorized_master.as_ref().expect("checked above"),
-                )
-                .await?,
-            );
-            let cred = String::from_utf8((*decrypted_bytes).clone()).map_err(|e| {
-                tracing::error!("Credential UTF-8 decode failed: {e}");
-                AppError::Internal("Failed to decode credential".to_string())
-            })?;
-            (cred, true)
-        }
-        None => (String::new(), false),
+        (String::new(), false)
     };
 
     let base_url = resolve_gateway_url_override(db, user_id, &service)
@@ -2125,9 +2173,7 @@ async fn finish_resolution(
         let authorized = authorize_master_credential(
             db,
             &catalog_service,
-            &EffectiveActor {
-                user_id: effective_owner_id.to_string(),
-            },
+            &EffectiveActor::from_user_id(effective_owner_id),
         )
         .await?;
         let decrypted_bytes = Zeroizing::new(
@@ -3144,32 +3190,6 @@ pub(crate) async fn forward_request_with_extra_outbound_headers(
     // non-overridable service defaults correctly replace them when names
     // collide. Do NOT re-apply them here — that would double-emit.
 
-    if let ProxyBody::Buffered(Some(ref body_bytes)) = body {
-        // Log request body for LLM proxy calls to diagnose truncation issues
-        if url.contains("/responses") {
-            let body_str = String::from_utf8_lossy(body_bytes);
-            let preview = if body_str.len() > 2048 {
-                let mut end = 2048;
-                while end > 0 && !body_str.is_char_boundary(end) {
-                    end -= 1;
-                }
-                format!(
-                    "{}...(truncated, total {} bytes)",
-                    &body_str[..end],
-                    body_str.len()
-                )
-            } else {
-                body_str.to_string()
-            };
-            tracing::info!(
-                url = %url,
-                body_len = body_bytes.len(),
-                body = %preview,
-                "Proxy LLM request body"
-            );
-        }
-    }
-
     match body {
         ProxyBody::Buffered(Some(body_bytes)) => {
             request = request.body(body_bytes);
@@ -3301,6 +3321,7 @@ mod tests {
         let mut service = dummy_service();
         service.visibility = "private".to_string();
         service.service_category = "internal".to_string();
+        service.auth_method = "bearer".to_string();
         service.requires_user_credential = false;
         service.credential_encrypted = vec![1, 2, 3];
         assert!(
@@ -3322,6 +3343,148 @@ mod tests {
                 .await
                 .is_err()
         );
+    }
+
+    #[tokio::test]
+    async fn master_credential_authorization_covers_visibility_and_consent() {
+        let Some(db) = connect_test_database("proxy_master_credential_authorization").await else {
+            panic!("MongoDB is required for master credential authorization tests");
+        };
+
+        let actor_id = uuid::Uuid::new_v4().to_string();
+        let app_id = uuid::Uuid::new_v4().to_string();
+        let now = chrono::Utc::now();
+        let oauth_client = crate::models::oauth_client::OauthClient {
+            id: app_id.clone(),
+            client_name: "master credential test app".to_string(),
+            client_secret_hash: "hash".to_string(),
+            redirect_uris: vec!["https://example.test/callback".to_string()],
+            allowed_scopes: "openid".to_string(),
+            scope_provenance: Default::default(),
+            grant_types: "authorization_code".to_string(),
+            client_type: "confidential".to_string(),
+            is_active: true,
+            delegation_scopes: String::new(),
+            default_service_catalog_slugs: Vec::new(),
+            broker_capability_enabled: false,
+            revocation_webhook_url: None,
+            revocation_webhook_secret_encrypted: None,
+            created_by: Some(actor_id.clone()),
+            created_at: now,
+            updated_at: now,
+        };
+        db.collection::<crate::models::oauth_client::OauthClient>(
+            crate::models::oauth_client::COLLECTION_NAME,
+        )
+        .insert_one(&oauth_client)
+        .await
+        .expect("insert active OAuth client");
+
+        let mut service = dummy_service();
+        service.service_category = "internal".to_string();
+        service.auth_method = "bearer".to_string();
+        service.credential_encrypted = vec![1, 2, 3];
+        let actor = EffectiveActor::from_user_id(actor_id.clone());
+
+        assert!(
+            authorize_master_credential(&db, &service, &actor)
+                .await
+                .is_ok(),
+            "public credentialed row should be allowed"
+        );
+
+        service.visibility = "private".to_string();
+        service.developer_app_ids = Some(vec![app_id.clone()]);
+        assert!(
+            authorize_master_credential(&db, &service, &actor)
+                .await
+                .is_err(),
+            "private row without consent must be denied"
+        );
+
+        let consent = crate::models::consent::Consent {
+            id: uuid::Uuid::new_v4().to_string(),
+            user_id: actor_id.clone(),
+            client_id: app_id.clone(),
+            scopes: "openid".to_string(),
+            allow_all_services: true,
+            allowed_service_ids: None,
+            granted_at: now,
+            expires_at: None,
+        };
+        db.collection::<crate::models::consent::Consent>(crate::models::consent::COLLECTION_NAME)
+            .insert_one(&consent)
+            .await
+            .expect("insert valid consent");
+        assert!(
+            authorize_master_credential(&db, &service, &actor)
+                .await
+                .is_ok(),
+            "private row with valid consent should be allowed"
+        );
+
+        db.collection::<crate::models::consent::Consent>(crate::models::consent::COLLECTION_NAME)
+            .update_one(
+                doc! { "_id": &consent.id },
+                doc! { "$set": { "expires_at": bson::DateTime::from_chrono(now - chrono::Duration::minutes(1)) } },
+            )
+            .await
+            .expect("expire consent");
+        assert!(
+            authorize_master_credential(&db, &service, &actor)
+                .await
+                .is_err(),
+            "expired consent must be denied"
+        );
+
+        db.collection::<crate::models::consent::Consent>(crate::models::consent::COLLECTION_NAME)
+            .delete_one(doc! { "_id": &consent.id })
+            .await
+            .expect("revoke consent");
+        assert!(
+            authorize_master_credential(&db, &service, &actor)
+                .await
+                .is_err(),
+            "revoked consent must be denied"
+        );
+
+        service.developer_app_ids = None;
+        assert!(
+            authorize_master_credential(&db, &service, &actor)
+                .await
+                .is_err(),
+            "private row without app ids must be denied"
+        );
+        service.developer_app_ids = Some(Vec::new());
+        assert!(
+            authorize_master_credential(&db, &service, &actor)
+                .await
+                .is_err(),
+            "private row with empty app ids must be denied"
+        );
+    }
+
+    #[tokio::test]
+    async fn assistant_shaped_server_target_without_credential_resolves() {
+        let Some(db) = connect_test_database("proxy_assistant_no_master_credential").await else {
+            panic!("MongoDB is required for assistant target regression test");
+        };
+        let mut service = dummy_service();
+        service.service_category = "internal".to_string();
+        service.auth_method = "none".to_string();
+        service.visibility = "private".to_string();
+        service.inject_delegation_token = true;
+        service.credential_encrypted = Vec::new();
+
+        db.collection::<DownstreamService>(DOWNSTREAM_SERVICES)
+            .insert_one(&service)
+            .await
+            .expect("insert assistant-shaped service");
+        let target = resolve_admin_proxy_target(&db, &test_encryption_keys(), &service.id)
+            .await
+            .expect("delegation-only assistant row should resolve");
+        assert!(target.credential.is_empty());
+        assert!(target.service.inject_delegation_token);
     }
 
     #[allow(clippy::too_many_arguments)]
