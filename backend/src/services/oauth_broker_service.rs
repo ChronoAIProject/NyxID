@@ -883,6 +883,8 @@ async fn mint_broker_access_token(
         (!refresh_token_doc.allow_all_services).then_some(jwt::AccessTokenRestrictions {
             resources: &refresh_token_doc.resource_uris,
             allowed_service_ids: &refresh_token_doc.allowed_service_ids,
+            allowed_node_ids: &[],
+            allow_all_nodes: true,
         }),
     )
 }

@@ -1,4 +1,6 @@
+use chrono::Utc;
 use mongodb::bson::doc;
+use std::collections::{BTreeSet, HashSet};
 use uuid::Uuid;
 
 use crate::config::AppConfig;
@@ -7,7 +9,11 @@ use crate::errors::{AppError, AppResult};
 use crate::models::oauth_client::{COLLECTION_NAME as OAUTH_CLIENTS, OauthClient};
 use crate::models::user::{COLLECTION_NAME as USERS, User};
 use crate::mw::auth::ACCOUNT_READ_SCOPE;
-use crate::services::{audit_service, consent_service, oauth_service};
+use crate::services::{
+    api_key_scope_service::{self, ScopeAuthorization},
+    audit_service, catalog_delegation_service, consent_service, oauth_resource_service,
+    oauth_service,
+};
 
 /// Result of a successful token exchange.
 pub struct TokenExchangeResponse {
@@ -27,6 +33,7 @@ pub struct TokenExchangeResponse {
 /// 3. Verify the user has consented to this client
 /// 4. Issue a constrained delegated access token
 #[allow(clippy::too_many_arguments)]
+#[cfg(test)]
 pub async fn exchange_token(
     db: &mongodb::Database,
     config: &AppConfig,
@@ -36,6 +43,39 @@ pub async fn exchange_token(
     subject_token: &str,
     subject_token_type: &str,
     requested_scope: Option<&str>,
+) -> AppResult<TokenExchangeResponse> {
+    exchange_token_with_authority(
+        db,
+        config,
+        jwt_keys,
+        client_id,
+        client_secret,
+        subject_token,
+        subject_token_type,
+        requested_scope,
+        &[],
+        None,
+        &[],
+        None,
+        &[],
+    )
+    .await
+}
+
+pub async fn exchange_token_with_authority(
+    db: &mongodb::Database,
+    config: &AppConfig,
+    jwt_keys: &JwtKeys,
+    client_id: &str,
+    client_secret: &str,
+    subject_token: &str,
+    subject_token_type: &str,
+    requested_scope: Option<&str>,
+    requested_resources: &[String],
+    requested_allow_all_services: Option<bool>,
+    requested_service_ids: &[String],
+    requested_allow_all_nodes: Option<bool>,
+    requested_node_ids: &[String],
 ) -> AppResult<TokenExchangeResponse> {
     // Step 1: Authenticate the requesting client
     let client = oauth_service::authenticate_client(db, client_id, Some(client_secret)).await?;
@@ -110,16 +150,90 @@ pub async fn exchange_token(
     // Step 6: Issue delegated access token (short-lived: 5 minutes)
     let user_uuid = Uuid::parse_str(user_id_str)
         .map_err(|e| AppError::Internal(format!("Invalid user_id in subject token: {e}")))?;
-    let restrictions = jwt::TokenRestrictionClaims::from_claims(&subject_claims);
-    let delegated_token = jwt::generate_delegated_access_token(
-        jwt_keys,
-        config,
-        &user_uuid,
-        &scope,
-        client_id,
-        DELEGATED_TOKEN_TTL_SECS,
-        Some(&restrictions),
-    )?;
+    let catalog_scope = catalog_delegation_service::scope_has_catalog_read(&scope);
+    let actor_client_id = subject_claims
+        .client_id
+        .as_deref()
+        .filter(|id| !id.is_empty());
+    if catalog_scope && actor_client_id.is_none() {
+        log_exchange_failure(
+            db,
+            Some(user_id_str),
+            client_id,
+            "catalog_source_client_missing",
+        );
+        return Err(AppError::Forbidden(
+            "Catalog delegation requires a client-bound subject token".to_string(),
+        ));
+    }
+    let (restrictions, authority) = if catalog_scope {
+        catalog_delegation_service::ensure_client_can_delegate_catalog(
+            db,
+            actor_client_id.expect("catalog source client checked above"),
+        )
+        .await?;
+        let authority = attenuate_catalog_authority(
+            db,
+            config,
+            user_id_str,
+            &subject_claims,
+            actor_client_id.expect("catalog source client checked above"),
+            client_id,
+            requested_resources,
+            requested_allow_all_services,
+            requested_service_ids,
+            requested_allow_all_nodes,
+            requested_node_ids,
+        )
+        .await?;
+        (authority.restriction_claims(), Some(authority))
+    } else {
+        let mut restrictions = jwt::TokenRestrictionClaims::from_claims(&subject_claims);
+        // Newly issued ordinary delegated tokens always carry their node
+        // posture explicitly. Missing source claims retain the legacy
+        // allow-all behavior, but that compatibility default is materialized
+        // in the new token rather than inferred again by its consumer.
+        restrictions.allowed_node_ids.get_or_insert_with(Vec::new);
+        restrictions.allow_all_nodes.get_or_insert(true);
+        (restrictions, None)
+    };
+    let (delegated_token, jti) = if catalog_scope {
+        jwt::generate_delegated_access_token_for_client(
+            jwt_keys,
+            config,
+            &user_uuid,
+            &scope,
+            actor_client_id.expect("catalog source client checked above"),
+            Some(client_id),
+            DELEGATED_TOKEN_TTL_SECS,
+            Some(&restrictions),
+        )?
+    } else {
+        let token = jwt::generate_delegated_access_token(
+            jwt_keys,
+            config,
+            &user_uuid,
+            &scope,
+            client_id,
+            DELEGATED_TOKEN_TTL_SECS,
+            Some(&restrictions),
+        )?;
+        (token, String::new())
+    };
+
+    if let Some(authority) = authority {
+        catalog_delegation_service::persist_grant(
+            db,
+            &jti,
+            user_id_str,
+            actor_client_id.unwrap_or(client_id),
+            client_id,
+            &scope,
+            &authority,
+            Utc::now().timestamp() + DELEGATED_TOKEN_TTL_SECS,
+        )
+        .await?;
+    }
 
     Ok(TokenExchangeResponse {
         access_token: delegated_token,
@@ -154,6 +268,7 @@ pub async fn refresh_delegation_token(
     jwt_keys: &JwtKeys,
     user_id: &str,
     acting_client_id: &str,
+    receiving_client_id: Option<&str>,
     scope: &str,
     restrictions: &jwt::TokenRestrictionClaims,
 ) -> AppResult<DelegationRefreshResponse> {
@@ -183,7 +298,7 @@ pub async fn refresh_delegation_token(
         .await
         .map_err(|e| AppError::Internal(format!("Client lookup failed: {e}")))?;
 
-    let client = match client {
+    let acting_client = match client {
         Some(c) if c.is_active => c,
         Some(_) => {
             log_exchange_failure(db, Some(user_id), acting_client_id, "client_deactivated");
@@ -211,23 +326,116 @@ pub async fn refresh_delegation_token(
         ));
     }
 
-    // Re-validate scope against the client's current delegation_scopes.
-    // The client's allowed scopes may have been downgraded since the
-    // original token was issued.
-    let validated_scope = validate_delegation_scope(scope, &client.delegation_scopes)?;
+    let catalog_scope = catalog_delegation_service::scope_has_catalog_read(scope);
+    let receiving_client_id = if catalog_scope {
+        Some(
+            receiving_client_id
+                .filter(|id| !id.is_empty())
+                .ok_or_else(|| {
+                    AppError::Unauthorized(
+                        "Delegated catalog authority is invalid or inactive".to_string(),
+                    )
+                })?,
+        )
+    } else {
+        None
+    };
+
+    // Catalog delegation has two client identities. `act.sub` remains the
+    // source actor while `client_id` identifies the receiver whose delegation
+    // scope authorizes the exchanged capability.
+    let scope_client = if let Some(receiving_client_id) = receiving_client_id {
+        catalog_delegation_service::ensure_client_can_delegate_catalog(db, receiving_client_id)
+            .await?;
+        let receiving_client = db
+            .collection::<OauthClient>(OAUTH_CLIENTS)
+            .find_one(doc! { "_id": receiving_client_id })
+            .await
+            .map_err(|e| AppError::Internal(format!("Client lookup failed: {e}")))?
+            .filter(|client| client.is_active)
+            .ok_or_else(|| {
+                AppError::Forbidden("Receiving OAuth client is inactive or missing".to_string())
+            })?;
+
+        if receiving_client_id != acting_client_id
+            && consent_service::check_consent(db, user_id, receiving_client_id, "openid")
+                .await?
+                .is_none()
+        {
+            return Err(AppError::Forbidden(
+                "User consent has been revoked for the receiving client".to_string(),
+            ));
+        }
+        receiving_client
+    } else {
+        acting_client
+    };
+
+    // Re-validate scope against the receiving client's current delegation
+    // scopes. The source client does not acquire the receiver's authority.
+    let validated_scope = validate_delegation_scope(scope, &scope_client.delegation_scopes)?;
+
+    let authority = if catalog_scope {
+        catalog_delegation_service::ensure_client_can_delegate_catalog(db, acting_client_id)
+            .await?;
+        let authority =
+            catalog_delegation_service::authority_from_restriction_claims(restrictions)?;
+        validate_refresh_catalog_authority(
+            db,
+            config,
+            user_id,
+            acting_client_id,
+            receiving_client_id.expect("catalog receiver checked above"),
+            &authority,
+        )
+        .await?;
+        Some(authority)
+    } else {
+        None
+    };
 
     let user_uuid = Uuid::parse_str(user_id)
         .map_err(|e| AppError::Internal(format!("Invalid user_id: {e}")))?;
 
-    let new_token = jwt::generate_delegated_access_token(
-        jwt_keys,
-        config,
-        &user_uuid,
-        &validated_scope,
-        acting_client_id,
-        DELEGATED_TOKEN_TTL_SECS,
-        Some(restrictions),
-    )?;
+    let (new_token, jti) = if catalog_scope {
+        jwt::generate_delegated_access_token_for_client(
+            jwt_keys,
+            config,
+            &user_uuid,
+            &validated_scope,
+            acting_client_id,
+            receiving_client_id,
+            DELEGATED_TOKEN_TTL_SECS,
+            Some(restrictions),
+        )?
+    } else {
+        (
+            jwt::generate_delegated_access_token(
+                jwt_keys,
+                config,
+                &user_uuid,
+                &validated_scope,
+                acting_client_id,
+                DELEGATED_TOKEN_TTL_SECS,
+                Some(restrictions),
+            )?,
+            String::new(),
+        )
+    };
+
+    if let Some(authority) = authority {
+        catalog_delegation_service::persist_grant(
+            db,
+            &jti,
+            user_id,
+            acting_client_id,
+            receiving_client_id.expect("catalog receiver checked above"),
+            &validated_scope,
+            &authority,
+            Utc::now().timestamp() + DELEGATED_TOKEN_TTL_SECS,
+        )
+        .await?;
+    }
 
     Ok(DelegationRefreshResponse {
         access_token: new_token,
@@ -261,7 +469,7 @@ fn log_exchange_failure(
 
 /// Validate that the requested delegation scope is allowed by the client's
 /// `delegation_scopes` configuration.
-fn validate_delegation_scope(
+pub fn validate_delegation_scope(
     requested: &str,
     allowed_delegation_scopes: &str,
 ) -> AppResult<String> {
@@ -271,8 +479,7 @@ fn validate_delegation_scope(
         ));
     }
 
-    let allowed: std::collections::HashSet<&str> =
-        allowed_delegation_scopes.split_whitespace().collect();
+    let allowed: HashSet<&str> = allowed_delegation_scopes.split_whitespace().collect();
     let requested_scopes: Vec<&str> = requested.split_whitespace().collect();
 
     for scope in &requested_scopes {
@@ -293,6 +500,322 @@ fn validate_delegation_scope(
     Ok(requested_scopes.join(" "))
 }
 
+async fn attenuate_catalog_authority(
+    db: &mongodb::Database,
+    config: &AppConfig,
+    user_id: &str,
+    source_claims: &jwt::Claims,
+    source_client_id: &str,
+    receiving_client_id: &str,
+    requested_resources: &[String],
+    requested_allow_all_services: Option<bool>,
+    requested_service_ids: &[String],
+    requested_allow_all_nodes: Option<bool>,
+    requested_node_ids: &[String],
+) -> AppResult<catalog_delegation_service::CatalogAuthority> {
+    let source = catalog_delegation_service::authority_from_claims(source_claims)?;
+    if source_claims.client_id.as_deref() != Some(source_client_id) {
+        return Err(AppError::Forbidden(
+            "Catalog delegation requires a client-bound subject token".to_string(),
+        ));
+    }
+    let source_services = AuthorityBound::from_explicit(
+        source.allow_all_services,
+        &source.allowed_service_ids,
+        "source service authority",
+    )?;
+    let source_nodes = AuthorityBound::from_explicit(
+        source.allow_all_nodes,
+        &source.allowed_node_ids,
+        "source node authority",
+    )?;
+    let requested_services = AuthorityBound::from_request(
+        requested_allow_all_services,
+        requested_service_ids,
+        "service",
+    )?;
+    let requested_nodes =
+        AuthorityBound::from_request(requested_allow_all_nodes, requested_node_ids, "node")?;
+
+    validate_service_bound(db, user_id, &source_services, "source").await?;
+    validate_node_bound(db, user_id, &source_nodes).await?;
+    validate_service_bound(db, user_id, &requested_services, "requested").await?;
+    validate_node_bound(db, user_id, &requested_nodes).await?;
+
+    let source_consent = load_catalog_consent(db, user_id, source_client_id).await?;
+    let receiving_consent = load_catalog_consent(db, user_id, receiving_client_id).await?;
+    let service_ceiling = source_services
+        .intersection(&authority_from_consent(&source_consent, "source client")?)
+        .intersection(&authority_from_consent(
+            &receiving_consent,
+            "receiving client",
+        )?);
+    requested_services.ensure_within(&service_ceiling, "service")?;
+    requested_nodes.ensure_within(&source_nodes, "node")?;
+
+    reject_duplicates(requested_resources, "resource")?;
+    let source_resources =
+        resolve_catalog_resources(db, config, user_id, &source.resources).await?;
+    source_resources
+        .services
+        .ensure_within(&source_services, "source resource service")?;
+    let requested_resource_scope = if requested_resources.is_empty() {
+        source_resources
+    } else {
+        let requested = resolve_catalog_resources(db, config, user_id, requested_resources).await?;
+        if !source.resources.is_empty()
+            && !resources_are_within_source(&requested.resources, &source_resources.resources)
+        {
+            return Err(AppError::InvalidTarget(
+                "resource cannot expand beyond the source token authority".to_string(),
+            ));
+        }
+        requested
+    };
+    if !matches!(requested_resource_scope.services, AuthorityBound::All) {
+        requested_resource_scope
+            .services
+            .ensure_within(&service_ceiling, "resource service")?;
+    }
+
+    let final_services = requested_services.intersection(&requested_resource_scope.services);
+    validate_service_bound(db, user_id, &final_services, "effective").await?;
+
+    let (allow_all_services, allowed_service_ids) = final_services.into_parts();
+    let (allow_all_nodes, allowed_node_ids) = requested_nodes.into_parts();
+    Ok(catalog_delegation_service::CatalogAuthority {
+        resources: requested_resource_scope.resources,
+        allow_all_services,
+        allowed_service_ids,
+        allow_all_nodes,
+        allowed_node_ids,
+    })
+}
+
+fn resources_are_within_source(requested: &[String], source: &[String]) -> bool {
+    requested
+        .iter()
+        .all(|resource| source.iter().any(|granted| granted == resource))
+}
+
+fn reject_duplicates(values: &[String], field: &str) -> AppResult<()> {
+    let unique: HashSet<&str> = values.iter().map(String::as_str).collect();
+    if unique.len() != values.len() {
+        return Err(AppError::InvalidTarget(format!(
+            "{field} must not contain duplicates"
+        )));
+    }
+    Ok(())
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum AuthorityBound {
+    All,
+    Restricted(BTreeSet<String>),
+}
+
+impl AuthorityBound {
+    fn from_explicit(allow_all: bool, ids: &[String], label: &str) -> AppResult<Self> {
+        reject_duplicates(ids, label)?;
+        if allow_all {
+            if !ids.is_empty() {
+                return Err(AppError::InvalidTarget(format!(
+                    "{label} cannot combine allow-all with explicit IDs"
+                )));
+            }
+            Ok(Self::All)
+        } else {
+            Ok(Self::Restricted(ids.iter().cloned().collect()))
+        }
+    }
+
+    fn from_request(allow_all: Option<bool>, ids: &[String], label: &str) -> AppResult<Self> {
+        let allow_all = allow_all.ok_or_else(|| {
+            AppError::InvalidTarget(format!("catalog {label} authority is required"))
+        })?;
+        Self::from_explicit(allow_all, ids, &format!("requested {label} authority"))
+    }
+
+    fn intersection(&self, other: &Self) -> Self {
+        match (self, other) {
+            (Self::All, bound) | (bound, Self::All) => bound.clone(),
+            (Self::Restricted(left), Self::Restricted(right)) => {
+                Self::Restricted(left.intersection(right).cloned().collect())
+            }
+        }
+    }
+
+    fn ensure_within(&self, ceiling: &Self, label: &str) -> AppResult<()> {
+        let within = match (self, ceiling) {
+            (_, Self::All) => true,
+            (Self::All, Self::Restricted(_)) => false,
+            (Self::Restricted(requested), Self::Restricted(allowed)) => {
+                requested.is_subset(allowed)
+            }
+        };
+        if !within {
+            return Err(AppError::InvalidTarget(format!(
+                "requested {label} authority exceeds the verified source authority"
+            )));
+        }
+        Ok(())
+    }
+
+    fn restricted_ids(&self) -> Option<Vec<String>> {
+        match self {
+            Self::All => None,
+            Self::Restricted(ids) => Some(ids.iter().cloned().collect()),
+        }
+    }
+
+    fn into_parts(self) -> (bool, Vec<String>) {
+        match self {
+            Self::All => (true, Vec::new()),
+            Self::Restricted(ids) => (false, ids.into_iter().collect()),
+        }
+    }
+}
+
+struct CatalogResourceScope {
+    resources: Vec<String>,
+    services: AuthorityBound,
+}
+
+async fn resolve_catalog_resources(
+    db: &mongodb::Database,
+    config: &AppConfig,
+    user_id: &str,
+    resources: &[String],
+) -> AppResult<CatalogResourceScope> {
+    if resources.is_empty() {
+        return Ok(CatalogResourceScope {
+            resources: Vec::new(),
+            services: AuthorityBound::All,
+        });
+    }
+    let resolved =
+        oauth_resource_service::resolve_requested_resources(db, config, user_id, Some(resources))
+            .await?
+            .expect("non-empty resource request resolves to a scope");
+    let mut canonical_resources = resolved.resource_uris;
+    if let Some(mcp_resource) = resolved.mcp_resource_uri {
+        canonical_resources.push(mcp_resource);
+    }
+    canonical_resources.sort();
+    let services = if resolved.service_ids.is_empty() {
+        AuthorityBound::All
+    } else {
+        AuthorityBound::Restricted(resolved.service_ids.into_iter().collect())
+    };
+    Ok(CatalogResourceScope {
+        resources: canonical_resources,
+        services,
+    })
+}
+
+async fn load_catalog_consent(
+    db: &mongodb::Database,
+    user_id: &str,
+    client_id: &str,
+) -> AppResult<crate::models::consent::Consent> {
+    consent_service::check_consent(db, user_id, client_id, "openid")
+        .await?
+        .ok_or_else(|| {
+            AppError::Forbidden("User consent has been revoked for this client".to_string())
+        })
+}
+
+fn authority_from_consent(
+    consent: &crate::models::consent::Consent,
+    label: &str,
+) -> AppResult<AuthorityBound> {
+    if consent.allow_all_services {
+        return AuthorityBound::from_explicit(true, &[], &format!("{label} consent"));
+    }
+    let ids = consent.allowed_service_ids.as_deref().ok_or_else(|| {
+        AppError::Forbidden(format!(
+            "{label} consent does not carry explicit catalog authority"
+        ))
+    })?;
+    AuthorityBound::from_explicit(false, ids, &format!("{label} consent"))
+}
+
+async fn validate_service_bound(
+    db: &mongodb::Database,
+    user_id: &str,
+    bound: &AuthorityBound,
+    label: &str,
+) -> AppResult<()> {
+    let Some(ids) = bound.restricted_ids() else {
+        return Ok(());
+    };
+    if !oauth_resource_service::validate_grantable_service_ids(db, user_id, &ids).await? {
+        return Err(AppError::InvalidTarget(format!(
+            "{label} service authority is unknown or inaccessible"
+        )));
+    }
+    Ok(())
+}
+
+async fn validate_node_bound(
+    db: &mongodb::Database,
+    user_id: &str,
+    bound: &AuthorityBound,
+) -> AppResult<()> {
+    let Some(ids) = bound.restricted_ids() else {
+        return Ok(());
+    };
+    api_key_scope_service::validate_node_ids(
+        db,
+        user_id,
+        &ids,
+        ScopeAuthorization::ActorPermissions {
+            actor_user_id: user_id,
+        },
+    )
+    .await
+}
+
+async fn validate_refresh_catalog_authority(
+    db: &mongodb::Database,
+    config: &AppConfig,
+    user_id: &str,
+    source_client_id: &str,
+    receiving_client_id: &str,
+    authority: &catalog_delegation_service::CatalogAuthority,
+) -> AppResult<()> {
+    let services = AuthorityBound::from_explicit(
+        authority.allow_all_services,
+        &authority.allowed_service_ids,
+        "catalog service authority",
+    )?;
+    let nodes = AuthorityBound::from_explicit(
+        authority.allow_all_nodes,
+        &authority.allowed_node_ids,
+        "catalog node authority",
+    )?;
+    let source_consent = load_catalog_consent(db, user_id, source_client_id).await?;
+    let receiving_consent = load_catalog_consent(db, user_id, receiving_client_id).await?;
+    services.ensure_within(
+        &authority_from_consent(&source_consent, "source client")?,
+        "service",
+    )?;
+    services.ensure_within(
+        &authority_from_consent(&receiving_consent, "receiving client")?,
+        "service",
+    )?;
+    validate_service_bound(db, user_id, &services, "catalog").await?;
+    validate_node_bound(db, user_id, &nodes).await?;
+    let resource_scope =
+        resolve_catalog_resources(db, config, user_id, &authority.resources).await?;
+    if !matches!(resource_scope.services, AuthorityBound::All) {
+        resource_scope
+            .services
+            .ensure_within(&services, "resource service")?;
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -304,6 +827,72 @@ mod tests {
     };
     use chrono::Utc;
     use tower::ServiceExt;
+
+    fn restricted(ids: &[&str]) -> AuthorityBound {
+        AuthorityBound::Restricted(ids.iter().map(|id| (*id).to_string()).collect())
+    }
+
+    #[test]
+    fn catalog_authority_lattice_intersects_unrestricted_bounds() {
+        assert_eq!(
+            AuthorityBound::All.intersection(&AuthorityBound::All),
+            AuthorityBound::All
+        );
+        assert_eq!(
+            AuthorityBound::All.intersection(&restricted(&["svc-a"])),
+            restricted(&["svc-a"])
+        );
+    }
+
+    #[test]
+    fn catalog_authority_lattice_intersects_service_and_node_restrictions() {
+        let services =
+            restricted(&["svc-a", "svc-b"]).intersection(&restricted(&["svc-b", "svc-c"]));
+        let nodes =
+            restricted(&["node-a", "node-b"]).intersection(&restricted(&["node-b", "node-c"]));
+        assert_eq!(services, restricted(&["svc-b"]));
+        assert_eq!(nodes, restricted(&["node-b"]));
+    }
+
+    #[test]
+    fn catalog_authority_lattice_preserves_empty_deny_all() {
+        let empty = restricted(&[]);
+        assert_eq!(empty.intersection(&restricted(&["svc-a"])), restricted(&[]));
+        assert_eq!(empty.clone().into_parts(), (false, Vec::new()));
+    }
+
+    #[test]
+    fn catalog_authority_lattice_rejects_widening() {
+        let ceiling = restricted(&["svc-a"]);
+        assert!(
+            AuthorityBound::All
+                .ensure_within(&ceiling, "service")
+                .is_err()
+        );
+        assert!(
+            restricted(&["svc-a", "svc-b"])
+                .ensure_within(&ceiling, "service")
+                .is_err()
+        );
+        assert!(
+            restricted(&["svc-a"])
+                .ensure_within(&ceiling, "service")
+                .is_ok()
+        );
+    }
+
+    #[test]
+    fn catalog_authority_request_requires_explicit_noncontradictory_bound() {
+        assert!(AuthorityBound::from_request(None, &[], "service").is_err());
+        assert!(
+            AuthorityBound::from_request(Some(true), &["svc-a".to_string()], "service").is_err()
+        );
+        assert_eq!(
+            AuthorityBound::from_request(Some(false), &[], "service")
+                .expect("explicit empty request"),
+            restricted(&[])
+        );
+    }
 
     #[test]
     fn validate_delegation_scope_allows_subset() {
@@ -468,6 +1057,7 @@ mod tests {
             &state.jwt_keys,
             &user_id.to_string(),
             client_id,
+            None,
             ACCOUNT_READ_SCOPE,
             &jwt::TokenRestrictionClaims::default(),
         )
@@ -616,6 +1206,8 @@ mod tests {
             Some(jwt::AccessTokenRestrictions {
                 resources: &resources,
                 allowed_service_ids: &allowed_service_ids,
+                allowed_node_ids: &[],
+                allow_all_nodes: true,
             }),
         )
         .expect("generate restricted subject token");

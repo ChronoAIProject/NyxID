@@ -99,6 +99,12 @@ pub struct Claims {
     /// False when this access token is restricted to `allowed_service_ids`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub allow_all_services: Option<bool>,
+    /// Node IDs granted to this access token.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub allowed_node_ids: Option<Vec<String>>,
+    /// False when this access token is restricted to `allowed_node_ids`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub allow_all_nodes: Option<bool>,
     /// True if this token was minted solely for forwarding to a downstream
     /// service (assistant pass-through bridge). `verify_token` rejects it,
     /// so a copy leaked from the downstream cannot re-enter NyxID.
@@ -308,6 +314,8 @@ pub struct RbacClaimData {
 pub struct AccessTokenRestrictions<'a> {
     pub resources: &'a [String],
     pub allowed_service_ids: &'a [String],
+    pub allowed_node_ids: &'a [String],
+    pub allow_all_nodes: bool,
 }
 
 #[derive(Clone, Debug, Default)]
@@ -315,6 +323,8 @@ pub struct TokenRestrictionClaims {
     pub resources: Option<Vec<String>>,
     pub allowed_service_ids: Option<Vec<String>>,
     pub allow_all_services: Option<bool>,
+    pub allowed_node_ids: Option<Vec<String>>,
+    pub allow_all_nodes: Option<bool>,
 }
 
 impl TokenRestrictionClaims {
@@ -323,15 +333,23 @@ impl TokenRestrictionClaims {
             resources: claims.resources.clone(),
             allowed_service_ids: claims.allowed_service_ids.clone(),
             allow_all_services: claims.allow_all_services,
+            allowed_node_ids: claims.allowed_node_ids.clone(),
+            allow_all_nodes: claims.allow_all_nodes,
         }
     }
 
     pub fn from_auth_user(auth_user: &crate::mw::auth::AuthUser) -> Self {
+        let catalog_authority = auth_user.has_scope(crate::mw::auth::MCP_CATALOG_READ_SCOPE);
         Self {
-            resources: auth_user.resource_uris.clone(),
-            allowed_service_ids: (!auth_user.allow_all_services)
+            resources: auth_user
+                .resource_uris
+                .clone()
+                .or_else(|| catalog_authority.then(Vec::new)),
+            allowed_service_ids: (catalog_authority || !auth_user.allow_all_services)
                 .then(|| auth_user.allowed_service_ids.clone()),
             allow_all_services: Some(auth_user.allow_all_services),
+            allowed_node_ids: Some(auth_user.allowed_node_ids.clone()),
+            allow_all_nodes: Some(auth_user.allow_all_nodes),
         }
     }
 }
@@ -442,11 +460,25 @@ fn generate_access_token_for_client(
         relay_allowed_node_ids: None,
         relay_allow_all_services: None,
         relay_allow_all_nodes: None,
-        resources: restrictions.as_ref().map(|r| r.resources.to_vec()),
+        resources: restrictions
+            .as_ref()
+            .map(|r| r.resources.to_vec())
+            .or_else(|| client_id.map(|_| Vec::new())),
         allowed_service_ids: restrictions
             .as_ref()
-            .map(|r| r.allowed_service_ids.to_vec()),
-        allow_all_services: restrictions.as_ref().map(|_| false),
+            .map(|r| r.allowed_service_ids.to_vec())
+            .or_else(|| client_id.map(|_| Vec::new())),
+        allow_all_services: client_id
+            .map(|_| restrictions.is_none())
+            .or_else(|| restrictions.as_ref().map(|_| false)),
+        allowed_node_ids: restrictions
+            .as_ref()
+            .map(|r| r.allowed_node_ids.to_vec())
+            .or_else(|| client_id.map(|_| Vec::new())),
+        allow_all_nodes: restrictions
+            .as_ref()
+            .map(|restriction| restriction.allow_all_nodes)
+            .or_else(|| client_id.map(|_| true)),
         assistant_forward: None,
     };
 
@@ -515,6 +547,8 @@ pub fn generate_assistant_forward_access_token(
         resources: Some(vec![resource_uri.to_string()]),
         allowed_service_ids: Some(vec![]),
         allow_all_services: Some(false),
+        allowed_node_ids: Some(Vec::new()),
+        allow_all_nodes: Some(false),
         assistant_forward: Some(true),
     };
 
@@ -582,6 +616,8 @@ pub fn generate_relay_access_token(
         resources: None,
         allowed_service_ids: None,
         allow_all_services: None,
+        allowed_node_ids: None,
+        allow_all_nodes: None,
         assistant_forward: None,
     };
 
@@ -692,6 +728,8 @@ pub fn generate_refresh_token(
         resources: None,
         allowed_service_ids: None,
         allow_all_services: None,
+        allowed_node_ids: None,
+        allow_all_nodes: None,
         assistant_forward: None,
     };
 
@@ -744,6 +782,8 @@ pub fn reissue_refresh_token(
         resources: None,
         allowed_service_ids: None,
         allow_all_services: None,
+        allowed_node_ids: None,
+        allow_all_nodes: None,
         assistant_forward: None,
     };
 
@@ -778,7 +818,35 @@ pub fn generate_delegated_access_token(
     ttl_secs: i64,
     restrictions: Option<&TokenRestrictionClaims>,
 ) -> Result<String, AppError> {
+    generate_delegated_access_token_for_client(
+        keys,
+        config,
+        user_id,
+        scope,
+        acting_client_id,
+        None,
+        ttl_secs,
+        restrictions,
+    )
+    .map(|(token, _)| token)
+}
+
+/// Generate a delegated token that distinguishes the RFC 8693 actor from the
+/// registered OAuth client receiving the token. Returns the token and its JTI
+/// so callers can anchor high-value capabilities in online grant state.
+#[allow(clippy::too_many_arguments)]
+pub fn generate_delegated_access_token_for_client(
+    keys: &JwtKeys,
+    config: &AppConfig,
+    user_id: &Uuid,
+    scope: &str,
+    acting_client_id: &str,
+    receiving_client_id: Option<&str>,
+    ttl_secs: i64,
+    restrictions: Option<&TokenRestrictionClaims>,
+) -> Result<(String, String), AppError> {
     let now = Utc::now().timestamp();
+    let jti = Uuid::new_v4().to_string();
 
     let claims = Claims {
         sub: user_id.to_string(),
@@ -786,10 +854,10 @@ pub fn generate_delegated_access_token(
         aud: config.base_url.clone(),
         exp: now + ttl_secs,
         iat: now,
-        jti: Uuid::new_v4().to_string(),
+        jti: jti.clone(),
         scope: scope.to_string(),
         token_type: "access".to_string(),
-        client_id: None,
+        client_id: receiving_client_id.map(String::from),
         roles: None,
         groups: None,
         permissions: None,
@@ -810,14 +878,17 @@ pub fn generate_delegated_access_token(
         resources: restrictions.and_then(|r| r.resources.as_ref().cloned()),
         allowed_service_ids: restrictions.and_then(|r| r.allowed_service_ids.as_ref().cloned()),
         allow_all_services: restrictions.and_then(|r| r.allow_all_services),
+        allowed_node_ids: restrictions.and_then(|r| r.allowed_node_ids.as_ref().cloned()),
+        allow_all_nodes: restrictions.and_then(|r| r.allow_all_nodes),
         assistant_forward: None,
     };
 
     let mut header = Header::new(Algorithm::RS256);
     header.kid = Some(keys.kid.clone());
 
-    encode(&header, &claims, &keys.encoding)
-        .map_err(|e| AppError::Internal(format!("Failed to encode delegated token: {e}")))
+    let token = encode(&header, &claims, &keys.encoding)
+        .map_err(|e| AppError::Internal(format!("Failed to encode delegated token: {e}")))?;
+    Ok((token, jti))
 }
 
 /// Optional auth context data to embed in ID token claims.
@@ -953,6 +1024,8 @@ pub fn generate_service_account_token(
         resources: None,
         allowed_service_ids: None,
         allow_all_services: None,
+        allowed_node_ids: None,
+        allow_all_nodes: None,
         assistant_forward: None,
     };
 
@@ -1362,6 +1435,8 @@ mod tests {
             Some(AccessTokenRestrictions {
                 resources: &resources,
                 allowed_service_ids: &allowed_service_ids,
+                allowed_node_ids: &[],
+                allow_all_nodes: true,
             }),
         )
         .unwrap();
@@ -1576,6 +1651,8 @@ mod tests {
             resources: None,
             allowed_service_ids: None,
             allow_all_services: None,
+            allowed_node_ids: None,
+            allow_all_nodes: None,
             assistant_forward: None,
         };
 
@@ -1692,6 +1769,8 @@ mod tests {
             resources: None,
             allowed_service_ids: None,
             allow_all_services: None,
+            allowed_node_ids: None,
+            allow_all_nodes: None,
             assistant_forward: None,
         };
         let json = serde_json::to_string(&claims).unwrap();
@@ -1734,6 +1813,8 @@ mod tests {
             ]),
             allowed_service_ids: Some(vec!["svc-1".to_string()]),
             allow_all_services: Some(false),
+            allowed_node_ids: Some(vec!["node-1".to_string()]),
+            allow_all_nodes: Some(false),
         };
         let token = generate_delegated_access_token(
             &keys,
@@ -1750,6 +1831,37 @@ mod tests {
         assert_eq!(claims.resources, restrictions.resources);
         assert_eq!(claims.allowed_service_ids, restrictions.allowed_service_ids);
         assert_eq!(claims.allow_all_services, restrictions.allow_all_services);
+        assert_eq!(claims.allowed_node_ids, restrictions.allowed_node_ids);
+        assert_eq!(claims.allow_all_nodes, restrictions.allow_all_nodes);
+    }
+
+    #[test]
+    fn catalog_delegated_token_distinguishes_actor_and_receiving_client() {
+        let (keys, config) = test_keys_and_config();
+        let user_id = Uuid::new_v4();
+        let restrictions = TokenRestrictionClaims {
+            resources: Some(Vec::new()),
+            allowed_service_ids: Some(Vec::new()),
+            allow_all_services: Some(false),
+            allowed_node_ids: Some(Vec::new()),
+            allow_all_nodes: Some(false),
+        };
+        let (token, jti) = generate_delegated_access_token_for_client(
+            &keys,
+            &config,
+            &user_id,
+            "mcp:catalog:read",
+            "nyxid-assistant",
+            Some("aevatar"),
+            300,
+            Some(&restrictions),
+        )
+        .expect("generate catalog token");
+        let claims = verify_token(&keys, &config, &token).expect("verify catalog token");
+        assert_eq!(claims.sub, user_id.to_string());
+        assert_eq!(claims.act.expect("actor claim").sub, "nyxid-assistant");
+        assert_eq!(claims.client_id.as_deref(), Some("aevatar"));
+        assert_eq!(claims.jti, jti);
     }
 
     #[test]

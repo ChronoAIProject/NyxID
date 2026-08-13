@@ -261,6 +261,10 @@ pub const LLM_PROXY_SCOPE: &str = "llm:proxy";
 /// Scope that grants read-only access to user account management resources.
 pub const ACCOUNT_READ_SCOPE: &str = "account:read";
 
+/// Scope that is reserved for the future connected-service catalog facade.
+/// It never grants proxy or management access by itself.
+pub const MCP_CATALOG_READ_SCOPE: &str = "mcp:catalog:read";
+
 /// Delegation scopes that may be configured on downstream and user services.
 /// OAuth-client delegation validation intentionally uses a narrower list.
 pub const SERVICE_DELEGATION_SCOPES: &[&str] = &[
@@ -757,6 +761,16 @@ impl FromRequestParts<AppState> for AuthUser {
                     };
 
                     if auth_method == AuthMethod::Delegated {
+                        if crate::services::catalog_delegation_service::scope_has_catalog_read(
+                            &claims.scope,
+                        ) {
+                            crate::services::catalog_delegation_service::validate_live_grant(
+                                &state.db,
+                                &state.config,
+                                &claims,
+                            )
+                            .await?;
+                        }
                         let request_path = parts
                             .extensions
                             .get::<OriginalUri>()
@@ -818,9 +832,9 @@ impl FromRequestParts<AppState> for AuthUser {
                     {
                         (
                             claims.allow_all_services.unwrap_or(true),
-                            true,
+                            claims.allow_all_nodes.unwrap_or(true),
                             claims.allowed_service_ids.clone().unwrap_or_default(),
-                            vec![],
+                            claims.allowed_node_ids.clone().unwrap_or_default(),
                             None,
                             None,
                         )
@@ -1478,6 +1492,19 @@ mod tests {
     }
 
     #[test]
+    fn catalog_read_scope_alone_grants_no_proxy_or_management_route() {
+        let headers = HeaderMap::new();
+        for path in ["/api/v1/keys", "/api/v1/orgs", "/api/v1/mcp/config"] {
+            assert!(
+                !delegated_request_allowed(&Method::GET, path, &headers, MCP_CATALOG_READ_SCOPE),
+                "catalog read must not authorize GET {path}"
+            );
+        }
+        assert!(!scope_contains(MCP_CATALOG_READ_SCOPE, PROXY_SCOPE));
+        assert!(!scope_allows_llm_proxy(MCP_CATALOG_READ_SCOPE));
+    }
+
+    #[test]
     fn delegated_account_read_rejects_every_denied_class_and_protocol_get() {
         let headers = HeaderMap::new();
         let denied_paths = [
@@ -1692,6 +1719,8 @@ mod tests {
             resources: None,
             allowed_service_ids: None,
             allow_all_services: None,
+            allowed_node_ids: None,
+            allow_all_nodes: None,
             assistant_forward: None,
         };
         assert!(ensure_delegated_claim_consistency(&claims).is_ok());

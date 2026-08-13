@@ -11,6 +11,7 @@ use crate::config::AppConfig;
 use crate::models::anonymous_endpoint_usage::COLLECTION_NAME as ANONYMOUS_ENDPOINT_USAGE;
 use crate::models::auth_device_code::{AuthDeviceCode, COLLECTION_NAME as AUTH_DEVICE_CODES};
 use crate::models::billing_topup_session::COLLECTION_NAME as BILLING_TOPUP_SESSIONS;
+use crate::models::catalog_delegation_grant::COLLECTION_NAME as CATALOG_DELEGATION_GRANTS;
 use crate::models::connect_link::{COLLECTION_NAME as CONNECT_LINKS, ConnectLink};
 use crate::models::device_code::COLLECTION_NAME as DEVICE_CODES;
 use crate::models::device_onboard_credential::COLLECTION_NAME as DEVICE_ONBOARD_CREDENTIALS;
@@ -554,6 +555,29 @@ pub async fn ensure_indexes(db: &Database) -> Result<(), mongodb::error::Error> 
                         .name("oauth_clients_allowed_scopes_created_at".to_string())
                         .build(),
                 )
+                .build(),
+        )
+        .await?;
+
+    // ── catalog_delegation_grants ──
+    let catalog_delegation_grants =
+        db.collection::<mongodb::bson::Document>(CATALOG_DELEGATION_GRANTS);
+    catalog_delegation_grants
+        .create_index(
+            IndexModel::builder()
+                .keys(doc! { "expires_at": 1 })
+                .options(
+                    IndexOptions::builder()
+                        .expire_after(Duration::from_secs(0))
+                        .build(),
+                )
+                .build(),
+        )
+        .await?;
+    catalog_delegation_grants
+        .create_index(
+            IndexModel::builder()
+                .keys(doc! { "user_id": 1, "receiving_client_id": 1 })
                 .build(),
         )
         .await?;
