@@ -142,9 +142,9 @@ async fn decrypt_master_credential_string(
 }
 
 fn master_credential_required(service: &DownstreamService) -> bool {
+    // Identity propagation is additive to the service's own auth method. A
+    // bearer row may inject both its catalog credential and a delegation token.
     service.auth_method != "none"
-        && !service.inject_delegation_token
-        && !service.forward_access_token
 }
 
 /// Authorize and wrap a catalog master credential before decryption.
@@ -1949,7 +1949,7 @@ async fn lookup_user_service(
 fn is_public_internal_master_credential_service(service: &DownstreamService) -> bool {
     service.visibility == "public"
         && service.service_category == "internal"
-        && service.auth_method != "none"
+        && master_credential_required(service)
         && service.auth_method != "token_exchange"
         && !service.requires_user_credential
         && service.service_type == "http"
@@ -3476,6 +3476,11 @@ mod tests {
         service.inject_delegation_token = true;
         service.credential_encrypted = Vec::new();
 
+        assert!(
+            !master_credential_required(&service),
+            "no-auth assistant rows must not require a catalog credential"
+        );
+
         db.collection::<DownstreamService>(DOWNSTREAM_SERVICES)
             .insert_one(&service)
             .await
@@ -3485,6 +3490,119 @@ mod tests {
             .expect("delegation-only assistant row should resolve");
         assert!(target.credential.is_empty());
         assert!(target.service.inject_delegation_token);
+
+        db.collection::<DownstreamService>(DOWNSTREAM_SERVICES)
+            .update_one(
+                doc! { "_id": &service.id },
+                doc! { "$set": { "auth_method": "bearer" } },
+            )
+            .await
+            .expect("make assistant row credential-bearing");
+        let rejected = resolve_admin_proxy_target(&db, &test_encryption_keys(), &service.id).await;
+        assert!(
+            rejected.is_err(),
+            "credential-bearing assistant rows without a credential must reach the gate"
+        );
+    }
+
+    #[tokio::test]
+    async fn delegated_identity_does_not_suppress_master_credential_across_resolvers() {
+        let Some(db) = connect_test_database("proxy_master_credential_with_delegation").await
+        else {
+            panic!("MongoDB is required for master credential resolver regression test");
+        };
+
+        let user_id = uuid::Uuid::new_v4().to_string();
+        let mut service = dummy_service();
+        service.id = uuid::Uuid::new_v4().to_string();
+        service.slug = format!("master-credential-{}", service.id);
+        service.service_category = "internal".to_string();
+        service.auth_method = "bearer".to_string();
+        service.auth_key_name = "Authorization".to_string();
+        service.requires_user_credential = false;
+        service.inject_delegation_token = true;
+        service.visibility = "public".to_string();
+        service.provider_config_id = None;
+        service.credential_encrypted = test_encryption_keys()
+            .encrypt(b"catalog-secret")
+            .await
+            .expect("encrypt catalog credential");
+
+        db.collection::<DownstreamService>(DOWNSTREAM_SERVICES)
+            .insert_one(&service)
+            .await
+            .expect("insert delegated master-credential service");
+
+        assert!(master_credential_required(&service));
+
+        let keys = test_encryption_keys();
+        let server_target = resolve_admin_proxy_target(&db, &keys, &service.id)
+            .await
+            .expect("server-chosen resolver should retain the master credential");
+        assert_eq!(server_target.credential, "catalog-secret");
+        assert!(server_target.service.inject_delegation_token);
+
+        let strict_target = resolve_proxy_target(&db, &keys, &user_id, &service.id)
+            .await
+            .expect("strict resolver should retain the master credential");
+        assert_eq!(strict_target.credential, "catalog-secret");
+        assert!(strict_target.service.inject_delegation_token);
+
+        let (lenient_target, has_credential) =
+            resolve_proxy_target_lenient(&db, &keys, &user_id, &service.id)
+                .await
+                .expect("lenient resolver should retain the master credential");
+        assert!(has_credential);
+        assert_eq!(lenient_target.credential, "catalog-secret");
+        assert!(lenient_target.service.inject_delegation_token);
+
+        let endpoint_id = uuid::Uuid::new_v4().to_string();
+        let user_service_id = uuid::Uuid::new_v4().to_string();
+        let endpoint = test_user_endpoint(
+            &endpoint_id,
+            &user_id,
+            "Delegated master endpoint",
+            &service.base_url,
+            None,
+            Some(&service.id),
+        );
+        db.collection::<UserEndpoint>(USER_ENDPOINTS)
+            .insert_one(endpoint)
+            .await
+            .expect("insert auto-provision endpoint");
+
+        let mut user_service = test_user_service(
+            &user_service_id,
+            &user_id,
+            &service.slug,
+            &endpoint_id,
+            Some(&service.id),
+            None,
+        );
+        user_service.auth_method = service.auth_method.clone();
+        user_service.auth_key_name = service.auth_key_name.clone();
+        user_service.inject_delegation_token = true;
+        user_service.source = Some(AUTO_PROVISION_SOURCE.to_string());
+        user_service.source_id = Some(format!("test:{user_service_id}"));
+        db.collection::<UserService>(USER_SERVICES)
+            .insert_one(user_service)
+            .await
+            .expect("insert auto-provision user service");
+
+        let auto_resolution = resolve_proxy_target_from_user_service(
+            &db,
+            &keys,
+            &Arc::new(NodeWsManager::new(30, 100)),
+            &user_id,
+            Some(&service.slug),
+            None,
+        )
+        .await
+        .expect("auto-provision resolver should succeed")
+        .expect("auto-provision user service should resolve");
+        assert_eq!(auto_resolution.target.credential, "catalog-secret");
+        assert!(auto_resolution.target.service.inject_delegation_token);
+        assert!(auto_resolution.master_credential);
     }
 
     #[allow(clippy::too_many_arguments)]
