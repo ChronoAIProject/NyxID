@@ -1,6 +1,6 @@
 # PR-A verification — design-author sign-off
 
-**Verdict: GREEN — raise the PR.** Branch `travel-booking`, commits `fcc93df7` + `1b426418` + `f086a726`, verified 2026-08-14 against `docs/TRAVEL_BOOKING.md` §A.1 by the design's author. Opus's three-cycle adversarial review (`PR_A_REVIEW.md`) asked "is there a path to a wrong outcome"; this pass asked "is it the thing we designed, and does it actually run." One defect found and fixed in this commit: the design document itself (below).
+**Verdict: GREEN — raise the PR.** Branch `travel-booking`, commits `fcc93df7` + `1b426418` + `f086a726`, verified 2026-08-14 against `docs/assistant/TRAVEL_BOOKING.md` §A.1 by the design's author. Opus's three-cycle adversarial review (`PR_A_REVIEW.md`) asked "is there a path to a wrong outcome"; this pass asked "is it the thing we designed, and does it actually run." One defect found and fixed in this commit: the design document itself (below).
 
 ## Checks
 
@@ -23,13 +23,13 @@ Closes a structural credential-authorization gap in the proxy, independent of an
 
 **Exposure calibration — structural, not live.** The ~30 provider-seeded catalog rows were excluded from the exposure on two independent counts: they carry `provider_config_id` (which the gate predicate rejects) and `auth_method: "none"` (which returns before the credential block is ever reached), and their stored credential is an encryption of the empty string. No seeded row could leak. The gap mattered for admin-created platform-credentialed rows and for rows added in the future — including the planned travel integration, which is why it was found — so this is a hardening of a structural path, not an incident response.
 
-**Verified by:** three adversarial review cycles (Opus — verdict SHIP, `docs/PR_A_REVIEW.md`: full decrypt-site census, strictly-narrowing behavior proof, consent fail-closed semantics, seeded-row regression analysis) plus a design-author verification pass (`docs/PR_A_VERIFICATION.md`: spec conformance, doc-claim accuracy, mutation-tested regression coverage — the key test fails against the pre-fix predicate — and live-Mongo execution of the suite; fmt/clippy/build clean).
+**Verified by:** three adversarial review cycles (Opus — verdict SHIP, `docs/assistant/PR_A_REVIEW.md`: full decrypt-site census, strictly-narrowing behavior proof, consent fail-closed semantics, seeded-row regression analysis) plus a design-author verification pass (`docs/assistant/PR_A_VERIFICATION.md`: spec conformance, doc-claim accuracy, mutation-tested regression coverage — the key test fails against the pre-fix predicate — and live-Mongo execution of the suite; fmt/clippy/build clean).
 
 **Behavior changes to know about:** (1) a *private* catalog row holding a platform credential is now callable only by users holding an OAuth consent for one of its `developer_app_ids`; a private credentialed row with none configured is not callable by anyone, including its creating admin — flip it public or wire an OAuth app if you own such a row. (2) Rows with an empty stored credential now 404 at authorization instead of 500 at decrypt.
 
-**Pre-deploy checks:** run the readback query in `docs/PR_A_VERIFICATION.md` §6 against prod: confirm the `aevatar` assistant row's shape (expected `auth_method: "none"`, unaffected; if it carries a credential it must be public + internal + no `provider_config_id`), and triage any other returned row against the six predicate clauses — each is a row that resolved a master credential before and must satisfy the predicate after.
+**Pre-deploy checks:** run the readback query in `docs/assistant/PR_A_VERIFICATION.md` §6 against prod: confirm the `aevatar` assistant row's shape (expected `auth_method: "none"`, unaffected; if it carries a credential it must be public + internal + no `provider_config_id`), and triage any other returned row against the six predicate clauses — each is a row that resolved a master credential before and must satisfy the predicate after.
 
-**Deferred, tracked in `docs/PR_A_VERIFICATION.md`:** ciphertext-length vs secret-presence check (N1), private-row escape hatch (N2, by design), `EffectiveActor` constructor exposure for PR-B (N7 — blocks the resource-token exchange route as designed; resolve at PR-B design time), twin-predicate comment (N14).
+**Deferred, tracked in `docs/assistant/PR_A_VERIFICATION.md`:** ciphertext-length vs secret-presence check (N1), private-row escape hatch (N2, by design), `EffectiveActor` constructor exposure for PR-B (N7 — blocks the resource-token exchange route as designed; resolve at PR-B design time), twin-predicate comment (N14).
 
 🤖 Generated with [Claude Code](https://claude.com/claude-code)
 

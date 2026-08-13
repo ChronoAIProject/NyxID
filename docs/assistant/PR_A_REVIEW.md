@@ -1,6 +1,6 @@
 # PR-A adversarial review — `fcc93df7` "fix(proxy): gate catalog credentials and redact upstream bodies"
 
-Reviewed against `docs/TRAVEL_BOOKING.md` §A.1 (contract) and Part I §9. Branch `travel-booking`, worktree `golden-badger`. 261 insertions across `backend/src/services/proxy_service.rs` and `backend/src/handlers/proxy.rs`.
+Reviewed against `docs/assistant/TRAVEL_BOOKING.md` §A.1 (contract) and Part I §9. Branch `travel-booking`, worktree `golden-badger`. 261 insertions across `backend/src/services/proxy_service.rs` and `backend/src/handlers/proxy.rs`.
 
 Everything below was read in the tree at `fcc93df7`. Two targeted test runs were executed for real (Mongo reachable on `:27018`); results are marked inline. The full gate (fmt/clippy/boundary/build/suite) was not run here — it is being run separately.
 
@@ -255,7 +255,7 @@ Any row returned with `inject_delegation_token: true` or `forward_access_token: 
 
 ### N8. `TRAVEL_BOOKING.md:114` still claims type-system enforcement the code does not provide, and the doc was not touched
 
-`git log -- docs/TRAVEL_BOOKING.md` shows `b786c8eb` as the last commit; `1b426418` changed only the two backend files. Line 114 still reads "**One gate in front of every master-credential decrypt**, enforced by the type system: a single authorization function is the only constructor of a decryptable catalog credential". After this commit that is closer to true but still overclaims: `EncryptionKeys::decrypt(&[u8])` (`crypto/aes.rs:372`) is unchanged and public, `decrypt_user_credential` (`proxy_service.rs:120-129`) is a live raw-bytes decrypt in the same file, and `handlers/services.rs:2033` still decrypts a catalog row's `credential_encrypted` outside the newtype. No lint or boundary check backs the property.
+`git log -- docs/assistant/TRAVEL_BOOKING.md` shows `b786c8eb` as the last commit; `1b426418` changed only the two backend files. Line 114 still reads "**One gate in front of every master-credential decrypt**, enforced by the type system: a single authorization function is the only constructor of a decryptable catalog credential". After this commit that is closer to true but still overclaims: `EncryptionKeys::decrypt(&[u8])` (`crypto/aes.rs:372`) is unchanged and public, `decrypt_user_credential` (`proxy_service.rs:120-129`) is a live raw-bytes decrypt in the same file, and `handlers/services.rs:2033` still decrypts a catalog row's `credential_encrypted` outside the newtype. No lint or boundary check backs the property.
 
 Line 193's "`EffectiveActor` has no default/system constructor — a synthetic actor cannot compile" **is** now true as stated for every module except `proxy_service` itself (see verified-correct below), so that one can stand. Line 114 should be reworded to what the code delivers: *the catalog master credential is unreachable outside `proxy_service`, and within it the only decrypt path for a catalog row goes through `AuthorizedMasterCredential`.* That sentence is defensible; the current one is not.
 
@@ -355,7 +355,7 @@ This commit did not address them and did not record a deferral:
 
 ### N17. `TRAVEL_BOOKING.md:114` still overclaims type-system enforcement
 
-Unchanged from cycle 2's N8: the doc was not modified in this commit either (`git log -- docs/TRAVEL_BOOKING.md` still ends at `b786c8eb`). Line 193 is accurate. Line 114's "enforced by the type system: a single authorization function is the only constructor of a decryptable catalog credential" remains stronger than the code, because `EncryptionKeys::decrypt` is public and `handlers/services.rs:2033` still decrypts a catalog row outside the newtype. The accurate version of that sentence is in N8. Documentation accuracy, not a code defect — but it is the sentence a future reader will trust.
+Unchanged from cycle 2's N8: the doc was not modified in this commit either (`git log -- docs/assistant/TRAVEL_BOOKING.md` still ends at `b786c8eb`). Line 193 is accurate. Line 114's "enforced by the type system: a single authorization function is the only constructor of a decryptable catalog credential" remains stronger than the code, because `EncryptionKeys::decrypt` is public and `handlers/services.rs:2033` still decrypts a catalog row outside the newtype. The accurate version of that sentence is in N8. Documentation accuracy, not a code defect — but it is the sentence a future reader will trust.
 
 ---
 
