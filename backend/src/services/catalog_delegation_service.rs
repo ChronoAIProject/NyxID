@@ -338,6 +338,180 @@ fn invalid_catalog_authority() -> AppError {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use chrono::Duration;
+
+    async fn live_grant_fixture() -> Option<(mongodb::Database, crate::config::AppConfig, Claims)> {
+        let db = crate::test_utils::connect_test_database("catalog_delegation_live_grant").await?;
+        let config = crate::test_utils::test_app_config();
+        let actor_client_id = "catalog-live-actor";
+        let receiving_client_id = "catalog-live-receiver";
+        let claims = Claims {
+            sub: uuid::Uuid::new_v4().to_string(),
+            iss: config.jwt_issuer.clone(),
+            aud: config.jwt_issuer.clone(),
+            exp: Utc::now().timestamp() + 300,
+            iat: Utc::now().timestamp(),
+            jti: uuid::Uuid::new_v4().to_string(),
+            scope: MCP_CATALOG_READ_SCOPE.to_string(),
+            token_type: "access".to_string(),
+            client_id: Some(receiving_client_id.to_string()),
+            roles: None,
+            groups: None,
+            permissions: None,
+            sid: None,
+            act: Some(crate::crypto::jwt::ActorClaim {
+                sub: actor_client_id.to_string(),
+            }),
+            delegated: Some(true),
+            sa: None,
+            cnf: None,
+            relay: None,
+            relay_api_key_id: None,
+            relay_api_key_name: None,
+            relay_allowed_service_ids: None,
+            relay_allowed_node_ids: None,
+            relay_allow_all_services: None,
+            relay_allow_all_nodes: None,
+            resources: Some(Vec::new()),
+            allowed_service_ids: Some(Vec::new()),
+            allow_all_services: Some(false),
+            allowed_node_ids: Some(Vec::new()),
+            allow_all_nodes: Some(false),
+            assistant_forward: None,
+        };
+
+        let now = Utc::now();
+        for client_id in [actor_client_id, receiving_client_id] {
+            db.collection::<OauthClient>(OAUTH_CLIENTS)
+                .insert_one(OauthClient {
+                    id: client_id.to_string(),
+                    client_name: client_id.to_string(),
+                    client_secret_hash: String::new(),
+                    redirect_uris: vec!["https://example.com/callback".to_string()],
+                    allowed_scopes: "openid".to_string(),
+                    scope_provenance: Default::default(),
+                    grant_types: "authorization_code".to_string(),
+                    client_type: "confidential".to_string(),
+                    is_active: true,
+                    delegation_scopes: MCP_CATALOG_READ_SCOPE.to_string(),
+                    default_service_catalog_slugs: Vec::new(),
+                    broker_capability_enabled: false,
+                    revocation_webhook_url: None,
+                    revocation_webhook_secret_encrypted: None,
+                    connection_webhook_url: None,
+                    connection_webhook_secret_encrypted: None,
+                    connection_webhook_key_id: None,
+                    connection_webhook_enabled: false,
+                    created_by: None,
+                    created_at: now,
+                    updated_at: now,
+                })
+                .await
+                .expect("insert OAuth client");
+            consent_service::grant_consent_with_services(
+                &db,
+                &claims.sub,
+                client_id,
+                "openid",
+                Some(Vec::new()),
+            )
+            .await
+            .expect("grant catalog consent");
+        }
+
+        let authority = authority_from_claims(&claims).expect("explicit catalog authority");
+        persist_grant(
+            &db,
+            &claims.jti,
+            &claims.sub,
+            actor_client_id,
+            receiving_client_id,
+            &claims.scope,
+            &authority,
+            claims.exp,
+        )
+        .await
+        .expect("persist catalog grant");
+        validate_live_grant(&db, &config, &claims)
+            .await
+            .expect("active catalog grant");
+
+        Some((db, config, claims))
+    }
+
+    fn assert_invalid(result: AppResult<()>) {
+        assert!(matches!(
+            result,
+            Err(AppError::Unauthorized(message))
+                if message == "Delegated catalog authority is invalid or inactive"
+        ));
+    }
+
+    #[tokio::test]
+    async fn validate_live_grant_rejects_expired_grant() {
+        let Some((db, config, claims)) = live_grant_fixture().await else {
+            return;
+        };
+        db.collection::<CatalogDelegationGrant>(CATALOG_DELEGATION_GRANTS)
+            .update_one(
+                doc! { "_id": &claims.jti },
+                doc! { "$set": { "expires_at": bson::DateTime::from_chrono(Utc::now() - Duration::seconds(1)) } },
+            )
+            .await
+            .expect("expire catalog grant");
+
+        assert_invalid(validate_live_grant(&db, &config, &claims).await);
+    }
+
+    #[tokio::test]
+    async fn validate_live_grant_rejects_revoked_grant() {
+        let Some((db, config, claims)) = live_grant_fixture().await else {
+            return;
+        };
+        db.collection::<CatalogDelegationGrant>(CATALOG_DELEGATION_GRANTS)
+            .update_one(
+                doc! { "_id": &claims.jti },
+                doc! { "$set": { "revoked": true } },
+            )
+            .await
+            .expect("revoke catalog grant");
+
+        assert_invalid(validate_live_grant(&db, &config, &claims).await);
+    }
+
+    #[tokio::test]
+    async fn validate_live_grant_rejects_disabled_client() {
+        let Some((db, config, claims)) = live_grant_fixture().await else {
+            return;
+        };
+        let receiving_client_id = claims.client_id.as_deref().expect("receiving client");
+        db.collection::<OauthClient>(OAUTH_CLIENTS)
+            .update_one(
+                doc! { "_id": receiving_client_id },
+                doc! { "$set": { "is_active": false } },
+            )
+            .await
+            .expect("disable OAuth client");
+
+        assert_invalid(validate_live_grant(&db, &config, &claims).await);
+    }
+
+    #[tokio::test]
+    async fn validate_live_grant_rejects_removed_consent() {
+        let Some((db, config, claims)) = live_grant_fixture().await else {
+            return;
+        };
+        let actor_client_id = claims
+            .act
+            .as_ref()
+            .map(|actor| actor.sub.as_str())
+            .expect("acting client");
+        consent_service::revoke_consent(&db, &claims.sub, actor_client_id)
+            .await
+            .expect("remove actor consent");
+
+        assert_invalid(validate_live_grant(&db, &config, &claims).await);
+    }
 
     fn claims() -> Claims {
         Claims {
