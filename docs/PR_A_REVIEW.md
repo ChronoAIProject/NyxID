@@ -307,3 +307,137 @@ Every denial in `authorize_master_credential` and `authorize_master_credential_s
 2. **Whether any live row combines a stored master credential with `inject_delegation_token: true` or `forward_access_token: true`.** Same query, same answer needed. The repo contains no seeded row with that shape (all 30 provider seeds are `auth_method: "none"` with `provider_config_id` set), so if any exist they were created through the admin UI and are invisible from here.
 3. **The full verification gate.** Only the four targeted tests were run here. `cargo fmt`, `cargo clippy --workspace --all-targets -- -D warnings`, the boundary script, and the full suite are running separately. One thing to watch in the clippy leg that this commit did not change: `authorize_master_credential_server_chosen` still takes an unused `_db` and is `async` with no `.await` (`:216-218`) — inert under the default lint set.
 4. **Whether the restructured resolvers changed behavior for any row shape I did not enumerate.** I compared the old and new credential blocks clause by clause for `requires_user_credential` true/false and `auth_method` none/non-none, which is the full input space of those branches. I did not run the broader proxy resolution suite; that is what the separate gate run covers.
+
+---
+---
+
+# Cycle 3 — re-review of `f086a726` "fix(proxy): preserve master credentials with delegated identity"
+
++121 / −3 in `backend/src/services/proxy_service.rs` only, on top of `1b426418`. Three lines of production change (the predicate and one call to it), the rest tests.
+
+Five targeted tests run and confirmed executed against Mongo on `:27018`: **5 passed, 0 failed, 0.65s** — `delegated_identity_does_not_suppress_master_credential_across_resolvers`, `assistant_shaped_server_target_without_credential_resolves`, `master_credential_authorization_covers_visibility_and_consent`, `upstream_error_body_is_redacted_end_to_end`, `server_chosen_master_credential_requires_public_valid_row`. Three of the five `panic!` rather than skip when Mongo is absent, so their passing proves the DB was live. The full gate is running separately.
+
+---
+
+## Verdict
+
+**SHIP.**
+
+B5 is closed correctly and at every call site, and the fix is verified by a test that could not pass against the old predicate. No blocking findings. Nothing from cycle 2 regressed. I looked specifically for new under-gating created by broadening the predicate and found none: broadening `master_credential_required` moves rows *into* the gated set, never out of it, and after this change the ungated branch in each resolver is provably unreachable.
+
+The remaining items are two maintenance notes and three previously-flagged deferrals, none of which is a path to a wrong outcome. There is one deployment verification I still cannot do from here — unchanged from cycle 1 and not a code defect.
+
+---
+
+## Blocking findings
+
+None.
+
+---
+
+## Non-blocking findings
+
+### N14. The twin predicate in `unified_key_service.rs` was not updated, so the two copies are now written differently while meaning the same thing
+
+**Consequence today:** none — both evaluate identically. **The hazard:** `proxy_service.rs:1832-1841` now reads `&& master_credential_required(service)` while its copy at `unified_key_service.rs:211-221` still spells out `&& service.auth_method != "none"`. The `unified_key_service` copy drives auto-provision *creation* and `reconcile_stale_auto_provisions`, which **deletes** users' auto-provisioned `UserService` rows when the predicate stops holding. If `master_credential_required` is ever narrowed again — which is exactly what cycle 2 did — proxy-time resolution and the reconcile sweep would silently disagree, and the sweep would delete rows the proxy still honors (or leave rows the proxy now refuses). Either extract one shared function or add a comment on both copies naming the other.
+
+### N15. Two defensive branches are now dead code
+
+`authorize_master_credential_server_chosen`'s `!master_credential_required(service)` → `AppError::Internal` (`proxy_service.rs:220-232`) is unreachable: its only caller is `proxy_service.rs:664`, which is preceded by the `auth_method == "none"` early return at `:649`. Same for the `else { String::new() }` arms at `:798` and `:930`, each preceded by the early returns at `:755` and `:875`. All three are fail-closed or fail-safe, so this is inert — worth noting only so nobody reads them as live behavior, and because they are the right shape to keep if the early returns are ever removed.
+
+### N16. N1, N2 and N7 are untouched and still undocumented
+
+This commit did not address them and did not record a deferral:
+
+- **N1** — `!service.credential_encrypted.is_empty()` (`proxy_service.rs:251`) is a ciphertext-length test satisfied by `encrypt(b"")` (`provider_service.rs:3578`, `handlers/services.rs:884`), so it does not mean "this row holds a secret". Latent, no current wrong outcome.
+- **N2** — a private row with no `developer_app_ids` is denied with no creator/admin escape hatch (`proxy_service.rs:169-177`). This is what the design specifies; it just is not written down anywhere a future operator would find it.
+- **N7/N10** — `EffectiveActor::from_user_id` is private (`proxy_service.rs:89-95`), so `authorize_master_credential` has no callable form outside `proxy_service`. That is correct sealing for PR-A. It does mean `TRAVEL_BOOKING.md:221`'s plan for `/api/v1/resource-tokens/exchange` to reach the credential gate from a new handler module is not expressible as written — a PR-B design decision (add `EffectiveActor::for_auth_user`, or host the exchange inside `proxy_service`), not a PR-A defect.
+
+### N17. `TRAVEL_BOOKING.md:114` still overclaims type-system enforcement
+
+Unchanged from cycle 2's N8: the doc was not modified in this commit either (`git log -- docs/TRAVEL_BOOKING.md` still ends at `b786c8eb`). Line 193 is accurate. Line 114's "enforced by the type system: a single authorization function is the only constructor of a decryptable catalog credential" remains stronger than the code, because `EncryptionKeys::decrypt` is public and `handlers/services.rs:2033` still decrypts a catalog row outside the newtype. The accurate version of that sentence is in N8. Documentation accuracy, not a code defect — but it is the sentence a future reader will trust.
+
+---
+
+## Verified correct
+
+### B5 closed — all four gate call sites agree, and the row shape is identical through every one
+
+The predicate is now `service.auth_method != "none"` (`proxy_service.rs:143-147`), with a comment recording *why* identity propagation is additive. Enumerating every site that can produce a catalog master credential:
+
+| Path | Early return | Gate | Behavior for bearer + `inject_delegation_token: true` + credential |
+|---|---|---|---|
+| server-chosen (assistant) | `:649` | `:664` `authorize_master_credential_server_chosen` | authorizes, injects credential |
+| strict (`/proxy/{id}`, `/proxy/s/{slug}`, WS, `_nyxid_via`) | `:755` | `:787-793` `authorize_master_credential` | authorizes, injects credential |
+| lenient (node-routed, MCP platform) | `:875` | `:926-932` `authorize_master_credential` | authorizes, injects credential |
+| auto-provisioned `UserService` | — | `:2048` predicate → `:2054` `authorize_master_credential` | authorizes, injects credential |
+
+The fourth row is the one that diverged in cycle 2. It is fixed indirectly but correctly: `is_public_internal_master_credential_service` (`:1835`) now delegates to `master_credential_required` instead of duplicating `auth_method != "none"`, so the guard that precedes the unguarded gate call at `:2054` and the gate's own `is_valid_master_credential_service` (`:246`) can no longer disagree about the delegation flag. Cycle 2's three divergent symptoms — silent empty bearer / 500 / 404 — collapse to one behavior.
+
+This is not just my reading. `delegated_identity_does_not_suppress_master_credential_across_resolvers` (`:3485`) builds one row — `auth_method: "bearer"`, `inject_delegation_token: true`, real encrypted credential `"catalog-secret"`, public, internal, `provider_config_id: None` — and drives it through `resolve_admin_proxy_target`, `resolve_proxy_target`, `resolve_proxy_target_lenient`, and `resolve_proxy_target_from_user_service`, asserting `credential == "catalog-secret"` and `inject_delegation_token` on each. The auto-provision leg additionally asserts `auto_resolution.master_credential` (`:3581`), which is set only inside the `finish_resolution` auto-provision branch — so the test provably reached the fourth site rather than an easier one. That is exactly the cross-site agreement check, automated.
+
+### The B5 regression test genuinely discriminates against the old predicate
+
+`delegated_identity_does_not_suppress_master_credential_across_resolvers` asserts `master_credential_required(&service)` at `:3512` on a row with `inject_delegation_token = true`. Under cycle 2's predicate that expression evaluated to `true && !true && !false` = **false**, so the assertion fails outright — before any resolver runs. The `.expect("server-chosen resolver should retain the master credential")` is a second independent failure point, since cycle 2 returned `AppError::Internal` there. The test cannot pass against the old code.
+
+I did not run the counterfactual by reverting the predicate locally, deliberately: a full gate run is in flight and mutating the tree mid-run would corrupt those results. The proof above is a direct read of the two predicates against the test's own assertion and is checkable without running anything.
+
+### `assistant_shaped_server_target_without_credential_resolves` now reaches the gate
+
+Cycle 2's version stopped at the `auth_method == "none"` early return and never touched the new code. It now has a second half (`:3469-3481`): it flips the stored row to `auth_method: "bearer"` in Mongo and asserts `resolve_admin_proxy_target` errors, which does reach `authorize_master_credential_server_chosen`. It also pins the intended semantics of the first half with `assert!(!master_credential_required(&service))` at `:3456`.
+
+One honest caveat: neither of those two assertions *discriminates* between the old and new predicates (both evaluate the same way for `auth_method: "none"`, and the second half errors under both, just with different error kinds). This test is now a correct behavioral pin rather than the B5 regression test — `delegated_identity_does_not_suppress_master_credential_across_resolvers` is the one that does the discriminating work, and it does it properly.
+
+### No new under-gating — broadening only added rows to the gated set
+
+The direction holds, and it now holds more strongly than before. `master_credential_required` returning `true` for strictly more rows means strictly more rows route through authorization. Concretely, after this change the ungated `else { String::new() }` arms at `:798` and `:930` are unreachable (N15), so **every** row with `requires_user_credential == false` and `auth_method != "none"` goes through `authorize_master_credential` on the caller-addressed paths — there is no residual shape that skips it.
+
+The census confirms it from the other direction: `service.credential_encrypted` / `catalog_service.credential_encrypted` appear in non-test code at exactly five places — `:210` and `:241` (inside the two authorize functions), and `:251`, `:1840` (predicates). Every producer of a catalog credential value is a gate function. Nothing else in `proxy_service.rs` or `handlers/proxy.rs` can name the ciphertext.
+
+Broadening also cannot re-open the original exposure: it restores the pre-PR baseline on the `auth_method` axis only. The narrowing clauses that close the hole — `visibility == "public"` on the server-chosen path, consent for private rows, internal category, no `provider_config_id`, non-empty credential, active, http — are all untouched (`:245-252`).
+
+### Nothing from cycle 2 regressed
+
+Verified by direct read, not inference — the commit touches one file, but I checked each item rather than trusting the diffstat:
+
+- `EffectiveActor` still has a private field and a private `from_user_id` (`:85-96`); no `Default`, no `From`, no public constructor. Sealed.
+- The typed decrypt split is intact: `AuthorizedMasterCredential::decrypt` (`:108`), `decrypt_user_credential` (`:120`), `decrypt_master_credential_string` (`:131`). The single `if / else if / else` credential chain in both resolvers is unchanged, so the cycle-1 two-boolean desync stays gone.
+- The 2 KiB outbound request-body preview is still absent — `rg "url.contains"` over `proxy_service.rs` returns nothing.
+- `log_upstream_error` still takes no body parameter, and `upstream_error_body_is_redacted_end_to_end` still passes end to end against a stubbed 422 carrying `SENTINEL_PASSENGER_NAME` (`handlers/proxy.rs` untouched this cycle).
+- All denial branches in both authorize functions still log a `reason` discriminator.
+
+### Consent semantics unchanged and still correct
+
+`master_credential_authorization_covers_visibility_and_consent` (`:3325`) is untouched and still passes: allow for public, allow for private-with-consent, deny for private-without-consent / expired / revoked / `None` app ids / empty app ids. Bidirectional, Mongo-backed, `panic!`s rather than skipping.
+
+---
+
+## Could not verify
+
+1. **The live `aevatar` row's shape, and whether any live row with `auth_method != "none"` fails the narrowing clauses.** Unchanged from cycle 1 and cycle 2, and no longer about the delegation flag — B5's fix removed that axis entirely. What remains is the intended security narrowing: a server-chosen or caller-addressed row that carries a credential must be `public` + `internal` + `provider_config_id: null` + non-empty credential + active + http. This is a deployment check, not a code defect, and I would run it as a post-deploy readback rather than a merge gate now that the code is verified for every shape:
+
+   ```js
+   db.downstream_services.find(
+     { requires_user_credential: false, auth_method: { $ne: "none" } },
+     { slug:1, visibility:1, service_category:1, provider_config_id:1,
+       is_active:1, credLen: { $binarySize: "$credential_encrypted" } }
+   )
+   ```
+
+   Every row returned must satisfy all six clauses or it will 404. If `aevatar` is `auth_method: "none"` — the shape Sol's test models, and consistent with a delegation-token-only integration — it never reaches the gate and is unaffected.
+
+2. **The full verification gate.** Only the five targeted tests were run here. `cargo fmt`, `cargo clippy --workspace --all-targets -- -D warnings`, `scripts/check-rci-backend-boundary.sh`, `cargo build`, and the full `nextest` run are yours. Two inert things clippy might notice, neither introduced by this commit: `authorize_master_credential_server_chosen` takes an unused `_db` and is `async` with no `.await` (`:216-218`), and N15's dead branches are dead by call-graph rather than by type, so `dead_code` will not fire on them.
+
+---
+
+## Certified
+
+Concretely, what I am signing off on:
+
+- Every path in the tree that decrypts a catalog row's master credential routes through `authorize_master_credential` or `authorize_master_credential_server_chosen`: strict, lenient, server-chosen, auto-provisioned, `_nyxid_via`, WebSocket, node-routed, LLM gateway, and the MCP executor (which resolves through the same functions rather than around them).
+- No row shape injects a master credential without authorization. The ciphertext is namable only inside the gate functions and the predicates.
+- Private credentialed rows require a valid, unexpired, unrevoked consent to an active OAuth client for one of the row's `developer_app_ids`; absent or empty `developer_app_ids` denies; DB errors deny; denials are `NotFound`-shaped so existence does not leak; every denial logs a `reason`.
+- The server-chosen surface can never serve a private row, and no synthetic actor can be constructed outside `proxy_service` to pretend otherwise.
+- A row combining a platform credential with `inject_delegation_token` or `forward_access_token` resolves identically through all four gate call sites, with the credential preserved.
+- No response body, and no request body, is written to tracing from the proxy path — verified end to end with a sentinel through a real stubbed 422, in the buffered branch, with the streaming and node branches read and confirmed to log no bytes.
+- The five tests above executed against a live Mongo and pass; the B5 regression test cannot pass against the pre-`f086a726` predicate.
