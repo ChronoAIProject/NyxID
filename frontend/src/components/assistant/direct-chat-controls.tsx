@@ -7,6 +7,7 @@ import {
   SelectTrigger,
   SelectValue,
 } from "@/components/ui/select";
+import { Switch } from "@/components/ui/switch";
 import {
   useDirectConversationSettings,
   useDirectEfforts,
@@ -17,17 +18,30 @@ import {
 const BANNER_DISMISSED_KEY = "nyxid.direct-chat-banner-dismissed";
 export const DIRECT_MODE_COPY =
   "Direct model chat — no tools, no approvals, and conversations are not saved.";
+export const AGENT_POC_MODE_COPY =
+  "Agent POC — read-only tools, four visible stages, and conversations are not saved.";
 
-export function DirectModeBanner() {
+export function DirectModeBanner({
+  conversationId,
+}: {
+  readonly conversationId?: string;
+}) {
   const [dismissed, setDismissed] = useState(
     () => localStorage.getItem(BANNER_DISMISSED_KEY) === "true",
   );
+  const { settings } = useDirectConversationSettings(conversationId, undefined);
   if (dismissed) return null;
 
   return (
-    <div className="flex min-h-9 shrink-0 items-center gap-2 border-b border-border/60 bg-overlay px-4 py-2 text-[11px] text-muted-foreground sm:px-6">
+    <div
+      aria-label="Direct chat mode notice"
+      className="flex min-h-9 shrink-0 items-center gap-2 border-b border-border/60 bg-overlay px-4 py-2 text-[11px] text-muted-foreground sm:px-6"
+      role="status"
+    >
       <Info aria-hidden="true" className="h-3.5 w-3.5 shrink-0" />
-      <span className="min-w-0 flex-1">{DIRECT_MODE_COPY}</span>
+      <span className="min-w-0 flex-1">
+        {settings.agentPocMode ? AGENT_POC_MODE_COPY : DIRECT_MODE_COPY}
+      </span>
       <button
         type="button"
         aria-label="Dismiss direct chat notice"
@@ -55,8 +69,14 @@ export function DirectChatControls({
   const efforts = useDirectEfforts();
   const defaultModel =
     models.data?.find((model) => model.default)?.id ?? models.data?.[0]?.id;
-  const { settings, canUpdate, setModel, setSkill, setEffort } =
-    useDirectConversationSettings(conversationId, defaultModel);
+  const {
+    settings,
+    canUpdate,
+    setModel,
+    setSkill,
+    setEffort,
+    setAgentPocMode,
+  } = useDirectConversationSettings(conversationId, defaultModel);
 
   return (
     <div className="ml-[30px] flex min-w-0 flex-wrap items-start gap-2 pb-1.5">
@@ -139,8 +159,27 @@ export function DirectChatControls({
           </SelectContent>
         </Select>
         <p className="mt-1 text-[10px] leading-4 text-text-tertiary">
-          A skill teaches the model about NyxID; it cannot take actions here.
+          {settings.agentPocMode
+            ? AGENT_POC_MODE_COPY
+            : "A skill teaches the model about NyxID; it cannot take actions here."}
         </p>
+      </div>
+      <div className="w-[110px] min-w-0">
+        <label
+          htmlFor="direct-agent-poc"
+          className="mb-1 block text-[10px] font-medium text-text-tertiary"
+        >
+          Agent POC
+        </label>
+        <div className="flex h-7 items-center">
+          <Switch
+            id="direct-agent-poc"
+            checked={settings.agentPocMode}
+            onCheckedChange={setAgentPocMode}
+            disabled={disabled || !canUpdate}
+            aria-label="Agent POC"
+          />
+        </div>
       </div>
     </div>
   );

@@ -1413,59 +1413,6 @@ fn mcp_node_scope<'a>(auth: &'a McpAuthContext) -> mcp_service::NodeScope<'a> {
     }
 }
 
-#[derive(Clone, Debug)]
-struct McpApprovalTarget {
-    service_id: String,
-    service_name: String,
-    service_slug: String,
-    service_owner_user_id: String,
-}
-
-/// Resolve the approval key and owner through the same metadata-only path as
-/// the REST proxy. MCP activation uses `UserService.id`, while catalog-backed
-/// approval policies use `catalog_service_id`; those identities must not be
-/// conflated.
-async fn approval_target_for_tool(
-    db: &mongodb::Database,
-    auth: &McpAuthContext,
-    service: &mcp_service::McpToolService,
-) -> crate::errors::AppResult<McpApprovalTarget> {
-    let approval_owner_user_id = auth.effective_approval_owner_user_id();
-    let hint = match &service.source {
-        mcp_service::McpToolSource::UserManaged {
-            user_service_id, ..
-        } => proxy_service::find_approval_resolution_hint_by_user_service_id(
-            db,
-            &approval_owner_user_id,
-            user_service_id,
-            Some(&service.service_slug),
-            None,
-        )
-        .await?
-        .ok_or_else(|| crate::errors::AppError::NotFound("Service not found".to_string()))?,
-        mcp_service::McpToolSource::Platform {
-            downstream_service_id,
-        } => proxy_service::find_approval_resolution_hint(
-            db,
-            &approval_owner_user_id,
-            None,
-            Some(downstream_service_id),
-        )
-        .await?
-        .unwrap_or_else(|| proxy_service::ApprovalResolutionHint {
-            service_id: downstream_service_id.clone(),
-            service_owner_id: approval_owner_user_id,
-        }),
-    };
-
-    Ok(McpApprovalTarget {
-        service_id: hint.service_id,
-        service_name: service.service_name.clone(),
-        service_slug: service.service_slug.clone(),
-        service_owner_user_id: hint.service_owner_id,
-    })
-}
-
 #[allow(clippy::result_large_err)]
 async fn authorize_mcp_tool_operation(
     state: &AppState,
@@ -1474,15 +1421,19 @@ async fn authorize_mcp_tool_operation(
     operation: &operation_descriptor::OperationDescriptor,
     request_id: Option<serde_json::Value>,
 ) -> Result<(), Response> {
-    let target = approval_target_for_tool(&state.db, auth, service)
-        .await
-        .map_err(|e| {
-            tool_result(
-                request_id.clone(),
-                &format!("Approval check failed: {e}"),
-                true,
-            )
-        })?;
+    let target = crate::services::mcp_approval::approval_target_for_tool(
+        &state.db,
+        &auth.effective_approval_owner_user_id(),
+        service,
+    )
+    .await
+    .map_err(|e| {
+        tool_result(
+            request_id.clone(),
+            &format!("Approval check failed: {e}"),
+            true,
+        )
+    })?;
     authorize_mcp_operation(state, auth, target, operation, request_id).await
 }
 
@@ -1490,7 +1441,7 @@ async fn authorize_mcp_tool_operation(
 async fn authorize_mcp_operation(
     state: &AppState,
     auth: &McpAuthContext,
-    target: McpApprovalTarget,
+    target: crate::services::mcp_approval::McpApprovalTarget,
     operation: &operation_descriptor::OperationDescriptor,
     request_id: Option<serde_json::Value>,
 ) -> Result<(), Response> {
@@ -2602,7 +2553,7 @@ async fn handle_mcp_ssh_exec(
     if let Err(resp) = authorize_mcp_operation(
         state,
         auth,
-        McpApprovalTarget {
+        crate::services::mcp_approval::McpApprovalTarget {
             service_id: service_id.clone(),
             service_name: service.name,
             service_slug: service.slug,
@@ -3421,7 +3372,13 @@ mod tests {
         auth.approval_owner_user_id = Some("owner-1".into());
         let svc = platform("svc-a");
 
-        let target = approval_target_for_tool(&db, &auth, &svc).await.unwrap();
+        let target = crate::services::mcp_approval::approval_target_for_tool(
+            &db,
+            &auth.effective_approval_owner_user_id(),
+            &svc,
+        )
+        .await
+        .unwrap();
 
         assert_eq!(target.service_id, "svc-a");
         assert_eq!(target.service_owner_user_id, "owner-1");

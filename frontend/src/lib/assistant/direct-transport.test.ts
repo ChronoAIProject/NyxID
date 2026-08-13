@@ -86,6 +86,35 @@ beforeEach(() => {
 });
 
 describe("DirectAssistantTransport streaming", () => {
+  it("seeds default models silently: no listener call, no-op identity kept", async () => {
+    const transport = new DirectAssistantTransport();
+    const listener = vi.fn();
+    const unsubscribe = transport.subscribeSettings(listener);
+
+    const draftBefore = transport.getSettings();
+    transport.seedDefaultModel(undefined, draftBefore.model);
+    expect(transport.getSettings()).toBe(draftBefore);
+    expect(listener).not.toHaveBeenCalled();
+
+    const conversationId = await startedConversation(transport);
+    const settingsBefore = transport.getSettings(conversationId);
+    const conversationBefore = (await transport.listConversations())[0];
+    transport.seedDefaultModel(conversationId, settingsBefore.model);
+    expect(transport.getSettings(conversationId)).toBe(settingsBefore);
+    expect((await transport.listConversations())[0]).toBe(conversationBefore);
+    expect(listener).not.toHaveBeenCalled();
+
+    // Real seeds run during render, so they update the snapshot without
+    // notifying subscribers (the caller reads the store after seeding).
+    transport.seedDefaultModel(conversationId, "server-new");
+    expect(listener).not.toHaveBeenCalled();
+    expect(transport.getSettings(conversationId).model).toBe("server-new");
+    expect((await transport.listConversations())[0]?.llm_model).toBe(
+      "server-new",
+    );
+    unsubscribe();
+  });
+
   it("accumulates the saved fixture and sends the selected model and skill", async () => {
     const fetchMock = vi.fn(async (...args: Parameters<typeof fetch>) => {
       void args;
@@ -615,6 +644,7 @@ describe("DirectAssistantTransport identity isolation", () => {
       model: "gpt-5.5",
       skillSlug: null,
       effort: null,
+      agentPocMode: false,
     });
     expect(useAssistantDraftStore.getState().drafts).toEqual({});
     await expect(transport.getHistory(conversationId)).rejects.toThrow(

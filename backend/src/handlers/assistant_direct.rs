@@ -36,7 +36,10 @@ pub struct DirectEffortResponse {
     label: &'static str,
 }
 
-async fn require_direct_chat_enabled(state: &AppState, auth_user: &AuthUser) -> AppResult<()> {
+pub(crate) async fn require_direct_chat_enabled(
+    state: &AppState,
+    auth_user: &AuthUser,
+) -> AppResult<()> {
     let enabled =
         feature_flag_service::resolve_personal_features(&state.db, &auth_user.user_id.to_string())
             .await?
@@ -188,7 +191,7 @@ pub async fn completions(
     Ok(attach_in_flight_permit(response, permit))
 }
 
-fn attach_in_flight_permit(response: Response, permit: DirectChatPermit) -> Response {
+pub(crate) fn attach_in_flight_permit(response: Response, permit: DirectChatPermit) -> Response {
     let (parts, body) = response.into_parts();
     let stream = async_stream::stream! {
         let _permit = permit;
