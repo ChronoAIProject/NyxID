@@ -41,7 +41,12 @@ pub const DEFAULT_ALLOWED_SCOPES: &str = "openid profile email";
 /// Delegation scopes OAuth clients may request through RFC 8693 token
 /// exchange. `account:read` is intentionally absent: that capability is
 /// confined to admin-configured downstream/user service rows.
-pub const OAUTH_CLIENT_DELEGATION_SCOPES: &[&str] = &["llm:proxy", "proxy:*", "llm:status"];
+pub const OAUTH_CLIENT_DELEGATION_SCOPES: &[&str] = &[
+    "llm:proxy",
+    "proxy:*",
+    "llm:status",
+    crate::services::catalog_delegation_service::MCP_CATALOG_READ_SCOPE,
+];
 
 pub fn validate_oauth_client_delegation_scopes(scopes: &str) -> AppResult<()> {
     for scope in scopes.split_whitespace() {
@@ -1467,6 +1472,14 @@ mod tests {
                 Err(AppError::ValidationError(_))
             ));
         }
+    }
+
+    #[test]
+    fn oauth_client_delegation_scopes_register_catalog_read_as_named_capability() {
+        validate_oauth_client_delegation_scopes(
+            crate::services::catalog_delegation_service::MCP_CATALOG_READ_SCOPE,
+        )
+        .expect("catalog read is a registered delegation capability");
     }
 
     #[test]

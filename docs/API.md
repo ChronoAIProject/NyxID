@@ -4131,6 +4131,11 @@ Exchange a user's access token for a short-lived delegated access token. The del
 | `subject_token`      | string | Yes      | The user's NyxID access token                              |
 | `subject_token_type` | string | Yes      | Must be `urn:ietf:params:oauth:token-type:access_token`    |
 | `scope`              | string | No       | Requested delegation scopes (default: `llm:proxy`)         |
+| `resource`           | string[] | No       | RFC 8707 connected-service resources to include           |
+| `allow_all_services` | boolean | Catalog | Explicit service authority posture for `mcp:catalog:read` |
+| `allowed_service_ids`| string[] | Catalog | Explicit connected-service IDs for `mcp:catalog:read`    |
+| `allow_all_nodes`    | boolean | Catalog | Explicit node authority posture for `mcp:catalog:read`   |
+| `allowed_node_ids`   | string[] | Catalog | Explicit node IDs for `mcp:catalog:read`                 |
 
 **Available Delegation Scopes:**
 
@@ -4140,6 +4145,7 @@ Exchange a user's access token for a short-lived delegated access token. The del
 | `proxy:*`          | All proxy endpoints (`/api/v1/proxy/{service_id}/{*path}`)      |
 | `proxy:{service_id}` | A specific service's proxy endpoint                           |
 | `llm:status`       | Read-only access to LLM status endpoint                        |
+| `mcp:catalog:read` | Read-only connected-service catalog authority; no proxy, management, secret, or effect access |
 | `account:read`     | GET-only access to the user's existing management resources, subject to route-class and WebSocket exclusions |
 
 `account:read` is service-issued only. It may be configured on an admin-managed downstream or user-service row, but OAuth clients cannot include it in `delegation_scopes`, request it through RFC 8693 token exchange, or regain it during delegation refresh. The scope preserves each endpoint's existing personal and organization ACLs, never authorizes management writes, and does not permit admin, auth/provisioning, credential-delivery, execution, streaming, or WebSocket route classes.
@@ -4168,7 +4174,11 @@ Exchange a user's access token for a short-lived delegated access token. The del
 | `scope`     | string  | Constrained delegation scopes                      |
 | `token_type`| string  | `"access"`                                         |
 | `act.sub`   | string  | OAuth client ID of the acting service (RFC 8693)   |
+| `client_id` | string  | Receiving OAuth client ID for catalog delegation  |
 | `delegated` | boolean | `true` (distinguishes from direct user tokens)     |
+| `resources` | string[] | Canonical RFC 8707 resources granted to the token |
+| `allow_all_services` / `allowed_service_ids` | boolean / string[] | Explicit connected-service authority for catalog tokens |
+| `allow_all_nodes` / `allowed_node_ids` | boolean / string[] | Explicit node authority for catalog tokens and new delegated tokens |
 
 **Errors:**
 - `1000 bad_request` -- Missing required parameters, invalid `subject_token_type`, subject token is not an access token, or subject token is itself a delegated token (chained exchange rejected)

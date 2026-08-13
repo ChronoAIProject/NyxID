@@ -39,6 +39,7 @@ pub async fn refresh_delegation_token(
         &state.jwt_keys,
         &user_id_str,
         acting_client_id,
+        auth_user.oauth_client_id.as_deref(),
         &auth_user.scope,
         &crate::crypto::jwt::TokenRestrictionClaims::from_auth_user(&auth_user),
     )

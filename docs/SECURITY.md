@@ -471,6 +471,8 @@ Both the introspection (`POST /oauth/introspect`) and revocation (`POST /oauth/r
 | **Endpoint restriction** | Native delegated routes remain available; management access requires the exact `account:read` scope and the read-parity controls below |
 | **No credential exposure** | Services never see user's provider credentials -- only NyxID resolves and injects them |
 | **Chained exchange prevention** | Delegated tokens cannot be exchanged for new delegated tokens, preventing indefinite TTL extension |
+| **Connected-service catalog authority** | The dedicated `mcp:catalog:read` scope is carried only by short-lived tokens with explicit service/node/resource bounds. RFC 8693 exchange intersects source claims, both client consents, receiver delegation scope, requested service/node bounds, and RFC 8707 resources; `All` cannot widen a restricted source and an empty restricted set remains deny-all. |
+| **Catalog token revocation** | Catalog grants are anchored by JWT `jti` in `catalog_delegation_grants`; every authenticated request checks expiry, revocation, actor/receiver identity, active clients, current delegation scopes, and current consent bounds. |
 | **Audit trail** | Token exchange and subsequent proxy requests are audit-logged with both `user_id` and `acting_client_id` |
 
 ### Account Read Parity
@@ -484,6 +486,8 @@ The `AuthUser` extractor applies the authoritative decision only after verifying
 Delegated JWTs also fail closed on routes outside `/api/v1` whenever those routes use `AuthUser` or `OptionalAuthUser`; `account:read` does not make top-level OAuth routes such as `/oauth/userinfo` delegated-native. Required-auth extractors return the delegated-policy `403`, while `OptionalAuthUser` treats the client rejection as absent optional credentials and logs it at debug level; genuine internal extractor failures remain error-level events. The top-level pending-credential accept pages take no authentication extractor and remain public HTML delivery, but their credential API calls stay inside the explicitly denied pending-credential route class.
 
 OAuth clients cannot configure or exchange for `account:read`, and delegation refresh cannot re-add it. The scope is confined to admin-configured downstream and user-service rows; a service must receive a newly minted token from an eligible invocation. Its bearer-token replay window is the existing five-minute delegated-token TTL and must not be increased.
+
+The separate `mcp:catalog:read` capability is intentionally not an account-read, proxy, approval, management, or secret-delivery grant. Its delegated JWT uses `sub` for the owner, `act.sub` for the source/acting OAuth client, and `client_id` for the receiving OAuth client. Catalog authority claims are explicit (`allow_all_services`/`allowed_service_ids`, `allow_all_nodes`/`allowed_node_ids`, and `resources`); missing or contradictory claims fail closed. Refresh preserves both client identities and rechecks both clients and both consent records.
 
 New management `GET` routes default to readable for `account:read`. Route authors must add any new secret-delivery, execution, streaming, WebSocket-upgrade, or authentication/provisioning protocol route to `delegated_read_denied_path` in `mw/auth.rs` before mounting it.
 

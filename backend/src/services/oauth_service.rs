@@ -425,6 +425,8 @@ pub async fn exchange_authorization_code(
             crate::crypto::jwt::AccessTokenRestrictions {
                 resources: &token_resource_scope.resource_uris,
                 allowed_service_ids: &token_resource_scope.allowed_service_ids,
+                allowed_node_ids: &[],
+                allow_all_nodes: true,
             },
         ),
         &stored.client_id,

@@ -604,6 +604,14 @@ pub async fn get_request_status(
     auth_user: AuthUser,
     Path(request_id): Path<String>,
 ) -> AppResult<Json<ApprovalStatusResponse>> {
+    if auth_user.auth_method == crate::mw::auth::AuthMethod::Delegated
+        && crate::services::catalog_delegation_service::scope_has_catalog_read(&auth_user.scope)
+        && !auth_user.can_use_rest_proxy()
+    {
+        return Err(AppError::Forbidden(
+            "Catalog-read scope does not grant approval authority".to_string(),
+        ));
+    }
     let request = approval_service::get_request(&state.db, &request_id).await?;
     let owner_user_id = auth_user.effective_approval_owner_user_id();
     let requester_type = auth_user.approval_requester_type().ok_or_else(|| {
