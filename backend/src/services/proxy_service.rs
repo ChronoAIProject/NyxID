@@ -79,6 +79,93 @@ pub struct ProxyTarget {
     pub connection_id: Option<String>,
 }
 
+/// The effective owner used for catalog consent and proxy resource checks.
+/// There is intentionally no default/system constructor: server-chosen
+/// surfaces use `authorize_master_credential_server_chosen` instead.
+#[derive(Clone, Debug)]
+pub struct EffectiveActor {
+    pub user_id: String,
+}
+
+/// Encrypted bytes for a catalog-owned platform credential. The private
+/// constructor makes authorization the only way to produce this value.
+pub struct AuthorizedMasterCredential(Vec<u8>);
+
+impl AuthorizedMasterCredential {
+    fn new(ciphertext: &[u8]) -> Self {
+        Self(ciphertext.to_vec())
+    }
+}
+
+async fn decrypt_authorized_master_credential(
+    encryption_keys: &EncryptionKeys,
+    credential: &AuthorizedMasterCredential,
+) -> AppResult<Vec<u8>> {
+    encryption_keys.decrypt(&credential.0).await
+}
+
+/// Authorize and wrap a catalog master credential before decryption.
+pub async fn authorize_master_credential(
+    db: &mongodb::Database,
+    service: &DownstreamService,
+    actor: &EffectiveActor,
+) -> AppResult<AuthorizedMasterCredential> {
+    if !is_valid_master_credential_service(service) {
+        return Err(AppError::NotFound("Service not found".to_string()));
+    }
+
+    match service.visibility.as_str() {
+        "public" => {}
+        "private" => {
+            let Some(app_ids) = service
+                .developer_app_ids
+                .as_ref()
+                .filter(|ids| !ids.is_empty())
+            else {
+                return Err(AppError::NotFound("Service not found".to_string()));
+            };
+            let app_refs: Vec<&str> = app_ids.iter().map(String::as_str).collect();
+            let consented = crate::services::unified_key_service::load_valid_app_consents(
+                db,
+                &actor.user_id,
+                &app_refs,
+            )
+            .await?;
+            if !app_ids.iter().any(|id| consented.contains(id.as_str())) {
+                return Err(AppError::NotFound("Service not found".to_string()));
+            }
+        }
+        _ => return Err(AppError::NotFound("Service not found".to_string())),
+    }
+
+    Ok(AuthorizedMasterCredential::new(
+        &service.credential_encrypted,
+    ))
+}
+
+/// Server-selected platform surfaces may serve public rows only.  Private
+/// rows have no real user actor and are therefore refused by construction.
+pub async fn authorize_master_credential_server_chosen(
+    _db: &mongodb::Database,
+    service: &DownstreamService,
+) -> AppResult<AuthorizedMasterCredential> {
+    if service.visibility != "public" || !is_valid_master_credential_service(service) {
+        return Err(AppError::NotFound("Service not found".to_string()));
+    }
+    Ok(AuthorizedMasterCredential::new(
+        &service.credential_encrypted,
+    ))
+}
+
+fn is_valid_master_credential_service(service: &DownstreamService) -> bool {
+    service.is_active
+        && service.service_type == "http"
+        && service.service_category == "internal"
+        && !service.requires_user_credential
+        && !service.credential_encrypted.is_empty()
+        && service.provider_config_id.is_none()
+}
+
 pub(crate) struct PreparedDelegatedRequest {
     pub path: String,
     pub query: Option<String>,
@@ -574,11 +661,9 @@ pub async fn resolve_admin_proxy_target(
     }
 
     // SEC-M3: raw decrypted bytes stay wrapped so they zero on drop.
-    let decrypted_bytes = Zeroizing::new(
-        encryption_keys
-            .decrypt(&service.credential_encrypted)
-            .await?,
-    );
+    let authorized = authorize_master_credential_server_chosen(db, &service).await?;
+    let decrypted_bytes =
+        Zeroizing::new(decrypt_authorized_master_credential(encryption_keys, &authorized).await?);
     let credential = String::from_utf8((*decrypted_bytes).clone()).map_err(|e| {
         tracing::error!("Credential UTF-8 decode failed: {e}");
         AppError::Internal("Failed to decode credential".to_string())
@@ -688,6 +773,20 @@ pub async fn resolve_proxy_target(
     }
 
     // Determine which credential to use
+    let authorized_master = if service.requires_user_credential {
+        None
+    } else {
+        Some(
+            authorize_master_credential(
+                db,
+                &service,
+                &EffectiveActor {
+                    user_id: user_id.to_string(),
+                },
+            )
+            .await?,
+        )
+    };
     let credential_encrypted = if service.requires_user_credential {
         // Connection services: must have per-user credential
         user_conn
@@ -699,12 +798,15 @@ pub async fn resolve_proxy_target(
                 )
             })?
     } else {
-        // Internal services: use master credential
-        service.credential_encrypted.clone()
+        Vec::new()
     };
 
     // SEC-M3: Wrap raw decrypted bytes in Zeroizing so they are zeroed on drop
-    let decrypted_bytes = Zeroizing::new(encryption_keys.decrypt(&credential_encrypted).await?);
+    let decrypted_bytes = Zeroizing::new(if let Some(authorized) = authorized_master {
+        decrypt_authorized_master_credential(encryption_keys, &authorized).await?
+    } else {
+        encryption_keys.decrypt(&credential_encrypted).await?
+    });
     let credential = String::from_utf8((*decrypted_bytes).clone()).map_err(|e| {
         tracing::error!("Credential UTF-8 decode failed: {e}");
         AppError::Internal("Failed to decode credential".to_string())
@@ -829,15 +931,43 @@ pub async fn resolve_proxy_target_lenient(
         ));
     }
 
+    let authorized_master = if service.requires_user_credential {
+        None
+    } else {
+        Some(
+            authorize_master_credential(
+                db,
+                &service,
+                &EffectiveActor {
+                    user_id: user_id.to_string(),
+                },
+            )
+            .await?,
+        )
+    };
     let credential_encrypted = if service.requires_user_credential {
         user_conn.and_then(|c| c.credential_encrypted)
     } else {
-        Some(service.credential_encrypted.clone())
+        None
     };
 
     let (credential, has_credential) = match credential_encrypted {
         Some(enc) => {
             let decrypted_bytes = Zeroizing::new(encryption_keys.decrypt(&enc).await?);
+            let cred = String::from_utf8((*decrypted_bytes).clone()).map_err(|e| {
+                tracing::error!("Credential UTF-8 decode failed: {e}");
+                AppError::Internal("Failed to decode credential".to_string())
+            })?;
+            (cred, true)
+        }
+        None if authorized_master.is_some() => {
+            let decrypted_bytes = Zeroizing::new(
+                decrypt_authorized_master_credential(
+                    encryption_keys,
+                    authorized_master.as_ref().expect("checked above"),
+                )
+                .await?,
+            );
             let cred = String::from_utf8((*decrypted_bytes).clone()).map_err(|e| {
                 tracing::error!("Credential UTF-8 decode failed: {e}");
                 AppError::Internal("Failed to decode credential".to_string())
@@ -1992,10 +2122,16 @@ async fn finish_resolution(
             ));
         }
 
+        let authorized = authorize_master_credential(
+            db,
+            &catalog_service,
+            &EffectiveActor {
+                user_id: effective_owner_id.to_string(),
+            },
+        )
+        .await?;
         let decrypted_bytes = Zeroizing::new(
-            encryption_keys
-                .decrypt(&catalog_service.credential_encrypted)
-                .await?,
+            decrypt_authorized_master_credential(encryption_keys, &authorized).await?,
         );
         let credential = String::from_utf8((*decrypted_bytes).clone()).map_err(|e| {
             tracing::error!("Credential UTF-8 decode failed: {e}");
@@ -3151,6 +3287,40 @@ mod tests {
                 "provider_config_id": "provider-id",
                 "status": { "$in": ["active", "expired", "refresh_failed"] },
             }
+        );
+    }
+
+    #[tokio::test]
+    async fn server_chosen_master_credential_requires_public_valid_row() {
+        let db = connect_test_database("proxy_master_credential_server_chosen").await;
+        let Some(db) = db else {
+            eprintln!("skipping server-chosen master credential test: no local MongoDB available");
+            return;
+        };
+
+        let mut service = dummy_service();
+        service.visibility = "private".to_string();
+        service.service_category = "internal".to_string();
+        service.requires_user_credential = false;
+        service.credential_encrypted = vec![1, 2, 3];
+        assert!(
+            authorize_master_credential_server_chosen(&db, &service)
+                .await
+                .is_err()
+        );
+
+        service.visibility = "public".to_string();
+        assert!(
+            authorize_master_credential_server_chosen(&db, &service)
+                .await
+                .is_ok()
+        );
+
+        service.service_category = "connection".to_string();
+        assert!(
+            authorize_master_credential_server_chosen(&db, &service)
+                .await
+                .is_err()
         );
     }
 

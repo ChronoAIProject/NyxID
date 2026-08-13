@@ -114,6 +114,22 @@ fn proxy_client_disconnected(service_id: &str) -> AppError {
     AppError::ClientDisconnected
 }
 
+fn log_upstream_error(
+    service_id: &str,
+    status: StatusCode,
+    _response_body: &[u8],
+    response_size: usize,
+    upstream_request_id: &str,
+) {
+    tracing::error!(
+        service_id = %service_id,
+        status = %status,
+        response_size,
+        upstream_request_id,
+        "Upstream returned error response"
+    );
+}
+
 /// Stable string label for the auth method that issued this proxy request.
 /// Pairs with `TelemetryEvent::ProxySuccess.auth_kind`. The values are part
 /// of the public PostHog property contract — if you rename one, update the
@@ -3412,6 +3428,12 @@ async fn execute_proxy_inner(
         }
     } else {
         // Buffer small / error responses so we can log diagnostics.
+        let upstream_request_id = downstream_response
+            .headers()
+            .get("x-request-id")
+            .and_then(|value| value.to_str().ok())
+            .unwrap_or("unknown")
+            .to_string();
         let response_body =
             until_client_disconnect(&downstream_cancellation, downstream_response.bytes())
                 .await
@@ -3421,13 +3443,12 @@ async fn execute_proxy_inner(
                 })?;
 
         if !status.is_success() {
-            let body_preview =
-                String::from_utf8_lossy(&response_body[..response_body.len().min(1024)]);
-            tracing::error!(
-                service_id = %service_id,
-                status = %status,
-                body = %body_preview,
-                "Upstream returned error response"
+            log_upstream_error(
+                service_id,
+                status,
+                &response_body,
+                response_body.len(),
+                &upstream_request_id,
             );
         }
 
@@ -5202,8 +5223,8 @@ mod tests {
         apply_agent_attribution_headers, auth_kind_label, caller_bearer_token_for_downstream,
         collect_ws_forward_headers, compose_pre_resolved_node_ids, enforce_node_route_scope,
         final_credential_class, is_chat_completions_proxy_path, is_codex_transport_path,
-        is_ws_upgrade_request, should_enforce_runtime_approval, single_system_header,
-        strip_durable_idempotency_defaults, validate_range_header,
+        is_ws_upgrade_request, log_upstream_error, should_enforce_runtime_approval,
+        single_system_header, strip_durable_idempotency_defaults, validate_range_header,
         websocket_realtime_usage_enabled, websocket_resale_usage,
     };
     use crate::models::service_billing::{BillingMetric, ServiceBilling};
@@ -5223,11 +5244,60 @@ mod tests {
         routing::get,
     };
     use futures::{SinkExt, StreamExt};
+    use std::io;
+    use std::sync::Mutex;
     use std::sync::{
         Arc,
         atomic::{AtomicUsize, Ordering},
     };
     use tower::ServiceExt;
+
+    #[derive(Clone)]
+    struct TraceCapture(Arc<Mutex<Vec<u8>>>);
+
+    impl io::Write for TraceCapture {
+        fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+            self.0
+                .lock()
+                .expect("trace capture lock")
+                .extend_from_slice(bytes);
+            Ok(bytes.len())
+        }
+
+        fn flush(&mut self) -> io::Result<()> {
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn upstream_error_log_excludes_response_body() {
+        let captured = Arc::new(Mutex::new(Vec::new()));
+        let writer = {
+            let captured = captured.clone();
+            move || TraceCapture(captured.clone())
+        };
+        let subscriber = tracing_subscriber::fmt()
+            .with_ansi(false)
+            .with_writer(writer)
+            .finish();
+
+        tracing::subscriber::with_default(subscriber, || {
+            log_upstream_error(
+                "duffel",
+                StatusCode::BAD_GATEWAY,
+                b"SENTINEL_UPSTREAM_BODY",
+                37,
+                "upstream-123",
+            );
+        });
+
+        let output = String::from_utf8(captured.lock().expect("trace capture lock").clone())
+            .expect("trace output is utf8");
+        assert!(output.contains("status=502"));
+        assert!(output.contains("response_size=37"));
+        assert!(output.contains("upstream-123"));
+        assert!(!output.contains("SENTINEL_UPSTREAM_BODY"));
+    }
 
     // ---- validate_range_header tests ----
 
