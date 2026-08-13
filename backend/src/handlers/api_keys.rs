@@ -198,6 +198,9 @@ pub struct CreateApiKeyResponse {
     pub full_key: String,
     pub scopes: String,
     pub created_at: String,
+    pub rotation_predecessor_id: Option<String>,
+    pub state_version: i64,
+    pub updated_at: String,
     pub allowed_service_ids: Vec<String>,
     pub allowed_node_ids: Vec<String>,
     pub allow_all_services: bool,
@@ -315,6 +318,9 @@ pub struct ApiKeyResponse {
     pub expires_at: Option<String>,
     pub is_active: bool,
     pub created_at: String,
+    pub rotation_predecessor_id: Option<String>,
+    pub state_version: i64,
+    pub updated_at: Option<String>,
     pub allowed_service_ids: Vec<String>,
     pub allowed_node_ids: Vec<String>,
     pub allow_all_services: bool,
@@ -617,6 +623,9 @@ async fn enrich_api_keys_batch(
                 expires_at: key.expires_at.map(|dt| dt.to_rfc3339()),
                 is_active: key.is_active,
                 created_at: key.created_at.to_rfc3339(),
+                rotation_predecessor_id: key.rotation_predecessor_id.clone(),
+                state_version: key.state_version,
+                updated_at: key.updated_at.map(|value| value.to_rfc3339()),
                 allowed_service_ids: key.allowed_service_ids.clone(),
                 allowed_node_ids: key.allowed_node_ids.clone(),
                 allow_all_services: key.allow_all_services,
@@ -1476,6 +1485,9 @@ pub async fn create_key(
         full_key: created.full_key,
         scopes: created.scopes,
         created_at: created.created_at.to_rfc3339(),
+        rotation_predecessor_id: created.rotation_predecessor_id,
+        state_version: created.state_version,
+        updated_at: created.updated_at.to_rfc3339(),
         allowed_service_ids: created.allowed_service_ids,
         allowed_node_ids: created.allowed_node_ids,
         allow_all_services: created.allow_all_services,
@@ -1614,17 +1626,13 @@ pub async fn rotate_key(
 
     let actor = auth_user.user_id.to_string();
     let user_id_str = resolve_api_key_write_owner(&state, &actor, &key_id).await?;
-    let created = if user_id_str == actor {
-        key_service::rotate_api_key_with_scope_authorization(
-            &state.db,
-            &user_id_str,
-            Some(&actor),
-            &key_id,
-        )
-        .await?
-    } else {
-        key_service::rotate_api_key(&state.db, &user_id_str, &key_id).await?
-    };
+    let created = key_service::rotate_api_key_with_scope_authorization(
+        &state.db,
+        &user_id_str,
+        Some(&actor),
+        &key_id,
+    )
+    .await?;
 
     // Telemetry: api_key.rotated.
     emit_event(
@@ -1645,6 +1653,9 @@ pub async fn rotate_key(
         full_key: created.full_key,
         scopes: created.scopes,
         created_at: created.created_at.to_rfc3339(),
+        rotation_predecessor_id: created.rotation_predecessor_id,
+        state_version: created.state_version,
+        updated_at: created.updated_at.to_rfc3339(),
         allowed_service_ids: created.allowed_service_ids,
         allowed_node_ids: created.allowed_node_ids,
         allow_all_services: created.allow_all_services,
@@ -1791,11 +1802,140 @@ pub async fn reauthorize_durable_grants(
 #[cfg(test)]
 mod tests {
     use super::{
-        UpdateApiKeyRequest, extract_response_status, is_error_event, parse_expires_at,
-        usage_date_range,
+        ApiKeyResponse, UpdateApiKeyRequest, extract_response_status, is_error_event,
+        parse_expires_at, usage_date_range,
     };
     use chrono::{Duration, NaiveDate, Utc};
     use serde_json::json;
+
+    #[test]
+    fn api_key_read_response_exposes_lineage_without_secret_material() {
+        let response = ApiKeyResponse {
+            id: "successor-id".to_string(),
+            name: "rotated-key".to_string(),
+            description: None,
+            key_prefix: "nyxid_ag_public".to_string(),
+            scopes: "proxy".to_string(),
+            last_used_at: None,
+            expires_at: None,
+            is_active: true,
+            created_at: "2026-08-11T00:00:00Z".to_string(),
+            rotation_predecessor_id: Some("predecessor-id".to_string()),
+            state_version: 1,
+            updated_at: Some("2026-08-11T00:00:00Z".to_string()),
+            allowed_service_ids: Vec::new(),
+            allowed_node_ids: Vec::new(),
+            allow_all_services: true,
+            allow_all_nodes: true,
+            allowed_services: Vec::new(),
+            allowed_nodes: Vec::new(),
+            rate_limit_per_second: None,
+            rate_limit_burst: None,
+            platform: Some("codex".to_string()),
+            callback_url: None,
+            purpose: Default::default(),
+            scheduled_write_enabled: false,
+            bindings_count: 0,
+            credential_source:
+                crate::handlers::user_services_handler::CredentialSourceResponse::Personal,
+        };
+
+        let json = serde_json::to_value(response).expect("serialize API key read response");
+        assert_eq!(json["rotation_predecessor_id"], "predecessor-id");
+        assert_eq!(json["state_version"], 1);
+        assert_eq!(json["updated_at"], "2026-08-11T00:00:00Z");
+        assert!(json.get("full_key").is_none());
+        assert!(json.get("key_hash").is_none());
+        assert!(json.get("secret").is_none());
+    }
+
+    #[tokio::test]
+    async fn org_rotation_passes_actor_scope_into_the_transaction() {
+        use crate::errors::AppError;
+        use crate::models::api_key::{ApiKey, COLLECTION_NAME as API_KEYS};
+        use crate::models::org_membership::{COLLECTION_NAME as ORG_MEMBERSHIPS, OrgRole};
+        use crate::models::user::{COLLECTION_NAME as USERS, User, UserType};
+        use crate::models::user_service::{COLLECTION_NAME as USER_SERVICES, UserService};
+        use crate::test_utils::{
+            connect_transaction_test_database, test_app_state, test_auth_user, test_membership,
+            test_user, test_user_service,
+        };
+        use axum::extract::{Path, State};
+
+        let db = connect_transaction_test_database("api_keys_org_rotate_actor_scope").await;
+        let actor_id = uuid::Uuid::new_v4().to_string();
+        let org_id = uuid::Uuid::new_v4().to_string();
+        let service_id = uuid::Uuid::new_v4().to_string();
+        let endpoint_id = uuid::Uuid::new_v4().to_string();
+        let key_id = uuid::Uuid::new_v4().to_string();
+        db.collection::<User>(USERS)
+            .insert_many([
+                test_user(&actor_id, UserType::Person),
+                test_user(&org_id, UserType::Org),
+            ])
+            .await
+            .unwrap();
+        db.collection(ORG_MEMBERSHIPS)
+            .insert_one(test_membership(
+                &org_id,
+                &actor_id,
+                OrgRole::Admin,
+                Some(vec!["different-service".to_string()]),
+            ))
+            .await
+            .unwrap();
+        db.collection::<UserService>(USER_SERVICES)
+            .insert_one(test_user_service(
+                &service_id,
+                &org_id,
+                "org-service",
+                &endpoint_id,
+                None,
+                None,
+            ))
+            .await
+            .unwrap();
+        let now = Utc::now();
+        db.collection::<ApiKey>(API_KEYS)
+            .insert_one(ApiKey {
+                id: key_id.clone(),
+                user_id: org_id,
+                name: "org-agent".to_string(),
+                key_prefix: "nyxid_ag_public".to_string(),
+                key_hash: "secret-hash-not-returned".to_string(),
+                scopes: "proxy".to_string(),
+                last_used_at: None,
+                expires_at: None,
+                is_active: true,
+                created_at: now,
+                rotation_predecessor_id: None,
+                state_version: 1,
+                updated_at: Some(now),
+                description: None,
+                allowed_service_ids: vec![service_id],
+                allowed_node_ids: Vec::new(),
+                allow_all_services: false,
+                allow_all_nodes: true,
+                rate_limit_per_second: None,
+                rate_limit_burst: None,
+                platform: Some("codex".to_string()),
+                callback_url: None,
+                purpose: Default::default(),
+                scheduled_write_enabled: false,
+            })
+            .await
+            .unwrap();
+
+        let error = super::rotate_key(
+            State(test_app_state(db)),
+            test_auth_user(&actor_id),
+            crate::telemetry::TelemetryContext::default(),
+            Path(key_id),
+        )
+        .await
+        .expect_err("transaction must enforce the actor's current service scope");
+        assert!(matches!(error, AppError::ValidationError(_)));
+    }
 
     #[test]
     fn parse_expires_at_accepts_future_rfc3339() {
@@ -2081,6 +2221,9 @@ mod tests {
                 description: None,
                 is_active: true,
                 created_at: Utc::now(),
+                rotation_predecessor_id: None,
+                state_version: 1,
+                updated_at: Some(Utc::now()),
                 last_used_at: None,
                 expires_at: None,
                 allow_all_services: true,
@@ -2475,6 +2618,9 @@ mod tests {
             expires_at: Some(Utc::now() + Duration::days(1)),
             is_active: true,
             created_at: Utc::now(),
+            rotation_predecessor_id: None,
+            state_version: 1,
+            updated_at: Some(Utc::now()),
             description: None,
             allowed_service_ids: vec![uuid::Uuid::new_v4().to_string()],
             allowed_node_ids: Vec::new(),

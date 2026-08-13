@@ -242,6 +242,35 @@ pub async fn ensure_indexes(db: &Database) -> Result<(), mongodb::error::Error> 
     api_keys
         .create_index(IndexModel::builder().keys(doc! { "user_id": 1 }).build())
         .await?;
+    api_keys
+        .create_index(
+            IndexModel::builder()
+                .keys(doc! { "rotation_predecessor_id": 1 })
+                .options(
+                    IndexOptions::builder()
+                        .name("api_keys_rotation_predecessor_unique".to_string())
+                        .unique(true)
+                        .partial_filter_expression(doc! {
+                            "rotation_predecessor_id": { "$type": "string" }
+                        })
+                        .build(),
+                )
+                .build(),
+        )
+        .await?;
+
+    // ── assistant_action_receipts ──
+    // A user/action/request identity admits exactly one durable reservation.
+    // The receipt is secret-free and reserves the eventual resource UUID.
+    let action_receipts = db.collection::<mongodb::bson::Document>("assistant_action_receipts");
+    action_receipts
+        .create_index(
+            IndexModel::builder()
+                .keys(doc! { "user_id": 1, "action": 1, "action_request_id": 1 })
+                .options(IndexOptions::builder().unique(true).build())
+                .build(),
+        )
+        .await?;
 
     // ── mfa_factors ──
     let mfa = db.collection::<mongodb::bson::Document>("mfa_factors");
@@ -913,6 +942,22 @@ pub async fn ensure_indexes(db: &Database) -> Result<(), mongodb::error::Error> 
                 .options(
                     IndexOptions::builder()
                         .expire_after(Duration::from_secs(90 * 24 * 60 * 60))
+                        .build(),
+                )
+                .build(),
+        )
+        .await?;
+    approval_requests
+        .create_index(
+            IndexModel::builder()
+                .keys(doc! { "exact_service.request_key": 1 })
+                .options(
+                    IndexOptions::builder()
+                        .name("exact_service_request_key_unique".to_string())
+                        .unique(true)
+                        .partial_filter_expression(
+                            doc! { "exact_service.request_key": { "$type": "string" } },
+                        )
                         .build(),
                 )
                 .build(),

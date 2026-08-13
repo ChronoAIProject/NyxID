@@ -1,7 +1,20 @@
-import { AevatarAssistantTransport } from "@/lib/assistant/aevatar-transport";
+import {
+  AEVATAR_DRAFT_CONVERSATION_PREFIX,
+  AEVATAR_LEGACY_CONVERSATION_PREFIX,
+  AEVATAR_LEGACY_PENDING_CONVERSATION_PREFIX,
+  AEVATAR_TYPED_CONVERSATION_PREFIX,
+  AevatarAssistantTransport,
+} from "@/lib/assistant/aevatar-transport";
+import {
+  DIRECT_CONVERSATION_PREFIX,
+  directAssistantTransport,
+} from "@/lib/assistant/direct-transport";
 import { ApiError } from "@/lib/api-client";
 import { composeUnreportedCompletedNote } from "@/lib/assistant/action-notes";
-import { AssistantTurnActiveError } from "@/lib/assistant/errors";
+import {
+  AssistantConversationNotFoundError,
+  AssistantTurnActiveError,
+} from "@/lib/assistant/errors";
 import {
   assistantMockStore,
   createScriptedTurn,
@@ -14,6 +27,7 @@ import {
   buildActionWakeBody,
   type ActionReport,
 } from "@/schemas/assistant-actions";
+import { inputAnswerSchema, type InputAnswer } from "@/schemas/assistant-input";
 import type {
   AssistantTransport,
   Conversation,
@@ -166,6 +180,61 @@ class MockAssistantTransport implements AssistantTransport {
     }
   }
 
+  async stopTask(conversationId: string): Promise<void> {
+    this.cancelActiveTurn(conversationId);
+  }
+
+  async steerTask(conversationId: string, instruction: string): Promise<void> {
+    void conversationId;
+    if (!instruction.trim()) throw new Error("Steering cannot be empty.");
+  }
+
+  async retryStep(conversationId: string, stepId: string): Promise<void> {
+    void conversationId;
+    if (!stepId) throw new Error("Step identity is required.");
+  }
+
+  async skipStep(conversationId: string, stepId: string): Promise<void> {
+    void conversationId;
+    if (!stepId) throw new Error("Step identity is required.");
+  }
+
+  async resolvePlan(
+    conversationId: string,
+    blockId: string,
+    confirmed: boolean,
+  ): Promise<void> {
+    const block = assistantMockStore.findBlock(conversationId, blockId);
+    if (block?.type !== "task_plan") {
+      throw new Error("Task plan was not found.");
+    }
+    const gate = block.plan.gate;
+    if (
+      gate?.mode !== "confirm" ||
+      gate.status !== "pending" ||
+      !gate.requestId ||
+      !gate.taskId ||
+      !gate.planId ||
+      gate.planRevision === undefined
+    ) {
+      throw new Error("This plan gate is no longer pending.");
+    }
+    this.emitLocalActionPatch(
+      conversationId,
+      blockId,
+      {
+        plan: {
+          ...block.plan,
+          gate: {
+            ...gate,
+            status: confirmed ? "satisfied" : "rejected",
+          },
+        },
+      },
+      () => undefined,
+    );
+  }
+
   async decideApproval(
     conversationId: string,
     blockId: string,
@@ -174,6 +243,29 @@ class MockAssistantTransport implements AssistantTransport {
     assistantMockStore.decideApproval(conversationId, blockId, approved);
     // The scripted store settles the card synchronously; there is no
     // continuation stream to hand back.
+    return null;
+  }
+
+  async resolveInput(
+    conversationId: string,
+    blockId: string,
+    answer: InputAnswer,
+    onEvent: (event: TurnEvent) => void = () => undefined,
+  ): Promise<TurnHandle | null> {
+    inputAnswerSchema.parse(answer);
+    const block = assistantMockStore.findBlock(conversationId, blockId);
+    if (block?.type !== "input_card") {
+      throw new Error("Input request was not found.");
+    }
+    if (block.status !== "pending") {
+      throw new Error("This input request was already resolved.");
+    }
+    this.emitLocalActionPatch(
+      conversationId,
+      blockId,
+      { status: "resolved" },
+      onEvent,
+    );
     return null;
   }
 
@@ -251,13 +343,13 @@ class MockAssistantTransport implements AssistantTransport {
             block.type === "action_card" &&
             block.action_request_id === report.actionRequestId,
         );
-      if (card?.type === "action_card") {
-        actionLookup.set(report.actionRequestId, card.action);
-      }
       const refusedByCardState =
         card?.type === "action_card" &&
         (card.status === "conflicted" ||
           (card.status === "blocked" && report.disposition === "completed"));
+      if (card?.type === "action_card") {
+        actionLookup.set(report.actionRequestId, card.action);
+      }
       if (refusedByCardState) {
         if (
           card?.type === "action_card" &&
@@ -306,10 +398,10 @@ class MockAssistantTransport implements AssistantTransport {
             : "failed";
       const outcomeNote =
         report.disposition === "completed"
-          ? "Reported — awaiting assistant verification."
+          ? "Connected. The assistant can use this service now."
           : report.disposition === "declined"
-            ? "You declined this request. No service was connected and no credential was shared."
-            : "The connection could not be completed. Ask the assistant to request it again.";
+            ? "You declined. Nothing was connected and no credential was shared."
+            : "The connection did not complete. Ask the assistant to request this service again.";
       this.emitLocalActionPatch(
         conversationId,
         card.block_id,
@@ -568,6 +660,273 @@ export function selectAssistantTransportKind(env: {
   return "aevatar";
 }
 
+export type AssistantEngine = "aevatar" | "direct";
+
+const CONVERSATION_ID_SUFFIX = /^[A-Za-z0-9_-]+$/;
+const AEVATAR_CONVERSATION_IDS = [
+  [AEVATAR_TYPED_CONVERSATION_PREFIX, 117],
+  [AEVATAR_LEGACY_CONVERSATION_PREFIX, 120],
+  [AEVATAR_DRAFT_CONVERSATION_PREFIX, 160],
+  [AEVATAR_LEGACY_PENDING_CONVERSATION_PREFIX, 160],
+] as const;
+
+function hasBoundedConversationSuffix(
+  conversationId: string,
+  prefix: string,
+  maxLength: number,
+): boolean {
+  if (!conversationId.startsWith(prefix)) return false;
+  const suffix = conversationId.slice(prefix.length);
+  return (
+    suffix.length >= 1 &&
+    suffix.length <= maxLength &&
+    CONVERSATION_ID_SUFFIX.test(suffix)
+  );
+}
+
+export function assistantEngineForConversationId(
+  conversationId: string,
+): AssistantEngine | null {
+  if (
+    hasBoundedConversationSuffix(
+      conversationId,
+      DIRECT_CONVERSATION_PREFIX,
+      160,
+    )
+  ) {
+    return "direct";
+  }
+  if (
+    AEVATAR_CONVERSATION_IDS.some(([prefix, maxLength]) =>
+      hasBoundedConversationSuffix(conversationId, prefix, maxLength),
+    )
+  ) {
+    return "aevatar";
+  }
+  return null;
+}
+
+/** Permanently owns both live engines; selection never consumes install(). */
+export class AssistantEngineRouter implements AssistantTransport {
+  private selectedEngine: AssistantEngine = "aevatar";
+  private readonly aevatar: AssistantTransport;
+  private readonly direct: AssistantTransport;
+
+  constructor(aevatar: AssistantTransport, direct: AssistantTransport) {
+    this.aevatar = aevatar;
+    this.direct = direct;
+  }
+
+  setSelectedEngine(engine: AssistantEngine): void {
+    this.selectedEngine = engine;
+  }
+
+  getSelectedEngine(): AssistantEngine {
+    return this.selectedEngine;
+  }
+
+  listConversations(): Promise<Conversation[]> {
+    return this.selectedDelegate().listConversations();
+  }
+
+  createConversation(): Promise<Conversation> {
+    return this.selectedDelegate().createConversation();
+  }
+
+  getHistory(conversationId: string): Promise<ConversationHistory> {
+    return this.delegateForConversation(conversationId).getHistory(
+      conversationId,
+    );
+  }
+
+  reconcileProjection(
+    conversationId: string,
+  ): Promise<ProjectionReconcileOutcome> {
+    return this.delegateForConversation(conversationId).reconcileProjection(
+      conversationId,
+    );
+  }
+
+  releaseProjectionWaiter(conversationId: string): void {
+    this.delegateForConversation(conversationId).releaseProjectionWaiter(
+      conversationId,
+    );
+  }
+
+  async deleteConversation(conversationId: string): Promise<void> {
+    this.cancelActiveTurn(conversationId);
+    await this.delegateForConversation(conversationId).deleteConversation(
+      conversationId,
+    );
+  }
+
+  sendMessage(
+    conversationId: string,
+    content: string,
+    onEvent: (event: TurnEvent) => void,
+  ): TurnHandle {
+    return this.delegateForConversation(conversationId).sendMessage(
+      conversationId,
+      content,
+      onEvent,
+    );
+  }
+
+  cancelActiveTurn(conversationId: string): void {
+    this.delegateForConversation(conversationId).cancelActiveTurn(
+      conversationId,
+    );
+  }
+
+  stopTask(conversationId: string): Promise<void> {
+    return this.delegateForConversation(conversationId).stopTask(
+      conversationId,
+    );
+  }
+
+  steerTask(conversationId: string, instruction: string): Promise<void> {
+    return this.delegateForConversation(conversationId).steerTask(
+      conversationId,
+      instruction,
+    );
+  }
+
+  retryStep(conversationId: string, stepId: string): Promise<void> {
+    return this.delegateForConversation(conversationId).retryStep(
+      conversationId,
+      stepId,
+    );
+  }
+
+  skipStep(conversationId: string, stepId: string): Promise<void> {
+    return this.delegateForConversation(conversationId).skipStep(
+      conversationId,
+      stepId,
+    );
+  }
+
+  resolvePlan(
+    conversationId: string,
+    blockId: string,
+    confirmed: boolean,
+  ): Promise<void> {
+    return this.delegateForConversation(conversationId).resolvePlan(
+      conversationId,
+      blockId,
+      confirmed,
+    );
+  }
+
+  async decideApproval(
+    conversationId: string,
+    blockId: string,
+    approved: boolean,
+    onEvent: (event: TurnEvent) => void = () => undefined,
+  ): Promise<TurnHandle | null> {
+    return this.delegateForConversation(conversationId).decideApproval(
+      conversationId,
+      blockId,
+      approved,
+      onEvent,
+    );
+  }
+
+  async resolveInput(
+    conversationId: string,
+    blockId: string,
+    answer: InputAnswer,
+    onEvent: (event: TurnEvent) => void = () => undefined,
+  ): Promise<TurnHandle | null> {
+    return this.delegateForConversation(conversationId).resolveInput(
+      conversationId,
+      blockId,
+      answer,
+      onEvent,
+    );
+  }
+
+  setActionCardInProgress(
+    conversationId: string,
+    blockId: string,
+    inProgress: boolean,
+    onEvent?: (event: TurnEvent) => void,
+  ): void {
+    this.delegateForConversation(conversationId).setActionCardInProgress(
+      conversationId,
+      blockId,
+      inProgress,
+      onEvent,
+    );
+  }
+
+  blockActionCard(
+    conversationId: string,
+    blockId: string,
+    note: string,
+    onEvent?: (event: TurnEvent) => void,
+  ): void {
+    this.delegateForConversation(conversationId).blockActionCard(
+      conversationId,
+      blockId,
+      note,
+      onEvent,
+    );
+  }
+
+  continueActions(
+    conversationId: string,
+    originTurnId: string,
+    reports: readonly ActionReport[],
+    onEvent: (event: TurnEvent) => void = () => undefined,
+  ): TurnHandle | null {
+    return this.delegateForConversation(conversationId).continueActions(
+      conversationId,
+      originTurnId,
+      reports,
+      onEvent,
+    );
+  }
+
+  wakeActions(
+    conversationId: string,
+    originTurnId: string,
+    onEvent: (event: TurnEvent) => void = () => undefined,
+  ): TurnHandle {
+    return this.delegateForConversation(conversationId).wakeActions(
+      conversationId,
+      originTurnId,
+      onEvent,
+    );
+  }
+
+  private selectedDelegate(): AssistantTransport {
+    return this.selectedEngine === "direct" ? this.direct : this.aevatar;
+  }
+
+  private delegateForConversation(conversationId: string): AssistantTransport {
+    const engine = assistantEngineForConversationId(conversationId);
+    if (engine === "direct") return this.direct;
+    if (engine === "aevatar") return this.aevatar;
+    throw new AssistantConversationNotFoundError();
+  }
+}
+
+let activeEngineRouter: AssistantEngineRouter | null = null;
+
+export function registerAssistantEngineRouter(
+  router: AssistantEngineRouter,
+): () => void {
+  const previous = activeEngineRouter;
+  activeEngineRouter = router;
+  return () => {
+    if (activeEngineRouter === router) activeEngineRouter = previous;
+  };
+}
+
+export function setAssistantTransportEngine(engine: AssistantEngine): void {
+  activeEngineRouter?.setSelectedEngine(engine);
+}
+
 export class DelegatingAssistantTransport implements AssistantTransport {
   private transport: AssistantTransport;
   private interceptorInstalled = false;
@@ -625,6 +984,30 @@ export class DelegatingAssistantTransport implements AssistantTransport {
     this.transport.cancelActiveTurn(conversationId);
   }
 
+  stopTask(conversationId: string): Promise<void> {
+    return this.transport.stopTask(conversationId);
+  }
+
+  steerTask(conversationId: string, instruction: string): Promise<void> {
+    return this.transport.steerTask(conversationId, instruction);
+  }
+
+  retryStep(conversationId: string, stepId: string): Promise<void> {
+    return this.transport.retryStep(conversationId, stepId);
+  }
+
+  skipStep(conversationId: string, stepId: string): Promise<void> {
+    return this.transport.skipStep(conversationId, stepId);
+  }
+
+  resolvePlan(
+    conversationId: string,
+    blockId: string,
+    confirmed: boolean,
+  ): Promise<void> {
+    return this.transport.resolvePlan(conversationId, blockId, confirmed);
+  }
+
   decideApproval(
     conversationId: string,
     blockId: string,
@@ -635,6 +1018,20 @@ export class DelegatingAssistantTransport implements AssistantTransport {
       conversationId,
       blockId,
       approved,
+      onEvent,
+    );
+  }
+
+  resolveInput(
+    conversationId: string,
+    blockId: string,
+    answer: InputAnswer,
+    onEvent?: (event: TurnEvent) => void,
+  ): Promise<TurnHandle | null> {
+    return this.transport.resolveInput(
+      conversationId,
+      blockId,
+      answer,
       onEvent,
     );
   }
@@ -688,6 +1085,7 @@ export class DelegatingAssistantTransport implements AssistantTransport {
 export interface AssistantTransportFactories {
   readonly createMock: () => AssistantTransport;
   readonly createAevatar: () => AssistantTransport;
+  readonly createDirect: () => AssistantTransport;
 }
 
 export interface AssistantInterceptorModule {
@@ -728,10 +1126,17 @@ export function createAssistantTransportForEnvironment(
   factories: AssistantTransportFactories,
   interceptorLoader?: AssistantInterceptorLoader,
   reportInterceptorState?: AssistantInterceptorStateReporter,
+  registerEngineRouter?: (router: AssistantEngineRouter) => void,
 ): AssistantTransport {
   const kind = selectAssistantTransportKind(env);
   if (kind === "mock") return factories.createMock();
-  const shell = new DelegatingAssistantTransport(factories.createAevatar());
+  const router = new AssistantEngineRouter(
+    factories.createAevatar(),
+    factories.createDirect(),
+  );
+  registerEngineRouter?.(router);
+  if (!env.dev) return router;
+  const shell = new DelegatingAssistantTransport(router);
   if (env.dev && interceptorLoader) {
     reportInterceptorState?.("loading");
     void installAssistantTransportInterceptor(shell, interceptorLoader).catch(
@@ -750,6 +1155,7 @@ function createAssistantTransport(): AssistantTransport {
   const factories: AssistantTransportFactories = {
     createMock: () => new MockAssistantTransport(),
     createAevatar: () => new AevatarAssistantTransport(),
+    createDirect: () => directAssistantTransport,
   };
   if (import.meta.env.DEV) {
     const setState = (state: "loading" | "error") =>
@@ -765,9 +1171,16 @@ function createAssistantTransport(): AssistantTransport {
       factories,
       () => import("@/lib/assistant/scenario-intercept-transport"),
       setState,
+      registerAssistantEngineRouter,
     );
   }
-  return createAssistantTransportForEnvironment(env, factories);
+  return createAssistantTransportForEnvironment(
+    env,
+    factories,
+    undefined,
+    undefined,
+    registerAssistantEngineRouter,
+  );
 }
 
 export const assistantTransport: AssistantTransport =

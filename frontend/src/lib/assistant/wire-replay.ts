@@ -32,7 +32,7 @@ import type {
 } from "@/types/assistant";
 import type { ChatStreamFrame } from "@/lib/assistant/chat-stream-worker-protocol";
 
-export type WireReplayProtocol = "actor" | "workflow";
+export type WireReplayProtocol = "actor";
 
 export interface WireReplayContext {
   readonly protocol: WireReplayProtocol;
@@ -82,20 +82,6 @@ function safeErrorCode(value: unknown, fallback: string): string {
   return typeof value === "string" && /^[A-Za-z0-9._:-]{1,128}$/.test(value)
     ? value
     : fallback;
-}
-
-/**
- * `aevatar.media.chunk` (`MediaContentEvent`) flattened to the fields `addMedia`
- * reads. `ChatContentPart` names the location `uri`, not `url`.
- */
-function mediaPartFields(body: Record<string, unknown>): Record<string, unknown> {
-  const part = unpackAny(body["part"]);
-  return {
-    mediaType: part["mediaType"],
-    dataBase64: part["dataBase64"],
-    url: part["uri"],
-    name: part["name"],
-  };
 }
 
 function safeErrorMessage(value: unknown, fallback: string): string {
@@ -187,7 +173,6 @@ class ReplayProjector {
   private currentMessageId: string | null = null;
   private currentBlockId: string | null = null;
   private currentText = "";
-  private sawText = false;
   private activityMessageId: string | null = null;
   private activityBlockCount = 0;
   private runBlockId: string | null = null;
@@ -197,16 +182,9 @@ class ReplayProjector {
   private readonly promptedActions = new Map<string, string>();
   private readonly openCards = new Map<string, "approval" | "connect">();
   private waitingForApproval = false;
-  /**
-   * Suspended on a signal wait or a human-input request. Mirrors the live
-   * transport's flag of the same name so a capture that legitimately ENDS at a
-   * suspension is finalized as waiting rather than scored a truncated failure.
-   */
-  private awaitingSignal = false;
-
-  /** Idle on purpose — an approval gate, a signal wait, or human input. */
+  /** Idle on purpose at an approval gate. */
   private get suspended(): boolean {
-    return this.waitingForApproval || this.awaitingSignal;
+    return this.waitingForApproval;
   }
 
   constructor(context: WireReplayContext) {
@@ -268,19 +246,16 @@ class ReplayProjector {
       type !== "RUN_ERROR" &&
       type !== "RUN_STOPPED"
     ) {
-      if (this.context.protocol === "workflow") return;
       this.failProtocol(
         "The assistant stream sent data after its terminal frame.",
       );
       return;
     }
     if (type !== "RUN_STARTED" && !keepalive && !this.started) {
-      if (this.context.protocol !== "workflow" || type !== "CUSTOM") {
-        this.failProtocol(
-          "The assistant stream sent data before identifying the turn.",
-        );
-        return;
-      }
+      this.failProtocol(
+        "The assistant stream sent data before identifying the turn.",
+      );
+      return;
     }
 
     switch (type) {
@@ -317,13 +292,13 @@ class ReplayProjector {
         return;
       case "STEP_STARTED": {
         const body = objectValue(frame["stepStarted"]);
-        const name = stringValue(body, "stepName") || "workflow-step";
+        const name = stringValue(body, "stepName") || "step";
         this.startStep(name, name, frame);
         return;
       }
       case "STEP_FINISHED": {
         const body = objectValue(frame["stepFinished"]);
-        const name = stringValue(body, "stepName") || "workflow-step";
+        const name = stringValue(body, "stepName") || "step";
         const succeeded = booleanValue(body, "success") !== false;
         this.finishStep(
           name,
@@ -360,16 +335,6 @@ class ReplayProjector {
           );
           return;
         }
-        const result = objectValue(body["result"]);
-        const output = result["output"];
-        if (
-          this.context.protocol === "workflow" &&
-          !this.sawText &&
-          typeof output === "string" &&
-          output.trim()
-        ) {
-          this.emitStaticText(output, frame);
-        }
         this.recordTerminal({
           kind: "finished",
           status: status === "blocked" ? "blocked" : "completed",
@@ -388,7 +353,6 @@ class ReplayProjector {
   }
 
   private handleRunStarted(frame: ChatStreamFrame): void {
-    if (this.context.protocol === "workflow" && this.started) return;
     const body = objectValue(frame["runStarted"]);
     const turnId = safeTurnId(
       frame["turnId"] ?? body["turnId"] ?? body["runId"],
@@ -437,7 +401,6 @@ class ReplayProjector {
     const delta = stringValue(body, "delta");
     if (!delta || !this.currentBlockId) return;
     this.currentText += delta;
-    this.sawText = true;
     this.addSource(this.currentBlockId, frame);
     this.emit({
       event: "block.delta",
@@ -579,9 +542,9 @@ class ReplayProjector {
       this.startStep(key, stringValue(body, "toolName") || "tool", frame);
     }
     const status = stringValue(body, "status").toUpperCase();
-    // Workflow `toolCallEnd` is only `{toolCallId, result}`, so a blocked
-    // capability is visible solely inside the result. Mirrors the live
-    // transport; parity breaks on a blocked turn otherwise.
+    // AG-UI `toolCallEnd` may be only `{toolCallId, result}`, so a blocked
+    // capability can be visible solely inside the result. Keep replay aligned
+    // with the live transport for that typed shape.
     const blocker = parseToolResultBlocker(body["result"]);
     if (blocker) this.addConnectionBlocker(blocker, frame);
     const succeeded =
@@ -636,6 +599,7 @@ class ReplayProjector {
         stringValue(body, "expiresAt") || stringValue(body, "expires_at"),
       decision: null,
       decision_channel: null,
+      decision_submission: null,
     };
     this.appendActivityBlock(block, frame);
     this.openCards.set(block.block_id, "approval");
@@ -666,56 +630,6 @@ class ReplayProjector {
    * as a typed `nyxid.authorization.required` frame, by handing it back in
    * that frame's camelCase shape.
    */
-  /** Prose mirror of the live transport's human-input suspension rendering. */
-  private addHumanInput(
-    body: Record<string, unknown>,
-    frame: ChatStreamFrame,
-  ): void {
-    const stepId = stringValue(body, "stepId");
-    const dedupeKey = `human-input:${stepId || stringValue(body, "runId")}`;
-    if (this.promptedApprovals.has(dedupeKey)) return;
-    this.promptedApprovals.add(dedupeKey);
-    this.awaitingSignal = true;
-
-    const prompt = stringValue(body, "prompt") || stringValue(body, "content");
-    const options = Array.isArray(body["options"])
-      ? body["options"].filter(
-          (option): option is string => typeof option === "string",
-        )
-      : [];
-    const text = [
-      prompt || "The workflow is waiting for your input to continue.",
-      options.length > 0 ? `Options: ${options.join(", ")}` : "",
-    ]
-      .filter(Boolean)
-      .join("\n\n");
-    this.appendActivityBlock(
-      {
-        type: "text",
-        block_id: this.nextId("human-input"),
-        text: redactDisplayText(text),
-      },
-      frame,
-    );
-    // Parity with the live transport, which moves the correlated step to
-    // waiting rather than leaving it active behind the prompt.
-    const step = stepId
-      ? this.steps.find((candidate) => candidate.key === stepId)
-      : undefined;
-    if (step?.status === "active") {
-      step.status = "waiting";
-      step.approval_request_id = dedupeKey;
-      this.patchRun(frame);
-    }
-    if (this.turnId) {
-      this.emit({
-        event: "turn.status",
-        turn_id: this.turnId,
-        status: "waiting",
-      });
-    }
-  }
-
   private addConnectionBlocker(
     blocker: AuthorizationBlocker,
     frame: ChatStreamFrame,
@@ -906,24 +820,6 @@ class ReplayProjector {
       case "aevatar.tool_approval.pending":
         this.addApproval(unpackAny(payload), frame);
         return;
-      case "aevatar.human_input.request":
-        // Not an approval payload — it has no request id, so the approval
-        // path dropped it. Mirrors the live transport's prose rendering.
-        this.addHumanInput(unpackAny(payload), frame);
-        return;
-      case "aevatar.media.chunk":
-        // Media fields are nested under `part`, and the location is `uri`.
-        this.addMedia(mediaPartFields(unpackAny(payload)), frame);
-        return;
-      case "aevatar.step.request": {
-        const body = unpackAny(payload);
-        const key =
-          stringValue(body, "stepId") ||
-          stringValue(body, "stepType") ||
-          this.nextId("step");
-        this.startStep(key, key, frame);
-        return;
-      }
       case "aevatar.step.completed": {
         const body = unpackAny(payload);
         // proto3 elides a `false` bool, so an absent `success` IS a failure.
@@ -937,123 +833,9 @@ class ReplayProjector {
         );
         return;
       }
-      case "aevatar.workflow.waiting_signal":
-        this.awaitingSignal = true;
-        if (this.turnId) {
-          this.emit({
-            event: "turn.status",
-            turn_id: this.turnId,
-            status: "waiting",
-          });
-        }
-        return;
-      case "aevatar.workflow.signal.buffered":
-        // The awaited signal landed; the run is live again.
-        this.awaitingSignal = false;
-        if (this.turnId) {
-          this.emit({
-            event: "turn.status",
-            turn_id: this.turnId,
-            status: "running",
-          });
-        }
-        return;
-      case "aevatar.chat.context":
-        this.applyWorkflowContext(unpackAny(payload));
-        return;
-      case "aevatar.raw.observed":
-        this.applyObservedCompletion(unpackAny(payload), frame);
-        return;
       default:
         return;
     }
-  }
-
-  private applyWorkflowContext(body: Record<string, unknown>): void {
-    if (this.context.protocol !== "workflow" || this.started) return;
-    const turnId = safeTurnId(body["turnId"]);
-    if (!turnId) {
-      this.failProtocol(
-        "The assistant stream did not provide a valid turn id.",
-      );
-      return;
-    }
-    if (this.turnId && this.turnId !== turnId) {
-      this.failProtocol("The assistant replay changed the turn id.");
-      return;
-    }
-    this.started = true;
-    this.turnId ??= turnId;
-    this.emit({ event: "turn.status", turn_id: turnId, status: "running" });
-  }
-
-  private applyObservedCompletion(
-    body: Record<string, unknown>,
-    frame: ChatStreamFrame,
-  ): void {
-    const typeUrl = stringValue(body, "payloadTypeUrl");
-    if (
-      (typeUrl.split(/[/.]/).at(-1) ?? "") !== "RoleChatSessionCompletedEvent"
-    )
-      return;
-    const completion = unpackAny(body["payload"]);
-    const calls = Array.isArray(completion["toolCalls"])
-      ? completion["toolCalls"].map(objectValue)
-      : [];
-    const receipts = new Map(
-      (Array.isArray(completion["toolReceipts"])
-        ? completion["toolReceipts"].map(objectValue)
-        : []
-      ).map((receipt) => [stringValue(receipt, "callId"), receipt]),
-    );
-    for (const call of calls) {
-      const key = stringValue(call, "callId") || this.nextId("tool");
-      this.startStep(key, stringValue(call, "toolName") || "tool", frame);
-      const receipt = receipts.get(key);
-      receipts.delete(key);
-      this.applyReceipt(key, receipt, frame);
-    }
-    for (const [key, receipt] of receipts) {
-      this.startStep(key, stringValue(receipt, "toolName") || "tool", frame);
-      this.applyReceipt(key, receipt, frame);
-    }
-    const content = completion["content"];
-    if (typeof content === "string" && content && !this.sawText) {
-      this.emitStaticText(content, frame);
-    }
-  }
-
-  private applyReceipt(
-    key: string,
-    receipt: Record<string, unknown> | undefined,
-    frame: ChatStreamFrame,
-  ): void {
-    if (!receipt) {
-      this.finishStep(key, true, "Completed", frame);
-      return;
-    }
-    // Parity with the live transport: `AUTHORIZATION_REQUIRED` contains neither
-    // "ERROR" nor "DENIED", so status alone scored a blocked capability as a
-    // success.
-    const blocker = parseToolResultBlocker(receipt["resultJson"]);
-    if (blocker) this.addConnectionBlocker(blocker, frame);
-    const failed =
-      Boolean(blocker) ||
-      /(ERROR|DENIED|AUTHORIZATION_REQUIRED)/i.test(
-        stringValue(receipt, "status"),
-      );
-    this.finishStep(
-      key,
-      !failed,
-      blocker
-        ? blocker.safeMessage
-        : summarizeToolResult(
-            failed
-              ? (receipt["errorMessage"] ?? receipt["errorCode"] ?? "Failed")
-              : receipt["resultJson"],
-          ),
-      frame,
-    );
   }
 
   private emitStaticText(text: string, frame: ChatStreamFrame): void {
@@ -1078,7 +860,6 @@ class ReplayProjector {
       block: { type: "text", block_id: blockId, text },
     });
     this.emit({ event: "message.completed", message_id: messageId });
-    this.sawText = true;
   }
 
   private recordTerminal(terminal: ReplayTerminal): void {
@@ -1250,14 +1031,8 @@ export function replayWireExchange(
 ): WireReplayProjection | null {
   const capture = exchange.capture;
   if (!capture || capture.state === "evicted" || !capture.sse) return null;
-  const primary = exchange.upstreamEchoes[0];
-  const protocol =
-    primary?.commandType === "workflow.studio" ||
-    primary?.path.includes("workflow-chat")
-      ? "workflow"
-      : "actor";
   return projectReplayFrames(parseCapturedWireLines(capture.sse.lines), {
-    protocol,
+    protocol: "actor",
     captureOutcome: capture.state === "settled" ? capture.outcome : undefined,
     truncated: capture.sse.truncated,
   });

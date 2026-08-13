@@ -98,7 +98,9 @@ function isReconnectableKey(
 ): boolean {
   if (keyInfo.auto_connected || isNonAdminOrgSource(source)) return false;
   const effectiveStatus = keyInfo.connection_status ?? keyInfo.status;
-  if (!RECONNECTABLE_STATUSES.has(effectiveStatus)) return false;
+  if (!keyInfo.credential_missing && !RECONNECTABLE_STATUSES.has(effectiveStatus)) {
+    return false;
+  }
   return (
     keyInfo.credential_type === "oauth2" ||
     keyInfo.auth_method === "oauth2" ||
@@ -202,6 +204,9 @@ function KeyCardContent({
           <Badge variant={statusVariant(displayStatus)}>
             {displayStatusLabel}
           </Badge>
+          {keyInfo.credential_missing && (
+            <Badge variant="warning">Credential Missing</Badge>
+          )}
           {isSsh && <Badge variant="secondary">SSH</Badge>}
           {/* Auth-method pill — moved to top so it aligns across cards */}
           <Badge variant="secondary">
@@ -238,7 +243,7 @@ function KeyCardContent({
                 : "Auto-connected"}
             </Badge>
           )}
-          {!keyInfo.is_active && <Badge variant="secondary">Inactive</Badge>}
+          {!keyInfo.is_active && <Badge variant="secondary">Disabled</Badge>}
         </div>
 
         {showReconnect && (
@@ -406,9 +411,16 @@ function ServiceTableRow({
             {isBlocked && <Badge variant="secondary">Read-Only</Badge>}
             {isReadOnly && !isBlocked && <Badge variant="secondary">View-Only</Badge>}
             {keyInfo.admin_only && <Badge variant="secondary">Admin-only</Badge>}
+            {/* Disabled services are listed so they can be re-enabled, so the
+                table has to say so — the credential status badge beside this
+                one reports the credential, which stays healthy while paused. */}
+            {!keyInfo.is_active && <Badge variant="secondary">Disabled</Badge>}
             <Badge variant={statusVariant(displayStatus)}>
               {displayStatusLabel}
             </Badge>
+            {keyInfo.credential_missing && (
+              <Badge variant="warning">Credential Missing</Badge>
+            )}
             {isSsh && <Badge variant="secondary">SSH</Badge>}
           </div>
           {showReconnect && (

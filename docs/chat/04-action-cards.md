@@ -16,11 +16,16 @@ Action requests arrive only as this AG-UI frame:
 CUSTOM name=nyxid.action.request
 ```
 
-The pinned Aevatar source emits that frame from the typed NyxIdChat conversation producer. Aevatar's `/api/chat` dispatcher selects that producer only when the request has a top-level `type`. The Studio workflow request has no `type`, executes the workflow engine instead, and does not emit `nyxid.action.request`.
+The pinned Aevatar source emits that frame from the typed NyxIdChat conversation
+producer. Aevatar's `/api/chat` dispatcher selects that producer only when the
+request has a top-level `type`. NyxID sends every browser turn through that typed
+producer; a legacy `chatc-*` history row is never an action origin or target.
 
 The upstream anchors are `MainnetChatEndpoints.cs:ClassifyRequestAsync`, `NyxIdChatPublicEndpoints.cs`, and `NyxIdChatConversationAguiFrameBuilder.cs`. Action-result continuation likewise uses the typed `action.continue` command and a `nyxid-chat-...` actor identity. A visible Studio `chatc-...` identity is never substituted as the typed actor ID.
 
-This means action cards may be present in typed histories and may be retained locally while histories materialize, but a normal Studio workflow turn cannot originate a new action/connect card. This limitation is tracked in [Testing and gaps](07-testing-and-gaps.md).
+Action cards may be present in typed histories and remain actor-projected while
+text history materializes. A transcript reload must not replace the pending
+action state with a text-only history response.
 
 ## Envelope v4
 
@@ -251,7 +256,7 @@ The schema recognizes these strict one-variant resource references:
 
 Each object has exactly one variant and each payload has exactly one valid control identity. The builder copies only the allowlisted variant and ID into the wire body.
 
-The generic schema anticipates other registry actions, but the current backend requires every `completed` report to contain `resource.userService.userServiceId`. A completed report with no resource or any other resource variant is rejected by `backend/src/services/assistant_service.rs:parse_assistant_chat_command`. This is stricter than the generic frontend union and is the effective shipped contract.
+Every `completed` report must carry exactly one of these allowlisted resource variants. A completed report with no resource, multiple variants, an unknown variant, an extra payload member, an invalid control identity, or secret-shaped material is rejected by `backend/src/services/assistant_service.rs:parse_assistant_chat_command`.
 
 Declined, failed, cancelled, and expired reports may omit the resource.
 

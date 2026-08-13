@@ -187,13 +187,31 @@ pub(crate) fn auth_key_name_required_message(auth_method: &str) -> String {
 }
 
 /// List all active user services for a user.
+///
+/// Active-only is the safe default and is what every enforcement consumer
+/// wants (proxy discovery, MCP catalog, OAuth resource indicators, API-key
+/// scope checks, assistant readiness). Only the `/keys` management listing
+/// wants disabled rows too — it goes through
+/// [`list_user_services_with_sources_including_disabled`].
 pub async fn list_user_services(
     db: &mongodb::Database,
     user_id: &str,
 ) -> AppResult<Vec<UserService>> {
+    list_user_services_inner(db, user_id, false).await
+}
+
+async fn list_user_services_inner(
+    db: &mongodb::Database,
+    user_id: &str,
+    include_disabled: bool,
+) -> AppResult<Vec<UserService>> {
+    let mut filter = doc! { "user_id": user_id };
+    if !include_disabled {
+        filter.insert("is_active", true);
+    }
     let services: Vec<UserService> = db
         .collection::<UserService>(COLLECTION_NAME)
-        .find(doc! { "user_id": user_id, "is_active": true })
+        .find(filter)
         .sort(doc! { "created_at": -1 })
         .await?
         .try_collect()
@@ -242,7 +260,25 @@ pub async fn list_user_services_with_sources(
     db: &mongodb::Database,
     user_id: &str,
 ) -> AppResult<Vec<UserServiceWithSource>> {
-    list_user_services_with_sources_impl(db, user_id, false).await
+    list_user_services_with_sources_impl(db, user_id, false, false).await
+}
+
+/// Source-tagged listing that also returns disabled services.
+///
+/// Backs the `/keys` management surface via `unified_key_service::list_keys`
+/// and nothing else. A disabled service must stay listed there or the pause
+/// becomes unreversible in the product: the row would vanish from the only
+/// screen carrying an Enable control. Every row still carries `is_active`, so
+/// the UI badges the disabled ones instead of presenting them as working.
+///
+/// Never use this for anything that resolves credentials or grants access — a
+/// disabled service must stay invisible to the proxy and to every catalog an
+/// agent can act from. Those callers use [`list_user_services_with_sources`].
+pub async fn list_user_services_with_sources_including_disabled(
+    db: &mongodb::Database,
+    user_id: &str,
+) -> AppResult<Vec<UserServiceWithSource>> {
+    list_user_services_with_sources_impl(db, user_id, false, true).await
 }
 
 /// List services for an internal policy projection, retaining scope-denied
@@ -253,22 +289,24 @@ pub(crate) async fn list_user_services_with_sources_for_policy(
     db: &mongodb::Database,
     user_id: &str,
 ) -> AppResult<Vec<UserServiceWithSource>> {
-    list_user_services_with_sources_impl(db, user_id, true).await
+    list_user_services_with_sources_impl(db, user_id, true, false).await
 }
 
 async fn list_user_services_with_sources_impl(
     db: &mongodb::Database,
     user_id: &str,
     include_scope_denied: bool,
+    include_disabled: bool,
 ) -> AppResult<Vec<UserServiceWithSource>> {
-    let mut out: Vec<UserServiceWithSource> = list_user_services(db, user_id)
-        .await?
-        .into_iter()
-        .map(|s| UserServiceWithSource {
-            service: s,
-            source: CredentialSource::Personal,
-        })
-        .collect();
+    let mut out: Vec<UserServiceWithSource> =
+        list_user_services_inner(db, user_id, include_disabled)
+            .await?
+            .into_iter()
+            .map(|s| UserServiceWithSource {
+                service: s,
+                source: CredentialSource::Personal,
+            })
+            .collect();
 
     let memberships = org_service::list_memberships_for_member(db, user_id, false).await?;
 
@@ -297,7 +335,7 @@ async fn list_user_services_with_sources_impl(
             meta
         };
 
-        let org_services = list_user_services(db, &m.org_user_id).await?;
+        let org_services = list_user_services_inner(db, &m.org_user_id, include_disabled).await?;
         for svc in org_services {
             // The normal listing drops services outside the effective member
             // scope because its response contains endpoint, key, and auth
@@ -833,6 +871,17 @@ pub async fn update_user_service(
         set_doc.insert("node_priority", np);
     }
     if let Some(active) = is_active {
+        if active
+            && let Some(api_key_id) = current.api_key_id.as_deref()
+            && crate::services::user_api_key_service::find_api_key(db, user_id, api_key_id)
+                .await?
+                .is_none()
+        {
+            return Err(AppError::BadRequest(
+                "Cannot enable this service because its stored credential is missing. Reconnect or delete the service first."
+                    .to_string(),
+            ));
+        }
         set_doc.insert("is_active", active);
     }
     if let Some(admin_only) = admin_only {
@@ -1174,19 +1223,18 @@ pub async fn validate_update_inputs(
     if changes_injection_params
         && !caller_is_promoting
         && let Some(ref ak_id) = current.api_key_id
+        && let Some(ak) =
+            crate::services::user_api_key_service::find_api_key(db, &current.user_id, ak_id).await?
+        && ak.credential_type == "node_managed"
     {
-        let ak =
-            crate::services::user_api_key_service::get_api_key(db, &current.user_id, ak_id).await?;
-        if ak.credential_type == "node_managed" {
-            return Err(AppError::BadRequest(
-                "Cannot change auth_method/auth_key_name/endpoint_url/node_id on a \
+        return Err(AppError::BadRequest(
+            "Cannot change auth_method/auth_key_name/endpoint_url/node_id on a \
                  node-managed service via `PUT /keys` without also supplying a \
                  new `credential` to promote the key to a server-held record. \
                  Either include `credential` in the same request, or run \
                  `nyxid node credentials add <slug> …` on the node directly."
-                    .to_string(),
-            ));
-        }
+                .to_string(),
+        ));
     }
 
     // Endpoint URL format: mirror `user_endpoint_service::validate_endpoint_url`.
@@ -1393,17 +1441,38 @@ pub async fn link_api_key(
     // round Codex P2). We also accept a re-attach of the same
     // `api_key_id` so an idempotent retry of a single request doesn't
     // return Conflict.
+    let current = db
+        .collection::<UserService>(COLLECTION_NAME)
+        .find_one(doc! { "_id": service_id, "user_id": user_id })
+        .await?
+        .ok_or_else(|| AppError::NotFound("User service not found".to_string()))?;
+    let stale_api_key_id = match current.api_key_id.as_deref() {
+        Some(current_id) if current_id != api_key_id => {
+            let exists = db
+                .collection::<mongodb::bson::Document>(USER_API_KEYS)
+                .count_documents(doc! { "_id": current_id, "user_id": user_id })
+                .await?
+                > 0;
+            (!exists).then_some(current_id.to_string())
+        }
+        _ => None,
+    };
+    let mut binding_options = vec![
+        doc! { "api_key_id": null },
+        doc! { "api_key_id": { "$exists": false } },
+        doc! { "api_key_id": api_key_id },
+    ];
+    if let Some(stale_id) = stale_api_key_id {
+        binding_options.push(doc! { "api_key_id": stale_id });
+    }
+
     let result = db
         .collection::<UserService>(COLLECTION_NAME)
         .update_one(
             doc! {
                 "_id": service_id,
                 "user_id": user_id,
-                "$or": [
-                    { "api_key_id": null },
-                    { "api_key_id": { "$exists": false } },
-                    { "api_key_id": api_key_id },
-                ],
+                "$or": binding_options,
             },
             doc! {
                 "$set": {
@@ -2425,6 +2494,55 @@ mod tests {
             .unwrap()
             .unwrap();
         assert!(!after.is_active);
+    }
+
+    /// The management listing must keep disabled services, and the
+    /// enforcement listing must keep dropping them. These two live together
+    /// because the pair is the invariant: "Disable" is advertised as a
+    /// reversible pause, which only holds while the row stays visible on the
+    /// screen that owns the Enable control — and it is only *safe* while the
+    /// active-only listing every credential-resolving consumer reads
+    /// (proxy discovery, MCP catalog, OAuth resource indicators, API-key
+    /// scope, assistant readiness) continues to exclude it.
+    #[tokio::test]
+    async fn disabled_services_are_listed_for_management_but_not_for_enforcement() {
+        let Some(db) = connect_test_database("user_svc_ext_disabled_listing").await else {
+            return;
+        };
+        let user_id = uuid::Uuid::new_v4().to_string();
+        let enabled_id = uuid::Uuid::new_v4().to_string();
+        let disabled_id = uuid::Uuid::new_v4().to_string();
+
+        let enabled = test_user_service(&enabled_id, &user_id, "still-on", "ep-1", None, None);
+        let mut disabled = test_user_service(&disabled_id, &user_id, "paused", "ep-2", None, None);
+        disabled.is_active = false;
+        db.collection::<UserService>(COLLECTION_NAME)
+            .insert_many(vec![enabled, disabled])
+            .await
+            .unwrap();
+
+        let enforcement = list_user_services(&db, &user_id).await.unwrap();
+        assert_eq!(
+            enforcement.len(),
+            1,
+            "active-only listing must hide the disabled service"
+        );
+        assert_eq!(enforcement[0].id, enabled_id);
+
+        let management = list_user_services_with_sources_including_disabled(&db, &user_id)
+            .await
+            .unwrap();
+        let mut listed: Vec<&str> = management
+            .iter()
+            .map(|tagged| tagged.service.id.as_str())
+            .collect();
+        listed.sort_unstable();
+        let mut expected = vec![enabled_id.as_str(), disabled_id.as_str()];
+        expected.sort_unstable();
+        assert_eq!(
+            listed, expected,
+            "management listing must keep the disabled service so it can be re-enabled"
+        );
     }
 
     #[test]

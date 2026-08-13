@@ -8,7 +8,6 @@ import {
 } from "@tanstack/react-router";
 import { TooltipProvider } from "@/components/ui/tooltip";
 import { Toaster } from "@/components/ui/toast";
-import { ChunkErrorBoundary } from "@/components/chunk-error-boundary";
 import { AppNotFound } from "@/components/shared/app-not-found";
 import { AppRouteError } from "@/components/shared/app-route-error";
 import { AuthLayout } from "@/components/layout/auth-layout";
@@ -102,11 +101,9 @@ import {
 const rootRoute = createRootRoute({
   component: () => (
     <TooltipProvider delayDuration={200}>
-      <ChunkErrorBoundary>
-        <Suspense>
-          <Outlet />
-        </Suspense>
-      </ChunkErrorBoundary>
+      <Suspense>
+        <Outlet />
+      </Suspense>
       <Toaster />
     </TooltipProvider>
   ),

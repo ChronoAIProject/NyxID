@@ -30,6 +30,7 @@ use crate::services::ssh_service::SshSessionManager;
 const TEST_DB_NAME_PREFIX: &str = "nyxid_test_";
 const TEST_DB_UUID_LEN: usize = 36;
 const MAX_TEST_DB_PREFIX_LEN: usize = 63 - TEST_DB_NAME_PREFIX.len() - 1 - TEST_DB_UUID_LEN;
+const TEST_DATABASE_URL_ENV: &str = "NYXID_TEST_DATABASE_URL";
 
 /// Single shared database used by every probe to check write-readiness. Reusing
 /// one fixed name (instead of a per-call UUID database) keeps the probe from
@@ -44,15 +45,14 @@ const TEST_DB_PROBE_NAME: &str = "nyxid_test_probe";
 
 /// Connect to a fresh per-test MongoDB database.
 ///
-/// Probes the dev docker-compose mongod on `127.0.0.1:27018` first (published by
-/// `docker-compose.override.yml`), then the CI-style mongod on `127.0.0.1:27017`
-/// (the GitHub Actions service container). Each candidate is gated by a fast TCP
-/// reachability check, so a port with no listener — e.g. 27018 in CI, or both
-/// ports when no mongod is running locally — is skipped in milliseconds instead
-/// of stalling on the driver's server-selection timeout. Without that pre-check
-/// the dead 27018 probe cost ~10s of server selection on *every* DB-backed test
-/// in CI (where only 27017 exists), which dominated the suite's wall-clock.
-/// Returns `None` when neither is reachable so integration tests skip cleanly.
+/// `NYXID_TEST_DATABASE_URL` is authoritative when set. Otherwise this probes the
+/// dev docker-compose mongod on `127.0.0.1:27018` first, then the CI-style mongod
+/// on `127.0.0.1:27017`. Default candidates are gated by a fast TCP reachability
+/// check, so a port with no listener is skipped in milliseconds instead of
+/// stalling on the driver's server-selection timeout. Returns `None` when neither
+/// default candidate is reachable so non-transactional integration tests retain
+/// their existing optional-Mongo behavior. A configured override fails loudly
+/// when unusable instead of silently falling back to a different database.
 ///
 /// Deliberately NOT cached: a per-test client is required for correct llvm-cov
 /// coverage measurement — a shared client broke under the runtime-per-test
@@ -72,6 +72,69 @@ pub(crate) async fn connect_test_database(prefix: &str) -> Option<mongodb::Datab
     register_test_db_for_cleanup(&cleanup_uri, &db_name);
 
     Some(client.database(&db_name))
+}
+
+/// Connect to a fresh database and prove that it supports multi-document
+/// transactions. Transaction-dependent tests must use this helper instead of
+/// conditionally returning when `connect_test_database` yields `None`.
+///
+/// The topology check catches a standalone mongod with a clear diagnostic. The
+/// write-and-abort probe then verifies the actual session/transaction path, so a
+/// misleading connection string or partially initialized replica set cannot
+/// make an atomicity test pass without exercising transactions.
+pub(crate) async fn connect_transaction_test_database(prefix: &str) -> mongodb::Database {
+    let db = connect_test_database(prefix).await.unwrap_or_else(|| {
+        panic!(
+            "transaction test requires MongoDB; set {TEST_DATABASE_URL_ENV} to a writable replica-set or mongos URI"
+        )
+    });
+
+    assert_transaction_test_topology(&db).await;
+    db
+}
+
+async fn assert_transaction_test_topology(db: &mongodb::Database) {
+    let hello = db
+        .run_command(doc! { "hello": 1 })
+        .await
+        .unwrap_or_else(|error| {
+            panic!(
+                "transaction test could not inspect MongoDB topology via hello: {error}; set {TEST_DATABASE_URL_ENV} to a writable replica-set or mongos URI"
+            )
+        });
+    let is_replica_set = hello.get_str("setName").is_ok();
+    let is_mongos = hello.get_str("msg").is_ok_and(|msg| msg == "isdbgrid");
+    assert!(
+        is_replica_set || is_mongos,
+        "transaction tests require a MongoDB replica set or mongos, but the configured server is standalone; set {TEST_DATABASE_URL_ENV} to a transaction-capable URI"
+    );
+    assert!(
+        hello.get("logicalSessionTimeoutMinutes").is_some(),
+        "transaction tests require MongoDB logical sessions; set {TEST_DATABASE_URL_ENV} to a transaction-capable URI"
+    );
+
+    let mut session = db.client().start_session().await.unwrap_or_else(|error| {
+        panic!("transaction test could not start a MongoDB session: {error}")
+    });
+    session
+        .start_transaction()
+        .await
+        .unwrap_or_else(|error| panic!("transaction test could not start a transaction: {error}"));
+    let probe_id = Uuid::new_v4().to_string();
+    let transaction_probe = db.collection::<mongodb::bson::Document>("__transaction_probe");
+    if let Err(error) = transaction_probe
+        .insert_one(doc! { "_id": probe_id })
+        .session(&mut session)
+        .await
+    {
+        let _ = session.abort_transaction().await;
+        panic!(
+            "transaction test MongoDB rejected a transactional write: {error}; set {TEST_DATABASE_URL_ENV} to a writable, initialized replica-set or mongos URI"
+        );
+    }
+    session.abort_transaction().await.unwrap_or_else(|error| {
+        panic!("transaction test could not abort its topology probe: {error}")
+    });
 }
 
 /// Returns `true` when a TCP connection to `addr` succeeds quickly. A closed
@@ -94,6 +157,22 @@ async fn test_mongo_port_reachable(addr: &str) -> bool {
 /// won, so callers can register a fresh-client teardown that survives the test's
 /// own tokio runtime being torn down (see `drop_test_databases_at_exit`).
 async fn probe_test_mongo_client() -> Option<(mongodb::Client, String)> {
+    if let Some(configured_uri) = std::env::var_os(TEST_DATABASE_URL_ENV) {
+        let configured_uri = configured_uri
+            .into_string()
+            .unwrap_or_else(|_| panic!("{TEST_DATABASE_URL_ENV} must contain valid Unicode"));
+        assert!(
+            !configured_uri.trim().is_empty(),
+            "{TEST_DATABASE_URL_ENV} must not be empty"
+        );
+        let client = probe_test_mongo_uri(&configured_uri).await.unwrap_or_else(|| {
+            panic!(
+                "{TEST_DATABASE_URL_ENV} is configured but MongoDB is not reachable and writable; refusing to fall back to a different test database"
+            )
+        });
+        return Some((client, configured_uri));
+    }
+
     // (tcp address, client URI). 27018 is the dev docker-compose port; 27017 is
     // the CI service-container port. Probe order is no longer load-bearing — the
     // TCP pre-check below skips whichever candidate has no listener. Every probe
@@ -119,47 +198,51 @@ async fn probe_test_mongo_client() -> Option<(mongodb::Client, String)> {
             continue;
         }
 
-        let Ok(mut options) = mongodb::options::ClientOptions::parse(&uri).await else {
-            continue;
-        };
-        // The TCP pre-check guards against dead-port stalls in milliseconds, so
-        // these generous driver timeouts only bound the real-mongod-present
-        // case. Under cargo llvm-cov, argon2 plus instrumentation can starve the
-        // driver's heartbeat monitor long enough to otherwise trigger
-        // ConnectionPoolCleared("server monitor timeout") flakes, observed on
-        // reset_password_happy_path.
-        options.server_selection_timeout = Some(Duration::from_secs(30));
-        options.connect_timeout = Some(Duration::from_secs(20));
-        options.max_pool_size = Some(4);
-        let Ok(client) = mongodb::Client::with_options(options) else {
-            continue;
-        };
-        let db = client.database(TEST_DB_PROBE_NAME);
-        if db.run_command(doc! { "ping": 1 }).await.is_err() {
-            continue;
-        }
-
-        // Unique doc id per call so concurrent probes against the shared probe
-        // database don't collide on a duplicate `_id` (which would fail the
-        // write check and silently skip the test).
-        let probe = db.collection::<mongodb::bson::Document>("__probe");
-        let probe_id = uuid::Uuid::new_v4().to_string();
-        let write_ready = tokio::time::timeout(
-            Duration::from_secs(5),
-            probe.insert_one(doc! { "_id": probe_id.clone() }),
-        )
-        .await;
-        if matches!(write_ready, Ok(Ok(_))) {
-            let _ = tokio::time::timeout(
-                Duration::from_secs(5),
-                probe.delete_one(doc! { "_id": probe_id }),
-            )
-            .await;
+        if let Some(client) = probe_test_mongo_uri(&uri).await {
             return Some((client, uri));
         }
     }
 
     None
+}
+
+async fn probe_test_mongo_uri(uri: &str) -> Option<mongodb::Client> {
+    let Ok(mut options) = mongodb::options::ClientOptions::parse(uri).await else {
+        return None;
+    };
+    // The TCP pre-check guards default candidates against dead-port stalls in
+    // milliseconds. These more generous driver timeouts cover a real mongod and
+    // remote explicit overrides. Under cargo llvm-cov, argon2 plus instrumentation
+    // can starve the heartbeat monitor long enough to otherwise clear the pool.
+    options.server_selection_timeout = Some(Duration::from_secs(30));
+    options.connect_timeout = Some(Duration::from_secs(20));
+    options.max_pool_size = Some(4);
+    let Ok(client) = mongodb::Client::with_options(options) else {
+        return None;
+    };
+    let db = client.database(TEST_DB_PROBE_NAME);
+    if db.run_command(doc! { "ping": 1 }).await.is_err() {
+        return None;
+    }
+
+    // Unique doc id per call so concurrent probes against the shared probe
+    // database don't collide on a duplicate `_id`.
+    let probe = db.collection::<mongodb::bson::Document>("__probe");
+    let probe_id = Uuid::new_v4().to_string();
+    let write_ready = tokio::time::timeout(
+        Duration::from_secs(5),
+        probe.insert_one(doc! { "_id": probe_id.clone() }),
+    )
+    .await;
+    if !matches!(write_ready, Ok(Ok(_))) {
+        return None;
+    }
+    let _ = tokio::time::timeout(
+        Duration::from_secs(5),
+        probe.delete_one(doc! { "_id": probe_id }),
+    )
+    .await;
+    Some(client)
 }
 
 /// Per-process registry of the databases created by `connect_test_database`,
@@ -554,6 +637,7 @@ pub(crate) fn test_app_state_with_config(db: mongodb::Database, config: AppConfi
         )),
         ssh_session_manager: Arc::new(SshSessionManager::new(config.ssh_max_sessions_per_user)),
         per_agent_limiter: Arc::new(crate::mw::rate_limit::PerAgentRateLimiter::new()),
+        direct_chat_limiter: crate::mw::rate_limit::create_direct_chat_rate_limiter(),
         device_code_pubkey_limiter: crate::mw::rate_limit::create_per_pubkey_rate_limiter(),
         device_code_ip_limiter: crate::mw::rate_limit::create_per_ip_rate_limiter(5, 60),
         auth_device_request_limiter: crate::mw::rate_limit::create_per_ip_rate_limiter(5, 60),
@@ -952,5 +1036,13 @@ mod tests {
             "closed-port probe must fail fast (got {elapsed:?}); a dead candidate \
              must not block on the mongo server-selection timeout"
         );
+    }
+
+    /// CI configures a single-node replica set. Keeping this as a mandatory test
+    /// makes a regression to standalone MongoDB fail at setup with an actionable
+    /// message instead of letting transaction-dependent tests silently return.
+    #[tokio::test]
+    async fn transaction_test_database_supports_atomic_writes() {
+        let _db = connect_transaction_test_database("transaction_topology").await;
     }
 }

@@ -89,6 +89,33 @@ describe("deriveConnectorItems", () => {
     expect(added[0]?.description).toBe("GPT models.");
   });
 
+  it("keeps a disabled connection in Added, flagged, rather than offering Connect", () => {
+    // Regression: while the backend hid disabled services from GET /keys, the
+    // catalog entry fell back into "Available to add", so a paused connector
+    // was indistinguishable from one that had never been connected — the card
+    // invited the user to create a SECOND connection instead of re-enabling
+    // the one they had.
+    const { added, available } = deriveConnectorItems(
+      [makeKey({ is_active: false } as Partial<KeyInfo>)],
+      [makeEntry({})],
+    );
+    expect(added.map((i) => i.id)).toEqual(["service:openai"]);
+    expect(added[0]?.disabled).toBe(true);
+    expect(available).toHaveLength(0);
+  });
+
+  it("does not flag a service that still has one working connection", () => {
+    const { added } = deriveConnectorItems(
+      [
+        makeKey({ id: "key-1", is_active: false } as Partial<KeyInfo>),
+        makeKey({ id: "key-8", is_active: true } as Partial<KeyInfo>),
+      ],
+      [makeEntry({})],
+    );
+    expect(added).toHaveLength(1);
+    expect(added[0]?.disabled).toBe(false);
+  });
+
   it("derives the auth-kind meta from the catalog entry shape", () => {
     const { available } = deriveConnectorItems(
       [],

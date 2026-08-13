@@ -40,7 +40,7 @@ import {
 import type { CatalogEntry, KeyInfo } from "@/types/keys";
 import { AddKeyDialog } from "@/components/dashboard/add-key-dialog";
 import { GrantCascadeDialog } from "@/components/shared/grant-cascade-dialog";
-import { RevokeConnectionDialog } from "@/components/shared/revoke-connection-dialog";
+import { DeleteConnectionDialog } from "@/components/shared/delete-connection-dialog";
 import {
   parseGrantCascadeDetails,
   type GrantCascadeDetails,
@@ -91,12 +91,14 @@ function canReconnect(
   key: KeyInfo,
   catalogEntry: CatalogEntry | undefined,
 ): boolean {
+  const providerCanAuthorize =
+    key.credential_type === "oauth2" ||
+    catalogEntry?.provider_type === "oauth2" ||
+    catalogEntry?.provider_type === "device_code";
   return (
     canModifyKey(key) &&
-    isReconnectableStatus(key.status) &&
-    (key.credential_type === "oauth2" ||
-      catalogEntry?.provider_type === "oauth2" ||
-      catalogEntry?.provider_type === "device_code")
+    providerCanAuthorize &&
+    (key.credential_missing || isReconnectableStatus(key.status))
   );
 }
 
@@ -320,7 +322,7 @@ function ConnectionPanel({
       {
         onSuccess: () =>
           toast.success(
-            nextActive ? "Connection enabled" : "Connection paused",
+            nextActive ? "Connection enabled" : "Connection disabled",
           ),
         onError: () => toast.error("Could not update the connection."),
       },
@@ -357,7 +359,7 @@ function ConnectionPanel({
           setConfirmingRevoke(false);
           return;
         }
-        toast.error("Could not revoke the connection.");
+        toast.error("Could not delete the connection.");
       },
     });
   }
@@ -413,15 +415,37 @@ function ConnectionPanel({
 
         {/* A broken connection is the reason this modal gets opened, so the
             explanation leads rather than sitting under the detail rows. */}
-        {isProblemStatus(key.status) && (
+        {(isProblemStatus(key.status) || key.credential_missing) && (
           <div className="pb-3">
-            <ConnectionStatusNotice
-              status={key.status}
-              errorMessage={key.error_message}
-              onReconnect={
-                reconnectable ? () => setReconnectOpen(true) : undefined
-              }
-            />
+            {key.credential_missing ? (
+              <div className="flex items-start gap-3 rounded-xl border border-warning/15 bg-warning/[0.04] px-4 py-3">
+                <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0 text-warning" />
+                <div className="min-w-0 flex-1 space-y-1.5">
+                  <p className="text-[12px] text-warning">
+                    The stored credential is missing. Reconnect or delete this service.
+                  </p>
+                  {reconnectable && (
+                    <Button
+                      type="button"
+                      variant="outline"
+                      size="sm"
+                      onClick={() => setReconnectOpen(true)}
+                    >
+                      <RefreshCw />
+                      Reconnect
+                    </Button>
+                  )}
+                </div>
+              </div>
+            ) : (
+              <ConnectionStatusNotice
+                status={key.status}
+                errorMessage={key.error_message}
+                onReconnect={
+                  reconnectable ? () => setReconnectOpen(true) : undefined
+                }
+              />
+            )}
           </div>
         )}
 
@@ -434,7 +458,9 @@ function ConnectionPanel({
             </DetailRow>
           )}
           <DetailRow label="Credential">
-            {key.credential_type.replaceAll("_", " ")}
+            {key.credential_missing
+              ? "Missing - reconnect or delete"
+              : key.credential_type.replaceAll("_", " ")}
           </DetailRow>
           {grantedScopes && grantedScopes.length > 0 && (
             <DetailRow label="Scopes">
@@ -476,17 +502,21 @@ function ConnectionPanel({
                     Enabled
                   </p>
                   <p className="text-[11px] text-text-tertiary">
-                    Pause to block the assistant from using this connection.
+                    Disable to stop the assistant using this connection. Your
+                    credential is kept — you can enable it again any time.
                   </p>
                 </div>
                 <Switch
                   checked={key.is_active}
-                  disabled={updateKey.isPending}
+                  disabled={
+                    updateKey.isPending ||
+                    (Boolean(key.credential_missing) && !key.is_active)
+                  }
                   onCheckedChange={toggleActive}
                   aria-label="Toggle connection enabled"
                 />
               </div>
-              {canReplaceCredential(key) && (
+              {canReplaceCredential(key) && !key.credential_missing && (
                 <ReplaceCredential apiKeyId={key.api_key_id as string} />
               )}
             </>
@@ -512,7 +542,7 @@ function ConnectionPanel({
               className="text-destructive hover:text-destructive"
               onClick={() => setConfirmingRevoke(true)}
             >
-              Revoke
+              Delete
             </Button>
           )}
         </div>
@@ -522,7 +552,7 @@ function ConnectionPanel({
           upstream account, and rendered in-card it read as an error the app
           had raised rather than a step the user had just triggered. */}
       {confirmingRevoke && (
-        <RevokeConnectionDialog
+        <DeleteConnectionDialog
           providerName={providerName}
           connectionLabel={showLabel ? key.label : null}
           revokesGrant={revokesGrant}

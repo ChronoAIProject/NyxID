@@ -476,11 +476,11 @@ describe("KeyDetailPage — edit flows", () => {
     expect(mockToastSuccess).toHaveBeenCalledWith("Credential rotated");
   });
 
-  it("toggles the service inactive via useUpdateUserService and surfaces an error toast on failure", async () => {
+  it("toggles the service disabled via useUpdateUserService and surfaces an error toast on failure", async () => {
     const user = userEvent.setup();
     render(<KeyDetailPage />);
 
-    await user.click(screen.getByRole("button", { name: /Deactivate/i }));
+    await user.click(screen.getByRole("button", { name: /Disable/i }));
 
     expect(hooks.updateUserService).toHaveBeenCalledTimes(1);
     expect(hooks.updateUserService.mock.calls[0]![0]).toEqual({
@@ -496,6 +496,36 @@ describe("KeyDetailPage — edit flows", () => {
       }),
     );
     expect(mockToastError).toHaveBeenCalledWith("Not allowed");
+  });
+
+  it("shows missing-credential recovery and blocks direct enable", async () => {
+    const user = userEvent.setup();
+    hooks.catalogEntry = { provider_type: "oauth2", name: "OpenAI" };
+    hooks.key.data = makeKey({
+      api_key_id: null,
+      credential_type: "none",
+      credential_missing: true,
+      is_active: false,
+      status: "active",
+    });
+
+    render(<KeyDetailPage />);
+
+    expect(screen.getByText("Credential missing")).toBeInTheDocument();
+    expect(
+      screen.getByText(/The stored credential no longer exists/i),
+    ).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Enable" })).toBeDisabled();
+    expect(
+      screen.queryByRole("button", { name: "Manage permissions" }),
+    ).not.toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: /Reconnect/ }));
+    expect(screen.getByTestId("add-key-dialog")).toHaveAttribute(
+      "data-reconnect",
+      "key-1",
+    );
+    expect(screen.getByRole("button", { name: "Delete" })).toBeInTheDocument();
+    expect(hooks.updateUserService).not.toHaveBeenCalled();
   });
 
   it("saves a custom User-Agent via useUpdateUserService", async () => {
@@ -536,7 +566,7 @@ describe("KeyDetailPage — delete flow", () => {
 
     // Dialog renders in a portal under document.body.
     const dialog = await screen.findByRole("dialog");
-    expect(within(dialog).getByText("Delete Service")).toBeInTheDocument();
+    expect(within(dialog).getByText("Delete service")).toBeInTheDocument();
 
     await user.click(within(dialog).getByRole("button", { name: "Delete" }));
 
@@ -665,7 +695,7 @@ describe("KeyDetailPage — org read-only branch", () => {
       screen.queryByRole("button", { name: /^Delete$/i }),
     ).not.toBeInTheDocument();
     expect(
-      screen.queryByRole("button", { name: /Deactivate/i }),
+      screen.queryByRole("button", { name: /Disable/i }),
     ).not.toBeInTheDocument();
     await user.click(screen.getByRole("tab", { name: "Advanced" }));
     expect(screen.getByTestId("routing-section")).toHaveAttribute(

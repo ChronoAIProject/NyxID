@@ -1,4 +1,4 @@
-data: {"type":"RUN_STARTED","actorId":"nyxid-chat-4a1e60ebd1fd44f192bf4bb90e1812ae"}
+data: {"type":"RUN_STARTED","actorId":"nyxid-chat-f8369965a444433f92ec50e67ad8ee52","turnId":"turn-server-owned-1","runStarted":{"threadId":"nyxid-chat-f8369965a444433f92ec50e67ad8ee52","runId":"turn-server-owned-1"}}
 
 data: {"type":"TEXT_MESSAGE_START","textMessageStart":{"messageId":"31c82249c61e42239075795cfa9306d9","role":"assistant"}}
 
@@ -9,4 +9,3 @@ data: {"type":"USAGE","usage":{"available":true,"promptTokens":25447,"completion
 data: {"type":"TEXT_MESSAGE_END","textMessageEnd":{"messageId":"31c82249c61e42239075795cfa9306d9"}}
 
 data: {"type":"RUN_FINISHED"}
-

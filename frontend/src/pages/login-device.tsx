@@ -1,11 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { Link, useNavigate } from "@tanstack/react-router";
-import {
-  AlertTriangle,
-  CheckCircle2,
-  ShieldCheck,
-  Terminal,
-} from "lucide-react";
+import { AlertTriangle, CheckCircle2, ShieldCheck } from "lucide-react";
+import { NyxidIcon } from "@/components/brand/nyxid-icon";
 import { ErrorBanner } from "@/components/shared/error-banner";
 import { Button, ButtonIcon } from "@/components/ui/button";
 import {
@@ -102,9 +98,9 @@ export function LoginDevicePage() {
 
   return (
     <LoginDeviceShell>
-      <header className="flex flex-col gap-2 text-center">
-        <div className="mx-auto flex h-10 w-10 items-center justify-center rounded-xl border border-nyx-500/30 bg-nyx-500/10">
-          <Terminal className="h-4 w-4 text-nyx-secondary-400" />
+      <header className="flex flex-col gap-3 text-center">
+        <div className="flex justify-center">
+          <NyxidIcon className="h-10 w-10" />
         </div>
         <div className="space-y-1">
           <h1 className="text-[22px] font-bold leading-tight tracking-tight text-foreground sm:text-[28px]">

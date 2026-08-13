@@ -2,12 +2,12 @@ import { render, screen } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { describe, expect, it, vi } from "vitest";
 import { grantRevocationDescription } from "@/schemas/oauth-revocation";
-import { RevokeConnectionDialog } from "./revoke-connection-dialog";
+import { DeleteConnectionDialog } from "./delete-connection-dialog";
 
-describe("RevokeConnectionDialog", () => {
+describe("DeleteConnectionDialog", () => {
   it("presents the grant-revoking consequence as dialog copy", () => {
     render(
-      <RevokeConnectionDialog
+      <DeleteConnectionDialog
         providerName="GitHub OAuth"
         revokesGrant
         isPending={false}
@@ -17,7 +17,7 @@ describe("RevokeConnectionDialog", () => {
     );
 
     expect(
-      screen.getByRole("dialog", { name: /Revoke GitHub OAuth connection\?/ }),
+      screen.getByRole("dialog", { name: /Delete GitHub OAuth connection\?/ }),
     ).toBeInTheDocument();
     expect(
       screen.getByText(grantRevocationDescription("GitHub OAuth")),
@@ -26,7 +26,7 @@ describe("RevokeConnectionDialog", () => {
 
   it("says upstream access survives when no grant is revoked", () => {
     render(
-      <RevokeConnectionDialog
+      <DeleteConnectionDialog
         providerName="Notion"
         revokesGrant={false}
         isPending={false}
@@ -45,7 +45,7 @@ describe("RevokeConnectionDialog", () => {
 
   it("names the specific connection when a service has several", () => {
     render(
-      <RevokeConnectionDialog
+      <DeleteConnectionDialog
         providerName="GitHub"
         connectionLabel="Work account"
         revokesGrant
@@ -63,7 +63,7 @@ describe("RevokeConnectionDialog", () => {
     const onConfirm = vi.fn();
     const onCancel = vi.fn();
     render(
-      <RevokeConnectionDialog
+      <DeleteConnectionDialog
         providerName="GitHub"
         revokesGrant
         isPending={false}
@@ -72,16 +72,16 @@ describe("RevokeConnectionDialog", () => {
       />,
     );
 
-    await user.click(screen.getByRole("button", { name: "Revoke" }));
+    await user.click(screen.getByRole("button", { name: "Delete" }));
     expect(onConfirm).toHaveBeenCalledOnce();
 
     await user.click(screen.getByRole("button", { name: "Cancel" }));
     expect(onCancel).toHaveBeenCalledOnce();
   });
 
-  it("blocks cancel while the revoke request is in flight", () => {
+  it("blocks cancel while the delete request is in flight", () => {
     render(
-      <RevokeConnectionDialog
+      <DeleteConnectionDialog
         providerName="GitHub"
         revokesGrant
         isPending

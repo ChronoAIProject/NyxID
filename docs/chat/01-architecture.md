@@ -1,21 +1,39 @@
 # Assistant Chat Architecture
 
-Last verified against `f608b33c` (2026-08-01).
+Last verified against Aevatar `0a86713671fcf551dc19ad86b1b6aa8ae6cb980b` and the
+production typed-chat probe (2026-08-11).
 
 ## System boundary
 
-The browser assistant is a three-hop system:
+The browser assistant is a three-hop system with two mutually exclusive send
+engines:
 
 ```text
 React browser
   -> NyxID /api/v1/assistant/**
-     -> admin-managed DownstreamService slug "aevatar"
+     -> default: admin-managed DownstreamService slug "aevatar"
         -> Aevatar /api/chat and conversation-history resources
+     -> experimental: admin-managed DownstreamService slug "chrono-llm-public"
+        -> Chrono LLM /v1/chat/completions (relative to the service base_url)
 ```
 
-The browser owns presentation state, optimistic turns, local structured blocks, stream consumption, and recovery orchestration. NyxID owns caller authentication, platform-target selection, scope derivation, body reconstruction, identity and capability injection, and response normalization. Aevatar owns the actor or workflow execution, persistent history, state versions, turn identities, and upstream stream semantics.
+The browser owns presentation state, optimistic turns, stream consumption, and
+engine selection from the effective feature flags. For Aevatar it also owns the
+local mirror of actor-projected UI state. NyxID owns caller authentication,
+platform-target selection, strict body reconstruction, and response
+normalization. Aevatar owns typed actor execution, persistent history,
+committed state versions, and turn identities. The Direct engine is stateless:
+its `direct-*` conversations and transcripts exist only in browser memory, and
+each turn resends the bounded local transcript.
 
-The route graph is defined in `backend/src/routes.rs:build_router`. The forwarding and resource-family switch are in `backend/src/handlers/assistant.rs`. Request grammar and exact upstream paths are in `backend/src/services/assistant_service.rs`. Browser orchestration is in `frontend/src/lib/assistant/aevatar-transport.ts` and `frontend/src/hooks/use-assistant.ts`.
+The route graph is defined in `backend/src/routes.rs:build_router`. Aevatar
+forwarding and resource-family switching are in
+`backend/src/handlers/assistant.rs`; Direct forwarding is in
+`backend/src/handlers/assistant_direct.rs`. Their request grammars live in
+`backend/src/services/assistant_service.rs` and
+`backend/src/services/assistant_direct.rs`. Browser orchestration is in the two
+engine transports, `frontend/src/lib/assistant/transport.ts`, and
+`frontend/src/hooks/use-assistant.ts`.
 
 ## Authentication boundary
 
@@ -34,7 +52,11 @@ The route placement and rejection layers are authoritative: `backend/src/routes.
 
 ## Platform service selection
 
-Assistant handlers do not resolve a user-owned `UserService`. They resolve the active admin-managed `DownstreamService` whose slug is `aevatar`, require it not to need a per-user credential, and call the administrative proxy path. This has several consequences:
+Assistant handlers do not resolve a user-owned `UserService`. The default
+Aevatar handlers resolve the active admin-managed `DownstreamService` whose
+slug is `aevatar`; the Direct handler uses `chrono-llm-public`. Both require the
+row not to need a per-user credential and call the administrative proxy path.
+This has several consequences:
 
 - The caller cannot choose the upstream base URL.
 - A personal or organization service with the same slug does not override the platform target.
@@ -42,7 +64,18 @@ Assistant handlers do not resolve a user-owned `UserService`. They resolve the a
 - User service scopes, node pins, and agent credential bindings do not select the assistant upstream.
 - The upstream URL comes from the service row's `base_url`; NyxID has no assistant-specific Aevatar URL environment variable.
 
-The selection is implemented by `backend/src/handlers/assistant.rs:forward` through `proxy_service::execute_admin_proxy`. The service row must be active and must set `requires_user_credential` to `false`.
+The selection is implemented by `backend/src/handlers/assistant.rs:forward` and
+`backend/src/handlers/assistant_direct.rs:completions` through
+`proxy_service::execute_admin_proxy`. The selected service row must be active
+and must set `requires_user_credential` to `false`.
+
+The Direct surface is default-off and independently enforced on every direct
+route through the effective per-user feature resolution for
+`experimental:direct-chat-engine`. When disabled, all three routes are
+not-found-shaped and the frontend remains on Aevatar. The current implementation
+does not include the endpoint selector, consolidated wire-log flag,
+`/assistant/chat-config`, or gear panel proposed by the
+[endpoint selector addendum](direct-chronollm-endpoints-addendum.md).
 
 ## Identity and capability chain
 
@@ -53,7 +86,7 @@ NyxID authenticates the human, selects the platform row, and supplies two differ
 
 The delegated capability scope comes from the service row's `delegation_token_scope` when that scope can call the REST proxy. An empty or LLM-only scope that cannot authorize the required REST surface falls back to `proxy` and emits one warning. The live token lifetime is the compile-time constant `backend/src/crypto/jwt.rs:MCP_DELEGATION_TOKEN_TTL_SECS`, fixed at 300 seconds. It is not an environment variable or an `AppConfig` field; changing it requires a code change.
 
-The stable service-row intent is therefore:
+The required live service-row configuration is therefore:
 
 ```text
 slug:                         aevatar
@@ -63,16 +96,18 @@ identity_propagation_mode:    jwt or both
 identity_jwt_audience:        urn:aevatar:api
 inject_delegation_token:      true
 delegation_token_scope:       proxy or another REST-capable scope
-forward_access_token:         false
+forward_access_token:         true    <-- REQUIRED. Setting this false takes chat down.
 ```
 
 Identity and delegated-capability construction live in `backend/src/handlers/proxy.rs`; assistant-specific forwarding and fallback scope selection live in `backend/src/handlers/assistant.rs:resolve_forward_scope` and `build_forward_authorization`.
 
 ### Authorization is not caller passthrough
 
-The configured steady state sets `forward_access_token` to `false`. The browser's inbound Authorization value is not copied to Aevatar. NyxID generates the identity assertion and delegated capability from the verified authentication context.
+`forward_access_token` must be `true` on the live row. That flag does not mean "copy the browser's inbound Authorization value" — it never does that. It is the enable switch for the bridge in `backend/src/handlers/assistant.rs:needs_forward_token_bridge`, which for a cookie-authenticated session mints a NyxID delegated token server-side and *overwrites* the upstream `Authorization` header. A verified bearer caller keeps its own verified bearer; the assistant route policy excludes API keys, service accounts, delegated tokens, and relay tokens before the handler runs.
 
-There is a compatibility bridge when `forward_access_token` is enabled on the service row. For a cookie-authenticated session, NyxID mints a standard delegated token and overwrites the upstream `Authorization` header; it does not forward an arbitrary browser-supplied value. A verified bearer caller can retain its verified bearer on that configuration, but the assistant route policy excludes API keys, service accounts, delegated tokens, and relay tokens before the handler runs.
+Deployed Aevatar authenticates **only** `Authorization: Bearer <NyxID JWT>`. It does not yet validate the `X-NyxID-Identity-Token` or `X-NyxID-Delegation-Token` headers that NyxID also sends. Because the bridge is gated on `Session && forward_access_token`, setting the flag to `false` both stops the bearer forward *and* disarms the mint, so NyxID sends no `Authorization` at all and **every** Aevatar surface returns 401 `authentication_required` — the typed `/api/chat`, `/api/chat/conversations`, and legacy `v1/chat/completions` alike. This is not a theoretical failure mode: it took production chat down on 2026-08-12 and was resolved only by setting the flag back to `true`.
+
+`forward_access_token: false` becomes correct **only after** Aevatar ships identity-assertion validation (the TD-3 cutover). Until that is verified live against the deployed Aevatar, do not set it. The bridge is designed to retire itself with no code change on that day; flipping the flag ahead of the upstream capability is what breaks it.
 
 `JWT_ASSISTANT_FORWARD_TTL_SECS`, `crypto/jwt.rs:generate_assistant_forward_access_token`, and the `assistant_forward` claim are compatibility tombstones. They preserve rejection behavior for a prior token shape and do not control live assistant authentication. New code must not depend on them.
 
@@ -89,48 +124,119 @@ The pinned Mainnet configuration expects `urn:aevatar:api`. NyxID tool callbacks
 
 The upstream source anchors are `src/Aevatar.Mainnet.Host.Api/appsettings.json`, `src/Aevatar.AI.ToolProviders.NyxId/NyxIdToolOptions.cs`, `agents/Aevatar.GAgents.NyxidChat/NyxIdAssistantActionsOptions.cs`, and `NyxIdAssistantActionRegistryStartup.cs` in Aevatar.
 
-## Two mutually exclusive engines
+## Default Aevatar engine and legacy history
 
 Aevatar's `POST /api/chat` classifies every request by the presence of a top-level `type` property. This dispatch rule is implemented in upstream `src/Aevatar.Mainnet.Host.Api/Chat/MainnetChatEndpoints.cs:ClassifyRequestAsync`.
 
-| Request shape | Engine | Conversation IDs | NyxID browser route |
+| Request shape | Engine/resource family | Conversation IDs | Browser use |
 | --- | --- | --- | --- |
-| top-level `type` present | typed NyxIdChat actor | `nyxid-chat-...` | `POST /api/v1/assistant/chat` |
-| no top-level `type` | workflow engine, pinned to Studio | `chatc-...` | `POST /api/v1/assistant/workflow-chat` |
+| top-level allowlisted `type` | typed `NyxIdChat` actor | `nyxid-chat-{32 lowercase hex}` | every new send and typed continuation |
+| no top-level `type` | Studio workflow compatibility resource | `chatc-...` | historical list, transcript, and delete only |
 
-The engines are mutually exclusive for a turn. A request cannot execute the workflow engine and typed actor together. NyxID reinforces this boundary by rebuilding both body families from strict request types: typed commands always include an allowlisted `type`; workflow turns cannot carry `type` and are rebuilt with `workflow: "studio"`.
+Every browser send is a typed command to `POST /api/v1/assistant/chat`; a first
+`text` command omits `conversationId`, and a continuation includes the exact
+previously observed `nyxid-chat-...` ID. NyxID rebuilds a closed, allowlisted
+typed body and never forwards caller-supplied engine, scope, headers, or unknown
+fields. An unknown explicit command type is rejected locally and cannot fall
+through to Studio.
 
-### Engine selection in the browser
+`chatc-...` is a legacy resource family, not an alternate chat engine. It may
+remain visible in the shared history index and supports only its historical
+transcript and delete resources. The browser never sends to it, creates a local
+workflow placeholder, performs create recovery, uses a workflow WebSocket, or
+falls back to it after a typed failure. Legacy parity is not a correctness goal.
 
-New browser conversations use the Studio workflow route. Before Aevatar assigns a durable ID, the frontend uses a local `workflow-pending-...` placeholder. The placeholder is routing state only and is never sent as an upstream conversation ID.
+The typed actor creates its public identity upstream as
+`nyxid-chat-{Guid.NewGuid():N}`. The browser adopts it only from a valid
+`RUN_STARTED`: top-level `actorId` and `turnId` are required, and
+`runStarted.threadId` / `runStarted.runId`, when present, must exactly echo them.
+The identity is immutable for that delivery; a missing or conflicting identity
+is a protocol error, not a cache rekey or recovery opportunity.
 
-When the first stream provides `aevatar.chat.context`, the browser adopts the returned `chatc-...` identity and aliases local query, draft, episode, and navigation state to that durable ID. A stale `nyxid-pending-...` identifier is recognized only to handle older saved URLs as not found; it is not created by the current flow.
+The typed actor and Studio workflow remain mutually exclusive upstream. Within
+the default Aevatar engine, the browser exposes only the typed send path;
+retaining legacy read/delete does not permit a second Aevatar send path. The
+separately feature-gated Direct engine is selected before dispatch and never
+acts as a fallback after an Aevatar failure.
 
-Existing `nyxid-chat-...` conversations continue through the typed NyxIdChat actor route. Typed action cards and action-result continuations therefore remain available for those histories. Existing `chatc-...` conversations continue through the Studio workflow route with a state-version fence.
+## Experimental stateless Direct engine
 
-The selection and identifier guards live in `frontend/src/lib/assistant/aevatar-transport.ts`, `frontend/src/lib/assistant/transport.ts`, and `backend/src/services/assistant_service.rs`.
+The implemented Direct engine is an internal-testing surface described in the
+[Direct Chrono-LLM spec](direct-chronollm-spec.md). Its browser calls use
+`POST /api/v1/assistant/direct/completions`; model and skill choices come from
+the two flag-gated metadata routes. NyxID validates a closed text-only request,
+prepends its server-owned base prompt and optional curated skill, forces
+streaming with usage reporting, and forwards `chat/completions` to the
+admin-managed `chrono-llm-public` row.
+
+Direct conversations have `direct-*` identifiers used only by the frontend
+engine router. They have no server-side list, history, state, or delete
+resource. Reload, logout, or a verified identity change clears them. They do
+not support tools, actions, approvals, task controls, attachments, Aevatar
+actor state, or cross-engine fallback.
+
+### Cutover gate
+
+The deployment's typed plan gate is `mode: "auto"`; a locally auto-admitted
+plan becomes `satisfied` with the reason "This plan contains only locally
+auto-admitted operations." The browser still decodes the complete actor plan
+and gate shape because a different deployment may require an explicit gate.
+
+The typed actor currently terminates a connected-service inventory request with
+`RUN_ERROR / USE_SKILL_ACCESS_DENIED`: its tool set omits the legacy
+`nyxid_services` capability. That Aevatar provisioning defect blocks feature-
+complete connected-service rollout, not deletion of the already-retired legacy
+send path. It is not a reason to add a typed-to-workflow fallback or to claim
+feature parity from record counts; the observed legacy
+"117 connected services" count includes 75 inactive records.
 
 ## Persistence ownership
 
-Aevatar owns both conversation families but exposes different resources:
+Aevatar exposes separate resource families:
 
-- Both families appear in the scoped history index.
+- Typed rows are listed by canonical `/api/chat/conversations`; the scoped
+  history index is authoritative only for retained legacy `chatc-*` rows.
 - Typed history and delete use `/api/chat/conversations/{id}`.
-- Workflow history and delete use `/api/scopes/{scope}/chat-history/conversations/{id}`.
-- Typed state is available from the actor state resource.
-- Workflow continuation state is recovered from workflow history and stream context rather than the typed state route.
+- Legacy `chatc-*` history and delete use `/api/scopes/{scope}/chat-history/conversations/{id}`.
+- Typed state is available only from `/api/chat/conversations/{id}/state`.
 
-NyxID multiplexes these resources behind one browser API. The frontend treats the server transcript as authoritative for persisted text while retaining local structured action and approval blocks that the text-only history response cannot yet represent.
+The transcript is authoritative for persisted text. It is not the authority for
+typed pending input, approval, action, control, task, or continuation facts.
+Those facts come only from the typed actor projection, which is updated by live
+custom frames and conditional `/state` reads. A history response must not
+overwrite that projection.
+
+The projection recognises the complete public snapshot contract, including
+`activeTurn`, `latestTurn`, `recentTerminalTurns`, `activeTask`, `taskStatus`,
+`pendingInput`, `pendingApproval`, `pendingActions`, `recentActions`,
+`latestInputResolution`,
+`latestApprovalResolution`, `latestControlResult`, `latestStepControlResult`,
+`recentStepControlResults`, `controlFence`, `continuationAdmission`,
+`attentionKind`, `attentionSince`, `activeStepSummary`, `scopeId`,
+`stateVersion`, and `progressSequence`. The deployment has
+also returned additive `canaryEffectFault`, absent from the pinned canon.
+Snapshot decoding therefore preserves recognised fields, ignores unknown
+additive fields, and fails closed only at identity, version, and command-verb
+boundaries. `stateVersion`, `progressSequence`, and operation generations must
+be browser-safe integers; invalid values cannot advance local state.
+
+On mount, reconnect, and after a relevant terminal or control acknowledgement,
+the browser conditionally reads `/state?afterStateVersion=<current>`. It treats
+`not_modified` as no state change, applies `current` only after validating the
+envelope, scope, actor identity, and monotonic version/sequence, reloads on
+`reload_required`, and treats `not_found` as a non-adoptable resource result.
 
 ## Failure boundaries
 
 The architecture is deliberately fail closed at identity and engine boundaries:
 
-- An unknown or malformed conversation prefix is rejected rather than guessed.
-- Workflow create and continuation shapes cannot be mixed.
-- A workflow continuation without a positive state fence must recover one from history before sending.
-- A create stream that does not establish a scoped durable identity enters bounded create recovery; it is not silently converted to a second create.
-- A stream cannot change conversation or turn identity after adoption.
+- An unknown, malformed, or wrong-family conversation ID is rejected rather than guessed or forwarded.
+- A typed command has one explicit allowlisted verb; unknown fields and verbs are rejected and cannot reach Workflow.
+- `RUN_STARTED`, custom-frame payloads, and `/state` must agree on the adopted actor and turn identities. A stream cannot change either identity after adoption.
+- State, progress, and operation generations must be safe integers and may advance only monotonically from actor-authored evidence.
+- A typed upstream error, transport error, or stale control fence cannot retry through the legacy path.
+- Attachments are unsupported for typed text. The browser rejects them at its boundary; NyxID sends no `inputParts`. Aevatar's reference client maps its own attachment affordance to `inputParts` after stripping `surface` and `attachment`, but that behaviour is not part of this contract.
 - Action completion cannot report arbitrary resources or secret material.
+- Workflow wire replay is retired. Session-only wire captures must not parse, fixture, replay, or label a workflow channel.
 
 Detailed request, stream, and card failure behavior is specified in [Wire contract](02-wire-contract.md), [Stream protocol](03-stream-protocol.md), and [Action cards](04-action-cards.md).

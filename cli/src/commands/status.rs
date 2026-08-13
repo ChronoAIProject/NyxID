@@ -70,7 +70,10 @@ fn print_table_output(user: &Value, services: &Value, api_keys: &Value, nodes: &
                 .or(svc["service_slug"].as_str())
                 .unwrap_or("-");
             let endpoint = svc["endpoint_url"].as_str().unwrap_or("-");
-            let status = svc["status"].as_str().unwrap_or("active");
+            // `status` is the CREDENTIAL's status, which stays healthy while a
+            // service is disabled — so a disabled service would print "active"
+            // here and read as usable. `is_active` wins when it is false.
+            let status = crate::commands::service::display_status(svc);
             table.add_row([id, slug, endpoint, status]);
         }
         eprintln!("{table}");

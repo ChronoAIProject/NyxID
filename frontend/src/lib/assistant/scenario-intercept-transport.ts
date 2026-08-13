@@ -1,4 +1,5 @@
 import { apiClient } from "@/lib/api-client";
+import { AEVATAR_DRAFT_CONVERSATION_PREFIX } from "@/lib/assistant/aevatar-transport";
 import {
   AssistantConversationNotFoundError,
   AssistantTurnActiveError,
@@ -18,6 +19,7 @@ import { applyTurnEvent, EMPTY_TURN_STATE } from "@/lib/assistant/stream";
 import { useAssistantMockScenariosStore } from "@/stores/assistant-mock-scenarios-store";
 import { useAuthStore } from "@/stores/auth-store";
 import type { ActionReport } from "@/schemas/assistant-actions";
+import type { InputAnswer } from "@/schemas/assistant-input";
 import type {
   AssistantMessage,
   AssistantTransport,
@@ -31,7 +33,6 @@ import type {
 import type { KeyInfo } from "@/types/keys";
 
 const MOCK_ID_PREFIX = "mockchat-";
-const PENDING_WORKFLOW_CONVERSATION_PREFIX = "workflow-pending-";
 const CLAIMED_FALLBACK_TEXT = "No scenario matched — this is a mock-only chat";
 const SUPERSEDED_NOTE = "Superseded by a newer message.";
 
@@ -90,7 +91,7 @@ function isMockId(value: string): boolean {
 }
 
 function isPlaceholderConversation(value: string): boolean {
-  return value.startsWith(PENDING_WORKFLOW_CONVERSATION_PREFIX);
+  return value.startsWith(AEVATAR_DRAFT_CONVERSATION_PREFIX);
 }
 
 function maxIso(left: string, right: string): string {
@@ -376,6 +377,30 @@ export class ScenarioInterceptTransport implements AssistantTransport {
     this.delegate.cancelActiveTurn(conversationId);
   }
 
+  stopTask(conversationId: string): Promise<void> {
+    return this.delegate.stopTask(conversationId);
+  }
+
+  steerTask(conversationId: string, instruction: string): Promise<void> {
+    return this.delegate.steerTask(conversationId, instruction);
+  }
+
+  retryStep(conversationId: string, stepId: string): Promise<void> {
+    return this.delegate.retryStep(conversationId, stepId);
+  }
+
+  skipStep(conversationId: string, stepId: string): Promise<void> {
+    return this.delegate.skipStep(conversationId, stepId);
+  }
+
+  resolvePlan(
+    conversationId: string,
+    blockId: string,
+    confirmed: boolean,
+  ): Promise<void> {
+    return this.delegate.resolvePlan(conversationId, blockId, confirmed);
+  }
+
   async decideApproval(
     conversationId: string,
     blockId: string,
@@ -412,6 +437,15 @@ export class ScenarioInterceptTransport implements AssistantTransport {
       this.restoreOwnership(conversationId, priorOwnership);
       throw error;
     }
+  }
+
+  resolveInput(
+    conversationId: string,
+    blockId: string,
+    answer: InputAnswer,
+    onEvent: (event: TurnEvent) => void = () => undefined,
+  ): Promise<TurnHandle | null> {
+    return this.delegate.resolveInput(conversationId, blockId, answer, onEvent);
   }
 
   setActionCardInProgress(

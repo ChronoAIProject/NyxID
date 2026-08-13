@@ -316,6 +316,7 @@ fn api_key_management_write_requires_scope(method: &Method, path: &str) -> bool 
         "/api/v1/llm",
         "/api/v1/proxy",
         "/api/v1/ssh",
+        "/api/v1/approvals/exact-service",
     ]
     .iter()
     .any(|prefix| path_matches_prefix(path, prefix))
@@ -376,6 +377,7 @@ fn is_delegated_native_path(path: &str) -> bool {
     }
 
     matches!(segments.as_slice(), ["approvals", "requests", _, "status"])
+        || segments.starts_with(&["approvals", "exact-service"])
 }
 
 /// Return true for management GET classes that delegated account reads must
@@ -1482,7 +1484,7 @@ mod tests {
             "/api/v1/admin/users",
             "/api/v1/ssh/service-id",
             "/api/v1/ssh/service-id/terminal",
-            "/api/v1/assistant/workflow-chat/ws",
+            "/api/v1/assistant/conversations/nyxid-chat-4a1e60ebd1fd44f192bf4bb90e1812ae/state",
             "/api/v1/auth/social/github",
             "/api/v1/devices/code/poll",
             "/api/v1/cli-pairings/pairing-id/poll",
@@ -1953,6 +1955,9 @@ mod tests {
             expires_at: None,
             is_active: true,
             created_at: chrono::Utc::now(),
+            rotation_predecessor_id: None,
+            state_version: 1,
+            updated_at: Some(chrono::Utc::now()),
             description: None,
             allowed_service_ids: Vec::new(),
             allowed_node_ids: Vec::new(),

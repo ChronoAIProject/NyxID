@@ -245,6 +245,123 @@ pub struct McpOperationCatalog {
     pub diagnostics: McpCatalogDiagnostics,
 }
 
+/// Digest of the exact normalized endpoint contract published by NyxID.
+/// Descriptive labels are excluded; every execution-relevant selector and
+/// schema field is included.
+pub fn endpoint_contract_digest(endpoint: &McpToolEndpoint) -> String {
+    canonical_sha256(serde_json::json!({
+        "contract_version": "nyxid-exact-endpoint.v1",
+        "endpoint_id": endpoint.endpoint_id,
+        "method": endpoint.method,
+        "path": endpoint.path,
+        "parameters": endpoint.parameters,
+        "request_body_schema": endpoint.request_body_schema,
+        "request_content_type": endpoint.request_content_type,
+        "request_body_required": endpoint.request_body_required,
+        "response": endpoint.response,
+    }))
+}
+
+/// Digest of one exact invocation. This binds the server-published endpoint
+/// contract to the canonical argument object that NyxID validates and later
+/// redeems.
+pub fn exact_operation_digest(
+    user_service_id: &str,
+    endpoint: &McpToolEndpoint,
+    arguments: &serde_json::Value,
+) -> String {
+    canonical_sha256(serde_json::json!({
+        "contract_version": "nyxid-exact-operation.v1",
+        "user_service_id": user_service_id,
+        "endpoint_id": endpoint.endpoint_id,
+        "endpoint_contract_digest": endpoint_contract_digest(endpoint),
+        "arguments": arguments,
+    }))
+}
+
+/// Digest of the complete caller-visible MCP catalog. The shape is identical
+/// to `/api/v1/mcp/config`'s contract-bearing service descriptors.
+pub fn operation_catalog_digest(services: &[McpToolService]) -> String {
+    let mut service_values: Vec<_> = services
+        .iter()
+        .map(|service| {
+            let mut endpoint_values: Vec<_> = service
+                .endpoints
+                .iter()
+                .map(|endpoint| {
+                    serde_json::json!({
+                        "endpoint_id": endpoint.endpoint_id,
+                        "name": endpoint.name,
+                        "description": endpoint.description,
+                        "method": endpoint.method,
+                        "path": endpoint.path,
+                        "parameters": endpoint.parameters,
+                        "request_body_schema": endpoint.request_body_schema,
+                        "request_content_type": endpoint.request_content_type,
+                        "request_body_required": endpoint.request_body_required,
+                        "response_description": endpoint.response_description,
+                        "response": endpoint.response,
+                        "operation_digest": endpoint_contract_digest(endpoint),
+                    })
+                })
+                .collect();
+            endpoint_values.sort_by(|left, right| {
+                left["endpoint_id"]
+                    .as_str()
+                    .cmp(&right["endpoint_id"].as_str())
+            });
+            let mut value = serde_json::json!({
+                "service_id": service.service_id,
+                "service_name": service.service_name,
+                "service_slug": service.service_slug,
+                "description": service.description,
+                "service_category": service.service_category,
+                "is_user_service": service.source.is_user_service(),
+                "is_generic_proxy": service.is_generic_proxy,
+                "endpoints": endpoint_values,
+            });
+            if !service.recommended_skills.is_empty() {
+                value["recommended_skills"] = serde_json::json!(service.recommended_skills);
+            }
+            value
+        })
+        .collect();
+    service_values.sort_by(|left, right| {
+        left["service_id"]
+            .as_str()
+            .cmp(&right["service_id"].as_str())
+    });
+    canonical_sha256(serde_json::json!({
+        "contract_version": "1.0",
+        "services": service_values,
+    }))
+}
+
+pub fn canonical_sha256(value: serde_json::Value) -> String {
+    let encoded =
+        serde_json::to_vec(&canonical_json(value)).expect("serializing JSON values cannot fail");
+    format!("sha256:{}", hex::encode(Sha256::digest(encoded)))
+}
+
+pub fn canonical_json(value: serde_json::Value) -> serde_json::Value {
+    match value {
+        serde_json::Value::Array(values) => {
+            serde_json::Value::Array(values.into_iter().map(canonical_json).collect())
+        }
+        serde_json::Value::Object(values) => {
+            let mut entries: Vec<_> = values.into_iter().collect();
+            entries.sort_by(|left, right| left.0.cmp(&right.0));
+            serde_json::Value::Object(
+                entries
+                    .into_iter()
+                    .map(|(key, value)| (key, canonical_json(value)))
+                    .collect(),
+            )
+        }
+        other => other,
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Load user tools (shared by MCP transport + REST /api/v1/mcp/config)
 // ---------------------------------------------------------------------------
@@ -3876,6 +3993,22 @@ mod tests {
             is_generic_proxy: false,
             invalid_openapi_contract: false,
         }
+    }
+
+    #[test]
+    fn exact_operation_digest_matches_cross_language_unicode_fixture() {
+        let digest = canonical_sha256(serde_json::json!({
+            "contract_version": "nyxid-exact-operation.v1",
+            "user_service_id": "us-alpha",
+            "endpoint_id": "message.create",
+            "endpoint_contract_digest": "sha256:contract",
+            "arguments": { "message": "你好 <team>" },
+        }));
+
+        assert_eq!(
+            digest,
+            "sha256:1bcaa1b49841edd6af5c6787659938cfe47196f3c6d2e38b460d955c4ccad4e3"
+        );
     }
 
     #[test]

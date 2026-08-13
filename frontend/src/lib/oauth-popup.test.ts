@@ -1,6 +1,12 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { oauthChannelName, openOAuthPopup } from "./oauth-popup";
 
+function stubWindowGeometry(geometry: Readonly<Record<string, number>>) {
+  for (const [key, value] of Object.entries(geometry)) {
+    vi.spyOn(window, key as "outerWidth", "get").mockReturnValue(value);
+  }
+}
+
 describe("OAuth popup manager", () => {
   afterEach(() => {
     vi.useRealTimers();
@@ -23,11 +29,58 @@ describe("OAuth popup manager", () => {
       1,
       "/oauth-launching",
       expect.stringMatching(/^nyxid_oauth_/),
-      "popup,width=760,height=820",
+      expect.stringContaining("popup,width="),
     );
     expect(first?.launchId).not.toBe(second?.launchId);
     first?.close();
     second?.close();
+  });
+
+  it("centers the popup over the opener window, not the primary display", () => {
+    const popup = {
+      closed: false,
+      close: vi.fn(),
+      postMessage: vi.fn(),
+    } as unknown as Window;
+    const open = vi.spyOn(window, "open").mockReturnValue(popup);
+    // A window on a second monitor to the right, taller than the popup.
+    stubWindowGeometry({
+      screenX: 1920,
+      screenY: 100,
+      outerWidth: 1400,
+      outerHeight: 1000,
+    });
+
+    openOAuthPopup()?.close();
+
+    expect(open).toHaveBeenCalledWith(
+      "/oauth-launching",
+      expect.any(String),
+      "popup,width=760,height=820,left=2240,top=190",
+    );
+  });
+
+  it("clamps the popup to a window smaller than its natural size", () => {
+    const popup = {
+      closed: false,
+      close: vi.fn(),
+      postMessage: vi.fn(),
+    } as unknown as Window;
+    const open = vi.spyOn(window, "open").mockReturnValue(popup);
+    stubWindowGeometry({
+      screenX: 0,
+      screenY: 0,
+      outerWidth: 600,
+      outerHeight: 500,
+    });
+
+    openOAuthPopup()?.close();
+
+    expect(open).toHaveBeenCalledWith(
+      "/oauth-launching",
+      expect.any(String),
+      "popup,width=600,height=500,left=0,top=0",
+    );
   });
 
   it("returns null when blocked and isolates channel names by nonce", () => {

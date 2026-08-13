@@ -10,6 +10,9 @@ import {
 } from "@/stores/assistant-wire-log-store";
 import type { TurnEvent } from "@/types/assistant";
 
+const ACTOR_ID = "nyxid-chat-f8369965a444433f92ec50e67ad8ee52";
+const SECOND_ACTOR_ID = "nyxid-chat-4a1e60ebd1fd44f192bf4bb90e1812ae";
+
 function encodedEcho(): string {
   const json = JSON.stringify([
     {
@@ -140,7 +143,7 @@ describe("assistant wire-log transport", () => {
           request.onFrames([
             {
               type: "RUN_STARTED",
-              actorId: "nyxid-chat-wire-log-disabled",
+              actorId: ACTOR_ID,
               turnId: "turn-wire-log-disabled",
             },
             { type: "RUN_FINISHED" },
@@ -232,7 +235,7 @@ describe("assistant wire-log transport", () => {
           request.onFrames([
             {
               type: "RUN_STARTED",
-              actorId: "nyxid-chat-wire-log",
+              actorId: ACTOR_ID,
               turnId: "turn-wire-log",
             },
             {
@@ -294,7 +297,7 @@ describe("assistant wire-log transport", () => {
         state: "settled",
         outcome: "complete",
         wireOutcome: "complete",
-        transportOutcome: "stream_protocol_error",
+        transportOutcome: "completed",
         framesSeen: 5,
         printableFramesSeen: 2,
         printableTurnEvents: 2,
@@ -344,7 +347,7 @@ describe("assistant wire-log transport", () => {
           request.onFrames([
             {
               type: "RUN_STARTED",
-              actorId: "nyxid-chat-wire-log",
+              actorId: ACTOR_ID,
               turnId: "turn-without-echo",
             },
             { type: "RUN_FINISHED" },
@@ -387,7 +390,7 @@ describe("assistant wire-log transport", () => {
   }
 
   it("L28 records clean EOF separately from stream-closed settlement", async () => {
-    const conversationId = "nyxid-chat-wire-clean-eof";
+    const conversationId = ACTOR_ID;
     useAssistantWireLogStore.getState().setFeatureEnabled(true);
     useAssistantWireLogStore.getState().setCaptureEnabled(true);
     const start = vi.spyOn(chatStreamClient, "start").mockImplementation(
@@ -444,7 +447,7 @@ describe("assistant wire-log transport", () => {
   });
 
   it("L29 records a dying body as network error at both wire and transport layers", async () => {
-    const conversationId = "nyxid-chat-wire-network-error";
+    const conversationId = SECOND_ACTOR_ID;
     useAssistantWireLogStore.getState().setFeatureEnabled(true);
     useAssistantWireLogStore.getState().setCaptureEnabled(true);
     vi.spyOn(chatStreamClient, "start").mockImplementation(
@@ -469,7 +472,11 @@ describe("assistant wire-log transport", () => {
             outcome: "network_error",
           });
           request.onFrames([
-            { type: "RUN_STARTED", turnId: "turn-dying-body" },
+            {
+              type: "RUN_STARTED",
+              actorId: conversationId,
+              turnId: "turn-dying-body",
+            },
           ]);
           return {
             kind: "network_error",

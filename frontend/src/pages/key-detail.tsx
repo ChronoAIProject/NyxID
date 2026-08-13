@@ -85,6 +85,7 @@ import {
   Power,
   Link2,
   SlidersHorizontal,
+  AlertTriangle,
 } from "lucide-react";
 import { toast } from "sonner";
 import type { SshServiceConfig } from "@/types/api";
@@ -680,6 +681,7 @@ function ServiceSection({
   isActive,
   credentialStatus,
   hasCredential,
+  credentialMissing,
   serviceId,
   nodeId,
   nodeStatus,
@@ -697,6 +699,8 @@ function ServiceSection({
    *  credential (e.g. auto-connected or no-auth downstreams) skip the
    *  credential-readiness check entirely. */
   readonly hasCredential: boolean;
+  /** Whether the service's stored credential reference is dangling. */
+  readonly credentialMissing: boolean;
   readonly serviceId: string;
   readonly nodeId?: string | null;
   readonly nodeStatus?: string | null;
@@ -707,7 +711,7 @@ function ServiceSection({
   const isNodeBound = nodeId !== undefined && nodeId !== null && nodeId !== "";
 
   let badgeVariant: "success" | "secondary" | "destructive" = "secondary";
-  let badgeLabel = "Inactive";
+  let badgeLabel = "Disabled";
   let credentialBlocked = false;
   let nodeWarning: string | null = null;
   let nodeHint: string | null = null;
@@ -773,7 +777,7 @@ function ServiceSection({
       { serviceId, is_active: !isActive },
       {
         onSuccess: () => {
-          toast.success(isActive ? "Service deactivated" : "Service activated");
+          toast.success(isActive ? "Service disabled" : "Service enabled");
         },
         onError: (err) => {
           const message =
@@ -792,28 +796,31 @@ function ServiceSection({
             <Server className="h-4 w-4 text-primary" />
             <CardTitle className="text-[15px]">Service</CardTitle>
           </div>
+          {/* Disable is reversible, so it is not a destructive action —
+              `destructive` (red) is reserved for Delete, the one action here
+              that cannot be undone. */}
           {!readOnly &&
             (isActive ? (
               <Button
-                variant="destructive"
+                variant="outline"
                 onClick={toggleActive}
                 disabled={updateService.isPending}
               >
-                <ButtonIcon variant="destructive">
+                <ButtonIcon>
                   <Power className="h-3 w-3" />
                 </ButtonIcon>
-                Deactivate
+                Disable
               </Button>
             ) : (
               <Button
                 variant="primary"
                 onClick={toggleActive}
-                disabled={updateService.isPending}
+                disabled={updateService.isPending || credentialMissing}
               >
                 <ButtonIcon variant="primary">
                   <Power className="h-3 w-3" />
                 </ButtonIcon>
-                Activate
+                Enable
               </Button>
             ))}
         </div>
@@ -834,6 +841,12 @@ function ServiceSection({
               {credentialStatus}
             </span>
             . Real requests will fail until the credential is restored.
+          </p>
+        )}
+
+        {credentialMissing && (
+          <p className="text-xs font-medium text-warning">
+            Reconnect or delete this service before enabling it.
           </p>
         )}
 
@@ -1659,11 +1672,11 @@ function DeleteKeyDialog({
     >
       <DialogContent>
         <DialogHeader>
-          <DialogTitle>Delete Service</DialogTitle>
+          <DialogTitle>Delete service</DialogTitle>
           <DialogDescription>
             {revokesGrant
               ? grantRevocationDescription(providerName)
-              : "This will deactivate the service and revoke the API key. Proxied requests using this key will stop working. This action cannot be undone."}
+              : "This permanently deletes the service and its stored credential. Proxied requests using it will stop working, and this cannot be undone. To stop it temporarily instead, use Disable."}
           </DialogDescription>
         </DialogHeader>
         <DialogFooter>
@@ -2242,7 +2255,7 @@ export function KeyDetailPage() {
   const canReconnect =
     !readOnly &&
     !keyInfo.auto_connected &&
-    isReconnectableStatus(keyInfo.status) &&
+    (keyInfo.credential_missing || isReconnectableStatus(keyInfo.status)) &&
     (keyInfo.credential_type === "oauth2" ||
       catalogEntry?.provider_type === "oauth2" ||
       catalogEntry?.provider_type === "device_code");
@@ -2265,6 +2278,7 @@ export function KeyDetailPage() {
   const canEditScopes =
     !readOnly &&
     !keyInfo.auto_connected &&
+    !keyInfo.credential_missing &&
     keyInfo.status === "active" &&
     !isOpenAiDeviceCode &&
     (keyInfo.credential_type === "oauth2" ||
@@ -2387,6 +2401,19 @@ export function KeyDetailPage() {
                 {source.allowed
                   ? " use this credential through the proxy, but only admins can modify it."
                   : " see this service but not use it. Ask an admin to grant you member access."}
+              </p>
+            </div>
+          </div>
+        )}
+        {keyInfo.credential_missing && (
+          <div className="flex items-start gap-3 rounded-xl border border-warning/15 bg-warning/[0.04] px-4 py-3">
+            <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0 text-warning" />
+            <div className="space-y-1">
+              <p className="text-[13px] font-semibold text-foreground">
+                Credential missing
+              </p>
+              <p className="text-[12px] text-warning">
+                The stored credential no longer exists. Reconnect or delete this service.
               </p>
             </div>
           </div>
@@ -2516,9 +2543,11 @@ export function KeyDetailPage() {
                 isActive={keyInfo.is_active}
                 credentialStatus={keyInfo.status}
                 hasCredential={
+                  keyInfo.credential_missing ||
                   keyInfo.api_key_id !== null &&
                   keyInfo.api_key_id !== undefined
                 }
+                credentialMissing={Boolean(keyInfo.credential_missing)}
                 serviceId={keyInfo.id}
                 nodeId={keyInfo.node_id}
                 nodeStatus={keyInfo.node_status}

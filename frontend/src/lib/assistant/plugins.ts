@@ -26,6 +26,18 @@ export interface ConnectorCardItem {
    * together rather than handing the user off to the Studio keys list.
    */
   readonly manageKeyIds?: readonly string[];
+  /**
+   * Added items only: every connection behind this card is disabled, so the
+   * assistant cannot use it. A card with a mix of enabled and disabled
+   * connections is NOT marked — it still has a working way in, and flagging it
+   * would misreport the service as unavailable.
+   *
+   * Disabled connections are deliberately still listed under "Added" rather
+   * than falling back to "Available to add": the catalog card is the connect
+   * affordance, so showing one here would invite a user to create a second
+   * connection when what they wanted was to re-enable the one they have.
+   */
+  readonly disabled?: boolean;
   /** Available items only: catalog slug for the `/keys?slug=` connect deep link. */
   readonly connectSlug?: string;
 }
@@ -113,6 +125,7 @@ function addedServiceItem(
         ? `${String(group.length)} connections`
         : first.credential_type.replaceAll("_", " "),
     added: true,
+    disabled: group.every((key) => key.is_active === false),
     manageKeyIds: group.map((key) => key.id),
   };
 }
@@ -129,6 +142,7 @@ function addedCustomItem(key: KeyInfo): ConnectorCardItem {
       `Connected through the NyxID proxy (${key.endpoint_url}).`,
     meta: key.credential_type.replaceAll("_", " "),
     added: true,
+    disabled: key.is_active === false,
     manageKeyIds: [key.id],
   };
 }

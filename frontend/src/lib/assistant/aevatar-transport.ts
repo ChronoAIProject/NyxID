@@ -5,14 +5,16 @@ import {
   composeUnreportedCompletedNote,
 } from "@/lib/assistant/action-notes";
 import {
+  ASSISTANT_SESSION_EXPIRED_MESSAGE,
+  ASSISTANT_UPSTREAM_AUTH_MESSAGE,
   AssistantConversationNotFoundError,
   AssistantProtocolError,
   AssistantTurnActiveError,
   AssistantTurnCancelledError,
+  isNyxIdSessionAuthFailure,
 } from "@/lib/assistant/errors";
 import { resolveAssistantAction } from "@/lib/assistant/action-registry";
 import {
-  CREATE_RECOVERY_BACKOFF_POLICY,
   PROJECTION_BACKOFF_POLICY,
   nextBackoffDelay,
 } from "@/lib/assistant/backoff";
@@ -39,10 +41,24 @@ import {
   type AssistantActionRequest,
 } from "@/schemas/assistant-actions";
 import {
+  assistantInputRequestSchema,
+  buildInputResolveBody,
+  inputAnswerSchema,
+  type AssistantInputRequest,
+  type InputAnswer,
+} from "@/schemas/assistant-input";
+import {
   applyTurnEvent,
   EMPTY_TURN_STATE,
   toTerminalBlock,
 } from "@/lib/assistant/stream";
+import {
+  applyCurrentTaskState,
+  createTaskProjection,
+  reduceTaskFrame,
+  taskCan,
+  type AssistantTaskProjection,
+} from "@/lib/assistant/task-state";
 import type {
   ActionCardContentBlock,
   ActionCardStatus,
@@ -53,7 +69,10 @@ import type {
   ContentBlock,
   Conversation,
   ConversationHistory,
+  InputCardContentBlock,
   RunContentBlock,
+  TaskPlanContentBlock,
+  TaskStep,
   TurnEvent,
   TurnHandle,
   TurnReducerState,
@@ -66,18 +85,6 @@ import {
   useAssistantWireLogStore,
 } from "@/stores/assistant-wire-log-store";
 import { useAuthStore } from "@/stores/auth-store";
-import {
-  adoptReceiptIdentity,
-  advanceReceiptFence,
-  deleteReceipt,
-  findReceiptByConversation,
-  findReceiptByPlaceholder,
-  listDeletionIntents,
-  recordCreateReceipt,
-  recordDeletionIntent,
-  retireReceiptAfterMaterialization,
-  resolveDeletionIntent,
-} from "@/stores/assistant-receipt-store";
 
 // NyxID's own assistant pass-through (PRD decision 4). NyxID resolves the
 // admin-managed aevatar service and derives the aevatar scope from the
@@ -205,11 +212,12 @@ const assistantApi = {
       onResponse: wireLog.onResponse,
     });
   },
-  post<T>(endpoint: string, body?: unknown): Promise<T> {
+  post<T>(endpoint: string, body?: unknown, signal?: AbortSignal): Promise<T> {
     return apiClient<T>(endpoint, {
       method: "POST",
       body,
       preserveSessionOn401: true,
+      signal,
       ...assistantWireLogOptions(),
     });
   },
@@ -237,44 +245,36 @@ const CONVERSATION_LIST_TTL_MS = 5_000;
 // assistant turn; legacy arrays retain the conservative keep-max behavior.
 const HISTORY_MATERIALIZATION_GRACE_MS = 15_000;
 
-// New chats run on Aevatar's Workflow Studio chat engine: the turn body
-// carries `workflow: "studio"`, which is the only thing that selects that
-// engine upstream. Aevatar's `/api/chat` dispatches on the PRESENCE of a
-// `type` discriminator (MainnetChatEndpoints.ClassifyRequestAsync) — a body
-// with `type` goes to the typed NyxIdChat actor handler and never reaches
-// the workflow engine, so the two surfaces are mutually exclusive per turn.
-// Conversations that already have a `nyxid-chat-…` actor keep the typed
-// surface so their transcripts stay continuable. Routing is by the
-// server-owned conversation-id family.
+// Every browser mutation uses the typed NyxIdChat command surface. Legacy
+// chatc-* rows remain addressable only through history and delete resources.
 const TYPED_CHAT_URL = "/api/v1/assistant/chat";
-const WORKFLOW_CHAT_URL = "/api/v1/assistant/workflow-chat";
 
 // Client-local placeholder minted before the typed surface returned its
 // authoritative actor. New chats no longer mint one; it survives only so a
 // stale `?c=nyxid-pending-…` URL from a pre-studio session still resolves to
 // a clean not-found instead of a network error.
-const LEGACY_PENDING_TYPED_CONVERSATION_PREFIX = "nyxid-pending-";
+export const AEVATAR_LEGACY_PENDING_CONVERSATION_PREFIX = "nyxid-pending-";
 
-// Server conversation ids minted by the workflow chat's history reservation
-// (`chatc-{hash[..32]}`).
-const WORKFLOW_CONVERSATION_PREFIX = "chatc-";
+// Legacy Studio conversation ids retained for historical read/delete only.
+export const AEVATAR_LEGACY_CONVERSATION_PREFIX = "chatc-";
 
-// Client-local id for a workflow conversation that has not reached the
-// server yet. The server id arrives in the first turn's
-// `aevatar.chat.context` frame, which aliases this id to it; a reload
-// forgets the placeholder and lists the server row instead.
-const PENDING_WORKFLOW_CONVERSATION_PREFIX = "workflow-pending-";
+// Client-local id for a typed conversation before authoritative RUN_STARTED
+// adoption. A reload forgets the placeholder and lists the server row instead.
+export const AEVATAR_DRAFT_CONVERSATION_PREFIX = "draft-";
 
-function isWorkflowConversationId(id: string): boolean {
-  return (
-    id.startsWith(WORKFLOW_CONVERSATION_PREFIX) ||
-    id.startsWith(PENDING_WORKFLOW_CONVERSATION_PREFIX)
-  );
+export const AEVATAR_TYPED_CONVERSATION_PREFIX = "nyxid-chat-";
+
+export function isLegacyConversationId(id: string): boolean {
+  return id.startsWith(AEVATAR_LEGACY_CONVERSATION_PREFIX);
 }
 
-const WORKFLOW_SERVER_CONVERSATION_ID_PATTERN = /^chatc-[A-Za-z0-9_-]{1,120}$/;
-const TYPED_SERVER_CONVERSATION_ID_PATTERN =
-  /^nyxid-chat-[A-Za-z0-9_-]{1,117}$/;
+function escapeRegexLiteral(value: string): string {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+const TYPED_SERVER_CONVERSATION_ID_PATTERN = new RegExp(
+  `^${escapeRegexLiteral(AEVATAR_TYPED_CONVERSATION_PREFIX)}[0-9a-f]{32}$`,
+);
 
 const MAX_MESSAGE_CHARS = 32_768;
 
@@ -293,6 +293,7 @@ const PRE_START_STOP_WINDOW_MS = 5_000;
 // accepts the connection but never answers would pin the `pendingStops`
 // entry forever and tax every later send/delete with the full fence wait.
 const STOP_REQUEST_DEADLINE_MS = 10_000;
+const DECISION_OBSERVATION_DELAYS_MS = [0, 250, 750, 1_500] as const;
 
 // Hard deadline on the composite DELETE. The deletion reservation rejects
 // sends and approvals while it holds, so an unanswered DELETE without a
@@ -304,10 +305,6 @@ const DELETE_REQUEST_DEADLINE_MS = 15_000;
 const MAX_MEDIA_DATA_CHARS = 8_000_000;
 
 const MAX_TOOL_SUMMARY_CHARS = 160;
-
-const HISTORY_RECONCILIATION_DELAYS_MS = [0, 300, 900, 1_800] as const;
-const RESERVATION_RETRY_DELAYS_MS = [300, 900] as const;
-const HISTORY_RESERVATION_UNAVAILABLE = "CHAT_HISTORY_RESERVATION_UNAVAILABLE";
 
 // A POST can be retried only because `clientRequestId` makes Aevatar an
 // idempotent receiver. Keep the budget deliberately small: one replay covers
@@ -341,6 +338,13 @@ interface ToolApprovalPayload {
   readonly expires_at?: string;
   readonly commandId?: string;
   readonly stepId?: string;
+  readonly presentation?: {
+    readonly action?: string;
+    readonly target?: string;
+    readonly actorLabel?: string;
+    readonly reversibility?: string;
+    readonly grantBoundary?: string;
+  };
 }
 
 type AuthorizationReasonCode =
@@ -369,13 +373,6 @@ interface MediaPayload {
   readonly name?: string;
 }
 
-interface StepPayload {
-  readonly runId?: string;
-  readonly stepId?: string;
-  readonly stepType?: string;
-  readonly success?: boolean;
-}
-
 interface CustomEnvelope {
   readonly name?: string;
   readonly payload?: unknown;
@@ -383,6 +380,8 @@ interface CustomEnvelope {
 
 interface AgUiFrame {
   readonly type?: string;
+  /** Actor-owned progress sequence. This is not the committed state version. */
+  readonly sequence?: string | number;
   readonly actorId?: string;
   readonly turnId?: string;
   readonly textMessageStart?: {
@@ -402,12 +401,11 @@ interface AgUiFrame {
     readonly runId?: string;
     readonly turnId?: string;
     readonly actorId?: string;
+    readonly threadId?: string;
   };
   readonly runFinished?: {
     readonly runId?: string;
     readonly status?: string;
-    /** Workflow chat terminal payload (`WorkflowRunResultPayload`). */
-    readonly result?: { readonly output?: string };
   };
   readonly runStopped?: { readonly reason?: string };
   readonly runError?: { readonly code?: string; readonly message?: string };
@@ -416,42 +414,8 @@ interface AgUiFrame {
     readonly stepName?: string;
     readonly success?: boolean;
   };
-  /** Workflow chat post-terminal projection snapshot; never rendered. */
+  /** Generic AG-UI snapshot frame; typed state comes from actor custom facts. */
   readonly stateSnapshot?: unknown;
-}
-
-/** `custom aevatar.chat.context` — first frame of a workflow chat turn. */
-interface WorkflowChatContextPayload {
-  readonly scopeId?: string;
-  readonly conversationId?: string;
-  readonly turnId?: string;
-  /** Protobuf int64: rendered as a JSON string. */
-  readonly stateVersion?: string | number;
-}
-
-/** Batched completion inside `aevatar.raw.observed` (reference `protocol.js`). */
-interface RoleChatToolCall {
-  readonly callId?: string;
-  readonly toolName?: string;
-  readonly argumentsJson?: string;
-}
-
-interface RoleChatToolReceipt {
-  readonly callId?: string;
-  readonly toolName?: string;
-  readonly status?: string;
-  readonly resultJson?: string;
-  readonly errorMessage?: string;
-  readonly errorCode?: string;
-}
-
-interface RoleChatCompletion {
-  readonly sessionId?: string;
-  readonly content?: string;
-  readonly toolCalls?: readonly RoleChatToolCall[];
-  readonly toolReceipts?: readonly RoleChatToolReceipt[];
-  readonly usage?: UsagePayload;
-  readonly model?: string;
 }
 
 /** One row of the Chat History index (`chat-history`). */
@@ -489,13 +453,6 @@ interface AevatarConversationListResponse {
   readonly conversations?: readonly AevatarHistoryIndexEntry[];
 }
 
-interface AevatarCreateRecoveryResponse {
-  readonly status?: unknown;
-  readonly conversationId?: unknown;
-  readonly stateVersion?: unknown;
-  readonly turnId?: unknown;
-}
-
 interface AevatarHistoryEntry {
   readonly id?: string;
   readonly role?: string;
@@ -518,11 +475,9 @@ interface AevatarHistoryEntry {
  * REMOVE the array branch once every supported Aevatar environment is
  * confirmed on the wrapped contract — not after a single prod probe.
  *
- * `stateVersion` is the workflow-chat continuation watermark: continuing a
- * `chatc-…` conversation requires the last observed value as
- * `minimumStateVersion` (Aevatar's chat-history read fence). It is captured
- * when present and never required — legacy-array responses simply leave the
- * stored watermark unchanged.
+ * `stateVersion` is the transcript read model's materialization watermark. It
+ * is captured when present and never required; legacy-array responses simply
+ * leave the stored watermark unchanged.
  */
 type AevatarHistoryResponse =
   | readonly AevatarHistoryEntry[]
@@ -598,19 +553,15 @@ interface StoredConversation {
   actionRequestFingerprints: Map<string, string>;
   /** Server turn ownership for client-only activity messages. */
   activityMessageTurnIds: Map<string, string | null>;
+  /** Actor-owned task projection shared by live CUSTOM and `/state`. */
+  taskProjection?: AssistantTaskProjection;
   /** Epoch milliseconds of the latest turn.completed applied to this mirror. */
   lastLocalTurnCompletedAt?: number;
-  /**
-   * Workflow-chat continuation watermark (`chatc-…` conversations only):
-   * the last `stateVersion` observed from the transcript read or the
-   * turn's `aevatar.chat.context` frame.
-   */
+  /** Latest materialization watermark observed from the transcript read. */
   stateVersion?: number;
-  /** A create command was dispatched but no canonical conversation is known. */
-  identityPending?: boolean;
-  /** A locally terminal workflow turn is not yet confirmed in wire history. */
+  /** A locally terminal typed turn is not yet confirmed in wire history. */
   projectionPending?: boolean;
-  /** Latest local workflow turn that must appear before materialization. */
+  /** Latest local typed turn that must appear before materialization. */
   requiredTurnId?: string | null;
   /** Fallback fence when an interrupted delivery never announced a turn id. */
   requiredAssistantBaselineIds?: Set<string>;
@@ -618,18 +569,6 @@ interface StoredConversation {
   projectionStalledAt?: number;
   /** One-shot handoff from a cold transcript 404 to the reconciler. */
   lastWireObservationAt?: number;
-  /**
-   * Client session correlation handle sent on every workflow turn of this
-   * conversation. Minted once and reused so the whole conversation shares
-   * one session: a per-turn value would make the field meaningless, and
-   * Aevatar folds `sessionId` into its create-replay fingerprint, so it must
-   * also stay stable across a turn's delivery retries. Transport-local, so a
-   * reload starts a new session id — nothing upstream reads it as identity
-   * (conversation continuity is `conversationId` + `minimumStateVersion`).
-   */
-  sessionId?: string;
-  /** Create idempotency identity retained across a user retry of one prompt. */
-  createRequest?: { readonly prompt: string; readonly commandId: string };
 }
 
 interface RunStepState {
@@ -663,16 +602,8 @@ interface ActionContinuationState {
 
 interface RunningTurn {
   readonly clientRequestId: string;
-  /**
-   * Which turn surface this run speaks: `workflow` = the studio workflow
-   * chat (every new conversation), `actor` = an existing nyxid-chat
-   * conversation on the typed NyxIdChat surface. Chosen from the
-   * conversation-id family at send time; gates the frame-ordering rules
-   * (`aevatar.chat.context` precedes `runStarted` on workflow streams,
-   * trailing `stateSnapshot` follows the terminal) and disables the
-   * `:stop` control, which only the actor surface serves.
-   */
-  readonly protocol: "actor" | "workflow";
+  /** This transport accepts only the typed NyxIdChat actor protocol. */
+  readonly protocol: "actor";
   turnId: string | null;
   /**
    * A cancel landed before RUN_STARTED delivered the server turn id. The
@@ -715,10 +646,10 @@ interface RunningTurn {
   activityBlockCount: number;
   runBlockId: string | null;
   runSteps: RunStepState[];
-  /** tool `toolCallId` / workflow `stepId` → index into `runSteps`. */
+  /** Tool or actor step identity to its index in `runSteps`. */
   stepKeys: Map<string, number>;
   /** Open cards: block_id → kind, completed at turn finalization. */
-  openCards: Map<string, "approval" | "connect">;
+  openCards: Map<string, "approval" | "connect" | "input">;
   /** Dedupe guards, per reference client behavior. */
   promptedApprovalIds: Set<string>;
   /** Service dedupe key → connect card block_id (for in-place upgrades). */
@@ -726,11 +657,11 @@ interface RunningTurn {
   /** Action request id → action card block id. */
   promptedActionIds: Map<string, string>;
   waitingForApproval: boolean;
-  /**
-   * Suspended on `aevatar.workflow.waiting_signal`. Distinct from
-   * `waitingForApproval`: it silences the progress watchdog, but there is no
-   * card to decide and no approval continuation to start.
-   */
+  /** Exact approval request currently owning the human gate. */
+  pendingApprovalRequestId: string | null;
+  /** Exact typed input request currently owning the human gate. */
+  pendingInputRequestId: string | null;
+  /** Suspended on a typed input request while the browser waits for the user. */
   awaitingSignal: boolean;
   watchdog: ReturnType<typeof setTimeout> | null;
   deliveryStarted: boolean;
@@ -749,25 +680,16 @@ interface RunningTurn {
   } | null;
   actionContinuation: ActionContinuationState | null;
   optimisticMessageAppended: boolean;
-  createRecoveryStarted: boolean;
-  /** History recovery already proved the exact assistant turn exists. */
-  createRecoveryMaterialized: boolean;
   activeWireTelemetry: StreamWireTelemetry | null;
 }
 
-type ReconcileOrigin =
-  | "post_terminal"
-  | "cold_observed"
-  | "identity_recovery"
-  | "explicit_retry";
+type ReconcileOrigin = "post_terminal" | "cold_observed" | "explicit_retry";
 
 interface ReconcileEntry {
   readonly promise: Promise<ProjectionReconcileOutcome>;
   readonly settle: (outcome: ProjectionReconcileOutcome) => void;
   readonly scopeId: string | null;
-  readonly placeholderId?: string;
   conversationId: string;
-  commandId?: string;
   readonly origin: ReconcileOrigin;
   attempt: number;
   startedAt: number;
@@ -847,50 +769,12 @@ function safeTurnId(value: unknown): string | null {
   return OPAQUE_TURN_ID_PATTERN.test(normalized) ? normalized : null;
 }
 
-/**
- * proto3 implicit presence: an ABSENT member is the type default, not "unknown".
- *
- * Aevatar serializes workflow chat frames with `WithFormatDefaultValues(false)`,
- * so `false`, `0` and `""` never appear on the wire — the member is dropped.
- * Read a workflow-proto scalar through these rather than by hand: `x !== false`
- * silently inverts an elided `false`, which is how a FAILED step came to render
- * as "Completed".
- *
- * Only for fields the workflow proto actually declares. Frames shared with the
- * AG-UI/actor protocol (`stepFinished`, `toolCallEnd`) carry members the
- * workflow proto does not have at all, where absence means "this protocol never
- * sends it" — the opposite reading.
- */
-function protoBool(value: unknown): boolean {
-  return value === true;
-}
-
+/** Read an optional protobuf JSON string without inventing a value. */
 function protoString(value: unknown): string {
   return typeof value === "string" ? value : "";
 }
 
-/**
- * `WorkflowChatContextPayload.state_version` (proto3 `int64`) as it arrives.
- *
- * Aevatar serializes chat frames with `WithFormatDefaultValues(false)`, so an
- * int64 holding the type default is ELIDED rather than sent as `0` — which is
- * every create turn, whose chat-history reservation has no prior watermark.
- * Absence therefore decodes to the elided `0`. A value that IS present must be
- * a canonical int64 encoding (JSON number, or the decimal string protobuf uses
- * for 64-bit ints); `""`, `"0x10"`, `true` and friends are protocol violations,
- * not zeroes. Returns null when the value is present and not decodable.
- */
-function chatContextStateVersion(value: unknown): number | null {
-  if (value === undefined || value === null) return 0;
-  const parsed =
-    typeof value === "number"
-      ? value
-      : typeof value === "string" && /^-?\d+$/.test(value)
-        ? Number(value)
-        : Number.NaN;
-  return Number.isSafeInteger(parsed) && parsed >= 0 ? parsed : null;
-}
-
+/** Decode a positive protobuf JSON integer into the browser-safe range. */
 function positiveStateVersion(value: unknown): number | undefined {
   const parsed =
     typeof value === "number"
@@ -1087,6 +971,21 @@ function fingerprintStableRequestInput(
   return fnv1aHex(stableJsonText(value));
 }
 
+function fingerprintActionRequest(request: AssistantActionRequest): string {
+  const params = resolveAssistantAction(request).params;
+  if (params.variant === "key_create") {
+    return fingerprintStableRequestInput({
+      name: params.name,
+      platform: params.platform,
+      allowedServiceIds: [...params.allowed_service_ids].sort(),
+    });
+  }
+  if (params.variant === "key_rotate") {
+    return fingerprintStableRequestInput({ keyId: params.key_id });
+  }
+  return fingerprintStableRequestInput(request.params);
+}
+
 function sameStringArray(
   left: readonly string[],
   right: readonly string[],
@@ -1095,6 +994,16 @@ function sameStringArray(
     left.length === right.length &&
     left.every((value, index) => value === right[index])
   );
+}
+
+function sameStringSet(
+  left: readonly string[],
+  right: readonly string[],
+): boolean {
+  if (left.length !== right.length) return false;
+  const sortedLeft = [...left].sort();
+  const sortedRight = [...right].sort();
+  return sortedLeft.every((value, index) => value === sortedRight[index]);
 }
 
 function sameActionCardParams(
@@ -1121,6 +1030,15 @@ function sameActionCardParams(
         left.via_node_id === right.via_node_id &&
         left.target_org_id === right.target_org_id
       );
+    case "key_create":
+      return (
+        right.variant === "key_create" &&
+        left.name === right.name &&
+        left.platform === right.platform &&
+        sameStringSet(left.allowed_service_ids, right.allowed_service_ids)
+      );
+    case "key_rotate":
+      return right.variant === "key_rotate" && left.key_id === right.key_id;
     case "unknown":
       return right.variant === "unknown";
   }
@@ -1148,10 +1066,9 @@ function matchesCommittedActionRequest(
  * Map a pre-stream rejection to a turn error. Errors before the SSE stream
  * starts arrive as a JSON envelope — NyxID's `{error, error_code, message}`
  * or Aevatar's `{code, message}` — and must not collapse to a bare
- * `http_<status>`. A 401/403 here means the downstream rejected the
- * identity NyxID forwarded, not that the NyxID session died — this raw
- * fetch never touches auth state, so it cannot trigger a sign-out; the
- * copy says so explicitly.
+ * `http_<status>`. A 401/403 is attributed to whichever side actually
+ * rejected it (see `isNyxIdSessionAuthFailure`); this raw fetch never touches
+ * auth state, so it cannot trigger a sign-out on its own.
  */
 function streamStartError(
   status: number,
@@ -1161,6 +1078,7 @@ function streamStartError(
     readonly error?: unknown;
     readonly code?: unknown;
     readonly message?: unknown;
+    readonly error_code?: unknown;
   }
   let envelope: ErrorEnvelope | null = null;
   try {
@@ -1181,8 +1099,9 @@ function streamStartError(
   if (status === 401 || status === 403) {
     return {
       code: envelopeCode ?? "unauthorized",
-      message:
-        "NyxID could not authenticate you to the chat backend. You are still signed in — reconnect the aevatar service and try again.",
+      message: isNyxIdSessionAuthFailure(envelope?.error_code)
+        ? ASSISTANT_SESSION_EXPIRED_MESSAGE
+        : ASSISTANT_UPSTREAM_AUTH_MESSAGE,
     };
   }
   return {
@@ -1193,20 +1112,6 @@ function streamStartError(
       ? redactDisplayText(envelopeMessage)
       : "The assistant stream could not be started.",
   };
-}
-
-function isRetryableHistoryRefreshError(error: unknown): boolean {
-  // A tombstone means the local conversation was deleted while refresh was in
-  // flight. Unlike the console's generic status-less failures, retrying cannot
-  // make that conversation valid again, so preserve the not-found result.
-  if (error instanceof AssistantConversationNotFoundError) return false;
-  if (error instanceof AssistantProtocolError) return false;
-  if (error instanceof ApiError) {
-    return error.status >= 500 && error.status < 600;
-  }
-  // Raw fetch/network failures carry no HTTP status and are transient in the
-  // console retry contract, so they consume the next reservation attempt.
-  return true;
 }
 
 // ---------------------------------------------------------------------------
@@ -1317,20 +1222,14 @@ function parseAuthorizationBlocker(
 }
 
 /**
- * The same blocker, as it reaches the WORKFLOW (studio) path.
- *
- * Studio never emits `custom nyxid.authorization.required` — that frame is
- * built only by the `nyxid-chat` actor surface, which chat stopped using when
- * turns moved to the studio engine. On studio the verdict arrives instead as
- * the `nyxid_require_service` tool's own JSON result, in snake_case (it is a
- * plain `System.Text.Json` object, not protobuf, so nothing is elided):
+ * Strict compatibility decoder for a NyxID readiness blocker embedded in a
+ * tool's JSON result:
  *
  *   {"blocked":true,"service_slug":"api-github",
  *    "readiness_status":"ServiceRegistrationRequired",
  *    "reason_code":"USER_SERVICE_NOT_VISIBLE","safe_message":"..."}
  *
- * Keyed on the shape rather than the tool name so any NyxID tool publishing
- * this contract surfaces a card — which means the WHOLE DTO must be present
+ * Keyed on the shape rather than the tool name, so the whole DTO must be present
  * before `blocked` is treated as authority. `blocked: true` plus a slug is not
  * enough: any tool could emit those two keys and mint a bogus connect card
  * while failing its own step. Upstream only sets `blocked` alongside
@@ -1392,28 +1291,11 @@ export function parseToolResultBlocker(
 }
 
 /**
- * `aevatar.media.chunk` (`MediaContentEvent`) flattened to the artifact shape.
- * `ChatContentPart` names the location `uri`; the flat AG-UI payload calls it
- * `url`, so reading `url` on the workflow path always missed.
- */
-function mediaPartPayload(payload: Record<string, unknown>): MediaPayload {
-  const part = unpackAny(payload["part"]);
-  return {
-    mediaType: protoString(part["mediaType"]) || undefined,
-    dataBase64: protoString(part["dataBase64"]) || undefined,
-    url: safeMediaUrl(protoString(part["uri"])),
-    name: protoString(part["name"]) || undefined,
-  };
-}
-
-/**
  * An artifact's `download_url` is rendered directly as an anchor `href`, so a
  * producer-supplied location is only safe after its scheme is checked — a
  * `javascript:` or `data:text/html` URI would otherwise be one click away.
- * The flat AG-UI arm always had this hole; it was unreachable because the
- * workflow producer emits media nested under `part`, and wiring that up makes
- * it reachable. Anything not plainly fetchable is dropped, which degrades to
- * the "shapeless media" acknowledgement rather than rendering a live link.
+ * Anything not plainly fetchable is dropped, which degrades to the shapeless
+ * media acknowledgement rather than rendering a live link.
  */
 function safeMediaUrl(value: string): string | undefined {
   if (!value) return undefined;
@@ -1452,9 +1334,7 @@ function base64SizeBytes(dataBase64: string): number {
  * client's `protocol.js` taxonomy) onto the PRD §3.5 block types the UI
  * renders: tool calls become the `run` step ledger, approval requests become
  * `approval_card`, authorization gaps become `connect_card`, inline media
- * becomes `artifact`. Reasoning frames are acknowledged but never rendered
- * (PRD §3.8); batched `aevatar.raw.observed` completions are mined for their
- * presentation content only.
+ * becomes `artifact`. Reasoning frames are acknowledged but never rendered.
  */
 export class AevatarAssistantTransport implements AssistantTransport {
   private readonly conversations = new Map<string, StoredConversation>();
@@ -1509,8 +1389,6 @@ export class AevatarAssistantTransport implements AssistantTransport {
     ChatStreamRequestHandle,
     StreamWireTelemetry
   >();
-  private readonly deletionCleanup = new Map<string, Promise<void>>();
-  private deletionSweepStarted = false;
   private listFetchedAt = 0;
 
   constructor(
@@ -1558,10 +1436,8 @@ export class AevatarAssistantTransport implements AssistantTransport {
     this.conversationAliases.clear();
     this.scopeControllers.clear();
     this.reconcileEntries.clear();
-    this.deletionCleanup.clear();
     this.activeConversationId = null;
     this.listFetchedAt = 0;
-    this.deletionSweepStarted = false;
     this.ownerScopeId = nextScope;
   }
 
@@ -1587,10 +1463,6 @@ export class AevatarAssistantTransport implements AssistantTransport {
 
   async listConversations(): Promise<Conversation[]> {
     const scopeId = this.ensureScope();
-    if (!this.deletionSweepStarted) {
-      this.deletionSweepStarted = true;
-      void this.sweepDeletionIntents(scopeId);
-    }
     const now = Date.now();
     if (
       this.running.size === 0 &&
@@ -1601,14 +1473,9 @@ export class AevatarAssistantTransport implements AssistantTransport {
         `${ASSISTANT_PREFIX}/conversations`,
       );
       if (scopeId !== this.ensureScope()) return [];
-      const deletionIntentIds = new Set(
-        listDeletionIntents().flatMap((intent) =>
-          intent.conversationId ? [intent.conversationId] : [],
-        ),
-      );
       for (const entry of response.conversations ?? []) {
         const id = entry?.id?.trim();
-        if (id) this.mergeIndexEntry(id, entry, deletionIntentIds);
+        if (id) this.mergeIndexEntry(id, entry, new Set());
       }
     }
     // An aliased conversation is stored under both its placeholder key and
@@ -1632,15 +1499,12 @@ export class AevatarAssistantTransport implements AssistantTransport {
 
   async createConversation(): Promise<Conversation> {
     this.ensureScope();
-    // New chats run on the workflow (studio) surface, where the conversation
-    // is created server-side by the FIRST turn's chat-history reservation
-    // (`conversation.conversationId: null` in the turn body) — there is no
-    // separate create call. Until that turn's `aevatar.chat.context` frame
-    // delivers the server `chatc-…` id, the conversation exists only under
-    // this client-local placeholder id; the frame aliases it in place.
+    // A typed first turn creates the actor. The local draft id exists only so
+    // navigation and optimistic state have a key before RUN_STARTED publishes
+    // the authoritative nyxid-chat-* identity.
     const createdAt = new Date().toISOString();
     const conversation: Conversation = {
-      id: `${PENDING_WORKFLOW_CONVERSATION_PREFIX}${crypto.randomUUID()}`,
+      id: `${AEVATAR_DRAFT_CONVERSATION_PREFIX}${crypto.randomUUID()}`,
       title: "New chat",
       created_at: createdAt,
       last_message_at: createdAt,
@@ -1650,6 +1514,7 @@ export class AevatarAssistantTransport implements AssistantTransport {
       turnState: EMPTY_TURN_STATE,
       actionRequestFingerprints: new Map(),
       activityMessageTurnIds: new Map(),
+      taskProjection: undefined,
     });
     this.activeConversationId = conversation.id;
     return conversation;
@@ -1658,42 +1523,15 @@ export class AevatarAssistantTransport implements AssistantTransport {
   async deleteConversation(conversationId: string): Promise<void> {
     this.ensureScope();
     const requestedId = conversationId;
-    const pendingReceipt = conversationId.startsWith(
-      PENDING_WORKFLOW_CONVERSATION_PREFIX,
-    )
-      ? findReceiptByPlaceholder(conversationId)
-      : undefined;
     const aliasedConversationId = this.conversationAliases.get(conversationId);
     if (
-      conversationId.startsWith(PENDING_WORKFLOW_CONVERSATION_PREFIX) &&
-      !pendingReceipt?.conversationId &&
+      conversationId.startsWith(AEVATAR_DRAFT_CONVERSATION_PREFIX) &&
       !aliasedConversationId
     ) {
       const run = this.running.get(conversationId);
       if (run) this.cancelTurn(conversationId, run);
-      if (pendingReceipt) {
-        recordDeletionIntent(
-          pendingReceipt.commandId,
-          pendingReceipt.placeholderId,
-          undefined,
-          this.now(),
-        );
-        deleteReceipt(pendingReceipt.commandId);
-      }
       this.tombstoneConversation(conversationId);
-      if (pendingReceipt) {
-        void this.startDeletionIntentCleanup(
-          pendingReceipt.commandId,
-          this.ownerScopeId,
-        );
-      }
       return;
-    }
-    if (pendingReceipt?.conversationId) {
-      this.conversationAliases.set(
-        conversationId,
-        pendingReceipt.conversationId,
-      );
     }
     conversationId = this.canonicalConversationId(conversationId);
     // A turn still streaming into the conversation must not keep painting
@@ -1758,8 +1596,6 @@ export class AevatarAssistantTransport implements AssistantTransport {
       this.deletedConversationIds.add(conversationId);
       this.pendingActionBatches.delete(conversationId);
       this.actionDrainBlocked.delete(conversationId);
-      const receipt = findReceiptByConversation(conversationId);
-      if (receipt) deleteReceipt(receipt.commandId);
       for (const [placeholder, target] of this.conversationAliases) {
         if (target === conversationId) {
           this.conversations.delete(placeholder);
@@ -1782,146 +1618,18 @@ export class AevatarAssistantTransport implements AssistantTransport {
     }
   }
 
-  private async sweepDeletionIntents(scopeId: string | null): Promise<void> {
-    await Promise.allSettled(
-      listDeletionIntents().map((intent) =>
-        this.startDeletionIntentCleanup(intent.commandId, scopeId),
-      ),
-    );
-  }
-
-  private startDeletionIntentCleanup(
-    commandId: string,
-    scopeId: string | null,
-  ): Promise<void> {
-    const existing = this.deletionCleanup.get(commandId);
-    if (existing) return existing;
-    const operation = this.cleanupDeletionIntent(commandId, scopeId).finally(
-      () => {
-        if (this.deletionCleanup.get(commandId) === operation) {
-          this.deletionCleanup.delete(commandId);
-        }
-      },
-    );
-    this.deletionCleanup.set(commandId, operation);
-    return operation;
-  }
-
-  private async cleanupDeletionIntent(
-    commandId: string,
-    scopeId: string | null,
-  ): Promise<void> {
-    if (!scopeId || scopeId !== this.ownerScopeId) return;
-    let intent = listDeletionIntents().find(
-      (candidate) => candidate.commandId === commandId,
-    );
-    if (!intent) return;
-    const controller = this.scopeController();
-    const deadlineAt = this.now() + CREATE_RECOVERY_BACKOFF_POLICY.deadlineMs;
-    try {
-      let conversationId = intent.conversationId;
-      for (let attempt = 0; !conversationId; attempt += 1) {
-        if (controller.signal.aborted || scopeId !== this.ownerScopeId) return;
-        try {
-          const response =
-            await assistantApi.get<AevatarCreateRecoveryResponse>(
-              `${ASSISTANT_PREFIX}/conversations/create-recovery/${encodeURIComponent(commandId)}`,
-              controller.signal,
-            );
-          const recovered = this.decodeCreateRecovery(response);
-          conversationId = recovered.conversationId;
-          recordDeletionIntent(
-            commandId,
-            intent.placeholderId,
-            conversationId,
-            intent.createdAt,
-          );
-          intent = { ...intent, conversationId };
-        } catch (error) {
-          if (controller.signal.aborted || scopeId !== this.ownerScopeId)
-            return;
-          if (!(error instanceof ApiError && error.status === 404)) return;
-          if (this.now() >= deadlineAt) return;
-          await abortableDelay(
-            nextBackoffDelay(
-              CREATE_RECOVERY_BACKOFF_POLICY,
-              attempt,
-              this.random,
-            ),
-            controller.signal,
-          );
-        }
-      }
-      if (!conversationId || scopeId !== this.ownerScopeId) return;
-      const deleteTimer = setTimeout(
-        () => controller.abort(),
-        DELETE_REQUEST_DEADLINE_MS,
-      );
-      try {
-        await apiClient<unknown>(
-          `${ASSISTANT_PREFIX}/conversations/${conversationId}`,
-          {
-            method: "DELETE",
-            preserveSessionOn401: true,
-            signal: controller.signal,
-            ...assistantWireLogOptions(),
-          },
-        );
-      } finally {
-        clearTimeout(deleteTimer);
-      }
-      if (scopeId !== this.ownerScopeId) return;
-      this.tombstoneConversation(intent.placeholderId);
-      this.tombstoneConversation(conversationId);
-      resolveDeletionIntent(commandId);
-    } catch {
-      // The persisted intent is retried on the next per-scope sweep.
-    } finally {
-      controller.abort();
-      this.releaseScopeController(controller);
-    }
-  }
-
   async getHistory(conversationId: string): Promise<ConversationHistory> {
     const scopeId = this.ensureScope();
     const requestedId = conversationId;
-    if (
-      conversationId.startsWith(PENDING_WORKFLOW_CONVERSATION_PREFIX) &&
-      !this.conversations.has(conversationId)
-    ) {
-      const receipt = findReceiptByPlaceholder(conversationId);
-      if (!receipt) throw new AssistantConversationNotFoundError();
-      if (receipt.conversationId) {
-        this.conversationAliases.set(conversationId, receipt.conversationId);
-        conversationId = receipt.conversationId;
-      } else {
-        const stored = this.syntheticPendingConversation(conversationId, {
-          identityPending: true,
-          stateVersion: receipt.stateVersion,
-        });
-        this.conversations.set(conversationId, stored);
-      }
-    }
     conversationId = this.canonicalConversationId(conversationId);
     if (this.deletedConversationIds.has(conversationId)) {
       throw new AssistantConversationNotFoundError();
     }
-    let existing = this.conversations.get(conversationId);
-    const canonicalReceipt = findReceiptByConversation(conversationId);
-    if (!existing && canonicalReceipt) {
-      existing = this.syntheticPendingConversation(conversationId, {
-        projectionPending: true,
-        stateVersion: canonicalReceipt.stateVersion,
-      });
-      this.conversations.set(conversationId, existing);
-      if (requestedId !== conversationId) {
-        this.conversations.set(requestedId, existing);
-      }
-    }
+    const existing = this.conversations.get(conversationId);
     if (
       !existing &&
-      (conversationId.startsWith(LEGACY_PENDING_TYPED_CONVERSATION_PREFIX) ||
-        conversationId.startsWith(PENDING_WORKFLOW_CONVERSATION_PREFIX))
+      (conversationId.startsWith(AEVATAR_LEGACY_PENDING_CONVERSATION_PREFIX) ||
+        conversationId.startsWith(AEVATAR_DRAFT_CONVERSATION_PREFIX))
     ) {
       throw new AssistantConversationNotFoundError();
     }
@@ -1933,7 +1641,7 @@ export class AevatarAssistantTransport implements AssistantTransport {
       existing &&
       (turnInFlight || isTurnActive(existing.turnState.activeTurn?.status))
     ) {
-      this.activateConversation(conversationId, existing);
+      this.activateConversation(conversationId);
       return this.historyFromStored(existing, true);
     }
     // Only an ACTIVE reconciliation owns the wire: while it polls, every
@@ -1945,14 +1653,13 @@ export class AevatarAssistantTransport implements AssistantTransport {
     // keeps serving the stalled mirror via the fallback below.
     if (
       existing &&
-      (existing.identityPending ||
-        (existing.projectionPending &&
-          existing.projectionStalledAt === undefined &&
-          (existing.turnState.messages.length > 0 ||
-            existing.requiredTurnId != null ||
-            existing.lastLocalTurnCompletedAt !== undefined)))
+      existing.projectionPending &&
+      existing.projectionStalledAt === undefined &&
+      (existing.turnState.messages.length > 0 ||
+        existing.requiredTurnId != null ||
+        existing.lastLocalTurnCompletedAt !== undefined)
     ) {
-      this.activateConversation(conversationId, existing);
+      this.activateConversation(conversationId);
       return this.historyFromStored(existing);
     }
     // A pending placeholder exists nowhere server-side — the id never left
@@ -1961,10 +1668,10 @@ export class AevatarAssistantTransport implements AssistantTransport {
     // the round trip.
     if (
       existing &&
-      (conversationId.startsWith(LEGACY_PENDING_TYPED_CONVERSATION_PREFIX) ||
-        conversationId.startsWith(PENDING_WORKFLOW_CONVERSATION_PREFIX))
+      (conversationId.startsWith(AEVATAR_LEGACY_PENDING_CONVERSATION_PREFIX) ||
+        conversationId.startsWith(AEVATAR_DRAFT_CONVERSATION_PREFIX))
     ) {
-      this.activateConversation(conversationId, existing);
+      this.activateConversation(conversationId);
       return this.historyFromStored(existing);
     }
     let stored: StoredConversation;
@@ -1985,26 +1692,23 @@ export class AevatarAssistantTransport implements AssistantTransport {
       // transient and protocol failures retain their original type.
       if (!existing) {
         if (error instanceof ApiError && error.status === 404) {
-          if (!conversationId.startsWith(WORKFLOW_CONVERSATION_PREFIX)) {
+          if (!conversationId.startsWith(AEVATAR_LEGACY_CONVERSATION_PREFIX)) {
             throw new AssistantConversationNotFoundError();
           }
           const membership = await this.fetchRawIndexMembership(conversationId);
           if (scopeId !== this.ensureScope()) {
             throw new AssistantConversationNotFoundError();
           }
-          if (membership === "unavailable" && !canonicalReceipt) throw error;
-          if (membership !== true && !canonicalReceipt) {
+          if (membership === "unavailable") throw error;
+          if (membership !== true) {
             throw new AssistantConversationNotFoundError();
           }
           stored =
             this.conversations.get(conversationId) ??
             this.syntheticPendingConversation(conversationId, {
               projectionPending: true,
-              stateVersion: canonicalReceipt?.stateVersion,
             });
           stored.projectionPending = true;
-          stored.stateVersion =
-            canonicalReceipt?.stateVersion ?? stored.stateVersion;
           stored.lastWireObservationAt = this.now();
           this.conversations.set(conversationId, stored);
         } else {
@@ -2015,9 +1719,8 @@ export class AevatarAssistantTransport implements AssistantTransport {
           error instanceof ApiError && error.status === 404;
         if (
           noServerTranscriptYet &&
-          conversationId.startsWith(WORKFLOW_CONVERSATION_PREFIX) &&
+          conversationId.startsWith(AEVATAR_LEGACY_CONVERSATION_PREFIX) &&
           existing.turnState.messages.length === 0 &&
-          !existing.identityPending &&
           !existing.projectionPending
         ) {
           const membership = await this.fetchRawIndexMembership(conversationId);
@@ -2047,20 +1750,20 @@ export class AevatarAssistantTransport implements AssistantTransport {
     ) {
       throw new AssistantConversationNotFoundError();
     }
-    this.activateConversation(conversationId, stored);
+    if (TYPED_SERVER_CONVERSATION_ID_PATTERN.test(conversationId)) {
+      await this.hydrateTaskState(conversationId, stored);
+      if (
+        scopeId !== this.ensureScope() ||
+        this.deletedConversationIds.has(conversationId)
+      ) {
+        throw new AssistantConversationNotFoundError();
+      }
+    }
+    this.activateConversation(conversationId);
     return this.historyFromStored(stored);
   }
 
-  private activateConversation(
-    conversationId: string,
-    stored: StoredConversation,
-  ): void {
-    if (
-      conversationId.startsWith(WORKFLOW_CONVERSATION_PREFIX) &&
-      this.activeConversationId !== conversationId
-    ) {
-      stored.sessionId = crypto.randomUUID();
-    }
+  private activateConversation(conversationId: string): void {
     this.activeConversationId = conversationId;
   }
 
@@ -2077,7 +1780,7 @@ export class AevatarAssistantTransport implements AssistantTransport {
       has_more: false,
       ...(stalled
         ? { projectionStalled: true }
-        : !turnActive && (stored.identityPending || stored.projectionPending)
+        : !turnActive && stored.projectionPending
           ? { awaitingProjection: true }
           : {}),
     };
@@ -2085,10 +1788,7 @@ export class AevatarAssistantTransport implements AssistantTransport {
 
   private syntheticPendingConversation(
     conversationId: string,
-    facts: Pick<
-      StoredConversation,
-      "identityPending" | "projectionPending" | "stateVersion"
-    >,
+    facts: Pick<StoredConversation, "projectionPending" | "stateVersion">,
   ): StoredConversation {
     const nowIso = new Date(this.now()).toISOString();
     return {
@@ -2101,6 +1801,7 @@ export class AevatarAssistantTransport implements AssistantTransport {
       turnState: EMPTY_TURN_STATE,
       actionRequestFingerprints: new Map(),
       activityMessageTurnIds: new Map(),
+      taskProjection: undefined,
       ...facts,
     };
   }
@@ -2120,14 +1821,9 @@ export class AevatarAssistantTransport implements AssistantTransport {
       const present = entries.some(
         (entry) => entry?.id?.trim() === conversationId,
       );
-      const deletionIntentIds = new Set(
-        listDeletionIntents().flatMap((intent) =>
-          intent.conversationId ? [intent.conversationId] : [],
-        ),
-      );
       for (const entry of entries) {
         const id = entry?.id?.trim();
-        if (id) this.mergeIndexEntry(id, entry, deletionIntentIds);
+        if (id) this.mergeIndexEntry(id, entry, new Set());
       }
       this.listFetchedAt = this.now();
       return present;
@@ -2159,36 +1855,10 @@ export class AevatarAssistantTransport implements AssistantTransport {
     requestedId: string,
   ): Promise<ProjectionReconcileOutcome> {
     const scopeId = this.ensureScope();
-    const placeholderReceipt = requestedId.startsWith(
-      PENDING_WORKFLOW_CONVERSATION_PREFIX,
-    )
-      ? findReceiptByPlaceholder(requestedId)
-      : undefined;
-    if (placeholderReceipt?.conversationId) {
-      this.conversationAliases.set(
-        requestedId,
-        placeholderReceipt.conversationId,
-      );
-    }
-    let conversationId = this.canonicalConversationId(requestedId);
-    let stored = this.conversations.get(conversationId);
-    if (!stored && placeholderReceipt && !placeholderReceipt.conversationId) {
-      stored = this.syntheticPendingConversation(requestedId, {
-        identityPending: true,
-        stateVersion: placeholderReceipt.stateVersion,
-      });
-      this.conversations.set(requestedId, stored);
-      conversationId = requestedId;
-    }
-    if (!stored) {
-      const receipt = findReceiptByConversation(conversationId);
-      if (receipt) {
-        stored = this.syntheticPendingConversation(conversationId, {
-          projectionPending: true,
-          stateVersion: receipt.stateVersion,
-        });
-        this.conversations.set(conversationId, stored);
-      }
+    const conversationId = this.canonicalConversationId(requestedId);
+    const stored = this.conversations.get(conversationId);
+    if (conversationId.startsWith(AEVATAR_DRAFT_CONVERSATION_PREFIX)) {
+      return Promise.resolve({ status: "timed_out", conversationId });
     }
 
     const existing = this.reconcileEntries.get(conversationId);
@@ -2201,32 +1871,24 @@ export class AevatarAssistantTransport implements AssistantTransport {
     const wasStalled = stored?.projectionStalledAt !== undefined;
     if (wasStalled && stored) {
       stored.projectionStalledAt = undefined;
-      if (!stored.identityPending) stored.projectionPending = true;
+      stored.projectionPending = true;
     }
-    const commandId =
-      placeholderReceipt?.commandId ??
-      findReceiptByConversation(conversationId)?.commandId;
-    const policy = stored?.identityPending
-      ? CREATE_RECOVERY_BACKOFF_POLICY
-      : PROJECTION_BACKOFF_POLICY;
+    const policy = PROJECTION_BACKOFF_POLICY;
     const createdAt = this.now();
     const coldObservationIsCurrent =
       stored?.lastWireObservationAt !== undefined &&
       createdAt - stored.lastWireObservationAt >= 0 &&
       createdAt - stored.lastWireObservationAt <=
         PROJECTION_BACKOFF_POLICY.floorMs;
-    const origin: ReconcileOrigin = stored?.identityPending
-      ? "identity_recovery"
-      : wasStalled
-        ? "explicit_retry"
-        : coldObservationIsCurrent
-          ? "cold_observed"
-          : "post_terminal";
+    const origin: ReconcileOrigin = wasStalled
+      ? "explicit_retry"
+      : coldObservationIsCurrent
+        ? "cold_observed"
+        : "post_terminal";
     if (origin === "cold_observed" && stored) {
       stored.lastWireObservationAt = undefined;
     }
-    const startsImmediately =
-      origin === "identity_recovery" || origin === "explicit_retry";
+    const startsImmediately = origin === "explicit_retry";
     const initialAttempt = origin === "cold_observed" ? 1 : 0;
     let settle!: (outcome: ProjectionReconcileOutcome) => void;
     const promise = new Promise<ProjectionReconcileOutcome>((resolve) => {
@@ -2236,13 +1898,7 @@ export class AevatarAssistantTransport implements AssistantTransport {
       promise,
       settle,
       scopeId,
-      placeholderId: requestedId.startsWith(
-        PENDING_WORKFLOW_CONVERSATION_PREFIX,
-      )
-        ? requestedId
-        : placeholderReceipt?.placeholderId,
       conversationId,
-      commandId,
       origin,
       attempt: initialAttempt,
       startedAt: createdAt,
@@ -2328,18 +1984,12 @@ export class AevatarAssistantTransport implements AssistantTransport {
       return;
     }
     const activeStored = this.conversations.get(entry.conversationId);
-    const turnInFlight =
-      this.running.has(entry.conversationId) ||
-      (entry.placeholderId !== undefined &&
-        this.running.has(entry.placeholderId));
+    const turnInFlight = this.running.has(entry.conversationId);
     if (
       activeStored &&
       (turnInFlight || isTurnActive(activeStored.turnState.activeTurn?.status))
     ) {
-      const policy = activeStored.identityPending
-        ? CREATE_RECOVERY_BACKOFF_POLICY
-        : PROJECTION_BACKOFF_POLICY;
-      entry.deadlineAt = this.now() + policy.deadlineMs;
+      entry.deadlineAt = this.now() + PROJECTION_BACKOFF_POLICY.deadlineMs;
       entry.running = false;
       this.scheduleReconcileEntry(entry);
       return;
@@ -2352,69 +2002,38 @@ export class AevatarAssistantTransport implements AssistantTransport {
     let observedMembership: boolean | "unavailable" | undefined;
     let rescheduleAfterTurn = false;
     try {
-      const stored = this.conversations.get(entry.conversationId);
-      if (stored?.identityPending) {
-        if (!entry.commandId) {
-          this.settleReconcileEntry(entry, "timed_out");
+      try {
+        const body = await assistantApi.get<AevatarHistoryResponse>(
+          `${ASSISTANT_PREFIX}/conversations/${entry.conversationId}`,
+          controller.signal,
+        );
+        if (entry.scopeId !== this.ownerScopeId) return;
+        const postFetchStored = this.conversations.get(entry.conversationId);
+        const postFetchTurnInFlight = this.running.has(entry.conversationId);
+        if (
+          postFetchStored &&
+          (postFetchTurnInFlight ||
+            isTurnActive(postFetchStored.turnState.activeTurn?.status))
+        ) {
+          entry.deadlineAt = this.now() + PROJECTION_BACKOFF_POLICY.deadlineMs;
+          rescheduleAfterTurn = true;
           return;
         }
-        try {
-          const response =
-            await assistantApi.get<AevatarCreateRecoveryResponse>(
-              `${ASSISTANT_PREFIX}/conversations/create-recovery/${encodeURIComponent(entry.commandId)}`,
-              controller.signal,
-            );
-          if (entry.scopeId !== this.ownerScopeId) return;
-          const recovered = this.decodeCreateRecovery(response);
-          this.adoptRecoveredReceipt(entry, stored, recovered);
-        } catch (error) {
-          if (controller.signal.aborted) {
-            pausedByAbort = true;
-            return;
-          }
-          if (!(error instanceof ApiError && error.status === 404)) throw error;
-          transcriptWasMissing = true;
+        const projected = this.applyHistoryResponse(entry.conversationId, body);
+        if (TYPED_SERVER_CONVERSATION_ID_PATTERN.test(entry.conversationId)) {
+          await this.hydrateTaskState(entry.conversationId, projected);
         }
-      } else {
-        try {
-          const body = await assistantApi.get<AevatarHistoryResponse>(
-            `${ASSISTANT_PREFIX}/conversations/${entry.conversationId}`,
-            controller.signal,
-          );
-          if (entry.scopeId !== this.ownerScopeId) return;
-          const postFetchStored = this.conversations.get(entry.conversationId);
-          const postFetchTurnInFlight =
-            this.running.has(entry.conversationId) ||
-            (entry.placeholderId !== undefined &&
-              this.running.has(entry.placeholderId));
-          if (
-            postFetchStored &&
-            (postFetchTurnInFlight ||
-              isTurnActive(postFetchStored.turnState.activeTurn?.status))
-          ) {
-            const policy = postFetchStored.identityPending
-              ? CREATE_RECOVERY_BACKOFF_POLICY
-              : PROJECTION_BACKOFF_POLICY;
-            entry.deadlineAt = this.now() + policy.deadlineMs;
-            rescheduleAfterTurn = true;
-            return;
-          }
-          const projected = this.applyHistoryResponse(
-            entry.conversationId,
-            body,
-          );
-          if (!projected.identityPending && !projected.projectionPending) {
-            this.settleReconcileEntry(entry, "materialized");
-            return;
-          }
-        } catch (error) {
-          if (controller.signal.aborted) {
-            pausedByAbort = true;
-            return;
-          }
-          if (!(error instanceof ApiError && error.status === 404)) throw error;
-          transcriptWasMissing = true;
+        if (!projected.projectionPending) {
+          this.settleReconcileEntry(entry, "materialized");
+          return;
         }
+      } catch (error) {
+        if (controller.signal.aborted) {
+          pausedByAbort = true;
+          return;
+        }
+        if (!(error instanceof ApiError && error.status === 404)) throw error;
+        transcriptWasMissing = true;
       }
 
       entry.attempt += 1;
@@ -2422,7 +2041,6 @@ export class AevatarAssistantTransport implements AssistantTransport {
         entry.finalObservationDue || this.now() >= entry.deadlineAt;
       entry.finalObservationDue = false;
       if (
-        !this.conversations.get(entry.conversationId)?.identityPending &&
         transcriptWasMissing &&
         (entry.attempt % 2 === 0 || deadlineReached)
       ) {
@@ -2453,16 +2071,12 @@ export class AevatarAssistantTransport implements AssistantTransport {
       }
 
       if (deadlineReached) {
-        const identityPending =
-          this.conversations.get(entry.conversationId)?.identityPending ===
-          true;
-        const membership = identityPending
-          ? "unavailable"
-          : (observedMembership ??
-            (await this.fetchRawIndexMembership(
-              entry.conversationId,
-              controller.signal,
-            )));
+        const membership =
+          observedMembership ??
+          (await this.fetchRawIndexMembership(
+            entry.conversationId,
+            controller.signal,
+          ));
         if (membership === false) {
           this.tombstoneConversation(entry.conversationId);
           this.settleReconcileEntry(entry, "absent");
@@ -2498,51 +2112,15 @@ export class AevatarAssistantTransport implements AssistantTransport {
       return;
     }
     if (entry.nextAttemptAt === undefined) {
-      const identityPending =
-        this.conversations.get(entry.conversationId)?.identityPending === true;
-      const policy = identityPending
-        ? CREATE_RECOVERY_BACKOFF_POLICY
-        : PROJECTION_BACKOFF_POLICY;
       entry.nextAttemptAt =
         this.now() +
-        nextBackoffDelay(policy, Math.max(0, entry.attempt - 1), this.random);
+        nextBackoffDelay(
+          PROJECTION_BACKOFF_POLICY,
+          Math.max(0, entry.attempt - 1),
+          this.random,
+        );
     }
     this.resumeReconcileEntry(entry);
-  }
-
-  private adoptRecoveredReceipt(
-    entry: ReconcileEntry,
-    stored: StoredConversation,
-    recovery: ReturnType<AevatarAssistantTransport["decodeCreateRecovery"]>,
-  ): void {
-    const placeholderId = entry.placeholderId ?? entry.conversationId;
-    stored.conversation = {
-      ...stored.conversation,
-      id: recovery.conversationId,
-    };
-    stored.identityPending = false;
-    stored.projectionPending = true;
-    stored.requiredTurnId = recovery.turnId;
-    stored.stateVersion = Math.max(
-      stored.stateVersion ?? 0,
-      recovery.stateVersion,
-    );
-    stored.createRequest = undefined;
-    this.conversations.set(recovery.conversationId, stored);
-    this.conversations.set(placeholderId, stored);
-    this.conversationAliases.set(placeholderId, recovery.conversationId);
-    if (this.activeConversationId === placeholderId) {
-      this.activeConversationId = recovery.conversationId;
-    }
-    adoptReceiptIdentity(
-      entry.commandId ?? "",
-      recovery.conversationId,
-      recovery.stateVersion,
-      this.now(),
-    );
-    this.reconcileEntries.delete(entry.conversationId);
-    entry.conversationId = recovery.conversationId;
-    this.reconcileEntries.set(entry.conversationId, entry);
   }
 
   private settleReconcileEntry(
@@ -2556,7 +2134,6 @@ export class AevatarAssistantTransport implements AssistantTransport {
       stored.projectionStalledAt = this.now();
     }
     this.reconcileEntries.delete(entry.conversationId);
-    if (entry.placeholderId) this.reconcileEntries.delete(entry.placeholderId);
     entry.settle({ status, conversationId: entry.conversationId });
   }
 
@@ -2617,7 +2194,9 @@ export class AevatarAssistantTransport implements AssistantTransport {
     if (
       this.running.has(conversationId) ||
       this.running.has(requestedId) ||
-      isTurnActive(stored.turnState.activeTurn?.status)
+      isTurnActive(stored.turnState.activeTurn?.status) ||
+      (stored.taskProjection?.task?.status === "active" &&
+        !this.pendingStops.has(conversationId))
     ) {
       throw new AssistantTurnActiveError();
     }
@@ -2626,37 +2205,27 @@ export class AevatarAssistantTransport implements AssistantTransport {
       throw new Error("Message must contain between 1 and 32768 characters.");
     }
 
-    const protocol = isWorkflowConversationId(conversationId)
-      ? "workflow"
-      : "actor";
-    let clientRequestId: string | undefined;
-    if (
-      protocol === "workflow" &&
-      !stored.conversation.id.startsWith(WORKFLOW_CONVERSATION_PREFIX)
-    ) {
-      clientRequestId =
-        stored.createRequest?.prompt === normalized
-          ? stored.createRequest.commandId
-          : crypto.randomUUID();
-      stored.createRequest = { prompt: normalized, commandId: clientRequestId };
-      stored.identityPending = true;
-      stored.projectionStalledAt = undefined;
-      recordCreateReceipt(clientRequestId, requestedId, this.now());
+    if (isLegacyConversationId(stored.conversation.id)) {
+      throw new AssistantProtocolError(
+        "Legacy conversations are read-only. Start a new chat to continue with the typed assistant.",
+      );
     }
-    const run = this.newRun(onEvent, null, protocol, clientRequestId);
+    if (
+      !stored.conversation.id.startsWith(AEVATAR_DRAFT_CONVERSATION_PREFIX) &&
+      !TYPED_SERVER_CONVERSATION_ID_PATTERN.test(stored.conversation.id)
+    ) {
+      throw new AssistantProtocolError(
+        "The conversation does not have a valid typed assistant identity.",
+      );
+    }
+    const run = this.newRun(onEvent, null, "actor", crypto.randomUUID());
     run.assistantMessageIdsAtDispatch = new Set(
       stored.turnState.messages
         .filter((message) => message.role === "assistant")
         .map((message) => message.id),
     );
     this.running.set(conversationId, run);
-    const needsWorkflowPreflight =
-      protocol === "workflow" &&
-      stored.conversation.id.startsWith(WORKFLOW_CONVERSATION_PREFIX) &&
-      positiveStateVersion(stored.stateVersion) === undefined;
-    if (!needsWorkflowPreflight) {
-      this.appendOptimisticUserMessage(conversationId, run, normalized);
-    }
+    this.appendOptimisticUserMessage(conversationId, run, normalized);
     void this.streamTurn(conversationId, run, normalized);
     return {
       get turnId() {
@@ -2693,14 +2262,172 @@ export class AevatarAssistantTransport implements AssistantTransport {
     }
   }
 
-  /**
-   * Send an approval decision. On the live contract the approve endpoint
-   * answers with an SSE continuation of the run (reference client behavior);
-   * the frames stream through the same adapter as the original turn, with
-   * cursors continuing past the previous turn's so at-least-once consumers
-   * never regress. Resolves once the continuation has started; the returned
-   * handle cancels it.
-   */
+  async stopTask(conversationId: string): Promise<void> {
+    this.ensureScope();
+    const requestedId = conversationId;
+    conversationId = this.canonicalConversationId(conversationId);
+    this.assertTypedTaskConversation(conversationId);
+    if (this.deletingConversations.has(conversationId)) {
+      throw new Error("This conversation is being deleted.");
+    }
+    const controller = this.scopeController();
+    const operation = this.dispatchTaskStop(
+      conversationId,
+      crypto.randomUUID(),
+      controller.signal,
+    );
+    this.trackFence(
+      conversationId,
+      operation.then(
+        () => undefined,
+        () => undefined,
+      ),
+    );
+    try {
+      await operation;
+      const run =
+        this.running.get(requestedId) ?? this.running.get(conversationId);
+      if (run) {
+        this.closeOpenMessage(conversationId, run);
+        this.finalizeActivity(conversationId, run, "cancelled");
+        this.finishTurn(conversationId, run, "cancelled", null);
+        run.controller.abort();
+      }
+    } finally {
+      controller.abort();
+      this.releaseScopeController(controller);
+    }
+  }
+
+  async steerTask(conversationId: string, instruction: string): Promise<void> {
+    this.ensureScope();
+    conversationId = this.canonicalConversationId(conversationId);
+    this.assertTypedTaskConversation(conversationId);
+    const normalized = instruction.trim();
+    if (!normalized || normalized.length > MAX_MESSAGE_CHARS) {
+      throw new Error("Steering must contain between 1 and 32768 characters.");
+    }
+    const controller = this.scopeController();
+    try {
+      await this.awaitPendingStop(conversationId);
+      const projection = await this.readTaskControlProjection(
+        conversationId,
+        controller.signal,
+      );
+      const turnId = protoString(projection.activeTurn?.["turnId"]);
+      if (!turnId) {
+        throw new AssistantProtocolError(
+          "The assistant no longer has active work to steer.",
+        );
+      }
+      await assistantApi.post(
+        `${ASSISTANT_PREFIX}/chat`,
+        {
+          type: "task.steer",
+          conversationId,
+          turnId,
+          steeringId: crypto.randomUUID(),
+          clientRequestId: crypto.randomUUID(),
+          instruction: normalized,
+          expectedStateVersion: projection.stateVersion,
+        },
+        controller.signal,
+      );
+    } finally {
+      controller.abort();
+      this.releaseScopeController(controller);
+    }
+  }
+
+  async retryStep(conversationId: string, stepId: string): Promise<void> {
+    await this.dispatchStepControl(conversationId, stepId, "retry");
+  }
+
+  async skipStep(conversationId: string, stepId: string): Promise<void> {
+    await this.dispatchStepControl(conversationId, stepId, "skip");
+  }
+
+  async resolvePlan(
+    conversationId: string,
+    blockId: string,
+    confirmed: boolean,
+  ): Promise<void> {
+    this.ensureScope();
+    conversationId = this.canonicalConversationId(conversationId);
+    this.assertTypedTaskConversation(conversationId);
+    if (this.deletingConversations.has(conversationId)) {
+      throw new Error("This conversation is being deleted.");
+    }
+    const stored = this.conversations.get(conversationId);
+    const card = stored?.turnState.messages
+      .flatMap((message) => message.blocks)
+      .find(
+        (block): block is TaskPlanContentBlock =>
+          block.type === "task_plan" && block.block_id === blockId,
+      );
+    const clickedGate = card?.plan.gate;
+    if (
+      !card ||
+      clickedGate?.mode !== "confirm" ||
+      clickedGate.status !== "pending" ||
+      !clickedGate.requestId ||
+      !clickedGate.taskId ||
+      !clickedGate.planId ||
+      clickedGate.planRevision === undefined
+    ) {
+      throw new AssistantProtocolError("This plan gate is no longer pending.");
+    }
+
+    const controller = this.scopeController();
+    try {
+      await this.awaitPendingStop(conversationId);
+      const projection = await this.readTaskControlProjection(
+        conversationId,
+        controller.signal,
+      );
+      const gate = projection.task?.gate;
+      if (
+        gate?.mode !== "confirm" ||
+        gate.status !== "pending" ||
+        gate.requestId !== clickedGate.requestId ||
+        gate.taskId !== clickedGate.taskId ||
+        gate.planId !== clickedGate.planId ||
+        gate.planRevision !== clickedGate.planRevision
+      ) {
+        throw new AssistantProtocolError(
+          "The actor no longer offers this exact plan gate.",
+        );
+      }
+      await assistantApi.post<{ readonly status: string }>(
+        `${ASSISTANT_PREFIX}/chat`,
+        {
+          type: "plan.resolve",
+          conversationId,
+          taskId: gate.taskId,
+          planId: gate.planId,
+          requestId: gate.requestId,
+          clientRequestId: crypto.randomUUID(),
+          planRevision: gate.planRevision,
+          confirmed,
+          expectedStateVersion: projection.stateVersion,
+        },
+        controller.signal,
+      );
+
+      // JSON 202 means accepted for actor dispatch, not committed. Refresh the
+      // same projection once and let only actor-owned state settle the gate.
+      try {
+        await this.readTaskControlProjection(conversationId, controller.signal);
+      } catch (error) {
+        if (controller.signal.aborted) throw error;
+      }
+    } finally {
+      controller.abort();
+      this.releaseScopeController(controller);
+    }
+  }
+
+  /** Submit a version-fenced approval decision and project JSON acceptance. */
   async decideApproval(
     conversationId: string,
     blockId: string,
@@ -2712,12 +2439,9 @@ export class AevatarAssistantTransport implements AssistantTransport {
     if (this.deletingConversations.has(conversationId)) {
       throw new Error("This conversation is being deleted.");
     }
-    // `:approve` addresses a nyxid-chat conversation ACTOR. A workflow run
-    // resumes through `runs/{runId}:resume`, which this mount does not
-    // proxy — posting the actor route with a `chatc-…` id would 404 with a
-    // misleading message. Fail honestly instead: the gate is real, we just
-    // cannot decide it from here yet.
-    if (isWorkflowConversationId(conversationId)) {
+    // approval.resolve addresses a typed nyxid-chat actor. A legacy chatc id
+    // is historical display identity only and must never reach this command.
+    if (isLegacyConversationId(conversationId)) {
       throw new Error(
         "Approvals cannot be decided from this chat yet. Approve the request in NyxID (Approvals) and send your message again.",
       );
@@ -2729,165 +2453,238 @@ export class AevatarAssistantTransport implements AssistantTransport {
         (block): block is ApprovalCardContentBlock =>
           block.type === "approval_card" && block.block_id === blockId,
       );
-    if (!stored || !card) {
+    const requestId = card?.approval_request_id;
+    if (!stored || !card || !requestId) {
       throw new Error("Approval request was not found.");
     }
     if (card.decision !== null) {
       throw new Error("This approval was already decided.");
     }
-    const active = this.running.get(conversationId);
-    if (active) {
-      if (!active.waitingForApproval) {
-        throw new AssistantTurnActiveError();
-      }
-      // The original stream is idle at the human gate; settle it quietly so
-      // the continuation below becomes the one live turn.
-      this.pauseForApproval(conversationId, active);
-    }
-
-    // Reserve the conversation BEFORE the network call: the whole approve
-    // exchange must read as one active turn, or the idle gap while awaiting
-    // response headers lets a concurrent send/approve/delete slip past the
-    // active-turn guards and interleave two streams into one reducer. The
-    // reservation's controller doubles as the fetch signal so Stop can
-    // abort an approve request hung before headers.
-    const run = this.newRun(
-      onEvent ?? noopEvent,
-      active?.turnId ?? stored.turnState.activeTurn?.turnId ?? null,
-    );
-    // Continuation cursors continue past the previous turn's: the reducer
-    // and any still-subscribed pump dedup by strictly-increasing cursor.
-    // (Read lastCursor only after pauseForApproval settled the prior turn.)
-    run.cursor = stored.turnState.lastCursor;
-    this.running.set(conversationId, run);
-
-    // Reservation first, THEN the fence: the approve must not overtake a
-    // prior turn's still-pending stop upstream, and the reservation keeps
-    // concurrent sends out while this waits. A cancel landing during the
-    // wait settles the run before anything was dispatched — bail with no
-    // continuation rather than posting a decision for a cancelled flow.
-    await this.awaitPendingStop(conversationId);
-    if (run.finished || run.controller.signal.aborted) {
-      return null;
-    }
-
-    const stream = this.startChatStream(
+    const run = this.reserveHumanDecision(
       conversationId,
-      run,
-      TYPED_CHAT_URL,
-      JSON.stringify({
-        type: "approval.resolve",
-        conversationId,
-        clientRequestId: crypto.randomUUID(),
-        requestId: card.approval_request_id,
-        approved,
-      }),
+      "approval",
+      blockId,
+      requestId,
+      onEvent ?? noopEvent,
     );
-    const response = await stream.headers;
-    if (response.kind === "cancelled") {
-      // cancelTurn already emitted the terminal events when the user stopped
-      // this request before response headers arrived.
-      this.finishTurn(conversationId, run, "cancelled", null);
-      throw new AssistantTurnCancelledError();
-    }
-    if (response.kind === "network_error") {
-      const aborted = run.controller.signal.aborted;
-      // cancelTurn may already have settled the run; finishTurn is a no-op
-      // then. The card was never flipped, so the decision stays retryable.
-      // Pre-stream failures settle the turn with a NULL error: the thrown
-      // rejection is what surfaces (the mutation's onError toast) — a turn
-      // error here would double-toast the same failure.
-      this.finishTurn(
+    try {
+      await this.awaitPendingStop(conversationId);
+      this.throwIfControlCancelled(run);
+      const preflight = await this.readDecisionPreflight(
         conversationId,
-        run,
-        aborted ? "cancelled" : "failed",
-        null,
+        "approval",
+        requestId,
+        run.controller.signal,
       );
-      throw aborted
-        ? new AssistantTurnCancelledError()
-        : new Error(response.message);
-    }
-    if (response.kind === "http_error") {
-      const failure = streamStartError(response.status, response.body);
-      // Null turn error for the same single-toast reason as above.
-      this.finishTurn(conversationId, run, "failed", null);
-      throw new Error(failure.message);
-    }
-
-    this.emit(conversationId, run, {
-      cursor: this.nextCursor(run),
-      event: "block.updated",
-      block_id: blockId,
-      patch: {
-        decision: approved ? "approved" : "denied",
-        decision_channel: "web",
-      },
-    });
-    // The prior turn's ledger parked with a step waiting on THIS approval;
-    // settle that step so the transient activity line doesn't show a stale
-    // approval clock (approved → the step proceeds; denied → skipped).
-    // Correlated by approval_request_id: deciding one card must not settle
-    // steps gated on a different pending approval, and a ledger with other
-    // approvals still waiting stays parked.
-    const parkedLedger = [...stored.turnState.messages]
-      .flatMap((message) => message.blocks)
-      .reverse()
-      .find(
-        (candidate): candidate is RunContentBlock =>
-          candidate.type === "run" &&
-          candidate.state === "awaiting_approval" &&
-          candidate.steps.some(
-            (step) =>
-              step.status === "waiting" &&
-              step.approval_request_id === card.approval_request_id,
-          ),
-      );
-    if (parkedLedger) {
-      const steps = parkedLedger.steps.map((step) =>
-        step.status === "waiting" &&
-        step.approval_request_id === card.approval_request_id
-          ? {
-              ...step,
-              status: approved ? ("done" as const) : ("skipped" as const),
-            }
-          : step,
-      );
-      const stillWaiting = steps.some((step) => step.status === "waiting");
-      this.emit(conversationId, run, {
-        cursor: this.nextCursor(run),
-        event: "block.updated",
-        block_id: parkedLedger.block_id,
-        patch: {
-          state: stillWaiting
-            ? "awaiting_approval"
-            : approved
-              ? "completed"
-              : "cancelled",
-          steps,
-          steps_complete: steps.filter((step) => step.status === "done").length,
+      if (preflight.committed) {
+        this.applyCommittedApproval(
+          conversationId,
+          blockId,
+          preflight.approved!,
+          preflight.stateVersion,
+          onEvent ?? noopEvent,
+        );
+        return null;
+      }
+      const expectedStateVersion = preflight.stateVersion;
+      this.throwIfControlCancelled(run);
+      await assistantApi.post<{ readonly status: string }>(
+        `${ASSISTANT_PREFIX}/chat`,
+        {
+          type: "approval.resolve",
+          conversationId,
+          clientRequestId: crypto.randomUUID(),
+          requestId,
+          approved,
+          expectedStateVersion,
         },
-      });
-    }
+        run.controller.signal,
+      );
+      this.throwIfControlCancelled(run);
 
-    if (response.contentType.includes("text/event-stream")) {
-      void this.consumeApprovalContinuation(conversationId, run, stream);
-    } else {
-      // Older backend acknowledging with JSON: nothing further will stream,
-      // and there is no live continuation for the caller to hold a handle
-      // to — returning one would let a stale entry linger in the caller's
-      // handle registry after this turn already completed.
-      stream.cancel();
-      this.finishTurn(conversationId, run, "completed", null);
+      this.emitLocalBlockPatch(
+        conversationId,
+        blockId,
+        {
+          decision_submission: approved ? "approved" : "denied",
+          state_version: expectedStateVersion,
+        },
+        onEvent ?? noopEvent,
+      );
+      const committedStateVersion = await this.observeDecisionCommit(
+        conversationId,
+        "approval",
+        requestId,
+        expectedStateVersion,
+        approved,
+        run.controller.signal,
+      );
+      if (committedStateVersion === null) {
+        this.emitLocalBlockPatch(
+          conversationId,
+          blockId,
+          { decision_submission: null },
+          onEvent ?? noopEvent,
+        );
+        throw new AssistantProtocolError(
+          "The approval decision was accepted for dispatch, but its committed result was not observed. The card is retryable and current state will be checked before another submission.",
+        );
+      }
+      this.applyCommittedApproval(
+        conversationId,
+        blockId,
+        approved,
+        committedStateVersion,
+        onEvent ?? noopEvent,
+      );
       return null;
+    } catch (error) {
+      if (run.controller.signal.aborted) {
+        throw new AssistantTurnCancelledError();
+      }
+      throw error;
+    } finally {
+      this.releaseHumanDecision(conversationId, run);
     }
-    return {
-      get turnId() {
-        return run.turnId;
-      },
-      cancel: () => {
-        this.cancelTurn(conversationId, run);
-      },
-    };
+  }
+
+  /** Submit a strict input answer against the exact committed request version. */
+  async resolveInput(
+    conversationId: string,
+    blockId: string,
+    answer: InputAnswer,
+    onEvent?: (event: TurnEvent) => void,
+  ): Promise<TurnHandle | null> {
+    this.ensureScope();
+    conversationId = this.canonicalConversationId(conversationId);
+    if (this.deletingConversations.has(conversationId)) {
+      throw new Error("This conversation is being deleted.");
+    }
+    if (!TYPED_SERVER_CONVERSATION_ID_PATTERN.test(conversationId)) {
+      throw new AssistantProtocolError(
+        "Input answers require a typed assistant conversation.",
+      );
+    }
+    const stored = this.conversations.get(conversationId);
+    const card = stored?.turnState.messages
+      .flatMap((message) => message.blocks)
+      .find(
+        (block): block is InputCardContentBlock =>
+          block.type === "input_card" && block.block_id === blockId,
+      );
+    const requestId = card?.request_id;
+    if (!stored || !card || !requestId) {
+      throw new Error("Input request was not found.");
+    }
+    if (card.status !== "pending") {
+      throw new Error("This input request was already resolved.");
+    }
+    const parsedAnswer = inputAnswerSchema.parse(answer);
+    const allowFreeText = card.allow_free_text;
+    if ("freeText" in parsedAnswer && !allowFreeText) {
+      throw new AssistantProtocolError(
+        "This input request does not allow a free-text answer.",
+      );
+    }
+    if ("selectedOptionIds" in parsedAnswer) {
+      const optionIds = new Set(card.options.map((option) => option.option_id));
+      if (
+        parsedAnswer.selectedOptionIds.some(
+          (optionId) => !optionIds.has(optionId),
+        )
+      ) {
+        throw new AssistantProtocolError(
+          "The answer selected an option that is not part of this request.",
+        );
+      }
+      const multiSelect = card.multi_select;
+      if (!multiSelect && parsedAnswer.selectedOptionIds.length !== 1) {
+        throw new AssistantProtocolError(
+          "This input request accepts exactly one selected option.",
+        );
+      }
+    }
+    const run = this.reserveHumanDecision(
+      conversationId,
+      "input",
+      blockId,
+      requestId,
+      onEvent ?? noopEvent,
+    );
+    try {
+      await this.awaitPendingStop(conversationId);
+      this.throwIfControlCancelled(run);
+      const preflight = await this.readDecisionPreflight(
+        conversationId,
+        "input",
+        requestId,
+        run.controller.signal,
+      );
+      if (preflight.committed) {
+        this.emitLocalBlockPatch(
+          conversationId,
+          blockId,
+          { status: "resolved", state_version: preflight.stateVersion },
+          onEvent ?? noopEvent,
+        );
+        return null;
+      }
+      const expectedStateVersion = preflight.stateVersion;
+      const body = buildInputResolveBody(
+        conversationId,
+        crypto.randomUUID(),
+        requestId,
+        parsedAnswer,
+        expectedStateVersion,
+      );
+      this.throwIfControlCancelled(run);
+      await assistantApi.post<{ readonly status: string }>(
+        `${ASSISTANT_PREFIX}/chat`,
+        body,
+        run.controller.signal,
+      );
+      this.throwIfControlCancelled(run);
+      this.emitLocalBlockPatch(
+        conversationId,
+        blockId,
+        { status: "submitted", state_version: expectedStateVersion },
+        onEvent ?? noopEvent,
+      );
+      const committedStateVersion = await this.observeDecisionCommit(
+        conversationId,
+        "input",
+        requestId,
+        expectedStateVersion,
+        undefined,
+        run.controller.signal,
+      );
+      if (committedStateVersion !== null) {
+        this.emitLocalBlockPatch(
+          conversationId,
+          blockId,
+          { status: "resolved", state_version: committedStateVersion },
+          onEvent ?? noopEvent,
+        );
+      } else {
+        this.emitLocalBlockPatch(
+          conversationId,
+          blockId,
+          { status: "pending" },
+          onEvent ?? noopEvent,
+        );
+        throw new AssistantProtocolError(
+          "The input answer was accepted for dispatch, but its committed result was not observed. The card is retryable and current state will be checked before another submission.",
+        );
+      }
+      return null;
+    } catch (error) {
+      if (run.controller.signal.aborted) {
+        throw new AssistantTurnCancelledError();
+      }
+      throw error;
+    } finally {
+      this.releaseHumanDecision(conversationId, run);
+    }
   }
 
   setActionCardInProgress(
@@ -3045,7 +2842,7 @@ export class AevatarAssistantTransport implements AssistantTransport {
     }
     const actorId =
       actorIds.values().next().value ??
-      (stored && !isWorkflowConversationId(stored.conversation.id)
+      (stored && !isLegacyConversationId(stored.conversation.id)
         ? stored.conversation.id
         : null);
 
@@ -3177,7 +2974,7 @@ export class AevatarAssistantTransport implements AssistantTransport {
   private emitLocalBlockPatch(
     conversationId: string,
     blockId: string,
-    patch: Partial<ActionCardContentBlock>,
+    patch: Partial<ContentBlock>,
     onEvent: (event: TurnEvent) => void,
   ): void {
     const stored = this.conversations.get(conversationId);
@@ -3216,12 +3013,12 @@ export class AevatarAssistantTransport implements AssistantTransport {
 
   private actionOutcomeNote(disposition: ActionReport["disposition"]): string {
     if (disposition === "completed") {
-      return "Reporting the new service reference to the assistant.";
+      return "Connected. Telling the assistant it can use this service…";
     }
     if (disposition === "declined") {
-      return "You declined this request. Sending the decision to the assistant; no credential was shared.";
+      return "You declined. Nothing was connected and no credential was shared. Telling the assistant…";
     }
-    return "The connection could not be completed. Sending the failure to the assistant.";
+    return "The connection did not complete. Telling the assistant…";
   }
 
   private settledActionOutcomeNote(
@@ -3230,17 +3027,17 @@ export class AevatarAssistantTransport implements AssistantTransport {
   ): string {
     if (disposition === "completed") {
       return delivered
-        ? "Reported — awaiting assistant verification."
-        : "The new service reference has not reached the assistant; delivery will retry after the next turn.";
+        ? "Connected. The assistant can use this service now."
+        : "Connected, but the assistant has not been told yet — NyxID will retry after your next message.";
     }
     if (disposition === "declined") {
       return delivered
-        ? "You declined this request. The assistant received the decision; no credential was shared."
-        : "You declined this request. The decision has not reached the assistant; delivery will retry after the next turn.";
+        ? "You declined. Nothing was connected and no credential was shared."
+        : "You declined. The assistant has not been told yet — NyxID will retry after your next message. No credential was shared.";
     }
     return delivered
-      ? "The assistant received the connection failure. Ask it to request the service again."
-      : "The connection failure has not reached the assistant; delivery will retry after the next turn.";
+      ? "The connection did not complete. Ask the assistant to request this service again."
+      : "The connection did not complete, and the assistant has not been told yet — NyxID will retry after your next message.";
   }
 
   private updateActionBatchOutcomeNotes(
@@ -3288,10 +3085,8 @@ export class AevatarAssistantTransport implements AssistantTransport {
       );
     if (!batch) return null;
 
-    // `action.continue` belongs to the nyxid-chat actor protocol even when the
-    // visible conversation runs on the studio workflow surface. The action
-    // frame carries its owning ConversationActorId; never substitute the
-    // workflow `chatc-*` id or send the control body to `/workflow-chat`.
+    // The action frame carries its owning typed actor identity. Never
+    // substitute a legacy `chatc-*` history identity.
     if (!batch.actorId) {
       batch.blocked = true;
       this.actionDrainBlocked.add(conversationId);
@@ -3430,16 +3225,14 @@ export class AevatarAssistantTransport implements AssistantTransport {
       actionRequestFingerprints:
         existing?.actionRequestFingerprints ?? new Map(),
       activityMessageTurnIds: existing?.activityMessageTurnIds ?? new Map(),
+      taskProjection: existing?.taskProjection,
       lastLocalTurnCompletedAt: existing?.lastLocalTurnCompletedAt,
       stateVersion: existing?.stateVersion,
-      identityPending: existing?.identityPending,
       projectionPending: existing?.projectionPending,
       requiredTurnId: existing?.requiredTurnId,
       requiredAssistantBaselineIds: existing?.requiredAssistantBaselineIds,
       projectionStalledAt: existing?.projectionStalledAt,
       lastWireObservationAt: existing?.lastWireObservationAt,
-      sessionId: existing?.sessionId,
-      createRequest: existing?.createRequest,
     });
   }
 
@@ -3450,6 +3243,458 @@ export class AevatarAssistantTransport implements AssistantTransport {
       `${ASSISTANT_PREFIX}/conversations/${conversationId}`,
     );
     return this.applyHistoryResponse(conversationId, body);
+  }
+
+  private async hydrateTaskState(
+    conversationId: string,
+    stored: StoredConversation,
+  ): Promise<void> {
+    let response: unknown;
+    try {
+      response = await assistantApi.get<unknown>(
+        `${ASSISTANT_PREFIX}/conversations/${encodeURIComponent(conversationId)}/state`,
+      );
+    } catch (error) {
+      if (!(error instanceof ApiError && error.status === 404)) throw error;
+      // Older typed conversations can have a valid transcript while their
+      // actor current-state projection is unavailable. Keep the richer local
+      // live/history mirror in that case; treating 404 as an authoritative
+      // empty snapshot would erase input, approval, and action cards.
+      if (stored.turnState.messages.length > 0) return;
+      response = { status: "not_found" };
+    }
+    const current = applyCurrentTaskState(
+      stored.taskProjection ?? createTaskProjection(conversationId),
+      response,
+    );
+    if (current.reload) {
+      throw new AssistantProtocolError(
+        "The assistant requested an unconditional state reload for an unconditional request.",
+      );
+    }
+    stored.taskProjection = current.projection;
+    if (current.projection.stateVersion > 0) {
+      stored.stateVersion = Math.max(
+        stored.stateVersion ?? 0,
+        current.projection.stateVersion,
+      );
+    }
+    this.materializeCurrentStateBlocks(stored);
+  }
+
+  private assertTypedTaskConversation(conversationId: string): void {
+    if (!TYPED_SERVER_CONVERSATION_ID_PATTERN.test(conversationId)) {
+      throw new AssistantProtocolError(
+        "Task controls require a typed assistant conversation.",
+      );
+    }
+  }
+
+  private async readTaskControlProjection(
+    conversationId: string,
+    signal: AbortSignal,
+  ): Promise<AssistantTaskProjection> {
+    const stored = this.conversations.get(conversationId);
+    if (!stored) throw new AssistantConversationNotFoundError();
+    const response = await assistantApi.get<unknown>(
+      `${ASSISTANT_PREFIX}/conversations/${encodeURIComponent(conversationId)}/state`,
+      signal,
+    );
+    const current = applyCurrentTaskState(
+      stored.taskProjection ?? createTaskProjection(conversationId),
+      response,
+    );
+    if (
+      current.reload ||
+      current.projection.stateVersion <= 0 ||
+      current.projection.actorId !== conversationId
+    ) {
+      throw new AssistantProtocolError(
+        "The assistant state is not current. Refresh the conversation and try again.",
+      );
+    }
+    stored.taskProjection = current.projection;
+    stored.stateVersion = Math.max(
+      stored.stateVersion ?? 0,
+      current.projection.stateVersion,
+    );
+    this.materializeCurrentStateBlocks(stored);
+    return current.projection;
+  }
+
+  private async dispatchTaskStop(
+    conversationId: string,
+    stopRequestId: string,
+    signal: AbortSignal,
+    expectedTurnId?: string,
+  ): Promise<void> {
+    const projection = await this.readTaskControlProjection(
+      conversationId,
+      signal,
+    );
+    const turnId = protoString(projection.activeTurn?.["turnId"]);
+    if (
+      !turnId ||
+      (expectedTurnId && expectedTurnId !== turnId) ||
+      !taskCan(projection, "stop")
+    ) {
+      throw new AssistantProtocolError(
+        "The actor no longer offers Stop for this task version.",
+      );
+    }
+    await assistantApi.post(
+      `${ASSISTANT_PREFIX}/chat`,
+      {
+        type: "task.stop",
+        conversationId,
+        turnId,
+        stopRequestId,
+        clientRequestId: crypto.randomUUID(),
+        expectedStateVersion: projection.stateVersion,
+      },
+      signal,
+    );
+  }
+
+  private async dispatchStepControl(
+    conversationId: string,
+    stepId: string,
+    action: "retry" | "skip",
+  ): Promise<void> {
+    this.ensureScope();
+    conversationId = this.canonicalConversationId(conversationId);
+    this.assertTypedTaskConversation(conversationId);
+    if (this.deletingConversations.has(conversationId)) {
+      throw new Error("This conversation is being deleted.");
+    }
+    const controller = this.scopeController();
+    try {
+      const projection = await this.readTaskControlProjection(
+        conversationId,
+        controller.signal,
+      );
+      const step: TaskStep | undefined = projection.steps.get(stepId);
+      const turnId =
+        step?.operation?.turnId ??
+        protoString(projection.activeTurn?.["turnId"]);
+      const taskId = step?.operation?.taskId ?? projection.task?.taskId;
+      const operationGeneration = step?.operation?.operationGeneration;
+      if (
+        !step ||
+        !turnId ||
+        !taskId ||
+        !Number.isSafeInteger(operationGeneration) ||
+        (operationGeneration ?? 0) <= 0 ||
+        !taskCan(projection, action, stepId)
+      ) {
+        throw new AssistantProtocolError(
+          `The actor no longer offers ${action === "retry" ? "Retry" : "Skip"} for this step version.`,
+        );
+      }
+      const requestId = crypto.randomUUID();
+      await assistantApi.post(
+        `${ASSISTANT_PREFIX}/chat`,
+        action === "retry"
+          ? {
+              type: "step.retry",
+              conversationId,
+              turnId,
+              taskId,
+              stepId,
+              retryRequestId: requestId,
+              clientRequestId: crypto.randomUUID(),
+              expectedOperationGeneration: operationGeneration,
+              expectedStateVersion: projection.stateVersion,
+            }
+          : {
+              type: "step.skip",
+              conversationId,
+              turnId,
+              taskId,
+              stepId,
+              skipRequestId: requestId,
+              clientRequestId: crypto.randomUUID(),
+              expectedOperationGeneration: operationGeneration,
+              expectedStateVersion: projection.stateVersion,
+            },
+        controller.signal,
+      );
+    } finally {
+      controller.abort();
+      this.releaseScopeController(controller);
+    }
+  }
+
+  private materializeCurrentStateBlocks(stored: StoredConversation): void {
+    const projection = stored.taskProjection;
+    if (!projection) return;
+    const existingBlocks = stored.turnState.messages.flatMap(
+      (message) => message.blocks,
+    );
+    const blocks: ContentBlock[] = [];
+    if (projection.task) {
+      blocks.push({
+        type: "task_plan",
+        block_id: `current-task-plan:${projection.task.taskId}`,
+        state_version: projection.stateVersion,
+        progress_sequence: projection.progressSequence,
+        plan: projection.task,
+      });
+    }
+
+    if (projection.pendingInput) {
+      const request = assistantInputRequestSchema.safeParse(
+        projection.pendingInput,
+      );
+      if (request.success) {
+        blocks.push(
+          this.inputCardBlock(
+            request.data,
+            projection.stateVersion,
+            `current-input:${request.data.requestId}`,
+          ),
+        );
+      } else {
+        const requestId = protoString(projection.pendingInput["requestId"]);
+        const existing = existingBlocks.find(
+          (block): block is InputCardContentBlock =>
+            block.type === "input_card" && block.request_id === requestId,
+        );
+        if (existing) {
+          blocks.push({
+            ...existing,
+            state_version: projection.stateVersion,
+          });
+        }
+      }
+    } else if (projection.latestInputResolution?.["outcome"] === "accepted") {
+      const requestId = protoString(
+        projection.latestInputResolution["requestId"],
+      );
+      const existing = existingBlocks.find(
+        (block): block is InputCardContentBlock =>
+          block.type === "input_card" && block.request_id === requestId,
+      );
+      if (existing) {
+        blocks.push({
+          ...existing,
+          status: "resolved",
+          state_version: projection.stateVersion,
+        });
+      }
+    }
+    if (projection.pendingApproval) {
+      const pending = projection.pendingApproval;
+      const presentation =
+        pending["presentation"] &&
+        typeof pending["presentation"] === "object" &&
+        !Array.isArray(pending["presentation"])
+          ? (pending["presentation"] as ToolApprovalPayload["presentation"])
+          : undefined;
+      const payload = {
+        ...(pending as ToolApprovalPayload),
+        ...(presentation ?? {}),
+        presentation,
+      };
+      const requestId =
+        payload.requestId ?? payload.approvalRequestId ?? payload.commandId;
+      if (requestId) {
+        const existing = existingBlocks.find(
+          (block): block is ApprovalCardContentBlock =>
+            block.type === "approval_card" &&
+            block.approval_request_id === requestId,
+        );
+        blocks.push(
+          existing
+            ? { ...existing, state_version: projection.stateVersion }
+            : this.approvalCardBlock(
+                payload,
+                projection.stateVersion,
+                `current-approval:${requestId}`,
+              ),
+        );
+      }
+    } else if (
+      projection.latestApprovalResolution?.["outcome"] === "accepted"
+    ) {
+      const requestId = protoString(
+        projection.latestApprovalResolution["requestId"],
+      );
+      const approved = projection.latestApprovalResolution["approved"];
+      const existing = existingBlocks.find(
+        (block): block is ApprovalCardContentBlock =>
+          block.type === "approval_card" &&
+          block.approval_request_id === requestId,
+      );
+      if (existing && typeof approved === "boolean") {
+        blocks.push({
+          ...existing,
+          decision: approved ? "approved" : "denied",
+          decision_channel: "web",
+          decision_submission: null,
+          state_version: projection.stateVersion,
+        });
+      }
+    }
+    for (const summary of projection.pendingActions) {
+      const requestPayload = summary["request"];
+      const parsed = assistantActionRequestSchema.safeParse(requestPayload);
+      const request = parsed.success
+        ? parsed.data
+        : recoverUnsupportedAssistantActionRequest(requestPayload);
+      if (!request || request.actorId !== projection.actorId) continue;
+      const resolved = resolveAssistantAction(request);
+      const reports = Array.isArray(summary["reports"])
+        ? summary["reports"]
+        : [];
+      const disposition = reports
+        .slice()
+        .reverse()
+        .map((report) =>
+          report && typeof report === "object" && !Array.isArray(report)
+            ? (report as Record<string, unknown>)["disposition"]
+            : undefined,
+        )
+        .find((value): value is string => typeof value === "string");
+      const status: ActionCardStatus =
+        summary["conflicted"] === true
+          ? "conflicted"
+          : disposition === "completed"
+            ? "completed"
+            : disposition === "declined"
+              ? "declined"
+              : disposition === "failed" ||
+                  disposition === "cancelled" ||
+                  disposition === "expired"
+                ? "failed"
+                : resolved.supported
+                  ? "pending"
+                  : "unsupported";
+      blocks.push({
+        type: "action_card",
+        block_id: `current-action:${request.actionRequestId}`,
+        action: request.action,
+        action_request_id: request.actionRequestId,
+        origin_turn_id: request.originTurnId,
+        actor_id: request.actorId || undefined,
+        task_id: request.taskId,
+        step_id: request.stepId,
+        params: resolved.params,
+        status,
+        outcome_note:
+          status === "completed"
+            ? "Reported — awaiting assistant verification."
+            : "",
+      });
+      stored.actionRequestFingerprints.set(
+        request.actionRequestId,
+        fingerprintStableRequestInput(request.params),
+      );
+    }
+
+    const managedTypes = new Set<ContentBlock["type"]>([
+      "task_plan",
+      "input_card",
+      "approval_card",
+      "action_card",
+    ]);
+    const stateMessageId = `assistant-current-state:${projection.actorId ?? stored.conversation.id}`;
+    const retainedMessages = stored.turnState.messages.flatMap((message) => {
+      if (message.id === stateMessageId) return [];
+      const retainedBlocks = message.blocks.filter(
+        (block) => !managedTypes.has(block.type),
+      );
+      if (retainedBlocks.length === 0 && message.blocks.length > 0) return [];
+      return retainedBlocks.length === message.blocks.length
+        ? [message]
+        : [{ ...message, blocks: retainedBlocks }];
+    });
+    stored.turnState = {
+      ...stored.turnState,
+      messages:
+        blocks.length === 0
+          ? retainedMessages
+          : [
+              ...retainedMessages,
+              {
+                id: stateMessageId,
+                role: "assistant",
+                schema_version: 1,
+                blocks,
+                created_at:
+                  projection.task?.updatedAt ??
+                  projection.task?.createdAt ??
+                  new Date(0).toISOString(),
+                turnId:
+                  projection.task?.turnId ??
+                  protoString(projection.activeTurn?.["turnId"]),
+              },
+            ],
+    };
+  }
+
+  private inputCardBlock(
+    request: AssistantInputRequest,
+    stateVersion?: number,
+    blockId = newId("input-card"),
+  ): InputCardContentBlock {
+    return {
+      type: "input_card",
+      block_id: blockId,
+      request_id: request.requestId,
+      prompt: redactDisplayText(request.prompt),
+      options: request.options.map((option) => ({
+        option_id: option.optionId,
+        label: redactDisplayText(option.label),
+        ...(option.description
+          ? { description: redactDisplayText(option.description) }
+          : {}),
+      })),
+      allow_free_text: request.allowFreeText,
+      multi_select: request.multiSelect,
+      ...(stateVersion !== undefined ? { state_version: stateVersion } : {}),
+      status: "pending",
+    };
+  }
+
+  private approvalCardBlock(
+    payload: ToolApprovalPayload,
+    stateVersion?: number,
+    blockId = newId("approval-card"),
+  ): ApprovalCardContentBlock {
+    const requestId =
+      payload.requestId ?? payload.approvalRequestId ?? payload.commandId ?? "";
+    const presentation = payload.presentation;
+    const presentationBody = [
+      presentation?.actorLabel,
+      presentation?.action,
+      presentation?.target ? `on ${presentation.target}` : "",
+    ]
+      .filter(Boolean)
+      .join(" ");
+    const body =
+      (payload.message ?? payload.body ?? presentationBody) ||
+      (payload.toolName
+        ? `The assistant wants to run ${redactDisplayText(payload.toolName)}.`
+        : "The assistant is requesting your approval to continue.");
+    return {
+      type: "approval_card",
+      block_id: blockId,
+      approval_request_id: requestId,
+      body: redactDisplayText(body),
+      service_slug: payload.serviceSlug ?? payload.service_slug ?? "",
+      agent_key_prefix: payload.agentKeyPrefix ?? "aevatar",
+      approval_mode: payload.approvalMode === "grant" ? "grant" : "per_request",
+      grant_duration_sec:
+        typeof payload.grantDurationSec === "number"
+          ? payload.grantDurationSec
+          : null,
+      expires_at: payload.expiresAt ?? payload.expires_at ?? "",
+      decision: null,
+      decision_channel: null,
+      decision_submission: null,
+      ...(stateVersion !== undefined ? { state_version: stateVersion } : {}),
+    };
   }
 
   private applyHistoryResponse(
@@ -3482,7 +3727,6 @@ export class AevatarAssistantTransport implements AssistantTransport {
         existing.stateVersion ?? 0,
         freshStateVersion,
       );
-      advanceReceiptFence(conversationId, freshStateVersion, this.now());
     }
     const localMessages = existing?.turnState.messages ?? [];
     const localStructuredBlocks = structuredBlockCount(localMessages);
@@ -3550,12 +3794,12 @@ export class AevatarAssistantTransport implements AssistantTransport {
       actionRequestFingerprints:
         existing?.actionRequestFingerprints ?? new Map(),
       activityMessageTurnIds: existing?.activityMessageTurnIds ?? new Map(),
+      taskProjection: existing?.taskProjection,
       lastLocalTurnCompletedAt: existing?.lastLocalTurnCompletedAt,
       stateVersion:
         freshStateVersion === undefined
           ? existing?.stateVersion
           : Math.max(existing?.stateVersion ?? 0, freshStateVersion),
-      identityPending: existing?.identityPending,
       projectionPending: existing?.projectionPending,
       requiredTurnId: existing?.requiredTurnId,
       // The baseline fence must survive transcript application: an
@@ -3566,8 +3810,6 @@ export class AevatarAssistantTransport implements AssistantTransport {
       requiredAssistantBaselineIds: existing?.requiredAssistantBaselineIds,
       projectionStalledAt: existing?.projectionStalledAt,
       lastWireObservationAt: existing?.lastWireObservationAt,
-      sessionId: existing?.sessionId,
-      createRequest: existing?.createRequest,
     };
     this.applyMaterializationObservation(stored, body, entries);
     this.conversations.set(conversationId, stored);
@@ -3594,19 +3836,15 @@ export class AevatarAssistantTransport implements AssistantTransport {
         : freshStateVersion >=
           Math.max(1, positiveStateVersion(stored.stateVersion) ?? 1);
     if (!fenceSatisfied || !containsRequiredTurn) return;
-    stored.identityPending = false;
     stored.projectionPending = false;
     stored.projectionStalledAt = undefined;
     stored.requiredAssistantBaselineIds = undefined;
-    const receipt = findReceiptByConversation(stored.conversation.id);
-    if (receipt)
-      retireReceiptAfterMaterialization(receipt.commandId, this.now());
   }
 
   private newRun(
     onEvent: (event: TurnEvent) => void,
     turnId: string | null = null,
-    protocol: "actor" | "workflow" = "actor",
+    protocol: "actor" = "actor",
     clientRequestId: string = crypto.randomUUID(),
   ): RunningTurn {
     return {
@@ -3637,6 +3875,8 @@ export class AevatarAssistantTransport implements AssistantTransport {
       promptedConnectSlugs: new Map(),
       promptedActionIds: new Map(),
       waitingForApproval: false,
+      pendingApprovalRequestId: null,
+      pendingInputRequestId: null,
       awaitingSignal: false,
       watchdog: null,
       deliveryStarted: false,
@@ -3645,8 +3885,6 @@ export class AevatarAssistantTransport implements AssistantTransport {
       deliveryProtocolError: null,
       actionContinuation: null,
       optimisticMessageAppended: false,
-      createRecoveryStarted: false,
-      createRecoveryMaterialized: false,
       activeWireTelemetry: null,
     };
   }
@@ -3681,11 +3919,7 @@ export class AevatarAssistantTransport implements AssistantTransport {
       ) {
         stored.lastLocalTurnCompletedAt = this.now();
         stored.lastWireObservationAt = undefined;
-        if (
-          run.protocol === "workflow" &&
-          (stored.identityPending === true ||
-            stored.conversation.id.startsWith(WORKFLOW_CONVERSATION_PREFIX))
-        ) {
+        if (TYPED_SERVER_CONVERSATION_ID_PATTERN.test(stored.conversation.id)) {
           stored.projectionPending = true;
           stored.requiredTurnId =
             run.serverAnswerExpectation === "none" ? null : run.turnId;
@@ -3724,56 +3958,6 @@ export class AevatarAssistantTransport implements AssistantTransport {
     }
   }
 
-  /**
-   * Caller half of the workflow-chat turn contract (`WorkflowChatTurnRequest`
-   * server-side; NyxID builds the strict upstream `/api/chat` body from it).
-   * A `chatc-…` conversation continues with the last observed `stateVersion`
-   * as the read fence; a placeholder (or missing) id starts a new
-   * conversation. `commandId` is create-only; Aevatar owns continuation
-   * command identities and uses the observed state version as their fence.
-   */
-  private workflowTurnBody(
-    conversationId: string,
-    run: RunningTurn,
-    prompt: string,
-  ): string {
-    const stored = this.conversations.get(conversationId);
-    const sessionId = this.conversationSessionId(conversationId);
-    const serverId = stored?.conversation.id;
-    if (serverId && serverId.startsWith(WORKFLOW_CONVERSATION_PREFIX)) {
-      const stateVersion = positiveStateVersion(stored.stateVersion);
-      if (stateVersion === undefined) {
-        throw new AssistantProtocolError(
-          "Conversation history is still synchronizing.",
-        );
-      }
-      return JSON.stringify({
-        prompt,
-        conversationId: serverId,
-        minimumStateVersion: stateVersion,
-        sessionId,
-      });
-    }
-    return JSON.stringify({
-      prompt,
-      commandId: run.clientRequestId,
-      sessionId,
-    });
-  }
-
-  /**
-   * The conversation's session handle, minted on first use and reused for
-   * every later turn. Conversations adopted from the server list have no
-   * stored id yet, so this fills one in lazily rather than leaving the field
-   * absent for legacy `chatc-…` rows.
-   */
-  private conversationSessionId(conversationId: string): string {
-    const stored = this.conversations.get(conversationId);
-    if (!stored) return crypto.randomUUID();
-    stored.sessionId ??= crypto.randomUUID();
-    return stored.sessionId;
-  }
-
   private latestAssistantTurnId(stored: StoredConversation): string | null {
     for (
       let index = stored.turnState.messages.length - 1;
@@ -3788,396 +3972,6 @@ export class AevatarAssistantTransport implements AssistantTransport {
     return safeTurnId(stored.requiredTurnId);
   }
 
-  private async readWorkflowHistory(
-    conversationId: string,
-    signal: AbortSignal,
-  ): Promise<{
-    readonly body: AevatarHistoryResponse;
-    readonly entries: readonly AevatarHistoryEntry[];
-    readonly stateVersion: number | undefined;
-  }> {
-    const body = await assistantApi.get<AevatarHistoryResponse>(
-      `${ASSISTANT_PREFIX}/conversations/${conversationId}`,
-      signal,
-    );
-    return {
-      body,
-      entries: readHistoryEntries(body),
-      stateVersion: historyStateVersion(body),
-    };
-  }
-
-  private async reconcileWorkflowHistory(
-    conversationId: string,
-    minimumStateVersion: number,
-    requiredTurnId: string | null,
-    signal: AbortSignal,
-  ): Promise<{
-    readonly body: AevatarHistoryResponse;
-    readonly stateVersion: number;
-  } | null> {
-    for (const delayMs of HISTORY_RECONCILIATION_DELAYS_MS) {
-      await abortableDelay(delayMs, signal);
-      try {
-        const observation = await this.readWorkflowHistory(
-          conversationId,
-          signal,
-        );
-        if (
-          observation.stateVersion !== undefined &&
-          observation.stateVersion >= minimumStateVersion &&
-          historyIncludesAssistantTurn(observation.entries, requiredTurnId)
-        ) {
-          return {
-            body: observation.body,
-            stateVersion: observation.stateVersion,
-          };
-        }
-      } catch (error) {
-        if (signal.aborted) throw error;
-      }
-    }
-    return null;
-  }
-
-  private decodeCreateRecovery(value: AevatarCreateRecoveryResponse): {
-    readonly conversationId: string;
-    readonly stateVersion: number;
-    readonly turnId: string;
-  } {
-    const conversationId =
-      typeof value.conversationId === "string" ? value.conversationId : "";
-    const turnId = safeTurnId(value.turnId);
-    const rawVersion = value.stateVersion;
-    const stateVersion =
-      typeof rawVersion === "number"
-        ? rawVersion
-        : typeof rawVersion === "string"
-          ? Number(rawVersion)
-          : NaN;
-    if (
-      !WORKFLOW_SERVER_CONVERSATION_ID_PATTERN.test(conversationId) ||
-      !turnId ||
-      !Number.isSafeInteger(stateVersion) ||
-      stateVersion < 0
-    ) {
-      throw new AssistantProtocolError(
-        "Chat create recovery returned an invalid conversation identity.",
-      );
-    }
-    return { conversationId, stateVersion, turnId };
-  }
-
-  private async pollCreateRecovery(
-    commandId: string,
-    signal: AbortSignal,
-  ): Promise<ReturnType<
-    AevatarAssistantTransport["decodeCreateRecovery"]
-  > | null> {
-    for (const delayMs of HISTORY_RECONCILIATION_DELAYS_MS) {
-      await abortableDelay(delayMs, signal);
-      try {
-        const response = await assistantApi.get<AevatarCreateRecoveryResponse>(
-          `${ASSISTANT_PREFIX}/conversations/create-recovery/${encodeURIComponent(commandId)}`,
-          signal,
-        );
-        return this.decodeCreateRecovery(response);
-      } catch (error) {
-        if (signal.aborted) throw error;
-        if (error instanceof ApiError && error.status === 404) continue;
-        throw error;
-      }
-    }
-    return null;
-  }
-
-  private async recoverWorkflowCreate(
-    conversationId: string,
-    run: RunningTurn,
-    signal: AbortSignal,
-  ): Promise<boolean> {
-    const scopeId = useAuthStore.getState().user?.id;
-    if (!scopeId) return false;
-    const recovery = await this.pollCreateRecovery(run.clientRequestId, signal);
-    if (
-      !recovery ||
-      useAuthStore.getState().user?.id !== scopeId ||
-      this.deletedConversationIds.has(conversationId)
-    ) {
-      return false;
-    }
-
-    const stored = this.conversations.get(conversationId);
-    if (!stored) return false;
-    const priorId = stored.conversation.id;
-    if (
-      priorId.startsWith(WORKFLOW_CONVERSATION_PREFIX) &&
-      priorId !== recovery.conversationId
-    ) {
-      throw new AssistantProtocolError(
-        "Chat create recovery changed the conversation identity.",
-      );
-    }
-
-    const reconciled = await this.reconcileWorkflowHistory(
-      recovery.conversationId,
-      Math.max(1, recovery.stateVersion),
-      recovery.turnId,
-      signal,
-    );
-    if (
-      !reconciled ||
-      useAuthStore.getState().user?.id !== scopeId ||
-      this.deletedConversationIds.has(conversationId)
-    )
-      return false;
-
-    stored.conversation = {
-      ...stored.conversation,
-      id: recovery.conversationId,
-    };
-    stored.identityPending = false;
-    stored.projectionPending = true;
-    stored.requiredTurnId = recovery.turnId;
-    stored.stateVersion = Math.max(
-      stored.stateVersion ?? 0,
-      recovery.stateVersion,
-      reconciled.stateVersion,
-    );
-    stored.createRequest = undefined;
-    adoptReceiptIdentity(
-      run.clientRequestId,
-      recovery.conversationId,
-      recovery.stateVersion,
-      this.now(),
-    );
-    this.conversations.set(recovery.conversationId, stored);
-    this.conversationAliases.set(conversationId, recovery.conversationId);
-    if (this.activeConversationId === conversationId) {
-      this.activeConversationId = recovery.conversationId;
-    }
-    // RUN_STARTED may have supplied a run-actor id from a different identity
-    // space. Chat History owns the recovered turn identity.
-    run.turnId = recovery.turnId;
-    const authoritative = this.applyHistoryResponse(
-      recovery.conversationId,
-      reconciled.body,
-    );
-    run.createRecoveryMaterialized = true;
-    this.conversations.set(conversationId, authoritative);
-    return true;
-  }
-
-  private startCreateRecoveryInBackground(
-    conversationId: string,
-    run: RunningTurn,
-  ): void {
-    if (run.createRecoveryStarted || run.protocol !== "workflow") return;
-    if (!this.workflowCreateNeedsRecovery(conversationId)) return;
-    run.createRecoveryStarted = true;
-    const recoveryController = this.scopeController();
-    void this.recoverWorkflowCreate(
-      conversationId,
-      run,
-      recoveryController.signal,
-    )
-      .catch(() => undefined)
-      .finally(() => this.releaseScopeController(recoveryController));
-  }
-
-  private workflowCreateNeedsRecovery(conversationId: string): boolean {
-    return Boolean(
-      this.conversations
-        .get(conversationId)
-        ?.conversation.id.startsWith(PENDING_WORKFLOW_CONVERSATION_PREFIX),
-    );
-  }
-
-  private async streamWorkflowTurn(
-    conversationId: string,
-    run: RunningTurn,
-    prompt: string,
-  ): Promise<void> {
-    const stored = this.conversations.get(conversationId);
-    if (!stored) return;
-    const isCreate = !stored.conversation.id.startsWith(
-      WORKFLOW_CONVERSATION_PREFIX,
-    );
-
-    if (!isCreate && positiveStateVersion(stored.stateVersion) === undefined) {
-      const reconciled = await this.reconcileWorkflowHistory(
-        stored.conversation.id,
-        1,
-        this.latestAssistantTurnId(stored),
-        run.controller.signal,
-      );
-      if (run.finished || run.controller.signal.aborted) return;
-      if (!reconciled) {
-        this.finishTurn(conversationId, run, "failed", {
-          code: "history_synchronizing",
-          message:
-            "Conversation history is still synchronizing. Try again shortly.",
-        });
-        return;
-      }
-      this.applyHistoryResponse(stored.conversation.id, reconciled.body);
-    }
-
-    if (run.finished || run.controller.signal.aborted) return;
-    this.appendOptimisticUserMessage(conversationId, run, prompt);
-    let finalFailure = {
-      code: "network_error",
-      message: "The assistant stream could not be reached. Try again.",
-    };
-    let reservationDelayIndex = 0;
-
-    while (!run.finished && !run.controller.signal.aborted) {
-      this.resetDeliveryState(run);
-      const bodyText = this.workflowTurnBody(conversationId, run, prompt);
-      const stream = this.startChatStream(
-        conversationId,
-        run,
-        WORKFLOW_CHAT_URL,
-        bodyText,
-      );
-      const response = await stream.headers;
-      if (response.kind === "cancelled") return;
-      if (response.kind === "network_error") {
-        finalFailure = { code: response.code, message: response.message };
-        if (isCreate && this.workflowCreateNeedsRecovery(conversationId)) {
-          run.createRecoveryStarted = true;
-          const recoveryController = this.scopeController();
-          try {
-            if (
-              await this.recoverWorkflowCreate(
-                conversationId,
-                run,
-                recoveryController.signal,
-              )
-            ) {
-              this.settleRecoveredWorkflowCreate(conversationId, run);
-              return;
-            }
-          } catch (error) {
-            if (error instanceof AssistantProtocolError) {
-              finalFailure = {
-                code: "stream_protocol_error",
-                message: error.message,
-              };
-            }
-          } finally {
-            this.releaseScopeController(recoveryController);
-          }
-        }
-        break;
-      }
-      if (response.kind === "http_error") {
-        const error = streamStartError(response.status, response.body);
-        if (
-          !isCreate &&
-          response.status === 503 &&
-          error.code === HISTORY_RESERVATION_UNAVAILABLE &&
-          reservationDelayIndex < RESERVATION_RETRY_DELAYS_MS.length
-        ) {
-          let refreshed = false;
-          let refreshFailed = false;
-          while (reservationDelayIndex < RESERVATION_RETRY_DELAYS_MS.length) {
-            const delayMs = RESERVATION_RETRY_DELAYS_MS[reservationDelayIndex]!;
-            reservationDelayIndex += 1;
-            await abortableDelay(delayMs, run.controller.signal);
-            try {
-              const observation = await this.readWorkflowHistory(
-                stored.conversation.id,
-                run.controller.signal,
-              );
-              const fence = positiveStateVersion(stored.stateVersion) ?? 1;
-              if (
-                observation.stateVersion === undefined ||
-                observation.stateVersion < fence
-              ) {
-                continue;
-              }
-              this.applyHistoryResponse(
-                stored.conversation.id,
-                observation.body,
-              );
-              refreshed = true;
-              break;
-            } catch (refreshError) {
-              if (run.controller.signal.aborted) return;
-              if (isRetryableHistoryRefreshError(refreshError)) {
-                continue;
-              }
-              finalFailure = {
-                code: "history_refresh_failed",
-                message:
-                  refreshError instanceof Error
-                    ? refreshError.message
-                    : "Conversation history could not be refreshed.",
-              };
-              refreshFailed = true;
-              break;
-            }
-          }
-          if (refreshed) continue;
-          if (refreshFailed) break;
-        }
-        if (
-          isCreate &&
-          (response.status === 400 ||
-            response.status === 401 ||
-            response.status === 403 ||
-            response.status === 422)
-        ) {
-          stored.identityPending = false;
-          stored.projectionPending = false;
-          deleteReceipt(run.clientRequestId);
-        }
-        finalFailure = error;
-        break;
-      }
-
-      const result = await this.consumeTurnStream(conversationId, run, stream);
-      if (result.kind === "settled" || run.finished) return;
-      finalFailure = result.error;
-      if (
-        isCreate &&
-        this.workflowCreateNeedsRecovery(conversationId) &&
-        result.kind === "retryable"
-      ) {
-        run.createRecoveryStarted = true;
-        const recoveryController = this.scopeController();
-        try {
-          if (
-            await this.recoverWorkflowCreate(
-              conversationId,
-              run,
-              recoveryController.signal,
-            )
-          ) {
-            this.settleRecoveredWorkflowCreate(conversationId, run);
-            return;
-          }
-        } catch (error) {
-          if (error instanceof AssistantProtocolError) {
-            finalFailure = {
-              code: "stream_protocol_error",
-              message: error.message,
-            };
-          }
-        } finally {
-          this.releaseScopeController(recoveryController);
-        }
-      }
-      break;
-    }
-
-    if (run.finished || run.controller.signal.aborted) return;
-    this.closeOpenMessage(conversationId, run);
-    this.finalizeActivity(conversationId, run, "failed");
-    this.finishTurn(conversationId, run, "failed", finalFailure);
-  }
-
   private async streamTurn(
     conversationId: string,
     run: RunningTurn,
@@ -4187,40 +3981,22 @@ export class AevatarAssistantTransport implements AssistantTransport {
     // arrive upstream before the fence commits.
     await this.awaitPendingStop(conversationId);
 
-    if (run.protocol === "workflow") {
-      try {
-        await this.streamWorkflowTurn(conversationId, run, prompt);
-      } catch (error) {
-        if (run.finished || run.controller.signal.aborted) return;
-        this.finishTurn(conversationId, run, "failed", {
-          code:
-            error instanceof AssistantProtocolError
-              ? "stream_protocol_error"
-              : "network_error",
-          message:
-            error instanceof Error
-              ? error.message
-              : "The assistant stream could not be reached. Try again.",
-        });
-      }
-      return;
-    }
-
     let finalFailure = {
       code: "network_error",
       message: "The assistant stream could not be reached. Try again.",
     };
 
-    // Actor delivery keeps its existing idempotent replay contract. Workflow
-    // retries are handled separately above because their continuation body and
-    // reservation-fence semantics differ.
+    const stored = this.conversations.get(conversationId);
+    const isFirstTurn =
+      stored?.conversation.id.startsWith(AEVATAR_DRAFT_CONVERSATION_PREFIX) ===
+      true;
     const target = {
       url: TYPED_CHAT_URL,
       bodyText: JSON.stringify({
         // Aevatar dispatches `/api/chat` on this discriminator; the comparison
         // is ordinal, so the exact lowercase value matters.
         type: "text",
-        conversationId,
+        ...(isFirstTurn ? {} : { conversationId: stored?.conversation.id }),
         prompt,
         clientRequestId: run.clientRequestId,
       }),
@@ -4398,23 +4174,6 @@ export class AevatarAssistantTransport implements AssistantTransport {
         return failure;
       }
       if (run.deliveryTerminal) {
-        if (
-          run.protocol === "workflow" &&
-          this.workflowCreateNeedsRecovery(conversationId)
-        ) {
-          const error =
-            run.deliveryTerminal.kind === "error"
-              ? run.deliveryTerminal.error
-              : {
-                  code: "stream_protocol_error",
-                  message: "Chat completed without a conversation context.",
-                };
-          this.recordStreamTransportOutcome(stream, error.code);
-          return {
-            kind: "retryable",
-            error,
-          };
-        }
         this.recordStreamTransportOutcome(
           stream,
           run.deliveryTerminal.kind === "finished"
@@ -4456,18 +4215,6 @@ export class AevatarAssistantTransport implements AssistantTransport {
     } finally {
       this.clearWatchdog(run);
     }
-  }
-
-  private async consumeApprovalContinuation(
-    conversationId: string,
-    run: RunningTurn,
-    stream: ChatStreamRequestHandle,
-  ): Promise<void> {
-    const result = await this.consumeTurnStream(conversationId, run, stream);
-    if (result.kind === "settled" || run.finished) return;
-    this.closeOpenMessage(conversationId, run);
-    this.finalizeActivity(conversationId, run, "failed");
-    this.finishTurn(conversationId, run, "failed", result.error);
   }
 
   private startChatStream(
@@ -4726,10 +4473,6 @@ export class AevatarAssistantTransport implements AssistantTransport {
       type !== "RUN_ERROR" &&
       type !== "RUN_STOPPED"
     ) {
-      // The workflow stream legitimately trails its terminal with the
-      // projection snapshot and late `aevatar.raw.observed` envelopes;
-      // they are not renderable and not an ordering fault.
-      if (run.protocol === "workflow") return;
       run.deliveryProtocolError = {
         code: "stream_protocol_error",
         message: "The assistant stream sent data after its terminal frame.",
@@ -4738,39 +4481,62 @@ export class AevatarAssistantTransport implements AssistantTransport {
     }
 
     if (type !== "RUN_STARTED" && !isKeepalive && !run.deliveryStarted) {
-      // Workflow streams open with `custom aevatar.chat.context` (which
-      // starts the delivery below) and `custom aevatar.run.context` BEFORE
-      // `runStarted` — pre-start CUSTOM frames are the contract there, not
-      // a fault.
-      if (run.protocol !== "workflow" || type !== "CUSTOM") {
-        run.deliveryProtocolError ??= {
-          code: "stream_protocol_error",
-          message:
-            "The assistant stream sent data before identifying the turn.",
-        };
-        return;
-      }
+      run.deliveryProtocolError ??= {
+        code: "stream_protocol_error",
+        message: "The assistant stream sent data before identifying the turn.",
+      };
+      return;
     }
 
     switch (type) {
       case "RUN_STARTED": {
-        if (run.protocol === "workflow" && run.deliveryStarted) {
-          // `aevatar.chat.context` already identified the turn; this frame
-          // only contributes the run actor identity (`runId`), which the
-          // workflow surface uses for run-level control, not as a turn id.
-          return;
-        }
-        const authoritativeTurnId = safeTurnId(
-          frame.turnId ?? frame.runStarted?.turnId ?? frame.runStarted?.runId,
-        );
-        if (run.deliveryStarted || !authoritativeTurnId) {
+        const authoritativeActorId =
+          typeof frame.actorId === "string" &&
+          TYPED_SERVER_CONVERSATION_ID_PATTERN.test(frame.actorId)
+            ? frame.actorId
+            : null;
+        const authoritativeTurnId = safeTurnId(frame.turnId);
+        const nestedThreadId = frame.runStarted?.threadId;
+        const nestedRunId = frame.runStarted?.runId;
+        const identityConflict =
+          !authoritativeActorId ||
+          !authoritativeTurnId ||
+          (nestedThreadId !== undefined &&
+            nestedThreadId !== authoritativeActorId) ||
+          (nestedRunId !== undefined && nestedRunId !== authoritativeTurnId);
+        if (run.deliveryStarted || identityConflict) {
           run.deliveryProtocolError ??= {
             code: "stream_protocol_error",
             message: run.deliveryStarted
               ? "The assistant stream started the same delivery more than once."
-              : "The assistant stream did not provide a valid turn id.",
+              : "The assistant stream returned missing or conflicting actor and turn identities.",
           };
           return;
+        }
+        const stored = this.conversations.get(conversationId);
+        const currentActorId = stored?.conversation.id;
+        if (
+          !stored ||
+          (currentActorId !== authoritativeActorId &&
+            !currentActorId?.startsWith(AEVATAR_DRAFT_CONVERSATION_PREFIX))
+        ) {
+          run.deliveryProtocolError = {
+            code: "stream_protocol_error",
+            message:
+              "The assistant stream belongs to a different conversation actor.",
+          };
+          return;
+        }
+        if (currentActorId !== authoritativeActorId) {
+          stored.conversation = {
+            ...stored.conversation,
+            id: authoritativeActorId,
+          };
+          this.conversations.set(authoritativeActorId, stored);
+          this.conversationAliases.set(conversationId, authoritativeActorId);
+          if (this.activeConversationId === conversationId) {
+            this.activeConversationId = authoritativeActorId;
+          }
         }
         run.deliveryStarted = true;
         if (run.turnId && run.turnId !== authoritativeTurnId) {
@@ -4925,18 +4691,6 @@ export class AevatarAssistantTransport implements AssistantTransport {
           };
           return;
         }
-        // Workflow terminal payload: when nothing streamed (no text deltas
-        // and no `RoleChatSessionCompletedEvent` mined en route), the run
-        // result is the only carrier of the assistant's reply.
-        const output = frame.runFinished?.result?.output;
-        if (
-          run.protocol === "workflow" &&
-          !run.sawText &&
-          typeof output === "string" &&
-          output.trim()
-        ) {
-          this.emitStaticText(conversationId, run, output);
-        }
         this.recordDeliveryTerminal(run, {
           kind: "finished",
           status: status === "blocked" ? "blocked" : "completed",
@@ -4951,13 +4705,13 @@ export class AevatarAssistantTransport implements AssistantTransport {
         return;
       }
       case "STEP_STARTED": {
-        const name = frame.stepStarted?.stepName ?? "workflow-step";
+        const name = frame.stepStarted?.stepName ?? "actor-step";
         this.startRunStep(conversationId, run, name, name);
         return;
       }
       case "STEP_FINISHED": {
         const step = frame.stepFinished ?? {};
-        const name = step.stepName ?? "workflow-step";
+        const name = step.stepName ?? "actor-step";
         this.finishRunStep(
           conversationId,
           run,
@@ -4968,10 +4722,15 @@ export class AevatarAssistantTransport implements AssistantTransport {
         return;
       }
       case "STATE_SNAPSHOT":
-        // Workflow projection state; telemetry only, never rendered.
+        // Generic AG-UI snapshot telemetry is not the typed actor authority.
         return;
       case "CUSTOM": {
-        this.handleCustomFrame(conversationId, run, frame.custom ?? {});
+        this.handleCustomFrame(
+          conversationId,
+          run,
+          frame.custom ?? {},
+          frame.sequence,
+        );
         return;
       }
       default:
@@ -5015,6 +4774,7 @@ export class AevatarAssistantTransport implements AssistantTransport {
     conversationId: string,
     run: RunningTurn,
     custom: CustomEnvelope,
+    sequence?: string | number,
   ): void {
     const name = custom.name ?? "";
     const payload = unpackAny(custom.payload);
@@ -5038,7 +4798,7 @@ export class AevatarAssistantTransport implements AssistantTransport {
             conversationId,
             run,
             request.data,
-            fingerprintStableRequestInput(request.data.params),
+            fingerprintActionRequest(request.data),
           );
         } else {
           const unsupported = recoverUnsupportedAssistantActionRequest(payload);
@@ -5053,6 +4813,33 @@ export class AevatarAssistantTransport implements AssistantTransport {
         }
         return;
       }
+      case "nyxid.task.snapshot":
+      case "nyxid.task.step.changed":
+        this.applyLiveTaskFrame(conversationId, run, name, payload, sequence);
+        return;
+      case "nyxid.input.request": {
+        const request = assistantInputRequestSchema.safeParse(payload);
+        if (request.success) {
+          this.addInputCard(conversationId, run, request.data);
+        }
+        return;
+      }
+      case "nyxid.input.changed":
+        this.applyInputChanged(conversationId, run, payload);
+        return;
+      case "nyxid.approval.request": {
+        if (payload && typeof payload === "object") {
+          this.addApprovalCard(
+            conversationId,
+            run,
+            payload as ToolApprovalPayload,
+          );
+        }
+        return;
+      }
+      case "nyxid.approval.changed":
+        this.applyApprovalChanged(conversationId, run, payload);
+        return;
       case "aevatar.tool_approval.pending":
         this.addApprovalCard(
           conversationId,
@@ -5060,318 +4847,60 @@ export class AevatarAssistantTransport implements AssistantTransport {
           payload as ToolApprovalPayload,
         );
         return;
-      case "aevatar.human_input.request":
-        // NOT a ToolApprovalPayload. `WorkflowHumanInputRequestCustomPayload`
-        // has no requestId/approvalRequestId/commandId at all, so casting it
-        // to the approval shape made `addApprovalCard` bail on its identity
-        // guard and drop the suspension silently — the user saw a turn that
-        // simply stopped. Its identity is the step, and its prose is
-        // `prompt`/`content`, not `message`/`body`.
-        this.addHumanInputCard(conversationId, run, payload);
-        return;
-      case "aevatar.step.request": {
-        const step = payload as StepPayload;
-        const key = step.stepId ?? step.stepType ?? newId("step");
-        this.startRunStep(conversationId, run, key, key);
-        return;
-      }
-      case "aevatar.step.completed": {
-        const step = payload as StepPayload;
-        // `WorkflowStepCompletedCustomPayload.success` is a proto3 bool, so a
-        // FAILED step omits it entirely. Absence is `false` here, not "no
-        // signal" — the earlier `stepFinished` envelope frame (which has no
-        // success member at all) already marked the row done, and this frame
-        // is the authoritative correction.
-        const succeeded = protoBool(step.success);
-        this.finishRunStep(
-          conversationId,
-          run,
-          step.stepId ?? "",
-          succeeded,
-          succeeded ? "Completed" : "Step failed",
-        );
-        return;
-      }
-      case "aevatar.workflow.waiting_signal":
-        // A signal wait is an upstream suspension, not a hang: the run is
-        // idle on purpose and may stay idle far longer than the client's
-        // progress watchdog. Leaving the watchdog armed made NyxID stop a
-        // healthy run and report `upstream_progress_timeout`. Held separate
-        // from `waitingForApproval`, which additionally means "a card is
-        // decidable" and drives the approval-continuation paths.
-        run.awaitingSignal = true;
-        this.clearWatchdog(run);
-        if (run.turnId) {
-          this.emit(conversationId, run, {
-            cursor: this.nextCursor(run),
-            event: "turn.status",
-            turn_id: run.turnId,
-            status: "waiting",
-          });
-        }
-        return;
-      case "aevatar.workflow.signal.buffered":
-        // The awaited signal landed: the run is live again. Re-arm HERE rather
-        // than leaving it to the next frame — the per-frame `armWatchdog` at
-        // the top of this dispatch already ran while `awaitingSignal` was
-        // still true, so it cleared the timer without setting one. If upstream
-        // then stalls, no later frame arrives to arm it and the run hangs
-        // until the user presses Stop.
-        run.awaitingSignal = false;
-        this.armWatchdog(conversationId, run);
-        if (run.turnId) {
-          this.emit(conversationId, run, {
-            cursor: this.nextCursor(run),
-            event: "turn.status",
-            turn_id: run.turnId,
-            status: "running",
-          });
-        }
-        return;
-      case "aevatar.media.chunk":
-        // `MediaContentEvent{session_id, agent_id, part}` — the media fields
-        // are nested under `part`, and the location field is `uri`. NyxID
-        // previously only read a FLAT top-level `mediaContent` envelope arm,
-        // which the workflow proto does not define, so studio attachments
-        // were dropped outright.
-        this.addMediaArtifact(conversationId, run, mediaPartPayload(payload));
-        return;
-      case "aevatar.chat.context":
-        this.applyWorkflowChatContext(
-          conversationId,
-          run,
-          payload as WorkflowChatContextPayload,
-        );
-        return;
       case "aevatar.run.context":
       case "demo.conversation.context":
         // Correlation ids only; nothing renders.
-        return;
-      case "aevatar.raw.observed":
-        this.applyObservedCompletion(conversationId, run, payload);
         return;
       default:
         return;
     }
   }
 
-  /**
-   * Batched run completion (`RoleChatSessionCompletedEvent`): the engine
-   * envelope itself is telemetry the browser must not render (PRD §3.8), so
-   * only its presentation content is mined — tool calls/receipts into the
-   * step ledger, the final content as fallback text when nothing streamed,
-   * and the model name. `reasoningContent` is never read.
-   */
-  /**
-   * First frame of a workflow-chat turn: the chat-history reservation's
-   * identity. Starts the delivery (the turn id lives here, not in
-   * `runStarted`), records the continuation watermark, and — on a new
-   * conversation's first turn — aliases the client placeholder id to the
-   * server `chatc-…` id so every later address reaches the server-backed
-   * conversation.
-   */
-  private applyWorkflowChatContext(
+  private applyLiveTaskFrame(
     conversationId: string,
     run: RunningTurn,
-    payload: WorkflowChatContextPayload,
+    name: "nyxid.task.snapshot" | "nyxid.task.step.changed",
+    payload: unknown,
+    sequence: unknown,
   ): void {
-    if (run.protocol !== "workflow") return;
-
     const stored = this.conversations.get(conversationId);
-    const activeScopeId = useAuthStore.getState().user?.id;
-    // The console always knows its active scope. NyxID can receive a stream
-    // before the auth store hydrates, so enforce the comparison only when the
-    // local user id is known pending a live production capture.
-    if (
-      activeScopeId &&
-      (typeof payload.scopeId !== "string" || payload.scopeId !== activeScopeId)
-    ) {
-      run.deliveryProtocolError = {
-        code: "stream_protocol_error",
-        message: "The assistant stream returned a context for another scope.",
-      };
-      return;
-    }
-    const serverId =
-      typeof payload.conversationId === "string" &&
-      WORKFLOW_SERVER_CONVERSATION_ID_PATTERN.test(payload.conversationId)
-        ? payload.conversationId
-        : null;
-    const priorId = stored?.conversation.id;
-    // Fail closed when the create turn never names its server conversation:
-    // accepting the turn would leave the record on its `workflow-pending-…`
-    // placeholder, so the NEXT send would build another create body and mint
-    // a SECOND upstream conversation instead of continuing this one.
-    if (
-      !serverId &&
-      priorId !== undefined &&
-      !priorId.startsWith(WORKFLOW_CONVERSATION_PREFIX)
-    ) {
-      run.deliveryProtocolError ??= {
-        code: "stream_protocol_error",
-        message:
-          "The assistant stream did not provide a valid conversation id.",
-      };
-      return;
-    }
-    // A replay must resolve to the conversation it already adopted. Silently
-    // re-keying would orphan the first server row while later events stay
-    // attributed to the old identity.
-    if (
-      serverId &&
-      priorId !== undefined &&
-      priorId !== serverId &&
-      priorId.startsWith(WORKFLOW_CONVERSATION_PREFIX)
-    ) {
-      run.deliveryProtocolError = {
-        code: "stream_protocol_error",
-        message: "The assistant replay changed the conversation id.",
-      };
-      return;
-    }
-    if (stored && serverId && stored.conversation.id !== serverId) {
-      const commandId = stored.createRequest?.commandId ?? run.clientRequestId;
-      stored.conversation = { ...stored.conversation, id: serverId };
-      stored.identityPending = false;
-      stored.createRequest = undefined;
-      this.conversations.set(serverId, stored);
-      this.conversationAliases.set(conversationId, serverId);
-      adoptReceiptIdentity(commandId, serverId, undefined, this.now());
-      if (this.activeConversationId === conversationId) {
-        this.activeConversationId = serverId;
-      }
-    }
-
-    // A create turn carries no `stateVersion` member at all (elided int64
-    // default), while every continuation carries one. Absent means "no
-    // watermark yet", not malformed. Rejecting absence broke the first turn of
-    // every new conversation while continuations kept working.
-    const stateVersion = chatContextStateVersion(payload.stateVersion);
-    if (stateVersion === null) {
-      run.deliveryProtocolError = {
-        code: "stream_protocol_error",
-        message: "The assistant stream returned an invalid state version.",
-      };
-      return;
-    }
-    if (stored && stateVersion > 0) {
-      stored.stateVersion = Math.max(stored.stateVersion ?? 0, stateVersion);
-      advanceReceiptFence(serverId ?? stored.conversation.id, stateVersion);
-    }
-
-    if (run.deliveryStarted) return;
-    const turnId = safeTurnId(payload.turnId);
-    if (!turnId) {
-      run.deliveryProtocolError = {
-        code: "stream_protocol_error",
-        message: "The assistant stream did not provide a valid turn id.",
-      };
-      return;
-    }
-    // Same replay guard as the conversation id: a retry that comes back on a
-    // DIFFERENT turn is not the turn this run is streaming, and attributing
-    // its events to the original turn id would interleave two turns.
-    if (run.turnId && run.turnId !== turnId) {
-      run.deliveryProtocolError = {
-        code: "stream_protocol_error",
-        message: "The assistant replay changed the turn id.",
-      };
-      return;
-    }
-    if (stored) stored.requiredTurnId = turnId;
-    run.deliveryStarted = true;
-    run.turnId ??= turnId;
-    if (!run.turnAnnounced) {
-      run.turnAnnounced = true;
+    if (!stored) return;
+    const projection = reduceTaskFrame(
+      stored.taskProjection ?? createTaskProjection(conversationId),
+      name,
+      payload,
+      sequence,
+    );
+    if (projection === stored.taskProjection || !projection.task) return;
+    stored.taskProjection = projection;
+    const existing = stored.turnState.messages
+      .flatMap((message) => message.blocks)
+      .find(
+        (block): block is TaskPlanContentBlock =>
+          block.type === "task_plan" &&
+          block.plan.taskId === projection.task?.taskId,
+      );
+    if (existing) {
       this.emit(conversationId, run, {
         cursor: this.nextCursor(run),
-        event: "turn.status",
-        turn_id: turnId,
-        status: "running",
+        event: "block.updated",
+        block_id: existing.block_id,
+        patch: {
+          state_version: projection.stateVersion,
+          progress_sequence: projection.progressSequence,
+          plan: projection.task,
+        },
       });
-    }
-  }
-
-  private applyObservedCompletion(
-    conversationId: string,
-    run: RunningTurn,
-    payload: Record<string, unknown>,
-  ): void {
-    const typeUrl =
-      typeof payload["payloadTypeUrl"] === "string"
-        ? payload["payloadTypeUrl"]
-        : "";
-    const observedType = typeUrl.split(/[/.]/).at(-1) ?? "";
-    if (observedType !== "RoleChatSessionCompletedEvent") return;
-    const completion = unpackAny(payload["payload"]) as RoleChatCompletion;
-
-    const receipts = new Map(
-      (completion.toolReceipts ?? [])
-        .filter((receipt) => receipt.callId)
-        .map((receipt) => [receipt.callId ?? "", receipt]),
-    );
-    for (const call of completion.toolCalls ?? []) {
-      const callId = call.callId ?? newId("tool");
-      this.startRunStep(conversationId, run, callId, call.toolName ?? "tool");
-      const receipt = receipts.get(callId);
-      receipts.delete(callId);
-      this.applyToolReceipt(conversationId, run, callId, receipt);
-    }
-    // Receipts without a matching call (defensive: the reference client
-    // renders both sides independently).
-    for (const [callId, receipt] of receipts) {
-      this.startRunStep(
-        conversationId,
-        run,
-        callId,
-        receipt.toolName ?? "tool",
-      );
-      this.applyToolReceipt(conversationId, run, callId, receipt);
-    }
-
-    if (completion.content && !run.sawText) {
-      this.emitStaticText(conversationId, run, completion.content);
-    }
-    this.applyUsage(conversationId, {
-      ...(completion.usage ?? {}),
-      model: completion.model ?? completion.usage?.model ?? null,
-    });
-  }
-
-  private applyToolReceipt(
-    conversationId: string,
-    run: RunningTurn,
-    callId: string,
-    receipt: RoleChatToolReceipt | undefined,
-  ): void {
-    if (!receipt) {
-      this.finishRunStep(conversationId, run, callId, true, "Completed");
       return;
     }
-    // `AgentToolReceiptStatus` is an enum: the failure members are non-zero
-    // (`DENIED`, `ERROR`) so they always reach the wire, while `UNSPECIFIED`
-    // is elided — absence is correctly "not a failure". `AUTHORIZATION_REQUIRED`
-    // matches neither name, so the blocked verdict is read from the result.
-    const blocker = parseToolResultBlocker(receipt.resultJson);
-    if (blocker) this.addConnectCard(conversationId, run, blocker);
-    const failed =
-      Boolean(blocker) ||
-      /(ERROR|DENIED|AUTHORIZATION_REQUIRED)/i.test(receipt.status ?? "");
-    this.finishRunStep(
-      conversationId,
-      run,
-      callId,
-      !failed,
-      blocker
-        ? blocker.safeMessage
-        : summarizeToolResult(
-            failed
-              ? (receipt.errorMessage ?? receipt.errorCode ?? "Failed")
-              : receipt.resultJson,
-          ),
-    );
+    this.appendActivityBlock(conversationId, run, {
+      type: "task_plan",
+      block_id: `live-task-plan:${projection.task.taskId}`,
+      state_version: projection.stateVersion,
+      progress_sequence: projection.progressSequence,
+      plan: projection.task,
+    });
   }
-
   // -------------------------------------------------------------------------
   // Activity message: one synthetic assistant message per turn hosts the run
   // ledger and any cards/artifacts (the reference client's activity card),
@@ -5532,9 +5061,8 @@ export class AevatarAssistantTransport implements AssistantTransport {
   ): void {
     const key = payload.toolCallId ?? "";
     const status = (payload.status ?? "").toUpperCase();
-    // On the workflow path `toolCallEnd` carries only `{toolCallId, result}` —
-    // `status`/`success`/`error` exist solely on the AG-UI/actor shape — so a
-    // blocked capability can only be seen by reading the result itself.
+    // A blocked capability can be reported in the tool result even when the
+    // optional status flags are absent, so inspect both sources.
     const blocker = parseToolResultBlocker(payload.result);
     if (blocker) this.addConnectCard(conversationId, run, blocker);
     const succeeded =
@@ -5679,33 +5207,11 @@ export class AevatarAssistantTransport implements AssistantTransport {
     if (!requestId || run.promptedApprovalIds.has(requestId)) return;
     run.promptedApprovalIds.add(requestId);
     run.waitingForApproval = true;
+    run.pendingApprovalRequestId = requestId;
     // A human gate has no client-imposed deadline; stop the watchdog.
     this.clearWatchdog(run);
 
-    const body =
-      payload.message ??
-      payload.body ??
-      (payload.toolName
-        ? `The assistant wants to run ${redactDisplayText(payload.toolName)}.`
-        : "The assistant is requesting your approval to continue.");
-    const block: ApprovalCardContentBlock = {
-      type: "approval_card",
-      block_id: newId("approval-card"),
-      approval_request_id: requestId,
-      body: redactDisplayText(body),
-      service_slug: payload.serviceSlug ?? payload.service_slug ?? "",
-      agent_key_prefix: payload.agentKeyPrefix ?? "aevatar",
-      approval_mode: payload.approvalMode === "grant" ? "grant" : "per_request",
-      grant_duration_sec:
-        typeof payload.grantDurationSec === "number"
-          ? payload.grantDurationSec
-          : null,
-      // Empty when upstream sends none: the card omits the countdown for an
-      // unparseable expiry rather than inventing a deadline.
-      expires_at: payload.expiresAt ?? payload.expires_at ?? "",
-      decision: null,
-      decision_channel: null,
-    };
+    const block = this.approvalCardBlock(payload);
     this.appendActivityBlock(conversationId, run, block);
     run.openCards.set(block.block_id, "approval");
     this.markStepWaiting(
@@ -5725,59 +5231,27 @@ export class AevatarAssistantTransport implements AssistantTransport {
     }
   }
 
-  /**
-   * `aevatar.human_input.request` — a workflow step suspended awaiting a person.
-   *
-   * Rendered as prose and deliberately NOT as an approval card: the payload
-   * carries no approval id, and approve/deny is the wrong shape for a request
-   * that wants typed input or a choice from `options`.
-   *
-   * A resume identity DOES exist — upstream's `CanResume` is `runId + stepId`,
-   * both of which this payload carries — so an actual input control is
-   * buildable; it needs a NyxID resume route and a card type, which is feature
-   * work rather than frame decoding. Until then this shows the ask instead of
-   * dropping it, and suspends the watchdog for the same reason an approval
-   * gate does: the run is idle on a person, not hung.
-   *
-   * Consequence to keep in mind: nothing in the workflow frame vocabulary
-   * announces a resume (the adapter emits no resumed event), so a run resumed
-   * out of band stays flagged and its watchdog stays off for the rest of the
-   * stream. That is the same trade the approval gate already makes.
-   */
-  private addHumanInputCard(
+  private addInputCard(
     conversationId: string,
     run: RunningTurn,
-    payload: Record<string, unknown>,
+    request: AssistantInputRequest,
   ): void {
-    const stepId = protoString(payload["stepId"]);
-    const dedupeKey = `human-input:${stepId || protoString(payload["runId"])}`;
+    const dedupeKey = `input:${request.requestId}`;
     if (run.promptedApprovalIds.has(dedupeKey)) return;
     run.promptedApprovalIds.add(dedupeKey);
-
-    // A human gate has no client-imposed deadline.
     run.awaitingSignal = true;
+    run.pendingInputRequestId = request.requestId;
     this.clearWatchdog(run);
 
-    const prompt =
-      protoString(payload["prompt"]) || protoString(payload["content"]);
-    const options = Array.isArray(payload["options"])
-      ? payload["options"].filter(
-          (option): option is string => typeof option === "string",
-        )
-      : [];
-    const text = [
-      prompt || "The workflow is waiting for your input to continue.",
-      options.length > 0 ? `Options: ${options.join(", ")}` : "",
-    ]
-      .filter(Boolean)
-      .join("\n\n");
-    this.appendActivityBlock(conversationId, run, {
-      type: "text",
-      block_id: newId("human-input"),
-      text: redactDisplayText(text),
-    });
-
-    if (stepId) this.markStepWaiting(conversationId, run, stepId, dedupeKey);
+    const block = this.inputCardBlock(request);
+    this.appendActivityBlock(conversationId, run, block);
+    run.openCards.set(block.block_id, "input");
+    this.markStepWaiting(
+      conversationId,
+      run,
+      protoString(request["stepId"]),
+      request.requestId,
+    );
     if (run.runBlockId) this.patchRunBlock(conversationId, run);
     if (run.turnId) {
       this.emit(conversationId, run, {
@@ -5786,6 +5260,70 @@ export class AevatarAssistantTransport implements AssistantTransport {
         turn_id: run.turnId,
         status: "waiting",
       });
+    }
+  }
+
+  private applyInputChanged(
+    conversationId: string,
+    run: RunningTurn,
+    payload: unknown,
+  ): void {
+    if (!payload || typeof payload !== "object") return;
+    const requestId = protoString(
+      (payload as Record<string, unknown>)["requestId"],
+    );
+    if (!requestId) return;
+    const card = this.conversations
+      .get(conversationId)
+      ?.turnState.messages.flatMap((message) => message.blocks)
+      .find(
+        (block): block is InputCardContentBlock =>
+          block.type === "input_card" && block.request_id === requestId,
+      );
+    if (!card) return;
+    this.emitLocalBlockPatch(
+      conversationId,
+      card.block_id,
+      { status: "resolved" },
+      run.onEvent,
+    );
+    if (run.pendingInputRequestId === requestId) {
+      run.pendingInputRequestId = null;
+      run.awaitingSignal = false;
+    }
+  }
+
+  private applyApprovalChanged(
+    conversationId: string,
+    run: RunningTurn,
+    payload: unknown,
+  ): void {
+    if (!payload || typeof payload !== "object") return;
+    const record = payload as Record<string, unknown>;
+    const requestId = protoString(record["requestId"]);
+    if (!requestId || typeof record["approved"] !== "boolean") return;
+    const card = this.conversations
+      .get(conversationId)
+      ?.turnState.messages.flatMap((message) => message.blocks)
+      .find(
+        (block): block is ApprovalCardContentBlock =>
+          block.type === "approval_card" &&
+          block.approval_request_id === requestId,
+      );
+    if (!card) return;
+    this.emitLocalBlockPatch(
+      conversationId,
+      card.block_id,
+      {
+        decision: record["approved"] ? "approved" : "denied",
+        decision_channel: "web",
+        decision_submission: null,
+      },
+      run.onEvent,
+    );
+    if (run.pendingApprovalRequestId === requestId) {
+      run.pendingApprovalRequestId = null;
+      run.waitingForApproval = false;
     }
   }
 
@@ -5886,7 +5424,8 @@ export class AevatarAssistantTransport implements AssistantTransport {
       });
       return;
     }
-    if (payload.url) {
+    const downloadUrl = safeMediaUrl(payload.url ?? "");
+    if (downloadUrl) {
       this.appendActivityBlock(conversationId, run, {
         type: "artifact",
         block_id: newId("artifact"),
@@ -5895,7 +5434,7 @@ export class AevatarAssistantTransport implements AssistantTransport {
         mime,
         size_bytes: 0,
         preview: null,
-        download_url: payload.url,
+        download_url: downloadUrl,
       });
       return;
     }
@@ -6010,10 +5549,7 @@ export class AevatarAssistantTransport implements AssistantTransport {
       case "finished":
         if (terminal.status === "blocked") {
           this.finalizeActivity(conversationId, run, "blocked");
-          if (
-            !run.assistantContentObserved &&
-            !run.createRecoveryMaterialized
-          ) {
+          if (!run.assistantContentObserved) {
             run.serverAnswerExpectation = "none";
           }
           this.finishTurn(conversationId, run, "blocked", null);
@@ -6023,28 +5559,12 @@ export class AevatarAssistantTransport implements AssistantTransport {
             run,
             run.waitingForApproval ? "waiting" : "done",
           );
-          if (
-            !run.assistantContentObserved &&
-            !run.createRecoveryMaterialized
-          ) {
+          if (!run.assistantContentObserved) {
             run.serverAnswerExpectation = "none";
           }
           this.finishTurn(conversationId, run, "completed", null);
         }
     }
-  }
-
-  private settleRecoveredWorkflowCreate(
-    conversationId: string,
-    run: RunningTurn,
-  ): void {
-    if (run.deliveryTerminal) {
-      this.settleDeliveryTerminal(conversationId, run, run.deliveryTerminal);
-      return;
-    }
-    // Header failures and truncated streams have no terminal kind to retain;
-    // the reconciled History row is the authoritative successful completion.
-    this.finishTurn(conversationId, run, "completed", null);
   }
 
   private closeOpenMessage(conversationId: string, run: RunningTurn): void {
@@ -6182,12 +5702,234 @@ export class AevatarAssistantTransport implements AssistantTransport {
     });
   }
 
-  /**
-   * Quietly settle a turn idling at a human gate so an approval decision can
-   * become the live turn: no card is terminal-ized (the decision flow patches
-   * it), the ledger parks as awaiting-approval, and the fetch aborts.
-   */
-  private pauseForApproval(conversationId: string, run: RunningTurn): void {
+  private reserveHumanDecision(
+    conversationId: string,
+    expectedKind: "approval" | "input",
+    blockId: string,
+    requestId: string,
+    onEvent: (event: TurnEvent) => void,
+  ): RunningTurn {
+    this.pauseAtHumanGate(conversationId, expectedKind, blockId, requestId);
+    if (this.running.has(conversationId)) {
+      throw new AssistantTurnActiveError();
+    }
+    const stored = this.conversations.get(conversationId);
+    if (!stored) throw new AssistantConversationNotFoundError();
+    const run = this.newRun(onEvent, null, "actor");
+    run.cursor = stored.turnState.lastCursor;
+    this.running.set(conversationId, run);
+    return run;
+  }
+
+  private releaseHumanDecision(conversationId: string, run: RunningTurn): void {
+    if (this.running.get(conversationId) !== run) return;
+    run.finished = true;
+    this.clearWatchdog(run);
+    this.running.delete(conversationId);
+  }
+
+  private throwIfControlCancelled(run: RunningTurn): void {
+    if (run.finished || run.controller.signal.aborted) {
+      throw new AssistantTurnCancelledError();
+    }
+  }
+
+  private async readDecisionPreflight(
+    conversationId: string,
+    kind: "approval" | "input",
+    requestId: string,
+    signal: AbortSignal,
+  ): Promise<{
+    readonly stateVersion: number;
+    readonly committed: boolean;
+    readonly approved?: boolean;
+  }> {
+    const current = await this.readCurrentDecisionState(conversationId, signal);
+    const latest =
+      current.snapshot[
+        kind === "input" ? "latestInputResolution" : "latestApprovalResolution"
+      ];
+    if (latest && typeof latest === "object" && !Array.isArray(latest)) {
+      const latestRecord = latest as Record<string, unknown>;
+      if (
+        protoString(latestRecord["requestId"]) === requestId &&
+        latestRecord["outcome"] === "accepted"
+      ) {
+        if (kind === "input") {
+          return { stateVersion: current.stateVersion, committed: true };
+        }
+        if (typeof latestRecord["approved"] === "boolean") {
+          return {
+            stateVersion: current.stateVersion,
+            committed: true,
+            approved: latestRecord["approved"],
+          };
+        }
+      }
+    }
+    if (current.snapshot["attentionKind"] !== kind) {
+      throw new AssistantProtocolError(
+        `The assistant is no longer waiting for ${kind}.`,
+      );
+    }
+    const pending =
+      current.snapshot[kind === "input" ? "pendingInput" : "pendingApproval"];
+    if (!pending || typeof pending !== "object" || Array.isArray(pending)) {
+      throw new AssistantProtocolError(
+        `The pending ${kind} request is no longer current.`,
+      );
+    }
+    const pendingRecord = pending as Record<string, unknown>;
+    const observedRequestId = protoString(
+      kind === "input"
+        ? pendingRecord["requestId"]
+        : (pendingRecord["approvalRequestId"] ?? pendingRecord["requestId"]),
+    );
+    if (observedRequestId !== requestId) {
+      throw new AssistantProtocolError(
+        `The pending ${kind} request changed before it could be resolved.`,
+      );
+    }
+    return { stateVersion: current.stateVersion, committed: false };
+  }
+
+  private applyCommittedApproval(
+    conversationId: string,
+    blockId: string,
+    approved: boolean,
+    stateVersion: number,
+    onEvent: (event: TurnEvent) => void,
+  ): void {
+    this.emitLocalBlockPatch(
+      conversationId,
+      blockId,
+      {
+        decision: approved ? "approved" : "denied",
+        decision_channel: "web",
+        decision_submission: null,
+        state_version: stateVersion,
+      },
+      onEvent,
+    );
+  }
+
+  private async readCurrentDecisionState(
+    conversationId: string,
+    signal: AbortSignal,
+  ): Promise<{
+    readonly stateVersion: number;
+    readonly snapshot: Record<string, unknown>;
+  }> {
+    const response = await assistantApi.get<unknown>(
+      `${ASSISTANT_PREFIX}/conversations/${encodeURIComponent(conversationId)}/state`,
+      signal,
+    );
+    if (!response || typeof response !== "object" || Array.isArray(response)) {
+      throw new AssistantProtocolError(
+        "The assistant state response was not a valid current-state envelope.",
+      );
+    }
+    const envelope = response as Record<string, unknown>;
+    if (envelope["status"] !== "current") {
+      throw new AssistantProtocolError(
+        "The assistant state is not current. Refresh the conversation and try again.",
+      );
+    }
+    const stateVersion = positiveStateVersion(envelope["stateVersion"]);
+    const snapshot = envelope["snapshot"];
+    if (
+      stateVersion === undefined ||
+      !snapshot ||
+      typeof snapshot !== "object" ||
+      Array.isArray(snapshot)
+    ) {
+      throw new AssistantProtocolError(
+        "The assistant state did not include an authoritative positive version.",
+      );
+    }
+    const snapshotRecord = snapshot as Record<string, unknown>;
+    if (protoString(snapshotRecord["actorId"]) !== conversationId) {
+      throw new AssistantProtocolError(
+        "The assistant state snapshot belongs to a different conversation.",
+      );
+    }
+    if (positiveStateVersion(snapshotRecord["stateVersion"]) !== stateVersion) {
+      throw new AssistantProtocolError(
+        "The assistant state envelope and snapshot versions did not match.",
+      );
+    }
+    return { stateVersion, snapshot: snapshotRecord };
+  }
+
+  private async observeDecisionCommit(
+    conversationId: string,
+    kind: "approval" | "input",
+    requestId: string,
+    expectedStateVersion: number,
+    approved: boolean | undefined,
+    signal: AbortSignal,
+  ): Promise<number | null> {
+    for (const delayMs of DECISION_OBSERVATION_DELAYS_MS) {
+      await abortableDelay(delayMs, signal);
+      const current = await this.readCurrentDecisionState(
+        conversationId,
+        signal,
+      );
+      const latest =
+        current.snapshot[
+          kind === "input"
+            ? "latestInputResolution"
+            : "latestApprovalResolution"
+        ];
+      if (latest && typeof latest === "object" && !Array.isArray(latest)) {
+        const latestRecord = latest as Record<string, unknown>;
+        const matchesDecision =
+          protoString(latestRecord["requestId"]) === requestId &&
+          latestRecord["outcome"] === "accepted" &&
+          (kind === "input" || latestRecord["approved"] === approved);
+        if (matchesDecision && current.stateVersion > expectedStateVersion) {
+          return current.stateVersion;
+        }
+      }
+      const pending =
+        current.snapshot[kind === "input" ? "pendingInput" : "pendingApproval"];
+      if (pending && typeof pending === "object" && !Array.isArray(pending)) {
+        const pendingRecord = pending as Record<string, unknown>;
+        const pendingRequestId = protoString(
+          kind === "input"
+            ? pendingRecord["requestId"]
+            : (pendingRecord["approvalRequestId"] ??
+                pendingRecord["requestId"]),
+        );
+        if (pendingRequestId !== requestId) {
+          throw new AssistantProtocolError(
+            `A different pending ${kind} request replaced the submitted request.`,
+          );
+        }
+      }
+    }
+    return null;
+  }
+
+  /** Quietly settle a stream that is already parked at a human gate. */
+  private pauseAtHumanGate(
+    conversationId: string,
+    expectedKind: "approval" | "input",
+    blockId: string,
+    requestId: string,
+  ): void {
+    const run = this.running.get(conversationId);
+    if (!run) return;
+    const exactRequestId =
+      expectedKind === "approval"
+        ? run.pendingApprovalRequestId
+        : run.pendingInputRequestId;
+    if (
+      exactRequestId !== requestId ||
+      run.openCards.get(blockId) !== expectedKind
+    ) {
+      throw new AssistantTurnActiveError();
+    }
     if (run.finished) return;
     this.acceptActionBatch(conversationId, run);
     this.closeOpenMessage(conversationId, run);
@@ -6214,21 +5956,7 @@ export class AevatarAssistantTransport implements AssistantTransport {
     if (run.actionContinuation) {
       this.keepActionBatchQueued(conversationId, run);
     }
-    if (run.protocol === "workflow") {
-      // Workflow has no stop control. Once a create request was dispatched,
-      // recover its Chat History identity even if RUN_STARTED already supplied
-      // a run-actor id; cancellation cannot prove the create was rejected.
-      if (run.streamDispatched) {
-        this.startCreateRecoveryInBackground(conversationId, run);
-      } else {
-        const stored = this.conversations.get(conversationId);
-        if (stored?.identityPending) {
-          stored.identityPending = false;
-          deleteReceipt(run.clientRequestId);
-        }
-      }
-      run.controller.abort();
-    } else if (run.turnId) {
+    if (run.turnId) {
       run.controller.abort();
       this.requestServerStop(conversationId, run);
     } else if (!run.streamDispatched) {
@@ -6309,9 +6037,9 @@ export class AevatarAssistantTransport implements AssistantTransport {
   /**
    * Best-effort server-side stop (the `feature/integrate` `:stop` control
    * contract): a fresh `stopRequestId` per intent keeps the command
-   * idempotent upstream, and `expectedStateVersion: 0` skips the
-   * optimistic-concurrency fence — the transport does not track actor
-   * state versions. Requires the server-announced `turnId` (a
+   * idempotent upstream. The transport first reads actor-owned current state
+   * and sends that exact version; Stop never bypasses the stale-state fence.
+   * Requires the server-announced `turnId` (a
    * pre-RUN_STARTED cancel defers here via `stopPendingStart`). Failures
    * are swallowed — stop is an upgrade over the previous client-only
    * cancel, never a new failure mode — but the in-flight request is
@@ -6322,9 +6050,6 @@ export class AevatarAssistantTransport implements AssistantTransport {
     conversationId: string,
     run: RunningTurn,
   ): Promise<void> | null {
-    // The workflow surface still stops elsewhere (`runs/{runId}:stop`), so
-    // only typed assistant conversations use the canonical chat command here.
-    if (run.protocol === "workflow") return null;
     if (!run.turnId) return null;
     const actorConversationId = this.canonicalConversationId(conversationId);
     // Own deadline: a server that accepts but never answers must not pin
@@ -6337,20 +6062,12 @@ export class AevatarAssistantTransport implements AssistantTransport {
       () => deadline.abort(),
       STOP_REQUEST_DEADLINE_MS,
     );
-    const pending = apiClient<unknown>(`${ASSISTANT_PREFIX}/chat`, {
-      method: "POST",
-      body: {
-        type: "task.stop",
-        conversationId: actorConversationId,
-        turnId: run.turnId,
-        stopRequestId: crypto.randomUUID(),
-        clientRequestId: crypto.randomUUID(),
-        expectedStateVersion: 0,
-      },
-      preserveSessionOn401: true,
-      signal: deadline.signal,
-      ...assistantWireLogOptions(),
-    }).then(
+    const pending = this.dispatchTaskStop(
+      actorConversationId,
+      crypto.randomUUID(),
+      deadline.signal,
+      run.turnId,
+    ).then(
       () => {
         clearTimeout(deadlineTimer);
         this.releaseScopeController(deadline);

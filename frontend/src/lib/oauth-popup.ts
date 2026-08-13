@@ -22,6 +22,34 @@ export interface PopupLaunchMetadata {
   readonly serviceName?: string;
 }
 
+const POPUP_WIDTH = 760;
+const POPUP_HEIGHT = 820;
+
+/**
+ * Center the popup over the window that opened it, not the primary display:
+ * `screenX`/`outerWidth` are what put it on the same monitor as the chat on a
+ * multi-screen desk. Sizes are clamped so a small window still gets a popup
+ * that fits on screen, and the offsets are floored at the window origin so a
+ * clamped popup can never land off-screen.
+ */
+function popupFeatures(view: Window = window): string {
+  const screenWidth = view.screen?.availWidth || view.screen?.width || 0;
+  const screenHeight = view.screen?.availHeight || view.screen?.height || 0;
+  const frameWidth = view.outerWidth || view.innerWidth || screenWidth;
+  const frameHeight = view.outerHeight || view.innerHeight || screenHeight;
+  const originX = view.screenX ?? view.screenLeft ?? 0;
+  const originY = view.screenY ?? view.screenTop ?? 0;
+
+  const width = frameWidth ? Math.min(POPUP_WIDTH, frameWidth) : POPUP_WIDTH;
+  const height = frameHeight
+    ? Math.min(POPUP_HEIGHT, frameHeight)
+    : POPUP_HEIGHT;
+  const left = Math.round(originX + Math.max(0, (frameWidth - width) / 2));
+  const top = Math.round(originY + Math.max(0, (frameHeight - height) / 2));
+
+  return `popup,width=${width},height=${height},left=${left},top=${top}`;
+}
+
 export interface OAuthPopupHandle {
   readonly launchId: string;
   readonly ready: Promise<void>;
@@ -109,7 +137,7 @@ export function openOAuthPopup(): OAuthPopupHandle | null {
   const popup = window.open(
     "/oauth-launching",
     `nyxid_oauth_${launchId}`,
-    "popup,width=760,height=820",
+    popupFeatures(),
   );
   if (!popup) return null;
 

@@ -1,6 +1,12 @@
 import type { AnchorHTMLAttributes, ReactNode } from "react";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import { fireEvent, render, screen, waitFor } from "@testing-library/react";
+import {
+  act,
+  fireEvent,
+  render,
+  screen,
+  waitFor,
+} from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { TooltipProvider } from "@/components/ui/tooltip";
@@ -18,6 +24,12 @@ const {
   mockCreateMutateAsync,
   mockCancelMutateAsync,
   mockDecideMutateAsync,
+  mockResolveInputMutateAsync,
+  mockStopTaskMutateAsync,
+  mockSteerTaskMutateAsync,
+  mockRetryStepMutateAsync,
+  mockSkipStepMutateAsync,
+  mockResolvePlanMutateAsync,
   mockContinueAction,
   mockDeleteMutateAsync,
   mockSendMutateAsync,
@@ -28,6 +40,12 @@ const {
   mockCreateMutateAsync: vi.fn(),
   mockCancelMutateAsync: vi.fn(),
   mockDecideMutateAsync: vi.fn(),
+  mockResolveInputMutateAsync: vi.fn(),
+  mockStopTaskMutateAsync: vi.fn(),
+  mockSteerTaskMutateAsync: vi.fn(),
+  mockRetryStepMutateAsync: vi.fn(),
+  mockSkipStepMutateAsync: vi.fn(),
+  mockResolvePlanMutateAsync: vi.fn(),
   mockContinueAction: vi.fn(),
   mockDeleteMutateAsync: vi.fn(),
   mockSendMutateAsync: vi.fn(),
@@ -60,6 +78,7 @@ const {
       printed: boolean;
       projecting: boolean;
     } | null,
+    transportKind: "aevatar" as "aevatar" | "mock",
   },
 }));
 
@@ -121,6 +140,22 @@ vi.mock("@/hooks/use-assistant", () => ({
       conversationId,
     ],
   },
+  assistantKeysFor: () => ({
+    conversations: ["assistant", "conversations"],
+    history: (conversationId: string) => [
+      "assistant",
+      "history",
+      conversationId,
+    ],
+    turn: (conversationId: string) => ["assistant", "turn", conversationId],
+    episode: (conversationId: string) => [
+      "assistant",
+      "episode",
+      conversationId,
+    ],
+    workspace: ["assistant", "workspace"],
+  }),
+  useAssistantEngine: () => undefined,
   useConversations: () => ({
     data: state.conversations,
     isSuccess: state.conversationsResolved,
@@ -129,19 +164,19 @@ vi.mock("@/hooks/use-assistant", () => ({
     data:
       conversationId && !state.historyLoading
         ? {
-          conversation: {
-            ...(state.conversations?.find(
-              (conversation) => conversation.id === conversationId,
-            ) ?? {
-              id: conversationId,
-              title: "Loading",
-              created_at: "2026-07-29T00:00:00.000Z",
-              last_message_at: "2026-07-29T00:00:00.000Z",
-            }),
-            id: state.historyCanonicalId ?? conversationId,
-          },
-          messages: state.historyMessages,
-          has_more: false,
+            conversation: {
+              ...(state.conversations?.find(
+                (conversation) => conversation.id === conversationId,
+              ) ?? {
+                id: conversationId,
+                title: "Loading",
+                created_at: "2026-07-29T00:00:00.000Z",
+                last_message_at: "2026-07-29T00:00:00.000Z",
+              }),
+              id: state.historyCanonicalId ?? conversationId,
+            },
+            messages: state.historyMessages,
+            has_more: false,
             awaitingProjection: state.historyAwaitingProjection,
             projectionStalled: state.historyProjectionStalled,
           }
@@ -175,6 +210,30 @@ vi.mock("@/hooks/use-assistant", () => ({
     mutateAsync: mockDecideMutateAsync,
     isPending: state.decisionPending,
   }),
+  useResolveInput: () => ({
+    mutateAsync: mockResolveInputMutateAsync,
+    isPending: false,
+  }),
+  useStopTask: () => ({
+    mutateAsync: mockStopTaskMutateAsync,
+    isPending: false,
+  }),
+  useSteerTask: () => ({
+    mutateAsync: mockSteerTaskMutateAsync,
+    isPending: false,
+  }),
+  useRetryStep: () => ({
+    mutateAsync: mockRetryStepMutateAsync,
+    isPending: false,
+  }),
+  useSkipStep: () => ({
+    mutateAsync: mockSkipStepMutateAsync,
+    isPending: false,
+  }),
+  useResolvePlan: () => ({
+    mutateAsync: mockResolvePlanMutateAsync,
+    isPending: false,
+  }),
   useActionCardActions: () => ({
     setInProgress: vi.fn(),
     blockAction: vi.fn(),
@@ -194,6 +253,28 @@ vi.mock("@/hooks/use-assistant", () => ({
 
 vi.mock("sonner", () => ({
   toast: { error: mockToastError },
+}));
+
+vi.mock("@/lib/assistant/transport", async (importOriginal) => {
+  const actual =
+    await importOriginal<typeof import("@/lib/assistant/transport")>();
+  return {
+    ...actual,
+    assistantTransport: { cancelActiveTurn: vi.fn() },
+    selectAssistantTransportKind: () => state.transportKind,
+  };
+});
+
+vi.mock("@/components/assistant/direct-chat-controls", () => ({
+  DIRECT_MODE_COPY:
+    "Direct model chat — no tools, no approvals, and conversations are not saved.",
+  DirectModeBanner: () => (
+    <div>
+      Direct model chat — no tools, no approvals, and conversations are not
+      saved.
+    </div>
+  ),
+  DirectChatControls: () => <div>Direct model controls</div>,
 }));
 
 import { AssistantPage } from "./assistant";
@@ -283,6 +364,7 @@ beforeEach(() => {
   state.decisionPending = false;
   state.historyMessages = [];
   state.episode = null;
+  state.transportKind = "aevatar";
   useAuthStore.setState({
     user,
     isAuthenticated: true,
@@ -294,6 +376,110 @@ beforeEach(() => {
     lastScreen: null,
   });
   useAssistantDraftStore.setState({ ownerUserId: user.id, drafts: {} });
+});
+
+describe("AssistantPage direct mode", () => {
+  it("keeps the current Aevatar empty-state copy when the flag is off", () => {
+    state.conversations = [];
+    renderPage();
+
+    expect(
+      screen.getByText("Ask NyxID to work with your connected services."),
+    ).toBeVisible();
+    expect(screen.queryByText(/Direct model chat/)).not.toBeInTheDocument();
+    expect(screen.queryByText("Direct model controls")).not.toBeInTheDocument();
+  });
+
+  it("shows the advisory banner, empty-state copy, and pickers when flagged on", () => {
+    state.conversations = [];
+    useAuthStore.setState({
+      user: {
+        ...user,
+        capabilities: {
+          enabled_features: ["experimental:direct-chat-engine"],
+        },
+      },
+    });
+    renderPage();
+
+    expect(
+      screen.getAllByText(
+        "Direct model chat — no tools, no approvals, and conversations are not saved.",
+      ),
+    ).toHaveLength(2);
+    expect(screen.getByText("Direct model controls")).toBeVisible();
+    expect(
+      screen.queryByText("Ask NyxID to work with your connected services."),
+    ).not.toBeInTheDocument();
+  });
+
+  it("keeps mock chrome unchanged when the direct flag is on", () => {
+    state.conversations = [];
+    state.transportKind = "mock";
+    useAuthStore.setState({
+      user: {
+        ...user,
+        capabilities: {
+          enabled_features: ["experimental:direct-chat-engine"],
+        },
+      },
+    });
+
+    renderPage();
+
+    expect(
+      screen.getByText("Ask NyxID to work with your connected services."),
+    ).toBeVisible();
+    expect(screen.queryByText(/Direct model chat/)).not.toBeInTheDocument();
+    expect(screen.queryByText("Direct model controls")).not.toBeInTheDocument();
+  });
+
+  it("clears only conversation drafts owned by the retired engine", async () => {
+    useAuthStore.setState({
+      user: {
+        ...user,
+        capabilities: {
+          enabled_features: ["experimental:direct-chat-engine"],
+        },
+      },
+    });
+    renderPage();
+    act(() => {
+      const drafts = useAssistantDraftStore.getState();
+      drafts.saveDraft(user.id, "conv:direct-retired-1", "retired");
+      drafts.saveDraft(user.id, "conv:nyxid-chat-active-1", "active");
+      drafts.saveDraft(user.id, "conv:unrecognized", "unknown");
+      drafts.saveDraft(user.id, "screen:/keys", "screen");
+    });
+
+    act(() => {
+      useAuthStore.setState({ user });
+    });
+
+    await waitFor(() => {
+      expect(useAssistantDraftStore.getState().drafts).toEqual({
+        "conv:nyxid-chat-active-1": expect.objectContaining({ text: "active" }),
+        "conv:unrecognized": expect.objectContaining({ text: "unknown" }),
+        "screen:/keys": expect.objectContaining({ text: "screen" }),
+      });
+    });
+  });
+});
+
+describe("AssistantPage typed conversation controls", () => {
+  it("makes legacy chatc history proactively read-only", () => {
+    const legacy: Conversation = {
+      ...existingConversation,
+      id: "chatc-8bd999c402fb37d60cdcd81e3b78cfd",
+    };
+    state.conversations = [legacy];
+    state.search = { c: legacy.id };
+
+    renderPage();
+
+    expect(screen.getByRole("textbox")).toBeDisabled();
+    expect(screen.getByRole("button", { name: "Send message" })).toBeDisabled();
+  });
 });
 
 describe("AssistantPage projection status", () => {
@@ -591,9 +777,7 @@ describe("AssistantPage new chat", () => {
     expect(
       screen.queryByText(/no saved transcript yet/i),
     ).not.toBeInTheDocument();
-    expect(
-      screen.queryByText(/You can keep chatting/),
-    ).not.toBeInTheDocument();
+    expect(screen.queryByText(/You can keep chatting/)).not.toBeInTheDocument();
     expect(screen.getByText("still here")).toBeInTheDocument();
     expect(screen.getByRole("textbox")).toBeEnabled();
   });
@@ -892,5 +1076,105 @@ describe("AssistantPage canonical conversation resolution", () => {
     renderPage();
 
     expect(mockNavigate).not.toHaveBeenCalled();
+  });
+});
+
+describe("AssistantPage typed task controls", () => {
+  it("routes active-task input and TaskPlan actions through actor controls", async () => {
+    const event = userEvent.setup();
+    const conversationId = "nyxid-chat-f8369965a444433f92ec50e67ad8ee52";
+    state.search = { c: conversationId };
+    state.conversations = [{ ...existingConversation, id: conversationId }];
+    state.historyMessages = [
+      {
+        id: "assistant-current-state",
+        role: "assistant",
+        schema_version: 1,
+        created_at: "2026-08-11T00:00:00.000Z",
+        blocks: [
+          {
+            type: "task_plan",
+            block_id: "current-task-plan:task-alpha",
+            state_version: 47,
+            progress_sequence: 12,
+            plan: {
+              schemaVersion: 4,
+              actorId: conversationId,
+              taskId: "task-alpha",
+              turnId: "turn-alpha",
+              planId: "plan-alpha",
+              planRevision: 2,
+              planRevisions: [],
+              title: "Publish the release",
+              status: "active",
+              activeStepId: "step-alpha",
+              gate: {
+                mode: "confirm",
+                status: "pending",
+                requestId: "plan-gate-alpha",
+                taskId: "task-alpha",
+                planId: "plan-alpha",
+                planRevision: 2,
+              },
+              steps: [
+                {
+                  stepId: "step-alpha",
+                  order: 1,
+                  kind: "tool",
+                  status: "running",
+                  required: true,
+                  description: "Publish release notes",
+                  source: { kind: "tool", label: "github_release" },
+                  mayChangeExternalState: true,
+                  externalEffect: "not_started",
+                  availableActions: {
+                    retry: true,
+                    skip: true,
+                    stop: true,
+                  },
+                  dependsOn: [],
+                  substeps: [],
+                  operation: { operationGeneration: 2 },
+                },
+              ],
+            },
+          },
+        ],
+      },
+    ];
+    renderPage();
+
+    const composer = screen.getByRole("textbox");
+    expect(composer).toBeEnabled();
+    await event.type(composer, "Use the release branch");
+    await event.click(
+      screen.getByRole("button", { name: "Send steering instruction" }),
+    );
+    expect(mockSteerTaskMutateAsync).toHaveBeenCalledWith(
+      "Use the release branch",
+    );
+    expect(mockSendMutateAsync).not.toHaveBeenCalled();
+
+    await event.click(screen.getByRole("button", { name: "Stop task" }));
+    await event.click(
+      screen.getByRole("button", { name: "Retry Publish release notes" }),
+    );
+    await event.click(
+      screen.getByRole("button", { name: "Skip Publish release notes" }),
+    );
+    expect(mockStopTaskMutateAsync).toHaveBeenCalledOnce();
+    expect(mockRetryStepMutateAsync).toHaveBeenCalledWith("step-alpha");
+    expect(mockSkipStepMutateAsync).toHaveBeenCalledWith("step-alpha");
+    await event.click(screen.getByRole("button", { name: "Confirm plan" }));
+    await event.click(screen.getByRole("button", { name: "Reject plan" }));
+    expect(mockResolvePlanMutateAsync).toHaveBeenNthCalledWith(1, {
+      blockId: "current-task-plan:task-alpha",
+      confirmed: true,
+    });
+    expect(mockResolvePlanMutateAsync).toHaveBeenNthCalledWith(2, {
+      blockId: "current-task-plan:task-alpha",
+      confirmed: false,
+    });
+    expect(mockCancelMutateAsync).not.toHaveBeenCalled();
   });
 });

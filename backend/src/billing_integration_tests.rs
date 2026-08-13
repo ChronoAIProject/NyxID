@@ -23,6 +23,10 @@ use tower::ServiceExt;
 use uuid::Uuid;
 
 use crate::errors::{AppError, AppResult};
+use crate::models::approval_request::{
+    ApprovalRequest, COLLECTION_NAME as APPROVAL_REQUESTS, ExactServiceApprovalBinding,
+};
+use crate::models::audit_log::{AuditLog, COLLECTION_NAME as AUDIT_LOG};
 use crate::models::billing_rate_cache::{BillingRateCache, COLLECTION_NAME as BILLING_RATE_CACHE};
 use crate::models::billing_wallet::{
     BillingWallet, COLLECTION_NAME as BILLING_WALLET, CollectionState, PlanKind,
@@ -31,8 +35,12 @@ use crate::models::downstream_service::{
     COLLECTION_NAME as DOWNSTREAM_SERVICES, DownstreamService,
 };
 use crate::models::node::{COLLECTION_NAME as NODES, Node, NodeMetrics, NodeStatus};
+use crate::models::notification_channel::{
+    COLLECTION_NAME as NOTIFICATION_CHANNELS, NotificationChannel,
+};
 use crate::models::provider_config::{COLLECTION_NAME as PROVIDER_CONFIGS, ProviderConfig};
-use crate::models::service_billing::{BillingMetric, PlatformUsage};
+use crate::models::service_approval_config::ApprovalMode;
+use crate::models::service_billing::{BillingMetric, PlatformUsage, ServiceBilling};
 use crate::models::ssh_auth_mode::SshAuthMode;
 use crate::models::usage_meter::{
     COLLECTION_NAME as USAGE_METER, CredentialClass, UsageMeterRow, UsageStatus,
@@ -273,6 +281,31 @@ async fn billing_route_coverage_smoke() {
     )
     .await;
     let llm_catalog = insert_llm_route_service(&db, &owner_id, &downstream_url).await;
+    let mut direct_catalog = crate::models::downstream_service::test_helpers::dummy_service();
+    direct_catalog.id = Uuid::new_v4().to_string();
+    direct_catalog.slug = crate::services::assistant_direct::DIRECT_LLM_SLUG.to_string();
+    direct_catalog.name = "Direct Chrono-LLM route boundary".to_string();
+    direct_catalog.base_url = format!("{downstream_url}/direct");
+    direct_catalog.service_category = "internal".to_string();
+    direct_catalog.streaming_supported = true;
+    direct_catalog.billing = Some(ServiceBilling {
+        platform_billable: true,
+        platform_metric: Some(BillingMetric::Tokens),
+        ..Default::default()
+    });
+    db.collection::<DownstreamService>(DOWNSTREAM_SERVICES)
+        .insert_one(&direct_catalog)
+        .await
+        .expect("insert direct assistant catalog service");
+    crate::services::feature_flag_service::set_platform_override(
+        &db,
+        crate::services::feature_flag_service::DIRECT_CHAT_ENGINE_FLAG_KEY,
+        &crate::services::feature_flag_service::FlagTarget::Global,
+        true,
+        "billing-route-test",
+    )
+    .await
+    .expect("enable direct assistant route for billing smoke");
 
     let state = billing_route_state(db.clone(), lago, 100);
     let token = route_access_token(&state, &owner_id);
@@ -281,6 +314,25 @@ async fn billing_route_coverage_smoke() {
         state.config.public_proxy_max_body_size,
     );
     let app = private.with_state(state.clone());
+
+    let direct_body = serde_json::json!({
+        "messages": [{"role": "user", "content": "route boundary"}],
+        "model": "gpt-5.5",
+        "skill_slug": "nyxid",
+    });
+    let direct_response = call_mounted_route(
+        &app,
+        route_request(
+            Method::POST,
+            "/api/v1/assistant/direct/completions",
+            &token,
+            Body::from(direct_body.to_string()),
+        ),
+    )
+    .await;
+    assert!(String::from_utf8_lossy(&direct_response).contains("\"total_tokens\":149"));
+    exercised_routes.insert("/api/v1/assistant/direct/completions");
+    assert_direct_reported_usage(&db, &direct_catalog).await;
 
     call_mounted_route(
         &app,
@@ -473,6 +525,149 @@ async fn billing_route_coverage_smoke() {
     );
     assert_route_settled(&db, &mcp.slug, BillingMetric::Requests).await;
     exercised_routes.insert("/mcp (POST)");
+
+    let now = Utc::now();
+    db.collection::<NotificationChannel>(NOTIFICATION_CHANNELS)
+        .insert_one(NotificationChannel {
+            id: Uuid::new_v4().to_string(),
+            user_id: owner_id.clone(),
+            telegram_chat_id: None,
+            telegram_username: None,
+            telegram_enabled: false,
+            telegram_link_code: None,
+            telegram_link_code_expires_at: None,
+            approval_timeout_secs: 300,
+            grant_expiry_days: 30,
+            approval_required: true,
+            push_enabled: false,
+            push_devices: vec![],
+            created_at: now,
+            updated_at: now,
+        })
+        .await
+        .expect("enable per-request approval for exact redemption smoke");
+    let exact_arguments = serde_json::json!({
+        "method": "GET",
+        "path": "/exact-billing?source=approval",
+    });
+    let exact_catalog = crate::services::mcp_service::load_operation_catalog(
+        &db,
+        state.node_ws_manager.as_ref(),
+        &owner_id,
+        crate::services::mcp_service::NodeScope::Unrestricted,
+        crate::services::mcp_service::ServiceScope::Unrestricted,
+    )
+    .await
+    .expect("load exact redemption catalog");
+    let exact_service = exact_catalog
+        .services
+        .iter()
+        .find(|service| service.service_id == mcp.id)
+        .expect("billing MCP service is present in exact catalog");
+    let exact_endpoint = exact_service
+        .endpoints
+        .iter()
+        .find(|endpoint| endpoint.endpoint_id == "nyx_generic_proxy_v1")
+        .expect("generic billing MCP request endpoint");
+    let endpoint_id = exact_endpoint.endpoint_id.clone();
+    let endpoint_contract_digest =
+        crate::services::mcp_service::endpoint_contract_digest(exact_endpoint);
+    let operation_digest = crate::services::mcp_service::exact_operation_digest(
+        &mcp.id,
+        exact_endpoint,
+        &exact_arguments,
+    );
+    let catalog_digest =
+        crate::services::mcp_service::operation_catalog_digest(&exact_catalog.services);
+    let request_id = Uuid::new_v4().to_string();
+    let operation_id = "billing-exact-operation".to_string();
+    let operation_generation = 1;
+    let effect_idempotency_key = "billing-exact-idempotency".to_string();
+    let request_key = crate::services::mcp_service::canonical_sha256(serde_json::json!({
+        "contract_version": "nyxid-exact-approval-request.v1",
+        "requester_type": "access_token",
+        "requester_id": owner_id,
+        "actor_user_id": owner_id,
+        "operation_id": operation_id,
+        "operation_generation": operation_generation,
+        "idempotency_key": effect_idempotency_key,
+    }));
+    db.collection::<ApprovalRequest>(APPROVAL_REQUESTS)
+        .insert_one(ApprovalRequest {
+            id: request_id.clone(),
+            user_id: owner_id.clone(),
+            service_id: mcp.id.clone(),
+            service_name: exact_service.service_name.clone(),
+            service_slug: exact_service.service_slug.clone(),
+            requester_type: "access_token".to_string(),
+            requester_id: owner_id.clone(),
+            requester_label: None,
+            operation_summary: "GET /exact-billing".to_string(),
+            action_description: None,
+            http_method: Some("GET".to_string()),
+            resource: Some("/exact-billing".to_string()),
+            verb: Some("read".to_string()),
+            grant_scope: None,
+            tool_name: None,
+            tool_call_id: None,
+            tool_arguments: None,
+            is_destructive: None,
+            approval_mode: ApprovalMode::PerRequest,
+            status: "approved".to_string(),
+            idempotency_key: request_key.clone(),
+            notification_channel: None,
+            telegram_message_id: None,
+            telegram_chat_id: None,
+            expires_at: now + Duration::minutes(5),
+            decided_at: Some(now),
+            decision_channel: Some("web".to_string()),
+            decision_idempotency_key: Some("billing-exact-decision".to_string()),
+            notify_user_ids: vec![owner_id.clone()],
+            from_org_policy: false,
+            exact_service: Some(ExactServiceApprovalBinding {
+                request_key,
+                actor_user_id: owner_id.clone(),
+                user_service_id: mcp.id.clone(),
+                endpoint_id,
+                catalog_digest: catalog_digest.clone(),
+                endpoint_contract_digest,
+                operation_digest: operation_digest.clone(),
+                operation_id: operation_id.clone(),
+                operation_generation,
+                effect_idempotency_key: effect_idempotency_key.clone(),
+                arguments: exact_arguments,
+                redemption: None,
+            }),
+            created_at: now,
+        })
+        .await
+        .expect("insert approved exact-service authority");
+    let redeem_body = serde_json::json!({
+        "catalog_digest": catalog_digest,
+        "operation_digest": operation_digest,
+        "operation_id": operation_id,
+        "operation_generation": operation_generation,
+        "idempotency_key": effect_idempotency_key,
+    });
+    let redeem_response = call_mounted_route(
+        &app,
+        route_request(
+            Method::POST,
+            &format!("/api/v1/approvals/exact-service/requests/{request_id}/redeem"),
+            &token,
+            Body::from(redeem_body.to_string()),
+        ),
+    )
+    .await;
+    let redeemed: serde_json::Value =
+        serde_json::from_slice(&redeem_response).expect("parse exact redemption response");
+    assert_eq!(redeemed["state"], "redeemed");
+    assert_route_settled_count(&db, &mcp.slug, BillingMetric::Requests, 2).await;
+    exercised_routes.insert("/api/v1/approvals/exact-service/requests/{request_id}/redeem");
+    db.collection::<NotificationChannel>(NOTIFICATION_CHANNELS)
+        .delete_one(doc! { "user_id": &owner_id })
+        .await
+        .expect("clear exact redemption approval policy before later route smoke cases");
 
     let node_mcp = insert_route_service(
         &db,
@@ -1109,14 +1304,33 @@ async fn lago_webhook_signature_is_verified_at_the_mounted_route() {
 
 async fn start_billing_downstream() -> (String, tokio::task::JoinHandle<()>) {
     async fn respond(request: Request<Body>) -> axum::response::Response {
-        if request.uri().path() == "/mcp-query" {
+        let path = request.uri().path().to_string();
+        if path == "/mcp-query" {
             assert_eq!(
                 request.uri().query(),
                 Some("tag=a&tag=b&name=Nyx%20ID&empty=")
             );
         }
 
-        if request.uri().path().contains("stream") {
+        if path == "/direct/chat/completions" {
+            let body = to_bytes(request.into_body(), 512 * 1024)
+                .await
+                .expect("read direct assistant upstream request");
+            let body: serde_json::Value =
+                serde_json::from_slice(&body).expect("parse direct assistant upstream request");
+            assert_eq!(body["stream"], true);
+            assert_eq!(body["stream_options"]["include_usage"], true);
+            assert_eq!(body["messages"][0]["role"], "system");
+            return (
+                [(axum::http::header::CONTENT_TYPE, "text/event-stream")],
+                include_str!(
+                    "../../frontend/src/lib/assistant/__fixtures__/chrono-llm-direct-stream.sse"
+                ),
+            )
+                .into_response();
+        }
+
+        if path.contains("stream") {
             return (
                 [(axum::http::header::CONTENT_TYPE, "text/event-stream")],
                 concat!(
@@ -1149,6 +1363,42 @@ async fn start_billing_downstream() -> (String, tokio::task::JoinHandle<()>) {
             .expect("serve billing downstream");
     });
     (format!("http://{address}"), server)
+}
+
+async fn assert_direct_reported_usage(db: &mongodb::Database, service: &DownstreamService) {
+    for _ in 0..100 {
+        let usage = db
+            .collection::<UsageMeterRow>(USAGE_METER)
+            .find_one(doc! {
+                "service_slug": &service.slug,
+                "metric": "tokens",
+                "status": "finalized",
+                "forwarded": true,
+                "released": true,
+            })
+            .await
+            .expect("query direct assistant usage row");
+        let provenance = db
+            .collection::<AuditLog>(AUDIT_LOG)
+            .find_one(doc! {
+                "event_type": "llm_usage_reported",
+                "event_data.service_id": &service.id,
+            })
+            .await
+            .expect("query direct assistant reported-usage audit");
+
+        if let (Some(usage), Some(provenance)) = (usage, provenance) {
+            assert_eq!(usage.quantity, Some(149));
+            let data = provenance.event_data.expect("reported usage audit data");
+            assert_eq!(data["prompt_tokens"], 30);
+            assert_eq!(data["completion_tokens"], 119);
+            assert_eq!(data["total_tokens"], 149);
+            assert_eq!(data["path"], "chat/completions");
+            return;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+    }
+    panic!("direct assistant route did not settle from the fixture's reported usage provenance");
 }
 
 async fn start_controlled_billing_downstream() -> (

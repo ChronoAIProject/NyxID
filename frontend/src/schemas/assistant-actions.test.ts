@@ -26,11 +26,13 @@ describe("assistant action request schema", () => {
       params: { catalogService: { serviceSlug: "api-github" } },
     });
 
-    expect(request.params.catalogService).toEqual({
-      serviceSlug: "api-github",
-      requestedScopes: [],
-      viaNodeId: "",
-      targetOrgId: "",
+    expect(request.params).toMatchObject({
+      catalogService: {
+        serviceSlug: "api-github",
+        requestedScopes: [],
+        viaNodeId: "",
+        targetOrgId: "",
+      },
     });
     expect(resolveAssistantAction(request)).toMatchObject({
       supported: true,
@@ -83,6 +85,104 @@ describe("assistant action request schema", () => {
     });
   });
 
+  it("parses an exact nonempty key.create service set", () => {
+    const request = assistantActionRequestSchema.parse({
+      ...BASE_REQUEST,
+      action: "key.create",
+      params: {
+        name: " coding-agent ",
+        platform: " codex ",
+        allowedServiceIds: ["service-alpha", "service-beta"],
+      },
+    });
+
+    expect(resolveAssistantAction(request)).toMatchObject({
+      supported: true,
+      journey: "key_create",
+      params: {
+        variant: "key_create",
+        name: "coding-agent",
+        platform: "codex",
+        allowed_service_ids: ["service-alpha", "service-beta"],
+      },
+    });
+  });
+
+  it("parses only an exact key.rotate predecessor identity", () => {
+    const request = assistantActionRequestSchema.parse({
+      ...BASE_REQUEST,
+      action: "key.rotate",
+      params: { keyId: "key-predecessor-alpha" },
+    });
+
+    expect(resolveAssistantAction(request)).toMatchObject({
+      supported: true,
+      journey: "key_rotate",
+      params: {
+        variant: "key_rotate",
+        key_id: "key-predecessor-alpha",
+      },
+    });
+
+    const missing = assistantActionRequestSchema.parse({
+      ...BASE_REQUEST,
+      actionRequestId: "missing-rotate-params",
+      action: "key.rotate",
+      params: {},
+    });
+    expect(resolveAssistantAction(missing).supported).toBe(false);
+
+    for (const params of [
+      { keyId: "" },
+      { keyId: "invalid/key" },
+      { keyId: "key-alpha", successorId: "key-beta" },
+      { keyId: "key-alpha", fullKey: "nyxid_ag_forbidden" },
+    ]) {
+      expect(
+        assistantActionRequestSchema.safeParse({
+          ...BASE_REQUEST,
+          actionRequestId: `invalid-rotate-${JSON.stringify(params)}`,
+          action: "key.rotate",
+          params,
+        }).success,
+      ).toBe(false);
+    }
+  });
+
+  it("rejects missing, empty, duplicate, malformed, and widened key.create params", () => {
+    const invalidParams = [
+      { name: "agent", platform: "codex" },
+      { name: "agent", platform: "codex", allowedServiceIds: [] },
+      {
+        name: "agent",
+        platform: "codex",
+        allowedServiceIds: ["service-alpha", "service-alpha"],
+      },
+      {
+        name: "agent",
+        platform: "codex",
+        allowedServiceIds: ["invalid/service"],
+      },
+      {
+        name: "agent",
+        platform: "codex",
+        allowedServiceIds: ["service-alpha"],
+        allowAllServices: true,
+      },
+    ];
+
+    for (const [index, params] of invalidParams.entries()) {
+      expect(
+        assistantActionRequestSchema.safeParse({
+          ...BASE_REQUEST,
+          actionRequestId: `invalid-key-create-${String(index)}`,
+          action: "key.create",
+          params,
+        }).success,
+      ).toBe(false);
+    }
+  });
+
   it("resolves bad catalog slugs and insecure custom urls as unsupported", () => {
     const badSlug = assistantActionRequestSchema.parse({
       ...BASE_REQUEST,
@@ -132,7 +232,13 @@ describe("assistant action request schema", () => {
       },
     });
 
-    for (const request of [badSlug, httpUrl, queryUrl, fragmentUrl, badAuthKeyName]) {
+    for (const request of [
+      badSlug,
+      httpUrl,
+      queryUrl,
+      fragmentUrl,
+      badAuthKeyName,
+    ]) {
       expect(resolveAssistantAction(request)).toMatchObject({
         supported: false,
         params: { variant: "unknown" },
@@ -421,7 +527,7 @@ describe("action continuation schema", () => {
     ).toBe(false);
   });
 
-  it("rejects completed service.connect reports without a userService resource", () => {
+  it("requires the resource variant owned by service and key actions", () => {
     expect(() =>
       buildActionContinueBody(
         "nyxid-chat-actor-1",
@@ -436,9 +542,7 @@ describe("action continuation schema", () => {
         ],
         new Map([["act-1", "service.connect"]]),
       ),
-    ).toThrow(
-      "service.connect completed reports must include resource.userService.userServiceId",
-    );
+    ).toThrow("Completed action reports must include a resource reference");
     expect(() =>
       buildActionContinueBody(
         "nyxid-chat-actor-1",
@@ -452,14 +556,62 @@ describe("action continuation schema", () => {
             resource: { key: { keyId: "key-1" } },
           },
         ],
-        new Map([["act-1", "service.connect"]]),
+        new Map([["act-1", "service.reauthorize"]]),
       ),
     ).toThrow(
-      "service.connect completed reports must include resource.userService.userServiceId",
+      "service.reauthorize completed reports must include resource.userService.userServiceId",
     );
+    expect(() =>
+      buildActionContinueBody(
+        "nyxid-chat-actor-1",
+        "request-1",
+        "turn-origin-1",
+        [
+          {
+            actionRequestId: "act-1",
+            originTurnId: "turn-origin-1",
+            disposition: "completed",
+            resource: {
+              userService: { userServiceId: "service-1" },
+            },
+          },
+        ],
+        new Map([["act-1", "key.rotate"]]),
+      ),
+    ).toThrow("key.rotate completed reports must include resource.key.keyId");
   });
 
-  it("fails closed for completed reports without resources when the action lookup is missing", () => {
+  it("round-trips all six safe resource variants when the action is neutral", () => {
+    const resources = [
+      { userService: { userServiceId: "service-1" } },
+      { key: { keyId: "key-1" } },
+      { node: { nodeId: "node-1" } },
+      { serviceAccount: { serviceAccountId: "sa-1" } },
+      { developerApp: { clientId: "app-1" } },
+      { device: { deviceId: "device-1" } },
+    ] as const;
+
+    for (const [index, resource] of resources.entries()) {
+      const actionRequestId = `act-${String(index)}`;
+      const body = buildActionContinueBody(
+        "nyxid-chat-actor-1",
+        `request-${String(index)}`,
+        "turn-origin-1",
+        [
+          {
+            actionRequestId,
+            originTurnId: "turn-origin-1",
+            disposition: "completed",
+            resource,
+          },
+        ],
+        new Map([[actionRequestId, "node.inspect"]]),
+      );
+      expect(body.actions[0]?.resource).toEqual(resource);
+    }
+  });
+
+  it("fails closed for completed reports without resources", () => {
     expect(() =>
       buildActionContinueBody(
         "nyxid-chat-actor-1",

@@ -1,4 +1,4 @@
-import { useEffect } from "react";
+import { useEffect, useRef } from "react";
 import {
   useMutation,
   useQuery,
@@ -8,9 +8,12 @@ import {
 import { toast } from "sonner";
 import { ApiError } from "@/lib/api-client";
 import {
+  ASSISTANT_SESSION_EXPIRED_MESSAGE,
+  ASSISTANT_UPSTREAM_AUTH_MESSAGE,
   AssistantConversationNotFoundError,
   AssistantTurnActiveError,
   AssistantTurnCancelledError,
+  isNyxIdSessionAuthFailure,
 } from "@/lib/assistant/errors";
 import {
   useApprovalRequests,
@@ -21,8 +24,17 @@ import {
   type AssistantApprovalEntry,
 } from "@/lib/assistant/approvals";
 import { assistantMockStore } from "@/lib/assistant/mock-data";
-import { assistantTransport } from "@/lib/assistant/transport";
+import {
+  assistantTransport,
+  setAssistantTransportEngine,
+  type AssistantEngine,
+} from "@/lib/assistant/transport";
+import {
+  getAssistantIdentityUserId,
+  subscribeAssistantIdentity,
+} from "@/lib/assistant/identity";
 import type { ActionReport } from "@/schemas/assistant-actions";
+import type { InputAnswer } from "@/schemas/assistant-input";
 import type {
   ActiveTurn,
   Conversation,
@@ -44,13 +56,113 @@ export const assistantKeys = {
   workspace: [...ROOT, "workspace"] as const,
 } as const;
 
+export const directAssistantKeys = {
+  root: [...ROOT, "direct"] as const,
+  owner: (ownerUserId: string | null) =>
+    [...ROOT, "direct", ownerUserId ?? "signed-out"] as const,
+  conversations: (ownerUserId: string | null) =>
+    [...ROOT, "direct", ownerUserId ?? "signed-out", "conversations"] as const,
+  history: (ownerUserId: string | null, conversationId: string) =>
+    [
+      ...ROOT,
+      "direct",
+      ownerUserId ?? "signed-out",
+      "history",
+      conversationId,
+    ] as const,
+  turn: (ownerUserId: string | null, conversationId: string) =>
+    [
+      ...ROOT,
+      "direct",
+      ownerUserId ?? "signed-out",
+      "turn",
+      conversationId,
+    ] as const,
+  episode: (ownerUserId: string | null, conversationId: string) =>
+    [
+      ...ROOT,
+      "direct",
+      ownerUserId ?? "signed-out",
+      "episode",
+      conversationId,
+    ] as const,
+  workspace: (ownerUserId: string | null) =>
+    [...ROOT, "direct", ownerUserId ?? "signed-out", "workspace"] as const,
+} as const;
+
+const directOwnerKeySets = new Map<
+  string,
+  {
+    readonly conversations: readonly string[];
+    readonly history: (conversationId: string) => readonly string[];
+    readonly turn: (conversationId: string) => readonly string[];
+    readonly episode: (conversationId: string) => readonly string[];
+    readonly workspace: readonly string[];
+  }
+>();
+
+export function assistantKeysFor(
+  engine: AssistantEngine,
+  ownerUserId: string | null = getAssistantIdentityUserId(),
+) {
+  if (engine === "aevatar") return assistantKeys;
+  const ownerKey = ownerUserId ?? "signed-out";
+  const existing = directOwnerKeySets.get(ownerKey);
+  if (existing) return existing;
+  const keys = {
+    conversations: directAssistantKeys.conversations(ownerUserId),
+    history: (conversationId: string) =>
+      directAssistantKeys.history(ownerUserId, conversationId),
+    turn: (conversationId: string) =>
+      directAssistantKeys.turn(ownerUserId, conversationId),
+    episode: (conversationId: string) =>
+      directAssistantKeys.episode(ownerUserId, conversationId),
+    workspace: directAssistantKeys.workspace(ownerUserId),
+  } as const;
+  directOwnerKeySets.set(ownerKey, keys);
+  return keys;
+}
+
+export function useAssistantEngine(engine: AssistantEngine): void {
+  const queryClient = useQueryClient();
+  const previousEngine = useRef(engine);
+
+  // Query functions may start during this render. Keep selection synchronous
+  // with the key namespace instead of waiting for an effect after commit; a
+  // discarded render leaves the selection set; the next committed render
+  // re-asserts it.
+  setAssistantTransportEngine(engine);
+
+  useEffect(() => {
+    const previous = previousEngine.current;
+    previousEngine.current = engine;
+    if (previous === engine) return;
+    if (engine === "direct") {
+      queryClient.removeQueries({
+        predicate: (query) =>
+          query.queryKey[0] === ROOT[0] && query.queryKey[1] !== "direct",
+      });
+    } else {
+      queryClient.removeQueries({ queryKey: directAssistantKeys.root });
+    }
+  }, [engine, queryClient]);
+
+  useEffect(
+    () =>
+      subscribeAssistantIdentity(() => {
+        queryClient.removeQueries({ queryKey: directAssistantKeys.root });
+      }),
+    [queryClient],
+  );
+}
+
 // One page comfortably above anything a single user accumulates as
 // simultaneously-pending; the badge uses the server-side total anyway.
 const PENDING_APPROVALS_PAGE_SIZE = 50;
 const APPROVAL_HISTORY_PAGE_SIZE = 20;
 // A turn that never emits a first event is failed rather than left hanging.
 // The deadline has to tolerate slow first-frame delivery from the upstream
-// workflow engine: at 8s it was cancelling healthy-but-slow SSE turns, so it
+// typed actor: at 8s it was cancelling healthy-but-slow SSE turns, so it
 // sits well above the observed worst-case time-to-first-event.
 const STREAM_START_DEADLINE_MS = 30_000;
 const PROJECTION_DEADLINE_MS = 5_000;
@@ -107,7 +219,10 @@ async function waitWithDeadline(
 async function projectTransportState(
   queryClient: QueryClient,
   conversationId: string,
+  engine: AssistantEngine = "aevatar",
+  ownerUserId: string | null = getAssistantIdentityUserId(),
 ): Promise<void> {
+  const keys = assistantKeysFor(engine, ownerUserId);
   await waitWithDeadline(
     (async () => {
       const [history, conversations] = await Promise.allSettled([
@@ -116,43 +231,39 @@ async function projectTransportState(
       ]);
       if (history.status === "fulfilled") {
         queryClient.setQueryData<ConversationHistory>(
-          assistantKeys.history(conversationId),
+          keys.history(conversationId),
           () => history.value,
         );
         const canonicalId = history.value.conversation.id;
         if (canonicalId !== conversationId) {
           queryClient.setQueryData<ConversationHistory>(
-            assistantKeys.history(canonicalId),
+            keys.history(canonicalId),
             () => history.value,
           );
           if (
-            queryClient.getQueryData(assistantKeys.episode(canonicalId)) ===
-            undefined
+            queryClient.getQueryData(keys.episode(canonicalId)) === undefined
           ) {
             queryClient.setQueryData(
-              assistantKeys.episode(canonicalId),
-              queryClient.getQueryData(assistantKeys.episode(conversationId)),
+              keys.episode(canonicalId),
+              queryClient.getQueryData(keys.episode(conversationId)),
             );
           }
-          if (
-            queryClient.getQueryData(assistantKeys.turn(canonicalId)) ===
-            undefined
-          ) {
+          if (queryClient.getQueryData(keys.turn(canonicalId)) === undefined) {
             queryClient.setQueryData(
-              assistantKeys.turn(canonicalId),
-              queryClient.getQueryData(assistantKeys.turn(conversationId)),
+              keys.turn(canonicalId),
+              queryClient.getQueryData(keys.turn(conversationId)),
             );
           }
         }
       }
       if (conversations.status === "fulfilled") {
         queryClient.setQueryData<Conversation[]>(
-          assistantKeys.conversations,
+          keys.conversations,
           () => conversations.value,
         );
       }
       await queryClient.invalidateQueries({
-        queryKey: assistantKeys.workspace,
+        queryKey: keys.workspace,
       });
     })(),
     PROJECTION_DEADLINE_MS,
@@ -246,22 +357,33 @@ const TRANSPORT_TOAST_ID = "assistant-transport-unavailable";
 
 /**
  * Chat reaches aevatar through NyxID's `/api/v1/assistant/*` pass-through,
- * which forwards the DOWNSTREAM's status straight through. A 401 there means
- * aevatar rejected the identity NyxID forwarded — the NyxID session itself is
- * fine — so the transport opts those requests out of the global sign-out
- * (`preserveSessionOn401` in aevatar-transport) and the route stays put.
- * Without a toast that failure is invisible: the sidebar just renders empty,
- * which reads as "no chats yet" rather than "chat is down".
+ * which forwards the DOWNSTREAM's status straight through. The transport opts
+ * those requests out of the global sign-out (`preserveSessionOn401` in
+ * aevatar-transport) so the route stays put. Without a toast that failure is
+ * invisible: the sidebar just renders empty, which reads as "no chats yet"
+ * rather than "chat is down".
+ *
+ * A 401 can come from either side, so attribute it by `errorCode` rather than
+ * assuming — see `isNyxIdSessionAuthFailure`. Guessing "aevatar rejected it"
+ * is what made an admin-only config outage look like a user's broken
+ * connection.
  */
-export function describeTransportError(error: unknown): {
+export function describeTransportError(
+  error: unknown,
+): {
   readonly message: string;
   readonly description: string;
 } {
   if (error instanceof ApiError && error.status === 401) {
+    if (isNyxIdSessionAuthFailure(error.errorCode)) {
+      return {
+        message: "Your session has expired",
+        description: ASSISTANT_SESSION_EXPIRED_MESSAGE,
+      };
+    }
     return {
       message: "Assistant chat is unavailable",
-      description:
-        "NyxID could not authenticate you to the chat backend. You are still signed in — reconnect the aevatar service and try again.",
+      description: ASSISTANT_UPSTREAM_AUTH_MESSAGE,
     };
   }
   return {
@@ -291,7 +413,10 @@ export function describeHistoryError(error: unknown): string {
   return "Could not load earlier messages in this conversation.";
 }
 
-function useTransportErrorToast(isError: boolean, error: unknown): void {
+function useTransportErrorToast(
+  isError: boolean,
+  error: unknown,
+): void {
   useEffect(() => {
     if (!isError) return;
     const { message, description } = describeTransportError(error);
@@ -327,19 +452,24 @@ function useHistoryErrorToast(isError: boolean, error: unknown): void {
   }, [isError, error]);
 }
 
-export function useConversations() {
+export function useConversations(engine: AssistantEngine = "aevatar") {
+  const keys = assistantKeysFor(engine);
   const query = useQuery({
-    queryKey: assistantKeys.conversations,
+    queryKey: keys.conversations,
     queryFn: () => assistantTransport.listConversations(),
   });
   useTransportErrorToast(query.isError, query.error);
   return query;
 }
 
-export function useConversation(conversationId: string | undefined) {
+export function useConversation(
+  conversationId: string | undefined,
+  engine: AssistantEngine = "aevatar",
+) {
   const queryClient = useQueryClient();
+  const keys = assistantKeysFor(engine);
   const query = useQuery({
-    queryKey: assistantKeys.history(conversationId ?? ""),
+    queryKey: keys.history(conversationId ?? ""),
     queryFn: () => assistantTransport.getHistory(conversationId ?? ""),
     enabled: Boolean(conversationId),
     retry: (failureCount, error) => {
@@ -369,15 +499,15 @@ export function useConversation(conversationId: string | undefined) {
           });
         }
         void queryClient.invalidateQueries({
-          queryKey: assistantKeys.history(conversationId),
+          queryKey: keys.history(conversationId),
         });
         if (outcome.conversationId !== conversationId) {
           void queryClient.invalidateQueries({
-            queryKey: assistantKeys.history(outcome.conversationId),
+            queryKey: keys.history(outcome.conversationId),
           });
         }
         void queryClient.invalidateQueries({
-          queryKey: assistantKeys.conversations,
+          queryKey: keys.conversations,
         });
       })
       .catch(() => undefined);
@@ -385,14 +515,22 @@ export function useConversation(conversationId: string | undefined) {
       released = true;
       assistantTransport.releaseProjectionWaiter(conversationId);
     };
-  }, [conversationId, query.data?.awaitingProjection, queryClient]);
+  }, [
+    conversationId,
+    engine,
+    keys,
+    query.data?.awaitingProjection,
+    queryClient,
+  ]);
   return query;
 }
 
 export function useRetryConversationProjection(
   conversationId: string | undefined,
+  engine: AssistantEngine = "aevatar",
 ) {
   const queryClient = useQueryClient();
+  const keys = assistantKeysFor(engine);
   return useMutation({
     mutationFn: async () => {
       if (!conversationId) throw new Error("Select a conversation first.");
@@ -402,24 +540,28 @@ export function useRetryConversationProjection(
       if (!conversationId) return;
       await Promise.all([
         queryClient.invalidateQueries({
-          queryKey: assistantKeys.history(conversationId),
+          queryKey: keys.history(conversationId),
         }),
         outcome.conversationId === conversationId
           ? Promise.resolve()
           : queryClient.invalidateQueries({
-              queryKey: assistantKeys.history(outcome.conversationId),
+              queryKey: keys.history(outcome.conversationId),
             }),
         queryClient.invalidateQueries({
-          queryKey: assistantKeys.conversations,
+          queryKey: keys.conversations,
         }),
       ]);
     },
   });
 }
 
-export function useAssistantTurn(conversationId: string | undefined) {
+export function useAssistantTurn(
+  conversationId: string | undefined,
+  engine: AssistantEngine = "aevatar",
+) {
+  const keys = assistantKeysFor(engine);
   return useQuery({
-    queryKey: assistantKeys.turn(conversationId ?? ""),
+    queryKey: keys.turn(conversationId ?? ""),
     queryFn: async (): Promise<ActiveTurn | null> => null,
     enabled: false,
     initialData: null,
@@ -433,9 +575,13 @@ export function useAssistantTurn(conversationId: string | undefined) {
  * for this conversation in this session, which is also the state after a
  * reload, so the thread falls back to reading the transcript.
  */
-export function useTurnEpisode(conversationId: string | undefined) {
+export function useTurnEpisode(
+  conversationId: string | undefined,
+  engine: AssistantEngine = "aevatar",
+) {
+  const keys = assistantKeysFor(engine);
   return useQuery({
-    queryKey: assistantKeys.episode(conversationId ?? ""),
+    queryKey: keys.episode(conversationId ?? ""),
     queryFn: async (): Promise<TurnEpisode | null> => null,
     enabled: false,
     initialData: null,
@@ -451,21 +597,32 @@ export function useTurnEpisode(conversationId: string | undefined) {
  * draft thread before the actor lands — and without one promise between
  * them that send would allocate a second actor and stream into it.
  */
-let pendingCreate: Promise<Conversation> | null = null;
+const pendingCreates = new Map<AssistantEngine, Promise<Conversation>>();
 
-function createConversationOnce(): Promise<Conversation> {
-  pendingCreate ??= assistantTransport.createConversation().finally(() => {
-    pendingCreate = null;
+function createConversationOnce(
+  engine: AssistantEngine,
+): Promise<Conversation> {
+  const existing = pendingCreates.get(engine);
+  if (existing) return existing;
+  const pending = assistantTransport.createConversation().finally(() => {
+    if (pendingCreates.get(engine) === pending) pendingCreates.delete(engine);
   });
-  return pendingCreate;
+  pendingCreates.set(engine, pending);
+  return pending;
 }
 
-export function useCreateConversation() {
+export function useCreateConversation(engine: AssistantEngine = "aevatar") {
   const queryClient = useQueryClient();
+  const ownerUserId = getAssistantIdentityUserId();
   return useMutation({
-    mutationFn: () => createConversationOnce(),
+    mutationFn: () => createConversationOnce(engine),
     onSuccess: async (conversation) => {
-      await projectTransportState(queryClient, conversation.id);
+      await projectTransportState(
+        queryClient,
+        conversation.id,
+        engine,
+        ownerUserId,
+      );
     },
   });
 }
@@ -476,22 +633,23 @@ export function useCreateConversation() {
  * mirror already dropped the row, so re-reading it is authoritative and a
  * refetch cannot race the upstream history materialization back in.
  */
-export function useDeleteConversation() {
+export function useDeleteConversation(engine: AssistantEngine = "aevatar") {
   const queryClient = useQueryClient();
+  const keys = assistantKeysFor(engine);
   return useMutation({
     mutationFn: (conversationId: string) =>
       assistantTransport.deleteConversation(conversationId),
     onSuccess: async (_result, conversationId) => {
       activeHandles.delete(conversationId);
       queryClient.removeQueries({
-        queryKey: assistantKeys.history(conversationId),
+        queryKey: keys.history(conversationId),
       });
       queryClient.removeQueries({
-        queryKey: assistantKeys.turn(conversationId),
+        queryKey: keys.turn(conversationId),
       });
       const conversations = await assistantTransport.listConversations();
       queryClient.setQueryData<Conversation[]>(
-        assistantKeys.conversations,
+        keys.conversations,
         () => conversations,
       );
     },
@@ -544,12 +702,15 @@ interface TurnEventPump {
 function createTurnEventPump(
   queryClient: QueryClient,
   targetId: string,
+  engine: AssistantEngine,
+  ownerUserId: string | null,
 ): TurnEventPump {
+  const keys = assistantKeysFor(engine, ownerUserId);
   const owners = ownersFor(queryClient);
   const owner = Symbol(targetId);
   const previousOwner = owners.get(targetId);
   const previousEpisode = queryClient.getQueryData<TurnEpisode | null>(
-    assistantKeys.episode(targetId),
+    keys.episode(targetId),
   );
   let lastSeenCursor = 0;
   // Per-episode, because the pump itself is per-episode. Opening it here rather
@@ -573,7 +734,7 @@ function createTurnEventPump(
   const publish = () => {
     if (!ownsEpisode()) return;
     queryClient.setQueryData<TurnEpisode | null>(
-      assistantKeys.episode(targetId),
+      keys.episode(targetId),
       () => ({ open, printed, projecting: projections > 0 }),
     );
   };
@@ -592,7 +753,7 @@ function createTurnEventPump(
     publish();
     // A delete can race a cancel-driven projection, in which case the history
     // read legitimately rejects for the tombstoned id.
-    void projectTransportState(queryClient, targetId)
+    void projectTransportState(queryClient, targetId, engine, ownerUserId)
       .catch(() => undefined)
       .finally(() => {
         projections -= 1;
@@ -634,10 +795,11 @@ function createTurnEventPump(
     };
     open = false;
     activeHandles.delete(targetId);
-    queryClient.setQueryData<ActiveTurn | null>(
-      assistantKeys.turn(targetId),
-      () => ({ turnId: handle?.turnId ?? null, status: "failed", error }),
-    );
+    queryClient.setQueryData<ActiveTurn | null>(keys.turn(targetId), () => ({
+      turnId: handle?.turnId ?? null,
+      status: "failed",
+      error,
+    }));
     publish();
     toast.error("The assistant reply failed", {
       id: `assistant-turn-start-timeout-${targetId}`,
@@ -656,7 +818,7 @@ function createTurnEventPump(
     const turn = turnFromEvent(event);
     if (turn) {
       queryClient.setQueryData<ActiveTurn | null>(
-        assistantKeys.turn(targetId),
+        keys.turn(targetId),
         () => turn,
       );
     }
@@ -695,7 +857,7 @@ function createTurnEventPump(
         owners.delete(targetId);
       }
       queryClient.setQueryData<TurnEpisode | null>(
-        assistantKeys.episode(targetId),
+        keys.episode(targetId),
         () => previousEpisode ?? null,
       );
     },
@@ -705,7 +867,7 @@ function createTurnEventPump(
       if (!ownsEpisode()) return;
       owners.delete(targetId);
       queryClient.setQueryData<TurnEpisode | null>(
-        assistantKeys.episode(targetId),
+        keys.episode(targetId),
         () => null,
       );
     },
@@ -719,8 +881,12 @@ function createTurnEventPump(
  * and must not silently do nothing; the caller navigates to the returned
  * `conversationId` to follow the new thread.
  */
-export function useSendMessage(conversationId: string | undefined) {
+export function useSendMessage(
+  conversationId: string | undefined,
+  engine: AssistantEngine = "aevatar",
+) {
   const queryClient = useQueryClient();
+  const ownerUserId = getAssistantIdentityUserId();
   return useMutation({
     mutationFn: async (content: string): Promise<SentMessage> => {
       let target = conversationId;
@@ -729,9 +895,9 @@ export function useSendMessage(conversationId: string | undefined) {
         // sends racing before React commits the disabled state, or a send
         // landing mid-provision, all resolve to the SAME actor (the losers
         // are then rejected by the active-turn guard).
-        const conversation = await createConversationOnce();
+        const conversation = await createConversationOnce(engine);
         target = conversation.id;
-        await projectTransportState(queryClient, target);
+        await projectTransportState(queryClient, target, engine, ownerUserId);
       }
       const targetId = target;
       // The pump opens this send's episode as it is constructed, which is what
@@ -740,7 +906,12 @@ export function useSendMessage(conversationId: string | undefined) {
       // cache here instead would survive a stream that hangs before its
       // response headers — the transport arms its watchdog only once a body
       // exists — and leave the composer disabled with no turn to stop.
-      const pump = createTurnEventPump(queryClient, targetId);
+      const pump = createTurnEventPump(
+        queryClient,
+        targetId,
+        engine,
+        ownerUserId,
+      );
       try {
         const handle = assistantTransport.sendMessage(
           targetId,
@@ -748,7 +919,7 @@ export function useSendMessage(conversationId: string | undefined) {
           pump.onEvent,
         );
         activeHandles.set(targetId, handle);
-        await projectTransportState(queryClient, targetId);
+        await projectTransportState(queryClient, targetId, engine, ownerUserId);
         return { conversationId: targetId, handle };
       } catch (error) {
         // A rejected candidate never became the owner of a real turn. Restore
@@ -767,7 +938,9 @@ export function useSendMessage(conversationId: string | undefined) {
  * before that, which previously vanished into the composer's restore-text
  * catch and made the send button look dead.
  */
-export function describeSendFailure(error: unknown): {
+export function describeSendFailure(
+  error: unknown,
+): {
   readonly message: string;
   readonly description: string;
 } {
@@ -777,8 +950,9 @@ export function describeSendFailure(error: unknown): {
   ) {
     return {
       message: "Message not sent",
-      description:
-        "NyxID could not authenticate you to the chat backend. You are still signed in — reconnect the aevatar service and try again.",
+      description: isNyxIdSessionAuthFailure(error.errorCode)
+        ? ASSISTANT_SESSION_EXPIRED_MESSAGE
+        : ASSISTANT_UPSTREAM_AUTH_MESSAGE,
     };
   }
   if (error instanceof AssistantTurnActiveError) {
@@ -796,8 +970,12 @@ export function describeSendFailure(error: unknown): {
   };
 }
 
-export function useCancelTurn(conversationId: string | undefined) {
+export function useCancelTurn(
+  conversationId: string | undefined,
+  engine: AssistantEngine = "aevatar",
+) {
   const queryClient = useQueryClient();
+  const ownerUserId = getAssistantIdentityUserId();
   return useMutation({
     mutationFn: async (): Promise<void> => {
       if (!conversationId) return;
@@ -806,13 +984,99 @@ export function useCancelTurn(conversationId: string | undefined) {
       // arrive, and Stop must abort a request hung before that.
       assistantTransport.cancelActiveTurn(conversationId);
       activeHandles.delete(conversationId);
-      await projectTransportState(queryClient, conversationId);
+      await projectTransportState(
+        queryClient,
+        conversationId,
+        engine,
+        ownerUserId,
+      );
     },
   });
 }
 
-export function useDecideApproval(conversationId: string | undefined) {
+function taskControlError(title: string, error: unknown): void {
+  toast.error(title, {
+    description:
+      error instanceof Error && error.message
+        ? error.message
+        : "The actor did not accept this control. Refresh the conversation and try again.",
+  });
+}
+
+export function useStopTask(conversationId: string | undefined) {
   const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: async (): Promise<void> => {
+      if (!conversationId) throw new Error("Select a conversation first.");
+      await assistantTransport.stopTask(conversationId);
+      activeHandles.delete(conversationId);
+      await projectTransportState(queryClient, conversationId);
+    },
+    onError: (error) => taskControlError("Task was not stopped", error),
+  });
+}
+
+export function useSteerTask(conversationId: string | undefined) {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: async (instruction: string): Promise<void> => {
+      if (!conversationId) throw new Error("Select a conversation first.");
+      await assistantTransport.steerTask(conversationId, instruction);
+      await projectTransportState(queryClient, conversationId);
+    },
+    onError: (error) => taskControlError("Steering was not delivered", error),
+  });
+}
+
+export function useRetryStep(conversationId: string | undefined) {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: async (stepId: string): Promise<void> => {
+      if (!conversationId) throw new Error("Select a conversation first.");
+      await assistantTransport.retryStep(conversationId, stepId);
+      await projectTransportState(queryClient, conversationId);
+    },
+    onError: (error) => taskControlError("Step was not retried", error),
+  });
+}
+
+export function useSkipStep(conversationId: string | undefined) {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: async (stepId: string): Promise<void> => {
+      if (!conversationId) throw new Error("Select a conversation first.");
+      await assistantTransport.skipStep(conversationId, stepId);
+      await projectTransportState(queryClient, conversationId);
+    },
+    onError: (error) => taskControlError("Step was not skipped", error),
+  });
+}
+
+export function useResolvePlan(conversationId: string | undefined) {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: async ({
+      blockId,
+      confirmed,
+    }: {
+      readonly blockId: string;
+      readonly confirmed: boolean;
+    }): Promise<void> => {
+      if (!conversationId) throw new Error("Select a conversation first.");
+      await assistantTransport.resolvePlan(conversationId, blockId, confirmed);
+      await projectTransportState(queryClient, conversationId);
+    },
+    onError: (error) =>
+      taskControlError("Plan decision was not delivered", error),
+  });
+}
+
+export function useDecideApproval(
+  conversationId: string | undefined,
+  engine: AssistantEngine = "aevatar",
+) {
+  const queryClient = useQueryClient();
+  const ownerUserId = getAssistantIdentityUserId();
   return useMutation({
     mutationFn: async ({
       blockId,
@@ -822,10 +1086,14 @@ export function useDecideApproval(conversationId: string | undefined) {
       readonly approved: boolean;
     }): Promise<void> => {
       if (!conversationId) throw new Error("Select a conversation first.");
-      // On the live contract the approve endpoint streams an SSE
-      // continuation of the run; the pump projects its events and the
-      // handle makes the stop button work during it.
-      const pump = createTurnEventPump(queryClient, conversationId);
+      // Approval returns JSON acceptance. The transport keeps the conversation
+      // reserved while it observes the matching committed resolution.
+      const pump = createTurnEventPump(
+        queryClient,
+        conversationId,
+        engine,
+        ownerUserId,
+      );
       try {
         const handle = await assistantTransport.decideApproval(
           conversationId,
@@ -838,7 +1106,12 @@ export function useDecideApproval(conversationId: string | undefined) {
         } else if (!pump.receivedEvent()) {
           pump.disown();
         }
-        await projectTransportState(queryClient, conversationId);
+        await projectTransportState(
+          queryClient,
+          conversationId,
+          engine,
+          ownerUserId,
+        );
       } catch (error) {
         if (!pump.receivedEvent() && !pump.expired()) {
           pump.restorePrevious();
@@ -865,8 +1138,68 @@ export function useDecideApproval(conversationId: string | undefined) {
   });
 }
 
-export function useActionCardActions(conversationId: string | undefined) {
+export function useResolveInput(
+  conversationId: string | undefined,
+  engine: AssistantEngine = "aevatar",
+) {
   const queryClient = useQueryClient();
+  const ownerUserId = getAssistantIdentityUserId();
+  return useMutation({
+    mutationFn: async ({
+      blockId,
+      answer,
+    }: {
+      readonly blockId: string;
+      readonly answer: InputAnswer;
+    }): Promise<void> => {
+      if (!conversationId) throw new Error("Select a conversation first.");
+      const pump = createTurnEventPump(
+        queryClient,
+        conversationId,
+        engine,
+        ownerUserId,
+      );
+      try {
+        const handle = await assistantTransport.resolveInput(
+          conversationId,
+          blockId,
+          answer,
+          pump.onEvent,
+        );
+        if (handle) activeHandles.set(conversationId, handle);
+        else if (!pump.receivedEvent()) pump.disown();
+        await projectTransportState(
+          queryClient,
+          conversationId,
+          engine,
+          ownerUserId,
+        );
+      } catch (error) {
+        if (!pump.receivedEvent() && !pump.expired()) pump.restorePrevious();
+        throw error;
+      }
+    },
+    onError: (error) => {
+      if (error instanceof AssistantTurnCancelledError) return;
+      toast.error("Input was not delivered", {
+        id: "assistant-input-failed",
+        description:
+          error instanceof AssistantTurnActiveError
+            ? "Wait for the current reply to finish, then try again."
+            : error instanceof Error && error.message
+              ? error.message
+              : "The assistant backend did not respond. Try again.",
+      });
+    },
+  });
+}
+
+export function useActionCardActions(
+  conversationId: string | undefined,
+  engine: AssistantEngine = "aevatar",
+) {
+  const queryClient = useQueryClient();
+  const ownerUserId = getAssistantIdentityUserId();
 
   return {
     setInProgress(blockId: string, inProgress: boolean): void {
@@ -876,7 +1209,12 @@ export function useActionCardActions(conversationId: string | undefined) {
       // immediately: setActionCardInProgress can return without emitting at
       // all, and the pump's stream-start watchdog would then fire a delayed
       // "assistant reply failed" toast on what was just a button press.
-      const pump = createTurnEventPump(queryClient, conversationId);
+      const pump = createTurnEventPump(
+        queryClient,
+        conversationId,
+        engine,
+        ownerUserId,
+      );
       try {
         assistantTransport.setActionCardInProgress(
           conversationId,
@@ -890,7 +1228,12 @@ export function useActionCardActions(conversationId: string | undefined) {
     },
     blockAction(blockId: string, note: string): void {
       if (!conversationId) return;
-      const pump = createTurnEventPump(queryClient, conversationId);
+      const pump = createTurnEventPump(
+        queryClient,
+        conversationId,
+        engine,
+        ownerUserId,
+      );
       try {
         assistantTransport.blockActionCard(
           conversationId,
@@ -906,7 +1249,12 @@ export function useActionCardActions(conversationId: string | undefined) {
       if (!conversationId) throw new Error("Select a conversation first.");
       // This one does stream a continuation of the run, so it follows the
       // same pump lifecycle as decideApproval above.
-      const pump = createTurnEventPump(queryClient, conversationId);
+      const pump = createTurnEventPump(
+        queryClient,
+        conversationId,
+        engine,
+        ownerUserId,
+      );
       try {
         const handle = assistantTransport.continueActions(
           conversationId,
@@ -919,7 +1267,12 @@ export function useActionCardActions(conversationId: string | undefined) {
         } else if (!pump.receivedEvent()) {
           pump.disown();
         }
-        await projectTransportState(queryClient, conversationId);
+        await projectTransportState(
+          queryClient,
+          conversationId,
+          engine,
+          ownerUserId,
+        );
       } catch (error) {
         if (!pump.receivedEvent() && !pump.expired()) {
           pump.restorePrevious();

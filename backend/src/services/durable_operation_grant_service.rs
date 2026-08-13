@@ -22,7 +22,9 @@ use crate::models::service_endpoint::{EndpointRisk, ServiceEndpoint};
 use crate::models::user_service::{COLLECTION_NAME as USER_SERVICES, UserService};
 use crate::services::mcp_service::{NodeScope, ServiceScope};
 use crate::services::node_ws_manager::NodeWsManager;
-use crate::services::{api_key_scope_service, key_service, mcp_service};
+use crate::services::{
+    api_key_mutation_service as key_mutations, api_key_scope_service, key_service, mcp_service,
+};
 
 pub const DURABLE_GRANT_CONTRACT_VERSION: &str = "durable-operation-grant-v1";
 pub const DURABLE_GRANT_HEADER: &str = "x-nyxid-durable-grant-id";
@@ -1256,6 +1258,68 @@ pub fn grant_from_plan(
     })
 }
 
+async fn activate_scheduled_key(
+    db: &mongodb::Database,
+    key_id: &str,
+    owner_user_id: &str,
+) -> AppResult<ApiKey> {
+    let activation = key_mutations::update_one(
+        db,
+        doc! {
+            "_id": key_id,
+            "user_id": owner_user_id,
+            "purpose": "scheduled_invocation",
+            "scheduled_write_enabled": false,
+        },
+        doc! { "$set": { "scheduled_write_enabled": true } },
+        None,
+    )
+    .await?;
+    if activation.modified_count != 1 {
+        return Err(AppError::Internal(
+            "scheduled key activation fence could not be committed".to_string(),
+        ));
+    }
+
+    db.collection::<ApiKey>(API_KEYS)
+        .find_one(doc! {
+            "_id": key_id,
+            "user_id": owner_user_id,
+            "purpose": "scheduled_invocation",
+            "scheduled_write_enabled": true,
+        })
+        .await?
+        .ok_or_else(|| {
+            AppError::Internal(
+                "scheduled key authority evidence disappeared after activation".to_string(),
+            )
+        })
+}
+
+async fn record_scheduled_key_provisioning_failure(
+    db: &mongodb::Database,
+    key_id: &str,
+) -> AppResult<()> {
+    let now = Utc::now();
+    let result = key_mutations::update_one(
+        db,
+        doc! { "_id": key_id },
+        doc! { "$set": {
+            "is_active": false,
+            "scheduled_write_enabled": false,
+            "provisioning_failed_at": bson::DateTime::from_chrono(now),
+        }},
+        None,
+    )
+    .await?;
+    if result.matched_count != 1 {
+        return Err(AppError::Internal(
+            "failed scheduled key disappeared before compensation".to_string(),
+        ));
+    }
+    Ok(())
+}
+
 #[allow(clippy::too_many_arguments)]
 pub async fn provision_scheduled_key(
     db: &mongodb::Database,
@@ -1314,7 +1378,7 @@ pub async fn provision_scheduled_key(
         .map(|operation| grant_from_plan(owner_user_id, &key.id, actor_user_id, operation, None))
         .collect::<AppResult<_>>()?;
 
-    let provision_result: AppResult<()> = async {
+    let provision_result: AppResult<ApiKey> = async {
         if grants.is_empty() {
             return Err(validation(
                 "scheduled_invocation provisioning requires at least one durable operation",
@@ -1323,45 +1387,24 @@ pub async fn provision_scheduled_key(
         db.collection::<DurableOperationGrant>(GRANTS)
             .insert_many(&grants)
             .await?;
-        let activation = db
-            .collection::<ApiKey>(API_KEYS)
-            .update_one(
-                doc! {
-                    "_id": &key.id,
-                    "user_id": owner_user_id,
-                    "purpose": "scheduled_invocation",
-                    "scheduled_write_enabled": false,
-                },
-                doc! { "$set": { "scheduled_write_enabled": true } },
-            )
-            .await?;
-        if activation.modified_count != 1 {
-            return Err(AppError::Internal(
-                "scheduled key activation fence could not be committed".to_string(),
-            ));
-        }
-        Ok(())
+        activate_scheduled_key(db, &key.id, owner_user_id).await
     }
     .await;
 
-    if let Err(error) = provision_result {
-        let now = Utc::now();
-        let _ = db
-            .collection::<ApiKey>(API_KEYS)
-            .update_one(
-                doc! { "_id": &key.id },
-                doc! { "$set": {
-                    "is_active": false,
-                    "scheduled_write_enabled": false,
-                    "provisioning_failed_at": bson::DateTime::from_chrono(now),
-                }},
-            )
-            .await;
-        return Err(error);
-    }
+    let activated_key = match provision_result {
+        Ok(activated_key) => activated_key,
+        Err(error) => {
+            let _ = record_scheduled_key_provisioning_failure(db, &key.id).await;
+            return Err(error);
+        }
+    };
 
     let mut key = key;
     key.scheduled_write_enabled = true;
+    key.state_version = activated_key.state_version;
+    key.updated_at = activated_key.updated_at.ok_or_else(|| {
+        AppError::Internal("activated scheduled key has no updated_at evidence".to_string())
+    })?;
     Ok(ProvisionedScheduledKey { key, grants })
 }
 
@@ -1533,6 +1576,9 @@ mod tests {
             expires_at: Some(now + Duration::hours(2)),
             is_active: true,
             created_at: now,
+            rotation_predecessor_id: None,
+            state_version: 1,
+            updated_at: Some(now),
             description: None,
             allowed_service_ids: vec![user_service_id.to_string()],
             allowed_node_ids: Vec::new(),
@@ -1545,6 +1591,54 @@ mod tests {
             purpose: ApiKeyPurpose::ScheduledInvocation,
             scheduled_write_enabled: true,
         }
+    }
+
+    #[tokio::test]
+    async fn scheduled_key_lifecycle_mutations_advance_authority_evidence() {
+        let Some(db) = connect_test_database("durable_scheduled_key_authority").await else {
+            return;
+        };
+        let owner = Uuid::new_v4().to_string();
+        let key_id = Uuid::new_v4().to_string();
+        let service_id = Uuid::new_v4().to_string();
+        let mut key = scheduled_key(&key_id, &owner, &service_id);
+        key.scheduled_write_enabled = false;
+        key.updated_at = Some(Utc::now() - Duration::minutes(1));
+        let initial_updated_at = key.updated_at.expect("initial authority timestamp");
+        key_mutations::insert_one(&db, &key, None)
+            .await
+            .expect("insert scheduled key");
+
+        let activated = activate_scheduled_key(&db, &key_id, &owner)
+            .await
+            .expect("activate scheduled key");
+        assert!(activated.scheduled_write_enabled);
+        assert_eq!(activated.state_version, 2);
+        assert!(activated.updated_at.expect("activation timestamp") > initial_updated_at);
+
+        record_scheduled_key_provisioning_failure(&db, &key_id)
+            .await
+            .expect("record provisioning failure");
+        let compensated = db
+            .collection::<ApiKey>(API_KEYS)
+            .find_one(doc! { "_id": &key_id })
+            .await
+            .unwrap()
+            .expect("compensated scheduled key");
+        assert!(!compensated.is_active);
+        assert!(!compensated.scheduled_write_enabled);
+        assert_eq!(compensated.state_version, 3);
+        assert!(compensated.updated_at.is_some());
+        assert!(
+            db.collection::<bson::Document>(API_KEYS)
+                .find_one(doc! {
+                    "_id": &key_id,
+                    "provisioning_failed_at": { "$type": "date" },
+                })
+                .await
+                .unwrap()
+                .is_some()
+        );
     }
 
     fn grant(

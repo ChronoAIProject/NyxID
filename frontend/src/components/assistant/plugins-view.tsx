@@ -30,6 +30,8 @@ interface PluginCardShape {
   readonly description: string;
   readonly meta: string;
   readonly added: boolean;
+  /** Added connectors only: every connection behind the card is disabled. */
+  readonly disabled?: boolean;
 }
 
 /**
@@ -131,7 +133,15 @@ function PluginCard({
       <div className="flex shrink-0 items-center justify-between gap-2">
         {item.added ? (
           <span className="flex min-w-0 items-center gap-2">
-            <Badge variant="success">{addedBadge}</Badge>
+            {/* A disabled connection is still added — it just can't be used.
+                Showing the green Connected badge would claim the assistant has
+                a working way in, so the neutral Disabled badge replaces it
+                rather than sitting beside it. */}
+            {item.disabled ? (
+              <Badge variant="secondary">Disabled</Badge>
+            ) : (
+              <Badge variant="success">{addedBadge}</Badge>
+            )}
             {addedMeta && (
               <span className="truncate font-mono text-[10px] text-text-tertiary">
                 {addedMeta}

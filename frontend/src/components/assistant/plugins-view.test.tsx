@@ -298,20 +298,20 @@ describe("PluginsView", () => {
     );
   });
 
-  it("requires an explicit confirmation before revoking", async () => {
+  it("requires an explicit confirmation before deleting", async () => {
     const mutate = vi.fn();
     mocks.useDeleteKey.mockReturnValue({ mutate, isPending: false });
     const user = userEvent.setup();
     render(<PluginsView />);
     await user.click(screen.getByRole("button", { name: "Manage OpenAI" }));
-    // First Revoke click only opens the confirmation dialog — no delete yet.
+    // First Delete click only opens the confirmation dialog — no delete yet.
     // (Dialog copy and cancel behaviour are covered in
     // manage-connection-modal.test.tsx.)
-    await user.click(await screen.findByRole("button", { name: "Revoke" }));
+    await user.click(await screen.findByRole("button", { name: "Delete" }));
     expect(mutate).not.toHaveBeenCalled();
     // The confirm click sends the delete with the key id.
     const confirm = screen
-      .getAllByRole("button", { name: "Revoke" })
+      .getAllByRole("button", { name: "Delete" })
       .at(-1) as HTMLElement;
     await user.click(confirm);
     expect(mutate).toHaveBeenCalledWith("key-1", expect.anything());
@@ -343,9 +343,9 @@ describe("PluginsView", () => {
     const user = userEvent.setup();
     render(<PluginsView />);
     await user.click(screen.getByRole("button", { name: "Manage OpenAI" }));
-    await user.click(await screen.findByRole("button", { name: "Revoke" }));
+    await user.click(await screen.findByRole("button", { name: "Delete" }));
     const confirm = screen
-      .getAllByRole("button", { name: "Revoke" })
+      .getAllByRole("button", { name: "Delete" })
       .at(-1) as HTMLElement;
     await user.click(confirm);
 
@@ -401,7 +401,7 @@ describe("PluginsView", () => {
     expect(await screen.findByRole("dialog")).toBeInTheDocument();
     expect(screen.queryByRole("switch")).not.toBeInTheDocument();
     expect(
-      screen.queryByRole("button", { name: "Revoke" }),
+      screen.queryByRole("button", { name: "Delete" }),
     ).not.toBeInTheDocument();
     expect(
       screen.queryByRole("button", { name: "Replace" }),

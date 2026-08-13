@@ -10,6 +10,41 @@ use crate::commands::lark_permission::print_permission_block;
 use crate::commands::node_credential::RciCliHintLines;
 use crate::org_resolver::resolve_org_id;
 
+/// One status word for a service row from `GET /keys`.
+///
+/// `status` on the row is the CREDENTIAL's status, and a disabled service
+/// keeps a perfectly healthy credential — so rendering `status` alone printed
+/// "active" for a service the proxy would refuse. `is_active: false` therefore
+/// wins over everything else.
+///
+/// This only became reachable when `/keys` started returning disabled services
+/// so they could be re-enabled; before that a disabled row never reached any
+/// listing. Node health still outranks the credential status for active rows,
+/// as it did before.
+pub(crate) fn display_status(svc: &Value) -> &'static str {
+    if svc["is_active"].as_bool() == Some(false) {
+        return "disabled";
+    }
+    let credential_status = match svc["status"].as_str() {
+        Some("expired") => "expired",
+        Some("revoked") => "revoked",
+        Some("failed") => "failed",
+        Some("refresh_failed") => "refresh_failed",
+        Some("pending_auth") => "pending_auth",
+        _ => "active",
+    };
+    if svc["node_id"].is_string() {
+        return match svc["node_status"].as_str() {
+            Some("unknown") => "node_deleted",
+            Some("inaccessible") => "inaccessible",
+            Some("offline") => "offline",
+            Some("draining") => "draining",
+            _ => credential_status,
+        };
+    }
+    credential_status
+}
+
 /// Parse one or more `--default-header NAME=VALUE[:overridable]` flag values
 /// into a JSON-shaped list that the backend `validate_headers` helper will
 /// then normalize and persist. NyxID#356.
@@ -941,18 +976,7 @@ pub async fn run(command: ServiceCommands) -> Result<()> {
                                 .unwrap_or("-");
                             let label = svc["label"].as_str().unwrap_or("-");
                             let endpoint = svc["endpoint_url"].as_str().unwrap_or("-");
-                            let status = if svc["node_id"].is_string() {
-                                match svc["node_status"].as_str() {
-                                    Some("unknown") => "node_deleted",
-                                    Some("inaccessible") => "inaccessible",
-                                    Some("offline") => "offline",
-                                    Some("draining") => "draining",
-                                    Some("online") => svc["status"].as_str().unwrap_or("active"),
-                                    _ => svc["status"].as_str().unwrap_or("active"),
-                                }
-                            } else {
-                                svc["status"].as_str().unwrap_or("active")
-                            };
+                            let status = display_status(svc);
                             let access = if svc["admin_only"].as_bool().unwrap_or(false) {
                                 "admin-only"
                             } else {
@@ -2516,6 +2540,58 @@ fn format_node_managed_list_hint_lines(items: &[Value]) -> Vec<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A disabled service must not print as "active".
+    ///
+    /// Its credential stays healthy while it is disabled, so the row's
+    /// `status` field alone says "active" for something the proxy will refuse
+    /// with a 404. This became reachable when `/keys` started returning
+    /// disabled services so they could be re-enabled.
+    #[test]
+    fn display_status_reports_disabled_over_a_healthy_credential() {
+        let disabled = serde_json::json!({ "is_active": false, "status": "active" });
+        assert_eq!(display_status(&disabled), "disabled");
+
+        // Disabled wins over node health too — the service is off regardless
+        // of whether the node behind it happens to be online.
+        let disabled_on_node = serde_json::json!({
+            "is_active": false,
+            "status": "active",
+            "node_id": "node-1",
+            "node_status": "online",
+        });
+        assert_eq!(display_status(&disabled_on_node), "disabled");
+    }
+
+    #[test]
+    fn display_status_preserves_pre_existing_reporting_for_active_rows() {
+        let active = serde_json::json!({ "is_active": true, "status": "active" });
+        assert_eq!(display_status(&active), "active");
+
+        let expired = serde_json::json!({ "is_active": true, "status": "expired" });
+        assert_eq!(display_status(&expired), "expired");
+
+        // A row with no `is_active` at all (older server) is treated as active.
+        let legacy = serde_json::json!({ "status": "revoked" });
+        assert_eq!(display_status(&legacy), "revoked");
+
+        // Node health still outranks the credential status for active rows.
+        let offline = serde_json::json!({
+            "is_active": true,
+            "status": "active",
+            "node_id": "node-1",
+            "node_status": "offline",
+        });
+        assert_eq!(display_status(&offline), "offline");
+
+        let node_deleted = serde_json::json!({
+            "is_active": true,
+            "status": "active",
+            "node_id": "node-1",
+            "node_status": "unknown",
+        });
+        assert_eq!(display_status(&node_deleted), "node_deleted");
+    }
 
     #[test]
     fn test_format_credential_lines() {

@@ -121,6 +121,22 @@ macro_rules! proxy_billing_routes {
     };
 }
 
+macro_rules! assistant_direct_billing_routes {
+    ($apply:ident, $router:expr) => {
+        $apply!($router;
+            (
+                "/direct/completions",
+                "/api/v1/assistant/direct/completions",
+                "handlers::assistant_direct::completions",
+                post(handlers::assistant_direct::completions),
+                crate::services::billing::route_inventory::BillingRoutePolicy::Metered(
+                    crate::services::billing::BillingIngress::Proxy
+                )
+            ),
+        )
+    };
+}
+
 macro_rules! ssh_billing_routes {
     ($apply:ident, $router:expr) => {
         $apply!($router;
@@ -192,6 +208,40 @@ macro_rules! mcp_billing_routes {
                 delete(handlers::mcp_transport::mcp_delete),
                 crate::services::billing::route_inventory::BillingRoutePolicy::Exempt(
                     "session teardown; no downstream request"
+                )
+            ),
+        )
+    };
+}
+
+macro_rules! exact_service_approval_billing_routes {
+    ($apply:ident, $router:expr) => {
+        $apply!($router;
+            (
+                "/approvals/exact-service/requests",
+                "/api/v1/approvals/exact-service/requests",
+                "handlers::exact_service_approvals::create_request",
+                post(handlers::exact_service_approvals::create_request),
+                crate::services::billing::route_inventory::BillingRoutePolicy::Exempt(
+                    "approval control plane; no downstream request"
+                )
+            ),
+            (
+                "/approvals/exact-service/requests/{request_id}/status",
+                "/api/v1/approvals/exact-service/requests/{request_id}/status",
+                "handlers::exact_service_approvals::observe_request",
+                get(handlers::exact_service_approvals::observe_request),
+                crate::services::billing::route_inventory::BillingRoutePolicy::Exempt(
+                    "approval observation; no downstream request"
+                )
+            ),
+            (
+                "/approvals/exact-service/requests/{request_id}/redeem",
+                "/api/v1/approvals/exact-service/requests/{request_id}/redeem",
+                "handlers::exact_service_approvals::redeem_request",
+                post(handlers::exact_service_approvals::redeem_request),
+                crate::services::billing::route_inventory::BillingRoutePolicy::Metered(
+                    crate::services::billing::BillingIngress::Mcp
                 )
             ),
         )
@@ -332,8 +382,16 @@ pub(crate) fn mounted_billing_route_inventory()
 -> Vec<crate::services::billing::route_inventory::BillingRouteSpec> {
     let mut routes = llm_billing_routes!(collect_billing_route_specs, ());
     routes.extend(proxy_billing_routes!(collect_billing_route_specs, ()));
+    routes.extend(assistant_direct_billing_routes!(
+        collect_billing_route_specs,
+        ()
+    ));
     routes.extend(ssh_billing_routes!(collect_billing_route_specs, ()));
     routes.extend(mcp_billing_routes!(collect_billing_route_specs, ()));
+    routes.extend(exact_service_approval_billing_routes!(
+        collect_billing_route_specs,
+        ()
+    ));
     routes.extend(public_proxy_billing_routes!(
         collect_billing_route_specs,
         ()
@@ -1322,6 +1380,10 @@ pub fn build_router(
     let api_v1_delegated = Router::new()
         .nest("/llm", llm_routes)
         .nest("/delegation", delegation_routes)
+        .merge(exact_service_approval_billing_routes!(
+            register_billing_routes,
+            Router::new()
+        ))
         .route(
             "/approvals/requests/{request_id}/status",
             get(handlers::approvals::get_request_status),
@@ -1383,39 +1445,45 @@ pub fn build_router(
     // the human-only router below: the chat surface -- approvals above all --
     // is a human session surface, so API-key, service-account, delegated, and
     // relay callers are rejected by that router's layers.
-    let assistant_proxy_routes = Router::new()
-        .route(
-            "/conversations",
-            get(handlers::assistant::list_conversations),
-        )
-        .route(
-            "/conversations/{conversation_id}",
-            get(handlers::assistant::get_history).delete(handlers::assistant::delete_conversation),
-        )
-        .route(
-            "/conversations/create-recovery/{command_id}",
-            get(handlers::assistant::get_create_recovery),
-        )
-        .route(
-            "/conversations/{conversation_id}/state",
-            get(handlers::assistant::get_state),
-        )
-        .route("/completions", post(handlers::assistant::completions))
-        .route("/chat", post(handlers::assistant::typed_chat))
-        .route("/workflow-chat", post(handlers::assistant::workflow_chat))
-        .route(
-            "/workflow-chat/ws",
-            get(handlers::assistant::workflow_chat_ws),
-        )
-        .route_layer(axum::Extension(
-            crate::services::billing::route_inventory::BillingRoutePolicy::Metered(
-                crate::services::billing::BillingIngress::Proxy,
-            ),
-        ));
+    let assistant_proxy_routes = assistant_direct_billing_routes!(
+        register_billing_routes,
+        Router::new()
+            .route(
+                "/conversations",
+                get(handlers::assistant::list_conversations),
+            )
+            .route(
+                "/conversations/{conversation_id}",
+                get(handlers::assistant::get_history)
+                    .delete(handlers::assistant::delete_conversation),
+            )
+            .route(
+                "/conversations/{conversation_id}/state",
+                get(handlers::assistant::get_state),
+            )
+            .route("/completions", post(handlers::assistant::completions))
+            .route("/chat", post(handlers::assistant::typed_chat))
+    )
+    .route_layer(axum::Extension(
+        crate::services::billing::route_inventory::BillingRoutePolicy::Metered(
+            crate::services::billing::BillingIngress::Proxy,
+        ),
+    ));
     let assistant_routes = Router::new()
         .route(
             "/readiness",
             get(handlers::assistant_readiness::get_readiness),
+        )
+        .route("/direct/skills", get(handlers::assistant_direct::skills))
+        .route("/direct/models", get(handlers::assistant_direct::models))
+        .route("/direct/efforts", get(handlers::assistant_direct::efforts))
+        .route(
+            "/actions/key-create",
+            post(handlers::assistant_action_effects::create_key),
+        )
+        .route(
+            "/actions/key-rotate",
+            post(handlers::assistant_action_effects::rotate_key),
         )
         .merge(assistant_proxy_routes);
 
