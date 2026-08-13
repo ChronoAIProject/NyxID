@@ -1,7 +1,7 @@
 ---
 name: aevatar-feasibility-advisor
 description: Use before building when a user asks whether Aevatar can achieve a goal, what prerequisites it has, or why it is unavailable. Triggers include bots and third-party APIs, inbound channels, external HTTP triggers, schedules, service exposure, Agent Profiles and tool ceilings, and bounded managed or private-host codex_exec work. It distinguishes outbound connectors from inbound channels and separates not connected, host-gated, not deployed, and genuinely unsupported outcomes. It chooses managed_sandbox versus private_ssh without promising repository, model, credential, runtime, or deployment capabilities the caller does not control, then routes feasible work to the owning Aevatar skill.
-version: "1.9"
+version: "1.10"
 metadata:
   category: plain
   tag:
@@ -156,7 +156,7 @@ not a fixed list.
 | **Inbound bot** that replies in-platform: **Lark / Telegram** | ✅ Yes | Connect the bot connector (`api-lark-bot` / `api-telegram-bot`) **and** register the channel (channel-admin / `channel_registrations`); NyxID provisions the webhook to Aevatar's relay. |
 | **Inbound bot** on a platform with a connector but **no channel module** (Discord, Slack, X, …) | ❌ Not self-serve | Outbound calls work, but inbound-reply needs a new Aevatar **channel module** + relay wiring = Aevatar platform work. Offer the outbound-only version as the alternative. |
 | **Publish** a workflow/team as an **invocable service** in-scope | ✅ Yes | Just bind it (`aevatar-service-publisher`). Usable within the user's scope immediately. |
-| An external automation **triggers an existing Aevatar workflow** (e.g. Lark Base row status changed → HTTP request → run member workflow) | ✅ Usually, without service externalExposure | Use a dedicated NyxID API key on the explicit member/team invoke path, or a NyxID trigger feeding the host-managed signed webhook ingress. Decide whether fields are trusted push input or unverified claims before authoring a Base read. This is an external trigger, not a NyxID connector registration. See `aevatar-service-publisher`. |
+| An external automation **triggers an existing Aevatar workflow** (e.g. Lark Base row status changed → HTTP request → run member workflow) | ✅ Usually, without service externalExposure | Use a dedicated NyxID API key on the explicit member/team invoke path, or a NyxID trigger feeding the signed webhook ingress (bindings are self-serve scope resources on current hosts; host-managed appsettings on older ones). Decide whether fields are trusted push input or unverified claims before authoring a Base read. This is an external trigger, not a NyxID connector registration. See `aevatar-service-publisher`. |
 | Have that service **registered as a NyxID-brokered connector** (callable by others/externally) | ⚠️ Host-gated | The **host** must enable external exposure (`GAgentService:ExternalExposure: Enabled=true` + `RegisterAllPublishedServices` or an opt-in policy). You **cannot** turn this on as a client — verify `externalExposure` on the service and, if empty, tell the user to ask the host. |
 | Give an agent a **fixed persona + pinned Ornn skills + an enforced tool ceiling** (an Agent Profile) | ⚠️ Modelled, owner-managed, deployment-dependent | Probe `GET /api/openapi.json` for the complete `agent-profiles` route family. Absent means unavailable in this deployment; present means the owner can manage it through `aevatar-agent-profile-management`. |
 | Have a published Profile actually **drive a running agent** | ⚠️ Host-gated, and narrow | Publication is not runtime binding. Only *newly created* NyxID direct conversations admitted by a **host-owned rollout** consume a Profile; existing conversations never hot-upgrade, and workflows/teams/services/schedules/channels/AgentRuns are not consumers at all. |
@@ -219,8 +219,9 @@ State these plainly when they bite:
   headers and JSON, call NyxID's proxy route for the already-connected `aevatar` service using
   a NyxID API key with `proxy` scope, and include the real scope/member/team id in the Aevatar
   path. Dedicate that key to one automation before trusting pushed fields. If the sender can set a
-  bearer token but cannot sign, prefer a NyxID trigger with webhook delivery into the host-managed
-  Aevatar ingress; NyxID verifies inbound, signs outbound, and provides durable delivery history.
+  bearer token but cannot sign, prefer a NyxID trigger with webhook delivery into the Aevatar
+  ingress (register the scope-owned binding self-serve on current hosts); NyxID verifies inbound,
+  signs outbound, and provides durable delivery history.
   If neither authority boundary exists, accept only a locator and read the provider. If the sender
   cannot tolerate SSE or cannot shape the typed payload, add the signed adapter path rather than
   weakening verification.

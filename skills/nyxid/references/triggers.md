@@ -77,8 +77,13 @@ Retained webhook envelopes are encrypted and expire after the configured retenti
 by default). Delivery lists contain metadata only. A deployment with retention set to `0` cannot
 redeliver payloads. Keep the receiver idempotent even with durable admission.
 
-For Aevatar's host-managed `/api/workflow-webhooks/{routeKey}` bridge, configure its signature,
-timestamp, and delivery-id header names to the NyxID headers above and map original fields from
-`payload.<field>`. That Host binding remains operator-managed; trigger creation does not create it.
-The current binding stores one HMAC secret and does not select a two-key map from
-`X-NyxID-Key-Id`, so coordinate its configuration change when rotating the delivery secret.
+For Aevatar's `/api/workflow-webhooks/{routeKey}` bridge (hosts from 2026-08-13 onward), the
+binding is a self-serve scope resource — register it once with
+`PUT /api/scopes/{scopeId}/workflow-webhooks/{routeKey}` using the NyxID header names above
+(`deliveryIdHeader=X-NyxID-Delivery-Id`, `hmacSignatureHeader=X-NyxID-Signature`,
+`hmacTimestampHeader=X-NyxID-Timestamp`) and `hmacSecret` = the trigger's
+`delivery_signing_secret`. Map original fields from `payload.<field>`; trigger creation does not
+create the binding. The binding does not select secrets by `X-NyxID-Key-Id`, but it accepts an
+optional `previousHmacSecret`, so rotate with `nyxid trigger rotate-delivery-secret`, PUT the new
+secret with the old one as `previousHmacSecret`, then PUT again without it. Older Aevatar hosts
+keep the appsettings-managed binding; report those as host-managed.

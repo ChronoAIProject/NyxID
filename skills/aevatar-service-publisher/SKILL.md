@@ -1,7 +1,7 @@
 ---
 name: aevatar-service-publisher
 description: Publish an Aevatar member, team, or workflow as an invocable service and (host permitting) register it with NyxID, then verify, invoke, or wire external HTTP triggers such as Lark Base automation — all over the REST API. Use when a user wants to "publish/bind a service", "expose my workflow/team as a service", "register it with NyxID", "make it callable", "get the service slug/URL", "invoke my service", "let Lark Base call my workflow", "trigger this workflow from an external webhook", or "version/deploy/roll out a service". It covers the simple scope binding, reading back a member's published service, the full account-level service lifecycle (revision → publish → deploy → rollout), how to confirm the NyxID registration (slug + status), how to invoke an endpoint, and how to distinguish direct NyxID proxy triggering from host-gated externalExposure. Build the team/member first with the team-builder skill.
-version: "1.9"
+version: "2.0"
 metadata:
   category: plain
   tag:
@@ -270,20 +270,46 @@ The adapter receives the Lark Base request, validates its own secret, maps the r
 to an Aevatar prompt or typed payload, calls the NyxID proxy, and returns a simple 2xx/JSON
 response to Lark Base.
 
-### Host-managed webhook ingress
+### Scope-owned webhook ingress bindings (self-serve)
 
-Aevatar also has a host-configured workflow webhook ingress at:
+Aevatar has a workflow webhook ingress at:
 
 ```http
 POST /api/workflow-webhooks/{routeKey}
 ```
 
-It supports binding-level `RouteKey`, `SourceId`, `WorkflowName`, `ScopeId`,
-`PromptTemplate` or `PromptJsonPath`, delivery-id extraction, replay dedupe, and HMAC-SHA256
-auth (`X-Aevatar-Timestamp` plus `X-Aevatar-Signature` over `timestamp.body` by default).
-This is a good first-class bridge for Lark Base-style webhooks **if the host configures the
-binding and secret** (`WorkflowWebhookIngress:Enabled` + binding + replay store). It is not
-currently a normal client self-serve operation, so report it as host-managed.
+On hosts from 2026-08-13 onward, its bindings are **scope-owned data**, managed self-serve
+(bearer-authenticated as the scope) with no host configuration or redeploy:
+
+```http
+PUT    /api/scopes/{scopeId}/workflow-webhooks/{routeKey}
+GET    /api/scopes/{scopeId}/workflow-webhooks
+DELETE /api/scopes/{scopeId}/workflow-webhooks/{routeKey}
+```
+
+Binding fields and guarantees:
+
+- Target: `workflowName` (host catalog) or `definitionActorId` (a scope-published workflow).
+  Definition-actor targets are validated at bind time — the actor must exist, be
+  workflow-capable, and belong to the caller's scope; pin `targetRevisionId` to get a 409
+  when the published revision has moved. The webhook payload can never choose the workflow.
+- Input mapping: `promptTemplate` (JSON with `{{payload.field}}` placeholders and literal
+  constants) or `promptJsonPath`. Trusted ingress placeholders `{{@run_date}}` (received_at
+  rendered as a UTC+8 `yyyy-MM-dd` date) and `{{@received_at_unix_ms}}` cover senders that
+  cannot supply "today", such as Lark Base automation.
+- Auth and replay: per-binding HMAC-SHA256 (`hmacSignatureHeader`/`hmacTimestampHeader`,
+  signature over `timestamp + "." + body`), delivery-id extraction, durable replay dedupe
+  (a redelivered payload never starts a second run), and payload-fingerprint conflict
+  detection.
+- Secrets: `hmacSecret` is write-only (views return only `hmacSecretSet`) and encrypted at
+  rest; `previousHmacSecret` keeps the retired secret valid during rotation.
+- Route keys are globally unique; a route owned by another scope answers 409.
+- 202 means "start accepted" only: the response carries a `statusUrl`; judge success by the
+  run's committed terminal state, not the HTTP receipt.
+
+Older hosts keep the appsettings-managed binding list (`WorkflowWebhookIngress:Enabled` +
+bindings); report those as host-managed. If the management API answers 503, the host lacks a
+binding store (its error message names the required configuration).
 
 NyxID v0.10+ can provide the missing sender-facing adapter and durable delivery contract:
 
@@ -297,16 +323,17 @@ nyxid trigger create \
 ```
 
 Store the returned inbound `secret` only in the Base automation's `Authorization: Bearer ...`
-header. Store the one-time `delivery_signing_secret` only in the Aevatar Host binding. Configure
-that binding with `HmacSignatureHeader=X-NyxID-Signature`,
-`HmacTimestampHeader=X-NyxID-Timestamp`, and
-`DeliveryIdHeader=X-NyxID-Delivery-Id`; NyxID signs the exact bytes
+header. Store the one-time `delivery_signing_secret` only in the Aevatar binding's
+`hmacSecret` (write-only). Register the binding with
+`hmacSignatureHeader=X-NyxID-Signature`, `hmacTimestampHeader=X-NyxID-Timestamp`, and
+`deliveryIdHeader=X-NyxID-Delivery-Id`; NyxID signs the exact bytes
 `timestamp + "." + body` and sends `X-NyxID-Key-Id` for rotation. The delivered JSON wraps the
-original Base body under `payload`, so map fields with `PromptTemplate` placeholders such as
+original Base body under `payload`, so map fields with `promptTemplate` placeholders such as
 `{{payload.name}}`. Never place either secret in workflow YAML, chat, logs, issue text, or a URL.
-The current Aevatar Host binding holds one HMAC secret and does not select secrets by
-`X-NyxID-Key-Id`; coordinate trigger-secret rotation with the Host configuration instead of
-claiming zero-gap automatic rotation on this receiver.
+The binding does not select secrets by `X-NyxID-Key-Id`; rotate zero-gap by running
+`nyxid trigger rotate-delivery-secret`, re-PUTting the binding with the new `hmacSecret` and
+the old value as `previousHmacSecret`, then re-PUTting without `previousHmacSecret` once the
+sender has flipped.
 Use `nyxid trigger deliveries` and an explicit `nyxid trigger redeliver` for failed retained
 deliveries; never replay by issuing a second business mutation blindly. Load the NyxID skill's
 `references/triggers.md` for the full trigger lifecycle and retention limits.
