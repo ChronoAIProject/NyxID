@@ -289,23 +289,82 @@ DELETE /api/scopes/{scopeId}/workflow-webhooks/{routeKey}
 
 Binding fields and guarantees:
 
-- Target: `workflowName` (host catalog) or `definitionActorId` (a scope-published workflow).
-  Definition-actor targets are validated at bind time — the actor must exist, be
-  workflow-capable, and belong to the caller's scope; pin `targetRevisionId` to get a 409
-  when the published revision has moved. The webhook payload can never choose the workflow.
-- Input mapping: `promptTemplate` (JSON with `{{payload.field}}` placeholders and literal
-  constants) or `promptJsonPath`. Trusted ingress placeholders `{{@run_date}}` (received_at
-  rendered as a UTC+8 `yyyy-MM-dd` date) and `{{@received_at_unix_ms}}` cover senders that
-  cannot supply "today", such as Lark Base automation.
-- Auth and replay: per-binding HMAC-SHA256 (`hmacSignatureHeader`/`hmacTimestampHeader`,
-  signature over `timestamp + "." + body`), delivery-id extraction, durable replay dedupe
-  (a redelivered payload never starts a second run), and payload-fingerprint conflict
-  detection.
-- Secrets: `hmacSecret` is write-only (views return only `hmacSecretSet`) and encrypted at
-  rest; `previousHmacSecret` keeps the retired secret valid during rotation.
-- Route keys are globally unique; a route owned by another scope answers 409.
-- 202 means "start accepted" only: the response carries a `statusUrl`; judge success by the
-  run's committed terminal state, not the HTTP receipt.
+- **Exact target:** `definitionActorId` is required. It must identify a committed workflow
+  **Definition** in the caller's scope; a run actor, `memberId`, `workflowId`, or
+  `publishedServiceId` is not accepted. The server pins the committed `targetRevisionId`; send the
+  revision you read as an expectation and treat a mismatch as 409 drift. `workflowName`, when
+  supplied, is only a consistency check against that exact Definition, never an alternative
+  target. The webhook payload cannot choose the workflow or revision.
+- **Required mapping and delivery identity:** provide exactly the intended `promptTemplate` or
+  `promptJsonPath`, plus a valid `deliveryIdJsonPath` whose value is inside the signed body. A
+  configured `deliveryIdHeader` is only a second consistency check and must equal that signed-body
+  value when present.
+- **Structured prompt template:** it must be valid JSON. Place `{{payload.field}}` paths and the
+  ingress variables `{{@run_date}}` / `{{@received_at_unix_ms}}` only in JSON string values, never
+  property names. `@run_date` is local `yyyy-MM-dd`, derived from the received time through the binding's IANA
+  `timeZoneId`; omitted timezone defaults to **UTC**, not UTC+8. Set `Asia/Singapore` explicitly
+  when that is the business timezone.
+- **HMAC:** `hmacSecret` is required and must contain at least 32 UTF-8 bytes. By default the
+  signature is `sha256=HMAC_SHA256(secret, timestamp + "." + rawBody)` in
+  `X-Aevatar-Signature`, with Unix seconds in `X-Aevatar-Timestamp` and 300 seconds of skew.
+  Override header names only to match a known sender contract.
+- **Replay admission:** the signed-body delivery ID is durable first-writer-wins and reuse with
+  different payload bytes is rejected. This prevents ordinary duplicate starts, but it is not a
+  terminal run lease/completion protocol and must not be advertised as crash-safe exactly-once.
+  Business effects still need idempotency and committed run/effect evidence.
+- **Secrets:** `hmacSecret` is write-only (views expose `hmacSecretSet`, never its value);
+  `previousHmacSecret` permits bounded zero-downtime rotation. Never persist a user bearer token
+  in the binding.
+- **Route ownership:** dynamic and host-configured routes share one global namespace. A host-reserved
+  route or route owned by another scope returns 409.
+- **Accepted is not complete:** 202 means only that start was accepted. Reconcile the returned run
+  identity/status URL to a committed root terminal state and verify any external effect separately.
+
+Resolve the exact target from the scope workflow read model, never from a guessed ID:
+
+```bash
+aev "api/scopes/$scopeId/workflows/<linked-workflow-id>" \
+  | jq '{available, definitionActorId:.source.definitionActorId,
+         revisionId:.workflow.activeRevisionId, deploymentStatus:.workflow.deploymentStatus}'
+```
+
+Require `available=true`, a non-empty Definition actor and revision, and a ready/active deployment.
+If you started from a Team member, first read its linked workflow identity; do not use the member or
+published service ID in the webhook target field.
+
+One complete NyxID-trigger binding request has this shape (keep the secret in a private variable;
+never print the rendered body):
+
+```bash
+binding=$(jq -nc \
+  --arg actor "$definitionActorId" \
+  --arg revision "$targetRevisionId" \
+  --arg secret "$deliverySigningSecret" \
+  '{definitionActorId:$actor,targetRevisionId:$revision,
+    promptTemplate:({record_id:"{{payload.record_id}}",run_date:"{{@run_date}}"}|tojson),
+    timeZoneId:"Asia/Singapore",deliveryIdJsonPath:"event_id",
+    deliveryIdHeader:"X-NyxID-Delivery-Id",hmacSecret:$secret,
+    hmacSignatureHeader:"X-NyxID-Signature",hmacTimestampHeader:"X-NyxID-Timestamp",
+    enableUnattendedEffects:false}')
+aev "api/scopes/$scopeId/workflow-webhooks/<route-key>" -m PUT -d "$binding"
+```
+
+Read the binding list back and compare the exact actor, revision, prompt string, timezone, delivery
+mapping, headers, and `hmacSecretSet=true`. For a direct webhook call, retain the accepted run/status
+identity. Through a NyxID trigger, correlate the stable signed `event_id`/source and delivery window
+to the one new committed Aevatar run; delivery history proves transport, not workflow completion.
+
+### Optional unattended effects
+
+Bindings start runs by default; HMAC authenticity alone grants no downstream write authority.
+`enableUnattendedEffects=true` is accepted only from an authenticated direct-human NyxID authority
+for an exact, versioned, Durable Definition. The server seals the caller's binding authority and
+only the eligible authored-request write call sites from that committed revision; it never stores
+the bearer. The permit does not flow into LLM, fork, or subworkflow contexts.
+
+This opt-in crosses only Aevatar's local tool-approval gate. NyxID operation policy and the target
+provider can still reject or require approval. It is not a substitute for Team-schedule operation
+authority, so never use a webhook-effect permit to make an authored write-capable schedule pass.
 
 Older hosts keep the appsettings-managed binding list (`WorkflowWebhookIngress:Enabled` +
 bindings); report those as host-managed. If the management API answers 503, the host lacks a
@@ -326,7 +385,7 @@ Store the returned inbound `secret` only in the Base automation's `Authorization
 header. Store the one-time `delivery_signing_secret` only in the Aevatar binding's
 `hmacSecret` (write-only). Register the binding with
 `hmacSignatureHeader=X-NyxID-Signature`, `hmacTimestampHeader=X-NyxID-Timestamp`, and
-`deliveryIdHeader=X-NyxID-Delivery-Id`; NyxID signs the exact bytes
+`deliveryIdHeader=X-NyxID-Delivery-Id`, and set `deliveryIdJsonPath=event_id`; NyxID signs the exact bytes
 `timestamp + "." + body` and sends `X-NyxID-Key-Id` for rotation. The delivered JSON wraps the
 original Base body under `payload`, so map fields with `promptTemplate` placeholders such as
 `{{payload.name}}`. Never place either secret in workflow YAML, chat, logs, issue text, or a URL.

@@ -81,9 +81,17 @@ For Aevatar's `/api/workflow-webhooks/{routeKey}` bridge (hosts from 2026-08-13 
 binding is a self-serve scope resource — register it once with
 `PUT /api/scopes/{scopeId}/workflow-webhooks/{routeKey}` using the NyxID header names above
 (`deliveryIdHeader=X-NyxID-Delivery-Id`, `hmacSignatureHeader=X-NyxID-Signature`,
-`hmacTimestampHeader=X-NyxID-Timestamp`) and `hmacSecret` = the trigger's
-`delivery_signing_secret`. Map original fields from `payload.<field>`; trigger creation does not
-create the binding. The binding does not select secrets by `X-NyxID-Key-Id`, but it accepts an
-optional `previousHmacSecret`, so rotate with `nyxid trigger rotate-delivery-secret`, PUT the new
-secret with the old one as `previousHmacSecret`, then PUT again without it. Older Aevatar hosts
-keep the appsettings-managed binding; report those as host-managed.
+`hmacTimestampHeader=X-NyxID-Timestamp`, `deliveryIdJsonPath=event_id`) and `hmacSecret` = the
+trigger's `delivery_signing_secret`. The binding also requires the exact same-scope committed
+workflow `definitionActorId`; send its `targetRevisionId` as a drift expectation. `workflowName`
+is only an optional consistency check, never a target alternative. Map original fields from
+`payload.<field>` and set `timeZoneId` explicitly when `{{@run_date}}` should not use the default
+UTC. Trigger creation does not create the binding.
+
+The binding does not select secrets by `X-NyxID-Key-Id`, but it accepts an optional
+`previousHmacSecret`, so rotate with `nyxid trigger rotate-delivery-secret`, PUT the new secret with
+the old one as `previousHmacSecret`, then PUT again without it. HMAC admits a run start only;
+Aevatar unattended effects require a separate direct-human exact-Durable opt-in, and NyxID/provider
+policy still applies. Aevatar's replay row is first-writer-wins, not a crash-safe exactly-once run
+completion protocol, so keep business effects idempotent. Older Aevatar hosts keep the
+appsettings-managed binding; report those as host-managed.

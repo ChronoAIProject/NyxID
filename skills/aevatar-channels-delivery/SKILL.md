@@ -1,7 +1,7 @@
 ---
 name: aevatar-channels-delivery
 description: "Aevatar channel & delivery how-to: capability tools (code_execute, nyxid_proxy, GitHub PAT fallback, channel bots), token_expired/401 credential triage that identifies the typed credential source before interpreting the failure (a dedicated scheduled-invocation Agent Key is vault-held and late-resolved per use — never diagnose it with the 300-second broker TTL), LLM route selection slash commands, channel_registrations (staged Lark provisioning), agent_delivery_targets binding, and a strict never-emit-secret-material policy."
-version: "1.3"
+version: "1.4"
 metadata:
   category: plain
   tag:
@@ -25,10 +25,11 @@ inventory with `{}`. This request-local channel exposure is list-only: do not ha
 shapes distinct:
 - Raw one-off call: require exact `service_id + slug + path`; `method`, `body`, allowed
   non-sensitive headers, and response mode are optional.
-- Compiled workflow operation: keep copied `user_service_id + operation_id` only in the
+- Compiled workflow operation: keep copied `user_service_id + endpoint_id` only in the
   step-level `capability.nyxid_operation`. Runtime `arguments` contain only admitted
   `path_params`, `query`, `headers`, `body`, and `response_mode`; never repeat service, slug,
-  operation ID, method, path template, digest, or schema.
+  endpoint/operation identity, method, path template, digest, or schema. `operation_id` is not an
+  authored selector field.
 
 **Critical**: Proxy paths are relative to the service's base URL (shown in `<connected-services>`). Do NOT duplicate version prefixes already in the base URL. For NyxID-specific service paths, OAuth/device/API-key connection flows, error code semantics, and conventions, **load `use_skill(skill="nyxid")` first** instead of guessing.
 
@@ -114,6 +115,11 @@ For advanced Lark API operations outside the current relay reply, prefer typed t
 
 For inbound Lark relay turns that represent a fresh user message, do **not** call `lark_messages_reply` or `lark_messages_react` to deliver the answer. Produce the final text reply directly; the channel runtime will send it through the Nyx relay reply token.
 
+That relay authority is request-local. A normal reply to the fresh inbound message must not also
+perform a provider send/reaction "for reliability"; doing both duplicates the effect. Use a typed
+Lark send/reply operation only for a separate, explicitly requested proactive effect, then verify
+that effect through its committed provider/tool evidence.
+
 When that turn needs a sender-scoped inventory followed by a compiled admitted Lark read, use the
 actual channel tool first, then pass only the operation value to the admitted proxy step. For an
 admission that already owns UserService `us-lark-7`, operation `get-message`, `GET`, slug, and path
@@ -127,16 +133,34 @@ template, fetching message `m-42` has these call shapes:
 capability:
   nyxid_operation:
     user_service_id: us-lark-7
-    operation_id: get-message
+    endpoint_id: get-message
 parameters:
   tool: nyxid_proxy
   arguments: '{"path_params":{"message_id":"m-42"}}'
 ```
 
-Do not put `user_service_id`, `operation_id`, `slug`, `method`, raw `path`, or a body inside those
+Do not put `user_service_id`, `endpoint_id`, `operation_id`, `slug`, `method`, raw `path`, or a body inside those
 runtime arguments.
 
-Managing registrations: `list`, `delete id=<reg_id> confirm=true`.
+Managing registrations: `list`, `delete id=<reg_id> confirm=true`. Both operations are strictly
+caller-scope-local. A foreign registration ID is deliberately indistinguishable from missing; do
+not enumerate across scopes, retry with a guessed scope, or ask an operator to delete another
+tenant's record.
+
+#### Connected-service key lifecycle
+
+When a current direct-human session offers exact API-key creation or rotation, keep the browser
+handoff and readback boundary:
+
+- Create accepts only 1–64 exact caller-visible UserService IDs. Catalog service IDs, slugs, and
+  inferred/wildcard service sets are not substitutes.
+- The assistant/tool starts a browser confirmation handoff; it does not create, receive, display,
+  or store raw key material in chat.
+- Rotate first resolves one exact active caller-visible key, sends only its stable `key_id` into
+  the browser action, then performs an exact readback after completion. Never infer success from
+  the action card alone.
+- Caller-visible is not automatically caller-writable. Organization routes still require the
+  appropriate owner/admin authority, and readiness queries never mutate route configuration.
 
 #### agent_delivery_targets
 

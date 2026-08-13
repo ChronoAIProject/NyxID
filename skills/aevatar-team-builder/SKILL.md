@@ -1,7 +1,7 @@
 ---
 name: aevatar-team-builder
 description: Build an Aevatar agent team and its members over the REST API. Use when a user wants to "create a team", "add a member", "make a workflow member / script member / gagent member", "set the team's entry point", or "assemble agents into a team". It creates the team, creates members whose implementation is a workflow (most common), a script, or a hosted gagent, binds each member's concrete implementation (the workflow YAML is attached here), waits for the async binding to succeed, and sets the team entry member. Author the workflow YAML first with the workflow-authoring skill; publish the result as a service with the service-publisher skill.
-version: "1.6"
+version: "1.7"
 metadata:
   category: plain
   tag:
@@ -21,6 +21,27 @@ You create a **team**, fill it with **members** (each backed by a workflow, scri
 gagent), bind their implementations, and set the team's entry member — all via REST. The
 output is an invocable team. Publishing it as a NyxID service is a separate step
 (`aevatar-service-publisher`); scheduling is another (`aevatar-scheduler`).
+
+A runnable workflow in Studio is normally a **Team-owned workflow member**, not a public template
+or an Ornn skill. Before creating anything, list the caller's Teams and resolve the intended Team.
+If more than one is plausible and the user did not choose, ask; never create a draft/member first
+and attach it to a guessed Team later. Follow `nextPageToken` on Team/member roster lists. Use
+workflow list/detail responses as returned, and apply documented server-side run filters and
+`take` without inventing a cursor.
+
+Choose the lifecycle from current state:
+
+- Existing Team member → edit/bind that exact member, wait for its exact revision readiness, then
+  hand it to `aevatar_schedule_member_workflow` if scheduling was requested.
+- No member, user explicitly wants a new scheduled workflow → in-session
+  `aevatar_provision_workflow_schedule` can create its own Team member and schedule after the Team
+  is confirmed. Do not use it as an update path for an existing member.
+- New member without scheduling → use the REST create/bind flow below.
+
+`memberId`, draft `workflowId`, `publishedServiceId`, Definition actor ID, revision ID, and schedule
+ID are separate opaque identities. Always carry the exact values returned by their owning
+readmodels; never derive one from another or use the workflow catalog/public template list as a
+Team roster.
 
 ## Bootstrap
 
@@ -48,6 +69,9 @@ the caller subject, `memberId`, or any other resource ID to be equal. Keep scope
 resource identity separate; never rewrite an ID to make those strings match.
 
 ## Step 1 — Create the team
+
+Skip creation when the user selected an existing Team. List with pagination first and reconcile an
+uncertain create response before issuing another mutation.
 
 ```bash
 teamId=$(aev "api/scopes/$scopeId/teams" -m POST \
@@ -171,6 +195,9 @@ aev "api/scopes/$scopeId/teams/$teamId"          | jq .
 aev "api/scopes/$scopeId/teams/$teamId/members"  | jq .
 ```
 Confirm the team exists, the roster contains your member(s), and the entry member is set.
+If the member roster returns `nextPageToken`, continue paging before concluding that a member is
+missing. A Workspace workflow list is a projection of Team-owned members; it is not the public
+workflow template catalog.
 
 ## Edit / clean up
 

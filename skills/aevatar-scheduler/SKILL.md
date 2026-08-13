@@ -1,7 +1,7 @@
 ---
 name: aevatar-scheduler
 description: Create and manage recurring Aevatar runs and route to the correct scheduling resource. Use for cron, recurring Team member workflows, scheduled skill agents, typed service invocations, pause/resume, run-now, reauthorization, deletion, or credential triage. Team member automation uses its dedicated route and Agent Key; generic schedules accept typed service invocation only. External raw actor/envelope schedules are retired and must fail closed.
-version: "1.10"
+version: "1.11"
 metadata:
   category: plain
   tag:
@@ -51,6 +51,78 @@ typed connector and NyxID capability refs, the owner LLM route/model and exact U
 required, the owner-scoped NyxID authorization catalog, and policy/version/expiry/disclosure facts.
 Never invent grants, wildcards, node IDs, route or model choices, or caller binding evidence.
 
+The two entry surfaces are intentionally not equivalent:
+
+- **Existing member, in-session:** prefer `aevatar_schedule_member_workflow`. If the member still
+  points at an interactive revision, the tool can admit and publish an immutable durable revision,
+  wait for that exact revision to become visible, pin it, rerun preflight, and create the
+  automation. `durable_revision_propagating` means wait for projection visibility and retry the
+  same operation; it is not permission to create another member. Durable admission publishes the
+  new revision before the final schedule preflight. If that later preflight fails, the immutable
+  revision may remain even though no automation was created; do not claim transaction rollback or
+  delete/rebind it without an explicit lifecycle decision.
+- **Raw REST:** `POST .../automations/preflight` stays pure read. It can return non-retryable 409
+  `TEAM_AUTOMATION_DURABLE_ADMISSION_REQUIRED` or
+  `TEAM_AUTOMATION_DURABLE_REQUEST_GRANT_MISMATCH`, but it never upgrades or rebinds a revision.
+  Raw create consumes a confirmed plan; it has no hidden durable-upgrade flag.
+- **No member yet:** use `aevatar_provision_workflow_schedule` only when the user explicitly wants
+  a new Team-owned workflow member and schedule. Do not use provisioning to clone an existing
+  member or guess its Team.
+
+### Console flow
+
+In Aevatar Console, open the target Scope and Team. Create a **workflow member**, edit the full
+YAML in Workflow Studio, apply it to the draft, save, publish, and wait for published/bind-ready
+state. Then open **Automate / Recurring work**, choose the published member, enter name, recurring
+prompt, five-field cron, IANA timezone, and enabled state, preview the next runs, and authorize the
+Dedicated Agent Key. Save is not publish, publish is not automation, and the accepted automation
+receipt is not active state. Never substitute `workflowId` or `publishedServiceId` for the member
+selected by the Console.
+
+### Fire-time prompt data
+
+For a Chat workflow, the recurring prompt may be a fire-time JSON template. Supported placeholders
+are:
+
+| Placeholder | Value at the authoritative logical fire |
+|---|---|
+| `{{@schedule.run_date}}` | Local `yyyy-MM-dd` in the configured schedule timezone |
+| `{{@schedule.run_year}}` | Local year |
+| `{{@schedule.run_month}}` | Local month without zero padding |
+| `{{@schedule.days_until_month_end}}` | Days after the local fire date through month end; today excluded |
+| `{{@schedule.fire_at_utc}}` | Logical fire instant in UTC |
+| `{{@schedule.timezone}}` | Normalized configured timezone |
+
+Example monthly input:
+
+```json
+{"period_label":"{{@schedule.run_year}}年{{@schedule.run_month}}月","run_date":"{{@schedule.run_date}}","submit":false}
+```
+
+If any `{{@schedule.*}}` placeholder is present, the whole prompt must be valid JSON and every
+placeholder must occur inside a JSON string value, never a property name. Unknown variables,
+unmatched delimiters, invalid JSON, or an invalid timezone fail closed before schedule effects.
+Prompts without schedule placeholders remain byte-for-byte unchanged. Late/catch-up execution uses
+the original scheduled occurrence; run-now uses its manual fire instant. Therefore run-now can
+prove template rendering, but it cannot prove cron re-arming.
+
+Do not freeze a monthly date or `days_left` into a recurring prompt. Do not use model knowledge or
+host wall-clock time as a business input when this contract can inject the logical fire date.
+
+### Authored write-call limitation
+
+Admission scans the committed workflow definition, not only the branch selected by a sample
+prompt. `submit:false` therefore does **not** hide authored POST/PUT/PATCH/DELETE
+`capability.nyxid_request` call sites. On a deployment whose scheduled-operation authority port is
+unavailable, preflight fails closed with
+`TEAM_AUTOMATION_NYXID_OPERATION_AUTHORITY_CONTRACT_UNAVAILABLE`. Do not bypass it with a generic
+schedule, a webhook-effect permit, or an interactive confirmation. For a harmless schedule proof,
+publish a preview-only definition that physically contains no write call sites. Prefer a dedicated
+acceptance member/revision and short-lived automation so the production member is not rebound by a
+smoke test. If the user instead wants to replace the production member's revision, make that
+lifecycle change explicit first. A real unattended write requires supported durable operation
+authority, an exact admitted capability, downstream policy acceptance, and business idempotency.
+
 **Create** uses `credentialProvisioningKind = dedicated_scheduled_invocation_agent_key`. The server
 revalidates the confirmed permission digest and policy version against current sources before any
 key-creation effect, then requests a fresh, targeted NyxID scope plan for the exact sorted
@@ -75,9 +147,52 @@ A ready automation normally shows:
 - `authorizationStatus == active`
 - `credentialSourceKind == scheduled_invocation_agent_key`
 - `enabled == true` (firing)
-- a future `credentialExpiresAtUtc`
+- a `credentialExpiresAtUtc` later than the next intended fire (and long enough for the recurring
+  operating window)
 - a positive `credentialGeneration`
 - `revocationPending == false`
+
+Also require the exact owner tuple, target revision, cron, timezone, and unrendered prompt template
+to match what was authorized. Then verify at least one **automatic** fire with `manual == false`,
+empty current `lastError` / `lastErrorCode`, and a committed successful workflow run. Prefer two
+consecutive automatic fires for a short-lived smoke schedule so re-arming is proven. Delete or
+pause high-frequency smoke schedules after acceptance.
+
+For a Team member, correlate the schedule to committed runs with
+`GET /api/scopes/{scopeId}/members/{memberId}/runs?take=50&scheduleId={scheduleId}` and then inspect
+the exact run. Require terminal success and, when testing a fire-time template, verify the committed
+run input contains rendered values and no residual `{{@schedule.` token. A `Dispatched` fire is not
+a completed workflow run.
+
+`failureCount` is a lifetime counter, not current health. A successful fire clears current
+`lastError` while historical failures remain counted. Do not label a recovered automation as
+currently failing from `failureCount > 0` alone.
+
+### Exact REST lifecycle
+
+The current member-owned surface is nested under the full owner tuple:
+
+```text
+POST   /api/scopes/{scopeId}/teams/{teamId}/members/{memberId}/automations/preflight
+GET    /api/scopes/{scopeId}/teams/{teamId}/members/{memberId}/automations
+POST   /api/scopes/{scopeId}/teams/{teamId}/members/{memberId}/automations
+GET    /api/scopes/{scopeId}/teams/{teamId}/members/{memberId}/automations/{scheduleId}
+PUT    /api/scopes/{scopeId}/teams/{teamId}/members/{memberId}/automations/{scheduleId}
+POST   .../{scheduleId}/reauthorize|pause|resume|run-now|retry-revocation
+DELETE .../{scheduleId}
+```
+
+Preflight with `{scheduleCron,scheduleTimezone,prompt,displayName,enabled}`. Create/reauthorize must
+copy the current plan's `permissionDigest` and `credentialPolicy.policyVersion`, set
+`credentialProvisioningKind=dedicated_scheduled_invocation_agent_key`, and use stable, unique
+`operationId` plus `idempotencyKey`. Lifecycle actions also require those two operation identities.
+Never retry a lost mutation with new identities; reread the same owner resource first.
+
+For owner-aware diagnostic reads through generic `/api/schedules`, use
+`ownerKind=studio_member_automation` plus `ownerScopeId`; add `ownerTeamId` for Team scope, and the
+full `ownerScopeId + ownerTeamId + ownerMemberId` tuple for a member or exact get. Legacy
+`scopeId/teamId/memberId` query names are invalid. Keep legacy generic schedules in a separate
+migration view; never mutate a Team automation through an ownerless legacy action.
 
 **`active` is credential health; `enabled` is firing. They are independent dimensions** — do not
 report one as the other.
@@ -128,6 +243,12 @@ credential source with different lifetime semantics.
 - `revocation_pending` → retry revocation with the **original delete operation identity**.
 - Missing owner binding or authorization catalog evidence → fail closed and report the prerequisite;
   never invent evidence or trigger projection repair.
+- `TEAM_AUTOMATION_AUTHORIZATION_ROUTE_UNRESOLVED` / tool
+  `authorization_catalog_route_unresolved` → non-retryable 409. Preserve the sanitized
+  `refreshFailureCode` and exact `requiredUserServiceIds`, stop retrying refresh/preflight, and fix
+  or deactivate the unresolved configured route before trying again. A required service ID can be
+  affected by a same-catalog active peer; it is not by itself proof of the offending row. Never
+  delete or reconnect unrelated services.
 - Projection pending → report eventual visibility and the required version; never replay or prime
   projection from the query path.
 

@@ -1,6 +1,6 @@
 ---
 name: nyxid
-version: "0.9"
+version: "0.10"
 description: Brokers credentials for downstream services so the agent never sees raw API keys or OAuth tokens. Use when the user explicitly mentions NyxID; asks to broker, store, proxy, connect, or manage credentials or a credential-backed service; manages NyxID inbound triggers, signed webhook delivery/replay, credential nodes, SSH, MCP, or other NyxID resources; or must call a protected downstream API using an available NyxID-managed credential because no suitable authenticated native path is available. Do not use merely because a service is external, for an ordinary public webhook that needs no NyxID trigger contract, for standard Git operations, or for ordinary GitHub work when local `gh` is authenticated. A GitHub username supplied only to select an account is not a trigger. Operate through the `nyxid` CLI or the authenticated NyxID Web API.
 metadata:
   category: tool-based
@@ -139,7 +139,7 @@ Prefer the canonical reference over guessing. If a topic spans two files (e.g. "
 
 ## Working Rules
 
-- Always discover configured service instances with `nyxid service list --output json` or authenticated `GET /api/v1/keys` before assuming a slug or exact UserService exists. This is the authoritative discovery, readiness, and execution inventory.
+- Discover configured service instances with `nyxid service list --output json` or authenticated `GET /api/v1/keys` before assuming a slug or exact UserService exists. This is the authoritative discovery, readiness, and execution inventory, but the read may lazily materialize missing no-auth UserServices. Under a strict zero-mutation diagnostic constraint, start with `/api/v1/user-services` and operator-visible route/node state, and use `/keys` only when that bounded materialization is acceptable.
 - Treat `/api/v1/user-services` as a routing-configuration projection only. It cannot prove that a credential is discoverable, ready, or authorized for execution.
 - Use `--output json` for machine-readable responses.
 - Prefer slug-based proxy URLs, but pin the exact UserService with `--via-service <id>` or `/api/v1/proxy/{user_service_id}/...` whenever multiple credentials share a slug or downstream authorization depends on a specific account/Bot. Get that ID only from the authoritative `/api/v1/keys` inventory.

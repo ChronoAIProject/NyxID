@@ -52,7 +52,12 @@ These are the failure modes that break generated workflows. Check every one befo
 - **Single terminal step.** A run ends at the step that has no `next` **and is last in document order**. Make the final step the last line of the document.
 - **Bounded YAML.** Each YAML document is limited to 1 MiB UTF-8, 10,000 parsed nodes, and collection nesting depth 64. Aliases do not bypass these limits. Treat a resource-limit rejection as a document defect; reduce the document instead of retrying it.
 - **Fall-through is by document order, not id order.** A step with no `next` falls through to the *next step written in the file*. So every branch must reach the terminal step via an explicit `next`, and nothing should sit after the terminal step. Getting this wrong silently overwrites your output.
-- **No clock.** The engine has no time source. If the workflow needs "today", a date, or a window, the caller must inject it via the run input (e.g. an early `assign`). Never assume the engine knows the date.
+- **No ambient workflow clock.** The engine does not invent "today" for a normal invocation. The
+  caller must inject dates through run input. A Team automation can render
+  `{{@schedule.run_date}}`, `run_year`, `run_month`, and `days_until_month_end` from its
+  authoritative logical fire plus configured timezone; a scope webhook binding can render
+  `{{@run_date}}` from received time plus its explicit `timeZoneId`. These are ingress contracts,
+  not workflow expression variables. Never read host wall-clock time or ask an LLM to guess it.
 - **Input authority follows the ingress contract.** Classify the source before adding a compensating provider read. A shared or unverified endpoint authenticates neither the sender nor its claims: accept only a locator such as `record_id`, then read authoritative fields through an admitted provider capability. A dedicated automation credential or HMAC-verified Host/Adapter path may treat pushed fields as workflow input only when that principal is exclusive to the source and the exact body is authenticated. Caller authentication alone is insufficient when people or unrelated systems share the credential. Preserve source/delivery provenance, make idempotency and deduplication explicit, and read the provider only for fields the trusted payload omitted, freshness after the trigger, or an independent business rule. For external-trigger wiring, hand off to `aevatar-service-publisher`; do not invent a second workflow lifecycle.
 - **Role is not model.** `target_role` selects the actor, not a model — never put a model name in `target_role`. A role *may* carry `provider`/`model`, but set them only when the user explicitly wants a specific model; otherwise omit and let the session default apply.
 - **`parameters` values are strings.** Bare words are read as strings (`op: trim`); quote anything numeric or boolean so it stays a string (`n: "50"`, `max_iterations: "5"`).
@@ -363,6 +368,12 @@ There is a raw current-turn proxy surface, two compiled workflow capability shap
       body_mode: none
       response_mode: text
   ```
+- **Durable scheduling inspects every call site.** A sample input that chooses a preview branch does
+  not remove a write call site from the definition. On a host without scheduled operation
+  authority, any authored non-read request makes Team automation preflight fail closed even when
+  the prompt says `submit:false`. To prove scheduling safely, publish a separate preview-only
+  revision with the write steps and their branch targets physically removed. Do not weaken the
+  original workflow or route it through generic scheduling to bypass admission.
 - **Registered workflow connectors.** If the capability is a connector registered in the workflow connector registry, call it with `connector_call` and authorize it on the role:
   ```yaml
   roles:
@@ -389,6 +400,12 @@ Dispatch **one** test run with `aevatar_start_workflow`, passing the draft inlin
 ```json
 { "workflow_id": "<name>", "workflow_yamls": ["<full yaml>"], "inputs": { "prompt": "<test input>" } }
 ```
+
+If the definition consumes structured run input (for example it captures `$input` and applies
+`json` or feeds it to a transform), `inputs.prompt` must be a **non-empty serialized JSON string**,
+such as `"{\"submit\":false}"`. Never pass natural-language prose, an empty string, or an
+unserialized object to a typed workflow. Free-text workflows that do not declare structured input
+keep their normal prompt semantics.
 
 `workflow_id` is required; `inputs` is an object (typically `{ "prompt": "..." }`, optionally `input_parts` / `headers`). File-bearing calls may carry normalized `inlineFile` or `fileRef` parts; member stream invocation and draft-run share the same ingress normalization, so preserve the typed file part instead of flattening it into prompt text.
 
@@ -436,6 +453,8 @@ Read [references/worked-examples.md](references/worked-examples.md) when you nee
 
 - [ ] Final step is last in the document and has no `next`; every branch reaches it via explicit `next`.
 - [ ] Any date/time the logic needs is injected via input, not assumed.
+- [ ] Typed/structured run input is passed as one non-empty serialized JSON string; schedule and
+      webhook dates come from their documented ingress-time templates and explicit timezone.
 - [ ] Every externally pushed field has an explicit ingress authority decision; unverified input is treated as a claim/locator, while trusted input is bound to a dedicated authenticated source and the delivery/idempotency contract is explicit.
 - [ ] No hardcoded `model:` unless the user demanded one.
 - [ ] Arithmetic / totals / dedup use `transform`, not `llm_call`.

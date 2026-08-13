@@ -160,7 +160,7 @@ not a fixed list.
 | Have that service **registered as a NyxID-brokered connector** (callable by others/externally) | ⚠️ Host-gated | The **host** must enable external exposure (`GAgentService:ExternalExposure: Enabled=true` + `RegisterAllPublishedServices` or an opt-in policy). You **cannot** turn this on as a client — verify `externalExposure` on the service and, if empty, tell the user to ask the host. |
 | Give an agent a **fixed persona + pinned Ornn skills + an enforced tool ceiling** (an Agent Profile) | ⚠️ Modelled, owner-managed, deployment-dependent | Probe `GET /api/openapi.json` for the complete `agent-profiles` route family. Absent means unavailable in this deployment; present means the owner can manage it through `aevatar-agent-profile-management`. |
 | Have a published Profile actually **drive a running agent** | ⚠️ Host-gated, and narrow | Publication is not runtime binding. Only *newly created* NyxID direct conversations admitted by a **host-owned rollout** consume a Profile; existing conversations never hot-upgrade, and workflows/teams/services/schedules/channels/AgentRuns are not consumers at all. |
-| Schedule an already-bound **Studio Team member** workflow | ✅ Yes | Use `aevatar_schedule_member_workflow` or the member automation route. It provisions a dedicated restricted Agent Key; do not route it through generic `/api/schedules`. |
+| Schedule an already-bound **Studio Team member** workflow | ✅ For admitted definitions; authored writes may be host-gated | Use `aevatar_schedule_member_workflow` or the member automation route. It can admit an existing interactive member to an exact durable revision and provisions a dedicated restricted Agent Key. Raw REST preflight is read-only. A host without scheduled-operation authority rejects any authored write call site even when a sample prompt chooses preview; do not route it through generic `/api/schedules` to bypass this. |
 | Create an independent recurring **Ornn skill agent** | ✅ Yes | Use `scheduled_agent_creator`, then `agent_builder`. It has its own dedicated Agent Key and is not a Team member automation alias. |
 | Schedule a generic typed **service invocation** | ⚠️ Yes, with its declared credential source | Use generic `/api/schedules`. A `scopeOwnerNyxId` or `senderNyxId` source needs the corresponding durable NyxID broker binding; this requirement does not apply to the two dedicated-Agent-Key resources above. |
 | A service backed by an **arbitrary custom agent / actor type** | ⚠️ Constrained | Member implementations are `workflow`, `script`, or **registered** `gagent` kinds (`GET /api/scopes/gagent-types`). You can't point a service at an arbitrary actor; wrap custom logic in a workflow or script, or use a registered gagent kind. |
@@ -170,9 +170,11 @@ not a fixed list.
 ## Hard engine/platform limits (make some asks impossible or need a workaround)
 
 State these plainly when they bite:
-- **No clock.** The engine has no time source. "When it's 9am", "every N minutes from inside
-  the run", relative dates — must be injected at the input or driven by an external **schedule**
-  (`aevatar-scheduler`), never computed inside the workflow.
+- **No ambient workflow clock.** "When it's 9am" and recurrence are owned by a **schedule**, not a
+  loop inside the workflow. A schedule can deterministically inject logical-fire fields with
+  `{{@schedule.run_date}}`, year/month/month-end variables and an explicit IANA timezone; a webhook
+  binding can inject `{{@run_date}}` from received time and its configured timezone. Ordinary runs
+  still require caller-supplied dates. Never ask the model to guess the time.
 - **No unbounded background loops / polling / fan-out-forever.** A run is a finite stepped
   pipeline with **one terminal step**; long waits use durable `delay`/`wait_signal` events, not
   busy loops. "Watch a feed continuously and react" → model as a *scheduled* run that polls.
@@ -225,6 +227,10 @@ State these plainly when they bite:
   If neither authority boundary exists, accept only a locator and read the provider. If the sender
   cannot tolerate SSE or cannot shape the typed payload, add the signed adapter path rather than
   weakening verification.
+  A self-serve Aevatar webhook binding must pin an exact same-scope committed Definition actor and
+  revision, require a signed-body delivery ID and a 32-byte-or-longer HMAC secret, and set
+  `timeZoneId` explicitly when UTC is not correct. HMAC allows a run start; unattended effects need
+  the separate direct-human durable opt-in and still remain subject to NyxID/provider policy.
 - **NyxID service registration** → ask the **host** to enable external exposure for the service;
   you can only drive publish + verify the `externalExposure` block.
 - **Scheduling** → choose the resource first. An already-bound Team member uses its owner-scoped

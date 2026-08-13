@@ -137,6 +137,12 @@ credential** (a blanket `401` is often just your own stale token, not a platform
 then retry only a safe/idempotent read) and a **stale local checkout** (the code you're about to read may be behind what's
 deployed).
 
+**Read-only caveat:** authenticated `GET /api/v1/keys` is authoritative execution inventory, but it
+may lazily materialize missing no-auth UserServices. Do not use it under a strict zero-mutation
+production constraint. For route-topology diagnosis, start with `/api/v1/user-services`, node
+inventory, and operator-visible binding state; use `/keys` only when that bounded materialization is
+acceptable. Route projection still does not prove execution readiness.
+
 ## Step 2 — Attribute to a layer (trace the request path, eliminate)
 
 **Main rule: follow the request path and find the *first boundary* that breaks.** A user request
@@ -153,11 +159,13 @@ typically flows `your agent -> Aevatar runtime -> NyxID proxy -> third-party`, a
 | workflow won't validate / run stalls / binding never `succeeded` | **Aevatar** (engine/runtime) | draft-run error body; run timeline / observatory; binding-run status |
 | `NYXID_OPERATION_SELECTION_REQUIRED` or YAML rejects `operation_id` | **Aevatar workflow capability authoring/discovery** | The exact selector schema is `user_service_id + endpoint_id`; `operation_id` is reserved/absent. Use the supported in-session list/picker. If the client surface has none, classify it as an operation-discovery product gap; do not probe invented REST paths or switch to `nyxid_request` without an exact independently admitted request contract. |
 | `USER_SERVICE_NOT_VISIBLE` with remediation `register_service` | **NyxID UserService visibility / Aevatar catalog reconciliation boundary** | Confirm the exact service in caller-authoritative `/api/v1/keys`, then use the supported NyxID connect/authorize flow. The remediation label is not proof of a self-serve Aevatar route. `/authorization-catalog:refresh` reconciles; it does not register. |
-| catalog refresh returns `api_key_scope_plan_route_unresolved` | **NyxID scope-plan/catalog construction** | Preserve the typed error and test whether any exact route/service id is named. Without that evidence, a stale/broken service poisoning the account is only a hypothesis. Do not remove unrelated active services, loop refresh, or invent the offender. `org_role_insufficient` requires an authorized org operator. |
+| Team automation returns 409 `TEAM_AUTOMATION_AUTHORIZATION_ROUTE_UNRESOLVED` / tool `authorization_catalog_route_unresolved` | **NyxID scope-plan/catalog construction** | Preserve `refreshFailureCode=api_key_scope_plan_route_unresolved` and exact `requiredUserServiceIds`; it is non-retryable. A required service may only share a catalog family with a bad active peer, so the list is not proof of the offending row. Inspect exact `/user-services`, same-catalog active peers/bindings, and referenced nodes; repair/deactivate only the verified route, then preflight once. Never loop refresh or remove unrelated services. |
 | `transform op: replace`/`regex_replace` returns the original input with a green step | **Aevatar transform capability gap** | Those ops do not exist; unknown names currently fall back to identity. Reject the definition, inspect actual output, and use only the documented allowlist. For essential deterministic replacement, use bounded admitted `code_execute` or request a platform primitive; never use an LLM as a deterministic substitute. |
 | readmodel stale / observatory missing data | **Aevatar** (projection) | is the projection subscription live? event stream flowing? authoritative version vs readmodel — note readmodels **do not back-fill** (compare record age to deploy time) |
 | **scheduled run stopped firing** (fired before; `nextFireAt` frozen in the past, `fireCount` flat, `failureCount=0`, empty `lastError`) | **Aevatar** (scheduler / actor not re-armed across pod churn) | compare to peer schedules; pod `startTime` / `restartCount`; is it still enabled? did a deploy/restart line up with the last good fire? |
+| schedule UI is red only because `failureCount > 0`, but current `lastError`/`lastErrorCode` are empty and a newer fire succeeded | **historical counter, not a current failure** | `failureCount` is lifetime history. Use current error plus Team automation lifecycle/authorization state for current health; preserve the counter as history. For a Team member, read by the exact scope/team/member owner tuple, not an ownerless legacy generic row. |
 | **scheduled run never fires, or fires but errors on credential** | **Aevatar scheduler ⨯ NyxID** (binding) | is it enabled and is `nextFireAt` computed? `lastError` like "binding not found" / "exactly one credential source" -> the *fired call's* invocation credential (scope-owner broker binding) |
+| Team automation raw preflight returns `TEAM_AUTOMATION_DURABLE_ADMISSION_REQUIRED` | **expected surface boundary** | Raw preflight is read-only and cannot upgrade a member. Use the in-session `aevatar_schedule_member_workflow` durable-admission path for that existing member, or explicitly bind a durable revision; do not search for a hidden REST flag or create a duplicate member. |
 | **schedule fires (`fireCount` climbs) but the real-world effect never happens** | **Aevatar** (the fired call's path / credential) | dispatch success ≠ effect — check the external side-effect out-of-band; the proxy can hand back `{"error":true}` inside a `200` |
 | **scheduled run starts fine, then late steps hit `token_expired`** | **depends entirely on `credentialSourceKind` — read it before you theorize** | see *Scheduled-run credentials are not one thing* below. `nyxid_binding_exchange` ⇒ the fire-time broker token (`BROKER_ACCESS_TTL_SECS = 300`, NyxID `backend/src/services/oauth_broker_service.rs`) is the right hypothesis. `scheduled_invocation_agent_key` ⇒ it is **not** the 300 s broker TTL and a ~5-6 min correlation is coincidence, not evidence |
 | **inbound bot doesn't reply** (Lark/Telegram) | **cross-layer — walk it** | did NyxID relay webhook fire? is the bot connector connected? did the Aevatar channel run start (observatory)? credential = the *sender's* NyxID, present and live? |
@@ -266,7 +274,18 @@ not evidence. Before attributing any expiry: decode the JWT actually involved an
 Key — read the automation's `credentialExpiresAtUtc` and `credentialGeneration`. A lifetime quoted
 from memory is the classic source of confident-but-wrong attributions here.
 
+For run inventory, prefer the server-side Activity/observatory filters (`q`, `workflowId`, cursor,
+and total count) and continue pages. Do not download one small first page and conclude a run is
+missing. Correlate the exact schedule ID, member, definition/revision, command/correlation IDs, and
+time window.
+
 ## Step 3 — Pull the repo and reach a code-grounded root cause
+
+**Production access is read-only for this skill.** On production Kubernetes, restrict diagnostics
+to `get`, `describe`, and logs. Do not exec into pods, delete/restart/scale workloads,
+patch/edit/apply resources, port-forward/copy files, run Helm mutations, or restart CI. Escalate a
+required mutation to the authorized operator with the exact resource and evidence. Local/dev
+reproduction is separate and may use its own authorized tooling.
 
 **Pin to the running system first — code is a hypothesis, not the live truth.** The single most
 common triage failure is a confident, code-traced root cause that is *wrong* because the running
