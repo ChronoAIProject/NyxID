@@ -1,0 +1,28 @@
+: ping
+
+data: {"type":"run.started","run_id":"run-4","model":"gpt-5.5","skill_slug":null,"effort":null,"limits":{"max_tool_calls":8,"max_llm_calls":8,"deadline_ms":180000}}
+
+: ping
+
+data: {"type":"stage","stage":"understand","status":"started","detail":"Loading"}
+
+data: {"type":"stage","stage":"understand","status":"completed","detail":"Loaded"}
+
+data: {"type":"stage","stage":"plan","status":"started","detail":"Planning"}
+
+data: {"type":"stage","stage":"plan","status":"completed","detail":"Planned"}
+
+data: {"type":"stage","stage":"execute","status":"started","detail":"Executing"}
+
+data: {"type":"stage","stage":"execute","status":"completed","detail":"Complete"}
+
+data: {"type":"stage","stage":"final","status":"started","detail":"Writing"}
+
+data: {"type":"stage","stage":"final","status":"completed","detail":"Complete"}
+
+data: {"type":"done","status":"completed","finish_reason":"stop","tool_calls":0,"llm_calls":2,"duration_ms":20}
+
+: ping
+
+data: [DONE]
+

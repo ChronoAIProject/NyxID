@@ -144,6 +144,11 @@ pub const BILLING_ROUTE_INVENTORY: &[BillingRouteSpec] = &[
         policy: BillingRoutePolicy::Metered(BillingIngress::Proxy),
     },
     BillingRouteSpec {
+        handler: "handlers::assistant_direct_agent_poc::agent_completions",
+        route: "/api/v1/assistant/direct/agent",
+        policy: BillingRoutePolicy::Metered(BillingIngress::Proxy),
+    },
+    BillingRouteSpec {
         handler: "handlers::exact_service_approvals::create_request",
         route: "/api/v1/approvals/exact-service/requests",
         policy: BillingRoutePolicy::Exempt("approval control plane; no downstream request"),

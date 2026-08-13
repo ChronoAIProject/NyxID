@@ -1,0 +1,30 @@
+data: {"type":"run.started","run_id":"run-1","model":"gpt-5.5","skill_slug":null,"effort":null,"limits":{"max_tool_calls":8,"max_llm_calls":8,"deadline_ms":180000}}
+
+data: {"type":"stage","stage":"understand","status":"started","detail":"Loading connected read operations"}
+
+data: {"type":"stage","stage":"understand","status":"completed","detail":"2 services · 1 read operation"}
+
+data: {"type":"stage","stage":"plan","status":"started","detail":"Building a bounded read-only plan"}
+
+data: {"type":"text.delta","stage":"plan","text":"1. Check health."}
+
+data: {"type":"stage","stage":"plan","status":"completed","detail":"Plan ready"}
+
+data: {"type":"stage","stage":"execute","status":"started","detail":"Executing eligible typed reads"}
+
+data: {"type":"tool.started","call_id":"call-1","index":0,"tool":"nyx_call_tool","target":{"service_slug":"chrono-sandbox","endpoint":"health_handler"}}
+
+data: {"type":"tool.completed","call_id":"call-1","tool":"nyx_call_tool","outcome":"ok","status":200,"duration_ms":10,"result_bytes":49,"truncated":false}
+
+data: {"type":"stage","stage":"execute","status":"completed","detail":"Read execution complete"}
+
+data: {"type":"stage","stage":"final","status":"started","detail":"Writing the grounded answer"}
+
+data: {"type":"text.delta","stage":"final","text":"Chrono Sandbox is healthy."}
+
+data: {"type":"stage","stage":"final","status":"completed","detail":"Grounded answer complete"}
+
+data: {"type":"done","status":"completed","finish_reason":"stop","tool_calls":1,"llm_calls":3,"duration_ms":42}
+
+data: [DONE]
+

@@ -12,6 +12,21 @@ import {
   EMPTY_TURN_STATE,
   toTerminalBlock,
 } from "@/lib/assistant/stream";
+import {
+  cancelAgentPocTurn,
+  createAgentPocRuntime,
+  MAX_AGENT_POC_CONTENT_BYTES,
+  projectAgentPocMessages,
+  streamAgentPocTurn,
+  type AgentPocRuntime,
+  type DirectAgentPocMessage,
+  type DirectAgentPocRequest,
+} from "@/lib/assistant/direct-agent-poc";
+import { isAgentPocPlanBlockId } from "@/lib/assistant/direct-agent-poc-ids";
+import {
+  isNyxidErrorEnvelope,
+  parseJsonErrorResponse,
+} from "@/lib/assistant/direct-http-error";
 import { useAuthStore } from "@/stores/auth-store";
 import type {
   AssistantMessage,
@@ -24,7 +39,6 @@ import type {
   TurnReducerState,
 } from "@/types/assistant";
 import { isTurnActive } from "@/types/assistant";
-import type { ApiErrorResponse } from "@/types/api";
 
 const DIRECT_COMPLETIONS_URL = "/api/v1/assistant/direct/completions";
 export const DIRECT_CONVERSATION_PREFIX = "direct-";
@@ -37,6 +51,8 @@ const TITLE_CHARS = 40;
 const FIRST_BYTE_TIMEOUT_MS = 30_000;
 const IDLE_TIMEOUT_MS = 120_000;
 const UTF8_ENCODER = new TextEncoder();
+
+export { isAgentPocPlanBlockId } from "@/lib/assistant/direct-agent-poc-ids";
 
 interface CompletionChunk {
   readonly id?: string;
@@ -64,6 +80,7 @@ export interface DirectConversationSettings {
   readonly skillSlug: string | null;
   /** `null` sends no `effort`, leaving the upstream default in place. */
   readonly effort: string | null;
+  readonly agentPocMode: boolean;
 }
 
 /**
@@ -75,6 +92,7 @@ const DEFAULT_DIRECT_SETTINGS: DirectConversationSettings = {
   model: DEFAULT_DIRECT_MODEL,
   skillSlug: null,
   effort: null,
+  agentPocMode: false,
 };
 
 interface StoredConversation {
@@ -98,6 +116,7 @@ interface RunningTurn {
   sawFinishReason: boolean;
   sawUpstreamError: boolean;
   sawDone: boolean;
+  agentPoc: AgentPocRuntime | null;
 }
 
 interface DirectTransportOptions {
@@ -133,12 +152,34 @@ function toDirectMessages(
     if (message.role !== "user" && message.role !== "assistant") continue;
     const content = message.blocks
       .filter((block) => block.type === "text")
+      .filter((block) => !isAgentPocPlanBlockId(block.block_id))
       .map((block) => (block.type === "text" ? block.text : ""))
       .filter(Boolean)
       .join("\n\n");
     if (content) payload.push({ role: message.role, content });
   }
   return payload;
+}
+
+function toBoundedAgentPocMessages(
+  messages: readonly AssistantMessage[],
+): DirectAgentPocMessage[] {
+  const transcript = projectAgentPocMessages(messages);
+  const newestFirst: DirectAgentPocMessage[] = [];
+  let contentBytes = 0;
+  for (
+    let index = transcript.length - 1;
+    index >= 0 && newestFirst.length < MAX_OUTGOING_MESSAGES;
+    index -= 1
+  ) {
+    const message = transcript[index];
+    if (!message) continue;
+    const messageBytes = UTF8_ENCODER.encode(message.content).byteLength;
+    if (contentBytes + messageBytes > MAX_AGENT_POC_CONTENT_BYTES) break;
+    newestFirst.push(message);
+    contentBytes += messageBytes;
+  }
+  return newestFirst.reverse();
 }
 
 function toBoundedDirectMessages(
@@ -164,27 +205,6 @@ function toBoundedDirectMessages(
   return newestFirst.reverse();
 }
 
-function isNyxidErrorEnvelope(value: unknown): value is ApiErrorResponse {
-  return Boolean(
-    value &&
-    typeof value === "object" &&
-    "error" in value &&
-    typeof value.error === "string" &&
-    "error_code" in value &&
-    typeof value.error_code === "number" &&
-    "message" in value &&
-    typeof value.message === "string",
-  );
-}
-
-async function parseJsonError(response: Response): Promise<unknown> {
-  try {
-    return await response.json();
-  } catch {
-    return null;
-  }
-}
-
 function unavailableMessage(status: number): string {
   if (status === 401 || status === 403) {
     return "The direct model rejected NyxID's service credential. Reconnect the service and try again.";
@@ -201,6 +221,7 @@ function unavailableMessage(status: number): string {
 export class DirectAssistantTransport implements AssistantTransport {
   private readonly conversations = new Map<string, StoredConversation>();
   private readonly running = new Map<string, RunningTurn>();
+  private readonly settingsListeners = new Set<() => void>();
   private readonly fetchFn: typeof fetch;
   private readonly firstByteTimeoutMs: number;
   private readonly idleTimeoutMs: number;
@@ -234,6 +255,7 @@ export class DirectAssistantTransport implements AssistantTransport {
     this.draftSettings = { ...DEFAULT_DIRECT_SETTINGS };
     this.draftModelSelected = false;
     this.ownerUserId = userId;
+    this.notifySettingsListeners();
   }
 
   getOwnerUserId(): string | null {
@@ -243,12 +265,13 @@ export class DirectAssistantTransport implements AssistantTransport {
   getSettings(conversationId?: string): DirectConversationSettings {
     this.ensureOwner();
     if (!conversationId) return this.draftSettings;
-    return (
-      this.conversations.get(conversationId)?.settings ?? {
-        ...DEFAULT_DIRECT_SETTINGS,
-      }
-    );
+    return this.conversations.get(conversationId)?.settings ?? DEFAULT_DIRECT_SETTINGS;
   }
+
+  readonly subscribeSettings = (listener: () => void): (() => void) => {
+    this.settingsListeners.add(listener);
+    return () => this.settingsListeners.delete(listener);
+  };
 
   canUpdateSettings(conversationId?: string): boolean {
     this.ensureOwner();
@@ -267,17 +290,24 @@ export class DirectAssistantTransport implements AssistantTransport {
     if (stored) stored.modelSelected = true;
   }
 
+  // Invoked during render by useDirectConversationSettings, so it must never
+  // notify subscribers: a listener firing here means setState while another
+  // component renders. The caller reads the snapshot after seeding in the same
+  // render, and useSyncExternalStore's commit-time consistency check re-renders
+  // any component that read the pre-seed snapshot earlier in that pass.
   seedDefaultModel(conversationId: string | undefined, model: string): void {
     this.ensureOwner();
     if (!this.ownerUserId) return;
     if (!conversationId) {
       if (this.draftModelSelected) return;
+      if (this.draftSettings.model === model) return;
       this.draftSettings = { ...this.draftSettings, model };
       return;
     }
     const stored = this.conversations.get(conversationId);
     if (!stored) return;
     if (stored.modelSelected) return;
+    if (stored.settings.model === model) return;
     stored.settings = { ...stored.settings, model };
     stored.conversation = { ...stored.conversation, llm_model: model };
   }
@@ -288,6 +318,10 @@ export class DirectAssistantTransport implements AssistantTransport {
 
   setEffort(conversationId: string | undefined, effort: string | null): void {
     this.updateSettings(conversationId, { effort });
+  }
+
+  setAgentPocMode(conversationId: string | undefined, agentPocMode: boolean): void {
+    this.updateSettings(conversationId, { agentPocMode });
   }
 
   async listConversations(): Promise<Conversation[]> {
@@ -403,8 +437,10 @@ export class DirectAssistantTransport implements AssistantTransport {
       llm_model: stored.settings.model,
     };
 
-    let request: DirectRequest = {
-      messages: toBoundedDirectMessages(stored.turnState.messages),
+    let request: DirectRequest | DirectAgentPocRequest = {
+      messages: stored.settings.agentPocMode
+        ? toBoundedAgentPocMessages(stored.turnState.messages)
+        : toBoundedDirectMessages(stored.turnState.messages),
       model: stored.settings.model,
       ...(stored.settings.skillSlug
         ? { skill_slug: stored.settings.skillSlug }
@@ -432,6 +468,7 @@ export class DirectAssistantTransport implements AssistantTransport {
       sawFinishReason: false,
       sawUpstreamError: false,
       sawDone: false,
+      agentPoc: null,
     };
     this.running.set(conversationId, run);
     this.emit(conversationId, run, {
@@ -440,7 +477,22 @@ export class DirectAssistantTransport implements AssistantTransport {
       turn_id: run.turnId,
       status: "running",
     });
-    void this.streamTurn(conversationId, run, request);
+    if (stored.settings.agentPocMode) {
+      const runtime = createAgentPocRuntime(run.turnId, run.controller);
+      run.agentPoc = runtime;
+      void streamAgentPocTurn(runtime, {
+        request,
+        fetch: this.fetchFn,
+        firstByteTimeoutMs: this.firstByteTimeoutMs,
+        idleTimeoutMs: this.idleTimeoutMs,
+        now: this.now,
+        nextCursor: () => this.nextCursor(run),
+        emit: (event) => this.emit(conversationId, run, event),
+        finishDrain: () => this.finishDrain(conversationId, run),
+      });
+    } else {
+      void this.streamTurn(conversationId, run, request);
+    }
     return {
       turnId: run.turnId,
       cancel: () => this.cancelRun(conversationId, run),
@@ -520,6 +572,7 @@ export class DirectAssistantTransport implements AssistantTransport {
     if (!this.ownerUserId) return false;
     if (!conversationId) {
       this.draftSettings = { ...this.draftSettings, ...patch };
+      this.notifySettingsListeners();
       return true;
     }
     const stored = this.conversations.get(conversationId);
@@ -529,7 +582,12 @@ export class DirectAssistantTransport implements AssistantTransport {
       ...stored.conversation,
       llm_model: stored.settings.model,
     };
+    this.notifySettingsListeners();
     return true;
+  }
+
+  private notifySettingsListeners(): void {
+    for (const listener of this.settingsListeners) listener();
   }
 
   private nextCursor(run: RunningTurn): number {
@@ -603,7 +661,7 @@ export class DirectAssistantTransport implements AssistantTransport {
         "first_byte_timeout",
       );
       if (!response.ok) {
-        const body = await parseJsonError(response);
+        const body = await parseJsonErrorResponse(response);
         if (
           response.status >= 400 &&
           response.status < 500 &&
@@ -833,6 +891,14 @@ export class DirectAssistantTransport implements AssistantTransport {
 
   private cancelRun(conversationId: string, run: RunningTurn): void {
     if (run.discarded || run.drained) return;
+    if (run.agentPoc) {
+      cancelAgentPocTurn(run.agentPoc, {
+        nextCursor: () => this.nextCursor(run),
+        emit: (event) => this.emit(conversationId, run, event),
+        finishDrain: () => this.finishDrain(conversationId, run),
+      });
+      return;
+    }
     run.controller.abort();
     if (!run.terminalEmitted) {
       if (run.currentBlockId) {
