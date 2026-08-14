@@ -279,23 +279,20 @@ pub fn exact_operation_digest(
     }))
 }
 
-/// Digest of the complete caller-visible MCP catalog. The shape is identical
-/// to `/api/v1/mcp/config`'s contract-bearing service descriptors.
-/// Whether a service belongs to the canonical exact-operation view.
+/// Whether a service belongs to the canonical exact-operation view: a
+/// user-managed service publishing declared typed operations.
 ///
-/// Exact admission deals only in user-managed services with declared typed
-/// operations. Platform-wide fallbacks and the generic proxy carry no exact
-/// operation identity, so they are invisible to discovery *and* ineligible for
-/// approval — filtering at only one of the two would make the other a bypass.
+/// Platform-wide fallbacks and the generic proxy carry no exact operation
+/// identity, so delegated discovery does not advertise them. This is a
+/// presentation boundary, not an authorization one — generic-proxy operations
+/// remain approvable and executable for callers already scoped to the service.
 pub fn is_exact_visible(service: &McpToolService) -> bool {
     matches!(service.source, McpToolSource::UserManaged { .. }) && !service.is_generic_proxy
 }
 
-/// The canonical caller-visible exact-operation projection.
-///
-/// This is the single view that delegated discovery, exact-approval creation,
-/// and redemption must all resolve against (issue #1440). Returning borrows
-/// keeps it allocation-light; `McpToolService` is deliberately not `Clone`.
+/// The canonical exact-operation projection listed by delegated discovery
+/// (issue #1440). Returning borrows keeps it allocation-light;
+/// `McpToolService` is deliberately not `Clone`.
 pub fn exact_operation_view(services: &[McpToolService]) -> Vec<&McpToolService> {
     services
         .iter()
@@ -303,21 +300,16 @@ pub fn exact_operation_view(services: &[McpToolService]) -> Vec<&McpToolService>
         .collect()
 }
 
-/// Digest over the canonical exact-operation view. Callers that have already
-/// projected the catalog use this directly so the hashed bytes are exactly the
-/// caller-visible set.
-pub fn exact_operation_view_digest(services: &[&McpToolService]) -> String {
-    operation_catalog_digest_inner(services.iter().copied())
-}
-
+/// Digest of the complete caller-visible MCP catalog.
+///
+/// Deliberately taken over the *whole* scoped catalog rather than the
+/// exact-operation view: this value is a shared fence published by
+/// `/api/v1/mcp/config` (which lists generic and platform rows) and consumed
+/// unchanged by exact-approval create and redeem. Narrowing it on one surface
+/// makes digests obtained there fail drift checks on another.
 pub fn operation_catalog_digest(services: &[McpToolService]) -> String {
-    operation_catalog_digest_inner(services.iter())
-}
-
-fn operation_catalog_digest_inner<'a>(
-    services: impl Iterator<Item = &'a McpToolService>,
-) -> String {
     let mut service_values: Vec<_> = services
+        .iter()
         .map(|service| {
             let mut endpoint_values: Vec<_> = service
                 .endpoints
@@ -4079,10 +4071,12 @@ mod tests {
         assert!(!is_exact_visible(&services[2]), "platform row is hidden");
     }
 
-    /// The #1440 requirement: the digest covers the caller-visible view, so a
-    /// service the caller can never see cannot move it.
+    /// `catalog_digest` is a whole-catalog fence shared with `/mcp/config` and
+    /// exact approval, so hidden rows DO move it. This pins that deliberate
+    /// deviation from #1440's "digest of the final view" wording: narrowing it
+    /// would make a digest read from one surface fail drift checks on another.
     #[test]
-    fn exact_operation_view_digest_ignores_services_the_caller_cannot_see() {
+    fn catalog_digest_is_a_whole_catalog_fence_not_the_exact_view() {
         let typed = user_managed(
             make_service(
                 "svc-typed",
@@ -4093,7 +4087,6 @@ mod tests {
             "us-typed",
         );
         let alone = vec![typed];
-        let digest_alone = exact_operation_view_digest(&exact_operation_view(&alone));
 
         let typed_again = user_managed(
             make_service(
@@ -4114,24 +4107,20 @@ mod tests {
             generic,
             make_service("svc-platform", "Platform", "platform", vec![]),
         ];
-        let digest_with_hidden = exact_operation_view_digest(&exact_operation_view(&with_hidden));
 
-        assert_eq!(
-            digest_alone, digest_with_hidden,
-            "hidden services must not affect the caller-visible digest"
-        );
-
-        // And the projection genuinely changes the hash versus the raw catalog,
-        // proving the filter is not a no-op.
+        // Both surfaces list the same single exact-visible service...
+        assert_eq!(exact_operation_view(&alone).len(), 1);
+        assert_eq!(exact_operation_view(&with_hidden).len(), 1);
+        // ...yet the shared fence still covers the rows discovery hides.
         assert_ne!(
-            digest_with_hidden,
+            operation_catalog_digest(&alone),
             operation_catalog_digest(&with_hidden),
-            "unfiltered digest should differ once hidden services exist"
+            "the fence must cover the whole scoped catalog, including hidden rows"
         );
     }
 
     #[test]
-    fn exact_operation_view_digest_is_deterministic_regardless_of_input_order() {
+    fn catalog_digest_is_deterministic_regardless_of_input_order() {
         let build = || {
             vec![
                 user_managed(
@@ -4149,8 +4138,8 @@ mod tests {
         reversed.reverse();
 
         assert_eq!(
-            exact_operation_view_digest(&exact_operation_view(&forward)),
-            exact_operation_view_digest(&exact_operation_view(&reversed)),
+            operation_catalog_digest(&forward),
+            operation_catalog_digest(&reversed),
             "canonical ordering must make the digest input-order independent"
         );
     }

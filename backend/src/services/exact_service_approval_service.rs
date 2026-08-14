@@ -516,26 +516,22 @@ async fn resolve_exact_catalog(
                 )
         })
         .ok_or_else(|| AppError::NotFound("exact_user_service_not_found".to_string()))?;
-    // A service the canonical view hides is not merely undiscoverable — it is
-    // ineligible for approval. Filtering only at the discovery facade would let
-    // a caller that already knows a hidden service's id approve against it
-    // (#1440).
-    if !mcp_service::is_exact_visible(&catalog.services[service_index]) {
-        return Err(AppError::NotFound(
-            "exact_user_service_not_found".to_string(),
-        ));
-    }
+    // Eligibility is deliberately NOT narrowed to the exact-visible view.
+    // Generic-proxy operations are an approvable, shipped capability -- see
+    // billing_integration_tests::billing_route_coverage_smoke, which approves
+    // and redeems `nyx_generic_proxy_v1`. Hiding generic operations from
+    // delegated discovery is about not advertising untyped operations, not an
+    // authorization boundary: a caller already scoped to the service can reach
+    // it through the generic proxy regardless.
     let endpoint_index = catalog.services[service_index]
         .endpoints
         .iter()
         .position(|endpoint| endpoint.endpoint_id == endpoint_id)
         .ok_or_else(|| AppError::NotFound("exact_endpoint_not_found".to_string()))?;
-    // Same projection and therefore the same digest bytes as delegated
-    // discovery; the two must never disagree.
-    let catalog_digest = {
-        let view = mcp_service::exact_operation_view(&catalog.services);
-        mcp_service::exact_operation_view_digest(&view)
-    };
+    // Whole-catalog fence, matching `/api/v1/mcp/config` and delegated
+    // discovery. All three must hash the same bytes or a digest obtained from
+    // one surface is rejected as drift by another.
+    let catalog_digest = mcp_service::operation_catalog_digest(&catalog.services);
     let endpoint = &catalog.services[service_index].endpoints[endpoint_index];
     let endpoint_contract_digest = mcp_service::endpoint_contract_digest(endpoint);
     let operation_digest =

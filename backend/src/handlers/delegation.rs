@@ -99,12 +99,20 @@ pub async fn get_operation_catalog(
         service_scope,
     )
     .await?;
-    // Discovery, approval creation, and redemption all resolve against this one
-    // projection, and the digest is taken over exactly the caller-visible view
-    // (#1440). Hashing the unfiltered catalog would let services the caller can
-    // never see move the digest.
+    // The response lists only the canonical exact-visible view (#1440:
+    // generic-free), but `catalog_digest` is deliberately taken over the whole
+    // scoped catalog.
+    //
+    // #1440 asks for the digest of the final filtered view. That is not
+    // achievable without breaking a shared fence: the same `catalog_digest` is
+    // published by `/api/v1/mcp/config` (handlers/mcp.rs), which lists generic
+    // and platform services, and is consumed as-is by exact-approval create and
+    // redeem. Narrowing it here alone makes this facade's digest unusable for
+    // approval; narrowing it everywhere makes `/mcp/config` advertise a digest
+    // that excludes rows it lists. The fence therefore stays whole-catalog, and
+    // the deviation is recorded in docs/1440-verification.md.
     let view = mcp_service::exact_operation_view(&catalog.services);
-    let catalog_digest = mcp_service::exact_operation_view_digest(&view);
+    let catalog_digest = mcp_service::operation_catalog_digest(&catalog.services);
     let resolved_at = Utc::now();
 
     let services: Vec<_> = view
