@@ -309,6 +309,7 @@ mod tests {
             executable: true,
             is_generic_proxy: false,
             invalid_openapi_contract: false,
+            proxy_operation_policy: None,
         }];
 
         let rest_operations: Vec<String> = config_services(&services)

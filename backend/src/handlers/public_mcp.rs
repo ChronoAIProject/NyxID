@@ -222,6 +222,7 @@ mod tests {
                 path_pattern: "/public/**".to_string(),
                 daily_quota: 100,
             }],
+            proxy_operation_policy: None,
             created_at: Utc::now(),
             updated_at: Utc::now(),
         }

@@ -343,6 +343,28 @@ pub async fn redeem_request(
         allow_all_nodes: caller.allow_all_nodes,
         allowed_node_ids: &caller.allowed_node_ids,
     };
+    let prepared = match mcp_service::prepare_proxy_tool_call(
+        resolution.service(),
+        resolution.endpoint(),
+        &binding.arguments,
+    ) {
+        Ok(prepared) => prepared,
+        Err(_) => {
+            let updated = persist_redemption(
+                &state.db,
+                request_id,
+                ExactServiceApprovalRedemption {
+                    status: ExactServiceRedemptionStatus::Failed,
+                    admitted_at: now,
+                    completed_at: Some(Utc::now()),
+                    receipt: None,
+                    failure_code: Some("operation_not_allowed".to_string()),
+                },
+            )
+            .await?;
+            return result_for(&updated, ExactServiceApprovalState::Failed);
+        }
+    };
     let executed = mcp_service::execute_tool(
         &state.http_client,
         &state.db,
@@ -353,7 +375,7 @@ pub async fn redeem_request(
         &caller.proxy_resolution_user_id,
         resolution.service(),
         resolution.endpoint(),
-        &binding.arguments,
+        prepared,
         &state.jwt_keys,
         &state.config,
         &state.connection_expiry_notifier,

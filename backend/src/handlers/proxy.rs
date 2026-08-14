@@ -1697,6 +1697,24 @@ async fn execute_proxy_inner(
     // before the handler returns `Ok`.
     *resolved_slug = target.service.slug.clone();
 
+    // A configured policy is a data-plane boundary, so authorize the final
+    // REST method/path before approval, billing, credential injection, node
+    // transport, or forwarding. Rows without a policy retain the legacy path
+    // bytes and behavior unchanged.
+    let canonical_forward_path = if target.service.proxy_operation_policy.is_some() {
+        let canonical_path =
+            crate::services::proxy_authorization::CanonicalPath::from_rest_decoded(path)?;
+        crate::services::proxy_authorization::authorize_proxy_operation(
+            &target.service,
+            request.method().as_str(),
+            &canonical_path,
+        )?;
+        Some(canonical_path.forwarding_path())
+    } else {
+        None
+    };
+    let path = canonical_forward_path.as_deref().unwrap_or(path);
+
     // Billing is metadata-only and must never change proxy resolution
     // behavior. Resolve the billing owner using the SAME identity the proxy
     // used to resolve and authorize the target (`proxy_resolution_user_id`,
@@ -7476,7 +7494,10 @@ mod proxy_resolution_integration_tests {
     use mongodb::bson::doc;
     use nyxid_node_proxy_test::{NodeMetrics as AgentNodeMetrics, ReplayGuard};
     use std::io;
-    use std::sync::{Arc, Mutex};
+    use std::sync::{
+        Arc, Mutex,
+        atomic::{AtomicUsize, Ordering},
+    };
     use tokio::net::TcpListener;
     use tokio::sync::mpsc;
 
@@ -8759,6 +8780,109 @@ mod proxy_resolution_integration_tests {
         .await
         .unwrap();
         service
+    }
+
+    #[tokio::test]
+    async fn configured_operation_policy_blocks_rest_without_forwarding() {
+        let Some(db) = connect_test_database("proxy_operation_policy_rest").await else {
+            panic!("MongoDB is required for proxy operation policy test");
+        };
+        let forwarded = Arc::new(AtomicUsize::new(0));
+        let app = Router::new()
+            .route(
+                "/{*path}",
+                any(|State(counter): State<Arc<AtomicUsize>>| async move {
+                    counter.fetch_add(1, Ordering::SeqCst);
+                    StatusCode::OK
+                }),
+            )
+            .with_state(forwarded.clone());
+        let listener = TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind operation policy downstream");
+        let base_url = format!(
+            "http://{}",
+            listener.local_addr().expect("operation policy address")
+        );
+        let server = tokio::spawn(async move {
+            axum::serve(listener, app)
+                .await
+                .expect("serve operation policy downstream");
+        });
+
+        let user_id = Uuid::new_v4().to_string();
+        db.collection::<crate::models::user::User>(USERS)
+            .insert_one(test_user(&user_id, UserType::Person))
+            .await
+            .expect("insert operation policy user");
+        let mut service = crate::models::downstream_service::test_helpers::dummy_service();
+        service.id = Uuid::new_v4().to_string();
+        service.slug = "operation-policy-rest".to_string();
+        service.name = "Operation policy REST".to_string();
+        service.base_url = base_url;
+        service.service_category = "internal".to_string();
+        service.proxy_operation_policy = Some(
+            crate::services::proxy_authorization::normalize_policy(
+                crate::models::downstream_service::ProxyOperationPolicy {
+                    rules: vec![crate::models::downstream_service::ProxyOperationRule {
+                        method: "POST".to_string(),
+                        path_template: "/air/offer_requests".to_string(),
+                    }],
+                },
+            )
+            .expect("valid operation policy"),
+        );
+        db.collection::<crate::models::downstream_service::DownstreamService>(
+            crate::models::downstream_service::COLLECTION_NAME,
+        )
+        .insert_one(&service)
+        .await
+        .expect("insert operation policy service");
+
+        let state = test_app_state(db);
+        let auth = access_token_auth(&user_id);
+        let mut allowed = proxy_json_request(
+            "/api/v1/proxy/s/operation-policy-rest/air/offer_requests",
+            r#"{"data":{}}"#,
+        );
+        *allowed.method_mut() = Method::POST;
+        let mut resolved_slug = String::new();
+        let response = execute_admin_proxy(
+            &state,
+            &auth,
+            &service.id,
+            "air/offer_requests",
+            allowed,
+            Vec::new(),
+            &mut resolved_slug,
+        )
+        .await
+        .expect("allowlisted REST operation must be forwarded");
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(forwarded.load(Ordering::SeqCst), 1);
+
+        for blocked_path in ["air/orders", "air/orders/ord_123"] {
+            let error = execute_admin_proxy(
+                &state,
+                &auth,
+                &service.id,
+                blocked_path,
+                proxy_request(&format!(
+                    "/api/v1/proxy/s/operation-policy-rest/{blocked_path}"
+                )),
+                Vec::new(),
+                &mut resolved_slug,
+            )
+            .await
+            .expect_err("blocked REST operation must be denied");
+            assert!(matches!(error, AppError::NotFound(_)));
+        }
+        assert_eq!(
+            forwarded.load(Ordering::SeqCst),
+            1,
+            "blocked REST operations must not reach the downstream"
+        );
+        server.abort();
     }
 
     /// A restricted token's `allowed_service_ids` holds `UserService` ids, so

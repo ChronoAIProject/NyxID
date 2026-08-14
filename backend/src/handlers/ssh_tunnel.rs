@@ -1449,6 +1449,7 @@ mod tests {
             developer_app_ids: None,
             token_exchange_config: None,
             anonymous_endpoints: Vec::new(),
+            proxy_operation_policy: None,
             created_at: chrono::Utc::now(),
             updated_at: chrono::Utc::now(),
         }

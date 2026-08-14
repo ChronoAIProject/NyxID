@@ -7,7 +7,8 @@ use sha2::{Digest, Sha256};
 use crate::crypto::aes::EncryptionKeys;
 use crate::errors::{AppError, AppResult};
 use crate::models::downstream_service::{
-    COLLECTION_NAME as DOWNSTREAM_SERVICES, DownstreamService, legacy_http_service_type_filter,
+    COLLECTION_NAME as DOWNSTREAM_SERVICES, DownstreamService, ProxyOperationPolicy,
+    legacy_http_service_type_filter,
 };
 use crate::models::service_billing::{BillingMetric, PlatformUsage};
 use crate::models::service_endpoint::{
@@ -176,6 +177,8 @@ pub struct McpToolService {
     /// service: the instance's `UserEndpoint.recommended_skills` when set,
     /// else the catalog template's `DownstreamService.recommended_skills`.
     pub recommended_skills: Vec<String>,
+    /// Catalog operation policy copied into the immutable execution catalog.
+    pub proxy_operation_policy: Option<ProxyOperationPolicy>,
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -933,6 +936,20 @@ async fn load_user_tools_inner(
     endpoint_service_ids.sort_unstable();
     endpoint_service_ids.dedup();
 
+    let catalog_policy_services: Vec<DownstreamService> = if endpoint_service_ids.is_empty() {
+        Vec::new()
+    } else {
+        db.collection::<DownstreamService>(DOWNSTREAM_SERVICES)
+            .find(doc! { "_id": { "$in": &endpoint_service_ids } })
+            .await?
+            .try_collect()
+            .await?
+    };
+    let catalog_policy_by_id: HashMap<&str, &DownstreamService> = catalog_policy_services
+        .iter()
+        .map(|service| (service.id.as_str(), service))
+        .collect();
+
     let all_endpoints: Vec<ServiceEndpoint> = if endpoint_service_ids.is_empty() {
         vec![]
     } else {
@@ -992,6 +1009,10 @@ async fn load_user_tools_inner(
     // 4a. User-managed services
     for r in &all_user_services {
         let us = &r.service;
+        let catalog_policy = us
+            .catalog_service_id
+            .as_deref()
+            .and_then(|id| catalog_policy_by_id.get(id).copied());
         let user_endpoint = endpoints_by_id.get(us.endpoint_id.as_str()).copied();
         let endpoint_label = user_endpoint
             .map(|ep| ep.label.as_str())
@@ -1086,6 +1107,8 @@ async fn load_user_tools_inner(
             executable: r.executable,
             is_generic_proxy: is_generic,
             invalid_openapi_contract,
+            proxy_operation_policy: catalog_policy
+                .and_then(|service| service.proxy_operation_policy.clone()),
         });
     }
 
@@ -1118,6 +1141,7 @@ async fn load_user_tools_inner(
             executable,
             is_generic_proxy: false,
             invalid_openapi_contract: false,
+            proxy_operation_policy: svc.proxy_operation_policy.clone(),
         });
     }
 
@@ -2093,6 +2117,7 @@ pub async fn load_public_tools(db: &mongodb::Database) -> AppResult<Vec<McpToolS
             executable: true,
             is_generic_proxy: false,
             invalid_openapi_contract: false,
+            proxy_operation_policy: None,
         });
     }
 
@@ -2754,23 +2779,73 @@ pub fn build_proxy_args(
     Ok((method, path, query, parameter_headers, body))
 }
 
+pub struct PreparedProxyCall {
+    method: reqwest::Method,
+    path: String,
+    query: Option<String>,
+    parameter_headers: Vec<(String, String)>,
+    body: Option<bytes::Bytes>,
+    is_generic_proxy_endpoint: bool,
+}
+
+impl PreparedProxyCall {
+    pub fn operation_descriptor(&self) -> operation_descriptor::OperationDescriptor {
+        operation_descriptor::build_mcp_descriptor(
+            self.method.as_str(),
+            &self.path,
+            self.body.as_ref().map(|bytes| bytes.as_ref()),
+        )
+    }
+}
+
+/// Build and authorize the exact request before any approval, billing, node,
+/// or downstream side effect. Execution consumes this value and never rebuilds
+/// method/path/body from caller arguments.
+pub fn prepare_proxy_tool_call(
+    service: &McpToolService,
+    endpoint: &McpToolEndpoint,
+    args: &serde_json::Value,
+) -> AppResult<PreparedProxyCall> {
+    let is_generic_proxy_endpoint = is_generic_proxy_dispatch(service, endpoint);
+    let (method, path, query, parameter_headers, body) = if is_generic_proxy_endpoint {
+        build_generic_proxy_args(args)?
+    } else {
+        build_proxy_args(endpoint, args)?
+    };
+    let path = if service.proxy_operation_policy.is_some() {
+        let canonical_path = if is_generic_proxy_endpoint {
+            crate::services::proxy_authorization::CanonicalPath::from_mcp_literal(&path)?
+        } else {
+            crate::services::proxy_authorization::CanonicalPath::from_mcp_built(&path)?
+        };
+        crate::services::proxy_authorization::authorize_proxy_operation_fields(
+            &service.service_id,
+            &service.service_slug,
+            service.proxy_operation_policy.as_ref(),
+            method.as_str(),
+            &canonical_path,
+        )?;
+        canonical_path.forwarding_path()
+    } else {
+        path
+    };
+
+    Ok(PreparedProxyCall {
+        method,
+        path,
+        query,
+        parameter_headers,
+        body,
+        is_generic_proxy_endpoint,
+    })
+}
+
 pub fn build_mcp_operation_descriptor(
     service: &McpToolService,
     endpoint: &McpToolEndpoint,
     args: &serde_json::Value,
 ) -> AppResult<operation_descriptor::OperationDescriptor> {
-    let (method, path, _query, _parameter_headers, body) =
-        if is_generic_proxy_dispatch(service, endpoint) {
-            build_generic_proxy_args(args)?
-        } else {
-            build_proxy_args(endpoint, args)?
-        };
-
-    Ok(operation_descriptor::build_mcp_descriptor(
-        method.as_str(),
-        &path,
-        body.as_ref().map(|bytes| bytes.as_ref()),
-    ))
+    Ok(prepare_proxy_tool_call(service, endpoint, args)?.operation_descriptor())
 }
 
 fn is_generic_proxy_dispatch(service: &McpToolService, endpoint: &McpToolEndpoint) -> bool {
@@ -3077,7 +3152,7 @@ pub async fn execute_tool(
     billing_principal_user_id: &str,
     service: &McpToolService,
     endpoint: &McpToolEndpoint,
-    arguments: &serde_json::Value,
+    prepared: PreparedProxyCall,
     jwt_keys: &crate::crypto::jwt::JwtKeys,
     config: &crate::config::AppConfig,
     connection_expiry_notifier:
@@ -3092,13 +3167,14 @@ pub async fn execute_tool(
     use crate::services::node_ws_manager::{NodeProxyRequest, ProxyResponseType};
     use crate::services::{delegation_service, identity_service, node_service};
 
-    // Build proxy arguments: generic proxy tools extract method/path from args
-    let is_generic_proxy_endpoint = is_generic_proxy_dispatch(service, endpoint);
-    let (method, path, query, parameter_headers, body) = if is_generic_proxy_endpoint {
-        build_generic_proxy_args(arguments)?
-    } else {
-        build_proxy_args(endpoint, arguments)?
-    };
+    let PreparedProxyCall {
+        method,
+        path,
+        query,
+        parameter_headers,
+        body,
+        is_generic_proxy_endpoint,
+    } = prepared;
 
     // Resolve the proxy target and node routing from the fresh resolver result
     // (not cached loader flags -- credential state may have changed).
@@ -4024,6 +4100,7 @@ mod tests {
             executable: true,
             is_generic_proxy: false,
             invalid_openapi_contract: false,
+            proxy_operation_policy: None,
         }
     }
 
@@ -4142,6 +4219,107 @@ mod tests {
             operation_catalog_digest(&reversed),
             "canonical ordering must make the digest input-order independent"
         );
+    }
+
+    fn cancellation_policy() -> ProxyOperationPolicy {
+        crate::services::proxy_authorization::normalize_policy(ProxyOperationPolicy {
+            rules: vec![
+                crate::models::downstream_service::ProxyOperationRule {
+                    method: "POST".to_string(),
+                    path_template: "/air/order_cancellations".to_string(),
+                },
+                crate::models::downstream_service::ProxyOperationRule {
+                    method: "POST".to_string(),
+                    path_template: "/air/order_cancellations/{id}/actions/confirm".to_string(),
+                },
+            ],
+        })
+        .expect("valid policy")
+    }
+
+    #[test]
+    fn mcp_preparation_denies_before_approval_descriptor_for_blocked_order_read() {
+        let endpoint = McpToolEndpoint {
+            method: "GET".to_string(),
+            path: "/air/orders/{id}".to_string(),
+            parameters: Some(serde_json::json!([{
+                "name": "id",
+                "in": "path",
+                "required": true
+            }])),
+            ..make_endpoint("order_read", "Read order")
+        };
+        let mut service = make_service("duffel", "Duffel", "duffel", vec![]);
+        service.proxy_operation_policy = Some(cancellation_policy());
+
+        let error =
+            prepare_proxy_tool_call(&service, &endpoint, &serde_json::json!({"id": "ord_123"}))
+                .err()
+                .expect("blocked operation must fail during preparation");
+        assert!(matches!(error, AppError::NotFound(_)));
+    }
+
+    #[test]
+    fn mcp_cancellation_prepares_a_write_for_the_existing_approval_path() {
+        let endpoint = McpToolEndpoint {
+            method: "POST".to_string(),
+            path: "/air/order_cancellations/{id}/actions/confirm".to_string(),
+            parameters: Some(serde_json::json!([{
+                "name": "id",
+                "in": "path",
+                "required": true
+            }])),
+            ..make_endpoint("cancel_confirm", "Confirm cancellation")
+        };
+        let mut service = make_service("duffel", "Duffel", "duffel", vec![]);
+        service.proxy_operation_policy = Some(cancellation_policy());
+
+        let prepared =
+            prepare_proxy_tool_call(&service, &endpoint, &serde_json::json!({"id": "orc_123"}))
+                .expect("allowlisted cancellation must reach approval");
+        let operation = prepared.operation_descriptor();
+        assert_eq!(
+            operation.verb,
+            crate::models::service_approval_config::ApprovalVerb::Write
+        );
+        assert_eq!(
+            operation.resource.as_deref(),
+            Some("/air/order_cancellations/orc_123/actions/confirm")
+        );
+    }
+
+    #[test]
+    fn mcp_no_policy_keeps_existing_passthrough_preparation() {
+        let endpoint = McpToolEndpoint {
+            method: "GET".to_string(),
+            path: "/existing/{id}".to_string(),
+            parameters: Some(serde_json::json!([{
+                "name": "id",
+                "in": "path",
+                "required": true
+            }])),
+            ..make_endpoint("existing", "Existing operation")
+        };
+        let service = make_service("existing", "Existing", "existing", vec![]);
+        prepare_proxy_tool_call(&service, &endpoint, &serde_json::json!({"id": "value:1"}))
+            .expect("missing policy must preserve existing behavior");
+    }
+
+    #[test]
+    fn generic_mcp_path_is_checked_by_the_same_preparation_gate() {
+        let endpoint = build_generic_proxy_endpoint("Duffel");
+        let mut service = make_service("duffel", "Duffel", "duffel", vec![]);
+        service.is_generic_proxy = true;
+        service.proxy_operation_policy = Some(cancellation_policy());
+
+        let error = prepare_proxy_tool_call(
+            &service,
+            &endpoint,
+            &serde_json::json!({"method": "GET", "path": "/air/orders"}),
+        )
+        .err()
+        .expect("generic order list must be denied during preparation");
+        assert!(matches!(error, AppError::NotFound(_)));
     }
 
     #[test]
@@ -7310,6 +7488,7 @@ mod tests {
                 developer_app_ids: None,
                 token_exchange_config: None,
                 anonymous_endpoints: rules,
+                proxy_operation_policy: None,
                 created_at: Utc::now(),
                 updated_at: Utc::now(),
             }

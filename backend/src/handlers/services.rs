@@ -14,7 +14,7 @@ use crate::crypto::token::{generate_random_token, hash_token};
 use crate::errors::{AppError, AppResult};
 use crate::models::downstream_service::{
     AnonymousEndpointRule, COLLECTION_NAME as DOWNSTREAM_SERVICES, DownstreamService,
-    ServiceCapabilities, TokenExchangeConfig,
+    ProxyOperationPolicy, ServiceCapabilities, TokenExchangeConfig,
 };
 use crate::models::oauth_client::{COLLECTION_NAME as OAUTH_CLIENTS, OauthClient};
 use crate::models::service_billing::ServiceBilling;
@@ -87,6 +87,8 @@ pub struct CreateServiceRequest {
     /// Admin-scoped no-auth public proxy rules.
     #[serde(default)]
     pub anonymous_endpoints: Vec<AnonymousEndpointRule>,
+    /// Data-plane method + path-template operation allowlist.
+    pub proxy_operation_policy: Option<ProxyOperationPolicy>,
 }
 
 impl std::fmt::Debug for CreateServiceRequest {
@@ -196,6 +198,8 @@ pub struct ServiceResponse {
     pub ws_frame_injections: Vec<WsFrameInjection>,
     pub anonymous_endpoints: Vec<AnonymousEndpointRule>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub proxy_operation_policy: Option<ProxyOperationPolicy>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub developer_app_ids: Option<Vec<String>>,
     pub created_by: String,
     pub created_at: String,
@@ -301,6 +305,8 @@ pub struct UpdateServiceRequest {
     /// `/anonymous-endpoints` endpoints for single-rule edits.
     #[serde(default)]
     pub anonymous_endpoints: Option<Vec<AnonymousEndpointRule>>,
+    /// Replace the data-plane operation allowlist. Empty rules deny all.
+    pub proxy_operation_policy: Option<ProxyOperationPolicy>,
 }
 
 fn identity_update_fields(body: &UpdateServiceRequest) -> Vec<&'static str> {
@@ -1047,6 +1053,11 @@ pub async fn create_service(
     };
     crate::services::ws_frame_injector::validate_rules(&body.ws_frame_injections)?;
     anonymous_endpoint_service::validate_rule_list(&body.anonymous_endpoints)?;
+    let proxy_operation_policy = body
+        .proxy_operation_policy
+        .clone()
+        .map(crate::services::proxy_authorization::normalize_policy)
+        .transpose()?;
     validate_service_billing(body.billing.as_ref())?;
 
     let new_service = DownstreamService {
@@ -1095,6 +1106,7 @@ pub async fn create_service(
         developer_app_ids: body.developer_app_ids.clone(),
         token_exchange_config,
         anonymous_endpoints: body.anonymous_endpoints.clone(),
+        proxy_operation_policy,
         created_at: now,
         updated_at: now,
     };
@@ -1807,6 +1819,15 @@ pub async fn update_service(
         );
     }
 
+    if let Some(policy) = body.proxy_operation_policy.clone() {
+        let normalized = crate::services::proxy_authorization::normalize_policy(policy)?;
+        set_doc.insert(
+            "proxy_operation_policy",
+            bson::to_bson(&normalized)
+                .map_err(|e| AppError::Internal(format!("BSON serialization error: {e}")))?,
+        );
+    }
+
     anonymous_endpoint_service::validate_service_update_anonymous_compatibility(
         &service,
         body.identity_propagation_mode.as_deref(),
@@ -2422,6 +2443,7 @@ mod tests {
             default_request_headers: None,
             ws_frame_injections: vec![],
             anonymous_endpoints: vec![],
+            proxy_operation_policy: None,
         }
     }
 

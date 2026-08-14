@@ -799,8 +799,9 @@ impl RunContext {
         if !tools::is_poc_operation_eligible(endpoint) {
             return Err("operation_not_allowed");
         }
-        let descriptor = mcp_service::build_mcp_operation_descriptor(service, endpoint, arguments)
-            .map_err(|_| "invalid_args")?;
+        let prepared = mcp_service::prepare_proxy_tool_call(service, endpoint, arguments)
+            .map_err(|_| "operation_not_allowed")?;
+        let descriptor = prepared.operation_descriptor();
         let actor = self.auth_user.user_id.to_string();
         enforce_deny_only(
             &self.state.db,
@@ -830,7 +831,7 @@ impl RunContext {
             &actor,
             service,
             endpoint,
-            arguments,
+            prepared,
             &self.state.jwt_keys,
             &self.state.config,
             &self.state.connection_expiry_notifier,
