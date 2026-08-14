@@ -479,7 +479,10 @@ mod tests {
                 "receiving_client_id",
                 Box::new(|g| g.receiving_client_id = "other-receiver".to_string()),
             ),
-            ("scope", Box::new(|g| g.scope = format!("{} proxy:*", g.scope))),
+            (
+                "scope",
+                Box::new(|g| g.scope = format!("{} proxy:*", g.scope)),
+            ),
             (
                 "resources",
                 Box::new(|g| {
