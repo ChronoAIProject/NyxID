@@ -346,8 +346,9 @@ pub enum TelemetryEvent {
         method: String,
         /// Upstream HTTP status code (always 2xx here).
         status: u16,
-        /// End-to-end proxy latency from handler entry to response,
-        /// including downstream wait and credential resolution.
+        /// Handler-to-response-start latency retained for the product reach
+        /// event. Full body/stream timing lives in the bounded operational
+        /// phase diagnostics emitted by the proxy handler.
         latency_ms: u64,
         /// Auth provenance: `session` | `access_token` | `relay` |
         /// `api_key` | `service_account` | `delegated`. Lets HogQL split
