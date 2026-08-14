@@ -281,9 +281,43 @@ pub fn exact_operation_digest(
 
 /// Digest of the complete caller-visible MCP catalog. The shape is identical
 /// to `/api/v1/mcp/config`'s contract-bearing service descriptors.
-pub fn operation_catalog_digest(services: &[McpToolService]) -> String {
-    let mut service_values: Vec<_> = services
+/// Whether a service belongs to the canonical exact-operation view.
+///
+/// Exact admission deals only in user-managed services with declared typed
+/// operations. Platform-wide fallbacks and the generic proxy carry no exact
+/// operation identity, so they are invisible to discovery *and* ineligible for
+/// approval — filtering at only one of the two would make the other a bypass.
+pub fn is_exact_visible(service: &McpToolService) -> bool {
+    matches!(service.source, McpToolSource::UserManaged { .. }) && !service.is_generic_proxy
+}
+
+/// The canonical caller-visible exact-operation projection.
+///
+/// This is the single view that delegated discovery, exact-approval creation,
+/// and redemption must all resolve against (issue #1440). Returning borrows
+/// keeps it allocation-light; `McpToolService` is deliberately not `Clone`.
+pub fn exact_operation_view(services: &[McpToolService]) -> Vec<&McpToolService> {
+    services
         .iter()
+        .filter(|service| is_exact_visible(service))
+        .collect()
+}
+
+/// Digest over the canonical exact-operation view. Callers that have already
+/// projected the catalog use this directly so the hashed bytes are exactly the
+/// caller-visible set.
+pub fn exact_operation_view_digest(services: &[&McpToolService]) -> String {
+    operation_catalog_digest_inner(services.iter().copied())
+}
+
+pub fn operation_catalog_digest(services: &[McpToolService]) -> String {
+    operation_catalog_digest_inner(services.iter())
+}
+
+fn operation_catalog_digest_inner<'a>(
+    services: impl Iterator<Item = &'a McpToolService>,
+) -> String {
+    let mut service_values: Vec<_> = services
         .map(|service| {
             let mut endpoint_values: Vec<_> = service
                 .endpoints
@@ -3999,6 +4033,126 @@ mod tests {
             is_generic_proxy: false,
             invalid_openapi_contract: false,
         }
+    }
+
+    // ---- Canonical exact-operation projection (#1440) ---------------------
+
+    fn user_managed(mut service: McpToolService, user_service_id: &str) -> McpToolService {
+        service.source = McpToolSource::UserManaged {
+            user_service_id: user_service_id.to_string(),
+            effective_owner_id: "owner-1".to_string(),
+            node_id: None,
+            has_server_credential: true,
+        };
+        service
+    }
+
+    #[test]
+    fn exact_operation_view_excludes_platform_and_generic_services() {
+        let typed = user_managed(
+            make_service(
+                "svc-typed",
+                "Typed",
+                "typed",
+                vec![make_endpoint("list", "d")],
+            ),
+            "us-typed",
+        );
+        let mut generic = user_managed(
+            make_service("svc-generic", "Generic", "generic", vec![]),
+            "us-generic",
+        );
+        generic.is_generic_proxy = true;
+        let platform = make_service("svc-platform", "Platform", "platform", vec![]);
+
+        let services = vec![typed, generic, platform];
+        let view = exact_operation_view(&services);
+
+        assert_eq!(
+            view.len(),
+            1,
+            "only the typed user service is exact-visible"
+        );
+        assert_eq!(view[0].service_id, "svc-typed");
+        assert!(is_exact_visible(&services[0]));
+        assert!(!is_exact_visible(&services[1]), "generic proxy is hidden");
+        assert!(!is_exact_visible(&services[2]), "platform row is hidden");
+    }
+
+    /// The #1440 requirement: the digest covers the caller-visible view, so a
+    /// service the caller can never see cannot move it.
+    #[test]
+    fn exact_operation_view_digest_ignores_services_the_caller_cannot_see() {
+        let typed = user_managed(
+            make_service(
+                "svc-typed",
+                "Typed",
+                "typed",
+                vec![make_endpoint("list", "d")],
+            ),
+            "us-typed",
+        );
+        let alone = vec![typed];
+        let digest_alone = exact_operation_view_digest(&exact_operation_view(&alone));
+
+        let typed_again = user_managed(
+            make_service(
+                "svc-typed",
+                "Typed",
+                "typed",
+                vec![make_endpoint("list", "d")],
+            ),
+            "us-typed",
+        );
+        let mut generic = user_managed(
+            make_service("svc-generic", "Generic", "generic", vec![]),
+            "us-generic",
+        );
+        generic.is_generic_proxy = true;
+        let with_hidden = vec![
+            typed_again,
+            generic,
+            make_service("svc-platform", "Platform", "platform", vec![]),
+        ];
+        let digest_with_hidden = exact_operation_view_digest(&exact_operation_view(&with_hidden));
+
+        assert_eq!(
+            digest_alone, digest_with_hidden,
+            "hidden services must not affect the caller-visible digest"
+        );
+
+        // And the projection genuinely changes the hash versus the raw catalog,
+        // proving the filter is not a no-op.
+        assert_ne!(
+            digest_with_hidden,
+            operation_catalog_digest(&with_hidden),
+            "unfiltered digest should differ once hidden services exist"
+        );
+    }
+
+    #[test]
+    fn exact_operation_view_digest_is_deterministic_regardless_of_input_order() {
+        let build = || {
+            vec![
+                user_managed(
+                    make_service("svc-b", "B", "b", vec![make_endpoint("beta", "d")]),
+                    "us-b",
+                ),
+                user_managed(
+                    make_service("svc-a", "A", "a", vec![make_endpoint("alpha", "d")]),
+                    "us-a",
+                ),
+            ]
+        };
+        let forward = build();
+        let mut reversed = build();
+        reversed.reverse();
+
+        assert_eq!(
+            exact_operation_view_digest(&exact_operation_view(&forward)),
+            exact_operation_view_digest(&exact_operation_view(&reversed)),
+            "canonical ordering must make the digest input-order independent"
+        );
     }
 
     #[test]

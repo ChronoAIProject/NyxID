@@ -99,11 +99,15 @@ pub async fn get_operation_catalog(
         service_scope,
     )
     .await?;
-    let catalog_digest = mcp_service::operation_catalog_digest(&catalog.services);
+    // Discovery, approval creation, and redemption all resolve against this one
+    // projection, and the digest is taken over exactly the caller-visible view
+    // (#1440). Hashing the unfiltered catalog would let services the caller can
+    // never see move the digest.
+    let view = mcp_service::exact_operation_view(&catalog.services);
+    let catalog_digest = mcp_service::exact_operation_view_digest(&view);
     let resolved_at = Utc::now();
 
-    let services: Vec<_> = catalog
-        .services
+    let services: Vec<_> = view
         .iter()
         .filter_map(|service| {
             let mcp_service::McpToolSource::UserManaged {
@@ -114,9 +118,6 @@ pub async fn get_operation_catalog(
             else {
                 return None;
             };
-            if service.is_generic_proxy {
-                return None;
-            }
             let operations = service
                 .endpoints
                 .iter()

@@ -516,12 +516,26 @@ async fn resolve_exact_catalog(
                 )
         })
         .ok_or_else(|| AppError::NotFound("exact_user_service_not_found".to_string()))?;
+    // A service the canonical view hides is not merely undiscoverable — it is
+    // ineligible for approval. Filtering only at the discovery facade would let
+    // a caller that already knows a hidden service's id approve against it
+    // (#1440).
+    if !mcp_service::is_exact_visible(&catalog.services[service_index]) {
+        return Err(AppError::NotFound(
+            "exact_user_service_not_found".to_string(),
+        ));
+    }
     let endpoint_index = catalog.services[service_index]
         .endpoints
         .iter()
         .position(|endpoint| endpoint.endpoint_id == endpoint_id)
         .ok_or_else(|| AppError::NotFound("exact_endpoint_not_found".to_string()))?;
-    let catalog_digest = mcp_service::operation_catalog_digest(&catalog.services);
+    // Same projection and therefore the same digest bytes as delegated
+    // discovery; the two must never disagree.
+    let catalog_digest = {
+        let view = mcp_service::exact_operation_view(&catalog.services);
+        mcp_service::exact_operation_view_digest(&view)
+    };
     let endpoint = &catalog.services[service_index].endpoints[endpoint_index];
     let endpoint_contract_digest = mcp_service::endpoint_contract_digest(endpoint);
     let operation_digest =
