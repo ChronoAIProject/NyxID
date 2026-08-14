@@ -441,3 +441,178 @@ Concretely, what I am signing off on:
 - A row combining a platform credential with `inject_delegation_token` or `forward_access_token` resolves identically through all four gate call sites, with the credential preserved.
 - No response body, and no request body, is written to tracing from the proxy path — verified end to end with a sentinel through a real stubbed 422, in the buffered branch, with the streaming and node branches read and confirmed to log no bytes.
 - The five tests above executed against a live Mongo and pass; the B5 regression test cannot pass against the pre-`f086a726` predicate.
+
+---
+---
+
+# Cycle 4 — post-rebase re-census against `origin/main` (`62add35b`)
+
+The branch was created from a stale `21297220` and has been rebased onto current `origin/main`. Confirmed: `travel-booking` is **0 behind, 10 ahead** of `62add35b`, linear history. Mainline changed the two files this PR touches by **1,464 insertions / 670 deletions** — the typed NyxIdChat migration, per-class LLM token metering, node-routed header work, and the direct-chat engine — so cycle 1's decrypt-site census was performed against a file that no longer exists.
+
+I rebuilt the census from scratch against the current tree and then compared to Sol's. **They agree.** Below is my derivation, not an audit of theirs.
+
+Five targeted tests run and confirmed executed: **5 passed, 0 failed, 1.72s** — see the environment note, which cost me one failed run and will affect your full-suite run too.
+
+---
+
+## Verdict
+
+**SHIP.**
+
+Mainline introduced no new read, decrypt, or plaintext-producer of a catalog master credential. The four gated branches remain the complete set. Every property certified in cycle 3 survived the rebase intact — I checked each one against the current file rather than inferring from the diffstat. No body logging was reintroduced. No blocking findings.
+
+Two things worth your attention that are not defects: `4410e7c5` adds no test despite its `test(proxy):` title (it is a rebase compile fix, and the property is pinned by the existing cycle-2/3 tests), and mainline added a **second** platform row that now flows through the server-chosen gate, which extends the pre-merge readback from one slug to two.
+
+---
+
+## Blocking findings
+
+None.
+
+---
+
+## Non-blocking findings
+
+### N18. `4410e7c5` adds no test; its title says it does
+
+**Consequence:** the commit log claims a verification artifact that is not in the diff, so a future reader looking for "the test that verifies the gate on current main" will not find one there.
+
+The production half of `4410e7c5` is a **rebase compile fix**, not a test: four new `OauthClient` fields (`connection_webhook_url`, `connection_webhook_secret_encrypted`, `connection_webhook_key_id`, `connection_webhook_enabled`) added to the fixture in `master_credential_authorization_covers_visibility_and_consent`, and one new `None` argument for the `connection_expiry_notifier: Option<&ConnectionExpiryNotifier>` parameter mainline added to `resolve_proxy_target_from_user_service` (`proxy_service.rs:1128`). The other half is the census appended to `PR_A_VERIFICATION.md`.
+
+That is the right work — the property is pinned by the *existing* cycle-2 and cycle-3 tests, which is stronger than a fresh shape assertion would have been, and keeping them compiling against the new base is exactly what was needed. The title should say `fix(test):` or `chore:` and the body should say the census is the deliverable. Answering the question directly: **it is not a shape assertion, because it is not an assertion at all** — the pinning is done by `delegated_identity_does_not_suppress_master_credential_across_resolvers` and `master_credential_authorization_covers_visibility_and_consent`, both of which I re-ran against the current base.
+
+I also checked the new parameter is inert for this PR: `connection_expiry_notifier` threads through to `maybe_refresh_provider_backed_api_key` (`:2243`) and the agent-binding override path (`:2506`), both `UserApiKey` refresh concerns downstream of the master-credential branch at `:2173`. It cannot reach or bypass the gate.
+
+### N19. Mainline added a second platform row that flows through the server-chosen gate
+
+**Consequence:** the pre-merge readback I have been carrying since cycle 1 now covers two slugs, not one. This is a deployment check, not a code defect.
+
+`execute_admin_proxy` — and therefore `resolve_admin_proxy_target` and the server-chosen gate — has two new production callers from mainline: `handlers/assistant_direct.rs:170` and `services/assistant_direct_agent_poc.rs:488`. Both target slug `chrono-llm-public` (`services/assistant_direct.rs:6`) via `assistant_service::resolve_admin_service_by_slug`. That row is not seeded in code (no hits in `provider_service.rs`, `catalog_service.rs`, or `db.rs`), so it is admin-created per environment.
+
+If `chrono-llm-public` carries `auth_method != "none"`, it must satisfy the same six clauses as any other server-chosen row: `public` + `internal` + `provider_config_id: null` + non-empty credential + active + http. Both test fixtures (`handlers/assistant_direct.rs:308-316`, `billing_integration_tests.rs:315-321`) build it from `dummy_service()` and leave `auth_method: "none"`, so in tests it takes the early return at `proxy_service.rs:736` and never reaches the gate — the same shape as the assistant row. Whether production matches is the readback below.
+
+### N20. N14 unchanged — the twin predicate still diverges in form
+
+`proxy_service.rs:1949-1959` delegates to `master_credential_required`; its copy at `unified_key_service.rs:190-200` still spells out `service.auth_method != "none"`. Identical today. The hazard is unchanged from cycle 3: the `unified_key_service` copy drives auto-provision creation and the reconcile sweep that *deletes* users' auto-provisioned rows, so a future edit to `master_credential_required` would silently desync provisioning from proxy-time resolution.
+
+### N21. N1, N2, N7 and the `TRAVEL_BOOKING.md:114` wording remain as recorded
+
+All four are tracked in `PR_A_VERIFICATION.md`'s deferred list and none is a path to a wrong outcome. N7 (the sealed `EffectiveActor` constructor blocking PR-B's `/resource-tokens/exchange` as designed) is the one that needs a decision before PR-B starts, not before this merges.
+
+---
+
+## Verified correct
+
+### 1. Mainline added no new credential-producing path — independent census
+
+Every non-model occurrence of `credential_encrypted` in `backend/src`, classified by the type it is read from. **Six** are reads of a `DownstreamService` (catalog) credential:
+
+| Site | Kind |
+|---|---|
+| `proxy_service.rs:211` | inside `authorize_master_credential` — authorization constructor |
+| `proxy_service.rs:242` | inside `authorize_master_credential_server_chosen` — authorization constructor |
+| `proxy_service.rs:252` | `is_valid_master_credential_service` — ciphertext-presence check |
+| `proxy_service.rs:1957` | `is_public_internal_master_credential_service` — ciphertext-presence check |
+| `unified_key_service.rs:198` | twin predicate — ciphertext-presence check |
+| `handlers/services.rs:2090` | admin/creator-gated OIDC client-secret endpoint, `auth_method == "oidc"` only |
+
+Everything else resolves to a `UserApiKey` or `UserServiceConnection`: `credential_push_service.rs:649`, `connection_service.rs:158`, `user_api_key_service.rs:81`, `keys.rs:684`, `gcp_sa_service.rs:239`, `proxy_service.rs:864/866/873/1006/2660`. I re-checked `assistant_readiness_service.rs:533`, which reads `connection.credential_encrypted` — a `UserServiceConnection` presence test, not catalog.
+
+**All 30 backend files mainline added** were checked individually. Exactly one contains the string `credential_encrypted` at all: `connection_expiry_service.rs:352`, a `credential_encrypted: None` struct initializer on a `UserServiceConnection`. Their decrypt calls are webhook secrets (`developer_webhook_service.rs:165,506,523`) and trigger envelopes (`trigger_service.rs:411,731,838,1102,1458`) — neither is a catalog credential. The direct-chat engine, the durable-operation grant service, connect links, triggers, and catalog identity reconciliation add **zero** catalog credential reads.
+
+I also checked the metering work specifically, since #1393 touched credential classification: `final_credential_class` (`handlers/proxy.rs:3571-3601`) inspects `target.credential.is_empty()` and boolean flags only. It classifies; it never reads ciphertext.
+
+### 2. The four gated branches are still the complete set of catalog-master plaintext producers
+
+Derived from the decrypt census rather than assumed. Every decrypt in `proxy_service.rs`:
+
+- `:110` `AuthorizedMasterCredential::decrypt` — requires the newtype; field and constructor private
+- `:118` `decrypt_authorized_master_credential` — requires the newtype
+- `:125` `decrypt_user_credential` — raw bytes, `UserServiceConnection`
+- `:137` `decrypt_master_credential_string` — requires the newtype
+- `:2667` `resolve_agent_credential_override` — `UserApiKey`
+
+Master **plaintext** is therefore produced at exactly four sites, each immediately preceded by an authorize call: `:753` (server-chosen, gate at `:751`), `:881` (strict, gate at `:875`), `:1021` (lenient, gate at `:1014`), `:2180` (auto-provision, gate at `:2173`). No fifth.
+
+Cross-checked from the consumer side: every non-test `ProxyTarget` construction that carries a non-empty credential is one of those four (`:759`, `:892`, `:1035`, `:2196`), two `UserApiKey` branches (`:2275`, `:2327`), or `llm_gateway.rs:852`, which moves an already-resolved `target.credential` into a base-URL-overridden copy. `public_proxy.rs:152` and `mcp_service.rs:6973` construct empty credentials — and `mcp_service.rs:6973` is inside `#[cfg(test)]` (mod opens at `:3956`).
+
+Entry-point convergence re-confirmed post-rebase: REST UUID/slug, `_nyxid_via`, WS, and node fallback at `handlers/proxy.rs:647, 708, 869, 930, 1195, 1218`; server-chosen at `:1626`; both LLM gateway paths at `llm_gateway.rs:292, 328, 653, 726`; MCP at `mcp_service.rs:3084, 3226, 3234`; assistant surfaces at `handlers/assistant.rs:693`, `handlers/assistant_direct.rs:170`, `services/assistant_direct_agent_poc.rs:488`.
+
+### 3. Nothing certified in cycle 3 was dropped or weakened by the rebase
+
+Checked against the current file, item by item:
+
+- **Sealed `EffectiveActor`** — private field, private `from_user_id`, no `Default`/`From` (`proxy_service.rs:86-96`). Intact.
+- **Typed decrypt split** — `:110`, `:114`, `:121`, `:132` all present with the same signatures. Intact.
+- **`master_credential_required` at every call site** — five production sites: `:221` (server-chosen gate), `:247` (`is_valid_master_credential_service`), `:874` (strict), `:1013` (lenient), `:1952` (`is_public_internal_master_credential_service`, which is what covers `finish_resolution`'s otherwise-unguarded call). Same five as cycle 3. The predicate body is still exactly `service.auth_method != "none"` (`:144-147`) with the explanatory comment.
+- **Four gated branches with their early returns** — early returns at `:736`, `:842`, `:962`; gates at `:751`, `:875`, `:1014`, `:2173`. Same structure, same ordering.
+- **`log_upstream_error` takes no body** — `handlers/proxy.rs:117-123`, four parameters: `service_id`, `status`, `response_size`, `upstream_request_id`. Intact.
+- **End-to-end redaction test** — `upstream_error_body_is_redacted_end_to_end` at `handlers/proxy.rs:7544`, sentinel at `:7554`, negative assertion at `:7621`. Re-run and passing.
+
+No hunk went missing in the conflict resolution.
+
+### 4. No body logging reintroduced by mainline
+
+Exactly two `from_utf8_lossy` occurrences remain in the two files. `handlers/proxy.rs:3189` feeds an SSE parse buffer consumed by `parse_sse_event` at `:3190` — parsed, never logged. `handlers/proxy.rs:7679` is the `echo_node_request` test helper inside `#[cfg(test)]` (mod opens at `:7434`), which echoes a request body back as JSON to the test.
+
+The `/responses` request-body preview this PR deleted has not returned — `rg "url.contains"` over `proxy_service.rs` is empty. `response_body` in `handlers/proxy.rs` is used only for `.len()` (`:3448`, `:3465`), a JSON parse for usage extraction (`:3456`), and passthrough to the client (`:3483`). I also swept every `tracing::` macro in both files for a field carrying a credential, body, payload, or preview value: the only matches are message strings and field *names* in the gate's denial logs, never a value.
+
+### 5. Consent, gate, and redaction behavior verified by execution on the current base
+
+`cargo test -p nyxid -- delegated_identity_does_not_suppress_master_credential_across_resolvers assistant_shaped_server_target_without_credential_resolves master_credential_authorization_covers_visibility_and_consent upstream_error_body_is_redacted_end_to_end server_chosen_master_credential_requires_public_valid_row` → **5 passed, 0 failed, 1.72s**, against Mongo `rs0` on `:27018`. Three of the five `panic!` rather than skip when the DB is unreachable, so their passing proves the run was DB-backed.
+
+---
+
+## Environment note — this will affect your full-suite run
+
+My first run of these tests failed four of five with `MongoDB is required for ...`. **It is not the topology, and it is not a code defect.** The replica set is healthy: `rs.conf()` reports `_id: rs0` with member `127.0.0.1:27018`, `isWritablePrimary: true`, and an unauthenticated connection reads and writes fine.
+
+The cause is **credentials**. The test harness's first probe candidate is
+
+```
+mongodb://nyxid:nyxid_dev_password@127.0.0.1:27018/...?authSource=admin&directConnection=true
+```
+
+(`backend/src/test_utils.rs:181-192`), but the restored server runs with **no authentication** — `mongod --port 27018 --dbpath /tmp/nyxid-rs0 --replSet rs0 --bind_ip 127.0.0.1`, no `--auth`. SCRAM against a server with no such user returns `Authentication failed`, the probe rejects the candidate, falls through to `127.0.0.1:27017` (no listener), and returns `None` — at which point the strict tests panic and the older lenient ones silently skip.
+
+Two ways out:
+
+```bash
+# either point the harness at the running server explicitly
+export NYXID_TEST_DATABASE_URL="mongodb://127.0.0.1:27018/nyxid_test_probe?directConnection=true"
+
+# or create the user the harness expects
+mongosh "mongodb://127.0.0.1:27018/?directConnection=true" --eval \
+  'db.getSiblingDB("admin").createUser({user:"nyxid",pwd:"nyxid_dev_password",roles:["root"]})'
+```
+
+I used the first. Note the harness *panics* when `NYXID_TEST_DATABASE_URL` is set but unreachable (`test_utils.rs:168-172`), so a typo there fails loudly rather than silently skipping — which is what you want.
+
+---
+
+## Could not verify
+
+**The live shapes of `aevatar` and `chrono-llm-public`.** Unchanged in kind from cycles 1–3, now covering two slugs because of N19. Any row that reaches a gate must satisfy all six clauses or it will 404. Rows with `auth_method: "none"` never reach a gate and are unaffected.
+
+```js
+db.downstream_services.find(
+  { requires_user_credential: false, auth_method: { $ne: "none" } },
+  { slug:1, visibility:1, service_category:1, provider_config_id:1,
+    is_active:1, service_type:1, credLen: { $binarySize: "$credential_encrypted" } }
+)
+```
+
+Run it against production. Every returned row must be `visibility: "public"`, `service_category: "internal"`, `provider_config_id: null`, `is_active: true`, `service_type: "http"`, `credLen > 0`. Pay particular attention to `aevatar` and `chrono-llm-public`. I would run this as a post-deploy readback rather than a merge gate: the code is verified correct for every shape, and this only tells you whether any deployed row is misconfigured relative to the new — intended — narrowing.
+
+The full CI suite is yours; only the five targeted tests were run here.
+
+---
+
+## Certified (cycle 4, against `origin/main` `62add35b`)
+
+- The census was rebuilt independently against the current tree and matches: six catalog `credential_encrypted` reads, four gated plaintext producers, one newtype-guarded raw master decrypt.
+- Mainline's 1,464 inserted lines across these two files, and all 30 files it added, introduce **no** new read, decrypt, or producer of a catalog master credential.
+- The four gated branches remain the complete set; no fifth producer exists, verified from both the decrypt side and the `ProxyTarget` construction side.
+- Every cycle-3 property survived the rebase: sealed `EffectiveActor`, typed decrypt split, `master_credential_required` at all five sites with its body unchanged, four gates behind their early returns, body-free `log_upstream_error`, end-to-end sentinel test.
+- No response-body or request-body preview exists in either proxy file, and no `tracing` call in either file carries a credential, body, or payload value.
+- The five gate and redaction tests execute and pass against the current base on a live replica set.
