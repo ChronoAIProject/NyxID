@@ -2,6 +2,7 @@ use std::collections::{HashMap, HashSet};
 
 use futures::TryStreamExt;
 use mongodb::bson::doc;
+use serde::Serialize;
 use sha2::{Digest, Sha256};
 
 use crate::crypto::aes::EncryptionKeys;
@@ -290,14 +291,101 @@ pub fn is_exact_visible(service: &McpToolService) -> bool {
     matches!(service.source, McpToolSource::UserManaged { .. }) && !service.is_generic_proxy
 }
 
-/// The canonical exact-operation projection listed by delegated discovery
-/// (issue #1440). Returning borrows keeps it allocation-light;
-/// `McpToolService` is deliberately not `Clone`.
-pub fn exact_operation_view(services: &[McpToolService]) -> Vec<&McpToolService> {
-    services
+/// One operation in the canonical delegated exact-operation view.
+///
+/// These fields are deliberately identical to the delegated discovery wire
+/// representation. Keeping the projection here lets discovery and exact
+/// approval hash the same representation without duplicating handler DTO
+/// construction in the authorization path.
+#[derive(Clone, Debug, PartialEq, Serialize)]
+pub struct ExactOperationViewOperation {
+    pub endpoint_id: String,
+    pub name: String,
+    pub method: String,
+    pub path: String,
+    pub parameters: Option<serde_json::Value>,
+    pub request_body_schema: Option<serde_json::Value>,
+    pub request_content_type: Option<String>,
+    pub request_body_required: bool,
+    pub response: OperationResponseContract,
+    pub endpoint_contract_digest: String,
+}
+
+/// One service in the canonical delegated exact-operation view.
+#[derive(Clone, Debug, PartialEq, Serialize)]
+pub struct ExactOperationViewService {
+    pub user_service_id: String,
+    pub service_slug: String,
+    pub service_name: String,
+    pub description: Option<String>,
+    pub node_id: Option<String>,
+    pub operations: Vec<ExactOperationViewOperation>,
+}
+
+/// The canonical caller-visible exact-operation projection.
+#[derive(Clone, Debug, Default, PartialEq, Serialize)]
+pub struct ExactOperationView {
+    pub services: Vec<ExactOperationViewService>,
+}
+
+/// Build the one exact-operation projection shared by delegated discovery and
+/// exact approval create/observe/redeem. Visibility remains separate from
+/// execution eligibility: generic proxy operations stay approvable but are not
+/// represented in this typed discovery view.
+pub fn exact_operation_view(services: &[McpToolService]) -> ExactOperationView {
+    let mut projected_services = services
         .iter()
         .filter(|service| is_exact_visible(service))
-        .collect()
+        .filter_map(|service| {
+            let McpToolSource::UserManaged {
+                user_service_id,
+                node_id,
+                ..
+            } = &service.source
+            else {
+                return None;
+            };
+            let mut operations = service
+                .endpoints
+                .iter()
+                .map(|endpoint| ExactOperationViewOperation {
+                    endpoint_id: endpoint.endpoint_id.clone(),
+                    name: endpoint.name.clone(),
+                    method: endpoint.method.clone(),
+                    path: endpoint.path.clone(),
+                    parameters: endpoint.parameters.clone(),
+                    request_body_schema: endpoint.request_body_schema.clone(),
+                    request_content_type: endpoint.request_content_type.clone(),
+                    request_body_required: endpoint.request_body_required,
+                    response: endpoint.response.clone(),
+                    endpoint_contract_digest: endpoint_contract_digest(endpoint),
+                })
+                .collect::<Vec<_>>();
+            operations.sort_by(|left, right| left.endpoint_id.cmp(&right.endpoint_id));
+            Some(ExactOperationViewService {
+                user_service_id: user_service_id.clone(),
+                service_slug: service.service_slug.clone(),
+                service_name: service.service_name.clone(),
+                description: service.description.clone(),
+                node_id: node_id.clone(),
+                operations,
+            })
+        })
+        .collect::<Vec<_>>();
+    projected_services.sort_by(|left, right| left.user_service_id.cmp(&right.user_service_id));
+    ExactOperationView {
+        services: projected_services,
+    }
+}
+
+/// Digest of exactly the deterministic service view returned by delegated
+/// discovery. Dynamic observation/authority timestamps and the legacy broad
+/// `catalog_digest` are intentionally outside this representation validator.
+pub fn exact_operation_view_digest(view: &ExactOperationView) -> String {
+    canonical_sha256(serde_json::json!({
+        "contract_version": "nyxid-delegated-operation-catalog.v1",
+        "services": &view.services,
+    }))
 }
 
 /// Digest of the complete caller-visible MCP catalog.
@@ -4061,11 +4149,11 @@ mod tests {
         let view = exact_operation_view(&services);
 
         assert_eq!(
-            view.len(),
+            view.services.len(),
             1,
             "only the typed user service is exact-visible"
         );
-        assert_eq!(view[0].service_id, "svc-typed");
+        assert_eq!(view.services[0].user_service_id, "us-typed");
         assert!(is_exact_visible(&services[0]));
         assert!(!is_exact_visible(&services[1]), "generic proxy is hidden");
         assert!(!is_exact_visible(&services[2]), "platform row is hidden");
@@ -4108,9 +4196,17 @@ mod tests {
             make_service("svc-platform", "Platform", "platform", vec![]),
         ];
 
-        // Both surfaces list the same single exact-visible service...
-        assert_eq!(exact_operation_view(&alone).len(), 1);
-        assert_eq!(exact_operation_view(&with_hidden).len(), 1);
+        // Both surfaces list the same single exact-visible service, and the
+        // representation validator is therefore stable...
+        let alone_view = exact_operation_view(&alone);
+        let with_hidden_view = exact_operation_view(&with_hidden);
+        assert_eq!(alone_view.services.len(), 1);
+        assert_eq!(with_hidden_view.services.len(), 1);
+        assert_eq!(
+            exact_operation_view_digest(&alone_view),
+            exact_operation_view_digest(&with_hidden_view),
+            "hidden rows must not move the exact-view representation validator"
+        );
         // ...yet the shared fence still covers the rows discovery hides.
         assert_ne!(
             operation_catalog_digest(&alone),
@@ -4141,6 +4237,44 @@ mod tests {
             operation_catalog_digest(&forward),
             operation_catalog_digest(&reversed),
             "canonical ordering must make the digest input-order independent"
+        );
+        let forward_view = exact_operation_view(&forward);
+        let reversed_view = exact_operation_view(&reversed);
+        assert_eq!(forward_view, reversed_view);
+        assert_eq!(forward_view.services[0].user_service_id, "us-a");
+        assert_eq!(
+            exact_operation_view_digest(&forward_view),
+            exact_operation_view_digest(&reversed_view),
+            "exact-view digest must be input-order independent"
+        );
+    }
+
+    #[test]
+    fn visible_mutation_moves_the_exact_view_digest() {
+        let original = vec![user_managed(
+            make_service(
+                "svc-typed",
+                "Typed",
+                "typed",
+                vec![make_endpoint("list", "d")],
+            ),
+            "us-typed",
+        )];
+        let mut changed = vec![user_managed(
+            make_service(
+                "svc-typed",
+                "Typed v2",
+                "typed",
+                vec![make_endpoint("list", "d")],
+            ),
+            "us-typed",
+        )];
+        changed[0].endpoints.push(make_endpoint("create", "d"));
+
+        assert_ne!(
+            exact_operation_view_digest(&exact_operation_view(&original)),
+            exact_operation_view_digest(&exact_operation_view(&changed)),
+            "caller-visible service and operation changes must move the digest"
         );
     }
 

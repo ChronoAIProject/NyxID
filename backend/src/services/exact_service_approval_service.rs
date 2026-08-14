@@ -37,6 +37,8 @@ pub struct ExactServiceApprovalCreate {
     pub user_service_id: String,
     pub endpoint_id: String,
     pub catalog_digest: String,
+    #[serde(default)]
+    pub exact_view_digest: Option<String>,
     pub endpoint_contract_digest: String,
     pub operation_digest: String,
     pub operation_id: String,
@@ -48,6 +50,8 @@ pub struct ExactServiceApprovalCreate {
 #[derive(Clone, Debug, Deserialize)]
 pub struct ExactServiceApprovalFence {
     pub catalog_digest: String,
+    #[serde(default)]
+    pub exact_view_digest: Option<String>,
     pub operation_digest: String,
     pub operation_id: String,
     pub operation_generation: i64,
@@ -75,6 +79,8 @@ pub struct ExactServiceApprovalResult {
     pub user_service_id: String,
     pub endpoint_id: String,
     pub catalog_digest: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub exact_view_digest: Option<String>,
     pub endpoint_contract_digest: String,
     pub operation_digest: String,
     pub operation_id: String,
@@ -92,6 +98,7 @@ struct ExactCatalogResolution<'a> {
     service_index: usize,
     endpoint_index: usize,
     catalog_digest: String,
+    exact_view_digest: String,
     endpoint_contract_digest: String,
     operation_digest: String,
     marker: std::marker::PhantomData<&'a ()>,
@@ -126,6 +133,13 @@ pub async fn create_request(
         &input.catalog_digest,
         &resolution.catalog_digest,
     )?;
+    if let Some(exact_view_digest) = input.exact_view_digest.as_deref() {
+        ensure_digest(
+            "exact_view_digest",
+            exact_view_digest,
+            &resolution.exact_view_digest,
+        )?;
+    }
     ensure_digest(
         "endpoint_contract_digest",
         &input.endpoint_contract_digest,
@@ -193,6 +207,7 @@ pub async fn create_request(
         user_service_id: input.user_service_id,
         endpoint_id: input.endpoint_id,
         catalog_digest: resolution.catalog_digest,
+        exact_view_digest: Some(resolution.exact_view_digest),
         endpoint_contract_digest: resolution.endpoint_contract_digest,
         operation_digest: resolution.operation_digest,
         operation_id: input.operation_id,
@@ -321,6 +336,7 @@ pub async fn redeem_request(
         &resolution.service().service_id,
         &resolution.endpoint().endpoint_id,
         &resolution.catalog_digest,
+        &resolution.exact_view_digest,
         &resolution.endpoint_contract_digest,
         &resolution.operation_digest,
     ) {
@@ -528,10 +544,14 @@ async fn resolve_exact_catalog(
         .iter()
         .position(|endpoint| endpoint.endpoint_id == endpoint_id)
         .ok_or_else(|| AppError::NotFound("exact_endpoint_not_found".to_string()))?;
-    // Whole-catalog fence, matching `/api/v1/mcp/config` and delegated
-    // discovery. All three must hash the same bytes or a digest obtained from
-    // one surface is rejected as drift by another.
+    // Keep eligibility on the unprojected catalog, but compute both approval
+    // fences from their canonical owners. The exact-view projection is shared
+    // with delegated discovery; the broad catalog fence stays byte-compatible
+    // with `/api/v1/mcp/config`.
     let catalog_digest = mcp_service::operation_catalog_digest(&catalog.services);
+    let exact_view_digest = mcp_service::exact_operation_view_digest(
+        &mcp_service::exact_operation_view(&catalog.services),
+    );
     let endpoint = &catalog.services[service_index].endpoints[endpoint_index];
     let endpoint_contract_digest = mcp_service::endpoint_contract_digest(endpoint);
     let operation_digest =
@@ -541,6 +561,7 @@ async fn resolve_exact_catalog(
         service_index,
         endpoint_index,
         catalog_digest,
+        exact_view_digest,
         endpoint_contract_digest,
         operation_digest,
         marker: std::marker::PhantomData,
@@ -686,6 +707,7 @@ async fn current_state(
         &resolution.service().service_id,
         &resolution.endpoint().endpoint_id,
         &resolution.catalog_digest,
+        &resolution.exact_view_digest,
         &resolution.endpoint_contract_digest,
         &resolution.operation_digest,
     ) {
@@ -748,12 +770,17 @@ fn exact_authority_has_drift(
     user_service_id: &str,
     endpoint_id: &str,
     catalog_digest: &str,
+    exact_view_digest: &str,
     endpoint_contract_digest: &str,
     operation_digest: &str,
 ) -> bool {
     binding.user_service_id != user_service_id
         || binding.endpoint_id != endpoint_id
         || binding.catalog_digest != catalog_digest
+        || binding
+            .exact_view_digest
+            .as_deref()
+            .is_some_and(|stored| stored != exact_view_digest)
         || binding.endpoint_contract_digest != endpoint_contract_digest
         || binding.operation_digest != operation_digest
 }
@@ -761,6 +788,10 @@ fn exact_authority_has_drift(
 fn ensure_fence(request: &ApprovalRequest, fence: &ExactServiceApprovalFence) -> AppResult<()> {
     let binding = request.exact_service.as_ref().unwrap();
     if binding.catalog_digest != fence.catalog_digest
+        || fence
+            .exact_view_digest
+            .as_ref()
+            .is_some_and(|provided| binding.exact_view_digest.as_ref() != Some(provided))
         || binding.operation_digest != fence.operation_digest
         || binding.operation_id != fence.operation_id
         || binding.operation_generation != fence.operation_generation
@@ -788,6 +819,7 @@ fn result_for(
         user_service_id: binding.user_service_id.clone(),
         endpoint_id: binding.endpoint_id.clone(),
         catalog_digest: binding.catalog_digest.clone(),
+        exact_view_digest: binding.exact_view_digest.clone(),
         endpoint_contract_digest: binding.endpoint_contract_digest.clone(),
         operation_digest: binding.operation_digest.clone(),
         operation_id: binding.operation_id.clone(),
@@ -824,6 +856,15 @@ fn validate_create(input: &ExactServiceApprovalCreate) -> AppResult<()> {
     if !input.arguments.is_object() {
         return Err(AppError::BadRequest(
             "arguments must be a JSON object".to_string(),
+        ));
+    }
+    if input
+        .exact_view_digest
+        .as_deref()
+        .is_some_and(|digest| digest.trim().is_empty())
+    {
+        return Err(AppError::BadRequest(
+            "exact_view_digest must not be empty when provided".to_string(),
         ));
     }
     Ok(())
@@ -887,6 +928,7 @@ mod tests {
             user_service_id: "service-alpha".to_string(),
             endpoint_id: "endpoint-alpha".to_string(),
             catalog_digest: "sha256:catalog".to_string(),
+            exact_view_digest: Some("sha256:exact-view".to_string()),
             endpoint_contract_digest: "sha256:contract".to_string(),
             operation_digest: "sha256:operation".to_string(),
             operation_id: "operation-alpha".to_string(),
@@ -904,6 +946,7 @@ mod tests {
             user_service_id: input.user_service_id,
             endpoint_id: input.endpoint_id,
             catalog_digest: input.catalog_digest,
+            exact_view_digest: input.exact_view_digest,
             endpoint_contract_digest: input.endpoint_contract_digest,
             operation_digest: input.operation_digest,
             operation_id: input.operation_id,
@@ -1018,12 +1061,21 @@ mod tests {
         );
         let mut fence = ExactServiceApprovalFence {
             catalog_digest: input.catalog_digest,
+            exact_view_digest: input.exact_view_digest,
             operation_digest: input.operation_digest,
             operation_id: input.operation_id,
             operation_generation: input.operation_generation,
             idempotency_key: input.idempotency_key,
         };
         ensure_fence(&request, &fence).unwrap();
+        let exact_view_digest = fence.exact_view_digest.take().unwrap();
+        ensure_fence(&request, &fence).expect("legacy client may omit additive exact-view fence");
+        fence.exact_view_digest = Some(format!("{exact_view_digest}-changed"));
+        assert!(matches!(
+            ensure_fence(&request, &fence),
+            Err(AppError::Conflict(_))
+        ));
+        fence.exact_view_digest = Some(exact_view_digest);
         fence.operation_generation += 1;
         assert!(matches!(
             ensure_fence(&request, &fence),
@@ -1039,6 +1091,7 @@ mod tests {
             &binding.user_service_id,
             &binding.endpoint_id,
             &binding.catalog_digest,
+            binding.exact_view_digest.as_deref().unwrap(),
             &binding.endpoint_contract_digest,
             &binding.operation_digest,
         ));
@@ -1047,8 +1100,29 @@ mod tests {
             &binding.user_service_id,
             &binding.endpoint_id,
             &binding.catalog_digest,
+            binding.exact_view_digest.as_deref().unwrap(),
             "sha256:changed-contract",
             &binding.operation_digest,
+        ));
+        assert!(exact_authority_has_drift(
+            &binding,
+            &binding.user_service_id,
+            &binding.endpoint_id,
+            &binding.catalog_digest,
+            "sha256:changed-exact-view",
+            &binding.endpoint_contract_digest,
+            &binding.operation_digest,
+        ));
+        let mut legacy_binding = binding.clone();
+        legacy_binding.exact_view_digest = None;
+        assert!(!exact_authority_has_drift(
+            &legacy_binding,
+            &legacy_binding.user_service_id,
+            &legacy_binding.endpoint_id,
+            &legacy_binding.catalog_digest,
+            "sha256:any-exact-view",
+            &legacy_binding.endpoint_contract_digest,
+            &legacy_binding.operation_digest,
         ));
         assert_eq!(
             catalog_resolution_terminal_state(&AppError::NotFound(
@@ -1076,6 +1150,12 @@ mod tests {
         let replay = create_bound_approval(&db, first_binding.clone())
             .await
             .expect("replay exact approval");
+        assert_eq!(replay.id, first.id);
+        let mut legacy_retry = first_binding.clone();
+        legacy_retry.exact_view_digest = None;
+        let replay = create_bound_approval(&db, legacy_retry)
+            .await
+            .expect("legacy retry without exact-view digest remains idempotent");
         assert_eq!(replay.id, first.id);
 
         let mut changed_selector = first_binding.clone();

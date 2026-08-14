@@ -473,6 +473,7 @@ Both the introspection (`POST /oauth/introspect`) and revocation (`POST /oauth/r
 | **Chained exchange prevention** | Delegated tokens cannot be exchanged for new delegated tokens, preventing indefinite TTL extension |
 | **Connected-service catalog authority** | The dedicated `mcp:catalog:read` scope is carried only by short-lived tokens with explicit service/node/resource bounds. RFC 8693 exchange intersects source claims, both client consents, receiver delegation scope, requested service/node bounds, and RFC 8707 resources; `All` cannot widen a restricted source and an empty restricted set remains deny-all. |
 | **Catalog token revocation** | Catalog grants are anchored by JWT `jti` in `catalog_delegation_grants`; every authenticated request checks expiry, revocation, actor/receiver identity, active clients, current delegation scopes, and current consent bounds. |
+| **Exact catalog representation binding** | Delegated discovery publishes `exact_view_digest` over its sorted generic-free service/operation projection. New exact approvals persist and revalidate that value in addition to the legacy whole-catalog `catalog_digest`; visibility remains separate from generic-operation execution eligibility. |
 | **Audit trail** | Token exchange and subsequent proxy requests are audit-logged with both `user_id` and `acting_client_id` |
 
 ### Account Read Parity
