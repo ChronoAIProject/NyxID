@@ -1,0 +1,28 @@
+{
+  "captured": "SIN-NRT return, test mode, 2026-08-14",
+  "offer_count": 635,
+  "holdable": 495,
+  "sample_holdable": {
+    "expires_at": "2026-08-14T04:11:37.588830Z",
+    "total_amount": "390.84",
+    "total_currency": "USD",
+    "owner": "American Airlines",
+    "payment_requirements": {
+      "requires_instant_payment": false,
+      "price_guarantee_expires_at": "2026-08-16T03:41:37Z",
+      "payment_required_by": "2026-08-17T03:41:37Z"
+    },
+    "passenger_identity_documents_required": false
+  },
+  "sample_instant": {
+    "expires_at": "2026-08-14T04:11:38.000000Z",
+    "total_amount": "909.79",
+    "total_currency": "USD",
+    "owner": "Singapore Airlines",
+    "payment_requirements": {
+      "requires_instant_payment": true,
+      "price_guarantee_expires_at": null,
+      "payment_required_by": null
+    }
+  }
+}
