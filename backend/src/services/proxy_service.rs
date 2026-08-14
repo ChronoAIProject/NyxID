@@ -339,6 +339,10 @@ const ALLOWED_FORWARD_HEADERS: &[&str] = &[
     "x-request-id",
     "x-correlation-id",
     "idempotency-key",
+    "traceparent",
+    "tracestate",
+    "last-event-id",
+    "prefer",
     "x-trace-id",
     "range",
     "if-range",
@@ -401,11 +405,23 @@ fn is_allowed_forward_header(name_lower: &str) -> bool {
 /// case-insensitive, and repeated values retain their map iteration order for
 /// the existing deterministic merge rules in `merge_into_header_list`.
 pub(crate) fn collect_forward_headers(headers: &http::HeaderMap) -> Vec<(String, String)> {
+    // W3C Trace Context requires `tracestate` to be ignored when its
+    // accompanying `traceparent` is absent or invalid. Validate before the
+    // generic allowlist walk so direct and node-routed HTTP use one policy.
+    let traceparent_valid = valid_traceparent_header(headers);
+    let tracestate_valid = traceparent_valid && valid_tracestate_headers(headers);
+
     headers
         .iter()
         .filter_map(|(name, value)| {
             let name_lower = name.as_str().to_ascii_lowercase();
             if !is_allowed_forward_header(&name_lower) {
+                return None;
+            }
+            if name_lower == "traceparent" && !traceparent_valid {
+                return None;
+            }
+            if name_lower == "tracestate" && !tracestate_valid {
                 return None;
             }
             value
@@ -414,6 +430,132 @@ pub(crate) fn collect_forward_headers(headers: &http::HeaderMap) -> Vec<(String,
                 .map(|value| (name.to_string(), value.to_string()))
         })
         .collect()
+}
+
+/// Validate the inbound W3C Trace Context without normalizing it. NyxID does
+/// not currently create an OpenTelemetry child span for proxy exchanges, so it
+/// acts as a transparent forwarder and preserves valid values byte-for-byte.
+/// If proxy spans are added later, that instrumentation must generate a child
+/// `parent-id` instead. Invalid `traceparent` values cause both trace headers
+/// to be ignored, as required by the W3C processing model.
+pub(crate) fn valid_traceparent_header(headers: &http::HeaderMap) -> bool {
+    let mut parents = headers.get_all("traceparent").iter();
+    let Some(parent) = parents.next().and_then(|value| value.to_str().ok()) else {
+        return false;
+    };
+    parents.next().is_none() && valid_traceparent(parent)
+}
+
+fn valid_tracestate_headers(headers: &http::HeaderMap) -> bool {
+    let mut states = Vec::new();
+    for value in headers.get_all("tracestate").iter() {
+        let Ok(value) = value.to_str() else {
+            return false;
+        };
+        states.push(value);
+    }
+    states.is_empty() || valid_tracestate(&states)
+}
+
+fn valid_traceparent(value: &str) -> bool {
+    let bytes = value.as_bytes();
+    if bytes.len() < 55 || bytes[2] != b'-' || bytes[35] != b'-' || bytes[52] != b'-' {
+        return false;
+    }
+    let version = &bytes[0..2];
+    let trace_id = &bytes[3..35];
+    let parent_id = &bytes[36..52];
+    let flags = &bytes[53..55];
+    if !version.iter().all(u8::is_ascii_hexdigit)
+        || !trace_id.iter().all(u8::is_ascii_hexdigit)
+        || !parent_id.iter().all(u8::is_ascii_hexdigit)
+        || !flags.iter().all(u8::is_ascii_hexdigit)
+        || bytes[..55].iter().any(|byte| byte.is_ascii_uppercase())
+        || version == b"ff"
+        || trace_id.iter().all(|byte| *byte == b'0')
+        || parent_id.iter().all(|byte| *byte == b'0')
+    {
+        return false;
+    }
+
+    // Version 00 has a fixed width. Future versions retain the first 55-byte
+    // layout and may append lower-case hexadecimal extension fields. Validate
+    // their framing without interpreting or rewriting them.
+    if version == b"00" {
+        return bytes.len() == 55;
+    }
+    bytes.len() == 55
+        || (bytes.len() > 56
+            && bytes[55] == b'-'
+            && bytes[56..]
+                .iter()
+                .all(|byte| byte.is_ascii_digit() || matches!(byte, b'a'..=b'f' | b'-')))
+}
+
+fn valid_tracestate(values: &[&str]) -> bool {
+    use std::collections::HashSet;
+
+    let combined_len =
+        values.iter().map(|value| value.len()).sum::<usize>() + values.len().saturating_sub(1);
+    if combined_len > 512 {
+        return false;
+    }
+
+    let mut keys = HashSet::new();
+    let mut member_count = 0usize;
+    for header_value in values {
+        for member in header_value.split(',') {
+            member_count += 1;
+            if member_count > 32 {
+                return false;
+            }
+            let member = member.trim_matches([' ', '\t']);
+            let Some((key, value)) = member.split_once('=') else {
+                return false;
+            };
+            if !valid_tracestate_key(key) || !valid_tracestate_value(value) || !keys.insert(key) {
+                return false;
+            }
+        }
+    }
+    member_count > 0
+}
+
+fn valid_tracestate_key(key: &str) -> bool {
+    fn simple_part(value: &str, max_len: usize, first_alpha_only: bool) -> bool {
+        if value.is_empty() || value.len() > max_len {
+            return false;
+        }
+        let mut bytes = value.bytes();
+        let Some(first) = bytes.next() else {
+            return false;
+        };
+        let first_valid =
+            first.is_ascii_lowercase() || (!first_alpha_only && first.is_ascii_digit());
+        first_valid
+            && bytes.all(|byte| {
+                byte.is_ascii_lowercase()
+                    || byte.is_ascii_digit()
+                    || matches!(byte, b'_' | b'-' | b'*' | b'/')
+            })
+    }
+
+    match key.split_once('@') {
+        Some((tenant, system)) if !system.contains('@') => {
+            simple_part(tenant, 241, false) && simple_part(system, 14, true)
+        }
+        Some(_) => false,
+        None => simple_part(key, 256, true),
+    }
+}
+
+fn valid_tracestate_value(value: &str) -> bool {
+    !value.is_empty()
+        && value.len() <= 256
+        && !value.ends_with(' ')
+        && value
+            .bytes()
+            .all(|byte| (0x20..=0x7e).contains(&byte) && !matches!(byte, b',' | b'='))
 }
 
 /// Header name the current `auth_method` will inject via
@@ -3289,13 +3431,21 @@ mod tests {
         test_user_endpoint, test_user_service,
     };
     use axum::{
-        Router,
+        Json, Router,
         body::Bytes,
-        extract::State,
+        extract::{Path, State},
         http::{HeaderMap, StatusCode, Uri},
-        routing::post,
+        response::{IntoResponse, Response},
+        routing::{get, post},
     };
     use chrono::Utc;
+    use std::{
+        collections::HashMap,
+        sync::{
+            Arc, Mutex,
+            atomic::{AtomicBool, AtomicUsize, Ordering},
+        },
+    };
     use tokio::{net::TcpListener, sync::mpsc};
 
     #[test]
@@ -3691,6 +3841,158 @@ mod tests {
         assert!(is_allowed_forward_header("range"));
         assert!(is_allowed_forward_header("idempotency-key"));
         assert!(is_allowed_forward_header("x-trace-id"));
+        assert!(is_allowed_forward_header("traceparent"));
+        assert!(is_allowed_forward_header("tracestate"));
+        assert!(is_allowed_forward_header("last-event-id"));
+        assert!(is_allowed_forward_header("prefer"));
+    }
+
+    #[test]
+    fn valid_w3c_trace_context_and_async_metadata_are_forwarded_unchanged() {
+        let mut headers = http::HeaderMap::new();
+        headers.insert(
+            "traceparent",
+            "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01"
+                .parse()
+                .unwrap(),
+        );
+        headers.insert("tracestate", "vendor=value,other=one".parse().unwrap());
+        headers.insert("idempotency-key", "opaque-recovery-key".parse().unwrap());
+        headers.insert("last-event-id", "event-42".parse().unwrap());
+        headers.insert("prefer", "respond-async".parse().unwrap());
+        headers.insert("baggage", "secret=value".parse().unwrap());
+
+        let forwarded = collect_forward_headers(&headers);
+        for (name, value) in [
+            (
+                "traceparent",
+                "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01",
+            ),
+            ("tracestate", "vendor=value,other=one"),
+            ("idempotency-key", "opaque-recovery-key"),
+            ("last-event-id", "event-42"),
+            ("prefer", "respond-async"),
+        ] {
+            assert!(forwarded.iter().any(|(actual_name, actual_value)| {
+                actual_name.eq_ignore_ascii_case(name) && actual_value == value
+            }));
+        }
+        assert!(
+            !forwarded
+                .iter()
+                .any(|(name, _)| name.eq_ignore_ascii_case("baggage"))
+        );
+    }
+
+    #[test]
+    fn invalid_traceparent_drops_the_complete_w3c_context_only() {
+        let mut headers = http::HeaderMap::new();
+        headers.insert(
+            "traceparent",
+            "00-00000000000000000000000000000000-00f067aa0ba902b7-01"
+                .parse()
+                .unwrap(),
+        );
+        headers.insert("tracestate", "vendor=value".parse().unwrap());
+        headers.insert("idempotency-key", "still-forwarded".parse().unwrap());
+
+        let forwarded = collect_forward_headers(&headers);
+        assert!(!forwarded.iter().any(|(name, _)| {
+            name.eq_ignore_ascii_case("traceparent") || name.eq_ignore_ascii_case("tracestate")
+        }));
+        assert!(forwarded.iter().any(|(name, value)| {
+            name.eq_ignore_ascii_case("idempotency-key") && value == "still-forwarded"
+        }));
+    }
+
+    #[test]
+    fn invalid_tracestate_is_dropped_without_discarding_valid_traceparent() {
+        let mut headers = http::HeaderMap::new();
+        headers.insert(
+            "traceparent",
+            "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01"
+                .parse()
+                .unwrap(),
+        );
+        headers.insert(
+            "tracestate",
+            "vendor=value,vendor=duplicate".parse().unwrap(),
+        );
+
+        let forwarded = collect_forward_headers(&headers);
+        assert!(
+            forwarded
+                .iter()
+                .any(|(name, _)| name.eq_ignore_ascii_case("traceparent"))
+        );
+        assert!(
+            !forwarded
+                .iter()
+                .any(|(name, _)| name.eq_ignore_ascii_case("tracestate"))
+        );
+    }
+
+    #[test]
+    fn w3c_future_versions_and_numeric_tenant_keys_follow_the_standard_grammar() {
+        let mut headers = http::HeaderMap::new();
+        headers.insert(
+            "traceparent",
+            "01-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01-a0-b"
+                .parse()
+                .unwrap(),
+        );
+        headers.insert("tracestate", "1tenant@vendor=value".parse().unwrap());
+
+        let forwarded = collect_forward_headers(&headers);
+        assert!(
+            forwarded
+                .iter()
+                .any(|(name, _)| name.eq_ignore_ascii_case("traceparent"))
+        );
+        assert!(
+            forwarded
+                .iter()
+                .any(|(name, _)| name.eq_ignore_ascii_case("tracestate"))
+        );
+
+        headers.insert(
+            "traceparent",
+            "01-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01ZZ"
+                .parse()
+                .unwrap(),
+        );
+        let forwarded = collect_forward_headers(&headers);
+        assert!(!forwarded.iter().any(|(name, _)| {
+            name.eq_ignore_ascii_case("traceparent") || name.eq_ignore_ascii_case("tracestate")
+        }));
+    }
+
+    #[test]
+    fn non_ascii_tracestate_member_drops_the_complete_tracestate() {
+        let mut headers = http::HeaderMap::new();
+        headers.insert(
+            "traceparent",
+            "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01"
+                .parse()
+                .unwrap(),
+        );
+        headers.append("tracestate", "vendor=value".parse().unwrap());
+        headers.append(
+            "tracestate",
+            http::HeaderValue::from_bytes(&[0x80]).unwrap(),
+        );
+
+        let forwarded = collect_forward_headers(&headers);
+        assert!(
+            forwarded
+                .iter()
+                .any(|(name, _)| name.eq_ignore_ascii_case("traceparent"))
+        );
+        assert!(
+            !forwarded
+                .iter()
+                .any(|(name, _)| name.eq_ignore_ascii_case("tracestate"))
+        );
     }
 
     #[test]
@@ -3744,8 +4046,110 @@ mod tests {
         content_type: Option<String>,
         idempotency_key: Option<String>,
         trace_id: Option<String>,
+        traceparent: Option<String>,
+        tracestate: Option<String>,
+        last_event_id: Option<String>,
+        prefer: Option<String>,
         user_agent: Option<String>,
         body: Vec<u8>,
+    }
+
+    #[derive(Clone, Default)]
+    struct FakeAsyncService {
+        operations: Arc<Mutex<HashMap<String, String>>>,
+        submit_count: Arc<AtomicUsize>,
+        complete: Arc<AtomicBool>,
+    }
+
+    async fn fake_async_submit(
+        State(state): State<FakeAsyncService>,
+        headers: HeaderMap,
+    ) -> Response {
+        state.submit_count.fetch_add(1, Ordering::Relaxed);
+        let key = headers
+            .get("idempotency-key")
+            .and_then(|value| value.to_str().ok())
+            .unwrap_or("missing");
+        let operation_id = {
+            let mut operations = state.operations.lock().expect("operation lock");
+            let next_id = format!("op-{}", operations.len() + 1);
+            operations.entry(key.to_string()).or_insert(next_id).clone()
+        };
+        let mut response = (
+            StatusCode::ACCEPTED,
+            Json(serde_json::json!({ "operation_id": operation_id })),
+        )
+            .into_response();
+        response.headers_mut().insert(
+            "location",
+            format!("executions/{operation_id}").parse().unwrap(),
+        );
+        response
+            .headers_mut()
+            .insert("retry-after", "1".parse().unwrap());
+        response
+    }
+
+    async fn fake_async_status(
+        State(state): State<FakeAsyncService>,
+        Path(operation_id): Path<String>,
+    ) -> Response {
+        let exists = state
+            .operations
+            .lock()
+            .expect("operation lock")
+            .values()
+            .any(|stored| stored == &operation_id);
+        if !exists {
+            return StatusCode::NOT_FOUND.into_response();
+        }
+        Json(serde_json::json!({
+            "operation_id": operation_id,
+            "status": if state.complete.load(Ordering::Relaxed) {
+                "completed"
+            } else {
+                "running"
+            }
+        }))
+        .into_response()
+    }
+
+    async fn fake_async_result(
+        State(state): State<FakeAsyncService>,
+        Path(operation_id): Path<String>,
+    ) -> Response {
+        if !state.complete.load(Ordering::Relaxed) {
+            return StatusCode::CONFLICT.into_response();
+        }
+        Json(serde_json::json!({
+            "operation_id": operation_id,
+            "result": "done"
+        }))
+        .into_response()
+    }
+
+    async fn call_fake_async_service(
+        base_url: &str,
+        method: reqwest::Method,
+        path: &str,
+        headers: reqwest::header::HeaderMap,
+    ) -> reqwest::Response {
+        forward_request(
+            &Client::new(),
+            &make_proxy_target(base_url.to_string()),
+            method,
+            path,
+            None,
+            headers,
+            ProxyBody::Buffered(Some(Bytes::from_static(b"{}"))),
+            vec![],
+            vec![],
+            None,
+            &empty_token_cache(),
+            &empty_response_cache(),
+        )
+        .await
+        .expect("fake async exchange should succeed")
     }
 
     async fn capture_request(
@@ -3767,6 +4171,22 @@ mod tests {
                 .map(ToString::to_string),
             trace_id: headers
                 .get("x-trace-id")
+                .and_then(|value| value.to_str().ok())
+                .map(ToString::to_string),
+            traceparent: headers
+                .get("traceparent")
+                .and_then(|value| value.to_str().ok())
+                .map(ToString::to_string),
+            tracestate: headers
+                .get("tracestate")
+                .and_then(|value| value.to_str().ok())
+                .map(ToString::to_string),
+            last_event_id: headers
+                .get("last-event-id")
+                .and_then(|value| value.to_str().ok())
+                .map(ToString::to_string),
+            prefer: headers
+                .get("prefer")
                 .and_then(|value| value.to_str().ok())
                 .map(ToString::to_string),
             user_agent: headers
@@ -4450,6 +4870,15 @@ mod tests {
         headers.insert("content-type", "application/json".parse().unwrap());
         headers.insert("idempotency-key", "caller-supplied-key".parse().unwrap());
         headers.insert("x-trace-id", "trace-001".parse().unwrap());
+        headers.insert(
+            "traceparent",
+            "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01"
+                .parse()
+                .unwrap(),
+        );
+        headers.insert("tracestate", "vendor=value".parse().unwrap());
+        headers.insert("last-event-id", "event-9".parse().unwrap());
+        headers.insert("prefer", "respond-async".parse().unwrap());
 
         let response = forward_request(
             &Client::new(),
@@ -4476,7 +4905,86 @@ mod tests {
             Some("caller-supplied-key")
         );
         assert_eq!(captured.trace_id.as_deref(), Some("trace-001"));
+        assert_eq!(
+            captured.traceparent.as_deref(),
+            Some("00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01")
+        );
+        assert_eq!(captured.tracestate.as_deref(), Some("vendor=value"));
+        assert_eq!(captured.last_event_id.as_deref(), Some("event-9"));
+        assert_eq!(captured.prefer.as_deref(), Some("respond-async"));
         assert_eq!(captured.body, br#"{"operation":"probe"}"#);
+
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn async_fixture_preserves_receipt_and_caller_driven_idempotent_recovery() {
+        let state = FakeAsyncService::default();
+        let app = Router::new()
+            .route("/executions", post(fake_async_submit))
+            .route("/executions/{operation_id}", get(fake_async_status))
+            .route("/executions/{operation_id}/result", get(fake_async_result))
+            .with_state(state.clone());
+        let listener = TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind fake async service");
+        let addr = listener.local_addr().expect("fake async address");
+        let server = tokio::spawn(async move {
+            axum::serve(listener, app)
+                .await
+                .expect("serve fake async service");
+        });
+        let base_url = format!("http://{addr}");
+
+        let mut submit_headers = reqwest::header::HeaderMap::new();
+        submit_headers.insert("idempotency-key", "caller-recovery-key".parse().unwrap());
+        let first = call_fake_async_service(
+            &base_url,
+            reqwest::Method::POST,
+            "executions",
+            submit_headers.clone(),
+        )
+        .await;
+        assert_eq!(first.status(), StatusCode::ACCEPTED);
+        assert_eq!(first.headers()["location"], "executions/op-1");
+        assert_eq!(first.headers()["retry-after"], "1");
+        let first_receipt: serde_json::Value = first.json().await.unwrap();
+
+        let repeated = call_fake_async_service(
+            &base_url,
+            reqwest::Method::POST,
+            "executions",
+            submit_headers,
+        )
+        .await;
+        assert_eq!(repeated.status(), StatusCode::ACCEPTED);
+        let repeated_receipt: serde_json::Value = repeated.json().await.unwrap();
+        assert_eq!(first_receipt, repeated_receipt);
+        assert_eq!(state.submit_count.load(Ordering::Relaxed), 2);
+        assert_eq!(state.operations.lock().unwrap().len(), 1);
+
+        let pending = call_fake_async_service(
+            &base_url,
+            reqwest::Method::GET,
+            "executions/op-1",
+            reqwest::header::HeaderMap::new(),
+        )
+        .await;
+        assert_eq!(pending.status(), StatusCode::OK);
+        let pending_body: serde_json::Value = pending.json().await.unwrap();
+        assert_eq!(pending_body["status"], "running");
+
+        state.complete.store(true, Ordering::Relaxed);
+        let result = call_fake_async_service(
+            &base_url,
+            reqwest::Method::GET,
+            "executions/op-1/result",
+            reqwest::header::HeaderMap::new(),
+        )
+        .await;
+        assert_eq!(result.status(), StatusCode::OK);
+        let result_body: serde_json::Value = result.json().await.unwrap();
+        assert_eq!(result_body["result"], "done");
 
         server.abort();
     }
@@ -5078,9 +5586,6 @@ mod tests {
     }
 
     // ─── token_exchange integration tests (Lark as example) ──────────
-
-    use axum::{Json, routing::get};
-    use std::sync::atomic::{AtomicUsize, Ordering};
 
     #[derive(Clone)]
     struct LarkMockState {
