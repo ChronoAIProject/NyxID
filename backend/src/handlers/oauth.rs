@@ -114,6 +114,16 @@ pub struct TokenRequest {
     pub subject_token_type: Option<String>,
     /// Requested scope (used by token exchange)
     pub scope: Option<String>,
+    /// Explicit service authority requested for `mcp:catalog:read`.
+    #[serde(default)]
+    pub allowed_service_ids: Vec<String>,
+    /// `true` requests no additional service narrowing.
+    pub allow_all_services: Option<bool>,
+    /// Explicit node authority requested for `mcp:catalog:read`.
+    #[serde(default)]
+    pub allowed_node_ids: Vec<String>,
+    /// `true` requests no additional node narrowing.
+    pub allow_all_nodes: Option<bool>,
     /// Social provider hint for external token exchange ("google" or "github")
     pub provider: Option<String>,
     #[serde(default)]
@@ -2171,7 +2181,7 @@ async fn token_inner(
                     .or(client_secret_for_auth)
                     .ok_or_else(|| AppError::BadRequest("Missing client_secret".to_string()))?;
 
-                let result = token_exchange_service::exchange_token(
+                let result = token_exchange_service::exchange_token_with_authority(
                     &state.db,
                     &state.config,
                     &state.jwt_keys,
@@ -2180,6 +2190,11 @@ async fn token_inner(
                     subject_token,
                     subject_token_type,
                     body.scope.as_deref(),
+                    &body.resource,
+                    body.allow_all_services,
+                    &body.allowed_service_ids,
+                    body.allow_all_nodes,
+                    &body.allowed_node_ids,
                 )
                 .await?;
 
@@ -2905,6 +2920,18 @@ pub async fn revoke(
                 doc! { "$set": { "revoked": true } },
             )
             .await;
+        return StatusCode::OK;
+    }
+
+    if claims.delegated == Some(true)
+        && crate::services::catalog_delegation_service::scope_has_catalog_read(&claims.scope)
+    {
+        let _ = crate::services::catalog_delegation_service::revoke_for_client(
+            &state.db,
+            &claims.jti,
+            &caller_client_id,
+        )
+        .await;
         return StatusCode::OK;
     }
 
@@ -4348,6 +4375,10 @@ mod tests {
                 scope: None,
                 provider: None,
                 resource: Vec::new(),
+                allowed_service_ids: Vec::new(),
+                allow_all_services: None,
+                allowed_node_ids: Vec::new(),
+                allow_all_nodes: None,
             },
         )
         .await
@@ -4396,6 +4427,10 @@ mod tests {
                 scope: None,
                 provider: None,
                 resource: Vec::new(),
+                allowed_service_ids: Vec::new(),
+                allow_all_services: None,
+                allowed_node_ids: Vec::new(),
+                allow_all_nodes: None,
             },
         )
         .await
@@ -4422,6 +4457,10 @@ mod tests {
                 scope: None,
                 provider: None,
                 resource: Vec::new(),
+                allowed_service_ids: Vec::new(),
+                allow_all_services: None,
+                allowed_node_ids: Vec::new(),
+                allow_all_nodes: None,
             },
         )
         .await
@@ -4448,6 +4487,10 @@ mod tests {
                 scope: Some("openid".to_string()),
                 provider: None,
                 resource: Vec::new(),
+                allowed_service_ids: Vec::new(),
+                allow_all_services: None,
+                allowed_node_ids: Vec::new(),
+                allow_all_nodes: None,
             },
         )
         .await
@@ -4591,6 +4634,10 @@ mod tests {
                 scope: None,
                 provider: None,
                 resource: resources.clone(),
+                allowed_service_ids: Vec::new(),
+                allow_all_services: None,
+                allowed_node_ids: Vec::new(),
+                allow_all_nodes: None,
             },
         )
         .await
@@ -4620,6 +4667,10 @@ mod tests {
                 scope: Some("proxy".to_string()),
                 provider: None,
                 resource: resources.clone(),
+                allowed_service_ids: Vec::new(),
+                allow_all_services: None,
+                allowed_node_ids: Vec::new(),
+                allow_all_nodes: None,
             },
         )
         .await
@@ -4673,6 +4724,10 @@ mod tests {
                 scope: None,
                 provider: None,
                 resource: Vec::new(),
+                allowed_service_ids: Vec::new(),
+                allow_all_services: None,
+                allowed_node_ids: Vec::new(),
+                allow_all_nodes: None,
             },
         )
         .await
@@ -4738,6 +4793,10 @@ mod tests {
                 scope: None,
                 provider: None,
                 resource: Vec::new(),
+                allowed_service_ids: Vec::new(),
+                allow_all_services: None,
+                allowed_node_ids: Vec::new(),
+                allow_all_nodes: None,
             },
         )
         .await
@@ -4844,6 +4903,10 @@ mod tests {
                 scope: Some("openid".to_string()),
                 provider: None,
                 resource: Vec::new(),
+                allowed_service_ids: Vec::new(),
+                allow_all_services: None,
+                allowed_node_ids: Vec::new(),
+                allow_all_nodes: None,
             },
         )
         .await
@@ -5022,6 +5085,10 @@ mod tests {
                 scope: None,
                 provider: None,
                 resource: Vec::new(),
+                allowed_service_ids: Vec::new(),
+                allow_all_services: None,
+                allowed_node_ids: Vec::new(),
+                allow_all_nodes: None,
             },
         )
         .await
@@ -5052,6 +5119,10 @@ mod tests {
                 scope: None,
                 provider: None,
                 resource: Vec::new(),
+                allowed_service_ids: Vec::new(),
+                allow_all_services: None,
+                allowed_node_ids: Vec::new(),
+                allow_all_nodes: None,
             },
         )
         .await
@@ -5082,6 +5153,10 @@ mod tests {
                 scope: None,
                 provider: None,
                 resource: Vec::new(),
+                allowed_service_ids: Vec::new(),
+                allow_all_services: None,
+                allowed_node_ids: Vec::new(),
+                allow_all_nodes: None,
             },
         )
         .await
@@ -5208,6 +5283,10 @@ mod tests {
                 scope: None,
                 provider: None,
                 resource: Vec::new(),
+                allowed_service_ids: Vec::new(),
+                allow_all_services: None,
+                allowed_node_ids: Vec::new(),
+                allow_all_nodes: None,
             },
         )
         .await
@@ -5238,6 +5317,10 @@ mod tests {
                 scope: None,
                 provider: None,
                 resource: Vec::new(),
+                allowed_service_ids: Vec::new(),
+                allow_all_services: None,
+                allowed_node_ids: Vec::new(),
+                allow_all_nodes: None,
             },
         )
         .await
@@ -5270,6 +5353,10 @@ mod tests {
                 scope: None,
                 provider: None,
                 resource: Vec::new(),
+                allowed_service_ids: Vec::new(),
+                allow_all_services: None,
+                allowed_node_ids: Vec::new(),
+                allow_all_nodes: None,
             },
         )
         .await
@@ -5300,6 +5387,10 @@ mod tests {
                 scope: None,
                 provider: None,
                 resource: Vec::new(),
+                allowed_service_ids: Vec::new(),
+                allow_all_services: None,
+                allowed_node_ids: Vec::new(),
+                allow_all_nodes: None,
             },
         )
         .await

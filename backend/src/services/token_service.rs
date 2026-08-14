@@ -480,6 +480,8 @@ pub async fn refresh_tokens(
         (!token_resource_scope.allow_all_services).then_some(jwt::AccessTokenRestrictions {
             resources: &token_resource_scope.resource_uris,
             allowed_service_ids: &token_resource_scope.allowed_service_ids,
+            allowed_node_ids: &[],
+            allow_all_nodes: true,
         });
     let new_access = if active_token.client_id == Uuid::nil().to_string() {
         jwt::generate_access_token(

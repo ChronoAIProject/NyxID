@@ -1580,7 +1580,8 @@ Delegated tokens are restricted to proxy and LLM gateway endpoints. All other en
 
 | File | Responsibility |
 |------|---------------|
-| `services/token_exchange_service.rs` | RFC 8693 token exchange: client auth, subject token validation, consent check, scope validation, delegated token issuance; `refresh_delegation_token()` for renewable tokens |
+| `services/token_exchange_service.rs` | RFC 8693 token exchange: client auth, subject token validation, consent check, scope validation, explicit connected-service catalog authority attenuation, and delegated token issuance/refresh |
+| `services/catalog_delegation_service.rs` | Online `jti`-anchored catalog grants, explicit `All`/restricted authority validation, live client/consent checks, and catalog-token revocation |
 | `crypto/jwt.rs` | `generate_delegated_access_token()` -- creates JWTs with `act` and `delegated` claims; `ActorClaim` struct |
 | `mw/auth.rs` | `AuthUser.acting_client_id` field; `require_direct_auth()` method; `reject_delegated_tokens` middleware |
 | `handlers/oauth.rs` | Token exchange grant type handler in `token()` |
