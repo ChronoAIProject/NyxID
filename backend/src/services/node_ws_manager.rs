@@ -71,6 +71,30 @@ pub enum ProxyResponseType {
     Streaming(mpsc::Receiver<StreamChunk>),
 }
 
+/// Failure from the node proxy transport annotated with the mutation-safety
+/// boundary. Once `dispatched` is true, the node may have delivered the
+/// request downstream even if NyxID never received a response.
+pub(crate) struct NodeProxyFailure {
+    pub error: AppError,
+    pub dispatched: bool,
+}
+
+impl NodeProxyFailure {
+    fn before_dispatch(error: AppError) -> Self {
+        Self {
+            error,
+            dispatched: false,
+        }
+    }
+
+    fn after_dispatch(error: AppError) -> Self {
+        Self {
+            error,
+            dispatched: true,
+        }
+    }
+}
+
 /// A chunk in a node-backed SSH tunnel.
 #[derive(Debug)]
 pub enum SshTunnelChunk {
@@ -1244,10 +1268,23 @@ impl NodeWsManager {
         signing_secret: Option<&[u8]>,
         _billing_egress_permit: crate::services::billing::route_inventory::BillingEgressPermit,
     ) -> AppResult<ProxyResponseType> {
-        let conn = self
-            .connections
-            .get(node_id)
-            .ok_or_else(|| AppError::NodeOffline(format!("Node {node_id} is not connected")))?;
+        self.send_proxy_request_classified(node_id, request, signing_secret, _billing_egress_permit)
+            .await
+            .map_err(|failure| failure.error)
+    }
+
+    pub(crate) async fn send_proxy_request_classified(
+        &self,
+        node_id: &str,
+        request: NodeProxyRequest,
+        signing_secret: Option<&[u8]>,
+        _billing_egress_permit: crate::services::billing::route_inventory::BillingEgressPermit,
+    ) -> Result<ProxyResponseType, NodeProxyFailure> {
+        let conn = self.connections.get(node_id).ok_or_else(|| {
+            NodeProxyFailure::before_dispatch(AppError::NodeOffline(format!(
+                "Node {node_id} is not connected"
+            )))
+        })?;
         let request_id = request.request_id.clone();
 
         // Create oneshot channel for response correlation. The response may be a
@@ -1305,7 +1342,9 @@ impl NodeWsManager {
 
         let msg_json = serde_json::to_string(&ws_msg).map_err(|e| {
             conn.pending.remove(&request_id);
-            AppError::Internal(format!("Failed to serialize proxy request: {e}"))
+            NodeProxyFailure::before_dispatch(AppError::Internal(format!(
+                "Failed to serialize proxy request: {e}"
+            )))
         })?;
 
         // H4: Use try_send on bounded channel. If the channel is full, the node
@@ -1314,14 +1353,14 @@ impl NodeWsManager {
             Ok(()) => {}
             Err(mpsc::error::TrySendError::Full(_)) => {
                 conn.pending.remove(&request_id);
-                return Err(AppError::NodeOffline(format!(
-                    "Node {node_id} write buffer full"
+                return Err(NodeProxyFailure::before_dispatch(AppError::NodeOffline(
+                    format!("Node {node_id} write buffer full"),
                 )));
             }
             Err(mpsc::error::TrySendError::Closed(_)) => {
                 conn.pending.remove(&request_id);
-                return Err(AppError::NodeOffline(format!(
-                    "Node {node_id} connection closed"
+                return Err(NodeProxyFailure::before_dispatch(AppError::NodeOffline(
+                    format!("Node {node_id} connection closed"),
                 )));
             }
         }
@@ -1334,17 +1373,25 @@ impl NodeWsManager {
         match tokio::time::timeout(timeout, resp_rx).await {
             Ok(Ok(NodeProxyOutcome::Response(response))) => Ok(response),
             Ok(Ok(NodeProxyOutcome::RetryableFailure { message, reason })) => {
-                Err(map_retryable_node_failure(message, reason.as_deref()))
+                let error = map_retryable_node_failure(message, reason.as_deref());
+                if matches!(error, AppError::NodeCredentialMissing(_)) {
+                    // The node resolves its local credential before building or
+                    // sending the downstream request, so this reason proves the
+                    // mutation never crossed the downstream dispatch boundary.
+                    Err(NodeProxyFailure::before_dispatch(error))
+                } else {
+                    Err(NodeProxyFailure::after_dispatch(error))
+                }
             }
-            Ok(Err(_)) => Err(AppError::NodeOffline(format!(
-                "Node {node_id} disconnected during request"
+            Ok(Err(_)) => Err(NodeProxyFailure::after_dispatch(AppError::NodeOffline(
+                format!("Node {node_id} disconnected during request"),
             ))),
             Err(_) => {
                 // Timeout -- clean up pending request
                 if let Some(conn) = self.connections.get(node_id) {
                     conn.pending.remove(&request_id);
                 }
-                Err(AppError::NodeProxyTimeout)
+                Err(NodeProxyFailure::after_dispatch(AppError::NodeProxyTimeout))
             }
         }
     }
@@ -3589,6 +3636,69 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn proxy_timeout_is_classified_after_dispatch() {
+        let mgr = NodeWsManager::new(0, 100);
+        let (tx, _rx) = mpsc::channel(256);
+        mgr.register_connection("node-timeout", tx);
+
+        let failure = match mgr
+            .send_proxy_request_classified(
+                "node-timeout",
+                NodeProxyRequest {
+                    request_id: "req-timeout".to_string(),
+                    service_id: "svc-1".to_string(),
+                    service_slug: "demo".to_string(),
+                    base_url: "https://api.example.com".to_string(),
+                    method: "POST".to_string(),
+                    path: "/executions".to_string(),
+                    query: None,
+                    headers: vec![],
+                    body: Some(b"{}".to_vec()),
+                },
+                None,
+                billing_egress_permit(crate::services::billing::BillingIngress::Proxy),
+            )
+            .await
+        {
+            Ok(_) => panic!("request without a node response must time out"),
+            Err(failure) => failure,
+        };
+
+        assert!(failure.dispatched);
+        assert!(matches!(failure.error, AppError::NodeProxyTimeout));
+    }
+
+    #[tokio::test]
+    async fn disconnected_node_is_classified_before_dispatch() {
+        let mgr = NodeWsManager::new(30, 100);
+        let failure = match mgr
+            .send_proxy_request_classified(
+                "node-missing",
+                NodeProxyRequest {
+                    request_id: "req-not-dispatched".to_string(),
+                    service_id: "svc-1".to_string(),
+                    service_slug: "demo".to_string(),
+                    base_url: "https://api.example.com".to_string(),
+                    method: "POST".to_string(),
+                    path: "/executions".to_string(),
+                    query: None,
+                    headers: vec![],
+                    body: Some(b"{}".to_vec()),
+                },
+                None,
+                billing_egress_permit(crate::services::billing::BillingIngress::Proxy),
+            )
+            .await
+        {
+            Ok(_) => panic!("disconnected node must reject before dispatch"),
+            Err(failure) => failure,
+        };
+
+        assert!(!failure.dispatched);
+        assert!(matches!(failure.error, AppError::NodeOffline(_)));
+    }
+
+    #[tokio::test]
     async fn send_proxy_request_drops_stream_when_buffer_fills() {
         let mgr = Arc::new(NodeWsManager::new(30, 100));
         let (tx, mut rx) = mpsc::channel(256);
@@ -3682,8 +3792,8 @@ mod tests {
             );
         });
 
-        let err = match mgr
-            .send_proxy_request(
+        let failure = match mgr
+            .send_proxy_request_classified(
                 "node-1",
                 NodeProxyRequest {
                     request_id: "req-2".to_string(),
@@ -3705,8 +3815,9 @@ mod tests {
             Err(err) => err,
         };
 
+        assert!(failure.dispatched);
         assert!(matches!(
-            err,
+            failure.error,
             AppError::NodeOffline(message)
                 if message.contains("Transient downstream failure")
         ));
@@ -3738,8 +3849,8 @@ mod tests {
             );
         });
 
-        let err = match mgr
-            .send_proxy_request(
+        let failure = match mgr
+            .send_proxy_request_classified(
                 "node-1",
                 NodeProxyRequest {
                     request_id: "req-cred-missing".to_string(),
@@ -3758,11 +3869,12 @@ mod tests {
             .await
         {
             Ok(_) => panic!("credential_missing proxy error should surface as credential missing"),
-            Err(err) => err,
+            Err(failure) => failure,
         };
 
+        assert!(!failure.dispatched);
         assert!(matches!(
-            err,
+            failure.error,
             AppError::NodeCredentialMissing(message)
                 if message.contains("No credentials configured for service 'demo'")
         ));

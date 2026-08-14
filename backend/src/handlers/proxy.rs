@@ -24,7 +24,9 @@ use crate::models::service_billing::{BillingMetric, PlatformUsage, ResaleUsage};
 use crate::models::usage_meter::CredentialClass;
 use crate::models::user::{COLLECTION_NAME as USERS, User};
 use crate::mw::auth::{AuthMethod, AuthUser};
-use crate::services::node_ws_manager::{NodeProxyRequest, ProxyResponseType, StreamChunk};
+use crate::services::node_ws_manager::{
+    NodeProxyFailure, NodeProxyRequest, ProxyResponseType, StreamChunk,
+};
 use crate::services::{
     approval_service, audit_service, chatgpt_translator, delegation_service,
     durable_operation_grant_service, identity_service, llm_usage_service, node_metrics_service,
@@ -153,12 +155,11 @@ fn auth_kind_label(method: &crate::mw::auth::AuthMethod) -> &'static str {
 /// path parameter, so success and error events join cleanly on
 /// `service_slug` for success-rate computation.
 ///
-/// `started_at` is the handler entry timestamp; the difference is recorded
-/// as `latency_ms`. The status is the actual upstream status echoed back
-/// in the response we are about to return to the client. Any non-2xx
-/// status is the caller's signal NOT to call this helper — it returns Ok
-/// for any status to keep the emit-site call brief, and the caller is
-/// expected to gate on `response.status().is_success()`.
+/// `latency_ms` is the handler-to-response-start reach metric retained for
+/// product analytics compatibility. Operational phase diagnostics are emitted
+/// separately at body/stream termination so this event is not mistaken for a
+/// full streaming lifetime. Any non-2xx status is the caller's signal not to
+/// call this helper.
 fn emit_proxy_success_telemetry(
     state: &AppState,
     auth_user: &AuthUser,
@@ -202,7 +203,301 @@ const ALLOWED_RESPONSE_HEADERS: &[&str] = &[
     "x-correlation-id",
     "accept-ranges",
     "content-range",
+    "retry-after",
+    "preference-applied",
+    "location",
+    "operation-location",
 ];
+
+const ASYNC_LOCATION_HEADERS: &[&str] = &["location", "operation-location"];
+
+#[derive(Clone, Debug)]
+struct AsyncLocationContext {
+    service_base: url::Url,
+    downstream_request: url::Url,
+    caller_proxy_prefix: String,
+}
+
+impl AsyncLocationContext {
+    fn new(
+        target_base_url: &str,
+        downstream_path: &str,
+        downstream_query: Option<&str>,
+        caller_proxy_prefix: Option<String>,
+    ) -> Option<Self> {
+        let caller_proxy_prefix = caller_proxy_prefix?;
+        let mut service_base = url::Url::parse(target_base_url).ok()?;
+        if !matches!(service_base.scheme(), "http" | "https") {
+            return None;
+        }
+        if !service_base.path().ends_with('/') {
+            let path = format!("{}/", service_base.path());
+            service_base.set_path(&path);
+        }
+        service_base.set_query(None);
+        service_base.set_fragment(None);
+
+        let mut downstream_request = service_base
+            .join(downstream_path.trim_start_matches('/'))
+            .ok()?;
+        downstream_request.set_query(downstream_query);
+        Some(Self {
+            service_base,
+            downstream_request,
+            caller_proxy_prefix,
+        })
+    }
+
+    fn from_downstream_request(
+        target_base_url: &str,
+        downstream_request: url::Url,
+        caller_proxy_prefix: Option<String>,
+    ) -> Option<Self> {
+        let caller_proxy_prefix = caller_proxy_prefix?;
+        let mut service_base = url::Url::parse(target_base_url).ok()?;
+        if !matches!(service_base.scheme(), "http" | "https") {
+            return None;
+        }
+        if !service_base.path().ends_with('/') {
+            let path = format!("{}/", service_base.path());
+            service_base.set_path(&path);
+        }
+        service_base.set_query(None);
+        service_base.set_fragment(None);
+        Some(Self {
+            service_base,
+            downstream_request,
+            caller_proxy_prefix,
+        })
+    }
+
+    fn rewrite(&self, value: &str) -> Option<axum::http::HeaderValue> {
+        let resolved = self.downstream_request.join(value).ok()?;
+        if resolved.scheme() != self.service_base.scheme()
+            || resolved.host_str() != self.service_base.host_str()
+            || resolved.port_or_known_default() != self.service_base.port_or_known_default()
+        {
+            return None;
+        }
+
+        let base_path = self.service_base.path();
+        let relative_path = if resolved.path() == base_path.trim_end_matches('/') {
+            ""
+        } else {
+            resolved.path().strip_prefix(base_path)?
+        };
+        let mut caller_location = format!(
+            "{}{}",
+            self.caller_proxy_prefix,
+            relative_path.trim_start_matches('/')
+        );
+        if let Some(query) = resolved.query() {
+            caller_location.push('?');
+            caller_location.push_str(query);
+        }
+        if let Some(fragment) = resolved.fragment() {
+            caller_location.push('#');
+            caller_location.push_str(fragment);
+        }
+        axum::http::HeaderValue::from_str(&caller_location).ok()
+    }
+}
+
+fn caller_proxy_prefix(request_path: &str, downstream_path: &str) -> Option<String> {
+    let normalized = downstream_path.trim_matches('/');
+    if normalized.is_empty() {
+        return Some(format!("{}/", request_path.trim_end_matches('/')));
+    }
+    let suffix = format!("/{normalized}");
+    let prefix = request_path.strip_suffix(&suffix)?;
+    Some(format!("{}/", prefix.trim_end_matches('/')))
+}
+
+fn ensure_proxy_request_id(headers: &mut axum::http::HeaderMap) -> String {
+    if let Some(existing) = headers
+        .get("x-request-id")
+        .and_then(|value| value.to_str().ok())
+    {
+        return existing.to_string();
+    }
+    let generated = uuid::Uuid::new_v4().to_string();
+    headers.insert(
+        "x-request-id",
+        axum::http::HeaderValue::from_str(&generated).expect("UUID is a valid header value"),
+    );
+    generated
+}
+
+fn apply_proxy_request_id_header(response: &mut Response, request_id: &str) {
+    if !response.headers().contains_key("x-request-id")
+        && let Ok(value) = axum::http::HeaderValue::from_str(request_id)
+    {
+        response.headers_mut().insert("x-request-id", value);
+    }
+}
+
+#[derive(Clone, Copy)]
+struct ProxyExchangeStartedAt(std::time::Instant);
+
+#[derive(Clone)]
+struct ProxyExchangeDiagnostics {
+    started_at: std::time::Instant,
+    headers_at: std::time::Instant,
+    target_resolution_admission_ms: u64,
+    downstream_headers_ms: Option<u64>,
+    method: String,
+    status: u16,
+    response_mode: &'static str,
+    trace_id: String,
+    request_id: String,
+}
+
+impl ProxyExchangeDiagnostics {
+    #[allow(clippy::too_many_arguments)]
+    fn new(
+        started_at: std::time::Instant,
+        target_resolution_admission_ms: u64,
+        downstream_headers_ms: Option<u64>,
+        method: &Method,
+        status: StatusCode,
+        response_mode: &'static str,
+        headers: &axum::http::HeaderMap,
+    ) -> Self {
+        Self {
+            started_at,
+            headers_at: std::time::Instant::now(),
+            target_resolution_admission_ms,
+            downstream_headers_ms,
+            method: method.as_str().to_string(),
+            status: status.as_u16(),
+            response_mode,
+            trace_id: sanitized_trace_id(headers).unwrap_or_default(),
+            request_id: sanitized_request_id(headers).unwrap_or_default(),
+        }
+    }
+
+    fn emit(&self, termination: &'static str) {
+        let body_ms = elapsed_ms(self.headers_at);
+        let downstream_headers_available = self.downstream_headers_ms.is_some();
+        let downstream_headers_ms = self.downstream_headers_ms.unwrap_or(0);
+        tracing::info!(
+            target_resolution_admission_ms = self.target_resolution_admission_ms,
+            connect_send_ms = tracing::field::Empty,
+            downstream_headers_ms,
+            downstream_headers_available,
+            body_ms,
+            total_ms = elapsed_ms(self.started_at),
+            method = %self.method,
+            upstream_status = self.status,
+            response_mode = self.response_mode,
+            termination,
+            trace_id = %self.trace_id,
+            request_id = %self.request_id,
+            "Proxy exchange phase diagnostics"
+        );
+    }
+}
+
+struct ProxyStreamDiagnostics {
+    diagnostics: ProxyExchangeDiagnostics,
+    finished: bool,
+}
+
+impl ProxyStreamDiagnostics {
+    fn new(diagnostics: ProxyExchangeDiagnostics) -> Self {
+        Self {
+            diagnostics,
+            finished: false,
+        }
+    }
+
+    fn finish(&mut self, termination: &'static str) {
+        if !self.finished {
+            self.finished = true;
+            self.diagnostics.emit(termination);
+        }
+    }
+}
+
+impl Drop for ProxyStreamDiagnostics {
+    fn drop(&mut self) {
+        if !self.finished {
+            self.finished = true;
+            self.diagnostics.emit("client_disconnect");
+        }
+    }
+}
+
+fn elapsed_ms(started_at: std::time::Instant) -> u64 {
+    started_at.elapsed().as_millis().min(u64::MAX as u128) as u64
+}
+
+fn emit_preheader_diagnostics(
+    started_at: std::time::Instant,
+    target_resolution_admission_ms: u64,
+    method: &Method,
+    headers: &axum::http::HeaderMap,
+    termination: &'static str,
+) {
+    let trace_id = sanitized_trace_id(headers).unwrap_or_default();
+    let request_id = sanitized_request_id(headers).unwrap_or_default();
+    tracing::info!(
+        target_resolution_admission_ms,
+        connect_send_ms = tracing::field::Empty,
+        downstream_headers_ms = 0u64,
+        downstream_headers_available = false,
+        body_ms = 0u64,
+        total_ms = elapsed_ms(started_at),
+        method = %method,
+        upstream_status = 0u16,
+        response_mode = "buffered",
+        termination,
+        trace_id = %trace_id,
+        request_id = %request_id,
+        "Proxy exchange phase diagnostics"
+    );
+}
+
+fn sanitized_trace_id(headers: &axum::http::HeaderMap) -> Option<String> {
+    if !proxy_service::valid_traceparent_header(headers) {
+        return None;
+    }
+    let traceparent = headers.get("traceparent")?.to_str().ok()?;
+    Some(traceparent[3..35].to_string())
+}
+
+fn sanitized_request_id(headers: &axum::http::HeaderMap) -> Option<String> {
+    let value = headers.get("x-request-id")?.to_str().ok()?;
+    (value.len() <= 128
+        && !value.is_empty()
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b':' | b'-')))
+    .then(|| value.to_string())
+}
+
+fn forwarded_response_header_value(
+    name_lower: &str,
+    value: &[u8],
+    is_sse: bool,
+    location_context: Option<&AsyncLocationContext>,
+) -> Option<axum::http::HeaderValue> {
+    if !forwardable_response_header(name_lower, is_sse) {
+        return None;
+    }
+    if ASYNC_LOCATION_HEADERS.contains(&name_lower) {
+        let raw = std::str::from_utf8(value).ok()?;
+        return location_context?.rewrite(raw);
+    }
+    axum::http::HeaderValue::from_bytes(value).ok()
+}
+
+fn node_is_sse_headers(headers: &[(String, String)]) -> bool {
+    headers.iter().any(|(name, value)| {
+        name.eq_ignore_ascii_case("content-type")
+            && crate::mw::security_headers::is_sse_media_type(value)
+    })
+}
 
 /// Headers worth preserving on proxied WebSocket handshakes.
 /// Upgrade mechanics and key/version headers are regenerated by the WS client,
@@ -573,7 +868,7 @@ pub async fn proxy_request(
     auth_user: AuthUser,
     tele: TelemetryContext,
     Path((service_id, path)): Path<(String, String)>,
-    request: Request<Body>,
+    mut request: Request<Body>,
 ) -> AppResult<Response> {
     // Emit `proxy.error` on any error branch reached via this handler. The
     // inner function threads `resolved_slug` through so we can attach a
@@ -581,8 +876,12 @@ pub async fn proxy_request(
     // happens after service resolution. See docs/TELEMETRY.md §5.1.
     let started_at = std::time::Instant::now();
     let method = request.method().clone();
+    request
+        .extensions_mut()
+        .insert(ProxyExchangeStartedAt(started_at));
+    let request_id = ensure_proxy_request_id(request.headers_mut());
     let mut resolved_slug = String::new();
-    let result = proxy_request_inner(
+    let mut result = proxy_request_inner(
         &state,
         &auth_user,
         &service_id,
@@ -591,6 +890,9 @@ pub async fn proxy_request(
         &mut resolved_slug,
     )
     .await;
+    if let Ok(response) = &mut result {
+        apply_proxy_request_id_header(response, &request_id);
+    }
     match &result {
         Ok(response) if response.status().is_success() => {
             emit_proxy_success_telemetry(
@@ -796,7 +1098,7 @@ pub async fn proxy_request_by_slug(
     auth_user: AuthUser,
     tele: TelemetryContext,
     Path((slug, path)): Path<(String, String)>,
-    request: Request<Body>,
+    mut request: Request<Body>,
 ) -> AppResult<Response> {
     // Start empty; `proxy_request_by_slug_inner` populates this once the
     // resolved `UserService`/`DownstreamService` is available. We
@@ -805,8 +1107,12 @@ pub async fn proxy_request_by_slug(
     // user input until resolution succeeds.
     let started_at = std::time::Instant::now();
     let method = request.method().clone();
+    request
+        .extensions_mut()
+        .insert(ProxyExchangeStartedAt(started_at));
+    let request_id = ensure_proxy_request_id(request.headers_mut());
     let mut resolved_slug = String::new();
-    let result = proxy_request_by_slug_inner(
+    let mut result = proxy_request_by_slug_inner(
         &state,
         &auth_user,
         &slug,
@@ -815,6 +1121,9 @@ pub async fn proxy_request_by_slug(
         &mut resolved_slug,
     )
     .await;
+    if let Ok(response) = &mut result {
+        apply_proxy_request_id_header(response, &request_id);
+    }
     match &result {
         Ok(response) if response.status().is_success() => {
             emit_proxy_success_telemetry(
@@ -1428,6 +1737,11 @@ async fn execute_proxy_inner(
     mut extra_outbound_headers: Vec<(String, String)>,
     resolved_slug: &mut String,
 ) -> AppResult<Response> {
+    let exchange_started_at = request
+        .extensions()
+        .get::<ProxyExchangeStartedAt>()
+        .map(|started| started.0)
+        .unwrap_or_else(std::time::Instant::now);
     let downstream_cancellation = request_cancellation(&request);
     let billing_egress_permit = enforce_proxy_billing_classification(&request)?;
 
@@ -1769,6 +2083,7 @@ async fn execute_proxy_inner(
     // Extract method, query, headers BEFORE body consumption.
     let method = request.method().clone();
     let method_str = method.as_str().to_string();
+    let caller_proxy_prefix = caller_proxy_prefix(request.uri().path(), path);
     // Strip NyxID-only routing params (e.g. `_nyxid_via`) from the
     // query string before forwarding. Downstream services should never
     // see NyxID-internal parameters.
@@ -2359,6 +2674,12 @@ async fn execute_proxy_inner(
         } else {
             format!("/{}", prepared.path)
         };
+        let node_location_context = AsyncLocationContext::new(
+            &target.base_url,
+            &node_path,
+            prepared.query.as_deref(),
+            caller_proxy_prefix.clone(),
+        );
 
         let mut base_headers = node_forward_headers;
         // Forward the caller's NyxID access token when the service is configured for it.
@@ -2394,6 +2715,8 @@ async fn execute_proxy_inner(
             .collect();
 
         let mut last_error: Option<AppError> = None;
+        let mut first_dispatch_admission_ms = None;
+        let mut had_dispatched_failure = false;
         for node_id in &all_node_ids {
             // Generate a new request_id for each attempt to avoid correlation conflicts
             let mut attempt_request = node_request.clone();
@@ -2459,9 +2782,12 @@ async fn execute_proxy_inner(
                 )
                 .await?;
             }
+            let target_admission_ms =
+                *first_dispatch_admission_ms.get_or_insert_with(|| elapsed_ms(exchange_started_at));
+            let downstream_started_at = std::time::Instant::now();
             let result = state
                 .node_ws_manager
-                .send_proxy_request(
+                .send_proxy_request_classified(
                     node_id,
                     attempt_request,
                     signing_secret.as_ref().map(|secret| secret.as_slice()),
@@ -2495,15 +2821,26 @@ async fn execute_proxy_inner(
                             .await;
                             let status = StatusCode::from_u16(node_response.status)
                                 .unwrap_or(StatusCode::BAD_GATEWAY);
+                            ProxyExchangeDiagnostics::new(
+                                exchange_started_at,
+                                target_admission_ms,
+                                None,
+                                &method,
+                                status,
+                                "buffered",
+                                &all_headers,
+                            )
+                            .emit("completed");
                             let mut response_builder = Response::builder().status(status);
                             for (name, value) in &node_response.headers {
                                 let name_lower = name.to_lowercase();
-                                if ALLOWED_RESPONSE_HEADERS.contains(&name_lower.as_str())
-                                    && let (Ok(hn), Ok(hv)) = (
-                                        axum::http::header::HeaderName::from_bytes(name.as_bytes()),
-                                        axum::http::header::HeaderValue::from_bytes(
-                                            value.as_bytes(),
-                                        ),
+                                if let Ok(hn) =
+                                    axum::http::header::HeaderName::from_bytes(name.as_bytes())
+                                    && let Some(hv) = forwarded_response_header_value(
+                                        &name_lower,
+                                        value.as_bytes(),
+                                        false,
+                                        node_location_context.as_ref(),
                                     )
                                 {
                                     response_builder = response_builder.header(hn, hv);
@@ -2541,6 +2878,19 @@ async fn execute_proxy_inner(
 
                             let http_status =
                                 StatusCode::from_u16(status).unwrap_or(StatusCode::BAD_GATEWAY);
+                            let stream_diagnostics = ProxyExchangeDiagnostics::new(
+                                exchange_started_at,
+                                target_admission_ms,
+                                Some(elapsed_ms(downstream_started_at)),
+                                &method,
+                                http_status,
+                                if node_is_sse_headers(&resp_headers) {
+                                    "sse"
+                                } else {
+                                    "binary_stream"
+                                },
+                                &all_headers,
+                            );
                             let mut response_builder = Response::builder().status(http_status);
 
                             // Detect SSE so we can skip content-length (length unknown).
@@ -2553,12 +2903,13 @@ async fn execute_proxy_inner(
 
                             for (name, value) in &resp_headers {
                                 let name_lower = name.to_lowercase();
-                                if forwardable_response_header(&name_lower, node_is_sse)
-                                    && let (Ok(hn), Ok(hv)) = (
-                                        axum::http::header::HeaderName::from_bytes(name.as_bytes()),
-                                        axum::http::header::HeaderValue::from_bytes(
-                                            value.as_bytes(),
-                                        ),
+                                if let Ok(hn) =
+                                    axum::http::header::HeaderName::from_bytes(name.as_bytes())
+                                    && let Some(hv) = forwarded_response_header_value(
+                                        &name_lower,
+                                        value.as_bytes(),
+                                        node_is_sse,
+                                        node_location_context.as_ref(),
                                     )
                                 {
                                     response_builder = response_builder.header(hn, hv);
@@ -2573,6 +2924,8 @@ async fn execute_proxy_inner(
                             let request_len = request_body_len;
 
                             // Convert the mpsc receiver into a streaming body.
+                            let mut exchange_diagnostics =
+                                ProxyStreamDiagnostics::new(stream_diagnostics);
                             let stream = async_stream::stream! {
                                 let mut response_len: i64 = 0;
                                 loop {
@@ -2581,7 +2934,10 @@ async fn execute_proxy_inner(
                                             response_len += bytes.len() as i64;
                                             yield Ok::<_, std::io::Error>(bytes::Bytes::from(bytes));
                                         }
-                                        Ok(Some(StreamChunk::End)) => break,
+                                        Ok(Some(StreamChunk::End)) => {
+                                            exchange_diagnostics.finish("completed");
+                                            break;
+                                        }
                                         Ok(Some(StreamChunk::Error(e))) => {
                                             tracing::error!(
                                                 service_id = %service_id_owned,
@@ -2592,12 +2948,16 @@ async fn execute_proxy_inner(
                                             yield Err(std::io::Error::other(format!(
                                                 "node stream error: {e}"
                                             )));
+                                            exchange_diagnostics.finish("body_error");
                                             break;
                                         }
                                         Ok(Some(StreamChunk::Start { .. })) => {
                                             // Duplicate start, ignore
                                         }
-                                        Ok(None) => break,
+                                        Ok(None) => {
+                                            exchange_diagnostics.finish("upstream_error");
+                                            break;
+                                        }
                                         Err(_) => {
                                             tracing::warn!(
                                                 service_id = %service_id_owned,
@@ -2605,6 +2965,7 @@ async fn execute_proxy_inner(
                                                 idle_timeout_secs,
                                                 "Node proxy stream idle timeout reached"
                                             );
+                                            exchange_diagnostics.finish("upstream_error");
                                             break;
                                         }
                                     }
@@ -2632,6 +2993,13 @@ async fn execute_proxy_inner(
                     let mut response = match response_result {
                         Ok(response) => response,
                         Err(error) => {
+                            emit_preheader_diagnostics(
+                                exchange_started_at,
+                                target_admission_ms,
+                                &method,
+                                &all_headers,
+                                "upstream_error",
+                            );
                             if let Some(reservation) = durable_reservation.as_ref() {
                                 finish_durable_operation(
                                     state,
@@ -2693,7 +3061,11 @@ async fn execute_proxy_inner(
 
                     return Ok(response);
                 }
-                Err(err @ AppError::NodeCredentialMissing(_)) => {
+                Err(NodeProxyFailure {
+                    error: err @ AppError::NodeCredentialMissing(_),
+                    dispatched,
+                }) => {
+                    had_dispatched_failure |= dispatched;
                     // A different fallback node may have the credential
                     // configured locally, so we still try the rest of
                     // the pool. Preserve the original error class in
@@ -2726,12 +3098,24 @@ async fn execute_proxy_inner(
                         .await;
                         return Err(err);
                     }
+                    if !should_retry_node_failure(&method, dispatched) {
+                        emit_preheader_diagnostics(
+                            exchange_started_at,
+                            target_admission_ms,
+                            &method,
+                            &all_headers,
+                            "upstream_error",
+                        );
+                        return Err(err);
+                    }
                     last_error = Some(err);
                     continue;
                 }
-                Err(AppError::NodeOffline(_) | AppError::NodeProxyTimeout) => {
-                    tracing::warn!(node_id = %node_id, "Node proxy failed, trying next");
-
+                Err(NodeProxyFailure {
+                    error: err @ (AppError::NodeOffline(_) | AppError::NodeProxyTimeout),
+                    dispatched,
+                }) => {
+                    had_dispatched_failure |= dispatched;
                     // Record error metrics (fire-and-forget)
                     let db_clone = state.db.clone();
                     let nid = node_id.to_string();
@@ -2753,10 +3137,30 @@ async fn execute_proxy_inner(
                         .await;
                         return Err(AppError::DurableOperationOutcomeUncertain);
                     }
-                    last_error = Some(AppError::NodeOffline(format!("Node {node_id} failed")));
+                    if !should_retry_node_failure(&method, dispatched) {
+                        emit_preheader_diagnostics(
+                            exchange_started_at,
+                            target_admission_ms,
+                            &method,
+                            &all_headers,
+                            "upstream_error",
+                        );
+                        tracing::warn!(
+                            node_id = %node_id,
+                            method = %method,
+                            "Not retrying unsafe proxy request after possible node dispatch"
+                        );
+                        return Err(err);
+                    }
+                    tracing::warn!(node_id = %node_id, "Node proxy failed, trying next");
+                    last_error = Some(err);
                     continue;
                 }
-                Err(e) => {
+                Err(failure) => {
+                    let NodeProxyFailure {
+                        error: e,
+                        dispatched,
+                    } = failure;
                     if let Some(reservation) = durable_reservation.as_ref() {
                         finish_durable_operation(
                             state,
@@ -2770,6 +3174,17 @@ async fn execute_proxy_inner(
                         .await;
                         return Err(AppError::DurableOperationOutcomeUncertain);
                     }
+                    emit_preheader_diagnostics(
+                        exchange_started_at,
+                        target_admission_ms,
+                        &method,
+                        &all_headers,
+                        if dispatched {
+                            "upstream_error"
+                        } else {
+                            "connect_error"
+                        },
+                    );
                     return Err(e);
                 }
             }
@@ -2785,6 +3200,17 @@ async fn execute_proxy_inner(
         //   * No server-side credential is available, so direct routing
         //     cannot succeed anyway.
         if node_routing_required || !has_server_credential {
+            emit_preheader_diagnostics(
+                exchange_started_at,
+                first_dispatch_admission_ms.unwrap_or_else(|| elapsed_ms(exchange_started_at)),
+                &method,
+                &all_headers,
+                if had_dispatched_failure {
+                    "upstream_error"
+                } else {
+                    "connect_error"
+                },
+            );
             if let Some(reservation) = durable_reservation.as_ref() {
                 durable_operation_grant_service::mark_pre_dispatch_rejected(
                     &state.db,
@@ -3031,6 +3457,8 @@ async fn execute_proxy_inner(
     if let Some(reservation) = durable_reservation.as_ref() {
         durable_operation_grant_service::mark_dispatched(&state.db, reservation, None).await?;
     }
+    let target_admission_ms = elapsed_ms(exchange_started_at);
+    let downstream_started_at = std::time::Instant::now();
     let downstream_result = until_client_disconnect(
         &downstream_cancellation,
         proxy_service::forward_request_with_extra_outbound_headers(
@@ -3054,6 +3482,13 @@ async fn execute_proxy_inner(
     let downstream_response = match downstream_result {
         Ok(Ok(response)) => response,
         Ok(Err(error)) => {
+            emit_preheader_diagnostics(
+                exchange_started_at,
+                target_admission_ms,
+                &method,
+                &all_headers,
+                "upstream_error",
+            );
             if let Some(reservation) = durable_reservation.as_ref() {
                 finish_durable_operation(
                     state,
@@ -3070,6 +3505,13 @@ async fn execute_proxy_inner(
             return Err(error);
         }
         Err(_) => {
+            emit_preheader_diagnostics(
+                exchange_started_at,
+                target_admission_ms,
+                &method,
+                &all_headers,
+                "client_disconnect",
+            );
             if let Some(reservation) = durable_reservation.as_ref() {
                 finish_durable_operation(
                     state,
@@ -3090,6 +3532,11 @@ async fn execute_proxy_inner(
     // Convert reqwest Response back to axum Response
     let status = StatusCode::from_u16(downstream_response.status().as_u16())
         .unwrap_or(StatusCode::BAD_GATEWAY);
+    let direct_location_context = AsyncLocationContext::from_downstream_request(
+        &target.base_url,
+        downstream_response.url().clone(),
+        caller_proxy_prefix,
+    );
 
     if let Some(reservation) = durable_reservation.as_ref() {
         finish_durable_operation(
@@ -3117,6 +3564,21 @@ async fn execute_proxy_inner(
         .and_then(|v| v.to_str().ok())
         .is_some_and(crate::mw::security_headers::is_sse_media_type);
     let should_stream = should_stream_response(&downstream_response, status, is_sse);
+    let exchange_diagnostics = ProxyExchangeDiagnostics::new(
+        exchange_started_at,
+        target_admission_ms,
+        Some(elapsed_ms(downstream_started_at)),
+        &method,
+        status,
+        if is_sse {
+            "sse"
+        } else if should_stream {
+            "binary_stream"
+        } else {
+            "buffered"
+        },
+        &all_headers,
+    );
     let usage_context =
         should_capture_llm_usage(&target.service.slug, platform_metric).then(|| {
             llm_usage_service::UsageAuditContext {
@@ -3138,10 +3600,14 @@ async fn execute_proxy_inner(
     // streaming responses — clients need it for download progress / seeking.
     for (name, value) in downstream_response.headers().iter() {
         let name_lower = name.as_str().to_lowercase();
-        if forwardable_response_header(&name_lower, is_sse)
-            && let Ok(header_name) =
-                axum::http::header::HeaderName::from_bytes(name.as_str().as_bytes())
-            && let Ok(header_value) = axum::http::header::HeaderValue::from_bytes(value.as_bytes())
+        if let Ok(header_name) =
+            axum::http::header::HeaderName::from_bytes(name.as_str().as_bytes())
+            && let Some(header_value) = forwarded_response_header_value(
+                &name_lower,
+                value.as_bytes(),
+                is_sse,
+                direct_location_context.as_ref(),
+            )
         {
             response_builder = response_builder.header(header_name, header_value);
         }
@@ -3164,6 +3630,7 @@ async fn execute_proxy_inner(
             let task_cancellation = downstream_cancellation.clone();
 
             tokio::spawn(async move {
+                let mut exchange_diagnostics = ProxyStreamDiagnostics::new(exchange_diagnostics);
                 let mut sse_buffer = String::new();
                 let mut usage_accumulator =
                     llm_usage_service::ReportedLlmUsageAccumulator::default();
@@ -3177,6 +3644,7 @@ async fn execute_proxy_inner(
                     .await;
                     match next {
                         Err(_) => {
+                            exchange_diagnostics.finish("client_disconnect");
                             drop(upstream_stream);
                             let usage = usage_accumulator.finalize();
                             if let Some(usage) = usage.clone() {
@@ -3217,6 +3685,7 @@ async fn execute_proxy_inner(
                             }
 
                             if tx.send(Ok(bytes)).await.is_err() {
+                                exchange_diagnostics.finish("client_disconnect");
                                 drop(upstream_stream);
                                 let usage = usage_accumulator.finalize();
                                 if let Some(usage) = usage.clone() {
@@ -3244,6 +3713,7 @@ async fn execute_proxy_inner(
                             }
                         }
                         Ok(Ok(Some(Err(e)))) => {
+                            exchange_diagnostics.finish("body_error");
                             tracing::error!(
                                 service_id = %service_id_owned,
                                 error = %e,
@@ -3280,6 +3750,7 @@ async fn execute_proxy_inner(
                             return;
                         }
                         Ok(Ok(None)) => {
+                            exchange_diagnostics.finish("completed");
                             let usage = usage_accumulator.finalize();
                             if let Some(usage) = usage.clone() {
                                 llm_usage_service::log_reported_usage_async(
@@ -3305,6 +3776,7 @@ async fn execute_proxy_inner(
                             return;
                         }
                         Ok(Err(_)) => {
+                            exchange_diagnostics.finish("upstream_error");
                             tracing::warn!(
                                 service_id = %service_id_owned,
                                 idle_timeout_secs,
@@ -3368,6 +3840,7 @@ async fn execute_proxy_inner(
                 None
             };
             let stream_resale_metric = billing_ctx.resale.as_ref().map(|spec| spec.metric);
+            let mut exchange_diagnostics = ProxyStreamDiagnostics::new(exchange_diagnostics);
             let stream = async_stream::stream! {
                 let mut response_len: i64 = 0;
                 let mut captured: Option<Vec<u8>> =
@@ -3386,6 +3859,7 @@ async fn execute_proxy_inner(
                             yield Ok::<_, std::io::Error>(bytes);
                         }
                         Ok(Some(Err(e))) => {
+                            exchange_diagnostics.finish("body_error");
                             tracing::error!(
                                 service_id = %service_id_owned,
                                 error = %e,
@@ -3397,8 +3871,12 @@ async fn execute_proxy_inner(
                             )));
                             break;
                         }
-                        Ok(None) => break,
+                        Ok(None) => {
+                            exchange_diagnostics.finish("completed");
+                            break;
+                        }
                         Err(_) => {
+                            exchange_diagnostics.finish("upstream_error");
                             tracing::warn!(
                                 service_id = %service_id_owned,
                                 idle_timeout_secs,
@@ -3452,12 +3930,22 @@ async fn execute_proxy_inner(
             .unwrap_or("unknown")
             .to_string();
         let response_body =
-            until_client_disconnect(&downstream_cancellation, downstream_response.bytes())
+            match until_client_disconnect(&downstream_cancellation, downstream_response.bytes())
                 .await
-                .map_err(|_| proxy_client_disconnected(service_id))?
-                .map_err(|e| {
-                    AppError::Internal(format!("Failed to read downstream response: {e}"))
-                })?;
+            {
+                Err(_) => {
+                    exchange_diagnostics.emit("client_disconnect");
+                    return Err(proxy_client_disconnected(service_id));
+                }
+                Ok(Err(e)) => {
+                    exchange_diagnostics.emit("body_error");
+                    return Err(AppError::Internal(format!(
+                        "Failed to read downstream response: {e}"
+                    )));
+                }
+                Ok(Ok(body)) => body,
+            };
+        exchange_diagnostics.emit("completed");
 
         if !status.is_success() {
             log_upstream_error(
@@ -3882,6 +4370,21 @@ fn forwardable_response_header(name_lower: &str, is_sse: bool) -> bool {
         return false;
     }
     ALLOWED_RESPONSE_HEADERS.contains(&name_lower)
+}
+
+/// RFC 9110 safe methods may be replayed for transport failover. Every other
+/// method is treated as potentially state-changing, including extension
+/// methods, and may only fail over when the node transport proves dispatch
+/// never occurred.
+fn method_allows_automatic_failover(method: &Method) -> bool {
+    matches!(
+        *method,
+        Method::GET | Method::HEAD | Method::OPTIONS | Method::TRACE
+    )
+}
+
+fn should_retry_node_failure(method: &Method, dispatched: bool) -> bool {
+    !dispatched || method_allows_automatic_failover(method)
 }
 
 /// Decide whether a downstream response should be streamed to the client
@@ -5235,11 +5738,13 @@ async fn bridge_websockets_via_node(
 #[cfg(test)]
 mod tests {
     use super::{
-        ConnectionUsageStats, WsPassthroughGuard, add_websocket_usage_provenance,
-        apply_agent_attribution_headers, auth_kind_label, caller_bearer_token_for_downstream,
+        ALLOWED_RESPONSE_HEADERS, AsyncLocationContext, ConnectionUsageStats, WsPassthroughGuard,
+        add_websocket_usage_provenance, apply_agent_attribution_headers,
+        apply_proxy_request_id_header, auth_kind_label, caller_bearer_token_for_downstream,
         collect_ws_forward_headers, compose_pre_resolved_node_ids, enforce_node_route_scope,
-        final_credential_class, is_chat_completions_proxy_path, is_codex_transport_path,
-        is_ws_upgrade_request, should_enforce_runtime_approval, single_system_header,
+        ensure_proxy_request_id, final_credential_class, forwarded_response_header_value,
+        is_chat_completions_proxy_path, is_codex_transport_path, is_ws_upgrade_request,
+        should_enforce_runtime_approval, should_retry_node_failure, single_system_header,
         strip_durable_idempotency_defaults, validate_range_header,
         websocket_realtime_usage_enabled, websocket_resale_usage,
     };
@@ -5255,7 +5760,7 @@ mod tests {
         Router,
         body::{Body, to_bytes},
         extract::{Path, State, ws::WebSocketUpgrade},
-        http::{Request, StatusCode},
+        http::{Method, Request, StatusCode},
         response::IntoResponse,
         routing::get,
     };
@@ -5337,6 +5842,71 @@ mod tests {
             "service_account"
         );
         assert_eq!(auth_kind_label(&AuthMethod::Delegated), "delegated");
+    }
+
+    #[test]
+    fn generated_request_id_is_forwarded_and_returned_as_correlation() {
+        let mut headers = axum::http::HeaderMap::new();
+        let generated = ensure_proxy_request_id(&mut headers);
+        assert_eq!(headers["x-request-id"], generated);
+        assert!(uuid::Uuid::parse_str(&generated).is_ok());
+
+        let mut response = Body::empty().into_response();
+        apply_proxy_request_id_header(&mut response, &generated);
+        assert_eq!(response.headers()["x-request-id"], generated);
+
+        headers.insert("x-request-id", "caller-owned".parse().unwrap());
+        assert_eq!(ensure_proxy_request_id(&mut headers), "caller-owned");
+    }
+
+    #[test]
+    fn async_locations_are_rewritten_to_the_caller_visible_proxy_route() {
+        let context = AsyncLocationContext::new(
+            "https://private.example/api/",
+            "/executions",
+            None,
+            Some("/api/v1/proxy/s/sandbox/".to_string()),
+        )
+        .unwrap();
+
+        assert_eq!(
+            context.rewrite("executions/op-1?view=status").unwrap(),
+            "/api/v1/proxy/s/sandbox/executions/op-1?view=status"
+        );
+        assert_eq!(
+            context
+                .rewrite("https://private.example/api/executions/op-2")
+                .unwrap(),
+            "/api/v1/proxy/s/sandbox/executions/op-2"
+        );
+        assert!(context.rewrite("https://attacker.example/op-3").is_none());
+        assert!(context.rewrite("/outside-service/op-4").is_none());
+    }
+
+    #[test]
+    fn async_response_headers_are_safe_and_location_requires_rewrite_context() {
+        for name in [
+            "retry-after",
+            "preference-applied",
+            "location",
+            "operation-location",
+            "etag",
+        ] {
+            assert!(ALLOWED_RESPONSE_HEADERS.contains(&name));
+        }
+        assert!(forwarded_response_header_value("location", b"/private", false, None).is_none());
+    }
+
+    #[test]
+    fn unsafe_node_failover_stops_after_possible_dispatch() {
+        for method in [Method::POST, Method::PUT, Method::PATCH, Method::DELETE] {
+            assert!(should_retry_node_failure(&method, false));
+            assert!(!should_retry_node_failure(&method, true));
+        }
+        for method in [Method::GET, Method::HEAD, Method::OPTIONS] {
+            assert!(should_retry_node_failure(&method, false));
+            assert!(should_retry_node_failure(&method, true));
+        }
     }
 
     // ---- X-NyxID-Agent-Id attribution header tests (issue #788) ----
@@ -6352,6 +6922,15 @@ mod tests {
         headers.insert("accept", "application/json".parse().unwrap());
         headers.insert("idempotency-key", "caller-key-001".parse().unwrap());
         headers.insert("x-trace-id", "trace-001".parse().unwrap());
+        headers.insert(
+            "traceparent",
+            "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01"
+                .parse()
+                .unwrap(),
+        );
+        headers.insert("tracestate", "vendor=value".parse().unwrap());
+        headers.insert("last-event-id", "event-7".parse().unwrap());
+        headers.insert("prefer", "respond-async".parse().unwrap());
 
         let forwarded = node_forward_headers(&headers);
         for (name, expected) in [
@@ -6359,6 +6938,13 @@ mod tests {
             ("accept", "application/json"),
             ("idempotency-key", "caller-key-001"),
             ("x-trace-id", "trace-001"),
+            (
+                "traceparent",
+                "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01",
+            ),
+            ("tracestate", "vendor=value"),
+            ("last-event-id", "event-7"),
+            ("prefer", "respond-async"),
         ] {
             assert!(
                 forwarded.iter().any(
