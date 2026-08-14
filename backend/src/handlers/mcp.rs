@@ -209,9 +209,6 @@ fn config_services(tool_services: &[mcp_service::McpToolService]) -> Vec<McpServ
         .collect()
 }
 
-/// SHA-256 of canonical JSON containing only `contract_version` and the sorted
-/// normalized service descriptors. Caller identity, observation time,
-/// diagnostics, and deployment URL are deliberately excluded.
 /// Build the proxy base URL from the backend's base_url config.
 fn build_proxy_base_url(base_url: &str) -> String {
     format!("{}/api/v1/proxy", base_url.trim_end_matches('/'))

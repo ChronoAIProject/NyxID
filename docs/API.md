@@ -4220,6 +4220,7 @@ Delegated tokens retain their native proxy, LLM, and refresh access according to
 | `/api/v1/llm/*`                                     | Allowed by native LLM scopes                        |
 | `/api/v1/proxy/{id}/{*path}`                        | Allowed by native proxy scopes                      |
 | `/api/v1/delegation/refresh`                        | Allowed for refreshable delegated scopes            |
+| `/api/v1/delegation/operation-catalog`              | Allowed only with `mcp:catalog:read`                |
 | Eligible management `GET` endpoints                | Allowed only with exact `account:read`              |
 | Management writes, upgrades, and denied GET classes | Blocked                                             |
 
@@ -4261,6 +4262,90 @@ This endpoint is critical for agentic/long-running workflows where a downstream 
 curl -X POST http://localhost:3001/api/v1/delegation/refresh \
   -H "Authorization: Bearer <current_delegation_token>"
 ```
+
+---
+
+#### GET /api/v1/delegation/operation-catalog
+
+Returns the delegated caller's safe, exact-operation discovery view. The
+request must use a verified delegated token with `mcp:catalog:read`; service
+and node authority comes from the live grant keyed by the token `jti`, and is
+never inferred from an unrestricted default.
+
+This endpoint is discovery-only. A caller that also needs to create, observe,
+or redeem an exact-service approval must use the **same delegated token with
+both independently granted scopes**: `mcp:catalog:read` and `proxy` or
+`proxy:*`. Catalog-read alone never grants proxy, generic-proxy, approval, or
+other effect authority. The existing approval endpoints intentionally return
+403 for a catalog-only token.
+
+**Auth:** Required (delegated Bearer token with `mcp:catalog:read`)
+
+**Response (200):**
+
+```json
+{
+  "contract_version": "nyxid-delegated-operation-catalog.v1",
+  "catalog_digest": "sha256:opaque-admission-token",
+  "resolved_at": "2026-08-14T00:00:00Z",
+  "authority_expires_at": "2026-08-14T00:05:00Z",
+  "services": [
+    {
+      "user_service_id": "user-service-uuid",
+      "service_slug": "github",
+      "service_name": "GitHub",
+      "description": "Connected GitHub service",
+      "node_id": null,
+      "operations": [
+        {
+          "endpoint_id": "op_opaque_id",
+          "name": "list_repositories",
+          "method": "GET",
+          "path": "/user/repos",
+          "parameters": null,
+          "request_body_schema": null,
+          "request_content_type": null,
+          "request_body_required": false,
+          "response": {
+            "content_types": ["application/json"],
+            "binary_artifact": false
+          },
+          "endpoint_contract_digest": "sha256:..."
+        }
+      ]
+    }
+  ],
+  "total_services": 1,
+  "total_operations": 1
+}
+```
+
+`catalog_digest` is an opaque admission token, not a checksum of this filtered
+JSON response. For wire compatibility with #1424 (commit `d1a042c2`), it is
+exactly `mcp_service::operation_catalog_digest` over the complete scoped
+catalog used by exact-service approval create and redeem. The canonical digest
+also includes catalog services that this facade omits (platform and generic
+rows), plus descriptor metadata such as operation descriptions and
+`recommended_skills`. Therefore an unrelated catalog row, description, or
+skill can change the digest without changing this response's visible list.
+That spurious-drift behavior is pre-existing #1424 approval semantics and is
+not introduced by this facade. Consumers must treat the value as opaque and
+send it back to approval create; they must not recompute it from the response
+body.
+
+The response excludes platform fallbacks, generic proxy services, invalid or
+empty contracts, unavailable services, credentials, tokens, headers, hashes,
+raw provider responses, and arbitrary request bodies. The route performs no
+writes, provider invocation, approval mutation, or credential mutation. A
+catalog resolution may still perform a hardened, cached, DNS-pinned outbound
+fetch of a user-mounted OpenAPI document when the canonical loader requires
+one.
+
+An empty service/node authority (`allow_all_*: false` with an empty list) is a
+valid deny-all grant and returns `200` with an empty catalog. Unknown or stale
+service/node IDs never widen to unrestricted authority; token exchange or live
+grant validation rejects them, and deletion after grant issuance remains
+restricted rather than falling back to allow-all.
 
 ---
 

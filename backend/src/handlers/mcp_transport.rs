@@ -432,6 +432,25 @@ async fn authenticate_mcp(
                     None
                 };
 
+                // Catalog authority is online-revocable. The MCP transport
+                // intentionally uses manual authentication, so delegated
+                // catalog tokens need the same live-grant check performed by
+                // the AuthUser middleware. Ordinary legacy MCP tokens do not
+                // carry this scope and retain their existing behavior.
+                if claims.act.is_some()
+                    && crate::services::catalog_delegation_service::scope_has_catalog_read(
+                        &claims.scope,
+                    )
+                {
+                    crate::services::catalog_delegation_service::validate_live_grant(
+                        &state.db,
+                        &state.config,
+                        &claims,
+                    )
+                    .await
+                    .map_err(|_| mcp_401(&state.config.base_url))?;
+                }
+
                 // Service account tokens have sa=true; verify against
                 // the service_accounts collection instead of users.
                 let (user_id, approval_owner_user_id) = if claims.sa == Some(true) {
@@ -453,6 +472,16 @@ async fn authenticate_mcp(
                 };
 
                 let mut ctx = McpAuthContext::user(user_id, auth_method);
+                if matches!(
+                    ctx.auth_method,
+                    AuthMethod::AccessToken | AuthMethod::Delegated
+                ) {
+                    ctx.allow_all_services = claims.allow_all_services.unwrap_or(true);
+                    ctx.allow_all_nodes = claims.allow_all_nodes.unwrap_or(true);
+                    ctx.allowed_service_ids =
+                        claims.allowed_service_ids.clone().unwrap_or_default();
+                    ctx.allowed_node_ids = claims.allowed_node_ids.clone().unwrap_or_default();
+                }
                 if let Some((
                     allow_all_services,
                     allow_all_nodes,
@@ -3204,6 +3233,7 @@ mod tests {
             scope: "proxy".to_string(),
             acting_client_id: None,
             oauth_client_id: None,
+            token_jti: None,
             approval_owner_user_id: None,
             auth_method: AuthMethod::ApiKey,
             allow_all_services: true,

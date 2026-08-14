@@ -54,6 +54,9 @@ pub struct AuthUser {
     pub acting_client_id: Option<String>,
     /// Registered OAuth client that received this ordinary access token.
     pub oauth_client_id: Option<String>,
+    /// JWT ID for online delegated-authority validation. `None` for non-JWT
+    /// authentication contexts.
+    pub token_jti: Option<String>,
     /// Resource-owner user ID used for approval/notification decisions.
     /// For service-account auth this points to the SA owner; otherwise `None`.
     pub approval_owner_user_id: Option<String>,
@@ -622,6 +625,7 @@ impl FromRequestParts<AppState> for AuthUser {
                                         scope: api_key.scopes.clone(),
                                         acting_client_id: None,
                                         oauth_client_id: None,
+                                        token_jti: None,
                                         approval_owner_user_id: None,
                                         auth_method: AuthMethod::ApiKey,
                                         allow_all_services: api_key.allow_all_services,
@@ -713,6 +717,7 @@ impl FromRequestParts<AppState> for AuthUser {
                             scope: claims.scope.clone(),
                             acting_client_id: None,
                             oauth_client_id: None,
+                            token_jti: None,
                             approval_owner_user_id: Some(sa.effective_owner_user_id().to_string()),
                             auth_method: AuthMethod::ServiceAccount,
                             allow_all_services: true,
@@ -848,6 +853,7 @@ impl FromRequestParts<AppState> for AuthUser {
                         scope: claims.scope.clone(),
                         acting_client_id: claims.act.map(|a| a.sub),
                         oauth_client_id: claims.client_id.clone(),
+                        token_jti: Some(claims.jti.clone()),
                         approval_owner_user_id: None,
                         auth_method,
                         allow_all_services,
@@ -918,6 +924,7 @@ impl FromRequestParts<AppState> for AuthUser {
                                     scope: String::new(),
                                     acting_client_id: None,
                                     oauth_client_id: None,
+                                    token_jti: None,
                                     approval_owner_user_id: None,
                                     auth_method: AuthMethod::Session,
                                     allow_all_services: true,
@@ -996,6 +1003,7 @@ impl FromRequestParts<AppState> for AuthUser {
                     scope: key.scopes.clone(),
                     acting_client_id: None,
                     oauth_client_id: None,
+                    token_jti: None,
                     approval_owner_user_id: None,
                     auth_method: AuthMethod::ApiKey,
                     allow_all_services: key.allow_all_services,
@@ -1398,6 +1406,7 @@ mod tests {
             scope: scope.to_string(),
             acting_client_id: None,
             oauth_client_id: None,
+            token_jti: None,
             approval_owner_user_id: None,
             auth_method,
             allow_all_services: true,
@@ -2760,6 +2769,7 @@ mod tests {
             scope: "read proxy".to_string(),
             acting_client_id: None,
             oauth_client_id: None,
+            token_jti: None,
             approval_owner_user_id: None,
             auth_method: AuthMethod::ApiKey,
             allow_all_services: false,
