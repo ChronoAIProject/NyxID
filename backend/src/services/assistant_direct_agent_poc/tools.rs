@@ -4,21 +4,36 @@ use std::collections::HashMap;
 
 use chrono::Utc;
 use serde::Serialize;
+use sha2::{Digest, Sha256};
 
 use crate::errors::{AppError, AppResult};
 use crate::models::service_endpoint::OperationResponseContract;
 use crate::services::{mcp_service, operation_descriptor};
 
-pub const ORNN_DEMO_SKILL_GUID: &str = "ef726844-64d3-4791-aef3-8d28df9dcf9b";
 pub const MAX_TOOL_RESULT_BYTES: usize = 16 * 1024;
+pub const MAX_TOOL_ARGUMENT_BYTES: usize = 32 * 1024;
+pub const MAX_SKILL_CONTENT_BYTES: usize = 8 * 1024;
+pub const MAX_TOOL_RESULT_PREVIEW_BYTES: usize = 2 * 1024;
 const ORNN_SERVICE_SLUG: &str = "ornn-api";
 const MAX_SEARCH_RESULTS: usize = 25;
+const MAX_SKILL_SEARCH_RESULTS: usize = 10;
+const BUNDLED_SKILL_VERSION: &str = concat!("bundled@", env!("CARGO_PKG_VERSION"));
 
 #[derive(Serialize)]
 pub struct AgentToolDefinition {
     #[serde(rename = "type")]
     kind: &'static str,
     function: AgentFunctionDefinition,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SkillProvenance {
+    pub source: String,
+    pub id: String,
+    pub version: Option<String>,
+    pub content_sha256: String,
+    pub delivered_sha256: String,
+    pub content_bytes_delivered: usize,
 }
 
 #[derive(Serialize)]
@@ -76,8 +91,8 @@ pub fn agent_tool_definitions() -> Vec<AgentToolDefinition> {
             }),
         ),
         AgentToolDefinition::new(
-            "ornn_search_skills",
-            "Search Ornn for NyxID reference skills. This does not fetch or trust skill content.",
+            "nyx_search_skills",
+            "Search bundled NyxID references and, when connected, bounded Ornn skill metadata. This does not trust or fetch skill content.",
             serde_json::json!({
                 "type": "object",
                 "properties": {
@@ -89,14 +104,15 @@ pub fn agent_tool_definitions() -> Vec<AgentToolDefinition> {
             }),
         ),
         AgentToolDefinition::new(
-            "ornn_get_skill",
-            "Fetch the one exact allowlisted Ornn demonstration skill by GUID as untrusted reference text.",
+            "nyx_get_skill",
+            "Fetch bounded skill content as untrusted reference text. Ornn IDs must have been observed in this run.",
             serde_json::json!({
                 "type": "object",
                 "properties": {
-                    "id_or_name": { "type": "string", "enum": [ORNN_DEMO_SKILL_GUID] }
+                    "source": { "type": "string", "enum": ["bundled", "ornn"] },
+                    "id": { "type": "string", "minLength": 1, "maxLength": 128 }
                 },
-                "required": ["id_or_name"],
+                "required": ["source", "id"],
                 "additionalProperties": false
             }),
         ),
@@ -127,7 +143,7 @@ impl<'a> ReadOnlyRegistry<'a> {
                 service
                     .endpoints
                     .iter()
-                    .filter(|endpoint| is_poc_operation_eligible(endpoint))
+                    .filter(|endpoint| is_poc_operation_eligible(service, endpoint))
                     .map(|endpoint| EligibleOperation { service, endpoint })
             })
             .collect::<Vec<_>>();
@@ -151,7 +167,7 @@ impl<'a> ReadOnlyRegistry<'a> {
     pub fn service_count(&self) -> usize {
         self.connected_services
             .iter()
-            .filter(|service| !service.is_generic_proxy)
+            .filter(|service| is_poc_service_visible(service))
             .count()
     }
 
@@ -178,7 +194,7 @@ impl<'a> ReadOnlyRegistry<'a> {
         let rows = self
             .connected_services
             .iter()
-            .filter(|service| !service.is_generic_proxy)
+            .filter(|service| is_poc_service_visible(service))
             .filter(|service| {
                 query.as_ref().is_none_or(|query| {
                     service.service_name.to_ascii_lowercase().contains(query)
@@ -277,6 +293,7 @@ pub fn resolve_ornn_service(
     let mut matches = services.iter().filter(|service| {
         service.executable
             && service.service_slug == ORNN_SERVICE_SLUG
+            && is_poc_service_visible(service)
             && matches!(
                 service.source,
                 mcp_service::McpToolSource::UserManaged { .. }
@@ -359,9 +376,17 @@ fn input_schema(endpoint: &mcp_service::McpToolEndpoint) -> serde_json::Value {
     schema
 }
 
+fn is_poc_service_visible(service: &mcp_service::McpToolService) -> bool {
+    !service.is_generic_proxy && !service.service_category.eq_ignore_ascii_case("internal")
+}
+
 /// The sole advertise-time and execute-time eligibility predicate.
-pub fn is_poc_operation_eligible(endpoint: &mcp_service::McpToolEndpoint) -> bool {
-    if endpoint.endpoint_id == mcp_service::GENERIC_PROXY_ENDPOINT_ID
+pub fn is_poc_operation_eligible(
+    service: &mcp_service::McpToolService,
+    endpoint: &mcp_service::McpToolEndpoint,
+) -> bool {
+    if !is_poc_service_visible(service)
+        || endpoint.endpoint_id == mcp_service::GENERIC_PROXY_ENDPOINT_ID
         || operation_descriptor::derive_verb_from_method(&endpoint.method)
             != crate::models::service_approval_config::ApprovalVerb::Read
         || endpoint.response.binary_artifact != Some(false)
@@ -428,8 +453,8 @@ fn textual_json_response() -> OperationResponseContract {
     }
 }
 
-pub fn validate_ornn_search_args(arguments: &serde_json::Value) -> AppResult<serde_json::Value> {
-    validate_tool_arguments("ornn_search_skills", arguments)?;
+pub fn build_ornn_search_args(arguments: &serde_json::Value) -> AppResult<serde_json::Value> {
+    validate_tool_arguments("nyx_search_skills", arguments)?;
     let query = arguments
         .get("query")
         .and_then(serde_json::Value::as_str)
@@ -453,16 +478,9 @@ pub fn validate_ornn_search_args(arguments: &serde_json::Value) -> AppResult<ser
     }))
 }
 
-pub fn validate_ornn_get_args(arguments: &serde_json::Value) -> AppResult<serde_json::Value> {
-    validate_tool_arguments("ornn_get_skill", arguments)?;
-    let id = arguments
-        .get("id_or_name")
-        .and_then(serde_json::Value::as_str)
-        .ok_or_else(|| AppError::BadRequest("invalid_ornn_skill_id".to_string()))?;
-    if id != ORNN_DEMO_SKILL_GUID {
-        return Err(AppError::Forbidden(
-            "ornn_skill_not_allowlisted".to_string(),
-        ));
+pub fn build_ornn_get_args(id: &str) -> AppResult<serde_json::Value> {
+    if canonical_uuid(id).is_none() {
+        return Err(AppError::BadRequest("invalid_ornn_skill_id".to_string()));
     }
     Ok(serde_json::json!({ "id_or_name": id }))
 }
@@ -475,8 +493,8 @@ pub fn validate_tool_arguments(tool_name: &str, arguments: &serde_json::Value) -
         "nyx_list_services" => &["query"],
         "nyx_search_tools" => &["query"],
         "nyx_call_tool" => &["tool_name", "arguments"],
-        "ornn_search_skills" => &["query", "limit"],
-        "ornn_get_skill" => &["id_or_name"],
+        "nyx_search_skills" => &["query", "limit"],
+        "nyx_get_skill" => &["source", "id"],
         _ => return Err(AppError::BadRequest("invalid_args".to_string())),
     };
     if object.keys().any(|key| !allowed.contains(&key.as_str())) {
@@ -496,7 +514,7 @@ pub fn validate_tool_arguments(tool_name: &str, arguments: &serde_json::Value) -
                 return Err(AppError::BadRequest("invalid_args".to_string()));
             }
         }
-        "ornn_search_skills" => {
+        "nyx_search_skills" => {
             validate_string(required(object, "query")?, true, 200)?;
             if let Some(limit) = object.get("limit")
                 && !matches!(limit.as_u64(), Some(1..=10))
@@ -504,12 +522,18 @@ pub fn validate_tool_arguments(tool_name: &str, arguments: &serde_json::Value) -
                 return Err(AppError::BadRequest("invalid_args".to_string()));
             }
         }
-        "ornn_get_skill" => {
-            let id = required(object, "id_or_name")?
+        "nyx_get_skill" => {
+            let source = required(object, "source")?
                 .as_str()
-                .filter(|value| *value == ORNN_DEMO_SKILL_GUID)
+                .filter(|value| matches!(*value, "bundled" | "ornn"))
                 .ok_or_else(|| AppError::BadRequest("invalid_args".to_string()))?;
-            debug_assert_eq!(id, ORNN_DEMO_SKILL_GUID);
+            let id = required(object, "id")?;
+            validate_string(id, true, 128)?;
+            if source == "ornn"
+                && canonical_uuid(id.as_str().expect("validated skill id")).is_none()
+            {
+                return Err(AppError::BadRequest("invalid_args".to_string()));
+            }
         }
         _ => unreachable!("tool name was matched above"),
     }
@@ -876,6 +900,45 @@ impl ModelToolResult {
     pub fn to_model_content(&self) -> String {
         serde_json::to_string(self).expect("model tool result serializes")
     }
+
+    pub fn result_preview(&self) -> String {
+        let preview = match &self.body {
+            serde_json::Value::String(text) => text.clone(),
+            value => serde_json::to_string(value).unwrap_or_else(|_| "null".to_string()),
+        };
+        truncate_utf8(
+            &preview,
+            MAX_TOOL_RESULT_PREVIEW_BYTES,
+            "\n...[preview truncated]",
+        )
+        .0
+    }
+
+    pub fn compacted_from_model_content(content: &str) -> String {
+        let parsed = serde_json::from_str::<serde_json::Value>(content).unwrap_or_default();
+        let status = parsed
+            .get("status")
+            .and_then(serde_json::Value::as_u64)
+            .and_then(|status| u16::try_from(status).ok())
+            .unwrap_or(0);
+        let body = parsed
+            .get("body")
+            .cloned()
+            .unwrap_or(serde_json::Value::Null);
+        let encoded = match body {
+            serde_json::Value::String(text) => text,
+            value => serde_json::to_string(&value).unwrap_or_else(|_| "null".to_string()),
+        };
+        let preview = truncate_utf8(
+            &encoded,
+            MAX_TOOL_RESULT_PREVIEW_BYTES,
+            "\n...[compacted for report]",
+        )
+        .0;
+        let mut compacted = Self::from_response(status, &preview);
+        compacted.truncated = true;
+        compacted.to_model_content()
+    }
 }
 
 fn scrub_credentials(value: &mut serde_json::Value) {
@@ -891,8 +954,44 @@ fn scrub_credentials(value: &mut serde_json::Value) {
                 scrub_credentials(value);
             }
         }
+        serde_json::Value::String(text) if is_secret_shaped_value(text) => {
+            *text = "[REDACTED]".to_string();
+        }
         _ => {}
     }
+}
+
+fn is_secret_shaped_value(value: &str) -> bool {
+    let value = value.trim();
+    if value.starts_with("Bearer ")
+        || value.starts_with("Basic ")
+        || value.starts_with("-----BEGIN PRIVATE KEY-----")
+        || value.starts_with("-----BEGIN RSA PRIVATE KEY-----")
+        || value.starts_with("-----BEGIN OPENSSH PRIVATE KEY-----")
+        || value.starts_with("github_pat_")
+        || value.starts_with("ghp_")
+        || value.starts_with("sk-proj-")
+        || value.starts_with("sk-live-")
+        || value.starts_with("sk_test_")
+    {
+        return true;
+    }
+    if value.starts_with("nyx_") && value.len() >= 24 {
+        return true;
+    }
+    let mut jwt = value.split('.');
+    matches!(
+        (jwt.next(), jwt.next(), jwt.next(), jwt.next()),
+        (Some(header), Some(payload), Some(signature), None)
+            if header.starts_with("eyJ")
+                && payload.len() >= 8
+                && signature.len() >= 8
+                && [header, payload, signature].iter().all(|segment| {
+                    segment.bytes().all(|byte| {
+                        byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_')
+                    })
+                })
+    )
 }
 
 fn is_credential_key(key: &str) -> bool {
@@ -923,7 +1022,46 @@ fn is_credential_key(key: &str) -> bool {
     )
 }
 
-pub fn extract_ornn_skill(value: &serde_json::Value) -> AppResult<(String, Option<String>)> {
+pub fn bundled_skill_matches(query: &str, requested_limit: usize) -> Vec<serde_json::Value> {
+    let query = query.trim().to_ascii_lowercase();
+    crate::services::assistant_direct::DIRECT_SKILLS
+        .iter()
+        .filter(|skill| {
+            skill.slug.to_ascii_lowercase().contains(&query)
+                || skill.label.to_ascii_lowercase().contains(&query)
+        })
+        .take(requested_limit.min(MAX_SKILL_SEARCH_RESULTS))
+        .map(|skill| {
+            serde_json::json!({
+                "source": "bundled",
+                "id": skill.slug,
+                "name": skill.label,
+                "description": serde_json::Value::Null,
+                "version": BUNDLED_SKILL_VERSION,
+                "fetchable": true,
+                "content_sha256": content_sha256(skill.body),
+            })
+        })
+        .collect()
+}
+
+pub fn bundled_skill_document(id: &str) -> AppResult<serde_json::Value> {
+    let skill = crate::services::assistant_direct::find_skill(id)
+        .ok_or_else(|| AppError::BadRequest("bundled_skill_not_found".to_string()))?;
+    Ok(skill_document(
+        "bundled",
+        skill.slug,
+        Some(BUNDLED_SKILL_VERSION),
+        skill.body,
+    ))
+}
+
+pub fn extract_ornn_skill(
+    value: &serde_json::Value,
+    id: &str,
+) -> AppResult<(serde_json::Value, Option<String>)> {
+    let id = canonical_uuid(id)
+        .ok_or_else(|| AppError::BadRequest("invalid_ornn_skill_id".to_string()))?;
     let mut matches = Vec::new();
     collect_skill_files(value, &mut matches);
     if matches.len() != 1 {
@@ -932,15 +1070,84 @@ pub fn extract_ornn_skill(value: &serde_json::Value) -> AppResult<(String, Optio
         ));
     }
     let version = find_string_field(value, "version").and_then(safe_version_token);
+    let document = skill_document("ornn", &id, version.as_deref(), matches.remove(0));
+    Ok((document, version))
+}
+
+fn skill_document(
+    source: &str,
+    id: &str,
+    version: Option<&str>,
+    source_content: &str,
+) -> serde_json::Value {
+    let digest = content_sha256(source_content);
+    let content_bytes_total = source_content.len();
+    let (delivered_content, content_truncated) = truncate_utf8(
+        source_content,
+        MAX_SKILL_CONTENT_BYTES,
+        "\n...[skill content truncated]",
+    );
+    let delivered_digest = content_sha256(&delivered_content);
     let fetched_at = Utc::now().to_rfc3339();
-    Ok((
-        format!(
-            "--- BEGIN untrusted skill content (Ornn, id={ORNN_DEMO_SKILL_GUID}, version={}, fetched {fetched_at}) ---\n{}\n--- END untrusted skill content ---",
-            version.as_deref().unwrap_or("unknown"),
-            matches.remove(0)
-        ),
-        version,
-    ))
+    let version_label = version.unwrap_or("unknown");
+    let fenced = format!(
+        "--- BEGIN untrusted skill content (source={source}, id={id}, version={version_label}, content_bytes_total={}, content_bytes_delivered={}, content_sha256={digest}, delivered_sha256={delivered_digest}, fetched_at={fetched_at}) ---\n{delivered_content}\n--- END untrusted skill content ---",
+        content_bytes_total,
+        delivered_content.len(),
+    );
+    serde_json::json!({
+        "source": source,
+        "id": id,
+        "version": version,
+        "content_sha256": digest,
+        "delivered_sha256": delivered_digest,
+        "content_bytes_total": content_bytes_total,
+        "content_bytes_delivered": delivered_content.len(),
+        "content_truncated": content_truncated,
+        "content": fenced,
+    })
+}
+
+pub fn skill_provenance(document: &serde_json::Value) -> Option<SkillProvenance> {
+    Some(SkillProvenance {
+        source: document.get("source")?.as_str()?.to_string(),
+        id: document.get("id")?.as_str()?.to_string(),
+        version: document
+            .get("version")
+            .and_then(serde_json::Value::as_str)
+            .map(str::to_string),
+        content_sha256: document.get("content_sha256")?.as_str()?.to_string(),
+        delivered_sha256: document.get("delivered_sha256")?.as_str()?.to_string(),
+        content_bytes_delivered: document
+            .get("content_bytes_delivered")?
+            .as_u64()?
+            .try_into()
+            .ok()?,
+    })
+}
+
+fn content_sha256(content: &str) -> String {
+    hex::encode(Sha256::digest(content.as_bytes()))
+}
+
+fn truncate_utf8(value: &str, max_bytes: usize, marker: &str) -> (String, bool) {
+    if value.len() <= max_bytes {
+        return (value.to_string(), false);
+    }
+    let marker = if marker.len() <= max_bytes {
+        marker
+    } else {
+        ""
+    };
+    let mut retained = max_bytes - marker.len();
+    while retained > 0 && !value.is_char_boundary(retained) {
+        retained -= 1;
+    }
+    let mut output = String::with_capacity(retained + marker.len());
+    output.push_str(&value[..retained]);
+    output.push_str(marker);
+    debug_assert!(output.len() <= max_bytes);
+    (output, true)
 }
 
 fn safe_version_token(version: String) -> Option<String> {
@@ -961,23 +1168,44 @@ pub fn project_ornn_search(
         .ok_or_else(|| AppError::BadRequest("ornn_search_response_invalid".to_string()))?;
     let matches = candidates
         .iter()
-        .take(requested_limit.min(10))
+        .take(requested_limit.min(MAX_SKILL_SEARCH_RESULTS))
         .filter_map(|value| value.as_object())
-        .map(|object| {
-            serde_json::json!({
-                "id": selected_field(object, &["id", "guid", "skillId"]),
+        .filter_map(|object| {
+            let id = ["id", "guid", "skillId"].iter().find_map(|key| {
+                object
+                    .get(*key)
+                    .and_then(serde_json::Value::as_str)
+                    .and_then(canonical_uuid)
+            })?;
+            Some(serde_json::json!({
+                "source": "ornn",
+                "id": id,
                 "name": selected_field(object, &["name", "slug"]),
                 "description": selected_field(object, &["description", "summary"]),
-                "createdAt": selected_field(object, &["createdAt", "created_at"]),
-                "updatedAt": selected_field(object, &["updatedAt", "updated_at"]),
-                "isSystemSkill": selected_field(object, &["isSystemSkill", "is_system_skill"]),
-                "isSystemForMe": selected_field(object, &["isSystemForMe", "is_system_for_me"]),
-                "creator": project_creator(object),
-                "accessReason": selected_field(object, &["accessReason", "access_reason"])
-            })
+                "version": selected_field(object, &["version"]),
+                "fetchable": true,
+                "content_sha256": serde_json::Value::Null,
+            }))
         })
         .collect::<Vec<_>>();
     Ok(serde_json::json!({ "matches": matches, "count": matches.len() }))
+}
+
+pub fn observed_ornn_skill_ids(projected: &serde_json::Value) -> Vec<String> {
+    projected
+        .get("matches")
+        .and_then(serde_json::Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(|row| row.get("id").and_then(serde_json::Value::as_str))
+        .filter_map(canonical_uuid)
+        .collect()
+}
+
+fn canonical_uuid(value: &str) -> Option<String> {
+    let parsed = uuid::Uuid::parse_str(value).ok()?;
+    let canonical = parsed.hyphenated().to_string();
+    (canonical == value).then_some(canonical)
 }
 
 fn find_result_array(value: &serde_json::Value) -> Option<&Vec<serde_json::Value>> {
@@ -1006,23 +1234,6 @@ fn find_result_array(value: &serde_json::Value) -> Option<&Vec<serde_json::Value
     }
 }
 
-fn project_creator(object: &serde_json::Map<String, serde_json::Value>) -> serde_json::Value {
-    let Some(creator) = ["creator", "createdBy", "created_by"]
-        .iter()
-        .find_map(|name| object.get(*name))
-    else {
-        return serde_json::Value::Null;
-    };
-    match creator {
-        serde_json::Value::String(_) | serde_json::Value::Number(_) => creator.clone(),
-        serde_json::Value::Object(creator) => serde_json::json!({
-            "id": selected_field(creator, &["id", "userId", "user_id"]),
-            "name": selected_field(creator, &["name", "displayName", "display_name"])
-        }),
-        _ => serde_json::Value::Null,
-    }
-}
-
 fn selected_field(
     object: &serde_json::Map<String, serde_json::Value>,
     names: &[&str],
@@ -1034,7 +1245,7 @@ fn selected_field(
         .unwrap_or(serde_json::Value::Null)
 }
 
-fn collect_skill_files(value: &serde_json::Value, matches: &mut Vec<String>) {
+fn collect_skill_files<'a>(value: &'a serde_json::Value, matches: &mut Vec<&'a str>) {
     match value {
         serde_json::Value::Object(object) => {
             let path = ["path", "name", "fileName", "filename"]
@@ -1045,7 +1256,7 @@ fn collect_skill_files(value: &serde_json::Value, matches: &mut Vec<String>) {
                     .iter()
                     .find_map(|key| object.get(*key).and_then(serde_json::Value::as_str))
             {
-                matches.push(content.to_string());
+                matches.push(content);
             }
             for child in object.values() {
                 collect_skill_files(child, matches);
@@ -1081,6 +1292,8 @@ fn find_string_field(value: &serde_json::Value, key: &str) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    const TEST_ORNN_SKILL_ID: &str = "ef726844-64d3-4791-aef3-8d28df9dcf9b";
 
     fn service(
         id: &str,
@@ -1128,36 +1341,53 @@ mod tests {
 
     #[test]
     fn eligibility_is_fail_closed_and_shared_by_fixed_descriptors() {
-        assert!(is_poc_operation_eligible(&endpoint(
-            "GET",
-            &["application/json; charset=utf-8"],
-            Some(false)
-        )));
-        assert!(is_poc_operation_eligible(&endpoint(
-            "HEAD",
-            &["application/vnd.example+json", "text/plain"],
-            Some(false)
-        )));
-        assert!(!is_poc_operation_eligible(&endpoint(
-            "POST",
-            &["application/json"],
-            Some(false)
-        )));
-        assert!(!is_poc_operation_eligible(&endpoint(
-            "GET",
-            &["application/json"],
-            None
-        )));
-        assert!(!is_poc_operation_eligible(&endpoint(
-            "GET",
-            &["application/json", "text/event-stream"],
-            Some(false)
-        )));
+        let public_service = service("one", "public", Vec::new());
+        assert!(is_poc_operation_eligible(
+            &public_service,
+            &endpoint("GET", &["application/json; charset=utf-8"], Some(false))
+        ));
+        assert!(is_poc_operation_eligible(
+            &public_service,
+            &endpoint(
+                "HEAD",
+                &["application/vnd.example+json", "text/plain"],
+                Some(false)
+            )
+        ));
+        assert!(!is_poc_operation_eligible(
+            &public_service,
+            &endpoint("POST", &["application/json"], Some(false))
+        ));
+        assert!(!is_poc_operation_eligible(
+            &public_service,
+            &endpoint("GET", &["application/json"], None)
+        ));
+        assert!(!is_poc_operation_eligible(
+            &public_service,
+            &endpoint(
+                "GET",
+                &["application/json", "text/event-stream"],
+                Some(false)
+            )
+        ));
         let mut generic = endpoint("GET", &["application/json"], Some(false));
         generic.endpoint_id = mcp_service::GENERIC_PROXY_ENDPOINT_ID.to_string();
-        assert!(!is_poc_operation_eligible(&generic));
-        assert!(is_poc_operation_eligible(&ornn_search_endpoint()));
-        assert!(is_poc_operation_eligible(&ornn_get_endpoint()));
+        assert!(!is_poc_operation_eligible(&public_service, &generic));
+        assert!(is_poc_operation_eligible(
+            &public_service,
+            &ornn_search_endpoint()
+        ));
+        assert!(is_poc_operation_eligible(
+            &public_service,
+            &ornn_get_endpoint()
+        ));
+
+        let mut internal = service("internal", "private", Vec::new());
+        internal.service_category = "InTeRnAl".to_string();
+        assert!(!is_poc_operation_eligible(
+            &internal,
+            &endpoint("GET", &["application/json"], Some(false))
+        ));
     }
 
     #[test]
@@ -1224,6 +1454,38 @@ mod tests {
         assert!(model.contains("credential_status"));
         assert!(model.contains("safe-name"));
         assert!(model.contains("truncated"));
+    }
+
+    #[test]
+    fn result_preview_is_redacted_and_independently_bounded() {
+        let result = ModelToolResult::from_response(
+            200,
+            &serde_json::json!({
+                "safe": "visible evidence",
+                "accessToken": "never-preview-this",
+                "nested": [{"x-api-key":"also-secret","value":"ok"}],
+                "derived": [
+                    "Bearer value-side-secret",
+                    "eyJhbGciOiJIUzI1NiJ9.cGF5bG9hZC1zZWNyZXQ.c2lnbmF0dXJlLXNlY3JldA",
+                    "nyx_clk_01234567890123456789012345678901",
+                    "ghp_012345678901234567890123456789012345",
+                    "ordinary-token-count-value"
+                ],
+                "padding": "x".repeat(MAX_TOOL_RESULT_PREVIEW_BYTES * 2),
+            })
+            .to_string(),
+        );
+        let preview = result.result_preview();
+        assert!(preview.len() <= MAX_TOOL_RESULT_PREVIEW_BYTES);
+        assert!(!preview.contains("never-preview-this"));
+        assert!(!preview.contains("also-secret"));
+        assert!(!preview.contains("value-side-secret"));
+        assert!(!preview.contains("cGF5bG9hZC1zZWNyZXQ"));
+        assert!(!preview.contains("nyx_clk_"));
+        assert!(!preview.contains("ghp_"));
+        assert!(preview.contains("ordinary-token-count-value"));
+        assert!(preview.contains("visible evidence"));
+        assert!(preview.contains("preview truncated"));
     }
 
     #[test]
@@ -1346,6 +1608,57 @@ mod tests {
     }
 
     #[test]
+    fn aevatar_operations_exist_only_when_present_in_canonical_catalog_view() {
+        let mut metadata_only = service(
+            "aevatar-user-service",
+            "aevatar",
+            vec![endpoint("GET", &["application/json"], Some(false))],
+        );
+        metadata_only.source = mcp_service::McpToolSource::UserManaged {
+            user_service_id: "aevatar-user-service".to_string(),
+            effective_owner_id: "owner".to_string(),
+            node_id: None,
+            has_server_credential: true,
+        };
+        let metadata = vec![metadata_only];
+        let without_catalog = ReadOnlyRegistry::new(&metadata, &[], None);
+        assert_eq!(without_catalog.operation_count(), 0);
+        assert!(without_catalog.resolve("aevatar__health").is_none());
+        assert_eq!(
+            without_catalog.list_services(None)["services"][0]["tool_count"],
+            0
+        );
+
+        let canonical = vec![service(
+            "aevatar-catalog-service",
+            "aevatar",
+            vec![endpoint("GET", &["application/json"], Some(false))],
+        )];
+        let with_catalog = ReadOnlyRegistry::new(&metadata, &canonical, None);
+        assert_eq!(with_catalog.operation_count(), 1);
+        assert!(with_catalog.resolve("aevatar__health").is_some());
+        assert_eq!(with_catalog.search("aevatar")["count"], 1);
+    }
+
+    #[test]
+    fn internal_category_services_are_neither_listed_advertised_nor_resolved() {
+        let mut internal = service(
+            "internal-service",
+            "internal-api",
+            vec![endpoint("GET", &["application/json"], Some(false))],
+        );
+        internal.service_category = "INTERNAL".to_string();
+        let services = vec![internal];
+        let registry = ReadOnlyRegistry::new(&services, &services, None);
+
+        assert_eq!(registry.service_count(), 0);
+        assert_eq!(registry.operation_count(), 0);
+        assert_eq!(registry.list_services(None)["count"], 0);
+        assert_eq!(registry.search("health")["count"], 0);
+        assert!(registry.resolve("internal-api__health").is_none());
+    }
+
+    #[test]
     fn unsupported_schema_semantics_are_not_advertised_counted_or_resolved() {
         let mut valid = endpoint("GET", &["application/json"], Some(false));
         valid.name = "valid".to_string();
@@ -1421,14 +1734,21 @@ mod tests {
                 serde_json::json!({"tool_name":"svc__op","arguments":{},"extra":1}),
             ),
             (
-                "ornn_search_skills",
+                "nyx_search_skills",
                 serde_json::json!({"query":"x","limit":11}),
             ),
             (
-                "ornn_search_skills",
+                "nyx_search_skills",
                 serde_json::json!({"query":"x","limit":1.5}),
             ),
-            ("ornn_get_skill", serde_json::json!({"id_or_name":"other"})),
+            (
+                "nyx_get_skill",
+                serde_json::json!({"source":"ornn","id":"other"}),
+            ),
+            (
+                "nyx_get_skill",
+                serde_json::json!({"source":"other","id":"nyxid"}),
+            ),
         ];
         for (tool, arguments) in cases {
             assert!(
@@ -1705,8 +2025,8 @@ mod tests {
                 }]
             }
         });
-        let (skill, _) = extract_ornn_skill(&hostile_skill).unwrap();
-        assert!(skill.contains("nyxid_proxy"));
+        let (skill, _) = extract_ornn_skill(&hostile_skill, TEST_ORNN_SKILL_ID).unwrap();
+        assert!(skill["content"].as_str().unwrap().contains("nyxid_proxy"));
 
         let registry = ReadOnlyRegistry::new(&services, &services, None);
         assert_eq!(registry.operation_count(), 1);
@@ -1727,7 +2047,7 @@ mod tests {
     fn ornn_search_projection_omits_hostile_extra_fields_and_caps_rows() {
         let body = serde_json::json!({
             "results": (0..12).map(|index| serde_json::json!({
-                "id": format!("guid-{index}"),
+                "guid": format!("00000000-0000-4000-8000-{index:012}"),
                 "name": format!("skill-{index}"),
                 "description": "safe",
                 "createdAt": "2026-08-13T00:00:00Z",
@@ -1746,12 +2066,26 @@ mod tests {
         let projected = project_ornn_search(&body, 3).unwrap();
         let encoded = projected.to_string();
         assert_eq!(projected["count"], 3);
+        assert_eq!(projected["matches"][0]["source"], "ornn");
+        assert_eq!(
+            projected["matches"][0]["content_sha256"],
+            serde_json::Value::Null
+        );
         assert!(!encoded.contains("hostile package body"));
         assert!(!encoded.contains("secret@example.com"));
         assert!(!encoded.contains("Bearer secret"));
         assert!(!encoded.contains("arbitrary"));
-        assert_eq!(projected["matches"][0]["creator"]["id"], "creator-1");
-        assert_eq!(projected["matches"][0]["creator"]["name"], "Creator");
+        for field in [
+            "creator",
+            "createdAt",
+            "updatedAt",
+            "accessReason",
+            "isSystemSkill",
+            "isSystemForMe",
+        ] {
+            assert!(projected["matches"][0].get(field).is_none());
+        }
+        assert_eq!(projected["matches"][0]["fetchable"], true);
     }
 
     #[test]
@@ -1759,7 +2093,7 @@ mod tests {
         let response = serde_json::json!({
             "data": {
                 "items": [{
-                    "id": ORNN_DEMO_SKILL_GUID,
+                    "guid": TEST_ORNN_SKILL_ID,
                     "name": "nyxid-service-call",
                     "description": "Reference",
                     "createdAt": "2026-08-13T00:00:00Z",
@@ -1775,7 +2109,7 @@ mod tests {
         });
         let projected = project_ornn_search(&response, 10).unwrap();
         assert_eq!(projected["count"], 1);
-        assert_eq!(projected["matches"][0]["id"], ORNN_DEMO_SKILL_GUID);
+        assert_eq!(projected["matches"][0]["id"], TEST_ORNN_SKILL_ID);
         assert_eq!(projected["matches"][0]["name"], "nyxid-service-call");
 
         let ambiguous = serde_json::json!({"items": [], "data": {"items": []}});
@@ -1788,25 +2122,36 @@ mod tests {
             "version": "1.1",
             "files": [{"path":"nyxid-service-call/SKILL.md","content":"reference"}]
         });
-        let (content, version) = extract_ornn_skill(&package).unwrap();
+        let (content, version) = extract_ornn_skill(&package, TEST_ORNN_SKILL_ID).unwrap();
         assert_eq!(version.as_deref(), Some("1.1"));
-        assert!(content.contains("reference"));
-        assert_eq!(content.matches("BEGIN untrusted skill content").count(), 1);
+        assert!(content["content"].as_str().unwrap().contains("reference"));
+        assert_eq!(
+            content["content"]
+                .as_str()
+                .unwrap()
+                .matches("BEGIN untrusted skill content")
+                .count(),
+            1
+        );
+        assert_eq!(content["source"], "ornn");
+        assert_eq!(content["id"], TEST_ORNN_SKILL_ID);
+        assert_eq!(content["content_sha256"], content_sha256("reference"));
 
         let duplicate = serde_json::json!({"files":[
             {"path":"SKILL.md","content":"one"},
             {"path":"nested/SKILL.md","content":"two"}
         ]});
-        assert!(extract_ornn_skill(&duplicate).is_err());
+        assert!(extract_ornn_skill(&duplicate, TEST_ORNN_SKILL_ID).is_err());
 
         let hostile_version = serde_json::json!({
             "version": "1.1\naccessToken=super-secret",
             "files": [{"path":"SKILL.md","content":"reference"}]
         });
-        let (content, version) = extract_ornn_skill(&hostile_version).unwrap();
+        let (content, version) = extract_ornn_skill(&hostile_version, TEST_ORNN_SKILL_ID).unwrap();
         assert_eq!(version, None);
-        assert!(content.contains("version=unknown"));
-        assert!(!content.contains("super-secret"));
+        let fenced = content["content"].as_str().unwrap();
+        assert!(fenced.contains("version=unknown"));
+        assert!(!fenced.contains("super-secret"));
     }
 
     #[test]
@@ -1821,8 +2166,13 @@ mod tests {
         });
         let raw = ModelToolResult::from_response(200, &package.to_string());
         assert!(raw.truncated);
-        let (skill, version) = extract_ornn_skill(raw.server_body()).unwrap();
-        assert!(skill.contains("reference content"));
+        let (skill, version) = extract_ornn_skill(raw.server_body(), TEST_ORNN_SKILL_ID).unwrap();
+        assert!(
+            skill["content"]
+                .as_str()
+                .unwrap()
+                .contains("reference content")
+        );
         assert_eq!(version.as_deref(), Some("1.1"));
         assert!(raw.to_model_content().len() <= MAX_TOOL_RESULT_BYTES);
     }
@@ -1836,8 +2186,72 @@ mod tests {
             },
             "error": null
         });
-        let (skill, version) = extract_ornn_skill(&response).unwrap();
-        assert!(skill.contains("reference"));
+        let (skill, version) = extract_ornn_skill(&response, TEST_ORNN_SKILL_ID).unwrap();
+        assert!(skill["content"].as_str().unwrap().contains("reference"));
         assert_eq!(version.as_deref(), Some("1.1"));
+    }
+
+    #[test]
+    fn bundled_skill_search_and_fetch_share_content_digest_and_provenance() {
+        let matches = bundled_skill_matches("NyxID", 10);
+        let row = matches
+            .iter()
+            .find(|row| row["id"] == "nyxid")
+            .expect("bundled NyxID skill is searchable");
+        let document = bundled_skill_document("nyxid").unwrap();
+
+        assert_eq!(row["source"], "bundled");
+        assert_eq!(row["content_sha256"], document["content_sha256"]);
+        assert_eq!(document["content_sha256"].as_str().unwrap().len(), 64);
+        assert!(
+            document["version"]
+                .as_str()
+                .unwrap()
+                .starts_with("bundled@")
+        );
+        let fenced = document["content"].as_str().unwrap();
+        assert!(fenced.contains("source=bundled"));
+        assert!(fenced.contains("content_sha256="));
+    }
+
+    #[test]
+    fn skill_content_is_capped_without_changing_full_content_digest() {
+        let full = "🙂\\\"".repeat(MAX_SKILL_CONTENT_BYTES);
+        let package = serde_json::json!({
+            "files": [{"path":"SKILL.md","content":full}]
+        });
+        let (document, _) = extract_ornn_skill(&package, TEST_ORNN_SKILL_ID).unwrap();
+
+        assert_eq!(document["content_sha256"], content_sha256(&full));
+        assert_eq!(document["content_truncated"], true);
+        assert_eq!(document["content_bytes_total"], full.len());
+        assert!(
+            document["content_bytes_delivered"].as_u64().unwrap() <= MAX_SKILL_CONTENT_BYTES as u64
+        );
+        let (delivered, _) = truncate_utf8(
+            &full,
+            MAX_SKILL_CONTENT_BYTES,
+            "\n...[skill content truncated]",
+        );
+        assert_eq!(document["delivered_sha256"], content_sha256(&delivered));
+        let fence = document["content"].as_str().unwrap();
+        assert!(fence.contains("content_bytes_total="));
+        assert!(fence.contains("content_bytes_delivered="));
+        assert!(fence.contains("delivered_sha256="));
+        assert!(document["content"].as_str().unwrap().len() < MAX_TOOL_RESULT_BYTES);
+    }
+
+    #[test]
+    fn ornn_search_admits_only_canonical_uuid_ids() {
+        let response = serde_json::json!({"items":[
+            {"id":"42","guid":TEST_ORNN_SKILL_ID,"name":"valid"},
+            {"guid":TEST_ORNN_SKILL_ID.to_ascii_uppercase(),"name":"uppercase"},
+            {"guid":"not-a-uuid","name":"invalid"}
+        ]});
+        let projected = project_ornn_search(&response, 10).unwrap();
+        assert_eq!(projected["count"], 1);
+        assert_eq!(observed_ornn_skill_ids(&projected), [TEST_ORNN_SKILL_ID]);
+        assert!(build_ornn_get_args(TEST_ORNN_SKILL_ID).is_ok());
+        assert!(build_ornn_get_args("not-a-uuid").is_err());
     }
 }

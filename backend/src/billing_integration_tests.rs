@@ -412,8 +412,8 @@ async fn billing_route_coverage_smoke() {
     let done = agent_sse.find("\"type\":\"done\"").unwrap();
     assert!(tool_started < tool_completed && tool_completed < final_text && final_text < done);
     assert_eq!(agent_tool_hits.load(Ordering::SeqCst), 1);
-    assert_eq!(direct_hops.load(Ordering::SeqCst), 4);
-    assert_direct_settled_usage_count(&db, &direct_catalog, 4).await;
+    assert_eq!(direct_hops.load(Ordering::SeqCst), 5);
+    assert_direct_settled_usage_count(&db, &direct_catalog, 5).await;
     exercised_routes.insert("/api/v1/assistant/direct/agent");
 
     call_mounted_route(
@@ -1422,6 +1422,20 @@ async fn start_billing_downstream() -> (
             assert_eq!(body["stream"], true);
             assert_eq!(body["stream_options"]["include_usage"], true);
             assert_eq!(body["messages"][0]["role"], "system");
+            let system_prompt = body["messages"][0]["content"]
+                .as_str()
+                .expect("agent system prompt");
+            if system_prompt.contains("REPORT PHASE:") {
+                return (
+                    [(axum::http::header::CONTENT_TYPE, "text/event-stream")],
+                    concat!(
+                        "data: {\"id\":\"agent-report\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"Chrono Sandbox is healthy.\"},\"finish_reason\":\"stop\"}]}\n\n",
+                        "data: {\"id\":\"agent-report\",\"choices\":[],\"usage\":{\"prompt_tokens\":9,\"completion_tokens\":4,\"total_tokens\":13}}\n\n",
+                        "data: [DONE]\n\n"
+                    ),
+                )
+                    .into_response();
+            }
             if body["tool_choice"] == "auto" {
                 let has_tool_result = body["messages"]
                     .as_array()
@@ -1440,8 +1454,8 @@ async fn start_billing_downstream() -> (
                     assert!(content.contains("healthy"));
                     assert!(content.contains("opensandbox_connected"));
                     concat!(
-                        "data: {\"id\":\"agent-final\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"Chrono Sandbox is healthy.\"},\"finish_reason\":\"stop\"}]}\n\n",
-                        "data: {\"id\":\"agent-final\",\"choices\":[],\"usage\":{\"prompt_tokens\":9,\"completion_tokens\":4,\"total_tokens\":13}}\n\n",
+                        "data: {\"id\":\"agent-evidence\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"Evidence collected.\"},\"finish_reason\":\"stop\"}]}\n\n",
+                        "data: {\"id\":\"agent-evidence\",\"choices\":[],\"usage\":{\"prompt_tokens\":9,\"completion_tokens\":4,\"total_tokens\":13}}\n\n",
                         "data: [DONE]\n\n"
                     )
                 } else {

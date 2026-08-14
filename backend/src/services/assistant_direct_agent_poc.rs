@@ -4,6 +4,7 @@ pub mod prompt;
 pub mod sse_decode;
 pub mod tools;
 
+use std::collections::HashSet;
 use std::convert::Infallible;
 use std::future::Future;
 use std::time::{Duration, Instant};
@@ -33,6 +34,10 @@ pub const MAX_TOOL_CALLS: usize = 8;
 pub const MAX_AGENT_CONTENT_BYTES: usize = 128 * 1024;
 pub const MAX_UPSTREAM_BODY_BYTES: usize = 448 * 1024;
 pub const WALL_DEADLINE: Duration = Duration::from_secs(180);
+// Request-body headroom retained after compaction. This covers roughly two
+// maximally escaped 16 KiB tool envelopes before the next compaction pass; it
+// is not a model-output token reservation.
+const POST_COMPACTION_REQUEST_HEADROOM_BYTES: usize = 64 * 1024;
 const FIRST_BYTE_TIMEOUT: Duration = Duration::from_secs(30);
 const HOP_IDLE_TIMEOUT: Duration = Duration::from_secs(60);
 const TOOL_TIMEOUT: Duration = Duration::from_secs(60);
@@ -74,6 +79,7 @@ enum AgentFrame<'a> {
         duration_ms: u64,
         result_bytes: usize,
         truncated: bool,
+        result_preview: &'a str,
     },
     #[serde(rename = "error")]
     Error { code: &'a str, message: &'a str },
@@ -105,6 +111,7 @@ enum RunError {
     Cancelled,
     Deadline,
     ContextOverflow,
+    Plan,
     Upstream,
     Internal,
 }
@@ -154,10 +161,13 @@ struct RunContext {
     llm_calls: usize,
     tool_calls: usize,
     ornn_skill_fetched: bool,
+    observed_ornn_skill_ids: HashSet<String>,
     in_flight_tool: Option<InFlightTool>,
     budget: AgentRunBudget,
     #[cfg(test)]
     test_dispatch_observer: TestDispatchObserver,
+    #[cfg(test)]
+    test_scripted_hops: Option<std::collections::VecDeque<HopResult>>,
 }
 
 #[derive(Clone)]
@@ -181,7 +191,7 @@ struct ToolCompletion<'a> {
     started: Instant,
     service_slug: &'a str,
     endpoint: &'a str,
-    skill_version: Option<&'a str>,
+    skill_provenance: Option<&'a tools::SkillProvenance>,
 }
 
 pub(crate) struct RunInputs {
@@ -212,10 +222,13 @@ pub(crate) async fn run(inputs: RunInputs) {
         llm_calls: 0,
         tool_calls: 0,
         ornn_skill_fetched: false,
+        observed_ornn_skill_ids: HashSet::new(),
         in_flight_tool: None,
         budget: AgentRunBudget::default(),
         #[cfg(test)]
         test_dispatch_observer: TestDispatchObserver::default(),
+        #[cfg(test)]
+        test_scripted_hops: None,
     };
     let cancellation = run.cancellation.clone();
     let wall_deadline = run.budget.wall_deadline;
@@ -275,44 +288,54 @@ impl RunContext {
         self.stage("understand", "started", "Loading connected read operations")
             .await?;
         self.check_cancelled()?;
-        let catalog = mcp_service::load_operation_catalog(
-            &self.state.db,
-            &self.state.node_ws_manager,
-            &self.auth_user.user_id.to_string(),
-            mcp_service::NodeScope::Unrestricted,
-            mcp_service::ServiceScope::Unrestricted,
-        )
-        .await
-        .map_err(|_| {
-            tracing::warn!(
-                run_id = %self.run_id,
-                failure_class = "operation_catalog_load_failed",
-                "assistant_agent_poc_registry_failed"
-            );
-            RunError::Internal
-        })?;
-        // The canonical operation catalog intentionally omits executable
-        // services with no publishable endpoint rows. Ornn has that production
-        // shape, so resolve its authentic connected UserService separately from
-        // the pre-publication metadata loader and use it only for the two fixed
-        // POC descriptors.
-        let connected_services = mcp_service::load_user_tools_all_scoped(
-            &self.state.db,
-            &self.state.node_ws_manager,
-            &self.auth_user.user_id.to_string(),
-            mcp_service::NodeScope::Unrestricted,
-        )
-        .await
-        .map_err(|_| {
-            tracing::warn!(
-                run_id = %self.run_id,
-                failure_class = "connected_service_load_failed",
-                "assistant_agent_poc_registry_failed"
-            );
-            RunError::Internal
-        })?;
+        #[cfg(test)]
+        let scripted = self.test_scripted_hops.is_some();
+        #[cfg(not(test))]
+        let scripted = false;
+        let (connected_services, operation_services) = if scripted {
+            (Vec::new(), Vec::new())
+        } else {
+            let catalog = mcp_service::load_operation_catalog(
+                &self.state.db,
+                &self.state.node_ws_manager,
+                &self.auth_user.user_id.to_string(),
+                mcp_service::NodeScope::Unrestricted,
+                mcp_service::ServiceScope::Unrestricted,
+            )
+            .await
+            .map_err(|_| {
+                tracing::warn!(
+                    run_id = %self.run_id,
+                    failure_class = "operation_catalog_load_failed",
+                    "assistant_agent_poc_registry_failed"
+                );
+                RunError::Internal
+            })?;
+            // The canonical operation catalog intentionally omits executable
+            // services with no publishable endpoint rows. Ornn has that production
+            // shape, so resolve its authentic connected UserService separately from
+            // the pre-publication metadata loader and use it only for the two fixed
+            // POC descriptors.
+            let connected_services = mcp_service::load_user_tools_all_scoped(
+                &self.state.db,
+                &self.state.node_ws_manager,
+                &self.auth_user.user_id.to_string(),
+                mcp_service::NodeScope::Unrestricted,
+            )
+            .await
+            .map_err(|_| {
+                tracing::warn!(
+                    run_id = %self.run_id,
+                    failure_class = "connected_service_load_failed",
+                    "assistant_agent_poc_registry_failed"
+                );
+                RunError::Internal
+            })?;
+            (connected_services, catalog.services)
+        };
         let ornn_service = tools::resolve_ornn_service(&connected_services);
-        let registry = ReadOnlyRegistry::new(&connected_services, &catalog.services, ornn_service);
+        let registry =
+            ReadOnlyRegistry::new(&connected_services, &operation_services, ornn_service);
         let detail = format!(
             "{} services · {} read operations",
             registry.service_count(),
@@ -331,27 +354,10 @@ impl RunContext {
                 Some("plan"),
             )
             .await?;
+        self.accept_plan_hop(&plan, &mut messages)?;
         self.stage("plan", "completed", "Plan ready").await?;
         self.stage("execute", "started", "Executing eligible typed reads")
             .await?;
-
-        match planning_transition(&plan) {
-            PlanningTransition::Execute => {
-                messages.push(serde_json::json!({"role":"assistant","content":plan.text}));
-            }
-            PlanningTransition::ExecuteBatch => {
-                self.execute_tool_batch(&registry, &plan, &mut messages)
-                    .await?;
-            }
-            PlanningTransition::Done => {
-                self.stage("execute", "completed", "Planning ended the run")
-                    .await?;
-                self.stage("final", "started", "No final answer was produced")
-                    .await?;
-                self.finish_success(&plan.finish_reason).await?;
-                return Ok(());
-            }
-        }
 
         let finish_reason = loop {
             self.check_cancelled()?;
@@ -365,6 +371,7 @@ impl RunContext {
                     .await?;
                 self.stage("final", "started", "Writing the grounded answer")
                     .await?;
+                self.compact_context_for_hop(&mut messages, AgentPhase::Final)?;
                 let final_hop = self
                     .chrono_hop(
                         &messages,
@@ -373,23 +380,34 @@ impl RunContext {
                         Some("final"),
                     )
                     .await?;
-                self.append_skipped_tool_messages(&mut messages, &final_hop.tool_calls);
+                validate_report_hop(&final_hop)?;
                 break final_hop.finish_reason;
             }
 
+            self.compact_context_for_hop(&mut messages, AgentPhase::Execute)?;
             let hop = self
                 .chrono_hop(&messages, AgentPhase::Execute, ToolMode::Enabled, None)
                 .await?;
             if hop.finish_reason != "tool_calls" || hop.tool_calls.is_empty() {
+                if !hop.tool_calls.is_empty() {
+                    return Err(RunError::Upstream);
+                }
+                append_assistant_message(&mut messages, &hop.text);
                 self.stage("execute", "completed", "Read execution complete")
                     .await?;
-                self.stage("final", "started", "Writing the grounded answer")
+                self.stage("final", "started", "Writing the grounded report")
                     .await?;
-                if !hop.text.is_empty() {
-                    self.text_delta("final", &hop.text).await?;
-                }
-                self.append_skipped_tool_messages(&mut messages, &hop.tool_calls);
-                break hop.finish_reason;
+                self.compact_context_for_hop(&mut messages, AgentPhase::Final)?;
+                let final_hop = self
+                    .chrono_hop(
+                        &messages,
+                        AgentPhase::Final,
+                        ToolMode::Disabled,
+                        Some("final"),
+                    )
+                    .await?;
+                validate_report_hop(&final_hop)?;
+                break final_hop.finish_reason;
             }
 
             self.execute_tool_batch(&registry, &hop, &mut messages)
@@ -430,6 +448,32 @@ impl RunContext {
         Ok(())
     }
 
+    fn accept_plan_hop(
+        &self,
+        hop: &HopResult,
+        messages: &mut Vec<serde_json::Value>,
+    ) -> Result<(), RunError> {
+        planning_transition(hop)?;
+        messages.push(serde_json::json!({"role":"assistant","content":hop.text}));
+        Ok(())
+    }
+
+    fn compact_context_for_hop(
+        &self,
+        messages: &mut Vec<serde_json::Value>,
+        phase: AgentPhase,
+    ) -> Result<(), RunError> {
+        let target = MAX_UPSTREAM_BODY_BYTES
+            .checked_sub(POST_COMPACTION_REQUEST_HEADROOM_BYTES)
+            .ok_or(RunError::ContextOverflow)?;
+        while hop_body_bytes(&self.request, messages, phase)? > target {
+            if !compact_oldest_complete_tool_exchange(messages) {
+                return Err(RunError::ContextOverflow);
+            }
+        }
+        Ok(())
+    }
+
     fn should_force_final(&self) -> bool {
         self.llm_calls.saturating_add(1) >= self.budget.max_llm_calls
             || self.tool_calls >= self.budget.max_tool_calls
@@ -459,6 +503,24 @@ impl RunContext {
         let payload = serde_json::to_vec(&body).map_err(|_| RunError::Internal)?;
         if payload.len() > MAX_UPSTREAM_BODY_BYTES {
             return Err(RunError::ContextOverflow);
+        }
+
+        #[cfg(test)]
+        if self.test_scripted_hops.is_some() {
+            self.test_dispatch_observer
+                .upstream_dispatches
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            let hop = self
+                .test_scripted_hops
+                .as_mut()
+                .and_then(std::collections::VecDeque::pop_front)
+                .ok_or(RunError::Upstream)?;
+            if let Some(stage) = visible_stage
+                && !hop.text.is_empty()
+            {
+                self.text_delta(stage, &hop.text).await?;
+            }
+            return Ok(hop);
         }
 
         let mut request = Request::builder()
@@ -588,8 +650,12 @@ impl RunContext {
         call: &ReassembledToolCall,
     ) -> Result<ModelToolResult, RunError> {
         self.check_cancelled()?;
-        let arguments: serde_json::Value =
-            serde_json::from_str(&call.arguments).unwrap_or(serde_json::Value::Null);
+        let arguments: serde_json::Value = if call.arguments.len() <= tools::MAX_TOOL_ARGUMENT_BYTES
+        {
+            serde_json::from_str(&call.arguments).unwrap_or(serde_json::Value::Null)
+        } else {
+            serde_json::Value::Null
+        };
         let (service_slug, endpoint_name) = tool_identity(registry, &call.name, &arguments);
         let public_identity = public_tool_identity(call, self.llm_calls);
         let started = Instant::now();
@@ -611,7 +677,7 @@ impl RunContext {
                 started,
                 service_slug: &service_slug,
                 endpoint: &endpoint_name,
-                skill_version: None,
+                skill_provenance: None,
             })
             .await?;
             return Ok(result);
@@ -637,7 +703,7 @@ impl RunContext {
                 ))
             }
         };
-        let (result, outcome, skill_version) = match result {
+        let (result, outcome, skill_provenance) = match result {
             Ok(value) => value,
             Err(error) => {
                 tracing::warn!(
@@ -665,7 +731,7 @@ impl RunContext {
             started,
             service_slug: &service_slug,
             endpoint: &endpoint_name,
-            skill_version: skill_version.as_deref(),
+            skill_provenance: skill_provenance.as_ref(),
         })
         .await?;
         Ok(result)
@@ -703,14 +769,21 @@ impl RunContext {
         registry: &ReadOnlyRegistry<'_>,
         tool_name: &str,
         arguments: &serde_json::Value,
-    ) -> Result<(ModelToolResult, &'static str, Option<String>), &'static str> {
+    ) -> Result<
+        (
+            ModelToolResult,
+            &'static str,
+            Option<tools::SkillProvenance>,
+        ),
+        &'static str,
+    > {
         if !matches!(
             tool_name,
             "nyx_list_services"
                 | "nyx_search_tools"
                 | "nyx_call_tool"
-                | "ornn_search_skills"
-                | "ornn_get_skill"
+                | "nyx_search_skills"
+                | "nyx_get_skill"
         ) {
             return Err("unknown_tool");
         }
@@ -750,39 +823,95 @@ impl RunContext {
                         (result, outcome, None)
                     })
             }
-            "ornn_search_skills" => {
-                let service = registry.ornn_service().ok_or("ornn_not_connected")?;
-                let endpoint = tools::ornn_search_endpoint();
-                let args =
-                    tools::validate_ornn_search_args(arguments).map_err(|_| "invalid_args")?;
-                let raw = self.execute_endpoint(service, &endpoint, &args).await?;
-                if !(200..300).contains(&raw.status) {
-                    return Ok((raw, "failed", None));
-                }
+            "nyx_search_skills" => {
+                let args = tools::build_ornn_search_args(arguments).map_err(|_| "invalid_args")?;
+                let query = arguments["query"]
+                    .as_str()
+                    .expect("validated skill search query");
                 let requested_limit = args["limit"].as_u64().unwrap_or(10) as usize;
-                let projected = tools::project_ornn_search(raw.server_body(), requested_limit)
-                    .map_err(|_| "ornn_search_response_invalid")?;
+                let mut matches = tools::bundled_skill_matches(query, requested_limit);
+                let mut ornn_status = if registry.ornn_service().is_some() {
+                    "not_queried"
+                } else {
+                    "not_connected"
+                };
+                let remaining = requested_limit.saturating_sub(matches.len());
+
+                if remaining > 0
+                    && let Some(service) = registry.ornn_service()
+                {
+                    ornn_status = "failed";
+                    let endpoint = tools::ornn_search_endpoint();
+                    let mut ornn_args = args;
+                    ornn_args["limit"] = serde_json::json!(remaining);
+                    if let Ok(raw) = self.execute_endpoint(service, &endpoint, &ornn_args).await
+                        && (200..300).contains(&raw.status)
+                        && let Ok(projected) =
+                            tools::project_ornn_search(raw.server_body(), remaining)
+                    {
+                        self.observed_ornn_skill_ids
+                            .extend(tools::observed_ornn_skill_ids(&projected));
+                        if let Some(rows) = projected["matches"].as_array() {
+                            matches.extend(rows.iter().cloned());
+                        }
+                        ornn_status = "ok";
+                    }
+                }
+                let value = serde_json::json!({
+                    "matches": matches,
+                    "count": matches.len(),
+                    "sources": {
+                        "bundled": "ok",
+                        "ornn": ornn_status,
+                    }
+                });
                 Ok((
-                    ModelToolResult::from_response(200, &projected.to_string()),
+                    ModelToolResult::from_response(200, &value.to_string()),
                     "ok",
                     None,
                 ))
             }
-            "ornn_get_skill" => {
+            "nyx_get_skill" => {
+                let source = arguments["source"]
+                    .as_str()
+                    .expect("validated skill source");
+                let id = arguments["id"].as_str().expect("validated skill id");
+                if source == "bundled" {
+                    let document =
+                        tools::bundled_skill_document(id).map_err(|_| "skill_not_found")?;
+                    let provenance =
+                        tools::skill_provenance(&document).ok_or("skill_provenance_invalid")?;
+                    return Ok((
+                        ModelToolResult::from_response(200, &document.to_string()),
+                        "ok",
+                        Some(provenance),
+                    ));
+                }
+
+                if !self.observed_ornn_skill_ids.contains(id) {
+                    return Err("ornn_skill_not_observed");
+                }
                 if self.ornn_skill_fetched {
                     return Err("ornn_skill_already_fetched");
                 }
                 let service = registry.ornn_service().ok_or("ornn_not_connected")?;
                 let endpoint = tools::ornn_get_endpoint();
-                let args = tools::validate_ornn_get_args(arguments).map_err(|_| "invalid_args")?;
+                let args = tools::build_ornn_get_args(id).map_err(|_| "invalid_args")?;
                 self.ornn_skill_fetched = true;
                 let raw = self.execute_endpoint(service, &endpoint, &args).await?;
                 if !(200..300).contains(&raw.status) {
                     return Ok((raw, "failed", None));
                 }
-                let (fenced, version) = tools::extract_ornn_skill(raw.server_body())
+                let (document, version) = tools::extract_ornn_skill(raw.server_body(), id)
                     .map_err(|_| "ornn_skill_package_invalid")?;
-                Ok((ModelToolResult::from_response(200, &fenced), "ok", version))
+                let provenance =
+                    tools::skill_provenance(&document).ok_or("skill_provenance_invalid")?;
+                debug_assert_eq!(provenance.version, version);
+                Ok((
+                    ModelToolResult::from_response(200, &document.to_string()),
+                    "ok",
+                    Some(provenance),
+                ))
             }
             _ => Err("unknown_tool"),
         }
@@ -796,7 +925,7 @@ impl RunContext {
     ) -> Result<ModelToolResult, &'static str> {
         // The exact same predicate constructs the advertised view and guards
         // immediately before execution.
-        if !tools::is_poc_operation_eligible(endpoint) {
+        if !tools::is_poc_operation_eligible(service, endpoint) {
             return Err("operation_not_allowed");
         }
         let descriptor = mcp_service::build_mcp_operation_descriptor(service, endpoint, arguments)
@@ -855,6 +984,7 @@ impl RunContext {
 
     async fn complete_tool(&mut self, completion: ToolCompletion<'_>) -> Result<(), RunError> {
         let duration_ms = elapsed_ms(completion.started);
+        let result_preview = completion.result.result_preview();
         self.audit(
             "assistant_agent_poc_tool_call",
             tool_audit_data(&self.run_id, &completion, duration_ms),
@@ -868,6 +998,7 @@ impl RunContext {
             duration_ms,
             result_bytes: completion.result.bytes,
             truncated: completion.result.truncated,
+            result_preview: &result_preview,
         })
         .await
     }
@@ -877,6 +1008,7 @@ impl RunContext {
             return;
         };
         let result = ModelToolResult::synthetic("outcome_uncertain");
+        let result_preview = result.result_preview();
         let duration_ms = elapsed_ms(tool.started);
         self.audit(
             "assistant_agent_poc_tool_call",
@@ -889,7 +1021,7 @@ impl RunContext {
                     started: tool.started,
                     service_slug: &tool.service_slug,
                     endpoint: &tool.endpoint,
-                    skill_version: None,
+                    skill_provenance: None,
                 },
                 duration_ms,
             ),
@@ -904,30 +1036,9 @@ impl RunContext {
                     duration_ms,
                     result_bytes: result.bytes,
                     truncated: result.truncated,
+                    result_preview: &result_preview,
                 })
                 .await;
-        }
-    }
-
-    fn append_skipped_tool_messages(
-        &self,
-        messages: &mut Vec<serde_json::Value>,
-        calls: &[ReassembledToolCall],
-    ) {
-        if calls.is_empty() {
-            return;
-        }
-        messages.push(serde_json::json!({
-            "role":"assistant",
-            "content":null,
-            "tool_calls": calls.iter().map(tool_call_value).collect::<Vec<_>>()
-        }));
-        for call in calls {
-            messages.push(serde_json::json!({
-                "role":"tool",
-                "tool_call_id":call.id,
-                "content":ModelToolResult::synthetic("tools_disabled").to_model_content()
-            }));
         }
     }
 
@@ -979,6 +1090,10 @@ impl RunContext {
                 "context_overflow",
                 "The bounded agent context is too large.",
             ),
+            RunError::Plan => (
+                "upstream_failed",
+                "The Plan phase ended before a usable plan was produced.",
+            ),
             RunError::Upstream => ("upstream_failed", "The Chrono stream failed."),
             RunError::Internal => ("internal", "The agent run failed."),
             RunError::Cancelled => unreachable!(),
@@ -1024,6 +1139,7 @@ fn run_error_class(error: RunError) -> &'static str {
         RunError::Cancelled => "cancelled",
         RunError::Deadline => "deadline_exceeded",
         RunError::ContextOverflow => "context_overflow",
+        RunError::Plan => "plan_protocol_failed",
         RunError::Upstream => "upstream_failed",
         RunError::Internal => "internal",
     }
@@ -1061,20 +1177,116 @@ enum ToolMode {
     Enabled,
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-enum PlanningTransition {
-    Execute,
-    ExecuteBatch,
-    Done,
+fn planning_transition(hop: &HopResult) -> Result<(), RunError> {
+    // Plan requests do not declare tools. A tool call here is upstream
+    // protocol drift, never an executable first batch.
+    if !hop.tool_calls.is_empty() || hop.finish_reason == "tool_calls" {
+        return Err(RunError::Plan);
+    }
+    (hop.finish_reason == "stop")
+        .then_some(())
+        .ok_or(RunError::Plan)
 }
 
-fn planning_transition(hop: &HopResult) -> PlanningTransition {
-    match hop.finish_reason.as_str() {
-        "stop" => PlanningTransition::Execute,
-        "tool_calls" if !hop.tool_calls.is_empty() => PlanningTransition::ExecuteBatch,
-        "tool_calls" => PlanningTransition::Done,
-        _ => PlanningTransition::Done,
+fn validate_report_hop(hop: &HopResult) -> Result<(), RunError> {
+    if !hop.tool_calls.is_empty() || hop.finish_reason == "tool_calls" {
+        return Err(RunError::Upstream);
     }
+    Ok(())
+}
+
+fn hop_body_bytes(
+    request: &DirectChatRequest,
+    messages: &[serde_json::Value],
+    phase: AgentPhase,
+) -> Result<usize, RunError> {
+    serde_json::to_vec(&build_hop_body(
+        request,
+        messages,
+        phase,
+        if phase == AgentPhase::Execute {
+            ToolMode::Enabled
+        } else {
+            ToolMode::Disabled
+        },
+    ))
+    .map(|body| body.len())
+    .map_err(|_| RunError::Internal)
+}
+
+fn compact_oldest_complete_tool_exchange(messages: &mut Vec<serde_json::Value>) -> bool {
+    const COMPACTED_MARKER: &str = "[NyxID compacted completed tool exchange]";
+    for start in 0..messages.len() {
+        let Some(assistant) = messages[start].as_object() else {
+            continue;
+        };
+        if assistant.get("role").and_then(serde_json::Value::as_str) != Some("assistant")
+            || assistant.get("content").and_then(serde_json::Value::as_str)
+                == Some(COMPACTED_MARKER)
+        {
+            continue;
+        }
+        let Some(calls) = assistant
+            .get("tool_calls")
+            .and_then(serde_json::Value::as_array)
+            .filter(|calls| !calls.is_empty())
+        else {
+            continue;
+        };
+        let end = start + 1 + calls.len();
+        if end > messages.len() {
+            continue;
+        }
+        let complete = calls
+            .iter()
+            .zip(&messages[start + 1..end])
+            .all(|(call, reply)| {
+                let call_id = call.get("id").and_then(serde_json::Value::as_str);
+                reply.get("role").and_then(serde_json::Value::as_str) == Some("tool")
+                    && reply
+                        .get("tool_call_id")
+                        .and_then(serde_json::Value::as_str)
+                        == call_id
+            });
+        if !complete {
+            continue;
+        }
+
+        let compacted_calls = calls
+            .iter()
+            .map(|call| {
+                let id = call.get("id").cloned().unwrap_or(serde_json::Value::Null);
+                let safe_name = call
+                    .pointer("/function/name")
+                    .and_then(serde_json::Value::as_str)
+                    .map(safe_tool_name)
+                    .unwrap_or("unknown_tool");
+                serde_json::json!({
+                    "id": id,
+                    "type": "function",
+                    "function": {"name": safe_name, "arguments": "{}"}
+                })
+            })
+            .collect::<Vec<_>>();
+        let mut replacement = Vec::with_capacity(1 + calls.len());
+        replacement.push(serde_json::json!({
+            "role": "assistant",
+            "content": COMPACTED_MARKER,
+            "tool_calls": compacted_calls,
+        }));
+        replacement.extend(messages[start + 1..end].iter().map(|reply| {
+            serde_json::json!({
+                "role": "tool",
+                "tool_call_id": reply["tool_call_id"],
+                "content": ModelToolResult::compacted_from_model_content(
+                    reply.get("content").and_then(serde_json::Value::as_str).unwrap_or("")
+                )
+            })
+        }));
+        messages.splice(start..end, replacement);
+        return true;
+    }
+    false
 }
 
 fn outcome_for_status(status: u16) -> &'static str {
@@ -1101,11 +1313,14 @@ fn build_hop_body(
         "model": request.model.as_deref().unwrap_or(assistant_direct::DEFAULT_DIRECT_MODEL),
         "stream": true,
         "stream_options": {"include_usage": true},
-        "messages": body_messages,
-        "parallel_tool_calls": false,
-        "tools": tools::agent_tool_definitions(),
-        "tool_choice": match tool_mode { ToolMode::Enabled => "auto", ToolMode::Disabled => "none" }
+        "messages": body_messages
     });
+    if matches!(tool_mode, ToolMode::Enabled) {
+        body["parallel_tool_calls"] = serde_json::Value::Bool(false);
+        body["tools"] = serde_json::to_value(tools::agent_tool_definitions())
+            .expect("agent tool definitions serialize");
+        body["tool_choice"] = serde_json::Value::String("auto".to_string());
+    }
     if let Some(effort) = &request.effort {
         body["reasoning_effort"] = serde_json::Value::String(effort.clone());
     }
@@ -1115,9 +1330,24 @@ fn build_hop_body(
 fn assistant_tool_call_message(hop: &HopResult) -> serde_json::Value {
     serde_json::json!({
         "role":"assistant",
-        "content": if hop.text.is_empty() { serde_json::Value::Null } else { serde_json::Value::String(hop.text.clone()) },
+        "content": assistant_message_content(&hop.text),
         "tool_calls": hop.tool_calls.iter().map(tool_call_value).collect::<Vec<_>>()
     })
+}
+
+fn append_assistant_message(messages: &mut Vec<serde_json::Value>, text: &str) {
+    messages.push(serde_json::json!({
+        "role": "assistant",
+        "content": assistant_message_content(text),
+    }));
+}
+
+fn assistant_message_content(text: &str) -> serde_json::Value {
+    if text.is_empty() {
+        serde_json::Value::Null
+    } else {
+        serde_json::Value::String(text.to_string())
+    }
 }
 
 fn append_assistant_tool_call_message(messages: &mut Vec<serde_json::Value>, hop: &HopResult) {
@@ -1161,8 +1391,8 @@ fn tool_identity(
                 )
             })
             .unwrap_or_else(|| ("nyxid".to_string(), "unknown_operation".to_string())),
-        "ornn_search_skills" => ("ornn-api".to_string(), "skill_search".to_string()),
-        "ornn_get_skill" => ("ornn-api".to_string(), "skill_fetch".to_string()),
+        "nyx_search_skills" => ("skills".to_string(), "search".to_string()),
+        "nyx_get_skill" => ("skills".to_string(), "fetch".to_string()),
         "nyx_search_tools" => ("nyxid".to_string(), "tool_catalog".to_string()),
         "nyx_list_services" => ("nyxid".to_string(), "connected_services".to_string()),
         _ => ("nyxid".to_string(), "unknown_tool".to_string()),
@@ -1181,8 +1411,8 @@ fn safe_tool_name(name: &str) -> &'static str {
         "nyx_list_services" => "nyx_list_services",
         "nyx_search_tools" => "nyx_search_tools",
         "nyx_call_tool" => "nyx_call_tool",
-        "ornn_search_skills" => "ornn_search_skills",
-        "ornn_get_skill" => "ornn_get_skill",
+        "nyx_search_skills" => "nyx_search_skills",
+        "nyx_get_skill" => "nyx_get_skill",
         _ => "unknown_tool",
     }
 }
@@ -1203,8 +1433,12 @@ fn tool_audit_data(
         "bytes": completion.result.bytes,
         "truncated": completion.result.truncated,
         "duration_ms": duration_ms,
-        "ornn_skill_id": if completion.public_identity.tool == "ornn_get_skill" { Some(tools::ORNN_DEMO_SKILL_GUID) } else { None },
-        "ornn_skill_version": completion.skill_version
+        "skill_source": completion.skill_provenance.map(|value| value.source.as_str()),
+        "skill_id": completion.skill_provenance.map(|value| value.id.as_str()),
+        "skill_version": completion.skill_provenance.and_then(|value| value.version.as_deref()),
+        "skill_content_sha256": completion.skill_provenance.map(|value| value.content_sha256.as_str()),
+        "skill_delivered_sha256": completion.skill_provenance.map(|value| value.delivered_sha256.as_str()),
+        "skill_content_bytes_delivered": completion.skill_provenance.map(|value| value.content_bytes_delivered)
     })
 }
 
@@ -1224,6 +1458,28 @@ mod tests {
             br#"{"messages":[{"role":"user","content":"hello"}],"model":"gpt-5.5"}"#,
         )
         .unwrap()
+    }
+
+    fn test_ornn_service() -> mcp_service::McpToolService {
+        mcp_service::McpToolService {
+            service_id: "ornn-user-service".to_string(),
+            service_name: "Ornn API".to_string(),
+            service_slug: "ornn-api".to_string(),
+            description: None,
+            service_category: "skills".to_string(),
+            endpoints: Vec::new(),
+            durable_endpoint_metadata: std::collections::HashMap::new(),
+            source: mcp_service::McpToolSource::UserManaged {
+                user_service_id: "ornn-user-service".to_string(),
+                effective_owner_id: TEST_USER_ID.to_string(),
+                node_id: None,
+                has_server_credential: true,
+            },
+            executable: true,
+            is_generic_proxy: false,
+            invalid_openapi_contract: false,
+            recommended_skills: Vec::new(),
+        }
     }
 
     async fn test_run(
@@ -1260,13 +1516,36 @@ mod tests {
                 llm_calls: 0,
                 tool_calls: 0,
                 ornn_skill_fetched: false,
+                observed_ornn_skill_ids: HashSet::new(),
                 in_flight_tool: None,
                 budget,
                 test_dispatch_observer: observer.clone(),
+                test_scripted_hops: None,
             },
             rx,
             observer,
         )
+    }
+
+    async fn test_scripted_run(
+        budget: AgentRunBudget,
+        hops: Vec<HopResult>,
+    ) -> (
+        RunContext,
+        mpsc::Receiver<Result<Bytes, Infallible>>,
+        TestDispatchObserver,
+    ) {
+        let (mut run, rx, observer) = test_run(budget).await;
+        run.test_scripted_hops = Some(hops.into());
+        (run, rx, observer)
+    }
+
+    async fn execute_and_settle(run: &mut RunContext) -> Result<(), RunError> {
+        let outcome = run.execute().await;
+        if let Err(error) = outcome {
+            run.settle_run_error(error).await;
+        }
+        outcome
     }
 
     fn drain_frames(rx: &mut mpsc::Receiver<Result<Bytes, Infallible>>) -> String {
@@ -1306,10 +1585,23 @@ mod tests {
         let execute = build_hop_body(&request, &[], AgentPhase::Execute, ToolMode::Enabled);
         assert_eq!(plan["stream"], true);
         assert_eq!(plan["stream_options"]["include_usage"], true);
-        assert_eq!(plan["tool_choice"], "none");
+        for field in ["tools", "tool_choice", "parallel_tool_calls"] {
+            assert!(
+                plan.get(field).is_none(),
+                "Plan must omit executable field {field}"
+            );
+        }
         assert_eq!(execute["tool_choice"], "auto");
         assert_eq!(execute["parallel_tool_calls"], false);
         assert_eq!(execute["tools"].as_array().unwrap().len(), 5);
+
+        let final_body = build_hop_body(&request, &[], AgentPhase::Final, ToolMode::Disabled);
+        for field in ["tools", "tool_choice", "parallel_tool_calls"] {
+            assert!(
+                final_body.get(field).is_none(),
+                "Final must omit executable field {field}"
+            );
+        }
     }
 
     #[tokio::test]
@@ -1355,6 +1647,27 @@ mod tests {
         assert_eq!(messages[0]["role"], "assistant");
         assert_eq!(messages[1]["tool_call_id"], "call-a");
         assert_eq!(messages[2]["tool_call_id"], "call-b");
+    }
+
+    #[test]
+    fn empty_assistant_content_is_null_for_natural_and_tool_call_messages() {
+        let mut messages = Vec::new();
+        append_assistant_message(&mut messages, "");
+        assert_eq!(messages[0]["role"], "assistant");
+        assert_eq!(messages[0]["content"], serde_json::Value::Null);
+
+        let tool_call_message = assistant_tool_call_message(&HopResult {
+            text: String::new(),
+            finish_reason: "tool_calls".to_string(),
+            saw_usage: true,
+            tool_calls: vec![ReassembledToolCall {
+                index: 0,
+                id: "call-empty-content".to_string(),
+                name: "nyx_list_services".to_string(),
+                arguments: "{}".to_string(),
+            }],
+        });
+        assert_eq!(tool_call_message["content"], serde_json::Value::Null);
     }
 
     #[tokio::test]
@@ -1489,20 +1802,385 @@ mod tests {
 
     #[test]
     fn planning_transition_table_is_deterministic() {
-        assert_eq!(
-            planning_transition(&hop("stop", false)),
-            PlanningTransition::Execute
-        );
+        assert_eq!(planning_transition(&hop("stop", false)), Ok(()));
         assert_eq!(
             planning_transition(&hop("tool_calls", true)),
-            PlanningTransition::ExecuteBatch
+            Err(RunError::Plan)
         );
         for reason in ["length", "content_filter", "future_reason"] {
             assert_eq!(
                 planning_transition(&hop(reason, false)),
-                PlanningTransition::Done,
-                "planning reason {reason} must not dispatch an execution hop"
+                Err(RunError::Plan),
+                "planning reason {reason} must fail instead of completing without Report"
             );
+        }
+    }
+
+    #[tokio::test]
+    async fn plan_phase_tool_call_is_rejected_before_any_tool_dispatch() {
+        let (run, _rx, observer) = test_run(AgentRunBudget::default()).await;
+        let mut messages = Vec::new();
+
+        assert_eq!(
+            run.accept_plan_hop(&hop("tool_calls", true), &mut messages),
+            Err(RunError::Plan)
+        );
+        assert!(messages.is_empty());
+        assert_eq!(observer.tool_dispatches.load(Ordering::SeqCst), 0);
+    }
+
+    #[tokio::test]
+    async fn scripted_plan_tool_call_fails_closed_through_the_run_engine() {
+        let (mut run, mut rx, observer) =
+            test_scripted_run(AgentRunBudget::default(), vec![hop("tool_calls", true)]).await;
+
+        assert_eq!(execute_and_settle(&mut run).await, Err(RunError::Plan));
+
+        let frames = drain_frames(&mut rx);
+        assert_eq!(observer.upstream_dispatches.load(Ordering::SeqCst), 1);
+        assert_eq!(observer.tool_dispatches.load(Ordering::SeqCst), 0);
+        assert!(!frames.contains("\"type\":\"tool.started\""));
+        assert!(!frames.contains("\"stage\":\"plan\",\"status\":\"completed\""));
+        assert!(!frames.contains("\"stage\":\"execute\",\"status\":\"started\""));
+        assert!(frames.contains("\"code\":\"upstream_failed\""));
+        assert_eq!(frames.matches("data: [DONE]").count(), 1);
+    }
+
+    #[tokio::test]
+    async fn scripted_plan_execute_report_happy_path_has_ordered_frames_and_one_terminal() {
+        let execute_call = HopResult {
+            text: String::new(),
+            finish_reason: "tool_calls".to_string(),
+            saw_usage: true,
+            tool_calls: vec![ReassembledToolCall {
+                index: 0,
+                id: "call-services".to_string(),
+                name: "nyx_list_services".to_string(),
+                arguments: "{}".to_string(),
+            }],
+        };
+        let (mut run, mut rx, observer) = test_scripted_run(
+            AgentRunBudget::default(),
+            vec![
+                HopResult {
+                    text: "1. Inspect connected services.".to_string(),
+                    ..hop("stop", false)
+                },
+                execute_call,
+                HopResult {
+                    text: "Evidence collected.".to_string(),
+                    ..hop("stop", false)
+                },
+                HopResult {
+                    text: "No connected services were found.".to_string(),
+                    ..hop("stop", false)
+                },
+            ],
+        )
+        .await;
+
+        assert_eq!(execute_and_settle(&mut run).await, Ok(()));
+
+        let frames = drain_frames(&mut rx);
+        let ordered_markers = [
+            "\"type\":\"run.started\"",
+            "\"stage\":\"understand\",\"status\":\"started\"",
+            "\"stage\":\"understand\",\"status\":\"completed\"",
+            "\"stage\":\"plan\",\"status\":\"started\"",
+            "\"type\":\"text.delta\",\"stage\":\"plan\"",
+            "\"stage\":\"plan\",\"status\":\"completed\"",
+            "\"stage\":\"execute\",\"status\":\"started\"",
+            "\"type\":\"tool.started\"",
+            "\"type\":\"tool.completed\"",
+            "\"stage\":\"execute\",\"status\":\"completed\"",
+            "\"stage\":\"final\",\"status\":\"started\"",
+            "\"type\":\"text.delta\",\"stage\":\"final\"",
+            "\"stage\":\"final\",\"status\":\"completed\"",
+            "\"type\":\"done\",\"status\":\"completed\"",
+            "data: [DONE]",
+        ];
+        let mut cursor = 0;
+        for marker in ordered_markers {
+            let offset = frames[cursor..]
+                .find(marker)
+                .unwrap_or_else(|| panic!("missing ordered frame marker: {marker}"));
+            cursor += offset + marker.len();
+        }
+        assert_eq!(observer.upstream_dispatches.load(Ordering::SeqCst), 4);
+        assert_eq!(observer.tool_dispatches.load(Ordering::SeqCst), 0);
+        assert_eq!(frames.matches("\"type\":\"done\"").count(), 1);
+        assert_eq!(frames.matches("data: [DONE]").count(), 1);
+        assert_started_tools_settle_before_terminal(&frames);
+    }
+
+    #[tokio::test]
+    async fn scripted_natural_and_forced_report_tool_calls_fail_the_same_way() {
+        let report_with_call = HopResult {
+            text: "I should not call this.".to_string(),
+            ..hop("tool_calls", true)
+        };
+        let cases = [
+            (
+                AgentRunBudget::default(),
+                vec![
+                    hop("stop", false),
+                    HopResult {
+                        text: "Execution complete.".to_string(),
+                        ..hop("stop", false)
+                    },
+                    report_with_call.clone(),
+                ],
+                3,
+            ),
+            (
+                AgentRunBudget {
+                    max_llm_calls: 2,
+                    ..AgentRunBudget::default()
+                },
+                vec![hop("stop", false), report_with_call],
+                2,
+            ),
+        ];
+
+        for (budget, hops, expected_dispatches) in cases {
+            let (mut run, mut rx, observer) = test_scripted_run(budget, hops).await;
+            assert_eq!(execute_and_settle(&mut run).await, Err(RunError::Upstream));
+            let frames = drain_frames(&mut rx);
+            assert_eq!(
+                observer.upstream_dispatches.load(Ordering::SeqCst),
+                expected_dispatches
+            );
+            assert_eq!(observer.tool_dispatches.load(Ordering::SeqCst), 0);
+            assert!(!frames.contains("\"type\":\"tool.started\""));
+            assert!(frames.contains("\"code\":\"upstream_failed\""));
+            assert_eq!(frames.matches("data: [DONE]").count(), 1);
+        }
+    }
+
+    #[tokio::test]
+    async fn completed_tool_frame_derives_preview_from_scrubbed_model_result() {
+        let (mut run, mut rx, _observer) = test_run(AgentRunBudget::default()).await;
+        let call = hop("tool_calls", true).tool_calls.remove(0);
+        let public = public_tool_identity(&call, 2);
+        let started = Instant::now();
+        run.start_tool(&call, &public, "nyxid", "connected_services", started)
+            .await
+            .unwrap();
+        let result = ModelToolResult::from_response(
+            200,
+            &serde_json::json!({
+                "evidence": "service is healthy",
+                "accessToken": "never-frame-this",
+                "message": "Bearer value-side-secret",
+                "padding": "x".repeat(tools::MAX_TOOL_RESULT_PREVIEW_BYTES * 2),
+            })
+            .to_string(),
+        );
+        run.complete_tool(ToolCompletion {
+            public_identity: &public,
+            outcome: "ok",
+            result: &result,
+            started,
+            service_slug: "nyxid",
+            endpoint: "connected_services",
+            skill_provenance: None,
+        })
+        .await
+        .unwrap();
+
+        let frames = drain_frames(&mut rx);
+        let completed = frames
+            .lines()
+            .find_map(|line| {
+                line.strip_prefix("data: ")
+                    .and_then(|data| serde_json::from_str::<serde_json::Value>(data).ok())
+                    .filter(|frame| frame["type"] == "tool.completed")
+            })
+            .expect("tool completion frame");
+        let preview = completed["result_preview"].as_str().unwrap();
+        assert!(preview.contains("service is healthy"));
+        assert!(!preview.contains("never-frame-this"));
+        assert!(!preview.contains("value-side-secret"));
+        assert!(preview.len() <= tools::MAX_TOOL_RESULT_PREVIEW_BYTES);
+    }
+
+    #[tokio::test]
+    async fn skill_tools_merge_bundled_with_explicit_ornn_source_state() {
+        let (mut run, _rx, observer) = test_run(AgentRunBudget::default()).await;
+        let no_services = Vec::new();
+        let registry = ReadOnlyRegistry::new(&no_services, &no_services, None);
+        let (search, outcome, provenance) = run
+            .execute_call_inner(
+                &registry,
+                "nyx_search_skills",
+                &serde_json::json!({"query":"NyxID","limit":10}),
+            )
+            .await
+            .unwrap();
+        assert_eq!(outcome, "ok");
+        assert!(provenance.is_none());
+        assert_eq!(search.server_body()["sources"]["ornn"], "not_connected");
+        assert!(
+            search.server_body()["matches"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|row| row["source"] == "bundled" && row["id"] == "nyxid")
+        );
+
+        let (bundled, outcome, provenance) = run
+            .execute_call_inner(
+                &registry,
+                "nyx_get_skill",
+                &serde_json::json!({"source":"bundled","id":"nyxid"}),
+            )
+            .await
+            .unwrap();
+        assert_eq!(outcome, "ok");
+        assert_eq!(provenance.as_ref().unwrap().source, "bundled");
+        assert_eq!(
+            provenance.as_ref().unwrap().content_sha256,
+            bundled.server_body()["content_sha256"]
+        );
+        assert_eq!(observer.tool_dispatches.load(Ordering::SeqCst), 0);
+    }
+
+    #[tokio::test]
+    async fn bundled_limit_marks_connected_ornn_not_queried_without_dispatch() {
+        let (mut run, _rx, observer) = test_run(AgentRunBudget::default()).await;
+        let connected = vec![test_ornn_service()];
+        let registry = ReadOnlyRegistry::new(&connected, &[], Some(&connected[0]));
+        let (search, _, _) = run
+            .execute_call_inner(
+                &registry,
+                "nyx_search_skills",
+                &serde_json::json!({"query":"nyxid","limit":1}),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(search.server_body()["count"], 1);
+        assert_eq!(search.server_body()["sources"]["ornn"], "not_queried");
+        assert_eq!(observer.tool_dispatches.load(Ordering::SeqCst), 0);
+    }
+
+    #[tokio::test]
+    async fn ornn_fetch_requires_a_canonical_id_observed_in_this_run() {
+        let (mut run, _rx, observer) = test_run(AgentRunBudget::default()).await;
+        let no_services = Vec::new();
+        let registry = ReadOnlyRegistry::new(&no_services, &no_services, None);
+        let arguments = serde_json::json!({
+            "source":"ornn",
+            "id":"ef726844-64d3-4791-aef3-8d28df9dcf9b"
+        });
+
+        assert_eq!(
+            run.execute_call_inner(&registry, "nyx_get_skill", &arguments)
+                .await
+                .unwrap_err(),
+            "ornn_skill_not_observed"
+        );
+        run.observed_ornn_skill_ids
+            .insert(arguments["id"].as_str().unwrap().to_string());
+        assert_eq!(
+            run.execute_call_inner(&registry, "nyx_get_skill", &arguments)
+                .await
+                .unwrap_err(),
+            "ornn_not_connected"
+        );
+        assert_eq!(observer.tool_dispatches.load(Ordering::SeqCst), 0);
+    }
+
+    #[tokio::test]
+    async fn oversized_native_tool_arguments_fail_before_dispatch() {
+        let (mut run, mut rx, observer) = test_run(AgentRunBudget::default()).await;
+        let no_services = Vec::new();
+        let registry = ReadOnlyRegistry::new(&no_services, &no_services, None);
+        let call = ReassembledToolCall {
+            index: 0,
+            id: "oversized".to_string(),
+            name: "nyx_list_services".to_string(),
+            arguments: format!(
+                "{{\"query\":\"{}\"}}",
+                "x".repeat(tools::MAX_TOOL_ARGUMENT_BYTES)
+            ),
+        };
+
+        let result = run.execute_call(&registry, &call).await.unwrap();
+
+        assert!(result.to_model_content().contains("invalid_args"));
+        assert_eq!(observer.tool_dispatches.load(Ordering::SeqCst), 0);
+        let frames = drain_frames(&mut rx);
+        assert!(!frames.contains(&"x".repeat(256)));
+        assert!(frames.contains("invalid_args"));
+    }
+
+    #[tokio::test]
+    async fn report_compaction_preserves_complete_tool_exchange_groups() {
+        let (run, _rx, _observer) = test_run(AgentRunBudget::default()).await;
+        let mut messages = Vec::new();
+        for index in 0..20 {
+            let call = ReassembledToolCall {
+                index,
+                id: format!("call-{index}"),
+                name: "nyx_call_tool".to_string(),
+                arguments: format!(
+                    "{{\"secret_argument\":\"{}\"}}",
+                    "x".repeat(tools::MAX_TOOL_ARGUMENT_BYTES / 2)
+                ),
+            };
+            messages.push(serde_json::json!({
+                "role": "assistant",
+                "content": serde_json::Value::Null,
+                "tool_calls": [tool_call_value(&call)],
+            }));
+            messages.push(serde_json::json!({
+                "role": "tool",
+                "tool_call_id": call.id,
+                "content": ModelToolResult::from_response(
+                    200,
+                    &serde_json::json!({"records": ["\\\"".repeat(12_000)]}).to_string()
+                ).to_model_content(),
+            }));
+        }
+        assert!(
+            hop_body_bytes(&run.request, &messages, AgentPhase::Final).unwrap()
+                > MAX_UPSTREAM_BODY_BYTES - POST_COMPACTION_REQUEST_HEADROOM_BYTES
+        );
+
+        run.compact_context_for_hop(&mut messages, AgentPhase::Final)
+            .unwrap();
+
+        assert!(
+            hop_body_bytes(&run.request, &messages, AgentPhase::Final).unwrap()
+                <= MAX_UPSTREAM_BODY_BYTES - POST_COMPACTION_REQUEST_HEADROOM_BYTES
+        );
+        assert!(
+            serde_json::to_string(&messages)
+                .unwrap()
+                .contains("NyxID compacted completed tool exchange")
+        );
+        for (index, message) in messages.iter().enumerate() {
+            let Some(calls) = message
+                .get("tool_calls")
+                .and_then(serde_json::Value::as_array)
+            else {
+                continue;
+            };
+            for (offset, call) in calls.iter().enumerate() {
+                let reply = &messages[index + offset + 1];
+                assert_eq!(reply["role"], "tool");
+                assert_eq!(reply["tool_call_id"], call["id"]);
+                if message["content"] == "[NyxID compacted completed tool exchange]" {
+                    assert_eq!(call["function"]["arguments"], "{}");
+                    assert!(
+                        !reply["content"]
+                            .as_str()
+                            .unwrap()
+                            .contains("secret_argument")
+                    );
+                }
+            }
         }
     }
 
@@ -1547,6 +2225,7 @@ mod tests {
             duration_ms: 1,
             result_bytes: 0,
             truncated: false,
+            result_preview: "{\"executed\":false}",
         })
         .unwrap();
         let result = ModelToolResult::synthetic("unknown_tool");
@@ -1559,7 +2238,7 @@ mod tests {
                 started: Instant::now(),
                 service_slug: "nyxid",
                 endpoint: "unknown_tool",
-                skill_version: None,
+                skill_provenance: None,
             },
             1,
         )
@@ -1574,5 +2253,46 @@ mod tests {
         let continuation = tool_call_value(&call).to_string();
         assert!(continuation.contains(secret_id));
         assert!(continuation.contains("super-secret"));
+    }
+
+    #[test]
+    fn skill_audit_contains_digest_provenance_but_no_content() {
+        let public = PublicToolIdentity {
+            call_id: "tool-2-0".to_string(),
+            tool: "nyx_get_skill",
+        };
+        let result = ModelToolResult::from_response(
+            200,
+            r#"{"content":"never-audit-skill-body","content_sha256":"body-field"}"#,
+        );
+        let provenance = tools::SkillProvenance {
+            source: "ornn".to_string(),
+            id: "ef726844-64d3-4791-aef3-8d28df9dcf9b".to_string(),
+            version: Some("1.2.3".to_string()),
+            content_sha256: "a".repeat(64),
+            delivered_sha256: "b".repeat(64),
+            content_bytes_delivered: 8192,
+        };
+        let audit = tool_audit_data(
+            "run-safe",
+            &ToolCompletion {
+                public_identity: &public,
+                outcome: "ok",
+                result: &result,
+                started: Instant::now(),
+                service_slug: "skills",
+                endpoint: "fetch",
+                skill_provenance: Some(&provenance),
+            },
+            1,
+        )
+        .to_string();
+
+        assert!(audit.contains("ef726844-64d3-4791-aef3-8d28df9dcf9b"));
+        assert!(audit.contains(&"a".repeat(64)));
+        assert!(audit.contains(&"b".repeat(64)));
+        assert!(audit.contains("8192"));
+        assert!(!audit.contains("never-audit-skill-body"));
+        assert!(!audit.contains("body-field"));
     }
 }

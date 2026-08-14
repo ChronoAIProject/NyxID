@@ -16,6 +16,7 @@ import type {
 
 export const DIRECT_AGENT_POC_URL = "/api/v1/assistant/direct/agent";
 export const MAX_AGENT_POC_CONTENT_BYTES = 128 * 1024;
+export const MAX_AGENT_POC_RESULT_PREVIEW_CHARS = 2 * 1024;
 
 const stageNameSchema = z.enum(["understand", "plan", "execute", "final"]);
 const frameSchemas = {
@@ -80,6 +81,10 @@ const frameSchemas = {
       duration_ms: z.number().int().nonnegative(),
       result_bytes: z.number().int().nonnegative(),
       truncated: z.boolean(),
+      result_preview: z
+        .string()
+        .max(MAX_AGENT_POC_RESULT_PREVIEW_CHARS)
+        .optional(),
     })
     .strict(),
   error: z
@@ -640,7 +645,7 @@ function completeTool(
     frame.outcome === "outcome_uncertain"
       ? "outcome uncertain"
       : `${frame.tool} · HTTP ${String(frame.status)}`;
-  setStep(runtime, started.index, status, meta);
+  setStep(runtime, started.index, status, meta, frame.result_preview ?? null);
   updateRun(runtime, options);
 }
 
@@ -677,6 +682,7 @@ function appendStep(
       {
         index,
         ...step,
+        result_preview: null,
         artifact_id: null,
         approval_request_id: null,
       },
@@ -690,12 +696,23 @@ function setStep(
   index: number,
   status: RunStepStatus,
   meta: string,
+  resultPreview?: string | null,
 ): void {
   if (!runtime.runBlock) return;
   runtime.runBlock = {
     ...runtime.runBlock,
     steps: runtime.runBlock.steps.map((step) =>
-      step.index === index ? { ...step, status, meta } : step,
+      step.index === index
+        ? {
+            ...step,
+            status,
+            meta,
+            result_preview:
+              resultPreview === undefined
+                ? step.result_preview
+                : resultPreview,
+          }
+        : step,
     ),
   };
 }
@@ -780,6 +797,7 @@ function withRunCounts(block: RunContentBlock): RunContentBlock {
 }
 
 function stageLabel(stage: StageName): string {
+  if (stage === "final") return "Report";
   return stage[0]!.toUpperCase() + stage.slice(1);
 }
 

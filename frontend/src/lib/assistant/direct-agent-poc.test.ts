@@ -1,4 +1,6 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
+import { createElement } from "react";
+import { fireEvent, render, screen } from "@testing-library/react";
 import deadlineFixture from "@/lib/assistant/__fixtures__/chrono-llm-agent-deadline.sse?raw";
 import doneMissingFixture from "@/lib/assistant/__fixtures__/chrono-llm-agent-done-missing.sse?raw";
 import duplicateTerminalFixture from "@/lib/assistant/__fixtures__/chrono-llm-agent-duplicate-terminal.sse?raw";
@@ -18,6 +20,7 @@ import {
   isAgentPocPlanBlockId,
 } from "@/lib/assistant/direct-transport";
 import { transitionAssistantIdentity } from "@/lib/assistant/identity";
+import { RunCard } from "@/components/assistant/blocks/run-card";
 import { useAuthStore } from "@/stores/auth-store";
 import type {
   AssistantMessage,
@@ -155,7 +158,7 @@ describe("Direct agent POC fixture contract", () => {
       "Plan",
       "Execute",
       "chrono-sandbox · health_handler",
-      "Final",
+      "Report",
     ]);
     expect(run.steps.map((step) => step.status)).toEqual([
       "done",
@@ -164,6 +167,10 @@ describe("Direct agent POC fixture contract", () => {
       "done",
       "done",
     ]);
+    expect(
+      run.steps.find((step) => step.label.includes("health_handler"))
+        ?.result_preview,
+    ).toBe('{"healthy":true,"request_id":"health-42"}');
     expect(assistant?.blocks[1]).toMatchObject({
       type: "text",
       text: "1. Check health.",
@@ -175,6 +182,9 @@ describe("Direct agent POC fixture contract", () => {
       type: "text",
       text: "Chrono Sandbox is healthy.",
     });
+    render(createElement(RunCard, { block: run }));
+    fireEvent.click(screen.getByText("Result preview"));
+    expect(screen.getByText(/health-42/)).toBeVisible();
     assertSettled(run);
   });
 
@@ -192,6 +202,36 @@ describe("Direct agent POC fixture contract", () => {
     expect(
       run.steps.find((step) => step.meta.includes("HTTP 503"))?.status,
     ).toBe("failed");
+    assertSettled(run);
+  });
+
+  it("accepts an older tool completion without a result preview", async () => {
+    const legacyFixture = happyFixture
+      .split("\n")
+      .map((line) => {
+        if (!line.startsWith("data: {")) return line;
+        const frame = JSON.parse(line.slice("data: ".length)) as Record<
+          string,
+          unknown
+        >;
+        if (frame.type !== "tool.completed") return line;
+        delete frame.result_preview;
+        return `data: ${JSON.stringify(frame)}`;
+      })
+      .join("\n");
+    const transport = new DirectAssistantTransport({
+      fetch: vi.fn(async () => sseResponse(legacyFixture)),
+    });
+    const conversationId = await createPocConversation(transport);
+
+    const events = await send(transport, conversationId);
+    const run = runBlock((await transport.getHistory(conversationId)).messages);
+
+    expect(terminal(events)).toMatchObject({ status: "completed", error: null });
+    expect(
+      run.steps.find((step) => step.label.includes("health_handler"))
+        ?.result_preview,
+    ).toBeNull();
     assertSettled(run);
   });
 
@@ -219,7 +259,7 @@ describe("Direct agent POC fixture contract", () => {
         "Understand",
         "Plan",
         "Execute",
-        "Final",
+        "Report",
       ]);
       expect(run.steps.map((step) => step.status)).toEqual([
         "done",
@@ -289,7 +329,7 @@ describe("Direct agent POC fixture contract", () => {
       "a tool completion with a different identity",
       happyFixture.replace(
         '"call_id":"call-1","tool":"nyx_call_tool","outcome":"ok"',
-        '"call_id":"call-1","tool":"ornn_get_skill","outcome":"ok"',
+        '"call_id":"call-1","tool":"nyx_get_skill","outcome":"ok"',
       ),
     ],
     [

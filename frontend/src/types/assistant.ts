@@ -258,6 +258,7 @@ export interface RunContentBlock {
     readonly status: RunStepStatus;
     readonly label: string;
     readonly meta: string;
+    readonly result_preview?: string | null;
     readonly service_slug: string | null;
     readonly artifact_id: string | null;
     readonly approval_request_id: string | null;

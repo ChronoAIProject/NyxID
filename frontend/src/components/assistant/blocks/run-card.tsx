@@ -107,6 +107,16 @@ export function RunCard({ block }: { readonly block: RunContentBlock }) {
                     {step.meta}
                   </span>
                 ) : null}
+                {step.result_preview ? (
+                  <details className="mt-1 text-text-tertiary">
+                    <summary className="cursor-pointer select-none text-[10px] font-medium hover:text-muted-foreground">
+                      Result preview
+                    </summary>
+                    <pre className="mt-1 max-h-36 overflow-auto whitespace-pre-wrap break-words border-l border-hairline pl-2 font-mono text-[10px] leading-4 text-muted-foreground">
+                      {step.result_preview}
+                    </pre>
+                  </details>
+                ) : null}
                 {step.status === "waiting" ? (
                   <span className="block text-text-tertiary">
                     waiting for approval

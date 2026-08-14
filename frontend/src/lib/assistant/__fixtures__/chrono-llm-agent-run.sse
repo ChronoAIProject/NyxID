@@ -14,7 +14,7 @@ data: {"type":"stage","stage":"execute","status":"started","detail":"Executing e
 
 data: {"type":"tool.started","call_id":"call-1","index":0,"tool":"nyx_call_tool","target":{"service_slug":"chrono-sandbox","endpoint":"health_handler"}}
 
-data: {"type":"tool.completed","call_id":"call-1","tool":"nyx_call_tool","outcome":"ok","status":200,"duration_ms":10,"result_bytes":49,"truncated":false}
+data: {"type":"tool.completed","call_id":"call-1","tool":"nyx_call_tool","outcome":"ok","status":200,"duration_ms":10,"result_bytes":49,"truncated":false,"result_preview":"{\"healthy\":true,\"request_id\":\"health-42\"}"}
 
 data: {"type":"stage","stage":"execute","status":"completed","detail":"Read execution complete"}
 
