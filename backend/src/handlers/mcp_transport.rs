@@ -1340,9 +1340,8 @@ async fn handle_tools_call(
         );
     }
 
-    let operation = match mcp_service::build_mcp_operation_descriptor(service, endpoint, &arguments)
-    {
-        Ok(operation) => operation,
+    let prepared = match mcp_service::prepare_proxy_tool_call(service, endpoint, &arguments) {
+        Ok(prepared) => prepared,
         Err(e) => {
             return tool_result(
                 request.id.clone(),
@@ -1351,6 +1350,7 @@ async fn handle_tools_call(
             );
         }
     };
+    let operation = prepared.operation_descriptor();
     if let Err(resp) =
         authorize_mcp_tool_operation(state, auth, service, &operation, request.id.clone()).await
     {
@@ -1368,7 +1368,7 @@ async fn handle_tools_call(
         auth.billing_principal_user_id(),
         service,
         endpoint,
-        &arguments,
+        prepared,
         &state.jwt_keys,
         &state.config,
         &state.connection_expiry_notifier,
@@ -1678,13 +1678,13 @@ async fn handle_meta_call_tool(
         }
     };
 
-    let operation =
-        match mcp_service::build_mcp_operation_descriptor(service, endpoint, &inner_args) {
-            Ok(operation) => operation,
-            Err(e) => {
-                return tool_result(request_id, &format!("Invalid tool arguments: {e}"), true);
-            }
-        };
+    let prepared = match mcp_service::prepare_proxy_tool_call(service, endpoint, &inner_args) {
+        Ok(prepared) => prepared,
+        Err(e) => {
+            return tool_result(request_id, &format!("Invalid tool arguments: {e}"), true);
+        }
+    };
+    let operation = prepared.operation_descriptor();
     if let Err(resp) =
         authorize_mcp_tool_operation(state, auth, service, &operation, request_id.clone()).await
     {
@@ -1717,7 +1717,7 @@ async fn handle_meta_call_tool(
         auth.billing_principal_user_id(),
         service,
         endpoint,
-        &inner_args,
+        prepared,
         &state.jwt_keys,
         &state.config,
         &state.connection_expiry_notifier,
@@ -3001,6 +3001,7 @@ mod tests {
     use crate::models::service_approval_config::{
         ApprovalMode, COLLECTION_NAME as SERVICE_APPROVAL_CONFIGS, ServiceApprovalConfig,
     };
+    use crate::models::service_endpoint::{COLLECTION_NAME as SERVICE_ENDPOINTS, ServiceEndpoint};
     use crate::models::user::{COLLECTION_NAME as USERS, User, UserType};
     use crate::models::user_endpoint::{COLLECTION_NAME as USER_ENDPOINTS, UserEndpoint};
     use crate::models::user_service::{COLLECTION_NAME as USER_SERVICES, UserService};
@@ -3058,6 +3059,7 @@ mod tests {
             executable: true,
             is_generic_proxy: false,
             invalid_openapi_contract: false,
+            proxy_operation_policy: None,
         }
     }
 
@@ -3077,6 +3079,7 @@ mod tests {
             executable: true,
             is_generic_proxy: false,
             invalid_openapi_contract: false,
+            proxy_operation_policy: None,
         }
     }
 
@@ -3390,6 +3393,171 @@ mod tests {
         }
 
         server.abort();
+    }
+
+    #[tokio::test]
+    async fn mcp_operation_policy_denial_precedes_approval_persistence() {
+        let Some(db) = connect_test_database("mcp_operation_policy_before_approval").await else {
+            panic!("MongoDB is required for MCP operation policy test");
+        };
+        let actor_id = uuid::Uuid::new_v4().to_string();
+        db.collection::<User>(USERS)
+            .insert_one(test_user(&actor_id, UserType::Person))
+            .await
+            .expect("insert MCP operation policy user");
+
+        let mut service = crate::models::downstream_service::test_helpers::dummy_service();
+        service.id = uuid::Uuid::new_v4().to_string();
+        service.slug = "mcp-operation-policy".to_string();
+        service.name = "MCP operation policy".to_string();
+        service.service_category = "internal".to_string();
+        service.proxy_operation_policy = Some(
+            crate::services::proxy_authorization::normalize_policy(
+                crate::models::downstream_service::ProxyOperationPolicy {
+                    rules: vec![crate::models::downstream_service::ProxyOperationRule {
+                        method: "POST".to_string(),
+                        path_template: "/air/order_cancellations".to_string(),
+                    }],
+                },
+            )
+            .expect("valid MCP operation policy"),
+        );
+        db.collection::<crate::models::downstream_service::DownstreamService>(
+            crate::models::downstream_service::COLLECTION_NAME,
+        )
+        .insert_one(&service)
+        .await
+        .expect("insert MCP operation policy service");
+
+        let now = chrono::Utc::now();
+        db.collection::<ServiceEndpoint>(SERVICE_ENDPOINTS)
+            .insert_one(ServiceEndpoint {
+                id: uuid::Uuid::new_v4().to_string(),
+                service_id: service.id.clone(),
+                name: "read_order".to_string(),
+                description: Some("Read an order".to_string()),
+                method: "GET".to_string(),
+                path: "/air/orders/{id}".to_string(),
+                parameters: Some(serde_json::json!([{
+                    "name": "id",
+                    "in": "path",
+                    "required": true,
+                    "schema": { "type": "string" }
+                }])),
+                request_body_schema: None,
+                request_content_type: None,
+                request_body_required: false,
+                response_description: None,
+                response: Default::default(),
+                risk: None,
+                supports_idempotency_key: false,
+                is_active: true,
+                created_at: now,
+                updated_at: now,
+            })
+            .await
+            .expect("insert blocked MCP endpoint");
+        db.collection::<ServiceEndpoint>(SERVICE_ENDPOINTS)
+            .insert_one(ServiceEndpoint {
+                id: uuid::Uuid::new_v4().to_string(),
+                service_id: service.id.clone(),
+                name: "create_cancellation".to_string(),
+                description: Some("Create an order cancellation".to_string()),
+                method: "POST".to_string(),
+                path: "/air/order_cancellations".to_string(),
+                parameters: None,
+                request_body_schema: None,
+                request_content_type: None,
+                request_body_required: false,
+                response_description: None,
+                response: Default::default(),
+                risk: None,
+                supports_idempotency_key: false,
+                is_active: true,
+                created_at: now,
+                updated_at: now,
+            })
+            .await
+            .expect("insert allowlisted cancellation endpoint");
+        db.collection::<ServiceApprovalConfig>(SERVICE_APPROVAL_CONFIGS)
+            .insert_one(ServiceApprovalConfig {
+                id: uuid::Uuid::new_v4().to_string(),
+                user_id: actor_id.clone(),
+                service_id: service.id.clone(),
+                service_name: service.name.clone(),
+                approval_required: true,
+                approval_mode: ApprovalMode::PerRequest,
+                rules: vec![],
+                default_effect: None,
+                created_at: now,
+                updated_at: now,
+            })
+            .await
+            .expect("insert MCP approval policy");
+
+        let state = test_app_state(db.clone());
+        let auth = McpAuthContext::user(actor_id.clone(), AuthMethod::AccessToken);
+        let request = JsonRpcRequest {
+            jsonrpc: JSONRPC_VERSION.to_string(),
+            id: Some(serde_json::json!(1)),
+            method: "tools/call".to_string(),
+            params: Some(serde_json::json!({
+                "name": format!("{}__read_order", service.slug),
+                "arguments": { "id": "ord_123" }
+            })),
+        };
+        let permit =
+            crate::services::billing::route_inventory::enforce_billing_egress_classification(
+                Some(
+                    crate::services::billing::route_inventory::BillingRoutePolicy::Metered(
+                        crate::services::billing::BillingIngress::Mcp,
+                    ),
+                ),
+                crate::services::billing::BillingIngress::Mcp,
+            )
+            .expect("MCP billing route classification");
+
+        let response = handle_tools_call(&state, &auth, None, &request, false, permit).await;
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(
+            db.collection::<ApprovalRequest>(APPROVAL_REQUESTS)
+                .count_documents(doc! { "service_id": &service.id })
+                .await
+                .expect("count approval requests"),
+            0,
+            "a denied MCP operation must not persist an approval request"
+        );
+
+        let cancellation_request = JsonRpcRequest {
+            jsonrpc: JSONRPC_VERSION.to_string(),
+            id: Some(serde_json::json!(2)),
+            method: "tools/call".to_string(),
+            params: Some(serde_json::json!({
+                "name": format!("{}__create_cancellation", service.slug),
+                "arguments": {}
+            })),
+        };
+        let permit =
+            crate::services::billing::route_inventory::enforce_billing_egress_classification(
+                Some(
+                    crate::services::billing::route_inventory::BillingRoutePolicy::Metered(
+                        crate::services::billing::BillingIngress::Mcp,
+                    ),
+                ),
+                crate::services::billing::BillingIngress::Mcp,
+            )
+            .expect("MCP billing route classification");
+        let response =
+            handle_tools_call(&state, &auth, None, &cancellation_request, false, permit).await;
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(
+            db.collection::<ApprovalRequest>(APPROVAL_REQUESTS)
+                .count_documents(doc! { "service_id": &service.id })
+                .await
+                .expect("count cancellation approval requests"),
+            1,
+            "an allowlisted cancellation must reach per-request approval persistence"
+        );
     }
 
     #[tokio::test]

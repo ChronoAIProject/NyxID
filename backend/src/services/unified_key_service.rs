@@ -1166,6 +1166,7 @@ pub async fn create_key(
             developer_app_ids: None,
             token_exchange_config: None,
             anonymous_endpoints: Vec::new(),
+            proxy_operation_policy: None,
             created_at: now,
             updated_at: now,
         };
@@ -4173,6 +4174,7 @@ mod tests {
             developer_app_ids: None,
             token_exchange_config: None,
             anonymous_endpoints: Vec::new(),
+            proxy_operation_policy: None,
             created_at: Utc::now(),
             updated_at: Utc::now(),
         }

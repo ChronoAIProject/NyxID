@@ -90,6 +90,7 @@ mod tests {
             is_generic_proxy: false,
             invalid_openapi_contract: false,
             recommended_skills: Vec::new(),
+            proxy_operation_policy: None,
         }
     }
 

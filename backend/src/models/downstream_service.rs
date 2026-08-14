@@ -122,6 +122,21 @@ pub struct AnonymousEndpointRule {
     pub daily_quota: u32,
 }
 
+/// Data-plane operation allowlist for a catalog service.
+///
+/// Rules are exact HTTP methods plus root-anchored path templates. Template
+/// variables match exactly one path segment; there are no glob semantics.
+#[derive(Clone, Debug, Default, Serialize, Deserialize, ToSchema, PartialEq, Eq)]
+pub struct ProxyOperationPolicy {
+    pub rules: Vec<ProxyOperationRule>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, ToSchema, PartialEq, Eq)]
+pub struct ProxyOperationRule {
+    pub method: String,
+    pub path_template: String,
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct SshServiceConfig {
     pub host: String,
@@ -333,6 +348,12 @@ pub struct DownstreamService {
     #[serde(default)]
     pub anonymous_endpoints: Vec<AnonymousEndpointRule>,
 
+    /// Operations callers may execute through NyxID. An empty policy denies
+    /// every operation. Missing policy preserves the service's existing
+    /// passthrough behavior.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub proxy_operation_policy: Option<ProxyOperationPolicy>,
+
     #[serde(with = "bson::serde_helpers::chrono_datetime_as_bson_datetime")]
     pub created_at: DateTime<Utc>,
     #[serde(with = "bson::serde_helpers::chrono_datetime_as_bson_datetime")]
@@ -439,6 +460,7 @@ pub mod test_helpers {
             developer_app_ids: None,
             token_exchange_config: None,
             anonymous_endpoints: Vec::new(),
+            proxy_operation_policy: None,
             created_at: Utc::now(),
             updated_at: Utc::now(),
         }
@@ -547,6 +569,7 @@ mod tests {
             developer_app_ids: None,
             token_exchange_config: None,
             anonymous_endpoints: Vec::new(),
+            proxy_operation_policy: None,
             created_at: Utc::now(),
             updated_at: Utc::now(),
         };
@@ -616,6 +639,7 @@ mod tests {
             developer_app_ids: None,
             token_exchange_config: None,
             anonymous_endpoints: Vec::new(),
+            proxy_operation_policy: None,
             created_at: Utc::now(),
             updated_at: Utc::now(),
         };

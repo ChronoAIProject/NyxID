@@ -304,6 +304,7 @@ mod tests {
                 path_pattern: "/public/**".to_string(),
                 daily_quota: 10,
             }],
+            proxy_operation_policy: None,
             created_at: Utc::now(),
             updated_at: Utc::now(),
         }
@@ -433,6 +434,7 @@ mod tests {
                     path_pattern: "/public/**".to_string(),
                     daily_quota,
                 }],
+                proxy_operation_policy: None,
                 created_at: Utc::now(),
                 updated_at: Utc::now(),
             }

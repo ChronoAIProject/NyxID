@@ -3678,6 +3678,7 @@ pub async fn seed_default_services(
             developer_app_ids: None,
             token_exchange_config,
             anonymous_endpoints: Vec::new(),
+            proxy_operation_policy: None,
             created_at: now,
             updated_at: now,
         };

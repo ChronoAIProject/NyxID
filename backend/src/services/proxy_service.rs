@@ -9,7 +9,7 @@ use crate::crypto::aes::EncryptionKeys;
 use crate::errors::{AppError, AppResult};
 use crate::models::default_request_header::{self, DefaultRequestHeader};
 use crate::models::downstream_service::{
-    COLLECTION_NAME as DOWNSTREAM_SERVICES, DownstreamService,
+    COLLECTION_NAME as DOWNSTREAM_SERVICES, DownstreamService, ProxyOperationPolicy,
 };
 use crate::models::provider_config::{COLLECTION_NAME as PROVIDER_CONFIGS, ProviderConfig};
 use crate::models::user_api_key::{COLLECTION_NAME as USER_API_KEYS, UserApiKey};
@@ -2108,6 +2108,8 @@ async fn finish_resolution(
     // entry has no defaults set.
     let catalog_default_headers =
         load_catalog_default_headers_for_user_service(db, &user_service).await;
+    let catalog_proxy_authorization =
+        load_catalog_proxy_authorization_for_user_service(db, &user_service).await?;
     let (catalog_billing, catalog_service_slug) =
         load_catalog_metering_for_user_service(db, &user_service).await;
     let catalog_ws_frame_injections =
@@ -2127,13 +2129,14 @@ async fn finish_resolution(
         let now = chrono::Utc::now();
         let token_exchange_config =
             load_token_exchange_config_for_user_service(db, &user_service).await?;
-        let minimal_service = build_minimal_downstream_service(
+        let mut minimal_service = build_minimal_downstream_service(
             &user_service,
             &endpoint,
             now,
             token_exchange_config,
             catalog_billing.clone(),
         );
+        apply_catalog_proxy_authorization(&mut minimal_service, &catalog_proxy_authorization);
 
         return Ok(UserServiceResolution {
             target: ProxyTarget {
@@ -2184,13 +2187,14 @@ async fn finish_resolution(
             AppError::Internal("Failed to decode credential".to_string())
         })?;
         let now = chrono::Utc::now();
-        let minimal_service = build_minimal_downstream_service(
+        let mut minimal_service = build_minimal_downstream_service(
             &user_service,
             &endpoint,
             now,
             None,
             catalog_billing.clone(),
         );
+        apply_catalog_proxy_authorization(&mut minimal_service, &catalog_proxy_authorization);
 
         return Ok(UserServiceResolution {
             target: ProxyTarget {
@@ -2263,13 +2267,14 @@ async fn finish_resolution(
         let now = chrono::Utc::now();
         let token_exchange_config =
             load_token_exchange_config_for_user_service(db, &user_service).await?;
-        let minimal_service = build_minimal_downstream_service(
+        let mut minimal_service = build_minimal_downstream_service(
             &user_service,
             &endpoint,
             now,
             token_exchange_config,
             catalog_billing.clone(),
         );
+        apply_catalog_proxy_authorization(&mut minimal_service, &catalog_proxy_authorization);
 
         return Ok(UserServiceResolution {
             target: ProxyTarget {
@@ -2315,13 +2320,14 @@ async fn finish_resolution(
     let now = chrono::Utc::now();
     let token_exchange_config =
         load_token_exchange_config_for_user_service(db, &user_service).await?;
-    let minimal_service = build_minimal_downstream_service(
+    let mut minimal_service = build_minimal_downstream_service(
         &user_service,
         &endpoint,
         now,
         token_exchange_config,
         catalog_billing,
     );
+    apply_catalog_proxy_authorization(&mut minimal_service, &catalog_proxy_authorization);
 
     Ok(UserServiceResolution {
         target: ProxyTarget {
@@ -2368,6 +2374,40 @@ async fn load_catalog_service_for_user_service(
             );
             AppError::Internal("Data integrity error: catalog service not found".to_string())
         })
+}
+
+#[derive(Clone, Default)]
+struct CatalogProxyAuthorization {
+    policy: Option<ProxyOperationPolicy>,
+}
+
+async fn load_catalog_proxy_authorization_for_user_service(
+    db: &mongodb::Database,
+    user_service: &crate::models::user_service::UserService,
+) -> AppResult<CatalogProxyAuthorization> {
+    let Some(catalog_id) = user_service.catalog_service_id.as_deref() else {
+        return Ok(CatalogProxyAuthorization::default());
+    };
+    let service = db
+        .collection::<DownstreamService>(DOWNSTREAM_SERVICES)
+        .find_one(doc! { "_id": catalog_id })
+        .await?;
+    let Some(service) = service else {
+        // Existing UserService resolution tolerates a missing catalog row and
+        // continues with its stored endpoint/credential data. Policy lookup is
+        // additive and must not turn that legacy shape into a new outage.
+        return Ok(CatalogProxyAuthorization::default());
+    };
+    Ok(CatalogProxyAuthorization {
+        policy: service.proxy_operation_policy,
+    })
+}
+
+fn apply_catalog_proxy_authorization(
+    service: &mut DownstreamService,
+    authorization: &CatalogProxyAuthorization,
+) {
+    service.proxy_operation_policy = authorization.policy.clone();
 }
 
 /// Load the catalog `DownstreamService.default_request_headers` associated
@@ -2809,6 +2849,7 @@ fn build_minimal_downstream_service(
         developer_app_ids: None,
         token_exchange_config,
         anonymous_endpoints: Vec::new(),
+        proxy_operation_policy: None,
         created_at: now,
         updated_at: now,
     }
@@ -4324,6 +4365,7 @@ mod tests {
                 developer_app_ids: None,
                 token_exchange_config: None,
                 anonymous_endpoints: Vec::new(),
+                proxy_operation_policy: None,
                 created_at: now,
                 updated_at: now,
             },
@@ -5202,6 +5244,7 @@ mod tests {
                 developer_app_ids: None,
                 token_exchange_config: Some(make_lark_token_exchange_config()),
                 anonymous_endpoints: Vec::new(),
+                proxy_operation_policy: None,
                 created_at: now,
                 updated_at: now,
             },
@@ -5529,6 +5572,7 @@ mod tests {
                 developer_app_ids: None,
                 token_exchange_config: None,
                 anonymous_endpoints: Vec::new(),
+                proxy_operation_policy: None,
                 created_at: now,
                 updated_at: now,
             },
@@ -5749,6 +5793,7 @@ mod tests {
                 developer_app_ids: None,
                 token_exchange_config: None,
                 anonymous_endpoints: Vec::new(),
+                proxy_operation_policy: None,
                 created_at: now,
                 updated_at: now,
             },
@@ -5988,6 +6033,7 @@ mod tests {
             developer_app_ids: None,
             token_exchange_config: None,
             anonymous_endpoints: Vec::new(),
+            proxy_operation_policy: None,
             created_at: Utc::now(),
             updated_at: Utc::now(),
         }
