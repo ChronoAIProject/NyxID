@@ -664,6 +664,9 @@ fn same_exact_service_authority(
         && left.user_service_id == right.user_service_id
         && left.endpoint_id == right.endpoint_id
         && left.catalog_digest == right.catalog_digest
+        && (left.exact_view_digest.is_none()
+            || right.exact_view_digest.is_none()
+            || left.exact_view_digest == right.exact_view_digest)
         && left.endpoint_contract_digest == right.endpoint_contract_digest
         && left.operation_digest == right.operation_digest
         && left.operation_id == right.operation_id

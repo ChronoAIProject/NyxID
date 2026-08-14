@@ -49,6 +49,8 @@ pub struct ExactServiceApprovalBinding {
     pub user_service_id: String,
     pub endpoint_id: String,
     pub catalog_digest: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub exact_view_digest: Option<String>,
     pub endpoint_contract_digest: String,
     pub operation_digest: String,
     pub operation_id: String,
@@ -284,6 +286,29 @@ mod tests {
         doc.remove("action_description");
         let restored: ApprovalRequest = bson::from_document(doc).expect("deserialize");
         assert!(restored.action_description.is_none());
+    }
+
+    #[test]
+    fn missing_exact_view_digest_defaults_to_none_for_legacy_rows() {
+        let mut binding = ExactServiceApprovalBinding {
+            request_key: "request-key".to_string(),
+            actor_user_id: "actor".to_string(),
+            user_service_id: "service".to_string(),
+            endpoint_id: "endpoint".to_string(),
+            catalog_digest: "sha256:catalog".to_string(),
+            exact_view_digest: Some("sha256:exact-view".to_string()),
+            endpoint_contract_digest: "sha256:endpoint".to_string(),
+            operation_digest: "sha256:operation".to_string(),
+            operation_id: "operation".to_string(),
+            operation_generation: 1,
+            effect_idempotency_key: "effect".to_string(),
+            arguments: serde_json::json!({}),
+            redemption: None,
+        };
+        let mut doc = bson::to_document(&binding).expect("serialize exact binding");
+        doc.remove("exact_view_digest");
+        binding = bson::from_document(doc).expect("deserialize legacy exact binding");
+        assert!(binding.exact_view_digest.is_none());
     }
 
     #[test]

@@ -4287,6 +4287,7 @@ other effect authority. The existing approval endpoints intentionally return
 {
   "contract_version": "nyxid-delegated-operation-catalog.v1",
   "catalog_digest": "sha256:opaque-admission-token",
+  "exact_view_digest": "sha256:exact-caller-visible-view",
   "resolved_at": "2026-08-14T00:00:00Z",
   "authority_expires_at": "2026-08-14T00:05:00Z",
   "services": [
@@ -4320,26 +4321,36 @@ other effect authority. The existing approval endpoints intentionally return
 }
 ```
 
-`catalog_digest` is an opaque admission token, not a checksum of this filtered
-JSON response. For wire compatibility with #1424 (commit `d1a042c2`), it is
-exactly `mcp_service::operation_catalog_digest` over the complete scoped
-catalog used by exact-service approval create and redeem. The canonical digest
+`exact_view_digest` is the representation validator for the exact
+caller-visible `services` array. It is SHA-256 over canonical compact JSON
+containing `contract_version: "nyxid-delegated-operation-catalog.v1"` and the
+returned `services`; services are sorted by `user_service_id`, operations by
+`endpoint_id`, and object keys recursively in lexicographic order. The dynamic
+timestamps, totals, and `catalog_digest` are excluded. Delegated discovery and
+exact approval create, observe, and redeem use this same projection.
+
+`catalog_digest` remains the pre-existing broad approval fence. For wire
+compatibility with #1424 (commit `d1a042c2`), it is exactly
+`mcp_service::operation_catalog_digest` over the complete scoped catalog. It
 also includes catalog services that this facade omits (platform and generic
 rows), plus descriptor metadata such as operation descriptions and
-`recommended_skills`. Therefore an unrelated catalog row, description, or
-skill can change the digest without changing this response's visible list.
-That spurious-drift behavior is pre-existing #1424 approval semantics and is
-not introduced by this facade. Consumers must treat the value as opaque and
-send it back to approval create; they must not recompute it from the response
-body.
+`recommended_skills`. Exact approval callers should send both digest fields at
+create and redeem. Omission of `exact_view_digest` remains accepted for legacy
+clients and stored approvals, while newly created approvals always persist the
+server-resolved exact-view value and revalidate it at use time. Both fences are
+enforced when present, so a hidden-row change can still cause drift through
+`catalog_digest` even though `exact_view_digest` is unchanged. Consumers must
+treat both values as opaque rather than substituting fetch time or a local
+counter.
 
 The response excludes platform fallbacks, generic proxy services, invalid or
 empty contracts, unavailable services, credentials, tokens, headers, hashes,
 raw provider responses, and arbitrary request bodies. The route performs no
-writes, provider invocation, approval mutation, or credential mutation. A
-catalog resolution may still perform a hardened, cached, DNS-pinned outbound
-fetch of a user-mounted OpenAPI document when the canonical loader requires
-one.
+writes, connected-provider invocation, proxy execution, approval mutation, or
+credential mutation. This is a database/effect read-only guarantee, not
+process-state purity: catalog resolution may perform a hardened, cached,
+DNS-pinned outbound fetch of a user-mounted OpenAPI document and update the
+process-wide documentation cache when the canonical loader requires one.
 
 An empty service/node authority (`allow_all_*: false` with an empty list) is a
 valid deny-all grant and returns `200` with an empty catalog. Unknown or stale

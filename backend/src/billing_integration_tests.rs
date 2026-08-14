@@ -712,6 +712,7 @@ async fn billing_route_coverage_smoke() {
                 user_service_id: mcp.id.clone(),
                 endpoint_id,
                 catalog_digest: catalog_digest.clone(),
+                exact_view_digest: None,
                 endpoint_contract_digest,
                 operation_digest: operation_digest.clone(),
                 operation_id: operation_id.clone(),
