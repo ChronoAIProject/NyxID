@@ -904,10 +904,15 @@ pub fn build_router(
         .route("/introspect", post(handlers::oauth::introspect))
         .route("/revoke", post(handlers::oauth::revoke));
 
-    let delegation_routes = Router::new().route(
-        "/refresh",
-        post(handlers::delegation::refresh_delegation_token),
-    );
+    let delegation_routes = Router::new()
+        .route(
+            "/refresh",
+            post(handlers::delegation::refresh_delegation_token),
+        )
+        .route(
+            "/operation-catalog",
+            get(handlers::delegation::get_operation_catalog),
+        );
 
     // Notification settings (human-only)
     let notification_routes = Router::new()

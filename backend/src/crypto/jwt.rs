@@ -1876,6 +1876,7 @@ mod tests {
             scope: "llm:proxy".to_string(),
             acting_client_id: Some("test-client-id".to_string()),
             oauth_client_id: None,
+            token_jti: None,
             approval_owner_user_id: None,
             auth_method: crate::mw::auth::AuthMethod::Delegated,
             allow_all_services: false,

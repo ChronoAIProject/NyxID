@@ -126,6 +126,7 @@ mod tests {
             scope: "proxy".to_string(),
             acting_client_id: (method == AuthMethod::Delegated).then(|| "client-alpha".to_string()),
             oauth_client_id: None,
+            token_jti: None,
             approval_owner_user_id: None,
             auth_method: method,
             allow_all_services: true,
@@ -155,5 +156,38 @@ mod tests {
     fn delegated_requester_is_bound_to_oauth_client() {
         let auth = auth(AuthMethod::Delegated);
         assert_eq!(caller(&auth).unwrap().requester_id, "client-alpha");
+    }
+
+    /// `create_request`, `observe_request`, and `redeem_request` all gate on the
+    /// same `ensure_rest_proxy_access()` call (lines 22, 35, and 50), so the
+    /// boundary is asserted once against that shared gate across several scope
+    /// shapes — rather than three times against one identical call. Driving the
+    /// handlers themselves would require a live database.
+    #[test]
+    fn catalog_read_scope_alone_never_satisfies_the_approval_proxy_gate() {
+        for scope in [
+            crate::mw::auth::MCP_CATALOG_READ_SCOPE.to_string(),
+            String::new(),
+            format!("{} openid profile", crate::mw::auth::MCP_CATALOG_READ_SCOPE),
+        ] {
+            let mut catalog_only = auth(AuthMethod::Delegated);
+            catalog_only.scope.clone_from(&scope);
+            assert!(
+                catalog_only.ensure_rest_proxy_access().is_err(),
+                "scope `{scope}` must not confer approval authority"
+            );
+        }
+    }
+
+    #[test]
+    fn both_catalog_and_proxy_scopes_are_accepted_by_approval_gate() {
+        let mut auth = auth(AuthMethod::Delegated);
+        auth.scope = format!(
+            "{} {}",
+            crate::mw::auth::MCP_CATALOG_READ_SCOPE,
+            crate::mw::auth::WIDE_PROXY_SCOPE
+        );
+        auth.ensure_rest_proxy_access()
+            .expect("proxy authority is independently granted");
     }
 }
