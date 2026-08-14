@@ -62,6 +62,7 @@ pub async fn exchange_token(
     .await
 }
 
+#[allow(clippy::too_many_arguments)]
 pub async fn exchange_token_with_authority(
     db: &mongodb::Database,
     config: &AppConfig,
@@ -262,6 +263,7 @@ pub struct DelegationRefreshResponse {
 /// 4. The requested scope is still allowed by the client's delegation_scopes
 /// 5. Issues a new delegated token with the same `act.sub` and validated scope
 ///    but a fresh 5-minute TTL
+#[allow(clippy::too_many_arguments)]
 pub async fn refresh_delegation_token(
     db: &mongodb::Database,
     config: &AppConfig,
@@ -500,6 +502,7 @@ pub fn validate_delegation_scope(
     Ok(requested_scopes.join(" "))
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn attenuate_catalog_authority(
     db: &mongodb::Database,
     config: &AppConfig,

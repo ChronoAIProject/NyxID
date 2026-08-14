@@ -41,6 +41,7 @@ pub fn scope_has_catalog_read(scope: &str) -> bool {
         .any(|value| value == MCP_CATALOG_READ_SCOPE)
 }
 
+#[allow(clippy::too_many_arguments)]
 pub async fn persist_grant(
     db: &mongodb::Database,
     jti: &str,

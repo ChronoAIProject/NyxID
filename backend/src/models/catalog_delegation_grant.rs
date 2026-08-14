@@ -35,7 +35,9 @@ mod tests {
 
     #[test]
     fn bson_roundtrip_preserves_explicit_empty_authority() {
-        let now = Utc::now();
+        // BSON DateTime stores millisecond precision; a raw Utc::now() carries
+        // microseconds and would fail the exact-equality assertion after roundtrip.
+        let now = chrono::DateTime::from_timestamp_millis(Utc::now().timestamp_millis()).unwrap();
         let grant = CatalogDelegationGrant {
             id: uuid::Uuid::new_v4().to_string(),
             user_id: uuid::Uuid::new_v4().to_string(),
