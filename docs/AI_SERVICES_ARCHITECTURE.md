@@ -19,7 +19,7 @@ graph TB
     subgraph "NyxID Backend"
         API["REST API<br/>/api/v1/*"]
         PROXY["Proxy Engine<br/>/proxy/s/{slug}/*"]
-        CATALOG["Service Catalog<br/>19 seeded + custom"]
+        CATALOG["Service Catalog<br/>Default-seeded + custom"]
         AUTH["Auth + JWT<br/>SSO, MFA, Sessions"]
     end
 
