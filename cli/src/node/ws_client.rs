@@ -4148,9 +4148,16 @@ async fn drain_active_ws_proxies(active_ws_proxies: &ActiveWsProxyMap) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::node::config::{SshConfig, SshTargetConfig};
+    use crate::node::config::{CredentialConfig, SshConfig, SshTargetConfig};
     use crate::node::credential_store::CredentialInjection;
     use crate::node::encryption::LocalEncryption;
+    use axum::{
+        Router,
+        body::Bytes,
+        extract::State,
+        http::{HeaderMap, StatusCode},
+        routing::post,
+    };
     use hmac::{Hmac, Mac};
     use sha2::Sha256;
     use tokio::net::TcpListener;
@@ -4158,12 +4165,39 @@ mod tests {
     use wiremock::matchers::{header, method, path};
     use wiremock::{Mock, MockServer, ResponseTemplate};
 
+    type CapturedTwilioRequest = (Option<String>, Option<String>, Vec<u8>);
+    type TwilioCaptureSender = mpsc::UnboundedSender<CapturedTwilioRequest>;
+
     /// Unwrap a NodeWsMessage::Text variant, panicking if it's Binary.
     fn unwrap_text(msg: NodeWsMessage) -> String {
         match msg {
             NodeWsMessage::Text(s) => s,
             NodeWsMessage::Binary(_) => panic!("expected Text message, got Binary"),
         }
+    }
+
+    async fn capture_twilio_request(
+        State(sender): State<TwilioCaptureSender>,
+        headers: HeaderMap,
+        body: Bytes,
+    ) -> StatusCode {
+        let authorization = headers
+            .get("authorization")
+            .and_then(|value| value.to_str().ok())
+            .map(str::to_string);
+        let content_type = headers
+            .get("content-type")
+            .and_then(|value| value.to_str().ok())
+            .map(str::to_string);
+        let _ = sender.send((authorization, content_type, body.to_vec()));
+        StatusCode::OK
+    }
+
+    async fn elevenlabs_audio_response() -> impl axum::response::IntoResponse {
+        (
+            [(axum::http::header::CONTENT_TYPE, "audio/mpeg")],
+            Bytes::from_static(&[0_u8, 1, 2, 255]),
+        )
     }
 
     fn ssh_config_with_allowed_target(host: &str, port: u16) -> SshConfig {
@@ -4317,6 +4351,269 @@ mod tests {
         let client = WebSocketStream::from_raw_socket(client_io, Role::Client, None).await;
         let server = WebSocketStream::from_raw_socket(server_io, Role::Server, None).await;
         (client, server)
+    }
+
+    #[tokio::test]
+    #[allow(clippy::result_large_err)]
+    async fn node_websocket_injects_elevenlabs_api_key_on_upgrade() {
+        use tokio_tungstenite::tungstenite::handshake::server::{
+            Request as WsRequest, Response as WsResponse,
+        };
+
+        let listener = TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind downstream WebSocket");
+        let addr = listener.local_addr().expect("downstream address");
+        let (header_tx, header_rx) = tokio::sync::oneshot::channel();
+        let server_task = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.expect("accept downstream");
+            let socket = tokio_tungstenite::accept_hdr_async(
+                stream,
+                move |request: &WsRequest, response: WsResponse| {
+                    let api_key = request
+                        .headers()
+                        .get("xi-api-key")
+                        .and_then(|value| value.to_str().ok())
+                        .map(str::to_string);
+                    header_tx.send(api_key).expect("send captured API key");
+                    Ok(response)
+                },
+            )
+            .await
+            .expect("complete downstream handshake");
+            drop(socket);
+        });
+
+        let dir = tempfile::tempdir().expect("temp config directory");
+        let encryption = LocalEncryption::load_or_generate(dir.path()).expect("local encryption");
+        let mut config = rci_test_config("ws://localhost:3001/api/v1/nodes/ws".to_string());
+        config.credentials.insert(
+            "api-elevenlabs".to_string(),
+            CredentialConfig::new_header(
+                "xi-api-key".to_string(),
+                Some(
+                    encryption
+                        .encrypt("elevenlabs-node-test-key")
+                        .expect("encrypt API key"),
+                ),
+                Some(format!("ws://{addr}")),
+            ),
+        );
+        let credentials =
+            CredentialStore::from_config(&config, &encryption).expect("load credentials");
+        let active_ws_proxies: ActiveWsProxyMap = Arc::new(tokio::sync::Mutex::new(HashMap::new()));
+        let (tx, mut rx) = mpsc::channel(4);
+
+        handle_ws_proxy_open(
+            &serde_json::json!({
+                "session_id": "elevenlabs-session",
+                "service_slug": "api-elevenlabs",
+                "base_url": format!("ws://{addr}"),
+                "path": "/v1/text-to-speech/voice-1/stream-input",
+                "headers": {},
+            }),
+            &credentials,
+            tx.clone(),
+            active_ws_proxies.clone(),
+            None,
+            replay_guard(),
+        )
+        .await;
+
+        assert_eq!(
+            header_rx.await.expect("captured API key"),
+            Some("elevenlabs-node-test-key".to_string())
+        );
+        let opened: serde_json::Value = serde_json::from_str(&unwrap_text(
+            rx.recv().await.expect("ws_proxy_opened acknowledgement"),
+        ))
+        .expect("valid acknowledgement");
+        assert_eq!(opened["type"], "ws_proxy_opened");
+        assert_eq!(opened["session_id"], "elevenlabs-session");
+
+        handle_ws_proxy_close(
+            &serde_json::json!({
+                "session_id": "elevenlabs-session",
+                "code": 1000,
+                "reason": "test complete",
+            }),
+            &tx,
+            &active_ws_proxies,
+        )
+        .await;
+        server_task.await.expect("downstream server task");
+    }
+
+    #[tokio::test]
+    async fn node_http_proxy_preserves_twilio_form_body_and_basic_header() {
+        let listener = TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind downstream server");
+        let addr = listener.local_addr().expect("downstream address");
+        let (capture_tx, mut capture_rx) = mpsc::unbounded_channel();
+        let app = Router::new()
+            .route(
+                "/2010-04-01/Accounts/AC123/Messages.json",
+                post(capture_twilio_request),
+            )
+            .with_state(capture_tx);
+        let server = tokio::spawn(async move {
+            axum::serve(listener, app).await.expect("serve downstream");
+        });
+
+        let dir = tempfile::tempdir().expect("temp config directory");
+        let encryption = LocalEncryption::load_or_generate(dir.path()).expect("local encryption");
+        let mut config = rci_test_config("ws://localhost:3001/api/v1/nodes/ws".to_string());
+        config.credentials.insert(
+            "api-twilio".to_string(),
+            CredentialConfig::new_header(
+                "Authorization".to_string(),
+                Some(
+                    encryption
+                        .encrypt("Basic QUMxMjM6YXV0aF90b2tlbg==")
+                        .expect("encrypt Basic header"),
+                ),
+                Some(format!("http://{addr}")),
+            ),
+        );
+        let credentials =
+            CredentialStore::from_config(&config, &encryption).expect("load credentials");
+        let form = b"To=%2B15551234567&From=%2B15557654321&Body=hello";
+        let request = serde_json::json!({
+            "request_id": "00000000-0000-0000-0000-000000000001",
+            "service_slug": "api-twilio",
+            "method": "POST",
+            "path": "/2010-04-01/Accounts/AC123/Messages.json",
+            "base_url": format!("http://{addr}"),
+            "headers": {
+                "content-type": "application/x-www-form-urlencoded"
+            },
+            "body": base64::engine::general_purpose::STANDARD.encode(form),
+        });
+        let replay_guard = tokio::sync::Mutex::new(ReplayGuard::new());
+        let metrics = NodeMetrics::new();
+        let (tx, mut rx) = mpsc::channel(4);
+
+        proxy_executor::execute_proxy_request(
+            &request,
+            &credentials,
+            None,
+            &replay_guard,
+            &metrics,
+            &tx,
+            true,
+            &reqwest::Client::new(),
+        )
+        .await;
+
+        let (authorization, content_type, body) = capture_rx
+            .recv()
+            .await
+            .expect("captured downstream request");
+        assert_eq!(
+            authorization.as_deref(),
+            Some("Basic QUMxMjM6YXV0aF90b2tlbg==")
+        );
+        assert_eq!(
+            content_type.as_deref(),
+            Some("application/x-www-form-urlencoded")
+        );
+        assert_eq!(body, form);
+
+        let response: serde_json::Value =
+            serde_json::from_str(&unwrap_text(rx.recv().await.expect("proxy response")))
+                .expect("valid proxy response");
+        assert_eq!(response["type"], "proxy_response");
+        assert_eq!(response["status"], 200);
+        assert_eq!(metrics.snapshot().success_count, 1);
+
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn node_http_proxy_streams_elevenlabs_audio_as_binary_chunks() {
+        const REQUEST_ID: &str = "00000000-0000-0000-0000-000000000002";
+        const AUDIO: &[u8] = &[0_u8, 1, 2, 255];
+
+        let listener = TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind downstream audio server");
+        let addr = listener.local_addr().expect("downstream audio address");
+        let app = Router::new().route(
+            "/v1/text-to-speech/voice-1/stream",
+            post(elevenlabs_audio_response),
+        );
+        let server = tokio::spawn(async move {
+            axum::serve(listener, app).await.expect("serve audio");
+        });
+
+        let dir = tempfile::tempdir().expect("temp config directory");
+        let encryption = LocalEncryption::load_or_generate(dir.path()).expect("local encryption");
+        let mut config = rci_test_config("ws://localhost:3001/api/v1/nodes/ws".to_string());
+        config.credentials.insert(
+            "api-elevenlabs".to_string(),
+            CredentialConfig::new_header(
+                "xi-api-key".to_string(),
+                Some(
+                    encryption
+                        .encrypt("elevenlabs-node-test-key")
+                        .expect("encrypt API key"),
+                ),
+                Some(format!("http://{addr}")),
+            ),
+        );
+        let credentials =
+            CredentialStore::from_config(&config, &encryption).expect("load credentials");
+        let request_body = br#"{"text":"hello"}"#;
+        let request = serde_json::json!({
+            "request_id": REQUEST_ID,
+            "service_slug": "api-elevenlabs",
+            "method": "POST",
+            "path": "/v1/text-to-speech/voice-1/stream",
+            "base_url": format!("http://{addr}"),
+            "headers": {
+                "content-type": "application/json"
+            },
+            "body": base64::engine::general_purpose::STANDARD.encode(request_body),
+        });
+        let replay_guard = tokio::sync::Mutex::new(ReplayGuard::new());
+        let metrics = NodeMetrics::new();
+        let (tx, mut rx) = mpsc::channel(4);
+
+        proxy_executor::execute_proxy_request(
+            &request,
+            &credentials,
+            None,
+            &replay_guard,
+            &metrics,
+            &tx,
+            true,
+            &reqwest::Client::new(),
+        )
+        .await;
+
+        let start: serde_json::Value =
+            serde_json::from_str(&unwrap_text(rx.recv().await.expect("proxy response start")))
+                .expect("valid proxy response start");
+        assert_eq!(start["type"], "proxy_response_start");
+        assert_eq!(start["status"], 200);
+        assert_eq!(start["headers"]["content-type"], "audio/mpeg");
+
+        let frame = match rx.recv().await.expect("binary audio chunk") {
+            NodeWsMessage::Binary(frame) => frame,
+            NodeWsMessage::Text(_) => panic!("expected binary audio chunk"),
+        };
+        assert_eq!(&frame[..REQUEST_ID.len()], REQUEST_ID.as_bytes());
+        assert_eq!(&frame[REQUEST_ID.len()..], AUDIO);
+
+        let end: serde_json::Value =
+            serde_json::from_str(&unwrap_text(rx.recv().await.expect("proxy response end")))
+                .expect("valid proxy response end");
+        assert_eq!(end["type"], "proxy_response_end");
+        assert_eq!(end["request_id"], REQUEST_ID);
+        assert_eq!(metrics.snapshot().success_count, 1);
+
+        server.abort();
     }
 
     #[tokio::test]

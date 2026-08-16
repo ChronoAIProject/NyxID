@@ -4085,6 +4085,7 @@ mod tests {
         path: String,
         query: Option<String>,
         content_type: Option<String>,
+        authorization: Option<String>,
         idempotency_key: Option<String>,
         trace_id: Option<String>,
         traceparent: Option<String>,
@@ -4204,6 +4205,10 @@ mod tests {
             query: uri.query().map(ToString::to_string),
             content_type: headers
                 .get(reqwest::header::CONTENT_TYPE)
+                .and_then(|value| value.to_str().ok())
+                .map(ToString::to_string),
+            authorization: headers
+                .get(reqwest::header::AUTHORIZATION)
                 .and_then(|value| value.to_str().ok())
                 .map(ToString::to_string),
             idempotency_key: headers
@@ -4839,6 +4844,67 @@ mod tests {
         assert_eq!(captured.path, "/upload");
         assert_eq!(captured.content_type.as_deref(), Some("application/zip"));
         assert_eq!(captured.body, b"PK\x03\x04");
+
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn forward_request_preserves_twilio_form_body_and_injects_basic_auth() {
+        let (sender, mut receiver) = mpsc::unbounded_channel();
+        let app = Router::new()
+            .route(
+                "/2010-04-01/Accounts/AC123/Calls.json",
+                post(capture_request),
+            )
+            .with_state(sender);
+
+        let listener = TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind test listener");
+        let addr = listener.local_addr().expect("listener addr");
+        let server = tokio::spawn(async move {
+            axum::serve(listener, app).await.expect("serve test app");
+        });
+
+        let form = b"To=%2B15551234567&From=%2B15557654321&Url=https%3A%2F%2Fexample.com%2Ftwiml";
+        let mut headers = reqwest::header::HeaderMap::new();
+        headers.insert(
+            reqwest::header::CONTENT_TYPE,
+            "application/x-www-form-urlencoded".parse().unwrap(),
+        );
+        let mut target = make_proxy_target(format!("http://{addr}"));
+        target.auth_method = "basic".to_string();
+        target.auth_key_name = "Authorization".to_string();
+        target.credential = "AC123:auth_token".to_string();
+
+        let response = forward_request(
+            &Client::new(),
+            &target,
+            reqwest::Method::POST,
+            "2010-04-01/Accounts/AC123/Calls.json",
+            None,
+            headers,
+            ProxyBody::Buffered(Some(bytes::Bytes::from_static(form))),
+            vec![],
+            vec![],
+            None,
+            &empty_token_cache(),
+            &empty_response_cache(),
+        )
+        .await
+        .expect("Twilio proxy request should succeed");
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let captured = receiver.recv().await.expect("captured request");
+        assert_eq!(
+            captured.content_type.as_deref(),
+            Some("application/x-www-form-urlencoded")
+        );
+        assert_eq!(
+            captured.authorization.as_deref(),
+            Some("Basic QUMxMjM6YXV0aF90b2tlbg==")
+        );
+        assert_eq!(captured.body, form);
 
         server.abort();
     }
