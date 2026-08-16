@@ -1515,8 +1515,13 @@ async fn start_billing_downstream() -> (
     )
 }
 
+// Async settlement can lag far behind the request under coverage
+// instrumentation (llvm-cov roughly halves throughput), so the assertion
+// polls with a generous budget instead of the 2s that flaked in CI.
+const SETTLEMENT_POLL_ATTEMPTS: u32 = 500;
+
 async fn assert_direct_reported_usage(db: &mongodb::Database, service: &DownstreamService) {
-    for _ in 0..100 {
+    for _ in 0..SETTLEMENT_POLL_ATTEMPTS {
         let usage = db
             .collection::<UsageMeterRow>(USAGE_METER)
             .find_one(doc! {
@@ -1556,7 +1561,7 @@ async fn assert_direct_settled_usage_count(
     service: &DownstreamService,
     expected_count: u64,
 ) {
-    for _ in 0..100 {
+    for _ in 0..SETTLEMENT_POLL_ATTEMPTS {
         let count = db
             .collection::<UsageMeterRow>(USAGE_METER)
             .count_documents(doc! {
@@ -2278,7 +2283,7 @@ async fn assert_route_settled_count(
     metric: BillingMetric,
     expected_count: u64,
 ) {
-    for _ in 0..100 {
+    for _ in 0..SETTLEMENT_POLL_ATTEMPTS {
         let count = db
             .collection::<UsageMeterRow>(USAGE_METER)
             .count_documents(doc! {
@@ -2525,7 +2530,7 @@ async fn wait_for_route_usage_status(
     service_slug: &str,
     expected: UsageStatus,
 ) -> UsageMeterRow {
-    for _ in 0..100 {
+    for _ in 0..SETTLEMENT_POLL_ATTEMPTS {
         let row = usage_row_for_service(db, service_slug).await;
         if row.status == expected {
             return row;
