@@ -191,7 +191,9 @@ A valid instance-mounted `openapi_spec_url` (set via `nyxid service update --ope
 
 Admin-created catalog services get the same treatment: any active HTTP service with an `openapi_spec_url` and **zero** endpoint rows has discovery run automatically -- once at startup (background sweep) and whenever an admin creates or updates the service with a spec URL. The fetch uses the hardened SSRF-checked path, so spec URLs on private/internal hosts still require the manual `POST /services/{id}/discover-endpoints` route. Services with any existing endpoint rows are never touched automatically; re-run manual discovery to refresh them.
 
-A weekly `catalog-spec-drift` workflow (`scripts/check-catalog-spec-drift.py`) verifies every overlay operation still exists in the official upstream spec for providers that publish one (OpenAI, X, Discord). A red run means a provider moved or removed an operation; update the overlay by hand -- overlays are never auto-updated.
+A weekly `catalog-spec-drift` workflow (`scripts/check-catalog-spec-drift.py`) verifies every overlay operation still exists in the official upstream spec for providers that publish one (OpenAI, X, Discord, ElevenLabs, Twilio). A red run means a provider moved or removed an operation; update the overlay by hand -- overlays are never auto-updated.
+
+ElevenLabs and Twilio both publish JSON specifications that currently fit under the 5MB fetch limit (roughly 2.0MB and 1.9MB respectively), but NyxID deliberately uses hosted overlays for them. The upstream documents expose much broader, frequently changing surfaces than the default MCP catalog needs. The overlays keep discovery focused on ElevenLabs speech/voice/ConvAI operations and Twilio Calls/Messages/Recordings operations, while preserving Aevatar risk annotations. ElevenLabs realtime WebSocket paths are transport capabilities rather than OpenAPI operations; clients use the normal proxy WebSocket route with the vendor frame protocol.
 
 To extend coverage: add a JSON overlay under `backend/specs/catalog/`, register it in `HOSTED_SPEC_SOURCES` and `SLUG_TO_SPEC_KEY`, and the seed, backfill, sync, and serving paths all pick it up.
 

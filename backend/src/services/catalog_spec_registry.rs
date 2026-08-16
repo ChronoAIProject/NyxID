@@ -44,6 +44,10 @@ const HOSTED_SPEC_SOURCES: &[(&str, &str)] = &[
         include_str!("../../specs/catalog/discord-bot.openapi.json"),
     ),
     (
+        "elevenlabs",
+        include_str!("../../specs/catalog/elevenlabs.openapi.json"),
+    ),
+    (
         "facebook",
         include_str!("../../specs/catalog/facebook.openapi.json"),
     ),
@@ -108,6 +112,10 @@ const HOSTED_SPEC_SOURCES: &[(&str, &str)] = &[
         include_str!("../../specs/catalog/twitch.openapi.json"),
     ),
     (
+        "twilio",
+        include_str!("../../specs/catalog/twilio.openapi.json"),
+    ),
+    (
         "twitter",
         include_str!("../../specs/catalog/twitter.openapi.json"),
     ),
@@ -117,6 +125,7 @@ const HOSTED_SPEC_SOURCES: &[(&str, &str)] = &[
 const SLUG_TO_SPEC_KEY: &[(&str, &str)] = &[
     ("api-discord", "discord"),
     ("api-discord-bot", "discord-bot"),
+    ("api-elevenlabs", "elevenlabs"),
     ("api-facebook", "facebook"),
     ("api-feishu", "lark"),
     ("api-feishu-bot", "lark-bot"),
@@ -133,6 +142,7 @@ const SLUG_TO_SPEC_KEY: &[(&str, &str)] = &[
     ("api-spotify", "spotify"),
     ("api-telegram-bot", "telegram-bot"),
     ("api-twitch", "twitch"),
+    ("api-twilio", "twilio"),
     ("api-twitter", "twitter"),
     ("llm-anthropic", "anthropic"),
     ("llm-cohere", "cohere"),
@@ -387,6 +397,8 @@ mod tests {
     #[test]
     fn spec_for_url_path_resolves_hosted_paths_only() {
         assert!(spec_for_url_path("/api/v1/catalog-specs/firecrawl/openapi.json").is_some());
+        assert!(spec_for_url_path("/api/v1/catalog-specs/elevenlabs/openapi.json").is_some());
+        assert!(spec_for_url_path("/api/v1/catalog-specs/twilio/openapi.json").is_some());
         assert!(spec_for_url_path("/api/v1/catalog-specs/lark-bot/openapi.json").is_some());
         assert!(spec_for_url_path("/api/v1/catalog-specs/unknown/openapi.json").is_none());
         assert!(spec_for_url_path("/api/v1/catalog-specs//openapi.json").is_none());
@@ -403,6 +415,14 @@ mod tests {
         assert_eq!(
             spec_path_for_slug("api-github-pat").as_deref(),
             Some("/api/v1/catalog-specs/github/openapi.json")
+        );
+        assert_eq!(
+            spec_path_for_slug("api-elevenlabs").as_deref(),
+            Some("/api/v1/catalog-specs/elevenlabs/openapi.json")
+        );
+        assert_eq!(
+            spec_path_for_slug("api-twilio").as_deref(),
+            Some("/api/v1/catalog-specs/twilio/openapi.json")
         );
         assert!(spec_path_for_slug("llm-openclaw").is_none());
     }

@@ -1,5 +1,6 @@
 use std::sync::Arc;
 
+use base64::Engine;
 use futures::TryStreamExt;
 use mongodb::bson::doc;
 
@@ -584,7 +585,10 @@ fn build_credential_params_from_fields(
             service_slug: service_slug.to_string(),
             injection_method: "header".to_string(),
             header_name: Some("Authorization".to_string()),
-            header_value: Some(format!("Basic {credential}")),
+            header_value: Some(format!(
+                "Basic {}",
+                base64::engine::general_purpose::STANDARD.encode(credential)
+            )),
             param_name: None,
             param_value: None,
             target_url,
@@ -833,12 +837,15 @@ mod tests {
     }
 
     #[test]
-    fn build_params_basic_uses_authorization_header() {
+    fn build_params_basic_encodes_raw_credential_for_authorization_header() {
         let params =
-            build_credential_params_from_fields("my-svc", "basic", "ignored", "dXNlcjpwYXNz", None);
+            build_credential_params_from_fields("my-svc", "basic", "ignored", "user:pa:ss", None);
         assert_eq!(params.injection_method, "header");
         assert_eq!(params.header_name, Some("Authorization".to_string()));
-        assert_eq!(params.header_value, Some("Basic dXNlcjpwYXNz".to_string()));
+        assert_eq!(
+            params.header_value,
+            Some("Basic dXNlcjpwYTpzcw==".to_string())
+        );
     }
 
     #[test]

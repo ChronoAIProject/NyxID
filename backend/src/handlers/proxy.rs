@@ -6834,6 +6834,72 @@ mod tests {
         );
     }
 
+    #[tokio::test]
+    #[allow(clippy::result_large_err)]
+    async fn direct_websocket_injects_elevenlabs_api_key_on_upgrade() {
+        use tokio_tungstenite::tungstenite::handshake::server::{
+            Request as WsRequest, Response as WsResponse,
+        };
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind downstream WebSocket");
+        let addr = listener.local_addr().expect("downstream address");
+        let (header_tx, header_rx) = tokio::sync::oneshot::channel();
+        let server_task = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.expect("accept downstream");
+            let socket = tokio_tungstenite::accept_hdr_async(
+                stream,
+                move |request: &WsRequest, response: WsResponse| {
+                    let api_key = request
+                        .headers()
+                        .get("xi-api-key")
+                        .and_then(|value| value.to_str().ok())
+                        .map(str::to_string);
+                    header_tx.send(api_key).expect("send captured API key");
+                    Ok(response)
+                },
+            )
+            .await
+            .expect("complete downstream handshake");
+            drop(socket);
+        });
+
+        let mut target = make_target(&format!("ws://{addr}"));
+        target.auth_method = "header".to_string();
+        target.auth_key_name = "xi-api-key".to_string();
+        target.credential = "elevenlabs-test-key".to_string();
+        let permit =
+            crate::services::billing::route_inventory::enforce_billing_egress_classification(
+                Some(
+                    crate::services::billing::route_inventory::BillingRoutePolicy::Metered(
+                        crate::services::billing::BillingIngress::Proxy,
+                    ),
+                ),
+                crate::services::billing::BillingIngress::Proxy,
+            )
+            .expect("proxy billing classification");
+
+        let connection = super::connect_downstream_ws(
+            &format!("ws://{addr}/v1/convai/conversation"),
+            &target,
+            &[],
+            &[],
+            &[],
+            None,
+            permit,
+        )
+        .await
+        .expect("connect to ElevenLabs-shaped WebSocket");
+
+        assert_eq!(
+            header_rx.await.expect("captured API key"),
+            Some("elevenlabs-test-key".to_string())
+        );
+        drop(connection);
+        server_task.await.expect("downstream server task");
+    }
+
     #[test]
     fn ws_url_handles_trailing_slash_on_base() {
         let target = make_target("http://localhost:8080/");
@@ -7890,6 +7956,44 @@ mod tests {
         assert!(super::STREAMING_CONTENT_TYPES.contains(&"video/"));
         assert!(super::STREAMING_CONTENT_TYPES.contains(&"audio/"));
         assert!(super::STREAMING_CONTENT_TYPES.contains(&"image/"));
+    }
+
+    #[tokio::test]
+    async fn elevenlabs_audio_response_uses_direct_streaming_branch() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind downstream audio server");
+        let addr = listener.local_addr().expect("downstream audio address");
+        let app = Router::new().route(
+            "/v1/text-to-speech/voice-1/stream",
+            get(|| async {
+                let mut response = Body::from(vec![0_u8, 1, 2, 255]).into_response();
+                response
+                    .headers_mut()
+                    .insert("content-type", "audio/mpeg".parse().unwrap());
+                response
+            }),
+        );
+        let server = tokio::spawn(async move {
+            axum::serve(listener, app).await.expect("serve audio");
+        });
+
+        let response = reqwest::get(format!("http://{addr}/v1/text-to-speech/voice-1/stream"))
+            .await
+            .expect("request ElevenLabs-shaped audio");
+
+        assert_eq!(response.status(), reqwest::StatusCode::OK);
+        assert!(super::should_stream_response(
+            &response,
+            StatusCode::OK,
+            false
+        ));
+        assert_eq!(
+            response.bytes().await.expect("read audio bytes").as_ref(),
+            &[0_u8, 1, 2, 255]
+        );
+
+        server.abort();
     }
 
     #[test]
