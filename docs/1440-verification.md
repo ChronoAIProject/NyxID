@@ -96,3 +96,15 @@ Stated explicitly rather than implied by silence:
   that is asserted by reading, not by a test.
 - `load_operation_catalog` may perform a hardened, cached, DNS-pinned outbound OpenAPI fetch, so the route is
   not a pure database read. See the plan's scope note.
+
+## Follow-up coverage (#1449)
+
+Issue #1449 adds the deferred handler-boundary coverage: a real handler-output
+snapshot pins deterministic service/operation ordering plus both digest values,
+MongoDB command monitoring rejects any route write, and direct handler calls
+exercise absent, revoked, and expired live-grant predicates. It also publishes
+`exact_view_digest` from the shared exact-view projection while preserving
+`catalog_digest` as the existing whole-catalog fence. The OpenAPI fetch/cache
+qualification above remains intentional: the route has no database or provider
+mutation, but it is not pure with respect to process state or documentation
+network reads.

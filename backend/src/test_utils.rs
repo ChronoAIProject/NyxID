@@ -74,6 +74,33 @@ pub(crate) async fn connect_test_database(prefix: &str) -> Option<mongodb::Datab
     Some(client.database(&db_name))
 }
 
+/// Connect to a fresh test database through a client with MongoDB command
+/// monitoring enabled. Tests use this to prove read-only handler boundaries;
+/// setup commands are observable too, so callers should clear their recorder
+/// immediately before invoking the behavior under test.
+pub(crate) async fn connect_test_database_with_command_handler(
+    prefix: &str,
+    handler: mongodb::event::EventHandler<mongodb::event::command::CommandEvent>,
+) -> Option<mongodb::Database> {
+    let (_, cleanup_uri) = probe_test_mongo_client().await?;
+    let db_name = format!(
+        "{TEST_DB_NAME_PREFIX}{}_{}",
+        sanitize_test_db_prefix(prefix),
+        uuid::Uuid::new_v4()
+    );
+    register_test_db_for_cleanup(&cleanup_uri, &db_name);
+
+    let mut options = mongodb::options::ClientOptions::parse(&cleanup_uri)
+        .await
+        .expect("test MongoDB URI was already parsed by the readiness probe");
+    options.server_selection_timeout = Some(Duration::from_secs(30));
+    options.connect_timeout = Some(Duration::from_secs(20));
+    options.max_pool_size = Some(4);
+    options.command_event_handler = Some(handler);
+    let client = mongodb::Client::with_options(options).expect("build monitored test client");
+    Some(client.database(&db_name))
+}
+
 /// Connect to a fresh database and prove that it supports multi-document
 /// transactions. Transaction-dependent tests must use this helper instead of
 /// conditionally returning when `connect_test_database` yields `None`.

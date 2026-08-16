@@ -23,35 +23,14 @@ pub struct DelegatedOperationCatalogResponse {
     /// of this filtered response body. Unrelated catalog metadata can therefore
     /// cause a drift rejection without changing the listed operations.
     pub catalog_digest: String,
+    /// Representation validator over exactly `services`, using the same
+    /// canonical projection as exact approval create and redemption.
+    pub exact_view_digest: String,
     pub resolved_at: String,
     pub authority_expires_at: String,
-    pub services: Vec<DelegatedCatalogService>,
+    pub services: Vec<mcp_service::ExactOperationViewService>,
     pub total_services: usize,
     pub total_operations: usize,
-}
-
-#[derive(Debug, Serialize)]
-pub struct DelegatedCatalogService {
-    pub user_service_id: String,
-    pub service_slug: String,
-    pub service_name: String,
-    pub description: Option<String>,
-    pub node_id: Option<String>,
-    pub operations: Vec<DelegatedCatalogOperation>,
-}
-
-#[derive(Debug, Serialize)]
-pub struct DelegatedCatalogOperation {
-    pub endpoint_id: String,
-    pub name: String,
-    pub method: String,
-    pub path: String,
-    pub parameters: Option<serde_json::Value>,
-    pub request_body_schema: Option<serde_json::Value>,
-    pub request_content_type: Option<String>,
-    pub request_body_required: bool,
-    pub response: crate::models::service_endpoint::OperationResponseContract,
-    pub endpoint_contract_digest: String,
 }
 
 /// GET /api/v1/delegation/operation-catalog
@@ -99,59 +78,14 @@ pub async fn get_operation_catalog(
         service_scope,
     )
     .await?;
-    // The response lists only the canonical exact-visible view (#1440:
-    // generic-free), but `catalog_digest` is deliberately taken over the whole
-    // scoped catalog.
-    //
-    // #1440 asks for the digest of the final filtered view. That is not
-    // achievable without breaking a shared fence: the same `catalog_digest` is
-    // published by `/api/v1/mcp/config` (handlers/mcp.rs), which lists generic
-    // and platform services, and is consumed as-is by exact-approval create and
-    // redeem. Narrowing it here alone makes this facade's digest unusable for
-    // approval; narrowing it everywhere makes `/mcp/config` advertise a digest
-    // that excludes rows it lists. The fence therefore stays whole-catalog, and
-    // the deviation is recorded in docs/1440-verification.md.
+    // `catalog_digest` remains the pre-existing broad approval fence shared
+    // with `/mcp/config`. `exact_view_digest` is the additive representation
+    // validator over exactly the generic-free response below.
     let view = mcp_service::exact_operation_view(&catalog.services);
     let catalog_digest = mcp_service::operation_catalog_digest(&catalog.services);
+    let exact_view_digest = mcp_service::exact_operation_view_digest(&view);
     let resolved_at = Utc::now();
-
-    let services: Vec<_> = view
-        .iter()
-        .filter_map(|service| {
-            let mcp_service::McpToolSource::UserManaged {
-                user_service_id,
-                node_id,
-                ..
-            } = &service.source
-            else {
-                return None;
-            };
-            let operations = service
-                .endpoints
-                .iter()
-                .map(|endpoint| DelegatedCatalogOperation {
-                    endpoint_id: endpoint.endpoint_id.clone(),
-                    name: endpoint.name.clone(),
-                    method: endpoint.method.clone(),
-                    path: endpoint.path.clone(),
-                    parameters: endpoint.parameters.clone(),
-                    request_body_schema: endpoint.request_body_schema.clone(),
-                    request_content_type: endpoint.request_content_type.clone(),
-                    request_body_required: endpoint.request_body_required,
-                    response: endpoint.response.clone(),
-                    endpoint_contract_digest: mcp_service::endpoint_contract_digest(endpoint),
-                })
-                .collect::<Vec<_>>();
-            Some(DelegatedCatalogService {
-                user_service_id: user_service_id.clone(),
-                service_slug: service.service_slug.clone(),
-                service_name: service.service_name.clone(),
-                description: service.description.clone(),
-                node_id: node_id.clone(),
-                operations,
-            })
-        })
-        .collect();
+    let services = view.services;
     let total_services = services.len();
     let total_operations = services
         .iter()
@@ -161,6 +95,7 @@ pub async fn get_operation_catalog(
     Ok(Json(DelegatedOperationCatalogResponse {
         contract_version: "nyxid-delegated-operation-catalog.v1",
         catalog_digest,
+        exact_view_digest,
         resolved_at: resolved_at.to_rfc3339(),
         authority_expires_at: grant.expires_at.to_rfc3339(),
         services,
@@ -287,7 +222,26 @@ pub async fn refresh_delegation_token(
 
 #[cfg(test)]
 mod tests {
+    use std::sync::{Arc, Mutex};
+
+    use mongodb::event::EventHandler;
+    use mongodb::event::command::CommandEvent;
+
+    use crate::models::downstream_service::{
+        COLLECTION_NAME as DOWNSTREAM_SERVICES, DownstreamService,
+    };
+    use crate::models::service_endpoint::{
+        COLLECTION_NAME as SERVICE_ENDPOINTS, OperationResponseContract, ServiceEndpoint,
+    };
+    use crate::models::user_endpoint::{COLLECTION_NAME as USER_ENDPOINTS, UserEndpoint};
+    use crate::models::user_service::{COLLECTION_NAME as USER_SERVICES, UserService};
+
     use super::*;
+
+    const TEST_USER_ID: &str = "00000000-0000-4000-8000-000000000001";
+    const TEST_SERVICE_A: &str = "00000000-0000-4000-8000-000000000101";
+    const TEST_SERVICE_B: &str = "00000000-0000-4000-8000-000000000102";
+    const TEST_GENERIC_SERVICE: &str = "00000000-0000-4000-8000-000000000103";
 
     #[test]
     fn delegation_refresh_response_serializes_all_fields() {
@@ -327,15 +281,16 @@ mod tests {
         let response = DelegatedOperationCatalogResponse {
             contract_version: "nyxid-delegated-operation-catalog.v1",
             catalog_digest: "sha256:opaque".to_string(),
+            exact_view_digest: "sha256:exact-view".to_string(),
             resolved_at: "2026-08-14T00:00:00Z".to_string(),
             authority_expires_at: "2026-08-14T00:05:00Z".to_string(),
-            services: vec![DelegatedCatalogService {
+            services: vec![mcp_service::ExactOperationViewService {
                 user_service_id: "service-1".to_string(),
                 service_slug: "github".to_string(),
                 service_name: "GitHub".to_string(),
                 description: Some("typed service".to_string()),
                 node_id: None,
-                operations: vec![DelegatedCatalogOperation {
+                operations: vec![mcp_service::ExactOperationViewOperation {
                     endpoint_id: "op_1".to_string(),
                     name: "list_repositories".to_string(),
                     method: "GET".to_string(),
@@ -394,9 +349,25 @@ mod tests {
         }
     }
 
+    fn fixture_catalog_auth() -> AuthUser {
+        let mut auth = catalog_auth(AuthMethod::Delegated);
+        auth.user_id = uuid::Uuid::parse_str(TEST_USER_ID).unwrap();
+        auth.token_jti = Some("00000000-0000-4000-8000-000000000501".to_string());
+        // Deliberately reverse the service order. The response projection must
+        // still sort by `user_service_id`.
+        auth.allowed_service_ids = vec![
+            TEST_GENERIC_SERVICE.to_string(),
+            TEST_SERVICE_B.to_string(),
+            TEST_SERVICE_A.to_string(),
+        ];
+        auth.allowed_node_ids.clear();
+        auth.resource_uris = Some(Vec::new());
+        auth
+    }
+
     /// A grant agreeing with `auth` on every bound authority field.
     fn matching_grant(auth: &AuthUser) -> CatalogDelegationGrant {
-        let now = Utc::now();
+        let now = mongodb::bson::DateTime::now().to_chrono();
         CatalogDelegationGrant {
             id: auth.token_jti.clone().expect("fixture carries a jti"),
             user_id: auth.user_id.to_string(),
@@ -412,6 +383,328 @@ mod tests {
             expires_at: now + chrono::Duration::minutes(5),
             created_at: now,
         }
+    }
+
+    fn template_service(id: &str, slug: &str) -> DownstreamService {
+        let mut service = crate::models::downstream_service::test_helpers::dummy_service();
+        service.id = id.to_string();
+        service.name = format!("{slug} template");
+        service.slug = slug.to_string();
+        service.requires_user_credential = true;
+        service
+    }
+
+    fn template_endpoint(
+        id: &str,
+        service_id: &str,
+        name: &str,
+        method: &str,
+        path: &str,
+    ) -> ServiceEndpoint {
+        let now = Utc::now();
+        ServiceEndpoint {
+            id: id.to_string(),
+            service_id: service_id.to_string(),
+            name: name.to_string(),
+            description: Some(format!("{name} description omitted from exact view")),
+            method: method.to_string(),
+            path: path.to_string(),
+            parameters: None,
+            request_body_schema: None,
+            request_content_type: None,
+            request_body_required: false,
+            response_description: Some("response description omitted".to_string()),
+            response: OperationResponseContract {
+                content_types: vec!["application/json".to_string()],
+                binary_artifact: Some(false),
+            },
+            risk: None,
+            supports_idempotency_key: false,
+            is_active: true,
+            created_at: now,
+            updated_at: now,
+        }
+    }
+
+    async fn seed_operation_catalog_fixture(
+        db: &mongodb::Database,
+        auth: &AuthUser,
+    ) -> CatalogDelegationGrant {
+        let grant = matching_grant(auth);
+        db.collection::<CatalogDelegationGrant>(CATALOG_DELEGATION_GRANTS)
+            .insert_one(&grant)
+            .await
+            .expect("insert catalog grant");
+
+        let catalog_a = "00000000-0000-4000-8000-000000000301";
+        let catalog_b = "00000000-0000-4000-8000-000000000302";
+        db.collection::<DownstreamService>(DOWNSTREAM_SERVICES)
+            .insert_many([
+                template_service(catalog_b, "beta-template"),
+                template_service(catalog_a, "alpha-template"),
+            ])
+            .await
+            .expect("insert catalog templates");
+        db.collection::<ServiceEndpoint>(SERVICE_ENDPOINTS)
+            .insert_many([
+                template_endpoint(
+                    "00000000-0000-4000-8000-000000000403",
+                    catalog_b,
+                    "beta_status",
+                    "GET",
+                    "/status",
+                ),
+                template_endpoint(
+                    "00000000-0000-4000-8000-000000000402",
+                    catalog_a,
+                    "alpha_create",
+                    "POST",
+                    "/items",
+                ),
+                template_endpoint(
+                    "00000000-0000-4000-8000-000000000401",
+                    catalog_a,
+                    "alpha_list",
+                    "GET",
+                    "/items",
+                ),
+            ])
+            .await
+            .expect("insert operation templates");
+
+        let endpoints = [
+            (
+                "00000000-0000-4000-8000-000000000201",
+                "Alpha Service",
+                Some(catalog_a),
+            ),
+            (
+                "00000000-0000-4000-8000-000000000202",
+                "Beta Service",
+                Some(catalog_b),
+            ),
+            (
+                "00000000-0000-4000-8000-000000000203",
+                "Hidden Generic",
+                None,
+            ),
+        ];
+        for (id, label, catalog_id) in endpoints {
+            db.collection::<UserEndpoint>(USER_ENDPOINTS)
+                .insert_one(crate::test_utils::test_user_endpoint(
+                    id,
+                    TEST_USER_ID,
+                    label,
+                    "https://provider.invalid",
+                    None,
+                    catalog_id,
+                ))
+                .await
+                .expect("insert user endpoint");
+        }
+        for (id, slug, endpoint_id, catalog_id) in [
+            (
+                TEST_SERVICE_B,
+                "beta",
+                "00000000-0000-4000-8000-000000000202",
+                Some(catalog_b),
+            ),
+            (
+                TEST_GENERIC_SERVICE,
+                "hidden-generic",
+                "00000000-0000-4000-8000-000000000203",
+                None,
+            ),
+            (
+                TEST_SERVICE_A,
+                "alpha",
+                "00000000-0000-4000-8000-000000000201",
+                Some(catalog_a),
+            ),
+        ] {
+            db.collection::<UserService>(USER_SERVICES)
+                .insert_one(crate::test_utils::test_user_service(
+                    id,
+                    TEST_USER_ID,
+                    slug,
+                    endpoint_id,
+                    catalog_id,
+                    None,
+                ))
+                .await
+                .expect("insert user service");
+        }
+        grant
+    }
+
+    fn assert_inactive_authority(error: AppError) {
+        assert!(matches!(
+            error,
+            AppError::Unauthorized(message)
+                if message == "Delegated catalog authority is invalid or inactive"
+        ));
+    }
+
+    #[tokio::test]
+    async fn handler_rejects_absent_revoked_and_expired_live_grants() {
+        let Some(db) = crate::test_utils::connect_test_database("delegation_handler_grants").await
+        else {
+            return;
+        };
+        let state = crate::test_utils::test_app_state(db.clone());
+
+        let absent = fixture_catalog_auth();
+        assert_inactive_authority(
+            get_operation_catalog(State(state.clone()), absent)
+                .await
+                .expect_err("absent grant must fail at the handler boundary"),
+        );
+
+        let mut revoked_auth = fixture_catalog_auth();
+        revoked_auth.token_jti = Some("00000000-0000-4000-8000-000000000502".to_string());
+        let mut revoked = matching_grant(&revoked_auth);
+        revoked.revoked = true;
+        db.collection::<CatalogDelegationGrant>(CATALOG_DELEGATION_GRANTS)
+            .insert_one(revoked)
+            .await
+            .unwrap();
+        assert_inactive_authority(
+            get_operation_catalog(State(state.clone()), revoked_auth)
+                .await
+                .expect_err("revoked grant must fail at the handler boundary"),
+        );
+
+        let mut expired_auth = fixture_catalog_auth();
+        expired_auth.token_jti = Some("00000000-0000-4000-8000-000000000503".to_string());
+        let mut expired = matching_grant(&expired_auth);
+        expired.expires_at = Utc::now() - chrono::Duration::seconds(1);
+        db.collection::<CatalogDelegationGrant>(CATALOG_DELEGATION_GRANTS)
+            .insert_one(expired)
+            .await
+            .unwrap();
+        assert_inactive_authority(
+            get_operation_catalog(State(state), expired_auth)
+                .await
+                .expect_err("expired grant must fail at the handler boundary"),
+        );
+    }
+
+    #[tokio::test]
+    async fn handler_output_is_deterministic_and_performs_no_database_writes() {
+        let commands = Arc::new(Mutex::new(Vec::<String>::new()));
+        let observed = commands.clone();
+        let handler = EventHandler::<CommandEvent>::callback(move |event| {
+            if let CommandEvent::Started(event) = event {
+                observed.lock().unwrap().push(event.command_name);
+            }
+        });
+        let Some(db) = crate::test_utils::connect_test_database_with_command_handler(
+            "delegation_handler_snapshot",
+            handler,
+        )
+        .await
+        else {
+            return;
+        };
+        let auth = fixture_catalog_auth();
+        let grant = seed_operation_catalog_fixture(&db, &auth).await;
+        commands.lock().unwrap().clear();
+
+        let Json(response) =
+            get_operation_catalog(State(crate::test_utils::test_app_state(db)), auth)
+                .await
+                .expect("resolve delegated operation catalog");
+        let mut actual = serde_json::to_value(response).unwrap();
+        actual["resolved_at"] = serde_json::json!("<resolved-at>");
+        assert_eq!(
+            actual["authority_expires_at"],
+            grant.expires_at.to_rfc3339()
+        );
+        assert_eq!(
+            actual,
+            serde_json::json!({
+                "contract_version": "nyxid-delegated-operation-catalog.v1",
+                "catalog_digest": "sha256:ea55205436c9a87a35ec9d21072cff07e77dc2ef23409aeb16760f0d08662a62",
+                "exact_view_digest": "sha256:e1d168ef49f0b5955c39fa4a0767791fa9a75141ed4c4df68a6d1b53f87284fc",
+                "resolved_at": "<resolved-at>",
+                "authority_expires_at": grant.expires_at.to_rfc3339(),
+                "services": [
+                    {
+                        "user_service_id": TEST_SERVICE_A,
+                        "service_slug": "alpha",
+                        "service_name": "Alpha Service",
+                        "description": null,
+                        "node_id": null,
+                        "operations": [
+                            {
+                                "endpoint_id": "00000000-0000-4000-8000-000000000401",
+                                "name": "alpha_list",
+                                "method": "GET",
+                                "path": "/items",
+                                "parameters": null,
+                                "request_body_schema": null,
+                                "request_content_type": null,
+                                "request_body_required": false,
+                                "response": {"content_types": ["application/json"], "binary_artifact": false},
+                                "endpoint_contract_digest": "sha256:44d63aba629068d100761faf33f1359e0837f554f691ea50fd30a69bb7b8ea5a"
+                            },
+                            {
+                                "endpoint_id": "00000000-0000-4000-8000-000000000402",
+                                "name": "alpha_create",
+                                "method": "POST",
+                                "path": "/items",
+                                "parameters": null,
+                                "request_body_schema": null,
+                                "request_content_type": null,
+                                "request_body_required": false,
+                                "response": {"content_types": ["application/json"], "binary_artifact": false},
+                                "endpoint_contract_digest": "sha256:b33c78e543e5bd0db8ac01378ced3f1598ba15457c91b7526178fe91313e5021"
+                            }
+                        ]
+                    },
+                    {
+                        "user_service_id": TEST_SERVICE_B,
+                        "service_slug": "beta",
+                        "service_name": "Beta Service",
+                        "description": null,
+                        "node_id": null,
+                        "operations": [
+                            {
+                                "endpoint_id": "00000000-0000-4000-8000-000000000403",
+                                "name": "beta_status",
+                                "method": "GET",
+                                "path": "/status",
+                                "parameters": null,
+                                "request_body_schema": null,
+                                "request_content_type": null,
+                                "request_body_required": false,
+                                "response": {"content_types": ["application/json"], "binary_artifact": false},
+                                "endpoint_contract_digest": "sha256:3f488040e19cb9fdc9e9f2aefd9061058c16426a58a2ace0664373e5b9574d5f"
+                            }
+                        ]
+                    }
+                ],
+                "total_services": 2,
+                "total_operations": 3
+            })
+        );
+
+        let write_commands: Vec<_> = commands
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|command| {
+                matches!(
+                    command.as_str(),
+                    "insert" | "update" | "delete" | "findAndModify" | "bulkWrite"
+                )
+            })
+            .cloned()
+            .collect();
+        assert!(
+            write_commands.is_empty(),
+            "catalog handler issued database writes: {write_commands:?}"
+        );
     }
 
     #[test]
