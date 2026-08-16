@@ -711,6 +711,7 @@ describe("KeyDetailPage — org read-only branch", () => {
 describe("KeyDetailPage — auto-connected branch", () => {
   it("renders the platform-managed service details card instead of editors", () => {
     hooks.key.data = makeKey({
+      endpoint_url: "https://platform.internal.example/v1",
       auto_connected: true,
       api_key_id: null,
       credential_type: "none",
@@ -725,12 +726,66 @@ describe("KeyDetailPage — auto-connected branch", () => {
     expect(
       screen.getByText("None (no credentials required)"),
     ).toBeInTheDocument();
+    expect(screen.getByText("Platform managed")).toBeInTheDocument();
+    expect(
+      screen.queryByText("https://platform.internal.example/v1"),
+    ).not.toBeInTheDocument();
     // No node bound → routing shows Direct.
     expect(screen.getByText("Direct")).toBeInTheDocument();
     // Editable sections (e.g. the rotate button) are absent.
     expect(
       screen.queryByRole("button", { name: /Rotate Credentials/i }),
     ).not.toBeInTheDocument();
+  });
+
+  it("uses a catalog /v1 base only to shape the proxy example path", () => {
+    const catalogBaseUrl = "https://platform.internal.example/v1";
+    hooks.key.data = makeKey({
+      endpoint_url: undefined,
+      auto_connected: true,
+      api_key_id: null,
+      credential_type: "none",
+      auth_method: "none",
+    });
+    hooks.catalogEntry = {
+      slug: "openai",
+      name: "OpenAI",
+      base_url: catalogBaseUrl,
+      service_type: "http",
+    };
+
+    render(<KeyDetailPage />);
+
+    const body = document.body.textContent ?? "";
+    const proxyUrl = `${window.location.origin}/api/v1/proxy/s/openai-x`;
+    expect(body).toContain(`${proxyUrl}/chat/completions`);
+    expect(body).not.toContain(`${proxyUrl}/v1/chat/completions`);
+    expect(body).not.toContain(catalogBaseUrl);
+  });
+
+  it("keeps /v1 in the proxy example when the catalog base has no /v1 suffix", () => {
+    const catalogBaseUrl = "https://platform.internal.example/api";
+    hooks.key.data = makeKey({
+      endpoint_url: undefined,
+      auto_connected: true,
+      api_key_id: null,
+      credential_type: "none",
+      auth_method: "none",
+    });
+    hooks.catalogEntry = {
+      slug: "openai",
+      name: "OpenAI",
+      base_url: catalogBaseUrl,
+      service_type: "http",
+    };
+
+    render(<KeyDetailPage />);
+
+    const body = document.body.textContent ?? "";
+    const proxyUrl = `${window.location.origin}/api/v1/proxy/s/openai-x`;
+    expect(body).toContain(`${proxyUrl}/v1/chat/completions`);
+    expect(body).not.toContain(`${proxyUrl}/chat/completions`);
+    expect(body).not.toContain(catalogBaseUrl);
   });
 });
 

@@ -20,7 +20,7 @@ use crate::models::user_endpoint::UserEndpoint;
 use crate::models::user_provider_token::{
     COLLECTION_NAME as USER_PROVIDER_TOKENS, UserProviderToken,
 };
-use crate::models::user_service::UserService;
+use crate::models::user_service::{AUTO_PROVISION_SOURCE, UserService};
 use crate::models::ws_frame_injection::WsFrameInjection;
 use crate::services::{
     audit_service::{self, AuditActor},
@@ -28,7 +28,6 @@ use crate::services::{
     user_endpoint_service, user_service_service, user_token_service, ws_frame_injector,
 };
 
-const AUTO_PROVISION_SOURCE: &str = "auto_provision";
 const MAX_SERVICE_SLUG_LEN: usize = 80;
 const HUMAN_SLUG_SUFFIX_MAX: u8 = 9;
 const RANDOM_SLUG_SUFFIX_ATTEMPTS: usize = 5;
@@ -5512,6 +5511,10 @@ mod tests {
         assert_eq!(view.credential_type, "none");
         assert_eq!(view.status, "active");
         assert!(view.auto_connected);
+        assert_eq!(
+            view.endpoint_url, "https://example.com",
+            "the internal view keeps the target for routing; response DTOs redact it"
+        );
     }
 
     #[test]

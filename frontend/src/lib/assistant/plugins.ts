@@ -110,6 +110,9 @@ function addedServiceItem(
   const first = group[0] as KeyInfo;
   const catalogEntry = catalogBySlug.get(slug);
   const name = catalogEntry?.name ?? first.label;
+  const endpointDescription = !first.auto_connected && first.endpoint_url
+    ? `Connected through the NyxID proxy (${first.endpoint_url}).`
+    : "Connected through the NyxID proxy.";
   return {
     id: `service:${slug}`,
     name,
@@ -119,7 +122,7 @@ function addedServiceItem(
     description:
       catalogEntry?.description ??
       first.description ??
-      `Connected through the NyxID proxy (${first.endpoint_url}).`,
+      endpointDescription,
     meta:
       group.length > 1
         ? `${String(group.length)} connections`
@@ -131,6 +134,9 @@ function addedServiceItem(
 }
 
 function addedCustomItem(key: KeyInfo): ConnectorCardItem {
+  const endpointDescription = !key.auto_connected && key.endpoint_url
+    ? `Connected through the NyxID proxy (${key.endpoint_url}).`
+    : "Connected through the NyxID proxy.";
   return {
     id: `key:${key.id}`,
     name: key.label,
@@ -139,7 +145,7 @@ function addedCustomItem(key: KeyInfo): ConnectorCardItem {
     category: categoryOf(key.service_type),
     description:
       key.description ??
-      `Connected through the NyxID proxy (${key.endpoint_url}).`,
+      endpointDescription,
     meta: key.credential_type.replaceAll("_", " "),
     added: true,
     disabled: key.is_active === false,

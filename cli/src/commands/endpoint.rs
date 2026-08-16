@@ -36,10 +36,8 @@ pub async fn run(command: EndpointCommands) -> Result<()> {
                             let id = ep["id"].as_str().or(ep["_id"].as_str()).unwrap_or("-");
                             let short_id = crate::commands::short_id(id);
                             let label = ep["label"].as_str().or(ep["name"].as_str()).unwrap_or("-");
-                            let url = ep["url"]
-                                .as_str()
-                                .or(ep["base_url"].as_str())
-                                .unwrap_or("-");
+                            let url =
+                                crate::commands::display_endpoint(ep, "url", Some("base_url"));
                             table.add_row([short_id, label, url]);
                         }
                         eprintln!("{table}");

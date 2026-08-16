@@ -54,9 +54,26 @@ pub(crate) fn short_id(id: &str) -> &str {
     id.get(..8).unwrap_or(id)
 }
 
+/// Render a user-facing target from a response row without disclosing the
+/// server-owned URL of an auto-connected service. The marker wins even when
+/// an older backend still includes the raw field.
+pub(crate) fn display_endpoint<'a>(
+    item: &'a serde_json::Value,
+    field: &str,
+    legacy_field: Option<&str>,
+) -> &'a str {
+    if item["auto_connected"].as_bool() == Some(true) {
+        return "platform managed";
+    }
+    item[field]
+        .as_str()
+        .or_else(|| legacy_field.and_then(|name| item[name].as_str()))
+        .unwrap_or("-")
+}
+
 #[cfg(test)]
 mod tests {
-    use super::short_id;
+    use super::{display_endpoint, short_id};
 
     #[test]
     fn short_id_truncates_long_ascii_to_eight_bytes() {
@@ -77,5 +94,34 @@ mod tests {
         let id = "日本語テスト";
         assert!(id.len() > 8, "precondition: more than 8 bytes");
         assert_eq!(short_id(id), id);
+    }
+
+    #[test]
+    fn display_endpoint_hides_auto_connected_targets() {
+        let omitted = serde_json::json!({ "auto_connected": true });
+        assert_eq!(
+            display_endpoint(&omitted, "endpoint_url", None),
+            "platform managed"
+        );
+
+        let old_server = serde_json::json!({
+            "auto_connected": true,
+            "endpoint_url": "https://platform.internal.example/v1",
+        });
+        let rendered = display_endpoint(&old_server, "endpoint_url", None);
+        assert_eq!(rendered, "platform managed");
+        assert!(!rendered.contains("platform.internal.example"));
+    }
+
+    #[test]
+    fn display_endpoint_keeps_user_managed_targets() {
+        let item = serde_json::json!({
+            "auto_connected": false,
+            "endpoint_url": "https://api.example.com/v1",
+        });
+        assert_eq!(
+            display_endpoint(&item, "endpoint_url", None),
+            "https://api.example.com/v1"
+        );
     }
 }

@@ -6,6 +6,7 @@ use crate::models::ssh_auth_mode::{SshAuthMode, default_ssh_auth_mode};
 use crate::models::ws_frame_injection::WsFrameInjection;
 
 pub const COLLECTION_NAME: &str = "user_services";
+pub const AUTO_PROVISION_SOURCE: &str = "auto_provision";
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct UserService {

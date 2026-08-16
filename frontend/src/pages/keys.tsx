@@ -131,11 +131,14 @@ function KeyCardContent({
     ? (nodes?.find((n) => n.id === keyInfo.node_id)?.name ??
       keyInfo.node_id.slice(0, 8))
     : null;
-  const displayUrl = isSsh
-    ? `${keyInfo.ssh_host ?? "unknown"}:${keyInfo.ssh_port ?? 22}`
-    : keyInfo.endpoint_url.length > 50
-      ? `${keyInfo.endpoint_url.slice(0, 50)}...`
-      : keyInfo.endpoint_url;
+  const endpointUrl = keyInfo.endpoint_url ?? "";
+  const displayUrl = keyInfo.auto_connected
+    ? "Platform managed"
+    : isSsh
+      ? `${keyInfo.ssh_host ?? "unknown"}:${keyInfo.ssh_port ?? 22}`
+      : endpointUrl.length > 50
+        ? `${endpointUrl.slice(0, 50)}...`
+        : endpointUrl;
 
   const isOrgInherited = source?.type === "org";
   // Viewers and out-of-scope members see the card with reduced opacity.
@@ -343,9 +346,11 @@ function ServiceTableRow({
       ? "Node Deleted"
       : displayStatus.charAt(0).toUpperCase() + displayStatus.slice(1);
 
-  const displayUrl = isSsh
-    ? `${keyInfo.ssh_host ?? "unknown"}:${keyInfo.ssh_port ?? 22}`
-    : keyInfo.endpoint_url;
+  const displayUrl = keyInfo.auto_connected
+    ? "Platform managed"
+    : isSsh
+      ? `${keyInfo.ssh_host ?? "unknown"}:${keyInfo.ssh_port ?? 22}`
+      : (keyInfo.endpoint_url ?? "");
 
   const authLabel = keyInfo.auto_connected
     ? keyInfo.auth_method === "none"
