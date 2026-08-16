@@ -1,7 +1,7 @@
 ---
 name: aevatar-automation
 description: "Aevatar scheduling & workflow automation: scheduled_agent_creator (cron/one-shot) for independent scheduled Ornn skill agents and reminders — NOT an alias for Studio Team member automation — the long-running task automation playbook, workflow creation semantics (Scope Workflow vs Ornn publish), agent_builder lifecycle, the typed required_nyx_services contract (exact user_service_id is the authorization; a slug snapshot never substitutes), dedicated Agent Key semantics (vault-held raw material, borrowed durable reference late-resolved per use, exact non-wildcard grants, ~90-day projected expiry, reauthorize-then-revoke, independent NyxID and Vault revocation tracks), accepted-is-admission-only receipts, and a token_expired triage protocol that reads credentialSourceKind before assuming any TTL."
-version: "1.2"
+version: "1.3"
 metadata:
   category: plain
   tag:
@@ -28,6 +28,13 @@ required_nyx_services[] = { user_service_id, service_slug_snapshot }
 ```
 
 **The exact `user_service_id` is the authorization; the slug snapshot is an integrity/display value and can never substitute for it.** `nyx_user_service_id` identifies the exact outbound provider where applicable. The older `required_service_slugs` contract has been removed — do not recommend it, and never infer a UserService ID from a slug, a vendor name, or a catalog service ID (a connected UserService ID and a catalog service ID are different identifiers and are not interchangeable).
+
+If the scheduled agent needs deterministic fire-date fields, its execution prompt may use the same
+fire-time Chat template as other schedules: `{{@schedule.run_date}}`, `run_year`, `run_month`,
+`days_until_month_end`, `fire_at_utc`, and `timezone`. The prompt must then be valid JSON and each
+placeholder must be inside a JSON string value. The values come from the authoritative logical fire
+and configured IANA timezone; catch-up keeps the original occurrence and run-now uses the manual
+instant. Unknown placeholders or invalid JSON fail closed. A manual run is not cron-rearm proof.
 
 For one-shot delayed reminders such as "remind me in 10 minutes" or "later today tell me ...", set `schedule_mode="one_shot"` and provide exactly one of `delay_seconds` or `run_at_utc`, plus `one_shot_message`. Prefer `delay_seconds` when the user gave a relative delay. Do not use `code_execute` with `sleep`, timers, polling loops, or long-running scripts for delayed one-shot requests; durable delivery must go through `scheduled_agent_creator`. Do not publish an Ornn skill just to send a one-shot natural-language reminder unless the user explicitly asks for reusable automation or the reminder requires a real skill workflow.
 
@@ -73,6 +80,12 @@ observed the new state, cron fired, or the workflow succeeded. Reread the canoni
 record and require a newer authoritative `stateVersion`. Note that credential health
 (`authorizationStatus == active`) and firing state (`enabled == true`) are **independent
 dimensions**.
+
+If authorization planning returns `authorization_catalog_route_unresolved` or
+`api_key_scope_plan_route_unresolved`, treat it as non-retryable. Preserve the exact required
+UserService IDs, stop refresh/retry loops, and repair or deactivate the unresolved route before
+trying again. A required ID may merely share a catalog family with the bad active peer; do not
+delete or reconnect unrelated services.
 
 ### Token classes: verified lifetimes, not folklore
 

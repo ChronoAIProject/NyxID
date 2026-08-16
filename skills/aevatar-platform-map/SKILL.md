@@ -1,7 +1,7 @@
 ---
 name: aevatar-platform-map
 description: Entry point, panorama, and router for the Aevatar skill family. Use before building, running, publishing, scheduling, externally triggering, or operating Aevatar resources; configuring an Agent Profile; assessing managed/private codex_exec feasibility and setup; running the canonical Codex readiness proof; authoring a workflow with codex_exec; diagnosing a Codex failure; or deciding which companion skill owns a request. It teaches resource and identity boundaries, NyxID-brokered auth, client REST versus in-session tools, deployment gates, and exact handoffs without treating member, workflow, service, profile, schedule, or Codex capabilities as one lifecycle.
-version: "1.14"
+version: "1.16"
 metadata:
   category: plain
   tag:
@@ -131,8 +131,18 @@ automation and must not be used as a fallback when the owner is a Team member. `
 owns the member-automation and generic paths; `aevatar-automation` owns the scheduled skill agent.
 
 Never convert between identities by route position, prefix, equality, or a familiar-looking string.
-`memberId`, draft `workflowId`, `publishedServiceId`, UserService ID, catalog service ID, schedule
-ID, Agent Key ID, and `profileId` are all distinct.
+`memberId`, draft `workflowId`, `publishedServiceId`, workflow Definition actor ID, revision ID,
+UserService ID, catalog service ID, schedule ID, Agent Key ID, and `profileId` are all distinct.
+
+Team member automations now own their full lifecycle under the nested
+`scope/team/member/automations` surface. Generic `/api/schedules` is not their CRUD fallback. An
+existing member is best scheduled in-session with `aevatar_schedule_member_workflow`, which may
+admit and pin an exact durable revision; raw REST preflight remains read-only. A brand-new scheduled
+workflow may use `aevatar_provision_workflow_schedule` only after the user confirms its Team.
+
+Scheduled Chat prompts can inject logical-fire date fields through `{{@schedule.*}}` JSON string
+values and an explicit timezone. Scope webhook bindings separately inject `{{@run_date}}` from
+received time and their binding timezone. Neither is an ambient workflow clock.
 
 ## Authenticate (every request)
 
@@ -202,7 +212,7 @@ For managed `codex_exec`, normal execution is credential-read-only. Explicitly `
 
 | You want to… | Use the skill | Key endpoints |
 |---|---|---|
-| **Decide if a goal is even possible** + what must be in place first (use FIRST, before building) | `aevatar-feasibility-advisor` | read-only `GET /api/v1/keys`, `GET /api/v1/catalog` (NyxID) |
+| **Decide if a goal is even possible** + what must be in place first (use FIRST, before building) | `aevatar-feasibility-advisor` | `GET /api/v1/catalog`, plus `/api/v1/keys` when its possible lazy no-auth UserService materialization is acceptable |
 | **Triage a failure** — is it an aevatar / nyxid / ornn problem? read the code, then file an issue or get authoritative usage guidance (use AFTER something breaks) | `aevatar-triage` | reads repos via `gh` or `nyxid_proxy` `api-github`; `gh issue` |
 | Assess whether **Codex fits the task** and select managed versus private | `aevatar-feasibility-advisor` | read-only contract decision; no Codex call yet |
 | Configure or repair managed/private **`codex_exec`** | `aevatar-codex-exec-node-setup` | in-session `codex_exec`; managed UserService readiness or private NyxID SSH route |
@@ -216,7 +226,7 @@ For managed `codex_exec`, normal execution is credential-read-only. Explicitly `
 | Run a **Team member workflow** on a schedule (dedicated Agent Key) | `aevatar-scheduler` | `aevatar_schedule_member_workflow` / `/api/scopes/{id}/teams/{teamId}/members/{memberId}/automations` |
 | Run an independent **scheduled skill agent** or one-shot reminder | `aevatar-automation` | `scheduled_agent_creator`, then `agent_builder` |
 | Run a typed **service invocation** on a cron (generic platform schedule) | `aevatar-scheduler` | `/api/schedules`, `:run-now`, `:enable`, `:disable` |
-| Trigger an existing workflow from an external HTTP sender such as **Lark Base** | `aevatar-feasibility-advisor` first, then `aevatar-service-publisher` | NyxID `/api/v1/proxy/s/aevatar/api/scopes/{scopeId}/members/{memberId}/invoke/...`, host-managed `/api/workflow-webhooks/{routeKey}` if configured |
+| Trigger an existing workflow from an external HTTP sender such as **Lark Base** | `aevatar-feasibility-advisor` first, then `aevatar-service-publisher` | NyxID `/api/v1/proxy/s/aevatar/api/scopes/{scopeId}/members/{memberId}/invoke/...`, or `/api/workflow-webhooks/{routeKey}` with a scope-owned binding that pins an exact same-scope Definition + revision (`PUT /api/scopes/{scopeId}/workflow-webhooks/{routeKey}`; host-managed appsettings bindings on older hosts) |
 | **Invoke**, watch **runs**, observe | (this map + service-publisher's invoke section) | `/invoke/{endpointId}`, `/runs/*`, `/api/workflow/observatory/*` |
 
 If a companion skill is not already loaded, find it with `ornn_search_skills` for the capability
@@ -305,9 +315,10 @@ lifecycle, and none of its IDs are aliases. Agent Profile work is not part of th
 
 ## Honesty rules (so you never over-promise)
 
-- **You are a client.** Everything here is plain REST you call with the user's NyxID
-  bearer token. There is no server-side tool that creates teams/members/services for you —
-  you make the HTTP calls.
+- **Detect the caller surface.** External clients use NyxID-brokered REST. In-session agents use
+  only the tools actually present, including workflow authoring and member schedule/provision
+  tools. Do not invent a tool as an HTTP route, and do not claim raw preflight can perform a
+  mutation that only the operator tool owns.
 - **NyxID registration is host-gated.** Publishing a service only results in a NyxID
   connector if the platform host has external exposure enabled (and the service is in
   scope of that policy). You drive publish + verify; you cannot force registration on. If
@@ -318,14 +329,21 @@ lifecycle, and none of its IDs are aliases. Agent Profile work is not part of th
   webhook senders can often trigger an existing member/team by calling the NyxID proxy for
   `aevatar` with a NyxID API key and an explicit scope path. Host externalExposure is only
   for turning the Aevatar service itself into a reusable NyxID connector/slug.
+- **Webhook authenticity is not broad effect authority.** A dynamic binding requires an exact
+  committed Definition/revision, signed-body delivery identity, HMAC, and explicit timezone
+  (default UTC). `enableUnattendedEffects` is a narrow direct-human Durable opt-in for eligible
+  exact call sites; downstream NyxID/provider policy still applies, and it cannot authorize Team
+  schedule writes.
 - **Remediation labels are not automatically self-serve actions.** `select_operation` needs a real
   supported picker/list; `register_service` must resolve through the NyxID connect/authorize flow.
   Catalog refresh only reconciles. On `api_key_scope_plan_route_unresolved`, stop and surface the
   blocker instead of guessing a route, deleting a service, or retrying binding.
 - **Lark connection proof is separate from binding.** Before side effects, use the same UserService
-  and Base/table contract to read one known `record_id`. `91403` means document-application access;
-  `1254302 RolePermNotAllow` means advanced-role coverage. There is no implied generic connection
-  preflight in a successful bind or publish.
+  and Base/table contract to read one known `record_id` only when the workflow actually reads Base.
+  `91403` means document-application access; `1254302 RolePermNotAllow` means advanced-role
+  coverage. A dedicated authenticated automation or signed Host/Adapter ingress may instead pass
+  required fields directly; a push-only workflow needs no Base read permission. There is no implied
+  generic connection preflight in a successful bind or publish.
 - **Many steps are async, and `202` is admission only.** Bindings, deployments, runs, Agent Key
   provisioning, and Profile mutations all settle over time. A `202 Accepted` never proves commit,
   credential issuance, vault write, projection visibility, publication, cron fire, or success —

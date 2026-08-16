@@ -1,7 +1,7 @@
 ---
 name: aevatar-workflow-authoring
 description: Author, preview, validate, and persist an executable aevatar workflow from a natural-language request. Use it when the user wants to create, build, set up, automate, or feature-probe a multi-step task as a runnable Aevatar workflow. It covers exact NyxID operation and authored-request admission, bounded YAML, file inputs, terminal run verification, feature-equivalent evidence boundaries, and reusable publication. Not for blindly rerunning an existing failed workflow.
-version: "2.6"
+version: "2.7"
 metadata:
   category: tool-based
   tool-list:
@@ -32,7 +32,7 @@ The core DSL, engine rules, and tool protocol are here. Load the linked REST or 
 ## Protocol (follow in order)
 
 1. **Confirm the intent is authoring.** The user wants a *new* runnable workflow. If they want to run something that already exists, stop and search for it instead.
-2. **Clarify just enough.** Pin down: the trigger/input, the ordered steps, the desired output, and which external services (if any) are involved. Ask only what you cannot reasonably infer; do not over-interrogate.
+2. **Clarify just enough.** Pin down: the trigger/input, how that ingress authenticates its source, the ordered steps, the desired output, and which external services (if any) are involved. Ask only what you cannot reasonably infer; do not over-interrogate.
 3. **Select the exact external capability (only if external calls are needed).** Prefer a published operation: call `list_external_workflow_capabilities`, copy its exact `user_service_id + endpoint_id` selector, then inspect readiness for `interactive` or `durable`. The YAML/proto selector has no `operation_id` field. Use typed `capability.nyxid_request` only when no published operation represents a required HTTP request; it needs an exact UserService selected from authoritative `/api/v1/keys`, a typed method/path/body contract, and bind-time authenticated confirmation/grant. One step carries exactly one of `nyxid_operation` or `nyxid_request`, never both. `/api/v1/user-services` is only a routing projection and is never execution authority.
 4. **Author the YAML.** Apply the DSL below and obey every rule in **Engine rules (must obey)**. Prefer the reliable-core primitives; use advanced primitives only when the task truly needs them.
 5. **Preview before execution.** Use the explicit-request preview or draft-run readiness surface. Confirm unique call sites, read/write classification, approval requirements, exact workflow/revision identity, and every blocker. Preview/readiness proves admission readiness only; it does not prove runtime credential propagation or downstream authorization.
@@ -52,7 +52,13 @@ These are the failure modes that break generated workflows. Check every one befo
 - **Single terminal step.** A run ends at the step that has no `next` **and is last in document order**. Make the final step the last line of the document.
 - **Bounded YAML.** Each YAML document is limited to 1 MiB UTF-8, 10,000 parsed nodes, and collection nesting depth 64. Aliases do not bypass these limits. Treat a resource-limit rejection as a document defect; reduce the document instead of retrying it.
 - **Fall-through is by document order, not id order.** A step with no `next` falls through to the *next step written in the file*. So every branch must reach the terminal step via an explicit `next`, and nothing should sit after the terminal step. Getting this wrong silently overwrites your output.
-- **No clock.** The engine has no time source. If the workflow needs "today", a date, or a window, the caller must inject it via the run input (e.g. an early `assign`). Never assume the engine knows the date.
+- **No ambient workflow clock.** The engine does not invent "today" for a normal invocation. The
+  caller must inject dates through run input. A Team automation can render
+  `{{@schedule.run_date}}`, `run_year`, `run_month`, and `days_until_month_end` from its
+  authoritative logical fire plus configured timezone; a scope webhook binding can render
+  `{{@run_date}}` from received time plus its explicit `timeZoneId`. These are ingress contracts,
+  not workflow expression variables. Never read host wall-clock time or ask an LLM to guess it.
+- **Input authority follows the ingress contract.** Classify the source before adding a compensating provider read. A shared or unverified endpoint authenticates neither the sender nor its claims: accept only a locator such as `record_id`, then read authoritative fields through an admitted provider capability. A dedicated automation credential or HMAC-verified Host/Adapter path may treat pushed fields as workflow input only when that principal is exclusive to the source and the exact body is authenticated. Caller authentication alone is insufficient when people or unrelated systems share the credential. Preserve source/delivery provenance, make idempotency and deduplication explicit, and read the provider only for fields the trusted payload omitted, freshness after the trigger, or an independent business rule. For external-trigger wiring, hand off to `aevatar-service-publisher`; do not invent a second workflow lifecycle.
 - **Role is not model.** `target_role` selects the actor, not a model — never put a model name in `target_role`. A role *may* carry `provider`/`model`, but set them only when the user explicitly wants a specific model; otherwise omit and let the session default apply.
 - **`parameters` values are strings.** Bare words are read as strings (`op: trim`); quote anything numeric or boolean so it stays a string (`n: "50"`, `max_iterations: "5"`).
 - **Determinism for money/counts/dedup.** Use `transform` (`sum`, `group_by`, `round`, …) for any arithmetic, totals, or deduplication. Never let an `llm_call` compute amounts or counts.
@@ -362,6 +368,12 @@ There is a raw current-turn proxy surface, two compiled workflow capability shap
       body_mode: none
       response_mode: text
   ```
+- **Durable scheduling inspects every call site.** A sample input that chooses a preview branch does
+  not remove a write call site from the definition. On a host without scheduled operation
+  authority, any authored non-read request makes Team automation preflight fail closed even when
+  the prompt says `submit:false`. To prove scheduling safely, publish a separate preview-only
+  revision with the write steps and their branch targets physically removed. Do not weaken the
+  original workflow or route it through generic scheduling to bypass admission.
 - **Registered workflow connectors.** If the capability is a connector registered in the workflow connector registry, call it with `connector_call` and authorize it on the role:
   ```yaml
   roles:
@@ -377,7 +389,7 @@ There is a raw current-turn proxy surface, two compiled workflow capability shap
 - **`allowed_tools` gotcha.** A role with no `allowed_tools` sees the full inherited tool catalog (including `nyxid_proxy`). But the moment you set `allowed_tools` on a role, you **must** list every tool its steps call (e.g. `allowed_tools: [nyxid_proxy]`) — otherwise the `tool_call` will not resolve the tool at run time.
 - **Prefer a typed tool when one exists** for the capability (they expose stable control fields and validation) over a hand-built proxy path.
 - **Missing or invisible service.** Use `nyxid_require_service` for an in-session connect/add/authorize request, or the supported NyxID CLI/console flow as a client. `USER_SERVICE_NOT_VISIBLE` does not prove that a simple registration retry will fix the account, and `/api/auth/nyxid/authorization-catalog:refresh` is reconciliation rather than service registration. If refresh returns `api_key_scope_plan_route_unresolved`, stop and report the catalog blocker; do not delete/reconnect unrelated services or guess which route caused it. `org_role_insufficient` requires an authorized organization operator. Never fabricate a slug, connector, or self-service path.
-- **Preflight downstream data access separately.** Binding/readiness does not test provider data ACLs. For Lark Base, before any create/approval/send/update step, run one explicitly authorized read-only call against a known sample `record_id` with the same UserService, Base/app token, table, and admitted read contract; require expected fields, not only 2xx. `91403` means the exact Bot application lacks Base document access (add it through the document-application entry). `1254302 RolePermNotAllow` means its advanced-permission role does not cover the target table/action. This probe proves only downstream read access, not durable admission or write authority.
+- **Preflight only the downstream access the workflow actually uses.** Binding/readiness does not test provider data ACLs. If a Lark Base workflow reads a record, run one explicitly authorized read-only call against a known sample `record_id` with the same UserService, Base/app token, table, and admitted read contract; require expected fields, not only 2xx. `91403` means the exact Bot application lacks Base document access; `1254302 RolePermNotAllow` means its advanced-permission role does not cover the target table/action. If a source-verified automation payload already carries every required field and the workflow makes no Base API call, do not add a read capability or demand Base document/role access. This probe proves only the read path it exercises, not trigger authenticity, durable admission, or write authority.
 
 ---
 
@@ -388,6 +400,12 @@ Dispatch **one** test run with `aevatar_start_workflow`, passing the draft inlin
 ```json
 { "workflow_id": "<name>", "workflow_yamls": ["<full yaml>"], "inputs": { "prompt": "<test input>" } }
 ```
+
+If the definition consumes structured run input (for example it captures `$input` and applies
+`json` or feeds it to a transform), `inputs.prompt` must be a **non-empty serialized JSON string**,
+such as `"{\"submit\":false}"`. Never pass natural-language prose, an empty string, or an
+unserialized object to a typed workflow. Free-text workflows that do not declare structured input
+keep their normal prompt semantics.
 
 `workflow_id` is required; `inputs` is an object (typically `{ "prompt": "..." }`, optionally `input_parts` / `headers`). File-bearing calls may carry normalized `inlineFile` or `fileRef` parts; member stream invocation and draft-run share the same ingress normalization, so preserve the typed file part instead of flattening it into prompt text.
 
@@ -435,6 +453,9 @@ Read [references/worked-examples.md](references/worked-examples.md) when you nee
 
 - [ ] Final step is last in the document and has no `next`; every branch reaches it via explicit `next`.
 - [ ] Any date/time the logic needs is injected via input, not assumed.
+- [ ] Typed/structured run input is passed as one non-empty serialized JSON string; schedule and
+      webhook dates come from their documented ingress-time templates and explicit timezone.
+- [ ] Every externally pushed field has an explicit ingress authority decision; unverified input is treated as a claim/locator, while trusted input is bound to a dedicated authenticated source and the delivery/idempotency contract is explicit.
 - [ ] No hardcoded `model:` unless the user demanded one.
 - [ ] Arithmetic / totals / dedup use `transform`, not `llm_call`.
 - [ ] Every transform `op` is on the explicit allowlist; no `replace`/`regex_replace` or other unknown identity fallback is present, and required transformed output is asserted.

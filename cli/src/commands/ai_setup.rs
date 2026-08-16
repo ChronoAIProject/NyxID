@@ -26,6 +26,7 @@ const REFERENCE_FILES: &[&str] = &[
     "devices",
     "notifications",
     "channels",
+    "triggers",
     "openclaw",
     "admin",
 ];
@@ -1077,6 +1078,19 @@ mod tests {
     fn skill_paths_generic_returns_empty() {
         let paths = super::skill_paths(super::AiToolTarget::Generic).unwrap();
         assert!(paths.is_empty());
+    }
+
+    #[test]
+    fn configured_reference_files_exist_in_the_canonical_skill() {
+        let references = Path::new(env!("CARGO_MANIFEST_DIR")).join("../skills/nyxid/references");
+
+        assert!(super::REFERENCE_FILES.contains(&"triggers"));
+        for name in super::REFERENCE_FILES {
+            assert!(
+                references.join(format!("{name}.md")).is_file(),
+                "missing configured reference: {name}.md"
+            );
+        }
     }
 
     #[test]

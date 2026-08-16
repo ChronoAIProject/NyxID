@@ -1,7 +1,7 @@
 ---
 name: nyxid
-version: "0.8"
-description: Brokers credentials for downstream services so the agent never sees raw API keys or OAuth tokens. Use when the user explicitly mentions NyxID; asks to broker, store, proxy, connect, or manage credentials or a credential-backed service; manages NyxID credential nodes, SSH, MCP, or other NyxID resources; or must call a protected downstream API using an available NyxID-managed credential because no suitable authenticated native path is available. Do not use merely because a service is external, for public or unauthenticated APIs or webhooks, for standard Git operations, or for ordinary GitHub work when local `gh` is authenticated. A GitHub username supplied only to select an account is not a trigger. Operate through the `nyxid` CLI or the authenticated NyxID Web API.
+version: "0.10"
+description: Brokers credentials for downstream services so the agent never sees raw API keys or OAuth tokens. Use when the user explicitly mentions NyxID; asks to broker, store, proxy, connect, or manage credentials or a credential-backed service; manages NyxID inbound triggers, signed webhook delivery/replay, credential nodes, SSH, MCP, or other NyxID resources; or must call a protected downstream API using an available NyxID-managed credential because no suitable authenticated native path is available. Do not use merely because a service is external, for an ordinary public webhook that needs no NyxID trigger contract, for standard Git operations, or for ordinary GitHub work when local `gh` is authenticated. A GitHub username supplied only to select an account is not a trigger. Operate through the `nyxid` CLI or the authenticated NyxID Web API.
 metadata:
   category: tool-based
   tool-list:
@@ -10,6 +10,7 @@ metadata:
     - credentials
     - oauth
     - proxy
+    - triggers
     - nyxid
     - sso
   documentation: https://github.com/ChronoAIProject/NyxID
@@ -127,6 +128,7 @@ Load the matching `references/<file>.md` when the user asks for one of these top
 | "provision a headless device", "approve a device", "ESP32", "factory key", "nyxprov QR", "device-code grant", `nyxid device approve/onboard/factory-key`, `/devices/code/*`, `/devices/onboard` | `references/devices.md` |
 | "approve / deny", "set up notifications", Telegram link, push notifications, approval grants, per-service approval configs, granular approval rules (method/path/verb), allow-list or deny specific endpoints, `default_effect`, scoped grants | `references/notifications.md` |
 | "channel bot", "register a bot", conversation routing, `/channel-relay/reply`, callback / reply tokens, ADR-013 passthrough semantics, device events / HTTP Event Gateway, `/channel-events/{id}` | `references/channels.md` |
+| "inbound trigger", "webhook trigger", provider event relay, bearer/query/HMAC trigger verification, durable webhook delivery, delivery history/replay, signing-key rotation, Lark Base automation to Aevatar | `references/triggers.md` |
 | OpenClaw setup, `llm-openclaw` transport selection, `x-openclaw-scopes` default header | `references/openclaw.md` |
 | `nyxid whoami / status / profile / mfa / session`, `nyxid admin user list/show/set-role`, platform roles (admin / operator / user), `nyxid admin invite-code`, `nyxid mcp config`, error codes (1001/1002/7000/7001/8003, downstream 403 / WAF / User-Agent override) | `references/admin.md` |
 | "list / revoke broker authorizations", "what apps hold credentials for me", `/settings/authorizations`, `nyxid oauth bindings`, OAuth `binding_id` / token vault, distinction from "Authorized Apps" (consents) | `references/oauth-broker.md` |
@@ -137,7 +139,7 @@ Prefer the canonical reference over guessing. If a topic spans two files (e.g. "
 
 ## Working Rules
 
-- Always discover configured service instances with `nyxid service list --output json` or authenticated `GET /api/v1/keys` before assuming a slug or exact UserService exists. This is the authoritative discovery, readiness, and execution inventory.
+- Discover configured service instances with `nyxid service list --output json` or authenticated `GET /api/v1/keys` before assuming a slug or exact UserService exists. This is the authoritative discovery, readiness, and execution inventory, but the read may lazily materialize missing no-auth UserServices. Under a strict zero-mutation diagnostic constraint, start with `/api/v1/user-services` and operator-visible route/node state, and use `/keys` only when that bounded materialization is acceptable.
 - Treat `/api/v1/user-services` as a routing-configuration projection only. It cannot prove that a credential is discoverable, ready, or authorized for execution.
 - Use `--output json` for machine-readable responses.
 - Prefer slug-based proxy URLs, but pin the exact UserService with `--via-service <id>` or `/api/v1/proxy/{user_service_id}/...` whenever multiple credentials share a slug or downstream authorization depends on a specific account/Bot. Get that ID only from the authoritative `/api/v1/keys` inventory.
