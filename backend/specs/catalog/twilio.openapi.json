@@ -1,0 +1,521 @@
+{
+  "openapi": "3.1.0",
+  "info": {
+    "title": "Twilio REST API",
+    "version": "2010-04-01-nyxid-overlay",
+    "description": "NyxID-hosted overlay for core Twilio Calls, Messages, and Recordings operations. Request bodies use application/x-www-form-urlencoded exactly as required by Twilio."
+  },
+  "servers": [
+    {
+      "url": "https://api.twilio.com",
+      "description": "Twilio REST API"
+    }
+  ],
+  "paths": {
+    "/2010-04-01/Accounts/{AccountSid}/Calls.json": {
+      "post": {
+        "operationId": "create_call",
+        "summary": "Create an outbound call",
+        "description": "Create a new outgoing call to a phone number, SIP endpoint, or Twilio Client connection.",
+        "x-aevatar-tool": {
+          "name": "create_call",
+          "description": "Place an outbound voice call with Twilio.",
+          "readOnly": false,
+          "destructive": false,
+          "requiresApproval": true
+        },
+        "parameters": [
+          {
+            "name": "AccountSid",
+            "in": "path",
+            "required": true,
+            "description": "Twilio Account SID used as the Basic auth username.",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/x-www-form-urlencoded": {
+              "schema": {
+                "type": "object",
+                "required": [
+                  "To",
+                  "From"
+                ],
+                "additionalProperties": true,
+                "properties": {
+                  "To": {
+                    "type": "string",
+                    "description": "Destination phone number, SIP URI, or client identifier."
+                  },
+                  "From": {
+                    "type": "string",
+                    "description": "Twilio phone number or verified caller ID."
+                  },
+                  "Url": {
+                    "type": "string",
+                    "description": "Public URL returning TwiML instructions for the call."
+                  },
+                  "Twiml": {
+                    "type": "string",
+                    "description": "Inline TwiML instructions; use instead of Url."
+                  },
+                  "StatusCallback": {
+                    "type": "string",
+                    "description": "Webhook URL for call status events."
+                  },
+                  "StatusCallbackEvent": {
+                    "type": "array",
+                    "description": "Call progress events to send to StatusCallback.",
+                    "items": {
+                      "type": "string"
+                    }
+                  },
+                  "Record": {
+                    "type": "boolean",
+                    "description": "Whether Twilio should record the call."
+                  },
+                  "Timeout": {
+                    "type": "integer",
+                    "description": "Seconds to wait for an answer before timing out."
+                  }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "201": {
+            "description": "Created call",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true
+                }
+              }
+            }
+          }
+        }
+      },
+      "get": {
+        "operationId": "list_calls",
+        "summary": "List calls",
+        "x-aevatar-tool": {
+          "name": "list_calls",
+          "description": "List calls associated with a Twilio account.",
+          "readOnly": true,
+          "destructive": false,
+          "requiresApproval": false
+        },
+        "parameters": [
+          {
+            "name": "AccountSid",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "To",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "From",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "Status",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "enum": [
+                "queued",
+                "ringing",
+                "in-progress",
+                "canceled",
+                "completed",
+                "failed",
+                "busy",
+                "no-answer"
+              ]
+            }
+          },
+          {
+            "name": "PageSize",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Call list",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/2010-04-01/Accounts/{AccountSid}/Calls/{Sid}.json": {
+      "get": {
+        "operationId": "get_call",
+        "summary": "Get a call",
+        "x-aevatar-tool": {
+          "name": "get_call",
+          "description": "Get a Twilio call by Call SID.",
+          "readOnly": true,
+          "destructive": false,
+          "requiresApproval": false
+        },
+        "parameters": [
+          {
+            "name": "AccountSid",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "Sid",
+            "in": "path",
+            "required": true,
+            "description": "Call SID.",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Call resource",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/2010-04-01/Accounts/{AccountSid}/Messages.json": {
+      "post": {
+        "operationId": "create_message",
+        "summary": "Send a message",
+        "description": "Send an SMS, MMS, RCS, or WhatsApp message through Twilio.",
+        "x-aevatar-tool": {
+          "name": "create_message",
+          "description": "Send a message with Twilio.",
+          "readOnly": false,
+          "destructive": false,
+          "requiresApproval": true
+        },
+        "parameters": [
+          {
+            "name": "AccountSid",
+            "in": "path",
+            "required": true,
+            "description": "Twilio Account SID used as the Basic auth username.",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/x-www-form-urlencoded": {
+              "schema": {
+                "type": "object",
+                "required": [
+                  "To"
+                ],
+                "additionalProperties": true,
+                "properties": {
+                  "To": {
+                    "type": "string",
+                    "description": "Destination phone number or channel address."
+                  },
+                  "From": {
+                    "type": "string",
+                    "description": "Twilio sender phone number or channel address."
+                  },
+                  "MessagingServiceSid": {
+                    "type": "string",
+                    "description": "Messaging Service SID; use instead of From."
+                  },
+                  "Body": {
+                    "type": "string",
+                    "description": "Message text."
+                  },
+                  "MediaUrl": {
+                    "type": "array",
+                    "description": "Public media URLs to attach to the message.",
+                    "items": {
+                      "type": "string"
+                    }
+                  },
+                  "StatusCallback": {
+                    "type": "string",
+                    "description": "Webhook URL for message status events."
+                  }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "201": {
+            "description": "Created message",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true
+                }
+              }
+            }
+          }
+        }
+      },
+      "get": {
+        "operationId": "list_messages",
+        "summary": "List messages",
+        "x-aevatar-tool": {
+          "name": "list_messages",
+          "description": "List messages associated with a Twilio account.",
+          "readOnly": true,
+          "destructive": false,
+          "requiresApproval": false
+        },
+        "parameters": [
+          {
+            "name": "AccountSid",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "To",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "From",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "PageSize",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Message list",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/2010-04-01/Accounts/{AccountSid}/Messages/{Sid}.json": {
+      "get": {
+        "operationId": "get_message",
+        "summary": "Get a message",
+        "x-aevatar-tool": {
+          "name": "get_message",
+          "description": "Get a Twilio message by Message SID.",
+          "readOnly": true,
+          "destructive": false,
+          "requiresApproval": false
+        },
+        "parameters": [
+          {
+            "name": "AccountSid",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "Sid",
+            "in": "path",
+            "required": true,
+            "description": "Message SID.",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Message resource",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/2010-04-01/Accounts/{AccountSid}/Recordings.json": {
+      "get": {
+        "operationId": "list_recordings",
+        "summary": "List recordings",
+        "x-aevatar-tool": {
+          "name": "list_recordings",
+          "description": "List recordings belonging to a Twilio account.",
+          "readOnly": true,
+          "destructive": false,
+          "requiresApproval": false
+        },
+        "parameters": [
+          {
+            "name": "AccountSid",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "CallSid",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "PageSize",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Recording list",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/2010-04-01/Accounts/{AccountSid}/Recordings/{Sid}.json": {
+      "get": {
+        "operationId": "get_recording",
+        "summary": "Get recording metadata",
+        "x-aevatar-tool": {
+          "name": "get_recording",
+          "description": "Get Twilio recording metadata by Recording SID.",
+          "readOnly": true,
+          "destructive": false,
+          "requiresApproval": false
+        },
+        "parameters": [
+          {
+            "name": "AccountSid",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "Sid",
+            "in": "path",
+            "required": true,
+            "description": "Recording SID.",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Recording resource",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  },
+  "components": {
+    "securitySchemes": {
+      "twilioBasicAuth": {
+        "type": "http",
+        "scheme": "basic"
+      }
+    }
+  },
+  "security": [
+    {
+      "twilioBasicAuth": []
+    }
+  ]
+}

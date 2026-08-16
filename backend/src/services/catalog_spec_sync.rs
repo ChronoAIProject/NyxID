@@ -394,6 +394,50 @@ mod tests {
             "api-lark-bot should publish im_message_create"
         );
 
+        let elevenlabs = db
+            .collection::<DownstreamService>(DOWNSTREAM_SERVICES)
+            .find_one(doc! { "slug": "api-elevenlabs" })
+            .await
+            .expect("query ElevenLabs service")
+            .expect("api-elevenlabs seeded");
+        let elevenlabs_endpoints =
+            crate::services::service_endpoint_service::list_endpoints(&db, &elevenlabs.id)
+                .await
+                .expect("list ElevenLabs endpoints");
+        assert!(
+            elevenlabs_endpoints.iter().any(|endpoint| {
+                endpoint.name == "text_to_speech_stream"
+                    && endpoint.path == "/v1/text-to-speech/{voice_id}/stream"
+                    && endpoint
+                        .response
+                        .content_types
+                        .iter()
+                        .any(|content_type| content_type == "audio/mpeg")
+                    && endpoint.response.binary_artifact == Some(true)
+            }),
+            "api-elevenlabs should publish binary streaming TTS"
+        );
+
+        let twilio = db
+            .collection::<DownstreamService>(DOWNSTREAM_SERVICES)
+            .find_one(doc! { "slug": "api-twilio" })
+            .await
+            .expect("query Twilio service")
+            .expect("api-twilio seeded");
+        let twilio_endpoints =
+            crate::services::service_endpoint_service::list_endpoints(&db, &twilio.id)
+                .await
+                .expect("list Twilio endpoints");
+        assert!(
+            twilio_endpoints.iter().any(|endpoint| {
+                endpoint.name == "create_call"
+                    && endpoint.path == "/2010-04-01/Accounts/{AccountSid}/Calls.json"
+                    && endpoint.request_content_type.as_deref()
+                        == Some("application/x-www-form-urlencoded")
+            }),
+            "api-twilio should publish form-encoded call creation"
+        );
+
         // Re-running must stay idempotent (same rows, no duplicates).
         sync_seeded_service_endpoints(&db)
             .await

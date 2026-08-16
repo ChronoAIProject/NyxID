@@ -468,6 +468,102 @@ pub async fn seed_default_providers(
         seeded_count += 1;
     }
 
+    // 7c. ElevenLabs (API Key)
+    if !slug_exists!("elevenlabs") {
+        let provider = ProviderConfig {
+            id: Uuid::new_v4().to_string(),
+            slug: "elevenlabs".to_string(),
+            name: "ElevenLabs".to_string(),
+            description: Some(
+                "ElevenLabs API access for speech generation, voices, models, and conversational AI."
+                    .to_string(),
+            ),
+            provider_type: "api_key".to_string(),
+            authorization_url: None,
+            token_url: None,
+            revocation_url: None,
+            revocation: None,
+            default_scopes: None,
+            client_id_encrypted: None,
+            client_secret_encrypted: None,
+            supports_pkce: false,
+            device_code_url: None,
+            device_token_url: None,
+            device_verification_url: None,
+            hosted_callback_url: None,
+            api_key_instructions: Some(
+                "Create an ElevenLabs API key in Developer Settings and paste the raw key. NyxID sends it in the `xi-api-key` header."
+                    .to_string(),
+            ),
+            api_key_url: Some("https://elevenlabs.io/app/developers/api-keys".to_string()),
+            icon_url: None,
+            documentation_url: Some(
+                "https://elevenlabs.io/docs/api-reference/introduction".to_string(),
+            ),
+            is_active: true,
+            credential_mode: "admin".to_string(),
+            token_endpoint_auth_method: "client_secret_post".to_string(),
+            extra_auth_params: None,
+            device_code_format: "rfc8628".to_string(),
+            client_id_param_name: None,
+            requires_gateway_url: false,
+            created_by: "system".to_string(),
+            revocation_seed_version: 0,
+            created_at: now,
+            updated_at: now,
+        };
+        collection.insert_one(&provider).await?;
+        tracing::info!(slug = "elevenlabs", "Seeded default provider: ElevenLabs");
+        seeded_count += 1;
+    }
+
+    // 7d. Twilio (API Key / HTTP Basic)
+    if !slug_exists!("twilio") {
+        let provider = ProviderConfig {
+            id: Uuid::new_v4().to_string(),
+            slug: "twilio".to_string(),
+            name: "Twilio".to_string(),
+            description: Some(
+                "Twilio REST API access for voice calls, messaging, and recordings."
+                    .to_string(),
+            ),
+            provider_type: "api_key".to_string(),
+            authorization_url: None,
+            token_url: None,
+            revocation_url: None,
+            revocation: None,
+            default_scopes: None,
+            client_id_encrypted: None,
+            client_secret_encrypted: None,
+            supports_pkce: false,
+            device_code_url: None,
+            device_token_url: None,
+            device_verification_url: None,
+            hosted_callback_url: None,
+            api_key_instructions: Some(
+                "Copy the Account SID and Auth Token from the Twilio Console, then enter them as `ACxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx:auth_token`. NyxID encodes that pair as HTTP Basic auth."
+                    .to_string(),
+            ),
+            api_key_url: Some("https://console.twilio.com/".to_string()),
+            icon_url: None,
+            documentation_url: Some("https://www.twilio.com/docs/usage/api".to_string()),
+            is_active: true,
+            credential_mode: "admin".to_string(),
+            token_endpoint_auth_method: "client_secret_post".to_string(),
+            extra_auth_params: None,
+            device_code_format: "rfc8628".to_string(),
+            client_id_param_name: None,
+            requires_gateway_url: false,
+            created_by: "system".to_string(),
+            revocation_seed_version: 0,
+            created_at: now,
+            updated_at: now,
+        };
+        collection.insert_one(&provider).await?;
+        tracing::info!(slug = "twilio", "Seeded default provider: Twilio");
+        seeded_count += 1;
+    }
+
     // 8. Twitter / X (OAuth 2.0 with PKCE)
     if !slug_exists!("twitter") {
         let provider = ProviderConfig {
@@ -2254,6 +2350,30 @@ fn seed_capability_override(slug: &str) -> Option<(ServiceCapabilities, bool)> {
             },
             true,
         )),
+        "api-elevenlabs" => Some((
+            ServiceCapabilities {
+                supports_proxy_read: true,
+                supports_proxy_write: true,
+                supports_proxy_binary_upload: true,
+                supports_direct_downstream_auth: true,
+                supports_authoring_via_nyx: false,
+                supports_websocket: true,
+                supports_streaming: true,
+            },
+            true,
+        )),
+        "api-twilio" => Some((
+            ServiceCapabilities {
+                supports_proxy_read: true,
+                supports_proxy_write: true,
+                supports_proxy_binary_upload: false,
+                supports_direct_downstream_auth: true,
+                supports_authoring_via_nyx: false,
+                supports_websocket: false,
+                supports_streaming: false,
+            },
+            false,
+        )),
         _ => None,
     }
 }
@@ -2447,6 +2567,52 @@ const DEFAULT_SERVICE_SEEDS: &[DefaultServiceSeed] = &[
         ),
         known_limitations: Some(
             "The NyxID-hosted OpenAPI overlay currently annotates the asynchronous agent submit and poll operations for Aevatar typed tool discovery.",
+        ),
+    },
+    DefaultServiceSeed {
+        provider_slug: "elevenlabs",
+        service_slug: "api-elevenlabs",
+        service_name: "ElevenLabs",
+        base_url: "https://api.elevenlabs.io",
+        injection_method: "header",
+        injection_key: "xi-api-key",
+        service_auth_method: Some("header"),
+        service_auth_key_name: Some("xi-api-key"),
+        description: Some(
+            "ElevenLabs speech and conversational AI APIs. NyxID injects the API key in the `xi-api-key` header for REST calls and WebSocket upgrades, while streaming TTS audio is relayed without buffering the full response.",
+        ),
+        default_request_headers: None,
+        service_category: "connection",
+        requires_user_credential: true,
+        homepage_url: Some("https://elevenlabs.io"),
+        auth_notes: Some(
+            "Paste the raw ElevenLabs API key. NyxID sends it as `xi-api-key` on HTTP requests and WebSocket upgrade requests. Realtime clients use `/v1/text-to-speech/{voice_id}/stream-input` or `/v1/convai/conversation` through the WebSocket proxy route.",
+        ),
+        known_limitations: Some(
+            "The hosted OpenAPI overlay covers core REST operations. OpenAPI cannot describe ElevenLabs' realtime WebSocket frame protocol, so realtime clients must follow the vendor's WebSocket message schema while connecting through the same NyxID proxy URL.",
+        ),
+    },
+    DefaultServiceSeed {
+        provider_slug: "twilio",
+        service_slug: "api-twilio",
+        service_name: "Twilio",
+        base_url: "https://api.twilio.com",
+        injection_method: "header",
+        injection_key: "Authorization",
+        service_auth_method: Some("basic"),
+        service_auth_key_name: Some("Authorization"),
+        description: Some(
+            "Twilio REST API access for outbound voice calls, messaging, and recordings. NyxID preserves Twilio's form-encoded request bodies and injects HTTP Basic credentials from an `AccountSID:AuthToken` pair.",
+        ),
+        default_request_headers: None,
+        service_category: "connection",
+        requires_user_credential: true,
+        homepage_url: Some("https://www.twilio.com"),
+        auth_notes: Some(
+            "Enter the credential as `AccountSID:AuthToken`; NyxID splits on the first colon and sends HTTP Basic auth. Twilio also requires the same Account SID in each `/2010-04-01/Accounts/{AccountSid}/...` path, so callers must put their own SID in the proxied URL.",
+        ),
+        known_limitations: Some(
+            "Twilio Media Streams are inbound WebSocket connections initiated by Twilio to a public application server and are outside this outbound credential proxy. The hosted overlay intentionally focuses on core Calls, Messages, and Recordings REST operations.",
         ),
     },
     DefaultServiceSeed {
@@ -2948,7 +3114,7 @@ async fn backfill_seeded_capability_overrides(
 ) -> AppResult<()> {
     // Slugs we upgrade in-place. Keep this short -- if the list grows,
     // iterate DEFAULT_SERVICE_SEEDS instead.
-    const BACKFILL_SLUGS: &[&str] = &["llm-openclaw"];
+    const BACKFILL_SLUGS: &[&str] = &["llm-openclaw", "api-elevenlabs", "api-twilio"];
 
     for slug in BACKFILL_SLUGS {
         let Some((caps, streaming)) = seed_capability_override(slug) else {
@@ -4984,6 +5150,37 @@ mod tests {
     }
 
     #[test]
+    fn elevenlabs_and_twilio_seeds_use_vendor_auth_with_overlay_specs() {
+        let elevenlabs = DEFAULT_SERVICE_SEEDS
+            .iter()
+            .find(|seed| seed.service_slug == "api-elevenlabs")
+            .expect("api-elevenlabs seed should exist");
+        assert_eq!(elevenlabs.provider_slug, "elevenlabs");
+        assert_eq!(elevenlabs.base_url, "https://api.elevenlabs.io");
+        assert_eq!(elevenlabs.service_auth_method, Some("header"));
+        assert_eq!(elevenlabs.service_auth_key_name, Some("xi-api-key"));
+        assert_eq!(
+            crate::services::catalog_spec_registry::spec_path_for_slug(elevenlabs.service_slug)
+                .as_deref(),
+            Some("/api/v1/catalog-specs/elevenlabs/openapi.json")
+        );
+
+        let twilio = DEFAULT_SERVICE_SEEDS
+            .iter()
+            .find(|seed| seed.service_slug == "api-twilio")
+            .expect("api-twilio seed should exist");
+        assert_eq!(twilio.provider_slug, "twilio");
+        assert_eq!(twilio.base_url, "https://api.twilio.com");
+        assert_eq!(twilio.service_auth_method, Some("basic"));
+        assert_eq!(twilio.service_auth_key_name, Some("Authorization"));
+        assert_eq!(
+            crate::services::catalog_spec_registry::spec_path_for_slug(twilio.service_slug)
+                .as_deref(),
+            Some("/api/v1/catalog-specs/twilio/openapi.json")
+        );
+    }
+
+    #[test]
     fn seed_capability_override_returns_none_for_unknown_slug() {
         assert!(seed_capability_override("llm-openai").is_none());
         assert!(seed_capability_override("api-github").is_none());
@@ -5458,6 +5655,92 @@ mod tests {
                 .count_documents(doc! { "service_id": &service.id })
                 .await
                 .expect("count firecrawl requirements"),
+            0
+        );
+    }
+
+    #[tokio::test]
+    async fn seed_default_services_seeds_elevenlabs_and_twilio_connection_metadata() {
+        let Some(db) = seed_default_catalog("prov_seed_elevenlabs_twilio").await else {
+            return;
+        };
+        let provider_col = db.collection::<ProviderConfig>(COLLECTION_NAME);
+        let service_col = db.collection::<DownstreamService>(DOWNSTREAM_SERVICES);
+        let req_col = db.collection::<ServiceProviderRequirement>(REQUIREMENTS);
+
+        let elevenlabs_provider = provider_col
+            .find_one(doc! { "slug": "elevenlabs" })
+            .await
+            .expect("query ElevenLabs provider")
+            .expect("ElevenLabs provider");
+        assert_eq!(elevenlabs_provider.provider_type, "api_key");
+        assert_eq!(
+            elevenlabs_provider.api_key_url.as_deref(),
+            Some("https://elevenlabs.io/app/developers/api-keys")
+        );
+        let elevenlabs = service_col
+            .find_one(doc! { "slug": "api-elevenlabs" })
+            .await
+            .expect("query ElevenLabs service")
+            .expect("ElevenLabs service");
+        assert_eq!(elevenlabs.auth_method, "header");
+        assert_eq!(elevenlabs.auth_key_name, "xi-api-key");
+        assert_eq!(elevenlabs.service_category, "connection");
+        assert!(elevenlabs.requires_user_credential);
+        assert!(elevenlabs.streaming_supported);
+        assert_eq!(
+            elevenlabs.openapi_spec_url.as_deref(),
+            Some("http://localhost:3001/api/v1/catalog-specs/elevenlabs/openapi.json")
+        );
+        let elevenlabs_caps = elevenlabs
+            .capabilities
+            .expect("ElevenLabs capability override");
+        assert!(elevenlabs_caps.supports_proxy_binary_upload);
+        assert!(elevenlabs_caps.supports_websocket);
+        assert!(elevenlabs_caps.supports_streaming);
+        assert_eq!(
+            req_col
+                .count_documents(doc! { "service_id": &elevenlabs.id })
+                .await
+                .expect("count ElevenLabs requirements"),
+            0
+        );
+
+        let twilio_provider = provider_col
+            .find_one(doc! { "slug": "twilio" })
+            .await
+            .expect("query Twilio provider")
+            .expect("Twilio provider");
+        assert_eq!(twilio_provider.provider_type, "api_key");
+        assert!(
+            twilio_provider
+                .api_key_instructions
+                .as_deref()
+                .is_some_and(|instructions| instructions.contains("ACxxxxxxxx"))
+        );
+        let twilio = service_col
+            .find_one(doc! { "slug": "api-twilio" })
+            .await
+            .expect("query Twilio service")
+            .expect("Twilio service");
+        assert_eq!(twilio.auth_method, "basic");
+        assert_eq!(twilio.auth_key_name, "Authorization");
+        assert_eq!(twilio.service_category, "connection");
+        assert!(twilio.requires_user_credential);
+        assert!(!twilio.streaming_supported);
+        assert_eq!(
+            twilio.openapi_spec_url.as_deref(),
+            Some("http://localhost:3001/api/v1/catalog-specs/twilio/openapi.json")
+        );
+        let twilio_caps = twilio.capabilities.expect("Twilio capability override");
+        assert!(!twilio_caps.supports_proxy_binary_upload);
+        assert!(!twilio_caps.supports_websocket);
+        assert!(!twilio_caps.supports_streaming);
+        assert_eq!(
+            req_col
+                .count_documents(doc! { "service_id": &twilio.id })
+                .await
+                .expect("count Twilio requirements"),
             0
         );
     }
@@ -6109,6 +6392,22 @@ mod tests {
         assert!(caps.supports_direct_downstream_auth);
         assert!(!caps.supports_authoring_via_nyx);
         assert!(streaming);
+    }
+
+    #[test]
+    fn seed_capability_overrides_match_elevenlabs_and_twilio_transports() {
+        let (elevenlabs, elevenlabs_streaming) =
+            seed_capability_override("api-elevenlabs").unwrap();
+        assert!(elevenlabs.supports_proxy_binary_upload);
+        assert!(elevenlabs.supports_websocket);
+        assert!(elevenlabs.supports_streaming);
+        assert!(elevenlabs_streaming);
+
+        let (twilio, twilio_streaming) = seed_capability_override("api-twilio").unwrap();
+        assert!(!twilio.supports_proxy_binary_upload);
+        assert!(!twilio.supports_websocket);
+        assert!(!twilio.supports_streaming);
+        assert!(!twilio_streaming);
     }
 
     #[test]
@@ -7420,6 +7719,8 @@ mod tests {
             "mistral",
             "cohere",
             "deepseek",
+            "elevenlabs",
+            "twilio",
             "twitter",
             "google",
             "github",
@@ -8552,6 +8853,8 @@ mod tests {
     #[test]
     fn direct_auth_seeds_have_service_auth_method() {
         let direct_auth_slugs = [
+            "api-elevenlabs",
+            "api-twilio",
             "api-github-pat",
             "api-telegram-bot",
             "api-discord-bot",

@@ -1,0 +1,526 @@
+{
+  "openapi": "3.1.0",
+  "info": {
+    "title": "ElevenLabs API",
+    "version": "v1-nyxid-overlay",
+    "description": "NyxID-hosted overlay for core ElevenLabs text-to-speech, catalog, agent, and conversation operations. Realtime WebSocket frame protocols are documented by ElevenLabs and pass through NyxID separately."
+  },
+  "servers": [
+    {
+      "url": "https://api.elevenlabs.io",
+      "description": "ElevenLabs API"
+    }
+  ],
+  "paths": {
+    "/v1/text-to-speech/{voice_id}": {
+      "post": {
+        "operationId": "text_to_speech",
+        "summary": "Generate speech audio",
+        "description": "Convert text to speech and return encoded audio.",
+        "x-aevatar-tool": {
+          "name": "text_to_speech",
+          "description": "Generate speech audio from text with an ElevenLabs voice.",
+          "readOnly": false,
+          "destructive": false,
+          "requiresApproval": false
+        },
+        "parameters": [
+          {
+            "name": "voice_id",
+            "in": "path",
+            "required": true,
+            "description": "ElevenLabs voice identifier.",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "output_format",
+            "in": "query",
+            "required": false,
+            "description": "Audio output format such as mp3_44100_128 or pcm_16000.",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "required": [
+                  "text"
+                ],
+                "additionalProperties": true,
+                "properties": {
+                  "text": {
+                    "type": "string",
+                    "description": "Text to convert to speech."
+                  },
+                  "model_id": {
+                    "type": "string",
+                    "description": "Text-to-speech model identifier.",
+                    "default": "eleven_multilingual_v2"
+                  },
+                  "language_code": {
+                    "type": "string",
+                    "description": "Optional ISO 639-1 language code."
+                  },
+                  "voice_settings": {
+                    "type": "object",
+                    "description": "Optional per-request voice settings.",
+                    "additionalProperties": true
+                  },
+                  "seed": {
+                    "type": "integer",
+                    "description": "Optional deterministic sampling seed."
+                  }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Generated audio",
+            "content": {
+              "audio/mpeg": {
+                "schema": {
+                  "type": "string",
+                  "format": "binary"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/text-to-speech/{voice_id}/stream": {
+      "post": {
+        "operationId": "text_to_speech_stream",
+        "summary": "Stream generated speech audio",
+        "description": "Convert text to speech and stream binary audio chunks as they are generated.",
+        "x-aevatar-tool": {
+          "name": "text_to_speech_stream",
+          "description": "Stream ElevenLabs speech audio generated from text.",
+          "readOnly": false,
+          "destructive": false,
+          "requiresApproval": false
+        },
+        "parameters": [
+          {
+            "name": "voice_id",
+            "in": "path",
+            "required": true,
+            "description": "ElevenLabs voice identifier.",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "output_format",
+            "in": "query",
+            "required": false,
+            "description": "Audio output format such as mp3_44100_128 or pcm_16000.",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "optimize_streaming_latency",
+            "in": "query",
+            "required": false,
+            "description": "Optional latency optimization level supported by ElevenLabs.",
+            "schema": {
+              "type": "integer"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "required": [
+                  "text"
+                ],
+                "additionalProperties": true,
+                "properties": {
+                  "text": {
+                    "type": "string",
+                    "description": "Text to convert to speech."
+                  },
+                  "model_id": {
+                    "type": "string",
+                    "description": "Text-to-speech model identifier.",
+                    "default": "eleven_multilingual_v2"
+                  },
+                  "language_code": {
+                    "type": "string",
+                    "description": "Optional ISO 639-1 language code."
+                  },
+                  "voice_settings": {
+                    "type": "object",
+                    "description": "Optional per-request voice settings.",
+                    "additionalProperties": true
+                  }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Streaming generated audio",
+            "content": {
+              "audio/mpeg": {
+                "schema": {
+                  "type": "string",
+                  "format": "binary"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/voices": {
+      "get": {
+        "operationId": "list_voices",
+        "summary": "List voices",
+        "x-aevatar-tool": {
+          "name": "list_voices",
+          "description": "List voices available to the ElevenLabs account.",
+          "readOnly": true,
+          "destructive": false,
+          "requiresApproval": false
+        },
+        "responses": {
+          "200": {
+            "description": "Voice list",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/models": {
+      "get": {
+        "operationId": "list_models",
+        "summary": "List models",
+        "x-aevatar-tool": {
+          "name": "list_models",
+          "description": "List ElevenLabs models and their supported capabilities.",
+          "readOnly": true,
+          "destructive": false,
+          "requiresApproval": false
+        },
+        "responses": {
+          "200": {
+            "description": "Model list",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "type": "object",
+                    "additionalProperties": true
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/convai/agents": {
+      "get": {
+        "operationId": "list_convai_agents",
+        "summary": "List conversational AI agents",
+        "x-aevatar-tool": {
+          "name": "list_convai_agents",
+          "description": "List ElevenLabs conversational AI agents.",
+          "readOnly": true,
+          "destructive": false,
+          "requiresApproval": false
+        },
+        "parameters": [
+          {
+            "name": "page_size",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer"
+            }
+          },
+          {
+            "name": "cursor",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Agent list",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/convai/agents/create": {
+      "post": {
+        "operationId": "create_convai_agent",
+        "summary": "Create a conversational AI agent",
+        "x-aevatar-tool": {
+          "name": "create_convai_agent",
+          "description": "Create an ElevenLabs conversational AI agent from an agent configuration.",
+          "readOnly": false,
+          "destructive": false,
+          "requiresApproval": true
+        },
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "additionalProperties": true,
+                "properties": {
+                  "name": {
+                    "type": "string",
+                    "description": "Display name for the agent."
+                  },
+                  "conversation_config": {
+                    "type": "object",
+                    "description": "ElevenLabs conversational AI configuration.",
+                    "additionalProperties": true
+                  },
+                  "platform_settings": {
+                    "type": "object",
+                    "description": "Optional platform settings.",
+                    "additionalProperties": true
+                  }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Created agent",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/convai/agents/{agent_id}": {
+      "get": {
+        "operationId": "get_convai_agent",
+        "summary": "Get a conversational AI agent",
+        "x-aevatar-tool": {
+          "name": "get_convai_agent",
+          "description": "Get an ElevenLabs conversational AI agent configuration.",
+          "readOnly": true,
+          "destructive": false,
+          "requiresApproval": false
+        },
+        "parameters": [
+          {
+            "name": "agent_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Agent configuration",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/convai/conversation/get-signed-url": {
+      "get": {
+        "operationId": "get_convai_signed_url",
+        "summary": "Get a signed conversational AI WebSocket URL",
+        "x-aevatar-tool": {
+          "name": "get_convai_signed_url",
+          "description": "Create a short-lived signed URL for an ElevenLabs conversational AI WebSocket session.",
+          "readOnly": false,
+          "destructive": false,
+          "requiresApproval": false
+        },
+        "parameters": [
+          {
+            "name": "agent_id",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "include_conversation_id",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "boolean",
+              "default": false
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Signed WebSocket URL",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/convai/conversations": {
+      "get": {
+        "operationId": "list_convai_conversations",
+        "summary": "List conversational AI conversations",
+        "x-aevatar-tool": {
+          "name": "list_convai_conversations",
+          "description": "List ElevenLabs conversational AI conversation histories.",
+          "readOnly": true,
+          "destructive": false,
+          "requiresApproval": false
+        },
+        "parameters": [
+          {
+            "name": "agent_id",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "page_size",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer"
+            }
+          },
+          {
+            "name": "cursor",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Conversation list",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/convai/conversations/{conversation_id}": {
+      "get": {
+        "operationId": "get_convai_conversation",
+        "summary": "Get a conversational AI conversation",
+        "x-aevatar-tool": {
+          "name": "get_convai_conversation",
+          "description": "Get one ElevenLabs conversational AI conversation history.",
+          "readOnly": true,
+          "destructive": false,
+          "requiresApproval": false
+        },
+        "parameters": [
+          {
+            "name": "conversation_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Conversation history",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  },
+  "components": {
+    "securitySchemes": {
+      "elevenLabsApiKey": {
+        "type": "apiKey",
+        "in": "header",
+        "name": "xi-api-key"
+      }
+    }
+  },
+  "security": [
+    {
+      "elevenLabsApiKey": []
+    }
+  ]
+}

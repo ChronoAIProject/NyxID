@@ -47,6 +47,16 @@ OFFICIAL_SPECS = {
         False,
         "",
     ),
+    "elevenlabs.openapi.json": (
+        "https://api.elevenlabs.io/openapi.json",
+        False,
+        "",
+    ),
+    "twilio.openapi.json": (
+        "https://raw.githubusercontent.com/twilio/twilio-oai/main/spec/json/twilio_api_v2010.json",
+        False,
+        "",
+    ),
 }
 
 OVERLAY_DIR = "backend/specs/catalog"
