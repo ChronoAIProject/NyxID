@@ -1,6 +1,7 @@
 use chrono::Utc;
 use futures::TryStreamExt;
 use mongodb::bson::{self, doc};
+use mongodb::options::FindOptions;
 use uuid::Uuid;
 
 use crate::errors::{AppError, AppResult};
@@ -9,7 +10,7 @@ use crate::models::ssh_auth_mode::SshAuthMode;
 use crate::models::user::{COLLECTION_NAME as USERS, User};
 use crate::models::user_api_key::COLLECTION_NAME as USER_API_KEYS;
 use crate::models::user_endpoint::COLLECTION_NAME as USER_ENDPOINTS;
-use crate::models::user_service::{COLLECTION_NAME, UserService};
+use crate::models::user_service::{AUTO_PROVISION_SOURCE, COLLECTION_NAME, UserService};
 use crate::models::ws_frame_injection::WsFrameInjection;
 use crate::mw::auth::SERVICE_DELEGATION_SCOPES;
 use crate::services::{
@@ -64,6 +65,75 @@ pub struct IdentityConfig {
     pub forward_access_token: bool,
     pub inject_delegation_token: bool,
     pub delegation_token_scope: String,
+}
+
+fn ensure_user_managed_service(service: &UserService) -> AppResult<()> {
+    if service.source.as_deref() == Some(AUTO_PROVISION_SOURCE) {
+        return Err(AppError::Forbidden(
+            "Auto-connected services are platform managed and cannot be modified".to_string(),
+        ));
+    }
+    Ok(())
+}
+
+/// Return endpoint ids whose target URL is owned by platform auto-provisioning.
+/// The URL remains stored normally for proxy resolution; callers use this set
+/// only when constructing user-facing endpoint responses.
+pub async fn auto_connected_endpoint_ids(
+    db: &mongodb::Database,
+    user_id: &str,
+) -> AppResult<std::collections::HashSet<String>> {
+    let services: Vec<bson::Document> = db
+        .collection::<bson::Document>(COLLECTION_NAME)
+        .find(doc! {
+            "user_id": user_id,
+            "source": AUTO_PROVISION_SOURCE,
+        })
+        .with_options(
+            FindOptions::builder()
+                .projection(doc! { "endpoint_id": 1 })
+                .build(),
+        )
+        .await?
+        .try_collect()
+        .await?;
+    services
+        .into_iter()
+        .map(|service| {
+            service
+                .get_str("endpoint_id")
+                .map(str::to_owned)
+                .map_err(|error| {
+                    AppError::Internal(format!(
+                        "Invalid auto-connected endpoint_id projection: {error}"
+                    ))
+                })
+        })
+        .collect()
+}
+
+/// Reject user mutations against an endpoint referenced by any
+/// auto-connected service owned by `user_id`.
+pub async fn ensure_user_managed_endpoint(
+    db: &mongodb::Database,
+    user_id: &str,
+    endpoint_id: &str,
+) -> AppResult<()> {
+    let count = db
+        .collection::<mongodb::bson::Document>(COLLECTION_NAME)
+        .count_documents(doc! {
+            "user_id": user_id,
+            "endpoint_id": endpoint_id,
+            "source": AUTO_PROVISION_SOURCE,
+        })
+        .await?;
+    if count > 0 {
+        return Err(AppError::Forbidden(
+            "Auto-connected service endpoints are platform managed and cannot be modified"
+                .to_string(),
+        ));
+    }
+    Ok(())
 }
 
 impl IdentityConfig {
@@ -616,7 +686,7 @@ pub async fn create_user_service(
     let platform_managed_catalog_service = api_key_id.is_none()
         && auth_method != "none"
         && catalog_service_id.is_some()
-        && source == Some("auto_provision");
+        && source == Some(AUTO_PROVISION_SOURCE);
     if api_key_id.is_none() && auth_method != "none" && !platform_managed_catalog_service {
         return Err(AppError::ValidationError(
             "Services without an API key must use auth_method 'none'".to_string(),
@@ -787,6 +857,7 @@ pub async fn update_user_service(
     admin_only: Option<bool>,
 ) -> AppResult<()> {
     let current = get_user_service(db, user_id, service_id).await?;
+    ensure_user_managed_service(&current)?;
     let mut set_doc = doc! {
         "updated_at": bson::DateTime::from_chrono(Utc::now()),
     };
@@ -1050,6 +1121,8 @@ pub async fn validate_update_inputs(
     new_endpoint_url: Option<&str>,
     new_openapi_spec_url: Option<&str>,
 ) -> AppResult<()> {
+    ensure_user_managed_service(current)?;
+
     if let Some(am) = auth_method {
         validate_auth_method(am)?;
     }
@@ -1572,6 +1645,7 @@ pub async fn update_ssh_auth_mode(
     mode: SshAuthMode,
 ) -> AppResult<UserService> {
     let current = get_user_service(db, user_id, service_id).await?;
+    ensure_user_managed_service(&current)?;
     if current.service_type != "ssh" {
         return Err(AppError::ValidationError(
             "SSH auth mode can only be changed for SSH services".to_string(),
@@ -1820,6 +1894,53 @@ mod tests {
             inject_delegation_token: true,
             delegation_token_scope: "llm:proxy".to_string(),
         }
+    }
+
+    #[tokio::test]
+    async fn update_user_service_rejects_auto_connected_service() {
+        let Some(db) = connect_test_database("user_service_auto_managed_update").await else {
+            eprintln!("skipping user_service_service integration test: no local MongoDB available");
+            return;
+        };
+        let user_id = uuid::Uuid::new_v4().to_string();
+        let service_id = uuid::Uuid::new_v4().to_string();
+        let mut service = test_user_service(
+            &service_id,
+            &user_id,
+            "platform-service",
+            "ep-auto",
+            Some("cat-1"),
+            None,
+        );
+        service.source = Some(AUTO_PROVISION_SOURCE.to_string());
+        db.collection::<UserService>(COLLECTION_NAME)
+            .insert_one(&service)
+            .await
+            .unwrap();
+
+        let error = update_user_service(
+            &db,
+            &user_id,
+            &user_id,
+            &service_id,
+            None,
+            None,
+            None,
+            None,
+            Some(false),
+            None,
+            None,
+            None,
+            None,
+            None,
+        )
+        .await
+        .expect_err("auto-connected services must reject user mutations");
+        assert!(matches!(error, AppError::Forbidden(_)));
+
+        let stored = get_user_service(&db, &user_id, &service_id).await.unwrap();
+        assert!(stored.is_active);
+        assert_eq!(stored.source.as_deref(), Some(AUTO_PROVISION_SOURCE));
     }
 
     fn test_downstream_ssh_service(

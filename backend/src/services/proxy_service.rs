@@ -17,7 +17,7 @@ use crate::models::user_endpoint::{COLLECTION_NAME as USER_ENDPOINTS, UserEndpoi
 use crate::models::user_provider_token::{
     COLLECTION_NAME as USER_PROVIDER_TOKENS, UserProviderToken,
 };
-use crate::models::user_service::UserService;
+use crate::models::user_service::{AUTO_PROVISION_SOURCE, UserService};
 use crate::models::user_service_connection::{
     COLLECTION_NAME as USER_SERVICE_CONNECTIONS, UserServiceConnection,
 };
@@ -32,8 +32,6 @@ use crate::services::{
     user_service_service, user_token_service,
 };
 use nyxid_cloud_auth::aws_sigv4::{self, AwsCredentials};
-
-const AUTO_PROVISION_SOURCE: &str = "auto_provision";
 
 /// Default User-Agent injected at the proxy boundary when neither the
 /// caller nor the resolved service supplies one. Resolved at compile

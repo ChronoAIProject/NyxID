@@ -6,6 +6,7 @@ use serde_json::Value;
 
 use crate::api::ApiClient;
 use crate::cli::{OutputFormat, ServiceCommands};
+use crate::commands::display_endpoint;
 use crate::commands::lark_permission::print_permission_block;
 use crate::commands::node_credential::RciCliHintLines;
 use crate::org_resolver::resolve_org_id;
@@ -975,7 +976,7 @@ pub async fn run(command: ServiceCommands) -> Result<()> {
                                 .or(svc["service_slug"].as_str())
                                 .unwrap_or("-");
                             let label = svc["label"].as_str().unwrap_or("-");
-                            let endpoint = svc["endpoint_url"].as_str().unwrap_or("-");
+                            let endpoint = display_endpoint(svc, "endpoint_url", None);
                             let status = display_status(svc);
                             let access = if svc["admin_only"].as_bool().unwrap_or(false) {
                                 "admin-only"
@@ -1025,7 +1026,7 @@ pub async fn run(command: ServiceCommands) -> Result<()> {
                     } else {
                         svc["status"].as_str().unwrap_or("active")
                     };
-                    let endpoint = svc["endpoint_url"].as_str().unwrap_or("-");
+                    let endpoint = display_endpoint(&svc, "endpoint_url", None);
                     let auth_method = svc["auth_method"].as_str().unwrap_or("-");
                     let auth_key = svc["auth_key_name"].as_str().unwrap_or("-");
                     let node = svc["node_id"].as_str().unwrap_or("-- (direct)");
@@ -2176,7 +2177,7 @@ fn print_add_result(api: &ApiClient, result: &Value, output: OutputFormat) -> Re
                 .as_str()
                 .or(result["service_slug"].as_str())
                 .unwrap_or("-");
-            let endpoint = result["endpoint_url"].as_str().unwrap_or("-");
+            let endpoint = display_endpoint(result, "endpoint_url", None);
             let status = result["status"].as_str().unwrap_or("active");
 
             eprintln!("Service added successfully!");
@@ -3267,6 +3268,27 @@ mod command_tests {
     use crate::test_support::{mock_auth, mock_auth_with_output};
     use wiremock::matchers::{body_json, method, path, query_param};
     use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    #[test]
+    fn auto_connected_service_endpoint_is_platform_managed() {
+        let omitted = serde_json::json!({
+            "id": "svc-auto",
+            "auto_connected": true,
+        });
+        assert_eq!(
+            display_endpoint(&omitted, "endpoint_url", None),
+            "platform managed"
+        );
+
+        let legacy = serde_json::json!({
+            "id": "svc-auto",
+            "auto_connected": true,
+            "endpoint_url": "https://platform.internal.example/v1",
+        });
+        let rendered = display_endpoint(&legacy, "endpoint_url", None);
+        assert_eq!(rendered, "platform managed");
+        assert!(!rendered.contains("platform.internal.example"));
+    }
 
     #[tokio::test]
     async fn list_fetches_services_json() {

@@ -106,7 +106,10 @@ pub struct UpdateEndpointRequest {
 pub struct EndpointResponse {
     pub id: String,
     pub label: String,
-    pub url: String,
+    /// Omitted when the endpoint belongs to an auto-connected service.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub url: Option<String>,
+    pub auto_connected: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub catalog_service_id: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -166,7 +169,15 @@ pub async fn list_endpoints(
         actor
     };
     let endpoints = user_endpoint_service::list_endpoints(&state.db, &user_id_str).await?;
-    let items = endpoints.into_iter().map(endpoint_response).collect();
+    let auto_connected_ids =
+        user_service_service::auto_connected_endpoint_ids(&state.db, &user_id_str).await?;
+    let items = endpoints
+        .into_iter()
+        .map(|endpoint| {
+            let auto_connected = auto_connected_ids.contains(&endpoint.id);
+            endpoint_response(endpoint, auto_connected)
+        })
+        .collect();
     Ok(Json(EndpointListResponse { endpoints: items }))
 }
 
@@ -180,6 +191,7 @@ pub async fn list_endpoints(
     responses(
         (status = 200, description = "Updated endpoint", body = EndpointResponse),
         (status = 401, description = "Unauthorized", body = crate::errors::ErrorResponse),
+        (status = 403, description = "Auto-connected endpoint is platform managed", body = crate::errors::ErrorResponse),
         (status = 404, description = "Endpoint not found", body = crate::errors::ErrorResponse)
     ),
     tag = "Endpoints"
@@ -194,6 +206,7 @@ pub async fn update_endpoint(
 ) -> AppResult<Json<EndpointResponse>> {
     let actor = auth_user.user_id.to_string();
     let owner_id = resolve_endpoint_write_owner(&state, &actor, &endpoint_id).await?;
+    user_service_service::ensure_user_managed_endpoint(&state.db, &owner_id, &endpoint_id).await?;
 
     if let Some(url) = body.url.as_deref()
         && !endpoint_is_only_node_routed(&state, &owner_id, &endpoint_id).await?
@@ -249,7 +262,7 @@ pub async fn update_endpoint(
         },
     );
 
-    Ok(Json(endpoint_response(ep)))
+    Ok(Json(endpoint_response(ep, false)))
 }
 
 #[utoipa::path(
@@ -261,6 +274,7 @@ pub async fn update_endpoint(
     responses(
         (status = 204, description = "Endpoint deleted"),
         (status = 401, description = "Unauthorized", body = crate::errors::ErrorResponse),
+        (status = 403, description = "Auto-connected endpoint is platform managed", body = crate::errors::ErrorResponse),
         (status = 404, description = "Endpoint not found", body = crate::errors::ErrorResponse)
     ),
     tag = "Endpoints"
@@ -274,6 +288,7 @@ pub async fn delete_endpoint(
 ) -> AppResult<impl IntoResponse> {
     let actor = auth_user.user_id.to_string();
     let owner_id = resolve_endpoint_write_owner(&state, &actor, &endpoint_id).await?;
+    user_service_service::ensure_user_managed_endpoint(&state.db, &owner_id, &endpoint_id).await?;
 
     // Capture endpoint_type pre-delete so telemetry can classify custom vs
     // catalog-derived endpoints even though the record will be gone after
@@ -306,11 +321,12 @@ pub async fn delete_endpoint(
     Ok(StatusCode::NO_CONTENT)
 }
 
-fn endpoint_response(ep: UserEndpoint) -> EndpointResponse {
+fn endpoint_response(ep: UserEndpoint, auto_connected: bool) -> EndpointResponse {
     EndpointResponse {
         id: ep.id,
         label: ep.label,
-        url: ep.url,
+        url: (!auto_connected).then_some(ep.url),
+        auto_connected,
         catalog_service_id: ep.catalog_service_id,
         openapi_spec_url: ep.openapi_spec_url,
         created_at: ep.created_at.to_rfc3339(),
@@ -430,8 +446,12 @@ mod tests {
     use super::*;
     use crate::models::user::{COLLECTION_NAME as USERS, User, UserType};
     use crate::models::user_endpoint::{COLLECTION_NAME as EP_COLLECTION, UserEndpoint};
+    use crate::models::user_service::{
+        AUTO_PROVISION_SOURCE, COLLECTION_NAME as USER_SERVICE_COLLECTION, UserService,
+    };
     use crate::test_utils::{
         connect_test_database, test_app_state, test_auth_user, test_user, test_user_endpoint,
+        test_user_service,
     };
     use axum::extract::State;
 
@@ -634,10 +654,11 @@ mod tests {
             created_at: chrono::Utc::now(),
             updated_at: chrono::Utc::now(),
         };
-        let resp = endpoint_response(ep);
+        let resp = endpoint_response(ep, false);
         assert_eq!(resp.id, "ep-1");
         assert_eq!(resp.label, "My EP");
-        assert_eq!(resp.url, "https://api.example.com/v1");
+        assert_eq!(resp.url.as_deref(), Some("https://api.example.com/v1"));
+        assert!(!resp.auto_connected);
         assert_eq!(resp.catalog_service_id.as_deref(), Some("cat-1"));
         assert_eq!(
             resp.openapi_spec_url.as_deref(),
@@ -658,7 +679,7 @@ mod tests {
             created_at: chrono::Utc::now(),
             updated_at: chrono::Utc::now(),
         };
-        let resp = endpoint_response(ep);
+        let resp = endpoint_response(ep, false);
         assert!(resp.catalog_service_id.is_none());
         assert!(resp.openapi_spec_url.is_none());
     }
@@ -728,10 +749,115 @@ mod tests {
             created_at: chrono::Utc::now(),
             updated_at: chrono::Utc::now(),
         };
-        let resp = endpoint_response(ep);
+        let resp = endpoint_response(ep, false);
         let json = serde_json::to_value(&resp).unwrap();
+        assert_eq!(json["url"], "https://example.com");
+        assert_eq!(json["auto_connected"], false);
         assert!(!json.as_object().unwrap().contains_key("catalog_service_id"));
         assert!(!json.as_object().unwrap().contains_key("openapi_spec_url"));
+    }
+
+    #[test]
+    fn auto_connected_endpoint_response_omits_url() {
+        let ep = UserEndpoint {
+            id: "ep-auto".into(),
+            user_id: "u-auto".into(),
+            label: "Platform service".into(),
+            url: "https://platform.internal.example/v1".into(),
+            catalog_service_id: Some("cat-1".into()),
+            openapi_spec_url: None,
+            recommended_skills: None,
+            created_at: chrono::Utc::now(),
+            updated_at: chrono::Utc::now(),
+        };
+
+        let response = endpoint_response(ep, true);
+        let json = serde_json::to_value(&response).unwrap();
+        assert!(response.url.is_none());
+        assert_eq!(json["auto_connected"], true);
+        assert!(!json.as_object().unwrap().contains_key("url"));
+        assert!(!json.to_string().contains("platform.internal.example"));
+    }
+
+    #[tokio::test]
+    async fn auto_connected_endpoint_is_redacted_and_cannot_be_updated() {
+        let Some(db) = connect_test_database("h_user_ep_auto_managed").await else {
+            return;
+        };
+        let user_id = uuid::Uuid::new_v4().to_string();
+        let ep_id = uuid::Uuid::new_v4().to_string();
+        let service_id = uuid::Uuid::new_v4().to_string();
+        let platform_url = "https://platform.internal.example/v1";
+        db.collection::<User>(USERS)
+            .insert_one(test_user(&user_id, UserType::Person))
+            .await
+            .unwrap();
+        db.collection::<UserEndpoint>(EP_COLLECTION)
+            .insert_one(test_user_endpoint(
+                &ep_id,
+                &user_id,
+                "Platform service",
+                platform_url,
+                Some("cat-1"),
+                None,
+            ))
+            .await
+            .unwrap();
+        let mut service = test_user_service(
+            &service_id,
+            &user_id,
+            "platform-service",
+            &ep_id,
+            Some("cat-1"),
+            None,
+        );
+        service.source = Some(AUTO_PROVISION_SOURCE.to_string());
+        db.collection::<UserService>(USER_SERVICE_COLLECTION)
+            .insert_one(service)
+            .await
+            .unwrap();
+        let state = test_app_state(db.clone());
+        let auth = test_auth_user(&user_id);
+
+        let Json(list) = list_endpoints(
+            State(state.clone()),
+            auth.clone(),
+            Query(EndpointListQuery { org_id: None }),
+        )
+        .await
+        .unwrap();
+        let response = &list.endpoints[0];
+        assert!(response.auto_connected);
+        assert!(response.url.is_none());
+        assert!(
+            !serde_json::to_string(response)
+                .unwrap()
+                .contains(platform_url)
+        );
+
+        let error = update_endpoint(
+            State(state),
+            auth,
+            tele(),
+            Path(ep_id.clone()),
+            Json(UpdateEndpointRequest {
+                url: Some("https://attacker.example/v1".to_string()),
+                label: None,
+                openapi_spec_url: None,
+                recommended_skills: None,
+            }),
+        )
+        .await
+        .expect_err("platform-managed endpoint update must be rejected");
+        assert!(matches!(error, AppError::Forbidden(_)));
+
+        let stored = db
+            .collection::<UserEndpoint>(EP_COLLECTION)
+            .find_one(doc! { "_id": ep_id })
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(stored.url, platform_url);
     }
 
     #[tokio::test]

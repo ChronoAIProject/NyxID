@@ -156,7 +156,6 @@ export async function listServices(
       slug: string;
       label: string;
       status: string;
-      endpoint_url: string;
       service_type: string;
       catalog_service_name: string | null;
       is_active: boolean;

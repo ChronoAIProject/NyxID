@@ -89,6 +89,23 @@ describe("deriveConnectorItems", () => {
     expect(added[0]?.description).toBe("GPT models.");
   });
 
+  it("does not expose an auto-connected endpoint in fallback copy", () => {
+    const { added } = deriveConnectorItems(
+      [
+        makeKey({
+          catalog_service_slug: null,
+          auto_connected: true,
+          endpoint_url: "https://platform.internal.example/v1",
+          description: null,
+        }),
+      ],
+      [],
+    );
+
+    expect(added[0]?.description).toBe("Connected through the NyxID proxy.");
+    expect(added[0]?.description).not.toContain("platform.internal.example");
+  });
+
   it("keeps a disabled connection in Added, flagged, rather than offering Connect", () => {
     // Regression: while the backend hid disabled services from GET /keys, the
     // catalog entry fell back into "Available to add", so a paused connector

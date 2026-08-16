@@ -420,7 +420,9 @@ pub struct KeyResponse {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub description: Option<String>,
     pub service_category: String,
-    pub endpoint_url: String,
+    /// Omitted for auto-connected services whose target is platform managed.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub endpoint_url: Option<String>,
     pub endpoint_id: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub api_key_id: Option<String>,
@@ -1169,6 +1171,7 @@ pub async fn get_key(
         (status = 200, description = "Key updated", body = KeyResponse),
         (status = 400, description = "Validation error", body = crate::errors::ErrorResponse),
         (status = 401, description = "Unauthorized", body = crate::errors::ErrorResponse),
+        (status = 403, description = "Auto-connected service is platform managed", body = crate::errors::ErrorResponse),
         (status = 404, description = "Key not found", body = crate::errors::ErrorResponse)
     ),
     tag = "AI Services"
@@ -1191,7 +1194,7 @@ pub async fn update_key(
             .await?;
 
     if view.auto_connected {
-        return Err(crate::errors::AppError::BadRequest(
+        return Err(crate::errors::AppError::Forbidden(
             "Auto-connected services cannot be modified".to_string(),
         ));
     }
@@ -2064,6 +2067,7 @@ pub struct DeleteKeyQuery {
         (status = 200, description = "Key revoked (or skipped when only_if_pending)", body = DeleteKeyResponse),
         (status = 400, description = "Invalid or conflicting revocation options", body = crate::errors::ErrorResponse),
         (status = 401, description = "Unauthorized", body = crate::errors::ErrorResponse),
+        (status = 403, description = "Auto-connected service is platform managed", body = crate::errors::ErrorResponse),
         (status = 404, description = "Key not found", body = crate::errors::ErrorResponse),
         (status = 409, description = "OAuth grant cascade confirmation required", body = crate::errors::ErrorResponse)
     ),
@@ -2091,7 +2095,7 @@ pub async fn delete_key(
         unified_key_service::get_key(&state.db, &state.encryption_keys, &user_id_str, &key_id)
             .await?;
     if view.auto_connected {
-        return Err(crate::errors::AppError::BadRequest(
+        return Err(crate::errors::AppError::Forbidden(
             "Auto-connected services cannot be deleted".to_string(),
         ));
     }
@@ -2168,7 +2172,7 @@ fn key_response_from_result(result: &unified_key_service::CreateKeyResult) -> Ke
         slug: result.service.slug.clone(),
         description: None,
         service_category: source.clone(),
-        endpoint_url: result.endpoint.url.clone(),
+        endpoint_url: Some(result.endpoint.url.clone()),
         endpoint_id: result.endpoint.id.clone(),
         api_key_id: result.api_key.as_ref().map(|api_key| api_key.id.clone()),
         credential_missing: false,
@@ -2284,6 +2288,7 @@ fn key_response_from_view(view: unified_key_service::KeyView) -> KeyResponse {
         .node_id
         .as_ref()
         .is_some_and(|node_id| !node_id.is_empty());
+    let endpoint_url = (!view.auto_connected).then_some(view.endpoint_url);
 
     KeyResponse {
         id: view.id,
@@ -2295,7 +2300,7 @@ fn key_response_from_view(view: unified_key_service::KeyView) -> KeyResponse {
         slug: view.slug,
         description: None,
         service_category: source.clone(),
-        endpoint_url: view.endpoint_url,
+        endpoint_url,
         endpoint_id: view.endpoint_id,
         api_key_id: view.api_key_id,
         credential_missing: view.credential_missing,
@@ -2610,7 +2615,9 @@ mod tests {
     use crate::models::user_api_key::COLLECTION_NAME as USER_API_KEYS;
     use crate::models::user_api_key::UserApiKey;
     use crate::models::user_endpoint::{COLLECTION_NAME as USER_ENDPOINTS, UserEndpoint};
-    use crate::models::user_service::{COLLECTION_NAME as USER_SERVICES, UserService};
+    use crate::models::user_service::{
+        AUTO_PROVISION_SOURCE, COLLECTION_NAME as USER_SERVICES, UserService,
+    };
     use crate::telemetry::TelemetryContext;
     use crate::test_utils::{
         connect_test_database, test_app_state, test_auth_user, test_membership, test_user,
@@ -3054,6 +3061,85 @@ mod tests {
 
         assert_eq!(response.id, service_id);
         assert_eq!(response.slug, "routeros");
+    }
+
+    #[tokio::test]
+    async fn auto_connected_key_responses_omit_endpoint_url() {
+        let Some(db) = connect_test_database("keys_auto_endpoint_redaction").await else {
+            eprintln!("skipping keys handler integration test: no local MongoDB available");
+            return;
+        };
+        let state = test_app_state(db.clone());
+        let actor_id = uuid::Uuid::new_v4().to_string();
+        let service_id = uuid::Uuid::new_v4().to_string();
+        let catalog_id = uuid::Uuid::new_v4().to_string();
+        insert_user(&db, &actor_id, UserType::Person).await;
+        insert_key_fixture(
+            &db,
+            &actor_id,
+            &service_id,
+            "platform-service",
+            "Platform Service",
+        )
+        .await;
+        let mut catalog = crate::models::downstream_service::test_helpers::dummy_service();
+        catalog.id = catalog_id.clone();
+        catalog.name = "Platform Service".to_string();
+        catalog.slug = "platform-service".to_string();
+        catalog.base_url = "https://api.example.com".to_string();
+        catalog.visibility = "public".to_string();
+        catalog.service_category = "internal".to_string();
+        catalog.service_type = "http".to_string();
+        catalog.auth_method = "none".to_string();
+        catalog.auth_key_name = String::new();
+        catalog.requires_user_credential = false;
+        catalog.provider_config_id = None;
+        catalog.is_active = true;
+        db.collection::<DownstreamService>(DOWNSTREAM_SERVICES)
+            .insert_one(catalog)
+            .await
+            .unwrap();
+        db.collection::<UserService>(USER_SERVICES)
+            .update_one(
+                doc! { "_id": &service_id },
+                doc! { "$set": {
+                    "source": AUTO_PROVISION_SOURCE,
+                    "catalog_service_id": &catalog_id,
+                } },
+            )
+            .await
+            .unwrap();
+
+        let Json(detail) = super::get_key(
+            State(state.clone()),
+            test_auth_user(&actor_id),
+            Path(service_id.clone()),
+        )
+        .await
+        .unwrap();
+        let detail_json = serde_json::to_value(&detail).unwrap();
+        assert!(detail.auto_connected);
+        assert!(detail.endpoint_url.is_none());
+        assert!(
+            !detail_json
+                .as_object()
+                .unwrap()
+                .contains_key("endpoint_url")
+        );
+        assert!(!detail_json.to_string().contains("api.example.com"));
+
+        let Json(list) = super::list_keys(State(state), test_auth_user(&actor_id))
+            .await
+            .unwrap();
+        let listed = list
+            .keys
+            .iter()
+            .find(|key| key.id == service_id)
+            .expect("auto-connected service should remain in the management listing");
+        let list_json = serde_json::to_value(listed).unwrap();
+        assert!(listed.endpoint_url.is_none());
+        assert!(!list_json.as_object().unwrap().contains_key("endpoint_url"));
+        assert!(!list_json.to_string().contains("api.example.com"));
     }
 
     /// A disabled service stays addressable by UUID, and stays hidden by slug.
@@ -3543,7 +3629,10 @@ mod tests {
 
         assert_eq!(response.label, "My Custom API");
         assert_eq!(response.slug, "my-custom-api");
-        assert_eq!(response.endpoint_url, "https://api.example.com");
+        assert_eq!(
+            response.endpoint_url.as_deref(),
+            Some("https://api.example.com")
+        );
         assert_eq!(response.auth_method, "bearer");
         assert!(response.api_key_id.is_some());
         assert!(response.is_active);

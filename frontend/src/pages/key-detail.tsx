@@ -1362,7 +1362,8 @@ function ApiUsageSection({
   ]);
   const showGenericEndpointExample = isBotOrWebhookService(metadataText);
   const llmDetected = isLlmService(metadataText);
-  const llmExamplePath = chatCompletionsPath(endpointUrl);
+  const endpointUrlForPathShape = endpointUrl || catalogEntry?.base_url || "";
+  const llmExamplePath = chatCompletionsPath(endpointUrlForPathShape);
   const genericExamplePath = showGenericEndpointExample
     ? genericEndpointPathFor(metadataText)
     : null;
@@ -2433,7 +2434,7 @@ export function KeyDetailPage() {
                   <span className="text-xs font-medium text-muted-foreground">
                     Endpoint
                   </span>
-                  <p className="truncate text-xs">{keyInfo.endpoint_url}</p>
+                  <p className="text-xs">Platform managed</p>
                 </div>
                 <div>
                   <span className="text-xs font-medium text-muted-foreground">
@@ -2481,7 +2482,7 @@ export function KeyDetailPage() {
               serviceId={keyInfo.id}
               slug={keyInfo.slug}
               authMethod={keyInfo.auth_method}
-              endpointUrl={keyInfo.endpoint_url}
+              endpointUrl={keyInfo.endpoint_url ?? ""}
               catalogServiceSlug={keyInfo.catalog_service_slug}
               label={keyInfo.label}
               catalogEntry={catalogEntry}
@@ -2520,7 +2521,7 @@ export function KeyDetailPage() {
           <TabsContent value="overview" className="space-y-4">
             <div className="grid gap-4 lg:grid-cols-2">
               <EndpointSection
-                endpointUrl={keyInfo.endpoint_url}
+                endpointUrl={keyInfo.endpoint_url ?? ""}
                 endpointId={keyInfo.endpoint_id}
                 nodeRouted={keyInfo.node_id !== null}
                 readOnly={readOnly}
@@ -2560,7 +2561,7 @@ export function KeyDetailPage() {
                 serviceId={keyInfo.id}
                 slug={keyInfo.slug}
                 authMethod={keyInfo.auth_method}
-                endpointUrl={keyInfo.endpoint_url}
+                endpointUrl={keyInfo.endpoint_url ?? ""}
                 catalogServiceSlug={keyInfo.catalog_service_slug}
                 label={keyInfo.label}
                 catalogEntry={catalogEntry}
@@ -2644,7 +2645,7 @@ export function KeyDetailPage() {
                 {keyInfo.node_id && (
                   <NodeSetupHelper
                     slug={keyInfo.slug}
-                    endpointUrl={keyInfo.endpoint_url}
+                    endpointUrl={keyInfo.endpoint_url ?? ""}
                     authMethod={keyInfo.auth_method}
                     authKeyName={keyInfo.auth_key_name}
                     catalogServiceName={keyInfo.catalog_service_name}

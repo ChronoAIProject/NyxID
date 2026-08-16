@@ -210,10 +210,16 @@ describe("KeysPage", () => {
   it("hides auto-connected services until the toggle is enabled", async () => {
     const user = userEvent.setup();
     state.keys = [
-      makeKey({ id: "user-1", label: "Manual Key", auto_connected: false }),
+      makeKey({
+        id: "user-1",
+        label: "Manual Key",
+        endpoint_url: "https://manual.example/v1",
+        auto_connected: false,
+      }),
       makeKey({
         id: "auto-1",
         label: "Auto Key",
+        endpoint_url: "https://platform.internal.example/v1",
         auto_connected: true,
         source_app_name: "Claude Code",
       }),
@@ -223,13 +229,50 @@ describe("KeysPage", () => {
 
     // Auto-connected hidden by default.
     expect(screen.getByText("Manual Key")).toBeInTheDocument();
+    expect(screen.getByText("https://manual.example/v1")).toBeInTheDocument();
     expect(screen.queryByText("Auto Key")).not.toBeInTheDocument();
+    expect(
+      screen.queryByText("https://platform.internal.example/v1"),
+    ).not.toBeInTheDocument();
     // The toggle label reflects the auto-connected count.
     expect(screen.getByText("Show auto-connected (1)")).toBeInTheDocument();
 
     await user.click(screen.getByRole("switch"));
 
     expect(screen.getByText("Auto Key")).toBeInTheDocument();
+    expect(
+      screen.queryByText("https://platform.internal.example/v1"),
+    ).not.toBeInTheDocument();
+    expect(screen.getAllByText("Platform managed").length).toBeGreaterThan(0);
+  });
+
+  it("hides auto-connected endpoint URLs in table rows without changing normal rows", async () => {
+    localStorage.setItem("nyxid-view-mode:keys-services", "table");
+    const user = userEvent.setup();
+    state.keys = [
+      makeKey({
+        id: "manual-table",
+        label: "Manual Table",
+        endpoint_url: "https://manual-table.example/v1",
+      }),
+      makeKey({
+        id: "auto-table",
+        label: "Auto Table",
+        endpoint_url: "https://platform-table.internal/v1",
+        auto_connected: true,
+      }),
+    ];
+
+    try {
+      render(<KeysPage />);
+      await user.click(screen.getByRole("switch"));
+
+      expect(screen.getByText("https://manual-table.example/v1")).toBeInTheDocument();
+      expect(screen.queryByText("https://platform-table.internal/v1")).not.toBeInTheDocument();
+      expect(screen.getAllByText("Platform managed").length).toBeGreaterThan(0);
+    } finally {
+      localStorage.removeItem("nyxid-view-mode:keys-services");
+    }
   });
 
   it("groups org-inherited services into a labelled section with a role badge", () => {

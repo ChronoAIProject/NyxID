@@ -237,6 +237,14 @@ also the healthy representation for a service that requires no credential.
 The degraded row may be reconnected or deleted, but it cannot be enabled until
 a replacement credential has been attached.
 
+Auto-connected rows (`auto_connected: true`) are platform managed. Their
+`endpoint_url` is omitted from both key-list and key-detail responses; clients
+must render a neutral platform-managed label rather than treating the missing
+field as an unknown or empty user endpoint. `GET /endpoints` follows the same
+contract by returning `auto_connected: true` and omitting `url`. The stored
+`UserEndpoint.url` remains intact for proxy routing and MCP configuration, and
+user-facing endpoint or service mutation routes reject changes to these rows.
+
 Because a disabled row keeps its slug while a new active service may reuse it,
 this listing can contain two rows with the same slug. Consumers that resolve by
 slug should prefer the active row.

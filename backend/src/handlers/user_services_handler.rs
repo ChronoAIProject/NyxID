@@ -312,6 +312,7 @@ pub async fn list_user_services(
     responses(
         (status = 200, description = "Updated user service", body = UserServiceResponse),
         (status = 401, description = "Unauthorized", body = crate::errors::ErrorResponse),
+        (status = 403, description = "Auto-connected service is platform managed", body = crate::errors::ErrorResponse),
         (status = 404, description = "Service not found", body = crate::errors::ErrorResponse)
     ),
     tag = "User Services"
@@ -459,6 +460,7 @@ pub async fn update_user_service(
         (status = 200, description = "Updated SSH auth mode", body = UserServiceResponse),
         (status = 400, description = "Validation error", body = crate::errors::ErrorResponse),
         (status = 401, description = "Unauthorized", body = crate::errors::ErrorResponse),
+        (status = 403, description = "Auto-connected service is platform managed", body = crate::errors::ErrorResponse),
         (status = 404, description = "Service not found", body = crate::errors::ErrorResponse)
     ),
     tag = "User Services"
@@ -494,6 +496,7 @@ pub async fn patch_user_service_ssh_auth_mode(
     responses(
         (status = 204, description = "User service deactivated"),
         (status = 401, description = "Unauthorized", body = crate::errors::ErrorResponse),
+        (status = 403, description = "Auto-connected service is platform managed", body = crate::errors::ErrorResponse),
         (status = 404, description = "Service not found", body = crate::errors::ErrorResponse)
     ),
     tag = "User Services"

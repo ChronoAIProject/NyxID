@@ -11,7 +11,8 @@ export interface KeyInfo {
   readonly slug: string;
   readonly description?: string | null;
   readonly service_category?: string;
-  readonly endpoint_url: string;
+  /** Omitted when the service endpoint is managed by the platform. */
+  readonly endpoint_url?: string;
   readonly endpoint_id: string;
   readonly api_key_id?: string | null;
   /** The service references a credential row that no longer exists. */
@@ -237,7 +238,9 @@ export interface CatalogListResponse {
 export interface UserEndpointInfo {
   readonly id: string;
   readonly label: string;
-  readonly url: string;
+  /** Omitted when the endpoint belongs to an auto-connected service. */
+  readonly url?: string;
+  readonly auto_connected: boolean;
   readonly catalog_service_id: string | null;
   readonly created_at: string;
   readonly updated_at: string;
