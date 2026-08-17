@@ -4,7 +4,7 @@
 // for unknown slugs.
 //
 // 2-tone discipline (checked in the test `add-key-dialog.test.tsx`):
-//  - The 30 known-slugs in `SPEC_CATALOG_SLUGS` carry `data-slug="<slug>"` on
+//  - The 33 known-slugs in `SPEC_CATALOG_SLUGS` carry `data-slug="<slug>"` on
 //    the rendered `<svg>` (or, for composites, on the brand `<svg>` nested
 //    inside the wrapper `<span>`).
 //  - `FallbackIcon` carries `data-fallback="true"` instead — it MUST NOT carry
@@ -47,6 +47,8 @@ import ApiLarkBotIcon from "./api-lark-bot";
 import ApiFeishuIcon from "./api-feishu";
 import ApiFeishuBotIcon from "./api-feishu-bot";
 import ApiTelegramBotIcon from "./api-telegram-bot";
+import ApiElevenLabsIcon from "./api-elevenlabs";
+import ApiTwilioIcon from "./api-twilio";
 
 import AwsCostExplorerIcon from "./aws-cost-explorer";
 
@@ -54,7 +56,7 @@ export type ServiceIconProps = { className?: string };
 
 export type IconComponent = ComponentType<ServiceIconProps>;
 
-// The 30 slugs seeded in `backend/src/services/provider_service.rs`
+// The 33 slugs seeded in `backend/src/services/provider_service.rs`
 // (`DEFAULT_SERVICE_SEEDS`) — authoritative the test setup asserts against.
 export const SPEC_CATALOG_SLUGS = [
   "llm-openai",
@@ -88,6 +90,8 @@ export const SPEC_CATALOG_SLUGS = [
   "api-feishu",
   "api-feishu-bot",
   "api-telegram-bot",
+  "api-elevenlabs",
+  "api-twilio",
 
   "aws-cost-explorer",
 ] as const;
@@ -126,6 +130,8 @@ export const SERVICE_ICONS: Readonly<Record<string, IconComponent>> = {
   "api-feishu": ApiFeishuIcon,
   "api-feishu-bot": ApiFeishuBotIcon,
   "api-telegram-bot": ApiTelegramBotIcon,
+  "api-elevenlabs": ApiElevenLabsIcon,
+  "api-twilio": ApiTwilioIcon,
 
   "aws-cost-explorer": AwsCostExplorerIcon,
 } satisfies Readonly<Record<Slug, IconComponent>>;

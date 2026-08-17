@@ -11,8 +11,8 @@
 // Sources:
 //   - OpenAI, Anthropic, Mistral AI, DeepSeek, X (Twitter), Google, GitHub,
 //     Facebook, Discord, Spotify, Slack, Microsoft, TikTok, Twitch, Reddit,
-//     Telegram, AWS — path data hand-extracted from Simple Icons
-//     (https://simpleicons.org, CC0 1.0). No runtime dependency on the
+//     Telegram, ElevenLabs, Twilio, AWS — path data hand-extracted from Simple
+//     Icons (https://simpleicons.org, CC0 1.0). No runtime dependency on the
 //     `simple-icons` npm package.
 //   - Cohere, Lark, Feishu, OpenClaw — hand-built glyphs (these brands have no
 //     Simple Icons entry and ship no publicly-extractable brand mark).
@@ -310,6 +310,32 @@ export function TelegramGlyph(props: GlyphProps) {
   return (
     <svg viewBox="0 0 24 24" fill="currentColor" aria-hidden="true" {...props}>
       <path d="M11.944 0A12 12 0 0 0 0 12a12 12 0 0 0 12 12 12 12 0 0 0 12-12A12 12 0 0 0 12 0a12 12 0 0 0-.056 0zm4.962 7.224c.1-.002.321.023.465.14a.506.506 0 0 1 .171.325c.016.093.036.306.02.472-.18 1.898-.962 6.502-1.36 8.627-.168.9-.499 1.201-.82 1.23-.696.065-1.225-.46-1.9-.902-1.056-.693-1.653-1.124-2.678-1.8-1.185-.78-.417-1.21.258-1.91.177-.184 3.247-2.977 3.307-3.23.007-.032.014-.15-.056-.212s-.174-.041-.249-.024c-.106.024-1.793 1.14-5.061 3.345-.48.33-.913.49-1.302.48-.428-.008-1.252-.241-1.865-.44-.752-.245-1.349-.374-1.297-.789.027-.216.325-.437.893-.663 3.498-1.524 5.83-2.529 6.998-3.014 3.332-1.386 4.025-1.627 4.476-1.635z" />
+    </svg>
+  );
+}
+
+/**
+ * ElevenLabs "II" bar mark. (Simple Icons: elevenlabs)
+ *
+ * The two bars run the full 0..24 height by design — that is the path's tight
+ * bounding box, same as the Google and Microsoft marks. Do not inset the
+ * viewBox to "balance" it; that just renders the brand smaller than its peers.
+ */
+export function ElevenLabsGlyph(props: GlyphProps) {
+  return (
+    <svg viewBox="0 0 24 24" fill="currentColor" aria-hidden="true" {...props}>
+      <path d="M4.6035 0v24h4.9317V0zm9.8613 0v24h4.9317V0z" />
+    </svg>
+  );
+}
+
+/**
+ * Twilio four-dot circle mark. (Simple Icons: twilio)
+ */
+export function TwilioGlyph(props: GlyphProps) {
+  return (
+    <svg viewBox="0 0 24 24" fill="currentColor" aria-hidden="true" {...props}>
+      <path d="M12 0C5.381-.008.008 5.352 0 11.971V12c0 6.64 5.359 12 12 12 6.64 0 12-5.36 12-12 0-6.641-5.36-12-12-12zm0 20.801c-4.846.015-8.786-3.904-8.801-8.75V12c-.014-4.846 3.904-8.786 8.75-8.801H12c4.847-.014 8.786 3.904 8.801 8.75V12c.015 4.847-3.904 8.786-8.75 8.801H12zm5.44-11.76c0 1.359-1.12 2.479-2.481 2.479-1.366-.007-2.472-1.113-2.479-2.479 0-1.361 1.12-2.481 2.479-2.481 1.361 0 2.481 1.12 2.481 2.481zm0 5.919c0 1.36-1.12 2.48-2.481 2.48-1.367-.008-2.473-1.114-2.479-2.48 0-1.359 1.12-2.479 2.479-2.479 1.361-.001 2.481 1.12 2.481 2.479zm-5.919 0c0 1.36-1.12 2.48-2.479 2.48-1.368-.007-2.475-1.113-2.481-2.48 0-1.359 1.12-2.479 2.481-2.479 1.358-.001 2.479 1.12 2.479 2.479zm0-5.919c0 1.359-1.12 2.479-2.479 2.479-1.367-.007-2.475-1.112-2.481-2.479 0-1.361 1.12-2.481 2.481-2.481 1.358 0 2.479 1.12 2.479 2.481z" />
     </svg>
   );
 }
