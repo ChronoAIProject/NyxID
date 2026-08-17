@@ -2,7 +2,7 @@ use axum::{
     Json,
     body::Body,
     extract::{ConnectInfo, Extension, Path, State},
-    http::Request,
+    http::{HeaderMap, Request, header},
 };
 use serde::{Deserialize, Serialize};
 use utoipa::ToSchema;
@@ -47,6 +47,30 @@ const DANGEROUS_COMMANDS: &[&str] = &[
     "init 0",
     ":(){ :|:& };:",
 ];
+
+fn require_json_content_type(headers: &HeaderMap) -> AppResult<()> {
+    let is_json = headers
+        .get(header::CONTENT_TYPE)
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| value.split(';').next())
+        .and_then(|media_type| media_type.trim().split_once('/'))
+        .is_some_and(|(type_, subtype)| {
+            let subtype = subtype.trim();
+            type_.trim().eq_ignore_ascii_case("application")
+                && (subtype.eq_ignore_ascii_case("json")
+                    || subtype.rsplit_once('+').is_some_and(|(name, suffix)| {
+                        !name.is_empty() && suffix.eq_ignore_ascii_case("json")
+                    }))
+        });
+
+    if is_json {
+        Ok(())
+    } else {
+        Err(AppError::BadRequest(
+            "SSH exec requires Content-Type: application/json".to_string(),
+        ))
+    }
+}
 
 // ---------------------------------------------------------------------------
 // Request / Response
@@ -108,6 +132,7 @@ pub async fn ssh_exec(
     ConnectInfo(addr): ConnectInfo<std::net::SocketAddr>,
     request: Request<Body>,
 ) -> AppResult<Json<SshExecResponse>> {
+    require_json_content_type(request.headers())?;
     let headers = request.headers().clone();
     let body_bytes =
         super::body_limit::read_request_body(request, MAX_SSH_EXEC_REQUEST_BYTES, "SSH exec")
@@ -559,6 +584,19 @@ pub(crate) fn redact_command_for_audit(command: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn ssh_exec_accepts_json_media_types() {
+        for content_type in [
+            "application/json",
+            "application/json; charset=utf-8",
+            "application/problem+json",
+        ] {
+            let mut headers = HeaderMap::new();
+            headers.insert(header::CONTENT_TYPE, content_type.parse().unwrap());
+            require_json_content_type(&headers).expect("valid JSON media type");
+        }
+    }
 
     #[tokio::test]
     async fn ssh_exec_rejects_missing_and_wrong_json_content_type_before_body_parse() {

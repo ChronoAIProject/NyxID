@@ -99,6 +99,14 @@ fn tool_result(id: Option<serde_json::Value>, text: &str, is_error: bool) -> Res
     )
 }
 
+fn request_body_too_large_tool_result(
+    id: Option<serde_json::Value>,
+    error: &crate::errors::AppError,
+) -> Response {
+    let message = format!("{} ({}): {error}", error.error_key(), error.error_code());
+    tool_result(id, &message, true)
+}
+
 /// Check if the client's `Accept` header includes `text/event-stream`.
 /// Used to decide whether we can send inline SSE notifications in POST responses
 /// (Streamable HTTP transport).
@@ -811,11 +819,6 @@ fn app_error_to_rpc(id: Option<serde_json::Value>, err: &crate::errors::AppError
     match err {
         AppError::RateLimited => rpc_error(id, -32005, "Rate limit exceeded"),
         AppError::ApiKeyScopeForbidden(msg) => rpc_scope_forbidden(id, msg),
-        AppError::RequestBodyTooLarge { max_bytes, context } => AppError::RequestBodyTooLarge {
-            max_bytes: *max_bytes,
-            context: context.clone(),
-        }
-        .into_response(),
         _ => rpc_error(id, -32603, "Internal error"),
     }
 }
@@ -1400,7 +1403,7 @@ async fn handle_tools_call(
             return tool_result(request.id.clone(), &msg, true);
         }
         Err(error @ crate::errors::AppError::RequestBodyTooLarge { .. }) => {
-            return app_error_to_rpc(request.id.clone(), &error);
+            return request_body_too_large_tool_result(request.id.clone(), &error);
         }
         Err(e) => {
             tracing::warn!("Tool execution failed for {tool_name}: {e}");
@@ -1752,7 +1755,7 @@ async fn handle_meta_call_tool(
             return tool_result(request_id, &msg, true);
         }
         Err(error @ crate::errors::AppError::RequestBodyTooLarge { .. }) => {
-            return app_error_to_rpc(request_id, &error);
+            return request_body_too_large_tool_result(request_id, &error);
         }
         Err(e) => {
             tracing::warn!("Tool execution failed for {tool_name}: {e}");
@@ -4018,7 +4021,7 @@ mod tests {
 
     #[tokio::test]
     async fn tool_execution_body_limit_error_preserves_mcp_result_contract() {
-        let resp = app_error_to_rpc(
+        let resp = request_body_too_large_tool_result(
             Some(serde_json::json!(3)),
             &crate::errors::AppError::RequestBodyTooLarge {
                 max_bytes: 4096,

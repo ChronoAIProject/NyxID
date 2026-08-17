@@ -1,5 +1,5 @@
 use axum::body::{Body, Bytes, to_bytes};
-use axum::http::Request;
+use axum::http::{Request, header};
 
 use crate::errors::{AppError, AppResult};
 
@@ -8,9 +8,25 @@ pub(crate) async fn read_request_body(
     max_bytes: usize,
     context: &'static str,
 ) -> AppResult<Bytes> {
+    let max_bytes_u64 = u64::try_from(max_bytes).unwrap_or(u64::MAX);
+    if request
+        .headers()
+        .get(header::CONTENT_LENGTH)
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| value.parse::<u64>().ok())
+        .is_some_and(|declared_bytes| declared_bytes > max_bytes_u64)
+    {
+        return Err(AppError::RequestBodyTooLarge {
+            max_bytes,
+            context: context.to_string(),
+        });
+    }
+
     read_body(request.into_body(), max_bytes, context).await
 }
 
+/// Read a body after its request parts have already been split. Callers using
+/// this form cannot preflight Content-Length but remain bounded by `max_bytes`.
 pub(crate) async fn read_body(
     body: Body,
     max_bytes: usize,
@@ -49,8 +65,6 @@ mod tests {
     use std::task::Poll;
 
     use super::*;
-    use axum::http::header;
-
     #[tokio::test]
     async fn declared_oversize_is_rejected_without_polling_body() {
         let polled = Arc::new(AtomicBool::new(false));
