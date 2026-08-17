@@ -3770,20 +3770,10 @@ fn build_key_view(
         // `EncryptionKeys` operations are async and `build_key_view`
         // is intentionally sync.
         oauth_client_id: None,
-        // Granted scopes for append-only scope editing (NyxID#917 follow-up).
-        // `token_scopes` is stored space-joined; split into a list. Empty /
-        // whitespace-only yields None so the UI treats it as "no recorded
-        // grant" and falls back to provider defaults.
-        granted_scopes: ak.and_then(|k| {
-            k.token_scopes.as_deref().and_then(|s| {
-                let scopes: Vec<String> = s.split_whitespace().map(str::to_string).collect();
-                if scopes.is_empty() {
-                    None
-                } else {
-                    Some(scopes)
-                }
-            })
-        }),
+        // OAuth providers echo scopes using either spaces or commas. Normalize
+        // both forms at the read boundary while preserving the raw provider
+        // response in storage and the first-occurrence display order.
+        granted_scopes: ak.and_then(|k| k.token_scopes.as_deref().and_then(parse_granted_scopes)),
         last_authorized_at: ak.and_then(|k| k.last_authorized_at.map(|dt| dt.to_rfc3339())),
         expires_at: ak.and_then(|k| k.expires_at.map(|dt| dt.to_rfc3339())),
         last_used_at: ak.and_then(|k| k.last_used_at.map(|dt| dt.to_rfc3339())),
@@ -3810,14 +3800,31 @@ pub(crate) fn oauth_connection_status(api_key: &UserApiKey) -> Option<String> {
     ) {
         return Some("expired".to_string());
     }
-    api_key.expires_at.map(|expires_at| {
-        if expires_at <= Utc::now() && api_key.refresh_token_encrypted.is_none() {
-            "expired"
-        } else {
-            "active"
-        }
-        .to_string()
-    })
+    if api_key.status != "active" || api_key.access_token_encrypted.is_none() {
+        return None;
+    }
+    Some(
+        api_key
+            .expires_at
+            .map_or("active", |expires_at| {
+                if expires_at <= Utc::now() && api_key.refresh_token_encrypted.is_none() {
+                    "expired"
+                } else {
+                    "active"
+                }
+            })
+            .to_string(),
+    )
+}
+
+fn parse_granted_scopes(raw: &str) -> Option<Vec<String>> {
+    let mut seen = HashSet::new();
+    let scopes: Vec<String> = raw
+        .split(|character: char| character == ',' || character.is_whitespace())
+        .filter(|scope| !scope.is_empty())
+        .filter_map(|scope| seen.insert(scope).then(|| scope.to_string()))
+        .collect();
+    (!scopes.is_empty()).then_some(scopes)
 }
 
 /// Async post-pass for `build_key_view`: decrypt
@@ -3986,6 +3993,13 @@ mod tests {
     fn oauth_connection_health_uses_stored_status_expiry_and_refreshability() {
         let mut key = sample_api_key("oauth2");
         assert!(oauth_connection_status(&key).is_none());
+
+        key.access_token_encrypted = Some(vec![9, 8, 7]);
+        assert_eq!(oauth_connection_status(&key).as_deref(), Some("active"));
+
+        key.status = "pending_auth".to_string();
+        assert!(oauth_connection_status(&key).is_none());
+        key.status = "active".to_string();
 
         key.expires_at = Some(Utc::now() + chrono::Duration::minutes(5));
         assert_eq!(oauth_connection_status(&key).as_deref(), Some("active"));
@@ -5842,7 +5856,8 @@ mod tests {
         let service = sample_service("bearer");
         let endpoint = sample_endpoint();
         let mut ak = sample_api_key("oauth2");
-        ak.token_scopes = Some("tweet.read  tweet.write users.read".to_string());
+        ak.token_scopes =
+            Some("tweet.read, tweet.write  users.read,tweet.read\ntweet.write".to_string());
 
         let view = build_key_view(
             &service,
