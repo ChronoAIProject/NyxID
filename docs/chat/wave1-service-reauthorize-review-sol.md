@@ -292,4 +292,3 @@ space-joined request, but the callback does not normalize the provider echo. Con
 the response read boundary must handle both comma- and whitespace-delimited echoes, and
 provider omission remains a last-known-scope behavior guarded by Aevatar's fresh timestamp
 and scope-superset verification.
-

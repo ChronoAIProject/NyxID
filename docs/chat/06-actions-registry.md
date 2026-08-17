@@ -1,6 +1,6 @@
 # Assistant Actions Registry
 
-Last verified against `feat/2026-08-11_assistant-key-rotate` (2026-08-11).
+Last verified against the `service.reauthorize` implementation (2026-08-17).
 
 `GET /api/v1/assistant/actions` publishes the immutable action vocabulary that Aevatar may compose into typed NyxIdChat turns. It is a public, static JSON endpoint with an exact-path exemption from the global rate limiter. It does not depend on a session, database row, user scope, or model state.
 
@@ -13,7 +13,7 @@ The response content type is `application/json`. The current body is equivalent 
 ```json
 {
   "schema_version": 4,
-  "revision": "nyxid-assistant-actions.v7",
+  "revision": "nyxid-assistant-actions.v8",
   "actions": [
     {
       "action": "service.connect",
@@ -68,6 +68,25 @@ The response content type is `application/json`. The current body is equivalent 
       "remember_eligible": true
     },
     {
+      "action": "service.reauthorize",
+      "description": "Ask the user's browser to re-authorize an existing connected service and review its requested scopes. Use when a task needs permissions that the referenced user service does not currently grant. NyxID owns the authorization journey and credential storage, and reports only a safe user-service reference. Never ask the user for keys, tokens, passwords, or authorization codes in chat.",
+      "params_schema": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["userServiceId", "requestedScopes"],
+        "properties": {
+          "userServiceId": { "type": "string" },
+          "requestedScopes": {
+            "type": "array",
+            "items": { "type": "string" }
+          }
+        }
+      },
+      "risk": "grant",
+      "tier": "v1",
+      "remember_eligible": false
+    },
+    {
       "action": "key.create",
       "description": "Ask the user's browser to create a scoped NyxID API key for the named platform and allowed services. Use when the user wants a new agent identity bounded to specific user-service IDs. NyxID owns key creation and one-time key display, and reports only a safe key reference. Never request, expose, or repeat key material in chat.",
       "params_schema": {
@@ -116,7 +135,7 @@ The serialized body is created once through `LazyLock<String>` and reused. The h
 | Field | Value | Meaning |
 | --- | --- | --- |
 | `schema_version` | `4` | action request/report envelope generation |
-| `revision` | `nyxid-assistant-actions.v7` | exact composition snapshot expected by the pinned Aevatar client |
+| `revision` | `nyxid-assistant-actions.v8` | exact composition snapshot expected by the pinned Aevatar client |
 | `actions` | descriptor array | actions that are both shipped by NyxID and executable by this Aevatar composition |
 
 Schema version and revision are independent checks. Aevatar rejects a version mismatch and rejects a revision mismatch. The registry is startup-pinned; a running host does not periodically refresh or replace it.
@@ -128,6 +147,7 @@ The registry ships these descriptors:
 | Action | Parameters | Risk | Remember eligible |
 | --- | --- | --- | --- |
 | `service.connect` | strict catalog-service or custom-service variant | `grant` | `true` |
+| `service.reauthorize` | exact `userServiceId` plus nonempty normalized unique `requestedScopes` enforced by the consumer and browser | `grant` | `false` |
 | `key.create` | `name`, `platform`, exact nonempty unique `allowedServiceIds` | `grant` | `false` |
 | `key.rotate` | exact predecessor `keyId` | `grant` | `false` |
 
@@ -187,12 +207,12 @@ Startup then parses the JSON and validates at least:
 
 - valid JSON object shape;
 - `schema_version == 4`;
-- `revision == "nyxid-assistant-actions.v7"`;
+- `revision == "nyxid-assistant-actions.v8"`;
 - `actions` is an array;
 - action names, tier, risk, remember policy, description, and parameter-schema shape;
 - no duplicate action descriptor;
 - supported schema constructs; and
-- presence of every action this Aevatar version marks executable: `service.connect`, `key.create`, and `key.rotate` for the v7 composition.
+- presence of every action this Aevatar version marks executable: `service.connect`, `service.reauthorize`, `key.create`, and `key.rotate` for the v8 composition.
 
 Enabled startup fails if fetch, size, JSON, schema, revision, or required-action validation fails. The host therefore does not accept typed chat work with a partially loaded or ambiguous registry.
 
