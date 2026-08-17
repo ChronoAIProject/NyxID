@@ -1316,9 +1316,13 @@ mod tests {
         );
     }
 
+    /// Named so the blank-digest table below stays readable; the tuple shape
+    /// otherwise trips clippy's `type_complexity` under CI's `-D warnings`.
+    type BlankDigestMutator = fn(&mut ExactServiceApprovalCreate);
+
     #[test]
     fn create_rejects_empty_or_whitespace_digest_fields() {
-        let fields: [(&str, fn(&mut ExactServiceApprovalCreate)); 3] = [
+        let fields: [(&str, BlankDigestMutator); 3] = [
             (
                 "catalog_digest",
                 |input: &mut ExactServiceApprovalCreate| {

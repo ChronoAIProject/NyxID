@@ -898,51 +898,6 @@ mod tests {
         }
     }
 
-    async fn create_and_approve_exact(
-        state: &crate::AppState,
-        auth: &AuthUser,
-        discovery: &DelegatedOperationCatalogResponse,
-        operation: &mcp_service::ExactOperationViewOperation,
-        operation_digest: &str,
-        idempotency_key: &str,
-    ) -> crate::services::exact_service_approval_service::ExactServiceApprovalResult {
-        let AxumJson(created) = exact_service_approvals::create_request(
-            State(state.clone()),
-            auth.clone(),
-            AxumJson(
-                crate::services::exact_service_approval_service::ExactServiceApprovalCreate {
-                    user_service_id: TEST_SERVICE_A.to_string(),
-                    endpoint_id: operation.endpoint_id.clone(),
-                    catalog_digest: discovery.catalog_digest.clone(),
-                    exact_view_digest: Some(discovery.exact_view_digest.clone()),
-                    endpoint_contract_digest: operation.endpoint_contract_digest.clone(),
-                    operation_digest: operation_digest.to_string(),
-                    operation_id: operation.endpoint_id.clone(),
-                    operation_generation: 1,
-                    idempotency_key: idempotency_key.to_string(),
-                    arguments: serde_json::json!({}),
-                },
-            ),
-        )
-        .await
-        .expect("create matrix exact request");
-        approval_service::process_decision(
-            &state.db,
-            &state.config,
-            &state.http_client,
-            state.fcm_auth.clone(),
-            state.apns_auth.clone(),
-            &created.request_id,
-            true,
-            None,
-            None,
-            "integration",
-        )
-        .await
-        .expect("approve matrix exact request");
-        created
-    }
-
     fn exact_fence(
         created: &crate::services::exact_service_approval_service::ExactServiceApprovalResult,
     ) -> crate::services::exact_service_approval_service::ExactServiceApprovalFence {
