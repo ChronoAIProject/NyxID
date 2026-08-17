@@ -3066,6 +3066,7 @@ mod tests {
             durable_endpoint_metadata: Default::default(),
             source: McpToolSource::UserManaged {
                 user_service_id: id.into(),
+                catalog_service_id: None,
                 effective_owner_id: "user-1".into(),
                 node_id: None,
                 has_server_credential: true,
@@ -3239,6 +3240,7 @@ mod tests {
         service.service_slug = slug.to_string();
         service.source = McpToolSource::UserManaged {
             user_service_id: user_service_id.clone(),
+            catalog_service_id: None,
             effective_owner_id: org_id.clone(),
             node_id: None,
             has_server_credential: true,

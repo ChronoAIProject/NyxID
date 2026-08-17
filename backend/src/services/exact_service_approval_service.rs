@@ -660,7 +660,11 @@ async fn expire_if_needed(
     state: &AppState,
     request: ApprovalRequest,
 ) -> AppResult<ApprovalRequest> {
-    if request.status != "pending" || request.expires_at > Utc::now() {
+    let exact_unredeemed = request.exact_service.as_ref().is_some_and(|binding| {
+        binding.redemption.is_none()
+            && matches!(request.status.as_str(), "pending" | "approved")
+    });
+    if !exact_unredeemed || request.expires_at > Utc::now() {
         return Ok(request);
     }
     let now = Utc::now();
@@ -668,7 +672,13 @@ async fn expire_if_needed(
         .db
         .collection::<ApprovalRequest>(REQUESTS)
         .find_one_and_update(
-            doc! { "_id": &request.id, "status": "pending", "expires_at": { "$lte": bson::DateTime::from_chrono(now) } },
+            doc! {
+                "_id": &request.id,
+                "status": &request.status,
+                "expires_at": { "$lte": bson::DateTime::from_chrono(now) },
+                "exact_service": { "$exists": true },
+                "exact_service.redemption": { "$exists": false },
+            },
             doc! { "$set": { "status": "expired", "decided_at": bson::DateTime::from_chrono(now) } },
         )
         .with_options(
@@ -1158,6 +1168,152 @@ mod tests {
         );
     }
 
+    #[test]
+    fn fail_closed_matrix_keeps_each_fence_and_live_selector_mutation_distinct() {
+        let input = create();
+        let request = approval_request(
+            "request-matrix",
+            "approved",
+            Utc::now() + Duration::minutes(5),
+            Some(binding()),
+        );
+        let mut wrong_operation = ExactServiceApprovalFence {
+            catalog_digest: input.catalog_digest.clone(),
+            exact_view_digest: input.exact_view_digest.clone(),
+            operation_digest: input.operation_digest.clone(),
+            operation_id: input.operation_id.clone(),
+            operation_generation: input.operation_generation,
+            idempotency_key: input.idempotency_key.clone(),
+        };
+        wrong_operation.operation_digest.push_str("-changed");
+        assert!(matches!(
+            ensure_fence(&request, &wrong_operation),
+            Err(AppError::Conflict(message)) if message == "exact_service_redemption_conflict"
+        ));
+
+        let mut wrong_idempotency = ExactServiceApprovalFence {
+            catalog_digest: input.catalog_digest,
+            exact_view_digest: input.exact_view_digest,
+            operation_digest: input.operation_digest,
+            operation_id: input.operation_id,
+            operation_generation: input.operation_generation,
+            idempotency_key: input.idempotency_key,
+        };
+        wrong_idempotency.idempotency_key.push_str("-changed");
+        assert!(matches!(
+            ensure_fence(&request, &wrong_idempotency),
+            Err(AppError::Conflict(message)) if message == "exact_service_redemption_conflict"
+        ));
+
+        // A provider rebinding changes the live exact view (because the
+        // producer-owned catalog_service_id is inside that view), while a
+        // contract mutation changes only the endpoint contract fence.
+        let binding = binding();
+        assert!(exact_authority_has_drift(
+            &binding,
+            &binding.user_service_id,
+            &binding.endpoint_id,
+            &binding.catalog_digest,
+            "sha256:provider-rebound-exact-view",
+            &binding.endpoint_contract_digest,
+            &binding.operation_digest,
+        ));
+        assert!(exact_authority_has_drift(
+            &binding,
+            &binding.user_service_id,
+            &binding.endpoint_id,
+            &binding.catalog_digest,
+            binding.exact_view_digest.as_deref().unwrap(),
+            "sha256:contract-mutated",
+            &binding.operation_digest,
+        ));
+        assert_eq!(
+            catalog_resolution_terminal_state(&AppError::NotFound(
+                "deactivated_user_service".to_string()
+            )),
+            Some(ExactServiceApprovalState::Revoked)
+        );
+        assert_eq!(
+            safe_execution_failure_code(&AppError::NodeOffline("unbound".to_string())),
+            "provider_unavailable"
+        );
+    }
+
+    #[test]
+    fn create_rejects_empty_or_whitespace_digest_fields() {
+        let fields: [(&str, fn(&mut ExactServiceApprovalCreate)); 3] = [
+            (
+                "catalog_digest",
+                |input: &mut ExactServiceApprovalCreate| {
+                    input.catalog_digest = "  ".to_string();
+                },
+            ),
+            (
+                "endpoint_contract_digest",
+                |input: &mut ExactServiceApprovalCreate| {
+                    input.endpoint_contract_digest = String::new();
+                },
+            ),
+            (
+                "operation_digest",
+                |input: &mut ExactServiceApprovalCreate| {
+                    input.operation_digest = "\t".to_string();
+                },
+            ),
+        ];
+        for (field, mutate) in fields {
+            let mut input = create();
+            mutate(&mut input);
+            assert!(
+                matches!(validate_create(&input), Err(AppError::BadRequest(message)) if message == format!("{field} is required")),
+                "{field} must reject empty input"
+            );
+        }
+
+        let mut input = create();
+        input.exact_view_digest = Some(" \n ".to_string());
+        assert!(matches!(
+            validate_create(&input),
+            Err(AppError::BadRequest(message))
+                if message == "exact_view_digest must not be empty when provided"
+        ));
+    }
+
+    #[test]
+    fn digest_mismatch_is_rejected_without_recomputing_a_fixture_value() {
+        let err = ensure_digest("catalog_digest", "sha256:caller", "sha256:server")
+            .expect_err("caller and server fences must agree");
+        assert!(matches!(
+            err,
+            AppError::Conflict(message) if message == "exact_service_catalog_digest_drift"
+        ));
+    }
+
+    #[test]
+    fn omitted_exact_view_digest_is_accepted_at_validation_but_never_at_persistence_boundary() {
+        let mut input = create();
+        input.exact_view_digest = None;
+        validate_create(&input).expect("legacy callers may omit the additive fence");
+
+        let mut binding = binding();
+        binding.exact_view_digest = Some("sha256:server-persisted".to_string());
+        assert_eq!(
+            result_for(
+                &approval_request(
+                    "request-server-fence",
+                    "pending",
+                    Utc::now() + Duration::minutes(5),
+                    Some(binding),
+                ),
+                ExactServiceApprovalState::Pending,
+            )
+            .expect("serialize persisted result")
+            .exact_view_digest
+            .as_deref(),
+            Some("sha256:server-persisted")
+        );
+    }
+
     #[tokio::test]
     async fn exact_create_replays_same_authority_and_rejects_changed_selector() {
         let Some(db) =
@@ -1250,6 +1406,12 @@ mod tests {
             Utc::now() - Duration::seconds(1),
             Some(binding()),
         );
+        let expired_approved = approval_request(
+            "request-expired-approved",
+            "approved",
+            Utc::now() - Duration::seconds(1),
+            Some(binding()),
+        );
         let mut drifted_binding = binding();
         drifted_binding.redemption = Some(ExactServiceApprovalRedemption {
             status: ExactServiceRedemptionStatus::Drifted,
@@ -1279,13 +1441,17 @@ mod tests {
             Some(revoked_binding),
         );
         db.collection::<ApprovalRequest>(REQUESTS)
-            .insert_many([denied, expired, drifted, revoked])
+            .insert_many([denied, expired, expired_approved, drifted, revoked])
             .await
             .expect("insert terminal fixtures");
 
         for (request_id, expected) in [
             ("request-denied", ExactServiceApprovalState::Denied),
             ("request-expired", ExactServiceApprovalState::Expired),
+            (
+                "request-expired-approved",
+                ExactServiceApprovalState::Expired,
+            ),
             ("request-drifted", ExactServiceApprovalState::Drifted),
             ("request-revoked", ExactServiceApprovalState::Revoked),
         ] {
