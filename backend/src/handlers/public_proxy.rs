@@ -248,8 +248,33 @@ fn is_ws_upgrade_request(request: &Request<Body>) -> bool {
 mod tests {
     use super::*;
     use crate::models::downstream_service::AnonymousEndpointRule;
+    use axum::response::IntoResponse;
     use chrono::Utc;
     use http::HeaderValue;
+
+    #[tokio::test]
+    async fn public_proxy_body_reader_returns_structured_413() {
+        let max_body_size = 512;
+        let request = Request::new(Body::from(vec![b'x'; max_body_size + 1]));
+
+        let error = read_public_body(request, max_body_size)
+            .await
+            .expect_err("oversize public proxy body must fail");
+        let response = error.into_response();
+
+        assert_eq!(response.status(), StatusCode::PAYLOAD_TOO_LARGE);
+        let body = axum::body::to_bytes(response.into_body(), 4096)
+            .await
+            .unwrap();
+        let payload: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(payload["error"], "request_body_too_large");
+        assert_eq!(payload["error_code"], 11700);
+        assert!(
+            payload["message"]
+                .as_str()
+                .is_some_and(|message| message.contains(&max_body_size.to_string()))
+        );
+    }
 
     fn service() -> DownstreamService {
         DownstreamService {

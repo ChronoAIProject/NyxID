@@ -3012,13 +3012,55 @@ mod tests {
         test_user_service,
     };
     use axum::{
-        Router,
+        Extension, Router,
         body::Body,
-        extract::{Path, State},
+        extract::{DefaultBodyLimit, Path, State},
         http::{Method, Request, StatusCode},
-        routing::any,
+        routing::{any, post},
     };
     use tokio::net::TcpListener;
+    use tower::ServiceExt;
+
+    #[tokio::test]
+    async fn mcp_post_accepts_body_above_global_default_below_proxy_limit() {
+        let Some(db) = connect_test_database("mcp_body_limit").await else {
+            return;
+        };
+        let state = test_app_state(db);
+        let padding = "x".repeat(1024 * 1024);
+        let body = serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "ping",
+            "padding": padding,
+        })
+        .to_string();
+        assert!(body.len() > 1024 * 1024);
+        assert!(body.len() < state.config.proxy_max_body_size);
+
+        let app = Router::new()
+            .route("/mcp", post(mcp_post))
+            .layer(Extension(
+                crate::services::billing::route_inventory::BillingRoutePolicy::Metered(
+                    crate::services::billing::BillingIngress::Mcp,
+                ),
+            ))
+            .with_state(state)
+            .layer(DefaultBodyLimit::max(1024 * 1024));
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method(Method::POST)
+                    .uri("/mcp")
+                    .header("content-type", "application/json")
+                    .body(Body::from(body))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+    }
 
     fn api_key_auth(allowed_service_ids: Vec<String>) -> McpAuthContext {
         McpAuthContext {
