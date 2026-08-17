@@ -21,6 +21,7 @@ frontend/src/components/service-icon.tsx
 frontend/src/components/service-icons/_shared.tsx
 frontend/src/components/service-icons/api-discord-bot.tsx
 frontend/src/components/service-icons/api-discord.tsx
+frontend/src/components/service-icons/api-elevenlabs.tsx
 frontend/src/components/service-icons/api-facebook.tsx
 frontend/src/components/service-icons/api-feishu-bot.tsx
 frontend/src/components/service-icons/api-feishu.tsx
@@ -38,6 +39,7 @@ frontend/src/components/service-icons/api-slack.tsx
 frontend/src/components/service-icons/api-spotify.tsx
 frontend/src/components/service-icons/api-telegram-bot.tsx
 frontend/src/components/service-icons/api-tiktok.tsx
+frontend/src/components/service-icons/api-twilio.tsx
 frontend/src/components/service-icons/api-twitch.tsx
 frontend/src/components/service-icons/api-twitter.tsx
 frontend/src/components/service-icons/aws-cost-explorer.tsx
