@@ -82,6 +82,7 @@ mod tests {
             durable_endpoint_metadata: Default::default(),
             source: mcp_service::McpToolSource::UserManaged {
                 user_service_id: id.to_string(),
+                catalog_service_id: None,
                 effective_owner_id: owner_id.to_string(),
                 node_id: None,
                 has_server_credential: true,

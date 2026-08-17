@@ -44,6 +44,9 @@ pub enum McpToolSource {
     /// User-managed service (UserService -- personal or org-shared)
     UserManaged {
         user_service_id: String,
+        /// The immutable producer-owned catalog identity, when this
+        /// UserService is catalog-backed. Custom endpoints have none.
+        catalog_service_id: Option<String>,
         /// The user who owns this service (actor for personal, org user_id for org-shared)
         effective_owner_id: String,
         /// Node routing -- when set, requests go through the node agent
@@ -318,6 +321,9 @@ pub struct ExactOperationViewOperation {
 #[derive(Clone, Debug, PartialEq, Serialize)]
 pub struct ExactOperationViewService {
     pub user_service_id: String,
+    /// Canonical catalog provider identity. Custom endpoints have no catalog
+    /// provider and therefore serialize this as null.
+    pub catalog_service_id: Option<String>,
     pub service_slug: String,
     pub service_name: String,
     pub description: Option<String>,
@@ -342,6 +348,7 @@ pub fn exact_operation_view(services: &[McpToolService]) -> ExactOperationView {
         .filter_map(|service| {
             let McpToolSource::UserManaged {
                 user_service_id,
+                catalog_service_id,
                 node_id,
                 ..
             } = &service.source
@@ -367,6 +374,7 @@ pub fn exact_operation_view(services: &[McpToolService]) -> ExactOperationView {
             operations.sort_by(|left, right| left.endpoint_id.cmp(&right.endpoint_id));
             Some(ExactOperationViewService {
                 user_service_id: user_service_id.clone(),
+                catalog_service_id: catalog_service_id.clone(),
                 service_slug: service.service_slug.clone(),
                 service_name: service.service_name.clone(),
                 description: service.description.clone(),
@@ -386,7 +394,7 @@ pub fn exact_operation_view(services: &[McpToolService]) -> ExactOperationView {
 /// `catalog_digest` are intentionally outside this representation validator.
 pub fn exact_operation_view_digest(view: &ExactOperationView) -> String {
     canonical_sha256(serde_json::json!({
-        "contract_version": "nyxid-delegated-operation-catalog.v1",
+        "contract_version": "nyxid-delegated-operation-catalog.v2",
         "services": &view.services,
     }))
 }
@@ -1188,6 +1196,7 @@ async fn load_user_tools_inner(
             recommended_skills,
             source: McpToolSource::UserManaged {
                 user_service_id: us.id.clone(),
+                catalog_service_id: us.catalog_service_id.clone(),
                 effective_owner_id: r.effective_owner_id.clone(),
                 node_id: us.node_id.clone(),
                 has_server_credential: r.has_server_credential,
@@ -4197,6 +4206,7 @@ mod tests {
     fn user_managed(mut service: McpToolService, user_service_id: &str) -> McpToolService {
         service.source = McpToolSource::UserManaged {
             user_service_id: user_service_id.to_string(),
+            catalog_service_id: None,
             effective_owner_id: "owner-1".to_string(),
             node_id: None,
             has_server_credential: true,
@@ -4352,6 +4362,60 @@ mod tests {
             exact_operation_view_digest(&exact_operation_view(&original)),
             exact_operation_view_digest(&exact_operation_view(&changed)),
             "caller-visible service and operation changes must move the digest"
+        );
+    }
+
+    #[test]
+    fn exact_view_projects_catalog_provider_identity_and_custom_none() {
+        let custom = user_managed(
+            make_service(
+                "custom-service",
+                "Custom",
+                "custom",
+                vec![make_endpoint("custom_read", "read")],
+            ),
+            "us-custom",
+        );
+        let mut catalog = user_managed(
+            make_service(
+                "catalog-service",
+                "Catalog",
+                "catalog",
+                vec![make_endpoint("catalog_read", "read")],
+            ),
+            "us-catalog",
+        );
+        let McpToolSource::UserManaged {
+            catalog_service_id, ..
+        } = &mut catalog.source
+        else {
+            unreachable!("test helper always creates a user-managed service")
+        };
+        *catalog_service_id = Some("producer-owned-catalog-id".to_string());
+
+        let view = exact_operation_view(&[custom, catalog]);
+        let custom = view
+            .services
+            .iter()
+            .find(|service| service.user_service_id == "us-custom")
+            .unwrap();
+        let catalog = view
+            .services
+            .iter()
+            .find(|service| service.user_service_id == "us-catalog")
+            .unwrap();
+        assert_eq!(custom.catalog_service_id, None);
+        assert_eq!(
+            catalog.catalog_service_id.as_deref(),
+            Some("producer-owned-catalog-id")
+        );
+        assert_ne!(
+            exact_operation_view_digest(&ExactOperationView {
+                services: vec![custom.clone()],
+            }),
+            exact_operation_view_digest(&ExactOperationView {
+                services: vec![catalog.clone()],
+            })
         );
     }
 
@@ -4550,6 +4614,7 @@ mod tests {
         let user_service = McpToolService {
             source: McpToolSource::UserManaged {
                 user_service_id: "service-allowed".to_string(),
+                catalog_service_id: None,
                 effective_owner_id: "owner-1".to_string(),
                 node_id: None,
                 has_server_credential: true,
@@ -7412,6 +7477,7 @@ mod tests {
         assert!(!platform.is_user_service());
         let user = McpToolSource::UserManaged {
             user_service_id: "x".into(),
+            catalog_service_id: None,
             effective_owner_id: "u".into(),
             node_id: None,
             has_server_credential: true,

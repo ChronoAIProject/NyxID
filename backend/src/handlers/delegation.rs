@@ -93,7 +93,7 @@ pub async fn get_operation_catalog(
         .sum();
 
     Ok(Json(DelegatedOperationCatalogResponse {
-        contract_version: "nyxid-delegated-operation-catalog.v1",
+        contract_version: "nyxid-delegated-operation-catalog.v2",
         catalog_digest,
         exact_view_digest,
         resolved_at: resolved_at.to_rfc3339(),
@@ -224,17 +224,28 @@ pub async fn refresh_delegation_token(
 mod tests {
     use std::sync::{Arc, Mutex};
 
+    use axum::{Extension, Json as AxumJson, Router, extract::Path, routing::get};
+    use chrono::Utc;
     use mongodb::event::EventHandler;
     use mongodb::event::command::CommandEvent;
+    use uuid::Uuid;
 
+    use crate::crypto::{jwt, token::hash_token};
+    use crate::handlers::exact_service_approvals;
     use crate::models::downstream_service::{
         COLLECTION_NAME as DOWNSTREAM_SERVICES, DownstreamService,
     };
+    use crate::models::oauth_client::{
+        COLLECTION_NAME as OAUTH_CLIENTS, OauthClient, ScopeProvenance,
+    };
+    use crate::models::service_approval_config::{ApprovalMode, ServiceApprovalConfig};
     use crate::models::service_endpoint::{
         COLLECTION_NAME as SERVICE_ENDPOINTS, OperationResponseContract, ServiceEndpoint,
     };
+    use crate::models::user::UserType;
     use crate::models::user_endpoint::{COLLECTION_NAME as USER_ENDPOINTS, UserEndpoint};
     use crate::models::user_service::{COLLECTION_NAME as USER_SERVICES, UserService};
+    use crate::services::{approval_service, consent_service, token_exchange_service};
 
     use super::*;
 
@@ -279,13 +290,14 @@ mod tests {
     #[test]
     fn operation_catalog_response_is_typed_and_secret_free() {
         let response = DelegatedOperationCatalogResponse {
-            contract_version: "nyxid-delegated-operation-catalog.v1",
+            contract_version: "nyxid-delegated-operation-catalog.v2",
             catalog_digest: "sha256:opaque".to_string(),
             exact_view_digest: "sha256:exact-view".to_string(),
             resolved_at: "2026-08-14T00:00:00Z".to_string(),
             authority_expires_at: "2026-08-14T00:05:00Z".to_string(),
             services: vec![mcp_service::ExactOperationViewService {
                 user_service_id: "service-1".to_string(),
+                catalog_service_id: Some("catalog-1".to_string()),
                 service_slug: "github".to_string(),
                 service_name: "GitHub".to_string(),
                 description: Some("typed service".to_string()),
@@ -312,6 +324,96 @@ mod tests {
             assert!(!encoded.contains(forbidden), "response leaked {forbidden}");
         }
         assert_eq!(value["total_operations"], 1);
+    }
+
+    fn deterministic_exact_view_fixture() -> mcp_service::ExactOperationView {
+        let response = || crate::models::service_endpoint::OperationResponseContract {
+            content_types: vec!["application/json".to_string()],
+            binary_artifact: Some(false),
+        };
+        let operation = |endpoint_id: &str,
+                         name: &str,
+                         method: &str,
+                         path: &str,
+                         endpoint_contract_digest: &str| {
+            mcp_service::ExactOperationViewOperation {
+                endpoint_id: endpoint_id.to_string(),
+                name: name.to_string(),
+                method: method.to_string(),
+                path: path.to_string(),
+                parameters: None,
+                request_body_schema: None,
+                request_content_type: None,
+                request_body_required: false,
+                response: response(),
+                endpoint_contract_digest: endpoint_contract_digest.to_string(),
+            }
+        };
+        mcp_service::ExactOperationView {
+            services: vec![
+                mcp_service::ExactOperationViewService {
+                    user_service_id: TEST_SERVICE_A.to_string(),
+                    catalog_service_id: Some("00000000-0000-4000-8000-000000000301".to_string()),
+                    service_slug: "alpha".to_string(),
+                    service_name: "Alpha Service".to_string(),
+                    description: None,
+                    node_id: None,
+                    operations: vec![
+                        operation(
+                            "00000000-0000-4000-8000-000000000401",
+                            "alpha_list",
+                            "GET",
+                            "/items",
+                            "sha256:44d63aba629068d100761faf33f1359e0837f554f691ea50fd30a69bb7b8ea5a",
+                        ),
+                        operation(
+                            "00000000-0000-4000-8000-000000000402",
+                            "alpha_create",
+                            "POST",
+                            "/items",
+                            "sha256:b33c78e543e5bd0db8ac01378ced3f1598ba15457c91b7526178fe91313e5021",
+                        ),
+                    ],
+                },
+                mcp_service::ExactOperationViewService {
+                    user_service_id: TEST_SERVICE_B.to_string(),
+                    catalog_service_id: Some("00000000-0000-4000-8000-000000000302".to_string()),
+                    service_slug: "beta".to_string(),
+                    service_name: "Beta Service".to_string(),
+                    description: None,
+                    node_id: None,
+                    operations: vec![operation(
+                        "00000000-0000-4000-8000-000000000403",
+                        "beta_status",
+                        "GET",
+                        "/status",
+                        "sha256:3f488040e19cb9fdc9e9f2aefd9061058c16426a58a2ace0664373e5b9574d5f",
+                    )],
+                },
+            ],
+        }
+    }
+
+    #[test]
+    fn deterministic_fixture_binds_provider_identity_and_v2_digest_envelope() {
+        let view = deterministic_exact_view_fixture();
+        assert_eq!(
+            view.services[0].catalog_service_id.as_deref(),
+            Some("00000000-0000-4000-8000-000000000301")
+        );
+        let digest = mcp_service::exact_operation_view_digest(&view);
+        assert_eq!(
+            digest,
+            "sha256:acfbddf689ec25828e01cb4c149f9fd5f3ab5c9f37fddc7d0891e088cf1030a5"
+        );
+        let mut provider_changed = view.clone();
+        provider_changed.services[0].catalog_service_id =
+            Some("00000000-0000-4000-8000-000000000302".to_string());
+        assert_ne!(
+            digest,
+            mcp_service::exact_operation_view_digest(&provider_changed),
+            "catalog provider rebinding must move the exact-view fence"
+        );
     }
 
     // ---- Catalog authority: fail-closed matrix -------------------------------
@@ -621,16 +723,46 @@ mod tests {
             grant.expires_at.to_rfc3339()
         );
         assert_eq!(
+            actual["contract_version"], "nyxid-delegated-operation-catalog.v2",
+            "the response and exact-view digest envelope must move together"
+        );
+        let service_ids: Vec<&str> = actual["services"]
+            .as_array()
+            .expect("services array")
+            .iter()
+            .map(|service| service["user_service_id"].as_str().unwrap())
+            .collect();
+        assert_eq!(
+            service_ids,
+            vec![TEST_SERVICE_A, TEST_SERVICE_B],
+            "delegated discovery sorts services by user_service_id"
+        );
+        let operation_ids: Vec<&str> = actual["services"][0]["operations"]
+            .as_array()
+            .expect("operations array")
+            .iter()
+            .map(|operation| operation["endpoint_id"].as_str().unwrap())
+            .collect();
+        assert_eq!(
+            operation_ids,
+            vec![
+                "00000000-0000-4000-8000-000000000401",
+                "00000000-0000-4000-8000-000000000402",
+            ],
+            "delegated discovery sorts operations by endpoint_id"
+        );
+        assert_eq!(
             actual,
             serde_json::json!({
-                "contract_version": "nyxid-delegated-operation-catalog.v1",
+                "contract_version": "nyxid-delegated-operation-catalog.v2",
                 "catalog_digest": "sha256:ea55205436c9a87a35ec9d21072cff07e77dc2ef23409aeb16760f0d08662a62",
-                "exact_view_digest": "sha256:e1d168ef49f0b5955c39fa4a0767791fa9a75141ed4c4df68a6d1b53f87284fc",
+                "exact_view_digest": "sha256:acfbddf689ec25828e01cb4c149f9fd5f3ab5c9f37fddc7d0891e088cf1030a5",
                 "resolved_at": "<resolved-at>",
                 "authority_expires_at": grant.expires_at.to_rfc3339(),
                 "services": [
                     {
                         "user_service_id": TEST_SERVICE_A,
+                        "catalog_service_id": "00000000-0000-4000-8000-000000000301",
                         "service_slug": "alpha",
                         "service_name": "Alpha Service",
                         "description": null,
@@ -664,6 +796,7 @@ mod tests {
                     },
                     {
                         "user_service_id": TEST_SERVICE_B,
+                        "catalog_service_id": "00000000-0000-4000-8000-000000000302",
                         "service_slug": "beta",
                         "service_name": "Beta Service",
                         "description": null,
@@ -705,6 +838,653 @@ mod tests {
             write_commands.is_empty(),
             "catalog handler issued database writes: {write_commands:?}"
         );
+        // This is a read facade over the domain collections. OpenAPI loading
+        // may still perform outbound reads and mutate the process-local
+        // api_docs_service cache; this assertion deliberately checks only
+        // durable domain writes and does not spy away that qualification.
+    }
+
+    fn oauth_client(id: &str, secret: &str, delegation_scopes: &str) -> OauthClient {
+        let now = Utc::now();
+        OauthClient {
+            id: id.to_string(),
+            client_name: id.to_string(),
+            client_secret_hash: hash_token(secret),
+            redirect_uris: vec!["https://example.invalid/callback".to_string()],
+            allowed_scopes: "openid".to_string(),
+            scope_provenance: ScopeProvenance::Explicit,
+            grant_types: "authorization_code refresh_token".to_string(),
+            client_type: "confidential".to_string(),
+            is_active: true,
+            delegation_scopes: delegation_scopes.to_string(),
+            default_service_catalog_slugs: Vec::new(),
+            broker_capability_enabled: false,
+            revocation_webhook_url: None,
+            revocation_webhook_secret_encrypted: None,
+            connection_webhook_url: None,
+            connection_webhook_secret_encrypted: None,
+            connection_webhook_key_id: None,
+            connection_webhook_enabled: false,
+            created_by: None,
+            created_at: now,
+            updated_at: now,
+        }
+    }
+
+    fn delegated_auth_from_token(state: &crate::AppState, token: &str) -> AuthUser {
+        let claims = jwt::verify_token(&state.jwt_keys, &state.config, token)
+            .expect("verify minted delegated token");
+        AuthUser {
+            user_id: Uuid::parse_str(&claims.sub).expect("delegated subject is a UUID"),
+            session_id: None,
+            scope: claims.scope,
+            acting_client_id: claims.act.map(|actor| actor.sub),
+            oauth_client_id: claims.client_id,
+            token_jti: Some(claims.jti),
+            approval_owner_user_id: None,
+            auth_method: AuthMethod::Delegated,
+            allow_all_services: claims.allow_all_services.unwrap_or(true),
+            allow_all_nodes: claims.allow_all_nodes.unwrap_or(true),
+            allowed_service_ids: claims.allowed_service_ids.unwrap_or_default(),
+            resource_uris: claims.resources,
+            allowed_node_ids: claims.allowed_node_ids.unwrap_or_default(),
+            api_key_id: None,
+            api_key_name: None,
+            api_key_purpose: crate::models::api_key::ApiKeyPurpose::General,
+            rate_limit_per_second: None,
+            rate_limit_burst: None,
+            ip_address: None,
+            user_agent: None,
+        }
+    }
+
+    fn exact_fence(
+        created: &crate::services::exact_service_approval_service::ExactServiceApprovalResult,
+    ) -> crate::services::exact_service_approval_service::ExactServiceApprovalFence {
+        crate::services::exact_service_approval_service::ExactServiceApprovalFence {
+            catalog_digest: created.catalog_digest.clone(),
+            exact_view_digest: created.exact_view_digest.clone(),
+            operation_digest: created.operation_digest.clone(),
+            operation_id: created.operation_id.clone(),
+            operation_generation: created.operation_generation,
+            idempotency_key: created.idempotency_key.clone(),
+        }
+    }
+
+    async fn redeem_exact(
+        state: &crate::AppState,
+        auth: &AuthUser,
+        created: &crate::services::exact_service_approval_service::ExactServiceApprovalResult,
+        fence: crate::services::exact_service_approval_service::ExactServiceApprovalFence,
+    ) -> AppResult<
+        AxumJson<crate::services::exact_service_approval_service::ExactServiceApprovalResult>,
+    > {
+        exact_service_approvals::redeem_request(
+            State(state.clone()),
+            Extension(
+                crate::services::billing::route_inventory::BillingRoutePolicy::Metered(
+                    crate::services::billing::route_inventory::BillingIngress::Mcp,
+                ),
+            ),
+            auth.clone(),
+            Path(created.request_id.clone()),
+            AxumJson(fence),
+        )
+        .await
+    }
+
+    /// Crosses the production token-exchange grant path and the actual
+    /// delegated discovery, exact-create, approval-decision, and exact-redeem
+    /// handler boundaries. Every catalog/exact fence sent to create/redeem is
+    /// copied from the discovery/create response; only the argument-bound
+    /// operation digest is obtained from the canonical operation helper because
+    /// discovery intentionally publishes contract metadata, not an
+    /// argument-specific invocation digest.
+    #[tokio::test]
+    async fn delegated_discovery_create_redeem_uses_live_catalog_evidence() {
+        let Some(db) =
+            crate::test_utils::connect_test_database("delegated_discovery_exact_redeem").await
+        else {
+            return;
+        };
+        let state = crate::test_utils::test_app_state(db.clone());
+        let user_id = Uuid::parse_str(TEST_USER_ID).unwrap();
+        let actor_client_id = "integration-actor-client";
+        let receiver_client_id = "integration-receiver-client";
+        let actor_secret = "integration-actor-secret";
+        let receiver_secret = "integration-receiver-secret";
+        let delegated_scope = format!(
+            "{} proxy",
+            catalog_delegation_service::MCP_CATALOG_READ_SCOPE
+        );
+        let requested_service_ids =
+            vec![TEST_SERVICE_A.to_string(), TEST_GENERIC_SERVICE.to_string()];
+
+        db.collection(crate::models::user::COLLECTION_NAME)
+            .insert_one(crate::test_utils::test_user(TEST_USER_ID, UserType::Person))
+            .await
+            .expect("insert integration user");
+        db.collection::<OauthClient>(OAUTH_CLIENTS)
+            .insert_many([
+                oauth_client(actor_client_id, actor_secret, &delegated_scope),
+                oauth_client(receiver_client_id, receiver_secret, &delegated_scope),
+            ])
+            .await
+            .expect("insert integration OAuth clients");
+        consent_service::grant_consent_with_services(
+            &db,
+            TEST_USER_ID,
+            actor_client_id,
+            "openid",
+            Some(requested_service_ids.clone()),
+        )
+        .await
+        .expect("grant actor consent");
+        consent_service::grant_consent_with_services(
+            &db,
+            TEST_USER_ID,
+            receiver_client_id,
+            "openid",
+            Some(requested_service_ids.clone()),
+        )
+        .await
+        .expect("grant receiver consent");
+
+        // The fixture seeds the catalog rows and a harmless fixture grant. The
+        // live token exchange below mints its own JTI and is the only grant
+        // used by the handler.
+        let fixture_auth = fixture_catalog_auth();
+        seed_operation_catalog_fixture(&db, &fixture_auth).await;
+        db.collection::<ServiceEndpoint>(SERVICE_ENDPOINTS)
+            .update_one(
+                mongodb::bson::doc! { "_id": "00000000-0000-4000-8000-000000000403" },
+                mongodb::bson::doc! { "$set": { "is_active": false } },
+            )
+            .await
+            .expect("keep alternate provider operation set empty for identity-only drift");
+
+        let provider_listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind local provider");
+        let provider_addr = provider_listener.local_addr().unwrap();
+        let provider = tokio::spawn(async move {
+            axum::serve(
+                provider_listener,
+                Router::new().route(
+                    "/items",
+                    get(|| async { AxumJson(serde_json::json!({"ok": true})) }),
+                ),
+            )
+            .await
+            .expect("serve local provider");
+        });
+        db.collection::<UserEndpoint>(USER_ENDPOINTS)
+            .update_many(
+                mongodb::bson::doc! { "_id": { "$in": [
+                    "00000000-0000-4000-8000-000000000201",
+                    "00000000-0000-4000-8000-000000000203",
+                ] } },
+                mongodb::bson::doc! { "$set": { "url": format!("http://{provider_addr}") } },
+            )
+            .await
+            .expect("point typed and generic user endpoints at local provider");
+
+        db.collection::<ServiceApprovalConfig>(
+            crate::models::service_approval_config::COLLECTION_NAME,
+        )
+        .insert_many([
+            ServiceApprovalConfig {
+                id: Uuid::new_v4().to_string(),
+                user_id: TEST_USER_ID.to_string(),
+                service_id: "00000000-0000-4000-8000-000000000301".to_string(),
+                service_name: "Alpha Service".to_string(),
+                approval_required: true,
+                approval_mode: ApprovalMode::PerRequest,
+                rules: Vec::new(),
+                default_effect: None,
+                created_at: Utc::now(),
+                updated_at: Utc::now(),
+            },
+            ServiceApprovalConfig {
+                id: Uuid::new_v4().to_string(),
+                user_id: TEST_USER_ID.to_string(),
+                service_id: TEST_GENERIC_SERVICE.to_string(),
+                service_name: "Hidden Generic".to_string(),
+                approval_required: true,
+                approval_mode: ApprovalMode::PerRequest,
+                rules: Vec::new(),
+                default_effect: None,
+                created_at: Utc::now(),
+                updated_at: Utc::now(),
+            },
+        ])
+        .await
+        .expect("seed per-request approval config");
+
+        let source_token = jwt::generate_oauth_access_token(
+            &state.jwt_keys,
+            &state.config,
+            &user_id,
+            "openid",
+            None,
+            None,
+            None,
+            None,
+            Some(jwt::AccessTokenRestrictions {
+                resources: &[],
+                allowed_service_ids: &requested_service_ids,
+                allowed_node_ids: &[],
+                allow_all_nodes: true,
+            }),
+            actor_client_id,
+        )
+        .expect("mint direct source token");
+        let exchanged = token_exchange_service::exchange_token_with_authority(
+            &db,
+            &state.config,
+            &state.jwt_keys,
+            receiver_client_id,
+            receiver_secret,
+            &source_token,
+            "urn:ietf:params:oauth:token-type:access_token",
+            Some(&delegated_scope),
+            &[],
+            Some(false),
+            &requested_service_ids,
+            Some(true),
+            &[],
+        )
+        .await
+        .expect("mint delegated token and persist live catalog grant");
+        let delegated_auth = delegated_auth_from_token(&state, &exchanged.access_token);
+        crate::services::catalog_delegation_service::validate_live_grant(
+            &db,
+            &state.config,
+            &jwt::verify_token(&state.jwt_keys, &state.config, &exchanged.access_token).unwrap(),
+        )
+        .await
+        .expect("delegated token has a live grant before discovery");
+
+        let AxumJson(discovery) =
+            get_operation_catalog(State(state.clone()), delegated_auth.clone())
+                .await
+                .expect("real delegated discovery handler");
+        assert_eq!(
+            discovery.contract_version,
+            "nyxid-delegated-operation-catalog.v2"
+        );
+        let service = discovery
+            .services
+            .iter()
+            .find(|service| service.user_service_id == TEST_SERVICE_A)
+            .expect("catalog-backed service in discovery");
+        let operation = service.operations.first().expect("typed operation");
+        assert_eq!(
+            service.catalog_service_id.as_deref(),
+            Some("00000000-0000-4000-8000-000000000301")
+        );
+        assert!(
+            discovery
+                .services
+                .iter()
+                .all(|service| service.user_service_id != TEST_GENERIC_SERVICE),
+            "delegated discovery must keep the authorized generic target out of the exact view"
+        );
+        assert!(
+            delegated_auth
+                .allowed_service_ids
+                .iter()
+                .any(|service_id| service_id == TEST_GENERIC_SERVICE),
+            "the membership test must not be confounded by the service allowlist"
+        );
+
+        let arguments = serde_json::json!({});
+        let allowed_service_ids = requested_service_ids.clone();
+        let live_catalog = mcp_service::load_operation_catalog(
+            &db,
+            state.node_ws_manager.as_ref(),
+            TEST_USER_ID,
+            mcp_service::NodeScope::Unrestricted,
+            mcp_service::ServiceScope::Allowed(&allowed_service_ids),
+        )
+        .await
+        .expect("resolve canonical operation for argument-bound digest");
+        let live_endpoint = live_catalog
+            .services
+            .iter()
+            .find(|service| service.service_id == TEST_SERVICE_A)
+            .and_then(|service| {
+                service
+                    .endpoints
+                    .iter()
+                    .find(|endpoint| endpoint.endpoint_id == operation.endpoint_id)
+            })
+            .expect("operation remains in canonical catalog");
+        let operation_digest =
+            mcp_service::exact_operation_digest(TEST_SERVICE_A, live_endpoint, &arguments);
+
+        let generic_service = live_catalog
+            .services
+            .iter()
+            .find(|service| service.service_id == TEST_GENERIC_SERVICE)
+            .expect("authorized generic service remains in the unprojected catalog");
+        let generic_endpoint = generic_service
+            .endpoints
+            .iter()
+            .find(|endpoint| endpoint.endpoint_id == mcp_service::GENERIC_PROXY_ENDPOINT_ID)
+            .expect("generic proxy endpoint remains a valid unprojected selector");
+        let generic_arguments = serde_json::json!({"method": "GET", "path": "/items"});
+        let generic_operation_digest = mcp_service::exact_operation_digest(
+            TEST_GENERIC_SERVICE,
+            generic_endpoint,
+            &generic_arguments,
+        );
+        let generic_create = |exact_view_digest: Option<String>, idempotency_key: &str| {
+            crate::services::exact_service_approval_service::ExactServiceApprovalCreate {
+                user_service_id: TEST_GENERIC_SERVICE.to_string(),
+                endpoint_id: generic_endpoint.endpoint_id.clone(),
+                catalog_digest: discovery.catalog_digest.clone(),
+                exact_view_digest,
+                endpoint_contract_digest: mcp_service::endpoint_contract_digest(generic_endpoint),
+                operation_digest: generic_operation_digest.clone(),
+                operation_id: generic_endpoint.endpoint_id.clone(),
+                operation_generation: 1,
+                idempotency_key: idempotency_key.to_string(),
+                arguments: generic_arguments.clone(),
+            }
+        };
+
+        let approval_requests = db.collection::<crate::models::approval_request::ApprovalRequest>(
+            crate::models::approval_request::COLLECTION_NAME,
+        );
+        let rows_before = approval_requests
+            .count_documents(mongodb::bson::doc! {})
+            .await
+            .expect("count approvals before delegated hidden-target create");
+        let row_1_error = exact_service_approvals::create_request(
+            State(state.clone()),
+            delegated_auth.clone(),
+            AxumJson(generic_create(
+                Some(discovery.exact_view_digest.clone()),
+                "matrix-row-1-delegated-hidden",
+            )),
+        )
+        .await
+        .expect_err("delegated generic target must be outside the exact view");
+        assert!(matches!(
+            row_1_error,
+            AppError::NotFound(message) if message == "exact_operation_not_in_exact_view"
+        ));
+        assert_eq!(
+            approval_requests
+                .count_documents(mongodb::bson::doc! {})
+                .await
+                .expect("count approvals after delegated hidden-target create"),
+            rows_before,
+            "matrix row 1 must reject before creating an ApprovalRequest"
+        );
+
+        let mut access_token_auth = delegated_auth.clone();
+        access_token_auth.auth_method = AuthMethod::AccessToken;
+        access_token_auth.scope = "proxy".to_string();
+        access_token_auth.acting_client_id = None;
+        access_token_auth.token_jti = None;
+        let AxumJson(row_3_created) = exact_service_approvals::create_request(
+            State(state.clone()),
+            access_token_auth.clone(),
+            AxumJson(generic_create(None, "matrix-row-3-access-token-generic")),
+        )
+        .await
+        .expect("non-delegated generic target remains approvable");
+        assert_eq!(row_3_created.exact_view_digest, None);
+        let persisted_row_3 = approval_requests
+            .find_one(mongodb::bson::doc! { "_id": &row_3_created.request_id })
+            .await
+            .expect("load persisted generic approval")
+            .expect("generic approval row was persisted");
+        assert_eq!(
+            persisted_row_3
+                .exact_service
+                .and_then(|binding| binding.exact_view_digest),
+            None,
+            "matrix row 3 must not persist an unrelated exact-view fence"
+        );
+        approval_service::process_decision(
+            &db,
+            &state.config,
+            &state.http_client,
+            state.fcm_auth.clone(),
+            state.apns_auth.clone(),
+            &row_3_created.request_id,
+            true,
+            None,
+            None,
+            "integration",
+        )
+        .await
+        .expect("approve non-delegated generic request");
+        let AxumJson(row_3_redeemed) = redeem_exact(
+            &state,
+            &access_token_auth,
+            &row_3_created,
+            exact_fence(&row_3_created),
+        )
+        .await
+        .expect("matrix row 3: non-delegated generic request redeems");
+        assert_eq!(
+            row_3_redeemed.state,
+            crate::services::exact_service_approval_service::ExactServiceApprovalState::Redeemed
+        );
+        assert_eq!(
+            row_3_redeemed
+                .receipt
+                .as_ref()
+                .map(|receipt| receipt.http_status),
+            Some(200)
+        );
+
+        let row_4_error = exact_service_approvals::create_request(
+            State(state.clone()),
+            access_token_auth,
+            AxumJson(generic_create(
+                Some(discovery.exact_view_digest.clone()),
+                "matrix-row-4-access-token-generic-with-view",
+            )),
+        )
+        .await
+        .expect_err("an out-of-view target cannot bind the exact-view digest");
+        assert!(matches!(
+            row_4_error,
+            AppError::BadRequest(message) if message == "exact_view_digest_not_applicable"
+        ));
+
+        let AxumJson(created) = exact_service_approvals::create_request(
+            State(state.clone()),
+            delegated_auth.clone(),
+            AxumJson(
+                crate::services::exact_service_approval_service::ExactServiceApprovalCreate {
+                    user_service_id: TEST_SERVICE_A.to_string(),
+                    endpoint_id: operation.endpoint_id.clone(),
+                    catalog_digest: discovery.catalog_digest.clone(),
+                    // Omit the additive field at create to prove the server
+                    // persists its live exact-view fence and returns it for
+                    // redeem, rather than trusting caller omission forever.
+                    exact_view_digest: None,
+                    endpoint_contract_digest: operation.endpoint_contract_digest.clone(),
+                    operation_digest: operation_digest.clone(),
+                    operation_id: operation.endpoint_id.clone(),
+                    operation_generation: 1,
+                    idempotency_key: "integration-idempotency-key".to_string(),
+                    arguments: arguments.clone(),
+                },
+            ),
+        )
+        .await
+        .expect("real exact create handler");
+        assert_eq!(
+            created.exact_view_digest,
+            Some(discovery.exact_view_digest.clone())
+        );
+        assert_eq!(created.catalog_digest, discovery.catalog_digest);
+
+        approval_service::process_decision(
+            &db,
+            &state.config,
+            &state.http_client,
+            state.fcm_auth.clone(),
+            state.apns_auth.clone(),
+            &created.request_id,
+            true,
+            None,
+            None,
+            "integration",
+        )
+        .await
+        .expect("approve per-request exact request");
+
+        let AxumJson(redeemed) = exact_service_approvals::redeem_request(
+            State(state.clone()),
+            Extension(
+                crate::services::billing::route_inventory::BillingRoutePolicy::Metered(
+                    crate::services::billing::route_inventory::BillingIngress::Mcp,
+                ),
+            ),
+            delegated_auth.clone(),
+            Path(created.request_id.clone()),
+            AxumJson(
+                crate::services::exact_service_approval_service::ExactServiceApprovalFence {
+                    catalog_digest: created.catalog_digest.clone(),
+                    exact_view_digest: created.exact_view_digest.clone(),
+                    operation_digest: created.operation_digest.clone(),
+                    operation_id: created.operation_id.clone(),
+                    operation_generation: created.operation_generation,
+                    idempotency_key: created.idempotency_key.clone(),
+                },
+            ),
+        )
+        .await
+        .expect("real exact redeem handler");
+        assert_eq!(
+            redeemed.state,
+            crate::services::exact_service_approval_service::ExactServiceApprovalState::Redeemed
+        );
+        assert_eq!(
+            redeemed.receipt.as_ref().map(|receipt| receipt.http_status),
+            Some(200)
+        );
+
+        let AxumJson(provider_bound) = exact_service_approvals::create_request(
+            State(state.clone()),
+            delegated_auth.clone(),
+            AxumJson(
+                crate::services::exact_service_approval_service::ExactServiceApprovalCreate {
+                    user_service_id: TEST_SERVICE_A.to_string(),
+                    endpoint_id: operation.endpoint_id.clone(),
+                    catalog_digest: discovery.catalog_digest.clone(),
+                    exact_view_digest: Some(discovery.exact_view_digest.clone()),
+                    endpoint_contract_digest: operation.endpoint_contract_digest.clone(),
+                    operation_digest,
+                    operation_id: operation.endpoint_id.clone(),
+                    operation_generation: 1,
+                    idempotency_key: "provider-binding-drift-key".to_string(),
+                    arguments,
+                },
+            ),
+        )
+        .await
+        .expect("create provider-bound exact request");
+        approval_service::process_decision(
+            &db,
+            &state.config,
+            &state.http_client,
+            state.fcm_auth.clone(),
+            state.apns_auth.clone(),
+            &provider_bound.request_id,
+            true,
+            None,
+            None,
+            "integration",
+        )
+        .await
+        .expect("approve provider-bound request");
+
+        // Move the same endpoint contracts to the second catalog provider and
+        // repoint the UserService. Endpoint identities and operation arguments
+        // remain stable; the newly projected catalog_service_id is the direct
+        // reason the exact-view fence changes.
+        db.collection::<ServiceEndpoint>(SERVICE_ENDPOINTS)
+            .update_many(
+                mongodb::bson::doc! {
+                    "service_id": "00000000-0000-4000-8000-000000000301"
+                },
+                mongodb::bson::doc! { "$set": {
+                    "service_id": "00000000-0000-4000-8000-000000000302"
+                } },
+            )
+            .await
+            .expect("move endpoint contracts to alternate provider");
+        db.collection::<UserService>(USER_SERVICES)
+            .update_one(
+                mongodb::bson::doc! { "_id": TEST_SERVICE_A },
+                mongodb::bson::doc! { "$set": {
+                    "catalog_service_id": "00000000-0000-4000-8000-000000000302"
+                } },
+            )
+            .await
+            .expect("repoint catalog provider binding");
+        let rebound_catalog = mcp_service::load_operation_catalog(
+            &db,
+            state.node_ws_manager.as_ref(),
+            TEST_USER_ID,
+            mcp_service::NodeScope::Unrestricted,
+            mcp_service::ServiceScope::Allowed(&allowed_service_ids),
+        )
+        .await
+        .expect("resolve rebound provider catalog");
+        assert_eq!(
+            mcp_service::operation_catalog_digest(&rebound_catalog.services),
+            discovery.catalog_digest,
+            "provider identity is intentionally outside the shared /mcp/config fence"
+        );
+        assert_ne!(
+            mcp_service::exact_operation_view_digest(&mcp_service::exact_operation_view(
+                &rebound_catalog.services,
+            )),
+            discovery.exact_view_digest,
+            "provider identity must move the exact-view fence"
+        );
+
+        let AxumJson(provider_drifted) = exact_service_approvals::redeem_request(
+            State(state),
+            Extension(
+                crate::services::billing::route_inventory::BillingRoutePolicy::Metered(
+                    crate::services::billing::route_inventory::BillingIngress::Mcp,
+                ),
+            ),
+            delegated_auth,
+            Path(provider_bound.request_id.clone()),
+            AxumJson(
+                crate::services::exact_service_approval_service::ExactServiceApprovalFence {
+                    catalog_digest: provider_bound.catalog_digest.clone(),
+                    exact_view_digest: provider_bound.exact_view_digest.clone(),
+                    operation_digest: provider_bound.operation_digest.clone(),
+                    operation_id: provider_bound.operation_id.clone(),
+                    operation_generation: provider_bound.operation_generation,
+                    idempotency_key: provider_bound.idempotency_key.clone(),
+                },
+            ),
+        )
+        .await
+        .expect("provider binding drift returns a typed fail-closed result");
+        assert_eq!(
+            provider_drifted.state,
+            crate::services::exact_service_approval_service::ExactServiceApprovalState::Drifted
+        );
+        assert_eq!(
+            provider_drifted.failure_code.as_deref(),
+            Some("catalog_drift")
+        );
+        provider.abort();
     }
 
     #[test]
