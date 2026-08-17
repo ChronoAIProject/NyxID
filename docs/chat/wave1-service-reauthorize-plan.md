@@ -1,5 +1,13 @@
 # Wave 1 — `service.reauthorize` implementation plan (issue #1400, item 1)
 
+> **Superseded as an instruction set.** The live action list is
+> [`wave1-service-reauthorize-actions.md`](./wave1-service-reauthorize-actions.md).
+> This document is retained as the **contract reference** — §1 (target contract)
+> and §5 (rollout order) remain accurate and are cited from the action list. Its
+> §3 task breakdown was executed and partly overridden during implementation; do
+> not work from it. Several §0 claims were amended by later passes — see the
+> action list §5 for what did and did not survive.
+
 **Status:** plan only, nothing implemented. Written 2026-08-17 against NyxID `origin/main`
 `ed372d8c` and Aevatar `origin/feature/integrate` `05db6b4b0` (clone at
 `~/Desktop/aelf-frontend-work/aevatar`; read files with

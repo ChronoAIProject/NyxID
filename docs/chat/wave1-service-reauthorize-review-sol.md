@@ -1,5 +1,12 @@
 # Adversarial review: Wave 1 `service.reauthorize`
 
+> **Evidence document, not an action list.** The live action list is
+> [`wave1-service-reauthorize-actions.md`](./wave1-service-reauthorize-actions.md).
+> This is the implementer's pre-build review of the plan; its findings were
+> dispositioned during implementation. Note it was written against the
+> **pre-rebase** branch point, which makes its §3 freshness finding accurate for
+> that branch but not for what shipped — see action list A4.
+
 **Reviewed:** 2026-08-17
 
 **NyxID plan source:** `51cab391` (`docs/chat/wave1-service-reauthorize-plan.md`)
