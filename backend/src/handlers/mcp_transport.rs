@@ -304,8 +304,22 @@ impl McpAuthContext {
     /// silently upgrades to `AuthMethod::Session` (allow-all, approval-bypassing)
     /// on the session-fallback path. Forcing statelessness re-runs the relay
     /// liveness check and allowlist inheritance on every call.
+    ///
+    /// Delegated tokens carry the same hazard and then some. They are minted
+    /// with a short TTL (300s on the assistant bridge), carry an actor plus
+    /// service/node restriction claims, and their catalog authority is online-
+    /// revocable through `CatalogDelegationGrant`. A persisted MCP session
+    /// records none of that -- only the user id, activated services and a
+    /// `proxy_authorized` bit -- so allowing one to be minted would let an
+    /// expired, narrowly-scoped, approval-gated delegated token be replayed for
+    /// up to 30 idle days as unrestricted `AuthMethod::Session`, which bypasses
+    /// the approval flow outright (`approval_service::evaluate_and_check` is
+    /// called with `bypass_approval_flow = true` for Session). Statelessness
+    /// keeps every delegated call bound to a live, unexpired credential.
     fn is_stateless(&self) -> bool {
-        self.is_api_key || self.auth_method == AuthMethod::Relay
+        self.is_api_key
+            || self.auth_method == AuthMethod::Relay
+            || self.auth_method == AuthMethod::Delegated
     }
 
     fn approval_requester_type(&self) -> Option<&'static str> {
@@ -3697,6 +3711,47 @@ mod tests {
         let mut api_key = McpAuthContext::user("user-1".to_string(), AuthMethod::ApiKey);
         api_key.is_api_key = true;
         assert!(api_key.is_stateless());
+    }
+
+    #[test]
+    fn delegated_auth_is_stateless_and_cannot_mint_a_session() {
+        // A delegated token is short-lived (300s on the assistant bridge),
+        // actor-bound, service/node-restricted and online-revocable. A persisted
+        // MCP session records none of that, so minting one would let an expired
+        // delegated token be replayed as unrestricted `AuthMethod::Session` --
+        // which bypasses approval entirely -- for up to 30 idle days.
+        let delegated = McpAuthContext::user("user-1".to_string(), AuthMethod::Delegated);
+        assert!(delegated.is_stateless());
+
+        // Statelessness is what `initialize` consults to decide whether to mint
+        // a session at all, so the guarantee is "no session exists to fall back
+        // to", not merely "the fallback is refused".
+        assert!(!McpAuthContext::user("user-1".to_string(), AuthMethod::Session).is_stateless());
+    }
+
+    #[test]
+    fn every_short_lived_or_revocable_auth_method_is_stateless() {
+        // Guard against a new AuthMethod being added to the MCP transport
+        // without deciding its session posture. Session and AccessToken are the
+        // only long-lived, unrestricted, human-owned credentials that may back a
+        // persisted MCP session.
+        for (method, is_api_key, expected_stateless) in [
+            (AuthMethod::ApiKey, true, true),
+            (AuthMethod::Relay, false, true),
+            (AuthMethod::Delegated, false, true),
+            (AuthMethod::ServiceAccount, false, false),
+            (AuthMethod::AccessToken, false, false),
+            (AuthMethod::Session, false, false),
+        ] {
+            let label = format!("{method:?}");
+            let mut ctx = McpAuthContext::user("user-1".to_string(), method);
+            ctx.is_api_key = is_api_key;
+            assert_eq!(
+                ctx.is_stateless(),
+                expected_stateless,
+                "unexpected MCP session posture for {label}"
+            );
+        }
     }
 
     #[test]
