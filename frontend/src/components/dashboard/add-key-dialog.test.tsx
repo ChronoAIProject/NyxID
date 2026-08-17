@@ -189,6 +189,14 @@ const DEVICE_CODE_ENTRY = {
   device_code_format: "openai",
 } as unknown as CatalogEntry;
 
+const RFC8628_DEVICE_CODE_ENTRY = {
+  ...DEVICE_CODE_ENTRY,
+  slug: "google-device",
+  name: "Google Device",
+  device_code_format: "rfc8628",
+  default_scopes: ["openid"],
+} as unknown as CatalogEntry;
+
 function makeReconnectKey(overrides: Partial<KeyInfo> = {}): KeyInfo {
   return {
     id: "existing-service-1",
@@ -736,6 +744,66 @@ describe("AddKeyDialog — reconnect path", () => {
     expect(screen.getByRole("status")).toHaveTextContent(/Waiting for GitHub/i);
   });
 
+  it("merges granted and assistant-requested scopes for OAuth reconnect", async () => {
+    catalog.entries = [OAUTH_ENTRY];
+    const user = userEvent.setup();
+    render(
+      <AddKeyDialog
+        open
+        onOpenChange={vi.fn()}
+        reconnectKey={makeReconnectKey({
+          granted_scopes: ["repo", "workflow"],
+        })}
+        prefillScopes={["workflow", "custom:assistant-scope"]}
+      />,
+    );
+
+    await user.click(
+      screen.getByRole("button", { name: /Connect with GitHub/i }),
+    );
+
+    await waitFor(() => {
+      expect(initiateOAuthMutateAsync).toHaveBeenCalledTimes(1);
+    });
+    expect(initiateOAuthMutateAsync).toHaveBeenCalledWith({
+      providerId: "provider-oauth",
+      redirectPath: "/keys/existing-service-1",
+      scopeOverride: ["repo", "workflow", "custom:assistant-scope"],
+      keyId: "existing-service-1",
+    });
+  });
+
+  it("merges provider defaults and assistant-requested scopes when no OAuth grant exists", async () => {
+    catalog.entries = [
+      {
+        ...OAUTH_ENTRY,
+        default_scopes: ["read:user"],
+      } as CatalogEntry,
+    ];
+    const user = userEvent.setup();
+    render(
+      <AddKeyDialog
+        open
+        onOpenChange={vi.fn()}
+        reconnectKey={makeReconnectKey({ granted_scopes: null })}
+        prefillScopes={["user:email"]}
+      />,
+    );
+
+    await user.click(
+      screen.getByRole("button", { name: /Connect with GitHub/i }),
+    );
+
+    await waitFor(() => {
+      expect(initiateOAuthMutateAsync).toHaveBeenCalledTimes(1);
+    });
+    expect(initiateOAuthMutateAsync).toHaveBeenCalledWith(
+      expect.objectContaining({
+        scopeOverride: ["read:user", "user:email"],
+      }),
+    );
+  });
+
   it("reports success in place once the polled placeholder key goes active", async () => {
     catalog.entries = [OAUTH_ENTRY];
     pendingKeyStatus.value = "active";
@@ -949,6 +1017,41 @@ describe("AddKeyDialog — reconnect path", () => {
     expect(createKeyMutate).not.toHaveBeenCalled();
     expect(createKeyMutateAsync).not.toHaveBeenCalled();
     expect(mockApiDelete).not.toHaveBeenCalled();
+  });
+
+  it("merges granted and assistant-requested scopes for RFC 8628 reconnect", async () => {
+    catalog.entries = [RFC8628_DEVICE_CODE_ENTRY];
+    const user = userEvent.setup();
+    render(
+      <AddKeyDialog
+        open
+        onOpenChange={vi.fn()}
+        reconnectKey={makeReconnectKey({
+          catalog_service_slug: "google-device",
+          catalog_service_name: "Google Device",
+          granted_scopes: ["openid", "profile"],
+        })}
+        prefillScopes={[
+          "profile",
+          "https://www.googleapis.com/auth/calendar.readonly",
+        ]}
+      />,
+    );
+
+    await user.click(screen.getByRole("button", { name: "Continue" }));
+
+    await waitFor(() => {
+      expect(initiateDeviceCodeMutateAsync).toHaveBeenCalledTimes(1);
+    });
+    expect(initiateDeviceCodeMutateAsync).toHaveBeenCalledWith({
+      providerId: "provider-device",
+      scopeOverride: [
+        "openid",
+        "profile",
+        "https://www.googleapis.com/auth/calendar.readonly",
+      ],
+      keyId: "existing-service-1",
+    });
   });
 
   it("does not announce a device-code attempt when initiation fails", async () => {

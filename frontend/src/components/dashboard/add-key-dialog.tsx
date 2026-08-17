@@ -1460,6 +1460,12 @@ export interface AuthorizationAttempt {
   readonly previousAuthorizationAt: string | null | undefined;
 }
 
+function mergeScopes(
+  ...groups: readonly (readonly string[])[]
+): readonly string[] {
+  return [...new Set(groups.flat())];
+}
+
 function OAuthStep({
   catalogEntry,
   ensureKey,
@@ -1473,6 +1479,7 @@ function OAuthStep({
   reconnectMode,
   lockedScopes = [],
   grantedScopes = [],
+  prefillScopes = [],
   launch,
   flow,
   onPopupViewResult,
@@ -1505,6 +1512,8 @@ function OAuthStep({
    * Drives the change summary + removal warning, and seeds the selection.
    */
   readonly grantedScopes?: readonly string[];
+  /** Additional normalized scopes requested by an assistant action. */
+  readonly prefillScopes?: readonly string[];
   readonly launch?: "popup";
   readonly flow?: OAuthFlowKind;
   readonly onPopupViewResult?: (keyId: string) => boolean;
@@ -1518,9 +1527,12 @@ function OAuthStep({
   // pre-selected) so an unedited add requests today's scopes. The full
   // selection is sent as `scopeOverride`.
   const [selectedScopes, setSelectedScopes] = useState<readonly string[]>(
-    grantedScopes.length > 0
-      ? grantedScopes
-      : (catalogEntry.default_scopes ?? []),
+    mergeScopes(
+      grantedScopes.length > 0
+        ? grantedScopes
+        : (catalogEntry.default_scopes ?? []),
+      prefillScopes,
+    ),
   );
   // In-dialog authorization handoff. The whole-tab `hardRedirect` this
   // replaced destroyed any surface hosting the dialog — fatal for the
@@ -1801,8 +1813,7 @@ function OAuthStep({
             throw new Error("OAuth provider returned an invalid attempt nonce");
           }
           if (
-            validateAuthorizationUrl(response.authorization_url, nonce) ===
-            null
+            validateAuthorizationUrl(response.authorization_url, nonce) === null
           ) {
             throw new Error(
               "OAuth provider returned an invalid authorization URL",
@@ -1840,11 +1851,7 @@ function OAuthStep({
         }
         useOAuthPopupStore.getState().setNonce(popup.launchId, nonce);
         try {
-          await popup.navigate(
-            authorizationHref,
-            nonce,
-            catalogEntry.name,
-          );
+          await popup.navigate(authorizationHref, nonce, catalogEntry.name);
         } catch {
           if (generationRef.current !== generation) return;
           // A cold interstitial or detached popup does not invalidate the
@@ -2033,11 +2040,7 @@ function OAuthStep({
 }
 
 type DeviceFlowStep =
-  | "configure"
-  | "requesting"
-  | "show_code"
-  | "success"
-  | "error";
+  "configure" | "requesting" | "show_code" | "success" | "error";
 
 function DeviceCodeStep({
   catalogEntry,
@@ -2054,6 +2057,7 @@ function DeviceCodeStep({
   reconnectMode,
   lockedScopes = [],
   grantedScopes = [],
+  prefillScopes = [],
 }: {
   readonly catalogEntry: CatalogEntry;
   readonly ensureKey: () => Promise<KeyInfo>;
@@ -2070,6 +2074,8 @@ function DeviceCodeStep({
   readonly lockedScopes?: readonly string[];
   /** The connection's currently-granted scopes when editing (see `OAuthStep`). */
   readonly grantedScopes?: readonly string[];
+  /** Additional normalized scopes requested by an assistant action. */
+  readonly prefillScopes?: readonly string[];
 }) {
   const [flowStep, setFlowStep] = useState<DeviceFlowStep>("configure");
   const [userCode, setUserCode] = useState("");
@@ -2081,9 +2087,12 @@ function DeviceCodeStep({
   // existing connection, else provider defaults. Only used for non-openai
   // device-code providers (openai rejects scopes).
   const [selectedScopes, setSelectedScopes] = useState<readonly string[]>(
-    grantedScopes.length > 0
-      ? grantedScopes
-      : (catalogEntry.default_scopes ?? []),
+    mergeScopes(
+      grantedScopes.length > 0
+        ? grantedScopes
+        : (catalogEntry.default_scopes ?? []),
+      prefillScopes,
+    ),
   );
 
   const pollTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -2840,6 +2849,7 @@ export function AddKeyDialog({
   prefillNodeId,
   prefillTargetOrgId,
   prefillCustom,
+  prefillScopes,
   reconnectKey,
   onSuccess,
   onAuthorizationPending,
@@ -2865,6 +2875,8 @@ export function AddKeyDialog({
   readonly prefillTargetOrgId?: string;
   /** Opens the existing custom-endpoint route with every mappable field set. */
   readonly prefillCustom?: AddKeyDialogCustomPrefill;
+  /** Additional normalized OAuth scopes supplied by an assistant action. */
+  readonly prefillScopes?: readonly string[];
   readonly reconnectKey?: KeyInfo | null;
   /** Fires only when the user finishes the post-connect success step. */
   readonly onSuccess?: (result: AddKeyDialogCompletion) => void;
@@ -3182,7 +3194,7 @@ export function AddKeyDialog({
           keyId: reconnectKey.id,
           auth_method:
             reconnectKey.auth_method === "none"
-              ? selectedEntry?.auth_method ?? reconnectKey.auth_method
+              ? (selectedEntry?.auth_method ?? reconnectKey.auth_method)
               : reconnectKey.auth_method,
         });
         setAuthKey(repaired);
@@ -3493,6 +3505,7 @@ export function AddKeyDialog({
                 ? (reconnectKey?.granted_scopes ?? [])
                 : []
             }
+            prefillScopes={prefillScopes}
             platformScopeAllowlist={
               // Gate scope pills only when this connection rides the shared
               // platform app: managed path (not switched to BYO), fresh add.
@@ -3537,6 +3550,7 @@ export function AddKeyDialog({
                 ? (reconnectKey?.granted_scopes ?? [])
                 : []
             }
+            prefillScopes={prefillScopes}
             onBack={() => {
               if (isReconnect) {
                 handleOpenChange(false);

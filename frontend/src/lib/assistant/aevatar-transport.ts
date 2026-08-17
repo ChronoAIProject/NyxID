@@ -973,6 +973,12 @@ function fingerprintStableRequestInput(
 
 function fingerprintActionRequest(request: AssistantActionRequest): string {
   const params = resolveAssistantAction(request).params;
+  if (params.variant === "service_reauthorize") {
+    return fingerprintStableRequestInput({
+      userServiceId: params.user_service_id,
+      requestedScopes: [...params.requested_scopes].sort(),
+    });
+  }
   if (params.variant === "key_create") {
     return fingerprintStableRequestInput({
       name: params.name,
@@ -1029,6 +1035,12 @@ function sameActionCardParams(
         left.auth_key_name === right.auth_key_name &&
         left.via_node_id === right.via_node_id &&
         left.target_org_id === right.target_org_id
+      );
+    case "service_reauthorize":
+      return (
+        right.variant === "service_reauthorize" &&
+        left.user_service_id === right.user_service_id &&
+        sameStringSet(left.requested_scopes, right.requested_scopes)
       );
     case "key_create":
       return (

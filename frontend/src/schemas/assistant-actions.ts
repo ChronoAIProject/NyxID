@@ -46,6 +46,34 @@ const allowedServiceIdsSchema = z
     }
   });
 
+export const actionScopeTokenSchema = z
+  .string()
+  .min(1)
+  .max(256)
+  .refine((value) => value === value.trim(), "Scope must be normalized")
+  .regex(
+    /^[A-Za-z0-9._:/~+*=-]+$/,
+    "Scope contains characters NyxID cannot request",
+  );
+
+const requestedScopesSchema = z
+  .array(actionScopeTokenSchema)
+  .min(1)
+  .max(64)
+  .superRefine((values, context) => {
+    const seen = new Set<string>();
+    for (const [index, value] of values.entries()) {
+      if (seen.has(value)) {
+        context.addIssue({
+          code: "custom",
+          path: [index],
+          message: "Duplicate requested scope",
+        });
+      }
+      seen.add(value);
+    }
+  });
+
 const SECRET_VALUE =
   /(Bearer\s+)[A-Za-z0-9._~+/-]+|nyx(?:id)?_[A-Za-z0-9_-]{8,}/gi;
 const FORBIDDEN_ACTION_KEY =
@@ -92,6 +120,13 @@ export const serviceConnectActionParamsSchema = z
   })
   .strict();
 
+export const serviceReauthorizeActionParamsSchema = z
+  .object({
+    userServiceId: requiredActionIdentitySchema,
+    requestedScopes: requestedScopesSchema,
+  })
+  .strict();
+
 export const keyCreateActionParamsSchema = z
   .object({
     name: z
@@ -119,6 +154,7 @@ const emptyActionParamsSchema = z.object({}).strict();
 export const assistantActionParamsSchema = z
   .union([
     serviceConnectActionParamsSchema,
+    serviceReauthorizeActionParamsSchema,
     keyCreateActionParamsSchema,
     keyRotateActionParamsSchema,
     emptyActionParamsSchema,
@@ -216,6 +252,11 @@ export type ActionCardParams =
       readonly auth_key_name: string;
       readonly via_node_id: string | null;
       readonly target_org_id: string | null;
+    }
+  | {
+      readonly variant: "service_reauthorize";
+      readonly user_service_id: string;
+      readonly requested_scopes: readonly string[];
     }
   | {
       readonly variant: "key_create";
@@ -332,8 +373,7 @@ export type ActionReport = z.infer<typeof actionReportSchema>;
 export type ActionContinueBody = z.infer<typeof actionContinueBodySchema>;
 export type ActionWakeBody = z.infer<typeof actionWakeBodySchema>;
 export type ActionReportActionLookup =
-  | ReadonlyMap<string, string>
-  | Readonly<Record<string, string | undefined>>;
+  ReadonlyMap<string, string> | Readonly<Record<string, string | undefined>>;
 function matchesSecretValue(value: string): boolean {
   SECRET_VALUE.lastIndex = 0;
   return SECRET_VALUE.test(value);
