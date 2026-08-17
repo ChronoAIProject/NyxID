@@ -4016,8 +4016,8 @@ mod tests {
         assert_eq!(resp.status(), StatusCode::OK);
     }
 
-    #[test]
-    fn app_error_to_rpc_preserves_request_body_413() {
+    #[tokio::test]
+    async fn tool_execution_body_limit_error_preserves_mcp_result_contract() {
         let resp = app_error_to_rpc(
             Some(serde_json::json!(3)),
             &crate::errors::AppError::RequestBodyTooLarge {
@@ -4025,7 +4025,17 @@ mod tests {
                 context: "Node proxy".to_string(),
             },
         );
-        assert_eq!(resp.status(), StatusCode::PAYLOAD_TOO_LARGE);
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(resp.into_body(), 4096).await.unwrap();
+        let payload: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(payload["id"], 3);
+        assert_eq!(payload["result"]["isError"], true);
+        let message = payload["result"]["content"][0]["text"]
+            .as_str()
+            .expect("tool error text");
+        assert!(message.contains("request_body_too_large"));
+        assert!(message.contains("11700"));
+        assert!(message.contains("4096 bytes"));
     }
 
     // -----------------------------------------------------------------------

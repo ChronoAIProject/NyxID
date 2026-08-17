@@ -560,6 +560,44 @@ pub(crate) fn redact_command_for_audit(command: &str) -> String {
 mod tests {
     use super::*;
 
+    #[tokio::test]
+    async fn ssh_exec_rejects_missing_and_wrong_json_content_type_before_body_parse() {
+        let state = crate::test_utils::test_app_state_no_db().await;
+        let auth_user = crate::test_utils::test_auth_user("a026fd00-bd86-4284-9832-9e5e65fc8f50");
+
+        for content_type in [None, Some("text/plain")] {
+            let mut request = Request::builder()
+                .method("POST")
+                .uri("/api/v1/ssh/service-1/exec");
+            if let Some(content_type) = content_type {
+                request = request.header(axum::http::header::CONTENT_TYPE, content_type);
+            }
+            let request = request.body(Body::from("not-json")).unwrap();
+
+            let error = ssh_exec(
+                State(state.clone()),
+                Extension(
+                    crate::services::billing::route_inventory::BillingRoutePolicy::Metered(
+                        crate::services::billing::BillingIngress::SshExec,
+                    ),
+                ),
+                auth_user.clone(),
+                TelemetryContext::default(),
+                Path("service-1".to_string()),
+                ConnectInfo("127.0.0.1:12345".parse().unwrap()),
+                request,
+            )
+            .await
+            .expect_err("non-JSON content type must fail before body parsing");
+
+            assert!(matches!(
+                error,
+                AppError::BadRequest(message)
+                    if message == "SSH exec requires Content-Type: application/json"
+            ));
+        }
+    }
+
     #[test]
     fn check_dangerous_command_blocks_rm_rf() {
         assert!(check_dangerous_command("rm -rf /").is_err());

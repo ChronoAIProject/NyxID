@@ -38,3 +38,52 @@ fn caused_by_length_limit(error: &(dyn std::error::Error + 'static)) -> bool {
     }
     false
 }
+
+#[cfg(test)]
+mod tests {
+    use std::convert::Infallible;
+    use std::sync::{
+        Arc,
+        atomic::{AtomicBool, Ordering},
+    };
+    use std::task::Poll;
+
+    use super::*;
+    use axum::http::header;
+
+    #[tokio::test]
+    async fn declared_oversize_is_rejected_without_polling_body() {
+        let polled = Arc::new(AtomicBool::new(false));
+        let stream_polled = polled.clone();
+        let stream = futures::stream::poll_fn(move |_| {
+            stream_polled.store(true, Ordering::SeqCst);
+            Poll::Ready(None::<Result<Bytes, Infallible>>)
+        });
+        let request = Request::builder()
+            .header(header::CONTENT_LENGTH, "5")
+            .body(Body::from_stream(stream))
+            .unwrap();
+
+        let error = read_request_body(request, 4, "Proxy")
+            .await
+            .expect_err("declared oversize body must fail");
+
+        assert!(matches!(
+            error,
+            AppError::RequestBodyTooLarge { max_bytes: 4, .. }
+        ));
+        assert!(!polled.load(Ordering::SeqCst));
+    }
+
+    #[tokio::test]
+    async fn unparseable_content_length_falls_through_to_bounded_read() {
+        let request = Request::builder()
+            .header(header::CONTENT_LENGTH, "not-a-number")
+            .body(Body::from("ok"))
+            .unwrap();
+
+        let body = read_request_body(request, 4, "Proxy").await.unwrap();
+
+        assert_eq!(body, "ok");
+    }
+}
