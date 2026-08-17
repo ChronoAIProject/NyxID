@@ -2,7 +2,7 @@
 
 use axum::{
     Json,
-    body::{Body, to_bytes},
+    body::Body,
     extract::State,
     http::{HeaderValue, Request, header},
     response::Response,
@@ -111,9 +111,12 @@ pub async fn completions(
         .try_acquire(&auth_user.user_id.to_string())?;
 
     let (mut parts, body) = request.into_parts();
-    let bytes = to_bytes(body, assistant_direct::MAX_DIRECT_REQUEST_BYTES)
-        .await
-        .map_err(|_| AppError::BadRequest("Direct chat request body is too large.".to_string()))?;
+    let bytes = super::body_limit::read_body(
+        body,
+        assistant_direct::MAX_DIRECT_REQUEST_BYTES,
+        "Direct chat",
+    )
+    .await?;
     let direct_request = assistant_direct::validate_direct_request(&bytes)?;
     let message_count = direct_request.messages.len();
     let content_bytes: usize = direct_request
@@ -242,7 +245,10 @@ mod tests {
 
         assert!(matches!(
             completions(State(state), auth_user, request).await,
-            Err(AppError::BadRequest(_))
+            Err(AppError::RequestBodyTooLarge {
+                max_bytes: assistant_direct::MAX_DIRECT_REQUEST_BYTES,
+                ..
+            })
         ));
     }
 

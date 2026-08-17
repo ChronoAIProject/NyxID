@@ -809,6 +809,7 @@ storage_backend = "file"  # or "keychain"
 
 [server]
 url = "wss://auth.nyxid.dev/api/v1/nodes/ws"
+proxy_max_body_size = 104857600  # Raw HTTP body; WS allowance includes base64 + envelope
 
 [node]
 id = "uuid-string"

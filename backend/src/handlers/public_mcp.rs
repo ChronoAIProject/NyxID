@@ -1,5 +1,5 @@
 use axum::{
-    body::{Body, to_bytes},
+    body::Body,
     extract::{ConnectInfo, State},
     http::{Request, Response, StatusCode, header},
     response::IntoResponse,
@@ -25,6 +25,7 @@ pub async fn public_mcp_post(
     match handle_public_mcp_post(state, Some(peer), request).await {
         Ok(response) => response,
         Err(AppError::RateLimited) => rpc_error(None, -32005, "Rate limit exceeded"),
+        Err(error @ AppError::RequestBodyTooLarge { .. }) => error.into_response(),
         Err(error) => {
             tracing::warn!(%error, "Public MCP request failed");
             rpc_error(None, -32603, "Internal error")
@@ -46,9 +47,12 @@ async fn handle_public_mcp_post(
         &path,
     )?;
 
-    let body = to_bytes(request.into_body(), state.config.public_proxy_max_body_size)
-        .await
-        .map_err(|_| AppError::BadRequest("Public MCP request body is too large".to_string()))?;
+    let body = super::body_limit::read_request_body(
+        request,
+        state.config.public_proxy_max_body_size,
+        "Public MCP",
+    )
+    .await?;
 
     let parsed: JsonRpcRequest = match serde_json::from_slice(&body) {
         Ok(request) => request,
@@ -167,6 +171,35 @@ mod tests {
             .uri("/public/mcp")
             .body(Body::from(raw.to_owned()))
             .unwrap()
+    }
+
+    #[tokio::test]
+    async fn oversize_public_mcp_body_returns_structured_413() {
+        let Some(db) = connect_test_database("public_mcp_body_limit").await else {
+            return;
+        };
+        let state = test_app_state(db);
+        let max_body_size = state.config.public_proxy_max_body_size;
+        let response = public_mcp_post(
+            State(state),
+            ConnectInfo(peer().expect("test peer")),
+            Request::builder()
+                .method("POST")
+                .uri("/public/mcp")
+                .body(Body::from(vec![b'x'; max_body_size + 1]))
+                .unwrap(),
+        )
+        .await;
+
+        assert_eq!(response.status(), StatusCode::PAYLOAD_TOO_LARGE);
+        let payload = json_body(response).await;
+        assert_eq!(payload["error"], "request_body_too_large");
+        assert_eq!(payload["error_code"], 11700);
+        assert!(
+            payload["message"]
+                .as_str()
+                .is_some_and(|message| message.contains(&max_body_size.to_string()))
+        );
     }
 
     fn safe_anonymous_service() -> DownstreamService {

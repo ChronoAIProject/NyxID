@@ -1185,10 +1185,7 @@ async fn main() {
 
     // Build router — public OAuth routes get open CORS (per RFC 9207),
     // private API routes get restricted CORS (FRONTEND_URL only).
-    let (public_oauth, private_api) = routes::build_router(
-        config.proxy_max_body_size,
-        config.public_proxy_max_body_size,
-    );
+    let (public_oauth, private_api) = routes::build_router();
 
     let csrf_state = state.clone();
     let private_api = private_api.layer(cors).layer(axum_mw::from_fn_with_state(

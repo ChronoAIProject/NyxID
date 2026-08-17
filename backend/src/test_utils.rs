@@ -478,6 +478,7 @@ pub(crate) fn test_app_config() -> AppConfig {
         node_max_stream_duration_secs: 300,
         node_hmac_signing_enabled: true,
         proxy_max_body_size: 100 * 1024 * 1024,
+        llm_max_body_size: 10 * 1024 * 1024,
         proxy_stream_idle_timeout_secs: 60,
         ssh_max_sessions_per_user: 4,
         ssh_connect_timeout_secs: 10,

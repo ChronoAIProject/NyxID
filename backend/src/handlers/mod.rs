@@ -20,6 +20,7 @@ pub mod assistant_readiness;
 pub mod auth;
 pub mod auth_device;
 pub mod billing;
+pub(crate) mod body_limit;
 pub mod broker_bindings;
 pub mod catalog;
 pub mod channel_bots;

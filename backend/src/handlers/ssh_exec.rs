@@ -1,7 +1,8 @@
 use axum::{
     Json,
+    body::Body,
     extract::{ConnectInfo, Extension, Path, State},
-    http::HeaderMap,
+    http::{HeaderMap, Request, header},
 };
 use serde::{Deserialize, Serialize};
 use utoipa::ToSchema;
@@ -32,6 +33,9 @@ const MAX_TIMEOUT_SECS: u32 = 300;
 /// Maximum bytes captured per output stream (stdout / stderr).
 const MAX_OUTPUT_BYTES: usize = 1_048_576; // 1 MB
 
+/// SSH exec accepts an 8 KiB command plus its small JSON envelope.
+const MAX_SSH_EXEC_REQUEST_BYTES: usize = 64 * 1024;
+
 /// Commands (or fragments) that are unconditionally blocked.
 const DANGEROUS_COMMANDS: &[&str] = &[
     "rm -rf /",
@@ -43,6 +47,30 @@ const DANGEROUS_COMMANDS: &[&str] = &[
     "init 0",
     ":(){ :|:& };:",
 ];
+
+fn require_json_content_type(headers: &HeaderMap) -> AppResult<()> {
+    let is_json = headers
+        .get(header::CONTENT_TYPE)
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| value.split(';').next())
+        .and_then(|media_type| media_type.trim().split_once('/'))
+        .is_some_and(|(type_, subtype)| {
+            let subtype = subtype.trim();
+            type_.trim().eq_ignore_ascii_case("application")
+                && (subtype.eq_ignore_ascii_case("json")
+                    || subtype.rsplit_once('+').is_some_and(|(name, suffix)| {
+                        !name.is_empty() && suffix.eq_ignore_ascii_case("json")
+                    }))
+        });
+
+    if is_json {
+        Ok(())
+    } else {
+        Err(AppError::BadRequest(
+            "SSH exec requires Content-Type: application/json".to_string(),
+        ))
+    }
+}
 
 // ---------------------------------------------------------------------------
 // Request / Response
@@ -86,6 +114,7 @@ pub struct SshExecResponse {
     responses(
         (status = 200, description = "Command execution result", body = SshExecResponse),
         (status = 400, description = "Validation error", body = crate::errors::ErrorResponse),
+        (status = 413, description = "Request body too large", body = crate::errors::ErrorResponse),
         (status = 403, description = "Forbidden", body = crate::errors::ErrorResponse),
         (status = 404, description = "SSH service not found", body = crate::errors::ErrorResponse)
     ),
@@ -101,9 +130,16 @@ pub async fn ssh_exec(
     tele: TelemetryContext,
     Path(service_id): Path<String>,
     ConnectInfo(addr): ConnectInfo<std::net::SocketAddr>,
-    headers: HeaderMap,
-    Json(body): Json<SshExecRequest>,
+    request: Request<Body>,
 ) -> AppResult<Json<SshExecResponse>> {
+    require_json_content_type(request.headers())?;
+    let headers = request.headers().clone();
+    let body_bytes =
+        super::body_limit::read_request_body(request, MAX_SSH_EXEC_REQUEST_BYTES, "SSH exec")
+            .await?;
+    let body: SshExecRequest = serde_json::from_slice(&body_bytes)
+        .map_err(|error| AppError::BadRequest(format!("Invalid SSH exec request: {error}")))?;
+
     let billing_egress_permit =
         crate::services::billing::route_inventory::enforce_billing_egress_classification(
             Some(billing_route_policy),
@@ -548,6 +584,57 @@ pub(crate) fn redact_command_for_audit(command: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn ssh_exec_accepts_json_media_types() {
+        for content_type in [
+            "application/json",
+            "application/json; charset=utf-8",
+            "application/problem+json",
+        ] {
+            let mut headers = HeaderMap::new();
+            headers.insert(header::CONTENT_TYPE, content_type.parse().unwrap());
+            require_json_content_type(&headers).expect("valid JSON media type");
+        }
+    }
+
+    #[tokio::test]
+    async fn ssh_exec_rejects_missing_and_wrong_json_content_type_before_body_parse() {
+        let state = crate::test_utils::test_app_state_no_db().await;
+        let auth_user = crate::test_utils::test_auth_user("a026fd00-bd86-4284-9832-9e5e65fc8f50");
+
+        for content_type in [None, Some("text/plain")] {
+            let mut request = Request::builder()
+                .method("POST")
+                .uri("/api/v1/ssh/service-1/exec");
+            if let Some(content_type) = content_type {
+                request = request.header(axum::http::header::CONTENT_TYPE, content_type);
+            }
+            let request = request.body(Body::from("not-json")).unwrap();
+
+            let error = ssh_exec(
+                State(state.clone()),
+                Extension(
+                    crate::services::billing::route_inventory::BillingRoutePolicy::Metered(
+                        crate::services::billing::BillingIngress::SshExec,
+                    ),
+                ),
+                auth_user.clone(),
+                TelemetryContext::default(),
+                Path("service-1".to_string()),
+                ConnectInfo("127.0.0.1:12345".parse().unwrap()),
+                request,
+            )
+            .await
+            .expect_err("non-JSON content type must fail before body parsing");
+
+            assert!(matches!(
+                error,
+                AppError::BadRequest(message)
+                    if message == "SSH exec requires Content-Type: application/json"
+            ));
+        }
+    }
 
     #[test]
     fn check_dangerous_command_blocks_rm_rf() {

@@ -1,8 +1,9 @@
 use std::convert::Infallible;
 use std::time::Duration;
 
+use axum::body::Body;
 use axum::extract::{Extension, State};
-use axum::http::{HeaderMap, StatusCode};
+use axum::http::{HeaderMap, Request, StatusCode};
 use axum::response::sse::{Event, KeepAlive, Sse};
 use axum::response::{IntoResponse, Response};
 use mongodb::bson::doc;
@@ -96,6 +97,14 @@ fn tool_result(id: Option<serde_json::Value>, text: &str, is_error: bool) -> Res
             "isError": is_error,
         }),
     )
+}
+
+fn request_body_too_large_tool_result(
+    id: Option<serde_json::Value>,
+    error: &crate::errors::AppError,
+) -> Response {
+    let message = format!("{} ({}): {error}", error.error_key(), error.error_code());
+    tool_result(id, &message, true)
 }
 
 /// Check if the client's `Accept` header includes `text/event-stream`.
@@ -710,11 +719,21 @@ pub async fn mcp_post(
     Extension(billing_route_policy): Extension<
         crate::services::billing::route_inventory::BillingRoutePolicy,
     >,
-    headers: HeaderMap,
-    body: String,
+    request: Request<Body>,
 ) -> Response {
+    let headers = request.headers().clone();
+    let body = match super::body_limit::read_request_body(
+        request,
+        state.config.proxy_max_body_size,
+        "MCP",
+    )
+    .await
+    {
+        Ok(body) => body,
+        Err(error) => return error.into_response(),
+    };
     // Manual JSON parse for proper JSON-RPC error on malformed input
-    let request: JsonRpcRequest = match serde_json::from_str(&body) {
+    let request: JsonRpcRequest = match serde_json::from_slice(&body) {
         Ok(r) => r,
         Err(_) => return rpc_error(None, -32700, "Parse error"),
     };
@@ -1397,6 +1416,9 @@ async fn handle_tools_call(
         Err(crate::errors::AppError::ApiKeyScopeForbidden(msg)) => {
             return tool_result(request.id.clone(), &msg, true);
         }
+        Err(error @ crate::errors::AppError::RequestBodyTooLarge { .. }) => {
+            return request_body_too_large_tool_result(request.id.clone(), &error);
+        }
         Err(e) => {
             tracing::warn!("Tool execution failed for {tool_name}: {e}");
             return tool_result(
@@ -1745,6 +1767,9 @@ async fn handle_meta_call_tool(
         Ok(r) => r,
         Err(crate::errors::AppError::ApiKeyScopeForbidden(msg)) => {
             return tool_result(request_id, &msg, true);
+        }
+        Err(error @ crate::errors::AppError::RequestBodyTooLarge { .. }) => {
+            return request_body_too_large_tool_result(request_id, &error);
         }
         Err(e) => {
             tracing::warn!("Tool execution failed for {tool_name}: {e}");
@@ -3026,13 +3051,55 @@ mod tests {
         test_user_service,
     };
     use axum::{
-        Router,
+        Extension, Router,
         body::Body,
-        extract::{Path, State},
+        extract::{DefaultBodyLimit, Path, State},
         http::{Method, Request, StatusCode},
-        routing::any,
+        routing::{any, post},
     };
     use tokio::net::TcpListener;
+    use tower::ServiceExt;
+
+    #[tokio::test]
+    async fn mcp_post_accepts_body_above_global_default_below_proxy_limit() {
+        let Some(db) = connect_test_database("mcp_body_limit").await else {
+            return;
+        };
+        let state = test_app_state(db);
+        let padding = "x".repeat(1024 * 1024);
+        let body = serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "ping",
+            "padding": padding,
+        })
+        .to_string();
+        assert!(body.len() > 1024 * 1024);
+        assert!(body.len() < state.config.proxy_max_body_size);
+
+        let app = Router::new()
+            .route("/mcp", post(mcp_post))
+            .layer(Extension(
+                crate::services::billing::route_inventory::BillingRoutePolicy::Metered(
+                    crate::services::billing::BillingIngress::Mcp,
+                ),
+            ))
+            .with_state(state)
+            .layer(DefaultBodyLimit::max(1024 * 1024));
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method(Method::POST)
+                    .uri("/mcp")
+                    .header("content-type", "application/json")
+                    .body(Body::from(body))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+    }
 
     fn api_key_auth(allowed_service_ids: Vec<String>) -> McpAuthContext {
         McpAuthContext {
@@ -4005,6 +4072,28 @@ mod tests {
     fn app_error_to_rpc_handles_generic_error() {
         let resp = app_error_to_rpc(None, &crate::errors::AppError::Internal("unknown".into()));
         assert_eq!(resp.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn tool_execution_body_limit_error_preserves_mcp_result_contract() {
+        let resp = request_body_too_large_tool_result(
+            Some(serde_json::json!(3)),
+            &crate::errors::AppError::RequestBodyTooLarge {
+                max_bytes: 4096,
+                context: "Node proxy".to_string(),
+            },
+        );
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(resp.into_body(), 4096).await.unwrap();
+        let payload: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(payload["id"], 3);
+        assert_eq!(payload["result"]["isError"], true);
+        let message = payload["result"]["content"][0]["text"]
+            .as_str()
+            .expect("tool error text");
+        assert!(message.contains("request_body_too_large"));
+        assert!(message.contains("11700"));
+        assert!(message.contains("4096 bytes"));
     }
 
     // -----------------------------------------------------------------------

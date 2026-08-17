@@ -35,9 +35,18 @@ fn default_storage_backend() -> String {
     "file".to_string()
 }
 
+pub const DEFAULT_NODE_PROXY_MAX_BODY_SIZE: usize = 100 * 1024 * 1024;
+
+fn default_node_proxy_max_body_size() -> usize {
+    DEFAULT_NODE_PROXY_MAX_BODY_SIZE
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ServerConfig {
     pub url: String,
+    /// Maximum raw HTTP request body accepted through the node control socket.
+    #[serde(default = "default_node_proxy_max_body_size")]
+    pub proxy_max_body_size: usize,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -360,7 +369,10 @@ impl NodeConfig {
     /// Create a new config after registration (no credentials yet).
     pub fn new(server_url: String, node_id: String, storage_backend: String) -> Self {
         Self {
-            server: ServerConfig { url: server_url },
+            server: ServerConfig {
+                url: server_url,
+                proxy_max_body_size: DEFAULT_NODE_PROXY_MAX_BODY_SIZE,
+            },
             node: NodeSection {
                 id: node_id,
                 auth_token_encrypted: String::new(),
@@ -743,10 +755,28 @@ mod tests {
         let loaded = NodeConfig::load(&config_file).unwrap();
         assert_eq!(loaded.node.id, "test-node-id");
         assert_eq!(loaded.server.url, "wss://example.com/api/v1/nodes/ws");
+        assert_eq!(loaded.server.proxy_max_body_size, 100 * 1024 * 1024);
         assert!(loaded.credentials.contains_key("openai"));
 
         let token = loaded.decrypt_auth_token(&enc).unwrap();
         assert_eq!(token, "nyx_nauth_abc123");
+    }
+
+    #[test]
+    fn existing_config_defaults_node_proxy_body_limit() {
+        let config: NodeConfig = toml::from_str(
+            r#"
+                [server]
+                url = "wss://example.com/api/v1/nodes/ws"
+
+                [node]
+                id = "test-node-id"
+                auth_token_encrypted = "ciphertext"
+            "#,
+        )
+        .unwrap();
+
+        assert_eq!(config.server.proxy_max_body_size, 100 * 1024 * 1024);
     }
 
     #[test]

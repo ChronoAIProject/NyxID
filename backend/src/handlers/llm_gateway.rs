@@ -253,9 +253,9 @@ pub async fn llm_proxy_request(
     let method = request.method().clone();
     let query = request.uri().query().map(String::from);
     let headers = request.headers().clone();
-    let body_bytes = axum::body::to_bytes(request.into_body(), 10 * 1024 * 1024)
-        .await
-        .map_err(|e| AppError::BadRequest(format!("Failed to read request body: {e}")))?;
+    let body_bytes =
+        super::body_limit::read_request_body(request, state.config.llm_max_body_size, "LLM proxy")
+            .await?;
 
     preflight_llm_deny_before_resolution(
         &state,
@@ -574,9 +574,12 @@ pub async fn gateway_request(
     let headers = request.headers().clone();
 
     // Read the full request body to extract the model field
-    let body_bytes = axum::body::to_bytes(request.into_body(), 10 * 1024 * 1024)
-        .await
-        .map_err(|e| AppError::BadRequest(format!("Failed to read request body: {e}")))?;
+    let body_bytes = super::body_limit::read_request_body(
+        request,
+        state.config.llm_max_body_size,
+        "LLM gateway",
+    )
+    .await?;
 
     // Parse body as JSON to extract model
     let mut body_json: serde_json::Value = if body_bytes.is_empty() {
@@ -1727,12 +1730,42 @@ fn should_bypass_approval_flow(
 #[cfg(test)]
 mod tests {
     use super::{
-        force_stream_usage_bytes_for_provider, llm_platform_usage,
+        force_stream_usage_bytes_for_provider, gateway_request, llm_platform_usage,
         resale_usage_from_optional_reported, should_bypass_approval_flow,
     };
+    use crate::errors::AppError;
     use crate::models::service_billing::BillingMetric;
     use crate::mw::auth::AuthMethod;
+    use crate::services::billing::{BillingIngress, route_inventory::BillingRoutePolicy};
     use crate::services::llm_usage_service::ReportedLlmUsage;
+    use axum::{
+        body::Body,
+        extract::{Path, State},
+        http::Request,
+    };
+
+    #[tokio::test]
+    async fn gateway_uses_configured_llm_body_limit() {
+        let mut state = crate::test_utils::test_app_state_no_db().await;
+        state.config.llm_max_body_size = 4;
+        let mut request = Request::new(Body::from("12345"));
+        request
+            .extensions_mut()
+            .insert(BillingRoutePolicy::Metered(BillingIngress::LlmGateway));
+
+        let result = gateway_request(
+            State(state),
+            crate::test_utils::test_auth_user("a026fd00-bd86-4284-9832-9e5e65fc8f50"),
+            Path("chat/completions".to_string()),
+            request,
+        )
+        .await;
+
+        assert!(matches!(
+            result,
+            Err(AppError::RequestBodyTooLarge { max_bytes: 4, .. })
+        ));
+    }
 
     #[test]
     fn bypasses_when_approval_is_disabled() {

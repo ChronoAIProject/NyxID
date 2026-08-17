@@ -4043,9 +4043,7 @@ async fn read_proxy_request_body(
     request: Request<Body>,
     max_body_size: usize,
 ) -> AppResult<bytes::Bytes> {
-    axum::body::to_bytes(request.into_body(), max_body_size)
-        .await
-        .map_err(|e| AppError::BadRequest(format!("Failed to read body: {e}")))
+    super::body_limit::read_request_body(request, max_body_size, "Proxy").await
 }
 
 fn is_codex_transport_path(path: &str) -> bool {
@@ -5744,8 +5742,8 @@ mod tests {
         collect_ws_forward_headers, compose_pre_resolved_node_ids, enforce_node_route_scope,
         ensure_proxy_request_id, final_credential_class, forwarded_response_header_value,
         is_chat_completions_proxy_path, is_codex_transport_path, is_ws_upgrade_request,
-        should_enforce_runtime_approval, should_retry_node_failure, single_system_header,
-        strip_durable_idempotency_defaults, validate_range_header,
+        read_proxy_request_body, should_enforce_runtime_approval, should_retry_node_failure,
+        single_system_header, strip_durable_idempotency_defaults, validate_range_header,
         websocket_realtime_usage_enabled, websocket_resale_usage,
     };
     use crate::models::service_billing::{BillingMetric, ServiceBilling};
@@ -5770,6 +5768,60 @@ mod tests {
         atomic::{AtomicUsize, Ordering},
     };
     use tower::ServiceExt;
+
+    async fn assert_body_limit_error(error: crate::errors::AppError, max_body_size: usize) {
+        let response = error.into_response();
+        assert_eq!(response.status(), StatusCode::PAYLOAD_TOO_LARGE);
+        let body = to_bytes(response.into_body(), 4096).await.unwrap();
+        let payload: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(payload["error"], "request_body_too_large");
+        assert_eq!(payload["error_code"], 11700);
+        assert!(
+            payload["message"]
+                .as_str()
+                .is_some_and(|message| message.contains(&max_body_size.to_string()))
+        );
+    }
+
+    #[tokio::test]
+    async fn proxy_body_reader_accepts_body_above_global_default_below_proxy_limit() {
+        let body_size = 1024 * 1024 + 1;
+        let request = Request::new(Body::from(vec![b'x'; body_size]));
+
+        let body = read_proxy_request_body(request, 2 * 1024 * 1024)
+            .await
+            .expect("proxy limit, not the app-wide default, controls raw proxy bodies");
+
+        assert_eq!(body.len(), body_size);
+    }
+
+    #[tokio::test]
+    async fn proxy_body_reader_returns_structured_413_for_fixed_oversize_body() {
+        let max_body_size = 1024;
+        let request = Request::new(Body::from(vec![b'x'; max_body_size + 1]));
+
+        let error = read_proxy_request_body(request, max_body_size)
+            .await
+            .expect_err("oversize proxy body must fail");
+
+        assert_body_limit_error(error, max_body_size).await;
+    }
+
+    #[tokio::test]
+    async fn proxy_body_reader_returns_structured_413_for_chunked_oversize_body() {
+        let max_body_size = 1024;
+        let chunks = futures::stream::iter([
+            Ok::<_, std::convert::Infallible>(bytes::Bytes::from(vec![b'x'; 768])),
+            Ok::<_, std::convert::Infallible>(bytes::Bytes::from(vec![b'y'; 768])),
+        ]);
+        let request = Request::new(Body::from_stream(chunks));
+
+        let error = read_proxy_request_body(request, max_body_size)
+            .await
+            .expect_err("chunked oversize proxy body must fail");
+
+        assert_body_limit_error(error, max_body_size).await;
+    }
 
     // ---- validate_range_header tests ----
 
@@ -10151,10 +10203,7 @@ mod proxy_resolution_integration_tests {
             None,
         )
         .unwrap();
-        let (_, private) = crate::routes::build_router(
-            state.config.proxy_max_body_size,
-            state.config.public_proxy_max_body_size,
-        );
+        let (_, private) = crate::routes::build_router();
         let private = private.with_state(state.clone());
         for (method, uri) in [
             (Method::POST, "/api/v1/assistant/workflow-chat"),
@@ -10881,10 +10930,7 @@ mod proxy_resolution_integration_tests {
             None,
         )
         .unwrap();
-        let (_, private) = crate::routes::build_router(
-            state.config.proxy_max_body_size,
-            state.config.public_proxy_max_body_size,
-        );
+        let (_, private) = crate::routes::build_router();
         let app = private.with_state(state);
 
         for (method, path) in [

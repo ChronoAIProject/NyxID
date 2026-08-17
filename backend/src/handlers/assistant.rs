@@ -978,11 +978,9 @@ pub async fn typed_chat(
     request: Request<Body>,
 ) -> AppResult<Response> {
     let (mut parts, body) = request.into_parts();
-    let bytes = to_bytes(body, MAX_ASSISTANT_CHAT_REQUEST_BYTES)
-        .await
-        .map_err(|_| {
-            AppError::BadRequest("Assistant chat request body is too large.".to_string())
-        })?;
+    let bytes =
+        super::body_limit::read_body(body, MAX_ASSISTANT_CHAT_REQUEST_BYTES, "Assistant chat")
+            .await?;
     let command = assistant_service::parse_assistant_chat_command(&bytes)?;
     let prepared = assistant_service::prepare_assistant_chat_command(&command)?;
     let payload = serde_json::to_vec(&prepared.body).map_err(|_| {
