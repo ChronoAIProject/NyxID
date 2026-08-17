@@ -346,12 +346,19 @@ For development, Mailpit is provided via Docker Compose (SMTP on `localhost:1025
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `PROXY_MAX_BODY_SIZE` | `104857600` | Maximum request body size for proxy routes in bytes (100 MB) |
-| `PUBLIC_PROXY_MAX_BODY_SIZE` | `1048576` | Maximum request body size for anonymous public proxy and public MCP routes in bytes (1 MB). |
+| `PROXY_MAX_BODY_SIZE` | `104857600` | Maximum request body size for authenticated proxy and MCP routes in bytes (100 MiB). Direct and node-routed proxy requests share this raw-body cap; upgraded node agents advertise their capacity, while legacy agents are limited to 11 MiB because their WebSocket frame cap predates capacity negotiation. |
+| `LLM_MAX_BODY_SIZE` | `10485760` | Maximum request body size for `/api/v1/llm/*` provider and gateway routes in bytes (10 MiB). |
+| `PUBLIC_PROXY_MAX_BODY_SIZE` | `1048576` | Maximum request body size for anonymous public proxy and public MCP routes in bytes (1 MiB). |
 | `PUBLIC_PROXY_RATE_LIMIT_PER_MINUTE` | `60` | Dedicated per-IP rate limit for `/public/s/{slug}/{path}` anonymous proxy requests. Honors `TRUSTED_PROXY_IPS` before trusting forwarded client IP headers. |
 | `PUBLIC_MCP_RATE_LIMIT_PER_MINUTE` | `30` | Dedicated per-IP rate limit for `POST /public/mcp` anonymous MCP discovery requests. Honors `TRUSTED_PROXY_IPS` before trusting forwarded client IP headers. |
 | `PROXY_STREAM_IDLE_TIMEOUT_SECS` | `60` | Terminate a streamed proxy response if no chunk arrives within N seconds |
 | `WS_PASSTHROUGH_MAX_CONNECTIONS` | `200` | Maximum concurrent WebSocket passthrough connections |
+
+Other forwarding surfaces remain intentionally fixed and bounded: assistant direct/chat
+requests are capped at 256 KiB, SSH exec JSON requests at 64 KiB, and Oracle consumer
+and worker payloads at 16 MiB. Ordinary API JSON extractors retain the app-wide 1 MiB cap.
+All manual forwarding limits return the structured `request_body_too_large` error (HTTP
+413, code 11700) and state the effective byte limit.
 
 ## SSH Tunneling (Optional)
 

@@ -44,6 +44,7 @@ Strict separation: `handlers/` -> `services/` -> `models/`
 - 11300-11305 connect links: 11300 `ConnectLinkNotFound`, 11301 `ConnectLinkExpired`, 11302 `ConnectLinkAlreadyCompleted`, 11303 `ConnectLinkCancelled`, 11304 `ConnectLinkRateLimited`, 11305 `ConnectLinkCompletionInProgress`
 - 11500 `GrantCascadeConfirmationRequired` (HTTP 409)
 - 11600-11606 triggers: 11600 `TriggerNotFound`, 11601 `TriggerSecretInvalid`, 11602 `TriggerRateLimited`, 11603 `TriggerPayloadTooLarge`, 11604 `TriggerDeliveryUnsupported`, 11605 `TriggerDeliveryFailed`, 11606 `TriggerDeliveryRecordNotFound`
+- 11700 `RequestBodyTooLarge` (HTTP 413): a bounded proxy or forwarding ingress exceeded its configured byte limit
 
 ### 4. Frontend Patterns
 
@@ -387,6 +388,9 @@ NODE_MAX_PER_USER=10
 NODE_MAX_WS_CONNECTIONS=100
 NODE_MAX_STREAM_DURATION_SECS=300
 NODE_HMAC_SIGNING_ENABLED=true
+PROXY_MAX_BODY_SIZE=104857600       # Authenticated proxy + MCP raw bodies; direct and node-routed
+LLM_MAX_BODY_SIZE=10485760          # /api/v1/llm provider + gateway bodies
+PUBLIC_PROXY_MAX_BODY_SIZE=1048576  # Anonymous public proxy + public MCP bodies
 WS_PASSTHROUGH_MAX_CONNECTIONS=200
 
 # HTTP Event Gateway (NyxID#221, ADR-013)
