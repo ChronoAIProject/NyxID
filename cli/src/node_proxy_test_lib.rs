@@ -40,7 +40,10 @@ pub fn no_auth_credentials(service_slug: &str, target_url: &str) -> error::Resul
         config::CredentialConfig::new_no_auth(Some(target_url.to_string())),
     );
     let config = config::NodeConfig {
-        server: config::ServerConfig { url: String::new() },
+        server: config::ServerConfig {
+            url: String::new(),
+            proxy_max_body_size: config::DEFAULT_NODE_PROXY_MAX_BODY_SIZE,
+        },
         node: config::NodeSection {
             id: "test-node".to_string(),
             auth_token_encrypted: String::new(),

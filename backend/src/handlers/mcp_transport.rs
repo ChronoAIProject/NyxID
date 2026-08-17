@@ -1,8 +1,9 @@
 use std::convert::Infallible;
 use std::time::Duration;
 
+use axum::body::Body;
 use axum::extract::{Extension, State};
-use axum::http::{HeaderMap, StatusCode};
+use axum::http::{HeaderMap, Request, StatusCode};
 use axum::response::sse::{Event, KeepAlive, Sse};
 use axum::response::{IntoResponse, Response};
 use mongodb::bson::doc;
@@ -696,11 +697,21 @@ pub async fn mcp_post(
     Extension(billing_route_policy): Extension<
         crate::services::billing::route_inventory::BillingRoutePolicy,
     >,
-    headers: HeaderMap,
-    body: String,
+    request: Request<Body>,
 ) -> Response {
+    let headers = request.headers().clone();
+    let body = match super::body_limit::read_request_body(
+        request,
+        state.config.proxy_max_body_size,
+        "MCP",
+    )
+    .await
+    {
+        Ok(body) => body,
+        Err(error) => return error.into_response(),
+    };
     // Manual JSON parse for proper JSON-RPC error on malformed input
-    let request: JsonRpcRequest = match serde_json::from_str(&body) {
+    let request: JsonRpcRequest = match serde_json::from_slice(&body) {
         Ok(r) => r,
         Err(_) => return rpc_error(None, -32700, "Parse error"),
     };
@@ -800,6 +811,11 @@ fn app_error_to_rpc(id: Option<serde_json::Value>, err: &crate::errors::AppError
     match err {
         AppError::RateLimited => rpc_error(id, -32005, "Rate limit exceeded"),
         AppError::ApiKeyScopeForbidden(msg) => rpc_scope_forbidden(id, msg),
+        AppError::RequestBodyTooLarge { max_bytes, context } => AppError::RequestBodyTooLarge {
+            max_bytes: *max_bytes,
+            context: context.clone(),
+        }
+        .into_response(),
         _ => rpc_error(id, -32603, "Internal error"),
     }
 }
@@ -1383,6 +1399,9 @@ async fn handle_tools_call(
         Err(crate::errors::AppError::ApiKeyScopeForbidden(msg)) => {
             return tool_result(request.id.clone(), &msg, true);
         }
+        Err(error @ crate::errors::AppError::RequestBodyTooLarge { .. }) => {
+            return app_error_to_rpc(request.id.clone(), &error);
+        }
         Err(e) => {
             tracing::warn!("Tool execution failed for {tool_name}: {e}");
             return tool_result(
@@ -1731,6 +1750,9 @@ async fn handle_meta_call_tool(
         Ok(r) => r,
         Err(crate::errors::AppError::ApiKeyScopeForbidden(msg)) => {
             return tool_result(request_id, &msg, true);
+        }
+        Err(error @ crate::errors::AppError::RequestBodyTooLarge { .. }) => {
+            return app_error_to_rpc(request_id, &error);
         }
         Err(e) => {
             tracing::warn!("Tool execution failed for {tool_name}: {e}");
@@ -3992,6 +4014,18 @@ mod tests {
     fn app_error_to_rpc_handles_generic_error() {
         let resp = app_error_to_rpc(None, &crate::errors::AppError::Internal("unknown".into()));
         assert_eq!(resp.status(), StatusCode::OK);
+    }
+
+    #[test]
+    fn app_error_to_rpc_preserves_request_body_413() {
+        let resp = app_error_to_rpc(
+            Some(serde_json::json!(3)),
+            &crate::errors::AppError::RequestBodyTooLarge {
+                max_bytes: 4096,
+                context: "Node proxy".to_string(),
+            },
+        );
+        assert_eq!(resp.status(), StatusCode::PAYLOAD_TOO_LARGE);
     }
 
     // -----------------------------------------------------------------------

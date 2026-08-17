@@ -75,6 +75,30 @@ const SSH_CONNECT_TIMEOUT_SECS: u64 = 10;
 const SSH_SHUTDOWN_DRAIN_TIMEOUT_SECS: u64 = 5;
 const AGENT_SHUTDOWN_TIMEOUT_SECS: u64 = 30;
 const WS_WRITE_CHANNEL_SIZE: usize = 256;
+/// A proxy request is sent as one JSON text frame with a base64 body. Reserve
+/// bounded room for request metadata and the largest accepted HTTP headers.
+const NODE_PROXY_MESSAGE_OVERHEAD_BYTES: usize = 1024 * 1024;
+
+fn node_proxy_message_size_limit(raw_body_limit: usize) -> usize {
+    let encoded_body_limit = (raw_body_limit / 3).saturating_mul(4).saturating_add(
+        if raw_body_limit.is_multiple_of(3) {
+            0
+        } else {
+            4
+        },
+    );
+    encoded_body_limit.saturating_add(NODE_PROXY_MESSAGE_OVERHEAD_BYTES)
+}
+
+fn node_control_ws_config(
+    raw_body_limit: usize,
+) -> tokio_tungstenite::tungstenite::protocol::WebSocketConfig {
+    let mut config = tokio_tungstenite::tungstenite::protocol::WebSocketConfig::default();
+    let message_limit = node_proxy_message_size_limit(raw_body_limit);
+    config.max_message_size = Some(message_limit);
+    config.max_frame_size = Some(message_limit);
+    config
+}
 /// Multiplier applied to the advertised server heartbeat interval to compute
 /// the idle watchdog: we allow ~3 missed pings before declaring the socket
 /// dead. For the default 30s interval this yields 90s, matching the prior
@@ -801,7 +825,9 @@ async fn connect_and_serve(
     mut shutdown: watch::Receiver<bool>,
 ) -> Result<()> {
     // 1. Connect
-    let connect = tokio_tungstenite::connect_async(&config.server.url);
+    let ws_config = node_control_ws_config(config.server.proxy_max_body_size);
+    let connect =
+        tokio_tungstenite::connect_async_with_config(&config.server.url, Some(ws_config), false);
     tokio::pin!(connect);
     let (ws_stream, _) = tokio::select! {
         result = &mut connect => {
@@ -922,6 +948,10 @@ async fn connect_and_serve(
     capabilities.insert(
         rci_crypto::REMOTE_CREDENTIAL_CRYPTO_CAPABILITY.to_string(),
         true.into(),
+    );
+    capabilities.insert(
+        "proxy_max_body_size".to_string(),
+        config.server.proxy_max_body_size.into(),
     );
     let caps_msg = serde_json::json!({
         "type": "status_update",
@@ -4167,6 +4197,20 @@ mod tests {
 
     type CapturedTwilioRequest = (Option<String>, Option<String>, Vec<u8>);
     type TwilioCaptureSender = mpsc::UnboundedSender<CapturedTwilioRequest>;
+
+    #[test]
+    fn node_control_ws_config_carries_configured_raw_proxy_body() {
+        let raw_limit = 100 * 1024 * 1024;
+        let config = node_control_ws_config(raw_limit);
+        let required = raw_limit.div_ceil(3) * 4 + NODE_PROXY_MESSAGE_OVERHEAD_BYTES;
+
+        assert!(
+            config
+                .max_message_size
+                .is_some_and(|limit| limit >= required)
+        );
+        assert!(config.max_frame_size.is_some_and(|limit| limit >= required));
+    }
 
     /// Unwrap a NodeWsMessage::Text variant, panicking if it's Binary.
     fn unwrap_text(msg: NodeWsMessage) -> String {

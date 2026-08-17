@@ -1,7 +1,8 @@
 use axum::{
     Json,
+    body::Body,
     extract::{ConnectInfo, Extension, Path, State},
-    http::HeaderMap,
+    http::Request,
 };
 use serde::{Deserialize, Serialize};
 use utoipa::ToSchema;
@@ -31,6 +32,9 @@ const MAX_TIMEOUT_SECS: u32 = 300;
 
 /// Maximum bytes captured per output stream (stdout / stderr).
 const MAX_OUTPUT_BYTES: usize = 1_048_576; // 1 MB
+
+/// SSH exec accepts an 8 KiB command plus its small JSON envelope.
+const MAX_SSH_EXEC_REQUEST_BYTES: usize = 64 * 1024;
 
 /// Commands (or fragments) that are unconditionally blocked.
 const DANGEROUS_COMMANDS: &[&str] = &[
@@ -86,6 +90,7 @@ pub struct SshExecResponse {
     responses(
         (status = 200, description = "Command execution result", body = SshExecResponse),
         (status = 400, description = "Validation error", body = crate::errors::ErrorResponse),
+        (status = 413, description = "Request body too large", body = crate::errors::ErrorResponse),
         (status = 403, description = "Forbidden", body = crate::errors::ErrorResponse),
         (status = 404, description = "SSH service not found", body = crate::errors::ErrorResponse)
     ),
@@ -101,9 +106,15 @@ pub async fn ssh_exec(
     tele: TelemetryContext,
     Path(service_id): Path<String>,
     ConnectInfo(addr): ConnectInfo<std::net::SocketAddr>,
-    headers: HeaderMap,
-    Json(body): Json<SshExecRequest>,
+    request: Request<Body>,
 ) -> AppResult<Json<SshExecResponse>> {
+    let headers = request.headers().clone();
+    let body_bytes =
+        super::body_limit::read_request_body(request, MAX_SSH_EXEC_REQUEST_BYTES, "SSH exec")
+            .await?;
+    let body: SshExecRequest = serde_json::from_slice(&body_bytes)
+        .map_err(|error| AppError::BadRequest(format!("Invalid SSH exec request: {error}")))?;
+
     let billing_egress_permit =
         crate::services::billing::route_inventory::enforce_billing_egress_classification(
             Some(billing_route_policy),

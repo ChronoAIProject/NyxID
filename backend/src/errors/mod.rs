@@ -67,6 +67,9 @@ pub enum AppError {
     #[error("Bad request: {0}")]
     BadRequest(String),
 
+    #[error("{context} request body exceeds the configured limit of {max_bytes} bytes")]
+    RequestBodyTooLarge { max_bytes: usize, context: String },
+
     #[error("Unauthorized: {0}")]
     Unauthorized(String),
 
@@ -523,6 +526,7 @@ impl AppError {
     fn status_code(&self) -> StatusCode {
         match self {
             Self::BadRequest(_) | Self::ValidationError(_) => StatusCode::BAD_REQUEST,
+            Self::RequestBodyTooLarge { .. } => StatusCode::PAYLOAD_TOO_LARGE,
             Self::Unauthorized(_) | Self::AuthenticationFailed(_) | Self::TokenExpired => {
                 StatusCode::UNAUTHORIZED
             }
@@ -673,6 +677,7 @@ impl AppError {
     pub(crate) fn error_code(&self) -> u32 {
         match self {
             Self::BadRequest(_) => 1000,
+            Self::RequestBodyTooLarge { .. } => 11700,
             Self::Unauthorized(_) => 1001,
             Self::Forbidden(_) => 1002,
             Self::NotFound(_) => 1003,
@@ -863,6 +868,7 @@ impl AppError {
     pub(crate) fn error_key(&self) -> &str {
         match self {
             Self::BadRequest(_) => "bad_request",
+            Self::RequestBodyTooLarge { .. } => "request_body_too_large",
             Self::Unauthorized(_) => "unauthorized",
             Self::Forbidden(_) => "forbidden",
             Self::NotFound(_) => "not_found",
@@ -1101,6 +1107,22 @@ mod tests {
     use super::*;
     use axum::body::to_bytes;
     use serde_json::Value;
+
+    #[tokio::test]
+    async fn request_body_too_large_has_structured_413_contract() {
+        let response = AppError::RequestBodyTooLarge {
+            max_bytes: 2048,
+            context: "Proxy".to_string(),
+        }
+        .into_response();
+
+        assert_eq!(response.status(), StatusCode::PAYLOAD_TOO_LARGE);
+        let body = to_bytes(response.into_body(), 4096).await.unwrap();
+        let payload: Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(payload["error"], "request_body_too_large");
+        assert_eq!(payload["error_code"], 11700);
+        assert!(payload["message"].as_str().unwrap().contains("2048 bytes"));
+    }
 
     #[test]
     fn status_codes() {
@@ -1384,6 +1406,11 @@ mod tests {
     fn error_codes_unique() {
         let codes = vec![
             AppError::BadRequest("".into()).error_code(),
+            AppError::RequestBodyTooLarge {
+                max_bytes: 0,
+                context: String::new(),
+            }
+            .error_code(),
             AppError::Unauthorized("".into()).error_code(),
             AppError::Forbidden("".into()).error_code(),
             AppError::NotFound("".into()).error_code(),

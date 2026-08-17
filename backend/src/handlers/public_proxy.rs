@@ -163,9 +163,7 @@ fn public_proxy_target(mut service: DownstreamService) -> proxy_service::ProxyTa
 }
 
 async fn read_public_body(request: Request<Body>, max_body_size: usize) -> AppResult<Bytes> {
-    axum::body::to_bytes(request.into_body(), max_body_size)
-        .await
-        .map_err(|_| AppError::BadRequest("Public request body is too large".to_string()))
+    super::body_limit::read_request_body(request, max_body_size, "Public proxy").await
 }
 
 fn reqwest_headers(headers: HeaderMap) -> AppResult<reqwest::header::HeaderMap> {

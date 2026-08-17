@@ -2106,10 +2106,7 @@ mod tests {
     }
 
     fn api_app_preserving_config(state: AppState) -> axum::Router {
-        let (_, private) = crate::routes::build_router(
-            state.config.proxy_max_body_size,
-            state.config.public_proxy_max_body_size,
-        );
+        let (_, private) = crate::routes::build_router();
         private.with_state(state)
     }
 
@@ -5680,6 +5677,7 @@ mod tests {
             capabilities: NodeCapabilitiesFlags {
                 credential_ack_correlation: true,
                 remote_credential_crypto_v1: true,
+                proxy_max_body_size: Some(100 * 1024 * 1024),
             },
             capabilities_resolved: true,
             dispatch: NodeDispatchInfo {

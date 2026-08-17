@@ -1958,10 +1958,7 @@ mod tests {
             Some("proxy:* account:read")
         );
 
-        let (_, private) = crate::routes::build_router(
-            state.config.proxy_max_body_size,
-            state.config.public_proxy_max_body_size,
-        );
+        let (_, private) = crate::routes::build_router();
         let response = private
             .with_state(state)
             .oneshot(
@@ -2504,10 +2501,7 @@ mod tests {
             None,
         )
         .unwrap();
-        let (_, private) = crate::routes::build_router(
-            state.config.proxy_max_body_size,
-            state.config.public_proxy_max_body_size,
-        );
+        let (_, private) = crate::routes::build_router();
         let app = private.with_state(state);
 
         let response_paths = vec![

@@ -822,8 +822,13 @@ pub async fn ws_handler(
         .get(axum::http::header::USER_AGENT)
         .and_then(|v| v.to_str().ok())
         .map(String::from);
+    let control_message_limit = crate::services::node_ws_manager::node_proxy_ws_message_size_limit(
+        state.config.proxy_max_body_size,
+    );
 
-    ws.on_upgrade(move |socket| handle_node_connection(state, socket, guard, ip, ua))
+    ws.max_message_size(control_message_limit)
+        .max_frame_size(control_message_limit)
+        .on_upgrade(move |socket| handle_node_connection(state, socket, guard, ip, ua))
         .into_response()
 }
 
@@ -3012,7 +3017,8 @@ mod tests {
             "type": "status_update",
             "capabilities": {
                 "credential_ack_correlation": true,
-                "remote_credential_crypto_v1": true
+                "remote_credential_crypto_v1": true,
+                "proxy_max_body_size": 104857600
             }
         }"#;
         let msg: NodeMessage = serde_json::from_str(json).unwrap();
@@ -3023,6 +3029,7 @@ mod tests {
             } => {
                 assert!(capabilities.credential_ack_correlation);
                 assert!(capabilities.remote_credential_crypto_v1);
+                assert_eq!(capabilities.proxy_max_body_size, Some(104_857_600));
             }
             _ => panic!("expected StatusUpdate with capabilities"),
         }

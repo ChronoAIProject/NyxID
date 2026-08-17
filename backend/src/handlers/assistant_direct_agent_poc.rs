@@ -3,7 +3,9 @@
 use std::convert::Infallible;
 use std::time::Duration;
 
-use axum::body::{Body, to_bytes};
+use axum::body::Body;
+#[cfg(test)]
+use axum::body::to_bytes;
 use axum::extract::State;
 use axum::http::{HeaderValue, Request, Response, header};
 use bytes::Bytes;
@@ -51,9 +53,12 @@ pub async fn agent_completions(
         .try_acquire(&auth_user.user_id.to_string())?;
 
     let (_, body) = request.into_parts();
-    let bytes = to_bytes(body, assistant_direct::MAX_DIRECT_REQUEST_BYTES)
-        .await
-        .map_err(|_| AppError::BadRequest("Direct chat request body is too large.".to_string()))?;
+    let bytes = super::body_limit::read_body(
+        body,
+        assistant_direct::MAX_DIRECT_REQUEST_BYTES,
+        "Direct agent chat",
+    )
+    .await?;
     let direct_request = assistant_direct::validate_direct_request(&bytes)?;
     let content_bytes = direct_request
         .messages

@@ -4043,9 +4043,7 @@ async fn read_proxy_request_body(
     request: Request<Body>,
     max_body_size: usize,
 ) -> AppResult<bytes::Bytes> {
-    axum::body::to_bytes(request.into_body(), max_body_size)
-        .await
-        .map_err(|e| AppError::BadRequest(format!("Failed to read body: {e}")))
+    super::body_limit::read_request_body(request, max_body_size, "Proxy").await
 }
 
 fn is_codex_transport_path(path: &str) -> bool {
@@ -10205,10 +10203,7 @@ mod proxy_resolution_integration_tests {
             None,
         )
         .unwrap();
-        let (_, private) = crate::routes::build_router(
-            state.config.proxy_max_body_size,
-            state.config.public_proxy_max_body_size,
-        );
+        let (_, private) = crate::routes::build_router();
         let private = private.with_state(state.clone());
         for (method, uri) in [
             (Method::POST, "/api/v1/assistant/workflow-chat"),
@@ -10935,10 +10930,7 @@ mod proxy_resolution_integration_tests {
             None,
         )
         .unwrap();
-        let (_, private) = crate::routes::build_router(
-            state.config.proxy_max_body_size,
-            state.config.public_proxy_max_body_size,
-        );
+        let (_, private) = crate::routes::build_router();
         let app = private.with_state(state);
 
         for (method, path) in [

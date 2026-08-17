@@ -505,10 +505,7 @@ mod tests {
     #[tokio::test]
     async fn assistant_actions_route_is_public_json_and_matches_static_body() {
         let state = crate::test_utils::test_app_state_no_db().await;
-        let (_, private_api) = crate::routes::build_router(
-            1024 * 1024,
-            crate::services::anonymous_endpoint_service::DEFAULT_PUBLIC_PROXY_MAX_BODY_SIZE,
-        );
+        let (_, private_api) = crate::routes::build_router();
 
         let response = private_api
             .with_state(state)

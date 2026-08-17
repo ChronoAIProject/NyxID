@@ -262,6 +262,8 @@ pub struct AppConfig {
     // Proxy streaming
     /// Maximum request body size for proxy routes in bytes (default: 100 MB)
     pub proxy_max_body_size: usize,
+    /// Maximum request body size for LLM gateway routes in bytes (default: 10 MiB)
+    pub llm_max_body_size: usize,
     /// Idle timeout for proxy streaming responses in seconds (default: 60).
     /// Stream is terminated if no data chunk arrives within this duration.
     pub proxy_stream_idle_timeout_secs: u64,
@@ -569,6 +571,7 @@ impl std::fmt::Debug for AppConfig {
             )
             .field("node_hmac_signing_enabled", &self.node_hmac_signing_enabled)
             .field("proxy_max_body_size", &self.proxy_max_body_size)
+            .field("llm_max_body_size", &self.llm_max_body_size)
             .field(
                 "proxy_stream_idle_timeout_secs",
                 &self.proxy_stream_idle_timeout_secs,
@@ -996,6 +999,10 @@ impl AppConfig {
                 .ok()
                 .and_then(|v| v.parse().ok())
                 .unwrap_or(100 * 1024 * 1024),
+            llm_max_body_size: env::var("LLM_MAX_BODY_SIZE")
+                .ok()
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(10 * 1024 * 1024),
             proxy_stream_idle_timeout_secs: env::var("PROXY_STREAM_IDLE_TIMEOUT_SECS")
                 .ok()
                 .and_then(|v| v.parse().ok())
@@ -1481,6 +1488,7 @@ mod tests {
             node_max_stream_duration_secs: 300,
             node_hmac_signing_enabled: true,
             proxy_max_body_size: 100 * 1024 * 1024,
+            llm_max_body_size: 10 * 1024 * 1024,
             proxy_stream_idle_timeout_secs: 60,
             ssh_max_sessions_per_user: 4,
             ssh_connect_timeout_secs: 10,
@@ -1539,6 +1547,16 @@ mod tests {
         assert!(cfg.is_development());
         let cfg2 = make_config("http://localhost:3001", "dev", "aa".repeat(32).as_str());
         assert!(cfg2.is_development());
+    }
+
+    #[test]
+    fn llm_body_limit_defaults_to_ten_mib() {
+        let cfg = make_config(
+            "http://localhost:3001",
+            "development",
+            "aa".repeat(32).as_str(),
+        );
+        assert_eq!(cfg.llm_max_body_size, 10 * 1024 * 1024);
     }
 
     #[test]

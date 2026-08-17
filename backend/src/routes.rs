@@ -6,7 +6,6 @@ use axum::{
     routing::{delete, get, patch, post, put},
 };
 use tower_http::cors::{AllowHeaders, AllowMethods, AllowOrigin, CorsLayer};
-use tower_http::limit::RequestBodyLimitLayer;
 
 use crate::AppState;
 use crate::handlers;
@@ -434,10 +433,7 @@ fn oauth_public_cors() -> CorsLayer {
 /// The caller must attach separate CORS layers to each before merging.
 /// Public OAuth endpoints allow any origin (per RFC 9207) while private
 /// API endpoints restrict origin to FRONTEND_URL.
-pub fn build_router(
-    proxy_max_body_size: usize,
-    public_proxy_max_body_size: usize,
-) -> (Router<AppState>, Router<AppState>) {
+pub fn build_router() -> (Router<AppState>, Router<AppState>) {
     let mfa_routes = Router::new()
         .route("/setup", post(handlers::mfa::setup))
         .route("/confirm", post(handlers::mfa::confirm))
@@ -1345,17 +1341,17 @@ pub fn build_router(
             post(handlers::developer_apps::rotate_connection_webhook_secret),
         );
 
-    // Proxy pass-through routes allow larger request bodies than the rest of the API.
-    // Use RequestBodyLimitLayer so manual Request<Body> handlers are also protected.
+    // Raw proxy handlers enforce their configured limits while buffering. Disable
+    // the app-wide extractor cap so it cannot preempt them with an opaque 413.
     let proxy_passthrough_routes = proxy_billing_routes!(register_billing_routes, Router::new())
-        .layer(RequestBodyLimitLayer::new(proxy_max_body_size));
+        .layer(DefaultBodyLimit::disable());
 
     let public_passthrough_routes =
         public_proxy_billing_routes!(register_billing_routes, Router::new())
-            .layer(RequestBodyLimitLayer::new(public_proxy_max_body_size));
+            .layer(DefaultBodyLimit::disable());
 
-    // LLM gateway routes get a moderate limit (10 MB for LLM payloads).
-    let llm_routes = llm_routes.layer(RequestBodyLimitLayer::new(10 * 1024 * 1024));
+    // LLM handlers enforce LLM_MAX_BODY_SIZE while buffering.
+    let llm_routes = llm_routes.layer(DefaultBodyLimit::disable());
 
     // Public API routes that expose non-sensitive runtime metadata.
     let device_code_public_routes = Router::new()
@@ -1675,8 +1671,13 @@ pub fn build_router(
         // Connection limiting: NodeWsManager enforces max concurrent connections.
         .route("/api/v1/nodes/ws", get(handlers::node_ws::ws_handler));
 
-    let private = mcp_billing_routes!(register_billing_routes, private);
-    let private = public_mcp_billing_routes!(register_billing_routes, private);
+    // MCP payloads may contain proxied tool inputs. The handlers retain explicit
+    // PROXY_MAX_BODY_SIZE / PUBLIC_PROXY_MAX_BODY_SIZE bounds.
+    let mcp_transport_routes = mcp_billing_routes!(register_billing_routes, Router::new())
+        .layer(DefaultBodyLimit::disable());
+    let public_mcp_routes = public_mcp_billing_routes!(register_billing_routes, Router::new())
+        .layer(DefaultBodyLimit::disable());
+    let private = private.merge(mcp_transport_routes).merge(public_mcp_routes);
 
     (public_oauth, private)
 }

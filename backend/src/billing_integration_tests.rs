@@ -339,10 +339,7 @@ async fn billing_route_coverage_smoke() {
 
     let state = billing_route_state(db.clone(), lago, 100);
     let token = route_access_token(&state, &owner_id);
-    let (_, private) = crate::routes::build_router(
-        state.config.proxy_max_body_size,
-        state.config.public_proxy_max_body_size,
-    );
+    let (_, private) = crate::routes::build_router();
     let app = private.with_state(state.clone());
 
     let direct_body = serde_json::json!({
@@ -1267,10 +1264,7 @@ async fn buffered_route_preserves_success_when_settlement_failure_is_replayed() 
     .await;
     let state = billing_route_state(db.clone(), Arc::new(FakeLago::default()), 0);
     let token = route_access_token(&state, &owner_id);
-    let (_, private) = crate::routes::build_router(
-        state.config.proxy_max_body_size,
-        state.config.public_proxy_max_body_size,
-    );
+    let (_, private) = crate::routes::build_router();
     let app = private.with_state(state.clone());
 
     let route = tokio::spawn(async move {
@@ -1367,7 +1361,7 @@ async fn lago_webhook_signature_is_verified_at_the_mounted_route() {
     let mut config = test_app_config();
     config.lago_webhook_secret = Some(secret.to_string());
     let state = test_app_state_with_config(db, config);
-    let (_, private) = crate::routes::build_router(1024 * 1024, 1024 * 1024);
+    let (_, private) = crate::routes::build_router();
     let app = private.with_state(state);
     let body = br#"{"webhook_type":"integration.signature_probe"}"#;
 

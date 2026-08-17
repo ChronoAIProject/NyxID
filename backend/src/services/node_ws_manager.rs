@@ -14,6 +14,21 @@ const STREAM_BUFFER_CAPACITY: usize = 1024;
 const SSH_TUNNEL_BUFFER_CAPACITY: usize = 256;
 const WEB_TERMINAL_BUFFER_CAPACITY: usize = 256;
 const WS_PROXY_BUFFER_CAPACITY: usize = 512;
+/// Existing node agents use tungstenite's 16 MiB frame cap. With a one-frame
+/// base64 JSON request, 11 MiB is the largest conservative raw-body bound.
+const LEGACY_NODE_PROXY_MAX_BODY_SIZE: usize = 11 * 1024 * 1024;
+pub(crate) const NODE_PROXY_MESSAGE_OVERHEAD_BYTES: usize = 1024 * 1024;
+
+pub(crate) fn node_proxy_ws_message_size_limit(raw_body_limit: usize) -> usize {
+    let encoded_body_limit = (raw_body_limit / 3).saturating_mul(4).saturating_add(
+        if raw_body_limit.is_multiple_of(3) {
+            0
+        } else {
+            4
+        },
+    );
+    encoded_body_limit.saturating_add(NODE_PROXY_MESSAGE_OVERHEAD_BYTES)
+}
 
 /// Request sent to a node via WebSocket.
 #[derive(Clone)]
@@ -321,6 +336,7 @@ struct NodeConnection {
 pub struct NodeCapabilitiesFlags {
     pub credential_ack_correlation: bool,
     pub remote_credential_crypto_v1: bool,
+    pub proxy_max_body_size: Option<usize>,
 }
 
 /// Live dispatch state for a node WebSocket session on this backend process.
@@ -844,6 +860,9 @@ pub struct NodeCapabilitiesMsg {
     pub credential_ack_correlation: bool,
     #[serde(default)]
     pub remote_credential_crypto_v1: bool,
+    /// Maximum raw HTTP request body that fits through this node's control WS.
+    #[serde(default)]
+    pub proxy_max_body_size: Option<usize>,
 }
 
 pub struct PendingCredentialCiphertextParams<'a> {
@@ -1280,11 +1299,30 @@ impl NodeWsManager {
         signing_secret: Option<&[u8]>,
         _billing_egress_permit: crate::services::billing::route_inventory::BillingEgressPermit,
     ) -> Result<ProxyResponseType, NodeProxyFailure> {
+        let request_body_len = request.body.as_ref().map_or(0, Vec::len);
+        if request_body_len > LEGACY_NODE_PROXY_MAX_BODY_SIZE {
+            self.await_capability_resolution(node_id, std::time::Duration::from_millis(500))
+                .await;
+        }
         let conn = self.connections.get(node_id).ok_or_else(|| {
             NodeProxyFailure::before_dispatch(AppError::NodeOffline(format!(
                 "Node {node_id} is not connected"
             )))
         })?;
+        let node_body_limit = conn
+            .capabilities
+            .lock()
+            .ok()
+            .and_then(|capabilities| capabilities.proxy_max_body_size)
+            .unwrap_or(LEGACY_NODE_PROXY_MAX_BODY_SIZE);
+        if request_body_len > node_body_limit {
+            return Err(NodeProxyFailure::before_dispatch(
+                AppError::RequestBodyTooLarge {
+                    max_bytes: node_body_limit,
+                    context: "Node proxy".to_string(),
+                },
+            ));
+        }
         let request_id = request.request_id.clone();
 
         // Create oneshot channel for response correlation. The response may be a
@@ -1863,6 +1901,7 @@ impl NodeWsManager {
         {
             flags.credential_ack_correlation = caps.credential_ack_correlation;
             flags.remote_credential_crypto_v1 = caps.remote_credential_crypto_v1;
+            flags.proxy_max_body_size = caps.proxy_max_body_size;
         }
     }
 
@@ -3270,6 +3309,100 @@ mod tests {
     }
 
     #[test]
+    fn node_proxy_ws_limit_accounts_for_base64_and_envelope_overhead() {
+        let raw_limit: usize = 100 * 1024 * 1024;
+        let base64_len = raw_limit.div_ceil(3) * 4;
+
+        assert!(
+            node_proxy_ws_message_size_limit(raw_limit)
+                >= base64_len + NODE_PROXY_MESSAGE_OVERHEAD_BYTES
+        );
+    }
+
+    #[tokio::test]
+    async fn advertised_node_proxy_body_limit_rejects_before_dispatch() {
+        let mgr = NodeWsManager::new(30, 100);
+        let (tx, mut rx) = mpsc::channel(256);
+        mgr.register_connection("node-small", tx);
+        mgr.record_capabilities(
+            "node-small",
+            &NodeCapabilitiesMsg {
+                proxy_max_body_size: Some(4),
+                ..NodeCapabilitiesMsg::default()
+            },
+        );
+
+        let result = mgr
+            .send_proxy_request(
+                "node-small",
+                NodeProxyRequest {
+                    request_id: "request-1".to_string(),
+                    service_id: "service-1".to_string(),
+                    service_slug: "service".to_string(),
+                    base_url: "https://example.test".to_string(),
+                    method: "POST".to_string(),
+                    path: "/upload".to_string(),
+                    query: None,
+                    headers: vec![],
+                    body: Some(vec![0; 5]),
+                },
+                None,
+                billing_egress_permit(crate::services::billing::BillingIngress::Proxy),
+            )
+            .await;
+        let error = match result {
+            Err(error) => error,
+            Ok(_) => panic!("node body limit must reject before dispatch"),
+        };
+
+        assert!(matches!(
+            error,
+            AppError::RequestBodyTooLarge { max_bytes: 4, .. }
+        ));
+        assert!(rx.try_recv().is_err(), "oversize body must not be queued");
+    }
+
+    #[tokio::test]
+    async fn legacy_node_proxy_body_limit_rejects_before_dispatch() {
+        let mgr = NodeWsManager::new(30, 100);
+        let (tx, mut rx) = mpsc::channel(256);
+        mgr.register_connection("node-legacy", tx);
+        mgr.mark_status_update_received("node-legacy");
+
+        let result = mgr
+            .send_proxy_request(
+                "node-legacy",
+                NodeProxyRequest {
+                    request_id: "request-legacy".to_string(),
+                    service_id: "service-1".to_string(),
+                    service_slug: "service".to_string(),
+                    base_url: "https://example.test".to_string(),
+                    method: "POST".to_string(),
+                    path: "/upload".to_string(),
+                    query: None,
+                    headers: vec![],
+                    body: Some(vec![0; LEGACY_NODE_PROXY_MAX_BODY_SIZE + 1]),
+                },
+                None,
+                billing_egress_permit(crate::services::billing::BillingIngress::Proxy),
+            )
+            .await;
+        let error = match result {
+            Err(error) => error,
+            Ok(_) => panic!("legacy node body limit must reject before dispatch"),
+        };
+
+        assert!(matches!(
+            error,
+            AppError::RequestBodyTooLarge {
+                max_bytes: LEGACY_NODE_PROXY_MAX_BODY_SIZE,
+                ..
+            }
+        ));
+        assert!(rx.try_recv().is_err(), "oversize body must not be queued");
+    }
+
+    #[test]
     fn register_and_check_connected() {
         let mgr = NodeWsManager::new(30, 100);
         assert!(!mgr.is_connected("node-1"));
@@ -4128,6 +4261,7 @@ mod tests {
             &NodeCapabilitiesMsg {
                 credential_ack_correlation: true,
                 remote_credential_crypto_v1: true,
+                proxy_max_body_size: None,
             },
         );
         assert!(mgr.supports_credential_ack_correlation("node-cap"));
