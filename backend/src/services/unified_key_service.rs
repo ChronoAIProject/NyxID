@@ -3822,7 +3822,8 @@ fn parse_granted_scopes(raw: &str) -> Option<Vec<String>> {
     let scopes: Vec<String> = raw
         .split(|character: char| character == ',' || character.is_whitespace())
         .filter(|scope| !scope.is_empty())
-        .filter_map(|scope| seen.insert(scope).then(|| scope.to_string()))
+        .filter(|scope| seen.insert(*scope))
+        .map(str::to_string)
         .collect();
     (!scopes.is_empty()).then_some(scopes)
 }
