@@ -10,8 +10,8 @@ use crate::services::billing::route_inventory::{
     BillingIngress, BillingRoutePolicy, enforce_billing_egress_classification,
 };
 use crate::services::exact_service_approval_service::{
-    self, ExactServiceApprovalCaller, ExactServiceApprovalCreate, ExactServiceApprovalFence,
-    ExactServiceApprovalResult,
+    self, DELEGATED_REQUESTER_TYPE, ExactServiceApprovalCaller, ExactServiceApprovalCreate,
+    ExactServiceApprovalFence, ExactServiceApprovalResult,
 };
 
 pub async fn create_request(
@@ -75,7 +75,7 @@ fn caller(auth_user: &AuthUser) -> AppResult<ExactServiceApprovalCaller> {
                 })?,
             ),
             AuthMethod::Delegated => (
-                "delegated",
+                DELEGATED_REQUESTER_TYPE,
                 auth_user.acting_client_id.clone().ok_or_else(|| {
                     AppError::Unauthorized("delegated client identity missing".to_string())
                 })?,

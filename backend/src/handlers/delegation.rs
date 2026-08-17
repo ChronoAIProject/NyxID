@@ -961,8 +961,9 @@ mod tests {
         auth: &AuthUser,
         created: &crate::services::exact_service_approval_service::ExactServiceApprovalResult,
         fence: crate::services::exact_service_approval_service::ExactServiceApprovalFence,
-    ) -> AppResult<AxumJson<crate::services::exact_service_approval_service::ExactServiceApprovalResult>>
-    {
+    ) -> AppResult<
+        AxumJson<crate::services::exact_service_approval_service::ExactServiceApprovalResult>,
+    > {
         exact_service_approvals::redeem_request(
             State(state.clone()),
             Extension(
@@ -1001,6 +1002,8 @@ mod tests {
             "{} proxy",
             catalog_delegation_service::MCP_CATALOG_READ_SCOPE
         );
+        let requested_service_ids =
+            vec![TEST_SERVICE_A.to_string(), TEST_GENERIC_SERVICE.to_string()];
 
         db.collection(crate::models::user::COLLECTION_NAME)
             .insert_one(crate::test_utils::test_user(TEST_USER_ID, UserType::Person))
@@ -1018,7 +1021,7 @@ mod tests {
             TEST_USER_ID,
             actor_client_id,
             "openid",
-            Some(vec![TEST_SERVICE_A.to_string()]),
+            Some(requested_service_ids.clone()),
         )
         .await
         .expect("grant actor consent");
@@ -1027,7 +1030,7 @@ mod tests {
             TEST_USER_ID,
             receiver_client_id,
             "openid",
-            Some(vec![TEST_SERVICE_A.to_string()]),
+            Some(requested_service_ids.clone()),
         )
         .await
         .expect("grant receiver consent");
@@ -1061,32 +1064,48 @@ mod tests {
             .expect("serve local provider");
         });
         db.collection::<UserEndpoint>(USER_ENDPOINTS)
-            .update_one(
-                mongodb::bson::doc! { "_id": "00000000-0000-4000-8000-000000000201" },
+            .update_many(
+                mongodb::bson::doc! { "_id": { "$in": [
+                    "00000000-0000-4000-8000-000000000201",
+                    "00000000-0000-4000-8000-000000000203",
+                ] } },
                 mongodb::bson::doc! { "$set": { "url": format!("http://{provider_addr}") } },
             )
             .await
-            .expect("point user endpoint at local provider");
+            .expect("point typed and generic user endpoints at local provider");
 
         db.collection::<ServiceApprovalConfig>(
             crate::models::service_approval_config::COLLECTION_NAME,
         )
-        .insert_one(ServiceApprovalConfig {
-            id: Uuid::new_v4().to_string(),
-            user_id: TEST_USER_ID.to_string(),
-            service_id: "00000000-0000-4000-8000-000000000301".to_string(),
-            service_name: "Alpha Service".to_string(),
-            approval_required: true,
-            approval_mode: ApprovalMode::PerRequest,
-            rules: Vec::new(),
-            default_effect: None,
-            created_at: Utc::now(),
-            updated_at: Utc::now(),
-        })
+        .insert_many([
+            ServiceApprovalConfig {
+                id: Uuid::new_v4().to_string(),
+                user_id: TEST_USER_ID.to_string(),
+                service_id: "00000000-0000-4000-8000-000000000301".to_string(),
+                service_name: "Alpha Service".to_string(),
+                approval_required: true,
+                approval_mode: ApprovalMode::PerRequest,
+                rules: Vec::new(),
+                default_effect: None,
+                created_at: Utc::now(),
+                updated_at: Utc::now(),
+            },
+            ServiceApprovalConfig {
+                id: Uuid::new_v4().to_string(),
+                user_id: TEST_USER_ID.to_string(),
+                service_id: TEST_GENERIC_SERVICE.to_string(),
+                service_name: "Hidden Generic".to_string(),
+                approval_required: true,
+                approval_mode: ApprovalMode::PerRequest,
+                rules: Vec::new(),
+                default_effect: None,
+                created_at: Utc::now(),
+                updated_at: Utc::now(),
+            },
+        ])
         .await
         .expect("seed per-request approval config");
 
-        let requested_service_ids = vec![TEST_SERVICE_A.to_string()];
         let source_token = jwt::generate_oauth_access_token(
             &state.jwt_keys,
             &state.config,
@@ -1149,9 +1168,23 @@ mod tests {
             service.catalog_service_id.as_deref(),
             Some("00000000-0000-4000-8000-000000000301")
         );
+        assert!(
+            discovery
+                .services
+                .iter()
+                .all(|service| service.user_service_id != TEST_GENERIC_SERVICE),
+            "delegated discovery must keep the authorized generic target out of the exact view"
+        );
+        assert!(
+            delegated_auth
+                .allowed_service_ids
+                .iter()
+                .any(|service_id| service_id == TEST_GENERIC_SERVICE),
+            "the membership test must not be confounded by the service allowlist"
+        );
 
         let arguments = serde_json::json!({});
-        let allowed_service_ids = vec![TEST_SERVICE_A.to_string()];
+        let allowed_service_ids = requested_service_ids.clone();
         let live_catalog = mcp_service::load_operation_catalog(
             &db,
             state.node_ws_manager.as_ref(),
@@ -1174,6 +1207,141 @@ mod tests {
             .expect("operation remains in canonical catalog");
         let operation_digest =
             mcp_service::exact_operation_digest(TEST_SERVICE_A, live_endpoint, &arguments);
+
+        let generic_service = live_catalog
+            .services
+            .iter()
+            .find(|service| service.service_id == TEST_GENERIC_SERVICE)
+            .expect("authorized generic service remains in the unprojected catalog");
+        let generic_endpoint = generic_service
+            .endpoints
+            .iter()
+            .find(|endpoint| endpoint.endpoint_id == mcp_service::GENERIC_PROXY_ENDPOINT_ID)
+            .expect("generic proxy endpoint remains a valid unprojected selector");
+        let generic_arguments = serde_json::json!({"method": "GET", "path": "/items"});
+        let generic_operation_digest = mcp_service::exact_operation_digest(
+            TEST_GENERIC_SERVICE,
+            generic_endpoint,
+            &generic_arguments,
+        );
+        let generic_create = |exact_view_digest: Option<String>, idempotency_key: &str| {
+            crate::services::exact_service_approval_service::ExactServiceApprovalCreate {
+                user_service_id: TEST_GENERIC_SERVICE.to_string(),
+                endpoint_id: generic_endpoint.endpoint_id.clone(),
+                catalog_digest: discovery.catalog_digest.clone(),
+                exact_view_digest,
+                endpoint_contract_digest: mcp_service::endpoint_contract_digest(generic_endpoint),
+                operation_digest: generic_operation_digest.clone(),
+                operation_id: generic_endpoint.endpoint_id.clone(),
+                operation_generation: 1,
+                idempotency_key: idempotency_key.to_string(),
+                arguments: generic_arguments.clone(),
+            }
+        };
+
+        let approval_requests = db.collection::<crate::models::approval_request::ApprovalRequest>(
+            crate::models::approval_request::COLLECTION_NAME,
+        );
+        let rows_before = approval_requests
+            .count_documents(mongodb::bson::doc! {})
+            .await
+            .expect("count approvals before delegated hidden-target create");
+        let row_1_error = exact_service_approvals::create_request(
+            State(state.clone()),
+            delegated_auth.clone(),
+            AxumJson(generic_create(
+                Some(discovery.exact_view_digest.clone()),
+                "matrix-row-1-delegated-hidden",
+            )),
+        )
+        .await
+        .expect_err("delegated generic target must be outside the exact view");
+        assert!(matches!(
+            row_1_error,
+            AppError::NotFound(message) if message == "exact_operation_not_in_exact_view"
+        ));
+        assert_eq!(
+            approval_requests
+                .count_documents(mongodb::bson::doc! {})
+                .await
+                .expect("count approvals after delegated hidden-target create"),
+            rows_before,
+            "matrix row 1 must reject before creating an ApprovalRequest"
+        );
+
+        let mut access_token_auth = delegated_auth.clone();
+        access_token_auth.auth_method = AuthMethod::AccessToken;
+        access_token_auth.scope = "proxy".to_string();
+        access_token_auth.acting_client_id = None;
+        access_token_auth.token_jti = None;
+        let AxumJson(row_3_created) = exact_service_approvals::create_request(
+            State(state.clone()),
+            access_token_auth.clone(),
+            AxumJson(generic_create(None, "matrix-row-3-access-token-generic")),
+        )
+        .await
+        .expect("non-delegated generic target remains approvable");
+        assert_eq!(row_3_created.exact_view_digest, None);
+        let persisted_row_3 = approval_requests
+            .find_one(mongodb::bson::doc! { "_id": &row_3_created.request_id })
+            .await
+            .expect("load persisted generic approval")
+            .expect("generic approval row was persisted");
+        assert_eq!(
+            persisted_row_3
+                .exact_service
+                .and_then(|binding| binding.exact_view_digest),
+            None,
+            "matrix row 3 must not persist an unrelated exact-view fence"
+        );
+        approval_service::process_decision(
+            &db,
+            &state.config,
+            &state.http_client,
+            state.fcm_auth.clone(),
+            state.apns_auth.clone(),
+            &row_3_created.request_id,
+            true,
+            None,
+            None,
+            "integration",
+        )
+        .await
+        .expect("approve non-delegated generic request");
+        let AxumJson(row_3_redeemed) = redeem_exact(
+            &state,
+            &access_token_auth,
+            &row_3_created,
+            exact_fence(&row_3_created),
+        )
+        .await
+        .expect("matrix row 3: non-delegated generic request redeems");
+        assert_eq!(
+            row_3_redeemed.state,
+            crate::services::exact_service_approval_service::ExactServiceApprovalState::Redeemed
+        );
+        assert_eq!(
+            row_3_redeemed
+                .receipt
+                .as_ref()
+                .map(|receipt| receipt.http_status),
+            Some(200)
+        );
+
+        let row_4_error = exact_service_approvals::create_request(
+            State(state.clone()),
+            access_token_auth,
+            AxumJson(generic_create(
+                Some(discovery.exact_view_digest.clone()),
+                "matrix-row-4-access-token-generic-with-view",
+            )),
+        )
+        .await
+        .expect_err("an out-of-view target cannot bind the exact-view digest");
+        assert!(matches!(
+            row_4_error,
+            AppError::BadRequest(message) if message == "exact_view_digest_not_applicable"
+        ));
 
         let AxumJson(created) = exact_service_approvals::create_request(
             State(state.clone()),
@@ -1285,19 +1453,21 @@ mod tests {
         .await
         .expect("approve provider-bound request");
 
-        // Move the same endpoint contract to the second catalog provider and
-        // repoint the UserService. Endpoint identity and operation arguments
+        // Move the same endpoint contracts to the second catalog provider and
+        // repoint the UserService. Endpoint identities and operation arguments
         // remain stable; the newly projected catalog_service_id is the direct
         // reason the exact-view fence changes.
         db.collection::<ServiceEndpoint>(SERVICE_ENDPOINTS)
-            .update_one(
-                mongodb::bson::doc! { "_id": &operation.endpoint_id },
+            .update_many(
+                mongodb::bson::doc! {
+                    "service_id": "00000000-0000-4000-8000-000000000301"
+                },
                 mongodb::bson::doc! { "$set": {
                     "service_id": "00000000-0000-4000-8000-000000000302"
                 } },
             )
             .await
-            .expect("move endpoint contract to alternate provider");
+            .expect("move endpoint contracts to alternate provider");
         db.collection::<UserService>(USER_SERVICES)
             .update_one(
                 mongodb::bson::doc! { "_id": TEST_SERVICE_A },
@@ -1355,7 +1525,10 @@ mod tests {
             provider_drifted.state,
             crate::services::exact_service_approval_service::ExactServiceApprovalState::Drifted
         );
-        assert_eq!(provider_drifted.failure_code.as_deref(), Some("catalog_drift"));
+        assert_eq!(
+            provider_drifted.failure_code.as_deref(),
+            Some("catalog_drift")
+        );
         provider.abort();
     }
 

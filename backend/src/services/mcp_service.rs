@@ -4386,8 +4386,7 @@ mod tests {
             "us-catalog",
         );
         let McpToolSource::UserManaged {
-            catalog_service_id,
-            ..
+            catalog_service_id, ..
         } = &mut catalog.source
         else {
             unreachable!("test helper always creates a user-managed service")

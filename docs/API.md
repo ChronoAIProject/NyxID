@@ -4285,7 +4285,7 @@ other effect authority. The existing approval endpoints intentionally return
 
 ```json
 {
-  "contract_version": "nyxid-delegated-operation-catalog.v1",
+  "contract_version": "nyxid-delegated-operation-catalog.v2",
   "catalog_digest": "sha256:opaque-admission-token",
   "exact_view_digest": "sha256:exact-caller-visible-view",
   "resolved_at": "2026-08-14T00:00:00Z",
@@ -4293,6 +4293,7 @@ other effect authority. The existing approval endpoints intentionally return
   "services": [
     {
       "user_service_id": "user-service-uuid",
+      "catalog_service_id": "catalog-provider-uuid",
       "service_slug": "github",
       "service_name": "GitHub",
       "description": "Connected GitHub service",
@@ -4323,11 +4324,17 @@ other effect authority. The existing approval endpoints intentionally return
 
 `exact_view_digest` is the representation validator for the exact
 caller-visible `services` array. It is SHA-256 over canonical compact JSON
-containing `contract_version: "nyxid-delegated-operation-catalog.v1"` and the
+containing `contract_version: "nyxid-delegated-operation-catalog.v2"` and the
 returned `services`; services are sorted by `user_service_id`, operations by
 `endpoint_id`, and object keys recursively in lexicographic order. The dynamic
 timestamps, totals, and `catalog_digest` are excluded. Delegated discovery and
 exact approval create, observe, and redeem use this same projection.
+
+Each service also carries the producer-owned `catalog_service_id` used to
+resolve its catalog provider. This field is included in `exact_view_digest` and
+is nullable: a custom user service with typed operations has no catalog
+provider, so its value is `null` and `user_service_id` is its canonical
+identity.
 
 `catalog_digest` remains the pre-existing broad approval fence. For wire
 compatibility with #1424 (commit `d1a042c2`), it is exactly
@@ -4335,13 +4342,33 @@ compatibility with #1424 (commit `d1a042c2`), it is exactly
 also includes catalog services that this facade omits (platform and generic
 rows), plus descriptor metadata such as operation descriptions and
 `recommended_skills`. Exact approval callers should send both digest fields at
-create and redeem. Omission of `exact_view_digest` remains accepted for legacy
-clients and stored approvals, while newly created approvals always persist the
-server-resolved exact-view value and revalidate it at use time. Both fences are
-enforced when present, so a hidden-row change can still cause drift through
-`catalog_digest` even though `exact_view_digest` is unchanged. Consumers must
-treat both values as opaque rather than substituting fetch time or a local
-counter.
+create and redeem when the target is in the exact view. Consumers must treat
+both values as opaque rather than substituting fetch time or a local counter.
+
+Exact-service eligibility and digest applicability are:
+
+| Requester | Target in exact view | `exact_view_digest` at create | Result | Persisted fence |
+|---|---:|---|---|---|
+| Delegated | Yes | Omitted or matching | Accepted | Server-resolved digest |
+| Nondelegated | Yes | Omitted or matching | Accepted | Server-resolved digest |
+| Delegated | No | Omitted | `404 exact_operation_not_in_exact_view` | No write |
+| Delegated | No | Supplied | `404 exact_operation_not_in_exact_view` | No write |
+| Nondelegated | No | Omitted | Accepted | `null` / omitted |
+| Nondelegated | No | Supplied | `400 exact_view_digest_not_applicable` | No write |
+
+A mismatched in-view digest returns the existing
+`exact_service_exact_view_digest_drift` conflict, and an empty supplied value is
+rejected as a bad request. At redeem, a supplied empty or mismatched digest
+returns `exact_service_redemption_conflict`; omission remains accepted, but the
+server still re-resolves the catalog and revalidates the digest persisted in
+the approval binding. Existing stored rows with no exact-view digest remain
+compatible and continue to use the other live fences.
+
+Delegated callers may create, observe, or redeem an exact-service approval only
+for a service and operation present in the exact projection returned by
+discovery. Nondelegated callers retain the shipped generic-proxy approval
+capability, but those out-of-view approvals are not bound to the digest of an
+unrelated exact projection.
 
 The response excludes platform fallbacks, generic proxy services, invalid or
 empty contracts, unavailable services, credentials, tokens, headers, hashes,

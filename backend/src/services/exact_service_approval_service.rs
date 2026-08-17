@@ -16,6 +16,7 @@ use crate::services::billing::route_inventory::BillingEgressPermit;
 use crate::services::{approval_service, mcp_service, notification_service, proxy_service};
 
 const MAX_RECEIPT_RESPONSE_BYTES: usize = 8 * 1024 * 1024;
+pub const DELEGATED_REQUESTER_TYPE: &str = "delegated";
 
 #[derive(Clone, Debug)]
 pub struct ExactServiceApprovalCaller {
@@ -99,6 +100,7 @@ struct ExactCatalogResolution<'a> {
     endpoint_index: usize,
     catalog_digest: String,
     exact_view_digest: String,
+    in_exact_view: bool,
     endpoint_contract_digest: String,
     operation_digest: String,
     marker: std::marker::PhantomData<&'a ()>,
@@ -133,12 +135,18 @@ pub async fn create_request(
         &input.catalog_digest,
         &resolution.catalog_digest,
     )?;
-    if let Some(exact_view_digest) = input.exact_view_digest.as_deref() {
-        ensure_digest(
-            "exact_view_digest",
-            exact_view_digest,
-            &resolution.exact_view_digest,
-        )?;
+    if resolution.in_exact_view {
+        if let Some(exact_view_digest) = input.exact_view_digest.as_deref() {
+            ensure_digest(
+                "exact_view_digest",
+                exact_view_digest,
+                &resolution.exact_view_digest,
+            )?;
+        }
+    } else if input.exact_view_digest.is_some() {
+        return Err(AppError::BadRequest(
+            "exact_view_digest_not_applicable".to_string(),
+        ));
     }
     ensure_digest(
         "endpoint_contract_digest",
@@ -207,7 +215,9 @@ pub async fn create_request(
         user_service_id: input.user_service_id,
         endpoint_id: input.endpoint_id,
         catalog_digest: resolution.catalog_digest,
-        exact_view_digest: Some(resolution.exact_view_digest),
+        exact_view_digest: resolution
+            .in_exact_view
+            .then(|| resolution.exact_view_digest.clone()),
         endpoint_contract_digest: resolution.endpoint_contract_digest,
         operation_digest: resolution.operation_digest,
         operation_id: input.operation_id,
@@ -272,7 +282,17 @@ pub async fn redeem_request(
         | ExactServiceApprovalState::Redeeming
         | ExactServiceApprovalState::Failed => return result_for(&request, state_value),
         ExactServiceApprovalState::Approved => {}
-        other => return result_for(&request, other),
+        other => {
+            let mut result = result_for(&request, other)?;
+            if result.failure_code.is_none() {
+                result.failure_code = match other {
+                    ExactServiceApprovalState::Revoked => Some("selector_revoked".to_string()),
+                    ExactServiceApprovalState::Drifted => Some("catalog_drift".to_string()),
+                    _ => None,
+                };
+            }
+            return Ok(result);
+        }
     }
 
     let now = Utc::now();
@@ -554,22 +574,19 @@ async fn resolve_exact_catalog(
                 )
         })
         .ok_or_else(|| AppError::NotFound("exact_user_service_not_found".to_string()))?;
-    // Eligibility is deliberately NOT narrowed to the exact-visible view.
-    // Generic-proxy operations are an approvable, shipped capability -- see
-    // billing_integration_tests::billing_route_coverage_smoke, which approves
-    // and redeems `nyx_generic_proxy_v1`. Hiding generic operations from
-    // delegated discovery is about not advertising untyped operations, not an
-    // authorization boundary: a caller already scoped to the service can reach
-    // it through the generic proxy regardless.
+    // The M42 contract makes exact-view membership an authorization boundary
+    // for delegated callers. Non-delegated callers retain generic-proxy
+    // approvability; billing_integration_tests::billing_route_coverage_smoke
+    // is the regression walker for that shipped capability.
+    let in_exact_view = exact_view_membership(caller, &catalog.services[service_index])?;
     let endpoint_index = catalog.services[service_index]
         .endpoints
         .iter()
         .position(|endpoint| endpoint.endpoint_id == endpoint_id)
         .ok_or_else(|| AppError::NotFound("exact_endpoint_not_found".to_string()))?;
-    // Keep eligibility on the unprojected catalog, but compute both approval
-    // fences from their canonical owners. The exact-view projection is shared
-    // with delegated discovery; the broad catalog fence stays byte-compatible
-    // with `/api/v1/mcp/config`.
+    // Compute both approval fences from their canonical owners. The exact-view
+    // projection is shared with delegated discovery; the broad catalog fence
+    // stays byte-compatible with `/api/v1/mcp/config`.
     let catalog_digest = mcp_service::operation_catalog_digest(&catalog.services);
     let exact_view_digest = mcp_service::exact_operation_view_digest(
         &mcp_service::exact_operation_view(&catalog.services),
@@ -584,10 +601,25 @@ async fn resolve_exact_catalog(
         endpoint_index,
         catalog_digest,
         exact_view_digest,
+        in_exact_view,
         endpoint_contract_digest,
         operation_digest,
         marker: std::marker::PhantomData,
     })
+}
+
+fn exact_view_membership(
+    caller: &ExactServiceApprovalCaller,
+    service: &mcp_service::McpToolService,
+) -> AppResult<bool> {
+    let in_exact_view = mcp_service::is_exact_visible(service);
+    if caller.requester_type == DELEGATED_REQUESTER_TYPE && !in_exact_view {
+        Err(AppError::NotFound(
+            "exact_operation_not_in_exact_view".to_string(),
+        ))
+    } else {
+        Ok(in_exact_view)
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -661,8 +693,7 @@ async fn expire_if_needed(
     request: ApprovalRequest,
 ) -> AppResult<ApprovalRequest> {
     let exact_unredeemed = request.exact_service.as_ref().is_some_and(|binding| {
-        binding.redemption.is_none()
-            && matches!(request.status.as_str(), "pending" | "approved")
+        binding.redemption.is_none() && matches!(request.status.as_str(), "pending" | "approved")
     });
     if !exact_unredeemed || request.expires_at > Utc::now() {
         return Ok(request);
@@ -935,6 +966,13 @@ fn safe_execution_failure_code(error: &AppError) -> &'static str {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::HashMap;
+    use std::sync::{
+        Arc,
+        atomic::{AtomicUsize, Ordering},
+    };
+
+    use axum::{Router, routing::any};
     use chrono::Duration;
 
     use super::*;
@@ -1240,6 +1278,45 @@ mod tests {
     }
 
     #[test]
+    fn exact_view_membership_rejects_only_delegated_generic_targets() {
+        let generic_service = mcp_service::McpToolService {
+            service_id: "generic-service".to_string(),
+            service_name: "Generic Service".to_string(),
+            service_slug: "generic-service".to_string(),
+            description: None,
+            service_category: "connection".to_string(),
+            endpoints: Vec::new(),
+            durable_endpoint_metadata: HashMap::new(),
+            source: mcp_service::McpToolSource::UserManaged {
+                user_service_id: "generic-service".to_string(),
+                catalog_service_id: None,
+                effective_owner_id: "user-alpha".to_string(),
+                node_id: None,
+                has_server_credential: true,
+            },
+            executable: true,
+            is_generic_proxy: true,
+            invalid_openapi_contract: false,
+            recommended_skills: Vec::new(),
+            proxy_operation_policy: None,
+        };
+
+        let delegated_error = exact_view_membership(&caller(), &generic_service)
+            .expect_err("delegated callers are confined to exact-view membership");
+        assert!(matches!(
+            delegated_error,
+            AppError::NotFound(message) if message == "exact_operation_not_in_exact_view"
+        ));
+
+        let mut access_token_caller = caller();
+        access_token_caller.requester_type = "access_token".to_string();
+        assert!(
+            !exact_view_membership(&access_token_caller, &generic_service)
+                .expect("non-delegated callers retain generic-target eligibility")
+        );
+    }
+
+    #[test]
     fn create_rejects_empty_or_whitespace_digest_fields() {
         let fields: [(&str, fn(&mut ExactServiceApprovalCreate)); 3] = [
             (
@@ -1312,6 +1389,142 @@ mod tests {
             .as_deref(),
             Some("sha256:server-persisted")
         );
+    }
+
+    #[tokio::test]
+    async fn legacy_delegated_generic_redeem_is_revoked_before_provider_effect() {
+        let Some(db) =
+            crate::test_utils::connect_test_database("exact_approval_legacy_delegated_generic")
+                .await
+        else {
+            return;
+        };
+        let state = crate::test_utils::test_app_state(db.clone());
+        let provider_calls = Arc::new(AtomicUsize::new(0));
+        let handler_calls = provider_calls.clone();
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind provider effect spy");
+        let provider_addr = listener.local_addr().expect("provider spy address");
+        let provider = tokio::spawn(async move {
+            axum::serve(
+                listener,
+                Router::new().fallback(any(move || {
+                    let handler_calls = handler_calls.clone();
+                    async move {
+                        handler_calls.fetch_add(1, Ordering::SeqCst);
+                        "unexpected provider effect"
+                    }
+                })),
+            )
+            .await
+            .expect("serve provider effect spy");
+        });
+
+        let user_service_id = "00000000-0000-4000-8000-000000000611";
+        let user_endpoint_id = "00000000-0000-4000-8000-000000000612";
+        db.collection::<crate::models::user_endpoint::UserEndpoint>(
+            crate::models::user_endpoint::COLLECTION_NAME,
+        )
+        .insert_one(crate::test_utils::test_user_endpoint(
+            user_endpoint_id,
+            "user-alpha",
+            "Legacy Generic",
+            &format!("http://{provider_addr}"),
+            None,
+            None,
+        ))
+        .await
+        .expect("insert legacy generic endpoint");
+        db.collection::<crate::models::user_service::UserService>(
+            crate::models::user_service::COLLECTION_NAME,
+        )
+        .insert_one(crate::test_utils::test_user_service(
+            user_service_id,
+            "user-alpha",
+            "legacy-generic",
+            user_endpoint_id,
+            None,
+            None,
+        ))
+        .await
+        .expect("insert legacy generic service");
+
+        let catalog = mcp_service::load_operation_catalog(
+            &db,
+            state.node_ws_manager.as_ref(),
+            "user-alpha",
+            mcp_service::NodeScope::Unrestricted,
+            mcp_service::ServiceScope::Unrestricted,
+        )
+        .await
+        .expect("load legacy generic catalog");
+        let generic_service = catalog
+            .services
+            .iter()
+            .find(|service| service.service_id == user_service_id)
+            .expect("legacy generic service is in the unprojected catalog");
+        let generic_endpoint = generic_service
+            .endpoints
+            .iter()
+            .find(|endpoint| endpoint.endpoint_id == mcp_service::GENERIC_PROXY_ENDPOINT_ID)
+            .expect("legacy generic selector exists");
+        let arguments = serde_json::json!({"method": "GET", "path": "/effect"});
+        let mut legacy_binding = binding();
+        legacy_binding.request_key = "legacy-delegated-generic-request-key".to_string();
+        legacy_binding.user_service_id = user_service_id.to_string();
+        legacy_binding.endpoint_id = generic_endpoint.endpoint_id.clone();
+        legacy_binding.catalog_digest = mcp_service::operation_catalog_digest(&catalog.services);
+        legacy_binding.exact_view_digest = Some(mcp_service::exact_operation_view_digest(
+            &mcp_service::exact_operation_view(&catalog.services),
+        ));
+        legacy_binding.endpoint_contract_digest =
+            mcp_service::endpoint_contract_digest(generic_endpoint);
+        legacy_binding.operation_digest =
+            mcp_service::exact_operation_digest(user_service_id, generic_endpoint, &arguments);
+        legacy_binding.operation_id = "legacy-delegated-generic-operation".to_string();
+        legacy_binding.operation_generation = 1;
+        legacy_binding.effect_idempotency_key = "legacy-delegated-generic-idempotency".to_string();
+        legacy_binding.arguments = arguments;
+
+        let request_id = "00000000-0000-4000-8000-000000000613";
+        db.collection::<ApprovalRequest>(REQUESTS)
+            .insert_one(approval_request(
+                request_id,
+                "approved",
+                Utc::now() + Duration::minutes(5),
+                Some(legacy_binding.clone()),
+            ))
+            .await
+            .expect("insert approved legacy delegated generic request");
+        let result = redeem_request(
+            &state,
+            &caller(),
+            request_id,
+            ExactServiceApprovalFence {
+                catalog_digest: legacy_binding.catalog_digest,
+                exact_view_digest: legacy_binding.exact_view_digest,
+                operation_digest: legacy_binding.operation_digest,
+                operation_id: legacy_binding.operation_id,
+                operation_generation: legacy_binding.operation_generation,
+                idempotency_key: legacy_binding.effect_idempotency_key,
+            },
+            crate::services::billing::route_inventory::enforce_billing_egress_classification(
+                Some(
+                    crate::services::billing::route_inventory::BillingRoutePolicy::Metered(
+                        crate::services::billing::route_inventory::BillingIngress::Mcp,
+                    ),
+                ),
+                crate::services::billing::route_inventory::BillingIngress::Mcp,
+            )
+            .expect("construct metered MCP permit"),
+        )
+        .await
+        .expect("legacy delegated generic redeem returns a typed terminal result");
+        assert_eq!(result.state, ExactServiceApprovalState::Revoked);
+        assert_eq!(result.failure_code.as_deref(), Some("selector_revoked"));
+        assert_eq!(provider_calls.load(Ordering::SeqCst), 0);
+        provider.abort();
     }
 
     #[tokio::test]
