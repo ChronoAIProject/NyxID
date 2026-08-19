@@ -4349,20 +4349,38 @@ Exact-service eligibility and digest applicability are:
 
 | Requester | Target in exact view | `exact_view_digest` at create | Result | Persisted fence |
 |---|---:|---|---|---|
-| Delegated | Yes | Omitted or matching | Accepted | Server-resolved digest |
+| Delegated | Yes | Matching | Accepted | Server-resolved digest |
+| Delegated | Yes | Omitted | `400 exact_view_digest_required` | No write |
 | Nondelegated | Yes | Omitted or matching | Accepted | Server-resolved digest |
 | Delegated | No | Omitted | `404 exact_operation_not_in_exact_view` | No write |
 | Delegated | No | Supplied | `404 exact_operation_not_in_exact_view` | No write |
 | Nondelegated | No | Omitted | Accepted | `null` / omitted |
 | Nondelegated | No | Supplied | `400 exact_view_digest_not_applicable` | No write |
 
+Delegated callers are additionally required to carry the `mcp:catalog:read`
+scope on all three exact-service routes (create, status, redeem). A delegated
+token without it returns `403 delegated_catalog_scope_required` before any
+catalog resolution or persistence. Such tokens cannot obtain a delegated
+exact-view digest in the first place, because discovery requires the same
+scope, and they are not covered by the live catalog-grant revalidation that
+`mcp:catalog:read` tokens undergo on every request.
+
 A mismatched in-view digest returns the existing
 `exact_service_exact_view_digest_drift` conflict, and an empty supplied value is
-rejected as a bad request. At redeem, a supplied empty or mismatched digest
-returns `exact_service_redemption_conflict`; omission remains accepted, but the
-server still re-resolves the catalog and revalidates the digest persisted in
-the approval binding. Existing stored rows with no exact-view digest remain
-compatible and continue to use the other live fences.
+rejected as a bad request.
+
+At redeem the fence follows the same split. For **delegated** callers an
+omitted `exact_view_digest` is rejected with `400 exact_view_digest_required`
+before the request is loaded or claimed; a supplied empty or mismatched digest
+returns `exact_service_redemption_conflict`. For **nondelegated** callers
+omission remains accepted, and the server still re-resolves the catalog and
+revalidates the digest persisted in the approval binding.
+
+Existing stored rows with no exact-view digest remain compatible for
+nondelegated callers and continue to use the other live fences. A delegated
+row created before this requirement still carries the server-resolved digest,
+which the status endpoint returns, so a client that previously omitted the
+value can read it back and supply it at redeem.
 
 Delegated callers may create, observe, or redeem an exact-service approval only
 for a service and operation present in the exact projection returned by
