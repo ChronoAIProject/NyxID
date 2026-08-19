@@ -6,9 +6,10 @@ use serde::Serialize;
 use serde_json::{Value, json};
 
 pub const ASSISTANT_ACTIONS_SCHEMA_VERSION: u32 = 4;
-pub const ASSISTANT_ACTIONS_REVISION: &str = "nyxid-assistant-actions.v7";
+pub const ASSISTANT_ACTIONS_REVISION: &str = "nyxid-assistant-actions.v8";
 
 const SERVICE_CONNECT_DESCRIPTION: &str = "Ask the user's browser to connect a service through NyxID. Use when a task needs a catalog service (by slug) or a custom HTTPS endpoint that the user has not connected yet. NyxID owns the entire journey - auth modality, consent copy, and credential storage - and reports back only completion or decline with a safe resource reference. Never ask the user for keys, tokens, or passwords in chat.";
+const SERVICE_REAUTHORIZE_DESCRIPTION: &str = "Ask the user's browser to re-authorize an existing connected service and review its requested scopes. Use when a task needs permissions that the referenced user service does not currently grant. NyxID owns the authorization journey and credential storage, and reports only a safe user-service reference. Never ask the user for keys, tokens, passwords, or authorization codes in chat.";
 const KEY_CREATE_DESCRIPTION: &str = "Ask the user's browser to create a scoped NyxID API key for the named platform and allowed services. Use when the user wants a new agent identity bounded to specific user-service IDs. NyxID owns key creation and one-time key display, and reports only a safe key reference. Never request, expose, or repeat key material in chat.";
 const KEY_ROTATE_DESCRIPTION: &str = "Ask the user's browser to rotate one exact NyxID API key. Use when the user needs a replacement credential for the identified key. NyxID commits an authoritative predecessor-successor relation, displays replacement key material once in the browser, and reports only the replacement key reference. Never request, expose, or repeat key material in chat.";
 
@@ -86,6 +87,25 @@ static MANIFEST_BODY: LazyLock<String> = LazyLock::new(|| {
                 risk: "grant",
                 tier: "v1",
                 remember_eligible: true,
+            },
+            AssistantActionDescriptor {
+                action: "service.reauthorize",
+                description: SERVICE_REAUTHORIZE_DESCRIPTION,
+                params_schema: json!({
+                    "type": "object",
+                    "additionalProperties": false,
+                    "required": ["userServiceId", "requestedScopes"],
+                    "properties": {
+                        "userServiceId": { "type": "string" },
+                        "requestedScopes": {
+                            "type": "array",
+                            "items": { "type": "string" }
+                        }
+                    }
+                }),
+                risk: "grant",
+                tier: "v1",
+                remember_eligible: false,
             },
             AssistantActionDescriptor {
                 action: "key.create",
@@ -262,6 +282,21 @@ mod tests {
         })
     }
 
+    fn service_reauthorize_params_schema() -> Value {
+        json!({
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["userServiceId", "requestedScopes"],
+            "properties": {
+                "userServiceId": { "type": "string" },
+                "requestedScopes": {
+                    "type": "array",
+                    "items": { "type": "string" }
+                }
+            }
+        })
+    }
+
     fn key_rotate_params_schema() -> Value {
         json!({
             "type": "object",
@@ -276,7 +311,7 @@ mod tests {
     fn golden_manifest() -> Value {
         json!({
             "schema_version": 4,
-            "revision": "nyxid-assistant-actions.v7",
+            "revision": "nyxid-assistant-actions.v8",
             "actions": [
                 {
                     "action": "service.connect",
@@ -285,6 +320,14 @@ mod tests {
                     "risk": "grant",
                     "tier": "v1",
                     "remember_eligible": true
+                },
+                {
+                    "action": "service.reauthorize",
+                    "description": super::SERVICE_REAUTHORIZE_DESCRIPTION,
+                    "params_schema": service_reauthorize_params_schema(),
+                    "risk": "grant",
+                    "tier": "v1",
+                    "remember_eligible": false
                 },
                 {
                     "action": "key.create",
@@ -452,6 +495,7 @@ mod tests {
         }
 
         assert!(seen_actions.contains("service.connect"));
+        assert!(seen_actions.contains("service.reauthorize"));
         assert!(seen_actions.contains("key.create"));
         assert!(seen_actions.contains("key.rotate"));
     }
@@ -462,31 +506,39 @@ mod tests {
         let actions = manifest["actions"].as_array().unwrap();
 
         assert_eq!(manifest["schema_version"], 4);
-        assert_eq!(manifest["revision"], "nyxid-assistant-actions.v7");
-        assert_eq!(actions.len(), 3);
+        assert_eq!(manifest["revision"], "nyxid-assistant-actions.v8");
+        assert_eq!(actions.len(), 4);
         assert_eq!(actions[0]["action"], "service.connect");
         assert_eq!(actions[0]["risk"], "grant");
         assert_eq!(actions[0]["tier"], "v1");
         assert_eq!(actions[0]["remember_eligible"], true);
         assert_eq!(actions[0]["params_schema"], service_connect_params_schema());
-        assert_eq!(actions[1]["action"], "key.create");
+        assert_eq!(actions[1]["action"], "service.reauthorize");
         assert_eq!(actions[1]["risk"], "grant");
         assert_eq!(actions[1]["tier"], "v1");
         assert_eq!(actions[1]["remember_eligible"], false);
-        assert_eq!(actions[1]["params_schema"], key_create_params_schema());
         assert_eq!(
-            actions[1]["params_schema"]["properties"]["allowedServiceIds"]["minItems"],
-            1
+            actions[1]["params_schema"],
+            service_reauthorize_params_schema()
         );
-        assert_eq!(
-            actions[1]["params_schema"]["properties"]["allowedServiceIds"]["uniqueItems"],
-            true
-        );
-        assert_eq!(actions[2]["action"], "key.rotate");
+        assert_eq!(actions[2]["action"], "key.create");
         assert_eq!(actions[2]["risk"], "grant");
         assert_eq!(actions[2]["tier"], "v1");
         assert_eq!(actions[2]["remember_eligible"], false);
-        assert_eq!(actions[2]["params_schema"], key_rotate_params_schema());
+        assert_eq!(actions[2]["params_schema"], key_create_params_schema());
+        assert_eq!(
+            actions[2]["params_schema"]["properties"]["allowedServiceIds"]["minItems"],
+            1
+        );
+        assert_eq!(
+            actions[2]["params_schema"]["properties"]["allowedServiceIds"]["uniqueItems"],
+            true
+        );
+        assert_eq!(actions[3]["action"], "key.rotate");
+        assert_eq!(actions[3]["risk"], "grant");
+        assert_eq!(actions[3]["tier"], "v1");
+        assert_eq!(actions[3]["remember_eligible"], false);
+        assert_eq!(actions[3]["params_schema"], key_rotate_params_schema());
         assert_eq!(manifest, golden_manifest());
     }
 

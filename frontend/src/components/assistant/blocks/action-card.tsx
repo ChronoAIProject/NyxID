@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState } from "react";
+import { z } from "zod";
 import {
   AlertTriangle,
   Globe,
@@ -21,9 +22,11 @@ import {
   descriptorForAction,
 } from "@/lib/assistant/action-registry";
 import { connectWatchDeadline } from "@/lib/assistant/connect-watch";
+import { ApiError, api } from "@/lib/api-client";
 import type { ActionReport, ActionResource } from "@/schemas/assistant-actions";
 import { usePendingConnectStore } from "@/stores/pending-connect-store";
 import type { ActionCardContentBlock } from "@/types/assistant";
+import type { KeyInfo } from "@/types/keys";
 
 interface ActionCardProps {
   readonly block: ActionCardContentBlock;
@@ -37,6 +40,174 @@ const VERIFICATION_BLOCKED_NOTE =
 
 const AUTHORIZATION_TIMEOUT_NOTE =
   "NyxID stopped waiting for this connection to finish authorizing. If you did complete it, find it in AI Services — otherwise ask the assistant to request it again.";
+
+const REAUTHORIZE_NOT_FOUND_NOTE =
+  "NyxID could not find that connected service. Ask the assistant to refresh its service list and request re-authorization again.";
+const REAUTHORIZE_UNAVAILABLE_NOTE =
+  "NyxID could not verify this service for re-authorization. Manage it in AI Services, then ask the assistant to request it again.";
+const REAUTHORIZE_IDENTITY_NOTE =
+  "NyxID returned a different connected service than the one requested. The re-authorization was blocked.";
+const REAUTHORIZE_INACTIVE_NOTE =
+  "This service is disabled. Enable it in AI Services before re-authorizing it.";
+const REAUTHORIZE_CREDENTIAL_NOTE =
+  "This service does not have a usable OAuth credential to re-authorize. Repair it in AI Services first.";
+const REAUTHORIZE_MODALITY_NOTE =
+  "This service does not support browser re-authorization. Manage its credential in AI Services instead.";
+const REAUTHORIZE_PLATFORM_NOTE =
+  "Platform-managed services cannot be re-authorized from an assistant request.";
+const REAUTHORIZE_ORG_NOTE =
+  "Only an organization admin can re-authorize this shared service.";
+const REAUTHORIZE_CATALOG_NOTE =
+  "NyxID could not resolve this service's OAuth provider. Manage it in AI Services, then ask the assistant to try again.";
+const REAUTHORIZE_SCOPES_UNSUPPORTED_NOTE =
+  "This provider does not accept requested scope changes during device authorization, so NyxID did not start a re-authorization that could drop the request.";
+
+const reauthorizationCredentialSourceSchema = z.discriminatedUnion("type", [
+  z.object({ type: z.literal("personal") }).passthrough(),
+  z
+    .object({
+      type: z.literal("org"),
+      role: z.string(),
+    })
+    .passthrough(),
+]);
+const reauthorizationKeySchema = z
+  .object({
+    id: z.string().min(1).max(256),
+    slug: z.string().min(1),
+    api_key_id: z.string().min(1).optional(),
+    credential_missing: z.boolean().optional(),
+    credential_type: z.string(),
+    auth_method: z.string(),
+    is_active: z.boolean(),
+    auto_connected: z.boolean(),
+    catalog_service_slug: z.string().nullish(),
+    credential_source: reauthorizationCredentialSourceSchema.optional(),
+  })
+  .passthrough();
+const reauthorizationCatalogSchema = z
+  .object({
+    entries: z.array(
+      z
+        .object({
+          slug: z.string().min(1),
+          provider_type: z.string().nullish(),
+          provider_config_id: z.string().nullish(),
+          device_code_format: z.string().nullish(),
+        })
+        .passthrough(),
+    ),
+  })
+  .passthrough();
+
+const FORBIDDEN_READ_BACK_FIELDS = new Set([
+  "apikey",
+  "fullkey",
+  "keyhash",
+  "credential",
+  "credentials",
+  "accesstoken",
+  "refreshtoken",
+  "authorization",
+  "cookie",
+  "cookies",
+  "secret",
+  "secrets",
+  "clientsecret",
+  "password",
+  "token",
+  "passphrase",
+  "usercode",
+  "devicecode",
+  "rawbody",
+  "rawupstreambody",
+]);
+const SECRET_READ_BACK_VALUE =
+  /(?:Bearer\s+\S+|nyxid_(?:ag_)?[A-Za-z0-9_-]{16,})/i;
+
+function assertSecretFreeReadBack(value: unknown): void {
+  if (typeof value === "string" && SECRET_READ_BACK_VALUE.test(value)) {
+    throw new Error("NyxID returned secret-bearing verification data.");
+  }
+  if (Array.isArray(value)) {
+    for (const entry of value) assertSecretFreeReadBack(entry);
+    return;
+  }
+  if (!value || typeof value !== "object") return;
+  for (const [key, entry] of Object.entries(value)) {
+    const normalized = key
+      .replace(/[^A-Za-z0-9]/g, "")
+      .toLocaleLowerCase("en-US");
+    if (FORBIDDEN_READ_BACK_FIELDS.has(normalized)) {
+      throw new Error("NyxID returned secret-bearing verification data.");
+    }
+    assertSecretFreeReadBack(entry);
+  }
+}
+
+class ReauthorizationBlockedError extends Error {}
+
+async function readReauthorizationKey(userServiceId: string): Promise<KeyInfo> {
+  const value = await api.get<unknown>(
+    `/keys/${encodeURIComponent(userServiceId)}`,
+  );
+  assertSecretFreeReadBack(value);
+  const snapshot = reauthorizationKeySchema.parse(value);
+  if (snapshot.id !== userServiceId) {
+    throw new ReauthorizationBlockedError(REAUTHORIZE_IDENTITY_NOTE);
+  }
+  if (!snapshot.is_active) {
+    throw new ReauthorizationBlockedError(REAUTHORIZE_INACTIVE_NOTE);
+  }
+  if (snapshot.credential_missing || !snapshot.api_key_id) {
+    throw new ReauthorizationBlockedError(REAUTHORIZE_CREDENTIAL_NOTE);
+  }
+  if (
+    snapshot.credential_type !== "oauth2" &&
+    snapshot.auth_method !== "oauth2" &&
+    snapshot.auth_method !== "oidc"
+  ) {
+    throw new ReauthorizationBlockedError(REAUTHORIZE_MODALITY_NOTE);
+  }
+  if (snapshot.auto_connected) {
+    throw new ReauthorizationBlockedError(REAUTHORIZE_PLATFORM_NOTE);
+  }
+  if (
+    snapshot.credential_source?.type === "org" &&
+    snapshot.credential_source.role !== "admin"
+  ) {
+    throw new ReauthorizationBlockedError(REAUTHORIZE_ORG_NOTE);
+  }
+
+  const catalog = reauthorizationCatalogSchema.parse(
+    await api.get<unknown>("/catalog?include_all=true"),
+  );
+  const catalogSlug = snapshot.catalog_service_slug ?? snapshot.slug;
+  const catalogEntry = catalog.entries.find(
+    (entry) => entry.slug === catalogSlug,
+  );
+  if (!catalogEntry) {
+    throw new ReauthorizationBlockedError(REAUTHORIZE_CATALOG_NOTE);
+  }
+  if (
+    (catalogEntry.provider_type !== "oauth2" &&
+      catalogEntry.provider_type !== "device_code") ||
+    !catalogEntry.provider_config_id
+  ) {
+    throw new ReauthorizationBlockedError(REAUTHORIZE_MODALITY_NOTE);
+  }
+  if (
+    catalogEntry.provider_type === "device_code" &&
+    catalogEntry.device_code_format === "openai"
+  ) {
+    throw new ReauthorizationBlockedError(REAUTHORIZE_SCOPES_UNSUPPORTED_NOTE);
+  }
+
+  // The public KeyInfo type is the full response contract. This read validates
+  // the journey-owned projection above and preserves the remaining fields for
+  // the existing reconnect dialog, which already consumes that full contract.
+  return value as KeyInfo;
+}
 
 function authorizationFailedNote(reason: string | undefined): string {
   const detail = reason?.trim();
@@ -93,6 +264,34 @@ function ParameterSummary({
           <Badge variant="secondary" className="max-w-full truncate font-mono">
             {params.key_id}
           </Badge>
+        </div>
+      </div>
+    );
+  }
+  if (params.variant === "service_reauthorize") {
+    return (
+      <div className="space-y-2.5 border-y border-border bg-muted px-4 py-3">
+        <div className="flex flex-wrap items-center gap-1.5">
+          <span className="text-[10px] font-semibold uppercase tracking-[1px] text-muted-foreground">
+            Service
+          </span>
+          <Badge variant="secondary" className="max-w-full truncate font-mono">
+            {params.user_service_id}
+          </Badge>
+        </div>
+        <div className="flex flex-wrap items-center gap-1.5">
+          <span className="text-[10px] font-semibold uppercase tracking-[1px] text-muted-foreground">
+            Requested scopes
+          </span>
+          {params.requested_scopes.map((scope) => (
+            <Badge
+              key={scope}
+              variant="secondary"
+              className="max-w-full truncate font-mono"
+            >
+              <span className="min-w-0 truncate">{scope}</span>
+            </Badge>
+          ))}
         </div>
       </div>
     );
@@ -231,7 +430,9 @@ export function ActionCard({
   onResolve,
 }: ActionCardProps) {
   const [dialogOpen, setDialogOpen] = useState(false);
+  const [reauthorizeKey, setReauthorizeKey] = useState<KeyInfo | null>(null);
   const resolvingRef = useRef(false);
+  const journeyStartingRef = useRef(false);
   /**
    * An out-of-band authorization handed to a provider, still settling. Held
    * outside React (keyed by block id) rather than in the dialog or in this
@@ -309,6 +510,19 @@ export function ActionCard({
     // The ref is the synchronous re-entry guard; the state clear rides the
     // microtask so this effect never sets the state it depends on inline.
     if (watch.authorized) {
+      if (
+        block.params.variant === "service_reauthorize" &&
+        keyId !== block.params.user_service_id
+      ) {
+        watchSettledRef.current = attemptId;
+        void Promise.resolve()
+          .then(() => {
+            endPendingAuth(block.block_id);
+            return onBlock(block.block_id, REAUTHORIZE_IDENTITY_NOTE);
+          })
+          .catch(() => undefined);
+        return;
+      }
       watchSettledRef.current = attemptId;
       resolvingRef.current = true;
       void Promise.resolve()
@@ -349,6 +563,7 @@ export function ActionCard({
     watch.authorized,
     watch.timedOut,
     watch.errorMessage,
+    block.params,
     block.block_id,
     block.action_request_id,
     block.origin_turn_id,
@@ -366,23 +581,34 @@ export function ActionCard({
 
   const baseVerdict = settled ? SETTLED[block.status as SettledStatus] : null;
   const verdict =
-    baseVerdict && block.status === "completed" && block.action === "key.create"
+    baseVerdict &&
+    block.status === "completed" &&
+    block.action === "service.reauthorize"
       ? {
           ...baseVerdict,
-          badge: "Created",
+          badge: "Re-authorized",
           footer:
-            "The assistant received only the verified key reference. Key material stayed in NyxID.",
+            "The assistant received only the verified service reference. Your OAuth credential stayed in NyxID.",
         }
       : baseVerdict &&
           block.status === "completed" &&
-          block.action === "key.rotate"
+          block.action === "key.create"
         ? {
             ...baseVerdict,
-            badge: "Rotated",
+            badge: "Created",
             footer:
-              "The assistant received only the verified replacement key reference. Replacement key material stayed in NyxID.",
+              "The assistant received only the verified key reference. Key material stayed in NyxID.",
           }
-        : baseVerdict;
+        : baseVerdict &&
+            block.status === "completed" &&
+            block.action === "key.rotate"
+          ? {
+              ...baseVerdict,
+              badge: "Rotated",
+              footer:
+                "The assistant received only the verified replacement key reference. Replacement key material stayed in NyxID.",
+            }
+          : baseVerdict;
   const VerdictIcon = verdict?.icon;
 
   // Trust the descriptor too: a card whose verb has no journey behind it must
@@ -463,6 +689,38 @@ export function ActionCard({
       });
   }
 
+  async function beginJourney() {
+    if (journeyStartingRef.current) return;
+    journeyStartingRef.current = true;
+    onProgress(block.block_id, true);
+
+    if (params.variant !== "service_reauthorize") {
+      setDialogOpen(true);
+      journeyStartingRef.current = false;
+      return;
+    }
+
+    try {
+      const key = await readReauthorizationKey(params.user_service_id);
+      setReauthorizeKey(key);
+      setDialogOpen(true);
+    } catch (caught) {
+      const note =
+        caught instanceof ReauthorizationBlockedError
+          ? caught.message
+          : caught instanceof ApiError && caught.status === 404
+            ? REAUTHORIZE_NOT_FOUND_NOTE
+            : REAUTHORIZE_UNAVAILABLE_NOTE;
+      try {
+        await onBlock(block.block_id, note);
+      } catch {
+        onProgress(block.block_id, false);
+      }
+    } finally {
+      journeyStartingRef.current = false;
+    }
+  }
+
   return (
     <section className="overflow-hidden rounded-xl border border-border bg-card shadow-sm">
       <div className="flex items-start gap-3 px-4 py-3.5">
@@ -479,6 +737,8 @@ export function ActionCard({
             <ServiceIcon slug={params.service_slug} size="sm" />
           ) : params.variant === "custom" ? (
             <Globe className="h-4 w-4 text-muted-foreground" />
+          ) : params.variant === "service_reauthorize" ? (
+            <ShieldCheck className="h-4 w-4 text-muted-foreground" />
           ) : params.variant === "key_create" ||
             params.variant === "key_rotate" ? (
             <KeyRound className="h-4 w-4 text-muted-foreground" />
@@ -547,7 +807,9 @@ export function ActionCard({
               ? "NyxID creates and verifies the key here. The assistant receives only the safe key reference after you finish."
               : params.variant === "key_rotate"
                 ? "NyxID rotates and verifies the exact lineage here. The assistant receives only the replacement key reference after you finish."
-                : "You choose the account, routing, and credential. The assistant receives only brokered access after you finish."}
+                : params.variant === "service_reauthorize"
+                  ? "NyxID opens the provider authorization flow here. The assistant receives only the service reference after fresh authorization finishes."
+                  : "You choose the account, routing, and credential. The assistant receives only brokered access after you finish."}
           </p>
         </div>
       ) : null}
@@ -560,10 +822,7 @@ export function ActionCard({
               variant="primary"
               size="sm"
               disabled={primaryDisabled}
-              onClick={() => {
-                onProgress(block.block_id, true);
-                setDialogOpen(true);
-              }}
+              onClick={() => void beginJourney()}
             >
               {busy ? <Loader2 className="animate-spin" /> : <ShieldCheck />}
               {awaitingAuthorization
@@ -572,7 +831,9 @@ export function ActionCard({
                   ? params.variant === "key_create" ||
                     params.variant === "key_rotate"
                     ? "Working"
-                    : "Connecting"
+                    : params.variant === "service_reauthorize"
+                      ? "Authorizing"
+                      : "Connecting"
                   : descriptor.cta(params)}
             </Button>
           ) : null}
@@ -682,6 +943,44 @@ export function ActionCard({
           actionRequestId={block.action_request_id}
           params={{ keyId: params.key_id }}
           onComplete={(keyId) => report("completed", { key: { keyId } })}
+        />
+      ) : null}
+      {!verdict &&
+      !unsupported &&
+      params.variant === "service_reauthorize" &&
+      reauthorizeKey ? (
+        <AddKeyDialog
+          open={dialogOpen}
+          onOpenChange={setOpen}
+          prefillIncludeAllCatalog
+          prefillScopes={params.requested_scopes}
+          reconnectKey={reauthorizeKey}
+          launch="popup"
+          flow="cc"
+          onPopupViewResult={() => {
+            setOpen(false);
+            return true;
+          }}
+          onSuccess={({ userServiceId }) => {
+            if (userServiceId !== params.user_service_id) {
+              void onBlock(block.block_id, REAUTHORIZE_IDENTITY_NOTE);
+              return;
+            }
+            report("completed", {
+              userService: { userServiceId: params.user_service_id },
+            });
+          }}
+          onAuthorizationPending={(attempt) => {
+            if (attempt.keyId !== params.user_service_id) {
+              void onBlock(block.block_id, REAUTHORIZE_IDENTITY_NOTE);
+              return;
+            }
+            watchSettledRef.current = null;
+            beginPendingAuth(block.block_id, {
+              ...attempt,
+              startedAt: Date.now(),
+            });
+          }}
         />
       ) : null}
     </section>

@@ -24,17 +24,25 @@ import { usePendingConnectStore } from "@/stores/pending-connect-store";
 import type { ActionCardContentBlock } from "@/types/assistant";
 import { ActionCard } from "./action-card";
 
+const { mockGet } = vi.hoisted(() => ({ mockGet: vi.fn() }));
+
 // The pending-authorization store outlives any one card by design, so it also
 // outlives any one test. Reset it or a stranded attempt leaks forward.
 beforeEach(() => {
+  mockGet.mockReset();
   usePendingConnectStore.setState({ attempts: {} });
 });
 
-const { mockGet } = vi.hoisted(() => ({ mockGet: vi.fn() }));
-
 vi.mock("@/lib/api-client", () => ({
   api: { get: mockGet },
-  ApiError: class ApiError extends Error {},
+  ApiError: class ApiError extends Error {
+    readonly status: number;
+
+    constructor(status: number) {
+      super("API request failed");
+      this.status = status;
+    }
+  },
 }));
 
 vi.mock("@/components/service-icon", () => ({
@@ -59,6 +67,8 @@ vi.mock("@/components/dashboard/add-key-dialog", () => ({
     prefillSlug,
     prefillIncludeAllCatalog,
     prefillCustom,
+    prefillScopes,
+    reconnectKey,
     onSuccess,
     onAuthorizationPending,
     onAuthorizationAborted,
@@ -71,6 +81,11 @@ vi.mock("@/components/dashboard/add-key-dialog", () => ({
     readonly prefillSlug?: string;
     readonly prefillIncludeAllCatalog?: boolean;
     readonly prefillCustom?: { readonly name?: string };
+    readonly prefillScopes?: readonly string[];
+    readonly reconnectKey?: {
+      readonly id: string;
+      readonly last_authorized_at?: string | null;
+    } | null;
     readonly onSuccess?: (result: AddKeyDialogCompletion) => void;
     readonly onAuthorizationPending?: (attempt: AuthorizationAttempt) => void;
     readonly onAuthorizationAborted?: (attemptId: string) => void;
@@ -83,12 +98,16 @@ vi.mock("@/components/dashboard/add-key-dialog", () => ({
         role="dialog"
         data-prefill={prefillSlug ?? prefillCustom?.name ?? ""}
         data-prefill-include-all={String(prefillIncludeAllCatalog ?? false)}
+        data-prefill-scopes={prefillScopes?.join(",") ?? ""}
+        data-reconnect-key={reconnectKey?.id ?? ""}
         data-launch={launch ?? ""}
         data-flow={flow ?? ""}
       >
         <button
           type="button"
-          onClick={() => onPopupViewResult?.("key-pending-1")}
+          onClick={() =>
+            onPopupViewResult?.(reconnectKey?.id ?? "key-pending-1")
+          }
         >
           Return from popup
         </button>
@@ -96,7 +115,8 @@ vi.mock("@/components/dashboard/add-key-dialog", () => ({
           type="button"
           onClick={() =>
             onSuccess?.({
-              userServiceId: "00000000-0000-4000-8000-000000000123",
+              userServiceId:
+                reconnectKey?.id ?? "00000000-0000-4000-8000-000000000123",
             })
           }
         >
@@ -118,9 +138,9 @@ vi.mock("@/components/dashboard/add-key-dialog", () => ({
           type="button"
           onClick={() =>
             onAuthorizationPending?.({
-              keyId: "key-pending-1",
+              keyId: reconnectKey?.id ?? "key-pending-1",
               attemptId: "attempt-pending-1",
-              previousAuthorizationAt: undefined,
+              previousAuthorizationAt: reconnectKey?.last_authorized_at,
             })
           }
         >
@@ -242,6 +262,84 @@ function keyCreateBlock(
   };
 }
 
+function reauthorizeBlock(
+  overrides: Partial<ActionCardContentBlock> = {},
+): ActionCardContentBlock {
+  return {
+    type: "action_card",
+    block_id: "action-card-reauthorize",
+    action: "service.reauthorize",
+    action_request_id: "act-reauthorize",
+    origin_turn_id: "turn-origin-1",
+    task_id: "task-1",
+    step_id: "step-1",
+    params: {
+      variant: "service_reauthorize",
+      user_service_id: "service-existing",
+      requested_scopes: ["repo", "workflow"],
+    },
+    status: "pending",
+    outcome_note: "",
+    ...overrides,
+  };
+}
+
+function reauthorizationKey(
+  overrides: Readonly<Record<string, unknown>> = {},
+): Readonly<Record<string, unknown>> {
+  return {
+    id: "service-existing",
+    slug: "github-user",
+    label: "GitHub",
+    api_key_id: "credential-existing",
+    credential_missing: false,
+    credential_type: "oauth2",
+    auth_method: "oauth2",
+    is_active: true,
+    auto_connected: false,
+    catalog_service_slug: "github",
+    credential_source: { type: "personal" },
+    status: "active",
+    last_authorized_at: "2026-08-17T00:00:00Z",
+    ...overrides,
+  };
+}
+
+function reauthorizationCatalog(
+  overrides: Readonly<Record<string, unknown>> = {},
+) {
+  return {
+    entries: [
+      {
+        slug: "github",
+        provider_type: "oauth2",
+        provider_config_id: "provider-github",
+        device_code_format: null,
+        ...overrides,
+      },
+      {
+        slug: "plain-api",
+        provider_type: "api_key",
+        provider_config_id: null,
+        device_code_format: null,
+      },
+    ],
+  };
+}
+
+function mockReauthorizationReads(
+  key: Readonly<Record<string, unknown>> = reauthorizationKey(),
+  catalog = reauthorizationCatalog(),
+) {
+  mockGet.mockImplementation((path: string) => {
+    if (path === "/keys/service-existing") return Promise.resolve(key);
+    if (path === "/catalog?include_all=true") {
+      return Promise.resolve(catalog);
+    }
+    return Promise.reject(new Error(`Unexpected read: ${path}`));
+  });
+}
+
 function keyRotateBlock(
   overrides: Partial<ActionCardContentBlock> = {},
 ): ActionCardContentBlock {
@@ -273,6 +371,151 @@ function expectNoBlueAccent(card: HTMLElement | null) {
 }
 
 describe("ActionCard", () => {
+  it("opens exact reconnect mode with every requested scope and reports only the service id", async () => {
+    mockReauthorizationReads();
+    const onProgress = vi.fn();
+    const onResolve = vi.fn();
+    renderCard(
+      <ActionCard
+        block={reauthorizeBlock()}
+        onProgress={onProgress}
+        onBlock={vi.fn()}
+        onResolve={onResolve}
+      />,
+    );
+
+    expect(
+      screen.getByRole("heading", { name: "Re-authorize service" }),
+    ).toBeInTheDocument();
+    expect(screen.getByText("service-existing")).toBeInTheDocument();
+    expect(screen.getByText("workflow")).toBeInTheDocument();
+
+    await userEvent.click(screen.getByRole("button", { name: "Re-authorize" }));
+    expect(onProgress).toHaveBeenCalledWith("action-card-reauthorize", true);
+    const dialog = await screen.findByRole("dialog");
+    expect(dialog).toHaveAttribute("data-reconnect-key", "service-existing");
+    expect(dialog).toHaveAttribute("data-prefill-scopes", "repo,workflow");
+    expect(dialog).toHaveAttribute("data-prefill-include-all", "true");
+    expect(dialog).toHaveAttribute("data-launch", "popup");
+    expect(dialog).toHaveAttribute("data-flow", "cc");
+    expect(mockGet).toHaveBeenCalledWith("/keys/service-existing");
+    expect(mockGet).toHaveBeenCalledWith("/catalog?include_all=true");
+
+    await userEvent.click(
+      screen.getByRole("button", { name: "Finish mock connection" }),
+    );
+    expect(onResolve).toHaveBeenCalledWith({
+      actionRequestId: "act-reauthorize",
+      originTurnId: "turn-origin-1",
+      disposition: "completed",
+      resource: { userService: { userServiceId: "service-existing" } },
+    });
+  });
+
+  it("blocks non-OAuth services before opening a reauthorization dialog", async () => {
+    mockReauthorizationReads(
+      reauthorizationKey({
+        credential_type: "api_key",
+        auth_method: "header",
+      }),
+    );
+    const onBlock = vi.fn();
+    const onResolve = vi.fn();
+    renderCard(
+      <ActionCard
+        block={reauthorizeBlock()}
+        onProgress={vi.fn()}
+        onBlock={onBlock}
+        onResolve={onResolve}
+      />,
+    );
+
+    await userEvent.click(screen.getByRole("button", { name: "Re-authorize" }));
+    await waitFor(() => {
+      expect(onBlock).toHaveBeenCalledWith(
+        "action-card-reauthorize",
+        expect.stringContaining("does not support browser re-authorization"),
+      );
+    });
+    expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
+    expect(onResolve).not.toHaveBeenCalled();
+    expect(mockGet).not.toHaveBeenCalledWith("/catalog?include_all=true");
+  });
+
+  it("blocks OpenAI-format device authorization instead of dropping requested scopes", async () => {
+    mockReauthorizationReads(
+      reauthorizationKey({ catalog_service_slug: "codex" }),
+      reauthorizationCatalog({
+        slug: "codex",
+        provider_type: "device_code",
+        provider_config_id: "provider-codex",
+        device_code_format: "openai",
+      }),
+    );
+    const onBlock = vi.fn();
+    renderCard(
+      <ActionCard
+        block={reauthorizeBlock()}
+        onProgress={vi.fn()}
+        onBlock={onBlock}
+        onResolve={vi.fn()}
+      />,
+    );
+
+    await userEvent.click(screen.getByRole("button", { name: "Re-authorize" }));
+    await waitFor(() => {
+      expect(onBlock).toHaveBeenCalledWith(
+        "action-card-reauthorize",
+        expect.stringContaining("does not accept requested scope changes"),
+      );
+    });
+    expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
+  });
+
+  it("waits for a fresh authorization timestamp before auto-completing reauthorization", async () => {
+    let keyReads = 0;
+    mockGet.mockImplementation((path: string) => {
+      if (path === "/keys/service-existing") {
+        keyReads += 1;
+        return Promise.resolve(
+          keyReads === 1
+            ? reauthorizationKey()
+            : reauthorizationKey({
+                last_authorized_at: "2026-08-17T00:01:00Z",
+              }),
+        );
+      }
+      if (path === "/catalog?include_all=true") {
+        return Promise.resolve(reauthorizationCatalog());
+      }
+      return Promise.reject(new Error(`Unexpected read: ${path}`));
+    });
+    const onResolve = vi.fn();
+    renderCard(
+      <ActionCard
+        block={reauthorizeBlock()}
+        onProgress={vi.fn()}
+        onBlock={vi.fn()}
+        onResolve={onResolve}
+      />,
+    );
+
+    await userEvent.click(screen.getByRole("button", { name: "Re-authorize" }));
+    await userEvent.click(
+      await screen.findByRole("button", { name: "Hand off to provider" }),
+    );
+
+    await waitFor(() => {
+      expect(onResolve).toHaveBeenCalledWith({
+        actionRequestId: "act-reauthorize",
+        originTurnId: "turn-origin-1",
+        disposition: "completed",
+        resource: { userService: { userServiceId: "service-existing" } },
+      });
+    });
+    expect(onResolve).toHaveBeenCalledTimes(1);
+  });
+
   it("opens the key.create journey and reports only the safe key identity", async () => {
     const onProgress = vi.fn();
     const onResolve = vi.fn();

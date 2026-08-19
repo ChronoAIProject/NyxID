@@ -4,6 +4,7 @@ import {
   keyCreateActionParamsSchema,
   keyRotateActionParamsSchema,
   serviceConnectActionParamsSchema,
+  serviceReauthorizeActionParamsSchema,
   type ActionCardParams,
   type AssistantActionRequest,
 } from "@/schemas/assistant-actions";
@@ -12,6 +13,7 @@ export type ActionRisk = "credential_access" | "unsupported";
 export type ActionJourney =
   | "catalog_service"
   | "custom_service"
+  | "service_reauthorize"
   | "key_create"
   | "key_rotate"
   | null;
@@ -87,6 +89,18 @@ const serviceConnectDescriptor: ActionDescriptor = {
   },
 };
 
+const serviceReauthorizeDescriptor: ActionDescriptor = {
+  title: () => "Re-authorize service",
+  body: (params) =>
+    params.variant === "service_reauthorize"
+      ? "NyxID will re-authorize this connected service with the requested permissions. Your credential stays in NyxID and is never shared with the model."
+      : "NyxID will re-authorize one exact connected service.",
+  cta: () => "Re-authorize",
+  risk: "credential_access",
+  journey: (params) =>
+    params.variant === "service_reauthorize" ? "service_reauthorize" : null,
+};
+
 const keyCreateDescriptor: ActionDescriptor = {
   title: () => "Create API key",
   body: (params) =>
@@ -120,6 +134,7 @@ const unsupportedDescriptor: ActionDescriptor = {
 
 export const ACTION_REGISTRY: Readonly<Record<string, ActionDescriptor>> = {
   "service.connect": serviceConnectDescriptor,
+  "service.reauthorize": serviceReauthorizeDescriptor,
   "key.create": keyCreateDescriptor,
   "key.rotate": keyRotateDescriptor,
 };
@@ -163,6 +178,18 @@ function safeAuthKeyName(value: string): string | null {
 }
 
 function normalizeParams(request: AssistantActionRequest): ActionCardParams {
+  if (request.action === "service.reauthorize") {
+    const parsed = serviceReauthorizeActionParamsSchema.safeParse(
+      request.params,
+    );
+    if (!parsed.success) return { variant: "unknown" };
+    return {
+      variant: "service_reauthorize",
+      user_service_id: parsed.data.userServiceId,
+      requested_scopes: parsed.data.requestedScopes,
+    };
+  }
+
   if (request.action === "key.create") {
     const parsed = keyCreateActionParamsSchema.safeParse(request.params);
     if (!parsed.success) return { variant: "unknown" };

@@ -433,7 +433,6 @@ pub struct KeyResponse {
     pub auth_method: String,
     pub auth_key_name: String,
     pub status: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub connection_status: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub catalog_service_id: Option<String>,
@@ -496,12 +495,12 @@ pub struct KeyResponse {
     /// parsed from the backing `UserApiKey.token_scopes`. The connect UIs
     /// pre-select and lock these when adding scopes to an existing connection
     /// (append-only edit). Omitted for non-OAuth keys / never-authorized
-    /// connections.
-    #[serde(skip_serializing_if = "Option::is_none")]
+    /// connections. Always serialized because authorization evidence readers
+    /// distinguish an explicit null from a missing property.
     pub granted_scopes: Option<Vec<String>>,
     /// RFC3339 timestamp of the last fresh OAuth authorization (NyxID#917).
-    /// Completion signal for the manage-scopes re-auth flow.
-    #[serde(skip_serializing_if = "Option::is_none")]
+    /// Completion signal for the manage-scopes re-auth flow. Always serialized
+    /// because authorization evidence readers require a stable property shape.
     pub last_authorized_at: Option<String>,
     /// Per-user default HTTP headers (NyxID#356). Only user-owned entries
     /// are surfaced here; catalog-level admin defaults are described on
@@ -2660,6 +2659,92 @@ mod tests {
             created_at: Utc::now(),
             updated_at: Utc::now(),
         }
+    }
+
+    #[test]
+    fn key_response_always_serializes_authorization_evidence_properties() {
+        let result = crate::services::unified_key_service::CreateKeyResult {
+            endpoint: test_user_endpoint(
+                "endpoint-1",
+                "user-1",
+                "Example",
+                "https://api.example.com",
+                None,
+                None,
+            ),
+            api_key: None,
+            service: test_user_service("service-1", "user-1", "example", "endpoint-1", None, None),
+            ssh_host: None,
+            ssh_port: None,
+            ssh_ca_public_key: None,
+            ssh_allowed_principals: None,
+            ssh_certificate_ttl_minutes: None,
+        };
+        let response = serde_json::to_value(super::key_response_from_result(&result)).unwrap();
+
+        for property in ["connection_status", "granted_scopes", "last_authorized_at"] {
+            assert_eq!(response.get(property), Some(&serde_json::Value::Null));
+        }
+
+        assert_aevatar_secret_free(&response);
+    }
+
+    fn assert_aevatar_secret_free(value: &serde_json::Value) {
+        const FORBIDDEN_NAMES: &[&str] = &[
+            "apikey",
+            "fullkey",
+            "keyhash",
+            "credential",
+            "credentials",
+            "accesstoken",
+            "refreshtoken",
+            "authorization",
+            "cookie",
+            "cookies",
+            "secret",
+            "secrets",
+            "clientsecret",
+            "password",
+            "token",
+            "passphrase",
+            "usercode",
+            "devicecode",
+            "rawbody",
+            "rawupstreambody",
+        ];
+        let secret_value =
+            regex::Regex::new(r"(?i)(?:Bearer\s+\S+|nyxid_(?:ag_)?[A-Za-z0-9_-]{16,})").unwrap();
+
+        fn visit(value: &serde_json::Value, secret_value: &regex::Regex) {
+            match value {
+                serde_json::Value::Object(properties) => {
+                    for (name, nested) in properties {
+                        let normalized: String = name
+                            .chars()
+                            .filter(char::is_ascii_alphanumeric)
+                            .map(|character| character.to_ascii_lowercase())
+                            .collect();
+                        assert!(
+                            !FORBIDDEN_NAMES.contains(&normalized.as_str()),
+                            "secret-bearing response property: {name}"
+                        );
+                        visit(nested, secret_value);
+                    }
+                }
+                serde_json::Value::Array(items) => {
+                    for item in items {
+                        visit(item, secret_value);
+                    }
+                }
+                serde_json::Value::String(text) => assert!(
+                    !secret_value.is_match(text),
+                    "secret-shaped response value at serialization boundary"
+                ),
+                _ => {}
+            }
+        }
+
+        visit(value, &secret_value);
     }
 
     async fn insert_user(db: &mongodb::Database, user_id: &str, user_type: UserType) {

@@ -85,6 +85,77 @@ describe("assistant action request schema", () => {
     });
   });
 
+  it("parses exact service.reauthorize params including URL-shaped scopes", () => {
+    const request = assistantActionRequestSchema.parse({
+      ...BASE_REQUEST,
+      action: "service.reauthorize",
+      params: {
+        userServiceId: "service-alpha",
+        requestedScopes: [
+          "repo",
+          "https://www.googleapis.com/auth/cloud-platform.read-only",
+        ],
+      },
+    });
+
+    expect(resolveAssistantAction(request)).toMatchObject({
+      supported: true,
+      journey: "service_reauthorize",
+      params: {
+        variant: "service_reauthorize",
+        user_service_id: "service-alpha",
+        requested_scopes: [
+          "repo",
+          "https://www.googleapis.com/auth/cloud-platform.read-only",
+        ],
+      },
+    });
+  });
+
+  it("rejects empty, duplicate, unnormalized, packed, and widened reauthorization scopes", () => {
+    const invalidParams = [
+      { userServiceId: "service-alpha", requestedScopes: [] },
+      {
+        userServiceId: "service-alpha",
+        requestedScopes: ["repo", "repo"],
+      },
+      { userServiceId: "service-alpha", requestedScopes: [" repo"] },
+      { userServiceId: "service-alpha", requestedScopes: ["repo write"] },
+      { userServiceId: "service-alpha", requestedScopes: ["repo,write"] },
+      {
+        userServiceId: "service-alpha",
+        requestedScopes: ["repo"],
+        replacementServiceId: "service-beta",
+      },
+      { userServiceId: "invalid/service", requestedScopes: ["repo"] },
+    ];
+
+    for (const [index, params] of invalidParams.entries()) {
+      expect(
+        assistantActionRequestSchema.safeParse({
+          ...BASE_REQUEST,
+          actionRequestId: `invalid-reauthorize-${String(index)}`,
+          action: "service.reauthorize",
+          params,
+        }).success,
+      ).toBe(false);
+    }
+  });
+
+  it("falls back to unsupported when service.reauthorize params are absent", () => {
+    const request = assistantActionRequestSchema.parse({
+      ...BASE_REQUEST,
+      action: "service.reauthorize",
+      params: {},
+    });
+
+    expect(resolveAssistantAction(request)).toMatchObject({
+      supported: false,
+      journey: null,
+      params: { variant: "unknown" },
+    });
+  });
+
   it("parses an exact nonempty key.create service set", () => {
     const request = assistantActionRequestSchema.parse({
       ...BASE_REQUEST,
