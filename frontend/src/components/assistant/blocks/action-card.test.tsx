@@ -24,13 +24,31 @@ import { usePendingConnectStore } from "@/stores/pending-connect-store";
 import type { ActionCardContentBlock } from "@/types/assistant";
 import { ActionCard } from "./action-card";
 
-const { mockGet } = vi.hoisted(() => ({ mockGet: vi.fn() }));
+const { mockGet, watchDeadline } = vi.hoisted(() => ({
+  mockGet: vi.fn(),
+  // Lets one test drive the watch past its give-up point without waiting out
+  // the real ten-minute window.
+  watchDeadline: { override: null as number | null },
+}));
 
 // The pending-authorization store outlives any one card by design, so it also
 // outlives any one test. Reset it or a stranded attempt leaks forward.
 beforeEach(() => {
   mockGet.mockReset();
+  watchDeadline.override = null;
   usePendingConnectStore.setState({ attempts: {} });
+});
+
+vi.mock("@/lib/assistant/connect-watch", async () => {
+  const actual = await vi.importActual<
+    typeof import("@/lib/assistant/connect-watch")
+  >("@/lib/assistant/connect-watch");
+  return {
+    ...actual,
+    connectWatchDeadline: (startedAt: number, lastActivityAt: number) =>
+      watchDeadline.override ??
+      actual.connectWatchDeadline(startedAt, lastActivityAt),
+  };
 });
 
 vi.mock("@/lib/api-client", () => ({
@@ -309,31 +327,47 @@ function reauthorizationCatalog(
   overrides: Readonly<Record<string, unknown>> = {},
 ) {
   return {
-    entries: [
-      {
-        slug: "github",
-        provider_type: "oauth2",
-        provider_config_id: "provider-github",
-        device_code_format: null,
-        ...overrides,
-      },
-      {
-        slug: "plain-api",
-        provider_type: "api_key",
-        provider_config_id: null,
-        device_code_format: null,
-      },
-    ],
+    slug: "github",
+    provider_type: "oauth2",
+    provider_config_id: "provider-github",
+    device_code_format: null,
+    ...overrides,
+  };
+}
+
+/**
+ * The authorization-evidence projection served by
+ * `GET /keys/{id}/authorization`. Defaults grant every scope the fixtures
+ * request, so a test that does not care about scopes settles as before.
+ */
+function reauthorizationEvidence(
+  overrides: Readonly<Record<string, unknown>> = {},
+): Readonly<Record<string, unknown>> {
+  return {
+    id: "service-existing",
+    api_key_id: "credential-existing",
+    is_active: true,
+    status: "active",
+    connection_status: "connected",
+    granted_scopes: ["repo", "workflow"],
+    last_authorized_at: "2026-08-17T00:00:00Z",
+    ...overrides,
   };
 }
 
 function mockReauthorizationReads(
   key: Readonly<Record<string, unknown>> = reauthorizationKey(),
   catalog = reauthorizationCatalog(),
+  evidence: Readonly<Record<string, unknown>> | null = reauthorizationEvidence(),
 ) {
   mockGet.mockImplementation((path: string) => {
     if (path === "/keys/service-existing") return Promise.resolve(key);
-    if (path === "/catalog?include_all=true") {
+    if (path === "/keys/service-existing/authorization") {
+      return evidence === null
+        ? Promise.reject(new Error("evidence unavailable"))
+        : Promise.resolve(evidence);
+    }
+    if (path === `/catalog/${String(catalog.slug)}`) {
       return Promise.resolve(catalog);
     }
     return Promise.reject(new Error(`Unexpected read: ${path}`));
@@ -399,7 +433,7 @@ describe("ActionCard", () => {
     expect(dialog).toHaveAttribute("data-launch", "popup");
     expect(dialog).toHaveAttribute("data-flow", "cc");
     expect(mockGet).toHaveBeenCalledWith("/keys/service-existing");
-    expect(mockGet).toHaveBeenCalledWith("/catalog?include_all=true");
+    expect(mockGet).toHaveBeenCalledWith("/catalog/github");
 
     await userEvent.click(
       screen.getByRole("button", { name: "Finish mock connection" }),
@@ -439,7 +473,7 @@ describe("ActionCard", () => {
     });
     expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
     expect(onResolve).not.toHaveBeenCalled();
-    expect(mockGet).not.toHaveBeenCalledWith("/catalog?include_all=true");
+    expect(mockGet).not.toHaveBeenCalledWith("/catalog/github");
   });
 
   it("blocks OpenAI-format device authorization instead of dropping requested scopes", async () => {
@@ -477,6 +511,8 @@ describe("ActionCard", () => {
     mockGet.mockImplementation((path: string) => {
       if (path === "/keys/service-existing") {
         keyReads += 1;
+        // Read 1 is the eligibility preflight. `AddKeyDialog` is mocked in
+        // this file, so the watch polls are everything after it.
         return Promise.resolve(
           keyReads === 1
             ? reauthorizationKey()
@@ -485,7 +521,10 @@ describe("ActionCard", () => {
               }),
         );
       }
-      if (path === "/catalog?include_all=true") {
+      if (path === "/keys/service-existing/authorization") {
+        return Promise.resolve(reauthorizationEvidence());
+      }
+      if (path === "/catalog/github") {
         return Promise.resolve(reauthorizationCatalog());
       }
       return Promise.reject(new Error(`Unexpected read: ${path}`));
@@ -514,6 +553,168 @@ describe("ActionCard", () => {
       });
     });
     expect(onResolve).toHaveBeenCalledTimes(1);
+  });
+
+  it("never auto-completes reauthorization while the authorization timestamp is unchanged", async () => {
+    // The counterpart to the test above: same flow, but the row never records
+    // a fresh authorization. Deleting the freshness gate makes this fail.
+    mockReauthorizationReads();
+    const onResolve = vi.fn();
+    const onBlock = vi.fn();
+    renderCard(
+      <ActionCard
+        block={reauthorizeBlock()}
+        onProgress={vi.fn()}
+        onBlock={onBlock}
+        onResolve={onResolve}
+      />,
+    );
+
+    await userEvent.click(screen.getByRole("button", { name: "Re-authorize" }));
+    await userEvent.click(
+      await screen.findByRole("button", { name: "Hand off to provider" }),
+    );
+
+    // Let the watch poll the unchanged row several times over. The fast
+    // cadence is 2s, so this needs more than waitFor's default second.
+    await waitFor(
+      () => {
+        expect(
+          mockGet.mock.calls.filter(
+            ([path]) => path === "/keys/service-existing",
+          ).length,
+        ).toBeGreaterThanOrEqual(3);
+      },
+      { timeout: 8_000 },
+    );
+    expect(onResolve).not.toHaveBeenCalled();
+  });
+
+  it("reports the authorization timeout when no fresh authorization ever lands", async () => {
+    mockReauthorizationReads();
+    const onResolve = vi.fn();
+    const onBlock = vi.fn();
+    // Give up immediately instead of waiting out the real window.
+    watchDeadline.override = Date.now() - 1;
+    renderCard(
+      <ActionCard
+        block={reauthorizeBlock()}
+        onProgress={vi.fn()}
+        onBlock={onBlock}
+        onResolve={onResolve}
+      />,
+    );
+
+    await userEvent.click(screen.getByRole("button", { name: "Re-authorize" }));
+    await userEvent.click(
+      await screen.findByRole("button", { name: "Hand off to provider" }),
+    );
+
+    await waitFor(() => {
+      expect(onBlock).toHaveBeenCalledWith(
+        "action-card-reauthorize",
+        expect.stringContaining("stopped waiting"),
+      );
+    });
+    expect(onResolve).not.toHaveBeenCalled();
+  });
+
+  it("blocks instead of reporting completed when the provider withheld a requested scope", async () => {
+    let keyReads = 0;
+    mockGet.mockImplementation((path: string) => {
+      if (path === "/keys/service-existing") {
+        keyReads += 1;
+        return Promise.resolve(
+          keyReads === 1
+            ? reauthorizationKey()
+            : reauthorizationKey({
+                last_authorized_at: "2026-08-17T00:01:00Z",
+              }),
+        );
+      }
+      if (path === "/keys/service-existing/authorization") {
+        // Fresh authorization, but `workflow` was never granted.
+        return Promise.resolve(
+          reauthorizationEvidence({
+            granted_scopes: ["repo"],
+            last_authorized_at: "2026-08-17T00:01:00Z",
+          }),
+        );
+      }
+      if (path === "/catalog/github") {
+        return Promise.resolve(reauthorizationCatalog());
+      }
+      return Promise.reject(new Error(`Unexpected read: ${path}`));
+    });
+    const onResolve = vi.fn();
+    const onBlock = vi.fn();
+    renderCard(
+      <ActionCard
+        block={reauthorizeBlock()}
+        onProgress={vi.fn()}
+        onBlock={onBlock}
+        onResolve={onResolve}
+      />,
+    );
+
+    await userEvent.click(screen.getByRole("button", { name: "Re-authorize" }));
+    await userEvent.click(
+      await screen.findByRole("button", { name: "Hand off to provider" }),
+    );
+
+    await waitFor(() => {
+      expect(onBlock).toHaveBeenCalledWith(
+        "action-card-reauthorize",
+        expect.stringContaining("did not grant workflow"),
+      );
+    });
+    expect(onResolve).not.toHaveBeenCalled();
+  });
+
+  it("blocks when the authorization evidence read fails", async () => {
+    let keyReads = 0;
+    mockGet.mockImplementation((path: string) => {
+      if (path === "/keys/service-existing") {
+        keyReads += 1;
+        return Promise.resolve(
+          keyReads === 1
+            ? reauthorizationKey()
+            : reauthorizationKey({
+                last_authorized_at: "2026-08-17T00:01:00Z",
+              }),
+        );
+      }
+      if (path === "/keys/service-existing/authorization") {
+        return Promise.reject(new Error("evidence unavailable"));
+      }
+      if (path === "/catalog/github") {
+        return Promise.resolve(reauthorizationCatalog());
+      }
+      return Promise.reject(new Error(`Unexpected read: ${path}`));
+    });
+    const onResolve = vi.fn();
+    const onBlock = vi.fn();
+    renderCard(
+      <ActionCard
+        block={reauthorizeBlock()}
+        onProgress={vi.fn()}
+        onBlock={onBlock}
+        onResolve={onResolve}
+      />,
+    );
+
+    await userEvent.click(screen.getByRole("button", { name: "Re-authorize" }));
+    await userEvent.click(
+      await screen.findByRole("button", { name: "Hand off to provider" }),
+    );
+
+    await waitFor(() => {
+      expect(onBlock).toHaveBeenCalledWith(
+        "action-card-reauthorize",
+        expect.stringContaining("could not read this service's authorization"),
+      );
+    });
+    expect(onResolve).not.toHaveBeenCalled();
   });
 
   it("opens the key.create journey and reports only the safe key identity", async () => {

@@ -61,6 +61,24 @@ const REAUTHORIZE_CATALOG_NOTE =
   "NyxID could not resolve this service's OAuth provider. Manage it in AI Services, then ask the assistant to try again.";
 const REAUTHORIZE_SCOPES_UNSUPPORTED_NOTE =
   "This provider does not accept requested scope changes during device authorization, so NyxID did not start a re-authorization that could drop the request.";
+const REAUTHORIZE_EVIDENCE_UNREADABLE_NOTE =
+  "NyxID could not read this service's authorization state, so the re-authorization was not confirmed. Check it in AI Services, then ask the assistant to request it again.";
+const REAUTHORIZE_SECRET_EVIDENCE_NOTE =
+  "NyxID returned credential-shaped data where it should have returned only authorization state, so the re-authorization was not confirmed. This is a NyxID bug — report it rather than retrying.";
+
+/** Ordinal, matching the postcondition reader's `StringComparer.Ordinal`. */
+function missingScopes(
+  requested: readonly string[],
+  granted: readonly string[] | null,
+): readonly string[] {
+  if (granted === null) return [...requested];
+  const held = new Set(granted);
+  return requested.filter((scope) => !held.has(scope));
+}
+
+function scopeShortfallNote(missing: readonly string[]): string {
+  return `The provider did not grant ${missing.join(", ")}. NyxID did not report this as re-authorized — ask the assistant to request it again, or grant the missing access at the provider first.`;
+}
 
 const reauthorizationCredentialSourceSchema = z.discriminatedUnion("type", [
   z.object({ type: z.literal("personal") }).passthrough(),
@@ -82,23 +100,40 @@ const reauthorizationKeySchema = z
     is_active: z.boolean(),
     auto_connected: z.boolean(),
     catalog_service_slug: z.string().nullish(),
-    credential_source: reauthorizationCredentialSourceSchema.optional(),
+    // Required, not optional. `KeyResponse.credential_source` is mandatory on
+    // the wire, and an `.optional()` schema would let the org-admin guard
+    // below silently vanish if that ever changed — the opposite of what a
+    // defence-in-depth check is for. The backend remains the real gate.
+    credential_source: reauthorizationCredentialSourceSchema,
   })
   .passthrough();
-const reauthorizationCatalogSchema = z
+const reauthorizationCatalogEntrySchema = z
   .object({
-    entries: z.array(
-      z
-        .object({
-          slug: z.string().min(1),
-          provider_type: z.string().nullish(),
-          provider_config_id: z.string().nullish(),
-          device_code_format: z.string().nullish(),
-        })
-        .passthrough(),
-    ),
+    slug: z.string().min(1),
+    provider_type: z.string().nullish(),
+    provider_config_id: z.string().nullish(),
+    device_code_format: z.string().nullish(),
   })
   .passthrough();
+
+/**
+ * The authorization-evidence projection of a user service
+ * (`GET /keys/{id}/authorization`) — the same seven properties the
+ * assistant-side postcondition reader consumes.
+ */
+const authorizationEvidenceSchema = z
+  .object({
+    id: z.string().min(1),
+    api_key_id: z.string().min(1).nullish(),
+    is_active: z.boolean(),
+    status: z.string().min(1),
+    connection_status: z.string().nullable(),
+    granted_scopes: z.array(z.string()).nullable(),
+    last_authorized_at: z.string().nullable(),
+  })
+  .strict();
+
+type AuthorizationEvidence = z.infer<typeof authorizationEvidenceSchema>;
 
 const FORBIDDEN_READ_BACK_FIELDS = new Set([
   "apikey",
@@ -147,11 +182,80 @@ function assertSecretFreeReadBack(value: unknown): void {
 
 class ReauthorizationBlockedError extends Error {}
 
+/** A secret-shaped value reached a read that reports to the assistant. */
+class SecretBearingEvidenceError extends Error {}
+
+/**
+ * Read the authorization evidence for one user service.
+ *
+ * This is the read that decides whether the assistant is told the
+ * re-authorization happened, so it is the read the secret-shape assertion
+ * belongs on — and it is served as a minimal projection precisely so a
+ * legitimately configured service (a `Bearer ${credential}` WS auth template,
+ * a `Bearer …` service label) cannot make its own authorization permanently
+ * unverifiable. The equivalent backend assertion over a fully populated
+ * detail response is the canary for the projection itself.
+ */
+async function readAuthorizationEvidence(
+  userServiceId: string,
+): Promise<AuthorizationEvidence> {
+  const value = await api.get<unknown>(
+    `/keys/${encodeURIComponent(userServiceId)}/authorization`,
+  );
+  try {
+    assertSecretFreeReadBack(value);
+  } catch {
+    throw new SecretBearingEvidenceError(REAUTHORIZE_SECRET_EVIDENCE_NOTE);
+  }
+  const evidence = authorizationEvidenceSchema.parse(value);
+  if (evidence.id !== userServiceId) {
+    throw new ReauthorizationBlockedError(REAUTHORIZE_IDENTITY_NOTE);
+  }
+  return evidence;
+}
+
+/**
+ * Verify that the provider actually granted every requested scope before the
+ * card reports `completed`.
+ *
+ * `last_authorized_at` advancing proves an authorization landed, not that it
+ * granted anything new: the token endpoint may omit `scope`, in which case the
+ * backend deliberately preserves the previous `token_scopes` while still
+ * stamping the timestamp. Returns the note to block with, or `null` to
+ * proceed.
+ */
+async function scopeGrantShortfall(
+  userServiceId: string,
+  requestedScopes: readonly string[],
+): Promise<string | null> {
+  if (requestedScopes.length === 0) return null;
+  let evidence: AuthorizationEvidence;
+  try {
+    evidence = await readAuthorizationEvidence(userServiceId);
+  } catch (caught) {
+    if (
+      caught instanceof SecretBearingEvidenceError ||
+      caught instanceof ReauthorizationBlockedError
+    ) {
+      return caught.message;
+    }
+    return REAUTHORIZE_EVIDENCE_UNREADABLE_NOTE;
+  }
+  const missing = missingScopes(requestedScopes, evidence.granted_scopes);
+  return missing.length > 0 ? scopeShortfallNote(missing) : null;
+}
+
 async function readReauthorizationKey(userServiceId: string): Promise<KeyInfo> {
   const value = await api.get<unknown>(
     `/keys/${encodeURIComponent(userServiceId)}`,
   );
-  assertSecretFreeReadBack(value);
+  // Deliberately not secret-scanned. This is the eligibility read: nothing
+  // from it is reported to the assistant, and the full detail response
+  // legitimately carries user free text (service label, custom header values,
+  // the supported `Bearer ${credential}` WS template) that a secret-shape
+  // scan cannot tell from a real credential. Scanning it here would refuse to
+  // start the journey for services that are configured perfectly correctly.
+  // The assertion lives on `readAuthorizationEvidence` instead.
   const snapshot = reauthorizationKeySchema.parse(value);
   if (snapshot.id !== userServiceId) {
     throw new ReauthorizationBlockedError(REAUTHORIZE_IDENTITY_NOTE);
@@ -173,21 +277,26 @@ async function readReauthorizationKey(userServiceId: string): Promise<KeyInfo> {
     throw new ReauthorizationBlockedError(REAUTHORIZE_PLATFORM_NOTE);
   }
   if (
-    snapshot.credential_source?.type === "org" &&
+    snapshot.credential_source.type === "org" &&
     snapshot.credential_source.role !== "admin"
   ) {
     throw new ReauthorizationBlockedError(REAUTHORIZE_ORG_NOTE);
   }
 
-  const catalog = reauthorizationCatalogSchema.parse(
-    await api.get<unknown>("/catalog?include_all=true"),
-  );
+  // One entry, not the whole catalog: `/catalog/{slug}` returns the same
+  // `provider_type` / `provider_config_id` / `device_code_format` this needs,
+  // and also resolves rows the list endpoint filters out.
   const catalogSlug = snapshot.catalog_service_slug ?? snapshot.slug;
-  const catalogEntry = catalog.entries.find(
-    (entry) => entry.slug === catalogSlug,
-  );
-  if (!catalogEntry) {
-    throw new ReauthorizationBlockedError(REAUTHORIZE_CATALOG_NOTE);
+  let catalogEntry: z.infer<typeof reauthorizationCatalogEntrySchema>;
+  try {
+    catalogEntry = reauthorizationCatalogEntrySchema.parse(
+      await api.get<unknown>(`/catalog/${encodeURIComponent(catalogSlug)}`),
+    );
+  } catch (caught) {
+    if (caught instanceof ApiError && caught.status === 404) {
+      throw new ReauthorizationBlockedError(REAUTHORIZE_CATALOG_NOTE);
+    }
+    throw caught;
   }
   if (
     (catalogEntry.provider_type !== "oauth2" &&
@@ -525,9 +634,21 @@ export function ActionCard({
       }
       watchSettledRef.current = attemptId;
       resolvingRef.current = true;
+      const requestedScopes =
+        block.params.variant === "service_reauthorize"
+          ? block.params.requested_scopes
+          : [];
       void Promise.resolve()
-        .then(() => {
+        .then(async () => {
           endPendingAuth(block.block_id);
+          // A fresh authorization is not the same as a granted one. Confirm
+          // the provider actually issued every requested scope before telling
+          // the assistant this succeeded.
+          const shortfall = await scopeGrantShortfall(keyId, requestedScopes);
+          if (shortfall) {
+            resolvingRef.current = false;
+            return onBlock(block.block_id, shortfall);
+          }
           return onResolve({
             actionRequestId: block.action_request_id,
             originTurnId: block.origin_turn_id,
@@ -966,9 +1087,27 @@ export function ActionCard({
               void onBlock(block.block_id, REAUTHORIZE_IDENTITY_NOTE);
               return;
             }
-            report("completed", {
-              userService: { userServiceId: params.user_service_id },
-            });
+            // Same scope confirmation as the watch path: the dialog reporting
+            // success only means the handshake finished.
+            void scopeGrantShortfall(
+              params.user_service_id,
+              params.requested_scopes,
+            )
+              .then((shortfall) => {
+                if (shortfall) {
+                  return onBlock(block.block_id, shortfall);
+                }
+                report("completed", {
+                  userService: { userServiceId: params.user_service_id },
+                });
+                return undefined;
+              })
+              .catch(() => {
+                void onBlock(
+                  block.block_id,
+                  REAUTHORIZE_EVIDENCE_UNREADABLE_NOTE,
+                );
+              });
           }}
           onAuthorizationPending={(attempt) => {
             if (attempt.keyId !== params.user_service_id) {
