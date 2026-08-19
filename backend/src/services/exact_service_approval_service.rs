@@ -17,6 +17,8 @@ use crate::services::{approval_service, mcp_service, notification_service, proxy
 
 const MAX_RECEIPT_RESPONSE_BYTES: usize = 8 * 1024 * 1024;
 pub const DELEGATED_REQUESTER_TYPE: &str = "delegated";
+pub const EXACT_VIEW_DIGEST_REQUIRED: &str = "exact_view_digest_required";
+pub const DELEGATED_CATALOG_SCOPE_REQUIRED: &str = "delegated_catalog_scope_required";
 
 #[derive(Clone, Debug)]
 pub struct ExactServiceApprovalCaller {
@@ -27,6 +29,7 @@ pub struct ExactServiceApprovalCaller {
     pub requester_id: String,
     pub requester_label: Option<String>,
     pub api_key_id: Option<String>,
+    pub has_catalog_read: bool,
     pub allow_all_services: bool,
     pub allowed_service_ids: Vec<String>,
     pub allow_all_nodes: bool,
@@ -121,6 +124,10 @@ pub async fn create_request(
     caller: &ExactServiceApprovalCaller,
     input: ExactServiceApprovalCreate,
 ) -> AppResult<ExactServiceApprovalResult> {
+    // Scope rejection is deliberately before validation and catalog resolution.
+    // The digest requirement itself is checked after exact-view membership so
+    // delegated out-of-view targets preserve their established NotFound error.
+    ensure_delegated_exact_authority(caller, input.exact_view_digest.as_deref(), false)?;
     validate_create(&input)?;
     let resolution = resolve_exact_catalog(
         state,
@@ -136,6 +143,7 @@ pub async fn create_request(
         &resolution.catalog_digest,
     )?;
     if resolution.in_exact_view {
+        ensure_delegated_exact_authority(caller, input.exact_view_digest.as_deref(), true)?;
         if let Some(exact_view_digest) = input.exact_view_digest.as_deref() {
             ensure_digest(
                 "exact_view_digest",
@@ -260,6 +268,7 @@ pub async fn observe_request(
     caller: &ExactServiceApprovalCaller,
     request_id: &str,
 ) -> AppResult<ExactServiceApprovalResult> {
+    ensure_delegated_exact_authority(caller, None, false)?;
     let request = load_bound_request(state, caller, request_id).await?;
     let request = expire_if_needed(state, request).await?;
     let state_value = current_state(state, caller, &request).await?;
@@ -273,6 +282,10 @@ pub async fn redeem_request(
     fence: ExactServiceApprovalFence,
     billing_egress_permit: BillingEgressPermit,
 ) -> AppResult<ExactServiceApprovalResult> {
+    // Redeem must reject a delegated omission before loading or claiming the
+    // request. Unlike create, membership has already been fixed in the stored
+    // binding, so this check can run at the service boundary immediately.
+    ensure_delegated_exact_authority(caller, fence.exact_view_digest.as_deref(), true)?;
     let request = load_bound_request(state, caller, request_id).await?;
     ensure_fence(&request, &fence)?;
     let request = expire_if_needed(state, request).await?;
@@ -620,6 +633,25 @@ fn exact_view_membership(
     } else {
         Ok(in_exact_view)
     }
+}
+
+fn ensure_delegated_exact_authority(
+    caller: &ExactServiceApprovalCaller,
+    provided_digest: Option<&str>,
+    require_digest: bool,
+) -> AppResult<()> {
+    if caller.requester_type != DELEGATED_REQUESTER_TYPE {
+        return Ok(());
+    }
+    if !caller.has_catalog_read {
+        return Err(AppError::Forbidden(
+            DELEGATED_CATALOG_SCOPE_REQUIRED.to_string(),
+        ));
+    }
+    if require_digest && provided_digest.is_none() {
+        return Err(AppError::BadRequest(EXACT_VIEW_DIGEST_REQUIRED.to_string()));
+    }
+    Ok(())
 }
 
 #[derive(Clone, Debug)]
@@ -986,6 +1018,7 @@ mod tests {
             requester_id: "client-alpha".to_string(),
             requester_label: None,
             api_key_id: None,
+            has_catalog_read: true,
             allow_all_services: true,
             allowed_service_ids: vec![],
             allow_all_nodes: true,
@@ -1371,10 +1404,14 @@ mod tests {
     }
 
     #[test]
-    fn omitted_exact_view_digest_is_accepted_at_validation_but_never_at_persistence_boundary() {
+    fn non_delegated_omission_still_persists_server_fence() {
         let mut input = create();
         input.exact_view_digest = None;
         validate_create(&input).expect("legacy callers may omit the additive fence");
+
+        let mut legacy_caller = caller();
+        legacy_caller.requester_type = "access_token".to_string();
+        assert!(ensure_delegated_exact_authority(&legacy_caller, None, true).is_ok());
 
         let mut binding = binding();
         binding.exact_view_digest = Some("sha256:server-persisted".to_string());
@@ -1393,6 +1430,69 @@ mod tests {
             .as_deref(),
             Some("sha256:server-persisted")
         );
+    }
+
+    #[test]
+    fn delegated_caller_requires_catalog_scope() {
+        let mut delegated = caller();
+        delegated.has_catalog_read = false;
+        assert!(matches!(
+            ensure_delegated_exact_authority(&delegated, None, false),
+            Err(AppError::Forbidden(message))
+                if message == DELEGATED_CATALOG_SCOPE_REQUIRED
+        ));
+    }
+
+    #[test]
+    fn delegated_create_rejects_omitted_exact_view_digest() {
+        let delegated = caller();
+        assert!(matches!(
+            ensure_delegated_exact_authority(&delegated, None, true),
+            Err(AppError::BadRequest(message)) if message == EXACT_VIEW_DIGEST_REQUIRED
+        ));
+        ensure_delegated_exact_authority(&delegated, Some("sha256:view"), true)
+            .expect("delegated caller with catalog scope and digest is authorized");
+    }
+
+    #[test]
+    fn delegated_redeem_rejects_omitted_fence_digest() {
+        let delegated = caller();
+        assert!(matches!(
+            ensure_delegated_exact_authority(&delegated, None, true),
+            Err(AppError::BadRequest(message)) if message == EXACT_VIEW_DIGEST_REQUIRED
+        ));
+    }
+
+    #[test]
+    fn delegated_out_of_view_error_precedence_preserved() {
+        let delegated = caller();
+        let generic_service = mcp_service::McpToolService {
+            service_id: "generic-service".to_string(),
+            service_name: "Generic Service".to_string(),
+            service_slug: "generic-service".to_string(),
+            description: None,
+            service_category: "connection".to_string(),
+            endpoints: Vec::new(),
+            durable_endpoint_metadata: HashMap::new(),
+            source: mcp_service::McpToolSource::UserManaged {
+                user_service_id: "generic-service".to_string(),
+                catalog_service_id: None,
+                effective_owner_id: "user-alpha".to_string(),
+                node_id: None,
+                has_server_credential: true,
+            },
+            executable: true,
+            is_generic_proxy: true,
+            invalid_openapi_contract: false,
+            recommended_skills: Vec::new(),
+            proxy_operation_policy: None,
+        };
+        ensure_delegated_exact_authority(&delegated, None, false)
+            .expect("scope gate passes before membership resolution");
+        assert!(matches!(
+            exact_view_membership(&delegated, &generic_service),
+            Err(AppError::NotFound(message)) if message == "exact_operation_not_in_exact_view"
+        ));
     }
 
     #[tokio::test]

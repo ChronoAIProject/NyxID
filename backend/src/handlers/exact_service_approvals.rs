@@ -98,6 +98,9 @@ fn caller(auth_user: &AuthUser) -> AppResult<ExactServiceApprovalCaller> {
         requester_id,
         requester_label: auth_user.api_key_name.clone(),
         api_key_id: auth_user.api_key_id.clone(),
+        has_catalog_read: crate::services::catalog_delegation_service::scope_has_catalog_read(
+            &auth_user.scope,
+        ),
         allow_all_services: auth_user.allow_all_services,
         allowed_service_ids: auth_user.allowed_service_ids.clone(),
         allow_all_nodes: auth_user.allow_all_nodes,
@@ -155,7 +158,9 @@ mod tests {
     #[test]
     fn delegated_requester_is_bound_to_oauth_client() {
         let auth = auth(AuthMethod::Delegated);
-        assert_eq!(caller(&auth).unwrap().requester_id, "client-alpha");
+        let caller = caller(&auth).unwrap();
+        assert_eq!(caller.requester_id, "client-alpha");
+        assert!(!caller.has_catalog_read);
     }
 
     /// `create_request`, `observe_request`, and `redeem_request` all gate on the
@@ -189,5 +194,6 @@ mod tests {
         );
         auth.ensure_rest_proxy_access()
             .expect("proxy authority is independently granted");
+        assert!(caller(&auth).unwrap().has_catalog_read);
     }
 }

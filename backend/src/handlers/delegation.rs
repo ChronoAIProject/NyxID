@@ -222,12 +222,20 @@ pub async fn refresh_delegation_token(
 
 #[cfg(test)]
 mod tests {
+    use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::{Arc, Mutex};
 
-    use axum::{Extension, Json as AxumJson, Router, extract::Path, routing::get};
+    use axum::body::{Body, to_bytes};
+    use axum::http::{Method, Request, StatusCode, header};
+    use axum::{
+        Extension, Json as AxumJson, Router,
+        extract::Path,
+        routing::{any, get},
+    };
     use chrono::Utc;
     use mongodb::event::EventHandler;
     use mongodb::event::command::CommandEvent;
+    use tower::ServiceExt;
     use uuid::Uuid;
 
     use crate::crypto::{jwt, token::hash_token};
@@ -235,6 +243,7 @@ mod tests {
     use crate::models::downstream_service::{
         COLLECTION_NAME as DOWNSTREAM_SERVICES, DownstreamService,
     };
+    use crate::models::node::{COLLECTION_NAME as NODES, Node, NodeMetrics, NodeStatus};
     use crate::models::oauth_client::{
         COLLECTION_NAME as OAUTH_CLIENTS, OauthClient, ScopeProvenance,
     };
@@ -243,6 +252,7 @@ mod tests {
         COLLECTION_NAME as SERVICE_ENDPOINTS, OperationResponseContract, ServiceEndpoint,
     };
     use crate::models::user::UserType;
+    use crate::models::user_api_key::{COLLECTION_NAME as USER_API_KEYS, UserApiKey};
     use crate::models::user_endpoint::{COLLECTION_NAME as USER_ENDPOINTS, UserEndpoint};
     use crate::models::user_service::{COLLECTION_NAME as USER_SERVICES, UserService};
     use crate::services::{approval_service, consent_service, token_exchange_service};
@@ -253,6 +263,450 @@ mod tests {
     const TEST_SERVICE_A: &str = "00000000-0000-4000-8000-000000000101";
     const TEST_SERVICE_B: &str = "00000000-0000-4000-8000-000000000102";
     const TEST_GENERIC_SERVICE: &str = "00000000-0000-4000-8000-000000000103";
+
+    const CREATE_PATH: &str = "/api/v1/approvals/exact-service/requests";
+
+    struct FullRouterFixture {
+        db: mongodb::Database,
+        state: crate::AppState,
+        app: Router,
+        delegated_token: String,
+        source_token: String,
+        grant: CatalogDelegationGrant,
+        delegated_scope: String,
+        receiver_client_id: String,
+        receiver_secret: String,
+        requested_service_ids: Vec<String>,
+        catalog_digest: String,
+        exact_view_digest: String,
+        operation: mcp_service::ExactOperationViewOperation,
+        operation_digest: String,
+        provider_calls: Arc<AtomicUsize>,
+        provider: tokio::task::JoinHandle<()>,
+    }
+
+    impl Drop for FullRouterFixture {
+        fn drop(&mut self) {
+            self.provider.abort();
+        }
+    }
+
+    async fn setup_full_router_fixture(prefix: &str) -> FullRouterFixture {
+        let db = crate::test_utils::connect_transaction_test_database(prefix).await;
+        let state = crate::test_utils::test_app_state(db.clone());
+        let user_id = Uuid::parse_str(TEST_USER_ID).unwrap();
+        let actor_client_id = format!("{prefix}-actor");
+        let receiver_client_id = format!("{prefix}-receiver");
+        let actor_secret = format!("{prefix}-actor-secret");
+        let receiver_secret = format!("{prefix}-receiver-secret");
+        let delegated_scope = format!(
+            "{} proxy",
+            catalog_delegation_service::MCP_CATALOG_READ_SCOPE
+        );
+        let requested_service_ids = vec![TEST_SERVICE_A.to_string()];
+
+        db.collection(crate::models::user::COLLECTION_NAME)
+            .insert_one(crate::test_utils::test_user(TEST_USER_ID, UserType::Person))
+            .await
+            .expect("insert full-router user");
+        db.collection::<OauthClient>(OAUTH_CLIENTS)
+            .insert_many([
+                oauth_client(&actor_client_id, &actor_secret, &delegated_scope),
+                oauth_client(&receiver_client_id, &receiver_secret, &delegated_scope),
+            ])
+            .await
+            .expect("insert full-router OAuth clients");
+        consent_service::grant_consent_with_services(
+            &db,
+            TEST_USER_ID,
+            &actor_client_id,
+            "openid",
+            Some(requested_service_ids.clone()),
+        )
+        .await
+        .expect("grant full-router actor consent");
+        consent_service::grant_consent_with_services(
+            &db,
+            TEST_USER_ID,
+            &receiver_client_id,
+            "openid",
+            Some(requested_service_ids.clone()),
+        )
+        .await
+        .expect("grant full-router receiver consent");
+
+        let fixture_auth = fixture_catalog_auth();
+        seed_operation_catalog_fixture(&db, &fixture_auth).await;
+        db.collection::<ServiceEndpoint>(SERVICE_ENDPOINTS)
+            .update_one(
+                mongodb::bson::doc! { "_id": "00000000-0000-4000-8000-000000000403" },
+                mongodb::bson::doc! { "$set": { "is_active": false } },
+            )
+            .await
+            .expect("disable alternate provider endpoint");
+
+        let provider_calls = Arc::new(AtomicUsize::new(0));
+        let route_calls = provider_calls.clone();
+        let fallback_calls = provider_calls.clone();
+        let provider_listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind full-router provider spy");
+        let provider_addr = provider_listener.local_addr().unwrap();
+        let provider = tokio::spawn(async move {
+            axum::serve(
+                provider_listener,
+                Router::new()
+                    .route(
+                        "/items",
+                        get(move || {
+                            let route_calls = route_calls.clone();
+                            async move {
+                                route_calls.fetch_add(1, Ordering::SeqCst);
+                                AxumJson(serde_json::json!({"ok": true}))
+                            }
+                        }),
+                    )
+                    .fallback(any(move || {
+                        let fallback_calls = fallback_calls.clone();
+                        async move {
+                            fallback_calls.fetch_add(1, Ordering::SeqCst);
+                            (
+                                StatusCode::NOT_FOUND,
+                                AxumJson(serde_json::json!({"unexpected": true})),
+                            )
+                        }
+                    })),
+            )
+            .await
+            .expect("serve full-router provider spy");
+        });
+        db.collection::<UserEndpoint>(USER_ENDPOINTS)
+            .update_one(
+                mongodb::bson::doc! { "_id": "00000000-0000-4000-8000-000000000201" },
+                mongodb::bson::doc! { "$set": { "url": format!("http://{provider_addr}") } },
+            )
+            .await
+            .expect("point full-router endpoint at provider spy");
+        db.collection::<ServiceApprovalConfig>(
+            crate::models::service_approval_config::COLLECTION_NAME,
+        )
+        .insert_one(ServiceApprovalConfig {
+            id: Uuid::new_v4().to_string(),
+            user_id: TEST_USER_ID.to_string(),
+            service_id: "00000000-0000-4000-8000-000000000301".to_string(),
+            service_name: "Alpha Service".to_string(),
+            approval_required: true,
+            approval_mode: ApprovalMode::PerRequest,
+            rules: Vec::new(),
+            default_effect: None,
+            created_at: Utc::now(),
+            updated_at: Utc::now(),
+        })
+        .await
+        .expect("seed full-router approval config");
+
+        let source_token = jwt::generate_oauth_access_token(
+            &state.jwt_keys,
+            &state.config,
+            &user_id,
+            "openid",
+            None,
+            None,
+            None,
+            None,
+            Some(jwt::AccessTokenRestrictions {
+                resources: &[],
+                allowed_service_ids: &requested_service_ids,
+                allowed_node_ids: &[],
+                allow_all_nodes: true,
+            }),
+            &actor_client_id,
+        )
+        .expect("mint full-router source token");
+        let exchanged = token_exchange_service::exchange_token_with_authority(
+            &db,
+            &state.config,
+            &state.jwt_keys,
+            &receiver_client_id,
+            &receiver_secret,
+            &source_token,
+            "urn:ietf:params:oauth:token-type:access_token",
+            Some(&delegated_scope),
+            &[],
+            Some(false),
+            &requested_service_ids,
+            Some(true),
+            &[],
+        )
+        .await
+        .expect("exchange full-router delegated token");
+        let delegated_auth = delegated_auth_from_token(&state, &exchanged.access_token);
+        let grant = db
+            .collection::<CatalogDelegationGrant>(CATALOG_DELEGATION_GRANTS)
+            .find_one(mongodb::bson::doc! {
+                "_id": delegated_auth.token_jti.as_deref().unwrap()
+            })
+            .await
+            .expect("load exchanged grant")
+            .expect("exchange persisted a grant");
+        let AxumJson(discovery) = get_operation_catalog(State(state.clone()), delegated_auth)
+            .await
+            .expect("discover full-router operation catalog");
+        let operation = discovery
+            .services
+            .iter()
+            .find(|service| service.user_service_id == TEST_SERVICE_A)
+            .and_then(|service| service.operations.first())
+            .cloned()
+            .expect("full-router operation");
+        let arguments = serde_json::json!({});
+        let catalog = mcp_service::load_operation_catalog(
+            &db,
+            state.node_ws_manager.as_ref(),
+            TEST_USER_ID,
+            mcp_service::NodeScope::Unrestricted,
+            mcp_service::ServiceScope::Allowed(&requested_service_ids),
+        )
+        .await
+        .expect("load full-router canonical catalog");
+        let live_endpoint = catalog
+            .services
+            .iter()
+            .find(|service| service.service_id == TEST_SERVICE_A)
+            .and_then(|service| {
+                service
+                    .endpoints
+                    .iter()
+                    .find(|endpoint| endpoint.endpoint_id == operation.endpoint_id)
+            })
+            .expect("full-router live endpoint");
+        let operation_digest =
+            mcp_service::exact_operation_digest(TEST_SERVICE_A, live_endpoint, &arguments);
+
+        let (_, private) = crate::routes::build_router();
+        let app = private.with_state(state.clone());
+        FullRouterFixture {
+            db,
+            state,
+            app,
+            delegated_token: exchanged.access_token,
+            source_token,
+            grant,
+            delegated_scope,
+            receiver_client_id,
+            receiver_secret,
+            requested_service_ids,
+            catalog_digest: discovery.catalog_digest,
+            exact_view_digest: discovery.exact_view_digest,
+            operation,
+            operation_digest,
+            provider_calls,
+            provider,
+        }
+    }
+
+    fn full_router_create_body(
+        fixture: &FullRouterFixture,
+        idempotency_key: &str,
+        exact_view_digest: Option<&str>,
+    ) -> serde_json::Value {
+        serde_json::json!({
+            "user_service_id": TEST_SERVICE_A,
+            "endpoint_id": fixture.operation.endpoint_id,
+            "catalog_digest": fixture.catalog_digest,
+            "exact_view_digest": exact_view_digest,
+            "endpoint_contract_digest": fixture.operation.endpoint_contract_digest,
+            "operation_digest": fixture.operation_digest,
+            "operation_id": fixture.operation.endpoint_id,
+            "operation_generation": 1,
+            "idempotency_key": idempotency_key,
+            "arguments": {},
+        })
+    }
+
+    fn full_router_fence_body(
+        fixture: &FullRouterFixture,
+        idempotency_key: &str,
+        exact_view_digest: Option<&str>,
+    ) -> serde_json::Value {
+        serde_json::json!({
+            "catalog_digest": fixture.catalog_digest,
+            "exact_view_digest": exact_view_digest,
+            "operation_digest": fixture.operation_digest,
+            "operation_id": fixture.operation.endpoint_id,
+            "operation_generation": 1,
+            "idempotency_key": idempotency_key,
+        })
+    }
+
+    async fn full_router_json_request(
+        app: &Router,
+        method: Method,
+        uri: &str,
+        token: &str,
+        body: Option<serde_json::Value>,
+    ) -> (StatusCode, serde_json::Value) {
+        let mut builder = Request::builder()
+            .method(method)
+            .uri(uri)
+            .header(header::AUTHORIZATION, format!("Bearer {token}"));
+        let body = if let Some(body) = body {
+            builder = builder.header(header::CONTENT_TYPE, "application/json");
+            Body::from(serde_json::to_vec(&body).expect("serialize router request"))
+        } else {
+            Body::empty()
+        };
+        let response = app
+            .clone()
+            .oneshot(builder.body(body).expect("build router request"))
+            .await
+            .expect("full router response");
+        let status = response.status();
+        let bytes = to_bytes(response.into_body(), 1024 * 1024)
+            .await
+            .expect("read full router response");
+        let json = serde_json::from_slice(&bytes).unwrap_or_else(|error| {
+            panic!(
+                "full router returned non-JSON body ({error}): {}",
+                String::from_utf8_lossy(&bytes)
+            )
+        });
+        (status, json)
+    }
+
+    /// Re-mint the fixture's delegated token and re-resolve its live grant.
+    ///
+    /// `jwt::DELEGATED_TOKEN_TTL_SECS` is a compile-time 300s, while a full
+    /// suite run takes longer than that and can starve a test thread, so a
+    /// token minted at fixture-build time may already be expired by the time a
+    /// later phase issues its request. Refresh at the start of each phase.
+    ///
+    /// Ordering matters: always refresh BEFORE mutating/revoking the grant,
+    /// never between the mutation and the request. Refreshing after the
+    /// mutation would hand the request a brand new valid grant and the
+    /// assertion would prove nothing.
+    async fn refresh_full_router_delegation(fixture: &mut FullRouterFixture) {
+        let exchanged = token_exchange_service::exchange_token_with_authority(
+            &fixture.db,
+            &fixture.state.config,
+            &fixture.state.jwt_keys,
+            &fixture.receiver_client_id,
+            &fixture.receiver_secret,
+            &fixture.source_token,
+            "urn:ietf:params:oauth:token-type:access_token",
+            Some(&fixture.delegated_scope),
+            &[],
+            Some(false),
+            &fixture.requested_service_ids,
+            Some(true),
+            &[],
+        )
+        .await
+        .expect("re-exchange full-router delegated token");
+        let delegated_auth = delegated_auth_from_token(&fixture.state, &exchanged.access_token);
+        let grant = fixture
+            .db
+            .collection::<CatalogDelegationGrant>(CATALOG_DELEGATION_GRANTS)
+            .find_one(mongodb::bson::doc! {
+                "_id": delegated_auth.token_jti.as_deref().unwrap()
+            })
+            .await
+            .expect("load refreshed full-router grant")
+            .expect("refreshed exchange persisted a grant");
+        fixture.delegated_token = exchanged.access_token;
+        fixture.grant = grant;
+    }
+
+    async fn approve_full_router_request(fixture: &FullRouterFixture, request_id: &str) {
+        approval_service::process_decision(
+            &fixture.db,
+            &fixture.state.config,
+            &fixture.state.http_client,
+            fixture.state.fcm_auth.clone(),
+            fixture.state.apns_auth.clone(),
+            request_id,
+            true,
+            None,
+            None,
+            "full-router",
+        )
+        .await
+        .expect("approve full-router exact request");
+    }
+
+    async fn create_full_router_request(
+        fixture: &FullRouterFixture,
+        idempotency_key: &str,
+    ) -> String {
+        let (status, body) = full_router_json_request(
+            &fixture.app,
+            Method::POST,
+            CREATE_PATH,
+            &fixture.delegated_token,
+            Some(full_router_create_body(
+                fixture,
+                idempotency_key,
+                Some(&fixture.exact_view_digest),
+            )),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "create failed: {body}");
+        body["request_id"]
+            .as_str()
+            .expect("create response request_id")
+            .to_string()
+    }
+
+    async fn redeem_full_router_request(
+        fixture: &FullRouterFixture,
+        request_id: &str,
+        idempotency_key: &str,
+    ) -> (StatusCode, serde_json::Value) {
+        let path = format!("/api/v1/approvals/exact-service/requests/{request_id}/redeem");
+        full_router_json_request(
+            &fixture.app,
+            Method::POST,
+            &path,
+            &fixture.delegated_token,
+            Some(full_router_fence_body(
+                fixture,
+                idempotency_key,
+                Some(&fixture.exact_view_digest),
+            )),
+        )
+        .await
+    }
+
+    async fn assert_no_full_router_redemption(fixture: &FullRouterFixture, request_id: &str) {
+        let request = fixture
+            .db
+            .collection::<crate::models::approval_request::ApprovalRequest>(
+                crate::models::approval_request::COLLECTION_NAME,
+            )
+            .find_one(mongodb::bson::doc! { "_id": request_id })
+            .await
+            .expect("load full-router request")
+            .expect("full-router request exists");
+        assert!(
+            request
+                .exact_service
+                .and_then(|binding| binding.redemption)
+                .is_none(),
+            "rejected full-router redeem must not claim the row"
+        );
+    }
+
+    fn assert_error_response(
+        status: StatusCode,
+        body: &serde_json::Value,
+        expected_status: StatusCode,
+        expected_code: u64,
+        expected_message: &str,
+    ) {
+        assert_eq!(status, expected_status, "unexpected error body: {body}");
+        assert_eq!(body["error_code"], expected_code);
+        assert_eq!(body["message"], expected_message);
+    }
 
     #[test]
     fn delegation_refresh_response_serializes_all_fields() {
@@ -1204,10 +1658,7 @@ mod tests {
         let row_1_error = exact_service_approvals::create_request(
             State(state.clone()),
             delegated_auth.clone(),
-            AxumJson(generic_create(
-                Some(discovery.exact_view_digest.clone()),
-                "matrix-row-1-delegated-hidden",
-            )),
+            AxumJson(generic_create(None, "matrix-row-1-delegated-hidden")),
         )
         .await
         .expect_err("delegated generic target must be outside the exact view");
@@ -1298,7 +1749,11 @@ mod tests {
             AppError::BadRequest(message) if message == "exact_view_digest_not_applicable"
         ));
 
-        let AxumJson(created) = exact_service_approvals::create_request(
+        let rows_before_omitted_create = approval_requests
+            .count_documents(mongodb::bson::doc! {})
+            .await
+            .expect("count approvals before delegated omission");
+        let omitted_error = exact_service_approvals::create_request(
             State(state.clone()),
             delegated_auth.clone(),
             AxumJson(
@@ -1306,9 +1761,6 @@ mod tests {
                     user_service_id: TEST_SERVICE_A.to_string(),
                     endpoint_id: operation.endpoint_id.clone(),
                     catalog_digest: discovery.catalog_digest.clone(),
-                    // Omit the additive field at create to prove the server
-                    // persists its live exact-view fence and returns it for
-                    // redeem, rather than trusting caller omission forever.
                     exact_view_digest: None,
                     endpoint_contract_digest: operation.endpoint_contract_digest.clone(),
                     operation_digest: operation_digest.clone(),
@@ -1320,7 +1772,41 @@ mod tests {
             ),
         )
         .await
-        .expect("real exact create handler");
+        .expect_err("delegated exact create requires the caller exact-view digest");
+        assert!(matches!(
+            omitted_error,
+            AppError::BadRequest(message)
+                if message == crate::services::exact_service_approval_service::EXACT_VIEW_DIGEST_REQUIRED
+        ));
+        assert_eq!(
+            approval_requests
+                .count_documents(mongodb::bson::doc! {})
+                .await
+                .expect("count approvals after delegated omission"),
+            rows_before_omitted_create,
+            "delegated digest omission must be rejected before persistence"
+        );
+
+        let AxumJson(created) = exact_service_approvals::create_request(
+            State(state.clone()),
+            delegated_auth.clone(),
+            AxumJson(
+                crate::services::exact_service_approval_service::ExactServiceApprovalCreate {
+                    user_service_id: TEST_SERVICE_A.to_string(),
+                    endpoint_id: operation.endpoint_id.clone(),
+                    catalog_digest: discovery.catalog_digest.clone(),
+                    exact_view_digest: Some(discovery.exact_view_digest.clone()),
+                    endpoint_contract_digest: operation.endpoint_contract_digest.clone(),
+                    operation_digest: operation_digest.clone(),
+                    operation_id: operation.endpoint_id.clone(),
+                    operation_generation: 1,
+                    idempotency_key: "integration-idempotency-key".to_string(),
+                    arguments: arguments.clone(),
+                },
+            ),
+        )
+        .await
+        .expect("real exact create handler with delegated digest");
         assert_eq!(
             created.exact_view_digest,
             Some(discovery.exact_view_digest.clone())
@@ -1371,6 +1857,64 @@ mod tests {
         assert_eq!(
             redeemed.receipt.as_ref().map(|receipt| receipt.http_status),
             Some(200)
+        );
+
+        let AxumJson(redeem_omission) = exact_service_approvals::create_request(
+            State(state.clone()),
+            delegated_auth.clone(),
+            AxumJson(
+                crate::services::exact_service_approval_service::ExactServiceApprovalCreate {
+                    user_service_id: TEST_SERVICE_A.to_string(),
+                    endpoint_id: operation.endpoint_id.clone(),
+                    catalog_digest: discovery.catalog_digest.clone(),
+                    exact_view_digest: Some(discovery.exact_view_digest.clone()),
+                    endpoint_contract_digest: operation.endpoint_contract_digest.clone(),
+                    operation_digest: operation_digest.clone(),
+                    operation_id: operation.endpoint_id.clone(),
+                    operation_generation: 1,
+                    idempotency_key: "integration-redeem-omission-key".to_string(),
+                    arguments: arguments.clone(),
+                },
+            ),
+        )
+        .await
+        .expect("create delegated request for redeem omission");
+        approval_service::process_decision(
+            &db,
+            &state.config,
+            &state.http_client,
+            state.fcm_auth.clone(),
+            state.apns_auth.clone(),
+            &redeem_omission.request_id,
+            true,
+            None,
+            None,
+            "integration",
+        )
+        .await
+        .expect("approve delegated request for redeem omission");
+        let mut omitted_fence = exact_fence(&redeem_omission);
+        omitted_fence.exact_view_digest = None;
+        let redeem_omission_error =
+            redeem_exact(&state, &delegated_auth, &redeem_omission, omitted_fence)
+                .await
+                .expect_err("delegated redeem must require the exact-view fence");
+        assert!(matches!(
+            redeem_omission_error,
+            AppError::BadRequest(message)
+                if message == crate::services::exact_service_approval_service::EXACT_VIEW_DIGEST_REQUIRED
+        ));
+        let persisted_redeem_omission = approval_requests
+            .find_one(mongodb::bson::doc! { "_id": &redeem_omission.request_id })
+            .await
+            .expect("load redeem omission row")
+            .expect("redeem omission row exists");
+        assert!(
+            persisted_redeem_omission
+                .exact_service
+                .and_then(|binding| binding.redemption)
+                .is_none(),
+            "digest omission must not claim redemption"
         );
 
         let AxumJson(provider_bound) = exact_service_approvals::create_request(
@@ -1485,6 +2029,731 @@ mod tests {
             Some("catalog_drift")
         );
         provider.abort();
+    }
+
+    #[tokio::test]
+    async fn full_router_delegated_success_exactly_one_provider_call_and_ac6_matrix() {
+        let mut fixture = setup_full_router_fixture("exact_router_success_ac6").await;
+        let approvals = fixture
+            .db
+            .collection::<crate::models::approval_request::ApprovalRequest>(
+                crate::models::approval_request::COLLECTION_NAME,
+            );
+        let rows_before = approvals
+            .count_documents(mongodb::bson::doc! {})
+            .await
+            .expect("count approvals before HTTP create rejection matrix");
+        let wrong_digest = format!("sha256:{}", "0".repeat(64));
+        for (name, digest, expected_status, expected_code, expected_message) in [
+            (
+                "omitted",
+                None,
+                StatusCode::BAD_REQUEST,
+                1000,
+                "Bad request: exact_view_digest_required",
+            ),
+            (
+                "empty",
+                Some(""),
+                StatusCode::BAD_REQUEST,
+                1000,
+                "Bad request: exact_view_digest must not be empty when provided",
+            ),
+            (
+                "noncanonical",
+                Some("sha256:not-hex"),
+                StatusCode::CONFLICT,
+                1004,
+                "Conflict: exact_service_exact_view_digest_drift",
+            ),
+            (
+                "mismatch",
+                Some(wrong_digest.as_str()),
+                StatusCode::CONFLICT,
+                1004,
+                "Conflict: exact_service_exact_view_digest_drift",
+            ),
+        ] {
+            refresh_full_router_delegation(&mut fixture).await;
+            let (status, body) = full_router_json_request(
+                &fixture.app,
+                Method::POST,
+                CREATE_PATH,
+                &fixture.delegated_token,
+                Some(full_router_create_body(
+                    &fixture,
+                    &format!("create-{name}"),
+                    digest,
+                )),
+            )
+            .await;
+            assert_error_response(
+                status,
+                &body,
+                expected_status,
+                expected_code,
+                expected_message,
+            );
+        }
+        assert_eq!(
+            approvals
+                .count_documents(mongodb::bson::doc! {})
+                .await
+                .expect("count approvals after HTTP create rejection matrix"),
+            rows_before,
+            "all delegated create fence failures must precede persistence"
+        );
+        assert_eq!(fixture.provider_calls.load(Ordering::SeqCst), 0);
+
+        let idempotency_key = "router-success";
+        refresh_full_router_delegation(&mut fixture).await;
+        let (create_status, created) = full_router_json_request(
+            &fixture.app,
+            Method::POST,
+            CREATE_PATH,
+            &fixture.delegated_token,
+            Some(full_router_create_body(
+                &fixture,
+                idempotency_key,
+                Some(&fixture.exact_view_digest),
+            )),
+        )
+        .await;
+        assert_eq!(create_status, StatusCode::OK, "create failed: {created}");
+        let request_id = created["request_id"]
+            .as_str()
+            .expect("create response request_id")
+            .to_string();
+        approve_full_router_request(&fixture, &request_id).await;
+
+        for (name, digest, expected_status, expected_code, expected_message) in [
+            (
+                "omitted",
+                None,
+                StatusCode::BAD_REQUEST,
+                1000,
+                "Bad request: exact_view_digest_required",
+            ),
+            (
+                "empty",
+                Some(""),
+                StatusCode::CONFLICT,
+                1004,
+                "Conflict: exact_service_redemption_conflict",
+            ),
+            (
+                "noncanonical",
+                Some("sha256:not-hex"),
+                StatusCode::CONFLICT,
+                1004,
+                "Conflict: exact_service_redemption_conflict",
+            ),
+            (
+                "mismatch",
+                Some(wrong_digest.as_str()),
+                StatusCode::CONFLICT,
+                1004,
+                "Conflict: exact_service_redemption_conflict",
+            ),
+        ] {
+            refresh_full_router_delegation(&mut fixture).await;
+            let path = format!("/api/v1/approvals/exact-service/requests/{request_id}/redeem");
+            let (status, body) = full_router_json_request(
+                &fixture.app,
+                Method::POST,
+                &path,
+                &fixture.delegated_token,
+                Some(full_router_fence_body(&fixture, idempotency_key, digest)),
+            )
+            .await;
+            assert_error_response(
+                status,
+                &body,
+                expected_status,
+                expected_code,
+                expected_message,
+            );
+            assert_no_full_router_redemption(&fixture, &request_id).await;
+            assert_eq!(
+                fixture.provider_calls.load(Ordering::SeqCst),
+                0,
+                "redeem fence row {name} reached the provider"
+            );
+        }
+
+        let status_path = format!("/api/v1/approvals/exact-service/requests/{request_id}/status");
+        let (status, observed) = full_router_json_request(
+            &fixture.app,
+            Method::GET,
+            &status_path,
+            &fixture.delegated_token,
+            None,
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "status failed: {observed}");
+        assert_eq!(observed["state"], "approved");
+
+        let redeem_path = format!("/api/v1/approvals/exact-service/requests/{request_id}/redeem");
+        refresh_full_router_delegation(&mut fixture).await;
+        let (status, redeemed) = full_router_json_request(
+            &fixture.app,
+            Method::POST,
+            &redeem_path,
+            &fixture.delegated_token,
+            Some(full_router_fence_body(
+                &fixture,
+                idempotency_key,
+                Some(&fixture.exact_view_digest),
+            )),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "redeem failed: {redeemed}");
+        assert_eq!(redeemed["state"], "redeemed");
+        assert_eq!(redeemed["receipt"]["http_status"], 200);
+        assert_eq!(
+            fixture.provider_calls.load(Ordering::SeqCst),
+            1,
+            "the real-router success path must dispatch exactly one effect"
+        );
+        let persisted = approvals
+            .find_one(mongodb::bson::doc! { "_id": &request_id })
+            .await
+            .expect("load completed approval")
+            .expect("completed approval exists");
+        assert_eq!(
+            persisted
+                .exact_service
+                .and_then(|binding| binding.redemption)
+                .map(|redemption| redemption.status),
+            Some(crate::models::approval_request::ExactServiceRedemptionStatus::Completed)
+        );
+    }
+
+    #[tokio::test]
+    async fn full_router_grant_absent_revoked_and_expired_block_create_and_redeem() {
+        let mut fixture = setup_full_router_fixture("exact_router_grant_matrix").await;
+        let grants = fixture
+            .db
+            .collection::<CatalogDelegationGrant>(CATALOG_DELEGATION_GRANTS);
+        let approvals = fixture
+            .db
+            .collection::<crate::models::approval_request::ApprovalRequest>(
+                crate::models::approval_request::COLLECTION_NAME,
+            );
+
+        for grant_state in ["absent", "revoked", "expired"] {
+            // Refresh before mutating: the phase must run against a live token
+            // whose grant is the one we are about to invalidate.
+            refresh_full_router_delegation(&mut fixture).await;
+            match grant_state {
+                "absent" => {
+                    grants
+                        .delete_one(mongodb::bson::doc! { "_id": &fixture.grant.id })
+                        .await
+                        .expect("delete live grant before create");
+                }
+                "revoked" => {
+                    grants
+                        .update_one(
+                            mongodb::bson::doc! { "_id": &fixture.grant.id },
+                            mongodb::bson::doc! { "$set": { "revoked": true } },
+                        )
+                        .await
+                        .expect("revoke live grant before create");
+                }
+                "expired" => {
+                    grants
+                        .update_one(
+                            mongodb::bson::doc! { "_id": &fixture.grant.id },
+                            mongodb::bson::doc! { "$set": {
+                                "expires_at": mongodb::bson::DateTime::from_chrono(
+                                    Utc::now() - chrono::Duration::seconds(1)
+                                )
+                            } },
+                        )
+                        .await
+                        .expect("expire live grant before create");
+                }
+                _ => unreachable!(),
+            }
+            let rows_before = approvals
+                .count_documents(mongodb::bson::doc! {})
+                .await
+                .expect("count approvals before inactive-grant create");
+            let (status, body) = full_router_json_request(
+                &fixture.app,
+                Method::POST,
+                CREATE_PATH,
+                &fixture.delegated_token,
+                Some(full_router_create_body(
+                    &fixture,
+                    &format!("grant-{grant_state}-create"),
+                    Some(&fixture.exact_view_digest),
+                )),
+            )
+            .await;
+            assert_error_response(
+                status,
+                &body,
+                StatusCode::UNAUTHORIZED,
+                1001,
+                "Unauthorized: Delegated catalog authority is invalid or inactive",
+            );
+            assert_eq!(
+                approvals
+                    .count_documents(mongodb::bson::doc! {})
+                    .await
+                    .expect("count approvals after inactive-grant create"),
+                rows_before,
+                "{grant_state} grant must reject before ApprovalRequest persistence"
+            );
+            grants
+                .replace_one(
+                    mongodb::bson::doc! { "_id": &fixture.grant.id },
+                    &fixture.grant,
+                )
+                .with_options(
+                    mongodb::options::ReplaceOptions::builder()
+                        .upsert(true)
+                        .build(),
+                )
+                .await
+                .expect("restore live grant after create rejection");
+
+            // Second phase needs a live token again, and its own grant to
+            // invalidate after approval.
+            refresh_full_router_delegation(&mut fixture).await;
+            let idempotency_key = format!("grant-{grant_state}-redeem");
+            let request_id = create_full_router_request(&fixture, &idempotency_key).await;
+            approve_full_router_request(&fixture, &request_id).await;
+            match grant_state {
+                "absent" => {
+                    grants
+                        .delete_one(mongodb::bson::doc! { "_id": &fixture.grant.id })
+                        .await
+                        .expect("delete live grant before redeem");
+                }
+                "revoked" => {
+                    grants
+                        .update_one(
+                            mongodb::bson::doc! { "_id": &fixture.grant.id },
+                            mongodb::bson::doc! { "$set": { "revoked": true } },
+                        )
+                        .await
+                        .expect("revoke live grant before redeem");
+                }
+                "expired" => {
+                    grants
+                        .update_one(
+                            mongodb::bson::doc! { "_id": &fixture.grant.id },
+                            mongodb::bson::doc! { "$set": {
+                                "expires_at": mongodb::bson::DateTime::from_chrono(
+                                    Utc::now() - chrono::Duration::seconds(1)
+                                )
+                            } },
+                        )
+                        .await
+                        .expect("expire live grant before redeem");
+                }
+                _ => unreachable!(),
+            }
+            let redeem_path =
+                format!("/api/v1/approvals/exact-service/requests/{request_id}/redeem");
+            let (status, body) = full_router_json_request(
+                &fixture.app,
+                Method::POST,
+                &redeem_path,
+                &fixture.delegated_token,
+                Some(full_router_fence_body(
+                    &fixture,
+                    &idempotency_key,
+                    Some(&fixture.exact_view_digest),
+                )),
+            )
+            .await;
+            assert_error_response(
+                status,
+                &body,
+                StatusCode::UNAUTHORIZED,
+                1001,
+                "Unauthorized: Delegated catalog authority is invalid or inactive",
+            );
+            assert_no_full_router_redemption(&fixture, &request_id).await;
+            assert_eq!(fixture.provider_calls.load(Ordering::SeqCst), 0);
+            grants
+                .replace_one(
+                    mongodb::bson::doc! { "_id": &fixture.grant.id },
+                    &fixture.grant,
+                )
+                .with_options(
+                    mongodb::options::ReplaceOptions::builder()
+                        .upsert(true)
+                        .build(),
+                )
+                .await
+                .expect("restore live grant after redeem rejection");
+        }
+    }
+
+    #[tokio::test]
+    async fn full_router_service_node_provider_operation_and_credential_mutations_fail_closed() {
+        let mut fixture = setup_full_router_fixture("exact_router_drift_matrix").await;
+        let user_services = fixture.db.collection::<UserService>(USER_SERVICES);
+        let service_endpoints = fixture.db.collection::<ServiceEndpoint>(SERVICE_ENDPOINTS);
+
+        let service_key = "service-deactivated";
+        refresh_full_router_delegation(&mut fixture).await;
+        let service_request = create_full_router_request(&fixture, service_key).await;
+        approve_full_router_request(&fixture, &service_request).await;
+        user_services
+            .update_one(
+                mongodb::bson::doc! { "_id": TEST_SERVICE_A },
+                mongodb::bson::doc! { "$set": { "is_active": false } },
+            )
+            .await
+            .expect("deactivate service between approve and redeem");
+        let (status, body) =
+            redeem_full_router_request(&fixture, &service_request, service_key).await;
+        assert_error_response(
+            status,
+            &body,
+            StatusCode::UNAUTHORIZED,
+            1001,
+            "Unauthorized: Delegated catalog authority is invalid or inactive",
+        );
+        assert_no_full_router_redemption(&fixture, &service_request).await;
+        user_services
+            .update_one(
+                mongodb::bson::doc! { "_id": TEST_SERVICE_A },
+                mongodb::bson::doc! { "$set": { "is_active": true } },
+            )
+            .await
+            .expect("restore service after deactivation row");
+
+        let node_key = "node-binding-mutated";
+        refresh_full_router_delegation(&mut fixture).await;
+        let node_request = create_full_router_request(&fixture, node_key).await;
+        approve_full_router_request(&fixture, &node_request).await;
+        let node_id = "00000000-0000-4000-8000-000000000601";
+        fixture
+            .db
+            .collection::<Node>(NODES)
+            .insert_one(Node {
+                id: node_id.to_string(),
+                user_id: TEST_USER_ID.to_string(),
+                name: "full-router-node".to_string(),
+                status: NodeStatus::Online,
+                auth_token_hash: "node-token-hash".to_string(),
+                signing_secret_encrypted: None,
+                signing_secret_hash: "node-signing-hash".to_string(),
+                last_heartbeat_at: Some(Utc::now()),
+                connected_at: Some(Utc::now()),
+                metadata: None,
+                metrics: NodeMetrics::default(),
+                is_active: true,
+                created_at: Utc::now(),
+                updated_at: Utc::now(),
+            })
+            .await
+            .expect("insert online node for binding mutation");
+        let (node_tx, _node_rx) = tokio::sync::mpsc::channel(8);
+        fixture
+            .state
+            .node_ws_manager
+            .register_connection(node_id, node_tx);
+        user_services
+            .update_one(
+                mongodb::bson::doc! { "_id": TEST_SERVICE_A },
+                mongodb::bson::doc! { "$set": { "node_id": node_id } },
+            )
+            .await
+            .expect("mutate primary node binding");
+        let (status, body) = redeem_full_router_request(&fixture, &node_request, node_key).await;
+        assert_eq!(status, StatusCode::OK, "node mutation failed: {body}");
+        assert_eq!(body["state"], "drifted");
+        assert_eq!(body["failure_code"], "catalog_drift");
+        assert_no_full_router_redemption(&fixture, &node_request).await;
+        user_services
+            .update_one(
+                mongodb::bson::doc! { "_id": TEST_SERVICE_A },
+                mongodb::bson::doc! { "$unset": { "node_id": "" } },
+            )
+            .await
+            .expect("restore direct service routing");
+
+        let operation_key = "endpoint-contract-mutated";
+        refresh_full_router_delegation(&mut fixture).await;
+        let operation_request = create_full_router_request(&fixture, operation_key).await;
+        approve_full_router_request(&fixture, &operation_request).await;
+        service_endpoints
+            .update_one(
+                mongodb::bson::doc! { "_id": &fixture.operation.endpoint_id },
+                mongodb::bson::doc! { "$set": { "path": "/items-mutated" } },
+            )
+            .await
+            .expect("mutate endpoint contract");
+        let (status, body) =
+            redeem_full_router_request(&fixture, &operation_request, operation_key).await;
+        assert_eq!(status, StatusCode::OK, "operation mutation failed: {body}");
+        assert_eq!(body["state"], "drifted");
+        assert_eq!(body["failure_code"], "catalog_drift");
+        assert_no_full_router_redemption(&fixture, &operation_request).await;
+        service_endpoints
+            .update_one(
+                mongodb::bson::doc! { "_id": &fixture.operation.endpoint_id },
+                mongodb::bson::doc! { "$set": { "path": "/items" } },
+            )
+            .await
+            .expect("restore endpoint contract");
+
+        let endpoint_key = "endpoint-deactivated";
+        refresh_full_router_delegation(&mut fixture).await;
+        let endpoint_request = create_full_router_request(&fixture, endpoint_key).await;
+        approve_full_router_request(&fixture, &endpoint_request).await;
+        service_endpoints
+            .update_one(
+                mongodb::bson::doc! { "_id": &fixture.operation.endpoint_id },
+                mongodb::bson::doc! { "$set": { "is_active": false } },
+            )
+            .await
+            .expect("deactivate selected endpoint");
+        let (status, body) =
+            redeem_full_router_request(&fixture, &endpoint_request, endpoint_key).await;
+        assert_eq!(status, StatusCode::OK, "endpoint mutation failed: {body}");
+        assert_eq!(body["state"], "revoked");
+        assert_eq!(body["failure_code"], "selector_revoked");
+        assert_no_full_router_redemption(&fixture, &endpoint_request).await;
+        service_endpoints
+            .update_one(
+                mongodb::bson::doc! { "_id": &fixture.operation.endpoint_id },
+                mongodb::bson::doc! { "$set": { "is_active": true } },
+            )
+            .await
+            .expect("restore selected endpoint");
+
+        let credential_id = "00000000-0000-4000-8000-000000000701";
+        fixture
+            .db
+            .collection::<UserApiKey>(USER_API_KEYS)
+            .insert_one(UserApiKey {
+                id: credential_id.to_string(),
+                user_id: TEST_USER_ID.to_string(),
+                label: "full-router credential".to_string(),
+                credential_type: "bearer".to_string(),
+                credential_encrypted: Some(vec![1, 2, 3]),
+                access_token_encrypted: None,
+                refresh_token_encrypted: None,
+                token_scopes: None,
+                expires_at: None,
+                provider_config_id: None,
+                connection_id: None,
+                oauth_attempt_nonce: None,
+                user_oauth_client_id_encrypted: None,
+                user_oauth_client_secret_encrypted: None,
+                credential_source: None,
+                status: "active".to_string(),
+                last_used_at: None,
+                last_authorized_at: None,
+                error_message: None,
+                source: Some("user_created".to_string()),
+                source_id: None,
+                created_at: Utc::now(),
+                updated_at: Utc::now(),
+            })
+            .await
+            .expect("insert active credential");
+        user_services
+            .update_one(
+                mongodb::bson::doc! { "_id": TEST_SERVICE_A },
+                mongodb::bson::doc! { "$set": {
+                    "api_key_id": credential_id,
+                    "auth_method": "bearer",
+                    "auth_key_name": "Authorization"
+                } },
+            )
+            .await
+            .expect("bind active credential");
+        let credential_key = "credential-revoked";
+        refresh_full_router_delegation(&mut fixture).await;
+        let credential_request = create_full_router_request(&fixture, credential_key).await;
+        approve_full_router_request(&fixture, &credential_request).await;
+        fixture
+            .db
+            .collection::<UserApiKey>(USER_API_KEYS)
+            .update_one(
+                mongodb::bson::doc! { "_id": credential_id },
+                mongodb::bson::doc! { "$set": { "status": "revoked" } },
+            )
+            .await
+            .expect("revoke bound credential");
+        let (status, body) =
+            redeem_full_router_request(&fixture, &credential_request, credential_key).await;
+        assert_eq!(status, StatusCode::OK, "credential mutation failed: {body}");
+        assert_eq!(body["state"], "revoked");
+        assert_eq!(body["failure_code"], "selector_revoked");
+        assert_no_full_router_redemption(&fixture, &credential_request).await;
+
+        fixture
+            .db
+            .collection::<UserApiKey>(USER_API_KEYS)
+            .update_one(
+                mongodb::bson::doc! { "_id": credential_id },
+                mongodb::bson::doc! { "$set": { "status": "active" } },
+            )
+            .await
+            .expect("restore credential before provider row");
+        user_services
+            .update_one(
+                mongodb::bson::doc! { "_id": TEST_SERVICE_A },
+                mongodb::bson::doc! {
+                    "$unset": { "api_key_id": "" },
+                    "$set": { "auth_method": "none", "auth_key_name": "" }
+                },
+            )
+            .await
+            .expect("restore no-auth service before provider row");
+
+        let provider_key = "provider-rebound";
+        refresh_full_router_delegation(&mut fixture).await;
+        let provider_request = create_full_router_request(&fixture, provider_key).await;
+        approve_full_router_request(&fixture, &provider_request).await;
+        service_endpoints
+            .update_many(
+                mongodb::bson::doc! {
+                    "service_id": "00000000-0000-4000-8000-000000000301"
+                },
+                mongodb::bson::doc! { "$set": {
+                    "service_id": "00000000-0000-4000-8000-000000000302"
+                } },
+            )
+            .await
+            .expect("move endpoint contracts to alternate provider");
+        user_services
+            .update_one(
+                mongodb::bson::doc! { "_id": TEST_SERVICE_A },
+                mongodb::bson::doc! { "$set": {
+                    "catalog_service_id": "00000000-0000-4000-8000-000000000302"
+                } },
+            )
+            .await
+            .expect("rebind service to alternate provider");
+        let (status, body) =
+            redeem_full_router_request(&fixture, &provider_request, provider_key).await;
+        assert_eq!(status, StatusCode::OK, "provider mutation failed: {body}");
+        assert_eq!(body["state"], "drifted");
+        assert_eq!(body["failure_code"], "catalog_drift");
+        assert_no_full_router_redemption(&fixture, &provider_request).await;
+
+        assert_eq!(
+            fixture.provider_calls.load(Ordering::SeqCst),
+            0,
+            "every full-router mutation row must fail before downstream dispatch"
+        );
+    }
+
+    #[tokio::test]
+    async fn delegated_caller_without_catalog_scope_rejected_on_all_exact_routes() {
+        let mut fixture = setup_full_router_fixture("exact_router_proxy_only").await;
+        let request_key = "proxy-only-status-redeem";
+        refresh_full_router_delegation(&mut fixture).await;
+        let request_id = create_full_router_request(&fixture, request_key).await;
+        approve_full_router_request(&fixture, &request_id).await;
+
+        let proxy_only = token_exchange_service::exchange_token_with_authority(
+            &fixture.db,
+            &fixture.state.config,
+            &fixture.state.jwt_keys,
+            &fixture.receiver_client_id,
+            &fixture.receiver_secret,
+            &fixture.source_token,
+            "urn:ietf:params:oauth:token-type:access_token",
+            Some("proxy"),
+            &[],
+            Some(false),
+            &fixture.requested_service_ids,
+            Some(true),
+            &[],
+        )
+        .await
+        .expect("mint proxy-only delegated token");
+        let proxy_claims = jwt::verify_token(
+            &fixture.state.jwt_keys,
+            &fixture.state.config,
+            &proxy_only.access_token,
+        )
+        .expect("verify proxy-only delegated token");
+        assert!(proxy_claims.act.is_some(), "token must be delegated");
+        assert!(!catalog_delegation_service::scope_has_catalog_read(
+            &proxy_claims.scope
+        ));
+        assert!(
+            fixture
+                .db
+                .collection::<CatalogDelegationGrant>(CATALOG_DELEGATION_GRANTS)
+                .find_one(mongodb::bson::doc! { "_id": &proxy_claims.jti })
+                .await
+                .expect("query proxy-only grant")
+                .is_none(),
+            "proxy-only exchange must not mint catalog authority"
+        );
+
+        let approvals = fixture
+            .db
+            .collection::<crate::models::approval_request::ApprovalRequest>(
+                crate::models::approval_request::COLLECTION_NAME,
+            );
+        let rows_before = approvals
+            .count_documents(mongodb::bson::doc! {})
+            .await
+            .expect("count before proxy-only create");
+        let status_path = format!("/api/v1/approvals/exact-service/requests/{request_id}/status");
+        let redeem_path = format!("/api/v1/approvals/exact-service/requests/{request_id}/redeem");
+        let requests = [
+            (
+                "create",
+                Method::POST,
+                CREATE_PATH.to_string(),
+                Some(full_router_create_body(&fixture, "proxy-only-create", None)),
+            ),
+            ("status", Method::GET, status_path, None),
+            (
+                "redeem",
+                Method::POST,
+                redeem_path,
+                Some(full_router_fence_body(&fixture, request_key, None)),
+            ),
+        ];
+        for (route, method, path, body) in requests {
+            let (status, body) = full_router_json_request(
+                &fixture.app,
+                method,
+                &path,
+                &proxy_only.access_token,
+                body,
+            )
+            .await;
+            assert_error_response(
+                status,
+                &body,
+                StatusCode::FORBIDDEN,
+                1002,
+                "Forbidden: delegated_catalog_scope_required",
+            );
+            assert_eq!(
+                fixture.provider_calls.load(Ordering::SeqCst),
+                0,
+                "proxy-only {route} reached the provider"
+            );
+        }
+        assert_eq!(
+            approvals
+                .count_documents(mongodb::bson::doc! {})
+                .await
+                .expect("count after proxy-only exact routes"),
+            rows_before,
+            "proxy-only create must not persist a request"
+        );
+        assert_no_full_router_redemption(&fixture, &request_id).await;
     }
 
     #[test]
