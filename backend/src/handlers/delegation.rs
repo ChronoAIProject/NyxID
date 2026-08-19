@@ -273,6 +273,7 @@ mod tests {
         delegated_token: String,
         source_token: String,
         grant: CatalogDelegationGrant,
+        delegated_scope: String,
         receiver_client_id: String,
         receiver_secret: String,
         requested_service_ids: Vec<String>,
@@ -491,6 +492,7 @@ mod tests {
             delegated_token: exchanged.access_token,
             source_token,
             grant,
+            delegated_scope,
             receiver_client_id,
             receiver_secret,
             requested_service_ids,
@@ -570,6 +572,49 @@ mod tests {
             )
         });
         (status, json)
+    }
+
+    /// Re-mint the fixture's delegated token and re-resolve its live grant.
+    ///
+    /// `jwt::DELEGATED_TOKEN_TTL_SECS` is a compile-time 300s, while a full
+    /// suite run takes longer than that and can starve a test thread, so a
+    /// token minted at fixture-build time may already be expired by the time a
+    /// later phase issues its request. Refresh at the start of each phase.
+    ///
+    /// Ordering matters: always refresh BEFORE mutating/revoking the grant,
+    /// never between the mutation and the request. Refreshing after the
+    /// mutation would hand the request a brand new valid grant and the
+    /// assertion would prove nothing.
+    async fn refresh_full_router_delegation(fixture: &mut FullRouterFixture) {
+        let exchanged = token_exchange_service::exchange_token_with_authority(
+            &fixture.db,
+            &fixture.state.config,
+            &fixture.state.jwt_keys,
+            &fixture.receiver_client_id,
+            &fixture.receiver_secret,
+            &fixture.source_token,
+            "urn:ietf:params:oauth:token-type:access_token",
+            Some(&fixture.delegated_scope),
+            &[],
+            Some(false),
+            &fixture.requested_service_ids,
+            Some(true),
+            &[],
+        )
+        .await
+        .expect("re-exchange full-router delegated token");
+        let delegated_auth = delegated_auth_from_token(&fixture.state, &exchanged.access_token);
+        let grant = fixture
+            .db
+            .collection::<CatalogDelegationGrant>(CATALOG_DELEGATION_GRANTS)
+            .find_one(mongodb::bson::doc! {
+                "_id": delegated_auth.token_jti.as_deref().unwrap()
+            })
+            .await
+            .expect("load refreshed full-router grant")
+            .expect("refreshed exchange persisted a grant");
+        fixture.delegated_token = exchanged.access_token;
+        fixture.grant = grant;
     }
 
     async fn approve_full_router_request(fixture: &FullRouterFixture, request_id: &str) {
@@ -1988,7 +2033,7 @@ mod tests {
 
     #[tokio::test]
     async fn full_router_delegated_success_exactly_one_provider_call_and_ac6_matrix() {
-        let fixture = setup_full_router_fixture("exact_router_success_ac6").await;
+        let mut fixture = setup_full_router_fixture("exact_router_success_ac6").await;
         let approvals = fixture
             .db
             .collection::<crate::models::approval_request::ApprovalRequest>(
@@ -2029,6 +2074,7 @@ mod tests {
                 "Conflict: exact_service_exact_view_digest_drift",
             ),
         ] {
+            refresh_full_router_delegation(&mut fixture).await;
             let (status, body) = full_router_json_request(
                 &fixture.app,
                 Method::POST,
@@ -2060,6 +2106,7 @@ mod tests {
         assert_eq!(fixture.provider_calls.load(Ordering::SeqCst), 0);
 
         let idempotency_key = "router-success";
+        refresh_full_router_delegation(&mut fixture).await;
         let (create_status, created) = full_router_json_request(
             &fixture.app,
             Method::POST,
@@ -2109,6 +2156,7 @@ mod tests {
                 "Conflict: exact_service_redemption_conflict",
             ),
         ] {
+            refresh_full_router_delegation(&mut fixture).await;
             let path = format!("/api/v1/approvals/exact-service/requests/{request_id}/redeem");
             let (status, body) = full_router_json_request(
                 &fixture.app,
@@ -2146,6 +2194,7 @@ mod tests {
         assert_eq!(observed["state"], "approved");
 
         let redeem_path = format!("/api/v1/approvals/exact-service/requests/{request_id}/redeem");
+        refresh_full_router_delegation(&mut fixture).await;
         let (status, redeemed) = full_router_json_request(
             &fixture.app,
             Method::POST,
@@ -2182,7 +2231,7 @@ mod tests {
 
     #[tokio::test]
     async fn full_router_grant_absent_revoked_and_expired_block_create_and_redeem() {
-        let fixture = setup_full_router_fixture("exact_router_grant_matrix").await;
+        let mut fixture = setup_full_router_fixture("exact_router_grant_matrix").await;
         let grants = fixture
             .db
             .collection::<CatalogDelegationGrant>(CATALOG_DELEGATION_GRANTS);
@@ -2193,6 +2242,9 @@ mod tests {
             );
 
         for grant_state in ["absent", "revoked", "expired"] {
+            // Refresh before mutating: the phase must run against a live token
+            // whose grant is the one we are about to invalidate.
+            refresh_full_router_delegation(&mut fixture).await;
             match grant_state {
                 "absent" => {
                     grants
@@ -2268,6 +2320,9 @@ mod tests {
                 .await
                 .expect("restore live grant after create rejection");
 
+            // Second phase needs a live token again, and its own grant to
+            // invalidate after approval.
+            refresh_full_router_delegation(&mut fixture).await;
             let idempotency_key = format!("grant-{grant_state}-redeem");
             let request_id = create_full_router_request(&fixture, &idempotency_key).await;
             approve_full_router_request(&fixture, &request_id).await;
@@ -2342,11 +2397,12 @@ mod tests {
 
     #[tokio::test]
     async fn full_router_service_node_provider_operation_and_credential_mutations_fail_closed() {
-        let fixture = setup_full_router_fixture("exact_router_drift_matrix").await;
+        let mut fixture = setup_full_router_fixture("exact_router_drift_matrix").await;
         let user_services = fixture.db.collection::<UserService>(USER_SERVICES);
         let service_endpoints = fixture.db.collection::<ServiceEndpoint>(SERVICE_ENDPOINTS);
 
         let service_key = "service-deactivated";
+        refresh_full_router_delegation(&mut fixture).await;
         let service_request = create_full_router_request(&fixture, service_key).await;
         approve_full_router_request(&fixture, &service_request).await;
         user_services
@@ -2375,6 +2431,7 @@ mod tests {
             .expect("restore service after deactivation row");
 
         let node_key = "node-binding-mutated";
+        refresh_full_router_delegation(&mut fixture).await;
         let node_request = create_full_router_request(&fixture, node_key).await;
         approve_full_router_request(&fixture, &node_request).await;
         let node_id = "00000000-0000-4000-8000-000000000601";
@@ -2425,6 +2482,7 @@ mod tests {
             .expect("restore direct service routing");
 
         let operation_key = "endpoint-contract-mutated";
+        refresh_full_router_delegation(&mut fixture).await;
         let operation_request = create_full_router_request(&fixture, operation_key).await;
         approve_full_router_request(&fixture, &operation_request).await;
         service_endpoints
@@ -2449,6 +2507,7 @@ mod tests {
             .expect("restore endpoint contract");
 
         let endpoint_key = "endpoint-deactivated";
+        refresh_full_router_delegation(&mut fixture).await;
         let endpoint_request = create_full_router_request(&fixture, endpoint_key).await;
         approve_full_router_request(&fixture, &endpoint_request).await;
         service_endpoints
@@ -2515,6 +2574,7 @@ mod tests {
             .await
             .expect("bind active credential");
         let credential_key = "credential-revoked";
+        refresh_full_router_delegation(&mut fixture).await;
         let credential_request = create_full_router_request(&fixture, credential_key).await;
         approve_full_router_request(&fixture, &credential_request).await;
         fixture
@@ -2554,6 +2614,7 @@ mod tests {
             .expect("restore no-auth service before provider row");
 
         let provider_key = "provider-rebound";
+        refresh_full_router_delegation(&mut fixture).await;
         let provider_request = create_full_router_request(&fixture, provider_key).await;
         approve_full_router_request(&fixture, &provider_request).await;
         service_endpoints
@@ -2592,8 +2653,9 @@ mod tests {
 
     #[tokio::test]
     async fn delegated_caller_without_catalog_scope_rejected_on_all_exact_routes() {
-        let fixture = setup_full_router_fixture("exact_router_proxy_only").await;
+        let mut fixture = setup_full_router_fixture("exact_router_proxy_only").await;
         let request_key = "proxy-only-status-redeem";
+        refresh_full_router_delegation(&mut fixture).await;
         let request_id = create_full_router_request(&fixture, request_key).await;
         approve_full_router_request(&fixture, &request_id).await;
 
