@@ -160,6 +160,51 @@ The description is composition guidance. It states the trust boundary: NyxID own
 
 The manifest schema defines structure. Aevatar and the browser apply additional semantic bounds, URL normalization, control-identity checks, exact-one-variant rules, secret rejection, and supported-auth-method checks before a request can execute. Those rules are specified in [Action cards](04-action-cards.md).
 
+### Where the browser is stricter than the published schema
+
+The manifest is the contract, and it is pinned byte-for-byte: Aevatar compares
+each published `params_schema` with `JsonNode.DeepEquals`, so a refinement
+added to the manifest to describe a browser-side rule would fail the pin and
+disable the whole registry. The rules below therefore live only in the browser
+and are invisible from the manifest. They are recorded here because a request
+that satisfies the published schema can still be refused.
+
+| Parameter | Published schema | Browser rule (`frontend/src/schemas/assistant-actions.ts`) |
+| --- | --- | --- |
+| `requestedScopes[]` | `{"type": "string"}`, and the array may be empty | non-empty, `<= 256` chars, already trimmed, and matching `/^[A-Za-z0-9._:\/~+*=-]+$/` |
+| `requestedScopes` | array of strings | 1-64 entries, no duplicates |
+
+RFC 6749 §3.3 permits every printable ASCII character except space, `"` and
+`\` in a scope token, so the character class is narrower than the standard
+allows. No provider in the current catalog trips it -- Google, GitHub, Slack,
+Lark, Microsoft, Zoom, HubSpot and Atlassian scopes all pass -- but a
+conforming scope outside it parses at Aevatar and then degrades to
+`{variant: "unknown"}` in the browser, which renders "Unsupported action
+request" without saying which scope was rejected.
+
+If a provider ever needs a character outside that class, widen the browser
+regex; do not widen the manifest.
+
+### Authorization evidence reads
+
+Postcondition verification reads evidence from dedicated projections rather
+than from the full detail responses:
+
+| Verb | Evidence read |
+| --- | --- |
+| `service.reauthorize` | `GET /api/v1/keys/{id}/authorization` |
+| `key.create`, `key.rotate` | `GET /api/v1/api-keys/{id}/authorization` |
+
+Both return exactly the properties the reader consumes and nothing else. The
+full `/keys/{id}` and `/api-keys/{id}` responses remain unchanged and are still
+the documented detail contract for the dashboard, the CLI and external
+consumers; they are simply not safe to use as evidence, because they carry
+user-controlled free text (a service label, a custom header value, the
+supported `Bearer ${credential}` WS auth template, a key description) that the
+reader's secret-shape scan cannot distinguish from a real credential. A
+consumer still reading evidence from the detail routes will reject any service
+or key configured that way, permanently and silently.
+
 `key.create` executes through `POST /api/v1/assistant/actions/key-create`.
 The effect reserves one key UUID in a durable, secret-free action receipt,
 validates the exact personal service set, and makes exact retries return only

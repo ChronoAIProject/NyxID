@@ -9,6 +9,7 @@ consolidates are evidence, not instructions:
 | `wave1-service-reauthorize-plan.md` | planner | Contract reference (§1 target contract, §5 rollout). Task breakdown is **superseded by this file**. |
 | `wave1-service-reauthorize-review-sol.md` | implementer's pre-build review | Evidence for the plan corrections that shaped the build. |
 | `wave1-service-reauthorize-review-opus.md` | independent adversarial review | Evidence for every A-item below; full reproductions live there. |
+| `wave1-relook-fable.md` (branch `review/2026-08-19_wave1-relook`, `d6c57a00`) | fourth-pass relook | Evidence for F1-F4. Found no errors in the other three documents. |
 
 Where any source document disagrees with this file, this file wins. Where a
 finding was overturned by a later pass, it is recorded in §5 so it is not
@@ -21,16 +22,25 @@ out of scope (item 3 shipped separately in #1404).
 
 ## 1. Status at a glance
 
-| | Count | Blocking merge? |
+| | Count | Status |
 | --- | --- | --- |
-| Shipped and verified | 4 workstreams | — |
-| **A. NyxID actions outstanding** | 3 major, 5 minor | 3 major: yes |
-| **B. Aevatar prerequisites** | 4 code sites | **yes — hard gate** |
-| **C. Verification gaps** | 2 | 1 should clear before merge |
-| **D. Coordination (Calvin)** | 2 posts | not code-blocking |
+| **A. NyxID actions** | 3 major, 5 minor | A2-A8 closed; A1 partly closed (see below) |
+| **B. Aevatar prerequisites** | 4 code sites + 2 evidence reads | **outstanding — hard gate** |
+| **C. Verification gaps** | 2 | C1 closed; C2 open |
+| **D. Coordination (Calvin)** | 2 posts | not posted |
+| **F. Fourth-pass findings** | 1 major, 3 minor | F1 partly closed, F2 closed, F3/F4 recorded |
 
-**Overall: BLOCKED.** PR #1462 stays draft. Two independent gates — the Aevatar
-consumer (§3) and the three MAJOR defects (§2) — must both clear.
+> **PR #1462 was merged into `main` at 2026-08-19T04:08:46Z** (merge commit
+> `67c9bc1f`, by `ctkm-aelf`), against the DO-NOT-MERGE instruction that was in
+> force. `main` now publishes `nyxid-assistant-actions.v8` while the Aevatar
+> consumer is still pinned at v7 with no `registry-v8.json`. If `main` is
+> deployed, every NyxID action card goes dark on Aevatar processes started
+> afterwards — chat itself survives. Whether it has been deployed is
+> **unverified**; it could not be checked from the implementation environment.
+> The rollout order in §3 is now out of sequence and needs Calvin's decision.
+
+The fixes below therefore live on `feat/2026-08-17_wave1-reauthorize-impl` past
+the merge point, with no PR tracking them yet.
 
 ---
 
@@ -39,155 +49,151 @@ consumer (§3) and the three MAJOR defects (§2) — must both clear.
 Severity, owner, and status per item. File references are on this branch unless
 marked otherwise.
 
-### A1 · MAJOR · open — user-controlled `Bearer …` strings permanently break the journey
+### A1 · MAJOR · partly closed — user-controlled `Bearer …` strings break the evidence read
 
-**Where** (line numbers re-verified on `5b1189ee` for this document).
-`backend/src/handlers/keys.rs:514` (`ws_frame_injections: Vec<WsFrameInjection>` —
-a bare `Vec`, always serialized), `:509` (`default_request_headers`), `:417-418`
-(`name` / `label`); `services/ws_frame_injector.rs:189-197` (the validator that
-permits the offending template);
-`frontend/src/components/assistant/blocks/action-card.tsx:110-128`
-(`assertSecretFreeReadBack`).
+**Status.** The NyxID side that can be closed unilaterally is closed. The half
+that requires Aevatar is not, and cannot be.
 
-**What.** Two recursive scanners run over the whole `/keys/{id}` body — Aevatar's
-`RejectSecretBearingRead` and this PR's `assertSecretFreeReadBack` — both matching
-`(?:Bearer\s+\S+|nyxid_(?:ag_)?[A-Za-z0-9_-]{16,})`. NyxID's own WS-template
-validator explicitly permits `{"headers":{"Authorization":"Bearer ${credential}"}}`
-(it strips `${credential}` before checking, leaving `Bearer ` — no `nyxid_`, no JWT
-segment). So NyxID stores a value it then refuses to read back. The service can
-never be re-authorized through the assistant; the user sees only the generic
-"NyxID could not verify this service for re-authorization" and is pointed at AI
-Services, where nothing is visibly wrong.
+**What was wrong.** Two recursive scanners run over the whole `/keys/{id}`
+body — Aevatar's `RejectSecretBearingRead` and the browser's
+`assertSecretFreeReadBack` — both matching
+`(?:Bearer\s+\S+|nyxid_(?:ag_)?[A-Za-z0-9_-]{16,})`. `KeyResponse` carries at
+least three user-controlled free-text carriers that reach them:
+`ws_frame_injections[].template` (NyxID's own validator explicitly permits
+`{"headers":{"Authorization":"Bearer ${credential}"}}`),
+`default_request_headers[].value`, and `label` / `name`. NyxID stores a value
+it then refuses to read back.
 
-Fail mode is closed, not leaky — no secret escapes. But this is reachable through a
-documented, supported feature (CLAUDE.md §6), not a hypothetical.
+**Why the two fixes the reviews proposed are both unavailable as written.**
 
-**Fix — preferred.** Serve a minimal evidence projection for this read. Aevatar
-consumes only `id`, `api_key_id`, `is_active`, `status`, `connection_status`,
-`granted_scopes`, `last_authorized_at`; every other field on that response is pure
-tripwire surface. Alternatives (reject `Bearer\s` at write time; browser-side error
-differentiation) are documented in the Opus review §M1 and are strictly worse — the
-write-time option does not repair rows already stored.
+- *Drop the carriers from `/keys/{id}`* — not possible. They have live
+  consumers: `frontend/src/pages/key-detail.tsx`, `schemas/keys.ts`,
+  `pages/service-detail.tsx`, `service-edit.tsx`, `cli/src/commands/service.rs`,
+  and the route is a documented public API (`backend/src/api_docs.rs`).
+  Dropping them is a breaking change to a published contract.
+- *Sanitize the values in place* — not possible either, and worse than it
+  looks. `key-detail.tsx:2635-2641` seeds the WS-template editor directly from
+  this response and `:2081` PUTs the edited value back, so a redacted template
+  would be written over the user's real configuration the next time they touch
+  that section. Same round trip for `default_request_headers`. This destroys
+  data rather than protecting it.
+- *Reject at write time* — does not repair rows already stored, and would
+  reject a feature CLAUDE.md §6 documents as supported.
 
-**Also required.** Extend `assert_aevatar_secret_free`
-(`backend/src/handlers/keys.rs:2692`, called from
-`key_response_always_serializes_authorization_evidence_properties` at `:2665`) to
-run over a *fully populated* `KeyResponse` including a `Bearer ${credential}` WS
-template. Today it runs over a near-empty response — no `ws_frame_injections`, no
-`default_request_headers`, fixed test label — so it cannot fail. Written correctly
-it would fail today, which is the point.
+**What landed.** `GET /api/v1/keys/{id}/authorization`: same resolution, ACL and
+lazy `pending_auth` reconciliation as the detail read, projected to exactly the
+seven properties the evidence reader consumes (`id`, `api_key_id`, `is_active`,
+`status`, `connection_status`, `granted_scopes`, `last_authorized_at`). The
+detail response is untouched. Tests assert both directions — that a fully
+populated `KeyResponse` carrying a `Bearer ${credential}` WS template, a
+`Bearer …` header value and a `Bearer Bot` label *does* trip the scan, and that
+the projection does not — so the projection cannot quietly stop being
+load-bearing.
 
-### A2 · MAJOR · open — `completed` is reported without checking scopes were granted
+The browser half is fully closed: the eligibility preflight no longer scans the
+detail response (it reports nothing to the assistant), the assertion moved to
+the evidence read, and a scan hit there now produces a specific note instead of
+the generic "could not verify this service".
 
-**Where.** `frontend/src/components/assistant/blocks/action-card.tsx:513-541`
-(watch path), `:965-973` (dialog path).
+**What remains open, and why it cannot be closed here.** Aevatar hardcodes
+`GET /api/v1/keys/{Uri.EscapeDataString(id)}` in `NyxIdApiClient.GetServiceAsync`
+and sends no header or query parameter NyxID could content-negotiate on. The
+same client method also serves `NyxIdServicesTool`, `NyxIdSshCommandExecutor`
+and `NyxIdAssistantToolSource`, which legitimately need the full document — so
+NyxID cannot narrow that response by caller either. Until Aevatar points its
+evidence read at the projection (**B5**), a service configured with any of the
+three carriers stays unverifiable on the Aevatar side.
 
-**What.** Both completion paths report `completed` on identity match + `status ==
-active` + `last_authorized_at` advancement. Neither reads `granted_scopes`. Aevatar
-*does* check (`NyxIdActionPostconditionPort.cs:294-296`), so the model is not
-misled — it receives `MismatchCode`. **The user is**: the card renders the
-`Re-authorized` badge while the conversation proceeds as though nothing happened.
+### A2 · MAJOR · closed — `completed` was reported without checking scopes
 
-Three reachable paths: the user deselects a prefilled scope before clicking Connect
-(`prefillScopes` only seeds the `useState` initializer,
-`add-key-dialog.tsx:1530-1536`, nothing pins it after); the provider grants a subset
-(unapproved GitHub org access, unchecked Google consent scopes, pending Lark review);
-or the provider omits `scope` from the token response, in which case the backend
-deliberately preserves the previous `token_scopes`
-(`services/user_api_key_service.rs:568-580`, per NyxID#917) while still stamping
-`last_authorized_at` — so the freshness gate passes on a completely unchanged grant.
+Both completion paths now read `/keys/{id}/authorization` and require
+`requested_scopes` to be an ordinal subset of `granted_scopes` before
+`report("completed", …)`, matching Aevatar's `StringComparer.Ordinal`. On a
+shortfall the card calls `onBlock` naming the missing scopes; an unreadable or
+secret-bearing evidence response blocks with its own distinct note rather than
+settling. Covered by three tests in `action-card.test.tsx` (shortfall, read
+failure, and the unchanged happy path).
 
-**Fix.** In both completion paths, re-read `/keys/{id}` and require
-`requested_scopes ⊆ granted_scopes` (case-sensitive, matching Aevatar's
-`StringComparer.Ordinal`) before `report("completed", …)`. On shortfall call
-`onBlock` naming the missing scopes.
+### A3 · MAJOR · partly closed — the freshness gate proved "some authorization advanced"
 
-### A3 · MAJOR · open — the freshness gate proves "some authorization advanced", not "this one"
+**Decision taken: the fresh-baseline option, not full server-side attempt
+correlation.** Stated plainly because the brief asked for that choice to be
+explicit.
 
-**Where.** `frontend/src/hooks/use-keys.ts:213-216`;
-`frontend/src/components/dashboard/add-key-dialog.tsx:1764, 1792-1794, 3191-3203`.
+**What landed.** `ensureAuthKey` re-reads the row when Connect is clicked
+instead of returning the `reconnectKey` prop, so the baseline is current as of
+the authorization it is about to start rather than as of when the card was
+clicked — a window that is minutes wide in the assistant flow. The read is
+deliberately not caught: falling back to a stale baseline can settle the card
+on someone else's authorization, so failing the click is the safer outcome.
+Two tests in `add-key-dialog.test.tsx` cover both directions.
 
-**What.** The predicate is a bare timestamp inequality with no server-side
-correlation to the attempt. `attemptId` is a client-side `crypto.randomUUID()` used
-only as a TanStack Query cache generation (`use-keys.ts:154`); it never reaches the
-server. The baseline comes from a **stale snapshot** — `ensureAuthKey` returns the
-`reconnectKey` prop verbatim, i.e. the object fetched at *card-click* time, which
-may be minutes old by the time the user presses Connect.
+**What remains open.** The gate still proves "an authorization landed on this
+row after Connect was pressed", not "*this* attempt landed". A concurrent
+authorization of the same service from another surface — the AI Services page,
+a second tab, `nyxid service scopes`, a second card — inside the window between
+Connect and settlement still satisfies it.
 
-Consequence: any unrelated fresh authorization of the same key inside that window —
-the AI Services page, a second tab, `nyxid service scopes`, the CLI wizard, a second
-assistant card for the same service — satisfies the gate and settles the card as
-`completed`. Two concurrent cards for one service share a baseline; completing
-either settles both.
+**Why full correlation was not attempted here.** The server does hold a
+correlation primitive, `UserApiKey.oauth_attempt_nonce` ("current chat-popup
+OAuth attempt allowed to mutate this connection"), but it is *consumed*:
+`user_api_key_service.rs` unsets it on completion, so it cannot witness after
+the fact which attempt won. Making it witness would mean a new stored field
+written on the OAuth token-write path, surfaced through the evidence contract,
+and required by the browser before settling. If any fresh-authorization path
+failed to stamp it — device-code reauthorization is the obvious candidate —
+cards would hang to the timeout instead of completing, which is a worse failure
+than the one being fixed. That is a change worth making deliberately, with its
+own coverage of every authorization path, not as a rider here.
 
-Combined with A2 this is the real false-`completed` surface: not a background
-refresh (that path is genuinely closed — see §5), but *someone else's*
-authorization being claimed as this attempt's.
+Note also that the residual is bounded by what the assistant is actually told:
+with A2 in place the report is only issued when the service genuinely holds the
+requested scopes and was genuinely authorized within the window. The remaining
+inaccuracy is about *causation*, not about state — and Aevatar re-verifies
+independently against its own recorded baseline.
 
-**Fix.** Correlate to the server-side attempt. `initiateOAuthAsync` already returns
-an `attempt_nonce` and the flow threads a `connection_id`; settle on evidence that
-*this* attempt landed. If that is too large for this wave, at minimum re-read
-`/keys/{id}` inside `handleConnect` and derive the baseline from that fresh read —
-closes the card-click→Connect-click window, does not close the concurrent-flow case.
+### A4 · MINOR · closed here, still wrong on the PR
 
-### A4 · MINOR · open — PR body misattributes the freshness fix
+The disposition table in PR #1462's body claims the freshness mechanism was
+delivered in that PR. It was not: all three parts pre-exist on `origin/main`
+(`stores/pending-connect-store.ts:12`, `action-card.tsx:285`, `hooks/use-keys.ts`
+×11), and neither `use-keys.ts` nor `pending-connect-store.ts` appears in its
+diffstat. What that PR added on this axis is the exact-service **identity**
+guard — real and correct, but a different control.
 
-The disposition table claims the freshness mechanism was delivered here. All three
-parts pre-exist on `origin/main` (`stores/pending-connect-store.ts:12`,
-`action-card.tsx:285`, `hooks/use-keys.ts` ×11); neither `use-keys.ts` nor
-`pending-connect-store.ts` is in this PR's diffstat. What this PR actually adds on
-that axis is the exact-service **identity** guard (`action-card.tsx:513-525`) —
-real and correct, but a different control.
+Corrected here, which is the authoritative record. The PR body itself still
+carries the error; #1462 is now merged, so editing it is Calvin's call rather
+than something to do unprompted.
 
-Sol's review was accurate about its pre-rebase branch point; the PR body carried
-"Fixed" forward without re-checking what the rebase brought in.
+### A5 · MINOR · closed — the freshness test now tests freshness
 
-**Fix.** Correct the table entry to "already present on `main`; this PR adds the
-exact-service identity guard and relies on the inherited baseline gate."
+Two cases added to `action-card.test.tsx`: one where the key read always
+returns the original `last_authorized_at`, asserting `onResolve` is never
+called across repeated polls; and one that drives the watch past its deadline
+and asserts the card reports the timeout note. Deleting the freshness gate from
+`use-keys.ts` now fails the first.
 
-### A5 · MINOR · open — the freshness test does not test freshness
+### A6 · MINOR · closed — scope-grammar divergence documented
 
-`action-card.test.tsx`, "waits for a fresh authorization timestamp before
-auto-completing reauthorization". Delete the entire freshness gate from
-`use-keys.ts` and this test still passes — the assertion its name promises (an
-unchanged `last_authorized_at` must **not** settle the card) is absent.
+`docs/chat/06-actions-registry.md` gains a "Where the browser is stricter than
+the published schema" section: the character class, the length and count
+bounds, the RFC 6749 §3.3 comparison, the degradation path
+(`{variant: "unknown"}` → "Unsupported action request"), and the instruction to
+widen the browser regex rather than the manifest if a provider ever needs it.
+The `params_schema` is unchanged — it is pinned by `JsonNode.DeepEquals`.
 
-**Fix.** Add a case whose key read always returns the original
-`last_authorized_at`; assert `onResolve` is never called and the card reports the
-timeout note.
+### A7 · MINOR · closed — `credential_source` is required
 
-### A6 · MINOR · open — browser scope grammar is stricter than the published contract
+The reauthorization key schema now requires `credential_source` instead of
+declaring it `.optional()`, so the org-admin guard fails loudly rather than
+silently vanishing if the response shape changes. The backend remains the real
+gate.
 
-`frontend/src/schemas/assistant-actions.ts:49-56` enforces
-`/^[A-Za-z0-9._:/~+*=-]+$/` and `.min(1)`. The published `params_schema` says
-`{"type": "string"}` and permits an empty array; RFC 6749 §3.3 allows every
-printable ASCII except space, `"` and `\`. A conforming scope outside that regex
-parses at Aevatar, then degrades to `{variant: "unknown"}` → "Unsupported action
-request" with no indication which scope was rejected.
+### A8 · MINOR · closed — one catalog entry, not the whole catalog
 
-No real catalog provider trips it (Google, GitHub, Slack, Lark, Microsoft, Zoom,
-HubSpot, Atlassian all pass), so likelihood is low.
-
-**Fix.** Document the divergence in `docs/chat/06-actions-registry.md` — the
-published schema is the contract and this restriction is invisible from it.
-
-### A7 · MINOR · open — org-admin preflight guard fails open
-
-`action-card.tsx:79-88, 158-163` declares `credential_source` `.optional()`, but
-`KeyResponse.credential_source` is mandatory (`keys.rs:544-546`), so the guard is
-currently unreachable. An `.optional()` schema means it silently vanishes if the
-response shape changes — the opposite of defence in depth.
-
-**Fix.** Make it required so a shape change fails loudly. (The backend remains the
-real gate.)
-
-### A8 · MINOR · open — preflight fetches the whole catalog for one entry
-
-`action-card.tsx:167-169` does `GET /catalog?include_all=true` then finds one slug.
-`GET /api/v1/catalog/{slug}` returns the same `provider_type` /
-`provider_config_id` / `device_code_format`. One full-catalog fetch per card click.
-
----
+The preflight fetches `GET /api/v1/catalog/{slug}` and maps a 404 to the
+existing catalog-unresolvable note, replacing a full `?include_all=true` fetch
+per card click.
 
 ## 3. Section B — Aevatar prerequisites (hard merge gate)
 
@@ -206,11 +212,21 @@ its own revision-map tests and still kills the registry.
 | B2 | `ExecutableActionsByRevision` (~line 234) | add `v8` → all four actions |
 | B3 | `IsActionExecutable` wire-action switch (~line 293) | **`ServiceReauthorize` currently falls through to `null`** — map it to `"service.reauthorize"` or the verb stays non-executable regardless of B1/B2 |
 | B4 | `ValidatePinnedContract` revision ternary (~line 886) | v8 is in neither branch, so `key.create` would be compared against the *unconstrained* schema while NyxID publishes the least-scope variant → `DeepEquals` fails → `RegistryInvalid` |
+| B5 | `NyxIdActionEvidenceReadPort.GetUserServiceAuthorizationAsync` | point the evidence read at `GET /api/v1/keys/{id}/authorization` instead of `GET /api/v1/keys/{id}`. Without this, A1 stays live: the shared `GetServiceAsync` also serves the services tool and the SSH executor, which need the full document, so NyxID cannot narrow the detail response by caller. |
+| B6 | `NyxIdActionEvidenceReadPort.GetAgentApiKeyAsync` | same, for `GET /api/v1/api-keys/{id}/authorization`. Closes F1's non-`name` carriers and F2. |
 
 Plus: `docs/contracts/nyxid-assistant-conformance/v1/registry-v8.json` matching the
 published manifest, and registry/conformance test updates.
 
-**Rollout order (binding).**
+**B4 rollout trap (F3).** B4's ternary is written over named constants
+(`revision is LeastScopeRegistryRevision or SupportedRegistryRevision`). The
+natural v8 implementation — repointing `SupportedRegistryRevision` from v7 to
+v8 — silently drops v7 from the least-scope branch, so the new consumer rejects
+the **live v7 manifest** during exactly the rollout step (2, below) that exists
+to catch this. Add a v8 constant and extend the pattern list; do not repoint
+`SupportedRegistryRevision`.
+
+**Rollout order (was binding; step 3 has already happened).**
 1. Aevatar merges + deploys the additive v8 consumer.
 2. Restart an Aevatar process while NyxID still serves **v7**; prove the registry
    still loads with all current actions.
@@ -218,34 +234,52 @@ published manifest, and registry/conformance test updates.
 4. Restart another Aevatar process, prove it loads v8, run one end-to-end
    `service.reauthorize`.
 
+⚠ **Step 3 has been performed out of order**: PR #1462 merged to `main` on
+2026-08-19, so NyxID's `main` publishes v8 before step 1. Step 2 can no longer
+be run against `main`. Either hold the NyxID deploy until the Aevatar consumer
+ships, or run step 2 against a NyxID build pinned to v7.
+
 ---
 
 ## 4. Section C — verification gaps
 
-### C1 · open · should clear before merge — nobody has run the full backend suite
+### C1 · closed — the full backend suite has now been run
 
-The implementer reported 5,189 passed / 129 failed with all failures attributed to
-a missing MongoDB replica set (`NYXID_TEST_DATABASE_URL` unset, Docker unavailable),
-and explicitly did **not** claim green — the correct posture. The reviewer could not
-reproduce it for the same reason. So the split and its attribution are unverified in
-both directions, and **no full backend run exists for this change**.
+Docker is unavailable in the implementation environment, so the replica set was
+stood up directly: `mongod` (Homebrew `mongodb-community@7.0`) as a single-node
+`rs0` on `127.0.0.1:27019`, with
+`NYXID_TEST_DATABASE_URL=mongodb://127.0.0.1:27019/?replicaSet=rs0`.
 
-**Action.** Someone with a replica set runs `cargo test` before merge.
+Numbers are in §4a below. The earlier 5,189/129 split was never reproducible in
+either direction and is superseded rather than confirmed.
 
-Everything else reproduced exactly on an independent re-run:
+### C1a · wire-visible changes on the existing detail routes
 
-| Command | Result |
-| --- | --- |
-| `npm --prefix frontend run test` | 246 files / 2,847 passed, 0 failed |
-| `npm --prefix frontend run lint` | 0 errors, 23 pre-existing warnings |
-| `npm --prefix frontend run build` (CI parity: `tsc -b`) | passed — 3,470 + 107 modules |
-| `cargo test assistant_actions` | 5 passed, 0 failed |
-| `cargo test unified_key_service` | 163 passed, 0 failed |
-| `cargo fmt --check` / `clippy -D warnings` | passed |
-| `cargo test -p nyxid-cli` | 1,100 + 1 wizard-freshness passed |
+Asked for explicitly. "Merged" below means already on `main` via #1462;
+"pending" means on the fix branch.
 
-No wizard-bundle rebuild is required: `add-key-dialog.tsx` is not in
-`cli/src/wizard/bundle-meta/index.manifest`.
+**`GET /api/v1/keys/{id}` and `GET /api/v1/keys` — three changes, all merged.**
+
+| # | Change | Shape |
+| --- | --- | --- |
+| 1 | `connection_status`, `granted_scopes` and `last_authorized_at` lost their `skip_serializing_if`. They were omitted when null; they are now always present, as explicit `null`. | Additive for a tolerant parser. **Breaking** for any consumer that treats *absence* as meaningful — `"granted_scopes" in response` flips from `false` to `true` for every non-OAuth key. |
+| 2 | `granted_scopes` values changed. The old code split `token_scopes` on whitespace only; it now splits on commas **and** whitespace and de-duplicates, preserving first-occurrence order. | **Value-breaking, and a fix.** A provider echoing `repo,read:user` previously produced the single garbage token `"repo,read:user"` (which was then re-submitted verbatim as a scope); it now produces `["repo", "read:user"]`. Repeated scopes now collapse to one entry. |
+| 3 | `connection_status` derivation changed in both directions. | **Value-breaking.** It now returns `null` when the credential's `status != "active"` or it has no stored access token — so a `pending_auth` row that used to report `"expired"`/`"active"` now reports `null`. Conversely an active row with no `expires_at` used to report `null` and now reports `"active"`. |
+
+Known consumers were checked: no Rust or TypeScript consumer of these three
+fields exists in `cli/src`, `sdk/` or `mobile/src`, no frontend Zod schema
+parses the key response, and `frontend/src/pages/keys.tsx` reads
+`connection_status ?? status`, so change 3 gives a `pending_auth` row a
+Reconnect affordance it did not have. External consumers were not enumerable.
+
+**`GET /api/v1/api-keys/{id}` — no change.** F2's lineage-trio fix lives only on
+the new projection; the detail response still emits
+`state_version: 0` with two nulls for legacy rows, as it always has.
+
+**Pending changes are additive only.** Two new routes,
+`GET /api/v1/keys/{id}/authorization` and
+`GET /api/v1/api-keys/{id}/authorization`. No existing response body is
+modified by the fix branch.
 
 ### C2 · open · low — one unreachability claim is inferred, not proven
 
@@ -296,6 +330,67 @@ Each was checked against code by the independent pass.
 
 ---
 
+## 5a. Section F — fourth-pass findings (Fable, 2026-08-19)
+
+Evidence: `wave1-relook-fable.md` on `review/2026-08-19_wave1-relook`
+(`d6c57a00`). That pass found **no errors** in the other three documents.
+
+### F1 · MAJOR · partly closed — the A1 tripwire class also hits `key.create` and `key.rotate`
+
+#1400 item 1 is a three-verb requirement, and the two key verbs were never
+audited to the standard applied to `service.reauthorize`. Aevatar verifies both
+through `GET /api/v1/api-keys/{id}` (`GetAgentApiKeyAsync`), and
+`ParseAgentApiKeyDocument` runs the same `RejectSecretBearingRead` scan.
+`ApiKeyResponse` reaches it with four user-controlled carriers: `name`,
+`description`, `allowed_services[].label` (the same `UserEndpoint.label` A1
+flags), and `allowed_nodes[].name`. `key.rotate` inherits the problem because
+the successor clones `name` and `description` from the predecessor.
+
+**Closed:** `GET /api/v1/api-keys/{id}/authorization` projects to the thirteen
+properties the reader consumes, removing `description`, `allowed_services`,
+`allowed_nodes` and everything else. Symmetric tests to A1's, both directions.
+
+**Irreducible remainder:** `name` is itself required evidence — the reader both
+demands it (`RequireNormalizedString(root, "name")`) and scans it, and the
+postcondition pins `evidence.Name == params.name`. A key named `Bearer Bot`
+stays unverifiable no matter what NyxID serves. No projection can fix that; it
+needs either a write-time restriction on key names (which would also have to
+handle rotation inheritance and existing rows) or an Aevatar-side change to
+exclude its own required evidence properties from the scan. Recommended: the
+latter — the scan exists to catch *unexpected* secret-bearing fields, not to
+reject the fields it deliberately reads.
+
+Also depends on **B6** to take effect at all.
+
+### F2 · MINOR · closed — legacy pre-lineage key rows were structurally unparseable
+
+`ApiKeyResponse` always serializes the lineage trio, so a pre-#1406 row emits
+`rotation_predecessor_id: null`, `state_version: 0`, `updated_at: null`.
+Aevatar's `ParseOptionalVersionEvidence` sees all three present, skips its
+absent-trio exit, then throws on `state_version <= 0` — the whole document is
+malformed. Zero impact today because create/rotate only read freshly written
+rows, but every legacy key violates the published evidence contract.
+
+The projection emits the trio as a trio or not at all: `state_version >= 1` or
+all three omitted. The detail response is unchanged, so this is not a wire
+change to `/api-keys/{id}`. Two tests pin both shapes.
+
+### F3 · MINOR · recorded — B4 rollout trap
+
+Folded into §3 above, and it belongs in the Aevatar issue text (D1).
+
+### F4 · MINOR · recorded — no clock-skew allowance
+
+All three verbs reject evidence timestamps a single tick ahead of Aevatar's
+clock (`LastAuthorizedAtUtc > now`, `NyxIdActionPostconditionPort.cs:306-308`;
+create `:381-382`; rotate `:460-464`). NyxID stamps, Aevatar compares, tolerance
+is zero, and verification runs immediately after the journey — the worst case
+for small positive NyxID skew. The failure is a retryable `StaleCode`, so this
+is a robustness note, not a bug. Deliberately **not** fixed here: any tolerance
+is Aevatar-side and should not be introduced unilaterally.
+
+---
+
 ## 6. Section D — coordination, owner: Calvin
 
 | # | Action | Status |
@@ -319,9 +414,15 @@ Verified against the issue text and this branch on 2026-08-18.
 | Param-shape confirmation: `{keyId, requestedScopes}` vs `{userServiceId, requestedScopes[]}` (aevatar#3315 item 6) | **Settled: `{userServiceId, requestedScopes[]}`.** Aevatar already implemented this shape on `feature/integrate`; NyxID now publishes it byte-identically. No decision outstanding. |
 | Wave 1 hardening follow-ups #1405, #1406 | **Both closed.** |
 
-**Conclusion.** Item 1 is fully addressed in scope and contract. It is not yet
-*complete* — completion requires §2 A1–A3 fixed and §3 B1–B4 shipped and deployed
-by Aevatar. The issue's framing that this "extends verb coverage beyond
+**Conclusion.** Item 1 is fully addressed in scope and contract **for
+`service.reauthorize`**. It is not fully addressed for the three verbs
+together: `key.create` and `key.rotate` shipped earlier (v6/v7) and were never
+audited to the same standard — see F1, which found the identical evidence-read
+tripwire on `GET /api/v1/api-keys/{id}` and one carrier (`name`) that no NyxID
+change can close.
+
+It is not yet *complete* either — completion requires A1's Aevatar half plus
+§3 B1–B6 shipped and deployed by Aevatar. The issue's framing that this "extends verb coverage beyond
 `service.connect`" is now accurate for all three Wave-1 verbs.
 
 Items 2 (exact-service non-blocking approval) and 3 (facade v4 conformance) of
