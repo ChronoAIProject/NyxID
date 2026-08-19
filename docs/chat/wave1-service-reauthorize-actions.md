@@ -254,6 +254,32 @@ stood up directly: `mongod` (Homebrew `mongodb-community@7.0`) as a single-node
 Numbers are in §4a below. The earlier 5,189/129 split was never reproducible in
 either direction and is superseded rather than confirmed.
 
+### C1 numbers
+
+| Command | Result |
+| --- | --- |
+| `cargo test -p nyxid` (replica set connected) | **5,342 passed, 0 failed, 0 ignored** — 301s |
+| `cargo fmt --check` | clean |
+| `cargo clippy --workspace --all-targets -- -D warnings` | clean |
+| `npm --prefix frontend run test` | 246 files / **2,853 passed, 0 failed** |
+| `npm --prefix frontend run lint` | 0 errors, 23 pre-existing warnings |
+| `npm --prefix frontend run build` (CI parity: `tsc -b`) | passed |
+
+Harness, for whoever needs to reproduce it: Docker was unavailable, so
+`mongod` (Homebrew `mongodb-community@7.0`) was run directly as a single-node
+replica set —
+
+```
+mongod --replSet rs0 --port 27019 --dbpath <dir> --bind_ip 127.0.0.1 --fork --logpath <log>
+mongosh --port 27019 --eval 'rs.initiate({_id:"rs0",members:[{_id:0,host:"127.0.0.1:27019"}]})'
+export NYXID_TEST_DATABASE_URL="mongodb://127.0.0.1:27019/?replicaSet=rs0"
+```
+
+Note the crate is `nyxid` and has no lib target: `cargo test --lib` silently
+matches zero tests in this package. Use `cargo test -p nyxid`.
+
+No wizard-bundle rebuild was needed — no frontend dependency or lockfile change.
+
 ### C1a · wire-visible changes on the existing detail routes
 
 Asked for explicitly. "Merged" below means already on `main` via #1462;
