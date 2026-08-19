@@ -258,7 +258,7 @@ either direction and is superseded rather than confirmed.
 
 | Command | Result |
 | --- | --- |
-| `cargo test -p nyxid` (replica set connected) | **5,342 passed, 0 failed, 0 ignored** — 301s |
+| `cargo test -p nyxid` (replica set connected) | **5,342 passed, 0 failed, 0 ignored** — 301s, and again at the final commit in 261s |
 | `cargo fmt --check` | clean |
 | `cargo clippy --workspace --all-targets -- -D warnings` | clean |
 | `npm --prefix frontend run test` | 246 files / **2,853 passed, 0 failed** |
@@ -279,6 +279,13 @@ Note the crate is `nyxid` and has no lib target: `cargo test --lib` silently
 matches zero tests in this package. Use `cargo test -p nyxid`.
 
 No wizard-bundle rebuild was needed — no frontend dependency or lockfile change.
+
+One caveat worth recording for whoever repeats this: an intermediate run
+appeared to hang in an unrelated org test. It was not a flaky test — `mongod`
+had crashed in its FTDC thread with the volume at 99% full, and every DB-backed
+test was blocked on server selection. If the suite stops making progress, check
+`mongod` is alive and check free disk before suspecting the tests. Restarting
+with `--setParameter diagnosticDataCollectionEnabled=false` avoided a repeat.
 
 ### C1a · wire-visible changes on the existing detail routes
 
