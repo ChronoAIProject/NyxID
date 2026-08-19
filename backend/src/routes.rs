@@ -494,6 +494,12 @@ pub fn build_router() -> (Router<AppState>, Router<AppState>) {
                 .put(handlers::api_keys::update_key)
                 .delete(handlers::api_keys::delete_key),
         )
+        // Authorization-evidence projection of `/{key_id}`; see the note on
+        // the equivalent unified-key route.
+        .route(
+            "/{key_id}/authorization",
+            get(handlers::api_keys::get_key_authorization),
+        )
         .route("/{key_id}/usage", get(handlers::api_keys::get_key_usage))
         .route("/{key_id}/rotate", post(handlers::api_keys::rotate_key))
         .route(
@@ -1070,6 +1076,13 @@ pub fn build_router() -> (Router<AppState>, Router<AppState>) {
             get(handlers::keys::get_key)
                 .put(handlers::keys::update_key)
                 .delete(handlers::keys::delete_key),
+        )
+        // Authorization-evidence projection of `/{key_id}`. Same ACL, strictly
+        // fewer properties: an evidence reader must not be handed the
+        // free-text carriers that its own secret-shape tripwire rejects.
+        .route(
+            "/{key_id}/authorization",
+            get(handlers::keys::get_key_authorization),
         );
 
     let connect_link_routes = Router::new()

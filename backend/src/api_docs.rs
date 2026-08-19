@@ -28,6 +28,7 @@
         crate::handlers::keys::create_key,
         crate::handlers::keys::list_keys,
         crate::handlers::keys::get_key,
+        crate::handlers::keys::get_key_authorization,
         crate::handlers::keys::update_key,
         crate::handlers::keys::delete_key,
         // Hosted Connect Links
@@ -59,6 +60,7 @@
         // NyxID API Keys
         crate::handlers::api_keys::list_keys,
         crate::handlers::api_keys::get_key,
+        crate::handlers::api_keys::get_key_authorization,
         crate::handlers::api_keys::plan_key_scope,
         crate::handlers::api_keys::create_key,
         crate::handlers::api_keys::update_key,
@@ -99,6 +101,7 @@
             crate::handlers::keys::CreateKeyRequest,
             crate::handlers::keys::UpdateKeyRequest,
             crate::handlers::keys::KeyResponse,
+            crate::handlers::keys::KeyAuthorizationEvidenceResponse,
             crate::handlers::keys::KeyListResponse,
             crate::handlers::keys::DeleteKeyResponse,
             // Hosted Connect Links
@@ -142,6 +145,7 @@
             crate::handlers::api_keys::AllowedServiceInfo,
             crate::handlers::api_keys::AllowedNodeInfo,
             crate::handlers::api_keys::ApiKeyResponse,
+            crate::handlers::api_keys::ApiKeyAuthorizationEvidenceResponse,
             crate::handlers::api_keys::ApiKeyListResponse,
             crate::handlers::api_keys::DeleteApiKeyResponse,
             crate::handlers::api_keys::DurableGrantReceipt,
