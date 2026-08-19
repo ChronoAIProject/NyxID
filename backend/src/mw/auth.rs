@@ -1372,7 +1372,12 @@ mod tests {
         "/api/v1/users/me",
         "/api/v1/users/me/consents",
         "/api/v1/keys",
+        // Assistant-action authorization evidence. Strictly fewer properties
+        // than the detail read directly above it, and no secret material, so
+        // it belongs in the same allowed family.
+        "/api/v1/keys/key-id/authorization",
         "/api/v1/api-keys",
+        "/api/v1/api-keys/key-id/authorization",
         "/api/v1/api-keys/key-id/usage",
         "/api/v1/api-keys/key-id/bindings",
         "/api/v1/nodes",

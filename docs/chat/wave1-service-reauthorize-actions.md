@@ -1,8 +1,9 @@
 # Wave 1 `service.reauthorize` — consolidated action list
 
-**This is the working document for PR #1462.** It is the single place that says what
-is done, what is outstanding, and who owns each item. The three documents it
-consolidates are evidence, not instructions:
+**This is the working document for the wave-1 `service.reauthorize` work**,
+originally PR #1462 (now merged — see the note in §1). It is the single place
+that says what is done, what is outstanding, and who owns each item. The four
+documents it consolidates are evidence, not instructions:
 
 | Document | Author | Role now |
 | --- | --- | --- |
@@ -44,7 +45,7 @@ the merge point, with no PR tracking them yet.
 
 ---
 
-## 2. Section A — NyxID actions outstanding
+## 2. Section A — NyxID actions
 
 Severity, owner, and status per item. File references are on this branch unless
 marked otherwise.

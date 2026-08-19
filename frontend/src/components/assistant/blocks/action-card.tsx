@@ -1087,6 +1087,12 @@ export function ActionCard({
               void onBlock(block.block_id, REAUTHORIZE_IDENTITY_NOTE);
               return;
             }
+            // Claim the card before awaiting. `report` used to run
+            // synchronously here, which is what stopped the watch from
+            // settling the same attempt; the scope read opens a gap the watch
+            // could otherwise resolve into a second report.
+            watchSettledRef.current = authorizationAttemptId;
+            resolvingRef.current = true;
             // Same scope confirmation as the watch path: the dialog reporting
             // success only means the handshake finished.
             void scopeGrantShortfall(
@@ -1095,6 +1101,7 @@ export function ActionCard({
             )
               .then((shortfall) => {
                 if (shortfall) {
+                  resolvingRef.current = false;
                   return onBlock(block.block_id, shortfall);
                 }
                 report("completed", {
@@ -1103,6 +1110,7 @@ export function ActionCard({
                 return undefined;
               })
               .catch(() => {
+                resolvingRef.current = false;
                 void onBlock(
                   block.block_id,
                   REAUTHORIZE_EVIDENCE_UNREADABLE_NOTE,
