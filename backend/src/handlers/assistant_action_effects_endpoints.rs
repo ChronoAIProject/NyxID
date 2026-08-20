@@ -179,6 +179,26 @@ struct CascadeSiblingFingerprint<'a> {
     slug: &'a str,
 }
 
+fn canonical_cascade_siblings<'a>(
+    siblings: Option<&'a [CascadeSiblingConfirmation]>,
+) -> Option<Vec<CascadeSiblingFingerprint<'a>>> {
+    let mut fingerprints: Vec<_> = siblings?
+        .iter()
+        .map(|sibling| CascadeSiblingFingerprint {
+            user_service_id: &sibling.user_service_id,
+            name: &sibling.name,
+            slug: &sibling.slug,
+        })
+        .collect();
+    fingerprints.sort_by(|left, right| {
+        left.user_service_id
+            .cmp(right.user_service_id)
+            .then_with(|| left.name.cmp(right.name))
+            .then_with(|| left.slug.cmp(right.slug))
+    });
+    Some(fingerprints)
+}
+
 fn optional_trimmed(value: Option<String>) -> Option<String> {
     value.map(|value| value.trim().to_string())
 }
@@ -455,16 +475,7 @@ pub async fn delete_external_key(
         external_key_id: &external_key_id,
         cascade_grant,
         grant_scope: grant_scope.as_deref(),
-        cascade_siblings: body.cascade_siblings.as_deref().map(|siblings| {
-            siblings
-                .iter()
-                .map(|sibling| CascadeSiblingFingerprint {
-                    user_service_id: &sibling.user_service_id,
-                    name: &sibling.name,
-                    slug: &sibling.slug,
-                })
-                .collect()
-        }),
+        cascade_siblings: canonical_cascade_siblings(body.cascade_siblings.as_deref()),
     })?;
     let actor = auth_user.user_id.to_string();
     match assistant_action_receipts::reserve_or_replay(
