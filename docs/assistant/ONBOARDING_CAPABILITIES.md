@@ -37,7 +37,7 @@ Five things. All of them are small, and all of them fit into code that already e
 
 ## What a user gets
 
-**Social listening and research.** Search recent posts on X. Read subreddit listings, search Reddit, pull comment threads. This is public conversation, so a shared credential reveals nothing about anyone else. It is a genuinely good demo: "what is being said about this."
+**Social listening and research.** Search recent posts on X. This is public conversation, so a shared credential reveals nothing about anyone else, and it is a genuinely good demo: "what is being said about this." **Reddit is excluded** — see below.
 
 **Read the web.** Firecrawl scrape and search, with a size cap and a spending ceiling per request. "Read me this page" is the strongest single first-run demo we have. It does cost us a little per page, and one reviewer would cut it for that reason — I think it earns its keep, but the disagreement is real and worth knowing about.
 
@@ -67,7 +67,7 @@ It is not an onboarding capability. Nobody's first minute on the platform should
 
 ## What we need from outside
 
-**Reddit** may not ship at all. The credential type it needs expires hourly and requires a flow we currently exclude, and their commercial terms for this kind of use are unverified. Either that changes or Reddit waits.
+**Reddit is excluded from this scope, by decision.** The credential it needs expires hourly and requires an auth flow we currently exclude from automatic setup, and their commercial terms for reselling access through a shared credential are unverified. Both are solvable; neither is worth solving now.
 
 **Duffel's Stays and Cars** products are switched off on our account — hotels and cars are a sales conversation, not an engineering one. Flights work today.
 
@@ -83,9 +83,50 @@ I described flight booking as safe because no money moves. It creates real oblig
 
 ---
 
+## How this gets built
+
+We have done this once already, and it worked. `chrono-llm-public` is a platform service running in production today: an admin-managed row holding our credential, resolved identically for every caller, serving a capability nobody has to sign up for. It is the model. But the interesting lesson is **how little of this plan should copy it.**
+
+### What the chrono-llm pattern actually cost
+
+Four parts:
+
+1. **A catalog row**, created through the admin interface rather than seeded in code — a slug, our credential, and the target URL. No deployment needed.
+2. **A validation and request-building module** — roughly 490 lines. It checks what the caller asked for against fixed lists, and constructs the upstream request itself rather than passing the caller's through.
+3. **A handler** — roughly 470 lines. Finds the row by slug, forwards, streams the answer back.
+4. **Routes**, mounted with the usual wrappers.
+
+About 950 lines for one service. That is the price of a purpose-built capability, and it bought real safety: the caller cannot ask for a model we did not approve, cannot inject a system prompt, and cannot reach a tool because the route has none.
+
+### Why most of this plan will not cost that
+
+**Four of the five capabilities need no code at all.** X search, Firecrawl, flight search and speech go through the proxy we already have, with a list of permitted operations attached to the row. That list is data. It lives in the database, an operator can change it without our involvement, and adding a sixth service later is the same act again.
+
+Concretely, enabling one looks like a single administrative call that creates the row, attaches the credential, and attaches the permitted operations in the same request — so the service is never live-but-unrestricted for even a moment. Then a flag turns it on.
+
+**One capability does need the chrono-llm treatment: phone calls.** For exactly the reason chrono-llm needed it — the safety required is about *what the request contains*, not which endpoint it reaches. NyxID has to build the call script itself, the way the assistant builds its own prompt. Same four parts, same rough size, and the same payoff: the caller supplies a destination and an intent, never the script.
+
+### The order, and what each step touches
+
+**First — let the assistant use tools.** This is the one that makes everything else visible, and it is the only item on the list that is not optional. It touches the assistant path rather than the catalog, and it is the piece where I would expect the estimate to be least reliable, because it depends on how the existing tool machinery fits the direct chat route.
+
+**Second — the three safety fixes**, which are small and independent of each other. Make a platform row refuse to run without a policy. Make the credential check reject the wrong kind of credential outright. Make the published tool list stop rebuilding itself from our shipped files on every restart. Each is a contained change in code that already exists; none requires a migration.
+
+**Third — turn on the capabilities**, one at a time, in the order they are least likely to embarrass us: X search, then web reading, then flight search, then speech. Each is configuration. Each can be reverted by disabling the row.
+
+**Fourth — the rate limit**, before anyone outside the building sees it.
+
+**Then, separately and deliberately — phone calls.** Its own design, its own review, and the compliance question answered before a line is written rather than after.
+
+### How we will know it worked
+
+A new account, nothing connected, asks the assistant what people are saying about a topic and gets real posts back. Then asks it to read a page. Then to find a flight. If those three work from a cold signup, the plan succeeded. If they do not, no amount of correctly-configured catalog rows will have mattered.
+
+---
+
 ## Appendix — the specifics
 
-**Operations to expose.** X: recent search only. Reddit: subreddit hot and new, search, comment threads. Firecrawl: scrape and search, with a body-size cap and a credit ceiling — no crawling, no site mapping, no async jobs. Duffel: offer requests and offer retrieval, nothing else. ElevenLabs: text-to-speech only, one voice, capped length.
+**Operations to expose.** X: recent search only. Firecrawl: scrape and search, with a body-size cap and a credit ceiling — no crawling, no site mapping, no async jobs. Duffel: offer requests and offer retrieval, nothing else. ElevenLabs: text-to-speech only, one voice, capped length.
 
 **Not exposed anywhere:** anything that writes, anything returning our own account identity, anything that lists activity across the shared account, and Firecrawl's asynchronous job polling — which accepts any job identifier and cannot be made safe by configuration, because nothing proves the job belongs to whoever is asking.
 
