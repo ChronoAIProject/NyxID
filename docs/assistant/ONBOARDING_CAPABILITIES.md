@@ -124,6 +124,57 @@ A new account, nothing connected, asks the assistant what people are saying abou
 
 ---
 
+# Voice and phone — offered together and separately
+
+Researched against ElevenLabs' current documentation rather than designed from scratch. There is a well-trodden path here and we should use it.
+
+## The automagical path exists
+
+ElevenLabs has a native Twilio integration. **We give ElevenLabs our Twilio credentials once**, through their dashboard — account SID and auth token, or better an API key with limited permissions, which their docs recommend. ElevenLabs then configures the number itself and owns the call flow.
+
+After that, placing a call is a single request:
+
+```
+POST https://api.elevenlabs.io/v1/convai/twilio/outbound-call
+{ "agent_id": "...", "agent_phone_number_id": "...", "to_number": "..." }
+```
+
+Three fields. ElevenLabs' agent conducts the conversation — speech recognition, turn-taking, the voice, all of it.
+
+**Two consequences worth sitting with.** First, this is genuinely "invoke a call almost automagically" — it is one operation, trivially expressible in the permitted-operations list. Second, **NyxID never holds a Twilio credential on this path at all.** ElevenLabs does. That removes an entire category of work — no call-script endpoint of ours, no TwiML, no Twilio credential to protect. It also means we are trusting ElevenLabs with access to our Twilio account, which is the argument for scoping that credential down to an API key rather than account-wide.
+
+## The task can be set per call
+
+The call is not stuck with a pre-baked script. Optional fields under `conversation_initiation_client_data` allow a `first_message` and `dynamic_variables` per call — so "call this restaurant and ask about a table for four at eight" is expressible without configuring a new agent each time.
+
+## Where the danger went
+
+The same optional block also permits `conversation_config_override.agent.prompt` — **replacing the agent's entire system prompt, and choosing the LLM.**
+
+So the problem I described earlier has not disappeared, it has moved. It was: whoever supplies the TwiML controls the call. It is now: whoever supplies the prompt override controls the call. A caller who can set both `to_number` and the full prompt has an arbitrary automated calling system operating from our number, with our voice.
+
+Two other fields matter: `to_number` is unconstrained, and `call_recording_enabled` has consent implications that vary by jurisdiction.
+
+**The safe shape is the one we already know.** NyxID constructs the request body itself — the same pattern as the assistant composing its own system prompt. The caller supplies a destination and an intent; NyxID emits a payload with a fixed `agent_id`, a fixed `agent_phone_number_id`, a bounded `first_message`, and **no prompt override field at all**. That is a small handler, not a general rule language, and it is directly modelled on `chrono-llm-public`.
+
+Worth noting honestly: this is the one capability where the nested-field constraints we cut would have been the alternative — `forbid` on `conversation_initiation_client_data.conversation_config_override.agent.prompt`. A handler is less machinery for one service, but if a second service ever needs this shape, the general mechanism earns its place.
+
+## Together and separately
+
+**Separately — speech only.** `POST /v1/text-to-speech/{voice_id}`. Generate audio, get it back, no phone involved. Already specified above; unchanged.
+
+**Separately — a call without the conversational agent.** This is the path that needs our own call script and a Twilio credential in NyxID, and it is the expensive one. Given the native integration exists, it is worth asking whether we need it at all in the first release.
+
+**Together — the conversational call.** One operation through the handler described above. The user picks a voice, the agent places the call and talks.
+
+## What has to be true before this ships
+
+Our Twilio number and credentials registered with ElevenLabs, scoped to an API key rather than account-wide. A small set of curated agents on our ElevenLabs account, so `agent_id` selects from things we approve. The handler that builds the request body. A decision on who may be called and how that is bounded — the genuine open question, and not a technical one. A per-user spend cap, since calls bill per minute. And an answer on recording and consent for the jurisdictions we operate in.
+
+This remains the largest single piece of work in the plan, and it is not an onboarding capability. But it is materially smaller than it looked yesterday, because the integration already exists and we do not have to build the call flow.
+
+---
+
 # Implementation specification
 
 Concrete enough to hand to an engineer. Every file path and identifier below was verified against the branch.
