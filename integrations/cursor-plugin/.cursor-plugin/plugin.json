@@ -1,0 +1,42 @@
+{
+  "name": "nyxid",
+  "description": "Connect Cursor agents to NyxID for credential brokering, service discovery, and proxied downstream API calls without exposing upstream secrets.",
+  "version": "0.1.0",
+  "author": {
+    "name": "ChronoAIProject"
+  },
+  "homepage": "https://github.com/ChronoAIProject/NyxID",
+  "repository": "https://github.com/ChronoAIProject/NyxID",
+  "license": "Apache-2.0",
+  "keywords": [
+    "credentials",
+    "oauth",
+    "proxy",
+    "mcp",
+    "service-discovery",
+    "nyxid"
+  ],
+  "logo": "assets/nyxid-icon.svg",
+  "rules": [
+    "rules/nyxid.mdc"
+  ],
+  "skills": [
+    "skills/nyxid"
+  ],
+  "commands": [
+    "commands/nyxid-connect.md"
+  ],
+  "mcpServers": "mcp.json",
+  "variables": {
+    "type": "object",
+    "properties": {
+      "NYXID_BASE_URL": {
+        "type": "string",
+        "title": "NyxID base URL",
+        "description": "API origin where the hosted NyxID MCP endpoint is served.",
+        "format": "uri",
+        "default": "https://nyx-api.chrono-ai.fun"
+      }
+    }
+  }
+}

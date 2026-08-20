@@ -1,0 +1,7 @@
+{
+  "mcpServers": {
+    "nyxid": {
+      "url": "${NYXID_BASE_URL}/mcp"
+    }
+  }
+}
