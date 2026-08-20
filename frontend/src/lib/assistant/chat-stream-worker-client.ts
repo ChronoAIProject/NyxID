@@ -20,12 +20,14 @@ export type ChatStreamHeadersResult =
       readonly kind: "response";
       readonly status: number;
       readonly contentType: string;
+      readonly debugUpstreamId?: string;
       readonly debugUpstream?: string;
     }
   | {
       readonly kind: "http_error";
       readonly status: number;
       readonly body: string;
+      readonly debugUpstreamId?: string;
       readonly debugUpstream?: string;
     }
   | {
@@ -250,6 +252,7 @@ export class ChatStreamWorkerClient {
           kind: "response",
           status: message.status,
           contentType: message.contentType,
+          debugUpstreamId: message.debugUpstreamId,
           debugUpstream: message.debugUpstream,
         });
         return;
@@ -293,6 +296,7 @@ export class ChatStreamWorkerClient {
           kind: "http_error",
           status: message.status,
           body: message.body,
+          debugUpstreamId: message.debugUpstreamId,
           debugUpstream: message.debugUpstream,
         });
         return;
@@ -517,9 +521,10 @@ export class ChatStreamWorkerClient {
               kind: "http_error",
               status: response.status,
               body: captured.result.text,
+              debugUpstreamId:
+                response.headers.get("x-nyxid-debug-upstream-id") ?? undefined,
               debugUpstream:
-                response.headers.get("x-nyxid-debug-upstream-log") ??
-                undefined,
+                response.headers.get("x-nyxid-debug-upstream-log") ?? undefined,
             });
             return;
           }
@@ -531,6 +536,8 @@ export class ChatStreamWorkerClient {
             kind: "http_error",
             status: response.status,
             body,
+            debugUpstreamId:
+              response.headers.get("x-nyxid-debug-upstream-id") ?? undefined,
             debugUpstream:
               response.headers.get("x-nyxid-debug-upstream-log") ?? undefined,
           });
@@ -541,6 +548,8 @@ export class ChatStreamWorkerClient {
           kind: "response",
           status: response.status,
           contentType,
+          debugUpstreamId:
+            response.headers.get("x-nyxid-debug-upstream-id") ?? undefined,
           debugUpstream:
             response.headers.get("x-nyxid-debug-upstream-log") ?? undefined,
         });

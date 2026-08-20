@@ -1,5 +1,5 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import { AevatarAssistantTransport } from "./aevatar-transport";
+import { AevatarAssistantTransport, assistantApi } from "./aevatar-transport";
 import {
   chatStreamClient,
   type ChatStreamRequestHandle,
@@ -12,6 +12,7 @@ import type { TurnEvent } from "@/types/assistant";
 
 const ACTOR_ID = "nyxid-chat-f8369965a444433f92ec50e67ad8ee52";
 const SECOND_ACTOR_ID = "nyxid-chat-4a1e60ebd1fd44f192bf4bb90e1812ae";
+const WIRE_LOG_ID = "d7dbbf38-a31c-4331-8ddb-13fda5a70d12";
 
 function encodedEcho(): string {
   const json = JSON.stringify([
@@ -50,59 +51,94 @@ describe("assistant wire-log transport", () => {
     });
   });
 
-  it("sends the gate only when enabled and decodes header delivery", async () => {
+  it("suppresses the exact conversation list even when capture is enabled", async () => {
     const fetchMock = vi.fn().mockImplementation(() =>
       Promise.resolve(
         new Response(JSON.stringify({ conversations: [] }), {
           status: 200,
           headers: {
             "Content-Type": "application/json",
+            "X-NyxID-Debug-Upstream-Id": WIRE_LOG_ID,
             "X-NyxID-Debug-Upstream-Log": encodedEcho(),
           },
         }),
       ),
     );
     vi.stubGlobal("fetch", fetchMock);
-
-    await new AevatarAssistantTransport().listConversations();
-    const firstInit = fetchMock.mock.calls[0]?.[1] as RequestInit;
-    expect(firstInit.headers).not.toHaveProperty("X-NyxID-Debug-Upstream");
-    expect(useAssistantWireLogStore.getState().entries).toHaveLength(0);
-
     useAssistantWireLogStore.getState().setFeatureEnabled(true);
     useAssistantWireLogStore.getState().setCaptureEnabled(true);
+
     await new AevatarAssistantTransport().listConversations();
-    const secondInit = fetchMock.mock.calls[1]?.[1] as RequestInit;
-    expect(secondInit.headers).toMatchObject({
+
+    const init = fetchMock.mock.calls[0]?.[1] as RequestInit;
+    expect(init.headers).not.toHaveProperty("X-NyxID-Debug-Upstream");
+    expect(useAssistantWireLogStore.getState().entries).toEqual([]);
+  });
+
+  it("prefers the id header and attributes HTTP metadata from the endpoint", async () => {
+    const fetchMock = vi.fn().mockResolvedValue(
+      new Response(JSON.stringify({ status: "current" }), {
+        status: 200,
+        headers: {
+          "Content-Type": "application/json",
+          "X-NyxID-Debug-Upstream-Id": WIRE_LOG_ID,
+          "X-NyxID-Debug-Upstream-Log": encodedEcho(),
+        },
+      }),
+    );
+    vi.stubGlobal("fetch", fetchMock);
+    useAssistantWireLogStore.getState().setFeatureEnabled(true);
+    useAssistantWireLogStore.getState().setCaptureEnabled(true);
+
+    await assistantApi.get(`/assistant/conversations/${ACTOR_ID}/state`);
+
+    const init = fetchMock.mock.calls[0]?.[1] as RequestInit;
+    expect(init.headers).toMatchObject({
       "X-NyxID-Debug-Upstream": "1",
     });
     expect(useAssistantWireLogStore.getState().entries[0]).toMatchObject({
       kind: "header",
       status: 200,
-      upstreamEchoes: [{ method: "GET", path: "api/chat/conversations" }],
+      conversationId: ACTOR_ID,
+      wireLogId: WIRE_LOG_ID,
+      label: `GET /assistant/conversations/${ACTOR_ID}/state`,
     });
     expect(useAssistantWireLogStore.getState().entries[0]).not.toHaveProperty(
-      "futureEnvelopeMetadata",
+      "upstreamEchoes",
     );
-    const capturedEcho =
-      useAssistantWireLogStore.getState().entries[0]?.upstreamEchoes?.[0];
-    if (!capturedEcho || capturedEcho.degraded) {
-      throw new Error("expected a full legacy echo");
-    }
-    expect(capturedEcho.identity).not.toHaveProperty("futureIdentityMetadata");
-    expect(capturedEcho).not.toHaveProperty("futureEnvelopeMetadata");
     await vi.waitFor(() => {
       expect(useAssistantWireLogStore.getState().entries[0]?.capture).toEqual({
         state: "settled",
         outcome: "complete",
         wireOutcome: "complete",
         body: {
-          text: JSON.stringify({ conversations: [] }),
+          text: JSON.stringify({ status: "current" }),
           bytes: 20,
           truncated: false,
         },
       });
     });
+  });
+
+  it("does not recursively capture a wire-log payload fetch", async () => {
+    const fetchMock = vi.fn().mockResolvedValue(
+      new Response(JSON.stringify({ id: WIRE_LOG_ID }), {
+        status: 200,
+        headers: {
+          "Content-Type": "application/json",
+          "X-NyxID-Debug-Upstream-Id": WIRE_LOG_ID,
+        },
+      }),
+    );
+    vi.stubGlobal("fetch", fetchMock);
+    useAssistantWireLogStore.getState().setFeatureEnabled(true);
+    useAssistantWireLogStore.getState().setCaptureEnabled(true);
+
+    await assistantApi.get(`/assistant/wire-logs/${WIRE_LOG_ID}`);
+
+    const init = fetchMock.mock.calls[0]?.[1] as RequestInit;
+    expect(init.headers).not.toHaveProperty("X-NyxID-Debug-Upstream");
+    expect(useAssistantWireLogStore.getState().entries).toEqual([]);
   });
 
   it("sends no debug header or stream observer when persisted capture meets a disabled feature", async () => {
@@ -164,6 +200,68 @@ describe("assistant wire-log transport", () => {
     expect(start.mock.calls[0]?.[0].headers).toBeUndefined();
     expect(start.mock.calls[0]?.[0].onWire).toBeUndefined();
     expect(useAssistantWireLogStore.getState().entries).toEqual([]);
+  });
+
+  it("prefers the SSE id header and adopts the authoritative conversation", async () => {
+    useAssistantWireLogStore.getState().setFeatureEnabled(true);
+    useAssistantWireLogStore.getState().setCaptureEnabled(true);
+    const start = vi.spyOn(chatStreamClient, "start").mockImplementation(
+      (request): ChatStreamRequestHandle => ({
+        headers: Promise.resolve({
+          kind: "response",
+          status: 200,
+          contentType: "text/event-stream",
+          debugUpstreamId: WIRE_LOG_ID,
+          debugUpstream: encodedEcho(),
+        }),
+        completion: Promise.resolve().then(() => {
+          request.onWire?.({
+            type: "end",
+            requestId: "id-backed-wire-log",
+            outcome: "complete",
+          });
+          request.onFrames([
+            {
+              type: "RUN_STARTED",
+              actorId: ACTOR_ID,
+              turnId: "turn-id-backed-wire-log",
+            },
+            { type: "RUN_FINISHED" },
+          ]);
+          return { kind: "complete" };
+        }),
+        cancel: vi.fn(),
+      }),
+    );
+    const transport = new AevatarAssistantTransport();
+    const conversation = await transport.createConversation();
+
+    await new Promise<void>((resolve) => {
+      transport.sendMessage(conversation.id, "hello", (event) => {
+        if (event.event === "turn.completed") resolve();
+      });
+    });
+
+    expect(start.mock.calls[0]?.[0].headers).toEqual({
+      "X-NyxID-Debug-Upstream": "1",
+    });
+    await vi.waitFor(() => {
+      expect(useAssistantWireLogStore.getState().entries[0]).toMatchObject({
+        kind: "sse",
+        status: 200,
+        conversationId: ACTOR_ID,
+        wireLogId: WIRE_LOG_ID,
+        label: "POST /assistant/chat",
+        capture: {
+          state: "settled",
+          outcome: "complete",
+          wireOutcome: "complete",
+        },
+      });
+    });
+    expect(useAssistantWireLogStore.getState().entries[0]).not.toHaveProperty(
+      "upstreamEchoes",
+    );
   });
 
   it("buffers wire data until its backend echo arrives without delivering it as chat content", async () => {

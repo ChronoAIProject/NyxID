@@ -63,6 +63,7 @@ export type ChatStreamWorkerMessage =
       readonly requestId: string;
       readonly status: number;
       readonly contentType: string;
+      readonly debugUpstreamId?: string;
       readonly debugUpstream?: string;
     }
   | {
@@ -99,6 +100,7 @@ export type ChatStreamWorkerMessage =
       readonly requestId: string;
       readonly status: number;
       readonly body: string;
+      readonly debugUpstreamId?: string;
       readonly debugUpstream?: string;
     }
   | {
