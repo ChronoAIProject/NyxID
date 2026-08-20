@@ -1,0 +1,91 @@
+# Platform Services — Credit-Billed Catalog APIs, with Travel as the Hardest Instance
+
+**The frame (owner):** *"We are planning to add a lot of other catalogue APIs like Firecrawl, Twitter, Twilio, ElevenLabs. How can we add these as platform services that users can call with their credits?"*
+
+The deliverable is a **general capability**: catalog services running on a platform credential, callable by any NyxID user, gated by an operation allowlist, and **paid for in credits**. Travel (the agent-driven booking plan, retained in full in §6 and Appendix C) is not the product — it is the hardest instance of the product, adding money-at-the-provider, PII in transit, PCI adjacency, and chargeback liability on top of the pattern.
+
+**Fact bases:** repo claims cite `file:line` on `travel-allowlist` (rebased onto `origin/main` today); Duffel facts per the citations in §6/Appendix C; live measurements in `fixtures/duffel-offer-request-sample.json`. Assumptions are marked.
+
+---
+
+# Part I — Narrative
+
+## 1. Almost everything already exists; three pieces are missing
+
+**Exists and shipped:** the credential authorization gate and log redaction (#1436); the operation-allowlist mechanism, enforced pre-side-effect on both executors (#1448: REST at `handlers/proxy.rs:2021`, MCP via `prepare_proxy_tool_call` at `mcp_transport.rs:1357, 1695`); **the entire credit-billing subsystem** — `ServiceBilling.platform_billable` + `platform_metric` (`models/service_billing.rs:26-43`) consumed at proxy time (`services/proxy_service.rs:2620, 2931`), with reserve-before-forward, settle-after, retry/dead-letter, hash-chained ledger, and Lago reconciliation behind it (`services/billing/{meter,reservation,ledger,reconcile,lago_client}.rs`); and catalog rows for all four named APIs (`provider_service.rs:2546-2650`).
+
+**Missing — the whole strategy hangs on these three:**
+
+1. **An admin path to put a platform credential on a catalog row.** A credential can be set at create time (`handlers/services.rs:1074`) but the only `/{service_id}/credential` route is `update_connection_credential` — a *user connection* credential (`routes.rs:607-611`). No set, no rotate, no clear, no kill switch. This is the actual blocker.
+2. **A policy actually applied to a row.** #1448's mechanism is live but the only policy in `main` is a `#[cfg(test)]` fixture. `None` = passthrough, so a platform-credentialed row without a policy exposes the entire vendor API surface to every user.
+3. **`platform_billable` switched on.** It appears only in tests today. Enabling it requires the Lago rate for the metric code to exist first — `gate_and_reserve` fails closed with `BillingNotConfigured` when the rate cache has no row (`reservation.rs:1102-1115`), so flipping the flag before configuring Lago is an outage, not a soft launch. Activation order is part of the design.
+
+**One verified wrinkle that makes this a conversion, not a flag-flip:** three of the four rows (`api-firecrawl`, `api-elevenlabs`, `api-twilio`) are seeded as *user-credential connection services* (`service_category: "connection"`, `requires_user_credential: true` — `provider_service.rs:2562-2563, 2586-2587, 2610-2611`), and **every provider-seeded row carries `provider_config_id`, which the #1436 credential gate rejects by design** (the master-credential predicate requires `provider_config_id.is_none()`). The platform variants must therefore be **provider-less platform rows** — either converted or seeded fresh via a new platform-seed shape — with the literal-empty-ciphertext sentinel (never `encrypt(b"")`, which is indistinguishable from a real credential; `handlers/services.rs:828, 889-917` encrypts even empty plaintext). Whether to convert the existing rows in place or add parallel platform rows (e.g. keep BYO-key connections *and* offer the credit-billed platform mode) is a product decision — flagged in §7; the infrastructure is identical either way.
+
+## 2. PR-1 is catalog infrastructure, not travel work
+
+Re-scoped: PR-1 delivers the three missing pieces as generic platform capability. **What it costs:** one backend PR — platform-seed shape, admin credential subresources (`PUT/DELETE /api/v1/services/{id}/credential`) + `nyxid admin service credential set|clear` / `enable|disable` CLI, per-row policy application, the catalog-header precedence fix (a catalog `overridable: false` header must beat user-service layers — needed by Duffel's mandatory `Duffel-Version` and correct for everyone), and the billing activation order codified (policy present → credential set → Lago rate configured → `platform_billable` on → row enabled). **What it unlocks:** Firecrawl, Twitter, Twilio, ElevenLabs, Duffel, and every future platform API become configuration + a policy + a skill, not engineering projects. Nothing in PR-1 is travel-shaped.
+
+## 3. Sequencing: prove the pattern on Firecrawl first — agreed, and here is the sharpened reasoning
+
+The recommendation is right and I'll state it stronger: **Duffel is the worst possible place to validate this primitive, and Firecrawl is close to the best.** A mis-scoped allowlist on Firecrawl costs a failed scrape; on Twilio it sends SMS that cost money and carry TCPA exposure; on Duffel it strands a passenger or books a flight. Firecrawl exercises *every* new moving part — provider-less platform row, admin credential lifecycle, policy enforcement on both executors, credit reservation/settlement against a real wallet, MCP publication, and a skill — with zero money movement at the provider, zero PII, idempotent operations, and a vendor that tolerates retries. It is the full pattern minus only the parts that are Duffel-specific anyway (Cards, holds, PCI adjacency). One addition to the reasoning: **the Duffel Cards approval is an external latency we don't control** — sequencing Firecrawl first fills that wait with the work that de-risks everything else, so travel is not actually delayed by going second. The only argument for Duffel-first would be that travel is the flagship; it fails because a flagship demo on an unproven primitive is how you get the demo that books the wrong flight.
+
+## 4. The four services are not uniform — per-service reality
+
+| Service | Row today | Metric (why) | Allowlist posture | Danger without allowlist |
+|---|---|---|---|---|
+| **Firecrawl** | connection/BYO-key (`:2562`) | **requests** — pricing is per scrape/crawl page; request count is the honest proxy | `POST /v2/scrape`, `/v2/search`, `/v2/map`, crawl submit + status/result reads (**ASSUMPTION:** exact v2 paths — pin against the existing overlay `backend/specs/catalog/firecrawl.openapi.json` at activation) | Low: worst case is quota burn on the platform key. The v1 proof target |
+| **ElevenLabs** | connection/BYO-key (`:2586`) | **bytes** — cost scales with characters synthesized; request+response bytes are the shipped approximation (tokens don't apply; note streaming TTS responses are relayed unbuffered, and the byte meter must count the streamed response — verify the WS/streaming meter path at activation) | Core TTS (`POST /v1/text-to-speech/{voice_id}`, streaming variant) + models/voices reads. **Exclude voice cloning and dubbing**: quota-heavy and an abuse surface (cloning real people's voices on the platform account) | Medium: quota drain + voice-cloning abuse attributed to ChronoAI's account |
+| **Twilio** | connection/BYO-key (`:2610`) | **requests** — one message/call ≈ one unit of real vendor spend | **Messages create** (and optionally status reads) only. Everything else on `api.twilio.com` — number purchase, key rotation, account management — must be unreachable | **Highest of the four.** Every allowed call spends real money from the platform account; SMS from platform-owned sender numbers carries spam/TCPA exposure attributed to ChronoAI. Do not activate without the allowlist, per-user rate caps (existing per-key limits), and a sender/compliance decision (§7) |
+| **Twitter/X** | already internal-shaped but provider-linked (`:2646-2647`) | **requests** | **Reads/search only** (`GET /2/tweets/search/*`, lookups). Writes are excluded on this rail — not primarily because destructive, but because a platform bearer token posts as *ChronoAI's own X account*: user-attributed writes belong to the existing user-credential connection model, not to a shared platform credential | Writes on a shared credential are reputationally destructive and rate-limit-catastrophic (one app-level rate pool for all users) |
+
+Two cross-cutting notes. First, the shared credential means **shared vendor rate limits and shared quota**: one user can starve everyone; per-key rate limits exist (`ApiKey.rate_limit_per_second`) and credit metering prices usage, but a per-service concurrency/velocity cap is a v1.1 item, stated not built. Second, **billing metric codes need Lago rates before any flag flips** (§1.3); the activation runbook makes that ordering mechanical.
+
+## 5. What users see
+
+Same answer as travel gave, generalized: platform services are **not** AI Services (`/keys`) entries — nothing to connect. Admins manage rows and credentials in the admin catalog UI (now with the credential subresources); users meet these services through the assistant and through MCP tools; credits are the meter, visible in existing billing/usage surfaces (platform metering rows flow through the shipped usage pipeline). For the three rows that today are BYO-key connection services, the product decision in §7 determines whether users keep the BYO option alongside the credit-billed platform mode.
+
+## 6. Travel — intact, sequenced later, undiluted
+
+Everything from the agent-driven travel plan stands; it moves behind the pattern-proof, not into it. Compressed statement (full contract in Appendix C): the agent plans and executes through the proxy — search + **hold orders** only (`type: "hold"`, no payment; 73% of a live 602-offer search was holdable; guarantee ~1 day inside a ~3-day payment window); the user sees the **final bill** and clicks a link to a **NyxID-hosted payment page embedding Duffel Cards** (`DuffelCardForm` + 3DS on the hold order + `POST /air/payments type: "card"`) — SAQ-A, card data never touches NyxID; a NyxID-built card form would be PCI scope and is ruled out. **No Duffel-hosted payment-only surface exists** (verified negative — Links is a one-time full search-and-book funnel with no order/offer injection). **The convenience fee cannot ride Duffel markup on the card leg** (verified: card payments must be the exact supplier amount) — the fee is either absent, or NyxID credits via the *same platform metering this plan turns on* (fee option 2 becomes more natural, not less, in the general frame: metered searches/bookings like any platform service), or a secondary Links funnel. Chargeback liability sits with ChronoAI on the card leg (standing Duffel term). Agents structurally cannot pay (payments are not proxied). Read-back: agent retains the creation response; the payment page uses a narrow server-side bill endpoint; `GET /air/orders*` stays blocked. The skill `skills/duffel-travel-via-nyxid/` (conventions: `skills/github-via-nyxid/SKILL.md`, `skills/nyxid-service-skill-authoring/`) ships with the row — failure modes first: no blind retries on order create (no idempotency keys), expiry detection from retained deadlines, stop-and-ask triggers. Gates: **Duffel Cards approval** (request now; test mode has 3DS test cards), Stays/Cars commercially blocked (live 403s).
+
+## 7. Open decisions — one place
+
+1. **Sequencing** — Firecrawl proves the pattern, then ElevenLabs → Twilio (after the compliance decision) → Twitter reads → Duffel. Assessment in §3; needs the owner's confirmation since it re-orders the flagship.
+2. **Convert or dual-mode the three BYO-key rows** (§1): replace the connection rows with platform rows, or run both (BYO keys stay free of platform billing; platform mode costs credits). Dual-mode preserves existing users; conversion is simpler. Recommend dual-mode via new platform rows (`platform-firecrawl` etc. or a mode flag — Appendix A).
+3. **Fee model for travel** (§6): none / credits-via-metering / Links funnel. The general frame makes option 2 the coherent default; still Calvin's call.
+4. **Twilio sender identity and compliance** — platform-owned numbers sending user-composed SMS is a legal posture, not a config value. Blocker for Twilio activation only.
+5. **Duffel Cards approval** — external, request immediately.
+6. **Stays/Cars entitlement** — commercial, parked (403 measured).
+7. **Order read-back** — resolved as §6 states; revisit only if "what did I book" from a lost conversation becomes a top ask.
+8. **Per-service concurrency caps** on shared credentials — v1.1, stated in §4.
+
+---
+
+# Appendix A — PR-1: catalog infrastructure (generic)
+
+- **Platform seed shape** (provider-less; the draft `docs/plans/duffel-air-stays-cars.md` Step 1A design is adopted): explicit visibility/category/auth/headers/policy fields; missing credential = literal `Vec::new()` ciphertext (regression test distinguishing it from `encrypt(b"")`); `is_active: false` on seed; reconciliation never touches `credential_encrypted` and never reactivates.
+- **Admin credential subresources:** `PUT /api/v1/services/{service_id}/credential` (encrypts, never returns, rejects rows that aren't provider-less platform rows or lack a policy) and `DELETE` (kill switch); both audited metadata-only; CLI `nyxid admin service credential set <slug> --credential-env VAR | clear` + `enable|disable` (env/interactive input only — no secrets in argv). Distinct from `update_connection_credential` (`routes.rs:607-611`), which stays user-scoped.
+- **Policy application:** per-row `ProxyOperationPolicy` written by seed/admin; `enable` refuses a platform row with a credential but no policy (data-plane `None` = passthrough is unchanged for legacy rows — the refusal lives in the activation path, where it is enforceable).
+- **Billing activation order, codified in the runbook and checked by `enable`:** policy present → credential set → Lago rate exists for the row's platform metric code (readable via the rate cache; `estimate_fresh_credits` fails closed otherwise, `reservation.rs:1102-1115`) → `platform_billable: true` → enable.
+- **Header precedence fix:** catalog `overridable: false` defaults beat caller *and* user-service layers on all four transports (direct/node × HTTP/WS); reject locked-name collisions at user-service write time as defense in depth.
+- Tests per the draft's Step-1A verification list (`docs/plans/duffel-air-stays-cars.md` — adopted wholesale), which this plan treats as the PR-1 acceptance contract.
+
+# Appendix B — Per-service activation contracts
+
+Each activation is: dual-mode row decision (§7.2) → overlay/policy parity (policy declared separately from the overlay; equality test) → Lago metric + rate → credential → skill/`recommended_skills` → staged enable per the runbook. Per-service specifics:
+
+- **Firecrawl (PR-2, the proof):** metric `requests`, Lago code `platform_requests` (existing) or a dedicated `firecrawl_requests` if finance wants per-service pricing (**decision at activation**); policy = scrape/search/map/crawl-submit/crawl-status; existing overlay `backend/specs/catalog/firecrawl.openapi.json` is the path source, re-pinned at activation. Acceptance: a real user wallet is debited per scrape through REST *and* MCP; a non-allowlisted path 404s on both executors with no meter row; credential clear renders the row inert.
+- **ElevenLabs (PR-3):** metric `bytes`; verify the streaming/WS byte-meter path before enabling (streamed TTS must meter response bytes); policy per §4; voice cloning/dubbing excluded and negative-tested.
+- **Twilio (PR-3, gated on §7.4):** metric `requests`; policy = Messages create (+ optional status read); per-user rate caps documented; negative tests for account-management paths.
+- **Twitter/X (PR-3):** metric `requests`; policy = reads/search only; the seeded row is already `internal` but provider-linked (`provider_service.rs:2646-2647`) — needs the provider-less platform variant like the others; writes negative-tested.
+
+# Appendix C — Travel (unchanged contract, sequenced after the proof)
+
+Carried verbatim from the prior revision of this document (git history: `TRAVEL_HOSTED_BOOKING_PLAN.md`), summarized in §6. Binding specifics: Duffel row per the parked draft's settled decisions with policy = `POST /air/offer_requests`, `GET /air/offers`, `GET /air/offers/{id}`, `POST /air/orders` — payments deliberately not proxied; payment endpoint family `GET /api/v1/travel/orders/{id}/bill`, `POST .../component-keys`, `POST .../payments` (server-chosen credential gate `proxy_service.rs:217`, public rows only; bearer-link access model stated as accepted risk; browsers only — agent/delegated/API-key callers rejected); page `/pay/duffel/:orderId` with `@duffel/components` (wizard bundle rebuild); paid-proof = `awaiting_payment == false` **and** documents issued; `price_changed` and `past_payment_required_by_date` are normal branches with re-confirm / lapsed copy; skill contract as specified in the prior revision's A.3 (failure modes first). Gates: Duffel Cards approval; fee decision §7.3.
+
+# Appendix D — Sequence and assumptions
+
+**Sequence:** PR-1 infrastructure (Appendix A) → PR-2 Firecrawl end-to-end proof (row + policy + billing + skill + MCP) → PR-3 ElevenLabs / Twitter-reads / Twilio-after-compliance (config-heavy, code-light) → PR-4 Duffel row + skill (search + holds; meterable per fee decision) → PR-5 payment page (gated on Duffel Cards approval). External throughout: Cards approval request, Lago rate configuration, Aevatar MCP operation-tool enablement (standing).
+
+**Assumptions to retire at each activation:** exact vendor paths re-pinned against overlays/specs (Firecrawl v2 paths; ElevenLabs streaming meter behavior; Twilio form-encoded body handling under the policy's template matcher — templates match paths, bodies pass through untouched; X API v2 read scopes on app-only bearer). Duffel-specific assumptions unchanged from the prior revision (Cards approval timeline, markup remittance mechanics if the Links funnel is ever built, idempotency-key absence — the design never retries writes).
