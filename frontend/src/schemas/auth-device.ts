@@ -29,7 +29,11 @@ export const approveResponseSchema = z.object({
 export const previewResponseSchema = z.object({
   client_label: z.string().nullable(),
   client_user_agent: z.string().nullable(),
-  client_ip: z.string().nullable(),
+  client_ip: z
+    .string()
+    .nullable()
+    .optional()
+    .transform((value) => value ?? null),
   initiated_at: z.string().datetime(),
   expires_at: z.string().datetime(),
   status: z.enum(["pending", "approved", "denied", "expired", "delivered"]),

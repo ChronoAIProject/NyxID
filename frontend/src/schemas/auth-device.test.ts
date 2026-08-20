@@ -5,6 +5,7 @@ import {
   errorEnvelopeSchema,
   formatAuthDeviceUserCodeInput,
   friendlyAuthDeviceErrorMessage,
+  previewResponseSchema,
   userCodeSchema,
 } from "./auth-device";
 
@@ -40,6 +41,20 @@ describe("denyBodySchema", () => {
     expect(denyBodySchema.parse({ user_code: "abcd-efgh" })).toEqual({
       user_code: "ABCDEFGH",
     });
+  });
+});
+
+describe("previewResponseSchema", () => {
+  it("normalizes a missing client_ip from an older backend to null", () => {
+    expect(
+      previewResponseSchema.parse({
+        client_label: "workstation",
+        client_user_agent: "nyxid-cli",
+        initiated_at: "2026-08-20T10:00:00Z",
+        expires_at: "2026-08-20T10:10:00Z",
+        status: "pending",
+      }).client_ip,
+    ).toBeNull();
   });
 });
 
