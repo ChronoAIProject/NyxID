@@ -273,6 +273,14 @@ mod tests {
     const TEST_CATALOG_SERVICE_ID: &str = "00000000-0000-4000-8000-000000000301";
     const TEST_USER_ENDPOINT_ID: &str = "00000000-0000-4000-8000-000000000201";
 
+    /// Shape of the one operation the full-router fixture drives. Tests select
+    /// the fixture's service by this operation rather than by its id: selecting
+    /// on `user_service_id` and then sending that same id back would make every
+    /// "response-derived" assertion circular.
+    const FIXTURE_OPERATION_NAME: &str = "alpha_list";
+    const FIXTURE_OPERATION_METHOD: &str = "GET";
+    const FIXTURE_OPERATION_PATH: &str = "/items";
+
     const CREATE_PATH: &str = "/api/v1/approvals/exact-service/requests";
 
     struct FullRouterFixture {
@@ -289,9 +297,16 @@ mod tests {
         requested_node_ids: Vec<String>,
         catalog_digest: String,
         exact_view_digest: String,
+        /// Taken from the discovery response, never from `TEST_SERVICE_A`, so
+        /// create bodies carry a response-derived id.
+        user_service_id: String,
         operation: mcp_service::ExactOperationViewOperation,
         operation_digest: String,
         provider_calls: Arc<AtomicUsize>,
+        /// Every `Authorization` header the test router actually received, in
+        /// order. Token-continuity assertions read this instead of re-reading
+        /// the fixture field that produced the header.
+        sent_authorizations: Arc<Mutex<Vec<String>>>,
         provider: tokio::task::JoinHandle<()>,
         _node_rx:
             tokio::sync::mpsc::Receiver<crate::services::node_ws_manager::NodeOutboundMessage>,
@@ -479,7 +494,13 @@ mod tests {
         .expect("exchange full-router delegated token");
 
         let (_, private) = crate::routes::build_router();
-        let app = private.with_state(state.clone());
+        let sent_authorizations: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
+        let app = private
+            .with_state(state.clone())
+            .layer(axum::middleware::from_fn_with_state(
+                sent_authorizations.clone(),
+                record_transmitted_authorization,
+            ));
         let (discovery_status, discovery) = full_router_json_request(
             &app,
             Method::GET,
@@ -500,19 +521,17 @@ mod tests {
         let services: Vec<mcp_service::ExactOperationViewService> =
             serde_json::from_value(discovery["services"].clone())
                 .expect("decode discovery services from HTTP body");
-        let service = services
-            .iter()
-            .find(|service| service.user_service_id == TEST_SERVICE_A)
-            .expect("full-router service in discovery response");
+        let service = unique_fixture_service(&services);
+        // Identity is asserted, never used as the selector.
+        assert_eq!(
+            service.user_service_id, TEST_SERVICE_A,
+            "discovery must surface the seeded fixture service"
+        );
         assert!(
             service.node_id.is_none(),
             "fixture service must stay direct-routed so the HTTP spy remains the effect path"
         );
-        let operation = service
-            .operations
-            .first()
-            .cloned()
-            .expect("full-router operation");
+        let operation = fixture_operation(service).clone();
         let arguments = serde_json::json!({});
         let operation_digest = mcp_service::exact_operation_digest_from_parts(
             &service.user_service_id,
@@ -556,12 +575,70 @@ mod tests {
                 .as_str()
                 .expect("discovery exact_view_digest")
                 .to_string(),
+            user_service_id: service.user_service_id.clone(),
             operation,
             operation_digest,
             provider_calls,
+            sent_authorizations,
             provider,
             _node_rx: node_rx,
         }
+    }
+
+    /// Records the `Authorization` header of every request the test router
+    /// actually receives. Continuity assertions read this log so they observe
+    /// the bearer as transmitted, rather than re-reading the fixture field the
+    /// header was built from.
+    async fn record_transmitted_authorization(
+        axum::extract::State(log): axum::extract::State<Arc<Mutex<Vec<String>>>>,
+        request: axum::extract::Request,
+        next: axum::middleware::Next,
+    ) -> axum::response::Response {
+        if let Some(value) = request
+            .headers()
+            .get(header::AUTHORIZATION)
+            .and_then(|value| value.to_str().ok())
+        {
+            log.lock()
+                .expect("transmitted authorization log")
+                .push(value.to_string());
+        }
+        next.run(request).await
+    }
+
+    fn is_fixture_operation(operation: &mcp_service::ExactOperationViewOperation) -> bool {
+        operation.name == FIXTURE_OPERATION_NAME
+            && operation.method == FIXTURE_OPERATION_METHOD
+            && operation.path == FIXTURE_OPERATION_PATH
+    }
+
+    /// Resolve the fixture's service from a discovery response by the operation
+    /// it publishes. Uniqueness is asserted, so the selector cannot silently
+    /// match a different service if the catalog fixture grows.
+    fn unique_fixture_service(
+        services: &[mcp_service::ExactOperationViewService],
+    ) -> &mcp_service::ExactOperationViewService {
+        let mut matching = services
+            .iter()
+            .filter(|service| service.operations.iter().any(is_fixture_operation));
+        let service = matching
+            .next()
+            .expect("discovery must publish the fixture operation");
+        assert!(
+            matching.next().is_none(),
+            "the fixture operation must identify exactly one discovered service"
+        );
+        service
+    }
+
+    fn fixture_operation(
+        service: &mcp_service::ExactOperationViewService,
+    ) -> &mcp_service::ExactOperationViewOperation {
+        service
+            .operations
+            .iter()
+            .find(|operation| is_fixture_operation(operation))
+            .expect("fixture operation in discovery response")
     }
 
     fn full_router_create_body(
@@ -570,7 +647,7 @@ mod tests {
         exact_view_digest: Option<&str>,
     ) -> serde_json::Value {
         serde_json::json!({
-            "user_service_id": TEST_SERVICE_A,
+            "user_service_id": fixture.user_service_id,
             "endpoint_id": fixture.operation.endpoint_id,
             "catalog_digest": fixture.catalog_digest,
             "exact_view_digest": exact_view_digest,
@@ -682,21 +759,53 @@ mod tests {
         fixture.grant = grant;
     }
 
+    /// Assert that every delegated bearer the router has actually received so
+    /// far is byte-identical to the one the journey started with.
+    ///
+    /// This reads the transmitted `Authorization` headers, not
+    /// `fixture.delegated_token`. Comparing the fixture field against a clone
+    /// of itself would pass even if a phase sent a freshly exchanged token, so
+    /// the continuity claim has to be made against the wire.
+    ///
+    /// The human decision phase legitimately uses the first-party source token,
+    /// so that header is excluded; everything else must be the delegated one.
     fn assert_full_router_delegated_token_unchanged(
         fixture: &FullRouterFixture,
         expected_token: &str,
         expected_jti: &str,
         phase: &str,
     ) {
-        assert_eq!(
-            fixture.delegated_token, expected_token,
-            "delegated token bytes changed during {phase}"
+        let transmitted = fixture
+            .sent_authorizations
+            .lock()
+            .expect("transmitted authorization log");
+        let source_header = format!("Bearer {}", fixture.source_token);
+        let delegated: Vec<&String> = transmitted
+            .iter()
+            .filter(|value| **value != source_header)
+            .collect();
+        assert!(
+            !delegated.is_empty(),
+            "no delegated request had been transmitted by {phase}"
         );
-        let auth = delegated_auth_from_token(&fixture.state, &fixture.delegated_token);
+        let expected_header = format!("Bearer {expected_token}");
+        for value in &delegated {
+            assert_eq!(
+                *value, &expected_header,
+                "a delegated phase transmitted a different bearer by {phase}"
+            );
+        }
+        // Parse the JTI out of the bytes that were actually sent.
+        let sent_token = delegated
+            .last()
+            .expect("delegated bearer")
+            .strip_prefix("Bearer ")
+            .expect("bearer scheme on transmitted authorization");
+        let auth = delegated_auth_from_token(&fixture.state, sent_token);
         assert_eq!(
             auth.token_jti.as_deref(),
             Some(expected_jti),
-            "delegated token JTI changed during {phase}"
+            "transmitted delegated token JTI changed during {phase}"
         );
     }
 
@@ -1645,12 +1754,9 @@ mod tests {
             discovery.contract_version,
             "nyxid-delegated-operation-catalog.v2"
         );
-        let service = discovery
-            .services
-            .iter()
-            .find(|service| service.user_service_id == TEST_SERVICE_A)
-            .expect("catalog-backed service in discovery");
-        let operation = service.operations.first().expect("typed operation");
+        let service = unique_fixture_service(&discovery.services);
+        assert_eq!(service.user_service_id, TEST_SERVICE_A);
+        let operation = fixture_operation(service);
         assert_eq!(
             service.catalog_service_id.as_deref(),
             Some("00000000-0000-4000-8000-000000000301")
@@ -2877,15 +2983,10 @@ mod tests {
         let services: Vec<mcp_service::ExactOperationViewService> =
             serde_json::from_value(discovery["services"].clone())
                 .expect("decode discovery services from HTTP body");
-        let service = services
-            .iter()
-            .find(|service| service.user_service_id == TEST_SERVICE_A)
-            .expect("fixture service in discovery HTTP body");
+        let service = unique_fixture_service(&services);
+        assert_eq!(service.user_service_id, TEST_SERVICE_A);
         assert!(service.node_id.is_none());
-        let operation = service
-            .operations
-            .first()
-            .expect("fixture operation in discovery HTTP body");
+        let operation = fixture_operation(service);
         let arguments = serde_json::json!({});
         let operation_digest = mcp_service::exact_operation_digest_from_parts(
             &service.user_service_id,
@@ -3637,15 +3738,10 @@ mod tests {
         let services: Vec<mcp_service::ExactOperationViewService> =
             serde_json::from_value(discovery["services"].clone())
                 .expect("decode discovery services from HTTP body");
-        let service = services
-            .iter()
-            .find(|service| service.user_service_id == TEST_SERVICE_A)
-            .expect("fixture service in discovery HTTP body");
+        let service = unique_fixture_service(&services);
+        assert_eq!(service.user_service_id, TEST_SERVICE_A);
         assert!(service.node_id.is_none());
-        let operation = service
-            .operations
-            .first()
-            .expect("fixture operation in discovery HTTP body");
+        let operation = fixture_operation(service);
         let arguments = serde_json::json!({});
         let operation_digest = mcp_service::exact_operation_digest_from_parts(
             &service.user_service_id,
