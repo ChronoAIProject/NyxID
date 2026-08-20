@@ -33,6 +33,16 @@ const ERROR_MESSAGES: Record<number, string> = {
   // ── Nodes ──
   8001: "The credential node is offline. Try again later.",
   8002: "Request timed out waiting for the credential node.",
+
+  // ── Auth device login ──
+  11200: "That login code is no longer valid.",
+  11201: "This login request has expired.",
+  11202: "This login request is still waiting for approval.",
+  11203: "Please wait before trying again.",
+  11204: "This login request was denied.",
+  11205: "This login request was already completed.",
+  11206: "Too many attempts. Please wait and try again.",
+  11207: "Enter a valid eight-character login code.",
 };
 
 /**

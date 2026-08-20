@@ -62,12 +62,16 @@ export default ({ config }: ConfigContext): ExpoConfig => {
       bundleIdentifier: r.iosBundleId,
       buildNumber: r.iosBuildNumber,
       associatedDomains,
-      infoPlist: { ITSAppUsesNonExemptEncryption: false },
+      infoPlist: {
+        ITSAppUsesNonExemptEncryption: false,
+        NSCameraUsageDescription: "Allow NyxID to scan login approval QR codes.",
+      },
     },
     android: {
       package: r.androidPackage,
       versionCode: Number(r.androidVersionCode),
       googleServicesFile: "./google-services.json",
+      permissions: ["android.permission.CAMERA"],
       blockedPermissions: [
         "android.permission.READ_EXTERNAL_STORAGE",
         "android.permission.WRITE_EXTERNAL_STORAGE",
@@ -101,6 +105,13 @@ export default ({ config }: ConfigContext): ExpoConfig => {
       ],
       "expo-font",
       "expo-web-browser",
+      [
+        "expo-camera",
+        {
+          cameraPermission: "Allow NyxID to scan login approval QR codes.",
+          recordAudioAndroid: false,
+        },
+      ],
     ],
     extra: {
       APP_ENV: appEnv,

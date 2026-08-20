@@ -289,6 +289,10 @@ export const appLinking: LinkingOptions<RootStackParamList> = {
         parse: { challengeId: String },
       },
       AccountSettings: "account",
+      DeviceLogin: {
+        path: "login/device",
+        parse: { user_code: String },
+      },
       TermsOfService: "terms",
       PrivacyPolicy: "privacy",
     },
