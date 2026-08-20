@@ -13,6 +13,7 @@ pub mod assistant_direct;
 pub mod assistant_direct_agent_poc;
 pub mod assistant_readiness_service;
 pub mod assistant_service;
+pub mod assistant_wire_log_service;
 pub mod audit_chain_service;
 pub mod audit_service;
 pub mod auth_device_service;
