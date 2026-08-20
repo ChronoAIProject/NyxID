@@ -1508,6 +1508,20 @@ pub fn build_router() -> (Router<AppState>, Router<AppState>) {
             "/actions/key-rotate",
             post(handlers::assistant_action_effects::rotate_key),
         )
+        // Wave-2 effect families (WS-0): mounted empty so `routes.rs` stays
+        // single-writer while each workstream fills its own router file.
+        .nest(
+            "/actions/keys",
+            handlers::assistant_action_effects_keys::router(),
+        )
+        .nest(
+            "/actions/services",
+            handlers::assistant_action_effects_services::router(),
+        )
+        .nest(
+            "/actions/endpoints",
+            handlers::assistant_action_effects_endpoints::router(),
+        )
         .merge(assistant_proxy_routes);
 
     let ssh_billing_routes = ssh_billing_routes!(register_billing_routes, Router::new());

@@ -149,6 +149,99 @@ export const keyRotateActionParamsSchema = z
   })
   .strict();
 
+// ---- Wave 2 param shapes (WS-0; dormant until an Aevatar revision pins the
+// verbs). Journey resolution stays "unsupported" in action-registry until the
+// owning team lands its journey, so accepting the shapes here changes no
+// behavior. Optional members deliberately have NO defaults: protobuf elides
+// empty strings, and for update-shaped verbs absence means "leave unchanged".
+const optionalUpdateTextSchema = z.string().max(4_096).optional();
+
+export const keyUpdateActionParamsSchema = z
+  .object({
+    keyId: requiredActionIdentitySchema,
+    name: optionalUpdateTextSchema,
+    platform: optionalUpdateTextSchema,
+    description: optionalUpdateTextSchema,
+  })
+  .strict();
+
+export const keyDeleteActionParamsSchema = z
+  .object({
+    keyId: requiredActionIdentitySchema,
+  })
+  .strict();
+
+export const keyExtendScopeActionParamsSchema = z
+  .object({
+    keyId: requiredActionIdentitySchema,
+    addServiceIds: allowedServiceIdsSchema,
+  })
+  .strict();
+
+export const keyBindCredentialActionParamsSchema = z
+  .object({
+    keyId: requiredActionIdentitySchema,
+    userServiceId: requiredActionIdentitySchema,
+    externalKeyId: requiredActionIdentitySchema,
+  })
+  .strict();
+
+export const serviceUpdateActionParamsSchema = z
+  .object({
+    userServiceId: requiredActionIdentitySchema,
+    name: optionalUpdateTextSchema,
+    endpointUrl: optionalUpdateTextSchema,
+    authMethod: customServiceAuthMethodSchema.optional(),
+    authKeyName: optionalUpdateTextSchema,
+  })
+  .strict();
+
+export const serviceDeleteActionParamsSchema = z
+  .object({
+    userServiceId: requiredActionIdentitySchema,
+  })
+  .strict();
+
+export const serviceRouteActionParamsSchema = z
+  .object({
+    userServiceId: requiredActionIdentitySchema,
+    viaNodeId: actionControlIdentitySchema.optional(),
+  })
+  .strict();
+
+export const serviceRotateCredentialActionParamsSchema = z
+  .object({
+    userServiceId: requiredActionIdentitySchema,
+  })
+  .strict();
+
+export const endpointUpdateActionParamsSchema = z
+  .object({
+    endpointId: requiredActionIdentitySchema,
+    label: optionalUpdateTextSchema,
+    endpointUrl: optionalUpdateTextSchema,
+    openapiSpecUrl: optionalUpdateTextSchema,
+  })
+  .strict();
+
+export const endpointDeleteActionParamsSchema = z
+  .object({
+    endpointId: requiredActionIdentitySchema,
+  })
+  .strict();
+
+export const externalKeyRotateActionParamsSchema = z
+  .object({
+    externalKeyId: requiredActionIdentitySchema,
+  })
+  .strict();
+
+export const externalKeyDeleteActionParamsSchema = z
+  .object({
+    externalKeyId: requiredActionIdentitySchema,
+  })
+  .strict();
+
 const emptyActionParamsSchema = z.object({}).strict();
 
 export const assistantActionParamsSchema = z
@@ -157,6 +250,14 @@ export const assistantActionParamsSchema = z
     serviceReauthorizeActionParamsSchema,
     keyCreateActionParamsSchema,
     keyRotateActionParamsSchema,
+    keyUpdateActionParamsSchema,
+    keyExtendScopeActionParamsSchema,
+    keyBindCredentialActionParamsSchema,
+    serviceUpdateActionParamsSchema,
+    serviceRouteActionParamsSchema,
+    endpointUpdateActionParamsSchema,
+    endpointDeleteActionParamsSchema,
+    externalKeyRotateActionParamsSchema,
     emptyActionParamsSchema,
   ])
   .optional()

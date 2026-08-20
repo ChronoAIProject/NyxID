@@ -220,6 +220,94 @@ describe("assistant action request schema", () => {
     }
   });
 
+  it("accepts all twelve Wave-2 param shapes while their journeys stay unsupported", () => {
+    const wave2 = [
+      ["key.update", { keyId: "key-1", name: "renamed" }],
+      ["key.delete", { keyId: "key-1" }],
+      [
+        "key.extend_scope",
+        { keyId: "key-1", addServiceIds: ["service-alpha"] },
+      ],
+      [
+        "key.bind_credential",
+        {
+          keyId: "key-1",
+          userServiceId: "service-alpha",
+          externalKeyId: "external-1",
+        },
+      ],
+      [
+        "service.update",
+        { userServiceId: "service-alpha", name: "Renamed API" },
+      ],
+      ["service.delete", { userServiceId: "service-alpha" }],
+      ["service.route", { userServiceId: "service-alpha", viaNodeId: "node-1" }],
+      ["service.rotate_credential", { userServiceId: "service-alpha" }],
+      ["endpoint.update", { endpointId: "endpoint-1", label: "Renamed" }],
+      ["endpoint.delete", { endpointId: "endpoint-1" }],
+      ["external_key.rotate", { externalKeyId: "external-1" }],
+      ["external_key.delete", { externalKeyId: "external-1" }],
+    ] as const;
+
+    for (const [index, [action, params]] of wave2.entries()) {
+      const request = assistantActionRequestSchema.parse({
+        ...BASE_REQUEST,
+        actionRequestId: `wave2-${String(index)}`,
+        action,
+        params,
+      });
+      // Dormant by design: the shapes parse so team journeys can build on
+      // them, but resolution must stay unsupported until each journey lands.
+      expect(resolveAssistantAction(request)).toMatchObject({
+        supported: false,
+        journey: null,
+      });
+    }
+  });
+
+  it("rejects id-less, widened, and secret-carrying Wave-2 params", () => {
+    const invalid = [
+      ["key.update", { name: "renamed" }],
+      ["key.extend_scope", { keyId: "key-1", addServiceIds: [] }],
+      [
+        "key.extend_scope",
+        { keyId: "key-1", addServiceIds: ["service-alpha", "service-alpha"] },
+      ],
+      [
+        "key.bind_credential",
+        { keyId: "key-1", userServiceId: "service-alpha" },
+      ],
+      [
+        "service.update",
+        { userServiceId: "service-alpha", authMethod: "bogus" },
+      ],
+      [
+        "service.route",
+        { userServiceId: "service-alpha", viaNodeId: "invalid/node" },
+      ],
+      [
+        "service.rotate_credential",
+        { userServiceId: "service-alpha", credentialValue: "nyxid_ag_secret99" },
+      ],
+      ["endpoint.update", { label: "Renamed" }],
+      [
+        "external_key.rotate",
+        { externalKeyId: "external-1", replacement: "Bearer top-secret" },
+      ],
+    ] as const;
+
+    for (const [index, [action, params]] of invalid.entries()) {
+      expect(
+        assistantActionRequestSchema.safeParse({
+          ...BASE_REQUEST,
+          actionRequestId: `wave2-invalid-${String(index)}`,
+          action,
+          params,
+        }).success,
+      ).toBe(false);
+    }
+  });
+
   it("rejects missing, empty, duplicate, malformed, and widened key.create params", () => {
     const invalidParams = [
       { name: "agent", platform: "codex" },

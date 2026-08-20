@@ -13,6 +13,26 @@ const SERVICE_REAUTHORIZE_DESCRIPTION: &str = "Ask the user's browser to re-auth
 const KEY_CREATE_DESCRIPTION: &str = "Ask the user's browser to create a scoped NyxID API key for the named platform and allowed services. Use when the user wants a new agent identity bounded to specific user-service IDs. NyxID owns key creation and one-time key display, and reports only a safe key reference. Never request, expose, or repeat key material in chat.";
 const KEY_ROTATE_DESCRIPTION: &str = "Ask the user's browser to rotate one exact NyxID API key. Use when the user needs a replacement credential for the identified key. NyxID commits an authoritative predecessor-successor relation, displays replacement key material once in the browser, and reports only the replacement key reference. Never request, expose, or repeat key material in chat.";
 
+// Wave-2 descriptors below are published DORMANT: they are deliberately absent
+// from every Aevatar revision pin, so every current composition skips them at
+// registry load (upstream `Load_ShouldIgnoreUnknownActionWhenExecutableActionsArePresent`).
+// They become executable only when a future revision pins them; until that
+// revision bump they may still be amended. Do not edit the four shipped
+// descriptors above - their schemas are pinned byte-for-byte by
+// `JsonNode.DeepEquals` in deployed compositions.
+const KEY_UPDATE_DESCRIPTION: &str = "Ask the user's browser to update the display metadata of one exact NyxID API key - its name, platform, or description. Use when the user wants to relabel or reclassify an existing agent key without changing what it can reach. NyxID owns the journey and reports only the safe key reference. Never request, expose, or repeat key material in chat.";
+const KEY_DELETE_DESCRIPTION: &str = "Ask the user's browser to permanently delete one exact NyxID API key. Use when the user wants to retire an agent identity entirely. Deletion is destructive and confirmed in the browser every time; NyxID reports only the safe key reference. Never request, expose, or repeat key material in chat.";
+const KEY_EXTEND_SCOPE_DESCRIPTION: &str = "Ask the user's browser to widen one exact NyxID API key's allowed services by the listed user-service IDs. Use when a task needs the key to reach a service it cannot reach today. Widening is confirmed in the browser and never remembered; NyxID reports only the safe key reference. Never request, expose, or repeat key material in chat.";
+const KEY_BIND_CREDENTIAL_DESCRIPTION: &str = "Ask the user's browser to bind one exact NyxID API key to a specific stored external credential for one user service. Use when an agent key must use a dedicated credential instead of the service default. Binding is confirmed in the browser and never remembered; NyxID reports only the safe key reference. Never request, expose, or repeat credential material in chat.";
+const SERVICE_UPDATE_DESCRIPTION: &str = "Ask the user's browser to update one exact connected service's configuration - display name, endpoint URL, or auth-method metadata. Use when the user wants to correct or rename an existing connected service. NyxID owns the journey and credential storage and reports only the safe user-service reference. Never ask the user for keys, tokens, or passwords in chat.";
+const SERVICE_DELETE_DESCRIPTION: &str = "Ask the user's browser to permanently disconnect and delete one exact connected service. Use when the user wants to remove a service connection entirely. Deletion is destructive and confirmed in the browser every time; NyxID reports only the safe user-service reference. Never ask the user for keys, tokens, or passwords in chat.";
+const SERVICE_ROUTE_DESCRIPTION: &str = "Ask the user's browser to change how one exact connected service is routed - through a named credential node, or directly when viaNodeId is omitted. Use when the user wants requests for the referenced service to run via a specific node or to clear that routing. NyxID reports only the safe user-service reference. Never ask the user for keys, tokens, or passwords in chat.";
+const SERVICE_ROTATE_CREDENTIAL_DESCRIPTION: &str = "Ask the user's browser to replace the stored credential of one exact connected service. Use when the user has minted a new upstream key and wants NyxID to store it. The new credential is entered only inside NyxID's browser journey; NyxID reports only the safe user-service reference. Never ask the user for keys, tokens, or passwords in chat.";
+const ENDPOINT_UPDATE_DESCRIPTION: &str = "Ask the user's browser to update one exact user endpoint - its label, target URL, or OpenAPI spec URL. Use when the user wants to correct where a custom endpoint points. NyxID reports only the safe user-service reference for the affected service. Never ask the user for keys, tokens, or passwords in chat.";
+const ENDPOINT_DELETE_DESCRIPTION: &str = "Ask the user's browser to permanently delete one exact user endpoint. Use when the user wants to remove a custom endpoint definition. Deletion is destructive and confirmed in the browser every time; NyxID reports only the safe user-service reference for the affected service. Never ask the user for keys, tokens, or passwords in chat.";
+const EXTERNAL_KEY_ROTATE_DESCRIPTION: &str = "Ask the user's browser to replace the secret of one exact stored external credential. Use when the user has a replacement API key for a connected provider. The replacement is entered only inside NyxID's browser journey; NyxID reports only the safe key reference. Never request, expose, or repeat credential material in chat.";
+const EXTERNAL_KEY_DELETE_DESCRIPTION: &str = "Ask the user's browser to permanently delete one exact stored external credential. Use when the user wants a stored provider key removed from NyxID. Deletion is destructive, confirmed in the browser every time, and may cascade an approval-grant review inside the journey; NyxID reports only the safe key reference. Never request, expose, or repeat credential material in chat.";
+
 #[derive(Serialize)]
 struct AssistantActionsManifest {
     schema_version: u32,
@@ -145,6 +165,207 @@ static MANIFEST_BODY: LazyLock<String> = LazyLock::new(|| {
                 tier: "v1",
                 remember_eligible: false,
             },
+            // ---- Wave 2 (dormant until a future revision pins them) ----
+            AssistantActionDescriptor {
+                action: "key.update",
+                description: KEY_UPDATE_DESCRIPTION,
+                params_schema: json!({
+                    "type": "object",
+                    "additionalProperties": false,
+                    "required": ["keyId"],
+                    "properties": {
+                        "keyId": { "type": "string" },
+                        "name": { "type": "string" },
+                        "platform": { "type": "string" },
+                        "description": { "type": "string" }
+                    }
+                }),
+                risk: "grant",
+                tier: "v1",
+                remember_eligible: false,
+            },
+            AssistantActionDescriptor {
+                action: "key.delete",
+                description: KEY_DELETE_DESCRIPTION,
+                params_schema: json!({
+                    "type": "object",
+                    "additionalProperties": false,
+                    "required": ["keyId"],
+                    "properties": {
+                        "keyId": { "type": "string" }
+                    }
+                }),
+                risk: "destructive",
+                tier: "v1",
+                remember_eligible: false,
+            },
+            AssistantActionDescriptor {
+                action: "key.extend_scope",
+                description: KEY_EXTEND_SCOPE_DESCRIPTION,
+                params_schema: json!({
+                    "type": "object",
+                    "additionalProperties": false,
+                    "required": ["keyId", "addServiceIds"],
+                    "properties": {
+                        "keyId": { "type": "string" },
+                        "addServiceIds": {
+                            "type": "array",
+                            "minItems": 1,
+                            "maxItems": 64,
+                            "uniqueItems": true,
+                            "items": { "type": "string" }
+                        }
+                    }
+                }),
+                risk: "grant",
+                tier: "v1",
+                remember_eligible: false,
+            },
+            AssistantActionDescriptor {
+                action: "key.bind_credential",
+                description: KEY_BIND_CREDENTIAL_DESCRIPTION,
+                params_schema: json!({
+                    "type": "object",
+                    "additionalProperties": false,
+                    "required": ["keyId", "userServiceId", "externalKeyId"],
+                    "properties": {
+                        "keyId": { "type": "string" },
+                        "userServiceId": { "type": "string" },
+                        "externalKeyId": { "type": "string" }
+                    }
+                }),
+                risk: "grant",
+                tier: "v1",
+                remember_eligible: false,
+            },
+            AssistantActionDescriptor {
+                action: "service.update",
+                description: SERVICE_UPDATE_DESCRIPTION,
+                params_schema: json!({
+                    "type": "object",
+                    "additionalProperties": false,
+                    "required": ["userServiceId"],
+                    "properties": {
+                        "userServiceId": { "type": "string" },
+                        "name": { "type": "string" },
+                        "endpointUrl": { "type": "string" },
+                        "authMethod": { "type": "string" },
+                        "authKeyName": { "type": "string" }
+                    }
+                }),
+                risk: "grant",
+                tier: "v1",
+                remember_eligible: false,
+            },
+            AssistantActionDescriptor {
+                action: "service.delete",
+                description: SERVICE_DELETE_DESCRIPTION,
+                params_schema: json!({
+                    "type": "object",
+                    "additionalProperties": false,
+                    "required": ["userServiceId"],
+                    "properties": {
+                        "userServiceId": { "type": "string" }
+                    }
+                }),
+                risk: "destructive",
+                tier: "v1",
+                remember_eligible: false,
+            },
+            AssistantActionDescriptor {
+                action: "service.route",
+                description: SERVICE_ROUTE_DESCRIPTION,
+                params_schema: json!({
+                    "type": "object",
+                    "additionalProperties": false,
+                    "required": ["userServiceId"],
+                    "properties": {
+                        "userServiceId": { "type": "string" },
+                        "viaNodeId": { "type": "string" }
+                    }
+                }),
+                risk: "grant",
+                tier: "v1",
+                remember_eligible: false,
+            },
+            AssistantActionDescriptor {
+                action: "service.rotate_credential",
+                description: SERVICE_ROTATE_CREDENTIAL_DESCRIPTION,
+                params_schema: json!({
+                    "type": "object",
+                    "additionalProperties": false,
+                    "required": ["userServiceId"],
+                    "properties": {
+                        "userServiceId": { "type": "string" }
+                    }
+                }),
+                risk: "grant",
+                tier: "v1",
+                remember_eligible: false,
+            },
+            AssistantActionDescriptor {
+                action: "endpoint.update",
+                description: ENDPOINT_UPDATE_DESCRIPTION,
+                params_schema: json!({
+                    "type": "object",
+                    "additionalProperties": false,
+                    "required": ["endpointId"],
+                    "properties": {
+                        "endpointId": { "type": "string" },
+                        "label": { "type": "string" },
+                        "endpointUrl": { "type": "string" },
+                        "openapiSpecUrl": { "type": "string" }
+                    }
+                }),
+                risk: "grant",
+                tier: "v1",
+                remember_eligible: false,
+            },
+            AssistantActionDescriptor {
+                action: "endpoint.delete",
+                description: ENDPOINT_DELETE_DESCRIPTION,
+                params_schema: json!({
+                    "type": "object",
+                    "additionalProperties": false,
+                    "required": ["endpointId"],
+                    "properties": {
+                        "endpointId": { "type": "string" }
+                    }
+                }),
+                risk: "destructive",
+                tier: "v1",
+                remember_eligible: false,
+            },
+            AssistantActionDescriptor {
+                action: "external_key.rotate",
+                description: EXTERNAL_KEY_ROTATE_DESCRIPTION,
+                params_schema: json!({
+                    "type": "object",
+                    "additionalProperties": false,
+                    "required": ["externalKeyId"],
+                    "properties": {
+                        "externalKeyId": { "type": "string" }
+                    }
+                }),
+                risk: "grant",
+                tier: "v1",
+                remember_eligible: false,
+            },
+            AssistantActionDescriptor {
+                action: "external_key.delete",
+                description: EXTERNAL_KEY_DELETE_DESCRIPTION,
+                params_schema: json!({
+                    "type": "object",
+                    "additionalProperties": false,
+                    "required": ["externalKeyId"],
+                    "properties": {
+                        "externalKeyId": { "type": "string" }
+                    }
+                }),
+                risk: "destructive",
+                tier: "v1",
+                remember_eligible: false,
+            },
         ],
     };
 
@@ -178,6 +399,12 @@ mod tests {
     use super::{ASSISTANT_ACTIONS_REVISION, ASSISTANT_ACTIONS_SCHEMA_VERSION, manifest_body};
 
     const MAXIMUM_REGISTRY_BYTES: usize = 1_048_576;
+    /// Names the manifest may contain. The first 14 mirror the Aevatar
+    /// parser's `SupportedActions` contract; the Wave-2 block extends the
+    /// rail with dormant verbs the upstream loader provably skips until a
+    /// future revision pins them (it validates only that `action` is a
+    /// string of at most 128 chars before skipping). Names outside this
+    /// list still fail the conformance test below.
     const SUPPORTED_ACTIONS: &[&str] = &[
         "service.connect",
         "service.reauthorize",
@@ -193,6 +420,28 @@ mod tests {
         "developer_app.rotate_secret",
         "account.mfa_setup",
         "device.onboard",
+        // Wave 2 (dormant; not pinned by any Aevatar revision yet)
+        "key.update",
+        "key.delete",
+        "key.extend_scope",
+        "key.bind_credential",
+        "service.update",
+        "service.delete",
+        "service.route",
+        "service.rotate_credential",
+        "endpoint.update",
+        "endpoint.delete",
+        "external_key.rotate",
+        "external_key.delete",
+    ];
+
+    /// The composition the deployed v8 pin executes. Everything else in the
+    /// manifest is dormant and must stay non-remembered until pinned.
+    const V8_PINNED_ACTIONS: &[&str] = &[
+        "service.connect",
+        "service.reauthorize",
+        "key.create",
+        "key.rotate",
     ];
     const FORBIDDEN_SECRET_NAMES: &[&str] = &[
         "token",
@@ -308,6 +557,136 @@ mod tests {
         })
     }
 
+    fn key_update_params_schema() -> Value {
+        json!({
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["keyId"],
+            "properties": {
+                "keyId": { "type": "string" },
+                "name": { "type": "string" },
+                "platform": { "type": "string" },
+                "description": { "type": "string" }
+            }
+        })
+    }
+
+    fn key_delete_params_schema() -> Value {
+        json!({
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["keyId"],
+            "properties": {
+                "keyId": { "type": "string" }
+            }
+        })
+    }
+
+    fn key_extend_scope_params_schema() -> Value {
+        json!({
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["keyId", "addServiceIds"],
+            "properties": {
+                "keyId": { "type": "string" },
+                "addServiceIds": {
+                    "type": "array",
+                    "minItems": 1,
+                    "maxItems": 64,
+                    "uniqueItems": true,
+                    "items": { "type": "string" }
+                }
+            }
+        })
+    }
+
+    fn key_bind_credential_params_schema() -> Value {
+        json!({
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["keyId", "userServiceId", "externalKeyId"],
+            "properties": {
+                "keyId": { "type": "string" },
+                "userServiceId": { "type": "string" },
+                "externalKeyId": { "type": "string" }
+            }
+        })
+    }
+
+    fn service_update_params_schema() -> Value {
+        json!({
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["userServiceId"],
+            "properties": {
+                "userServiceId": { "type": "string" },
+                "name": { "type": "string" },
+                "endpointUrl": { "type": "string" },
+                "authMethod": { "type": "string" },
+                "authKeyName": { "type": "string" }
+            }
+        })
+    }
+
+    fn user_service_only_params_schema() -> Value {
+        json!({
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["userServiceId"],
+            "properties": {
+                "userServiceId": { "type": "string" }
+            }
+        })
+    }
+
+    fn service_route_params_schema() -> Value {
+        json!({
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["userServiceId"],
+            "properties": {
+                "userServiceId": { "type": "string" },
+                "viaNodeId": { "type": "string" }
+            }
+        })
+    }
+
+    fn endpoint_update_params_schema() -> Value {
+        json!({
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["endpointId"],
+            "properties": {
+                "endpointId": { "type": "string" },
+                "label": { "type": "string" },
+                "endpointUrl": { "type": "string" },
+                "openapiSpecUrl": { "type": "string" }
+            }
+        })
+    }
+
+    fn endpoint_delete_params_schema() -> Value {
+        json!({
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["endpointId"],
+            "properties": {
+                "endpointId": { "type": "string" }
+            }
+        })
+    }
+
+    fn external_key_only_params_schema() -> Value {
+        json!({
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["externalKeyId"],
+            "properties": {
+                "externalKeyId": { "type": "string" }
+            }
+        })
+    }
+
     fn golden_manifest() -> Value {
         json!({
             "schema_version": 4,
@@ -342,6 +721,102 @@ mod tests {
                     "description": super::KEY_ROTATE_DESCRIPTION,
                     "params_schema": key_rotate_params_schema(),
                     "risk": "grant",
+                    "tier": "v1",
+                    "remember_eligible": false
+                },
+                {
+                    "action": "key.update",
+                    "description": super::KEY_UPDATE_DESCRIPTION,
+                    "params_schema": key_update_params_schema(),
+                    "risk": "grant",
+                    "tier": "v1",
+                    "remember_eligible": false
+                },
+                {
+                    "action": "key.delete",
+                    "description": super::KEY_DELETE_DESCRIPTION,
+                    "params_schema": key_delete_params_schema(),
+                    "risk": "destructive",
+                    "tier": "v1",
+                    "remember_eligible": false
+                },
+                {
+                    "action": "key.extend_scope",
+                    "description": super::KEY_EXTEND_SCOPE_DESCRIPTION,
+                    "params_schema": key_extend_scope_params_schema(),
+                    "risk": "grant",
+                    "tier": "v1",
+                    "remember_eligible": false
+                },
+                {
+                    "action": "key.bind_credential",
+                    "description": super::KEY_BIND_CREDENTIAL_DESCRIPTION,
+                    "params_schema": key_bind_credential_params_schema(),
+                    "risk": "grant",
+                    "tier": "v1",
+                    "remember_eligible": false
+                },
+                {
+                    "action": "service.update",
+                    "description": super::SERVICE_UPDATE_DESCRIPTION,
+                    "params_schema": service_update_params_schema(),
+                    "risk": "grant",
+                    "tier": "v1",
+                    "remember_eligible": false
+                },
+                {
+                    "action": "service.delete",
+                    "description": super::SERVICE_DELETE_DESCRIPTION,
+                    "params_schema": user_service_only_params_schema(),
+                    "risk": "destructive",
+                    "tier": "v1",
+                    "remember_eligible": false
+                },
+                {
+                    "action": "service.route",
+                    "description": super::SERVICE_ROUTE_DESCRIPTION,
+                    "params_schema": service_route_params_schema(),
+                    "risk": "grant",
+                    "tier": "v1",
+                    "remember_eligible": false
+                },
+                {
+                    "action": "service.rotate_credential",
+                    "description": super::SERVICE_ROTATE_CREDENTIAL_DESCRIPTION,
+                    "params_schema": user_service_only_params_schema(),
+                    "risk": "grant",
+                    "tier": "v1",
+                    "remember_eligible": false
+                },
+                {
+                    "action": "endpoint.update",
+                    "description": super::ENDPOINT_UPDATE_DESCRIPTION,
+                    "params_schema": endpoint_update_params_schema(),
+                    "risk": "grant",
+                    "tier": "v1",
+                    "remember_eligible": false
+                },
+                {
+                    "action": "endpoint.delete",
+                    "description": super::ENDPOINT_DELETE_DESCRIPTION,
+                    "params_schema": endpoint_delete_params_schema(),
+                    "risk": "destructive",
+                    "tier": "v1",
+                    "remember_eligible": false
+                },
+                {
+                    "action": "external_key.rotate",
+                    "description": super::EXTERNAL_KEY_ROTATE_DESCRIPTION,
+                    "params_schema": external_key_only_params_schema(),
+                    "risk": "grant",
+                    "tier": "v1",
+                    "remember_eligible": false
+                },
+                {
+                    "action": "external_key.delete",
+                    "description": super::EXTERNAL_KEY_DELETE_DESCRIPTION,
+                    "params_schema": external_key_only_params_schema(),
+                    "risk": "destructive",
                     "tier": "v1",
                     "remember_eligible": false
                 }
@@ -507,7 +982,7 @@ mod tests {
 
         assert_eq!(manifest["schema_version"], 4);
         assert_eq!(manifest["revision"], "nyxid-assistant-actions.v8");
-        assert_eq!(actions.len(), 4);
+        assert_eq!(actions.len(), 16);
         assert_eq!(actions[0]["action"], "service.connect");
         assert_eq!(actions[0]["risk"], "grant");
         assert_eq!(actions[0]["tier"], "v1");
@@ -545,6 +1020,60 @@ mod tests {
     #[test]
     fn assistant_actions_manifest_conforms_to_aevatar_parser_contract() {
         assert_manifest_conforms(manifest_body());
+    }
+
+    /// Guards the dormant-merge protocol: the revision stays v8, the four
+    /// pinned descriptors keep their positions (deployed compositions
+    /// deep-equal their schemas), and every Wave-2 descriptor is present,
+    /// never remember-eligible, and correctly marked destructive where the
+    /// wave says so. A revision bump or a shipped-schema edit fails here
+    /// before it can fail an Aevatar startup.
+    #[test]
+    fn wave2_descriptors_are_dormant_appended_and_never_remembered() {
+        let manifest: Value = serde_json::from_str(manifest_body()).unwrap();
+        assert_eq!(manifest["revision"], "nyxid-assistant-actions.v8");
+
+        let actions = manifest["actions"].as_array().unwrap();
+        for (index, pinned) in V8_PINNED_ACTIONS.iter().enumerate() {
+            assert_eq!(
+                actions[index]["action"], *pinned,
+                "pinned descriptor moved: {pinned}"
+            );
+        }
+
+        let destructive = [
+            "key.delete",
+            "service.delete",
+            "endpoint.delete",
+            "external_key.delete",
+        ];
+        let wave2: Vec<&str> = SUPPORTED_ACTIONS
+            .iter()
+            .copied()
+            .filter(|name| !V8_PINNED_ACTIONS.contains(name))
+            .filter(|name| {
+                actions
+                    .iter()
+                    .any(|entry| entry["action"].as_str() == Some(name))
+            })
+            .collect();
+        assert_eq!(wave2.len(), 12, "expected all 12 Wave-2 descriptors");
+        for name in wave2 {
+            let entry = actions
+                .iter()
+                .find(|entry| entry["action"].as_str() == Some(name))
+                .unwrap();
+            assert_eq!(
+                entry["remember_eligible"], false,
+                "dormant descriptors must never be remembered: {name}"
+            );
+            let expected_risk = if destructive.contains(&name) {
+                "destructive"
+            } else {
+                "grant"
+            };
+            assert_eq!(entry["risk"], expected_risk, "wrong risk: {name}");
+        }
     }
 
     #[test]
