@@ -414,6 +414,21 @@ const developerAppResourceSchema = z
     developerApp: z.object({ clientId: actionControlIdentitySchema }).strict(),
   })
   .strict();
+const endpointResourceSchema = z
+  .object({
+    endpoint: z.object({ endpointId: actionControlIdentitySchema }).strict(),
+  })
+  .strict();
+// external_key.* reports MUST NOT reuse `key`: that variant addresses
+// api_keys via /api/v1/api-keys/{id}/authorization, while these are
+// user_api_keys rows read at /api/v1/api-keys/external/{id}/authorization.
+const externalKeyResourceSchema = z
+  .object({
+    externalKey: z
+      .object({ externalKeyId: actionControlIdentitySchema })
+      .strict(),
+  })
+  .strict();
 const deviceResourceSchema = z
   .object({
     device: z.object({ deviceId: actionControlIdentitySchema }).strict(),
@@ -423,6 +438,8 @@ const deviceResourceSchema = z
 export const actionResourceSchema = z.union([
   userServiceResourceSchema,
   keyResourceSchema,
+  endpointResourceSchema,
+  externalKeyResourceSchema,
   nodeResourceSchema,
   serviceAccountResourceSchema,
   developerAppResourceSchema,
@@ -549,6 +566,19 @@ function assertReportMatchesAction(
       `${action} completed reports must include resource.key.keyId`,
     );
   }
+  if (action?.startsWith("endpoint.") && !("endpoint" in report.resource)) {
+    throw new Error(
+      `${action} completed reports must include resource.endpoint.endpointId`,
+    );
+  }
+  if (
+    action?.startsWith("external_key.") &&
+    !("externalKey" in report.resource)
+  ) {
+    throw new Error(
+      `${action} completed reports must include resource.externalKey.externalKeyId`,
+    );
+  }
   if (
     action === "key.bind_credential" &&
     (!("key" in report.resource) || !report.resource.key.userServiceId)
@@ -573,6 +603,14 @@ function copyResource(resource: ActionResource): ActionResource {
           ? { userServiceId: resource.key.userServiceId }
           : {}),
       },
+    };
+  }
+  if ("endpoint" in resource) {
+    return { endpoint: { endpointId: resource.endpoint.endpointId } };
+  }
+  if ("externalKey" in resource) {
+    return {
+      externalKey: { externalKeyId: resource.externalKey.externalKeyId },
     };
   }
   if ("node" in resource) return { node: { nodeId: resource.node.nodeId } };

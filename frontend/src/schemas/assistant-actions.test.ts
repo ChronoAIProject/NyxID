@@ -3,6 +3,7 @@ import { resolveAssistantAction } from "@/lib/assistant/action-registry";
 import {
   actionContinueBodySchema,
   actionControlIdentitySchema,
+  actionResourceSchema,
   actionWakeBodySchema,
   assistantActionRequestSchema,
   buildActionContinueBody,
@@ -842,5 +843,48 @@ describe("action continuation schema", () => {
     expect(
       actionControlIdentitySchema.safeParse("turn-safe_1:part").success,
     ).toBe(true);
+  });
+});
+
+describe("wave-2 typed resource variants", () => {
+  it("accepts the endpoint and externalKey variants", () => {
+    expect(
+      actionResourceSchema.safeParse({ endpoint: { endpointId: "ep-1" } })
+        .success,
+    ).toBe(true);
+    expect(
+      actionResourceSchema.safeParse({
+        externalKey: { externalKeyId: "xk-1" },
+      }).success,
+    ).toBe(true);
+  });
+
+  it("rejects unknown members inside the new variants", () => {
+    expect(
+      actionResourceSchema.safeParse({
+        endpoint: { endpointId: "ep-1", label: "leak" },
+      }).success,
+    ).toBe(false);
+    expect(
+      actionResourceSchema.safeParse({
+        externalKey: { externalKeyId: "xk-1", credential: "nyxid_abcdefgh" },
+      }).success,
+    ).toBe(false);
+  });
+
+  // api_keys and user_api_keys are different collections: a `key` variant is
+  // resolved against /api/v1/api-keys/{id}/authorization, so an external-key
+  // id sent that way reads the wrong collection entirely.
+  it("keeps externalKey distinct from key", () => {
+    const asKey = actionResourceSchema.safeParse({
+      key: { keyId: "xk-1" },
+    });
+    const asExternal = actionResourceSchema.safeParse({
+      externalKey: { externalKeyId: "xk-1" },
+    });
+    expect(asKey.success && asExternal.success).toBe(true);
+    expect(JSON.stringify(asKey.data)).not.toEqual(
+      JSON.stringify(asExternal.data),
+    );
   });
 });
