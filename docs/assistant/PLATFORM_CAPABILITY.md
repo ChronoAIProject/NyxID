@@ -206,3 +206,51 @@ The workable order, given all of the above:
 5. **Metric extensibility** as its own migration, landing together with request-derived reservation and maximum-unit admission.
 6. **Duffel, then Twilio and ElevenLabs** — Twilio last, because its controls are the most demanding and its failures are the most public.
 
+---
+
+# The five surfaces, in depth
+
+Billing is set aside here by decision. What follows is about **what each service safely offers on a shared credential**, and what it leaks. *Adversarial review of this section is in flight; verdicts may move.*
+
+**At a glance:** Firecrawl **offer now** · Twitter reads **offer now** · Reddit reads **offer with constraints** (commercial terms) · ElevenLabs **offer with constraints** (TTS only) · Twilio **not yet**.
+
+## Firecrawl — "read the web for me"
+
+Market research, competitor monitoring, reading a page an agent was pointed at. The synchronous operations are pure configuration: the parameter space carries no money and no impersonation, and a mis-scoped rule costs a failed scrape.
+
+One real caveat: **crawl submission is not idempotent under retry** through the MCP node path (`services/mcp_service.rs:3664-3739`), which can duplicate a submitted crawl and the provider quota it consumes. Synchronous operations are unaffected.
+
+## Twitter/X reads — "what is being said"
+
+Search and public timeline reads. Writes are excluded outright — a platform credential posting means posting *as ChronoAI*, which is not a capability we want to hand an agent.
+
+## Reddit reads — "monitor the conversation"
+
+Technically the same shape as Twitter: configuration is sufficient, no handler needed. **What gates it is commercial, not technical.** Reddit's API terms for precisely this use — reselling access through a shared credential — are unverified, and this is the kind of term vendors actively enforce. The auth shape for a platform credential here also has no production precedent with us.
+
+Both are marked as assumptions in the underlying document rather than waved through, and the terms check should happen before activation rather than after a suspension.
+
+## ElevenLabs — "give the agent a voice"
+
+The TTS family under voice, model and length constraints is a well-bounded capability. Quota burn is the residual risk, shared across users.
+
+The sharp finding here refined my own hypothesis. I had guessed ElevenLabs sat "between configuration and a handler, depending on streaming." The more accurate statement: **it is a configuration case if and only if the realtime and conversational-AI family stays excluded.** Include streaming conversations and it becomes a handler case — frame policy, per-session brokering — because realtime frame protocols are out of band and cannot be policed by method and path. **The scoping decision is the mechanism decision**, not a factor in it.
+
+## Twilio — "call or text someone for me"
+
+The one that has to wait, and the reason is instructive rather than merely cautious.
+
+Messages are the only candidate; **call creation is excluded** because `Url` and `Twiml` hand the caller the call's content and control flow, which no field constraint meaningfully bounds. The account-wide message and recording endpoints are excluded too — they have no tenant partition, so one user could read another's phone numbers and recordings.
+
+Even restricted to sending, configuration is not enough. `MessagingServiceSid` can select a sender outside any approved set, `To` is unconstrained, and `Body` is arbitrary. Constraining `From` alone does nothing.
+
+What a purpose-built handler can do that configuration cannot is the interesting part: **recipient verification** — permitting only numbers the *receiving* user has verified through NyxID, which turns "text anyone" into "text me" — plus server-constructed request bodies with no caller-supplied fields at all, content policy hooks, and per-user velocity limits.
+
+So Twilio is the clearest handler case in the set, and it needs a standing compliance decision on sender identity besides. Until both exist it stays dark.
+
+## What this settles about the hybrid
+
+The pattern holds, with one correction to my hypothesis. **Read surfaces are configuration cases** — the dangerous parameter space is thin, and a method-and-path rule genuinely bounds them. **Twilio is a handler case**, for the same reason `chrono-llm-public` is a handler: the safety needed is about *what the call does*, not which endpoint it reaches. **ElevenLabs is a configuration case because of scoping** — not despite it.
+
+That is a much smaller first step than a universal constraint language. Three services switch on with configuration this week. One waits on a commercial answer. One needs a handler, and we already know how to write one, because we wrote it for Chrono LLM.
+
