@@ -1,5 +1,7 @@
 # Selling Capability to Someone Else's AI
 
+> **Superseded (2026-08-21):** replaced by `ONBOARDING_CAPABILITIES.md` — the converged onboarding-scoped plan after two adversarial reviews. Kept as working history.
+
 **NyxID Platform Services — an assessment**
 *2026-08-20. Sources: the NyxID repo at `travel-allowlist` (rebased on `main`), live vendor probes, and an adversarial review at maximum scrutiny; every repo claim in this document was re-verified against the code before publication. Repo claims cite `file:line`. Assumptions are marked as such. Canonical: supersedes `PLATFORM_SERVICES_PLAN.md`, `PLATFORM_CAPABILITY_SURFACE.md`, and the travel plan lineage.*
 

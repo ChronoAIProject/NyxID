@@ -1,5 +1,7 @@
 # Catalogue Enablement — Making Chrono LLM the Pattern, Not the Exception
 
+> **Superseded (2026-08-21):** replaced by `ONBOARDING_CAPABILITIES.md` — the converged onboarding-scoped plan after two adversarial reviews. Kept as working history.
+
 **Owner ask:** *"How can we model Chrono LLM using catalogue services. This needs to be platform level and billing metrics needs to be adjusted from here in the future. We need this enabled for Duffel flight, Twilio, ElevenLabs, Twitter, Reddit. What can we do to enable this flow?"*
 
 Repo claims cite `file:line` on `travel-allowlist`, rebased onto `origin/main` today. Assumptions are marked. Written for both a non-implementer and a builder.

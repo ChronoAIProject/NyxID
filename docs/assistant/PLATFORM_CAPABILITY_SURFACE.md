@@ -1,6 +1,6 @@
 # Platform Capability Surface — What We Have, What AsiaOne Is, What to Add
 
-> **Superseded (2026-08-20):** converged into the canonical `PLATFORM_CAPABILITY.md` (single article for the owner, fact-checked against the repo). Kept as working history.
+> **Superseded (2026-08-21):** replaced by `ONBOARDING_CAPABILITIES.md` — the converged onboarding-scoped plan after two adversarial reviews. Kept as working history.
 
 **Owner ask:** what NyxID already provides that can be offered as a **platform capability** (fungible account — the user wants the capability, not the account), what asiaone.com provides, and which additions cover the widest scope, with approach and risk. Identity-bound services (GitHub, Google, Slack, Lark, Microsoft, Discord) are out of scope by decision — those stay BYOK.
 

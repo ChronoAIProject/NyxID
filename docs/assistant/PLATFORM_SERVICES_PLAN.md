@@ -1,6 +1,6 @@
 # Platform Services — What Can Be Done, and How
 
-> **Superseded (2026-08-20):** converged into the canonical `PLATFORM_CAPABILITY.md` (single article for the owner, fact-checked against the repo). Kept as working history.
+> **Superseded (2026-08-21):** replaced by `ONBOARDING_CAPABILITIES.md` — the converged onboarding-scoped plan after two adversarial reviews. Kept as working history.
 
 **Decision document.** Owner ask: *"I need plan to tell me what can be done and how it can be achieved."* Revised after adversarial review (11 findings, mostly CONFIRMED with citations); every finding is absorbed as a work item in §8 — none argued away. Repo claims cite `file:line` on `travel-allowlist`, rebased onto `origin/main` today. Sizes: **S** ≤ 2 days, **M** ≈ a week incl. review, **L** = multi-week. Every size is justified where claimed — the previous revision called the substrate "one backend PR" and was wrong; sizes below are itemized to rebuild that credibility.
 
