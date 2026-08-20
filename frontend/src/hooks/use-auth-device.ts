@@ -3,6 +3,7 @@ import { api } from "@/lib/api-client";
 import {
   approveBodySchema,
   approveResponseSchema,
+  denyBodySchema,
   previewResponseSchema,
   type ApproveAuthDeviceResponse,
   type PreviewAuthDeviceResponse,
@@ -30,6 +31,21 @@ export function useApproveAuthDevice() {
       const body = approveBodySchema.parse({ user_code: userCode });
       const response = await api.post<ApproveAuthDeviceResponse>(
         "/auth/device/approve",
+        body,
+      );
+      return approveResponseSchema.parse(response);
+    },
+  });
+}
+
+export function useDenyAuthDevice() {
+  return useMutation({
+    mutationFn: async (
+      userCode: string,
+    ): Promise<ApproveAuthDeviceResponse> => {
+      const body = denyBodySchema.parse({ user_code: userCode });
+      const response = await api.post<ApproveAuthDeviceResponse>(
+        "/auth/device/deny",
         body,
       );
       return approveResponseSchema.parse(response);

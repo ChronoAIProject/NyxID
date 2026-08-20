@@ -1,0 +1,111 @@
+import { StyleSheet } from "react-native";
+
+import { radius, spacing, typeScale, TOUCH_TARGET } from "../../theme/designTokens";
+import type { ThemeColors } from "../../theme/mobileTheme";
+
+export function createDeviceLoginStyles(c: ThemeColors) {
+  return StyleSheet.create({
+    fill: { flex: 1 },
+    content: { padding: spacing.xxl, paddingBottom: 48 },
+    title: { ...typeScale.pageHeader, color: c.textPrimary },
+    subtitle: {
+      ...typeScale.description,
+      color: c.textSecondary,
+      marginTop: spacing.sm,
+      marginBottom: spacing.huge,
+    },
+    inputSection: { gap: spacing.lg },
+    inputLabel: { ...typeScale.bodyStrong, color: c.textPrimary },
+    codeInput: {
+      minHeight: 52,
+      borderRadius: radius.md,
+      borderWidth: 1,
+      borderColor: c.border,
+      backgroundColor: c.card,
+      paddingHorizontal: spacing.xxl,
+      color: c.textPrimary,
+      ...typeScale.mono,
+      fontSize: 18,
+      textAlign: "center" as const,
+    },
+    scanButton: {
+      minHeight: TOUCH_TARGET,
+      flexDirection: "row" as const,
+      alignItems: "center" as const,
+      justifyContent: "center" as const,
+      gap: spacing.sm,
+      borderRadius: radius.md,
+      borderWidth: 1,
+      borderColor: c.border,
+      backgroundColor: c.ghostBg,
+    },
+    scanButtonText: { ...typeScale.label, color: c.primary },
+    previewSection: { gap: spacing.lg },
+    warningBanner: {
+      flexDirection: "row" as const,
+      alignItems: "flex-start" as const,
+      gap: spacing.md,
+      padding: spacing.lg,
+      borderRadius: radius.lg,
+      borderWidth: 1,
+      borderColor: c.warningTone.border,
+      backgroundColor: c.warningTone.bg,
+    },
+    warningText: { ...typeScale.body, color: c.warningTone.text, flex: 1 },
+    detailPanel: {
+      borderRadius: radius.lg,
+      borderWidth: 1,
+      borderColor: c.border,
+      backgroundColor: c.card,
+      paddingHorizontal: spacing.xxl,
+    },
+    detailRow: {
+      paddingVertical: spacing.lg,
+      borderBottomWidth: 1,
+      borderBottomColor: c.borderSoft,
+      gap: spacing.xs,
+    },
+    detailLabel: { ...typeScale.overline, color: c.textMuted },
+    detailValue: { ...typeScale.body, color: c.textPrimary },
+    decisionRow: { flexDirection: "row" as const, gap: spacing.md },
+    decisionButton: { flex: 1 },
+    signInNotice: { gap: spacing.lg },
+    signInText: { ...typeScale.body, color: c.textSecondary },
+    errorText: {
+      ...typeScale.body,
+      color: c.danger,
+      marginTop: spacing.xxl,
+      textAlign: "center" as const,
+    },
+    pressed: { opacity: 0.72 },
+    disabled: { opacity: 0.5 },
+    terminalScreen: {
+      flex: 1,
+      justifyContent: "center" as const,
+      padding: spacing.huge,
+      gap: spacing.lg,
+    },
+    terminalIcon: {
+      width: 64,
+      height: 64,
+      borderRadius: radius.lg,
+      alignItems: "center" as const,
+      justifyContent: "center" as const,
+      borderWidth: 1,
+    },
+    successIcon: {
+      backgroundColor: c.successTone.bg,
+      borderColor: c.successTone.border,
+    },
+    deniedIcon: {
+      backgroundColor: c.dangerTone.bg,
+      borderColor: c.dangerTone.border,
+    },
+    terminalTitle: { ...typeScale.pageHeader, color: c.textPrimary },
+    terminalBody: {
+      ...typeScale.description,
+      color: c.textSecondary,
+      marginBottom: spacing.md,
+    },
+  });
+}

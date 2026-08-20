@@ -1,9 +1,12 @@
 import { describe, expect, it } from "vitest";
 import {
   approveBodySchema,
+  denyBodySchema,
   errorEnvelopeSchema,
   formatAuthDeviceUserCodeInput,
   friendlyAuthDeviceErrorMessage,
+  friendlyAuthDeviceStatusMessage,
+  previewResponseSchema,
   userCodeSchema,
 } from "./auth-device";
 
@@ -34,6 +37,28 @@ describe("approveBodySchema", () => {
   });
 });
 
+describe("denyBodySchema", () => {
+  it("normalizes the request payload", () => {
+    expect(denyBodySchema.parse({ user_code: "abcd-efgh" })).toEqual({
+      user_code: "ABCDEFGH",
+    });
+  });
+});
+
+describe("previewResponseSchema", () => {
+  it("normalizes a missing client_ip from an older backend to null", () => {
+    expect(
+      previewResponseSchema.parse({
+        client_label: "workstation",
+        client_user_agent: "nyxid-cli",
+        initiated_at: "2026-08-20T10:00:00Z",
+        expires_at: "2026-08-20T10:10:00Z",
+        status: "pending",
+      }).client_ip,
+    ).toBeNull();
+  });
+});
+
 describe("formatAuthDeviceUserCodeInput", () => {
   it("keeps an editable XXXX-XXXX shape while typing", () => {
     expect(formatAuthDeviceUserCodeInput("ab")).toBe("AB");
@@ -60,6 +85,12 @@ describe("errorEnvelopeSchema", () => {
 
 describe("friendlyAuthDeviceErrorMessage", () => {
   it("maps auth-device error codes to friendly messages", () => {
+    expect(
+      friendlyAuthDeviceErrorMessage({
+        errorCode: 11204,
+      }),
+    ).toBe("This login request was already denied.");
+
     expect(
       friendlyAuthDeviceErrorMessage({
         errorCode: 11200,
@@ -98,5 +129,20 @@ describe("friendlyAuthDeviceErrorMessage", () => {
         errorCode: 11207,
       }),
     ).toBe("That code is no longer valid. Run `nyxid login --device` again.");
+  });
+});
+
+describe("friendlyAuthDeviceStatusMessage", () => {
+  it.each([
+    ["denied", "This login request was already denied."],
+    ["expired", "This code has expired."],
+    ["approved", "This code was already used."],
+    ["delivered", "This code was already used."],
+  ] as const)("maps %s previews to terminal copy", (status, message) => {
+    expect(friendlyAuthDeviceStatusMessage(status)).toBe(message);
+  });
+
+  it("returns no message for a pending preview", () => {
+    expect(friendlyAuthDeviceStatusMessage("pending")).toBeNull();
   });
 });

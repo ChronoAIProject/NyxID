@@ -1,4 +1,9 @@
 import { ApiError } from "./ApiError";
+import {
+  approveAuthDeviceRequest,
+  denyAuthDeviceRequest,
+  previewAuthDeviceRequest,
+} from "./authDeviceApi";
 import { createIdempotencyKey } from "./idempotency";
 import {
   deleteCurrentUserAccountRequest,
@@ -71,6 +76,9 @@ function getApiBaseUrl(): string {
 }
 
 export const mobileApi = {
+  previewAuthDevice: previewAuthDeviceRequest,
+  approveAuthDevice: approveAuthDeviceRequest,
+  denyAuthDevice: denyAuthDeviceRequest,
   async loginWithPassword(input: LoginWithPasswordInput): Promise<LoginWithPasswordResponse> {
     const response = await loginWithPasswordRequest({
       email: input.email,

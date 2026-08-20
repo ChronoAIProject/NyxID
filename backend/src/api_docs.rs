@@ -38,6 +38,12 @@
         crate::handlers::connect_links::preview_connect_link,
         crate::handlers::connect_links::cancel_hosted_connect_link,
         crate::handlers::connect_links::complete_connect_link,
+        // Auth Device Login
+        crate::handlers::auth_device::request_auth_device,
+        crate::handlers::auth_device::poll_auth_device,
+        crate::handlers::auth_device::preview_auth_device,
+        crate::handlers::auth_device::approve_auth_device,
+        crate::handlers::auth_device::deny_auth_device,
         // Catalog
         crate::handlers::catalog::list_catalog,
         crate::handlers::catalog::get_catalog_entry,
@@ -114,6 +120,16 @@
             crate::handlers::connect_links::CancelHostedConnectLinkRequest,
             crate::handlers::connect_links::CompleteConnectLinkRequest,
             crate::handlers::connect_links::CompleteConnectLinkResponse,
+            // Auth Device Login
+            crate::handlers::auth_device::AuthDeviceRequestBody,
+            crate::handlers::auth_device::AuthDeviceRequestResponse,
+            crate::handlers::auth_device::AuthDevicePollBody,
+            crate::handlers::auth_device::AuthDevicePollResponse,
+            crate::handlers::auth_device::AuthDevicePreviewBody,
+            crate::handlers::auth_device::AuthDevicePreviewResponse,
+            crate::handlers::auth_device::AuthDeviceApproveBody,
+            crate::handlers::auth_device::AuthDeviceDenyBody,
+            crate::handlers::auth_device::AuthDeviceDecisionResponse,
             // Catalog
             crate::handlers::catalog::CatalogEntryResponse,
             crate::handlers::catalog::CatalogListResponse,
@@ -196,6 +212,7 @@
         (name = "SSH", description = "SSH certificate issuance and WebSocket tunnel endpoints"),
         (name = "AI Services", description = "Unified key management: auto-provisions endpoint, credential, and proxy routing from catalog or custom input"),
         (name = "Connect Links", description = "Hosted single-use service credential connection flows"),
+        (name = "Auth Device Login", description = "First-party device-code login review and decisions"),
         (name = "Catalog", description = "Read-only service catalog for users (admin-created services and providers)"),
         (name = "Endpoints", description = "User-managed target URLs"),
         (name = "External API Keys", description = "User's external API keys and credentials"),

@@ -18,7 +18,7 @@ nyxid login --base-url <BASE_URL>
 
 ### Headless / SSH / no browser
 
-If `nyxid login` can't open a browser (SSH session, container, WSL without `$DISPLAY`), it auto-falls back to the **device-code flow**: the CLI prints a one-time code + a URL, you open the URL on any signed-in browser (phone, laptop), type the code, approve, and the CLI completes. You can also force the flow explicitly:
+If `nyxid login` can't open a browser (SSH session, container, WSL without `$DISPLAY`), it auto-falls back to the **device-code flow**: the CLI prints a one-time code + a URL, you open the URL on any signed-in browser (phone, laptop), type the code, review the requester IP and time, then approve or reject. Approval completes the CLI login; rejection stops it immediately. You can also force the flow explicitly:
 
 ```bash
 nyxid login --device --base-url <BASE_URL>

@@ -522,7 +522,62 @@ Poll no faster than the `interval` returned by `/request`. A `11202` response me
 | `11206` | `auth_device_rate_limited` | 429 | Endpoint rate limit was exceeded |
 | `11207` | `auth_device_user_code_invalid` | 400 | The first-party review UI supplied an invalid user code |
 
-`POST /api/v1/auth/device/preview` and `POST /api/v1/auth/device/approve` support the first-party browser review surface. Integrators should direct users to `verification_uri`; they should not call those UI endpoints. Approval requires a human session and rejects API-key, service-account, delegated, and relay credentials.
+#### POST /api/v1/auth/device/preview
+
+Fetch the non-mutating anti-phishing context shown by first-party review surfaces.
+
+**Auth:** None
+
+```json
+{
+  "user_code": "7KM2-RQ9D"
+}
+```
+
+**Response (200):**
+
+```json
+{
+  "client_label": "Desktop workstation",
+  "client_user_agent": "desktop-app/1.4",
+  "client_ip": "203.0.113.24",
+  "initiated_at": "2026-08-20T08:15:00Z",
+  "expires_at": "2026-08-20T08:25:00Z",
+  "status": "pending"
+}
+```
+
+`client_label` and `client_user_agent` are requester-supplied free text. `client_ip` is the server-resolved request address observed at `/request`; legacy rows return `null`. All auth-device rows expire after 10 minutes.
+
+#### POST /api/v1/auth/device/approve
+
+Atomically approve a pending request and prepare a first-party token pair for one poller.
+
+**Auth:** Human JWT session only
+
+```json
+{
+  "user_code": "7KM2-RQ9D"
+}
+```
+
+**Response (200):** `{ "ok": true }`
+
+#### POST /api/v1/auth/device/deny
+
+Atomically reject a pending request. No tokens are minted, and the requester's next poll returns `11204` immediately.
+
+**Auth:** Human JWT session only
+
+```json
+{
+  "user_code": "7KM2-RQ9D"
+}
+```
+
+**Response (200):** `{ "ok": true }`
+
+Approve and deny use the same pending-status guard, so exactly one wins a concurrent decision. API-key, service-account, delegated, and relay credentials are rejected before either decision handler runs. Integrators should direct users to `verification_uri`; these are first-party review endpoints.
 
 ---
 

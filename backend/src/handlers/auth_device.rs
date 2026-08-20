@@ -14,7 +14,7 @@ use crate::AppState;
 use crate::errors::{AppError, AppResult};
 use crate::mw::auth::AuthUser;
 use crate::services::auth_device_service::{
-    self, ApproveInput, InitiateInput, PollClaim, PreviewOutput,
+    self, ApproveInput, DenyInput, InitiateInput, PollClaim, PreviewOutput,
 };
 
 type HmacSha256 = Hmac<Sha256>;
@@ -56,6 +56,16 @@ pub struct AuthDeviceApproveBody {
 }
 
 #[derive(Debug, Deserialize, ToSchema)]
+pub struct AuthDeviceDenyBody {
+    pub user_code: String,
+}
+
+#[derive(Debug, Serialize, ToSchema)]
+pub struct AuthDeviceDecisionResponse {
+    pub ok: bool,
+}
+
+#[derive(Debug, Deserialize, ToSchema)]
 pub struct AuthDevicePreviewBody {
     pub user_code: String,
 }
@@ -64,11 +74,22 @@ pub struct AuthDevicePreviewBody {
 pub struct AuthDevicePreviewResponse {
     pub client_label: Option<String>,
     pub client_user_agent: Option<String>,
+    pub client_ip: Option<String>,
     pub initiated_at: String,
     pub expires_at: String,
     pub status: String,
 }
 
+#[utoipa::path(
+    post,
+    path = "/api/v1/auth/device/request",
+    request_body = AuthDeviceRequestBody,
+    responses(
+        (status = 200, body = AuthDeviceRequestResponse),
+        (status = 429, body = crate::errors::ErrorResponse)
+    ),
+    tag = "Auth Device Login"
+)]
 #[tracing::instrument(skip_all, fields(client_ip_hash, route = "request"))]
 pub async fn request_auth_device(
     State(state): State<AppState>,
@@ -115,6 +136,20 @@ pub async fn request_auth_device(
     }))
 }
 
+#[utoipa::path(
+    post,
+    path = "/api/v1/auth/device/poll",
+    request_body = AuthDevicePollBody,
+    responses(
+        (status = 200, body = AuthDevicePollResponse),
+        (status = 400, body = crate::errors::ErrorResponse),
+        (status = 403, body = crate::errors::ErrorResponse),
+        (status = 404, body = crate::errors::ErrorResponse),
+        (status = 410, body = crate::errors::ErrorResponse),
+        (status = 429, body = crate::errors::ErrorResponse)
+    ),
+    tag = "Auth Device Login"
+)]
 #[tracing::instrument(skip_all, fields(client_ip_hash, route = "poll"))]
 pub async fn poll_auth_device(
     State(state): State<AppState>,
@@ -187,6 +222,21 @@ pub async fn poll_auth_device(
     }
 }
 
+#[utoipa::path(
+    post,
+    path = "/api/v1/auth/device/approve",
+    request_body = AuthDeviceApproveBody,
+    responses(
+        (status = 200, body = AuthDeviceDecisionResponse),
+        (status = 400, body = crate::errors::ErrorResponse),
+        (status = 401, body = crate::errors::ErrorResponse),
+        (status = 403, body = crate::errors::ErrorResponse),
+        (status = 410, body = crate::errors::ErrorResponse),
+        (status = 429, body = crate::errors::ErrorResponse)
+    ),
+    security(("bearer_auth" = [])),
+    tag = "Auth Device Login"
+)]
 #[tracing::instrument(skip_all, fields(client_ip_hash, route = "approve"))]
 pub async fn approve_auth_device(
     State(state): State<AppState>,
@@ -194,7 +244,7 @@ pub async fn approve_auth_device(
     ConnectInfo(addr): ConnectInfo<SocketAddr>,
     headers: HeaderMap,
     Json(body): Json<AuthDeviceApproveBody>,
-) -> AppResult<Json<serde_json::Value>> {
+) -> AppResult<Json<AuthDeviceDecisionResponse>> {
     let client_ip = resolve_client_ip(&headers, addr, &state)?;
     let client_ip_hash = client_ip_hash(&state, client_ip);
     tracing::Span::current().record("client_ip_hash", client_ip_hash.as_str());
@@ -232,9 +282,80 @@ pub async fn approve_auth_device(
         "auth_device.handler.approve"
     );
 
-    Ok(Json(serde_json::json!({ "ok": true })))
+    Ok(Json(AuthDeviceDecisionResponse { ok: true }))
 }
 
+#[utoipa::path(
+    post,
+    path = "/api/v1/auth/device/deny",
+    request_body = AuthDeviceDenyBody,
+    responses(
+        (status = 200, body = AuthDeviceDecisionResponse),
+        (status = 400, body = crate::errors::ErrorResponse),
+        (status = 401, body = crate::errors::ErrorResponse),
+        (status = 403, body = crate::errors::ErrorResponse),
+        (status = 410, body = crate::errors::ErrorResponse),
+        (status = 429, body = crate::errors::ErrorResponse)
+    ),
+    security(("bearer_auth" = [])),
+    tag = "Auth Device Login"
+)]
+#[tracing::instrument(skip_all, fields(client_ip_hash, route = "deny"))]
+pub async fn deny_auth_device(
+    State(state): State<AppState>,
+    user: AuthUser,
+    ConnectInfo(addr): ConnectInfo<SocketAddr>,
+    headers: HeaderMap,
+    Json(body): Json<AuthDeviceDenyBody>,
+) -> AppResult<Json<AuthDeviceDecisionResponse>> {
+    let client_ip = resolve_client_ip(&headers, addr, &state)?;
+    let client_ip_hash = client_ip_hash(&state, client_ip);
+    tracing::Span::current().record("client_ip_hash", client_ip_hash.as_str());
+
+    if !state.auth_device_approve_limiter.check(client_ip) {
+        rate_limit_hit("deny", &client_ip_hash);
+        return Err(AppError::AuthDeviceCodeRateLimited);
+    }
+
+    let user_key = format!("user:{}", user.user_id);
+    if !state.auth_device_approve_per_user_limiter.check(&user_key) {
+        rate_limit_hit("deny", &client_ip_hash);
+        return Err(AppError::AuthDeviceCodeRateLimited);
+    }
+
+    auth_device_service::deny(
+        &state.db,
+        state.auth_device_hmac_key.as_slice(),
+        DenyInput {
+            user_id: user.user_id.to_string(),
+            user_code: body.user_code,
+            denier_ip: Some(client_ip.to_string()),
+            denier_user_agent: user_agent(&headers),
+        },
+    )
+    .await?;
+
+    tracing::info!(
+        client_ip_hash = %client_ip_hash,
+        user_id = %user.user_id,
+        audit_logged = true,
+        "auth_device.handler.deny"
+    );
+
+    Ok(Json(AuthDeviceDecisionResponse { ok: true }))
+}
+
+#[utoipa::path(
+    post,
+    path = "/api/v1/auth/device/preview",
+    request_body = AuthDevicePreviewBody,
+    responses(
+        (status = 200, body = AuthDevicePreviewResponse),
+        (status = 400, body = crate::errors::ErrorResponse),
+        (status = 429, body = crate::errors::ErrorResponse)
+    ),
+    tag = "Auth Device Login"
+)]
 #[tracing::instrument(skip_all, fields(client_ip_hash, route = "preview"))]
 pub async fn preview_auth_device(
     State(state): State<AppState>,
@@ -320,6 +441,7 @@ fn preview_response(preview: PreviewOutput) -> AuthDevicePreviewResponse {
     AuthDevicePreviewResponse {
         client_label: preview.client_label,
         client_user_agent: preview.client_user_agent,
+        client_ip: preview.client_ip,
         initiated_at: preview
             .initiated_at
             .to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
@@ -352,6 +474,9 @@ mod tests {
     use uuid::Uuid;
 
     use crate::models::audit_log::{AuditLog, COLLECTION_NAME as AUDIT_LOG};
+    use crate::models::auth_device_code::{
+        AuthDeviceCode, AuthDeviceCodeStatus, COLLECTION_NAME as AUTH_DEVICE_CODES,
+    };
     use crate::models::user::{COLLECTION_NAME as USERS, UserType};
     use crate::services::auth_device_service::InitiateInput;
     use crate::test_utils::{connect_test_database, test_app_config, test_app_state, test_user};
@@ -599,6 +724,30 @@ mod tests {
         ));
     }
 
+    #[tokio::test]
+    async fn auth_device_deny_rejects_api_key_auth() {
+        let Some(state) = setup_state("auth_device_api_key_deny").await else {
+            return;
+        };
+        let user_id = Uuid::new_v4().to_string();
+        insert_user(&state, &user_id).await;
+        let api_key = create_api_key(&state, &user_id).await;
+        let server = spawn_test_server(state).await;
+
+        let (status, _) = post_json(
+            &server,
+            "/api/v1/auth/device/deny",
+            Some(&api_key),
+            serde_json::json!({ "user_code": "ABCD-EFGH" }),
+        )
+        .await;
+
+        assert!(matches!(
+            status,
+            StatusCode::UNAUTHORIZED | StatusCode::FORBIDDEN
+        ));
+    }
+
     // Covers the public mount of /auth/device/preview: an anonymous caller must
     // succeed and receive the sanitized anti-phishing payload (client_label,
     // UA, timestamps, status). Approve stays human-only — see the test above.
@@ -631,9 +780,105 @@ mod tests {
         assert_eq!(status, StatusCode::OK);
         assert_eq!(json["client_label"], "kitchen-rpi");
         assert_eq!(json["client_user_agent"], "nyxid-cli/0.7.1");
+        assert_eq!(json["client_ip"], "127.0.0.1");
         assert_eq!(json["status"], "pending");
-        assert!(json["initiated_at"].is_string());
-        assert!(json["expires_at"].is_string());
+        assert!(
+            json["initiated_at"]
+                .as_str()
+                .is_some_and(|value| value.ends_with('Z'))
+        );
+        assert!(
+            json["expires_at"]
+                .as_str()
+                .is_some_and(|value| value.ends_with('Z'))
+        );
+    }
+
+    #[tokio::test]
+    async fn auth_device_preview_legacy_row_without_client_ip_returns_null() {
+        let Some(state) = setup_state("auth_device_preview_legacy_ip_http").await else {
+            return;
+        };
+        let initiated = auth_device_service::initiate(
+            &state.db,
+            state.auth_device_hmac_key.as_slice(),
+            InitiateInput {
+                client_label: None,
+                client_user_agent: None,
+                client_ip: Some("127.0.0.1".to_string()),
+            },
+        )
+        .await
+        .expect("initiate");
+        state
+            .db
+            .collection::<mongodb::bson::Document>(AUTH_DEVICE_CODES)
+            .update_many(doc! {}, doc! { "$unset": { "client_ip": "" } })
+            .await
+            .expect("remove client_ip");
+        let server = spawn_test_server(state).await;
+
+        let (status, json) = post_json(
+            &server,
+            "/api/v1/auth/device/preview",
+            None,
+            serde_json::json!({ "user_code": initiated.user_code }),
+        )
+        .await;
+
+        assert_eq!(status, StatusCode::OK);
+        assert!(json["client_ip"].is_null());
+    }
+
+    #[tokio::test]
+    async fn auth_device_deny_terminates_next_poll_with_11204() {
+        let Some(state) = setup_state("auth_device_deny_poll").await else {
+            return;
+        };
+        let user_id = Uuid::new_v4().to_string();
+        insert_user(&state, &user_id).await;
+        let token = access_token(&state, &user_id);
+        let server = spawn_test_server(state.clone()).await;
+
+        let (status, request_json) = post_json(
+            &server,
+            "/api/v1/auth/device/request",
+            None,
+            serde_json::json!({}),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+
+        let (status, deny_json) = post_json(
+            &server,
+            "/api/v1/auth/device/deny",
+            Some(&token),
+            serde_json::json!({ "user_code": request_json["user_code"] }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(deny_json, serde_json::json!({ "ok": true }));
+
+        let row = state
+            .db
+            .collection::<AuthDeviceCode>(AUTH_DEVICE_CODES)
+            .find_one(doc! {})
+            .await
+            .expect("query auth device row")
+            .expect("auth device row");
+        assert_eq!(row.status, AuthDeviceCodeStatus::Denied);
+        assert!(row.denied_at.is_some());
+        assert_eq!(row.denied_by_user_id.as_deref(), Some(user_id.as_str()));
+
+        let (status, poll_json) = post_json(
+            &server,
+            "/api/v1/auth/device/poll",
+            None,
+            serde_json::json!({ "device_code": request_json["device_code"] }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::FORBIDDEN);
+        assert_error(&poll_json, "auth_device_access_denied", 11204);
     }
 
     #[tokio::test]

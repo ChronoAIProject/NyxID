@@ -1136,7 +1136,7 @@ fn handle_device_poll_error(error_code: i64, message: &str, interval: u64) -> Re
         AUTH_DEVICE_CODE_PENDING => Ok(interval),
         AUTH_DEVICE_CODE_SLOW_DOWN => Ok(interval + 5),
         AUTH_DEVICE_CODE_EXPIRED => bail!("Login timed out - run `nyxid login --device` again."),
-        AUTH_DEVICE_CODE_DENIED => bail!("Login denied."),
+        AUTH_DEVICE_CODE_DENIED => bail!("Login was denied."),
         AUTH_DEVICE_CODE_ALREADY_DELIVERED => {
             bail!("This code was already used. Run `nyxid login --device` again.")
         }
@@ -1447,7 +1447,7 @@ mod tests {
             "unexpected: {expired}"
         );
         let denied = handle_device_poll_error(AUTH_DEVICE_CODE_DENIED, "denied", 5).unwrap_err();
-        assert_eq!(denied.to_string(), "Login denied.");
+        assert_eq!(denied.to_string(), "Login was denied.");
         let used =
             handle_device_poll_error(AUTH_DEVICE_CODE_ALREADY_DELIVERED, "used", 5).unwrap_err();
         assert!(

@@ -3,6 +3,7 @@ import { z } from "zod";
 export const AUTH_DEVICE_ERROR_MESSAGES: Record<number, string> = {
   11200: "That code is no longer valid. Run `nyxid login --device` again.",
   11201: "This code has expired.",
+  11204: "This login request was already denied.",
   11205: "This code was already used.",
   11206: "Too many attempts. Try again in a few minutes.",
   11207: "That code is no longer valid. Run `nyxid login --device` again.",
@@ -17,6 +18,10 @@ export const approveBodySchema = z.object({
   user_code: userCodeSchema,
 });
 
+export const denyBodySchema = z.object({
+  user_code: userCodeSchema,
+});
+
 export const approveResponseSchema = z.object({
   ok: z.literal(true),
 });
@@ -24,6 +29,11 @@ export const approveResponseSchema = z.object({
 export const previewResponseSchema = z.object({
   client_label: z.string().nullable(),
   client_user_agent: z.string().nullable(),
+  client_ip: z
+    .string()
+    .nullable()
+    .optional()
+    .transform((value) => value ?? null),
   initiated_at: z.string().datetime(),
   expires_at: z.string().datetime(),
   status: z.enum(["pending", "approved", "denied", "expired", "delivered"]),
@@ -37,6 +47,7 @@ export const errorEnvelopeSchema = z.object({
 
 export type ApproveAuthDeviceBody = z.output<typeof approveBodySchema>;
 export type ApproveAuthDeviceResponse = z.infer<typeof approveResponseSchema>;
+export type DenyAuthDeviceBody = z.output<typeof denyBodySchema>;
 export type PreviewAuthDeviceResponse = z.infer<typeof previewResponseSchema>;
 export type AuthDeviceErrorEnvelope = z.infer<typeof errorEnvelopeSchema>;
 
@@ -79,4 +90,20 @@ export function friendlyAuthDeviceErrorMessage(error: unknown): string {
   return typeof maybeApiError.message === "string"
     ? maybeApiError.message
     : "Device login failed.";
+}
+
+export function friendlyAuthDeviceStatusMessage(
+  status: PreviewAuthDeviceResponse["status"],
+): string | null {
+  switch (status) {
+    case "pending":
+      return null;
+    case "denied":
+      return AUTH_DEVICE_ERROR_MESSAGES[11204] ?? null;
+    case "expired":
+      return AUTH_DEVICE_ERROR_MESSAGES[11201] ?? null;
+    case "approved":
+    case "delivered":
+      return AUTH_DEVICE_ERROR_MESSAGES[11205] ?? null;
+  }
 }

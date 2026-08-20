@@ -4,6 +4,7 @@ import type { PropsWithChildren } from "react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import {
   useApproveAuthDevice,
+  useDenyAuthDevice,
   usePreviewAuthDevice,
 } from "./use-auth-device";
 
@@ -38,6 +39,7 @@ describe("usePreviewAuthDevice", () => {
     mockPost.mockResolvedValue({
       client_label: "kitchen-rpi",
       client_user_agent: "nyxid-cli/0.7.1",
+      client_ip: "203.0.113.10",
       initiated_at: "2026-06-18T10:00:00Z",
       expires_at: "2026-06-18T10:10:00Z",
       status: "pending",
@@ -57,6 +59,7 @@ describe("usePreviewAuthDevice", () => {
     mockPost.mockResolvedValue({
       client_label: "ok",
       client_user_agent: "ok",
+      client_ip: "203.0.113.10",
       initiated_at: "not-a-datetime",
       expires_at: "2026-06-18T10:10:00Z",
       status: "pending",
@@ -70,6 +73,7 @@ describe("usePreviewAuthDevice", () => {
     mockPost.mockResolvedValue({
       client_label: null,
       client_user_agent: null,
+      client_ip: null,
       initiated_at: "2026-06-18T10:00:00Z",
       expires_at: "2026-06-18T10:10:00Z",
       status: "weird-state",
@@ -84,6 +88,7 @@ describe("usePreviewAuthDevice", () => {
       .mockResolvedValueOnce({
         client_label: "device-1",
         client_user_agent: null,
+        client_ip: "203.0.113.11",
         initiated_at: "2026-06-18T10:00:00Z",
         expires_at: "2026-06-18T10:10:00Z",
         status: "pending",
@@ -91,6 +96,7 @@ describe("usePreviewAuthDevice", () => {
       .mockResolvedValueOnce({
         client_label: "device-2",
         client_user_agent: null,
+        client_ip: "203.0.113.12",
         initiated_at: "2026-06-18T10:05:00Z",
         expires_at: "2026-06-18T10:15:00Z",
         status: "pending",
@@ -139,5 +145,24 @@ describe("useApproveAuthDevice", () => {
     const { result } = renderHook(() => useApproveAuthDevice(), { wrapper });
 
     await expect(result.current.mutateAsync("ABCDEFGH")).rejects.toThrow();
+  });
+});
+
+describe("useDenyAuthDevice", () => {
+  it("is idle on mount and only fires when mutateAsync is called", () => {
+    const { result } = renderHook(() => useDenyAuthDevice(), { wrapper });
+    expect(mockPost).not.toHaveBeenCalled();
+    expect(result.current.isPending).toBe(false);
+  });
+
+  it("normalizes the user_code before posting to the deny endpoint", async () => {
+    mockPost.mockResolvedValue({ ok: true });
+    const { result } = renderHook(() => useDenyAuthDevice(), { wrapper });
+
+    await result.current.mutateAsync("abcd-efgh");
+
+    expect(mockPost).toHaveBeenCalledWith("/auth/device/deny", {
+      user_code: "ABCDEFGH",
+    });
   });
 });

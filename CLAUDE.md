@@ -5,7 +5,7 @@ NyxID is an Auth/SSO platform (similar to Supabase Auth) with a Rust backend, Re
 **Tech Stack:**
 - **Backend:** Rust, Axum 0.8, MongoDB 8.0 (`mongodb` 3.5, `bson` 2.15)
 - **Frontend:** React 19, TypeScript, Vite 7, TanStack Router + Query, Tailwind CSS 4, Zod 4, Zustand
-- **Mobile:** React Native 0.79, Expo 53, TypeScript (iOS + Android approval app)
+- **Mobile:** React Native 0.83, Expo 55, TypeScript (iOS + Android approval app)
 - **SDK:** TypeScript OAuth 2.0 client (`@nyxids/oauth-core`, `@nyxids/oauth-react`)
 - **Dev tools:** Docker Compose (MongoDB + Mailpit), RSA keys for JWT signing
 
@@ -158,16 +158,16 @@ Key files: `models/oracle_{pool,task,session,worker}.rs`, `services/oracle_{pool
 
 ### 12. Auth Device-Code Login
 
-First-party RFC 8628-style login for headless CLI environments: `nyxid login --device` displays a short `user_code`; an already logged-in human approves it in the web UI; the waiting CLI receives normal first-party access + refresh tokens without a password in the terminal.
+First-party RFC 8628-style login for headless CLI environments: `nyxid login --device` displays a short `user_code`; an already logged-in human approves or rejects it in the web UI or mobile app; the waiting CLI receives normal first-party access + refresh tokens without a password in the terminal.
 
-- **Storage**: `auth_device_codes` collection -- HMACs of both the opaque `device_code` and display `user_code` (raw codes and token plaintext never persisted), `pending`/`approved`/`denied`/`expired`/`delivered` status state machine, sanitized client context, encrypted delivery tokens. The CLI polls with an opaque `nyx_adc_`-prefixed `device_code` secret (not a worker-pool flow).
-- **Routes**: `POST /auth/device/request` and `POST /auth/device/poll` are public (no auth). `POST /auth/device/approve` is human-only: JWT session user; API keys, service accounts, and delegated tokens are rejected before handler execution. `POST /auth/device/preview` is public and returns non-sensitive anti-phishing context (`client_label`, `client_user_agent`, timestamps, status) for a `user_code` without changing state -- all fields are device-supplied at `/request` time so there is nothing to leak; the verification page only calls it after login (GitHub-style flow), but it stays public as defense-in-depth simplification and for future anonymous-preview surfaces. Rate-limited per IP.
+- **Storage**: `auth_device_codes` collection -- HMACs of both the opaque `device_code` and display `user_code` (raw codes and token plaintext never persisted), `pending`/`approved`/`denied`/`expired`/`delivered` status state machine, sanitized client context, short-lived server-observed `client_ip` plus its HMAC, encrypted delivery tokens. Denials record `denied_at` and `denied_by_user_id`. The CLI polls with an opaque `nyx_adc_`-prefixed `device_code` secret (not a worker-pool flow).
+- **Routes**: `POST /auth/device/request`, `/poll`, and `/preview` are public (no auth). Preview is non-mutating and returns untrusted `client_label`/`client_user_agent` plus server-observed `client_ip`, Z-suffix timestamps, and status. `POST /auth/device/approve` and `/deny` are human-only: JWT session user; API keys, service accounts, delegated tokens, and relay tokens are rejected before handler execution. Approve and deny race atomically on `status = pending`; deny mints no tokens and the next poll returns 11204. All routes are rate-limited per IP; decisions also share a per-user limit.
 - **Atomic delivery**: poll claims `approved` -> `delivered` via `find_one_and_update(...).return_document(Before)`; the pre-update document carries the encrypted delivery tokens for exactly one poller; later pollers get `AuthDeviceCodeAlreadyDelivered` (11205).
 - **Rate limiters**: `auth_device_{request,poll,approve,approve_per_user,preview}_limiter`
 - **CLI output**: prints `user_code` plus the bare `verification_uri` -- never `verification_uri_complete`, which would put the code in the URL and defeat manual-entry anti-phishing. On stdin+stderr TTYs: prompts `Open in your browser? [Y/n]` and opens via `crate::browser::open_browser`, falling through with a "paste it manually" hint on failure. Non-TTY (CI/piped) skips the prompt and polls immediately.
 - **CLI dispatch**: `nyxid login --device` forces device-code login; plain `nyxid login` auto-falls back to it when browser launch is unavailable unless `NYXID_LOGIN_NO_DEVICE_FALLBACK=1`.
-- **Verification page** (`/login/device`): auth-gated at entry (redirect to `/login?return_to=/login/device`). Code input starts empty; the `?user_code=` query param is stripped by the router's `validateSearch` and ignored. Two explicit clicks: Continue calls `/preview` (anti-phishing block renders), then Approve calls `/approve`. No API call fires on typing, focus, mount, or reconnect; both buttons are throttled to >= 750 ms between clicks and disabled while pending (input disabled too).
-- **Out of scope for v1**: mobile approval deep-link to the approval app (follow-up issue if needed).
+- **Verification page** (`/login/device`): auth-gated at entry (redirect to `/login?return_to=/login/device`). Code input starts empty; the `?user_code=` query param is stripped by the router's `validateSearch` and ignored. Two explicit clicks: Continue calls `/preview` (anti-phishing block renders), then Approve or Reject calls `/approve` or `/deny`. No API call fires on typing, focus, mount, or reconnect; actions are throttled to >= 750 ms between clicks and disabled while pending (input disabled too).
+- **Mobile approval**: `CameraView` scans only QR codes whose shape is `https://<frontend>/login/device?user_code=...` or `nyxid://login/device?user_code=...`. The app extracts and normalizes only `user_code`; every request uses its configured API base URL. Deep links prefill without making a request. Preview and approve/reject remain separate explicit actions, share the >= 750 ms throttle, and never auto-approve.
 
 ### 13. Hosted Connect Links
 
@@ -222,7 +222,7 @@ frontend/src/
 |-- types/               # TypeScript type definitions
 |-- router.tsx           # TanStack Router config
 
-mobile/src/              # React Native + Expo app (Expo 53, RN 0.79): app/ (shell, navigator,
+mobile/src/              # React Native + Expo app (Expo 55, RN 0.83): app/ (shell, navigator,
                          # deep linking nyxid://challenge/{id}), features/ (auth, challenges,
                          # approvals, account, legal), components/, lib/ (API client, SecureStore
                          # session, push registration), theme/
@@ -236,7 +236,7 @@ sdk/                     # OAuth SDK monorepo (@nyxids/* npm namespace): oauth-c
 
 All API routes under `/api/v1`:
 - `/auth` -- register, login, logout, refresh, verify-email, forgot/reset-password
-- `/auth/device/{request,poll,approve,preview}` -- auth device-code login (see Critical Rule 12 for auth posture per route)
+- `/auth/device/{request,poll,preview,approve,deny}` -- auth device-code login (see Critical Rule 12 for auth posture per route)
 - `/connect-links` -- create, poll, creator cancel, public preview, human decline, and human-only completion for hosted service connections (see Critical Rule 13)
 - `/developer/oauth-clients/{client_id}/connection-webhook` -- human-only developer-app lifecycle webhook configure/disable; `/connection-webhook/rotate-secret` returns a new signing secret and key ID once
 - `/triggers` -- trigger CRUD; `/{id}/rotate-secret`, `/{id}/rotate-delivery-secret`, `/{id}/deliveries`, and `/{id}/deliveries/{event_id}/redeliver` cover inbound/outbound secret rotation, delivery history, and retained-envelope replay (JWT or agent API key; delegated, relay, and service-account tokens rejected)

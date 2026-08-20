@@ -52,6 +52,7 @@ import type { RootStackParamList } from "../../app/AppNavigator";
 import type { ActivitySegment } from "./activityTypes";
 import type { ApprovalMode, ChallengeDetail, ApprovalItem } from "../../lib/api/types";
 import { usePushPollingActive } from "../../lib/notifications/pushPollingSignal";
+import { ScanQrCode } from "lucide-react-native";
 
 type Nav = NativeStackNavigationProp<RootStackParamList>;
 
@@ -616,10 +617,20 @@ export function ActivityScreen() {
   return (
     <ScreenContainer>
       <View style={styles.header}>
-        <Text style={styles.title}>Activity</Text>
-        <Text style={styles.subtitle}>
-          {pendingCount} pending · {activeCount} active grant{activeCount !== 1 ? "s" : ""}
-        </Text>
+        <View style={styles.headerCopy}>
+          <Text style={styles.title}>Activity</Text>
+          <Text style={styles.subtitle}>
+            {pendingCount} pending · {activeCount} active grant{activeCount !== 1 ? "s" : ""}
+          </Text>
+        </View>
+        <Pressable
+          accessibilityRole="button"
+          accessibilityLabel="Scan login QR code"
+          onPress={() => navigation.navigate("DeviceLogin")}
+          style={({ pressed }) => [styles.scanLoginButton, pressed && styles.scanLoginButtonPressed]}
+        >
+          <ScanQrCode size={21} color={colors.primary} />
+        </Pressable>
       </View>
 
       <View style={styles.segmentWrap}>
@@ -764,6 +775,13 @@ const createStyles = (c: ThemeColors) => StyleSheet.create({
     paddingHorizontal: spacing.xxl,
     paddingTop: spacing.sm,
     minHeight: 41,
+    flexDirection: "row",
+    alignItems: "flex-start",
+    justifyContent: "space-between",
+    gap: spacing.lg,
+  },
+  headerCopy: {
+    flex: 1,
     gap: spacing.xxs,
   },
   // DESIGN.md §PageHeader: mobile page title is text-[22px] font-bold leading-none
@@ -776,6 +794,19 @@ const createStyles = (c: ThemeColors) => StyleSheet.create({
     ...typeScale.label,
     color: c.textSecondary,
     marginBottom: spacing.md,
+  },
+  scanLoginButton: {
+    width: 44,
+    height: 44,
+    borderRadius: radius.md,
+    borderWidth: 1,
+    borderColor: c.border,
+    backgroundColor: c.ghostBg,
+    alignItems: "center",
+    justifyContent: "center",
+  },
+  scanLoginButtonPressed: {
+    opacity: 0.7,
   },
   segmentWrap: {
     paddingHorizontal: spacing.xxl,

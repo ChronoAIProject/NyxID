@@ -28,6 +28,8 @@ pub struct AuthDeviceCode {
     pub slow_down_increments: u32,
     pub client_label: Option<String>,
     pub client_user_agent: Option<String>,
+    #[serde(default)]
+    pub client_ip: Option<String>,
     pub client_ip_hmac: Option<String>,
     #[serde(default, with = "bson_datetime::optional")]
     pub last_polled_at: Option<DateTime<Utc>>,
@@ -47,6 +49,8 @@ pub struct AuthDeviceCode {
     pub delivered_at: Option<DateTime<Utc>>,
     #[serde(default, with = "bson_datetime::optional")]
     pub denied_at: Option<DateTime<Utc>>,
+    #[serde(default)]
+    pub denied_by_user_id: Option<String>,
     #[serde(with = "bson::serde_helpers::chrono_datetime_as_bson_datetime")]
     pub expires_at: DateTime<Utc>,
 }
@@ -77,6 +81,10 @@ impl fmt::Debug for AuthDeviceCode {
             .field("slow_down_increments", &self.slow_down_increments)
             .field("client_label", &self.client_label)
             .field("client_user_agent", &self.client_user_agent)
+            .field(
+                "client_ip",
+                &self.client_ip.as_ref().map(|ip| RedactedLen(ip.len())),
+            )
             .field(
                 "client_ip_hmac",
                 &self
@@ -116,6 +124,7 @@ impl fmt::Debug for AuthDeviceCode {
             .field("approved_at", &self.approved_at)
             .field("delivered_at", &self.delivered_at)
             .field("denied_at", &self.denied_at)
+            .field("denied_by_user_id", &self.denied_by_user_id)
             .field("expires_at", &self.expires_at)
             .finish()
     }
@@ -136,6 +145,7 @@ mod tests {
             slow_down_increments: 0,
             client_label: Some("wsl-calvin".to_string()),
             client_user_agent: Some("nyxid-cli/0.8.0".to_string()),
+            client_ip: Some("203.0.113.10".to_string()),
             client_ip_hmac: Some("11112222".repeat(8)),
             last_polled_at: Some(now + chrono::Duration::seconds(5)),
             approved_user_id: Some(uuid::Uuid::new_v4().to_string()),
@@ -148,6 +158,7 @@ mod tests {
             approved_at: Some(now + chrono::Duration::seconds(10)),
             delivered_at: Some(now + chrono::Duration::seconds(20)),
             denied_at: None,
+            denied_by_user_id: None,
             expires_at: now + chrono::Duration::minutes(10),
         }
     }
@@ -177,6 +188,7 @@ mod tests {
         assert_eq!(row.slow_down_increments, restored.slow_down_increments);
         assert_eq!(row.client_label, restored.client_label);
         assert_eq!(row.client_user_agent, restored.client_user_agent);
+        assert_eq!(row.client_ip, restored.client_ip);
         assert_eq!(row.client_ip_hmac, restored.client_ip_hmac);
         assert_eq!(row.approved_user_id, restored.approved_user_id);
         assert_eq!(row.approved_session_id, restored.approved_session_id);
@@ -210,6 +222,7 @@ mod tests {
             restored.delivered_at.unwrap().timestamp_millis()
         );
         assert_eq!(row.denied_at, restored.denied_at);
+        assert_eq!(row.denied_by_user_id, restored.denied_by_user_id);
         assert_eq!(
             row.expires_at.timestamp_millis(),
             restored.expires_at.timestamp_millis()
@@ -225,6 +238,7 @@ mod tests {
             row.device_code_hmac.as_str(),
             row.user_code_hmac.as_str(),
             row.client_ip_hmac.as_deref().unwrap(),
+            row.client_ip.as_deref().unwrap(),
             row.approver_ip_hmac.as_deref().unwrap(),
             "abcdef",
             "123456",
@@ -237,5 +251,18 @@ mod tests {
         assert!(debug.contains("expires_at"));
         assert!(debug.contains("wsl-calvin"));
         assert!(debug.contains("nyxid-cli/0.8.0"));
+    }
+
+    #[test]
+    fn legacy_bson_without_new_optional_fields_deserializes() {
+        let row = make_auth_device_code();
+        let mut doc = bson::to_document(&row).expect("serialize");
+        doc.remove("client_ip");
+        doc.remove("denied_by_user_id");
+
+        let restored: AuthDeviceCode = bson::from_document(doc).expect("deserialize legacy row");
+
+        assert!(restored.client_ip.is_none());
+        assert!(restored.denied_by_user_id.is_none());
     }
 }
