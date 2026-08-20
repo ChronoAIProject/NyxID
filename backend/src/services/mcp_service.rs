@@ -2,7 +2,7 @@ use std::collections::{HashMap, HashSet};
 
 use futures::TryStreamExt;
 use mongodb::bson::doc;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
 use crate::crypto::aes::EncryptionKeys;
@@ -277,11 +277,30 @@ pub fn exact_operation_digest(
     endpoint: &McpToolEndpoint,
     arguments: &serde_json::Value,
 ) -> String {
+    exact_operation_digest_from_parts(
+        user_service_id,
+        &endpoint.endpoint_id,
+        &endpoint_contract_digest(endpoint),
+        arguments,
+    )
+}
+
+/// Digest of one exact invocation from already-published response fields.
+///
+/// A client holding a discovery response can compute this without reloading
+/// the catalog: `endpoint_id` and `endpoint_contract_digest` are on
+/// `ExactOperationViewOperation`.
+pub fn exact_operation_digest_from_parts(
+    user_service_id: &str,
+    endpoint_id: &str,
+    endpoint_contract_digest: &str,
+    arguments: &serde_json::Value,
+) -> String {
     canonical_sha256(serde_json::json!({
         "contract_version": "nyxid-exact-operation.v1",
         "user_service_id": user_service_id,
-        "endpoint_id": endpoint.endpoint_id,
-        "endpoint_contract_digest": endpoint_contract_digest(endpoint),
+        "endpoint_id": endpoint_id,
+        "endpoint_contract_digest": endpoint_contract_digest,
         "arguments": arguments,
     }))
 }
@@ -303,7 +322,7 @@ pub fn is_exact_visible(service: &McpToolService) -> bool {
 /// representation. Keeping the projection here lets discovery and exact
 /// approval hash the same representation without duplicating handler DTO
 /// construction in the authorization path.
-#[derive(Clone, Debug, PartialEq, Serialize)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct ExactOperationViewOperation {
     pub endpoint_id: String,
     pub name: String,
@@ -318,7 +337,7 @@ pub struct ExactOperationViewOperation {
 }
 
 /// One service in the canonical delegated exact-operation view.
-#[derive(Clone, Debug, PartialEq, Serialize)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct ExactOperationViewService {
     pub user_service_id: String,
     /// Canonical catalog provider identity. Custom endpoints have no catalog
@@ -4534,6 +4553,20 @@ mod tests {
             digest,
             "sha256:1bcaa1b49841edd6af5c6787659938cfe47196f3c6d2e38b460d955c4ccad4e3"
         );
+    }
+
+    #[test]
+    fn exact_operation_digest_parts_equivalence() {
+        let endpoint = make_endpoint("list_items", "List items");
+        let arguments = serde_json::json!({"limit": 10});
+        let from_endpoint = exact_operation_digest("us-alpha", &endpoint, &arguments);
+        let from_parts = exact_operation_digest_from_parts(
+            "us-alpha",
+            &endpoint.endpoint_id,
+            &endpoint_contract_digest(&endpoint),
+            &arguments,
+        );
+        assert_eq!(from_endpoint, from_parts);
     }
 
     #[test]
