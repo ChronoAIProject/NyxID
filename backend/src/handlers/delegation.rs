@@ -263,6 +263,7 @@ mod tests {
     const TEST_SERVICE_A: &str = "00000000-0000-4000-8000-000000000101";
     const TEST_SERVICE_B: &str = "00000000-0000-4000-8000-000000000102";
     const TEST_GENERIC_SERVICE: &str = "00000000-0000-4000-8000-000000000103";
+    const TEST_NODE_ID: &str = "00000000-0000-4000-8000-000000000600";
 
     const CREATE_PATH: &str = "/api/v1/approvals/exact-service/requests";
 
@@ -277,12 +278,15 @@ mod tests {
         receiver_client_id: String,
         receiver_secret: String,
         requested_service_ids: Vec<String>,
+        requested_node_ids: Vec<String>,
         catalog_digest: String,
         exact_view_digest: String,
         operation: mcp_service::ExactOperationViewOperation,
         operation_digest: String,
         provider_calls: Arc<AtomicUsize>,
         provider: tokio::task::JoinHandle<()>,
+        _node_rx:
+            tokio::sync::mpsc::Receiver<crate::services::node_ws_manager::NodeOutboundMessage>,
     }
 
     impl Drop for FullRouterFixture {
@@ -405,6 +409,31 @@ mod tests {
         .await
         .expect("seed full-router approval config");
 
+        let requested_node_ids = vec![TEST_NODE_ID.to_string()];
+        db.collection::<Node>(NODES)
+            .insert_one(Node {
+                id: TEST_NODE_ID.to_string(),
+                user_id: TEST_USER_ID.to_string(),
+                name: "full-router-scope-node".to_string(),
+                status: NodeStatus::Online,
+                auth_token_hash: "scope-node-token-hash".to_string(),
+                signing_secret_encrypted: None,
+                signing_secret_hash: "scope-node-signing-hash".to_string(),
+                last_heartbeat_at: Some(Utc::now()),
+                connected_at: Some(Utc::now()),
+                metadata: None,
+                metrics: NodeMetrics::default(),
+                is_active: true,
+                created_at: Utc::now(),
+                updated_at: Utc::now(),
+            })
+            .await
+            .expect("insert fixture node for explicit node-bound token");
+        let (node_tx, node_rx) = tokio::sync::mpsc::channel(8);
+        state
+            .node_ws_manager
+            .register_connection(TEST_NODE_ID, node_tx);
+
         let source_token = jwt::generate_oauth_access_token(
             &state.jwt_keys,
             &state.config,
@@ -417,8 +446,8 @@ mod tests {
             Some(jwt::AccessTokenRestrictions {
                 resources: &[],
                 allowed_service_ids: &requested_service_ids,
-                allowed_node_ids: &[],
-                allow_all_nodes: true,
+                allowed_node_ids: &requested_node_ids,
+                allow_all_nodes: false,
             }),
             &actor_client_id,
         )
@@ -435,11 +464,55 @@ mod tests {
             &[],
             Some(false),
             &requested_service_ids,
-            Some(true),
-            &[],
+            Some(false),
+            &requested_node_ids,
         )
         .await
         .expect("exchange full-router delegated token");
+
+        let (_, private) = crate::routes::build_router();
+        let app = private.with_state(state.clone());
+        let (discovery_status, discovery) = full_router_json_request(
+            &app,
+            Method::GET,
+            "/api/v1/delegation/operation-catalog",
+            &exchanged.access_token,
+            None,
+        )
+        .await;
+        assert_eq!(
+            discovery_status,
+            StatusCode::OK,
+            "discovery failed: {discovery}"
+        );
+        assert_eq!(
+            discovery["contract_version"],
+            "nyxid-delegated-operation-catalog.v2"
+        );
+        let services: Vec<mcp_service::ExactOperationViewService> =
+            serde_json::from_value(discovery["services"].clone())
+                .expect("decode discovery services from HTTP body");
+        let service = services
+            .iter()
+            .find(|service| service.user_service_id == TEST_SERVICE_A)
+            .expect("full-router service in discovery response");
+        assert!(
+            service.node_id.is_none(),
+            "fixture service must stay direct-routed so the HTTP spy remains the effect path"
+        );
+        let operation = service
+            .operations
+            .first()
+            .cloned()
+            .expect("full-router operation");
+        let arguments = serde_json::json!({});
+        let operation_digest = mcp_service::exact_operation_digest_from_parts(
+            TEST_SERVICE_A,
+            &operation.endpoint_id,
+            &operation.endpoint_contract_digest,
+            &arguments,
+        );
+
         let delegated_auth = delegated_auth_from_token(&state, &exchanged.access_token);
         let grant = db
             .collection::<CatalogDelegationGrant>(CATALOG_DELEGATION_GRANTS)
@@ -449,42 +522,12 @@ mod tests {
             .await
             .expect("load exchanged grant")
             .expect("exchange persisted a grant");
-        let AxumJson(discovery) = get_operation_catalog(State(state.clone()), delegated_auth)
-            .await
-            .expect("discover full-router operation catalog");
-        let operation = discovery
-            .services
-            .iter()
-            .find(|service| service.user_service_id == TEST_SERVICE_A)
-            .and_then(|service| service.operations.first())
-            .cloned()
-            .expect("full-router operation");
-        let arguments = serde_json::json!({});
-        let catalog = mcp_service::load_operation_catalog(
-            &db,
-            state.node_ws_manager.as_ref(),
-            TEST_USER_ID,
-            mcp_service::NodeScope::Unrestricted,
-            mcp_service::ServiceScope::Allowed(&requested_service_ids),
-        )
-        .await
-        .expect("load full-router canonical catalog");
-        let live_endpoint = catalog
-            .services
-            .iter()
-            .find(|service| service.service_id == TEST_SERVICE_A)
-            .and_then(|service| {
-                service
-                    .endpoints
-                    .iter()
-                    .find(|endpoint| endpoint.endpoint_id == operation.endpoint_id)
-            })
-            .expect("full-router live endpoint");
-        let operation_digest =
-            mcp_service::exact_operation_digest(TEST_SERVICE_A, live_endpoint, &arguments);
+        assert!(
+            !grant.allow_all_nodes,
+            "full-router token must be explicitly node-bound"
+        );
+        assert_eq!(grant.allowed_node_ids, requested_node_ids);
 
-        let (_, private) = crate::routes::build_router();
-        let app = private.with_state(state.clone());
         FullRouterFixture {
             db,
             state,
@@ -496,12 +539,20 @@ mod tests {
             receiver_client_id,
             receiver_secret,
             requested_service_ids,
-            catalog_digest: discovery.catalog_digest,
-            exact_view_digest: discovery.exact_view_digest,
+            requested_node_ids,
+            catalog_digest: discovery["catalog_digest"]
+                .as_str()
+                .expect("discovery catalog_digest")
+                .to_string(),
+            exact_view_digest: discovery["exact_view_digest"]
+                .as_str()
+                .expect("discovery exact_view_digest")
+                .to_string(),
             operation,
             operation_digest,
             provider_calls,
             provider,
+            _node_rx: node_rx,
         }
     }
 
@@ -518,24 +569,26 @@ mod tests {
             "endpoint_contract_digest": fixture.operation.endpoint_contract_digest,
             "operation_digest": fixture.operation_digest,
             "operation_id": fixture.operation.endpoint_id,
+            // Client-originated bookkeeping with no discovery-response source.
+            // Validated only as `>= 1`; not producer-owned freshness evidence
+            // (issue #1457 AC5). Keep `1` here only.
             "operation_generation": 1,
             "idempotency_key": idempotency_key,
             "arguments": {},
         })
     }
 
-    fn full_router_fence_body(
-        fixture: &FullRouterFixture,
-        idempotency_key: &str,
-        exact_view_digest: Option<&str>,
+    fn fence_body_from_created(
+        created: &serde_json::Value,
+        exact_view_digest_override: Option<&str>,
     ) -> serde_json::Value {
         serde_json::json!({
-            "catalog_digest": fixture.catalog_digest,
-            "exact_view_digest": exact_view_digest,
-            "operation_digest": fixture.operation_digest,
-            "operation_id": fixture.operation.endpoint_id,
-            "operation_generation": 1,
-            "idempotency_key": idempotency_key,
+            "catalog_digest": created["catalog_digest"],
+            "exact_view_digest": exact_view_digest_override,
+            "operation_digest": created["operation_digest"],
+            "operation_id": created["operation_id"],
+            "operation_generation": created["operation_generation"],
+            "idempotency_key": created["idempotency_key"],
         })
     }
 
@@ -598,8 +651,8 @@ mod tests {
             &[],
             Some(false),
             &fixture.requested_service_ids,
-            Some(true),
-            &[],
+            Some(false),
+            &fixture.requested_node_ids,
         )
         .await
         .expect("re-exchange full-router delegated token");
@@ -618,26 +671,23 @@ mod tests {
     }
 
     async fn approve_full_router_request(fixture: &FullRouterFixture, request_id: &str) {
-        approval_service::process_decision(
-            &fixture.db,
-            &fixture.state.config,
-            &fixture.state.http_client,
-            fixture.state.fcm_auth.clone(),
-            fixture.state.apns_auth.clone(),
-            request_id,
-            true,
-            None,
-            None,
-            "full-router",
+        let path = format!("/api/v1/approvals/requests/{request_id}/decide");
+        let (status, body) = full_router_json_request(
+            &fixture.app,
+            Method::POST,
+            &path,
+            &fixture.source_token,
+            Some(serde_json::json!({ "approved": true })),
         )
-        .await
-        .expect("approve full-router exact request");
+        .await;
+        assert_eq!(status, StatusCode::OK, "decide failed: {body}");
+        assert_eq!(body["status"], "approved", "decide body: {body}");
     }
 
     async fn create_full_router_request(
         fixture: &FullRouterFixture,
         idempotency_key: &str,
-    ) -> String {
+    ) -> serde_json::Value {
         let (status, body) = full_router_json_request(
             &fixture.app,
             Method::POST,
@@ -651,27 +701,25 @@ mod tests {
         )
         .await;
         assert_eq!(status, StatusCode::OK, "create failed: {body}");
-        body["request_id"]
-            .as_str()
-            .expect("create response request_id")
-            .to_string()
+        body
     }
 
     async fn redeem_full_router_request(
         fixture: &FullRouterFixture,
-        request_id: &str,
-        idempotency_key: &str,
+        created: &serde_json::Value,
     ) -> (StatusCode, serde_json::Value) {
+        let request_id = created["request_id"]
+            .as_str()
+            .expect("create response request_id");
         let path = format!("/api/v1/approvals/exact-service/requests/{request_id}/redeem");
         full_router_json_request(
             &fixture.app,
             Method::POST,
             &path,
             &fixture.delegated_token,
-            Some(full_router_fence_body(
-                fixture,
-                idempotency_key,
-                Some(&fixture.exact_view_digest),
+            Some(fence_body_from_created(
+                created,
+                created["exact_view_digest"].as_str(),
             )),
         )
         .await
@@ -1633,6 +1681,9 @@ mod tests {
             generic_endpoint,
             &generic_arguments,
         );
+        // Create-side `operation_generation: 1` is client-originated
+        // bookkeeping (validated `>= 1`), not a fence echo. Redeem fences
+        // in this test copy `created.operation_generation`.
         let generic_create = |exact_view_digest: Option<String>, idempotency_key: &str| {
             crate::services::exact_service_approval_service::ExactServiceApprovalCreate {
                 user_service_id: TEST_GENERIC_SERVICE.to_string(),
@@ -2163,7 +2214,7 @@ mod tests {
                 Method::POST,
                 &path,
                 &fixture.delegated_token,
-                Some(full_router_fence_body(&fixture, idempotency_key, digest)),
+                Some(fence_body_from_created(&created, digest)),
             )
             .await;
             assert_error_response(
@@ -2200,10 +2251,9 @@ mod tests {
             Method::POST,
             &redeem_path,
             &fixture.delegated_token,
-            Some(full_router_fence_body(
-                &fixture,
-                idempotency_key,
-                Some(&fixture.exact_view_digest),
+            Some(fence_body_from_created(
+                &created,
+                created["exact_view_digest"].as_str(),
             )),
         )
         .await;
@@ -2324,7 +2374,11 @@ mod tests {
             // invalidate after approval.
             refresh_full_router_delegation(&mut fixture).await;
             let idempotency_key = format!("grant-{grant_state}-redeem");
-            let request_id = create_full_router_request(&fixture, &idempotency_key).await;
+            let created = create_full_router_request(&fixture, &idempotency_key).await;
+            let request_id = created["request_id"]
+                .as_str()
+                .expect("create response request_id")
+                .to_string();
             approve_full_router_request(&fixture, &request_id).await;
             match grant_state {
                 "absent" => {
@@ -2359,15 +2413,15 @@ mod tests {
             }
             let redeem_path =
                 format!("/api/v1/approvals/exact-service/requests/{request_id}/redeem");
+            let calls_before = fixture.provider_calls.load(Ordering::SeqCst);
             let (status, body) = full_router_json_request(
                 &fixture.app,
                 Method::POST,
                 &redeem_path,
                 &fixture.delegated_token,
-                Some(full_router_fence_body(
-                    &fixture,
-                    &idempotency_key,
-                    Some(&fixture.exact_view_digest),
+                Some(fence_body_from_created(
+                    &created,
+                    created["exact_view_digest"].as_str(),
                 )),
             )
             .await;
@@ -2379,7 +2433,11 @@ mod tests {
                 "Unauthorized: Delegated catalog authority is invalid or inactive",
             );
             assert_no_full_router_redemption(&fixture, &request_id).await;
-            assert_eq!(fixture.provider_calls.load(Ordering::SeqCst), 0);
+            assert_eq!(
+                fixture.provider_calls.load(Ordering::SeqCst),
+                calls_before,
+                "{grant_state} grant redeem must not reach the provider"
+            );
             grants
                 .replace_one(
                     mongodb::bson::doc! { "_id": &fixture.grant.id },
@@ -2393,6 +2451,11 @@ mod tests {
                 .await
                 .expect("restore live grant after redeem rejection");
         }
+        assert_eq!(
+            fixture.provider_calls.load(Ordering::SeqCst),
+            0,
+            "every inactive-grant row must fail before downstream dispatch"
+        );
     }
 
     #[tokio::test]
@@ -2403,7 +2466,11 @@ mod tests {
 
         let service_key = "service-deactivated";
         refresh_full_router_delegation(&mut fixture).await;
-        let service_request = create_full_router_request(&fixture, service_key).await;
+        let service_created = create_full_router_request(&fixture, service_key).await;
+        let service_request = service_created["request_id"]
+            .as_str()
+            .expect("create response request_id")
+            .to_string();
         approve_full_router_request(&fixture, &service_request).await;
         user_services
             .update_one(
@@ -2412,8 +2479,8 @@ mod tests {
             )
             .await
             .expect("deactivate service between approve and redeem");
-        let (status, body) =
-            redeem_full_router_request(&fixture, &service_request, service_key).await;
+        let calls_before = fixture.provider_calls.load(Ordering::SeqCst);
+        let (status, body) = redeem_full_router_request(&fixture, &service_created).await;
         assert_error_response(
             status,
             &body,
@@ -2422,6 +2489,11 @@ mod tests {
             "Unauthorized: Delegated catalog authority is invalid or inactive",
         );
         assert_no_full_router_redemption(&fixture, &service_request).await;
+        assert_eq!(
+            fixture.provider_calls.load(Ordering::SeqCst),
+            calls_before,
+            "service deactivation redeem must not reach the provider"
+        );
         user_services
             .update_one(
                 mongodb::bson::doc! { "_id": TEST_SERVICE_A },
@@ -2432,47 +2504,36 @@ mod tests {
 
         let node_key = "node-binding-mutated";
         refresh_full_router_delegation(&mut fixture).await;
-        let node_request = create_full_router_request(&fixture, node_key).await;
+        let node_created = create_full_router_request(&fixture, node_key).await;
+        let node_request = node_created["request_id"]
+            .as_str()
+            .expect("create response request_id")
+            .to_string();
         approve_full_router_request(&fixture, &node_request).await;
-        let node_id = "00000000-0000-4000-8000-000000000601";
-        fixture
-            .db
-            .collection::<Node>(NODES)
-            .insert_one(Node {
-                id: node_id.to_string(),
-                user_id: TEST_USER_ID.to_string(),
-                name: "full-router-node".to_string(),
-                status: NodeStatus::Online,
-                auth_token_hash: "node-token-hash".to_string(),
-                signing_secret_encrypted: None,
-                signing_secret_hash: "node-signing-hash".to_string(),
-                last_heartbeat_at: Some(Utc::now()),
-                connected_at: Some(Utc::now()),
-                metadata: None,
-                metrics: NodeMetrics::default(),
-                is_active: true,
-                created_at: Utc::now(),
-                updated_at: Utc::now(),
-            })
-            .await
-            .expect("insert online node for binding mutation");
-        let (node_tx, _node_rx) = tokio::sync::mpsc::channel(8);
-        fixture
-            .state
-            .node_ws_manager
-            .register_connection(node_id, node_tx);
+        // Bind onto the fixture-scoped node (the token's allowlist), not a
+        // second node. An explicitly node-bound token excludes a service
+        // whose `node_id` is outside the allowlist from the scoped catalog,
+        // which fail-closes as `revoked` rather than `catalog_drift`. Binding
+        // to TEST_NODE_ID keeps the service in scope so this row still pins
+        // the exact-view digest change (`node_id: null` → the fixture node).
         user_services
             .update_one(
                 mongodb::bson::doc! { "_id": TEST_SERVICE_A },
-                mongodb::bson::doc! { "$set": { "node_id": node_id } },
+                mongodb::bson::doc! { "$set": { "node_id": TEST_NODE_ID } },
             )
             .await
             .expect("mutate primary node binding");
-        let (status, body) = redeem_full_router_request(&fixture, &node_request, node_key).await;
+        let calls_before = fixture.provider_calls.load(Ordering::SeqCst);
+        let (status, body) = redeem_full_router_request(&fixture, &node_created).await;
         assert_eq!(status, StatusCode::OK, "node mutation failed: {body}");
         assert_eq!(body["state"], "drifted");
         assert_eq!(body["failure_code"], "catalog_drift");
         assert_no_full_router_redemption(&fixture, &node_request).await;
+        assert_eq!(
+            fixture.provider_calls.load(Ordering::SeqCst),
+            calls_before,
+            "node-binding mutation redeem must not reach the provider"
+        );
         user_services
             .update_one(
                 mongodb::bson::doc! { "_id": TEST_SERVICE_A },
@@ -2483,7 +2544,11 @@ mod tests {
 
         let operation_key = "endpoint-contract-mutated";
         refresh_full_router_delegation(&mut fixture).await;
-        let operation_request = create_full_router_request(&fixture, operation_key).await;
+        let operation_created = create_full_router_request(&fixture, operation_key).await;
+        let operation_request = operation_created["request_id"]
+            .as_str()
+            .expect("create response request_id")
+            .to_string();
         approve_full_router_request(&fixture, &operation_request).await;
         service_endpoints
             .update_one(
@@ -2492,12 +2557,17 @@ mod tests {
             )
             .await
             .expect("mutate endpoint contract");
-        let (status, body) =
-            redeem_full_router_request(&fixture, &operation_request, operation_key).await;
+        let calls_before = fixture.provider_calls.load(Ordering::SeqCst);
+        let (status, body) = redeem_full_router_request(&fixture, &operation_created).await;
         assert_eq!(status, StatusCode::OK, "operation mutation failed: {body}");
         assert_eq!(body["state"], "drifted");
         assert_eq!(body["failure_code"], "catalog_drift");
         assert_no_full_router_redemption(&fixture, &operation_request).await;
+        assert_eq!(
+            fixture.provider_calls.load(Ordering::SeqCst),
+            calls_before,
+            "endpoint-contract mutation redeem must not reach the provider"
+        );
         service_endpoints
             .update_one(
                 mongodb::bson::doc! { "_id": &fixture.operation.endpoint_id },
@@ -2508,7 +2578,11 @@ mod tests {
 
         let endpoint_key = "endpoint-deactivated";
         refresh_full_router_delegation(&mut fixture).await;
-        let endpoint_request = create_full_router_request(&fixture, endpoint_key).await;
+        let endpoint_created = create_full_router_request(&fixture, endpoint_key).await;
+        let endpoint_request = endpoint_created["request_id"]
+            .as_str()
+            .expect("create response request_id")
+            .to_string();
         approve_full_router_request(&fixture, &endpoint_request).await;
         service_endpoints
             .update_one(
@@ -2517,12 +2591,17 @@ mod tests {
             )
             .await
             .expect("deactivate selected endpoint");
-        let (status, body) =
-            redeem_full_router_request(&fixture, &endpoint_request, endpoint_key).await;
+        let calls_before = fixture.provider_calls.load(Ordering::SeqCst);
+        let (status, body) = redeem_full_router_request(&fixture, &endpoint_created).await;
         assert_eq!(status, StatusCode::OK, "endpoint mutation failed: {body}");
         assert_eq!(body["state"], "revoked");
         assert_eq!(body["failure_code"], "selector_revoked");
         assert_no_full_router_redemption(&fixture, &endpoint_request).await;
+        assert_eq!(
+            fixture.provider_calls.load(Ordering::SeqCst),
+            calls_before,
+            "endpoint deactivation redeem must not reach the provider"
+        );
         service_endpoints
             .update_one(
                 mongodb::bson::doc! { "_id": &fixture.operation.endpoint_id },
@@ -2575,7 +2654,11 @@ mod tests {
             .expect("bind active credential");
         let credential_key = "credential-revoked";
         refresh_full_router_delegation(&mut fixture).await;
-        let credential_request = create_full_router_request(&fixture, credential_key).await;
+        let credential_created = create_full_router_request(&fixture, credential_key).await;
+        let credential_request = credential_created["request_id"]
+            .as_str()
+            .expect("create response request_id")
+            .to_string();
         approve_full_router_request(&fixture, &credential_request).await;
         fixture
             .db
@@ -2586,12 +2669,17 @@ mod tests {
             )
             .await
             .expect("revoke bound credential");
-        let (status, body) =
-            redeem_full_router_request(&fixture, &credential_request, credential_key).await;
+        let calls_before = fixture.provider_calls.load(Ordering::SeqCst);
+        let (status, body) = redeem_full_router_request(&fixture, &credential_created).await;
         assert_eq!(status, StatusCode::OK, "credential mutation failed: {body}");
         assert_eq!(body["state"], "revoked");
         assert_eq!(body["failure_code"], "selector_revoked");
         assert_no_full_router_redemption(&fixture, &credential_request).await;
+        assert_eq!(
+            fixture.provider_calls.load(Ordering::SeqCst),
+            calls_before,
+            "credential revocation redeem must not reach the provider"
+        );
 
         fixture
             .db
@@ -2615,7 +2703,11 @@ mod tests {
 
         let provider_key = "provider-rebound";
         refresh_full_router_delegation(&mut fixture).await;
-        let provider_request = create_full_router_request(&fixture, provider_key).await;
+        let provider_created = create_full_router_request(&fixture, provider_key).await;
+        let provider_request = provider_created["request_id"]
+            .as_str()
+            .expect("create response request_id")
+            .to_string();
         approve_full_router_request(&fixture, &provider_request).await;
         service_endpoints
             .update_many(
@@ -2637,12 +2729,17 @@ mod tests {
             )
             .await
             .expect("rebind service to alternate provider");
-        let (status, body) =
-            redeem_full_router_request(&fixture, &provider_request, provider_key).await;
+        let calls_before = fixture.provider_calls.load(Ordering::SeqCst);
+        let (status, body) = redeem_full_router_request(&fixture, &provider_created).await;
         assert_eq!(status, StatusCode::OK, "provider mutation failed: {body}");
         assert_eq!(body["state"], "drifted");
         assert_eq!(body["failure_code"], "catalog_drift");
         assert_no_full_router_redemption(&fixture, &provider_request).await;
+        assert_eq!(
+            fixture.provider_calls.load(Ordering::SeqCst),
+            calls_before,
+            "provider rebind redeem must not reach the provider"
+        );
 
         assert_eq!(
             fixture.provider_calls.load(Ordering::SeqCst),
@@ -2652,11 +2749,92 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn full_router_discovery_response_alone_is_sufficient_client_evidence() {
+        let mut fixture = setup_full_router_fixture("exact_router_ac4_client_evidence").await;
+        refresh_full_router_delegation(&mut fixture).await;
+
+        let (status, discovery) = full_router_json_request(
+            &fixture.app,
+            Method::GET,
+            "/api/v1/delegation/operation-catalog",
+            &fixture.delegated_token,
+            None,
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "discovery failed: {discovery}");
+        assert_eq!(
+            discovery["contract_version"],
+            "nyxid-delegated-operation-catalog.v2"
+        );
+        let services: Vec<mcp_service::ExactOperationViewService> =
+            serde_json::from_value(discovery["services"].clone())
+                .expect("decode discovery services from HTTP body");
+        let service = services
+            .iter()
+            .find(|service| service.user_service_id == TEST_SERVICE_A)
+            .expect("fixture service in discovery HTTP body");
+        assert!(service.node_id.is_none());
+        let operation = service
+            .operations
+            .first()
+            .expect("fixture operation in discovery HTTP body");
+        let arguments = serde_json::json!({});
+        let operation_digest = mcp_service::exact_operation_digest_from_parts(
+            TEST_SERVICE_A,
+            &operation.endpoint_id,
+            &operation.endpoint_contract_digest,
+            &arguments,
+        );
+
+        let idempotency_key = "ac4-client-evidence";
+        let (create_status, created) = full_router_json_request(
+            &fixture.app,
+            Method::POST,
+            CREATE_PATH,
+            &fixture.delegated_token,
+            Some(serde_json::json!({
+                "user_service_id": TEST_SERVICE_A,
+                "endpoint_id": operation.endpoint_id,
+                "catalog_digest": discovery["catalog_digest"],
+                "exact_view_digest": discovery["exact_view_digest"],
+                "endpoint_contract_digest": operation.endpoint_contract_digest,
+                "operation_digest": operation_digest,
+                "operation_id": operation.endpoint_id,
+                "operation_generation": 1,
+                "idempotency_key": idempotency_key,
+                "arguments": arguments,
+            })),
+        )
+        .await;
+        assert_eq!(create_status, StatusCode::OK, "create failed: {created}");
+        let request_id = created["request_id"]
+            .as_str()
+            .expect("create response request_id")
+            .to_string();
+        approve_full_router_request(&fixture, &request_id).await;
+
+        refresh_full_router_delegation(&mut fixture).await;
+        let (status, redeemed) = redeem_full_router_request(&fixture, &created).await;
+        assert_eq!(status, StatusCode::OK, "redeem failed: {redeemed}");
+        assert_eq!(redeemed["state"], "redeemed");
+        assert_eq!(redeemed["receipt"]["http_status"], 200);
+        assert_eq!(
+            fixture.provider_calls.load(Ordering::SeqCst),
+            1,
+            "response-derived discovery → create → redeem must dispatch exactly one effect"
+        );
+    }
+
+    #[tokio::test]
     async fn delegated_caller_without_catalog_scope_rejected_on_all_exact_routes() {
         let mut fixture = setup_full_router_fixture("exact_router_proxy_only").await;
         let request_key = "proxy-only-status-redeem";
         refresh_full_router_delegation(&mut fixture).await;
-        let request_id = create_full_router_request(&fixture, request_key).await;
+        let created = create_full_router_request(&fixture, request_key).await;
+        let request_id = created["request_id"]
+            .as_str()
+            .expect("create response request_id")
+            .to_string();
         approve_full_router_request(&fixture, &request_id).await;
 
         let proxy_only = token_exchange_service::exchange_token_with_authority(
@@ -2671,8 +2849,8 @@ mod tests {
             &[],
             Some(false),
             &fixture.requested_service_ids,
-            Some(true),
-            &[],
+            Some(false),
+            &fixture.requested_node_ids,
         )
         .await
         .expect("mint proxy-only delegated token");
@@ -2720,7 +2898,7 @@ mod tests {
                 "redeem",
                 Method::POST,
                 redeem_path,
-                Some(full_router_fence_body(&fixture, request_key, None)),
+                Some(fence_body_from_created(&created, None)),
             ),
         ];
         for (route, method, path, body) in requests {
