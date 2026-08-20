@@ -1,0 +1,26 @@
+{
+  "nyxid-assistant-actions.v4": [
+    "service.connect"
+  ],
+  "nyxid-assistant-actions.v5": [
+    "service.connect",
+    "service.reauthorize",
+    "key.create",
+    "key.rotate"
+  ],
+  "nyxid-assistant-actions.v6": [
+    "service.connect",
+    "key.create"
+  ],
+  "nyxid-assistant-actions.v7": [
+    "service.connect",
+    "key.create",
+    "key.rotate"
+  ],
+  "nyxid-assistant-actions.v8": [
+    "service.connect",
+    "service.reauthorize",
+    "key.create",
+    "key.rotate"
+  ]
+}

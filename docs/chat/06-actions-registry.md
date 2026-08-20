@@ -128,7 +128,38 @@ The response content type is `application/json`. The current body is equivalent 
 }
 ```
 
-The serialized body is created once through `LazyLock<String>` and reused. The handler has no service/model layer because the manifest is compile-time product metadata.
+The default (no-query) serialized body is created once through `LazyLock<String>` and reused. Per-revision compositions are pre-serialized the same way. The handler has no service/model layer because the manifest is compile-time product metadata.
+
+### Revision negotiation
+
+`GET /api/v1/assistant/actions?revision=<r>`:
+
+| Request | Response |
+| --- | --- |
+| No `revision` query param | Latest body, byte-identical to the default composition (`schema_version` 4, `revision` `nyxid-assistant-actions.v8`, including dormant Wave-2 descriptors). Current consumers are unchanged. |
+| Known `<r>` | A composition whose `revision` field is exactly `<r>` and whose `actions` are **that revision's action-name set**, serialized with the **current** schemas and descriptions — not historical bytes. Aevatar compares pinned actions with `JsonNode.DeepEquals`. The live consumer ask is `?revision={SupportedRegistryRevision}` (v7 on `origin/dev`, v8 on `origin/feature/integrate`), both of which pin `key.create` to the current least-scope schema. Historical v4/v5 still DeepEquals `key.create` against the pre-`minItems` constant on those branches; NyxID still serves current bytes for every known `<r>`, per this contract. |
+| Unknown `<r>` | `404` with the stable `not_found` / `1003` error body. No manifest fields. |
+| Malformed `<r>` (more than 128 characters, or any control character) | `400` with the stable `validation_error` / `1008` error body. |
+
+Known revisions are the static `revision → action-name set` map mirroring Aevatar `PinnedActionsByRevision` (`origin/dev` accepts `{v4, v5, v6, v7}`; `origin/feature/integrate` accepts those plus `v8`). v7's set is `{service.connect, key.create, key.rotate}` — not a prefix of the current default array (`service.reauthorize` sits at index 1). `aevatar-nyxid-actions.v1` is Aevatar's own composition namespace, not a NyxID-published revision; NyxID returns 404 for it.
+
+The rate-limit exemption is exact-path (`/api/v1/assistant/actions`). Query strings do not change the path.
+
+#### Published-revision contract
+
+- **Immutable.** Once a revision is published, its action-name set is never edited. A schema or description change to a shipped verb is a coordinated pin-breaking event, not a silent rewrite of an old revision.
+- **Monotone (each ⊆ the next), waves only append.** A new wave adds names under the current string as dormant descriptors, then a later revision-bump PR adds a new map entry whose set is the previous pin plus those names. Historical exception, frozen in Aevatar's pin map and not to be repeated: v5 (`WaveOneDraft`) listed `service.reauthorize` and `key.rotate`, then v6 (`LeastScope`) dropped them. From v6 onward the served sets are append-only.
+- **Dormant descriptors** (today: the 12 Wave-2 verbs) appear only in the default latest body. They are absent from every pinned revision set until a future revision pins them. No wave PR bumps `ASSISTANT_ACTIONS_REVISION`.
+
+### Upstream consumer ask (Aevatar)
+
+Startup fetch should request:
+
+```text
+{Aevatar:NyxId:ApiBaseUrl}/api/v1/assistant/actions?revision={SupportedRegistryRevision}
+```
+
+On `404` (older NyxID without negotiation), fall back to the bare path and existing set-membership validation. One URL-builder change plus fallback; NyxID and Aevatar can then deploy independently.
 
 ## Top-level contract
 
@@ -215,6 +246,10 @@ The authoritative successor read exposes `created_at`, exact
 key material. Both browser journeys display a newly committed secret once and
 submit only `{ "key": { "keyId": "..." } }` to Aevatar.
 
+## ADR: Wave-0 G1 resolved as fork (b)
+
+G1 of the assistant support contract is resolved as **fork (b): extended REST**. Wave-1 postconditions shipped as hardened REST evidence projections (`GET /keys/{id}/authorization`, `GET /api-keys/{id}/authorization`) plus delegated `account:read` GET admission, consumed by Aevatar's REST reader (`NyxIdAssistantToolSource` / `NyxIdApiClient`). The MCP `nyx__*` G2 read built-ins (`nyx__list_api_keys`, `nyx__readiness`, and similar) will not be built. The contract §6 matrix "mechanism" column re-targets to the registered REST reads and projections documented above. Aevatar wave issues must not target MCP-client read tools that will never exist. Class-P (proxy execution in chat) and uncovered Class-R parity reads remain gapped; that is Wave-0 product debt owned by Aevatar's mechanism decision and does not gate Wave 2/3/4 postconditions.
+
 ## `params_schema` loader grammar
 
 Aevatar accepts this restricted recursive schema grammar:
@@ -245,6 +280,8 @@ When `Aevatar:NyxId:AssistantActions:Enabled` is `true`, Aevatar registers a sta
 ```text
 {Aevatar:NyxId:ApiBaseUrl}/api/v1/assistant/actions
 ```
+
+Once the consumer-ask above lands, that fetch appends `?revision={SupportedRegistryRevision}` and falls back to this bare path on 404.
 
 The source accepts an absolute HTTP or HTTPS NyxID base URL. It builds the registry URL from the configured origin and base path, performs one GET with response-header streaming, and enforces a 1 MiB limit from both `Content-Length` and bytes read.
 

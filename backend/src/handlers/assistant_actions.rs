@@ -1,12 +1,56 @@
+use std::collections::HashMap;
 use std::sync::LazyLock;
 
+use axum::extract::Query;
 use axum::http::header;
 use axum::response::{IntoResponse, Response};
+use serde::Deserialize;
 use serde::Serialize;
 use serde_json::{Value, json};
 
+use crate::errors::AppError;
+
 pub const ASSISTANT_ACTIONS_SCHEMA_VERSION: u32 = 4;
 pub const ASSISTANT_ACTIONS_REVISION: &str = "nyxid-assistant-actions.v8";
+
+/// Maximum accepted `?revision=` length. Matches Aevatar's
+/// `ReadRequiredString(..., 128)` bound on the revision field.
+const MAX_REVISION_PARAM_CHARS: usize = 128;
+
+/// Mirrors Aevatar `PinnedActionsByRevision` on `origin/feature/integrate`
+/// (the superset of `origin/dev`'s `{v4…v7}`). Action-name order is Aevatar's
+/// listed order; it is not a prefix of the current default array (v7 skips
+/// `service.reauthorize` at index 1). `aevatar-nyxid-actions.v1` is Aevatar's
+/// own composition namespace and is not a NyxID-published revision.
+const PINNED_ACTIONS_BY_REVISION: &[(&str, &[&str])] = &[
+    ("nyxid-assistant-actions.v4", &["service.connect"]),
+    (
+        "nyxid-assistant-actions.v5",
+        &[
+            "service.connect",
+            "service.reauthorize",
+            "key.create",
+            "key.rotate",
+        ],
+    ),
+    (
+        "nyxid-assistant-actions.v6",
+        &["service.connect", "key.create"],
+    ),
+    (
+        "nyxid-assistant-actions.v7",
+        &["service.connect", "key.create", "key.rotate"],
+    ),
+    (
+        "nyxid-assistant-actions.v8",
+        &[
+            "service.connect",
+            "service.reauthorize",
+            "key.create",
+            "key.rotate",
+        ],
+    ),
+];
 
 const SERVICE_CONNECT_DESCRIPTION: &str = "Ask the user's browser to connect a service through NyxID. Use when a task needs a catalog service (by slug) or a custom HTTPS endpoint that the user has not connected yet. NyxID owns the entire journey - auth modality, consent copy, and credential storage - and reports back only completion or decline with a safe resource reference. Never ask the user for keys, tokens, or passwords in chat.";
 const SERVICE_REAUTHORIZE_DESCRIPTION: &str = "Ask the user's browser to re-authorize an existing connected service and review its requested scopes. Use when a task needs permissions that the referenced user service does not currently grant. NyxID owns the authorization journey and credential storage, and reports only a safe user-service reference. Never ask the user for keys, tokens, passwords, or authorization codes in chat.";
@@ -372,31 +416,113 @@ static MANIFEST_BODY: LazyLock<String> = LazyLock::new(|| {
     serde_json::to_string(&manifest).expect("assistant actions manifest must serialize")
 });
 
+/// Per-revision bodies: that revision's action-name set serialized with the
+/// *current* descriptor schemas and descriptions, not historical bytes.
+/// Aevatar's `JsonNode.DeepEquals` pin is a compiled constant per action;
+/// current bytes are the ones a deployed composition can accept.
+static PINNED_REVISION_BODIES: LazyLock<HashMap<&'static str, String>> = LazyLock::new(|| {
+    PINNED_ACTIONS_BY_REVISION
+        .iter()
+        .map(|(revision, action_names)| {
+            (*revision, compose_revision_manifest(revision, action_names))
+        })
+        .collect()
+});
+
+#[derive(Debug, Default, Deserialize)]
+pub(crate) struct AssistantActionsQuery {
+    revision: Option<String>,
+}
+
+fn compose_revision_manifest(revision: &'static str, action_names: &[&str]) -> String {
+    let latest: Value = serde_json::from_str(manifest_body())
+        .expect("latest assistant actions manifest must parse");
+    let actions = latest
+        .get("actions")
+        .and_then(Value::as_array)
+        .expect("latest manifest must have an actions array");
+    let filtered: Vec<Value> = actions
+        .iter()
+        .filter(|entry| {
+            entry
+                .get("action")
+                .and_then(Value::as_str)
+                .is_some_and(|name| action_names.contains(&name))
+        })
+        .cloned()
+        .collect();
+    assert_eq!(
+        filtered.len(),
+        action_names.len(),
+        "pinned action missing from current descriptors for {revision}"
+    );
+
+    serde_json::to_string(&json!({
+        "schema_version": latest["schema_version"],
+        "revision": revision,
+        "actions": filtered,
+    }))
+    .expect("revision assistant actions manifest must serialize")
+}
+
+fn revision_param_is_malformed(revision: &str) -> bool {
+    revision.chars().count() > MAX_REVISION_PARAM_CHARS || revision.chars().any(char::is_control)
+}
+
+fn json_manifest_response(body: &'static str) -> Response {
+    ([(header::CONTENT_TYPE, "application/json")], body).into_response()
+}
+
 pub fn manifest_body() -> &'static str {
     MANIFEST_BODY.as_str()
 }
 
+fn pinned_revision_body(revision: &str) -> Option<&'static str> {
+    PINNED_REVISION_BODIES.get(revision).map(String::as_str)
+}
+
+fn resolve_assistant_actions_body(revision: Option<&str>) -> Result<&'static str, AppError> {
+    let Some(revision) = revision else {
+        return Ok(manifest_body());
+    };
+    if revision_param_is_malformed(revision) {
+        return Err(AppError::ValidationError(
+            "Invalid assistant actions revision".to_string(),
+        ));
+    }
+    pinned_revision_body(revision)
+        .ok_or_else(|| AppError::NotFound("Unknown assistant actions revision".to_string()))
+}
+
 /// GET /api/v1/assistant/actions
-pub async fn get_assistant_actions() -> Response {
-    (
-        [(header::CONTENT_TYPE, "application/json")],
-        manifest_body(),
-    )
-        .into_response()
+pub async fn get_assistant_actions(Query(query): Query<AssistantActionsQuery>) -> Response {
+    match resolve_assistant_actions_body(query.revision.as_deref()) {
+        Ok(body) => json_manifest_response(body),
+        Err(error) => error.into_response(),
+    }
 }
 
 #[cfg(test)]
 mod tests {
-    use std::collections::HashSet;
+    use std::collections::{HashMap as StdHashMap, HashSet};
 
     use axum::{
+        Extension,
         body::{Body, to_bytes},
         http::{Request, StatusCode, header},
+        middleware,
+        response::Response,
     };
     use serde_json::{Value, json};
     use tower::ServiceExt;
 
-    use super::{ASSISTANT_ACTIONS_REVISION, ASSISTANT_ACTIONS_SCHEMA_VERSION, manifest_body};
+    use super::{
+        ASSISTANT_ACTIONS_REVISION, ASSISTANT_ACTIONS_SCHEMA_VERSION, PINNED_ACTIONS_BY_REVISION,
+        manifest_body, pinned_revision_body,
+    };
+    use crate::mw::rate_limit::{
+        create_per_ip_rate_limiter, create_rate_limiter, rate_limit_middleware,
+    };
 
     const MAXIMUM_REGISTRY_BYTES: usize = 1_048_576;
     /// Names the manifest may contain. The first 14 mirror the Aevatar
@@ -903,6 +1029,14 @@ mod tests {
     }
 
     fn assert_manifest_conforms(body: &str) {
+        assert_manifest_conforms_revision(body, ASSISTANT_ACTIONS_REVISION, None);
+    }
+
+    fn assert_manifest_conforms_revision(
+        body: &str,
+        expected_revision: &str,
+        expected_actions: Option<&[&str]>,
+    ) {
         assert!(body.len() <= MAXIMUM_REGISTRY_BYTES);
 
         let manifest: Value = serde_json::from_str(body).expect("manifest must be valid JSON");
@@ -918,7 +1052,7 @@ mod tests {
             .and_then(Value::as_str)
             .expect("revision must be a string");
         assert!(revision.chars().count() <= 128);
-        assert_eq!(revision, ASSISTANT_ACTIONS_REVISION);
+        assert_eq!(revision, expected_revision);
 
         let actions = root
             .get("actions")
@@ -969,10 +1103,52 @@ mod tests {
             }
         }
 
-        assert!(seen_actions.contains("service.connect"));
-        assert!(seen_actions.contains("service.reauthorize"));
-        assert!(seen_actions.contains("key.create"));
-        assert!(seen_actions.contains("key.rotate"));
+        if let Some(expected) = expected_actions {
+            let expected_set: HashSet<&str> = expected.iter().copied().collect();
+            assert_eq!(seen_actions, expected_set);
+        } else {
+            assert!(seen_actions.contains("service.connect"));
+            assert!(seen_actions.contains("service.reauthorize"));
+            assert!(seen_actions.contains("key.create"));
+            assert!(seen_actions.contains("key.rotate"));
+        }
+    }
+
+    fn current_params_schema(action: &str) -> Value {
+        match action {
+            "service.connect" => service_connect_params_schema(),
+            "service.reauthorize" => service_reauthorize_params_schema(),
+            "key.create" => key_create_params_schema(),
+            "key.rotate" => key_rotate_params_schema(),
+            other => panic!("no current schema helper for {other}"),
+        }
+    }
+
+    fn action_names(manifest: &Value) -> Vec<&str> {
+        manifest["actions"]
+            .as_array()
+            .expect("actions must be an array")
+            .iter()
+            .map(|entry| entry["action"].as_str().expect("action must be a string"))
+            .collect()
+    }
+
+    async fn request_assistant_actions(uri: &str) -> Response {
+        let state = crate::test_utils::test_app_state_no_db().await;
+        let (_, private_api) = crate::routes::build_router();
+        private_api
+            .with_state(state)
+            .oneshot(Request::builder().uri(uri).body(Body::empty()).unwrap())
+            .await
+            .unwrap()
+    }
+
+    async fn response_bytes(response: Response) -> (StatusCode, Vec<u8>) {
+        let status = response.status();
+        let body = to_bytes(response.into_body(), MAXIMUM_REGISTRY_BYTES)
+            .await
+            .unwrap();
+        (status, body.to_vec())
     }
 
     #[test]
@@ -1115,5 +1291,287 @@ mod tests {
             serde_json::from_slice::<Value>(&body).unwrap(),
             golden_manifest()
         );
+    }
+
+    #[tokio::test]
+    async fn assistant_actions_default_body_is_byte_identical_to_golden() {
+        let response = request_assistant_actions("/api/v1/assistant/actions").await;
+        let (status, body) = response_bytes(response).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body.as_slice(), manifest_body().as_bytes());
+        let golden_bytes = serde_json::to_vec(&golden_manifest()).expect("golden must serialize");
+        assert_eq!(body.as_slice(), golden_bytes.as_slice());
+    }
+
+    #[tokio::test]
+    async fn assistant_actions_revision_v7_serves_exact_action_set_with_current_schemas() {
+        let response = request_assistant_actions(
+            "/api/v1/assistant/actions?revision=nyxid-assistant-actions.v7",
+        )
+        .await;
+        let (status, body) = response_bytes(response).await;
+        assert_eq!(status, StatusCode::OK);
+        let manifest: Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(manifest["revision"], "nyxid-assistant-actions.v7");
+        assert_eq!(
+            action_names(&manifest),
+            vec!["service.connect", "key.create", "key.rotate"]
+        );
+        for entry in manifest["actions"].as_array().unwrap() {
+            let action = entry["action"].as_str().unwrap();
+            assert_eq!(
+                entry["params_schema"],
+                current_params_schema(action),
+                "current schema mismatch for {action}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn assistant_actions_revision_v4_serves_service_connect_only() {
+        let response = request_assistant_actions(
+            "/api/v1/assistant/actions?revision=nyxid-assistant-actions.v4",
+        )
+        .await;
+        let (status, body) = response_bytes(response).await;
+        assert_eq!(status, StatusCode::OK);
+        let manifest: Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(manifest["revision"], "nyxid-assistant-actions.v4");
+        assert_eq!(action_names(&manifest), vec!["service.connect"]);
+        assert_eq!(
+            manifest["actions"][0]["params_schema"],
+            service_connect_params_schema()
+        );
+    }
+
+    #[tokio::test]
+    async fn assistant_actions_unknown_revision_returns_404_stable_error() {
+        for revision in ["nyxid-assistant-actions.v3", "aevatar-nyxid-actions.v1"] {
+            let response = request_assistant_actions(&format!(
+                "/api/v1/assistant/actions?revision={revision}"
+            ))
+            .await;
+            let (status, body) = response_bytes(response).await;
+            assert_eq!(status, StatusCode::NOT_FOUND, "revision {revision}");
+            let error: Value = serde_json::from_slice(&body).unwrap();
+            assert_eq!(error["error"], "not_found");
+            assert_eq!(error["error_code"], 1003);
+            assert!(error.get("actions").is_none());
+            assert!(error.get("schema_version").is_none());
+            assert!(
+                error
+                    .get("message")
+                    .and_then(Value::as_str)
+                    .is_some_and(|message| message.contains("Unknown assistant actions revision")),
+                "stable unknown-revision message for {revision}: {error}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn assistant_actions_malformed_revision_param_returns_400() {
+        let oversized = "n".repeat(129);
+        let oversized_response =
+            request_assistant_actions(&format!("/api/v1/assistant/actions?revision={oversized}"))
+                .await;
+        let (status, body) = response_bytes(oversized_response).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        let error: Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(error["error"], "validation_error");
+        assert_eq!(error["error_code"], 1008);
+        assert!(error.get("actions").is_none());
+
+        let control_response = request_assistant_actions(
+            "/api/v1/assistant/actions?revision=nyxid-assistant-actions.v7%0A",
+        )
+        .await;
+        let (status, body) = response_bytes(control_response).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        let error: Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(error["error"], "validation_error");
+        assert_eq!(error["error_code"], 1008);
+        assert!(error.get("actions").is_none());
+    }
+
+    #[test]
+    fn assistant_actions_every_published_revision_passes_parser_contract() {
+        for (revision, action_names) in PINNED_ACTIONS_BY_REVISION {
+            let body = pinned_revision_body(revision)
+                .unwrap_or_else(|| panic!("missing composed body for {revision}"));
+            assert_manifest_conforms_revision(body, revision, Some(action_names));
+        }
+        assert_manifest_conforms(manifest_body());
+    }
+
+    #[test]
+    fn assistant_actions_revision_sets_are_monotone_append_only() {
+        // Going forward, each published set is a subset of the next. Aevatar's
+        // frozen pin map has one historical reduction: v5 (WaveOneDraft)
+        // listed reauthorize+rotate, then v6 (LeastScope) dropped them. That
+        // pair is the only permitted non-subset consecutive step.
+        let latest = PINNED_ACTIONS_BY_REVISION
+            .last()
+            .expect("at least one published revision");
+        let latest_set: HashSet<&str> = latest.1.iter().copied().collect();
+
+        for window in PINNED_ACTIONS_BY_REVISION.windows(2) {
+            let (left_revision, left_actions) = window[0];
+            let (right_revision, right_actions) = window[1];
+            let left: HashSet<&str> = left_actions.iter().copied().collect();
+            let right: HashSet<&str> = right_actions.iter().copied().collect();
+            let is_historical_v5_to_v6 = left_revision == "nyxid-assistant-actions.v5"
+                && right_revision == "nyxid-assistant-actions.v6";
+            if is_historical_v5_to_v6 {
+                assert!(
+                    !left.is_subset(&right),
+                    "v5→v6 is the frozen historical reduction; if it became monotone, drop the exception"
+                );
+                continue;
+            }
+            assert!(
+                left.is_subset(&right),
+                "{left_revision} must be a subset of {right_revision}"
+            );
+        }
+
+        for (revision, actions) in PINNED_ACTIONS_BY_REVISION {
+            let set: HashSet<&str> = actions.iter().copied().collect();
+            assert!(
+                set.is_subset(&latest_set),
+                "{revision} must be a subset of the latest pin {}",
+                latest.0
+            );
+        }
+    }
+
+    #[test]
+    fn assistant_actions_revision_sets_match_aevatar_pinned_fixture() {
+        let fixture: StdHashMap<String, Vec<String>> = serde_json::from_str(include_str!(
+            "../../../tests/fixtures/assistant/aevatar-pinned-actions-by-revision.json"
+        ))
+        .expect("Aevatar pinned-set fixture must parse");
+
+        assert_eq!(fixture.len(), PINNED_ACTIONS_BY_REVISION.len());
+        for (revision, action_names) in PINNED_ACTIONS_BY_REVISION {
+            let expected: Vec<String> = action_names
+                .iter()
+                .map(|name| (*name).to_string())
+                .collect();
+            assert_eq!(
+                fixture.get(*revision),
+                Some(&expected),
+                "fixture drifted from Aevatar PinnedActionsByRevision for {revision}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn assistant_actions_route_with_query_remains_rate_limit_exempt() {
+        let state = crate::test_utils::test_app_state_no_db().await;
+        let (_, private_api) = crate::routes::build_router();
+        let per_ip = create_per_ip_rate_limiter(1, 60);
+        let global = create_rate_limiter(1, 1);
+        let app = private_api
+            .with_state(state)
+            .layer(middleware::from_fn(rate_limit_middleware))
+            .layer(Extension(per_ip))
+            .layer(Extension(global));
+
+        let query_uri = "/api/v1/assistant/actions?revision=nyxid-assistant-actions.v7";
+        for _ in 0..3 {
+            let response = app
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .uri(query_uri)
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(
+                response.status(),
+                StatusCode::OK,
+                "query-string fetch must stay rate-limit exempt"
+            );
+        }
+
+        let first_counted = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/api/v1/runtime-config")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(first_counted.status(), StatusCode::OK);
+
+        let limited = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/api/v1/runtime-config")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(limited.status(), StatusCode::TOO_MANY_REQUESTS);
+
+        let still_exempt = app
+            .oneshot(
+                Request::builder()
+                    .uri(query_uri)
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(still_exempt.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn assistant_actions_dormant_descriptor_is_served_but_absent_from_all_pinned_sets() {
+        let default_manifest: Value = serde_json::from_str(manifest_body()).unwrap();
+        let default_names = action_names(&default_manifest);
+        let latest_pin: HashSet<&str> = PINNED_ACTIONS_BY_REVISION
+            .last()
+            .expect("latest pin")
+            .1
+            .iter()
+            .copied()
+            .collect();
+        let dormant: Vec<&str> = default_names
+            .iter()
+            .copied()
+            .filter(|name| !latest_pin.contains(name))
+            .collect();
+        assert_eq!(
+            dormant.len(),
+            12,
+            "expected the 12 Wave-2 dormant descriptors"
+        );
+
+        for (revision, action_names) in PINNED_ACTIONS_BY_REVISION {
+            for name in &dormant {
+                assert!(
+                    !action_names.contains(name),
+                    "{name} must stay absent from pinned set {revision}"
+                );
+            }
+        }
+
+        let response = request_assistant_actions("/api/v1/assistant/actions").await;
+        let (status, body) = response_bytes(response).await;
+        assert_eq!(status, StatusCode::OK);
+        let served: Value = serde_json::from_slice(&body).unwrap();
+        for name in dormant {
+            assert!(
+                action_names(&served).contains(&name),
+                "default body must still serve dormant descriptor {name}"
+            );
+        }
     }
 }
