@@ -1706,15 +1706,26 @@ pub async fn cancel_pending_credential(
 ) -> AppResult<NodePendingCredential> {
     node_service::ensure_node_writable_by_actor(db, actor_user_id, node_id).await?;
 
-    // Cancellation is destructive absence evidence. Removing the exact active
-    // row means a 404 projection can only follow an operation that actually
-    // deleted this pending credential; history remains in the audit chain.
+    // Consume rejects expired pushes because accepting stale setup metadata is
+    // correctness-critical. Cancel intentionally remains admin housekeeping:
+    // it can deactivate an expired active row so cleanup is idempotent.
+    //
+    // Cancel deliberately does NOT hard-delete. The deactivated row is the
+    // assistant's terminal evidence -- `is_active: false` plus `declined_at`
+    // proves *this* cancellation happened, which absence cannot: a 404 is
+    // equally consistent with "never existed" and "not yours". It also keeps
+    // the row the cancellation audit entry refers to.
+    let now = bson::DateTime::from_chrono(Utc::now());
     db.collection::<NodePendingCredential>(NODE_PENDING_CREDENTIALS)
-        .find_one_and_delete(doc! {
-            "_id": pending_id,
-            "node_id": node_id,
-            "is_active": true,
-        })
+        .find_one_and_update(
+            doc! {
+                "_id": pending_id,
+                "node_id": node_id,
+                "is_active": true,
+            },
+            doc! { "$set": { "is_active": false, "declined_at": &now, "updated_at": &now } },
+        )
+        .return_document(ReturnDocument::After)
         .await?
         .ok_or_else(|| AppError::NotFound("Pending credential not found".to_string()))
 }
@@ -3313,12 +3324,20 @@ mod tests {
             .expect_err("canceled row is not consumable");
         assert!(matches!(err, AppError::NotFound(_)));
 
+        // Cancel is terminal-state evidence, not absence: the row survives so
+        // `is_active: false` + `declined_at` prove *this* cancellation. A 404
+        // could not -- it is equally consistent with "never existed".
         let stored = db
             .collection::<NodePendingCredential>(NODE_PENDING_CREDENTIALS)
             .find_one(doc! { "_id": &pending.id })
             .await
-            .expect("query cancelled pending credential");
-        assert!(stored.is_none(), "cancel must be authoritative absence");
+            .expect("query cancelled pending credential")
+            .expect("cancelled row must survive as terminal evidence");
+        assert!(!stored.is_active, "cancel must deactivate the row");
+        assert!(
+            stored.declined_at.is_some(),
+            "cancel must stamp declined_at as causal evidence"
+        );
     }
 
     #[tokio::test]
