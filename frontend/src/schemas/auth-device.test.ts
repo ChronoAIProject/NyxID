@@ -5,6 +5,7 @@ import {
   errorEnvelopeSchema,
   formatAuthDeviceUserCodeInput,
   friendlyAuthDeviceErrorMessage,
+  friendlyAuthDeviceStatusMessage,
   previewResponseSchema,
   userCodeSchema,
 } from "./auth-device";
@@ -128,5 +129,20 @@ describe("friendlyAuthDeviceErrorMessage", () => {
         errorCode: 11207,
       }),
     ).toBe("That code is no longer valid. Run `nyxid login --device` again.");
+  });
+});
+
+describe("friendlyAuthDeviceStatusMessage", () => {
+  it.each([
+    ["denied", "This login request was already denied."],
+    ["expired", "This code has expired."],
+    ["approved", "This code was already used."],
+    ["delivered", "This code was already used."],
+  ] as const)("maps %s previews to terminal copy", (status, message) => {
+    expect(friendlyAuthDeviceStatusMessage(status)).toBe(message);
+  });
+
+  it("returns no message for a pending preview", () => {
+    expect(friendlyAuthDeviceStatusMessage("pending")).toBeNull();
   });
 });

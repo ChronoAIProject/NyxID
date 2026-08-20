@@ -91,3 +91,19 @@ export function friendlyAuthDeviceErrorMessage(error: unknown): string {
     ? maybeApiError.message
     : "Device login failed.";
 }
+
+export function friendlyAuthDeviceStatusMessage(
+  status: PreviewAuthDeviceResponse["status"],
+): string | null {
+  switch (status) {
+    case "pending":
+      return null;
+    case "denied":
+      return AUTH_DEVICE_ERROR_MESSAGES[11204] ?? null;
+    case "expired":
+      return AUTH_DEVICE_ERROR_MESSAGES[11201] ?? null;
+    case "approved":
+    case "delivered":
+      return AUTH_DEVICE_ERROR_MESSAGES[11205] ?? null;
+  }
+}

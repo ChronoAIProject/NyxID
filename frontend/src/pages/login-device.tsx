@@ -21,6 +21,7 @@ import {
 import {
   formatAuthDeviceUserCodeInput,
   friendlyAuthDeviceErrorMessage,
+  friendlyAuthDeviceStatusMessage,
   userCodeSchema,
 } from "@/schemas/auth-device";
 import { useAuthStore } from "@/stores/auth-store";
@@ -43,6 +44,9 @@ export function LoginDevicePage() {
   const approve = useApproveAuthDevice();
   const deny = useDenyAuthDevice();
   const isDecisionPending = approve.isPending || deny.isPending;
+  const previewStatusMessage = preview.data
+    ? friendlyAuthDeviceStatusMessage(preview.data.status)
+    : null;
   const step: "enter-code" | "review" | "terminal" = decision
     ? "terminal"
     : preview.data
@@ -191,6 +195,9 @@ export function LoginDevicePage() {
                 status={preview.data.status}
               />
             ) : null}
+            {previewStatusMessage ? (
+              <ErrorBanner message={previewStatusMessage} />
+            ) : null}
 
             <div className="flex flex-col gap-2 sm:flex-row sm:justify-end">
               <Button
@@ -214,7 +221,7 @@ export function LoginDevicePage() {
                   </ButtonIcon>
                   Continue
                 </Button>
-              ) : step === "review" ? (
+              ) : step === "review" && preview.data?.status === "pending" ? (
                 <>
                   <Button
                     type="button"
