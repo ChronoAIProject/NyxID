@@ -41,6 +41,7 @@
         // Auth Device Login
         crate::handlers::auth_device::request_auth_device,
         crate::handlers::auth_device::poll_auth_device,
+        crate::handlers::auth_device::poll_auth_device_web,
         crate::handlers::auth_device::preview_auth_device,
         crate::handlers::auth_device::approve_auth_device,
         crate::handlers::auth_device::deny_auth_device,
