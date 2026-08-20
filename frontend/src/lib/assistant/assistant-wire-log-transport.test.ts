@@ -85,7 +85,7 @@ describe("assistant wire-log transport", () => {
       "futureEnvelopeMetadata",
     );
     const capturedEcho =
-      useAssistantWireLogStore.getState().entries[0]?.upstreamEchoes[0];
+      useAssistantWireLogStore.getState().entries[0]?.upstreamEchoes?.[0];
     if (!capturedEcho || capturedEcho.degraded) {
       throw new Error("expected a full legacy echo");
     }

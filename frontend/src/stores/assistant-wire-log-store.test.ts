@@ -110,10 +110,10 @@ describe("useAssistantWireLogStore", () => {
 
     const entries = useAssistantWireLogStore.getState().entries;
     expect(entries).toHaveLength(100);
-    expect(entries[0]?.upstreamEchoes[0]).toMatchObject({
+    expect(entries[0]?.upstreamEchoes?.[0]).toMatchObject({
       body: { prompt: "prompt-5" },
     });
-    expect(entries.at(-1)?.upstreamEchoes[0]).toMatchObject({
+    expect(entries.at(-1)?.upstreamEchoes?.[0]).toMatchObject({
       body: { prompt: "prompt-104" },
     });
   });
@@ -126,7 +126,7 @@ describe("useAssistantWireLogStore", () => {
 
     const { entries, totalBytes } = useAssistantWireLogStore.getState();
     expect(entries).toHaveLength(1);
-    expect(entries[0]?.upstreamEchoes[0]).toMatchObject({
+    expect(entries[0]?.upstreamEchoes?.[0]).toMatchObject({
       body: { prompt: expect.stringMatching(/^b/) },
     });
     expect(totalBytes).toBeGreaterThan(1_200_000);

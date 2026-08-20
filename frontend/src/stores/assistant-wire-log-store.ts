@@ -99,7 +99,12 @@ function persistedExchange(
     ts: exchange.ts,
     kind: exchange.kind,
     status: exchange.status,
-    upstreamEchoes: exchange.upstreamEchoes,
+    conversationId: exchange.conversationId,
+    wireLogId: exchange.wireLogId,
+    label: exchange.label,
+    ...(exchange.upstreamEchoes === undefined
+      ? {}
+      : { upstreamEchoes: exchange.upstreamEchoes }),
     ...(exchange.droppedEchoCount === undefined
       ? {}
       : { droppedEchoCount: exchange.droppedEchoCount }),
@@ -272,6 +277,9 @@ export const useAssistantWireLogStore = create<AssistantWireLogState>()(
           ts: Date.now(),
           kind,
           status,
+          conversationId: null,
+          wireLogId: null,
+          label: `${envelopes[0]?.method ?? kind.toUpperCase()} /${envelopes[0]?.path ?? "assistant"}`,
           upstreamEchoes: [...envelopes],
           ...(droppedEchoCount > 0 ? { droppedEchoCount } : {}),
           capture: { state: "open" },

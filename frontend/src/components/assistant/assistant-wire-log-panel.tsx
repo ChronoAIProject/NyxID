@@ -379,7 +379,8 @@ export function AssistantWireLogPanel() {
             <div className="space-y-2">
               {[...entries].reverse().map((entry) => {
                 const isExpanded = expanded.has(entry.id);
-                const primary = entry.upstreamEchoes[0];
+                const upstreamEchoes = entry.upstreamEchoes ?? [];
+                const primary = upstreamEchoes[0];
                 if (!primary) return null;
                 const aevatarStatus = upstreamStatus(primary);
                 return (
@@ -467,7 +468,7 @@ export function AssistantWireLogPanel() {
                     </div>
                     {isExpanded ? (
                       <div className="space-y-4 border-t border-border/60 bg-background/20 p-3">
-                        {entry.upstreamEchoes.map((envelope, index) => (
+                        {upstreamEchoes.map((envelope, index) => (
                           <section
                             key={`${envelope.path}-${String(index)}`}
                             className="space-y-2"
@@ -494,7 +495,7 @@ export function AssistantWireLogPanel() {
                         ) : null}
                         {showResponses ? (
                           <>
-                            {entry.upstreamEchoes.map((envelope, index) => (
+                            {upstreamEchoes.map((envelope, index) => (
                               <UpstreamResponse
                                 key={`${envelope.path}-response-${String(index)}`}
                                 envelope={envelope}

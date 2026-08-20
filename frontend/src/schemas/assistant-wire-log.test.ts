@@ -2,7 +2,63 @@ import { describe, expect, it } from "vitest";
 import {
   assistantTransportOutcomeSchema,
   assistantWireCaptureSchema,
+  assistantWireLogExchangeSchema,
+  assistantWireLogRecordSchema,
 } from "./assistant-wire-log";
+
+const minimalEcho = {
+  degraded: true as const,
+  method: "POST",
+  path: "api/chat",
+  commandType: "text",
+  upstreamOutcome: "response" as const,
+  status: 200,
+};
+
+describe("assistant wire-log record schema", () => {
+  it("accepts metadata-first exchanges without an inline payload", () => {
+    expect(
+      assistantWireLogExchangeSchema.parse({
+        id: "exchange-1",
+        ts: 1_776_947_200_000,
+        kind: "header",
+        status: 200,
+        conversationId: "nyxchat-1",
+        wireLogId: "d7dbbf38-a31c-4331-8ddb-13fda5a70d12",
+        label: "GET /assistant/conversations/nyxchat-1/state",
+      }),
+    ).toMatchObject({
+      conversationId: "nyxchat-1",
+      wireLogId: "d7dbbf38-a31c-4331-8ddb-13fda5a70d12",
+      label: "GET /assistant/conversations/nyxchat-1/state",
+    });
+  });
+
+  it("parses the strict fetch response with the unchanged v2 envelope", () => {
+    const record = {
+      id: "d7dbbf38-a31c-4331-8ddb-13fda5a70d12",
+      conversation_id: null,
+      created_at: "2026-08-20T12:00:00Z",
+      payload: {
+        version: 2 as const,
+        echoes: [minimalEcho],
+        droppedEchoCount: 0,
+      },
+    };
+
+    expect(assistantWireLogRecordSchema.parse(record)).toEqual(record);
+    expect(
+      assistantWireLogRecordSchema.safeParse({ ...record, unexpected: true })
+        .success,
+    ).toBe(false);
+    expect(
+      assistantWireLogRecordSchema.safeParse({
+        ...record,
+        payload: { ...record.payload, version: 3 },
+      }).success,
+    ).toBe(false);
+  });
+});
 
 describe("assistant wire-log telemetry schema", () => {
   it("accepts metadata-only wire and transport outcomes with bounded counters", () => {
