@@ -8267,15 +8267,35 @@ mod proxy_resolution_integration_tests {
         .expect("clear the wire-log flag override");
     }
 
-    fn assistant_echoes(response: &Response) -> Vec<serde_json::Value> {
-        let Some(value) = response.headers().get("x-nyxid-debug-upstream-log") else {
+    async fn assistant_echoes(
+        db: &mongodb::Database,
+        user_id: &str,
+        response: &Response,
+    ) -> Vec<serde_json::Value> {
+        let wrapper: serde_json::Value = if let Some(id) = response
+            .headers()
+            .get("x-nyxid-debug-upstream-id")
+            .and_then(|value| value.to_str().ok())
+        {
+            assert!(
+                response
+                    .headers()
+                    .get("x-nyxid-debug-upstream-log")
+                    .is_none()
+            );
+            let row = crate::services::assistant_wire_log_service::fetch_for_user(db, user_id, id)
+                .await
+                .expect("fetch assistant wire log")
+                .expect("assistant wire log exists");
+            serde_json::from_str(&row.payload).expect("stored assistant echo is JSON")
+        } else if let Some(value) = response.headers().get("x-nyxid-debug-upstream-log") {
+            let decoded = base64::engine::general_purpose::STANDARD
+                .decode(value.as_bytes())
+                .expect("assistant echo header is base64");
+            serde_json::from_slice(&decoded).expect("assistant echo header is JSON")
+        } else {
             return Vec::new();
         };
-        let decoded = base64::engine::general_purpose::STANDARD
-            .decode(value.as_bytes())
-            .expect("assistant echo header is base64");
-        let wrapper: serde_json::Value =
-            serde_json::from_slice(&decoded).expect("assistant echo header is JSON");
         assert_eq!(wrapper["version"], 2);
         assert_eq!(wrapper["droppedEchoCount"], 0);
         wrapper["echoes"]
@@ -10019,7 +10039,7 @@ mod proxy_resolution_integration_tests {
             .await
             .expect("typed chat handler must forward");
             assert_eq!(response.status(), StatusCode::OK);
-            debug_echoes.push(assistant_echoes(&response));
+            debug_echoes.push(assistant_echoes(&db, &user_id, &response).await);
         }
 
         let mut list_request = request(Method::GET, "/api/v1/assistant/conversations", None);
@@ -10035,7 +10055,48 @@ mod proxy_resolution_integration_tests {
         .await
         .expect("list conversations handler must forward");
         assert_eq!(list_response.status(), StatusCode::OK);
-        debug_echoes.push(assistant_echoes(&list_response));
+        assert!(
+            list_response
+                .headers()
+                .get("x-nyxid-debug-upstream-id")
+                .is_none()
+        );
+        assert!(
+            list_response
+                .headers()
+                .get("x-nyxid-debug-upstream-log")
+                .is_none()
+        );
+        let wire_logs = db.collection::<crate::models::assistant_wire_log::AssistantWireLog>(
+            crate::models::assistant_wire_log::AssistantWireLog::COLLECTION_NAME,
+        );
+        assert_eq!(
+            wire_logs
+                .count_documents(doc! { "user_id": &user_id })
+                .await
+                .expect("count stored assistant wire logs"),
+            11
+        );
+        assert_eq!(
+            wire_logs
+                .count_documents(doc! {
+                    "user_id": &user_id,
+                    "conversation_id": mongodb::bson::Bson::Null,
+                })
+                .await
+                .expect("count unattributed assistant wire logs"),
+            1
+        );
+        assert_eq!(
+            wire_logs
+                .count_documents(doc! {
+                    "user_id": &user_id,
+                    "conversation_id": "nyxid-chat-4a1e60ebd1fd44f192bf4bb90e1812ae",
+                })
+                .await
+                .expect("count conversation-scoped assistant wire logs"),
+            10
+        );
 
         let malformed_typed_id = "nyxid-chat-not-a-guid";
         let calls_before_malformed_resources = captured.lock().unwrap().len();
@@ -10259,7 +10320,7 @@ mod proxy_resolution_integration_tests {
             ]
         );
         assert!(paths.iter().any(|path| path.contains("chat-history")));
-        assert_eq!(debug_echoes.last().map(Vec::len), Some(2));
+        assert!(debug_echoes.iter().all(|echoes| echoes.len() == 1));
 
         let expected_chat_bodies = [
             serde_json::json!({
@@ -10409,8 +10470,8 @@ mod proxy_resolution_integration_tests {
             );
         }
 
-        assert_eq!(debug_echoes.len(), 12);
-        for (call_index, envelope_array) in debug_echoes[..11].iter().enumerate() {
+        assert_eq!(debug_echoes.len(), 11);
+        for (call_index, envelope_array) in debug_echoes.iter().enumerate() {
             assert_eq!(envelope_array.len(), 1);
             let envelope = &envelope_array[0];
             let (method, path, body, _) = &calls[call_index];
@@ -10449,23 +10510,6 @@ mod proxy_resolution_integration_tests {
             }
         }
 
-        let list_echoes = &debug_echoes[11];
-        assert_eq!(list_echoes.len(), 2);
-        for (envelope, call) in list_echoes.iter().zip(&calls[11..13]) {
-            assert_eq!(envelope["method"], "GET");
-            let expected_path = if call.1 == "/api/chat/conversations" {
-                "api/chat/conversations?pageSize=50"
-            } else {
-                call.1.trim_start_matches('/')
-            };
-            assert_eq!(envelope["path"], expected_path);
-            assert!(envelope["commandType"].is_null());
-            assert!(envelope["body"].is_null());
-            assert_eq!(envelope["truncated"], false);
-            assert_eq!(envelope["upstreamOutcome"], "response");
-            assert_eq!(envelope["response"]["status"], 200);
-            assert_eq!(envelope["response"]["sse"], false);
-        }
         let serialized_echoes = serde_json::to_string(&debug_echoes).unwrap();
         for forbidden in [
             "caller-secret",
@@ -10502,7 +10546,7 @@ mod proxy_resolution_integration_tests {
         )
         .await
         .expect("typed chat without debug opt-in must forward");
-        assert!(assistant_echoes(&no_opt_in).is_empty());
+        assert!(assistant_echoes(&db, &user_id, &no_opt_in).await.is_empty());
         let no_opt_in_calls = std::mem::take(&mut *captured.lock().unwrap());
         assert_eq!(no_opt_in_calls.len(), 1);
         assert!(no_opt_in_calls[0].3.get("x-nyxid-debug-upstream").is_none());
@@ -10524,7 +10568,7 @@ mod proxy_resolution_integration_tests {
         )
         .await
         .expect("feature-disabled typed chat must forward");
-        assert!(assistant_echoes(&flag_off).is_empty());
+        assert!(assistant_echoes(&db, &user_id, &flag_off).await.is_empty());
         let flag_off_calls = std::mem::take(&mut *captured.lock().unwrap());
         assert_eq!(flag_off_calls.len(), 1);
         assert!(flag_off_calls[0].3.get("x-nyxid-debug-upstream").is_none());
@@ -10551,13 +10595,16 @@ mod proxy_resolution_integration_tests {
         )
         .await
         .expect("authenticated non-admin must capture their own exchange");
-        assert_eq!(assistant_echoes(&non_admin).len(), 1);
+        assert_eq!(
+            assistant_echoes(&db, &non_admin_id, &non_admin).await.len(),
+            1
+        );
 
         server.abort();
     }
 
     #[tokio::test]
-    async fn assistant_list_drains_mixed_history_pages_and_captures_every_upstream_call() {
+    async fn assistant_list_drains_mixed_history_pages_without_wire_log_headers() {
         use std::sync::Mutex as StdMutex;
         use std::sync::atomic::{AtomicU8, Ordering};
 
@@ -10759,7 +10806,18 @@ mod proxy_resolution_integration_tests {
         .await
         .expect("list conversations handler must drain both pages");
         assert_eq!(response.status(), StatusCode::OK);
-        let echoes = assistant_echoes(&response);
+        assert!(
+            response
+                .headers()
+                .get("x-nyxid-debug-upstream-id")
+                .is_none()
+        );
+        assert!(
+            response
+                .headers()
+                .get("x-nyxid-debug-upstream-log")
+                .is_none()
+        );
         let body = to_bytes(response.into_body(), 1024 * 1024).await.unwrap();
         let body: serde_json::Value = serde_json::from_slice(&body).unwrap();
         let rows = body["conversations"].as_array().unwrap();
@@ -10801,18 +10859,7 @@ mod proxy_resolution_integration_tests {
                 (Method::GET, format!("{history_path}?cursor=page-2"), true,),
             ]
         );
-        assert_eq!(echoes.len(), 4);
-        for (envelope, (method, path, accepts_json)) in echoes.iter().zip(&calls) {
-            assert_eq!(envelope["method"], method.as_str());
-            // The drained page's cursor rides along in the echo: without it
-            // every page echoes the same path and the wire log hides the
-            // pagination behind what look like duplicate calls.
-            assert_eq!(envelope["path"], path.trim_start_matches('/'));
-            assert!(envelope["commandType"].is_null());
-            assert!(envelope["body"].is_null());
-            assert_eq!(envelope["upstreamOutcome"], "response");
-            assert_eq!(envelope["response"]["status"], 200);
-            assert_eq!(envelope["response"]["sse"], false);
+        for (_, _, accepts_json) in &calls {
             assert!(*accepts_json, "every drained page must request JSON");
         }
 
