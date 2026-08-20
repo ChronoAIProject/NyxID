@@ -1113,6 +1113,20 @@ mod tests {
         assert_eq!(status, StatusCode::CONFLICT, "{first}");
         assert_eq!(first["error_code"], 11500);
         assert_ne!(status, StatusCode::INTERNAL_SERVER_ERROR);
+        assert_eq!(
+            state
+                .db
+                .collection::<AssistantActionReceipt>(ASSISTANT_ACTION_RECEIPTS)
+                .count_documents(doc! {
+                    "user_id": &actor_id,
+                    "action": EXTERNAL_KEY_DELETE_ACTION,
+                    "action_request_id": "delete-cascade",
+                })
+                .await
+                .expect("count confirmation receipts"),
+            0,
+            "the preflight 11500 must not reserve a receipt"
+        );
 
         let cascade_siblings = first["details"]["siblings"].clone();
         assert!(cascade_siblings.is_array());
