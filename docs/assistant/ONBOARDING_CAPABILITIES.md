@@ -1,54 +1,94 @@
-# Onboarding Capabilities — The Smaller, Correct Plan
+# What a New User Should Be Able to Do on Day One
 
-**Purpose, which decides everything below:** showcase capabilities at onboarding. A brand-new user with no accounts connected gets a genuine aha-moment on a ChronoAI credential — safe operations only, and DB-configurable because NyxID is open source and operators must be able to set this up without forking. Two adversarial reviews (code and product) converged on the same verdict about the previous plan: it solved a bigger problem than the one we have. This is the smaller one. Repo claims cite `file:line` on `travel-allowlist` (rebased onto `origin/main` today); assumptions are marked.
+**NyxID platform capabilities — the plan, in plain terms**
+*2026-08-21. Written after two independent adversarial reviews, both of which concluded the previous plan was solving a bigger problem than we have. This replaces it.*
 
-## The finding that gates everything else
+---
 
-**The assistant a new user actually meets cannot call any of this.** Production direct chat is text-only with no tool execution — its own system prompt says so (`services/assistant_direct.rs:14-24`), and its validation allows nothing else (`:176-217`). The one relevant skill it ships teaches the *BYOK* Firecrawl flow and the async agent this plan excludes (`prompts/direct/firecrawl-via-nyxid.md:14-37`). Every catalog row configured below is invisible to a first-run user until the assistant is wired to tools. **Without build item 1, the rest of this document delivers nothing.** It is the first work item, not a footnote.
+## What we're trying to do
 
-## Cut, one line each
+Someone signs up for NyxID. They have connected nothing — no API keys, no accounts, no setup. Within a minute, they should be able to ask for something useful and get it.
 
-- **Twilio SMS** — irreducibly needs consent/opt-out/phone-identity code plus a compliance posture; not an onboarding capability.
-- **Duffel hold/book/pay** — booking is a different product with its own gates (Cards approval, payment surface); onboarding needs search, at most.
-- **Firecrawl `agent` + `map`** — the async pair's polling cannot be made multi-tenant by configuration; `map` serves no first-run intent.
-- **The constraint DSL** — both reviewers found its flagship example does not work: `closed` + `require {data.type}` either rejects `passengers`/`selected_offers` (no hold possible) or checks top-level only so `data.payment` (a typo) passes. Twilio and Duffel booking were what the DSL existed for; with both cut, the language has nothing left to justify.
-- **`direct_only` / `retriable_methods` flags** — solve problems (node-retry duplication of vendor jobs) that the cut capabilities carried in.
-- **Dual-mode rows** — the plumbing I previously claimed exists does not (correction below); not needed to showcase.
-- **Per-user access lists** — onboarding rows are public by intent.
-- **Billing-metric redesign** — billing is deferred; nothing here charges.
+"What are people saying about our competitor this week." "Read this page and summarise it." "Find me flights to Tokyo in October."
 
-## Build — five items, a few hundred lines total, all in existing seams
+They can do that because **we** hold the credentials for a handful of services and lend the capability out, safely bounded. That is the whole idea. It is also, separately, how we eventually make money — but that part is deferred and this plan does not depend on it.
 
-1. **Wire the assistant to the tools. (M — the largest and least optional.)** Give production first-run chat a tool-execution path to platform catalog rows — the repo already carries a direct-agent proof-of-concept seam (`services/assistant_direct_agent_poc/`) and the MCP operation machinery; the work is productionizing one path from first-run chat to allowlisted platform operations, plus replacing the BYOK-teaching skill with one that narrates the platform capabilities. Without this there is no showcase; with only this and item 2, X and Reddit already demo.
-2. **Fail-closed platform rows. (S.)** Today an absent `proxy_operation_policy` means passthrough — documented in the model itself (`models/downstream_service.rs:351-353`). A row holding a master credential must refuse to execute without a present, non-empty policy. One condition in the authorization path plus tests; grandfathering concerns don't apply because no production row carries both a credential and no policy yet.
-3. **Reject user-mode credentials on platform rows — a check, not a warning. (S.)** The seeded `api-twitter`/`api-reddit` rows cannot serve this purpose: they carry `provider_config_id` and `auth_method: "none"` (`services/provider_service.rs:3763-3766, :3823-3826`), failing the master-credential predicate on three counts (`services/proxy_service.rs:244-251`); the X provider's default scopes include `tweet.write` (`:590-595`) and Reddit is user-mode (`:1269-1282`). Platform variants are **new provider-less rows**, and admin validation must reject OAuth-shaped/user-mode credentials on them outright — an operator wiring a personal OAuth token into a shared row is the predictable mistake.
-4. **Trim the overlays so discovery matches execution. (S–M.)** The overlays still publish X `POST /tweets` and `DELETE /tweets/{id}`, Reddit `POST /api/submit`, `/users/me`, `/api/v1/me`, and Firecrawl `/v2/agent` — operations the policy will deny — and **startup sync force-reactivates overlay endpoints on every boot** (`services/service_endpoint_service.rs:336`), so an operator cannot even remove them from their own DB. Fix both: cut the excluded operations from the overlays, and make sync respect an operator's deactivation. The overlay is enforcement for *discovery*; the matcher is enforcement for *execution*; an agent that discovers tools it cannot call burns its turns on 404s.
-5. **Per-user rate limit on the shared key. (S–M.)** The existing limiter is API-key-scoped and browser sessions bypass it (`mw/rate_limit.rs:462-496`); onboarding callers *are* sessions. A per-user bucket on platform rows, else one enthusiastic session starves the demo for everyone.
+## The problem nobody noticed until now
 
-## The capability set
+**The assistant a new user actually talks to cannot use any of these services.**
 
-| Service | Operations | Notes |
-|---|---|---|
-| **X** | `GET /tweets/search/recent` — only | "What's being said about…" — the single-op demo. App-only bearer, reads of public data. |
-| **Reddit** | `GET /r/{subreddit}/hot`, `/new`, `GET /search`, `GET /comments/{article}` | **Conditional:** app-only tokens expire (~1 h) and need the `token_exchange` auth method, which auto-provision currently excludes (`services/unified_key_service.rs:193`) — lift that exclusion for platform rows or do not ship Reddit. Commercial terms remain unverified (**ASSUMPTION** — check before activation). |
-| **Firecrawl** | `POST /v2/scrape`, `POST /v2/search` — only, with a request body-size cap and a `maxCredits` ceiling | Kept: "read me this page" is the strongest first-run demo we have. **Dissent, represented honestly:** one reviewer would cut it — per-page cost on the platform key with no billing means every demo scrape is unrecovered spend. The keep is a deliberate marketing cost, bounded by the vendor plan, the ceilings, and item 5 — not a free lunch. Note: `Pattern("^https?://")` is **not** an SSRF control — it happily permits `http://169.254.169.254/`; the fetch happens at Firecrawl's infrastructure, not ours, which is the actual mitigation, and internal-address filtering is Firecrawl's responsibility (**ASSUMPTION** that their fetcher does so — do not represent the URL pattern as a security boundary). |
-| **Duffel** | `POST /air/offer_requests`, `GET /air/offers/{id}` — search only, **no orders** | Optional. "Find me flights" with real prices is a strong demo; everything irreversible is out. |
-| **ElevenLabs** | `POST /v1/text-to-speech/{voice_id}` — one stock voice, hard character cap | Optional and tiny. Honest alternative: browser `speechSynthesis` is a cheaper aha if the point is delight — a product call, not an engineering one. |
+Our production chat is text-only. It has no ability to call tools at all. So we could wire up every service described below, configure them perfectly, and a new user's experience would be exactly what it is today: a model that talks back.
 
-All rows: new, provider-less, `internal`, public, explicit policy (deny-by-default; the GET exclusions that made X/Reddit/ElevenLabs safe are simply absent rules), non-overridable headers where the vendor requires them.
+This is the single most important thing in this document. Everything else is worthless without it. It is also not hard — it is wiring that already exists elsewhere in the codebase — but it has to come first, and it has to be understood as the actual product work rather than a supporting task.
 
-## What an operator must supply
+## What we're building
 
-Per service they choose to enable: the credential (X app-only bearer; Reddit app client via `token_exchange`; Firecrawl key; Duffel test token; ElevenLabs key on an account containing **only** the voices they are willing to offer — curation is the voice control), the policy rows above (shipped as seed defaults they can edit), and the rate-limit setting. Nothing in this plan bakes our policy choices into code they would have to fork: the capability set is rows, policies, and skill text — all DB or assets.
+Five things. All of them are small, and all of them fit into code that already exists. Together this is a few hundred lines, not a subsystem.
 
-## Corrections carried so this document does not contradict its lineage
+**1. Let the assistant use tools.** Without this, nothing else is visible to a new user.
 
-- **Dual-mode plumbing does not exist.** I previously wrote that resolution prefers a user's row and falls back to the platform's. Misread: those paths are UserService versus *legacy BYOK* (`handlers/llm_gateway.rs:274-280`, `services/proxy_service.rs:1277`), not user-versus-platform. Platform resolution is a separate admin path.
-- **Scoped agent API keys still cannot call platform rows** (`handlers/mcp_transport.rs:642-660`; `handlers/proxy.rs:1958-1978`). Under the onboarding frame the first-run caller is a session user, so this is an **availability gap, not a blocker** — but it stays true, and the moment the showcase extends to user-configured agents it becomes work item 6.
-- The constraint-DSL cut is not a verdict that parameter validation is worthless — it is that the two capabilities requiring it are out of scope, and a validation language should be built when its first real user exists, against that user's actual semantics (`closed` interacting with required fields was the failure).
+**2. Make platform services refuse to run without a policy.** Today, a service with no operation rules configured allows *everything*. That is backwards. A service holding our shared credential should refuse to do anything until someone has explicitly said what it may do.
 
-## If travel comes back later
+**3. Check the credential is the right kind.** We want these services running on app-only credentials — the sort that read public data and cannot act as any particular person. Right now nothing stops an operator pasting in a personal account token instead, which would quietly turn "search public posts" into "act as whoever owns that account." This needs to be a check that fails, not a warning that scrolls past.
 
-Do not generalise from it. Build a NyxID-owned `POST /travel/holds` endpoint that constructs the Duffel order body server-side — hold-only by construction, no caller-supplied fields. That is less code than correct `closed`-body semantics in a generic DSL, and it does not become every operator's configuration problem.
+**4. Make the published tool list match what's actually allowed.** We publish a menu of operations to agents, and separately enforce a shorter list at execution. They disagree — the menu still advertises posting to X, deleting posts, and submitting to Reddit. Worse, the menu rebuilds itself from our shipped files every time the server restarts, so an operator cannot remove those entries from their own database. An agent discovers a tool, tries it, gets refused, tries again. Both lists need to be the same list.
 
-**Assumptions register:** Reddit commercial API terms; Firecrawl-side internal-address filtering; ElevenLabs stock-voice acceptance outside the account library (moot under account curation, noted for completeness); the direct-agent PoC seam's fitness as the production wiring path (item 1's size rides on it — re-estimate if it proves demo-grade only).
+**5. Limit how much any one person can use.** Everyone shares one key with each vendor. Without a per-user cap, one enthusiastic session exhausts the quota and the demo stops working for everybody.
+
+## What a user gets
+
+**Social listening and research.** Search recent posts on X. Read subreddit listings, search Reddit, pull comment threads. This is public conversation, so a shared credential reveals nothing about anyone else. It is a genuinely good demo: "what is being said about this."
+
+**Read the web.** Firecrawl scrape and search, with a size cap and a spending ceiling per request. "Read me this page" is the strongest single first-run demo we have. It does cost us a little per page, and one reviewer would cut it for that reason — I think it earns its keep, but the disagreement is real and worth knowing about.
+
+**Flight search.** Ask for flights and get real options back. We tested this: a live search returned 602 offers. Searching commits nothing and costs nothing. *Booking* flights is a different matter and is not part of this.
+
+**A voice, optionally.** One stock voice, capped length. Pleasant, costs money per character. Worth noting the browser can already speak text for free, so this is only worth doing if we specifically want to show off the vendor.
+
+## Phone calls — the piece you've asked for
+
+You want Twilio for **calls**, not texts. That changes the picture, and it is worth being precise about why.
+
+Twilio's call API takes a destination, a caller ID, and then either a URL or a block of markup that tells Twilio what to say and do once the call connects. The danger has never really been the phone number — it is that whoever supplies that script controls the call. Hand that to an agent and you have handed it an arbitrary automated calling system operating under our phone number.
+
+**The version that works: we own the script.** The agent says "call this restaurant and ask whether they have a table for four at eight." NyxID builds the call flow itself, on our own endpoint, and hands Twilio only a reference to it. The agent never supplies markup. This pairs naturally with the voice work — the call can be spoken in the voice the user picked.
+
+That is a genuinely differentiated capability. It is also **the largest single piece of work in this document**, and it is honest to say it is a product rather than a configuration change. It needs our own call-script endpoint, rules about who may be called, a per-user spend cap, and a decision about recording and consent — which varies by jurisdiction and is a real legal question, not a checkbox.
+
+It is not an onboarding capability. Nobody's first minute on the platform should involve us phoning a stranger on their behalf. Build it deliberately, after the five items above, and let it be its own thing.
+
+## What we cut, and why
+
+**Sending SMS.** The dangerous parts are the destination and the message body, and no amount of configuration constrains either meaningfully. It also carries real regulatory exposure. Calls, with a script we own, are the better shape.
+
+**Flight booking and payment.** Creating a booking writes passenger details into our airline account, reserves real inventory, and starts a payment clock. We would also be liable for fraud on money we never receive. That is a travel product, not a first-run demo.
+
+**A general-purpose rule language.** We had designed a way to express detailed constraints on request contents, stored in the database. Both reviewers found it existed almost entirely to make SMS and flight booking safe — and that its flagship example did not actually work. Remove those two capabilities and there is nothing left for it to do. If we need it later, we will know precisely why.
+
+## What we need from outside
+
+**Reddit** may not ship at all. The credential type it needs expires hourly and requires a flow we currently exclude, and their commercial terms for this kind of use are unverified. Either that changes or Reddit waits.
+
+**Duffel's Stays and Cars** products are switched off on our account — hotels and cars are a sales conversation, not an engineering one. Flights work today.
+
+**Duffel Cards approval** is needed before any payment work. Worth requesting now, because that clock runs regardless of what we build.
+
+## Corrections to earlier drafts
+
+Two things I previously told you that were wrong, corrected here so this document does not carry them forward.
+
+I said the platform could already fall back to our credential when a user has not connected their own. It cannot — I misread two similar code paths. That capability would need building.
+
+I described flight booking as safe because no money moves. It creates real obligations regardless: passenger data in our account, held inventory, and a deadline. "No payment" is not the same as "no consequence."
+
+---
+
+## Appendix — the specifics
+
+**Operations to expose.** X: recent search only. Reddit: subreddit hot and new, search, comment threads. Firecrawl: scrape and search, with a body-size cap and a credit ceiling — no crawling, no site mapping, no async jobs. Duffel: offer requests and offer retrieval, nothing else. ElevenLabs: text-to-speech only, one voice, capped length.
+
+**Not exposed anywhere:** anything that writes, anything returning our own account identity, anything that lists activity across the shared account, and Firecrawl's asynchronous job polling — which accepts any job identifier and cannot be made safe by configuration, because nothing proves the job belongs to whoever is asking.
+
+**What an operator supplies:** app-only credentials for each vendor, a curated voice library if they enable speech, and their own answer to the vendor terms questions above. Everything else is configuration on the service row.
+
+**Where the code changes live:** assistant tool wiring; the credential validity check; policy-required enforcement on platform rows; the overlay/endpoint sync that currently resurrects removed operations on restart; and the rate limiter.
