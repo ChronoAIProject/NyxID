@@ -577,6 +577,11 @@ mod tests {
             .with_state(state)
     }
 
+    fn production_app(state: AppState) -> Router {
+        let (_, private) = crate::routes::build_router();
+        private.with_state(state)
+    }
+
     async fn request(
         app: Router,
         token: &str,
@@ -739,6 +744,53 @@ mod tests {
             assert_eq!(status, StatusCode::BAD_REQUEST, "{label}: {response}");
             assert_ne!(status, StatusCode::INTERNAL_SERVER_ERROR);
         }
+    }
+
+    #[tokio::test]
+    async fn production_router_mounts_endpoint_and_external_key_evidence() {
+        let Some((db, actor_id)) = prepare_database("asst_production_evidence_routes").await else {
+            return;
+        };
+        let endpoint_id = insert_endpoint(
+            &db,
+            &actor_id,
+            "Production route endpoint",
+            "https://api.example.com",
+        )
+        .await;
+        let key_id = Uuid::new_v4().to_string();
+        db.collection::<UserApiKey>(USER_API_KEYS)
+            .insert_one(fixture_external_key(
+                &key_id,
+                &actor_id,
+                "Production route key",
+            ))
+            .await
+            .expect("insert external key");
+        let state = test_app_state(db);
+        let token = access_token(&state, &actor_id);
+
+        let (status, endpoint_evidence) = request(
+            production_app(state.clone()),
+            &token,
+            "GET",
+            &format!("/api/v1/endpoints/{endpoint_id}/authorization"),
+            None,
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{endpoint_evidence}");
+        assert_eq!(endpoint_evidence["id"], endpoint_id);
+
+        let (status, external_key_evidence) = request(
+            production_app(state),
+            &token,
+            "GET",
+            &format!("/api/v1/api-keys/external/{key_id}/authorization"),
+            None,
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{external_key_evidence}");
+        assert_eq!(external_key_evidence["id"], key_id);
     }
 
     #[tokio::test]
