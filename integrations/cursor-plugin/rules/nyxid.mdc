@@ -1,7 +1,6 @@
 ---
 description: Route credential-backed downstream API work through NyxID instead of asking for or handling raw provider secrets.
 alwaysApply: false
-globs: ["**/*"]
 ---
 
 When a task needs an authenticated downstream service and no suitable native integration is already available, use the NyxID MCP server. Discover or connect the service with NyxID's MCP tools, then call the exposed service tool through NyxID so its stored credential is injected server-side. Do not ask the user to paste an API key or OAuth token into chat or source files.

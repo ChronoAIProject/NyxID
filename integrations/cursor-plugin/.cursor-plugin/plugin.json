@@ -1,7 +1,14 @@
 {
   "name": "nyxid",
+  "displayName": "NyxID",
   "description": "Connect Cursor agents to NyxID for credential brokering, service discovery, and proxied downstream API calls without exposing upstream secrets.",
   "version": "0.1.0",
+  "category": "developer-tools",
+  "tags": [
+    "credentials",
+    "mcp",
+    "api-proxy"
+  ],
   "author": {
     "name": "ChronoAIProject"
   },

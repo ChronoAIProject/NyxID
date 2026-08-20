@@ -7,10 +7,10 @@ NyxID's Cursor plugin lives in [`integrations/cursor-plugin/`](../integrations/c
 1. Keep the repository public and make sure the plugin manifest, logo, rules, skills, commands, MCP config, and README are committed.
 2. Run `python3 scripts/validate-cursor-plugin.py` from the repository root.
 3. Open <https://cursor.com/marketplace/publish> and submit the public GitHub repository.
-4. Select the `nyxid` plugin entry from `.cursor-plugin/marketplace.json` when prompted.
+4. The root `.cursor-plugin/marketplace.json` identifies the `nyxid` plugin and its `integrations/cursor-plugin` source directory for the marketplace submission.
 5. Complete Cursor's manual review. Marketplace updates are reviewed again, so publish a new version for substantive changes and rerun validation before submitting.
 
-The root marketplace file is needed because the plugin is nested in this monorepo. Its `source` is `./integrations/cursor-plugin`, and `metadata.pluginRoot` documents the directory for marketplace tooling.
+The root marketplace file is needed because the plugin is nested in this monorepo. Its `source` is `integrations/cursor-plugin`, relative to the repository root.
 
 ## Mirror into a standalone repository
 

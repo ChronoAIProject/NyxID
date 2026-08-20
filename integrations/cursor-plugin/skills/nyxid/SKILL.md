@@ -9,7 +9,7 @@ Use NyxID when the user wants a credential-backed downstream API call, service d
 
 ## MCP-first workflow
 
-The plugin configures the hosted `${NYXID_BASE_URL}/mcp` endpoint. Authenticate in the browser when Cursor prompts. The built-in MCP tools are:
+The plugin configures the MCP endpoint at `<base URL>/mcp`, using the plugin's `NYXID_BASE_URL` variable for the configured NyxID base URL. Authenticate in the browser when Cursor prompts. The built-in MCP tools are:
 
 - `nyx__discover_services` lists catalog services that are not connected. Use its optional `query` or `category` filters when useful.
 - `nyx__list_connected_services` lists the user's connected services and availability.

@@ -145,8 +145,8 @@ def validate_components(root: Path, manifest: dict) -> None:
             fail(f"{root / relative}: rule frontmatter requires description")
         if not isinstance(fields.get("alwaysApply"), bool):
             fail(f"{root / relative}: rule frontmatter requires boolean alwaysApply")
-        if "globs" not in fields or not str(fields["globs"]).strip():
-            fail(f"{root / relative}: rule frontmatter requires globs")
+        if "globs" in fields and not str(fields["globs"]).strip():
+            fail(f"{root / relative}: rule frontmatter globs must be non-empty when present")
 
     for relative in manifest.get("commands", []):
         fields = frontmatter(root / relative)
@@ -172,6 +172,70 @@ def validate_mcp(root: Path, properties: dict) -> None:
         fail(f"mcp.json uses undeclared variables: {', '.join(missing)}")
 
 
+def find_marketplace(plugin_root: Path) -> tuple[Path, Path] | None:
+    """Find a repository marketplace index above a plugin root, if present."""
+    current = plugin_root
+    while True:
+        candidate = current / ".cursor-plugin" / "marketplace.json"
+        if candidate.is_file():
+            return candidate, current
+        if current.parent == current:
+            return None
+        current = current.parent
+
+
+def validate_marketplace(plugin_root: Path) -> None:
+    """Validate monorepo marketplace entries without requiring one standalone."""
+    found = find_marketplace(plugin_root)
+    if found is None:
+        return
+
+    marketplace_path, marketplace_root = found
+    marketplace = require_mapping(load_json(marketplace_path), "marketplace.json")
+    marketplace_name = marketplace.get("name")
+    if not isinstance(marketplace_name, str) or not NAME_RE.fullmatch(marketplace_name):
+        fail("marketplace name must be lowercase kebab-case")
+
+    plugins = marketplace.get("plugins")
+    if not isinstance(plugins, list) or not plugins:
+        fail("marketplace plugins must be a non-empty array")
+
+    metadata = marketplace.get("metadata", {})
+    if not isinstance(metadata, dict):
+        fail("marketplace metadata must be an object when present")
+    plugin_prefix = metadata.get("pluginRoot", "")
+    if not isinstance(plugin_prefix, str):
+        fail("marketplace metadata.pluginRoot must be a relative path when present")
+    if plugin_prefix:
+        prefix_path = Path(plugin_prefix)
+        if prefix_path.is_absolute() or ".." in prefix_path.parts:
+            fail("marketplace metadata.pluginRoot must be relative and must not contain '..'")
+
+    for index, entry_value in enumerate(plugins):
+        entry = require_mapping(entry_value, f"marketplace.plugins[{index}]")
+        entry_name = entry.get("name")
+        if not isinstance(entry_name, str) or not NAME_RE.fullmatch(entry_name):
+            fail(f"marketplace.plugins[{index}].name must be lowercase kebab-case")
+        source = entry.get("source")
+        if not isinstance(source, str) or not source:
+            fail(f"marketplace.plugins[{index}].source must be a non-empty relative path")
+        source_path = Path(source)
+        if source_path.is_absolute() or ".." in source_path.parts:
+            fail(f"marketplace.plugins[{index}].source must be relative and must not contain '..'")
+        effective_source = marketplace_root / plugin_prefix / source_path
+        manifest_path = effective_source / ".cursor-plugin" / "plugin.json"
+        if not manifest_path.is_file():
+            fail(
+                f"marketplace.plugins[{index}].source does not resolve to a plugin: "
+                f"{effective_source}"
+            )
+        plugin_manifest = require_mapping(load_json(manifest_path), f"{manifest_path}")
+        if plugin_manifest.get("name") != entry_name:
+            fail(f"marketplace.plugins[{index}].name does not match {manifest_path}")
+        if "version" not in entry or entry.get("version") != plugin_manifest.get("version"):
+            fail(f"marketplace.plugins[{index}].version does not match {manifest_path}")
+
+
 def main() -> int:
     default_root = Path(__file__).resolve().parents[1] / "integrations" / "cursor-plugin"
     root = Path(sys.argv[1]).resolve() if len(sys.argv) > 1 else default_root
@@ -179,6 +243,7 @@ def main() -> int:
         manifest, properties = validate_manifest(root)
         validate_components(root, manifest)
         validate_mcp(root, properties)
+        validate_marketplace(root)
     except ValidationError as exc:
         print(f"Cursor plugin validation failed: {exc}", file=sys.stderr)
         return 1
