@@ -506,7 +506,23 @@ pub async fn delete_external_key(
                         .await?;
                     return Err(error);
                 }
-                Err(error) => return Err(error),
+                Err(error) => {
+                    if matches!(
+                        &error,
+                        AppError::Conflict(message)
+                            if message
+                                == "the grant-cascade sibling set changed; review the confirmation again"
+                    ) {
+                        state
+                            .db
+                            .collection::<crate::models::assistant_action_receipt::AssistantActionReceipt>(
+                                crate::models::assistant_action_receipt::COLLECTION_NAME,
+                            )
+                            .delete_one(mongodb::bson::doc! { "_id": &receipt.id })
+                            .await?;
+                    }
+                    return Err(error);
+                }
                 Ok(_) => {}
             }
             assistant_action_receipts::mark_completed(&state.db, &receipt).await?;
@@ -1174,6 +1190,22 @@ mod tests {
 
         let cascade_siblings = first["details"]["siblings"].clone();
         assert!(cascade_siblings.is_array());
+        let (status, changed) = request(
+            app(state.clone()),
+            &token,
+            "POST",
+            "/assistant/actions/endpoints/external-key-delete",
+            Some(json!({
+                "actionRequestId": "delete-cascade",
+                "externalKeyId": primary_key,
+                "cascadeGrant": true,
+                "cascadeSiblings": [],
+            })),
+        )
+        .await;
+        assert_eq!(status, StatusCode::CONFLICT, "{changed}");
+        assert_eq!(changed["error_code"], 1004);
+
         let (status, confirmed) = request(
             app(state.clone()),
             &token,
