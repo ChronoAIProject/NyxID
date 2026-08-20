@@ -24,6 +24,7 @@ import { Input } from "@/components/ui/input";
 import { Button } from "@/components/ui/button";
 import { toast } from "sonner";
 import { usePublicConfig } from "@/hooks/use-public-config";
+import { WebDeviceLogin } from "@/components/auth/web-device-login";
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -444,6 +445,8 @@ export function AuthFlow({
               </form>
             </Form>
           )}
+
+          <WebDeviceLogin returnTo={returnTo} />
 
           {/* Footer */}
           <div className="mt-8 text-center text-[13px] text-muted-foreground">

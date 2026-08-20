@@ -6,7 +6,11 @@ import {
   formatAuthDeviceUserCodeInput,
   friendlyAuthDeviceErrorMessage,
   friendlyAuthDeviceStatusMessage,
+  pollBodySchema,
+  pollWebResponseSchema,
   previewResponseSchema,
+  requestBodySchema,
+  requestResponseSchema,
   userCodeSchema,
 } from "./auth-device";
 
@@ -56,6 +60,39 @@ describe("previewResponseSchema", () => {
         status: "pending",
       }).client_ip,
     ).toBeNull();
+  });
+});
+
+describe("browser device-code schemas", () => {
+  it("accepts a request response and normalizes the request body", () => {
+    expect(
+      requestBodySchema.parse({
+        client_label: "NyxID web (MacIntel)",
+        client_user_agent: "Mozilla/5.0",
+      }),
+    ).toEqual({
+      client_label: "NyxID web (MacIntel)",
+      client_user_agent: "Mozilla/5.0",
+    });
+    expect(
+      requestResponseSchema.parse({
+        device_code: "nyx_adc_test",
+        user_code: "ABCD-EFGH",
+        verification_uri: "https://id.example/login/device",
+        verification_uri_complete:
+          "https://id.example/login/device?user_code=ABCD-EFGH",
+        expires_in: 600,
+        interval: 5,
+      }).interval,
+    ).toBe(5);
+  });
+
+  it("validates the cookie-only web poll response", () => {
+    expect(pollBodySchema.parse({ device_code: "nyx_adc_test" })).toEqual({
+      device_code: "nyx_adc_test",
+    });
+    expect(pollWebResponseSchema.parse({ ok: true })).toEqual({ ok: true });
+    expect(pollWebResponseSchema.safeParse({ access_token: "secret" }).success).toBe(false);
   });
 });
 

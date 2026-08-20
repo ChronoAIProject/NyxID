@@ -26,6 +26,28 @@ export const approveResponseSchema = z.object({
   ok: z.literal(true),
 });
 
+export const requestBodySchema = z.object({
+  client_label: z.string().trim().min(1).max(128),
+  client_user_agent: z.string().trim().min(1).max(512),
+});
+
+export const requestResponseSchema = z.object({
+  device_code: z.string().min(1),
+  user_code: z.string().min(1),
+  verification_uri: z.string().url(),
+  verification_uri_complete: z.string().url(),
+  expires_in: z.number().int().positive(),
+  interval: z.number().int().positive(),
+});
+
+export const pollBodySchema = z.object({
+  device_code: z.string().min(1),
+});
+
+export const pollWebResponseSchema = z.object({
+  ok: z.literal(true),
+});
+
 export const previewResponseSchema = z.object({
   client_label: z.string().nullable(),
   client_user_agent: z.string().nullable(),
@@ -48,6 +70,10 @@ export const errorEnvelopeSchema = z.object({
 export type ApproveAuthDeviceBody = z.output<typeof approveBodySchema>;
 export type ApproveAuthDeviceResponse = z.infer<typeof approveResponseSchema>;
 export type DenyAuthDeviceBody = z.output<typeof denyBodySchema>;
+export type AuthDeviceRequestBody = z.output<typeof requestBodySchema>;
+export type AuthDeviceRequestResponse = z.infer<typeof requestResponseSchema>;
+export type AuthDevicePollBody = z.output<typeof pollBodySchema>;
+export type AuthDevicePollWebResponse = z.infer<typeof pollWebResponseSchema>;
 export type PreviewAuthDeviceResponse = z.infer<typeof previewResponseSchema>;
 export type AuthDeviceErrorEnvelope = z.infer<typeof errorEnvelopeSchema>;
 
