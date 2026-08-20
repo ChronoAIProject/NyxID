@@ -107,6 +107,18 @@ pub struct UserService {
     pub created_at: DateTime<Utc>,
     #[serde(with = "bson::serde_helpers::chrono_datetime_as_bson_datetime")]
     pub updated_at: DateTime<Utc>,
+
+    /// Authoritative monotonic version for this user-service row. Legacy
+    /// rows without the field deserialize as zero; newly written rows start
+    /// at one. Assistant mutations `$inc` it so update/route/rotate evidence
+    /// can prove a committed change without free text.
+    #[serde(default)]
+    pub state_version: i64,
+
+    /// Immutable lineage edge for a rotated successor credential. Directly
+    /// created services and rows that have never rotated have no predecessor.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rotation_predecessor_id: Option<String>,
 }
 
 fn default_service_type() -> String {
@@ -164,6 +176,8 @@ mod tests {
             source_app_id: None,
             created_at: Utc::now(),
             updated_at: Utc::now(),
+            state_version: 1,
+            rotation_predecessor_id: None,
         };
         let doc = bson::to_document(&svc).expect("serialize");
         let restored: UserService = bson::from_document(doc).expect("deserialize");
@@ -212,6 +226,8 @@ mod tests {
             source_app_id: None,
             created_at: Utc::now(),
             updated_at: Utc::now(),
+            state_version: 1,
+            rotation_predecessor_id: None,
         };
         let mut doc = bson::to_document(&svc).expect("serialize");
         doc.remove("node_priority");
@@ -261,6 +277,8 @@ mod tests {
             source_app_id: None,
             created_at: Utc::now(),
             updated_at: Utc::now(),
+            state_version: 1,
+            rotation_predecessor_id: None,
         };
         let mut doc = bson::to_document(&svc).expect("serialize");
         // Remove all identity fields to simulate existing documents
@@ -317,11 +335,66 @@ mod tests {
             source_app_id: None,
             created_at: Utc::now(),
             updated_at: Utc::now(),
+            state_version: 1,
+            rotation_predecessor_id: None,
         };
         let doc = bson::to_document(&svc).expect("serialize");
         assert!(!doc.contains_key("api_key_id"), "None should be skipped");
         let restored: UserService = bson::from_document(doc).expect("deserialize");
         assert!(restored.api_key_id.is_none());
         assert_eq!(restored.auth_method, "none");
+    }
+
+    /// Pre-lineage `user_services` documents (written before `state_version`
+    /// existed) must deserialize rather than fail closed. Absence is zero,
+    /// matching `ApiKey` — the evidence projection then omits the lineage
+    /// trio instead of serializing a malformed `state_version: 0`.
+    #[test]
+    fn user_service_preexisting_documents_deserialize_missing_state_version_as_zero() {
+        let svc = UserService {
+            id: "id".to_string(),
+            user_id: "uid".to_string(),
+            slug: "legacy".to_string(),
+            endpoint_id: "ep".to_string(),
+            api_key_id: Some("ak".to_string()),
+            auth_method: "bearer".to_string(),
+            auth_key_name: "Authorization".to_string(),
+            catalog_service_id: None,
+            node_id: None,
+            node_priority: 0,
+            service_type: "http".to_string(),
+            ssh_auth_mode: SshAuthMode::ProxyOnly,
+            admin_only: false,
+            ssh_node_keys_stale: false,
+            identity_propagation_mode: "none".to_string(),
+            identity_include_user_id: false,
+            identity_include_email: false,
+            identity_include_name: false,
+            identity_jwt_audience: None,
+            forward_access_token: false,
+            inject_delegation_token: false,
+            delegation_token_scope: "llm:proxy".to_string(),
+            custom_user_agent: None,
+            default_request_headers: None,
+            ws_frame_injections: Vec::new(),
+            is_active: true,
+            source: None,
+            source_id: None,
+            source_app_id: None,
+            created_at: Utc::now(),
+            updated_at: Utc::now(),
+            state_version: 1,
+            rotation_predecessor_id: Some("prev-key".to_string()),
+        };
+        let mut doc = bson::to_document(&svc).expect("serialize");
+        assert!(doc.contains_key("state_version"));
+        assert!(doc.contains_key("rotation_predecessor_id"));
+        doc.remove("state_version");
+        doc.remove("rotation_predecessor_id");
+        let restored: UserService = bson::from_document(doc).expect("deserialize");
+        assert_eq!(restored.state_version, 0);
+        assert_eq!(restored.rotation_predecessor_id, None);
+        assert_eq!(restored.id, "id");
+        assert!(restored.is_active);
     }
 }

@@ -774,6 +774,8 @@ pub async fn create_user_service(
         source_app_id: source_app_id.map(str::to_string),
         created_at: now,
         updated_at: now,
+        state_version: 1,
+        rotation_predecessor_id: None,
     };
 
     db.collection::<UserService>(COLLECTION_NAME)
@@ -1057,7 +1059,10 @@ pub async fn update_user_service(
         .collection::<UserService>(COLLECTION_NAME)
         .update_one(
             doc! { "_id": service_id, "user_id": user_id },
-            doc! { "$set": set_doc },
+            doc! {
+                "$set": set_doc,
+                "$inc": { "state_version": 1_i64 },
+            },
         )
         .await?;
 

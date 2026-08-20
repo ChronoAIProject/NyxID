@@ -466,6 +466,14 @@ pub struct KeyView {
     pub last_used_at: Option<String>,
     pub error_message: Option<String>,
     pub created_at: String,
+    /// Authoritative timestamp of the latest committed `UserService` mutation.
+    pub updated_at: String,
+    /// Authoritative monotonic version for the user-service row. Legacy rows
+    /// without the field report zero.
+    pub state_version: i64,
+    /// Credential-rotation predecessor (`UserApiKey` id). Absent when this
+    /// service has never rotated its stored credential.
+    pub rotation_predecessor_id: Option<String>,
     // SSH fields
     pub ssh_host: Option<String>,
     pub ssh_port: Option<u16>,
@@ -3779,6 +3787,9 @@ fn build_key_view(
         last_used_at: ak.and_then(|k| k.last_used_at.map(|dt| dt.to_rfc3339())),
         error_message: ak.and_then(|k| k.error_message.clone()),
         created_at: svc.created_at.to_rfc3339(),
+        updated_at: svc.updated_at.to_rfc3339(),
+        state_version: svc.state_version,
+        rotation_predecessor_id: svc.rotation_predecessor_id.clone(),
         ssh_host,
         ssh_port,
         ssh_ca_public_key,
@@ -4050,6 +4061,8 @@ mod tests {
             source_id: None,
             created_at: Utc::now(),
             updated_at: Utc::now(),
+            state_version: 1,
+            rotation_predecessor_id: None,
         }
     }
 

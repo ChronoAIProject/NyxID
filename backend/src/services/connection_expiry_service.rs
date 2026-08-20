@@ -405,6 +405,8 @@ mod tests {
             source_app_id: None,
             created_at: now,
             updated_at: now,
+            state_version: 1,
+            rotation_predecessor_id: None,
         }
     }
 
