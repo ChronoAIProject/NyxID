@@ -1143,6 +1143,10 @@ pub fn build_router() -> (Router<AppState>, Router<AppState>) {
                 .delete(handlers::user_endpoints::delete_endpoint),
         )
         .route(
+            "/{endpoint_id}/authorization",
+            get(handlers::user_endpoints::get_endpoint_authorization),
+        )
+        .route(
             "/{endpoint_id}/openapi-endpoints",
             get(handlers::user_endpoints::list_openapi_endpoints),
         );
@@ -1160,6 +1164,10 @@ pub fn build_router() -> (Router<AppState>, Router<AppState>) {
             "/{key_id}",
             put(handlers::user_api_keys_external::update_external_api_key)
                 .delete(handlers::user_api_keys_external::delete_external_api_key),
+        )
+        .route(
+            "/{key_id}/authorization",
+            get(handlers::user_api_keys_external::get_external_api_key_authorization),
         );
 
     let user_service_routes = Router::new()

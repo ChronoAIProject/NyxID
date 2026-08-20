@@ -55,7 +55,7 @@ async fn load_readable_api_key(
 /// whether the actor may modify it (directly or as an org admin).
 /// Returns the effective owner_id (which may be an org user_id) for
 /// downstream service calls.
-async fn resolve_api_key_write_owner(
+pub(crate) async fn resolve_api_key_write_owner(
     state: &AppState,
     actor: &str,
     key_id: &str,

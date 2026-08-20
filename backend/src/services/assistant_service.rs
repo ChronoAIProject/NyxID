@@ -472,6 +472,8 @@ impl ActionDisposition {
 pub enum ActionResource {
     UserService { user_service_id: String },
     Key { key_id: String },
+    Endpoint { endpoint_id: String },
+    ExternalKey { external_key_id: String },
     Node { node_id: String },
     ServiceAccount { service_account_id: String },
     DeveloperApp { client_id: String },
@@ -486,6 +488,12 @@ impl ActionResource {
             }),
             Self::Key { key_id } => serde_json::json!({
                 "key": { "keyId": key_id }
+            }),
+            Self::Endpoint { endpoint_id } => serde_json::json!({
+                "endpoint": { "endpointId": endpoint_id }
+            }),
+            Self::ExternalKey { external_key_id } => serde_json::json!({
+                "externalKey": { "externalKeyId": external_key_id }
             }),
             Self::Node { node_id } => serde_json::json!({
                 "node": { "nodeId": node_id }
@@ -779,6 +787,12 @@ fn parse_action_resource(value: Option<serde_json::Value>) -> AppResult<Option<A
         },
         "key" => ActionResource::Key {
             key_id: parse_identity(payload, "keyId", "keyId")?,
+        },
+        "endpoint" => ActionResource::Endpoint {
+            endpoint_id: parse_identity(payload, "endpointId", "endpointId")?,
+        },
+        "externalKey" => ActionResource::ExternalKey {
+            external_key_id: parse_identity(payload, "externalKeyId", "externalKeyId")?,
         },
         "node" => ActionResource::Node {
             node_id: parse_identity(payload, "nodeId", "nodeId")?,

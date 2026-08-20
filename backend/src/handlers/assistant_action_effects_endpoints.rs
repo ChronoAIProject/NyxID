@@ -10,22 +10,22 @@
 
 use axum::{
     Json, Router,
-    extract::{Path, Query, State},
+    extract::{Path, State},
     routing::{get, post},
 };
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 use utoipa::ToSchema;
 
 use crate::AppState;
 use crate::errors::{AppError, AppResult};
-use crate::handlers::user_api_keys_external::{
-    self, DeleteExternalApiKeyQuery, UpdateExternalApiKeyRequest,
-};
+use crate::handlers::user_api_keys_external::{self, UpdateExternalApiKeyRequest};
 use crate::handlers::user_endpoints::{self, UpdateEndpointRequest};
 use crate::mw::auth::AuthUser;
 use crate::services::assistant_action_receipts::{
     self, ReceiptOutcome, fingerprint_canonical, in_progress_conflict, normalize_action_request_id,
 };
+use crate::services::{audit_service::AuditActor, unified_key_service};
 use crate::telemetry::TelemetryContext;
 
 const ENDPOINT_UPDATE_ACTION: &str = "endpoint.update";
@@ -99,6 +99,8 @@ pub struct DeleteAssistantExternalKeyRequest {
     pub cascade_grant: Option<bool>,
     #[serde(default)]
     pub grant_scope: Option<String>,
+    #[serde(default)]
+    pub cascade_siblings: Option<Vec<CascadeSiblingConfirmation>>,
 }
 
 #[derive(Debug, Serialize, ToSchema)]
@@ -149,6 +151,7 @@ struct EndpointDeleteFingerprint<'a> {
 struct ExternalKeyRotateFingerprint<'a> {
     action: &'static str,
     external_key_id: &'a str,
+    credential_sha256: String,
 }
 
 #[derive(Serialize)]
@@ -156,6 +159,25 @@ struct ExternalKeyRotateFingerprint<'a> {
 struct ExternalKeyDeleteFingerprint<'a> {
     action: &'static str,
     external_key_id: &'a str,
+    cascade_grant: bool,
+    grant_scope: Option<&'a str>,
+    cascade_siblings: Option<Vec<CascadeSiblingFingerprint<'a>>>,
+}
+
+#[derive(Debug, Deserialize, Serialize, ToSchema)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct CascadeSiblingConfirmation {
+    pub user_service_id: String,
+    pub name: String,
+    pub slug: String,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct CascadeSiblingFingerprint<'a> {
+    user_service_id: &'a str,
+    name: &'a str,
+    slug: &'a str,
 }
 
 fn optional_trimmed(value: Option<String>) -> Option<String> {
@@ -256,9 +278,9 @@ pub async fn update_endpoint(
     }
 }
 
-/// Permanently delete one user endpoint. Exact retries of a completed receipt
-/// replay success even though the row is gone; a first attempt against a
-/// missing id returns 404, not 500.
+/// Permanently delete one user endpoint. A receipt is completed only after the
+/// underlying delete succeeds; a missing or foreign id never becomes a
+/// successful deletion on an exact retry.
 pub async fn delete_endpoint(
     State(state): State<AppState>,
     auth_user: AuthUser,
@@ -299,6 +321,16 @@ pub async fn delete_endpoint(
                     assistant_action_receipts::mark_completed(&state.db, &receipt).await?;
                     Ok(Json(endpoint_effect_response(endpoint_id, false)))
                 }
+                Err(AppError::NotFound(message)) => {
+                    state
+                        .db
+                        .collection::<crate::models::assistant_action_receipt::AssistantActionReceipt>(
+                            crate::models::assistant_action_receipt::COLLECTION_NAME,
+                        )
+                        .delete_one(mongodb::bson::doc! { "_id": &receipt.id })
+                        .await?;
+                    Err(AppError::NotFound(message))
+                }
                 Err(error) => Err(error),
             }
         }
@@ -325,6 +357,7 @@ pub async fn rotate_external_key(
     let fingerprint = fingerprint_canonical(&ExternalKeyRotateFingerprint {
         action: EXTERNAL_KEY_ROTATE_ACTION,
         external_key_id: &external_key_id,
+        credential_sha256: hex::encode(Sha256::digest(credential.as_bytes())),
     })?;
     let actor = auth_user.user_id.to_string();
     match assistant_action_receipts::reserve_or_replay(
@@ -370,9 +403,53 @@ pub async fn delete_external_key(
     auth_user.ensure_write_scope()?;
     let action_request_id = normalize_action_request_id(body.action_request_id)?;
     let external_key_id = normalize_action_request_id(body.external_key_id)?;
+    let cascade_grant = body.cascade_grant.unwrap_or(false);
+    let grant_scope = body.grant_scope.clone();
+    let expected_siblings = body.cascade_siblings.as_ref().map(|siblings| {
+        siblings
+            .iter()
+            .map(|sibling| {
+                (
+                    sibling.user_service_id.clone(),
+                    sibling.name.clone(),
+                    sibling.slug.clone(),
+                )
+            })
+            .collect::<Vec<_>>()
+    });
+    let actor = auth_user.user_id.to_string();
+    let owner_id =
+        user_api_keys_external::resolve_api_key_write_owner(&state, &actor, &external_key_id)
+            .await?;
+    let options = unified_key_service::DisconnectOptions {
+        cascade_grant,
+        grant_scope: grant_scope.clone(),
+    };
+    if !cascade_grant && grant_scope.as_deref() != Some("token") {
+        unified_key_service::ensure_disconnect_confirmation(
+            &state.db,
+            &state.encryption_keys,
+            &owner_id,
+            unified_key_service::DisconnectTarget::UserApiKey(&external_key_id),
+            options.clone(),
+        )
+        .await?;
+    }
     let fingerprint = fingerprint_canonical(&ExternalKeyDeleteFingerprint {
         action: EXTERNAL_KEY_DELETE_ACTION,
         external_key_id: &external_key_id,
+        cascade_grant,
+        grant_scope: grant_scope.as_deref(),
+        cascade_siblings: body.cascade_siblings.as_deref().map(|siblings| {
+            siblings
+                .iter()
+                .map(|sibling| CascadeSiblingFingerprint {
+                    user_service_id: &sibling.user_service_id,
+                    name: &sibling.name,
+                    slug: &sibling.slug,
+                })
+                .collect()
+        }),
     })?;
     let actor = auth_user.user_id.to_string();
     match assistant_action_receipts::reserve_or_replay(
@@ -391,17 +468,32 @@ pub async fn delete_external_key(
         ))),
         ReceiptOutcome::InProgress(_) => Err(in_progress_conflict()),
         ReceiptOutcome::Reserved(receipt) => {
-            let _deleted = user_api_keys_external::delete_external_api_key(
-                State(state.clone()),
-                auth_user,
-                TelemetryContext::default(),
-                Path(external_key_id.clone()),
-                Query(DeleteExternalApiKeyQuery {
-                    cascade_grant: body.cascade_grant,
-                    grant_scope: body.grant_scope,
-                }),
+            let audit_actor = AuditActor::from_auth_user(&auth_user);
+            let deleted = unified_key_service::disconnect_credentials_with_expected_siblings(
+                &state.db,
+                &state.encryption_keys,
+                &owner_id,
+                &audit_actor,
+                unified_key_service::DisconnectTarget::UserApiKey(&external_key_id),
+                options,
+                expected_siblings.as_deref(),
             )
-            .await?;
+            .await;
+            match deleted {
+                Err(error @ AppError::NotFound(_))
+                | Err(error @ AppError::GrantCascadeConfirmationRequired(_)) => {
+                    state
+                        .db
+                        .collection::<crate::models::assistant_action_receipt::AssistantActionReceipt>(
+                            crate::models::assistant_action_receipt::COLLECTION_NAME,
+                        )
+                        .delete_one(mongodb::bson::doc! { "_id": &receipt.id })
+                        .await?;
+                    return Err(error);
+                }
+                Err(error) => return Err(error),
+                Ok(_) => {}
+            }
             assistant_action_receipts::mark_completed(&state.db, &receipt).await?;
             Ok(Json(external_key_effect_response(external_key_id, false)))
         }
