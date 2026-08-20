@@ -7,6 +7,7 @@ import {
 import {
   ASSISTANT_WIRE_LOG_STORAGE_KEY,
   captureAssistantWireLogHeader,
+  captureAssistantWireLogId,
   useAssistantWireLogStore,
 } from "./assistant-wire-log-store";
 
@@ -61,6 +62,31 @@ function encodeHeader(value: unknown): string {
   return btoa(binary);
 }
 
+function recordExchange(
+  envelopes: readonly AssistantUpstreamEnvelope[],
+  kind: "sse" | "header" = "header",
+  status = 200,
+) {
+  return useAssistantWireLogStore.getState().recordExchange({
+    kind,
+    status,
+    conversationId: "nyxchat-store-test",
+    wireLogId: null,
+    label: `${envelopes[0]?.method ?? "GET"} /${envelopes[0]?.path ?? "assistant"}`,
+    envelopes,
+  });
+}
+
+function recordWireLog(index: number) {
+  return useAssistantWireLogStore.getState().recordExchange({
+    kind: "header",
+    status: 200,
+    conversationId: "nyxchat-store-test",
+    wireLogId: `wire-log-${String(index)}`,
+    label: `GET /assistant/resource/${String(index)}`,
+  });
+}
+
 describe("assistant upstream envelope decoder", () => {
   it("accepts every backend degradation rung through the real union decoder", () => {
     expect(backendLadderFixtures).toHaveLength(6);
@@ -103,26 +129,24 @@ describe("useAssistantWireLogStore", () => {
   });
 
   it("evicts the oldest exchanges from the 100-entry ring", () => {
-    const store = useAssistantWireLogStore.getState();
     for (let index = 0; index < 105; index += 1) {
-      store.recordExchange([envelope(index)], "header", 200);
+      recordWireLog(index);
     }
 
     const entries = useAssistantWireLogStore.getState().entries;
     expect(entries).toHaveLength(100);
-    expect(entries[0]?.upstreamEchoes?.[0]).toMatchObject({
-      body: { prompt: "prompt-5" },
-    });
-    expect(entries.at(-1)?.upstreamEchoes?.[0]).toMatchObject({
-      body: { prompt: "prompt-104" },
-    });
+    expect(entries[0]?.wireLogId).toBe("wire-log-5");
+    expect(entries.at(-1)?.wireLogId).toBe("wire-log-104");
+    expect(entries.every((entry) => entry.upstreamEchoes === undefined)).toBe(
+      true,
+    );
   });
 
   it("evicts oldest envelopes to stay below the two-megabyte persisted budget", () => {
     const first = { ...envelope(1), body: { prompt: "a".repeat(1_200_000) } };
     const second = { ...envelope(2), body: { prompt: "b".repeat(1_200_000) } };
-    useAssistantWireLogStore.getState().recordExchange([first], "header", 200);
-    useAssistantWireLogStore.getState().recordExchange([second], "header", 200);
+    recordExchange([first]);
+    recordExchange([second]);
 
     const { entries, totalBytes } = useAssistantWireLogStore.getState();
     expect(entries).toHaveLength(1);
@@ -133,10 +157,8 @@ describe("useAssistantWireLogStore", () => {
     expect(totalBytes).toBeLessThanOrEqual(2 * 1024 * 1024);
   });
 
-  it("persists only backend envelopes and recomputes byte accounting", async () => {
-    const id = useAssistantWireLogStore
-      .getState()
-      .recordExchange([envelope(1)], "sse", 201);
+  it("persists inline fallback envelopes but not delivered captures", async () => {
+    const id = recordExchange([envelope(1)], "sse", 201);
     expect(id).not.toBeNull();
     useAssistantWireLogStore
       .getState()
@@ -157,7 +179,7 @@ describe("useAssistantWireLogStore", () => {
     expect(state.captureBytes).toBe(0);
   });
 
-  it("explicitly migrates a real v1 payload to an empty v2 state", async () => {
+  it("explicitly migrates a real v2 payload to an empty v3 state", async () => {
     resetStore();
     localStorage.setItem(
       ASSISTANT_WIRE_LOG_STORAGE_KEY,
@@ -166,7 +188,7 @@ describe("useAssistantWireLogStore", () => {
           captureEnabled: true,
           entries: [{ ...envelope(1), body: { prompt: "v1-private" } }],
         },
-        version: 1,
+        version: 2,
       }),
     );
 
@@ -184,13 +206,13 @@ describe("useAssistantWireLogStore", () => {
     );
   });
 
-  it("drops corrupt persisted v2 state during hydration", async () => {
+  it("drops corrupt persisted v3 state during hydration", async () => {
     resetStore();
     localStorage.setItem(
       ASSISTANT_WIRE_LOG_STORAGE_KEY,
       JSON.stringify({
         state: { captureEnabled: "yes", entries: [{ body: "private" }] },
-        version: 2,
+        version: 3,
       }),
     );
 
@@ -231,7 +253,13 @@ describe("useAssistantWireLogStore", () => {
 
   it("never creates an exchange without a backend echo", () => {
     expect(
-      useAssistantWireLogStore.getState().recordExchange([], "header", 200),
+      useAssistantWireLogStore.getState().recordExchange({
+        kind: "header",
+        status: 200,
+        conversationId: null,
+        wireLogId: null,
+        label: "GET /assistant/resource",
+      }),
     ).toBeNull();
     expect(useAssistantWireLogStore.getState().entries).toEqual([]);
   });
@@ -239,9 +267,7 @@ describe("useAssistantWireLogStore", () => {
   it("ignores a backend echo that arrives after capture is disabled", () => {
     useAssistantWireLogStore.getState().setCaptureEnabled(false);
 
-    const id = useAssistantWireLogStore
-      .getState()
-      .recordExchange([envelope(1)], "header", 200);
+    const id = recordExchange([envelope(1)]);
 
     expect(id).toBeNull();
     expect(useAssistantWireLogStore.getState().entries).toEqual([]);
@@ -250,21 +276,15 @@ describe("useAssistantWireLogStore", () => {
   it("ignores a backend echo while the server-driven feature is disabled", () => {
     useAssistantWireLogStore.getState().setFeatureEnabled(false);
 
-    const id = useAssistantWireLogStore
-      .getState()
-      .recordExchange([envelope(1)], "header", 200);
+    const id = recordExchange([envelope(1)]);
 
     expect(id).toBeNull();
     expect(useAssistantWireLogStore.getState().entries).toEqual([]);
   });
 
   it("evicts oldest session captures under the separate four-megabyte budget", () => {
-    const firstId = useAssistantWireLogStore
-      .getState()
-      .recordExchange([envelope(1)], "header", 200)!;
-    const secondId = useAssistantWireLogStore
-      .getState()
-      .recordExchange([envelope(2)], "header", 200)!;
+    const firstId = recordExchange([envelope(1)])!;
+    const secondId = recordExchange([envelope(2)])!;
     useAssistantWireLogStore
       .getState()
       .attachResponseBody(firstId, "a".repeat(2_200_000), 2_200_000, false);
@@ -297,7 +317,12 @@ describe("useAssistantWireLogStore", () => {
       droppedEchoCount: 3,
     });
 
-    const id = captureAssistantWireLogHeader(header, "sse", 202);
+    const id = captureAssistantWireLogHeader(header, {
+      kind: "sse",
+      status: 202,
+      conversationId: "nyxchat-store-test",
+      label: "POST /assistant/chat",
+    });
 
     expect(id).not.toBeNull();
     expect(useAssistantWireLogStore.getState().entries).toHaveLength(1);
@@ -312,13 +337,64 @@ describe("useAssistantWireLogStore", () => {
     });
   });
 
+  it("records id-backed metadata and assigns its authoritative conversation", () => {
+    const id = captureAssistantWireLogId(
+      "d7dbbf38-a31c-4331-8ddb-13fda5a70d12",
+      {
+        kind: "sse",
+        status: 200,
+        conversationId: null,
+        label: "POST /assistant/chat",
+      },
+    );
+    expect(id).not.toBeNull();
+    expect(useAssistantWireLogStore.getState().entries[0]).toMatchObject({
+      id,
+      conversationId: null,
+      wireLogId: "d7dbbf38-a31c-4331-8ddb-13fda5a70d12",
+      label: "POST /assistant/chat",
+    });
+    expect(
+      useAssistantWireLogStore.getState().entries[0]?.upstreamEchoes,
+    ).toBeUndefined();
+
+    useAssistantWireLogStore
+      .getState()
+      .assignConversation(id!, "nyxchat-authoritative");
+
+    expect(useAssistantWireLogStore.getState().entries[0]).toMatchObject({
+      conversationId: "nyxchat-authoritative",
+      wireLogId: "d7dbbf38-a31c-4331-8ddb-13fda5a70d12",
+    });
+  });
+
+  it("rehydrates id-backed metadata without inventing an inline payload", async () => {
+    const id = recordWireLog(7);
+    expect(id).not.toBeNull();
+    const persisted = localStorage.getItem(ASSISTANT_WIRE_LOG_STORAGE_KEY);
+    expect(persisted).not.toBeNull();
+
+    resetStore();
+    localStorage.setItem(ASSISTANT_WIRE_LOG_STORAGE_KEY, persisted!);
+    await useAssistantWireLogStore.persist.rehydrate();
+
+    const state = useAssistantWireLogStore.getState();
+    expect(state.entries).toHaveLength(1);
+    expect(state.entries[0]).toMatchObject({
+      id,
+      conversationId: "nyxchat-store-test",
+      wireLogId: "wire-log-7",
+      label: "GET /assistant/resource/7",
+    });
+    expect(state.entries[0]).not.toHaveProperty("upstreamEchoes");
+    expect(state.entries[0]).not.toHaveProperty("capture");
+    expect(state.totalBytes).toBeGreaterThan(0);
+    expect(state.captureBytes).toBe(0);
+  });
+
   it("drops the oldest persisted exchange and retries once after quota exhaustion", () => {
-    useAssistantWireLogStore
-      .getState()
-      .recordExchange([envelope(1)], "header", 200);
-    useAssistantWireLogStore
-      .getState()
-      .recordExchange([envelope(2)], "header", 200);
+    recordExchange([envelope(1)]);
+    recordExchange([envelope(2)]);
     const writes: string[] = [];
     vi.stubGlobal("localStorage", {
       getItem: vi.fn(() => null),
@@ -334,9 +410,7 @@ describe("useAssistantWireLogStore", () => {
       }),
     });
 
-    useAssistantWireLogStore
-      .getState()
-      .recordExchange([envelope(3)], "header", 200);
+    recordExchange([envelope(3)]);
 
     expect(writes).toHaveLength(2);
     const retried = JSON.parse(writes[1]!) as {

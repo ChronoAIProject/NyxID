@@ -22,6 +22,21 @@ const MAX_PERSISTED_BYTES = 2 * 1024 * 1024;
 const MAX_CAPTURE_BYTES = 4 * 1024 * 1024;
 const textEncoder = new TextEncoder();
 
+export interface AssistantWireLogExchangeMeta {
+  readonly kind: AssistantWireLogExchange["kind"];
+  readonly status: number;
+  readonly conversationId: string | null;
+  readonly wireLogId: string | null;
+  readonly label: string;
+  readonly envelopes?: readonly AssistantUpstreamEnvelope[];
+  readonly droppedEchoCount?: number;
+}
+
+export type AssistantWireLogResponseMeta = Omit<
+  AssistantWireLogExchangeMeta,
+  "wireLogId" | "envelopes" | "droppedEchoCount"
+>;
+
 interface AssistantWireLogState {
   readonly featureEnabled: boolean;
   readonly captureEnabled: boolean;
@@ -32,12 +47,11 @@ interface AssistantWireLogState {
   readonly setFeatureEnabled: (enabled: boolean) => void;
   readonly setCaptureEnabled: (enabled: boolean) => void;
   readonly setShowResponses: (enabled: boolean) => void;
-  readonly recordExchange: (
-    envelopes: readonly AssistantUpstreamEnvelope[],
-    kind: AssistantWireLogExchange["kind"],
-    status: number,
-    droppedEchoCount?: number,
-  ) => string | null;
+  readonly recordExchange: (meta: AssistantWireLogExchangeMeta) => string | null;
+  readonly assignConversation: (
+    exchangeId: string,
+    conversationId: string,
+  ) => void;
   readonly attachWireLines: (
     exchangeId: string,
     lines: readonly AssistantWireLine[],
@@ -243,7 +257,7 @@ function migrateWireLog(
   persisted: unknown,
   version: number,
 ): PersistedWireLogState {
-  if (version < 2) {
+  if (version < 3) {
     removeInvalidPersistedState();
     return EMPTY_PERSISTED_WIRE_LOG;
   }
@@ -255,7 +269,7 @@ function migrateWireLog(
   return parsed.data;
 }
 
-// Backend echoes persist across restarts; delivered bodies stay session-only.
+// Exchange metadata and inline fallbacks persist; fetched and delivered bodies do not.
 export const useAssistantWireLogStore = create<AssistantWireLogState>()(
   persist(
     (set, get) => ({
@@ -263,11 +277,12 @@ export const useAssistantWireLogStore = create<AssistantWireLogState>()(
       setFeatureEnabled: (featureEnabled) => set({ featureEnabled }),
       setCaptureEnabled: (captureEnabled) => set({ captureEnabled }),
       setShowResponses: (showResponses) => set({ showResponses }),
-      recordExchange: (envelopes, kind, status, droppedEchoCount = 0) => {
+      recordExchange: (meta) => {
+        const envelopes = meta.envelopes;
         if (
           !get().featureEnabled ||
           !get().captureEnabled ||
-          envelopes.length === 0
+          (!meta.wireLogId && (!envelopes || envelopes.length === 0))
         ) {
           return null;
         }
@@ -275,17 +290,35 @@ export const useAssistantWireLogStore = create<AssistantWireLogState>()(
         const exchange: AssistantWireLogExchange = {
           id,
           ts: Date.now(),
-          kind,
-          status,
-          conversationId: null,
-          wireLogId: null,
-          label: `${envelopes[0]?.method ?? kind.toUpperCase()} /${envelopes[0]?.path ?? "assistant"}`,
-          upstreamEchoes: [...envelopes],
-          ...(droppedEchoCount > 0 ? { droppedEchoCount } : {}),
+          kind: meta.kind,
+          status: meta.status,
+          conversationId: meta.conversationId,
+          wireLogId: meta.wireLogId,
+          label: meta.label,
+          ...(envelopes === undefined
+            ? {}
+            : { upstreamEchoes: [...envelopes] }),
+          ...(meta.droppedEchoCount && meta.droppedEchoCount > 0
+            ? { droppedEchoCount: meta.droppedEchoCount }
+            : {}),
           capture: { state: "open" },
         };
         set((state) => boundedPersistedEntries([...state.entries, exchange]));
         return id;
+      },
+      assignConversation: (exchangeId, conversationId) => {
+        set((state) => {
+          const index = state.entries.findIndex(
+            (entry) => entry.id === exchangeId,
+          );
+          const exchange = state.entries[index];
+          if (!exchange || exchange.conversationId === conversationId) {
+            return state;
+          }
+          const entries = [...state.entries];
+          entries[index] = { ...exchange, conversationId };
+          return boundedPersistedEntries(entries);
+        });
       },
       attachWireLines: (
         exchangeId,
@@ -370,7 +403,7 @@ export const useAssistantWireLogStore = create<AssistantWireLogState>()(
     }),
     {
       name: ASSISTANT_WIRE_LOG_STORAGE_KEY,
-      version: 2,
+      version: 3,
       storage: createJSONStorage(() => quotaSafeStorage),
       migrate: migrateWireLog,
       partialize: ({ captureEnabled, showResponses, entries }) => ({
@@ -405,8 +438,7 @@ function decodeBase64Utf8(value: string): string {
 
 export function captureAssistantWireLogHeader(
   value: string | null | undefined,
-  kind: AssistantWireLogExchange["kind"],
-  status: number,
+  meta: AssistantWireLogResponseMeta,
 ): string | null {
   if (!value) return null;
   try {
@@ -416,14 +448,25 @@ export function captureAssistantWireLogHeader(
     if (!parsed.success) return null;
     return useAssistantWireLogStore
       .getState()
-      .recordExchange(
-        parsed.data.echoes,
-        kind,
-        status,
-        parsed.data.droppedEchoCount,
-      );
+      .recordExchange({
+        ...meta,
+        wireLogId: null,
+        envelopes: parsed.data.echoes,
+        droppedEchoCount: parsed.data.droppedEchoCount,
+      });
   } catch {
     // A malformed debug header must never affect the assistant request.
     return null;
   }
+}
+
+export function captureAssistantWireLogId(
+  value: string | null | undefined,
+  meta: AssistantWireLogResponseMeta,
+): string | null {
+  if (!value) return null;
+  return useAssistantWireLogStore.getState().recordExchange({
+    ...meta,
+    wireLogId: value,
+  });
 }

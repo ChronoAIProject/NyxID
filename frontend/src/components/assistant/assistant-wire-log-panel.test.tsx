@@ -7,6 +7,7 @@ import { useAssistantDraftStore } from "@/stores/assistant-draft-store";
 import { useAssistantWireLogStore } from "@/stores/assistant-wire-log-store";
 import { useAuthStore } from "@/stores/auth-store";
 import { FEATURE_FLAG } from "@/lib/feature-flags";
+import type { AssistantUpstreamEnvelope } from "@/schemas/assistant-wire-log";
 import type { User } from "@/types/api";
 import {
   AssistantWireLogAction,
@@ -86,6 +87,21 @@ function sseLines(frames: readonly Record<string, unknown>[]) {
   ]);
 }
 
+function recordPanelExchange(
+  envelopes: readonly AssistantUpstreamEnvelope[],
+  kind: "sse" | "header" = "sse",
+  status = 200,
+) {
+  return useAssistantWireLogStore.getState().recordExchange({
+    kind,
+    status,
+    conversationId: "nyxchat-panel",
+    wireLogId: null,
+    label: "POST /assistant/chat",
+    envelopes,
+  });
+}
+
 describe("AssistantWireLogPanel", () => {
   beforeEach(() => {
     localStorage.clear();
@@ -109,29 +125,25 @@ describe("AssistantWireLogPanel", () => {
   });
 
   it("renders, expands, and clears captured entries", () => {
-    useAssistantWireLogStore.getState().recordExchange(
-      [
-        {
-          degraded: false,
-          method: "POST",
-          path: "api/chat",
-          commandType: "text",
-          body: { type: "text", prompt: "inspect this payload" },
-          headers: { accept: "text/event-stream" },
-          identity: {
-            mode: "jwt",
-            forward_access_token: false,
-            inject_delegation_token: true,
-            bridge_minted: false,
-          },
-          truncated: false,
-          response: null,
-          upstreamOutcome: "no_response",
+    recordPanelExchange([
+      {
+        degraded: false,
+        method: "POST",
+        path: "api/chat",
+        commandType: "text",
+        body: { type: "text", prompt: "inspect this payload" },
+        headers: { accept: "text/event-stream" },
+        identity: {
+          mode: "jwt",
+          forward_access_token: false,
+          inject_delegation_token: true,
+          bridge_minted: false,
         },
-      ],
-      "sse",
-      200,
-    );
+        truncated: false,
+        response: null,
+        upstreamOutcome: "no_response",
+      },
+    ]);
     renderWithTooltips(<AssistantWireLogPanel />);
 
     fireEvent.click(screen.getByRole("button", { name: "Aevatar wire log" }));
@@ -224,9 +236,7 @@ describe("AssistantWireLogPanel", () => {
   });
 
   it("gates every response-derived surface with the top Responses switch", () => {
-    const exchangeId = useAssistantWireLogStore
-      .getState()
-      .recordExchange([responseEnvelope()], "sse", 200);
+    const exchangeId = recordPanelExchange([responseEnvelope()]);
     if (!exchangeId) throw new Error("expected exchange");
     useAssistantWireLogStore
       .getState()
@@ -263,9 +273,7 @@ describe("AssistantWireLogPanel", () => {
   });
 
   it("mounts raw SSE lines in bounded windows", () => {
-    const exchangeId = useAssistantWireLogStore
-      .getState()
-      .recordExchange([responseEnvelope()], "sse", 200);
+    const exchangeId = recordPanelExchange([responseEnvelope()]);
     if (!exchangeId) throw new Error("expected exchange");
     const lines = Array.from({ length: 450 }, (_, index) => ({
       text: `line-${String(index)}`,
@@ -291,7 +299,7 @@ describe("AssistantWireLogPanel", () => {
 
   it("discloses when response headers were dropped by degradation", () => {
     const degradedResponse = responseEnvelope();
-    useAssistantWireLogStore.getState().recordExchange(
+    recordPanelExchange(
       [
         {
           ...degradedResponse,
@@ -300,7 +308,6 @@ describe("AssistantWireLogPanel", () => {
         },
       ],
       "header",
-      200,
     );
     renderWithTooltips(<AssistantWireLogPanel />);
 
@@ -315,9 +322,7 @@ describe("AssistantWireLogPanel", () => {
   });
 
   it("renders text and inert original-frame placeholders without side effects", () => {
-    const exchangeId = useAssistantWireLogStore
-      .getState()
-      .recordExchange([responseEnvelope()], "sse", 200);
+    const exchangeId = recordPanelExchange([responseEnvelope()]);
     if (!exchangeId) throw new Error("expected exchange");
     const connectFrame = {
       type: "CUSTOM",

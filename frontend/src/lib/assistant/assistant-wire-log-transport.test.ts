@@ -110,7 +110,7 @@ describe("assistant wire-log transport", () => {
       ASSISTANT_WIRE_LOG_STORAGE_KEY,
       JSON.stringify({
         state: { captureEnabled: true, showResponses: true, entries: [] },
-        version: 2,
+        version: 3,
       }),
     );
     await useAssistantWireLogStore.persist.rehydrate();

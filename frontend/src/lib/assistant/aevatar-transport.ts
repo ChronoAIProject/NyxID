@@ -108,8 +108,12 @@ function assistantWireLogOptions(): {
       try {
         const exchangeId = captureAssistantWireLogHeader(
           response.headers.get(DEBUG_UPSTREAM_RESPONSE_HEADER),
-          "header",
-          response.status,
+          {
+            kind: "header",
+            status: response.status,
+            conversationId: null,
+            label: "Assistant response",
+          },
         );
         if (!exchangeId) return;
         const clone = response.clone();
@@ -4321,8 +4325,12 @@ export class AevatarAssistantTransport implements AssistantTransport {
           }
           wireExchangeId = captureAssistantWireLogHeader(
             response.debugUpstream,
-            "sse",
-            response.status,
+            {
+              kind: "sse",
+              status: response.status,
+              conversationId,
+              label: "POST /assistant/chat",
+            },
           );
           if (!wireExchangeId) {
             if (wireTelemetry) wireTelemetry.exchangeId = null;
