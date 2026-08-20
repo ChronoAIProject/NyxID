@@ -35,10 +35,9 @@ const EXTERNAL_KEY_DELETE_ACTION: &str = "external_key.delete";
 
 /// Effect routes mounted at `/api/v1/assistant/actions/endpoints`.
 ///
-/// Evidence GETs are also mounted here this increment because `routes.rs` is
-/// a frozen merge point. Canonical sibling mounts (`GET /endpoints/{id}/authorization`
-/// and `GET /api-keys/external/{id}/authorization`) should replace these
-/// aliases when that file can be touched.
+/// Evidence GETs retain these action-router aliases for local action journeys;
+/// the canonical sibling mounts live in `routes.rs` and are exercised through
+/// the production-router regression test below.
 pub fn router() -> Router<AppState> {
     Router::new()
         .route("/update", post(update_endpoint))
