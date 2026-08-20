@@ -264,6 +264,7 @@ mod tests {
     const TEST_SERVICE_B: &str = "00000000-0000-4000-8000-000000000102";
     const TEST_GENERIC_SERVICE: &str = "00000000-0000-4000-8000-000000000103";
     const TEST_NODE_ID: &str = "00000000-0000-4000-8000-000000000600";
+    const TEST_OUT_OF_SCOPE_NODE_ID: &str = "00000000-0000-4000-8000-000000000601";
 
     const CREATE_PATH: &str = "/api/v1/approvals/exact-service/requests";
 
@@ -507,7 +508,7 @@ mod tests {
             .expect("full-router operation");
         let arguments = serde_json::json!({});
         let operation_digest = mcp_service::exact_operation_digest_from_parts(
-            TEST_SERVICE_A,
+            &service.user_service_id,
             &operation.endpoint_id,
             &operation.endpoint_contract_digest,
             &arguments,
@@ -569,9 +570,11 @@ mod tests {
             "endpoint_contract_digest": fixture.operation.endpoint_contract_digest,
             "operation_digest": fixture.operation_digest,
             "operation_id": fixture.operation.endpoint_id,
-            // Client-originated bookkeeping with no discovery-response source.
-            // Validated only as `>= 1`; not producer-owned freshness evidence
-            // (issue #1457 AC5). Keep `1` here only.
+            // Caller bookkeeping with no producer referent in discovery;
+            // validation as `>= 1` does not make this freshness evidence.
+            // AC4's response-derived-field requirement is met only if @eanz17
+            // exempts this field, and that exemption has not been granted.
+            // Producer-owned generation belongs to issue #1457 AC5.
             "operation_generation": 1,
             "idempotency_key": idempotency_key,
             "arguments": {},
@@ -632,7 +635,9 @@ mod tests {
     /// `jwt::DELEGATED_TOKEN_TTL_SECS` is a compile-time 300s, while a full
     /// suite run takes longer than that and can starve a test thread, so a
     /// token minted at fixture-build time may already be expired by the time a
-    /// later phase issues its request. Refresh at the start of each phase.
+    /// later phase issues its request. The mutation matrices use this helper
+    /// before slow DB mutation phases. The single-token AC4 journey deliberately
+    /// avoids it and keeps its phases back-to-back.
     ///
     /// Ordering matters: always refresh BEFORE mutating/revoking the grant,
     /// never between the mutation and the request. Refreshing after the
@@ -668,6 +673,24 @@ mod tests {
             .expect("refreshed exchange persisted a grant");
         fixture.delegated_token = exchanged.access_token;
         fixture.grant = grant;
+    }
+
+    fn assert_full_router_delegated_token_unchanged(
+        fixture: &FullRouterFixture,
+        expected_token: &str,
+        expected_jti: &str,
+        phase: &str,
+    ) {
+        assert_eq!(
+            fixture.delegated_token, expected_token,
+            "delegated token bytes changed during {phase}"
+        );
+        let auth = delegated_auth_from_token(&fixture.state, &fixture.delegated_token);
+        assert_eq!(
+            auth.token_jti.as_deref(),
+            Some(expected_jti),
+            "delegated token JTI changed during {phase}"
+        );
     }
 
     async fn approve_full_router_request(fixture: &FullRouterFixture, request_id: &str) {
@@ -2542,6 +2565,76 @@ mod tests {
             .await
             .expect("restore direct service routing");
 
+        let out_of_scope_node_key = "node-binding-out-of-scope";
+        refresh_full_router_delegation(&mut fixture).await;
+        let out_of_scope_node_created =
+            create_full_router_request(&fixture, out_of_scope_node_key).await;
+        let out_of_scope_node_request = out_of_scope_node_created["request_id"]
+            .as_str()
+            .expect("create response request_id")
+            .to_string();
+        approve_full_router_request(&fixture, &out_of_scope_node_request).await;
+        fixture
+            .db
+            .collection::<Node>(NODES)
+            .insert_one(Node {
+                id: TEST_OUT_OF_SCOPE_NODE_ID.to_string(),
+                user_id: TEST_USER_ID.to_string(),
+                name: "full-router-out-of-scope-node".to_string(),
+                status: NodeStatus::Online,
+                auth_token_hash: "out-of-scope-node-token-hash".to_string(),
+                signing_secret_encrypted: None,
+                signing_secret_hash: "out-of-scope-node-signing-hash".to_string(),
+                last_heartbeat_at: Some(Utc::now()),
+                connected_at: Some(Utc::now()),
+                metadata: None,
+                metrics: NodeMetrics::default(),
+                is_active: true,
+                created_at: Utc::now(),
+                updated_at: Utc::now(),
+            })
+            .await
+            .expect("insert out-of-scope node for binding mutation");
+        let (out_of_scope_node_tx, out_of_scope_node_rx) = tokio::sync::mpsc::channel(8);
+        fixture
+            .state
+            .node_ws_manager
+            .register_connection(TEST_OUT_OF_SCOPE_NODE_ID, out_of_scope_node_tx);
+        user_services
+            .update_one(
+                mongodb::bson::doc! { "_id": TEST_SERVICE_A },
+                mongodb::bson::doc! { "$set": { "node_id": TEST_OUT_OF_SCOPE_NODE_ID } },
+            )
+            .await
+            .expect("bind service to node outside delegated allowlist");
+        let calls_before = fixture.provider_calls.load(Ordering::SeqCst);
+        let (status, body) = redeem_full_router_request(&fixture, &out_of_scope_node_created).await;
+        assert_eq!(
+            status,
+            StatusCode::OK,
+            "out-of-scope node mutation failed: {body}"
+        );
+        assert_eq!(body["state"], "revoked");
+        assert_eq!(body["failure_code"], "selector_revoked");
+        assert_no_full_router_redemption(&fixture, &out_of_scope_node_request).await;
+        assert_eq!(
+            fixture.provider_calls.load(Ordering::SeqCst),
+            calls_before,
+            "out-of-scope node mutation redeem must not reach the provider"
+        );
+        user_services
+            .update_one(
+                mongodb::bson::doc! { "_id": TEST_SERVICE_A },
+                mongodb::bson::doc! { "$unset": { "node_id": "" } },
+            )
+            .await
+            .expect("restore direct service routing after out-of-scope node row");
+        fixture
+            .state
+            .node_ws_manager
+            .unregister_connection(TEST_OUT_OF_SCOPE_NODE_ID);
+        drop(out_of_scope_node_rx);
+
         let operation_key = "endpoint-contract-mutated";
         refresh_full_router_delegation(&mut fixture).await;
         let operation_created = create_full_router_request(&fixture, operation_key).await;
@@ -2780,7 +2873,7 @@ mod tests {
             .expect("fixture operation in discovery HTTP body");
         let arguments = serde_json::json!({});
         let operation_digest = mcp_service::exact_operation_digest_from_parts(
-            TEST_SERVICE_A,
+            &service.user_service_id,
             &operation.endpoint_id,
             &operation.endpoint_contract_digest,
             &arguments,
@@ -2793,13 +2886,17 @@ mod tests {
             CREATE_PATH,
             &fixture.delegated_token,
             Some(serde_json::json!({
-                "user_service_id": TEST_SERVICE_A,
+                "user_service_id": &service.user_service_id,
                 "endpoint_id": operation.endpoint_id,
                 "catalog_digest": discovery["catalog_digest"],
                 "exact_view_digest": discovery["exact_view_digest"],
                 "endpoint_contract_digest": operation.endpoint_contract_digest,
                 "operation_digest": operation_digest,
                 "operation_id": operation.endpoint_id,
+                // Caller bookkeeping with no producer referent in discovery.
+                // It is not freshness evidence, and AC4 needs an ungranted
+                // @eanz17 exemption for this one non-response-derived field.
+                // Producer-owned generation remains issue #1457 AC5 scope.
                 "operation_generation": 1,
                 "idempotency_key": idempotency_key,
                 "arguments": arguments,
@@ -2822,6 +2919,150 @@ mod tests {
             fixture.provider_calls.load(Ordering::SeqCst),
             1,
             "response-derived discovery → create → redeem must dispatch exactly one effect"
+        );
+    }
+
+    #[tokio::test]
+    async fn full_router_single_token_discovery_create_decide_status_redeem() {
+        let fixture = setup_full_router_fixture("exact_router_ac4_single_token").await;
+        let delegated_token = fixture.delegated_token.clone();
+        let delegated_jti = delegated_auth_from_token(&fixture.state, &delegated_token)
+            .token_jti
+            .expect("single-token journey delegated JTI");
+        assert_full_router_delegated_token_unchanged(
+            &fixture,
+            &delegated_token,
+            &delegated_jti,
+            "journey start",
+        );
+
+        let (status, discovery) = full_router_json_request(
+            &fixture.app,
+            Method::GET,
+            "/api/v1/delegation/operation-catalog",
+            &delegated_token,
+            None,
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "discovery failed: {discovery}");
+        assert_eq!(
+            discovery["contract_version"],
+            "nyxid-delegated-operation-catalog.v2"
+        );
+        assert_full_router_delegated_token_unchanged(
+            &fixture,
+            &delegated_token,
+            &delegated_jti,
+            "discovery",
+        );
+
+        let services: Vec<mcp_service::ExactOperationViewService> =
+            serde_json::from_value(discovery["services"].clone())
+                .expect("decode discovery services from HTTP body");
+        let service = services
+            .iter()
+            .find(|service| service.user_service_id == TEST_SERVICE_A)
+            .expect("fixture service in discovery HTTP body");
+        assert!(service.node_id.is_none());
+        let operation = service
+            .operations
+            .first()
+            .expect("fixture operation in discovery HTTP body");
+        let arguments = serde_json::json!({});
+        let operation_digest = mcp_service::exact_operation_digest_from_parts(
+            &service.user_service_id,
+            &operation.endpoint_id,
+            &operation.endpoint_contract_digest,
+            &arguments,
+        );
+        let (status, created) = full_router_json_request(
+            &fixture.app,
+            Method::POST,
+            CREATE_PATH,
+            &delegated_token,
+            Some(serde_json::json!({
+                "user_service_id": &service.user_service_id,
+                "endpoint_id": operation.endpoint_id,
+                "catalog_digest": discovery["catalog_digest"],
+                "exact_view_digest": discovery["exact_view_digest"],
+                "endpoint_contract_digest": operation.endpoint_contract_digest,
+                "operation_digest": operation_digest,
+                "operation_id": operation.endpoint_id,
+                // Caller bookkeeping with no producer referent in discovery.
+                // It is not freshness evidence, and AC4 needs an ungranted
+                // @eanz17 exemption for this one non-response-derived field.
+                // Producer-owned generation remains issue #1457 AC5 scope.
+                "operation_generation": 1,
+                "idempotency_key": "ac4-single-token",
+                "arguments": arguments,
+            })),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "create failed: {created}");
+        assert_full_router_delegated_token_unchanged(
+            &fixture,
+            &delegated_token,
+            &delegated_jti,
+            "create",
+        );
+
+        let request_id = created["request_id"]
+            .as_str()
+            .expect("create response request_id")
+            .to_string();
+        // The human decision uses the first-party source token. The delegated
+        // bearer retained for all delegated phases must remain unchanged.
+        approve_full_router_request(&fixture, &request_id).await;
+        assert_full_router_delegated_token_unchanged(
+            &fixture,
+            &delegated_token,
+            &delegated_jti,
+            "decision",
+        );
+
+        let status_path = format!("/api/v1/approvals/exact-service/requests/{request_id}/status");
+        let (status, observed) = full_router_json_request(
+            &fixture.app,
+            Method::GET,
+            &status_path,
+            &delegated_token,
+            None,
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "status failed: {observed}");
+        assert_eq!(observed["state"], "approved");
+        assert_full_router_delegated_token_unchanged(
+            &fixture,
+            &delegated_token,
+            &delegated_jti,
+            "status",
+        );
+
+        let redeem_path = format!("/api/v1/approvals/exact-service/requests/{request_id}/redeem");
+        let (status, redeemed) = full_router_json_request(
+            &fixture.app,
+            Method::POST,
+            &redeem_path,
+            &delegated_token,
+            Some(fence_body_from_created(
+                &created,
+                created["exact_view_digest"].as_str(),
+            )),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "redeem failed: {redeemed}");
+        assert_eq!(redeemed["state"], "redeemed");
+        assert_eq!(redeemed["receipt"]["http_status"], 200);
+        assert_full_router_delegated_token_unchanged(
+            &fixture,
+            &delegated_token,
+            &delegated_jti,
+            "redeem",
+        );
+        assert_eq!(
+            fixture.provider_calls.load(Ordering::SeqCst),
+            1,
+            "the single-token journey must dispatch exactly one effect"
         );
     }
 
