@@ -185,6 +185,21 @@ pub struct NodeInfo {
     pub created_at: String,
 }
 
+/// Secret-free assistant evidence. Deliberately excludes node name, metadata,
+/// metrics, owner display text, and every stored authentication field.
+#[derive(Debug, Serialize)]
+pub struct NodeAuthorizationEvidenceResponse {
+    pub id: String,
+    pub owner_user_id: String,
+    pub lifecycle: String,
+    pub is_active: bool,
+    pub state_version: i64,
+    pub access_revision: i64,
+    pub created_at: String,
+    pub updated_at: String,
+    pub registration_expires_at: Option<String>,
+}
+
 #[derive(Debug, Serialize)]
 pub struct RotateTokenResponse {
     pub auth_token: String,
@@ -257,6 +272,21 @@ pub struct PendingCredentialInfo {
 #[derive(Debug, Serialize)]
 pub struct PendingCredentialListResponse {
     pub pending_credentials: Vec<PendingCredentialInfo>,
+}
+
+/// Secret-free pending-credential evidence. It excludes the service slug,
+/// field name, target URL, label, public-key material, and ciphertext state.
+#[derive(Debug, Serialize)]
+pub struct PendingCredentialAuthorizationEvidenceResponse {
+    pub id: String,
+    pub node_id: String,
+    pub owner_user_id: String,
+    pub remote_state: Option<String>,
+    pub is_active: bool,
+    pub created_at: String,
+    pub expires_at: String,
+    pub consumed_at: Option<String>,
+    pub declined_at: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -1079,6 +1109,33 @@ pub async fn get_node(
     )))
 }
 
+/// GET /api/v1/nodes/{node_id}/authorization
+pub async fn get_node_authorization(
+    State(state): State<AppState>,
+    auth_user: AuthUser,
+    Path(node_id): Path<String>,
+) -> AppResult<Json<NodeAuthorizationEvidenceResponse>> {
+    let authority = node_service::get_node_authorization_state(
+        &state.db,
+        &auth_user.user_id.to_string(),
+        &node_id,
+    )
+    .await?;
+    Ok(Json(NodeAuthorizationEvidenceResponse {
+        id: authority.id,
+        owner_user_id: authority.owner_user_id,
+        lifecycle: authority.lifecycle.as_str().to_string(),
+        is_active: authority.is_active,
+        state_version: authority.state_version,
+        access_revision: authority.access_revision,
+        created_at: authority.created_at.to_rfc3339(),
+        updated_at: authority.updated_at.to_rfc3339(),
+        registration_expires_at: authority
+            .registration_expires_at
+            .map(|value| value.to_rfc3339()),
+    }))
+}
+
 /// DELETE /api/v1/nodes/{node_id}
 pub async fn delete_node(
     State(state): State<AppState>,
@@ -1528,6 +1585,36 @@ pub async fn list_pending_credentials(
 
     Ok(Json(PendingCredentialListResponse {
         pending_credentials: pending.into_iter().map(pending_credential_info).collect(),
+    }))
+}
+
+/// GET /api/v1/nodes/{node_id}/credentials/pending/{pending_id}/authorization
+pub async fn get_pending_credential_authorization(
+    State(state): State<AppState>,
+    auth_user: AuthUser,
+    Path((node_id, pending_id)): Path<(String, String)>,
+) -> AppResult<Json<PendingCredentialAuthorizationEvidenceResponse>> {
+    let authority = node_pending_credential_service::get_pending_credential_authorization_state(
+        &state.db,
+        &auth_user.user_id.to_string(),
+        &node_id,
+        &pending_id,
+    )
+    .await?;
+    Ok(Json(PendingCredentialAuthorizationEvidenceResponse {
+        id: authority.id,
+        node_id: authority.node_id,
+        owner_user_id: authority.owner_user_id,
+        remote_state: authority
+            .remote_state
+            .as_ref()
+            .map(remote_state_name)
+            .map(str::to_string),
+        is_active: authority.is_active,
+        created_at: authority.created_at.to_rfc3339(),
+        expires_at: authority.expires_at.to_rfc3339(),
+        consumed_at: authority.consumed_at.map(|value| value.to_rfc3339()),
+        declined_at: authority.declined_at.map(|value| value.to_rfc3339()),
     }))
 }
 

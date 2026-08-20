@@ -17,7 +17,9 @@ pub use approve::approve;
 pub use initiate::initiate;
 pub use lockout::{claim_lockout_notification, is_locked};
 use lockout::{is_pubkey_locked, record_pubkey_signature_failure, reset_pubkey_lockout};
-pub use onboard::{onboard, redeem_onboard, revoke_onboard};
+pub use onboard::{
+    get_onboard_authorization_state, onboard, onboard_with_id, redeem_onboard, revoke_onboard,
+};
 pub use poll::poll;
 
 pub const DEVICE_CODE_SIGNATURE_FAILURE_LOCK_THRESHOLD: u32 = 3;
