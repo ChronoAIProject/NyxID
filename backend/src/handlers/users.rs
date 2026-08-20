@@ -448,6 +448,7 @@ mod tests {
             is_active: true,
             social_provider: Some("google".to_string()),
             created_at: "2025-01-01T00:00:00+00:00".to_string(),
+            updated_at: "2025-01-01T00:00:00+00:00".to_string(),
             last_login_at: Some("2025-06-01T12:00:00+00:00".to_string()),
             profile_config: ProfileConfigResponse {
                 onboarding: OnboardingStateResponse {
@@ -496,6 +497,7 @@ mod tests {
             is_active: true,
             social_provider: None,
             created_at: "2025-06-01T00:00:00+00:00".to_string(),
+            updated_at: "2025-06-01T00:00:00+00:00".to_string(),
             last_login_at: None,
             profile_config: ProfileConfigResponse {
                 onboarding: OnboardingStateResponse {
@@ -678,6 +680,7 @@ mod tests {
             is_active: true,
             social_provider: None,
             created_at: "2025-01-01T00:00:00+00:00".to_string(),
+            updated_at: "2025-01-01T00:00:00+00:00".to_string(),
             last_login_at: None,
             profile_config: ProfileConfigResponse {
                 onboarding: OnboardingStateResponse {
@@ -705,6 +708,7 @@ mod tests {
             "is_active",
             "social_provider",
             "created_at",
+            "updated_at",
             "last_login_at",
             "profile_config",
             "capabilities",

@@ -82,7 +82,12 @@ describe("Wave 4 account journeys", () => {
     await userEvent.click(screen.getByRole("button", { name: "Enable MFA" }));
     await userEvent.click(await screen.findByRole("button", { name: "I have saved them" }));
     expect(onComplete).toHaveBeenCalledWith(IDS.user);
-    expect(mockPost.mock.calls[1][1]).not.toHaveProperty("setupValue");
+    // noUncheckedIndexedAccess: index access is `T | undefined`, so assert the
+    // call exists before asserting on its body -- otherwise the guarantee this
+    // test claims (no setup value is ever posted) could vacuously pass.
+    const confirmCall = mockPost.mock.calls[1];
+    expect(confirmCall).toBeDefined();
+    expect(confirmCall?.[1]).not.toHaveProperty("setupValue");
   });
 });
 

@@ -2135,6 +2135,7 @@ mod tests {
             org_scoped: false,
             org_id: None,
             org_name: None,
+            revoked: false,
         };
         let json = serde_json::to_value(&item).unwrap();
         assert!(json.get("org_id").is_none());
