@@ -15,6 +15,8 @@ pub mod assistant;
 pub mod assistant_action_effects;
 pub mod assistant_action_effects_endpoints;
 pub mod assistant_action_effects_keys;
+pub mod assistant_action_effects_nodes;
+pub mod assistant_action_effects_org;
 pub mod assistant_action_effects_services;
 pub mod assistant_actions;
 pub mod assistant_direct;

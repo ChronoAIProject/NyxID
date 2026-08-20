@@ -1538,6 +1538,14 @@ pub fn build_router() -> (Router<AppState>, Router<AppState>) {
             "/actions/endpoints",
             handlers::assistant_action_effects_endpoints::router(),
         )
+        .nest(
+            "/actions/nodes",
+            handlers::assistant_action_effects_nodes::router(),
+        )
+        .nest(
+            "/actions/org",
+            handlers::assistant_action_effects_org::router(),
+        )
         .merge(assistant_proxy_routes);
 
     let ssh_billing_routes = ssh_billing_routes!(register_billing_routes, Router::new());
