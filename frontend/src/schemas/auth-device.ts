@@ -3,6 +3,7 @@ import { z } from "zod";
 export const AUTH_DEVICE_ERROR_MESSAGES: Record<number, string> = {
   11200: "That code is no longer valid. Run `nyxid login --device` again.",
   11201: "This code has expired.",
+  11204: "This login request was already denied.",
   11205: "This code was already used.",
   11206: "Too many attempts. Try again in a few minutes.",
   11207: "That code is no longer valid. Run `nyxid login --device` again.",
@@ -17,6 +18,10 @@ export const approveBodySchema = z.object({
   user_code: userCodeSchema,
 });
 
+export const denyBodySchema = z.object({
+  user_code: userCodeSchema,
+});
+
 export const approveResponseSchema = z.object({
   ok: z.literal(true),
 });
@@ -24,6 +29,7 @@ export const approveResponseSchema = z.object({
 export const previewResponseSchema = z.object({
   client_label: z.string().nullable(),
   client_user_agent: z.string().nullable(),
+  client_ip: z.string().nullable(),
   initiated_at: z.string().datetime(),
   expires_at: z.string().datetime(),
   status: z.enum(["pending", "approved", "denied", "expired", "delivered"]),
@@ -37,6 +43,7 @@ export const errorEnvelopeSchema = z.object({
 
 export type ApproveAuthDeviceBody = z.output<typeof approveBodySchema>;
 export type ApproveAuthDeviceResponse = z.infer<typeof approveResponseSchema>;
+export type DenyAuthDeviceBody = z.output<typeof denyBodySchema>;
 export type PreviewAuthDeviceResponse = z.infer<typeof previewResponseSchema>;
 export type AuthDeviceErrorEnvelope = z.infer<typeof errorEnvelopeSchema>;
 

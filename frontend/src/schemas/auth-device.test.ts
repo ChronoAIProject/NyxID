@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
   approveBodySchema,
+  denyBodySchema,
   errorEnvelopeSchema,
   formatAuthDeviceUserCodeInput,
   friendlyAuthDeviceErrorMessage,
@@ -34,6 +35,14 @@ describe("approveBodySchema", () => {
   });
 });
 
+describe("denyBodySchema", () => {
+  it("normalizes the request payload", () => {
+    expect(denyBodySchema.parse({ user_code: "abcd-efgh" })).toEqual({
+      user_code: "ABCDEFGH",
+    });
+  });
+});
+
 describe("formatAuthDeviceUserCodeInput", () => {
   it("keeps an editable XXXX-XXXX shape while typing", () => {
     expect(formatAuthDeviceUserCodeInput("ab")).toBe("AB");
@@ -60,6 +69,12 @@ describe("errorEnvelopeSchema", () => {
 
 describe("friendlyAuthDeviceErrorMessage", () => {
   it("maps auth-device error codes to friendly messages", () => {
+    expect(
+      friendlyAuthDeviceErrorMessage({
+        errorCode: 11204,
+      }),
+    ).toBe("This login request was already denied.");
+
     expect(
       friendlyAuthDeviceErrorMessage({
         errorCode: 11200,
