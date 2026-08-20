@@ -146,3 +146,63 @@ Twilio and ElevenLabs wait — not for billing, but for parameter validation and
 **Open decisions:** the fee model (none, credits, or a Links funnel); dual-mode versus separate rows; whether oracle-as-platform is acceptable given account sharing; provider contracts, which have not been checked and which matter a great deal — many vendors forbid reselling API access on a shared key, and a suspension would take every tenant down at once.
 
 The uncomfortable summary is that the two hardest problems are not in the roadmap: an agent with a properly scoped key cannot call these services, and the allowlist cannot constrain what a permitted call actually does. Both are fixable. Neither is a schedule item.
+
+---
+
+# Enabling the flow: making `chrono-llm-public` the pattern rather than the exception
+
+The question this section answers: **how do we model Chrono LLM as a catalogue service, at platform level, with billing metrics we can adjust later — and turn it on for Duffel flights, Twilio, ElevenLabs, Twitter and Reddit?**
+
+A plan for this exists (`docs/assistant/CATALOGUE_ENABLEMENT_PLAN.md`) and has been through adversarial review. The review returned **REWORK**, and the findings are integrated below rather than appended, because several of them change the design rather than decorate it.
+
+## The shape being generalised
+
+`chrono-llm-public` works because someone wrote a purpose-built handler: one upstream, text-only, no tool execution, with models and skills validated against fixed allowlists in Rust (`services/assistant_direct.rs:176-217`), metered on tokens — the one unit that already matches its vendor. Generalising it means expressing that same safety **as configuration**, across services whose vendors bill in units we cannot currently represent.
+
+Three designs carry the weight: parameter constraints as configuration, extensible billing metrics, and platform-level resolution throughout. The third is uncontroversial and already proven. The first two are where the difficulty lives.
+
+## What survived review
+
+The constraints we most need **are expressible in principle**: Duffel hold-only with `data.payments` rejected; Twilio restricted to Messages with an approved sender; ElevenLabs voice-id membership — though that needs separate path and body rules, since the id appears in both depending on operation. Platform-level resolution through the shared proxy data plane is sound architecture. Snapshotting the Lago metric code per usage row is a valid foundation for changing prices without rewriting history. And sequencing Reddit and Twitter ahead of Duffel and Twilio is the right risk order.
+
+One expressiveness limit worth recording: **equality between two fields is not expressible** in the proposed language. No target operation needs it today.
+
+## Two findings that will break in production
+
+**Anonymous proxying bypasses the policy entirely.** `handlers/public_proxy.rs:65-74` authorizes against `anonymous_endpoints` alone and never consults `proxy_operation_policy`, while forwarding the body at `:90-113`. `validate_anonymous_service_runtime_safety` checks identity propagation and resale billing, but does not refuse an anonymous endpoint on a platform-billable row. A broad anonymous `POST` rule would forward a Duffel order carrying `data.type: "instant"` without the constraint ever running. Public *MCP* execution is blocked (`public_mcp.rs:96-103`), so that surface is not the hole — this one is.
+
+**Per-character and per-segment billing would authorize work while reserving a single unit.** Admission always estimates one unit at the platform layer (`services/billing/reservation.rs:1065-1071`); settlement then bills the measured quantity (`services/billing/meter.rs:480-485`). A prepaid user holding one credit can send a 20,000-character ElevenLabs request or a multi-segment Twilio message, clear admission, and incur the real charge only *after* the provider side effect. Finer-grained metrics make this worse, not better: they widen the gap between what admission checks and what the call costs. Any metric work must land with request-derived reservation and a maximum-unit admission rule, or it converts a billing defect into a spend hole.
+
+## Findings that change the design
+
+**"Metric code as a string" does not escape the enum.** `BillingMetric` is an exhaustive three-variant enum threaded through `ServiceBilling`, `BillingRouteContext`, quantity selection in the meter, and `UsageMeterRow` — and it is **hashed into the tamper-evident billing ledger** (`services/billing/ledger.rs:306-313`). Billing reports parse only `tokens`, `requests` and `bytes`, silently defaulting anything else to `Tokens` (`handlers/billing.rs:264-299`). A Lago code alone cannot describe the unit. Adjustable metrics are achievable, but the honest cost is a coordinated code, API, ledger and report migration — not a config field.
+
+**Per-operation metrics have nowhere to attach.** The plan allows a different metric for searches and bookings, but REST derives one target-level metric before forwarding (`handlers/proxy.rs:4108-4130`) with no selected-operation context, and **MCP hard-codes `BillingMetric::Requests`** (`services/mcp_service.rs:119-139`) regardless of the row. So a Duffel order cannot become `booking` by configuration, and a platform ElevenLabs call through MCP stays request-metered whatever the REST row says.
+
+**REST denies after decrypting the platform credential.** Target resolution runs first (`handlers/proxy.rs:1937-1951`), decrypting the master credential (`services/proxy_service.rs:890-894`), and only then does policy run (`handlers/proxy.rs:2014-2026`). A refused Duffel payment still loads key material. MCP's placement is correct; REST, node and admin surfaces need one pre-resolution evaluator.
+
+**Streaming and WebSocket cannot enforce any of this.** Upgrades deliberately skip body buffering (`handlers/proxy.rs:2138-2163`) and then forward arbitrary client frames (`:4919-4984`). The only real-time usage collector is gated to `llm-openai`. A permitted ElevenLabs streaming handshake can therefore carry arbitrary later text and options, with no frame-level policy and no character meter. **Either a frame protocol policy is designed, or streaming and WebSocket are explicitly excluded from activation.** Excluding them is the honest short-term answer.
+
+**The scoped-key fix must key on IDs, not slugs.** The proposal grants access by catalog slug; existing isolation uses stable UserService ids (`models/api_key.rs:55-73`). Catalog deletion is a soft deactivate and slug uniqueness is checked only among active rows, so a key granted `twilio-platform` would silently inherit access to a *replacement* row reusing that slug. The fix must also reach `AuthUser`, MCP auth context, and OAuth/delegated/relay claims, which today carry service ids only — omitting them yields inconsistent denial, and defaulting missing scope to allow would widen access rather than fix it.
+
+**"Read-only" is not a privacy boundary on a shared account.** The current overlays already expose the authenticated shared identity: Reddit `/api/v1/me` and X `/users/me`. The matcher reasons about method and path only, with no caller or resource-owner predicate, so it cannot express "public resources only" or "never the platform account's own data." Excluding writes is right; calling reads inherently safe is not.
+
+**Twilio needs enforceable controls, not acknowledged risk.** Restricting `From` is necessary and insufficient: the message schema also permits `MessagingServiceSid` — which can select a sender outside the approved set — plus unconstrained `To` and arbitrary `Body`. Destination limits, consent and opt-out, country and cost caps, and per-sender rate limits all need specifying. Excluding the Calls endpoint is sound, and avoids both `Url` and inline TwiML.
+
+**Constraining a body means parsing it, which is new attack surface.** Bodies are buffered and forwarded byte-for-byte under a 100 MB default cap. Duplicate JSON keys, duplicate form fields, non-canonical Unicode, or a deep parse can make NyxID and the vendor disagree about what was sent, or multiply memory and CPU. Duplicate rejection, canonical parsing, depth and field limits, and per-rule body caps are required — not optional hardening.
+
+**Retire Lago metrics on a delay.** Snapshotting the code per row is right, but the old metric must stay live until every reserved, forwarded and unsettled row clears; Lago dead-letters usage whose billable metric is missing.
+
+## What this means for the sequence
+
+The plan's own step one is described as small and is not: it crosses the API-key model, service APIs, auth middleware, MCP transport, JWT and relay claims, CLI and frontend schemas. The activation runbook also omits global billing enablement — `BILLING_ENABLED` and `BILLING_FAIL_CLOSED` both default false — so an operator can follow every row-level step and either serve the five services free or move money with billing fail-open.
+
+The workable order, given all of the above:
+
+1. **Scoped-key access keyed on stable ids**, propagated through every claim carrier — otherwise the intended caller stays locked out.
+2. **One pre-resolution policy evaluator** shared by REST, node and admin paths, ahead of credential decryption, with anonymous proxying brought under it or platform-billable rows refused an anonymous endpoint outright.
+3. **Parameter constraints**, with canonical parsing and body limits, and streaming/WebSocket explicitly out of scope until a frame policy exists.
+4. **Reddit and Twitter reads** as the first activation — lowest consequence, and it exercises the whole chain.
+5. **Metric extensibility** as its own migration, landing together with request-derived reservation and maximum-unit admission.
+6. **Duffel, then Twilio and ElevenLabs** — Twilio last, because its controls are the most demanding and its failures are the most public.
+
