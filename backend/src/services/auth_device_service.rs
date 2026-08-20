@@ -63,6 +63,7 @@ pub enum PollClaim {
 pub struct PreviewOutput {
     pub client_label: Option<String>,
     pub client_user_agent: Option<String>,
+    pub client_ip: Option<String>,
     pub initiated_at: DateTime<Utc>,
     pub expires_at: DateTime<Utc>,
     pub status: AuthDeviceCodeStatus,
@@ -74,6 +75,14 @@ pub struct ApproveInput {
     pub user_code: String,
     pub approver_ip: Option<String>,
     pub approver_user_agent: Option<String>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct DenyInput {
+    pub user_id: String,
+    pub user_code: String,
+    pub denier_ip: Option<String>,
+    pub denier_user_agent: Option<String>,
 }
 
 #[tracing::instrument(
@@ -130,6 +139,7 @@ where
             slow_down_increments: 0,
             client_label: client_label.clone(),
             client_user_agent: client_user_agent.clone(),
+            client_ip: client_ip.clone(),
             client_ip_hmac: client_ip
                 .as_deref()
                 .map(|client_ip| hmac_hex(hmac_key, client_ip.as_bytes())),
@@ -144,6 +154,7 @@ where
             approved_at: None,
             delivered_at: None,
             denied_at: None,
+            denied_by_user_id: None,
             expires_at: now + Duration::seconds(AUTH_DEVICE_EXPIRES_IN_SECS),
         };
 
@@ -242,6 +253,7 @@ pub async fn preview(db: &Database, hmac_key: &[u8], user_code: &str) -> AppResu
     Ok(PreviewOutput {
         client_label: row.client_label,
         client_user_agent: row.client_user_agent,
+        client_ip: row.client_ip,
         initiated_at: row.created_at,
         expires_at: row.expires_at,
         status: row.status,
@@ -356,7 +368,7 @@ pub async fn approve(
 
     if updated.is_none() {
         cleanup_issued_session(db, &session_id).await;
-        return Err(AppError::AuthDeviceCodeAlreadyDelivered);
+        return Err(current_decision_error(&collection, &row.id).await?);
     }
 
     audit_service::log_async(
@@ -380,6 +392,75 @@ pub async fn approve(
         latency_ms = started_at.elapsed().as_millis() as u64,
         audit_logged = true,
         "auth_device.approve"
+    );
+
+    Ok(())
+}
+
+#[tracing::instrument(
+    name = "auth_device.deny",
+    skip_all,
+    fields(row_id, user_id = %input.user_id)
+)]
+pub async fn deny(db: &Database, hmac_key: &[u8], input: DenyInput) -> AppResult<()> {
+    let normalized = normalize_user_code(&input.user_code)?;
+    let user_code_hmac = hmac_hex(hmac_key, normalized.as_bytes());
+    let collection = collection(db);
+    let now = Utc::now();
+
+    let row = collection
+        .find_one(doc! { "user_code_hmac": user_code_hmac })
+        .await?
+        .ok_or(AppError::AuthDeviceUserCodeInvalid)?;
+
+    tracing::Span::current().record("row_id", row.id.as_str());
+
+    if row.expires_at < now {
+        return Err(AppError::AuthDeviceCodeExpired);
+    }
+
+    if row.status != AuthDeviceCodeStatus::Pending {
+        return Err(non_pending_approve_error(row.status));
+    }
+
+    let denied_status = bson::to_bson(&AuthDeviceCodeStatus::Denied)
+        .map_err(|e| AppError::Internal(format!("serialize auth device status: {e}")))?;
+    let updated = collection
+        .find_one_and_update(
+            doc! { "_id": &row.id, "status": "pending" },
+            doc! {
+                "$set": {
+                    "status": denied_status,
+                    "denied_at": bson::DateTime::from_chrono(now),
+                    "denied_by_user_id": &input.user_id,
+                }
+            },
+        )
+        .return_document(ReturnDocument::After)
+        .await?;
+
+    if updated.is_none() {
+        return Err(current_decision_error(&collection, &row.id).await?);
+    }
+
+    audit_service::log_async(
+        db.clone(),
+        Some(input.user_id.clone()),
+        "auth_device_code_denied".to_string(),
+        Some(serde_json::json!({
+            "user_code_redacted": redact_user_code(&normalized),
+        })),
+        input.denier_ip,
+        input.denier_user_agent,
+        None,
+        None,
+    );
+
+    tracing::info!(
+        row_id = %row.id,
+        user_id = %input.user_id,
+        audit_logged = true,
+        "auth_device.deny"
     );
 
     Ok(())
@@ -503,6 +584,20 @@ fn non_pending_approve_error(status: AuthDeviceCodeStatus) -> AppError {
             AppError::AuthDeviceCodeAlreadyDelivered
         }
     }
+}
+
+async fn current_decision_error(
+    collection: &Collection<AuthDeviceCode>,
+    row_id: &str,
+) -> AppResult<AppError> {
+    let row = collection
+        .find_one(doc! { "_id": row_id })
+        .await?
+        .ok_or(AppError::AuthDeviceCodeAlreadyDelivered)?;
+    if row.expires_at < Utc::now() {
+        return Ok(AppError::AuthDeviceCodeExpired);
+    }
+    Ok(non_pending_approve_error(row.status))
 }
 
 fn redact_user_code(normalized: &str) -> String {
@@ -734,6 +829,7 @@ mod tests {
         assert_eq!(row.status, AuthDeviceCodeStatus::Pending);
         assert_eq!(row.client_label.as_deref(), Some("labelwith-control"));
         assert_eq!(row.client_user_agent.as_ref().unwrap().len(), 256);
+        assert_eq!(row.client_ip.as_deref(), Some("203.0.113.10"));
         assert_eq!(
             row.client_ip_hmac.as_deref(),
             Some(hmac_hex(TEST_HMAC_KEY, b"203.0.113.10").as_str())
@@ -753,7 +849,7 @@ mod tests {
             TEST_HMAC_KEY,
             Some("workstation".to_string()),
             Some("nyxid-cli/0.8.0".to_string()),
-            None,
+            Some("203.0.113.10".to_string()),
             || "ABCD1234".to_string(),
         )
         .await
@@ -768,7 +864,292 @@ mod tests {
             preview.client_user_agent.as_deref(),
             Some("nyxid-cli/0.8.0")
         );
+        assert_eq!(preview.client_ip.as_deref(), Some("203.0.113.10"));
         assert_eq!(preview.status, AuthDeviceCodeStatus::Pending);
+    }
+
+    #[tokio::test]
+    async fn preview_legacy_row_without_client_ip_returns_none() {
+        let Some(db) = connect_test_database("auth_device_preview_legacy_ip").await else {
+            return;
+        };
+        crate::db::ensure_indexes(&db)
+            .await
+            .expect("ensure indexes");
+        let row = seed_row(
+            &db,
+            AuthDeviceCodeStatus::Pending,
+            Utc::now() + Duration::minutes(10),
+        )
+        .await;
+        db.collection::<bson::Document>(AUTH_DEVICE_CODES)
+            .update_one(
+                doc! { "_id": &row.id },
+                doc! { "$unset": { "client_ip": "" } },
+            )
+            .await
+            .expect("remove legacy field");
+
+        let output = preview(&db, TEST_HMAC_KEY, "ABCD-1234")
+            .await
+            .expect("preview legacy row");
+
+        assert!(output.client_ip.is_none());
+    }
+
+    #[tokio::test]
+    async fn deny_pending_row_sets_terminal_fields_and_audits() {
+        let Some(db) = connect_test_database("auth_device_deny_happy").await else {
+            return;
+        };
+        crate::db::ensure_indexes(&db)
+            .await
+            .expect("ensure indexes");
+        let user_id = Uuid::new_v4().to_string();
+        seed_user(&db, &user_id).await;
+        let row = seed_row(
+            &db,
+            AuthDeviceCodeStatus::Pending,
+            Utc::now() + Duration::minutes(10),
+        )
+        .await;
+        let audit_written =
+            audit_service::notify_on_audit_write_for_user("auth_device_code_denied", &user_id);
+
+        deny(
+            &db,
+            TEST_HMAC_KEY,
+            DenyInput {
+                user_id: user_id.clone(),
+                user_code: "ABCD-1234".to_string(),
+                denier_ip: Some("203.0.113.88".to_string()),
+                denier_user_agent: Some("nyxid-mobile/1.0".to_string()),
+            },
+        )
+        .await
+        .expect("deny");
+
+        let denied = row_by_id(&db, &row.id).await;
+        assert_eq!(denied.status, AuthDeviceCodeStatus::Denied);
+        assert!(denied.denied_at.is_some());
+        assert_eq!(denied.denied_by_user_id.as_deref(), Some(user_id.as_str()));
+        assert!(denied.approved_user_id.is_none());
+        assert!(denied.approved_session_id.is_none());
+
+        let audit_id = tokio::time::timeout(Duration::seconds(2).to_std().unwrap(), audit_written)
+            .await
+            .expect("audit write timed out")
+            .expect("audit watcher");
+        let audit = db
+            .collection::<AuditLog>(AUDIT_LOG)
+            .find_one(doc! { "_id": audit_id })
+            .await
+            .expect("audit query")
+            .expect("audit row");
+        assert_eq!(audit.event_type, "auth_device_code_denied");
+        assert_eq!(audit.user_id.as_deref(), Some(user_id.as_str()));
+        assert_eq!(
+            audit
+                .event_data
+                .as_ref()
+                .and_then(|data| data.get("user_code_redacted"))
+                .and_then(serde_json::Value::as_str),
+            Some("AB****34")
+        );
+        assert!(
+            !audit
+                .event_data
+                .as_ref()
+                .is_some_and(|data| data.to_string().contains("ABCD1234"))
+        );
+    }
+
+    #[tokio::test]
+    async fn deny_wrong_user_code_returns_invalid_without_mutation() {
+        let Some(db) = connect_test_database("auth_device_deny_wrong_code").await else {
+            return;
+        };
+        crate::db::ensure_indexes(&db)
+            .await
+            .expect("ensure indexes");
+        let row = seed_row(
+            &db,
+            AuthDeviceCodeStatus::Pending,
+            Utc::now() + Duration::minutes(10),
+        )
+        .await;
+
+        let result = deny(
+            &db,
+            TEST_HMAC_KEY,
+            DenyInput {
+                user_id: Uuid::new_v4().to_string(),
+                user_code: "WXYZ-9999".to_string(),
+                denier_ip: None,
+                denier_user_agent: None,
+            },
+        )
+        .await;
+
+        assert!(matches!(result, Err(AppError::AuthDeviceUserCodeInvalid)));
+        assert_eq!(
+            row_by_id(&db, &row.id).await.status,
+            AuthDeviceCodeStatus::Pending
+        );
+    }
+
+    #[tokio::test]
+    async fn deny_non_pending_rows_use_approve_error_mapping() {
+        let Some(db) = connect_test_database("auth_device_deny_non_pending").await else {
+            return;
+        };
+        crate::db::ensure_indexes(&db)
+            .await
+            .expect("ensure indexes");
+
+        for (status, expected_error_code) in [
+            (AuthDeviceCodeStatus::Approved, 11205),
+            (AuthDeviceCodeStatus::Denied, 11204),
+            (AuthDeviceCodeStatus::Expired, 11201),
+        ] {
+            collection(&db)
+                .delete_many(doc! {})
+                .await
+                .expect("clear rows");
+            seed_row(&db, status, Utc::now() + Duration::minutes(10)).await;
+
+            let error = deny(
+                &db,
+                TEST_HMAC_KEY,
+                DenyInput {
+                    user_id: Uuid::new_v4().to_string(),
+                    user_code: "ABCD-1234".to_string(),
+                    denier_ip: None,
+                    denier_user_agent: None,
+                },
+            )
+            .await
+            .expect_err("non-pending deny must fail");
+
+            assert_eq!(error.error_code(), expected_error_code);
+        }
+    }
+
+    #[tokio::test]
+    async fn deny_after_expiry_returns_expired_without_transition() {
+        let Some(db) = connect_test_database("auth_device_deny_expired_at").await else {
+            return;
+        };
+        crate::db::ensure_indexes(&db)
+            .await
+            .expect("ensure indexes");
+        let row = seed_row(
+            &db,
+            AuthDeviceCodeStatus::Pending,
+            Utc::now() - Duration::seconds(1),
+        )
+        .await;
+
+        let result = deny(
+            &db,
+            TEST_HMAC_KEY,
+            DenyInput {
+                user_id: Uuid::new_v4().to_string(),
+                user_code: "ABCD-1234".to_string(),
+                denier_ip: None,
+                denier_user_agent: None,
+            },
+        )
+        .await;
+
+        assert!(matches!(result, Err(AppError::AuthDeviceCodeExpired)));
+        assert_eq!(
+            row_by_id(&db, &row.id).await.status,
+            AuthDeviceCodeStatus::Pending
+        );
+    }
+
+    #[tokio::test]
+    async fn concurrent_approve_and_deny_have_one_winner_and_no_orphan_session() {
+        let Some(db) = connect_test_database("auth_device_approve_deny_race").await else {
+            return;
+        };
+        crate::db::ensure_indexes(&db)
+            .await
+            .expect("ensure indexes");
+        let config = test_app_config();
+        let jwt_keys = cached_test_jwt_keys();
+        let encryption_keys = test_encryption_keys();
+        let user_id = Uuid::new_v4().to_string();
+        seed_user(&db, &user_id).await;
+        let row = seed_row(
+            &db,
+            AuthDeviceCodeStatus::Pending,
+            Utc::now() + Duration::minutes(10),
+        )
+        .await;
+
+        let (approve_result, deny_result) = tokio::join!(
+            approve(
+                &db,
+                &config,
+                &jwt_keys,
+                &encryption_keys,
+                TEST_HMAC_KEY,
+                ApproveInput {
+                    user_id: user_id.clone(),
+                    user_code: "ABCD-1234".to_string(),
+                    approver_ip: None,
+                    approver_user_agent: None,
+                },
+            ),
+            deny(
+                &db,
+                TEST_HMAC_KEY,
+                DenyInput {
+                    user_id: user_id.clone(),
+                    user_code: "ABCD-1234".to_string(),
+                    denier_ip: None,
+                    denier_user_agent: None,
+                },
+            )
+        );
+
+        assert_eq!(
+            [approve_result.is_ok(), deny_result.is_ok()]
+                .into_iter()
+                .filter(|won| *won)
+                .count(),
+            1,
+            "approve={approve_result:?} deny={deny_result:?}"
+        );
+
+        let decided = row_by_id(&db, &row.id).await;
+        let live_sessions = db
+            .collection::<bson::Document>(SESSIONS)
+            .count_documents(doc! { "revoked": false })
+            .await
+            .expect("live session count");
+        match decided.status {
+            AuthDeviceCodeStatus::Approved => {
+                assert!(approve_result.is_ok());
+                assert!(matches!(
+                    deny_result,
+                    Err(AppError::AuthDeviceCodeAlreadyDelivered)
+                ));
+                assert_eq!(live_sessions, 1);
+            }
+            AuthDeviceCodeStatus::Denied => {
+                assert!(deny_result.is_ok());
+                assert!(matches!(
+                    approve_result,
+                    Err(AppError::AuthDeviceCodeDenied)
+                ));
+                assert_eq!(live_sessions, 0);
+                assert!(decided.approved_session_id.is_none());
+            }
+            status => panic!("unexpected race terminal status: {status:?}"),
+        }
     }
 
     #[tokio::test]
@@ -1298,6 +1679,7 @@ mod tests {
             slow_down_increments: 0,
             client_label: None,
             client_user_agent: None,
+            client_ip: None,
             client_ip_hmac: None,
             last_polled_at: None,
             approved_user_id: None,
@@ -1310,6 +1692,7 @@ mod tests {
             approved_at: None,
             delivered_at: None,
             denied_at: None,
+            denied_by_user_id: None,
             expires_at,
         };
         collection(db).insert_one(&row).await.expect("seed row");
@@ -1360,6 +1743,7 @@ mod tests {
             slow_down_increments: 0,
             client_label: Some("wsl-calvin".to_string()),
             client_user_agent: Some("nyxid-cli/0.8.0".to_string()),
+            client_ip: Some("203.0.113.10".to_string()),
             client_ip_hmac: Some("11112222".repeat(8)),
             last_polled_at: Some(now),
             approved_user_id: Some(Uuid::new_v4().to_string()),
@@ -1372,6 +1756,7 @@ mod tests {
             approved_at: Some(now),
             delivered_at: Some(now),
             denied_at: None,
+            denied_by_user_id: None,
             expires_at: now + Duration::minutes(10),
         }
     }

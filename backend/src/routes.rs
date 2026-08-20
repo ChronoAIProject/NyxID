@@ -1525,6 +1525,10 @@ pub fn build_router() -> (Router<AppState>, Router<AppState>) {
             post(handlers::auth_device::approve_auth_device),
         )
         .route(
+            "/auth/device/deny",
+            post(handlers::auth_device::deny_auth_device),
+        )
+        .route(
             "/connect-links/complete",
             post(handlers::connect_links::complete_connect_link),
         )
