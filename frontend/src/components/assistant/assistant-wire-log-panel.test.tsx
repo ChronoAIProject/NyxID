@@ -49,11 +49,12 @@ function renderWithTooltips(node: React.ReactNode) {
   const queryClient = new QueryClient({
     defaultOptions: { queries: { retry: false }, mutations: { retry: false } },
   });
-  return render(
+  const result = render(
     <QueryClientProvider client={queryClient}>
       <TooltipProvider>{node}</TooltipProvider>
     </QueryClientProvider>,
   );
+  return { ...result, queryClient };
 }
 
 function responseEnvelope() {
@@ -262,7 +263,7 @@ describe("AssistantWireLogPanel", () => {
       }),
     );
     vi.stubGlobal("fetch", fetchSpy);
-    renderWithTooltips(
+    const { queryClient } = renderWithTooltips(
       <AssistantWireLogPanel activeConversationId={ACTIVE_CONVERSATION_ID} />,
     );
 
@@ -281,6 +282,14 @@ describe("AssistantWireLogPanel", () => {
     expect(screen.getByText("Loading wire log...")).toBeInTheDocument();
     expect(await screen.findByText(/inspect this payload/)).toBeInTheDocument();
     expect(fetchSpy).toHaveBeenCalledOnce();
+    expect(
+      queryClient.getQueryData(["assistant-wire-log", WIRE_LOG_ID]),
+    ).toMatchObject({ status: "loaded" });
+
+    fireEvent.click(screen.getByRole("button", { name: /clear/i }));
+    expect(
+      queryClient.getQueryData(["assistant-wire-log", WIRE_LOG_ID]),
+    ).toBeUndefined();
   });
 
   it("renders an expired state for an unavailable id-backed payload", async () => {
@@ -527,7 +536,7 @@ describe("AssistantWireLogPanel", () => {
 
     expect(
       screen.getByText(
-        "Allowlisted response headers were dropped by the wire-header size ladder.",
+        "Allowlisted response headers were dropped by the wire-log size ladder.",
       ),
     ).toBeInTheDocument();
   });

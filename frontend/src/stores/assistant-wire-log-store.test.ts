@@ -41,10 +41,7 @@ function envelope(index: number): AssistantUpstreamEnvelope {
   };
 }
 
-function resetStore(
-  captureEnabled = false,
-  featureEnabled = captureEnabled,
-) {
+function resetStore(captureEnabled = false, featureEnabled = captureEnabled) {
   useAssistantWireLogStore.setState({
     featureEnabled,
     captureEnabled,

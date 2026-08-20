@@ -47,7 +47,9 @@ interface AssistantWireLogState {
   readonly setFeatureEnabled: (enabled: boolean) => void;
   readonly setCaptureEnabled: (enabled: boolean) => void;
   readonly setShowResponses: (enabled: boolean) => void;
-  readonly recordExchange: (meta: AssistantWireLogExchangeMeta) => string | null;
+  readonly recordExchange: (
+    meta: AssistantWireLogExchangeMeta,
+  ) => string | null;
   readonly assignConversation: (
     exchangeId: string,
     conversationId: string,
@@ -446,14 +448,12 @@ export function captureAssistantWireLogHeader(
       JSON.parse(decodeBase64Utf8(value)),
     );
     if (!parsed.success) return null;
-    return useAssistantWireLogStore
-      .getState()
-      .recordExchange({
-        ...meta,
-        wireLogId: null,
-        envelopes: parsed.data.echoes,
-        droppedEchoCount: parsed.data.droppedEchoCount,
-      });
+    return useAssistantWireLogStore.getState().recordExchange({
+      ...meta,
+      wireLogId: null,
+      envelopes: parsed.data.echoes,
+      droppedEchoCount: parsed.data.droppedEchoCount,
+    });
   } catch {
     // A malformed debug header must never affect the assistant request.
     return null;

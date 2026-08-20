@@ -114,7 +114,7 @@ function UpstreamResponse({
           </dl>
           {!envelope.degraded && envelope.droppedHeaders ? (
             <p className="mt-2 text-[10px] text-warning">
-              Allowlisted response headers were dropped by the wire-header size
+              Allowlisted response headers were dropped by the wire-log size
               ladder.
             </p>
           ) : null}
@@ -295,7 +295,7 @@ function WireLogPayload({
       {droppedEchoCount ? (
         <p className="text-[11px] text-warning">
           {droppedEchoCount} later backend echo
-          {droppedEchoCount === 1 ? " was" : "es were"} dropped by the header
+          {droppedEchoCount === 1 ? " was" : "es were"} dropped by the wire-log
           size ladder.
         </p>
       ) : null}
@@ -484,6 +484,7 @@ export function AssistantWireLogPanel({
 }: {
   readonly activeConversationId: string | null;
 }) {
+  const queryClient = useQueryClient();
   const entries = useAssistantWireLogStore((state) => state.entries);
   const captureEnabled = useAssistantWireLogStore(
     (state) => state.captureEnabled,
@@ -524,6 +525,11 @@ export function AssistantWireLogPanel({
     : activeConversationId
       ? entries.filter((entry) => entry.conversationId === activeConversationId)
       : [];
+
+  function clearWireLogs() {
+    queryClient.removeQueries({ queryKey: ["assistant-wire-log"] });
+    clear();
+  }
 
   return (
     <Sheet>
@@ -598,7 +604,7 @@ export function AssistantWireLogPanel({
             variant="ghost"
             size="sm"
             className="ml-auto"
-            onClick={clear}
+            onClick={clearWireLogs}
             disabled={entries.length === 0}
           >
             <Trash2 />

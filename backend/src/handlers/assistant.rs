@@ -572,13 +572,15 @@ fn encode_echo_header(echoes: &[UpstreamEcho]) -> Option<HeaderValue> {
 }
 
 fn attach_upstream_echoes(mut response: Response, echoes: Option<&[UpstreamEcho]>) -> Response {
-    if let Some(value) = echoes
-        .filter(|echoes| !echoes.is_empty())
-        .and_then(encode_echo_header)
-    {
-        response
-            .headers_mut()
-            .insert(DEBUG_UPSTREAM_RESPONSE_HEADER, value);
+    let Some(echoes) = echoes.filter(|echoes| !echoes.is_empty()) else {
+        return response;
+    };
+    let value = encode_echo_header(echoes);
+    let headers = response.headers_mut();
+    headers.remove(DEBUG_UPSTREAM_ID_RESPONSE_HEADER);
+    headers.remove(DEBUG_UPSTREAM_RESPONSE_HEADER);
+    if let Some(value) = value {
+        headers.insert(DEBUG_UPSTREAM_RESPONSE_HEADER, value);
     }
     response
 }
@@ -623,9 +625,9 @@ async fn attach_wire_log(
     {
         Ok(id) => {
             let value = HeaderValue::from_str(&id).expect("wire-log UUID is a valid header value");
-            response
-                .headers_mut()
-                .insert(DEBUG_UPSTREAM_ID_RESPONSE_HEADER, value);
+            let headers = response.headers_mut();
+            headers.remove(DEBUG_UPSTREAM_RESPONSE_HEADER);
+            headers.insert(DEBUG_UPSTREAM_ID_RESPONSE_HEADER, value);
             response
         }
         Err(_) => {
@@ -1747,6 +1749,7 @@ mod tests {
         let response = Response::builder()
             .header(header::CONTENT_TYPE, "text/event-stream; charset=utf-8")
             .header(header::CONTENT_LENGTH, upstream.len())
+            .header(DEBUG_UPSTREAM_RESPONSE_HEADER, "stale-inline-value")
             .body(Body::from(upstream.as_slice()))
             .unwrap();
 
@@ -1801,6 +1804,7 @@ mod tests {
             let response = Response::builder()
                 .header(header::CONTENT_TYPE, content_type)
                 .header(header::CONTENT_LENGTH, upstream.len())
+                .header(DEBUG_UPSTREAM_ID_RESPONSE_HEADER, "stale-id-value")
                 .body(Body::from(upstream.as_slice()))
                 .unwrap();
             let response = attach_wire_log(
