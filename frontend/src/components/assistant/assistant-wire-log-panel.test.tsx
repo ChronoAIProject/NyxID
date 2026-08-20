@@ -27,6 +27,9 @@ const admin: User = {
   created_at: "2026-07-31T00:00:00.000Z",
 };
 
+const ACTIVE_CONVERSATION_ID = "nyxchat-panel";
+const WIRE_LOG_ID = "d7dbbf38-a31c-4331-8ddb-13fda5a70d12";
+
 /**
  * The wire-log gate is the `experimental:aevatar-chat-wire-log` runtime
  * feature flag, resolved server-side and delivered on `/users/me` as
@@ -91,19 +94,54 @@ function recordPanelExchange(
   envelopes: readonly AssistantUpstreamEnvelope[],
   kind: "sse" | "header" = "sse",
   status = 200,
+  conversationId: string | null = ACTIVE_CONVERSATION_ID,
+  label = "POST /assistant/chat",
 ) {
   return useAssistantWireLogStore.getState().recordExchange({
     kind,
     status,
-    conversationId: "nyxchat-panel",
+    conversationId,
     wireLogId: null,
-    label: "POST /assistant/chat",
+    label,
     envelopes,
   });
 }
 
+function recordLazyExchange({
+  conversationId = ACTIVE_CONVERSATION_ID,
+  label = "POST /assistant/chat",
+  wireLogId = WIRE_LOG_ID,
+}: {
+  readonly conversationId?: string | null;
+  readonly label?: string;
+  readonly wireLogId?: string;
+} = {}) {
+  return useAssistantWireLogStore.getState().recordExchange({
+    kind: "header",
+    status: 200,
+    conversationId,
+    wireLogId,
+    label,
+  });
+}
+
+function wireLogRecord() {
+  return {
+    id: WIRE_LOG_ID,
+    conversation_id: ACTIVE_CONVERSATION_ID,
+    created_at: "2026-08-20T12:00:00Z",
+    payload: {
+      version: 2 as const,
+      echoes: [responseEnvelope()],
+      droppedEchoCount: 0,
+    },
+  };
+}
+
 describe("AssistantWireLogPanel", () => {
   beforeEach(() => {
+    vi.unstubAllGlobals();
+    vi.restoreAllMocks();
     localStorage.clear();
     signIn([]);
     useAssistantWireLogStore.setState({
@@ -144,22 +182,168 @@ describe("AssistantWireLogPanel", () => {
         upstreamOutcome: "no_response",
       },
     ]);
-    renderWithTooltips(<AssistantWireLogPanel />);
+    const fetchSpy = vi.fn();
+    vi.stubGlobal("fetch", fetchSpy);
+    renderWithTooltips(
+      <AssistantWireLogPanel activeConversationId={ACTIVE_CONVERSATION_ID} />,
+    );
 
     fireEvent.click(screen.getByRole("button", { name: "Aevatar wire log" }));
-    expect(screen.getByText("/api/chat")).toBeInTheDocument();
-    fireEvent.click(screen.getByText("/api/chat").closest("button")!);
+    expect(screen.getByText("POST /assistant/chat")).toBeInTheDocument();
+    fireEvent.click(
+      screen.getByRole("button", {
+        name: "Toggle POST /assistant/chat details",
+      }),
+    );
     expect(screen.getByText(/inspect this payload/)).toBeInTheDocument();
     expect(screen.getByText(/"path": "\/api\/chat"/)).toBeInTheDocument();
+    expect(fetchSpy).not.toHaveBeenCalled();
 
     fireEvent.click(screen.getByRole("button", { name: /clear/i }));
     expect(screen.getByText("No captured requests")).toBeInTheDocument();
     expect(useAssistantWireLogStore.getState().entries).toHaveLength(0);
   });
 
+  it("shows only the active conversation until all conversations is enabled", () => {
+    recordPanelExchange(
+      [responseEnvelope()],
+      "sse",
+      200,
+      ACTIVE_CONVERSATION_ID,
+      "POST /assistant/chat/active",
+    );
+    recordPanelExchange(
+      [responseEnvelope()],
+      "header",
+      204,
+      "nyxchat-other",
+      "GET /assistant/conversations/other",
+    );
+    recordPanelExchange(
+      [responseEnvelope()],
+      "header",
+      200,
+      null,
+      "POST /assistant/completions",
+    );
+
+    renderWithTooltips(
+      <AssistantWireLogPanel activeConversationId={ACTIVE_CONVERSATION_ID} />,
+    );
+    fireEvent.click(screen.getByRole("button", { name: "Aevatar wire log" }));
+
+    expect(screen.getByText("POST /assistant/chat/active")).toBeInTheDocument();
+    expect(
+      screen.queryByText("GET /assistant/conversations/other"),
+    ).not.toBeInTheDocument();
+    expect(
+      screen.queryByText("POST /assistant/completions"),
+    ).not.toBeInTheDocument();
+    expect(
+      screen.getByRole("switch", { name: "Show all conversations" }),
+    ).not.toBeChecked();
+
+    fireEvent.click(
+      screen.getByRole("switch", { name: "Show all conversations" }),
+    );
+
+    expect(
+      screen.getByText("GET /assistant/conversations/other"),
+    ).toBeInTheDocument();
+    expect(screen.getByText("POST /assistant/completions")).toBeInTheDocument();
+  });
+
+  it("fetches an id-backed payload only after its metadata row expands", async () => {
+    recordLazyExchange();
+    const fetchSpy = vi.fn().mockResolvedValue(
+      new Response(JSON.stringify(wireLogRecord()), {
+        status: 200,
+        headers: { "Content-Type": "application/json" },
+      }),
+    );
+    vi.stubGlobal("fetch", fetchSpy);
+    renderWithTooltips(
+      <AssistantWireLogPanel activeConversationId={ACTIVE_CONVERSATION_ID} />,
+    );
+
+    fireEvent.click(screen.getByRole("button", { name: "Aevatar wire log" }));
+    expect(screen.getByText("POST /assistant/chat")).toBeInTheDocument();
+    expect(screen.getByText("Header")).toBeInTheDocument();
+    expect(screen.getByText("NyxID 200")).toBeInTheDocument();
+    expect(fetchSpy).not.toHaveBeenCalled();
+
+    fireEvent.click(
+      screen.getByRole("button", {
+        name: "Toggle POST /assistant/chat details",
+      }),
+    );
+
+    expect(screen.getByText("Loading wire log...")).toBeInTheDocument();
+    expect(await screen.findByText(/inspect this payload/)).toBeInTheDocument();
+    expect(fetchSpy).toHaveBeenCalledOnce();
+  });
+
+  it("renders an expired state for an unavailable id-backed payload", async () => {
+    recordLazyExchange();
+    vi.stubGlobal(
+      "fetch",
+      vi.fn().mockResolvedValue(
+        new Response(
+          JSON.stringify({
+            error: "not_found",
+            error_code: 1004,
+            message: "Wire log not found.",
+          }),
+          {
+            status: 404,
+            headers: { "Content-Type": "application/json" },
+          },
+        ),
+      ),
+    );
+    renderWithTooltips(
+      <AssistantWireLogPanel activeConversationId={ACTIVE_CONVERSATION_ID} />,
+    );
+
+    fireEvent.click(screen.getByRole("button", { name: "Aevatar wire log" }));
+    fireEvent.click(
+      screen.getByRole("button", {
+        name: "Toggle POST /assistant/chat details",
+      }),
+    );
+
+    expect(
+      await screen.findByText("Wire log expired or unavailable."),
+    ).toBeInTheDocument();
+  });
+
+  it("renders a generic error for non-404 wire-log failures", async () => {
+    recordLazyExchange();
+    vi.stubGlobal(
+      "fetch",
+      vi.fn().mockRejectedValue(new TypeError("network unavailable")),
+    );
+    renderWithTooltips(
+      <AssistantWireLogPanel activeConversationId={ACTIVE_CONVERSATION_ID} />,
+    );
+
+    fireEvent.click(screen.getByRole("button", { name: "Aevatar wire log" }));
+    fireEvent.click(
+      screen.getByRole("button", {
+        name: "Toggle POST /assistant/chat details",
+      }),
+    );
+
+    expect(
+      await screen.findByText("Could not load wire log."),
+    ).toBeInTheDocument();
+  });
+
   it("hides the action for everyone while the operator flag is off", async () => {
     signIn([]);
-    renderWithTooltips(<AssistantWireLogAction />);
+    renderWithTooltips(
+      <AssistantWireLogAction activeConversationId={ACTIVE_CONVERSATION_ID} />,
+    );
 
     expect(
       screen.queryByRole("button", { name: "Aevatar wire log" }),
@@ -181,7 +365,9 @@ describe("AssistantWireLogPanel", () => {
       captureEnabled: true,
     });
 
-    renderWithTooltips(<AssistantWireLogAction />);
+    renderWithTooltips(
+      <AssistantWireLogAction activeConversationId={ACTIVE_CONVERSATION_ID} />,
+    );
 
     await waitFor(() => {
       expect(useAssistantWireLogStore.getState().featureEnabled).toBe(false);
@@ -196,7 +382,9 @@ describe("AssistantWireLogPanel", () => {
     signIn(undefined);
     useAssistantWireLogStore.setState({ featureEnabled: true });
 
-    renderWithTooltips(<AssistantWireLogAction />);
+    renderWithTooltips(
+      <AssistantWireLogAction activeConversationId={ACTIVE_CONVERSATION_ID} />,
+    );
 
     expect(
       screen.queryByRole("button", { name: "Aevatar wire log" }),
@@ -208,7 +396,9 @@ describe("AssistantWireLogPanel", () => {
 
   it("shows the action for authenticated users regardless of role when the flag is on", async () => {
     signIn([FEATURE_FLAG.AEVATAR_CHAT_WIRE_LOG]);
-    const { unmount } = renderWithTooltips(<AssistantWireLogAction />);
+    const { unmount } = renderWithTooltips(
+      <AssistantWireLogAction activeConversationId={ACTIVE_CONVERSATION_ID} />,
+    );
 
     expect(
       await screen.findByRole("button", { name: "Aevatar wire log" }),
@@ -228,7 +418,9 @@ describe("AssistantWireLogPanel", () => {
         },
       },
     });
-    renderWithTooltips(<AssistantWireLogAction />);
+    renderWithTooltips(
+      <AssistantWireLogAction activeConversationId={ACTIVE_CONVERSATION_ID} />,
+    );
 
     expect(
       await screen.findByRole("button", { name: "Aevatar wire log" }),
@@ -250,14 +442,21 @@ describe("AssistantWireLogPanel", () => {
         false,
       );
     useAssistantWireLogStore.getState().finalizeCapture(exchangeId, "complete");
-    renderWithTooltips(<AssistantWireLogPanel />);
+    renderWithTooltips(
+      <AssistantWireLogPanel activeConversationId={ACTIVE_CONVERSATION_ID} />,
+    );
 
     fireEvent.click(screen.getByRole("button", { name: "Aevatar wire log" }));
     expect(
       screen.getByRole("switch", { name: "Show Aevatar responses" }),
     ).toBeChecked();
+    expect(screen.queryByText("Aevatar 202")).not.toBeInTheDocument();
+    fireEvent.click(
+      screen.getByRole("button", {
+        name: "Toggle POST /assistant/chat details",
+      }),
+    );
     expect(screen.getByText("Aevatar 202")).toBeInTheDocument();
-    fireEvent.click(screen.getByText("/api/chat").closest("button")!);
     expect(screen.getByText("Upstream response 1")).toBeInTheDocument();
     expect(screen.getByText("Delivered response")).toBeInTheDocument();
     expect(screen.getByRole("tab", { name: "Raw" })).toBeInTheDocument();
@@ -283,10 +482,16 @@ describe("AssistantWireLogPanel", () => {
       .getState()
       .attachWireLines(exchangeId, lines, 3_590, false);
     useAssistantWireLogStore.getState().finalizeCapture(exchangeId, "complete");
-    renderWithTooltips(<AssistantWireLogPanel />);
+    renderWithTooltips(
+      <AssistantWireLogPanel activeConversationId={ACTIVE_CONVERSATION_ID} />,
+    );
 
     fireEvent.click(screen.getByRole("button", { name: "Aevatar wire log" }));
-    fireEvent.click(screen.getByText("/api/chat").closest("button")!);
+    fireEvent.click(
+      screen.getByRole("button", {
+        name: "Toggle POST /assistant/chat details",
+      }),
+    );
     expect(screen.getByText("line-199")).toBeInTheDocument();
     expect(screen.queryByText("line-200")).not.toBeInTheDocument();
     expect(screen.queryByText("line-449")).not.toBeInTheDocument();
@@ -309,10 +514,16 @@ describe("AssistantWireLogPanel", () => {
       ],
       "header",
     );
-    renderWithTooltips(<AssistantWireLogPanel />);
+    renderWithTooltips(
+      <AssistantWireLogPanel activeConversationId={ACTIVE_CONVERSATION_ID} />,
+    );
 
     fireEvent.click(screen.getByRole("button", { name: "Aevatar wire log" }));
-    fireEvent.click(screen.getByText("/api/chat").closest("button")!);
+    fireEvent.click(
+      screen.getByRole("button", {
+        name: "Toggle POST /assistant/chat details",
+      }),
+    );
 
     expect(
       screen.getByText(
@@ -379,12 +590,18 @@ describe("AssistantWireLogPanel", () => {
     render(
       <QueryClientProvider client={queryClient}>
         <TooltipProvider>
-          <AssistantWireLogPanel />
+          <AssistantWireLogPanel
+            activeConversationId={ACTIVE_CONVERSATION_ID}
+          />
         </TooltipProvider>
       </QueryClientProvider>,
     );
     fireEvent.click(screen.getByRole("button", { name: "Aevatar wire log" }));
-    fireEvent.click(screen.getByText("/api/chat").closest("button")!);
+    fireEvent.click(
+      screen.getByRole("button", {
+        name: "Toggle POST /assistant/chat details",
+      }),
+    );
     const renderedTab = screen.getByRole("tab", { name: "Rendered" });
     fireEvent.click(renderedTab);
 
