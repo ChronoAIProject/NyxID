@@ -15,7 +15,7 @@ import { Button, ButtonIcon } from "@/components/ui/button";
 import {
   formatAuthDeviceUserCodeInput,
 } from "@/schemas/auth-device";
-import { isTrustedAuthReturnTo } from "@/lib/return-url";
+import { resolveTrustedAuthReturnTo } from "@/lib/return-url";
 import { copyToClipboard } from "@/lib/utils";
 import { formatWebAuthDeviceRemaining } from "@/lib/auth-device-time";
 import { useWebAuthDeviceLogin } from "@/hooks/use-auth-device";
@@ -58,8 +58,9 @@ export function WebDeviceLogin({ returnTo }: WebDeviceLoginProps) {
 
   useEffect(() => {
     if (deviceLogin.phase !== "success") return;
-    if (isTrustedAuthReturnTo(returnTo)) {
-      window.location.assign(returnTo);
+    const trustedReturnTo = resolveTrustedAuthReturnTo(returnTo);
+    if (trustedReturnTo) {
+      window.location.assign(trustedReturnTo);
       return;
     }
     void navigate({ to: "/dashboard" as string });

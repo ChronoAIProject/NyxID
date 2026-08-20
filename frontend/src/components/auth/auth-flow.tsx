@@ -10,7 +10,7 @@ import {
 import { useLogin, useRegister } from "@/hooks/use-auth";
 import { ApiError } from "@/lib/api-client";
 import { openExternal } from "@/lib/navigation";
-import { isTrustedAuthReturnTo } from "@/lib/return-url";
+import { resolveTrustedAuthReturnTo } from "@/lib/return-url";
 import {
   useAppForm,
   Form,
@@ -234,8 +234,9 @@ export function AuthFlow({
     try {
       const result = await loginMutation.mutateAsync(data);
       if (!result.mfaRequired) {
-        if (isTrustedAuthReturnTo(returnTo)) {
-          window.location.assign(returnTo);
+        const trustedReturnTo = resolveTrustedAuthReturnTo(returnTo);
+        if (trustedReturnTo) {
+          window.location.assign(trustedReturnTo);
           return;
         }
         void navigate({ to: "/dashboard" as string });
