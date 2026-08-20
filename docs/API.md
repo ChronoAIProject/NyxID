@@ -4472,8 +4472,8 @@ skip the new gate until they expire.
 The current implementation keeps `operation_generation` as caller bookkeeping
 for wire compatibility. Its producer-freshness rationale (live
 `endpoint_contract_digest` plus the execution-authority digest) is the
-implementation's proposed interpretation of the acceptance bar, not a settled
-acceptance decision; eanz17 sign-off remains required.
+implementation's proposed interpretation, not a ratified contract decision.
+It remains open.
 
 Existing stored rows with no exact-view digest remain compatible for
 nondelegated callers and continue to use the other live fences. A delegated

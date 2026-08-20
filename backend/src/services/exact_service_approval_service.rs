@@ -714,6 +714,18 @@ async fn resolve_execution_authority(
     })
 }
 
+/// Execution-authority drift check for the **observe** path only.
+///
+/// Despite the name, this is not the only gate. `redeem_request` re-checks
+/// inline, after claiming the redemption and against the very resolution it is
+/// about to execute. Both are load-bearing and neither subsumes the other:
+/// this one runs before the claim so a status poll can report `drifted`
+/// without side effects, but it never sees the resolution that actually
+/// executes. Deleting the inline check in `redeem_request` because "the helper
+/// already covers it" silently reopens the retargeting hole the digest exists
+/// to close.
+///
+/// See `docs/GRANULAR_APPROVALS_DESIGN.md` ("Two gates, not one").
 async fn execution_authority_mismatch(
     state: &AppState,
     caller: &ExactServiceApprovalCaller,
