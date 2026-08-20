@@ -4,7 +4,8 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 import { ApiError } from "@/lib/api-client";
 import { AssistantServiceDeleteDialog } from "./assistant-service-delete-dialog";
 
-const { mockPost } = vi.hoisted(() => ({
+const { mockGet, mockPost } = vi.hoisted(() => ({
+  mockGet: vi.fn(),
   mockPost: vi.fn(),
 }));
 
@@ -29,7 +30,7 @@ vi.mock("@/lib/api-client", () => {
     }
   }
   return {
-    api: { post: mockPost },
+    api: { get: mockGet, post: mockPost },
     ApiError,
   };
 });
@@ -49,6 +50,7 @@ function renderDialog(onComplete = vi.fn(), onOpenChange = vi.fn()) {
 }
 
 beforeEach(() => {
+  mockGet.mockReset();
   mockPost.mockReset();
 });
 
@@ -58,6 +60,11 @@ describe("AssistantServiceDeleteDialog", () => {
       resource: { userServiceId: SERVICE_ID },
       replayed: false,
     });
+    mockGet.mockRejectedValue(new ApiError(404, {
+      error: "not_found",
+      error_code: 404,
+      message: "not found",
+    }));
     const onComplete = vi.fn();
     const { rerender } = renderDialog(onComplete);
 
@@ -121,6 +128,11 @@ describe("AssistantServiceDeleteDialog", () => {
       resource: { userServiceId: SERVICE_ID },
       replayed: false,
     });
+    mockGet.mockRejectedValue(new ApiError(404, {
+      error: "not_found",
+      error_code: 404,
+      message: "not found",
+    }));
     const onComplete = vi.fn();
     renderDialog(onComplete);
 
@@ -145,5 +157,26 @@ describe("AssistantServiceDeleteDialog", () => {
       },
     );
     expect(onComplete).toHaveBeenCalledWith(SERVICE_ID);
+  });
+
+  it("does not report deletion while the evidence projection remains live", async () => {
+    mockPost.mockResolvedValue({
+      resource: { userServiceId: SERVICE_ID },
+      replayed: false,
+    });
+    mockGet.mockResolvedValue({ id: SERVICE_ID });
+    const onComplete = vi.fn();
+    renderDialog(onComplete);
+
+    await userEvent.click(
+      screen.getByRole("button", { name: "I understand, continue" }),
+    );
+    await userEvent.click(
+      screen.getByRole("button", { name: "Delete service" }),
+    );
+    expect(await screen.findByRole("alert")).toHaveTextContent(
+      "still returned authorization evidence",
+    );
+    expect(onComplete).not.toHaveBeenCalled();
   });
 });

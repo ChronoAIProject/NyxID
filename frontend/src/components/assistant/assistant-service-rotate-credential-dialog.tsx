@@ -58,6 +58,7 @@ const authorizationEvidenceSchema = z
     updated_at: z.string().optional(),
   })
   .strict();
+type AuthorizationEvidence = z.infer<typeof authorizationEvidenceSchema>;
 
 const FORBIDDEN_READ_BACK_FIELDS = new Set([
   "apikey",
@@ -135,11 +136,15 @@ export function AssistantServiceRotateCredentialDialog({
   const [credential, setCredential] = useState("");
   const [error, setError] = useState<string | null>(null);
   const [resultId, setResultId] = useState<string | null>(null);
+  const [expectedStateVersion, setExpectedStateVersion] = useState<number | null>(null);
+  const [expectedPredecessorId, setExpectedPredecessorId] = useState<string | null>(null);
 
   function close() {
     setError(null);
     setVerified(false);
     setResultId(null);
+    setExpectedStateVersion(null);
+    setExpectedPredecessorId(null);
     setCredential("");
     submittingRef.current = false;
     verificationRef.current = false;
@@ -148,22 +153,52 @@ export function AssistantServiceRotateCredentialDialog({
     onOpenChange(false);
   }
 
-  async function verifyEvidence(userServiceId: string): Promise<void> {
+  async function readEvidence(userServiceId: string): Promise<AuthorizationEvidence> {
+    const value = await api.get<unknown>(
+      `/keys/${encodeURIComponent(userServiceId)}/authorization`,
+    );
+    assertSecretFreeReadBack(value);
+    return authorizationEvidenceSchema.parse(value);
+  }
+
+  async function verifyEvidence(
+    userServiceId: string,
+    expectedVersion: number,
+    predecessorId: string | null,
+    requireAdvance: boolean,
+    previousUpdatedAt?: string,
+  ): Promise<void> {
     if (verificationRef.current) return;
     verificationRef.current = true;
     setVerifying(true);
     setVerified(false);
     try {
-      const value = await api.get<unknown>(
-        `/keys/${encodeURIComponent(userServiceId)}/authorization`,
-      );
-      assertSecretFreeReadBack(value);
-      const evidence = authorizationEvidenceSchema.parse(value);
+      const evidence = await readEvidence(userServiceId);
       if (evidence.id !== userServiceId) {
         throw new Error("NyxID returned a different service identity.");
       }
-      if (!evidence.state_version || evidence.state_version < 1) {
+      if (evidence.state_version !== expectedVersion) {
+        throw new Error("NyxID service evidence did not show the expected state advance.");
+      }
+      if (!evidence.rotation_predecessor_id) {
         throw new Error("NyxID rotation lineage was missing.");
+      }
+      if (predecessorId && evidence.rotation_predecessor_id !== predecessorId) {
+        throw new Error("NyxID rotation lineage did not identify the replaced credential.");
+      }
+      if (requireAdvance) {
+        if (!evidence.updated_at || !previousUpdatedAt) {
+          throw new Error("NyxID rotation timestamp evidence was missing.");
+        }
+        const beforeTimestamp = Date.parse(previousUpdatedAt);
+        const afterTimestamp = Date.parse(evidence.updated_at);
+        if (
+          !Number.isFinite(beforeTimestamp) ||
+          !Number.isFinite(afterTimestamp) ||
+          afterTimestamp <= beforeTimestamp
+        ) {
+          throw new Error("NyxID rotation timestamp did not advance.");
+        }
       }
       setVerified(true);
       setError(null);
@@ -190,6 +225,13 @@ export function AssistantServiceRotateCredentialDialog({
       const expected = serviceRotateCredentialActionParamsSchema.parse({
         userServiceId: params.userServiceId,
       });
+      const before = await readEvidence(expected.userServiceId);
+      if (!before.state_version || before.state_version < 1) {
+        throw new Error("NyxID service evidence was missing its state version.");
+      }
+      if (!before.api_key_id) {
+        throw new Error("NyxID service evidence was missing the predecessor credential identity.");
+      }
       const raw = await api.post<unknown>(
         "/assistant/actions/services/rotate-credential",
         {
@@ -202,7 +244,18 @@ export function AssistantServiceRotateCredentialDialog({
       const response = assistantServiceRotateResponseSchema.parse(raw);
       setCredential("");
       setResultId(response.resource.userServiceId);
-      await verifyEvidence(response.resource.userServiceId);
+      const nextVersion =
+        before.state_version + (response.replayed ? 0 : 1);
+      const predecessorId = response.replayed ? null : before.api_key_id;
+      setExpectedStateVersion(nextVersion);
+      setExpectedPredecessorId(predecessorId);
+      await verifyEvidence(
+        response.resource.userServiceId,
+        nextVersion,
+        predecessorId,
+        !response.replayed,
+        before.updated_at,
+      );
     } catch (caught) {
       setError(
         errorMessage(caught, "NyxID could not rotate this service credential."),
@@ -279,7 +332,17 @@ export function AssistantServiceRotateCredentialDialog({
               variant="outline"
               isLoading={verifying}
               onClick={() => {
-                if (resultId) void verifyEvidence(resultId);
+                if (
+                  resultId &&
+                  expectedStateVersion !== null
+                )
+                  void verifyEvidence(
+                    resultId,
+                    expectedStateVersion,
+                    expectedPredecessorId,
+                    false,
+                    undefined,
+                  );
               }}
             >
               <RefreshCw />

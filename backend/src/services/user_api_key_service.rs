@@ -1,7 +1,7 @@
 use chrono::Utc;
 use futures::TryStreamExt;
 use mongodb::bson::{self, doc};
-use mongodb::options::ReturnDocument;
+use mongodb::{ClientSession, Database, options::ReturnDocument};
 use uuid::Uuid;
 
 use crate::crypto::aes::EncryptionKeys;
@@ -128,6 +128,19 @@ pub async fn create_api_key(
     user_id: &str,
     params: CreateApiKeyParams<'_>,
 ) -> AppResult<UserApiKey> {
+    let api_key = build_api_key(encryption_keys, user_id, params).await?;
+    db.collection::<UserApiKey>(COLLECTION_NAME)
+        .insert_one(&api_key)
+        .await?;
+    Ok(api_key)
+}
+
+/// Build an encrypted API-key document without writing it.
+pub async fn build_api_key(
+    encryption_keys: &EncryptionKeys,
+    user_id: &str,
+    params: CreateApiKeyParams<'_>,
+) -> AppResult<UserApiKey> {
     if params.label.is_empty() || params.label.len() > 200 {
         return Err(AppError::ValidationError(
             "Label must be between 1 and 200 characters".to_string(),
@@ -227,11 +240,20 @@ pub async fn create_api_key(
         updated_at: now,
     };
 
-    db.collection::<UserApiKey>(COLLECTION_NAME)
-        .insert_one(&api_key)
-        .await?;
-
     Ok(api_key)
+}
+
+/// Insert a previously built API-key document, optionally in a caller-owned
+/// transaction. Keeping construction separate lets multi-document mutations
+/// encrypt and validate before any write occurs.
+pub async fn insert_api_key_in_session(
+    db: &Database,
+    session: &mut ClientSession,
+    api_key: &UserApiKey,
+) -> AppResult<()> {
+    let collection = db.collection::<UserApiKey>(COLLECTION_NAME);
+    collection.insert_one(api_key).session(session).await?;
+    Ok(())
 }
 
 /// Create a new API key by copying encrypted fields from an existing provider token.

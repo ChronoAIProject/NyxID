@@ -18,7 +18,7 @@ const EVIDENCE = {
   last_authorized_at: null,
   node_id: null,
   rotation_predecessor_id: null,
-  state_version: 2,
+  state_version: 1,
   updated_at: "2026-08-20T00:00:00Z",
 };
 
@@ -27,6 +27,8 @@ async function stubServiceApis(
   options: { deleteConflictOnce?: boolean } = {},
 ): Promise<void> {
   let deleteCalls = 0;
+  let serviceStateVersion = EVIDENCE.state_version;
+  let deleted = false;
   await page.route("**/api/v1/assistant/actions/services/**", async (route) => {
     const url = route.request().url();
     const method = route.request().method();
@@ -55,6 +57,8 @@ async function stubServiceApis(
       });
       return;
     }
+    serviceStateVersion += 1;
+    if (url.includes("/delete")) deleted = true;
     await route.fulfill({
       status: 200,
       contentType: "application/json",
@@ -64,13 +68,16 @@ async function stubServiceApis(
       }),
     });
   });
-  await page.route(`**/api/v1/keys/${SERVICE_ID}/authorization`, (route) =>
-    route.fulfill({
+  await page.route(`**/api/v1/keys/${SERVICE_ID}/authorization`, (route) => {
+    if (deleted) {
+      return route.fulfill({ status: 404, contentType: "application/json", body: "" });
+    }
+    return route.fulfill({
       status: 200,
       contentType: "application/json",
-      body: JSON.stringify(EVIDENCE),
-    }),
-  );
+      body: JSON.stringify({ ...EVIDENCE, state_version: serviceStateVersion }),
+    });
+  });
 }
 
 async function mountDialog(
@@ -124,7 +131,7 @@ async function mountDialog(
   );
 }
 
-test("wave2_service_update_journey_end_to_end", async ({ page }) => {
+test("wave2_service_update_dialog_ui_contract", async ({ page }) => {
   await openAssistant(page);
   await stubServiceApis(page);
   await mountDialog(
@@ -152,7 +159,7 @@ test("wave2_service_update_journey_end_to_end", async ({ page }) => {
   await expect(page.getByTestId("wave2-complete")).toHaveText(SERVICE_ID);
 });
 
-test("wave2_service_delete_confirm_every_time", async ({ page }) => {
+test("wave2_service_delete_dialog_ui_contract", async ({ page }) => {
   await openAssistant(page);
   await stubServiceApis(page, { deleteConflictOnce: true });
   await mountDialog(

@@ -1,6 +1,9 @@
 use chrono::Utc;
 use futures::TryStreamExt;
-use mongodb::bson::{self, doc};
+use mongodb::{
+    ClientSession, Database,
+    bson::{self, Document, doc},
+};
 use uuid::Uuid;
 
 use crate::errors::{AppError, AppResult};
@@ -169,6 +172,52 @@ pub async fn update_endpoint(
     openapi_spec_url: OpenApiSpecUrlUpdate<'_>,
     recommended_skills: RecommendedSkillsUpdate,
 ) -> AppResult<()> {
+    let update_doc = build_endpoint_update(url, label, openapi_spec_url, recommended_skills)?;
+
+    let result = db
+        .collection::<UserEndpoint>(COLLECTION_NAME)
+        .update_one(doc! { "_id": endpoint_id, "user_id": user_id }, update_doc)
+        .await?;
+
+    if result.matched_count == 0 {
+        return Err(AppError::NotFound("Endpoint not found".to_string()));
+    }
+
+    Ok(())
+}
+
+/// Apply an endpoint update inside a caller-owned MongoDB transaction.
+pub async fn update_endpoint_in_session(
+    db: &Database,
+    session: &mut ClientSession,
+    user_id: &str,
+    endpoint_id: &str,
+    url: Option<&str>,
+    label: Option<&str>,
+    openapi_spec_url: OpenApiSpecUrlUpdate<'_>,
+    recommended_skills: RecommendedSkillsUpdate,
+) -> AppResult<()> {
+    let update_doc = build_endpoint_update(url, label, openapi_spec_url, recommended_skills)?;
+
+    let result = db
+        .collection::<UserEndpoint>(COLLECTION_NAME)
+        .update_one(doc! { "_id": endpoint_id, "user_id": user_id }, update_doc)
+        .session(session)
+        .await?;
+
+    if result.matched_count == 0 {
+        return Err(AppError::NotFound("Endpoint not found".to_string()));
+    }
+
+    Ok(())
+}
+
+fn build_endpoint_update(
+    url: Option<&str>,
+    label: Option<&str>,
+    openapi_spec_url: OpenApiSpecUrlUpdate<'_>,
+    recommended_skills: RecommendedSkillsUpdate,
+) -> AppResult<Document> {
     let spec_update = match openapi_spec_url {
         OpenApiSpecUrlUpdate::Leave => None,
         OpenApiSpecUrlUpdate::Clear => Some(None),
@@ -248,16 +297,7 @@ pub async fn update_endpoint(
         update_doc.insert("$unset", unset_doc);
     }
 
-    let result = db
-        .collection::<UserEndpoint>(COLLECTION_NAME)
-        .update_one(doc! { "_id": endpoint_id, "user_id": user_id }, update_doc)
-        .await?;
-
-    if result.matched_count == 0 {
-        return Err(AppError::NotFound("Endpoint not found".to_string()));
-    }
-
-    Ok(())
+    Ok(update_doc)
 }
 
 /// Delete endpoint. Fails if any active UserService references it.

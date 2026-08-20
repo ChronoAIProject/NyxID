@@ -13,6 +13,7 @@ use axum::{Json, Router, extract::State, routing::post};
 use mongodb::bson::doc;
 use regex::Regex;
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 use utoipa::ToSchema;
 use uuid::Uuid;
 
@@ -140,6 +141,8 @@ struct ServiceUpdateFingerprint<'a> {
 struct ServiceDeleteFingerprint<'a> {
     action: &'static str,
     user_service_id: &'a str,
+    cascade_grant: bool,
+    grant_scope: Option<&'a str>,
 }
 
 #[derive(Serialize)]
@@ -155,6 +158,7 @@ struct ServiceRouteFingerprint<'a> {
 struct ServiceRotateFingerprint<'a> {
     action: &'static str,
     user_service_id: &'a str,
+    credential_sha256: &'a str,
 }
 
 struct NormalizedUpdate {
@@ -210,6 +214,10 @@ fn optional_trimmed(value: Option<String>) -> Option<String> {
             Some(trimmed)
         }
     })
+}
+
+fn secret_sha256(value: &str) -> String {
+    hex::encode(Sha256::digest(value.as_bytes()))
 }
 
 fn normalize_update(body: UpdateAssistantServiceRequest) -> AppResult<NormalizedUpdate> {
@@ -330,38 +338,6 @@ async fn resolve_write_owner(
     })
 }
 
-fn utc_now_at_bson_precision() -> chrono::DateTime<chrono::Utc> {
-    chrono::DateTime::from_timestamp_millis(chrono::Utc::now().timestamp_millis())
-        .expect("current UTC timestamp must fit BSON precision")
-}
-
-/// Atomically `$inc` `state_version` and `$set` `updated_at` plus extra fields.
-async fn commit_service_mutation(
-    db: &mongodb::Database,
-    owner_id: &str,
-    service_id: &str,
-    extra_set: mongodb::bson::Document,
-) -> AppResult<UserService> {
-    let mut set_doc = extra_set;
-    set_doc.insert(
-        "updated_at",
-        bson::DateTime::from_chrono(utc_now_at_bson_precision()),
-    );
-    let updated = db
-        .collection::<UserService>(USER_SERVICES)
-        .find_one_and_update(
-            doc! { "_id": service_id, "user_id": owner_id },
-            doc! {
-                "$set": set_doc,
-                "$inc": { "state_version": 1_i64 },
-            },
-        )
-        .return_document(mongodb::options::ReturnDocument::After)
-        .await?
-        .ok_or_else(|| AppError::NotFound("User service not found".to_string()))?;
-    Ok(updated)
-}
-
 fn completed_replay(outcome: &ReceiptOutcome) -> bool {
     // `Replay` is now completed-only; a pending reservation surfaces as
     // `InProgress` and must never reach the mutation branch.
@@ -376,6 +352,48 @@ fn receipt_from_outcome(
         ReceiptOutcome::Replay(receipt) => Ok(receipt),
         ReceiptOutcome::InProgress(_) => Err(in_progress_conflict()),
     }
+}
+
+async fn apply_update_in_session(
+    db: &mongodb::Database,
+    session: &mut mongodb::ClientSession,
+    owner_id: &str,
+    endpoint_id: &str,
+    service_id: &str,
+    endpoint_url: Option<&str>,
+    name: Option<&str>,
+    auth_method: Option<&str>,
+    auth_key_name: Option<&str>,
+) -> AppResult<()> {
+    if endpoint_url.is_some() || name.is_some() {
+        user_endpoint_service::update_endpoint_in_session(
+            db,
+            session,
+            owner_id,
+            endpoint_id,
+            endpoint_url,
+            name,
+            OpenApiSpecUrlUpdate::Leave,
+            RecommendedSkillsUpdate::Leave,
+        )
+        .await?;
+    }
+    let mut service_set = doc! {};
+    if let Some(auth_method) = auth_method {
+        service_set.insert("auth_method", auth_method);
+    }
+    if let Some(auth_key_name) = auth_key_name {
+        service_set.insert("auth_key_name", auth_key_name);
+    }
+    user_service_service::commit_user_service_mutation(
+        db,
+        session,
+        owner_id,
+        service_id,
+        service_set,
+    )
+    .await?;
+    Ok(())
 }
 
 /// POST /api/v1/assistant/actions/services/update
@@ -416,45 +434,44 @@ pub async fn update_service(
             )
             .await?;
         }
-        if request.name.is_some() || request.endpoint_url.is_some() {
-            user_endpoint_service::update_endpoint(
-                &state.db,
-                &access.owner_id,
-                &access.service.endpoint_id,
-                request.endpoint_url.as_deref(),
-                request.name.as_deref(),
-                OpenApiSpecUrlUpdate::Leave,
-                RecommendedSkillsUpdate::Leave,
-            )
-            .await?;
-        }
-        if request.auth_method.is_some() || request.auth_key_name.is_some() {
-            user_service_service::update_user_service(
-                &state.db,
-                &access.owner_id,
-                &actor,
-                &request.user_service_id,
-                request.auth_method.as_deref(),
-                request.auth_key_name.as_deref(),
-                None,
-                None,
-                None,
-                None,
-                None,
-                None,
-                None,
-                None,
-            )
-            .await?;
-        } else {
-            commit_service_mutation(
-                &state.db,
-                &access.owner_id,
-                &request.user_service_id,
-                doc! {},
-            )
-            .await?;
-        }
+        user_service_service::validate_service_auth_update(
+            &access.service,
+            request.auth_method.as_deref(),
+            request.auth_key_name.as_deref(),
+        )?;
+
+        let db = state.db.clone();
+        let owner_id = access.owner_id.clone();
+        let endpoint_id = access.service.endpoint_id.clone();
+        let service_id = request.user_service_id.clone();
+        let endpoint_url = request.endpoint_url.clone();
+        let name = request.name.clone();
+        let auth_method = request.auth_method.clone();
+        let auth_key_name = request.auth_key_name.clone();
+        let mut session = db.client().start_session().await?;
+        session
+            .start_transaction()
+            .and_run2(async move |session| {
+                let endpoint_url = endpoint_url.clone();
+                let name = name.clone();
+                let auth_method = auth_method.clone();
+                let auth_key_name = auth_key_name.clone();
+                let operation = apply_update_in_session(
+                    &db,
+                    &mut *session,
+                    &owner_id,
+                    &endpoint_id,
+                    &service_id,
+                    endpoint_url.as_deref(),
+                    name.as_deref(),
+                    auth_method.as_deref(),
+                    auth_key_name.as_deref(),
+                )
+                .await;
+                crate::services::api_key_mutation_service::transaction_result(operation)
+            })
+            .await
+            .map_err(crate::services::api_key_mutation_service::map_transaction_error)?;
         mark_completed(&state.db, &receipt).await?;
     }
 
@@ -483,6 +500,8 @@ pub async fn delete_service(
     let fingerprint = fingerprint_canonical(&ServiceDeleteFingerprint {
         action: SERVICE_DELETE_ACTION,
         user_service_id: &request.user_service_id,
+        cascade_grant: request.cascade_grant,
+        grant_scope: request.grant_scope.as_deref(),
     })?;
     let outcome = reserve_or_replay(
         &state.db,
@@ -562,8 +581,30 @@ pub async fn route_service(
                 extra.insert("node_id", mongodb::bson::Bson::Null);
             }
         }
-        commit_service_mutation(&state.db, &access.owner_id, &request.user_service_id, extra)
-            .await?;
+        let db = state.db.clone();
+        let owner_id = access.owner_id.clone();
+        let service_id = request.user_service_id.clone();
+        let mut session = db.client().start_session().await?;
+        session
+            .start_transaction()
+            .and_run2(async move |session| {
+                let db = db.clone();
+                let owner_id = owner_id.clone();
+                let service_id = service_id.clone();
+                let extra = extra.clone();
+                let operation = user_service_service::commit_user_service_mutation(
+                    &db,
+                    &mut *session,
+                    &owner_id,
+                    &service_id,
+                    extra,
+                )
+                .await
+                .map(|_| ());
+                crate::services::api_key_mutation_service::transaction_result(operation)
+            })
+            .await
+            .map_err(crate::services::api_key_mutation_service::map_transaction_error)?;
         mark_completed(&state.db, &receipt).await?;
     }
 
@@ -584,9 +625,11 @@ pub async fn rotate_credential(
     auth_user.ensure_write_scope()?;
     let actor = auth_user.user_id.to_string();
     let request = normalize_rotate(body)?;
+    let credential_sha256 = secret_sha256(&request.credential);
     let fingerprint = fingerprint_canonical(&ServiceRotateFingerprint {
         action: SERVICE_ROTATE_ACTION,
         user_service_id: &request.user_service_id,
+        credential_sha256: &credential_sha256,
     })?;
     let outcome = reserve_or_replay(
         &state.db,
@@ -612,8 +655,9 @@ pub async fn rotate_credential(
                     .to_string(),
             ));
         }
-        let successor = user_api_key_service::create_api_key(
-            &state.db,
+        // Encrypt and validate the successor before opening the transaction;
+        // no write is possible after a validation or crypto failure.
+        let successor = user_api_key_service::build_api_key(
             &state.encryption_keys,
             &access.owner_id,
             user_api_key_service::CreateApiKeyParams {
@@ -634,16 +678,40 @@ pub async fn rotate_credential(
             },
         )
         .await?;
-        commit_service_mutation(
-            &state.db,
-            &access.owner_id,
-            &request.user_service_id,
-            doc! {
-                "api_key_id": &successor.id,
-                "rotation_predecessor_id": &predecessor_id,
-            },
-        )
-        .await?;
+        let db = state.db.clone();
+        let owner_id = access.owner_id.clone();
+        let service_id = request.user_service_id.clone();
+        let predecessor_id_for_tx = predecessor_id.clone();
+        let successor_for_tx = successor.clone();
+        let mut session = db.client().start_session().await?;
+        session
+            .start_transaction()
+            .and_run2(async move |session| {
+                let operation: AppResult<()> = async {
+                    user_api_key_service::insert_api_key_in_session(
+                        &db,
+                        &mut *session,
+                        &successor_for_tx,
+                    )
+                    .await?;
+                    user_service_service::commit_user_service_mutation(
+                        &db,
+                        &mut *session,
+                        &owner_id,
+                        &service_id,
+                        doc! {
+                            "api_key_id": &successor_for_tx.id,
+                            "rotation_predecessor_id": &predecessor_id_for_tx,
+                        },
+                    )
+                    .await?;
+                    Ok(())
+                }
+                .await;
+                crate::services::api_key_mutation_service::transaction_result(operation)
+            })
+            .await
+            .map_err(crate::services::api_key_mutation_service::map_transaction_error)?;
         mark_completed(&state.db, &receipt).await?;
     }
 
@@ -688,8 +756,8 @@ mod tests {
         WsFrameDirection, WsFrameInjection, WsFrameKind, WsFrameTrigger,
     };
     use crate::test_utils::{
-        connect_test_database, test_app_state, test_encryption_keys, test_user, test_user_endpoint,
-        test_user_service,
+        connect_test_database, connect_transaction_test_database, test_app_state,
+        test_encryption_keys, test_user, test_user_endpoint, test_user_service,
     };
 
     fn access_token(state: &AppState, user_id: &str) -> String {
@@ -876,6 +944,55 @@ mod tests {
         Some((db, actor_id))
     }
 
+    async fn prepare_transaction_actor(prefix: &str) -> (mongodb::Database, String) {
+        let db = connect_transaction_test_database(prefix).await;
+        prepare_receipts(&db).await;
+        let actor_id = Uuid::new_v4().to_string();
+        db.collection::<User>(USERS)
+            .insert_one(test_user(&actor_id, UserType::Person))
+            .await
+            .expect("insert user");
+        (db, actor_id)
+    }
+
+    #[test]
+    fn service_delete_fingerprint_includes_cascade_semantics() {
+        let first = fingerprint_canonical(&ServiceDeleteFingerprint {
+            action: SERVICE_DELETE_ACTION,
+            user_service_id: "service",
+            cascade_grant: false,
+            grant_scope: None,
+        })
+        .expect("fingerprint");
+        let second = fingerprint_canonical(&ServiceDeleteFingerprint {
+            action: SERVICE_DELETE_ACTION,
+            user_service_id: "service",
+            cascade_grant: true,
+            grant_scope: Some("repo"),
+        })
+        .expect("fingerprint");
+        assert_ne!(first, second);
+    }
+
+    #[test]
+    fn service_rotate_fingerprint_includes_credential_content() {
+        let first_credential = secret_sha256("credential-a");
+        let first = fingerprint_canonical(&ServiceRotateFingerprint {
+            action: SERVICE_ROTATE_ACTION,
+            user_service_id: "service",
+            credential_sha256: &first_credential,
+        })
+        .expect("fingerprint");
+        let second_credential = secret_sha256("credential-b");
+        let second = fingerprint_canonical(&ServiceRotateFingerprint {
+            action: SERVICE_ROTATE_ACTION,
+            user_service_id: "service",
+            credential_sha256: &second_credential,
+        })
+        .expect("fingerprint");
+        assert_ne!(first, second);
+    }
+
     #[tokio::test]
     async fn service_update_effect_normalizes_and_receipts() {
         let Some((db, actor_id)) = prepare_actor("svc_update_normalizes").await else {
@@ -909,7 +1026,7 @@ mod tests {
             .await
             .expect("load service")
             .expect("service exists");
-        assert!(stored.state_version >= 1);
+        assert_eq!(stored.state_version, 2);
         let endpoint = db
             .collection::<UserEndpoint>(USER_ENDPOINTS)
             .find_one(doc! { "_id": &service.endpoint_id })
@@ -1037,7 +1154,7 @@ mod tests {
             stored.rotation_predecessor_id.as_deref(),
             Some(predecessor.as_str())
         );
-        assert!(stored.state_version >= 1);
+        assert_eq!(stored.state_version, 2);
 
         let (status, replayed) = request(
             app(state),
@@ -1346,12 +1463,122 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn service_update_validation_does_not_mutate_endpoint_before_rejection() {
+        let (db, actor_id) = prepare_transaction_actor("svc_update_atomic_validation").await;
+        let (service, endpoint_before) = seed_service(&db, &actor_id, false, None).await;
+        let state = test_app_state(db.clone());
+        let token = access_token(&state, &actor_id);
+        let (status, body) = request(
+            app(state),
+            &token,
+            "POST",
+            "/assistant/actions/services/update",
+            Some(json!({
+                "actionRequestId": "update-invalid-auth",
+                "userServiceId": service.id,
+                "name": "Changed before rejection",
+                "authMethod": "bearer",
+            })),
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+
+        let endpoint = db
+            .collection::<UserEndpoint>(USER_ENDPOINTS)
+            .find_one(doc! { "_id": &endpoint_before.id })
+            .await
+            .expect("load endpoint")
+            .expect("endpoint exists");
+        assert_eq!(endpoint.label, endpoint_before.label);
+        let stored = db
+            .collection::<UserService>(USER_SERVICES)
+            .find_one(doc! { "_id": &service.id })
+            .await
+            .expect("load service")
+            .expect("service exists");
+        assert_eq!(stored.state_version, 1);
+    }
+
+    #[tokio::test]
+    async fn service_rotate_transaction_rolls_back_orphan_on_pointer_failure() {
+        let (db, actor_id) = prepare_transaction_actor("svc_rotate_atomic_failure").await;
+        let (service, _) = seed_service(&db, &actor_id, true, None).await;
+        let predecessor = service.api_key_id.clone().expect("credential");
+        let state = test_app_state(db.clone());
+        let existing = user_api_key_service::get_api_key(&db, &actor_id, &predecessor)
+            .await
+            .expect("load predecessor");
+        let successor = user_api_key_service::build_api_key(
+            &state.encryption_keys,
+            &actor_id,
+            user_api_key_service::CreateApiKeyParams {
+                label: &existing.label,
+                credential_type: &existing.credential_type,
+                credential: "replacement-that-must-roll-back",
+                access_token: None,
+                refresh_token: None,
+                token_scopes: existing.token_scopes.as_deref(),
+                expires_at: None,
+                provider_config_id: existing.provider_config_id.as_deref(),
+                connection_id: None,
+                oauth_client_id: None,
+                oauth_client_secret: None,
+                status: "active",
+                source: Some("assistant_rotate"),
+                source_id: Some(&predecessor),
+            },
+        )
+        .await
+        .expect("build successor");
+
+        let tx_db = db.clone();
+        let tx_actor_id = actor_id.clone();
+        let tx_successor = successor.clone();
+        let tx_predecessor = predecessor.clone();
+        let mut session = db.client().start_session().await.expect("session");
+        let outcome = session
+            .start_transaction()
+            .and_run2(async move |session| {
+                let operation: AppResult<()> = async {
+                    user_api_key_service::insert_api_key_in_session(
+                        &tx_db,
+                        &mut *session,
+                        &tx_successor,
+                    )
+                    .await?;
+                    user_service_service::commit_user_service_mutation(
+                        &tx_db,
+                        &mut *session,
+                        &tx_actor_id,
+                        "missing-service-after-successor-insert",
+                        doc! {
+                            "api_key_id": &tx_successor.id,
+                            "rotation_predecessor_id": &tx_predecessor,
+                        },
+                    )
+                    .await?;
+                    Ok(())
+                }
+                .await;
+                crate::services::api_key_mutation_service::transaction_result(operation)
+            })
+            .await;
+        assert!(outcome.is_err());
+        assert!(
+            db.collection::<UserApiKey>(USER_API_KEYS)
+                .find_one(doc! { "_id": &successor.id })
+                .await
+                .expect("lookup successor")
+                .is_none()
+        );
+    }
+
+    #[tokio::test]
     async fn service_rotate_stale_identity_replay_rejected() {
         let Some((db, actor_id)) = prepare_actor("svc_rotate_stale_id").await else {
             return;
         };
         let (first, _) = seed_service_named(&db, &actor_id, "svc-one", true, None).await;
-        let (second, _) = seed_service_named(&db, &actor_id, "svc-two", true, None).await;
         let state = test_app_state(db);
         let token = access_token(&state, &actor_id);
 
@@ -1376,7 +1603,7 @@ mod tests {
             "/assistant/actions/services/rotate-credential",
             Some(json!({
                 "actionRequestId": "shared-identity",
-                "userServiceId": second.id,
+                "userServiceId": first.id,
                 "credential": "replacement-two",
             })),
         )

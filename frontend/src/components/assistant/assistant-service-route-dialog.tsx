@@ -43,6 +43,7 @@ const authorizationEvidenceSchema = z
     updated_at: z.string().optional(),
   })
   .strict();
+type AuthorizationEvidence = z.infer<typeof authorizationEvidenceSchema>;
 
 const FORBIDDEN_READ_BACK_FIELDS = new Set([
   "apikey",
@@ -122,12 +123,14 @@ export function AssistantServiceRouteDialog({
   const [error, setError] = useState<string | null>(null);
   const [resultId, setResultId] = useState<string | null>(null);
   const [observedNodeId, setObservedNodeId] = useState<string | null>(null);
+  const [expectedStateVersion, setExpectedStateVersion] = useState<number | null>(null);
 
   function close() {
     setError(null);
     setVerified(false);
     setResultId(null);
     setObservedNodeId(null);
+    setExpectedStateVersion(null);
     submittingRef.current = false;
     verificationRef.current = false;
     setSubmitting(false);
@@ -135,26 +138,34 @@ export function AssistantServiceRouteDialog({
     onOpenChange(false);
   }
 
+  async function readEvidence(userServiceId: string): Promise<AuthorizationEvidence> {
+    const value = await api.get<unknown>(
+      `/keys/${encodeURIComponent(userServiceId)}/authorization`,
+    );
+    assertSecretFreeReadBack(value);
+    return authorizationEvidenceSchema.parse(value);
+  }
+
   async function verifyEvidence(
     userServiceId: string,
     expectedNodeId: string | undefined,
+    expectedVersion: number,
   ): Promise<void> {
     if (verificationRef.current) return;
     verificationRef.current = true;
     setVerifying(true);
     setVerified(false);
     try {
-      const value = await api.get<unknown>(
-        `/keys/${encodeURIComponent(userServiceId)}/authorization`,
-      );
-      assertSecretFreeReadBack(value);
-      const evidence = authorizationEvidenceSchema.parse(value);
+      const evidence = await readEvidence(userServiceId);
       if (evidence.id !== userServiceId) {
         throw new Error("NyxID returned a different service identity.");
       }
       const expected = expectedNodeId?.trim() ? expectedNodeId.trim() : null;
       if (evidence.node_id !== expected) {
         throw new Error("NyxID routing evidence did not match this action.");
+      }
+      if (evidence.state_version !== expectedVersion) {
+        throw new Error("NyxID service evidence did not show the expected state advance.");
       }
       setObservedNodeId(evidence.node_id);
       setVerified(true);
@@ -179,6 +190,10 @@ export function AssistantServiceRouteDialog({
         userServiceId: params.userServiceId,
         ...(viaNodeId.trim() ? { viaNodeId: viaNodeId.trim() } : {}),
       });
+      const before = await readEvidence(expected.userServiceId);
+      if (!before.state_version || before.state_version < 1) {
+        throw new Error("NyxID service evidence was missing its state version.");
+      }
       const response = assistantServiceRouteResponseSchema.parse(
         await api.post<unknown>("/assistant/actions/services/route", {
           actionRequestId,
@@ -187,7 +202,14 @@ export function AssistantServiceRouteDialog({
         }),
       );
       setResultId(response.resource.userServiceId);
-      await verifyEvidence(response.resource.userServiceId, expected.viaNodeId);
+      const nextVersion =
+        before.state_version + (response.replayed ? 0 : 1);
+      setExpectedStateVersion(nextVersion);
+      await verifyEvidence(
+        response.resource.userServiceId,
+        expected.viaNodeId,
+        nextVersion,
+      );
     } catch (caught) {
       setError(errorMessage(caught, "NyxID could not route this service."));
     } finally {
@@ -260,7 +282,8 @@ export function AssistantServiceRouteDialog({
               variant="outline"
               isLoading={verifying}
               onClick={() => {
-                if (resultId) void verifyEvidence(resultId, viaNodeId);
+                if (resultId && expectedStateVersion !== null)
+                  void verifyEvidence(resultId, viaNodeId, expectedStateVersion);
               }}
             >
               <RefreshCw />

@@ -33,7 +33,19 @@ describe("AssistantServiceRouteDialog", () => {
       resource: { userServiceId: SERVICE_ID },
       replayed: false,
     });
-    mockGet.mockResolvedValue({
+    mockGet.mockResolvedValueOnce({
+      id: SERVICE_ID,
+      is_active: true,
+      status: "active",
+      connection_status: null,
+      granted_scopes: null,
+      last_authorized_at: null,
+      node_id: NODE_ID,
+      state_version: 1,
+      updated_at: "2026-08-19T00:00:00Z",
+      rotation_predecessor_id: null,
+    });
+    mockGet.mockResolvedValueOnce({
       id: SERVICE_ID,
       is_active: true,
       status: "active",
@@ -72,5 +84,44 @@ describe("AssistantServiceRouteDialog", () => {
       screen.getByRole("button", { name: "Report service" }),
     );
     expect(onComplete).toHaveBeenCalledWith(SERVICE_ID);
+  });
+
+  it("rejects stale evidence even when node_id already matches", async () => {
+    mockPost.mockResolvedValue({
+      resource: { userServiceId: SERVICE_ID },
+      replayed: false,
+    });
+    const stale = {
+      id: SERVICE_ID,
+      is_active: true,
+      status: "active",
+      connection_status: null,
+      granted_scopes: null,
+      last_authorized_at: null,
+      node_id: NODE_ID,
+      state_version: 1,
+      updated_at: "2026-08-19T00:00:00Z",
+      rotation_predecessor_id: null,
+    };
+    mockGet.mockResolvedValue(stale);
+    render(
+      <AssistantServiceRouteDialog
+        open
+        onOpenChange={vi.fn()}
+        actionRequestId="act-route-stale"
+        params={{ userServiceId: SERVICE_ID, viaNodeId: NODE_ID }}
+        onComplete={vi.fn()}
+      />,
+    );
+
+    await userEvent.click(
+      screen.getByRole("button", { name: "Apply routing" }),
+    );
+    expect(await screen.findByRole("alert")).toHaveTextContent(
+      "expected state advance",
+    );
+    expect(
+      screen.getByRole("button", { name: "Report service" }),
+    ).toBeDisabled();
   });
 });

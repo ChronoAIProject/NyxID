@@ -32,7 +32,7 @@ describe("AssistantServiceRotateCredentialDialog", () => {
       resource: { userServiceId: SERVICE_ID },
       replayed: false,
     });
-    mockGet.mockResolvedValue({
+    mockGet.mockResolvedValueOnce({
       id: SERVICE_ID,
       api_key_id: "44444444-4444-4444-8444-444444444444",
       is_active: true,
@@ -41,8 +41,21 @@ describe("AssistantServiceRotateCredentialDialog", () => {
       granted_scopes: null,
       last_authorized_at: null,
       node_id: null,
-      rotation_predecessor_id: "55555555-5555-4555-8555-555555555555",
-      state_version: 3,
+      rotation_predecessor_id: null,
+      state_version: 1,
+      updated_at: "2026-08-19T00:00:00Z",
+    });
+    mockGet.mockResolvedValueOnce({
+      id: SERVICE_ID,
+      api_key_id: "66666666-6666-4666-8666-666666666666",
+      is_active: true,
+      status: "active",
+      connection_status: null,
+      granted_scopes: null,
+      last_authorized_at: null,
+      node_id: null,
+      rotation_predecessor_id: "44444444-4444-4444-8444-444444444444",
+      state_version: 2,
       updated_at: "2026-08-20T00:00:00Z",
     });
     const onComplete = vi.fn();
@@ -88,6 +101,19 @@ describe("AssistantServiceRotateCredentialDialog", () => {
   });
 
   it("rejects an effect response that includes credential material", async () => {
+    mockGet.mockResolvedValue({
+      id: SERVICE_ID,
+      api_key_id: "44444444-4444-4444-8444-444444444444",
+      is_active: true,
+      status: "active",
+      connection_status: null,
+      granted_scopes: null,
+      last_authorized_at: null,
+      node_id: null,
+      rotation_predecessor_id: null,
+      state_version: 1,
+      updated_at: "2026-08-19T00:00:00Z",
+    });
     mockPost.mockResolvedValue({
       resource: { userServiceId: SERVICE_ID },
       replayed: false,
@@ -112,6 +138,51 @@ describe("AssistantServiceRotateCredentialDialog", () => {
     expect(await screen.findByRole("alert")).toHaveTextContent(
       "secret-bearing verification data",
     );
-    expect(mockGet).not.toHaveBeenCalled();
+    expect(mockGet).toHaveBeenCalledTimes(1);
+    expect(mockPost).toHaveBeenCalledTimes(1);
+  });
+
+  it("rejects a stale pre-rotation projection after the effect", async () => {
+    const stale = {
+      id: SERVICE_ID,
+      api_key_id: "44444444-4444-4444-8444-444444444444",
+      is_active: true,
+      status: "active",
+      connection_status: null,
+      granted_scopes: null,
+      last_authorized_at: null,
+      node_id: null,
+      rotation_predecessor_id: null,
+      state_version: 1,
+      updated_at: "2026-08-19T00:00:00Z",
+    };
+    mockGet.mockResolvedValue(stale);
+    mockPost.mockResolvedValue({
+      resource: { userServiceId: SERVICE_ID },
+      replayed: false,
+    });
+    render(
+      <AssistantServiceRotateCredentialDialog
+        open
+        onOpenChange={vi.fn()}
+        actionRequestId="act-rotate-stale"
+        params={{ userServiceId: SERVICE_ID }}
+        onComplete={vi.fn()}
+      />,
+    );
+
+    await userEvent.type(
+      screen.getByLabelText("Replacement credential"),
+      "replacement",
+    );
+    await userEvent.click(
+      screen.getByRole("button", { name: "Rotate credential" }),
+    );
+    expect(await screen.findByRole("alert")).toHaveTextContent(
+      "expected state advance",
+    );
+    expect(
+      screen.getByRole("button", { name: "Report service" }),
+    ).toBeDisabled();
   });
 });

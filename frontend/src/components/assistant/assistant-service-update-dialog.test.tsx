@@ -67,7 +67,9 @@ describe("AssistantServiceUpdateDialog", () => {
       resource: { userServiceId: SERVICE_ID },
       replayed: false,
     });
-    mockGet.mockResolvedValue(evidence());
+    mockGet
+      .mockResolvedValueOnce(evidence({ state_version: 1, updated_at: "2026-08-19T00:00:00Z" }))
+      .mockResolvedValueOnce(evidence({ state_version: 2 }));
     const onComplete = vi.fn();
     renderDialog(onComplete);
 
@@ -87,6 +89,7 @@ describe("AssistantServiceUpdateDialog", () => {
     expect(mockGet).toHaveBeenCalledWith(
       `/keys/${SERVICE_ID}/authorization`,
     );
+    expect(mockGet).toHaveBeenCalledTimes(2);
     expect(
       await screen.findByText("Authorization evidence verified."),
     ).toBeInTheDocument();
@@ -110,6 +113,27 @@ describe("AssistantServiceUpdateDialog", () => {
     );
     expect(await screen.findByRole("alert")).toHaveTextContent(
       "secret-bearing verification data",
+    );
+    expect(
+      screen.queryByRole("button", { name: "Report service" }),
+    ).not.toBeInTheDocument();
+  });
+
+  it("rejects stale evidence that does not advance state_version", async () => {
+    mockPost.mockResolvedValue({
+      resource: { userServiceId: SERVICE_ID },
+      replayed: false,
+    });
+    mockGet
+      .mockResolvedValueOnce(evidence({ state_version: 1 }))
+      .mockResolvedValueOnce(evidence({ state_version: 1 }));
+    renderDialog();
+
+    await userEvent.click(
+      screen.getByRole("button", { name: "Update service" }),
+    );
+    expect(await screen.findByRole("alert")).toHaveTextContent(
+      "expected state advance",
     );
     expect(
       screen.getByRole("button", { name: "Report service" }),

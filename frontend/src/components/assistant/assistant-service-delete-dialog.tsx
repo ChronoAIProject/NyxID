@@ -46,6 +46,18 @@ const cascadeDetailsSchema = z
   })
   .passthrough();
 
+async function verifyDeletion(userServiceId: string): Promise<void> {
+  try {
+    await api.get<unknown>(
+      `/keys/${encodeURIComponent(userServiceId)}/authorization`,
+    );
+  } catch (caught) {
+    if (caught instanceof ApiError && caught.status === 404) return;
+    throw new Error("NyxID could not confirm that the service was deleted.");
+  }
+  throw new Error("NyxID still returned authorization evidence for this service.");
+}
+
 function errorMessage(caught: unknown, fallback: string): string {
   if (caught instanceof ApiError) return caught.message;
   if (caught instanceof Error && caught.message.trim()) return caught.message;
@@ -108,6 +120,7 @@ export function AssistantServiceDeleteDialog({
           ...(cascadeGrant ? { cascadeGrant: true } : {}),
         }),
       );
+      await verifyDeletion(response.resource.userServiceId);
       setDone(true);
       onComplete(response.resource.userServiceId);
     } catch (caught) {
