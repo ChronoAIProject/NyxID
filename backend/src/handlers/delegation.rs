@@ -240,10 +240,15 @@ mod tests {
 
     use crate::crypto::{jwt, token::hash_token};
     use crate::handlers::exact_service_approvals;
+    use crate::models::default_request_header::DefaultRequestHeader;
     use crate::models::downstream_service::{
-        COLLECTION_NAME as DOWNSTREAM_SERVICES, DownstreamService,
+        COLLECTION_NAME as DOWNSTREAM_SERVICES, DownstreamService, ProxyOperationPolicy,
+        ProxyOperationRule,
     };
     use crate::models::node::{COLLECTION_NAME as NODES, Node, NodeMetrics, NodeStatus};
+    use crate::models::node_service_binding::{
+        COLLECTION_NAME as NODE_SERVICE_BINDINGS, NodeServiceBinding,
+    };
     use crate::models::oauth_client::{
         COLLECTION_NAME as OAUTH_CLIENTS, OauthClient, ScopeProvenance,
     };
@@ -265,6 +270,8 @@ mod tests {
     const TEST_GENERIC_SERVICE: &str = "00000000-0000-4000-8000-000000000103";
     const TEST_NODE_ID: &str = "00000000-0000-4000-8000-000000000600";
     const TEST_OUT_OF_SCOPE_NODE_ID: &str = "00000000-0000-4000-8000-000000000601";
+    const TEST_CATALOG_SERVICE_ID: &str = "00000000-0000-4000-8000-000000000301";
+    const TEST_USER_ENDPOINT_ID: &str = "00000000-0000-4000-8000-000000000201";
 
     const CREATE_PATH: &str = "/api/v1/approvals/exact-service/requests";
 
@@ -2712,7 +2719,14 @@ mod tests {
                 user_id: TEST_USER_ID.to_string(),
                 label: "full-router credential".to_string(),
                 credential_type: "bearer".to_string(),
-                credential_encrypted: Some(vec![1, 2, 3]),
+                credential_encrypted: Some(
+                    fixture
+                        .state
+                        .encryption_keys
+                        .encrypt(b"full-router-secret")
+                        .await
+                        .expect("encrypt full-router credential"),
+                ),
                 access_token_encrypted: None,
                 refresh_token_encrypted: None,
                 token_scopes: None,
@@ -2731,6 +2745,7 @@ mod tests {
                 source_id: None,
                 created_at: Utc::now(),
                 updated_at: Utc::now(),
+                credential_epoch: 1,
             })
             .await
             .expect("insert active credential");
@@ -2920,6 +2935,669 @@ mod tests {
             1,
             "response-derived discovery → create → redeem must dispatch exactly one effect"
         );
+    }
+
+    #[tokio::test]
+    async fn full_router_endpoint_url_mutation_fails_closed_with_zero_provider_effect() {
+        let mut fixture = setup_full_router_fixture("exact_router_ac5_url_mutation").await;
+        refresh_full_router_delegation(&mut fixture).await;
+        let created = create_full_router_request(&fixture, "ac5-url-mutation").await;
+        let request_id = created["request_id"]
+            .as_str()
+            .expect("create response request_id")
+            .to_string();
+        approve_full_router_request(&fixture, &request_id).await;
+
+        let diverted_calls = Arc::new(AtomicUsize::new(0));
+        let diverted_route = diverted_calls.clone();
+        let diverted_fallback = diverted_calls.clone();
+        let diverted_listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind diverted provider spy");
+        let diverted_addr = diverted_listener.local_addr().unwrap();
+        let diverted_provider = tokio::spawn(async move {
+            axum::serve(
+                diverted_listener,
+                Router::new()
+                    .route(
+                        "/items",
+                        get(move || {
+                            let diverted_route = diverted_route.clone();
+                            async move {
+                                diverted_route.fetch_add(1, Ordering::SeqCst);
+                                AxumJson(serde_json::json!({"ok": true}))
+                            }
+                        }),
+                    )
+                    .fallback(any(move || {
+                        let diverted_fallback = diverted_fallback.clone();
+                        async move {
+                            diverted_fallback.fetch_add(1, Ordering::SeqCst);
+                            (
+                                StatusCode::NOT_FOUND,
+                                AxumJson(serde_json::json!({"unexpected": true})),
+                            )
+                        }
+                    })),
+            )
+            .await
+            .expect("serve diverted provider spy");
+        });
+        fixture
+            .db
+            .collection::<UserEndpoint>(USER_ENDPOINTS)
+            .update_one(
+                mongodb::bson::doc! { "_id": "00000000-0000-4000-8000-000000000201" },
+                mongodb::bson::doc! { "$set": { "url": format!("http://{diverted_addr}") } },
+            )
+            .await
+            .expect("repoint endpoint at diverted spy");
+
+        let original_before = fixture.provider_calls.load(Ordering::SeqCst);
+        let diverted_before = diverted_calls.load(Ordering::SeqCst);
+        refresh_full_router_delegation(&mut fixture).await;
+        let (status, body) = redeem_full_router_request(&fixture, &created).await;
+        diverted_provider.abort();
+        assert_eq!(status, StatusCode::OK, "redeem failed: {body}");
+        assert_eq!(body["state"], "drifted");
+        assert_eq!(body["failure_code"], "execution_authority_drift");
+        assert_eq!(
+            fixture.provider_calls.load(Ordering::SeqCst),
+            original_before,
+            "original spy must not receive the diverted effect"
+        );
+        assert_eq!(
+            diverted_calls.load(Ordering::SeqCst),
+            diverted_before,
+            "diverted spy must not receive the unapproved effect"
+        );
+        assert_no_full_router_redemption(&fixture, &request_id).await;
+    }
+
+    async fn insert_bearer_credential(
+        fixture: &FullRouterFixture,
+        credential_id: &str,
+        secret: &[u8],
+        epoch: i64,
+    ) {
+        let encrypted = fixture
+            .state
+            .encryption_keys
+            .encrypt(secret)
+            .await
+            .expect("encrypt test credential");
+        fixture
+            .db
+            .collection::<UserApiKey>(USER_API_KEYS)
+            .insert_one(UserApiKey {
+                id: credential_id.to_string(),
+                user_id: TEST_USER_ID.to_string(),
+                label: "ac5 credential".to_string(),
+                credential_type: "bearer".to_string(),
+                credential_encrypted: Some(encrypted),
+                access_token_encrypted: None,
+                refresh_token_encrypted: None,
+                token_scopes: None,
+                expires_at: None,
+                provider_config_id: None,
+                connection_id: None,
+                oauth_attempt_nonce: None,
+                user_oauth_client_id_encrypted: None,
+                user_oauth_client_secret_encrypted: None,
+                credential_source: None,
+                status: "active".to_string(),
+                last_used_at: None,
+                last_authorized_at: None,
+                error_message: None,
+                source: Some("user_created".to_string()),
+                source_id: None,
+                credential_epoch: epoch,
+                created_at: Utc::now(),
+                updated_at: Utc::now(),
+            })
+            .await
+            .expect("insert test credential");
+    }
+
+    async fn bind_service_credential(fixture: &FullRouterFixture, credential_id: &str) {
+        fixture
+            .db
+            .collection::<UserService>(USER_SERVICES)
+            .update_one(
+                mongodb::bson::doc! { "_id": TEST_SERVICE_A },
+                mongodb::bson::doc! { "$set": {
+                    "api_key_id": credential_id,
+                    "auth_method": "bearer",
+                    "auth_key_name": "Authorization"
+                } },
+            )
+            .await
+            .expect("bind test credential");
+    }
+
+    #[tokio::test]
+    async fn full_router_credential_rebind_and_inplace_rotation_fail_closed() {
+        let mut fixture = setup_full_router_fixture("exact_router_ac5_cred").await;
+        insert_bearer_credential(
+            &fixture,
+            "00000000-0000-4000-8000-000000000711",
+            b"secret-a",
+            1,
+        )
+        .await;
+        insert_bearer_credential(
+            &fixture,
+            "00000000-0000-4000-8000-000000000712",
+            b"secret-b",
+            1,
+        )
+        .await;
+        bind_service_credential(&fixture, "00000000-0000-4000-8000-000000000711").await;
+
+        refresh_full_router_delegation(&mut fixture).await;
+        let created = create_full_router_request(&fixture, "ac5-cred-rebind").await;
+        let request_id = created["request_id"]
+            .as_str()
+            .expect("create response request_id")
+            .to_string();
+        approve_full_router_request(&fixture, &request_id).await;
+
+        bind_service_credential(&fixture, "00000000-0000-4000-8000-000000000712").await;
+        let calls_before = fixture.provider_calls.load(Ordering::SeqCst);
+        refresh_full_router_delegation(&mut fixture).await;
+        let (status, body) = redeem_full_router_request(&fixture, &created).await;
+        assert_eq!(status, StatusCode::OK, "rebind redeem: {body}");
+        assert_eq!(body["state"], "drifted");
+        assert_eq!(body["failure_code"], "execution_authority_drift");
+        assert_eq!(fixture.provider_calls.load(Ordering::SeqCst), calls_before);
+        assert_no_full_router_redemption(&fixture, &request_id).await;
+
+        bind_service_credential(&fixture, "00000000-0000-4000-8000-000000000711").await;
+        let rotated = fixture
+            .state
+            .encryption_keys
+            .encrypt(b"secret-a-rotated")
+            .await
+            .expect("encrypt rotated credential");
+        fixture
+            .db
+            .collection::<UserApiKey>(USER_API_KEYS)
+            .update_one(
+                mongodb::bson::doc! { "_id": "00000000-0000-4000-8000-000000000711" },
+                mongodb::bson::doc! {
+                    "$set": { "credential_encrypted": mongodb::bson::Binary {
+                        subtype: mongodb::bson::spec::BinarySubtype::Generic,
+                        bytes: rotated,
+                    } },
+                    "$inc": { "credential_epoch": 1 }
+                },
+            )
+            .await
+            .expect("rotate credential in place");
+        let created = create_full_router_request(&fixture, "ac5-cred-rotate").await;
+        let request_id = created["request_id"]
+            .as_str()
+            .expect("create response request_id")
+            .to_string();
+        approve_full_router_request(&fixture, &request_id).await;
+        fixture
+            .db
+            .collection::<UserApiKey>(USER_API_KEYS)
+            .update_one(
+                mongodb::bson::doc! { "_id": "00000000-0000-4000-8000-000000000711" },
+                mongodb::bson::doc! {
+                    "$set": { "credential_encrypted": mongodb::bson::Binary {
+                        subtype: mongodb::bson::spec::BinarySubtype::Generic,
+                        bytes: fixture
+                            .state
+                            .encryption_keys
+                            .encrypt(b"secret-a-rotated-again")
+                            .await
+                            .expect("encrypt second rotation"),
+                    } },
+                    "$inc": { "credential_epoch": 1 }
+                },
+            )
+            .await
+            .expect("second in-place rotation");
+        let calls_before = fixture.provider_calls.load(Ordering::SeqCst);
+        refresh_full_router_delegation(&mut fixture).await;
+        let (status, body) = redeem_full_router_request(&fixture, &created).await;
+        assert_eq!(status, StatusCode::OK, "rotation redeem: {body}");
+        assert_eq!(body["state"], "drifted");
+        assert_eq!(body["failure_code"], "execution_authority_drift");
+        assert_eq!(fixture.provider_calls.load(Ordering::SeqCst), calls_before);
+        assert_no_full_router_redemption(&fixture, &request_id).await;
+    }
+
+    #[tokio::test]
+    async fn full_router_background_token_refresh_does_not_drift() {
+        let mut fixture = setup_full_router_fixture("exact_router_ac5_refresh").await;
+        let access = fixture
+            .state
+            .encryption_keys
+            .encrypt(b"oauth-access")
+            .await
+            .expect("encrypt access token");
+        fixture
+            .db
+            .collection::<UserApiKey>(USER_API_KEYS)
+            .insert_one(UserApiKey {
+                id: "00000000-0000-4000-8000-000000000713".to_string(),
+                user_id: TEST_USER_ID.to_string(),
+                label: "oauth refresh canary".to_string(),
+                credential_type: "oauth2".to_string(),
+                credential_encrypted: None,
+                access_token_encrypted: Some(access),
+                refresh_token_encrypted: None,
+                token_scopes: Some("openid".to_string()),
+                expires_at: None,
+                provider_config_id: None,
+                connection_id: None,
+                oauth_attempt_nonce: None,
+                user_oauth_client_id_encrypted: None,
+                user_oauth_client_secret_encrypted: None,
+                credential_source: None,
+                status: "active".to_string(),
+                last_used_at: None,
+                last_authorized_at: None,
+                error_message: None,
+                source: Some("user_created".to_string()),
+                source_id: None,
+                credential_epoch: 1,
+                created_at: Utc::now(),
+                updated_at: Utc::now(),
+            })
+            .await
+            .expect("insert oauth key");
+        bind_service_credential(&fixture, "00000000-0000-4000-8000-000000000713").await;
+
+        refresh_full_router_delegation(&mut fixture).await;
+        let created = create_full_router_request(&fixture, "ac5-refresh-canary").await;
+        let request_id = created["request_id"]
+            .as_str()
+            .expect("create response request_id")
+            .to_string();
+        approve_full_router_request(&fixture, &request_id).await;
+
+        let refreshed = fixture
+            .state
+            .encryption_keys
+            .encrypt(b"oauth-access-refreshed")
+            .await
+            .expect("encrypt refreshed access token");
+        fixture
+            .db
+            .collection::<UserApiKey>(USER_API_KEYS)
+            .update_one(
+                mongodb::bson::doc! { "_id": "00000000-0000-4000-8000-000000000713" },
+                mongodb::bson::doc! { "$set": {
+                    "access_token_encrypted": mongodb::bson::Binary {
+                        subtype: mongodb::bson::spec::BinarySubtype::Generic,
+                        bytes: refreshed,
+                    },
+                    "updated_at": mongodb::bson::DateTime::from_chrono(Utc::now()),
+                } },
+            )
+            .await
+            .expect("simulate background token refresh");
+
+        refresh_full_router_delegation(&mut fixture).await;
+        let (status, body) = redeem_full_router_request(&fixture, &created).await;
+        assert_eq!(status, StatusCode::OK, "refresh redeem: {body}");
+        assert_eq!(body["state"], "redeemed");
+        assert_eq!(body["receipt"]["http_status"], 200);
+        assert_eq!(fixture.provider_calls.load(Ordering::SeqCst), 1);
+        let persisted = fixture
+            .db
+            .collection::<crate::models::approval_request::ApprovalRequest>(
+                crate::models::approval_request::COLLECTION_NAME,
+            )
+            .find_one(mongodb::bson::doc! { "_id": &request_id })
+            .await
+            .expect("load redeemed request")
+            .expect("redeemed request exists");
+        assert_eq!(
+            persisted
+                .exact_service
+                .and_then(|binding| binding.redemption)
+                .map(|redemption| redemption.status),
+            Some(crate::models::approval_request::ExactServiceRedemptionStatus::Completed)
+        );
+    }
+
+    #[tokio::test]
+    async fn full_router_auth_and_injection_config_mutations_fail_closed() {
+        let mut fixture = setup_full_router_fixture("exact_router_ac5_injection").await;
+        insert_bearer_credential(
+            &fixture,
+            "00000000-0000-4000-8000-000000000714",
+            b"injection-matrix-secret",
+            1,
+        )
+        .await;
+        bind_service_credential(&fixture, "00000000-0000-4000-8000-000000000714").await;
+        let mutations: [(&str, mongodb::bson::Document, mongodb::bson::Document); 7] = [
+            (
+                "auth-method",
+                mongodb::bson::doc! { "$set": { "auth_method": "none" } },
+                mongodb::bson::doc! { "$set": { "auth_method": "bearer" } },
+            ),
+            (
+                "auth-key-name",
+                mongodb::bson::doc! { "$set": { "auth_key_name": "X-Api-Key" } },
+                mongodb::bson::doc! { "$set": { "auth_key_name": "" } },
+            ),
+            (
+                "inject-delegation",
+                mongodb::bson::doc! { "$set": { "inject_delegation_token": true } },
+                mongodb::bson::doc! { "$set": { "inject_delegation_token": false } },
+            ),
+            (
+                "identity-mode",
+                mongodb::bson::doc! { "$set": { "identity_propagation_mode": "headers" } },
+                mongodb::bson::doc! { "$set": { "identity_propagation_mode": "none" } },
+            ),
+            (
+                "delegation-scope",
+                mongodb::bson::doc! { "$set": { "delegation_token_scope": "proxy" } },
+                mongodb::bson::doc! { "$set": { "delegation_token_scope": "llm:proxy" } },
+            ),
+            (
+                "forward-access-token",
+                mongodb::bson::doc! { "$set": { "forward_access_token": true } },
+                mongodb::bson::doc! { "$set": { "forward_access_token": false } },
+            ),
+            (
+                "custom-user-agent",
+                mongodb::bson::doc! { "$set": { "custom_user_agent": "NyxID-Test/1.0" } },
+                mongodb::bson::doc! { "$unset": { "custom_user_agent": "" } },
+            ),
+        ];
+        for (name, mutate, restore) in mutations {
+            refresh_full_router_delegation(&mut fixture).await;
+            let created = create_full_router_request(&fixture, &format!("ac5-inj-{name}")).await;
+            let request_id = created["request_id"]
+                .as_str()
+                .expect("create response request_id")
+                .to_string();
+            approve_full_router_request(&fixture, &request_id).await;
+            fixture
+                .db
+                .collection::<UserService>(USER_SERVICES)
+                .update_one(mongodb::bson::doc! { "_id": TEST_SERVICE_A }, mutate)
+                .await
+                .unwrap_or_else(|_| panic!("mutate {name}"));
+            let calls_before = fixture.provider_calls.load(Ordering::SeqCst);
+            refresh_full_router_delegation(&mut fixture).await;
+            let (status, body) = redeem_full_router_request(&fixture, &created).await;
+            assert_eq!(status, StatusCode::OK, "{name} redeem: {body}");
+            assert_eq!(body["state"], "drifted", "{name}");
+            assert_eq!(body["failure_code"], "execution_authority_drift", "{name}");
+            assert_eq!(fixture.provider_calls.load(Ordering::SeqCst), calls_before);
+            assert_no_full_router_redemption(&fixture, &request_id).await;
+            fixture
+                .db
+                .collection::<UserService>(USER_SERVICES)
+                .update_one(mongodb::bson::doc! { "_id": TEST_SERVICE_A }, restore)
+                .await
+                .unwrap_or_else(|_| panic!("restore {name}"));
+        }
+    }
+
+    #[tokio::test]
+    async fn full_router_default_header_mutations_fail_closed() {
+        let mut fixture = setup_full_router_fixture("exact_router_ac5_headers").await;
+        let header = DefaultRequestHeader {
+            name: "X-Test-Header".to_string(),
+            value: "alpha".to_string(),
+            overridable: false,
+            sensitive: false,
+        };
+
+        refresh_full_router_delegation(&mut fixture).await;
+        let created = create_full_router_request(&fixture, "ac5-user-header").await;
+        let request_id = created["request_id"]
+            .as_str()
+            .expect("create response request_id")
+            .to_string();
+        approve_full_router_request(&fixture, &request_id).await;
+        fixture
+            .db
+            .collection::<UserService>(USER_SERVICES)
+            .update_one(
+                mongodb::bson::doc! { "_id": TEST_SERVICE_A },
+                mongodb::bson::doc! { "$set": {
+                    "default_request_headers": [mongodb::bson::to_bson(&header).unwrap()]
+                } },
+            )
+            .await
+            .expect("set user-layer headers");
+        let calls_before = fixture.provider_calls.load(Ordering::SeqCst);
+        refresh_full_router_delegation(&mut fixture).await;
+        let (status, body) = redeem_full_router_request(&fixture, &created).await;
+        assert_eq!(status, StatusCode::OK, "user header redeem: {body}");
+        assert_eq!(body["state"], "drifted");
+        assert_eq!(body["failure_code"], "execution_authority_drift");
+        assert_eq!(fixture.provider_calls.load(Ordering::SeqCst), calls_before);
+        assert_no_full_router_redemption(&fixture, &request_id).await;
+        fixture
+            .db
+            .collection::<UserService>(USER_SERVICES)
+            .update_one(
+                mongodb::bson::doc! { "_id": TEST_SERVICE_A },
+                mongodb::bson::doc! { "$unset": { "default_request_headers": "" } },
+            )
+            .await
+            .expect("clear user-layer headers");
+
+        refresh_full_router_delegation(&mut fixture).await;
+        let created = create_full_router_request(&fixture, "ac5-catalog-header").await;
+        let request_id = created["request_id"]
+            .as_str()
+            .expect("create response request_id")
+            .to_string();
+        approve_full_router_request(&fixture, &request_id).await;
+        fixture
+            .db
+            .collection::<DownstreamService>(DOWNSTREAM_SERVICES)
+            .update_one(
+                mongodb::bson::doc! { "_id": TEST_CATALOG_SERVICE_ID },
+                mongodb::bson::doc! { "$set": {
+                    "default_request_headers": [mongodb::bson::to_bson(&header).unwrap()]
+                } },
+            )
+            .await
+            .expect("set catalog-layer headers");
+        let calls_before = fixture.provider_calls.load(Ordering::SeqCst);
+        refresh_full_router_delegation(&mut fixture).await;
+        let (status, body) = redeem_full_router_request(&fixture, &created).await;
+        assert_eq!(status, StatusCode::OK, "catalog header redeem: {body}");
+        assert_eq!(body["state"], "drifted");
+        assert_eq!(body["failure_code"], "execution_authority_drift");
+        assert_eq!(fixture.provider_calls.load(Ordering::SeqCst), calls_before);
+        assert_no_full_router_redemption(&fixture, &request_id).await;
+    }
+
+    #[tokio::test]
+    async fn full_router_proxy_operation_policy_mutation_fails_closed() {
+        let mut fixture = setup_full_router_fixture("exact_router_ac5_policy").await;
+        refresh_full_router_delegation(&mut fixture).await;
+        let created = create_full_router_request(&fixture, "ac5-policy").await;
+        let request_id = created["request_id"]
+            .as_str()
+            .expect("create response request_id")
+            .to_string();
+        approve_full_router_request(&fixture, &request_id).await;
+        let policy = ProxyOperationPolicy {
+            rules: vec![ProxyOperationRule {
+                method: "GET".to_string(),
+                path_template: "/items".to_string(),
+            }],
+        };
+        fixture
+            .db
+            .collection::<DownstreamService>(DOWNSTREAM_SERVICES)
+            .update_one(
+                mongodb::bson::doc! { "_id": TEST_CATALOG_SERVICE_ID },
+                mongodb::bson::doc! { "$set": {
+                    "proxy_operation_policy": mongodb::bson::to_bson(&policy).unwrap()
+                } },
+            )
+            .await
+            .expect("set proxy operation policy");
+        let calls_before = fixture.provider_calls.load(Ordering::SeqCst);
+        refresh_full_router_delegation(&mut fixture).await;
+        let (status, body) = redeem_full_router_request(&fixture, &created).await;
+        assert_eq!(status, StatusCode::OK, "policy redeem: {body}");
+        assert_eq!(body["state"], "drifted");
+        assert_eq!(body["failure_code"], "execution_authority_drift");
+        assert_eq!(fixture.provider_calls.load(Ordering::SeqCst), calls_before);
+        assert_no_full_router_redemption(&fixture, &request_id).await;
+    }
+
+    #[tokio::test]
+    async fn full_router_configured_fallback_binding_mutation_fails_closed() {
+        let mut fixture = setup_full_router_fixture("exact_router_ac5_fallback").await;
+        refresh_full_router_delegation(&mut fixture).await;
+        let created = create_full_router_request(&fixture, "ac5-fallback").await;
+        let request_id = created["request_id"]
+            .as_str()
+            .expect("create response request_id")
+            .to_string();
+        approve_full_router_request(&fixture, &request_id).await;
+        fixture
+            .db
+            .collection::<NodeServiceBinding>(NODE_SERVICE_BINDINGS)
+            .insert_one(NodeServiceBinding {
+                id: uuid::Uuid::new_v4().to_string(),
+                node_id: TEST_NODE_ID.to_string(),
+                user_id: TEST_USER_ID.to_string(),
+                service_id: TEST_CATALOG_SERVICE_ID.to_string(),
+                is_active: true,
+                priority: 0,
+                created_at: Utc::now(),
+                updated_at: Utc::now(),
+            })
+            .await
+            .expect("insert configured fallback binding");
+        let calls_before = fixture.provider_calls.load(Ordering::SeqCst);
+        refresh_full_router_delegation(&mut fixture).await;
+        let (status, body) = redeem_full_router_request(&fixture, &created).await;
+        assert_eq!(status, StatusCode::OK, "fallback redeem: {body}");
+        assert_eq!(body["state"], "drifted");
+        assert_eq!(body["failure_code"], "execution_authority_drift");
+        assert_eq!(fixture.provider_calls.load(Ordering::SeqCst), calls_before);
+        assert_no_full_router_redemption(&fixture, &request_id).await;
+
+        fixture
+            .db
+            .collection::<NodeServiceBinding>(NODE_SERVICE_BINDINGS)
+            .delete_many(mongodb::bson::doc! {
+                "service_id": TEST_CATALOG_SERVICE_ID,
+            })
+            .await
+            .expect("remove fallback binding");
+
+        refresh_full_router_delegation(&mut fixture).await;
+        let created = create_full_router_request(&fixture, "ac5-disconnect").await;
+        let request_id = created["request_id"]
+            .as_str()
+            .expect("create response request_id")
+            .to_string();
+        approve_full_router_request(&fixture, &request_id).await;
+        fixture
+            .state
+            .node_ws_manager
+            .unregister_connection(TEST_NODE_ID);
+        refresh_full_router_delegation(&mut fixture).await;
+        let (status, body) = redeem_full_router_request(&fixture, &created).await;
+        assert_eq!(status, StatusCode::OK, "disconnect redeem: {body}");
+        assert_eq!(body["state"], "redeemed");
+        assert_eq!(body["receipt"]["http_status"], 200);
+        assert_eq!(fixture.provider_calls.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn full_router_aba_url_revert_redeems_exactly_once() {
+        let mut fixture = setup_full_router_fixture("exact_router_ac5_aba").await;
+        refresh_full_router_delegation(&mut fixture).await;
+        let created = create_full_router_request(&fixture, "ac5-aba").await;
+        let request_id = created["request_id"]
+            .as_str()
+            .expect("create response request_id")
+            .to_string();
+        approve_full_router_request(&fixture, &request_id).await;
+
+        let original_url = fixture
+            .db
+            .collection::<UserEndpoint>(USER_ENDPOINTS)
+            .find_one(mongodb::bson::doc! { "_id": TEST_USER_ENDPOINT_ID })
+            .await
+            .expect("load endpoint")
+            .expect("endpoint exists")
+            .url;
+        fixture
+            .db
+            .collection::<UserEndpoint>(USER_ENDPOINTS)
+            .update_one(
+                mongodb::bson::doc! { "_id": TEST_USER_ENDPOINT_ID },
+                mongodb::bson::doc! { "$set": { "url": "http://127.0.0.1:9" } },
+            )
+            .await
+            .expect("move url away");
+        fixture
+            .db
+            .collection::<UserEndpoint>(USER_ENDPOINTS)
+            .update_one(
+                mongodb::bson::doc! { "_id": TEST_USER_ENDPOINT_ID },
+                mongodb::bson::doc! { "$set": { "url": &original_url } },
+            )
+            .await
+            .expect("revert url");
+
+        refresh_full_router_delegation(&mut fixture).await;
+        let (status, body) = redeem_full_router_request(&fixture, &created).await;
+        assert_eq!(status, StatusCode::OK, "aba redeem: {body}");
+        assert_eq!(body["state"], "redeemed");
+        assert_eq!(body["receipt"]["http_status"], 200);
+        assert_eq!(fixture.provider_calls.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn full_router_observe_reports_execution_authority_drift_before_redeem() {
+        let mut fixture = setup_full_router_fixture("exact_router_ac5_observe").await;
+        refresh_full_router_delegation(&mut fixture).await;
+        let created = create_full_router_request(&fixture, "ac5-observe").await;
+        let request_id = created["request_id"]
+            .as_str()
+            .expect("create response request_id")
+            .to_string();
+        approve_full_router_request(&fixture, &request_id).await;
+        fixture
+            .db
+            .collection::<UserEndpoint>(USER_ENDPOINTS)
+            .update_one(
+                mongodb::bson::doc! { "_id": TEST_USER_ENDPOINT_ID },
+                mongodb::bson::doc! { "$set": { "url": "http://127.0.0.1:9" } },
+            )
+            .await
+            .expect("mutate url before observe");
+        refresh_full_router_delegation(&mut fixture).await;
+        let status_path = format!("/api/v1/approvals/exact-service/requests/{request_id}/status");
+        let (status, observed) = full_router_json_request(
+            &fixture.app,
+            Method::GET,
+            &status_path,
+            &fixture.delegated_token,
+            None,
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "observe failed: {observed}");
+        assert_eq!(observed["state"], "drifted");
+        assert_eq!(observed["failure_code"], "execution_authority_drift");
+        assert_eq!(fixture.provider_calls.load(Ordering::SeqCst), 0);
+        assert_no_full_router_redemption(&fixture, &request_id).await;
     }
 
     #[tokio::test]

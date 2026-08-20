@@ -13,7 +13,10 @@ use crate::models::approval_request::{
 };
 use crate::models::service_approval_config::ApprovalMode;
 use crate::services::billing::route_inventory::BillingEgressPermit;
-use crate::services::{approval_service, mcp_service, notification_service, proxy_service};
+use crate::services::{
+    approval_service, execution_authority, mcp_service, node_routing_service, notification_service,
+    proxy_service,
+};
 
 const MAX_RECEIPT_RESPONSE_BYTES: usize = 8 * 1024 * 1024;
 pub const DELEGATED_REQUESTER_TYPE: &str = "delegated";
@@ -217,6 +220,11 @@ pub async fn create_request(
         .ok_or_else(|| AppError::Internal("approval recipient list is empty".to_string()))?;
     let channel = notification_service::get_or_create_channel(&state.db, timeout_recipient).await?;
     let request_key = request_key(caller, &input);
+    let execution_authority_digest = Some(
+        resolve_execution_authority(state, caller, &input.user_service_id, &service.service_slug)
+            .await?
+            .digest,
+    );
     let binding = ExactServiceApprovalBinding {
         request_key,
         actor_user_id: caller.actor_user_id.clone(),
@@ -232,6 +240,7 @@ pub async fn create_request(
         operation_generation: input.operation_generation,
         effect_idempotency_key: input.idempotency_key,
         arguments: input.arguments,
+        execution_authority_digest,
         redemption: None,
     };
     let operation = approval_service::ApprovalRequestOperation::from_descriptor(
@@ -271,8 +280,12 @@ pub async fn observe_request(
     ensure_delegated_exact_authority(caller, None, false)?;
     let request = load_bound_request(state, caller, request_id).await?;
     let request = expire_if_needed(state, request).await?;
-    let state_value = current_state(state, caller, &request).await?;
-    result_for(&request, state_value)
+    let observed = current_state(state, caller, &request).await?;
+    let mut result = result_for(&request, observed.state)?;
+    if result.failure_code.is_none() {
+        result.failure_code = observed.failure_code;
+    }
+    Ok(result)
 }
 
 pub async fn redeem_request(
@@ -289,20 +302,20 @@ pub async fn redeem_request(
     let request = load_bound_request(state, caller, request_id).await?;
     ensure_fence(&request, &fence)?;
     let request = expire_if_needed(state, request).await?;
-    let state_value = current_state(state, caller, &request).await?;
-    match state_value {
+    let observed = current_state(state, caller, &request).await?;
+    match observed.state {
         ExactServiceApprovalState::Redeemed
         | ExactServiceApprovalState::Redeeming
-        | ExactServiceApprovalState::Failed => return result_for(&request, state_value),
+        | ExactServiceApprovalState::Failed => return result_for(&request, observed.state),
         ExactServiceApprovalState::Approved => {}
         other => {
             let mut result = result_for(&request, other)?;
             if result.failure_code.is_none() {
-                result.failure_code = match other {
+                result.failure_code = observed.failure_code.or_else(|| match other {
                     ExactServiceApprovalState::Revoked => Some("selector_revoked".to_string()),
                     ExactServiceApprovalState::Drifted => Some("catalog_drift".to_string()),
                     _ => None,
-                };
+                });
             }
             return Ok(result);
         }
@@ -315,7 +328,7 @@ pub async fn redeem_request(
         Some(claimed) => claimed,
         None => {
             let replay = load_bound_request(state, caller, request_id).await?;
-            return result_for(&replay, redemption_state(&replay)?);
+            return result_for(&replay, redemption_state(&replay)?.state);
         }
     };
 
@@ -387,6 +400,63 @@ pub async fn redeem_request(
         .await?;
         return result_for(&updated, ExactServiceApprovalState::Drifted);
     }
+    let execution = match resolve_execution_authority(
+        state,
+        caller,
+        &binding.user_service_id,
+        &claimed.service_slug,
+    )
+    .await
+    {
+        Ok(execution) => execution,
+        Err(error) => {
+            let (terminal_state, status, failure_code) =
+                match catalog_resolution_terminal_state(&error) {
+                    Some(ExactServiceApprovalState::Revoked) => (
+                        ExactServiceApprovalState::Revoked,
+                        ExactServiceRedemptionStatus::Revoked,
+                        "selector_revoked",
+                    ),
+                    _ => (
+                        ExactServiceApprovalState::Failed,
+                        ExactServiceRedemptionStatus::Failed,
+                        safe_execution_failure_code(&error),
+                    ),
+                };
+            let updated = persist_redemption(
+                &state.db,
+                request_id,
+                ExactServiceApprovalRedemption {
+                    status,
+                    admitted_at: now,
+                    completed_at: Some(Utc::now()),
+                    receipt: None,
+                    failure_code: Some(failure_code.to_string()),
+                },
+            )
+            .await?;
+            return result_for(&updated, terminal_state);
+        }
+    };
+    if binding
+        .execution_authority_digest
+        .as_deref()
+        .is_some_and(|stored| stored != execution.digest)
+    {
+        let updated = persist_redemption(
+            &state.db,
+            request_id,
+            ExactServiceApprovalRedemption {
+                status: ExactServiceRedemptionStatus::Drifted,
+                admitted_at: now,
+                completed_at: Some(Utc::now()),
+                receipt: None,
+                failure_code: Some("execution_authority_drift".to_string()),
+            },
+        )
+        .await?;
+        return result_for(&updated, ExactServiceApprovalState::Drifted);
+    }
     let exec_ctx = mcp_service::McpExecContext {
         api_key_id: caller.api_key_id.as_deref(),
         allow_all_nodes: caller.allow_all_nodes,
@@ -414,7 +484,31 @@ pub async fn redeem_request(
             return result_for(&updated, ExactServiceApprovalState::Failed);
         }
     };
-    let executed = mcp_service::execute_tool(
+    let node_route = match frozen_node_route(state, &execution, &exec_ctx).await {
+        Ok(route) => route,
+        Err(error) => {
+            let updated = persist_redemption(
+                &state.db,
+                request_id,
+                ExactServiceApprovalRedemption {
+                    status: ExactServiceRedemptionStatus::Failed,
+                    admitted_at: now,
+                    completed_at: Some(Utc::now()),
+                    receipt: None,
+                    failure_code: Some(safe_execution_failure_code(&error).to_string()),
+                },
+            )
+            .await?;
+            return result_for(&updated, ExactServiceApprovalState::Failed);
+        }
+    };
+    let has_cred_for_fallback = execution.resolution.has_server_credential && node_route.is_none();
+    let billing_context_builder =
+        mcp_service::McpBillingRouteContextBuilder::from_user_service_resolution(
+            &caller.proxy_resolution_user_id,
+            &execution.resolution,
+        );
+    let executed = mcp_service::execute_tool_resolved(
         &state.http_client,
         &state.db,
         &state.encryption_keys,
@@ -432,6 +526,10 @@ pub async fn redeem_request(
         &state.cloud_response_cache,
         &exec_ctx,
         billing_egress_permit,
+        execution.resolution.target,
+        node_route,
+        has_cred_for_fallback,
+        billing_context_builder,
     )
     .await;
 
@@ -548,6 +646,134 @@ async fn persist_redemption(
         )
         .await?
         .ok_or_else(|| AppError::Conflict("exact_service_redemption_state_conflict".to_string()))
+}
+
+struct ResolvedExecution {
+    resolution: proxy_service::UserServiceResolution,
+    configured_fallback_node_ids: Vec<String>,
+    digest: String,
+}
+
+async fn resolve_execution_authority(
+    state: &AppState,
+    caller: &ExactServiceApprovalCaller,
+    user_service_id: &str,
+    service_slug: &str,
+) -> AppResult<ResolvedExecution> {
+    let mut resolution = proxy_service::resolve_proxy_target_by_user_service_id(
+        &state.db,
+        &state.encryption_keys,
+        &caller.proxy_resolution_user_id,
+        user_service_id,
+        Some(service_slug),
+        None,
+        Some(&state.connection_expiry_notifier),
+    )
+    .await?
+    .ok_or_else(|| AppError::NotFound(format!("User service '{service_slug}' not found")))?;
+
+    let mut override_identity = None;
+    if let Some(api_key_id) = caller.api_key_id.as_deref()
+        && let Some(override_cred) = proxy_service::resolve_agent_credential_override_identity(
+            &state.db,
+            &state.encryption_keys,
+            &caller.proxy_resolution_user_id,
+            api_key_id,
+            user_service_id,
+            Some(&state.connection_expiry_notifier),
+        )
+        .await?
+    {
+        resolution.target.credential = override_cred.credential.clone();
+        override_identity = Some(execution_authority::OverrideCredentialIdentity {
+            api_key_id: override_cred.api_key_id,
+            credential_epoch: override_cred.credential_epoch,
+        });
+    }
+
+    let effective_owner = resolution
+        .org_routing
+        .as_ref()
+        .map(|routing| routing.org_user_id.as_str())
+        .unwrap_or(caller.proxy_resolution_user_id.as_str());
+    let configured_fallback_node_ids = node_routing_service::list_configured_binding_node_ids(
+        &state.db,
+        effective_owner,
+        &resolution.target.service.id,
+    )
+    .await?;
+    let digest = execution_authority::digest(&execution_authority::build_projection(
+        &resolution,
+        override_identity.as_ref(),
+        configured_fallback_node_ids.clone(),
+    ));
+    Ok(ResolvedExecution {
+        resolution,
+        configured_fallback_node_ids,
+        digest,
+    })
+}
+
+async fn execution_authority_mismatch(
+    state: &AppState,
+    caller: &ExactServiceApprovalCaller,
+    binding: &ExactServiceApprovalBinding,
+    service_slug: &str,
+) -> AppResult<Option<&'static str>> {
+    let Some(stored) = binding.execution_authority_digest.as_deref() else {
+        return Ok(None);
+    };
+    let live =
+        resolve_execution_authority(state, caller, &binding.user_service_id, service_slug).await?;
+    if live.digest != stored {
+        return Ok(Some("execution_authority_drift"));
+    }
+    Ok(None)
+}
+
+async fn frozen_node_route(
+    state: &AppState,
+    execution: &ResolvedExecution,
+    exec_ctx: &mcp_service::McpExecContext<'_>,
+) -> AppResult<Option<node_routing_service::NodeRoute>> {
+    let effective_primary = execution
+        .resolution
+        .node_id
+        .as_deref()
+        .filter(|node_id| !node_id.is_empty());
+    if !exec_ctx.allow_all_nodes
+        && let Some(node_id) = effective_primary
+        && !exec_ctx.allowed_node_ids.contains(&node_id.to_string())
+    {
+        return Err(AppError::ApiKeyScopeForbidden(
+            "API key does not have access to this node".to_string(),
+        ));
+    }
+    let Some(primary_node_id) = effective_primary else {
+        return Ok(None);
+    };
+    let mut fallback_node_ids = Vec::new();
+    for node_id in &execution.configured_fallback_node_ids {
+        if node_id == primary_node_id {
+            continue;
+        }
+        if !exec_ctx.allow_all_nodes && !exec_ctx.allowed_node_ids.contains(node_id) {
+            continue;
+        }
+        if node_routing_service::is_node_id_dispatchable(
+            &state.db,
+            node_id,
+            state.node_ws_manager.as_ref(),
+        )
+        .await?
+        {
+            fallback_node_ids.push(node_id.clone());
+        }
+    }
+    Ok(Some(node_routing_service::NodeRoute {
+        node_id: primary_node_id.to_string(),
+        fallback_node_ids,
+    }))
 }
 
 async fn resolve_exact_catalog(
@@ -761,17 +987,29 @@ async fn expire_if_needed(
     }
 }
 
+struct ObservedApprovalState {
+    state: ExactServiceApprovalState,
+    failure_code: Option<String>,
+}
+
+fn observed(state: ExactServiceApprovalState, failure_code: Option<&str>) -> ObservedApprovalState {
+    ObservedApprovalState {
+        state,
+        failure_code: failure_code.map(str::to_string),
+    }
+}
+
 async fn current_state(
     state: &AppState,
     caller: &ExactServiceApprovalCaller,
     request: &ApprovalRequest,
-) -> AppResult<ExactServiceApprovalState> {
+) -> AppResult<ObservedApprovalState> {
     match request.status.as_str() {
-        "pending" => return Ok(ExactServiceApprovalState::Pending),
-        "rejected" => return Ok(ExactServiceApprovalState::Denied),
-        "expired" => return Ok(ExactServiceApprovalState::Expired),
+        "pending" => return Ok(observed(ExactServiceApprovalState::Pending, None)),
+        "rejected" => return Ok(observed(ExactServiceApprovalState::Denied, None)),
+        "expired" => return Ok(observed(ExactServiceApprovalState::Expired, None)),
         "approved" => {}
-        _ => return Ok(ExactServiceApprovalState::Revoked),
+        _ => return Ok(observed(ExactServiceApprovalState::Revoked, None)),
     }
     if request
         .exact_service
@@ -793,7 +1031,19 @@ async fn current_state(
     {
         Ok(resolution) => resolution,
         Err(error) => match catalog_resolution_terminal_state(&error) {
-            Some(state) => return Ok(state),
+            Some(ExactServiceApprovalState::Revoked) => {
+                return Ok(observed(
+                    ExactServiceApprovalState::Revoked,
+                    Some("selector_revoked"),
+                ));
+            }
+            Some(ExactServiceApprovalState::Drifted) => {
+                return Ok(observed(
+                    ExactServiceApprovalState::Drifted,
+                    Some("catalog_drift"),
+                ));
+            }
+            Some(other) => return Ok(observed(other, None)),
             None => return Err(error),
         },
     };
@@ -806,7 +1056,18 @@ async fn current_state(
         &resolution.endpoint_contract_digest,
         &resolution.operation_digest,
     ) {
-        return Ok(ExactServiceApprovalState::Drifted);
+        return Ok(observed(
+            ExactServiceApprovalState::Drifted,
+            Some("catalog_drift"),
+        ));
+    }
+    if let Some(failure_code) =
+        execution_authority_mismatch(state, caller, binding, &request.service_slug).await?
+    {
+        return Ok(observed(
+            ExactServiceApprovalState::Drifted,
+            Some(failure_code),
+        ));
     }
     let descriptor = mcp_service::build_mcp_operation_descriptor(
         resolution.service(),
@@ -829,24 +1090,30 @@ async fn current_state(
         approval_service::ApprovalOutcome::NeedsApproval(pending)
             if pending.resolution.mode == ApprovalMode::PerRequest =>
         {
-            Ok(ExactServiceApprovalState::Approved)
+            Ok(observed(ExactServiceApprovalState::Approved, None))
         }
-        _ => Ok(ExactServiceApprovalState::Revoked),
+        _ => Ok(observed(
+            ExactServiceApprovalState::Revoked,
+            Some("selector_revoked"),
+        )),
     }
 }
 
-fn redemption_state(request: &ApprovalRequest) -> AppResult<ExactServiceApprovalState> {
+fn redemption_state(request: &ApprovalRequest) -> AppResult<ObservedApprovalState> {
     let redemption = request
         .exact_service
         .as_ref()
         .and_then(|binding| binding.redemption.as_ref())
         .ok_or_else(|| AppError::Conflict("exact_service_redemption_missing".to_string()))?;
-    Ok(match redemption.status {
-        ExactServiceRedemptionStatus::Executing => ExactServiceApprovalState::Redeeming,
-        ExactServiceRedemptionStatus::Completed => ExactServiceApprovalState::Redeemed,
-        ExactServiceRedemptionStatus::Drifted => ExactServiceApprovalState::Drifted,
-        ExactServiceRedemptionStatus::Revoked => ExactServiceApprovalState::Revoked,
-        ExactServiceRedemptionStatus::Failed => ExactServiceApprovalState::Failed,
+    Ok(ObservedApprovalState {
+        state: match redemption.status {
+            ExactServiceRedemptionStatus::Executing => ExactServiceApprovalState::Redeeming,
+            ExactServiceRedemptionStatus::Completed => ExactServiceApprovalState::Redeemed,
+            ExactServiceRedemptionStatus::Drifted => ExactServiceApprovalState::Drifted,
+            ExactServiceRedemptionStatus::Revoked => ExactServiceApprovalState::Revoked,
+            ExactServiceRedemptionStatus::Failed => ExactServiceApprovalState::Failed,
+        },
+        failure_code: redemption.failure_code.clone(),
     })
 }
 
@@ -1056,6 +1323,7 @@ mod tests {
             operation_generation: input.operation_generation,
             effect_idempotency_key: input.idempotency_key,
             arguments: input.arguments,
+            execution_authority_digest: None,
             redemption: None,
         }
     }

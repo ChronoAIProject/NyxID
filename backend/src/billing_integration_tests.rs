@@ -716,6 +716,7 @@ async fn billing_route_coverage_smoke() {
                 operation_generation,
                 effect_idempotency_key: effect_idempotency_key.clone(),
                 arguments: exact_arguments,
+                execution_authority_digest: None,
                 redemption: None,
             }),
             created_at: now,

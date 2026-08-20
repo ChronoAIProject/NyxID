@@ -62,14 +62,14 @@ impl McpToolSource {
     }
 }
 
-struct McpBillingRouteContextBuilder {
+pub(crate) struct McpBillingRouteContextBuilder {
     effective_owner_id: String,
     user_service_id: Option<String>,
     is_user_service: bool,
 }
 
 impl McpBillingRouteContextBuilder {
-    fn from_user_service_resolution(
+    pub(crate) fn from_user_service_resolution(
         billing_principal_user_id: &str,
         resolution: &proxy_service::UserServiceResolution,
     ) -> Self {
@@ -3278,20 +3278,6 @@ pub async fn execute_tool(
     exec_ctx: &McpExecContext<'_>,
     billing_egress_permit: crate::services::billing::route_inventory::BillingEgressPermit,
 ) -> AppResult<(u16, String)> {
-    use crate::models::service_account::{COLLECTION_NAME as SERVICE_ACCOUNTS, ServiceAccount};
-    use crate::models::user::{COLLECTION_NAME as USERS, User};
-    use crate::services::node_ws_manager::{NodeProxyRequest, ProxyResponseType};
-    use crate::services::{delegation_service, identity_service, node_service};
-
-    let PreparedProxyCall {
-        method,
-        path,
-        query,
-        parameter_headers,
-        body,
-        is_generic_proxy_endpoint,
-    } = prepared;
-
     // Resolve the proxy target and node routing from the fresh resolver result
     // (not cached loader flags -- credential state may have changed).
     let (target, node_route, has_server_credential, billing_context_builder) = match &service.source
@@ -3475,6 +3461,72 @@ pub async fn execute_tool(
             )
         }
     };
+
+    execute_tool_resolved(
+        http_client,
+        db,
+        encryption_keys,
+        node_ws_manager,
+        billing,
+        user_id,
+        billing_principal_user_id,
+        service,
+        endpoint,
+        prepared,
+        jwt_keys,
+        config,
+        connection_expiry_notifier,
+        token_exchange_cache,
+        cloud_response_cache,
+        exec_ctx,
+        billing_egress_permit,
+        target,
+        node_route,
+        has_server_credential,
+        billing_context_builder,
+    )
+    .await
+}
+
+/// Execute an already-resolved proxy target. Exact-service redemption uses
+/// this so the attested resolution is the one that produces the effect.
+#[allow(clippy::too_many_arguments)]
+pub async fn execute_tool_resolved(
+    http_client: &reqwest::Client,
+    db: &mongodb::Database,
+    encryption_keys: &EncryptionKeys,
+    node_ws_manager: &std::sync::Arc<NodeWsManager>,
+    billing: &std::sync::Arc<crate::services::billing::BillingService>,
+    user_id: &str,
+    billing_principal_user_id: &str,
+    service: &McpToolService,
+    endpoint: &McpToolEndpoint,
+    prepared: PreparedProxyCall,
+    jwt_keys: &crate::crypto::jwt::JwtKeys,
+    config: &crate::config::AppConfig,
+    connection_expiry_notifier: &crate::services::connection_expiry_service::ConnectionExpiryNotifier,
+    token_exchange_cache: &crate::services::provider_token_exchange_service::TokenExchangeCache,
+    cloud_response_cache: &crate::services::cloud_response_cache::CloudResponseCache,
+    exec_ctx: &McpExecContext<'_>,
+    billing_egress_permit: crate::services::billing::route_inventory::BillingEgressPermit,
+    target: proxy_service::ProxyTarget,
+    node_route: Option<node_routing_service::NodeRoute>,
+    has_server_credential: bool,
+    billing_context_builder: McpBillingRouteContextBuilder,
+) -> AppResult<(u16, String)> {
+    use crate::models::service_account::{COLLECTION_NAME as SERVICE_ACCOUNTS, ServiceAccount};
+    use crate::models::user::{COLLECTION_NAME as USERS, User};
+    use crate::services::node_ws_manager::{NodeProxyRequest, ProxyResponseType};
+    use crate::services::{delegation_service, identity_service, node_service};
+
+    let PreparedProxyCall {
+        method,
+        path,
+        query,
+        parameter_headers,
+        body,
+        is_generic_proxy_endpoint,
+    } = prepared;
 
     // Build identity headers if configured on the service (CR-8)
     let mut identity_headers = Vec::new();
@@ -7539,6 +7591,8 @@ mod tests {
             node_id: None,
             user_service_id: "user-service".to_string(),
             has_server_credential: false,
+            api_key_id: None,
+            credential_epoch: 1,
             master_credential: false,
             org_routing: org_user_id.map(|org_user_id| proxy_service::OrgRouting {
                 org_user_id: org_user_id.to_string(),

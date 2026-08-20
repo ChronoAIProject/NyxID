@@ -7,12 +7,21 @@ use uuid::Uuid;
 use crate::crypto::aes::EncryptionKeys;
 use crate::errors::{AppError, AppResult};
 use crate::models::oauth_state::{COLLECTION_NAME as OAUTH_STATES, OAuthState};
-use crate::models::user_api_key::{COLLECTION_NAME, UserApiKey};
+use crate::models::user_api_key::{COLLECTION_NAME, UserApiKey, default_credential_epoch};
 use crate::models::user_provider_token::{
     COLLECTION_NAME as USER_PROVIDER_TOKENS, UserProviderToken,
 };
 use crate::models::user_service::COLLECTION_NAME as USER_SERVICES;
 use crate::services::agent_binding_service;
+
+fn credential_epoch_add_expr() -> mongodb::bson::Document {
+    doc! {
+        "$add": [
+            { "$ifNull": ["$credential_epoch", default_credential_epoch()] },
+            1i64
+        ]
+    }
+}
 
 /// Maximum credential length in bytes to prevent abuse.
 const MAX_CREDENTIAL_LENGTH: usize = 8192;
@@ -223,6 +232,7 @@ pub async fn create_api_key(
         error_message: None,
         source: Some(params.source.unwrap_or("user_created").to_string()),
         source_id: params.source_id.map(str::to_string),
+        credential_epoch: default_credential_epoch(),
         created_at: now,
         updated_at: now,
     };
@@ -294,6 +304,7 @@ pub async fn create_api_key_from_provider_token(
         error_message: provider_token.error_message.clone(),
         source: Some("user_created".to_string()),
         source_id: Some(provider_token.id.clone()),
+        credential_epoch: default_credential_epoch(),
         created_at: now,
         updated_at: now,
     };
@@ -425,6 +436,11 @@ async fn sync_provider_token_to_api_keys_impl(
         // signal that the wizard polls for.
         if let Some(ts) = last_authorized_at.as_ref() {
             set_doc.insert("last_authorized_at", ts);
+            // A fresh OAuth authorization is a user-initiated credential
+            // replacement. Background/lazy syncs pass `None` and must leave
+            // the epoch unchanged so routine token refreshes do not cause
+            // false execution-authority drift.
+            set_doc.insert("credential_epoch", credential_epoch_add_expr());
         }
 
         db.collection::<UserApiKey>(COLLECTION_NAME)
@@ -504,6 +520,7 @@ pub async fn write_oauth_tokens_to_key(
     // OAuth keys); explicit unset so a previously-set credential cannot
     // mask the new access_token at proxy time.
     set_doc.insert("credential_encrypted", bson::Bson::Null);
+    set_doc.insert("credential_epoch", credential_epoch_add_expr());
 
     // Exclude terminal-status rows from the write. `revoked` / `failed`
     // are terminal by design (matching `sync_provider_token_to_api_keys`
@@ -519,10 +536,10 @@ pub async fn write_oauth_tokens_to_key(
                 "connection_id": connection_id,
                 "status": { "$nin": ["revoked", "failed"] },
             },
-            doc! {
-                "$set": set_doc,
-                "$unset": { "oauth_attempt_nonce": "" },
-            },
+            vec![
+                doc! { "$set": set_doc },
+                doc! { "$unset": ["oauth_attempt_nonce"] },
+            ],
         )
         .await?;
 
@@ -579,6 +596,7 @@ pub async fn write_chat_oauth_tokens_to_key(
         set_doc.insert("token_scopes", optional_string_bson(Some(scopes)));
     }
     set_doc.insert("credential_encrypted", bson::Bson::Null);
+    set_doc.insert("credential_epoch", credential_epoch_add_expr());
 
     let result = db
         .collection::<UserApiKey>(COLLECTION_NAME)
@@ -588,10 +606,10 @@ pub async fn write_chat_oauth_tokens_to_key(
                 "oauth_attempt_nonce": attempt_nonce,
                 "status": { "$nin": ["revoked", "failed"] },
             },
-            doc! {
-                "$set": set_doc,
-                "$unset": { "oauth_attempt_nonce": "" },
-            },
+            vec![
+                doc! { "$set": set_doc },
+                doc! { "$unset": ["oauth_attempt_nonce"] },
+            ],
         )
         .await?;
 
@@ -1201,20 +1219,23 @@ pub async fn promote_node_managed_api_key(
                     { "provider_config_id": { "$exists": false } },
                 ],
             },
-            doc! {
-                "$set": {
-                    "credential_type": credential_type,
-                    "credential_encrypted": encrypted_bson,
-                    "access_token_encrypted": bson::Bson::Null,
-                    "refresh_token_encrypted": bson::Bson::Null,
-                    "token_scopes": bson::Bson::Null,
-                    "expires_at": bson::Bson::Null,
-                    "status": "active",
-                    "error_message": bson::Bson::Null,
-                    "updated_at": bson::DateTime::from_chrono(Utc::now()),
+            vec![
+                doc! {
+                    "$set": {
+                        "credential_type": credential_type,
+                        "credential_encrypted": encrypted_bson,
+                        "access_token_encrypted": bson::Bson::Null,
+                        "refresh_token_encrypted": bson::Bson::Null,
+                        "token_scopes": bson::Bson::Null,
+                        "expires_at": bson::Bson::Null,
+                        "status": "active",
+                        "error_message": bson::Bson::Null,
+                        "updated_at": bson::DateTime::from_chrono(Utc::now()),
+                        "credential_epoch": credential_epoch_add_expr(),
+                    }
                 },
-                "$unset": { "oauth_attempt_nonce": "" },
-            },
+                doc! { "$unset": ["oauth_attempt_nonce"] },
+            ],
         )
         .await?;
 
@@ -1432,15 +1453,24 @@ pub async fn update_api_key(
         }
         set_doc.insert("status", "active");
         set_doc.insert("error_message", bson::Bson::Null);
+        set_doc.insert("credential_epoch", credential_epoch_add_expr());
     }
 
-    let result = db
-        .collection::<UserApiKey>(COLLECTION_NAME)
-        .update_one(
-            doc! { "_id": key_id, "user_id": user_id },
-            doc! { "$set": set_doc },
-        )
-        .await?;
+    let result = if credential.is_some() {
+        db.collection::<UserApiKey>(COLLECTION_NAME)
+            .update_one(
+                doc! { "_id": key_id, "user_id": user_id },
+                vec![doc! { "$set": set_doc }],
+            )
+            .await?
+    } else {
+        db.collection::<UserApiKey>(COLLECTION_NAME)
+            .update_one(
+                doc! { "_id": key_id, "user_id": user_id },
+                doc! { "$set": set_doc },
+            )
+            .await?
+    };
 
     if result.matched_count == 0 {
         return Err(AppError::NotFound("API key not found".to_string()));
@@ -1644,6 +1674,7 @@ mod tests {
             error_message: None,
             source: Some("user_created".to_string()),
             source_id: None,
+            credential_epoch: 1,
             created_at: Utc::now(),
             updated_at: Utc::now(),
         }
@@ -1726,6 +1757,7 @@ mod tests {
                 source_id: None,
                 created_at: now,
                 updated_at: now,
+                credential_epoch: 1,
             })
             .await
             .unwrap();
@@ -2342,6 +2374,7 @@ mod tests {
         let updated = get_key(&db, &key.id).await;
         assert_eq!(updated.status, "active");
         assert!(updated.access_token_encrypted.is_some());
+        assert_eq!(updated.credential_epoch, 2);
     }
 
     fn live_oauth_state(user_id: &str, provider_id: &str) -> OAuthState {
@@ -2832,6 +2865,7 @@ mod tests {
                 source_id: None,
                 created_at: now,
                 updated_at: now,
+                credential_epoch: 1,
             })
             .await
             .unwrap();
@@ -3371,6 +3405,7 @@ mod tests {
                 source_id: None,
                 created_at: now,
                 updated_at: now,
+                credential_epoch: 1,
             })
             .await
             .unwrap();
@@ -3444,6 +3479,7 @@ mod tests {
                 source_id: None,
                 created_at: now,
                 updated_at: now,
+                credential_epoch: 1,
             })
             .await
             .unwrap();
@@ -3549,6 +3585,10 @@ mod tests {
         assert!(
             after.last_authorized_at.is_some(),
             "fresh-auth wrapper must stamp last_authorized_at so the wizard's manage-scopes poller exits instead of timing out"
+        );
+        assert_eq!(
+            after.credential_epoch, 2,
+            "fresh legacy OAuth authorization must invalidate pending approvals"
         );
         // Sanity: the token did fan out too.
         assert_eq!(after.access_token_encrypted, Some(vec![1, 2, 3]));
@@ -3688,6 +3728,7 @@ mod tests {
                 source_id: None,
                 created_at: now,
                 updated_at: now,
+                credential_epoch: 1,
             })
             .await
             .unwrap();
@@ -3761,6 +3802,7 @@ mod tests {
                     source_id: None,
                     created_at: now,
                     updated_at: now,
+                    credential_epoch: 1,
                 })
                 .await
                 .unwrap();
@@ -4535,6 +4577,7 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(String::from_utf8(cred_bytes).unwrap(), "new-secret");
+        assert_eq!(updated.credential_epoch, 2);
     }
 
     #[tokio::test]

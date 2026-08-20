@@ -3525,6 +3525,7 @@ mod tests {
             error_message: None,
             source: Some("user_created".to_string()),
             source_id: None,
+            credential_epoch: 1,
             created_at: now,
             updated_at: now,
         };
@@ -4261,6 +4262,7 @@ mod tests {
             source_id: None,
             created_at: now,
             updated_at: now,
+            credential_epoch: 1,
         };
         db.collection::<UserApiKey>(USER_API_KEYS)
             .insert_one(&key)
@@ -5109,6 +5111,7 @@ mod tests {
             error_message: None,
             source: Some("user_created".to_string()),
             source_id: None,
+            credential_epoch: 1,
             created_at: now,
             updated_at: now,
         };
