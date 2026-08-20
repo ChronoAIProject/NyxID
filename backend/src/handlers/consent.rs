@@ -1,3 +1,5 @@
+#![allow(dead_code)]
+
 use axum::{
     Json,
     extract::{Path, State},
@@ -8,7 +10,7 @@ use serde::Serialize;
 use std::collections::HashMap;
 
 use crate::AppState;
-use crate::errors::AppResult;
+use crate::errors::{AppError, AppResult};
 use crate::models::consent::Consent;
 use crate::models::downstream_service::{
     COLLECTION_NAME as DOWNSTREAM_SERVICES, DownstreamService,
@@ -52,6 +54,32 @@ pub struct ConsentListResponse {
 #[derive(Debug, Serialize)]
 pub struct ConsentRevokeResponse {
     pub message: String,
+}
+
+/// Safe consent state for assistant postcondition reads. Client names,
+/// scopes, and service labels stay on the detail response and never enter
+/// this projection.
+#[derive(Debug, Serialize)]
+pub struct ConsentAuthorizationEvidenceResponse {
+    pub id: String,
+    pub client_id: String,
+    pub allow_all_services: bool,
+    pub allowed_service_ids: Vec<String>,
+    pub granted_at: String,
+    pub expires_at: Option<String>,
+}
+
+impl ConsentAuthorizationEvidenceResponse {
+    fn from_consent(consent: &Consent) -> Self {
+        Self {
+            id: consent.id.clone(),
+            client_id: consent.client_id.clone(),
+            allow_all_services: consent.allow_all_services,
+            allowed_service_ids: consent.allowed_service_ids.clone().unwrap_or_default(),
+            granted_at: consent.granted_at.to_rfc3339(),
+            expires_at: consent.expires_at.map(|value| value.to_rfc3339()),
+        }
+    }
 }
 
 // --- Handlers ---
@@ -128,6 +156,26 @@ pub async fn revoke_my_consent(
     Ok(Json(ConsentRevokeResponse {
         message: "Consent revoked".to_string(),
     }))
+}
+
+/// GET /api/v1/users/me/consents/{client_id}/authorization
+///
+/// A revoked consent is proven by this exact route returning body-free 404.
+pub async fn get_my_consent_authorization(
+    State(state): State<AppState>,
+    auth_user: AuthUser,
+    Path(client_id): Path<String>,
+) -> AppResult<Json<ConsentAuthorizationEvidenceResponse>> {
+    let user_id = auth_user.user_id.to_string();
+    let consent = state
+        .db
+        .collection::<Consent>(crate::models::consent::COLLECTION_NAME)
+        .find_one(doc! { "user_id": &user_id, "client_id": &client_id })
+        .await?
+        .ok_or(AppError::ConsentNotFound)?;
+    Ok(Json(ConsentAuthorizationEvidenceResponse::from_consent(
+        &consent,
+    )))
 }
 
 fn is_legacy_unrestricted(consent: &Consent) -> bool {

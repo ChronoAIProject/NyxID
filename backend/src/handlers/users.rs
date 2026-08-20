@@ -1,3 +1,5 @@
+#![allow(dead_code)]
+
 use axum::{Json, extract::State, http::HeaderMap};
 use chrono::Utc;
 use mongodb::bson::{self, doc};
@@ -51,9 +53,38 @@ pub struct UserProfileResponse {
     pub is_active: bool,
     pub social_provider: Option<String>,
     pub created_at: String,
+    pub updated_at: String,
     pub last_login_at: Option<String>,
     pub profile_config: ProfileConfigResponse,
     pub capabilities: UserCapabilitiesResponse,
+}
+
+/// Secret-free, free-text-free account state for assistant postconditions.
+///
+/// The full profile response contains user-controlled display text and is not
+/// safe for recursive evidence scanning. This projection is derived from that
+/// response and deliberately exposes only primitive state.
+#[derive(Debug, Serialize)]
+pub struct AccountAuthorizationEvidenceResponse {
+    pub id: String,
+    pub is_active: bool,
+    pub mfa_enabled: bool,
+    pub display_name_length: Option<usize>,
+    pub avatar_url_length: Option<usize>,
+    pub updated_at: String,
+}
+
+impl AccountAuthorizationEvidenceResponse {
+    fn from_profile_response(profile: &UserProfileResponse) -> Self {
+        Self {
+            id: profile.id.clone(),
+            is_active: profile.is_active,
+            mfa_enabled: profile.mfa_enabled,
+            display_name_length: profile.display_name.as_ref().map(String::len),
+            avatar_url_length: profile.avatar_url.as_ref().map(String::len),
+            updated_at: profile.updated_at.clone(),
+        }
+    }
 }
 
 #[derive(Debug, Deserialize)]
@@ -116,6 +147,7 @@ pub async fn get_me(
         is_active: user_model.is_active,
         social_provider: user_model.social_provider,
         created_at: user_model.created_at.to_rfc3339(),
+        updated_at: user_model.updated_at.to_rfc3339(),
         last_login_at: user_model.last_login_at.map(|t| t.to_rfc3339()),
         profile_config: ProfileConfigResponse {
             onboarding: OnboardingStateResponse {
@@ -135,6 +167,21 @@ pub async fn get_me(
             enabled_features,
         },
     }))
+}
+
+/// GET /api/v1/users/me/authorization
+///
+/// Authoritative account postcondition projection. This must be mounted next
+/// to `GET /users/me` in both the normal and delegated `account:read` route
+/// inventories; it must never be served from the assistant-effect nest.
+pub async fn get_account_authorization(
+    State(state): State<AppState>,
+    auth_user: AuthUser,
+) -> AppResult<Json<AccountAuthorizationEvidenceResponse>> {
+    let Json(profile) = get_me(State(state), auth_user).await?;
+    Ok(Json(
+        AccountAuthorizationEvidenceResponse::from_profile_response(&profile),
+    ))
 }
 
 #[derive(Debug, Deserialize)]
