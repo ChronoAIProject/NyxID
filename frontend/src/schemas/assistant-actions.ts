@@ -399,6 +399,40 @@ const keyResourceSchema = z
       .strict(),
   })
   .strict();
+const pendingCredentialResourceSchema = z
+  .object({
+    pendingCredential: z
+      .object({ pendingCredentialId: actionControlIdentitySchema })
+      .strict(),
+  })
+  .strict();
+const orgResourceSchema = z
+  .object({ org: z.object({ orgId: actionControlIdentitySchema }).strict() })
+  .strict();
+const accountResourceSchema = z
+  .object({
+    account: z.object({ userId: actionControlIdentitySchema }).strict(),
+  })
+  .strict();
+const grantResourceSchema = z
+  .object({
+    grant: z.object({ grantId: actionControlIdentitySchema }).strict(),
+  })
+  .strict();
+const approvalConfigResourceSchema = z
+  .object({
+    approvalConfig: z
+      .object({ serviceId: actionControlIdentitySchema })
+      .strict(),
+  })
+  .strict();
+const notificationBindingResourceSchema = z
+  .object({
+    notificationBinding: z
+      .object({ bindingId: actionControlIdentitySchema })
+      .strict(),
+  })
+  .strict();
 const nodeResourceSchema = z
   .object({ node: z.object({ nodeId: actionControlIdentitySchema }).strict() })
   .strict();
@@ -441,6 +475,12 @@ export const actionResourceSchema = z.union([
   endpointResourceSchema,
   externalKeyResourceSchema,
   nodeResourceSchema,
+  pendingCredentialResourceSchema,
+  orgResourceSchema,
+  accountResourceSchema,
+  grantResourceSchema,
+  approvalConfigResourceSchema,
+  notificationBindingResourceSchema,
   serviceAccountResourceSchema,
   developerAppResourceSchema,
   deviceResourceSchema,
@@ -614,6 +654,26 @@ function copyResource(resource: ActionResource): ActionResource {
     };
   }
   if ("node" in resource) return { node: { nodeId: resource.node.nodeId } };
+  if ("pendingCredential" in resource) {
+    return {
+      pendingCredential: {
+        pendingCredentialId: resource.pendingCredential.pendingCredentialId,
+      },
+    };
+  }
+  if ("org" in resource) return { org: { orgId: resource.org.orgId } };
+  if ("account" in resource) {
+    return { account: { userId: resource.account.userId } };
+  }
+  if ("grant" in resource) return { grant: { grantId: resource.grant.grantId } };
+  if ("approvalConfig" in resource) {
+    return { approvalConfig: { serviceId: resource.approvalConfig.serviceId } };
+  }
+  if ("notificationBinding" in resource) {
+    return {
+      notificationBinding: { bindingId: resource.notificationBinding.bindingId },
+    };
+  }
   if ("serviceAccount" in resource) {
     return {
       serviceAccount: {
