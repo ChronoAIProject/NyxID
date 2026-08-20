@@ -18,9 +18,8 @@ use crate::services::{
 };
 use crate::telemetry::{TelemetryContext, TelemetryEvent, emit_event};
 
-/// Resolve which user_id owns this endpoint and whether the actor may
-/// modify it. Returns the effective owner_id (may be an org user id) for
-/// downstream service calls. Errors out as Forbidden / NotFound otherwise.
+/// Load an endpoint the actor may read. Unauthorized access is
+/// not-found-shaped so existence is not leaked.
 ///
 /// `OrgMembership.allowed_service_ids` is keyed by `UserService.id`, not
 /// by endpoint id. We translate by looking up every UserService that
@@ -28,11 +27,11 @@ use crate::telemetry::{TelemetryContext, TelemetryEvent, emit_event};
 /// orphan endpoint (referenced by zero services) is treated as a
 /// scope-less resource: only Direct owners or unscoped admins can touch
 /// it, since a scoped admin has no concrete claim to it.
-async fn resolve_endpoint_write_owner(
+async fn load_readable_endpoint(
     state: &AppState,
     actor: &str,
     endpoint_id: &str,
-) -> AppResult<String> {
+) -> AppResult<UserEndpoint> {
     let endpoint = state
         .db
         .collection::<UserEndpoint>(USER_ENDPOINTS)
@@ -53,6 +52,19 @@ async fn resolve_endpoint_write_owner(
     if !access.allows_any_resource(&backing_service_ids) {
         return Err(AppError::NotFound("Endpoint not found".to_string()));
     }
+    Ok(endpoint)
+}
+
+/// Resolve which user_id owns this endpoint and whether the actor may
+/// modify it. Returns the effective owner_id (may be an org user id) for
+/// downstream service calls. Errors out as Forbidden / NotFound otherwise.
+async fn resolve_endpoint_write_owner(
+    state: &AppState,
+    actor: &str,
+    endpoint_id: &str,
+) -> AppResult<String> {
+    let endpoint = load_readable_endpoint(state, actor, endpoint_id).await?;
+    let access = org_service::resolve_owner_access(&state.db, actor, &endpoint.user_id).await?;
     if !access.can_write() {
         return Err(AppError::OrgRoleInsufficient(
             "you do not have permission to modify this endpoint".to_string(),
@@ -116,6 +128,41 @@ pub struct EndpointResponse {
     pub openapi_spec_url: Option<String>,
     pub created_at: String,
     pub updated_at: String,
+}
+
+/// Authorization evidence for one user endpoint — the minimal projection of
+/// [`EndpointResponse`] that an assistant-action postcondition reader consumes.
+///
+/// The full detail response carries user-controlled free text (`label`) and a
+/// user-typed `url`. Either can match the reader's secret-shape scan
+/// (`Bearer\s+\S+`, `nyxid_` prefixes), so a legitimately labelled endpoint
+/// would become permanently unverifiable. This projection keeps only ids,
+/// booleans, and RFC 3339 timestamps.
+///
+/// Every property is serialized unconditionally. Readers distinguish an
+/// explicit `null` from a missing property, so `catalog_service_id` is never
+/// `skip_serializing_if`.
+#[derive(Debug, Serialize, ToSchema)]
+pub struct EndpointAuthorizationEvidenceResponse {
+    pub id: String,
+    pub auto_connected: bool,
+    pub catalog_service_id: Option<String>,
+    pub updated_at: String,
+}
+
+impl EndpointAuthorizationEvidenceResponse {
+    /// Project the full detail response down to authorization evidence.
+    ///
+    /// Derived from [`EndpointResponse`] so the two representations cannot
+    /// drift on shared properties.
+    pub fn from_endpoint_response(response: EndpointResponse) -> Self {
+        Self {
+            id: response.id,
+            auto_connected: response.auto_connected,
+            catalog_service_id: response.catalog_service_id,
+            updated_at: response.updated_at,
+        }
+    }
 }
 
 #[derive(Debug, Serialize, ToSchema)]
@@ -321,6 +368,43 @@ pub async fn delete_endpoint(
     Ok(StatusCode::NO_CONTENT)
 }
 
+#[utoipa::path(
+    get,
+    path = "/api/v1/endpoints/{endpoint_id}/authorization",
+    params(
+        ("endpoint_id" = String, Path, description = "User endpoint ID")
+    ),
+    responses(
+        (status = 200, description = "Authorization evidence", body = EndpointAuthorizationEvidenceResponse),
+        (status = 401, description = "Unauthorized", body = crate::errors::ErrorResponse),
+        (status = 404, description = "Endpoint not found", body = crate::errors::ErrorResponse)
+    ),
+    tag = "Endpoints"
+)]
+/// GET /api/v1/endpoints/{endpoint_id}/authorization
+///
+/// Same ACL as the endpoint detail sibling, projected to the properties an
+/// assistant-action postcondition reader consumes. Delete-shaped verbs prove
+/// absence through this route returning 404.
+pub async fn get_endpoint_authorization(
+    State(state): State<AppState>,
+    auth_user: AuthUser,
+    Path(endpoint_id): Path<String>,
+) -> AppResult<Json<EndpointAuthorizationEvidenceResponse>> {
+    let actor = auth_user.user_id.to_string();
+    let endpoint = load_readable_endpoint(&state, &actor, &endpoint_id).await?;
+    let auto_connected =
+        user_service_service::auto_connected_endpoint_ids(&state.db, &endpoint.user_id)
+            .await?
+            .contains(&endpoint.id);
+    Ok(Json(
+        EndpointAuthorizationEvidenceResponse::from_endpoint_response(endpoint_response(
+            endpoint,
+            auto_connected,
+        )),
+    ))
+}
+
 fn endpoint_response(ep: UserEndpoint, auto_connected: bool) -> EndpointResponse {
     EndpointResponse {
         id: ep.id,
@@ -393,28 +477,7 @@ pub async fn list_openapi_endpoints(
     Path(endpoint_id): Path<String>,
 ) -> AppResult<Json<UserEndpointOperationsResponse>> {
     let actor = auth_user.user_id.to_string();
-
-    // Ownership check: mirror the read-access path used by list/update.
-    let endpoint = state
-        .db
-        .collection::<UserEndpoint>(USER_ENDPOINTS)
-        .find_one(doc! { "_id": &endpoint_id })
-        .await?
-        .ok_or_else(|| AppError::NotFound("Endpoint not found".to_string()))?;
-
-    let access = org_service::resolve_owner_access(&state.db, &actor, &endpoint.user_id).await?;
-    if !access.can_read() {
-        return Err(AppError::NotFound("Endpoint not found".to_string()));
-    }
-    let backing_service_ids = user_service_service::user_service_ids_for_endpoint(
-        &state.db,
-        &endpoint.user_id,
-        &endpoint.id,
-    )
-    .await?;
-    if !access.allows_any_resource(&backing_service_ids) {
-        return Err(AppError::NotFound("Endpoint not found".to_string()));
-    }
+    let endpoint = load_readable_endpoint(&state, &actor, &endpoint_id).await?;
 
     let Some(ref spec_url) = endpoint.openapi_spec_url else {
         return Ok(Json(UserEndpointOperationsResponse {
@@ -892,5 +955,125 @@ mod tests {
         assert_eq!(resp.endpoint_id, ep_id);
         assert!(resp.openapi_spec_url.is_none());
         assert!(resp.operations.is_empty());
+    }
+
+    fn poisoned_endpoint_response() -> EndpointResponse {
+        EndpointResponse {
+            id: uuid::Uuid::new_v4().to_string(),
+            label: "Bearer nyxid_ag_abcdefghijklmnopqrst".to_string(),
+            url: Some("https://user:secret@api.example.com/v1#token".to_string()),
+            auto_connected: false,
+            catalog_service_id: Some(uuid::Uuid::new_v4().to_string()),
+            openapi_spec_url: Some("https://api.example.com/openapi.json".to_string()),
+            created_at: chrono::Utc::now().to_rfc3339(),
+            updated_at: chrono::Utc::now().to_rfc3339(),
+        }
+    }
+
+    #[tokio::test]
+    async fn endpoint_evidence_projection_has_no_label() {
+        let Some(db) = connect_test_database("h_user_ep_evidence_no_label").await else {
+            return;
+        };
+        let user_id = uuid::Uuid::new_v4().to_string();
+        let ep_id = uuid::Uuid::new_v4().to_string();
+        let catalog_id = uuid::Uuid::new_v4().to_string();
+        db.collection::<User>(USERS)
+            .insert_one(test_user(&user_id, UserType::Person))
+            .await
+            .unwrap();
+        db.collection::<UserEndpoint>(EP_COLLECTION)
+            .insert_one(test_user_endpoint(
+                &ep_id,
+                &user_id,
+                "Bearer nyxid_ag_abcdefghijklmnopqrst",
+                "https://api.example.com/v1",
+                None,
+                Some(&catalog_id),
+            ))
+            .await
+            .unwrap();
+        let state = test_app_state(db);
+        let auth = test_auth_user(&user_id);
+
+        let Json(evidence) = get_endpoint_authorization(State(state), auth, Path(ep_id.clone()))
+            .await
+            .unwrap();
+        let json = serde_json::to_value(&evidence).unwrap();
+
+        assert_eq!(json["id"], ep_id);
+        assert_eq!(json["auto_connected"], false);
+        assert_eq!(json["catalog_service_id"], catalog_id);
+        assert!(
+            json.get("label").is_none(),
+            "evidence must never carry label"
+        );
+        assert!(json.get("url").is_none(), "evidence must never carry url");
+        assert!(
+            json.get("openapi_spec_url").is_none(),
+            "evidence must never carry openapi_spec_url"
+        );
+        assert!(json.get("created_at").is_none());
+        assert!(json["updated_at"].as_str().is_some());
+        assert_eq!(
+            crate::test_utils::aevatar_secret_free_violation(&json),
+            None,
+            "endpoint evidence must never carry a secret-shaped value"
+        );
+        let properties: std::collections::BTreeSet<&str> = json
+            .as_object()
+            .unwrap()
+            .keys()
+            .map(String::as_str)
+            .collect();
+        assert_eq!(
+            properties,
+            ["auto_connected", "catalog_service_id", "id", "updated_at"]
+                .into_iter()
+                .collect::<std::collections::BTreeSet<&str>>()
+        );
+    }
+
+    #[test]
+    fn endpoint_update_secret_shaped_label_rejected_as_evidence_never_served() {
+        let detail = poisoned_endpoint_response();
+        let detail_json = serde_json::to_value(&detail).unwrap();
+        assert!(
+            crate::test_utils::aevatar_secret_free_violation(&detail_json).is_some(),
+            "full endpoint detail must trip the evidence scan so the projection has a reason to exist"
+        );
+
+        let evidence = serde_json::to_value(
+            EndpointAuthorizationEvidenceResponse::from_endpoint_response(detail),
+        )
+        .unwrap();
+        assert!(evidence.get("label").is_none());
+        assert!(evidence.get("url").is_none());
+        assert_eq!(
+            crate::test_utils::aevatar_secret_free_violation(&evidence),
+            None,
+            "secret-shaped labels and URLs must never be served as evidence"
+        );
+    }
+
+    #[test]
+    fn endpoint_evidence_always_serializes_catalog_service_id_null() {
+        let ep = UserEndpoint {
+            id: "ep-null-catalog".into(),
+            user_id: "u-1".into(),
+            label: "Minimal".into(),
+            url: "https://example.com".into(),
+            catalog_service_id: None,
+            openapi_spec_url: None,
+            recommended_skills: None,
+            created_at: chrono::Utc::now(),
+            updated_at: chrono::Utc::now(),
+        };
+        let evidence = EndpointAuthorizationEvidenceResponse::from_endpoint_response(
+            endpoint_response(ep, false),
+        );
+        let json = serde_json::to_value(&evidence).unwrap();
+        assert_eq!(json["catalog_service_id"], serde_json::Value::Null);
+        assert!(json.as_object().unwrap().contains_key("catalog_service_id"));
     }
 }
