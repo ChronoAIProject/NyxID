@@ -110,29 +110,24 @@ pub struct ExternalApiKeyResponse {
 /// Adding a value is a breaking consumer change (`ParseCredentialStatus`-style
 /// closed parsers throw on unknowns) — not additive. Keep in lockstep with
 /// `user_api_key_service::VALID_CREDENTIAL_TYPES`.
-pub(crate) const SERVED_EXTERNAL_KEY_CREDENTIAL_TYPES: &[&str] = &[
-    "api_key",
-    "oauth2",
-    "bearer",
-    "basic",
-    "ssh_certificate",
-    "node_managed",
-    "gcp_service_account",
-];
+pub(crate) const SERVED_EXTERNAL_KEY_CREDENTIAL_TYPES: &[&str] =
+    user_api_key_service::VALID_CREDENTIAL_TYPES;
 
 /// Closed status set served as assistant-action evidence.
 /// Adding a value is a breaking consumer change — not additive. Keep in
 /// lockstep with `user_api_key_service::VALID_STATUSES`.
-pub(crate) const SERVED_EXTERNAL_KEY_STATUSES: &[&str] = &[
-    "active",
-    "expired",
-    "revoked",
-    "failed",
-    "refresh_failed",
-    "pending_auth",
-];
+pub(crate) const SERVED_EXTERNAL_KEY_STATUSES: &[&str] = user_api_key_service::VALID_STATUSES;
 
 fn served_credential_type(value: String) -> AppResult<String> {
+    // Telegram login rows predate the unified credential enum and are
+    // migrated verbatim. They carry identity metadata, not a distinct
+    // externally injectable credential; normalize without echoing the
+    // legacy source value into the closed evidence contract.
+    let value = if value == "telegram_identity" {
+        "api_key".to_string()
+    } else {
+        value
+    };
     if SERVED_EXTERNAL_KEY_CREDENTIAL_TYPES.contains(&value.as_str()) {
         Ok(value)
     } else {

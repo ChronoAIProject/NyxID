@@ -16,7 +16,7 @@ use crate::services::agent_binding_service;
 
 /// Maximum credential length in bytes to prevent abuse.
 const MAX_CREDENTIAL_LENGTH: usize = 8192;
-const VALID_CREDENTIAL_TYPES: &[&str] = &[
+pub(crate) const VALID_CREDENTIAL_TYPES: &[&str] = &[
     "api_key",
     "oauth2",
     "bearer",
@@ -29,7 +29,7 @@ const VALID_CREDENTIAL_TYPES: &[&str] = &[
     // `access_token_encrypted` (see `gcp_sa_service`).
     "gcp_service_account",
 ];
-const VALID_STATUSES: &[&str] = &[
+pub(crate) const VALID_STATUSES: &[&str] = &[
     "active",
     "expired",
     "revoked",
@@ -1427,6 +1427,12 @@ pub async fn update_api_key(
                     .to_string(),
             ));
         }
+        if existing.credential_type == "ssh_certificate" {
+            return Err(AppError::SshAuthModeUnsupportedForOperation(
+                "ssh_certificate credentials are rotated through the SSH certificate flow"
+                    .to_string(),
+            ));
+        }
 
         if cred.is_empty() {
             return Err(AppError::ValidationError(
@@ -1451,6 +1457,10 @@ pub async fn update_api_key(
             set_doc.insert("token_scopes", bson::Bson::Null);
         } else {
             set_doc.insert("credential_encrypted", encrypted_bson);
+            // A rotation replaces the durable credential. Any cached access
+            // token minted from the old value must be discarded immediately.
+            set_doc.insert("access_token_encrypted", bson::Bson::Null);
+            set_doc.insert("expires_at", bson::Bson::Null);
         }
         set_doc.insert("status", "active");
         set_doc.insert("error_message", bson::Bson::Null);
