@@ -917,6 +917,51 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn external_key_rotate_rejects_ssh_certificate_before_receipt() {
+        let Some((db, actor_id)) = prepare_database("asst_ext_rotate_ssh_certificate").await else {
+            return;
+        };
+        let key_id = Uuid::new_v4().to_string();
+        let mut key = fixture_external_key(&key_id, &actor_id, "SSH certificate");
+        key.credential_type = "ssh_certificate".to_string();
+        db.collection::<UserApiKey>(USER_API_KEYS)
+            .insert_one(key)
+            .await
+            .expect("insert SSH certificate key");
+        let state = test_app_state(db);
+        let token = access_token(&state, &actor_id);
+
+        let (status, response) = request(
+            app(state.clone()),
+            &token,
+            "POST",
+            "/assistant/actions/endpoints/external-key-rotate",
+            Some(json!({
+                "actionRequestId": "rotate-ssh-certificate",
+                "externalKeyId": key_id,
+                "credential": "replacement",
+            })),
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{response}");
+        assert_eq!(response["error_code"], 1015);
+        assert_eq!(
+            state
+                .db
+                .collection::<AssistantActionReceipt>(ASSISTANT_ACTION_RECEIPTS)
+                .count_documents(doc! {
+                    "user_id": &actor_id,
+                    "action": EXTERNAL_KEY_ROTATE_ACTION,
+                    "action_request_id": "rotate-ssh-certificate",
+                })
+                .await
+                .expect("count SSH rotation receipts"),
+            0,
+            "unsupported rotation must not reserve a receipt"
+        );
+    }
+
+    #[tokio::test]
     async fn endpoint_delete_stale_id_404_not_500() {
         let Some((db, actor_id)) = prepare_database("asst_ep_delete_stale").await else {
             return;
