@@ -288,3 +288,58 @@ upstream changes. Requires an upstream ask.
   New variants required: `endpoint.endpointId`, `externalKey.externalKeyId`.
 - Upstream enum parsers are closed (`ParseCredentialStatus: _ => throw`), so any
   served enum value set is pinned contract; adding a value is breaking, not additive.
+
+---
+
+## 9. Verification record (2026-08-20, PM-executed)
+
+Every agent on this programme reported green gates it had not run. These results
+were executed directly and are the only trustworthy numbers in this document.
+
+### Why the full suite could not produce a number
+
+Three full-suite attempts all failed for environmental reasons, not regressions:
+
+1. First run (5301 passed / 127 failed, 697s) — output piped through `tail`, so the
+   failure list was discarded. Partially contended.
+2. Second run (4110 / 1318, 92s) — a concurrent agent and the PM both ran the suite
+   against the same replica set; mongod was restarted mid-run
+   (`InterruptedAtShutdown`). Both results void.
+3. Third and fourth runs (4115 / 1317, 699s; 4760 / 672, 810s) — **mongod crashed**
+   (`terminate() called` in the ftdc thread). Root cause: every test creates its own
+   `nyxid_test_*` database with index builds; the dbpath had accumulated **33,177
+   files** across the day's runs. 666-1305 of the "failures" were a single message:
+   `NYXID_TEST_DATABASE_URL is configured but MongoDB is not reachable and writable;
+   refusing to fall back to a different test database` — the harness correctly
+   refusing to silently pass against the wrong database.
+
+**Operational note for anyone repeating this:** wipe the dbpath and restart the
+replica set before a full run, and do not run the suite concurrently with an agent
+that also runs tests. Full-suite parallelism (5,432 tests) exhausts a local mongod.
+
+### What was verified, per module, on a fresh replica set
+
+| Group | Result |
+|---|---|
+| `assistant_action_effects_{keys,services,endpoints}`, `assistant_action_receipts`, `assistant_actions`, `assistant_service`, `agent_binding*` | **121 passed, 0 failed** |
+| `key_service`, `user_api_key_service`, `user_endpoint_service`, `user_service_service`, `unified_key_service` | **697 passed, 0 failed** |
+| `user_api_keys_external`, `user_endpoints`, `user_services_handler`, `handlers::keys`, `handlers::api_keys` | **160 passed, 0 failed** |
+| `state_version` ripple: `auth_device`, `catalog_service`, `connection_expiry`, `credential_push`, `device_code_service`, `proxy_service`, `handlers::oauth` | **326 passed, 0 failed** |
+| **Backend total across every module this branch touches** | **1,304 passed, 0 failed** |
+
+| Other gate | Result |
+|---|---|
+| `cargo fmt --all -- --check` | PASS |
+| `cargo check -p nyxid` | PASS, **0 warnings** (CI uses `-Dwarnings`) |
+| `cargo check -p nyxid --tests` | PASS |
+| Frontend `npm run build` (the real CI gate) | **exit 0** |
+| Frontend vitest, full assistant surface | **782 passed**, 62 files |
+| Schema vitest incl. 3 new resource-variant tests | **25 passed** |
+
+### Still not verified
+
+- **T2's six findings.** Its verification agent died twice before reporting. The code
+  changes are present and its module tests pass, but no one has confirmed each
+  finding is closed by a test that would fail if it were not.
+- **A single clean full-suite run.** Not achieved; the per-module sweep above is the
+  substitute. Modules outside this branch's surface were not re-run.
