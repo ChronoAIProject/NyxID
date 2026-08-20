@@ -30,10 +30,11 @@ Do not confuse this page with provider OAuth device-code flows.
 
 | Flow | Purpose | CLI / API surface |
 |---|---|---|
+| Auth device-code login | A human reviews and approves or rejects a headless `nyxid login --device` request; the CLI receives normal session tokens only after approval. | `/auth/device/{request,poll,preview,approve,deny}`; the web page or mobile app performs the decision |
 | Device-code grant | A fresh headless device asks NyxID for its own NyxID API key, node id, and refresh token. | `nyxid device approve`, `nyxid device onboard`, `nyxid device factory-key`, `/devices/code/*`, `/devices/onboard` |
 | Provider device-code OAuth | A user connects a downstream provider credential, such as Codex or GitHub, using that provider's RFC 8628 OAuth flow. | `nyxid service add <slug> --device-code`, `/providers/{id}/connect/device-code/*`; see `services.md` / `managing.md` |
 
-When a user says "approve my ESP32", "factory key", "headless device", "nyxprov QR", or gives a 12-character hardware user code, use this reference. When they say "connect Codex/OpenAI/GitHub with device code", use the service/provider references.
+When a user says "approve my ESP32", "factory key", "headless device", "nyxprov QR", or gives a 12-character hardware user code, use this reference. An 8-character `nyxid login --device` code is the auth device-code login flow instead. When they ask to connect a service with device code, use the service/provider references.
 
 ## Provisioning flow
 

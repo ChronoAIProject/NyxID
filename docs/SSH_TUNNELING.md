@@ -59,7 +59,7 @@ For headless interactive environments (SSH, Docker shell, WSL with no `$DISPLAY`
 nyxid login --base-url https://auth.example.com --device
 ```
 
-The CLI prints a one-time code and a URL — open the URL on any signed-in browser (phone, another machine), type the code, approve, and the CLI completes. For unattended CI/CD use an API key (Option B below) instead — `nyxid login` short-circuits in CI environments with a hint to do exactly that. `--password` is still available for legacy scripted setups where neither device-code nor an API key fits.
+The CLI prints a one-time code and a URL -- open the URL on any signed-in browser (phone, another machine), type the code, review the requester IP and time, then approve or reject. Approval completes the CLI login; rejection stops its poll immediately. For unattended CI/CD use an API key (Option B below) instead -- `nyxid login` short-circuits in CI environments with a hint to do exactly that. `--password` is still available for legacy scripted setups where neither device-code nor an API key fits.
 
 ### Option B: API Key
 

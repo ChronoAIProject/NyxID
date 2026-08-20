@@ -57,7 +57,7 @@ For headless environments (SSH, container, WSL with no `$DISPLAY`), `nyxid login
 nyxid login --device --base-url https://nyx-api.chrono-ai.fun
 ```
 
-The CLI prints a one-time code and a URL; open the URL on any signed-in browser (phone, another machine), paste the code, approve, and the CLI completes.
+The CLI prints a one-time code and a URL; open the URL on any signed-in browser (phone, another machine), paste the code, review the requester IP and time, then approve or reject. Approval completes the CLI login; rejection stops it immediately.
 
 For non-interactive CI use a pre-issued API key (`nyxid api-key create --platform <agent>`) instead of an interactive login — `nyxid login` short-circuits in CI environments with a hint to do exactly that.
 
