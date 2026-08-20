@@ -106,7 +106,7 @@ export function WebDeviceLogin({ returnTo }: WebDeviceLoginProps) {
     deviceLogin.phase === "denied"
       ? "Sign-in was rejected"
       : deviceLogin.phase === "expired"
-        ? "Code expired — generate a new one"
+        ? "Code expired - generate a new one"
         : deviceLogin.phase === "used"
           ? "This code was already used"
           : deviceLogin.phase === "error"
@@ -141,7 +141,7 @@ export function WebDeviceLogin({ returnTo }: WebDeviceLoginProps) {
 
       {deviceLogin.phase === "requesting" && (
         <p className="mt-5 text-center text-[12px] text-muted-foreground">
-          Generating a sign-in code…
+          Generating a sign-in code...
         </p>
       )}
 
@@ -156,7 +156,7 @@ export function WebDeviceLogin({ returnTo }: WebDeviceLoginProps) {
               />
             ) : (
               <div className="flex size-[208px] items-center justify-center rounded-md border border-border text-[12px] text-muted-foreground">
-                Preparing QR code…
+                Preparing QR code...
               </div>
             )}
           </div>
@@ -214,7 +214,7 @@ export function WebDeviceLogin({ returnTo }: WebDeviceLoginProps) {
       {deviceLogin.phase === "success" && (
         <div className="mt-5 flex items-center justify-center gap-2 text-[13px] text-success">
           <Check className="size-4" />
-          Signed in. Redirecting…
+          Signed in. Redirecting...
         </div>
       )}
 
