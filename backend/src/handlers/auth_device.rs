@@ -12,10 +12,13 @@ use utoipa::ToSchema;
 
 use crate::AppState;
 use crate::errors::{AppError, AppResult};
+use crate::handlers::auth::apply_browser_session_cookies;
 use crate::mw::auth::AuthUser;
 use crate::services::auth_device_service::{
     self, ApproveInput, DenyInput, InitiateInput, PollClaim, PreviewOutput,
 };
+use crate::services::{audit_service, token_service};
+use crate::telemetry::{TelemetryContext, TelemetryEvent, emit_event};
 
 type HmacSha256 = Hmac<Sha256>;
 
@@ -198,6 +201,7 @@ pub async fn poll_auth_device(
             encrypted_access,
             encrypted_refresh,
             expires_in,
+            ..
         } => {
             let (access_token, refresh_token) = auth_device_service::decrypt_tokens(
                 &state.encryption_keys,
@@ -219,6 +223,149 @@ pub async fn poll_auth_device(
                 expires_in,
             }))
         }
+    }
+}
+
+#[utoipa::path(
+    post,
+    path = "/api/v1/auth/device/poll-web",
+    request_body = AuthDevicePollBody,
+    responses(
+        (status = 200, body = AuthDeviceDecisionResponse),
+        (status = 400, body = crate::errors::ErrorResponse),
+        (status = 403, body = crate::errors::ErrorResponse),
+        (status = 404, body = crate::errors::ErrorResponse),
+        (status = 410, body = crate::errors::ErrorResponse),
+        (status = 429, body = crate::errors::ErrorResponse)
+    ),
+    tag = "Auth Device Login"
+)]
+#[tracing::instrument(skip_all, fields(client_ip_hash, route = "poll-web"))]
+pub async fn poll_auth_device_web(
+    State(state): State<AppState>,
+    ConnectInfo(addr): ConnectInfo<SocketAddr>,
+    telemetry: TelemetryContext,
+    headers: HeaderMap,
+    Json(body): Json<AuthDevicePollBody>,
+) -> AppResult<(HeaderMap, Json<AuthDeviceDecisionResponse>)> {
+    let client_ip = resolve_client_ip(&headers, addr, &state)?;
+    let client_ip_hash = client_ip_hash(&state, client_ip);
+    tracing::Span::current().record("client_ip_hash", client_ip_hash.as_str());
+
+    if !state.auth_device_poll_limiter.check(client_ip) {
+        rate_limit_hit("poll-web", &client_ip_hash);
+        return Err(AppError::AuthDeviceCodeRateLimited);
+    }
+
+    let claim = auth_device_service::poll_and_claim(
+        &state.db,
+        state.auth_device_hmac_key.as_slice(),
+        &body.device_code,
+    )
+    .await?;
+
+    let (approved_user_id, approved_session_id) = match claim {
+        PollClaim::Pending => {
+            trace_poll_error(&client_ip_hash, "pending");
+            return Err(AppError::AuthDeviceCodePending);
+        }
+        PollClaim::SlowDown => {
+            trace_poll_error(&client_ip_hash, "slow_down");
+            return Err(AppError::AuthDeviceCodeSlowDown);
+        }
+        PollClaim::Denied => {
+            trace_poll_error(&client_ip_hash, "denied");
+            return Err(AppError::AuthDeviceCodeDenied);
+        }
+        PollClaim::Expired => {
+            trace_poll_error(&client_ip_hash, "expired");
+            return Err(AppError::AuthDeviceCodeExpired);
+        }
+        PollClaim::AlreadyDelivered => {
+            trace_poll_error(&client_ip_hash, "already_delivered");
+            return Err(AppError::AuthDeviceCodeAlreadyDelivered);
+        }
+        PollClaim::Ready {
+            approved_user_id,
+            approved_session_id,
+            ..
+        } => (approved_user_id, approved_session_id),
+    };
+
+    token_service::revoke_session(&state.db, &approved_session_id, Some(&state.mcp_sessions))
+        .await?;
+
+    let browser_user_agent = user_agent(&headers);
+    let browser_ip = client_ip.to_string();
+    let browser_session = token_service::create_session(
+        &state.db,
+        &approved_user_id,
+        Some(browser_ip.as_str()),
+        browser_user_agent.as_deref(),
+    )
+    .await?;
+
+    let mut response_headers = HeaderMap::new();
+    if let Err(error) = apply_browser_session_cookies(
+        &mut response_headers,
+        &browser_session.session_token,
+        state.config.use_secure_cookies(),
+        state.config.cookie_domain(),
+    ) {
+        cleanup_web_delivery_session(&state, &browser_session.session_id).await;
+        return Err(error);
+    }
+
+    audit_service::log_async(
+        state.db.clone(),
+        Some(approved_user_id.clone()),
+        "login".to_string(),
+        Some(serde_json::json!({
+            "session_id": &browser_session.session_id,
+            "method": "device_code_web",
+        })),
+        Some(browser_ip),
+        browser_user_agent,
+        None,
+        None,
+    );
+
+    emit_event(
+        state.telemetry.as_deref(),
+        &approved_user_id,
+        None,
+        &telemetry,
+        TelemetryEvent::AuthLoggedIn {
+            method: "device_code_web".to_string(),
+            mfa_required: false,
+        },
+    );
+
+    tracing::info!(
+        client_ip_hash = %client_ip_hash,
+        user_id = %approved_user_id,
+        session_id = %browser_session.session_id,
+        revoked_session_id = %approved_session_id,
+        audit_logged = true,
+        outcome = "delivered",
+        "auth_device.handler.poll_web"
+    );
+
+    Ok((
+        response_headers,
+        Json(AuthDeviceDecisionResponse { ok: true }),
+    ))
+}
+
+async fn cleanup_web_delivery_session(state: &AppState, session_id: &str) {
+    if let Err(error) =
+        token_service::revoke_session(&state.db, session_id, Some(&state.mcp_sessions)).await
+    {
+        tracing::error!(
+            session_id,
+            error = %error,
+            "failed to revoke browser session after auth-device cookie failure"
+        );
     }
 }
 
@@ -466,7 +613,7 @@ fn trace_poll_error(client_ip_hash: &str, outcome: &str) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use axum::http::StatusCode;
+    use axum::http::{StatusCode, header};
     use mongodb::bson::doc;
     use reqwest::Client;
     use serde_json::Value;
@@ -477,6 +624,8 @@ mod tests {
     use crate::models::auth_device_code::{
         AuthDeviceCode, AuthDeviceCodeStatus, COLLECTION_NAME as AUTH_DEVICE_CODES,
     };
+    use crate::models::refresh_token::{COLLECTION_NAME as REFRESH_TOKENS, RefreshToken};
+    use crate::models::session::{COLLECTION_NAME as SESSIONS, Session};
     use crate::models::user::{COLLECTION_NAME as USERS, UserType};
     use crate::services::auth_device_service::InitiateInput;
     use crate::test_utils::{connect_test_database, test_app_config, test_app_state, test_user};
@@ -627,6 +776,29 @@ mod tests {
         assert_eq!(json["error_code"], code);
     }
 
+    async fn request_and_approve(state: &AppState, server: &TestServer, user_id: &str) -> Value {
+        let token = access_token(state, user_id);
+        let (status, request_json) = post_json(
+            server,
+            "/api/v1/auth/device/request",
+            None,
+            serde_json::json!({}),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+
+        let (status, response) = post_json(
+            server,
+            "/api/v1/auth/device/approve",
+            Some(&token),
+            serde_json::json!({ "user_code": request_json["user_code"] }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(response, serde_json::json!({ "ok": true }));
+        request_json
+    }
+
     #[tokio::test]
     async fn auth_device_full_happy_path_returns_valid_jwt_pair() {
         let Some(state) = setup_state("auth_device_http_happy").await else {
@@ -698,6 +870,381 @@ mod tests {
         )
         .expect("valid refresh token");
         assert_eq!(refresh_claims.sub, access_claims.sub);
+    }
+
+    #[tokio::test]
+    async fn auth_device_web_poll_sets_browser_cookie_and_revokes_approval_session() {
+        let Some(state) = setup_state("auth_device_web_poll_happy").await else {
+            return;
+        };
+        crate::services::role_service::seed_system_roles(&state.db)
+            .await
+            .expect("seed roles");
+        let user_id = Uuid::new_v4().to_string();
+        insert_user(&state, &user_id).await;
+        let server = spawn_test_server(state.clone()).await;
+        let request_json = request_and_approve(&state, &server, &user_id).await;
+
+        let device_row = state
+            .db
+            .collection::<AuthDeviceCode>(AUTH_DEVICE_CODES)
+            .find_one(doc! {})
+            .await
+            .expect("query auth-device row")
+            .expect("auth-device row");
+        let approved_session_id = device_row.approved_session_id.expect("approved session id");
+
+        let response = server
+            .client
+            .post(format!("{}/api/v1/auth/device/poll-web", server.base_url))
+            .header(header::USER_AGENT.as_str(), "NyxID web test/1.0")
+            .json(&serde_json::json!({
+                "device_code": request_json["device_code"]
+            }))
+            .send()
+            .await
+            .expect("web poll request");
+        assert_eq!(response.status(), StatusCode::OK);
+
+        let set_cookies = response
+            .headers()
+            .get_all(header::SET_COOKIE.as_str())
+            .iter()
+            .map(|value| value.to_str().expect("set-cookie value").to_string())
+            .collect::<Vec<_>>();
+        let session_cookie = set_cookies
+            .iter()
+            .find(|value| value.starts_with("nyx_session="))
+            .expect("nyx_session cookie");
+        assert!(session_cookie.contains("; HttpOnly"));
+        assert!(session_cookie.contains("; SameSite=Lax"));
+        assert!(session_cookie.contains("; Path=/"));
+        assert!(session_cookie.contains("; Max-Age=2592000"));
+        assert!(!session_cookie.contains("; Secure"));
+        let cookie_pair = session_cookie
+            .split(';')
+            .next()
+            .expect("cookie name/value")
+            .to_string();
+
+        let body = response.json::<Value>().await.expect("web poll response");
+        assert_eq!(body, serde_json::json!({ "ok": true }));
+        assert!(body.get("access_token").is_none());
+        assert!(body.get("refresh_token").is_none());
+
+        let approval_session = state
+            .db
+            .collection::<Session>(SESSIONS)
+            .find_one(doc! { "_id": &approved_session_id })
+            .await
+            .expect("query approval session")
+            .expect("approval session");
+        assert!(approval_session.revoked);
+
+        let approval_refresh = state
+            .db
+            .collection::<RefreshToken>(REFRESH_TOKENS)
+            .find_one(doc! { "session_id": &approved_session_id })
+            .await
+            .expect("query approval refresh token")
+            .expect("approval refresh token");
+        assert!(approval_refresh.revoked);
+
+        let browser_session = state
+            .db
+            .collection::<Session>(SESSIONS)
+            .find_one(doc! {
+                "user_id": &user_id,
+                "_id": { "$ne": &approved_session_id },
+            })
+            .await
+            .expect("query browser session")
+            .expect("browser session");
+        assert!(!browser_session.revoked);
+        assert_eq!(browser_session.ip_address.as_deref(), Some("127.0.0.1"));
+        assert_eq!(
+            browser_session.user_agent.as_deref(),
+            Some("NyxID web test/1.0")
+        );
+
+        let me_response = server
+            .client
+            .get(format!("{}/api/v1/users/me", server.base_url))
+            .header(header::COOKIE.as_str(), cookie_pair)
+            .send()
+            .await
+            .expect("users/me request");
+        assert_eq!(me_response.status(), StatusCode::OK);
+        let me_json = me_response
+            .json::<Value>()
+            .await
+            .expect("users/me response");
+        assert_eq!(me_json["id"], user_id);
+
+        for _ in 0..20 {
+            if let Some(log) = state
+                .db
+                .collection::<AuditLog>(AUDIT_LOG)
+                .find_one(doc! {
+                    "event_type": "login",
+                    "user_id": &user_id,
+                    "event_data.session_id": &browser_session.id,
+                })
+                .await
+                .expect("query login audit")
+            {
+                assert_eq!(
+                    log.event_data
+                        .as_ref()
+                        .and_then(|data| data.get("method"))
+                        .and_then(Value::as_str),
+                    Some("device_code_web")
+                );
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+        }
+        let audit = state
+            .db
+            .collection::<AuditLog>(AUDIT_LOG)
+            .find_one(doc! {
+                "event_type": "login",
+                "user_id": &user_id,
+                "event_data.session_id": &browser_session.id,
+            })
+            .await
+            .expect("query final login audit");
+        assert!(audit.is_some(), "expected device-code web login audit");
+
+        let (status, json) = post_json(
+            &server,
+            "/api/v1/auth/device/poll",
+            None,
+            serde_json::json!({ "device_code": request_json["device_code"] }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::GONE);
+        assert_error(&json, "auth_device_already_delivered", 11205);
+    }
+
+    #[tokio::test]
+    async fn auth_device_json_poll_then_web_poll_is_already_delivered() {
+        let Some(state) = setup_state("auth_device_json_then_web_poll").await else {
+            return;
+        };
+        let user_id = Uuid::new_v4().to_string();
+        insert_user(&state, &user_id).await;
+        let server = spawn_test_server(state.clone()).await;
+        let request_json = request_and_approve(&state, &server, &user_id).await;
+
+        let (status, _) = post_json(
+            &server,
+            "/api/v1/auth/device/poll",
+            None,
+            serde_json::json!({ "device_code": request_json["device_code"] }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+
+        let (status, json) = post_json(
+            &server,
+            "/api/v1/auth/device/poll-web",
+            None,
+            serde_json::json!({ "device_code": request_json["device_code"] }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::GONE);
+        assert_error(&json, "auth_device_already_delivered", 11205);
+    }
+
+    #[tokio::test]
+    async fn auth_device_web_poll_maps_pending_denied_and_expired() {
+        let Some(state) = setup_state("auth_device_web_poll_outcomes").await else {
+            return;
+        };
+        let user_id = Uuid::new_v4().to_string();
+        insert_user(&state, &user_id).await;
+        let token = access_token(&state, &user_id);
+        let server = spawn_test_server(state.clone()).await;
+
+        let (_, pending) = post_json(
+            &server,
+            "/api/v1/auth/device/request",
+            None,
+            serde_json::json!({}),
+        )
+        .await;
+        let (status, json) = post_json(
+            &server,
+            "/api/v1/auth/device/poll-web",
+            None,
+            serde_json::json!({ "device_code": pending["device_code"] }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert_error(&json, "auth_device_authorization_pending", 11202);
+
+        let (_, denied) = post_json(
+            &server,
+            "/api/v1/auth/device/request",
+            None,
+            serde_json::json!({}),
+        )
+        .await;
+        let (status, _) = post_json(
+            &server,
+            "/api/v1/auth/device/deny",
+            Some(&token),
+            serde_json::json!({ "user_code": denied["user_code"] }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        let (status, json) = post_json(
+            &server,
+            "/api/v1/auth/device/poll-web",
+            None,
+            serde_json::json!({ "device_code": denied["device_code"] }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::FORBIDDEN);
+        assert_error(&json, "auth_device_access_denied", 11204);
+
+        let (_, expired) = post_json(
+            &server,
+            "/api/v1/auth/device/request",
+            None,
+            serde_json::json!({ "client_label": "expired-web-poll-test" }),
+        )
+        .await;
+        state
+            .db
+            .collection::<AuthDeviceCode>(AUTH_DEVICE_CODES)
+            .update_one(
+                doc! { "client_label": "expired-web-poll-test" },
+                doc! { "$set": { "expires_at": bson::DateTime::from_chrono(
+                    chrono::Utc::now() - chrono::Duration::seconds(1),
+                ) } },
+            )
+            .await
+            .expect("expire auth-device row");
+        let (status, json) = post_json(
+            &server,
+            "/api/v1/auth/device/poll-web",
+            None,
+            serde_json::json!({ "device_code": expired["device_code"] }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::GONE);
+        assert_error(&json, "auth_device_expired_token", 11201);
+    }
+
+    #[tokio::test]
+    async fn auth_device_poll_and_web_poll_share_rate_limiter() {
+        let Some(mut state) = setup_state("auth_device_web_poll_shared_limit").await else {
+            return;
+        };
+        state.auth_device_poll_limiter = crate::mw::rate_limit::create_per_ip_rate_limiter(1, 60);
+        let server = spawn_test_server(state).await;
+
+        let (status, json) = post_json(
+            &server,
+            "/api/v1/auth/device/poll",
+            None,
+            serde_json::json!({ "device_code": "nyx_adc_unknown" }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+        assert_error(&json, "auth_device_code_not_found", 11200);
+
+        let (status, json) = post_json(
+            &server,
+            "/api/v1/auth/device/poll-web",
+            None,
+            serde_json::json!({ "device_code": "nyx_adc_unknown" }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::TOO_MANY_REQUESTS);
+        assert_error(&json, "auth_device_rate_limited", 11206);
+    }
+
+    #[tokio::test]
+    async fn auth_device_web_poll_cookie_failure_revokes_both_sessions() {
+        let Some(db) = connect_test_database("auth_device_web_poll_cookie_failure").await else {
+            return;
+        };
+        crate::db::ensure_indexes(&db)
+            .await
+            .expect("ensure indexes");
+        let mut config = test_app_config();
+        config.cookie_domain = Some("invalid\ndomain".to_string());
+        let state = crate::test_utils::test_app_state_with_config(db, config);
+        let user_id = Uuid::new_v4().to_string();
+        insert_user(&state, &user_id).await;
+        let server = spawn_test_server(state.clone()).await;
+        let request_json = request_and_approve(&state, &server, &user_id).await;
+        let device_row = state
+            .db
+            .collection::<AuthDeviceCode>(AUTH_DEVICE_CODES)
+            .find_one(doc! {})
+            .await
+            .expect("query auth-device row")
+            .expect("auth-device row");
+        let approved_session_id = device_row.approved_session_id.expect("approved session id");
+
+        let (status, json) = post_json(
+            &server,
+            "/api/v1/auth/device/poll-web",
+            None,
+            serde_json::json!({ "device_code": request_json["device_code"] }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR);
+        assert_eq!(json["error"], "internal_error");
+
+        let approval_session = state
+            .db
+            .collection::<Session>(SESSIONS)
+            .find_one(doc! { "_id": &approved_session_id })
+            .await
+            .expect("query approval session")
+            .expect("approval session");
+        assert!(approval_session.revoked);
+        assert_eq!(
+            state
+                .db
+                .collection::<Session>(SESSIONS)
+                .count_documents(doc! { "user_id": &user_id, "revoked": false })
+                .await
+                .expect("count active sessions"),
+            0
+        );
+        assert_eq!(
+            state
+                .db
+                .collection::<Session>(SESSIONS)
+                .count_documents(doc! { "user_id": &user_id, "revoked": true })
+                .await
+                .expect("count revoked sessions"),
+            2
+        );
+        let approval_refresh = state
+            .db
+            .collection::<RefreshToken>(REFRESH_TOKENS)
+            .find_one(doc! { "session_id": &approved_session_id })
+            .await
+            .expect("query approval refresh token")
+            .expect("approval refresh token");
+        assert!(approval_refresh.revoked);
+
+        let (status, json) = post_json(
+            &server,
+            "/api/v1/auth/device/poll",
+            None,
+            serde_json::json!({ "device_code": request_json["device_code"] }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::GONE);
+        assert_error(&json, "auth_device_already_delivered", 11205);
     }
 
     #[tokio::test]

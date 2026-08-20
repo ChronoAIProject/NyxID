@@ -640,6 +640,8 @@ Consent endpoints use the authenticated user's ID from the `AuthUser` middleware
 
 NyxID's first-party web app uses only the `nyx_session` cookie for browser authentication. Mobile apps and OAuth clients use bearer access tokens and explicit refresh-token request bodies instead of browser auth cookies.
 
+The first-party browser device-code login uses the same cookie contract: a successful public `POST /api/v1/auth/device/poll-web` atomically claims delivery, revokes the approval-created JWT session, creates a fresh browser session bound to the polling browser's IP and user agent, and returns only `{ "ok": true }` with `nyx_session` set. The route never returns access or refresh tokens and shares the JSON poll rate limiter; integrators must use `/poll` for token delivery.
+
 ### Authentication Chain
 
 Requests are authenticated in this order:

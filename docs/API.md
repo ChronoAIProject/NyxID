@@ -522,6 +522,26 @@ Poll no faster than the `interval` returned by `/request`. A `11202` response me
 | `11206` | `auth_device_rate_limited` | 429 | Endpoint rate limit was exceeded |
 | `11207` | `auth_device_user_code_invalid` | 400 | The first-party review UI supplied an invalid user code |
 
+#### POST /api/v1/auth/device/poll-web
+
+First-party browser delivery variant for the NyxID web login page. Integrators and desktop/CLI clients must continue using `/auth/device/poll`, which returns the token pair.
+
+**Auth:** None (the response establishes the browser session)
+
+```json
+{
+  "device_code": "nyx_adc_<opaque-secret>"
+}
+```
+
+On a successful approved claim, the endpoint atomically marks the request delivered, revokes the approval-created JWT session, creates a fresh browser session using the polling browser's IP and user agent, and returns:
+
+```json
+{ "ok": true }
+```
+
+The response sets the standard `nyx_session` cookie (`HttpOnly`, `SameSite=Lax`, `Path=/`, and the deployment's normal `Secure`/`Domain` settings). Access and refresh tokens are never returned in the body. Pending, denied, expired, already-delivered, and rate-limit outcomes use the same `11200`-`11207` error contract as `/poll`; a claim delivered through either variant makes the other variant return `11205`.
+
 #### POST /api/v1/auth/device/preview
 
 Fetch the non-mutating anti-phishing context shown by first-party review surfaces.

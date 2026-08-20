@@ -1373,6 +1373,10 @@ pub fn build_router() -> (Router<AppState>, Router<AppState>) {
     let auth_device_public_routes = Router::new()
         .route("/request", post(handlers::auth_device::request_auth_device))
         .route("/poll", post(handlers::auth_device::poll_auth_device))
+        .route(
+            "/poll-web",
+            post(handlers::auth_device::poll_auth_device_web),
+        )
         .route("/preview", post(handlers::auth_device::preview_auth_device));
     let device_onboard_public_routes =
         Router::new().route("/redeem", post(handlers::devices::redeem_onboard_device));

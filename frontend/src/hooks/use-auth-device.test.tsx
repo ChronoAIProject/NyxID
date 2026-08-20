@@ -1,17 +1,26 @@
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import { renderHook, waitFor } from "@testing-library/react";
+import { act, renderHook, waitFor } from "@testing-library/react";
 import type { PropsWithChildren } from "react";
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
   useApproveAuthDevice,
   useDenyAuthDevice,
   usePreviewAuthDevice,
+  useWebAuthDeviceLogin,
 } from "./use-auth-device";
 
-const { mockPost } = vi.hoisted(() => ({ mockPost: vi.fn() }));
+const { mockPost, mockCheckAuth } = vi.hoisted(() => ({
+  mockPost: vi.fn(),
+  mockCheckAuth: vi.fn(),
+}));
 
 vi.mock("@/lib/api-client", () => ({
   api: { post: mockPost },
+}));
+
+vi.mock("@/stores/auth-store", () => ({
+  useAuthStore: (selector: (state: { checkAuth: typeof mockCheckAuth }) => unknown) =>
+    selector({ checkAuth: mockCheckAuth }),
 }));
 
 function wrapper({ children }: PropsWithChildren) {
@@ -25,6 +34,12 @@ function wrapper({ children }: PropsWithChildren) {
 
 beforeEach(() => {
   vi.clearAllMocks();
+  mockCheckAuth.mockResolvedValue(undefined);
+});
+
+afterEach(() => {
+  vi.clearAllTimers();
+  vi.useRealTimers();
 });
 
 describe("usePreviewAuthDevice", () => {
@@ -164,5 +179,212 @@ describe("useDenyAuthDevice", () => {
     expect(mockPost).toHaveBeenCalledWith("/auth/device/deny", {
       user_code: "ABCDEFGH",
     });
+  });
+});
+
+const requestResponse = {
+  device_code: "nyx_adc_test",
+  user_code: "ABCD-EFGH",
+  verification_uri: "https://id.example/login/device",
+  verification_uri_complete:
+    "https://id.example/login/device?user_code=ABCD-EFGH",
+  expires_in: 60,
+  interval: 5,
+};
+
+describe("useWebAuthDeviceLogin", () => {
+  it("does not request on mount and starts only after explicit activation", async () => {
+    const { result } = renderHook(() => useWebAuthDeviceLogin());
+    expect(mockPost).not.toHaveBeenCalled();
+
+    mockPost.mockResolvedValueOnce(requestResponse);
+    await act(async () => {
+      result.current.start();
+      await Promise.resolve();
+    });
+
+    await waitFor(() => expect(result.current.phase).toBe("pending"));
+    expect(mockPost).toHaveBeenCalledWith("/auth/device/request", {
+      client_label: expect.stringMatching(/^NyxID web/),
+      client_user_agent: expect.any(String),
+    });
+  });
+
+  it("polls at the server interval and adds five seconds after slow_down", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-08-20T10:00:00Z"));
+    mockPost.mockResolvedValueOnce(requestResponse);
+    const { result } = renderHook(() => useWebAuthDeviceLogin());
+
+    await act(async () => {
+      result.current.start();
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+    expect(result.current.phase).toBe("pending");
+    expect(mockPost).toHaveBeenCalledTimes(1);
+
+    const slowDown = {
+      errorCode: 11203,
+      errorResponse: {
+        error: "auth_device_slow_down",
+        error_code: 11203,
+        message: "Slow down",
+      },
+    };
+    mockPost.mockRejectedValueOnce(slowDown).mockResolvedValueOnce({ ok: true });
+
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(4_999);
+    });
+    expect(mockPost).toHaveBeenCalledTimes(1);
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(1);
+    });
+    expect(mockPost).toHaveBeenCalledTimes(2);
+
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(9_999);
+    });
+    expect(mockPost).toHaveBeenCalledTimes(2);
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(1);
+    });
+    expect(mockPost).toHaveBeenCalledTimes(3);
+    expect(result.current.phase).toBe("success");
+    expect(mockCheckAuth).toHaveBeenCalledTimes(1);
+  });
+
+  it("treats rate limiting as backoff and keeps polling", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-08-20T10:00:00Z"));
+    mockPost.mockResolvedValueOnce(requestResponse);
+    const { result } = renderHook(() => useWebAuthDeviceLogin());
+    await act(async () => {
+      result.current.start();
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+
+    const rateLimited = {
+      errorCode: 11206,
+      errorResponse: {
+        error: "auth_device_rate_limited",
+        error_code: 11206,
+        message: "Rate limited",
+      },
+    };
+    mockPost.mockRejectedValueOnce(rateLimited).mockResolvedValueOnce({ ok: true });
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(5_000);
+    });
+    expect(mockPost).toHaveBeenCalledTimes(2);
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(9_999);
+    });
+    expect(mockPost).toHaveBeenCalledTimes(2);
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(1);
+    });
+    expect(mockPost).toHaveBeenCalledTimes(3);
+    expect(result.current.phase).toBe("success");
+  });
+
+  it("recovers from one transient poll failure", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-08-20T10:00:00Z"));
+    mockPost.mockResolvedValueOnce(requestResponse);
+    const { result } = renderHook(() => useWebAuthDeviceLogin());
+    await act(async () => {
+      result.current.start();
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+
+    mockPost
+      .mockRejectedValueOnce(new Error("temporary network failure"))
+      .mockResolvedValueOnce({ ok: true });
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(5_000);
+    });
+    expect(mockPost).toHaveBeenCalledTimes(2);
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(5_000);
+    });
+    expect(mockPost).toHaveBeenCalledTimes(3);
+    expect(result.current.phase).toBe("success");
+  });
+
+  it("enters error after the consecutive transient-failure budget", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-08-20T10:00:00Z"));
+    mockPost.mockResolvedValueOnce(requestResponse);
+    const { result } = renderHook(() => useWebAuthDeviceLogin());
+    await act(async () => {
+      result.current.start();
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+
+    mockPost
+      .mockRejectedValueOnce(new Error("network failure 1"))
+      .mockRejectedValueOnce(new Error("network failure 2"))
+      .mockRejectedValueOnce(new Error("network failure 3"))
+      .mockRejectedValueOnce(new Error("network failure 4"));
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(5_000);
+    });
+    expect(result.current.phase).toBe("pending");
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(5_000);
+    });
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(5_000);
+    });
+    expect(result.current.phase).toBe("pending");
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(5_000);
+    });
+    expect(result.current.phase).toBe("error");
+    expect(mockPost).toHaveBeenCalledTimes(5);
+  });
+
+  it("stops polling on denied and supports explicit regeneration", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-08-20T10:00:00Z"));
+    mockPost.mockResolvedValueOnce(requestResponse);
+    const { result } = renderHook(() => useWebAuthDeviceLogin());
+    await act(async () => {
+      result.current.start();
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+    const denied = {
+      errorCode: 11204,
+      errorResponse: {
+        error: "auth_device_access_denied",
+        error_code: 11204,
+        message: "Denied",
+      },
+    };
+    mockPost.mockRejectedValueOnce(denied);
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(5_000);
+    });
+    expect(result.current.phase).toBe("denied");
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(60_000);
+    });
+    expect(mockPost).toHaveBeenCalledTimes(2);
+
+    mockPost.mockResolvedValueOnce({ ...requestResponse, device_code: "nyx_adc_new" });
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(750);
+      result.current.generateNew();
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+    expect(mockPost).toHaveBeenCalledTimes(3);
+    expect(result.current.phase).toBe("pending");
   });
 });

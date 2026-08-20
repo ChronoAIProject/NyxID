@@ -56,6 +56,8 @@ pub enum PollClaim {
         encrypted_access: Vec<u8>,
         encrypted_refresh: Vec<u8>,
         expires_in: i64,
+        approved_user_id: String,
+        approved_session_id: String,
     },
 }
 
@@ -696,11 +698,21 @@ async fn deliver_approved_claim(
                     "approved auth-device row missing access token expiry".to_string(),
                 )
             })?;
+            let approved_user_id = claimed.approved_user_id.ok_or_else(|| {
+                AppError::Internal("approved auth-device row missing approved user id".to_string())
+            })?;
+            let approved_session_id = claimed.approved_session_id.ok_or_else(|| {
+                AppError::Internal(
+                    "approved auth-device row missing approved session id".to_string(),
+                )
+            })?;
             tracing::info!("auth_device.deliver");
             Ok(PollClaim::Ready {
                 encrypted_access,
                 encrypted_refresh,
                 expires_in,
+                approved_user_id,
+                approved_session_id,
             })
         }
         None => Ok(PollClaim::AlreadyDelivered),
@@ -1629,6 +1641,8 @@ mod tests {
                 encrypted_access: b"encrypted-access".to_vec(),
                 encrypted_refresh: b"encrypted-refresh".to_vec(),
                 expires_in: 900,
+                approved_user_id: "approved-user-id".to_string(),
+                approved_session_id: "approved-session-id".to_string(),
             }
         );
 
@@ -1670,6 +1684,10 @@ mod tests {
         expires_at: DateTime<Utc>,
     ) -> AuthDeviceCode {
         let now = Utc::now();
+        let has_approval = matches!(
+            status,
+            AuthDeviceCodeStatus::Approved | AuthDeviceCodeStatus::Delivered
+        );
         let row = AuthDeviceCode {
             id: Uuid::new_v4().to_string(),
             device_code_hmac: hmac_hex(TEST_HMAC_KEY, b"device-code"),
@@ -1682,8 +1700,8 @@ mod tests {
             client_ip: None,
             client_ip_hmac: None,
             last_polled_at: None,
-            approved_user_id: None,
-            approved_session_id: None,
+            approved_user_id: has_approval.then(|| "approved-user-id".to_string()),
+            approved_session_id: has_approval.then(|| "approved-session-id".to_string()),
             approver_ip_hmac: None,
             delivery_access_token_encrypted: Some(b"encrypted-access".to_vec()),
             delivery_refresh_token_encrypted: Some(b"encrypted-refresh".to_vec()),
