@@ -1,3 +1,8 @@
+// The assistant-actions golden manifest is a single `json!` literal covering
+// every published descriptor (54 and growing), which exceeds the default
+// macro recursion limit during test expansion.
+#![recursion_limit = "1024"]
+
 use axum::{extract::DefaultBodyLimit, extract::Extension, middleware as axum_mw};
 use clap::{Parser, Subcommand};
 use tokio::net::TcpListener;

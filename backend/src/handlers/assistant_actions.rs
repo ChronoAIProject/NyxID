@@ -126,6 +126,37 @@ const PENDING_CREDENTIAL_PUSH_DESCRIPTION: &str = "Ask the user's browser to que
 const PENDING_CREDENTIAL_CANCEL_DESCRIPTION: &str = "Ask the user's browser to cancel one exact queued pending credential. Destructive: the queued secret is discarded. NyxID confirms every time and reports only the pending-credential reference.";
 const DEVICE_ONBOARD_DESCRIPTION: &str = "Ask the user's browser to onboard a headless device and issue its scoped provisioning credentials. NyxID owns the whole journey and shows provisioning material once in the browser, reporting only a safe device reference. Never request, expose, or repeat a device code or credential in chat.";
 
+const ORG_CREATE_DESCRIPTION: &str = "Ask the user's browser to create a NyxID organization. NyxID owns the journey in the user's own browser and reports only a safe typed resource reference. Never request, expose, or repeat credential material in chat.";
+const ORG_UPDATE_DESCRIPTION: &str = "Ask the user's browser to update one exact organization's profile. NyxID owns the journey in the user's own browser and reports only a safe typed resource reference. Never request, expose, or repeat credential material in chat.";
+const ORG_DELETE_DESCRIPTION: &str = "Ask the user's browser to delete one exact organization and every membership it owns. Destructive: NyxID confirms every time and never remembers this action. NyxID owns the journey in the user's own browser and reports only a safe typed resource reference. Never request, expose, or repeat credential material in chat.";
+const ORG_MEMBER_ADD_DESCRIPTION: &str = "Ask the user's browser to add one exact member to an organization with an explicit role. NyxID owns the journey in the user's own browser and reports only a safe typed resource reference. Never request, expose, or repeat credential material in chat.";
+const ORG_MEMBER_REMOVE_DESCRIPTION: &str = "Ask the user's browser to remove one exact organization member. Destructive: NyxID confirms every time and never remembers this action. NyxID owns the journey in the user's own browser and reports only a safe typed resource reference. Never request, expose, or repeat credential material in chat.";
+const ORG_MEMBER_UPDATE_ROLE_DESCRIPTION: &str = "Ask the user's browser to change one exact organization member's role. NyxID owns the journey in the user's own browser and reports only a safe typed resource reference. Never request, expose, or repeat credential material in chat.";
+const ORG_INVITE_DESCRIPTION: &str = "Ask the user's browser to mint an organization invite for an explicit role. NyxID owns the journey in the user's own browser and reports only a safe typed resource reference. Never request, expose, or repeat credential material in chat.";
+const ORG_SET_PRIMARY_DESCRIPTION: &str = "Ask the user's browser to set one exact organization as the primary one. NyxID owns the journey in the user's own browser and reports only a safe typed resource reference. Never request, expose, or repeat credential material in chat.";
+const ACCOUNT_PROFILE_UPDATE_DESCRIPTION: &str = "Ask the user's browser to update the signed-in account profile. NyxID owns the journey in the user's own browser and reports only a safe typed resource reference. Never request, expose, or repeat credential material in chat.";
+const ACCOUNT_REVOKE_CONSENT_DESCRIPTION: &str = "Ask the user's browser to revoke one exact application's consent. Destructive: NyxID confirms every time and never remembers this action. NyxID owns the journey in the user's own browser and reports only a safe typed resource reference. Never request, expose, or repeat credential material in chat.";
+const ACCOUNT_DELETE_DESCRIPTION: &str = "Ask the user's browser to open the irreversible account deletion journey. Destructive: NyxID confirms every time and never remembers this action. NyxID owns the journey in the user's own browser and reports only a safe typed resource reference. Never request, expose, or repeat credential material in chat.";
+const ACCOUNT_MFA_SETUP_DESCRIPTION: &str = "Ask the user's browser to set up multi-factor authentication. NyxID owns the journey in the user's own browser and reports only a safe typed resource reference. Never request, expose, or repeat credential material in chat.";
+const APPROVAL_CONFIGURE_DESCRIPTION: &str = "Ask the user's browser to configure the approval policy for one exact service. NyxID owns the journey in the user's own browser and reports only a safe typed resource reference. Never request, expose, or repeat credential material in chat.";
+const APPROVAL_ENABLE_DESCRIPTION: &str = "Ask the user's browser to require approvals for one exact service. NyxID owns the journey in the user's own browser and reports only a safe typed resource reference. Never request, expose, or repeat credential material in chat.";
+const APPROVAL_DISABLE_DESCRIPTION: &str = "Ask the user's browser to stop requiring approvals for one exact service. Destructive: NyxID confirms every time and never remembers this action. NyxID owns the journey in the user's own browser and reports only a safe typed resource reference. Never request, expose, or repeat credential material in chat.";
+const APPROVAL_REVOKE_GRANT_DESCRIPTION: &str = "Ask the user's browser to revoke one exact standing approval grant. Destructive: NyxID confirms every time and never remembers this action. NyxID owns the journey in the user's own browser and reports only a safe typed resource reference. Never request, expose, or repeat credential material in chat.";
+const NOTIFICATIONS_UPDATE_DESCRIPTION: &str = "Ask the user's browser to open notification settings so the user can change them. NyxID owns the journey in the user's own browser and reports only a safe typed resource reference. Never request, expose, or repeat credential material in chat.";
+const NOTIFICATIONS_TELEGRAM_LINK_DESCRIPTION: &str = "Ask the user's browser to link a Telegram account for approval notifications. NyxID owns the journey in the user's own browser and reports only a safe typed resource reference. Never request, expose, or repeat credential material in chat.";
+const NOTIFICATIONS_TELEGRAM_DISCONNECT_DESCRIPTION: &str = "Ask the user's browser to disconnect the linked Telegram account. Destructive: NyxID confirms every time and never remembers this action. NyxID owns the journey in the user's own browser and reports only a safe typed resource reference. Never request, expose, or repeat credential material in chat.";
+const SERVICE_ACCOUNT_CREATE_DESCRIPTION: &str = "Ask the user's browser to create a service account and show its secret once. NyxID owns the journey in the user's own browser and reports only a safe typed resource reference. Never request, expose, or repeat credential material in chat.";
+const SERVICE_ACCOUNT_UPDATE_DESCRIPTION: &str = "Ask the user's browser to update one exact service account. NyxID owns the journey in the user's own browser and reports only a safe typed resource reference. Never request, expose, or repeat credential material in chat.";
+const SERVICE_ACCOUNT_DELETE_DESCRIPTION: &str = "Ask the user's browser to delete one exact service account. Destructive: NyxID confirms every time and never remembers this action. NyxID owns the journey in the user's own browser and reports only a safe typed resource reference. Never request, expose, or repeat credential material in chat.";
+const SERVICE_ACCOUNT_ROTATE_SECRET_DESCRIPTION: &str = "Ask the user's browser to rotate one exact service account's secret. NyxID owns the journey in the user's own browser and reports only a safe typed resource reference. Never request, expose, or repeat credential material in chat.";
+const SERVICE_ACCOUNT_REVOKE_TOKENS_DESCRIPTION: &str = "Ask the user's browser to revoke every live token for one exact service account. Destructive: NyxID confirms every time and never remembers this action. NyxID owns the journey in the user's own browser and reports only a safe typed resource reference. Never request, expose, or repeat credential material in chat.";
+const DEVELOPER_APP_CREATE_DESCRIPTION: &str = "Ask the user's browser to create a developer OAuth application and show its secret once. NyxID owns the journey in the user's own browser and reports only a safe typed resource reference. Never request, expose, or repeat credential material in chat.";
+const DEVELOPER_APP_UPDATE_DESCRIPTION: &str = "Ask the user's browser to update one exact developer OAuth application. NyxID owns the journey in the user's own browser and reports only a safe typed resource reference. Never request, expose, or repeat credential material in chat.";
+const DEVELOPER_APP_DELETE_DESCRIPTION: &str = "Ask the user's browser to delete one exact developer OAuth application. Destructive: NyxID confirms every time and never remembers this action. NyxID owns the journey in the user's own browser and reports only a safe typed resource reference. Never request, expose, or repeat credential material in chat.";
+const DEVELOPER_APP_ROTATE_SECRET_DESCRIPTION: &str = "Ask the user's browser to rotate one exact developer OAuth application's secret. NyxID owns the journey in the user's own browser and reports only a safe typed resource reference. Never request, expose, or repeat credential material in chat.";
+const EXTERNAL_KEY_ADD_GCP_SERVICE_ACCOUNT_DESCRIPTION: &str = "Ask the user's browser to add a GCP service-account key as an external credential. NyxID owns the journey in the user's own browser and reports only a safe typed resource reference. Never request, expose, or repeat credential material in chat.";
+const OPENCLAW_CONNECT_DESCRIPTION: &str = "Ask the user's browser to connect a self-hosted OpenClaw gateway. NyxID owns the journey in the user's own browser and reports only a safe typed resource reference. Never request, expose, or repeat credential material in chat.";
+
 #[derive(Serialize)]
 struct AssistantActionsManifest {
     schema_version: u32,
@@ -594,6 +625,460 @@ static MANIFEST_BODY: LazyLock<String> = LazyLock::new(|| {
                 tier: "v1",
                 remember_eligible: false,
             },
+            AssistantActionDescriptor {
+                action: "org.create",
+                description: ORG_CREATE_DESCRIPTION,
+                params_schema: json!({
+                    "type": "object",
+                    "additionalProperties": false,
+                    "required": ["displayName"],
+                    "properties": {
+                        "displayName": { "type": "string" },
+                        "contactEmail": { "type": "string" },
+                        "avatarUrl": { "type": "string" }
+                    }
+                }),
+                risk: "grant",
+                tier: "v1",
+                remember_eligible: false,
+            },
+            AssistantActionDescriptor {
+                action: "org.update",
+                description: ORG_UPDATE_DESCRIPTION,
+                params_schema: json!({
+                    "type": "object",
+                    "additionalProperties": false,
+                    "required": ["orgId"],
+                    "properties": {
+                        "orgId": { "type": "string" },
+                        "displayName": { "type": "string" },
+                        "slug": { "type": "string" },
+                        "contactEmail": { "type": "string" },
+                        "avatarUrl": { "type": "string" }
+                    }
+                }),
+                risk: "grant",
+                tier: "v1",
+                remember_eligible: false,
+            },
+            AssistantActionDescriptor {
+                action: "org.delete",
+                description: ORG_DELETE_DESCRIPTION,
+                params_schema: json!({
+                    "type": "object",
+                    "additionalProperties": false,
+                    "required": ["orgId"],
+                    "properties": {
+                        "orgId": { "type": "string" }
+                    }
+                }),
+                risk: "destructive",
+                tier: "v1",
+                remember_eligible: false,
+            },
+            AssistantActionDescriptor {
+                action: "org.member_add",
+                description: ORG_MEMBER_ADD_DESCRIPTION,
+                params_schema: json!({
+                    "type": "object",
+                    "additionalProperties": false,
+                    "required": ["orgId", "userId", "role"],
+                    "properties": {
+                        "orgId": { "type": "string" },
+                        "userId": { "type": "string" },
+                        "role": { "type": "string" },
+                        "allowedServiceIds": { "type": "array", "items": { "type": "string" } }
+                    }
+                }),
+                risk: "grant",
+                tier: "v1",
+                remember_eligible: false,
+            },
+            AssistantActionDescriptor {
+                action: "org.member_remove",
+                description: ORG_MEMBER_REMOVE_DESCRIPTION,
+                params_schema: json!({
+                    "type": "object",
+                    "additionalProperties": false,
+                    "required": ["orgId", "memberId"],
+                    "properties": {
+                        "orgId": { "type": "string" },
+                        "memberId": { "type": "string" }
+                    }
+                }),
+                risk: "destructive",
+                tier: "v1",
+                remember_eligible: false,
+            },
+            AssistantActionDescriptor {
+                action: "org.member_update_role",
+                description: ORG_MEMBER_UPDATE_ROLE_DESCRIPTION,
+                params_schema: json!({
+                    "type": "object",
+                    "additionalProperties": false,
+                    "required": ["orgId", "memberId", "role"],
+                    "properties": {
+                        "orgId": { "type": "string" },
+                        "memberId": { "type": "string" },
+                        "role": { "type": "string" }
+                    }
+                }),
+                risk: "grant",
+                tier: "v1",
+                remember_eligible: false,
+            },
+            AssistantActionDescriptor {
+                action: "org.invite",
+                description: ORG_INVITE_DESCRIPTION,
+                params_schema: json!({
+                    "type": "object",
+                    "additionalProperties": false,
+                    "required": ["orgId", "role"],
+                    "properties": {
+                        "orgId": { "type": "string" },
+                        "role": { "type": "string" },
+                        "allowedServiceIds": { "type": "array", "items": { "type": "string" } }
+                    }
+                }),
+                risk: "grant",
+                tier: "v1",
+                remember_eligible: false,
+            },
+            AssistantActionDescriptor {
+                action: "org.set_primary",
+                description: ORG_SET_PRIMARY_DESCRIPTION,
+                params_schema: json!({
+                    "type": "object",
+                    "additionalProperties": false,
+                    "required": ["orgId"],
+                    "properties": {
+                        "orgId": { "type": "string" }
+                    }
+                }),
+                risk: "grant",
+                tier: "v1",
+                remember_eligible: false,
+            },
+            AssistantActionDescriptor {
+                action: "account.profile_update",
+                description: ACCOUNT_PROFILE_UPDATE_DESCRIPTION,
+                params_schema: json!({
+                    "type": "object",
+                    "additionalProperties": false,
+                    "properties": {
+                        "displayName": { "type": "string" },
+                        "avatarUrl": { "type": "string" }
+                    }
+                }),
+                risk: "grant",
+                tier: "v1",
+                remember_eligible: false,
+            },
+            AssistantActionDescriptor {
+                action: "account.revoke_consent",
+                description: ACCOUNT_REVOKE_CONSENT_DESCRIPTION,
+                params_schema: json!({
+                    "type": "object",
+                    "additionalProperties": false,
+                    "required": ["clientId"],
+                    "properties": {
+                        "clientId": { "type": "string" }
+                    }
+                }),
+                risk: "destructive",
+                tier: "v1",
+                remember_eligible: false,
+            },
+            AssistantActionDescriptor {
+                action: "account.delete",
+                description: ACCOUNT_DELETE_DESCRIPTION,
+                params_schema: json!({
+                    "type": "object",
+                    "additionalProperties": false,
+                    "properties": {}
+                }),
+                risk: "destructive",
+                tier: "v1",
+                remember_eligible: false,
+            },
+            AssistantActionDescriptor {
+                action: "account.mfa_setup",
+                description: ACCOUNT_MFA_SETUP_DESCRIPTION,
+                params_schema: json!({
+                    "type": "object",
+                    "additionalProperties": false,
+                    "properties": {}
+                }),
+                risk: "grant",
+                tier: "v1",
+                remember_eligible: false,
+            },
+            AssistantActionDescriptor {
+                action: "approval.configure",
+                description: APPROVAL_CONFIGURE_DESCRIPTION,
+                params_schema: json!({
+                    "type": "object",
+                    "additionalProperties": false,
+                    "required": ["serviceId"],
+                    "properties": {
+                        "serviceId": { "type": "string" }
+                    }
+                }),
+                risk: "grant",
+                tier: "v1",
+                remember_eligible: false,
+            },
+            AssistantActionDescriptor {
+                action: "approval.enable",
+                description: APPROVAL_ENABLE_DESCRIPTION,
+                params_schema: json!({
+                    "type": "object",
+                    "additionalProperties": false,
+                    "required": ["serviceId"],
+                    "properties": {
+                        "serviceId": { "type": "string" }
+                    }
+                }),
+                risk: "grant",
+                tier: "v1",
+                remember_eligible: false,
+            },
+            AssistantActionDescriptor {
+                action: "approval.disable",
+                description: APPROVAL_DISABLE_DESCRIPTION,
+                params_schema: json!({
+                    "type": "object",
+                    "additionalProperties": false,
+                    "required": ["serviceId"],
+                    "properties": {
+                        "serviceId": { "type": "string" }
+                    }
+                }),
+                risk: "destructive",
+                tier: "v1",
+                remember_eligible: false,
+            },
+            AssistantActionDescriptor {
+                action: "approval.revoke_grant",
+                description: APPROVAL_REVOKE_GRANT_DESCRIPTION,
+                params_schema: json!({
+                    "type": "object",
+                    "additionalProperties": false,
+                    "required": ["grantId"],
+                    "properties": {
+                        "grantId": { "type": "string" }
+                    }
+                }),
+                risk: "destructive",
+                tier: "v1",
+                remember_eligible: false,
+            },
+            AssistantActionDescriptor {
+                action: "notifications.update",
+                description: NOTIFICATIONS_UPDATE_DESCRIPTION,
+                params_schema: json!({
+                    "type": "object",
+                    "additionalProperties": false,
+                    "properties": {}
+                }),
+                risk: "low",
+                tier: "v1",
+                remember_eligible: false,
+            },
+            AssistantActionDescriptor {
+                action: "notifications.telegram_link",
+                description: NOTIFICATIONS_TELEGRAM_LINK_DESCRIPTION,
+                params_schema: json!({
+                    "type": "object",
+                    "additionalProperties": false,
+                    "properties": {}
+                }),
+                risk: "grant",
+                tier: "v1",
+                remember_eligible: false,
+            },
+            AssistantActionDescriptor {
+                action: "notifications.telegram_disconnect",
+                description: NOTIFICATIONS_TELEGRAM_DISCONNECT_DESCRIPTION,
+                params_schema: json!({
+                    "type": "object",
+                    "additionalProperties": false,
+                    "properties": {}
+                }),
+                risk: "destructive",
+                tier: "v1",
+                remember_eligible: false,
+            },
+            AssistantActionDescriptor {
+                action: "service_account.create",
+                description: SERVICE_ACCOUNT_CREATE_DESCRIPTION,
+                params_schema: json!({
+                    "type": "object",
+                    "additionalProperties": false,
+                    "required": ["name"],
+                    "properties": {
+                        "name": { "type": "string" },
+                        "description": { "type": "string" }
+                    }
+                }),
+                risk: "grant",
+                tier: "v1",
+                remember_eligible: false,
+            },
+            AssistantActionDescriptor {
+                action: "service_account.update",
+                description: SERVICE_ACCOUNT_UPDATE_DESCRIPTION,
+                params_schema: json!({
+                    "type": "object",
+                    "additionalProperties": false,
+                    "required": ["serviceAccountId"],
+                    "properties": {
+                        "serviceAccountId": { "type": "string" },
+                        "name": { "type": "string" },
+                        "description": { "type": "string" }
+                    }
+                }),
+                risk: "grant",
+                tier: "v1",
+                remember_eligible: false,
+            },
+            AssistantActionDescriptor {
+                action: "service_account.delete",
+                description: SERVICE_ACCOUNT_DELETE_DESCRIPTION,
+                params_schema: json!({
+                    "type": "object",
+                    "additionalProperties": false,
+                    "required": ["serviceAccountId"],
+                    "properties": {
+                        "serviceAccountId": { "type": "string" }
+                    }
+                }),
+                risk: "destructive",
+                tier: "v1",
+                remember_eligible: false,
+            },
+            AssistantActionDescriptor {
+                action: "service_account.rotate_secret",
+                description: SERVICE_ACCOUNT_ROTATE_SECRET_DESCRIPTION,
+                params_schema: json!({
+                    "type": "object",
+                    "additionalProperties": false,
+                    "required": ["serviceAccountId"],
+                    "properties": {
+                        "serviceAccountId": { "type": "string" }
+                    }
+                }),
+                risk: "grant",
+                tier: "v1",
+                remember_eligible: false,
+            },
+            AssistantActionDescriptor {
+                action: "service_account.revoke_tokens",
+                description: SERVICE_ACCOUNT_REVOKE_TOKENS_DESCRIPTION,
+                params_schema: json!({
+                    "type": "object",
+                    "additionalProperties": false,
+                    "required": ["serviceAccountId"],
+                    "properties": {
+                        "serviceAccountId": { "type": "string" }
+                    }
+                }),
+                risk: "destructive",
+                tier: "v1",
+                remember_eligible: false,
+            },
+            AssistantActionDescriptor {
+                action: "developer_app.create",
+                description: DEVELOPER_APP_CREATE_DESCRIPTION,
+                params_schema: json!({
+                    "type": "object",
+                    "additionalProperties": false,
+                    "required": ["name", "redirectUris"],
+                    "properties": {
+                        "name": { "type": "string" },
+                        "redirectUris": { "type": "array", "items": { "type": "string" } }
+                    }
+                }),
+                risk: "grant",
+                tier: "v1",
+                remember_eligible: false,
+            },
+            AssistantActionDescriptor {
+                action: "developer_app.update",
+                description: DEVELOPER_APP_UPDATE_DESCRIPTION,
+                params_schema: json!({
+                    "type": "object",
+                    "additionalProperties": false,
+                    "required": ["clientId"],
+                    "properties": {
+                        "clientId": { "type": "string" },
+                        "name": { "type": "string" },
+                        "redirectUris": { "type": "array", "items": { "type": "string" } }
+                    }
+                }),
+                risk: "grant",
+                tier: "v1",
+                remember_eligible: false,
+            },
+            AssistantActionDescriptor {
+                action: "developer_app.delete",
+                description: DEVELOPER_APP_DELETE_DESCRIPTION,
+                params_schema: json!({
+                    "type": "object",
+                    "additionalProperties": false,
+                    "required": ["clientId"],
+                    "properties": {
+                        "clientId": { "type": "string" }
+                    }
+                }),
+                risk: "destructive",
+                tier: "v1",
+                remember_eligible: false,
+            },
+            AssistantActionDescriptor {
+                action: "developer_app.rotate_secret",
+                description: DEVELOPER_APP_ROTATE_SECRET_DESCRIPTION,
+                params_schema: json!({
+                    "type": "object",
+                    "additionalProperties": false,
+                    "required": ["clientId"],
+                    "properties": {
+                        "clientId": { "type": "string" }
+                    }
+                }),
+                risk: "grant",
+                tier: "v1",
+                remember_eligible: false,
+            },
+            AssistantActionDescriptor {
+                action: "external_key.add_gcp_service_account",
+                description: EXTERNAL_KEY_ADD_GCP_SERVICE_ACCOUNT_DESCRIPTION,
+                params_schema: json!({
+                    "type": "object",
+                    "additionalProperties": false,
+                    "properties": {
+                        "label": { "type": "string" }
+                    }
+                }),
+                risk: "grant",
+                tier: "v1",
+                remember_eligible: false,
+            },
+            AssistantActionDescriptor {
+                action: "openclaw.connect",
+                description: OPENCLAW_CONNECT_DESCRIPTION,
+                params_schema: json!({
+                    "type": "object",
+                    "additionalProperties": false,
+                    "required": ["gatewayUrl"],
+                    "properties": {
+                        "gatewayUrl": { "type": "string" }
+                    }
+                }),
+                risk: "grant",
+                tier: "v1",
+                remember_eligible: false,
+            },
         ],
     };
 
@@ -736,8 +1221,33 @@ mod tests {
         "node.transfer",
         "pending_credential.push",
         "pending_credential.cancel",
+        "org.create",
+        "org.update",
+        "org.delete",
+        "org.member_add",
+        "org.member_remove",
+        "org.member_update_role",
+        "org.invite",
+        "org.set_primary",
+        "account.profile_update",
+        "account.revoke_consent",
+        "account.delete",
+        "approval.configure",
+        "approval.enable",
+        "approval.disable",
+        "approval.revoke_grant",
+        "notifications.update",
+        "notifications.telegram_link",
+        "notifications.telegram_disconnect",
+        "service_account.update",
+        "service_account.delete",
+        "service_account.revoke_tokens",
+        "developer_app.update",
+        "developer_app.delete",
+        "external_key.add_gcp_service_account",
+        "openclaw.connect",
         "device.onboard",
-        // Wave 2 (dormant; not pinned by any Aevatar revision yet)
+        "// Wave 2 (dormant; not pinned by any Aevatar revision yet)",
         "key.update",
         "key.delete",
         "key.extend_scope",
@@ -1271,6 +1781,460 @@ mod tests {
                     "risk": "grant",
                     "tier": "v1",
                     "remember_eligible": false
+                },
+                {
+                    "action": "org.create",
+                    "description": super::ORG_CREATE_DESCRIPTION,
+                    "params_schema": {
+                        "type": "object",
+                        "additionalProperties": false,
+                        "required": ["displayName"],
+                        "properties": {
+                            "displayName": { "type": "string" },
+                            "contactEmail": { "type": "string" },
+                            "avatarUrl": { "type": "string" }
+                        }
+                    },
+                    "risk": "grant",
+                    "tier": "v1",
+                    "remember_eligible": false
+                },
+                {
+                    "action": "org.update",
+                    "description": super::ORG_UPDATE_DESCRIPTION,
+                    "params_schema": {
+                        "type": "object",
+                        "additionalProperties": false,
+                        "required": ["orgId"],
+                        "properties": {
+                            "orgId": { "type": "string" },
+                            "displayName": { "type": "string" },
+                            "slug": { "type": "string" },
+                            "contactEmail": { "type": "string" },
+                            "avatarUrl": { "type": "string" }
+                        }
+                    },
+                    "risk": "grant",
+                    "tier": "v1",
+                    "remember_eligible": false
+                },
+                {
+                    "action": "org.delete",
+                    "description": super::ORG_DELETE_DESCRIPTION,
+                    "params_schema": {
+                        "type": "object",
+                        "additionalProperties": false,
+                        "required": ["orgId"],
+                        "properties": {
+                            "orgId": { "type": "string" }
+                        }
+                    },
+                    "risk": "destructive",
+                    "tier": "v1",
+                    "remember_eligible": false
+                },
+                {
+                    "action": "org.member_add",
+                    "description": super::ORG_MEMBER_ADD_DESCRIPTION,
+                    "params_schema": {
+                        "type": "object",
+                        "additionalProperties": false,
+                        "required": ["orgId", "userId", "role"],
+                        "properties": {
+                            "orgId": { "type": "string" },
+                            "userId": { "type": "string" },
+                            "role": { "type": "string" },
+                            "allowedServiceIds": { "type": "array", "items": { "type": "string" } }
+                        }
+                    },
+                    "risk": "grant",
+                    "tier": "v1",
+                    "remember_eligible": false
+                },
+                {
+                    "action": "org.member_remove",
+                    "description": super::ORG_MEMBER_REMOVE_DESCRIPTION,
+                    "params_schema": {
+                        "type": "object",
+                        "additionalProperties": false,
+                        "required": ["orgId", "memberId"],
+                        "properties": {
+                            "orgId": { "type": "string" },
+                            "memberId": { "type": "string" }
+                        }
+                    },
+                    "risk": "destructive",
+                    "tier": "v1",
+                    "remember_eligible": false
+                },
+                {
+                    "action": "org.member_update_role",
+                    "description": super::ORG_MEMBER_UPDATE_ROLE_DESCRIPTION,
+                    "params_schema": {
+                        "type": "object",
+                        "additionalProperties": false,
+                        "required": ["orgId", "memberId", "role"],
+                        "properties": {
+                            "orgId": { "type": "string" },
+                            "memberId": { "type": "string" },
+                            "role": { "type": "string" }
+                        }
+                    },
+                    "risk": "grant",
+                    "tier": "v1",
+                    "remember_eligible": false
+                },
+                {
+                    "action": "org.invite",
+                    "description": super::ORG_INVITE_DESCRIPTION,
+                    "params_schema": {
+                        "type": "object",
+                        "additionalProperties": false,
+                        "required": ["orgId", "role"],
+                        "properties": {
+                            "orgId": { "type": "string" },
+                            "role": { "type": "string" },
+                            "allowedServiceIds": { "type": "array", "items": { "type": "string" } }
+                        }
+                    },
+                    "risk": "grant",
+                    "tier": "v1",
+                    "remember_eligible": false
+                },
+                {
+                    "action": "org.set_primary",
+                    "description": super::ORG_SET_PRIMARY_DESCRIPTION,
+                    "params_schema": {
+                        "type": "object",
+                        "additionalProperties": false,
+                        "required": ["orgId"],
+                        "properties": {
+                            "orgId": { "type": "string" }
+                        }
+                    },
+                    "risk": "grant",
+                    "tier": "v1",
+                    "remember_eligible": false
+                },
+                {
+                    "action": "account.profile_update",
+                    "description": super::ACCOUNT_PROFILE_UPDATE_DESCRIPTION,
+                    "params_schema": {
+                        "type": "object",
+                        "additionalProperties": false,
+                        "properties": {
+                            "displayName": { "type": "string" },
+                            "avatarUrl": { "type": "string" }
+                        }
+                    },
+                    "risk": "grant",
+                    "tier": "v1",
+                    "remember_eligible": false
+                },
+                {
+                    "action": "account.revoke_consent",
+                    "description": super::ACCOUNT_REVOKE_CONSENT_DESCRIPTION,
+                    "params_schema": {
+                        "type": "object",
+                        "additionalProperties": false,
+                        "required": ["clientId"],
+                        "properties": {
+                            "clientId": { "type": "string" }
+                        }
+                    },
+                    "risk": "destructive",
+                    "tier": "v1",
+                    "remember_eligible": false
+                },
+                {
+                    "action": "account.delete",
+                    "description": super::ACCOUNT_DELETE_DESCRIPTION,
+                    "params_schema": {
+                        "type": "object",
+                        "additionalProperties": false,
+                        "properties": {}
+                    },
+                    "risk": "destructive",
+                    "tier": "v1",
+                    "remember_eligible": false
+                },
+                {
+                    "action": "account.mfa_setup",
+                    "description": super::ACCOUNT_MFA_SETUP_DESCRIPTION,
+                    "params_schema": {
+                        "type": "object",
+                        "additionalProperties": false,
+                        "properties": {}
+                    },
+                    "risk": "grant",
+                    "tier": "v1",
+                    "remember_eligible": false
+                },
+                {
+                    "action": "approval.configure",
+                    "description": super::APPROVAL_CONFIGURE_DESCRIPTION,
+                    "params_schema": {
+                        "type": "object",
+                        "additionalProperties": false,
+                        "required": ["serviceId"],
+                        "properties": {
+                            "serviceId": { "type": "string" }
+                        }
+                    },
+                    "risk": "grant",
+                    "tier": "v1",
+                    "remember_eligible": false
+                },
+                {
+                    "action": "approval.enable",
+                    "description": super::APPROVAL_ENABLE_DESCRIPTION,
+                    "params_schema": {
+                        "type": "object",
+                        "additionalProperties": false,
+                        "required": ["serviceId"],
+                        "properties": {
+                            "serviceId": { "type": "string" }
+                        }
+                    },
+                    "risk": "grant",
+                    "tier": "v1",
+                    "remember_eligible": false
+                },
+                {
+                    "action": "approval.disable",
+                    "description": super::APPROVAL_DISABLE_DESCRIPTION,
+                    "params_schema": {
+                        "type": "object",
+                        "additionalProperties": false,
+                        "required": ["serviceId"],
+                        "properties": {
+                            "serviceId": { "type": "string" }
+                        }
+                    },
+                    "risk": "destructive",
+                    "tier": "v1",
+                    "remember_eligible": false
+                },
+                {
+                    "action": "approval.revoke_grant",
+                    "description": super::APPROVAL_REVOKE_GRANT_DESCRIPTION,
+                    "params_schema": {
+                        "type": "object",
+                        "additionalProperties": false,
+                        "required": ["grantId"],
+                        "properties": {
+                            "grantId": { "type": "string" }
+                        }
+                    },
+                    "risk": "destructive",
+                    "tier": "v1",
+                    "remember_eligible": false
+                },
+                {
+                    "action": "notifications.update",
+                    "description": super::NOTIFICATIONS_UPDATE_DESCRIPTION,
+                    "params_schema": {
+                        "type": "object",
+                        "additionalProperties": false,
+                        "properties": {}
+                    },
+                    "risk": "low",
+                    "tier": "v1",
+                    "remember_eligible": false
+                },
+                {
+                    "action": "notifications.telegram_link",
+                    "description": super::NOTIFICATIONS_TELEGRAM_LINK_DESCRIPTION,
+                    "params_schema": {
+                        "type": "object",
+                        "additionalProperties": false,
+                        "properties": {}
+                    },
+                    "risk": "grant",
+                    "tier": "v1",
+                    "remember_eligible": false
+                },
+                {
+                    "action": "notifications.telegram_disconnect",
+                    "description": super::NOTIFICATIONS_TELEGRAM_DISCONNECT_DESCRIPTION,
+                    "params_schema": {
+                        "type": "object",
+                        "additionalProperties": false,
+                        "properties": {}
+                    },
+                    "risk": "destructive",
+                    "tier": "v1",
+                    "remember_eligible": false
+                },
+                {
+                    "action": "service_account.create",
+                    "description": super::SERVICE_ACCOUNT_CREATE_DESCRIPTION,
+                    "params_schema": {
+                        "type": "object",
+                        "additionalProperties": false,
+                        "required": ["name"],
+                        "properties": {
+                            "name": { "type": "string" },
+                            "description": { "type": "string" }
+                        }
+                    },
+                    "risk": "grant",
+                    "tier": "v1",
+                    "remember_eligible": false
+                },
+                {
+                    "action": "service_account.update",
+                    "description": super::SERVICE_ACCOUNT_UPDATE_DESCRIPTION,
+                    "params_schema": {
+                        "type": "object",
+                        "additionalProperties": false,
+                        "required": ["serviceAccountId"],
+                        "properties": {
+                            "serviceAccountId": { "type": "string" },
+                            "name": { "type": "string" },
+                            "description": { "type": "string" }
+                        }
+                    },
+                    "risk": "grant",
+                    "tier": "v1",
+                    "remember_eligible": false
+                },
+                {
+                    "action": "service_account.delete",
+                    "description": super::SERVICE_ACCOUNT_DELETE_DESCRIPTION,
+                    "params_schema": {
+                        "type": "object",
+                        "additionalProperties": false,
+                        "required": ["serviceAccountId"],
+                        "properties": {
+                            "serviceAccountId": { "type": "string" }
+                        }
+                    },
+                    "risk": "destructive",
+                    "tier": "v1",
+                    "remember_eligible": false
+                },
+                {
+                    "action": "service_account.rotate_secret",
+                    "description": super::SERVICE_ACCOUNT_ROTATE_SECRET_DESCRIPTION,
+                    "params_schema": {
+                        "type": "object",
+                        "additionalProperties": false,
+                        "required": ["serviceAccountId"],
+                        "properties": {
+                            "serviceAccountId": { "type": "string" }
+                        }
+                    },
+                    "risk": "grant",
+                    "tier": "v1",
+                    "remember_eligible": false
+                },
+                {
+                    "action": "service_account.revoke_tokens",
+                    "description": super::SERVICE_ACCOUNT_REVOKE_TOKENS_DESCRIPTION,
+                    "params_schema": {
+                        "type": "object",
+                        "additionalProperties": false,
+                        "required": ["serviceAccountId"],
+                        "properties": {
+                            "serviceAccountId": { "type": "string" }
+                        }
+                    },
+                    "risk": "destructive",
+                    "tier": "v1",
+                    "remember_eligible": false
+                },
+                {
+                    "action": "developer_app.create",
+                    "description": super::DEVELOPER_APP_CREATE_DESCRIPTION,
+                    "params_schema": {
+                        "type": "object",
+                        "additionalProperties": false,
+                        "required": ["name", "redirectUris"],
+                        "properties": {
+                            "name": { "type": "string" },
+                            "redirectUris": { "type": "array", "items": { "type": "string" } }
+                        }
+                    },
+                    "risk": "grant",
+                    "tier": "v1",
+                    "remember_eligible": false
+                },
+                {
+                    "action": "developer_app.update",
+                    "description": super::DEVELOPER_APP_UPDATE_DESCRIPTION,
+                    "params_schema": {
+                        "type": "object",
+                        "additionalProperties": false,
+                        "required": ["clientId"],
+                        "properties": {
+                            "clientId": { "type": "string" },
+                            "name": { "type": "string" },
+                            "redirectUris": { "type": "array", "items": { "type": "string" } }
+                        }
+                    },
+                    "risk": "grant",
+                    "tier": "v1",
+                    "remember_eligible": false
+                },
+                {
+                    "action": "developer_app.delete",
+                    "description": super::DEVELOPER_APP_DELETE_DESCRIPTION,
+                    "params_schema": {
+                        "type": "object",
+                        "additionalProperties": false,
+                        "required": ["clientId"],
+                        "properties": {
+                            "clientId": { "type": "string" }
+                        }
+                    },
+                    "risk": "destructive",
+                    "tier": "v1",
+                    "remember_eligible": false
+                },
+                {
+                    "action": "developer_app.rotate_secret",
+                    "description": super::DEVELOPER_APP_ROTATE_SECRET_DESCRIPTION,
+                    "params_schema": {
+                        "type": "object",
+                        "additionalProperties": false,
+                        "required": ["clientId"],
+                        "properties": {
+                            "clientId": { "type": "string" }
+                        }
+                    },
+                    "risk": "grant",
+                    "tier": "v1",
+                    "remember_eligible": false
+                },
+                {
+                    "action": "external_key.add_gcp_service_account",
+                    "description": super::EXTERNAL_KEY_ADD_GCP_SERVICE_ACCOUNT_DESCRIPTION,
+                    "params_schema": {
+                        "type": "object",
+                        "additionalProperties": false,
+                        "properties": {
+                            "label": { "type": "string" }
+                        }
+                    },
+                    "risk": "grant",
+                    "tier": "v1",
+                    "remember_eligible": false
+                },
+                {
+                    "action": "openclaw.connect",
+                    "description": super::OPENCLAW_CONNECT_DESCRIPTION,
+                    "params_schema": {
+                        "type": "object",
+                        "additionalProperties": false,
+                        "required": ["gatewayUrl"],
+                        "properties": {
+                            "gatewayUrl": { "type": "string" }
+                        }
+                    },
+                    "risk": "grant",
+                    "tier": "v1",
+                    "remember_eligible": false
                 }
             ]
         })
@@ -1631,7 +2595,7 @@ mod tests {
 
         assert_eq!(manifest["schema_version"], 4);
         assert_eq!(manifest["revision"], "nyxid-assistant-actions.v8");
-        assert_eq!(actions.len(), 24);
+        assert_eq!(actions.len(), 54);
         assert_eq!(actions[0]["action"], "service.connect");
         assert_eq!(actions[0]["risk"], "grant");
         assert_eq!(actions[0]["tier"], "v1");
@@ -1698,6 +2662,16 @@ mod tests {
             "node.delete",
             "node.transfer",
             "pending_credential.cancel",
+            "org.delete",
+            "org.member_remove",
+            "account.revoke_consent",
+            "account.delete",
+            "approval.disable",
+            "approval.revoke_grant",
+            "notifications.telegram_disconnect",
+            "service_account.delete",
+            "service_account.revoke_tokens",
+            "developer_app.delete",
         ];
         let wave2: Vec<&str> = SUPPORTED_ACTIONS
             .iter()
@@ -1711,8 +2685,8 @@ mod tests {
             .collect();
         assert_eq!(
             wave2.len(),
-            20,
-            "expected 12 Wave-2 + 8 Wave-3 dormant descriptors"
+            50,
+            "expected 12 Wave-2 + 8 Wave-3 + 30 Wave-4 dormant descriptors"
         );
         for name in wave2 {
             let entry = actions
@@ -1723,8 +2697,13 @@ mod tests {
                 entry["remember_eligible"], false,
                 "dormant descriptors must never be remembered: {name}"
             );
+            // `low` is a legitimate third risk tier (execute immediately, show a
+            // receipt) for verbs that only open a settings surface.
+            let low = ["notifications.update"];
             let expected_risk = if destructive.contains(&name) {
                 "destructive"
+            } else if low.contains(&name) {
+                "low"
             } else {
                 "grant"
             };
@@ -2118,8 +3097,8 @@ mod tests {
             .collect();
         assert_eq!(
             dormant.len(),
-            20,
-            "expected 12 Wave-2 + 8 Wave-3 dormant descriptors"
+            50,
+            "expected 12 Wave-2 + 8 Wave-3 + 30 Wave-4 dormant descriptors"
         );
 
         for (revision, action_names) in PINNED_ACTIONS_BY_REVISION {
