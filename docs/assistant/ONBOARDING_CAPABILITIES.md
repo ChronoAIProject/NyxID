@@ -124,6 +124,90 @@ A new account, nothing connected, asks the assistant what people are saying abou
 
 ---
 
+# Implementation specification
+
+Concrete enough to hand to an engineer. Every file path and identifier below was verified against the branch.
+
+## Item 1 — Let the assistant use tools
+
+**This is not a build. The machinery exists and is already routed.**
+
+`services/assistant_direct_agent_poc.rs` (1,579 lines) plus `services/assistant_direct_agent_poc/{tools,prompt,sse_decode}.rs` (1,845 lines in `tools.rs` alone) implement a read-only tool registry exposing two tools to the model — `nyx_search_tools` and `nyx_call_tool` — with operation resolution, eligibility filtering, and a result boundary. It is mounted at `POST /api/v1/assistant/direct/agent` (`routes.rs:136-138`).
+
+**And it already understands platform services.** `tools.rs:198` maps `McpToolSource::Platform` to `"platform"` in its service listing — unlike `handlers/mcp_transport.rs:659`, which filters platform rows out for scoped keys. The POC does not inherit that restriction.
+
+**What gates it:** `handlers/assistant_direct_agent_poc.rs:35` calls `require_direct_chat_enabled`, which checks the feature flag `experimental:direct-chat-engine` (`services/feature_flag_service.rs:111`), settable per-platform via `set_platform_override`.
+
+**The work is therefore:**
+1. Enable the flag for a test account and drive the POC against a configured platform row end to end.
+2. Confirm `is_poc_operation_eligible` (`tools.rs:130`) admits the operations we intend to expose — it filters to typed read operations, so `POST /v2/scrape` and `POST /air/offer_requests` need checking specifically, since they are POSTs that are semantically reads.
+3. Decide whether the POC becomes the default assistant path or stays flagged.
+
+**Acceptance:** a flagged account asks for recent posts on a topic and receives real results, with the tool call visible in the response trace.
+
+**This is the item whose size I cannot yet state honestly** — it depends entirely on what step 2 finds. Everything else below is bounded.
+
+## Item 2 — Platform rows must refuse to run without a policy
+
+**Current behaviour:** an absent `proxy_operation_policy` means passthrough — every operation allowed (`models/downstream_service.rs:351-353`). Only an empty-but-present policy denies.
+
+**Change:** in `services/proxy_authorization.rs`, when the resolved service holds a master credential, treat absent policy as deny rather than allow. Reuse the existing predicate `is_valid_master_credential_service` (`services/proxy_service.rs:246`) to identify those rows.
+
+**Acceptance:** a platform-credentialed row with no policy returns not-found for every operation; a non-platform row is unaffected.
+
+## Item 3 — Reject the wrong kind of credential
+
+**Current behaviour:** nothing inspects credential type. Seeded `api-twitter` carries `provider_config_id` and `auth_method: "none"` (`services/provider_service.rs:3765`, `:3825`), and its provider defaults include `tweet.write` (`:590-595`).
+
+**Change:** at admin write (`handlers/services.rs`, the create and update paths that already call `normalize_policy`), reject a row that combines a master credential with either a `provider_config_id` or a user-mode credential shape. This is a hard error, not a warning.
+
+**Acceptance:** creating a platform row with a provider config returns 400; the existing BYOK rows are untouched.
+
+## Item 4 — Stop the overlay resurrecting removed operations
+
+**Current behaviour:** `services/service_endpoint_service.rs:336` force-sets overlay-named endpoints `is_active: true` on every startup sync, so an operator cannot remove `POST /tweets` from their own database — it returns on the next boot.
+
+**Change:** two parts. Trim the shipped overlays so they stop advertising operations we exclude — X `POST /tweets`, `GET /users/me`; Firecrawl `POST /v2/agent`, `GET /v2/agent/{id}`, `POST /v2/map`; ElevenLabs `GET /v1/voices` and the six `convai` operations. And make the sync stop reactivating an endpoint an operator has explicitly deactivated.
+
+**Acceptance:** an operator deactivates an endpoint, restarts, and it stays deactivated. `tools/list` matches the policy.
+
+## Item 5 — Per-user rate limit on the shared credential
+
+**Current behaviour:** the limiter keys on API-key id and only runs when that key carries an explicit limit (`mw/rate_limit.rs:462-496`); browser sessions bypass it entirely.
+
+**Change:** add a per-user bucket for platform-credentialed rows, keyed on the effective user rather than the key.
+
+**Acceptance:** one session exceeding the cap is throttled without affecting another user.
+
+## The service configurations
+
+Each is one admin call — `POST /api/v1/services` — carrying `credential` and `proxy_operation_policy` together, so the row is never live-but-unrestricted. Then `is_active: true`.
+
+**X** — one operation:
+`GET /2/tweets/search/recent`
+Excluded and to be removed from the overlay: `POST /tweets`, `GET /users/me`. Retained but unused: `GET /users/by/username/{username}`, `GET /users/{id}/tweets`.
+Credential must be app-only.
+
+**Firecrawl** — two operations:
+`POST /v2/scrape`, `POST /v2/search`
+Excluded: `/v2/agent` both verbs — job ids are not caller-scoped and no configuration makes them so — and `/v2/map`.
+
+**Duffel** — two operations:
+`POST /air/offer_requests`, `GET /air/offers/{id}`
+Nothing under `/air/orders`, `/air/payments`, or `/air/order_cancellations`.
+
+**ElevenLabs** — one operation, optional:
+`POST /v1/text-to-speech/{voice_id}`
+Excluded: `/stream`, `/v1/voices`, `/v1/models`, all six `convai` operations. The shared account should contain only offerable voices, since the matcher cannot constrain the path parameter.
+
+## Sequence
+
+Item 1 first — without it nothing is visible. Items 2 and 3 before any row is enabled, because they are what make an enabled row safe. Item 4 before agents see the tool list. X first among the services, then Firecrawl, then Duffel search, then speech. Item 5 before anyone outside the building.
+
+Phone calls are separate work with their own design and review, after all of the above.
+
+---
+
 ## Appendix — the specifics
 
 **Operations to expose.** X: recent search only. Firecrawl: scrape and search, with a body-size cap and a credit ceiling — no crawling, no site mapping, no async jobs. Duffel: offer requests and offer retrieval, nothing else. ElevenLabs: text-to-speech only, one voice, capped length.
