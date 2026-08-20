@@ -41,24 +41,6 @@ The product story that falls out is clean: **the platform credential is the on-r
 
 ---
 
-## What we actually have
-
-Here the assessment gets less comfortable, because the honest answer differs from the intuitive one. The repo contains a great deal of machinery. Machinery that exists is not the same as capacity we operate, and the gap between those two things is where every overstatement in this workstream has lived.
-
-**24 curated OpenAPI overlays** exist in `backend/specs/catalog/` — OpenAI, Anthropic, Cohere, DeepSeek, Mistral, OpenRouter, Google AI, GitHub, Google, Microsoft Graph, Slack, Discord, Lark, Reddit, Spotify, Facebook, Firecrawl, ElevenLabs, Twilio, Twitter and more. Each turns a service into typed operations an agent can call with no per-service code. This is a real asset and the curation is largely done.
-
-**But the four capability rows we most want cannot carry a platform credential as they stand.** `api-firecrawl`, `api-twitter`, `api-twilio` and `api-elevenlabs` are BYOK rows carrying `provider_config_id`, which the credential gate rejects by design. Platform variants must be fresh provider-less rows.
-
-**The LLM gateway is not a platform-funded service.** It resolves `UserService`/`UserApiKey` credentials and falls back to personal provider tokens (`handlers/llm_gateway.rs:274`, `:641`); seeded rows carry an empty credential and a provider config (`services/provider_service.rs:3796`, `:3806`). Platform charging is separately opt-in behind a production-default-off flag. It is a strong multi-provider surface, and it is *not* evidence that platform-funded LLM access already works. OpenRouter specifically has no generic-gateway model branch (`services/llm_gateway_service.rs:346-379`), so a seed and an overlay do not add up to gateway support.
-
-**The oracle relay is genuinely differentiated and genuinely problematic.** A logged-in ChatGPT Pro tab as a callable resource is something no aggregator offers. But a pool is *one owner's browser account* (`models/oracle_pool.rs:28-31` — "one ChatGPT (or similar) account whose logged-in browser tabs serve tasks"), and `visibility: platform` makes it submittable by any authenticated user (`services/oracle_pool_service.rs:392-414`). Unrelated users' prompts would execute inside one person's consumer session, with that account's cookies, conversation context, rate limits and retention; bodies persist up to 30 days; follow-ups pin to the account that first answered, which makes rotation and fair pooling hard. There is also a URL-extraction mode that makes the operator's real browser fetch pages using its network position and cookies. As a *personal* capability this is excellent. As *platform* capacity it is an account-sharing, privacy and residency decision that no allowlist resolves. To keep the balance honest: some of that is operable — the account can be a dedicated ChronoAI-ops account rather than anyone's personal session, the URL-extraction mode is disablable per pool (the `OracleExtractDisabled` error class exists, code 11010), and the same small per-user access list proposed below would gate a consented beta cohort who are told, in words, that their prompts run inside a shared consumer account. What no configuration fixes: the provider-ToS exposure of selling consumer-account output as shared capacity, and cross-user prompt commingling in one account's history and retention. A cohort-gated, consent-first beta is viable; a general tier is a decision the owner must make with those two facts in view.
-
-**Channel bots do not ship as platform capability.** Registration accepts Telegram, Discord, Lark, Feishu and Slack only, and requires a caller-supplied bot token stored on a user-owned row (`handlers/channel_bots.rs:403-434`). WhatsApp exists only through per-user OpenClaw mappings, with the unified path still a TODO. A NyxID-owned bot usable by every account is a coherent future product; it is not the present one.
-
-**Node proxy and SSH are user-bound by nature** — they reach a specific user's machines. Real capability, wrong category for a shared credential.
-
-**Some seeded rows would be dangerous as platform rows and were omitted from the inventory entirely:** AWS Cost Explorer (management/payer credentials, per-request charges, consolidated organisation billing) and generic Google Cloud access (caller-selected host, extensible to write scopes). These should be explicitly classified unsafe rather than left unlisted.
-
 ---
 
 ## The precedent we already run: `chrono-llm-public`
@@ -149,126 +131,130 @@ The uncomfortable summary is that the two hardest problems are not in the roadma
 
 ---
 
-# Enabling the flow: making `chrono-llm-public` the pattern rather than the exception
+# The three capabilities
 
-The question this section answers: **how do we model Chrono LLM as a catalogue service, at platform level, with billing metrics we can adjust later — and turn it on for Duffel flights, Twilio, ElevenLabs, Twitter and Reddit?**
+Defined by what a user wants done, not by vendor. Every operation below is justified by that intent; anything that could not be is cut, because an unneeded operation is security surface for no product gain.
 
-A plan for this exists (`docs/assistant/CATALOGUE_ENABLEMENT_PLAN.md`) and has been through adversarial review. The review returned **REWORK**, and the findings are integrated below rather than appended, because several of them change the design rather than decorate it.
+## 1. Social listening and research — Reddit, X, Firecrawl
 
-## The shape being generalised
+**What a user gets.** "What is being said about my product, on Reddit, on X, and on the open web — and read me the sources." The sensing half of research and marketing agents.
 
-`chrono-llm-public` works because someone wrote a purpose-built handler: one upstream, text-only, no tool execution, with models and skills validated against fixed allowlists in Rust (`services/assistant_direct.rs:176-217`), metered on tokens — the one unit that already matches its vendor. Generalising it means expressing that same safety **as configuration**, across services whose vendors bill in units we cannot currently represent.
+**Minimal operation set, each justified by intent — and what was cut:**
 
-Three designs carry the weight: parameter constraints as configuration, extensible billing metrics, and platform-level resolution throughout. The third is uncontroversial and already proven. The first two are where the difficulty lives.
+| Op | Intent served |
+|---|---|
+| X `GET /tweets/search/recent` | topic/brand listening |
+| X `GET /users/by/username/{username}`, `GET /users/{id}/tweets` | monitor a named account |
+| Reddit `GET /r/{subreddit}/hot`, `/new` | monitor a subreddit |
+| Reddit `GET /search`, `GET /comments/{article}` | topic search; read a thread |
+| Firecrawl `POST /v2/scrape`, `POST /v2/search` | read a page; search the web |
+| Firecrawl `POST /v2/map` | site-structure research ("what does this company publish") |
 
-## What survived review
+Cut, with reasons: X `POST /tweets`, `DELETE /tweets/{id}` (write/destroy as ChronoAI), `GET /users/me` and Reddit `GET /api/v1/me` (the platform's own identity — invites targeted reports; serves no user intent), Reddit `POST /api/submit` (posts as ChronoAI), Reddit `GET /r/{subreddit}/about` (marginal — monitoring does not need it; it can return with a one-line justification if an agent proves the need), and **Firecrawl's async pair** `POST /v2/agent` + `GET /v2/agent/{id}`: the poll is bearer-by-job-id over account-scoped jobs — one caller reading another's research topics — and **cannot be made multi-tenant by configuration at all**; excluded rather than constrained.
 
-The constraints we most need **are expressible in principle**: Duffel hold-only with `data.payments` rejected; Twilio restricted to Messages with an approved sender; ElevenLabs voice-id membership — though that needs separate path and body rules, since the id appears in both depending on operation. Platform-level resolution through the shared proxy data plane is sound architecture. Snapshotting the Lago metric code per usage row is a valid foundation for changing prices without rewriting history. And sequencing Reddit and Twitter ahead of Duffel and Twilio is the right risk order.
+**DB configuration that makes it safe.** X and Reddit: method+path rules only — the shipped matcher already expresses them, which is why they ship first. Firecrawl needs the constraint engine (§4): `url` fields `Pattern("^https?://")`, `limit`/`maxCredits`-class fields `Range`-bounded, bodies `closed` — today those fields are open and unbounded, which is exactly why Firecrawl is **not** "offer now" despite being read-shaped. Firecrawl's row also sets `direct_only: true`: the MCP node executor retries *every* method across fallback nodes with fresh request ids (`services/mcp_service.rs:3664`, `:3736`), duplicating vendor jobs on failover — a per-row routing flag in the DB, honored by engine code that ships once (§5).
 
-One expressiveness limit worth recording: **equality between two fields is not expressible** in the proposed language. No target operation needs it today.
+**What the operator supplies.** Firecrawl API key; X app-only bearer; Reddit app credentials via the declarative `token_exchange` method (**ASSUMPTION:** that method on a platform credential has no production precedent). **Invariant:** the credentials must be app-only — the provider defaults are user-OAuth and would make "reads" run as a person.
 
-## Two findings that will break in production
+**Cannot be expressed in configuration:** nothing, for the operations that ship. The things that couldn't be — multi-tenant async polling — were cut instead.
 
-**Anonymous proxying bypasses the policy entirely.** `handlers/public_proxy.rs:65-74` authorizes against `anonymous_endpoints` alone and never consults `proxy_operation_policy`, while forwarding the body at `:90-113`. `validate_anonymous_service_runtime_safety` checks identity propagation and resale billing, but does not refuse an anonymous endpoint on a platform-billable row. A broad anonymous `POST` rule would forward a Duffel order carrying `data.type: "instant"` without the constraint ever running. Public *MCP* execution is blocked (`public_mcp.rs:96-103`), so that surface is not the hole — this one is.
+## 2. Calling and getting things done over the phone — Twilio + ElevenLabs
 
-**Per-character and per-segment billing would authorize work while reserving a single unit.** Admission always estimates one unit at the platform layer (`services/billing/reservation.rs:1065-1071`); settlement then bills the measured quantity (`services/billing/meter.rs:480-485`). A prepaid user holding one credit can send a 20,000-character ElevenLabs request or a multi-segment Twilio message, clear admission, and incur the real charge only *after* the provider side effect. Finer-grained metrics make this worse, not better: they widen the gap between what admission checks and what the call costs. Any metric work must land with request-derived reservation and a maximum-unit admission rule, or it converts a billing defect into a spend hole.
+**What a user gets.** Today's slice: the agent can *speak* (text → audio, returned to the user as their own artifact) and — later — *text a phone*. The full capability the pairing implies (the agent talks on a live call: ElevenLabs voice over a Twilio call) is explicitly future: it requires a NyxID-owned TwiML surface, which is code, and is out of scope until the pieces below exist.
 
-## Findings that change the design
+**Minimal operation set — write-only, both services:**
 
-**"Metric code as a string" does not escape the enum.** `BillingMetric` is an exhaustive three-variant enum threaded through `ServiceBilling`, `BillingRouteContext`, quantity selection in the meter, and `UsageMeterRow` — and it is **hashed into the tamper-evident billing ledger** (`services/billing/ledger.rs:306-313`). Billing reports parse only `tokens`, `requests` and `bytes`, silently defaulting anything else to `Tokens` (`handlers/billing.rs:264-299`). A Lago code alone cannot describe the unit. Adjustable metrics are achievable, but the honest cost is a coordinated code, API, ledger and report migration — not a config field.
+| Op | Intent served |
+|---|---|
+| ElevenLabs `POST /v1/text-to-speech/{voice_id}` (+ `/stream` — plain HTTP chunked audio, not the realtime protocol) | "say this"; the response *is* the artifact, `audio/mpeg` straight back to the caller |
+| Twilio `POST /2010-04-01/Accounts/{AccountSid}/Messages.json` | "text this number" — *when it ships* |
 
-**Per-operation metrics have nowhere to attach.** The plan allows a different metric for searches and bookings, but REST derives one target-level metric before forwarding (`handlers/proxy.rs:4108-4130`) with no selected-operation context, and **MCP hard-codes `BillingMetric::Requests`** (`services/mcp_service.rs:119-139`) regardless of the row. So a Duffel order cannot become `booking` by configuration, and a platform ElevenLabs call through MCP stays request-metered whatever the REST row says.
+Everything else is absent, and absence is the enforcement: **all six Twilio GETs** (account-wide message/recording/call listings — reads of shared private state with no tenant partition), `POST .../Calls.json` (caller-supplied `Url`/`Twiml` hands over the call's control flow — write-only does not fix control flow), **all eight ElevenLabs GETs** (`/v1/voices` exposes the account's voice inventory; the convai family exposes every user's conversations, shared persistent agents, and an out-of-band realtime protocol — `elevenlabs.openapi.json:6`). Voice and model *discovery* becomes documentation and the skill: the offered voice list is a published fact, not an API call.
 
-**REST denies after decrypting the platform credential.** Target resolution runs first (`handlers/proxy.rs:1937-1951`), decrypting the master credential (`services/proxy_service.rs:890-894`), and only then does policy run (`handlers/proxy.rs:2014-2026`). A refused Duffel payment still loads key material. MCP's placement is correct; REST, node and admin surfaces need one pre-resolution evaluator.
+**DB configuration that makes it safe.** ElevenLabs: body `closed`, `text` `MaxLen`, `model_id` `InSet`; the path `{voice_id}` is bounded either by a `capture_constraints` `InSet` (engine) or — the recommended launch posture — by **curating the account**: the operator's shared ElevenLabs account contains only offerable voices, so any other id fails at the vendor. That is operator-supplied account state, not code (**ASSUMPTION:** whether ElevenLabs accepts stock voice ids outside the account library — verify; the risk that matters, cloned-voice impersonation, is bounded either way since cloned voices exist only if the operator creates them). Twilio (when it ships): body `closed`, `From` `InSet` (operator's approved senders), `To` `Pattern` (E.164), `Body` `MaxLen`, **forbid** `MessagingServiceSid` (sender-set bypass), `StatusCallback` (attacker webhook), `MediaUrl`; `{AccountSid}` fails safe at the vendor for a plain account (**ASSUMPTION:** the credential is a non-master account — operator invariant, since master credentials reach subaccount paths).
 
-**Streaming and WebSocket cannot enforce any of this.** Upgrades deliberately skip body buffering (`handlers/proxy.rs:2138-2163`) and then forward arbitrary client frames (`:4919-4984`). The only real-time usage collector is gated to `llm-openai`. A permitted ElevenLabs streaming handshake can therefore carry arbitrary later text and options, with no frame-level policy and no character meter. **Either a frame protocol policy is designed, or streaming and WebSocket are explicitly excluded from activation.** Excluding them is the honest short-term answer.
+**What the operator supplies.** ElevenLabs: API key + the curated voice account + the published voice list. Twilio: credentials (non-master), approved sender numbers, and their own compliance posture — which is precisely why this must not be baked into our code.
 
-**The scoped-key fix must key on IDs, not slugs.** The proposal grants access by catalog slug; existing isolation uses stable UserService ids (`models/api_key.rs:55-73`). Catalog deletion is a soft deactivate and slug uniqueness is checked only among active rows, so a key granted `twilio-platform` would silently inherit access to a *replacement* row reusing that slug. The fix must also reach `AuthUser`, MCP auth context, and OAuth/delegated/relay claims, which today carry service ids only — omitting them yields inconsistent denial, and defaulting missing scope to allow would widen access rather than fix it.
+**Cannot be expressed in configuration — the honest line.** ElevenLabs: nothing, at launch scope (the per-user default-voice product — server-inserted voice, transcript+audio returned as the user's artifact — is a v2 *product* handler, not a safety prerequisite). Twilio: **the danger lives in `To` and `Body`, the two fields no value-set can bound.** Consent, opt-out/suppression, per-recipient velocity, and *phone ownership* ("text me" requires knowing a number is the requester's — the user model has `email_verified` only, `models/user.rs:115`) are stateful, identity-bound workflow. No DSL expressiveness removes them; they are the irreducible code (§5), and Twilio SMS waits on them.
 
-**"Read-only" is not a privacy boundary on a shared account.** The current overlays already expose the authenticated shared identity: Reddit `/api/v1/me` and X `/users/me`. The matcher reasons about method and path only, with no caller or resource-owner predicate, so it cannot express "public resources only" or "never the platform account's own data." Excluding writes is right; calling reads inherently safe is not.
+## 3. Flight search and booking — Duffel
 
-**Twilio needs enforceable controls, not acknowledged risk.** Restricting `From` is necessary and insufficient: the message schema also permits `MessagingServiceSid` — which can select a sender outside the approved set — plus unconstrained `To` and arbitrary `Body`. Destination limits, consent and opt-out, country and cost caps, and per-sender rate limits all need specifying. Excluding the Calls endpoint is sound, and avoids both `Url` and inline TwiML.
+**What a user gets.** "Find me flights, hold the one I pick, show me the bill; I'll pay by link." The agent reads, searches, and prepares; the human does the irreversible step. Hold orders are confirmed available on live offers (`requires_instant_payment: false` measured on real search results).
 
-**Constraining a body means parsing it, which is new attack surface.** Bodies are buffered and forwarded byte-for-byte under a 100 MB default cap. Duplicate JSON keys, duplicate form fields, non-canonical Unicode, or a deep parse can make NyxID and the vendor disagree about what was sent, or multiply memory and CPU. Duplicate rejection, canonical parsing, depth and field limits, and per-rule body caps are required — not optional hardening.
+**Minimal operation set, each justified:**
 
-**Retire Lago metrics on a delay.** Snapshotting the code per row is right, but the old metric must stay live until every reserved, forwarded and unsettled row clears; Lago dead-letters usage whose billable metric is missing.
+| Op | Intent served |
+|---|---|
+| `POST /air/offer_requests` | search (offers return inline in the response — measured, 602 offers) |
+| `GET /air/offers/{id}` | re-price the *chosen* offer immediately before holding (vendor-documented requirement; stale prices are rejected) |
+| `POST /air/orders` | create the hold — the booking itself, no money moved |
 
-## What this means for the sequence
+Cut: `GET /air/offers` (list — the create response already embeds the offers; a second enumeration surface serves no intent), `POST /air/payments` and cancellations (human-link territory, not agent operations), `GET /air/orders` and `GET /air/orders/{id}` (order list/read — on a shared credential these are every user's bookings with passenger names; the agent retains the creation response instead, and the payment link surface does its own server-side read).
 
-The plan's own step one is described as small and is not: it crosses the API-key model, service APIs, auth middleware, MCP transport, JWT and relay claims, CLI and frontend schemas. The activation runbook also omits global billing enablement — `BILLING_ENABLED` and `BILLING_FAIL_CLOSED` both default false — so an operator can follow every row-level step and either serve the five services free or move money with billing fail-open.
+**DB configuration that makes it safe.** The hold-only guarantee becomes a body constraint instead of documentation: on `POST /air/orders` — `data.type` `Equals("hold")`, **forbid** `data.payments`, body `closed`. Plus the non-overridable `Duffel-Version: v2` header (existing `default_request_headers` machinery) and `direct_only: true`.
 
-The workable order, given all of the above:
+**What the operator supplies.** Duffel token (test until go-live), and — for payment — their own Duffel Cards approval.
 
-1. **Scoped-key access keyed on stable ids**, propagated through every claim carrier — otherwise the intended caller stays locked out.
-2. **One pre-resolution policy evaluator** shared by REST, node and admin paths, ahead of credential decryption, with anonymous proxying brought under it or platform-billable rows refused an anonymous endpoint outright.
-3. **Parameter constraints**, with canonical parsing and body limits, and streaming/WebSocket explicitly out of scope until a frame policy exists.
-4. **Reddit and Twitter reads** as the first activation — lowest consequence, and it exercises the whole chain.
-5. **Metric extensibility** as its own migration, landing together with request-derived reservation and maximum-unit admission.
-6. **Duffel, then Twilio and ElevenLabs** — Twilio last, because its controls are the most demanding and its failures are the most public.
+**Cannot be expressed in configuration:** the payment link surface (the page that renders the bill, embeds Duffel's card form and 3DS, and submits the payment server-side) — a browser flow with a PCI boundary, not request validation. Already designed; code by nature (§5).
 
 ---
 
-# The five surfaces, in depth
+---
 
-Billing is set aside here by decision. What follows is about **what each service safely offers on a shared credential**, and what it leaks. *Verdicts below reflect adversarial review; two were downgraded from the first draft.*
+# 4. The DB structure
 
-**At a glance, after adversarial review:** Twitter reads **offer now** (with an app-only credential) · Reddit reads **gated** on commercial terms *and* app-only auth · Firecrawl **not yet** · ElevenLabs **not yet** · Twilio **not yet**.
+**The rule shape.** `proxy_operation_policy` on `DownstreamService` grows from method + path template to:
 
-The first draft of this section said three services could switch on with configuration. Review downgraded two of them, for the same underlying reason in both cases: **the contracts assumed parameter constraints that do not exist in the merged code.** Only method and path are matched today (`services/proxy_authorization.rs:186`). A contract that reads "expose scrape with bounded limits" is not a contract until bounds are enforceable.
+```
+ProxyOperationRule {
+  method: String,
+  path_template: String,                          // shipped today
+  capture_constraints: { "<name>": ValueRule },   // path {captures}, e.g. voice_id ∈ set
+  body: Option<{
+    content_type: "json" | "form",                // Twilio is form-encoded; both first-class
+    closed: bool,                                 // reject unknown fields
+    require: { "<field.path>": ValueRule },       // nested paths, e.g. data.type
+    forbid:  [ "<field.path>" ],
+    max_bytes: u64,
+  }>,
+}
+ValueRule = Equals(v) | InSet([v]) | Pattern(regex) | Range{min,max} | MaxLen(n)
+```
 
-## Firecrawl — "read the web for me"
+Row-level flags alongside the policy: `direct_only` (no node routing — Firecrawl, Duffel) and `retriable_methods` (which methods the engine may retry across nodes/fallbacks; default none for POST — the DB knob for the duplication problem in `mcp_service.rs:3664-3736`). Everything above is serde on the existing row, validated at admin write, evaluated in the shared pre-side-effect check on both executors. **The engine ships once; the policy ships per deployment** — that is the open-source contract.
 
-Market research, competitor monitoring, reading a page an agent was pointed at. The synchronous operations are pure configuration: the parameter space carries no money and no impersonation, and a mis-scoped rule costs a failed scrape.
+**Is "capability" a first-class DB object? No — argued and decided.** A capability is a *presentation and discovery* grouping: a `capability: Option<String>` tag on the service row (plus the skill that narrates the bundle), used by catalog listing, MCP tool grouping, and docs. Making it a first-class enablement object would create a second source of enforcement truth that can disagree with the row-level one — a row enabled but its capability disabled, or vice versa — and every security property in this document lives on rows (credential, policy, flags). One enforcement surface; capability is how humans and agents *find* it, not how it is *gated*. If per-capability gating is ever wanted, it composes as "set the tag, toggle the rows sharing it" in admin tooling — still one truth.
 
-Two findings moved this from "offer now" to "not yet".
+---
 
-**The bodies are open and the bounds are imaginary.** The overlay leaves `scrape`, `search` and `map` bodies unconstrained; search accepts an unbounded `limit` plus arbitrary `scrapeOptions`, and agent submission makes `maxCredits` optional with no ceiling. The proposed contract depends on bounds the matcher cannot express.
+# 5. The irreducible code list — what must be Rust, and why
 
-**Retry duplication is broader than I said.** The MCP node executor retries *every* method across fallback nodes with a fresh request id (`services/mcp_service.rs:3664`, `:3736`) — so `scrape` and `search` are affected, not only async submission. Platform tools resolve node bindings automatically, and there is no catalog-row `direct_only` control to prevent it. If a node completes a large search and its response is lost, the same body goes to the next node and can fall through to direct execution: the caller sees one result, the vendor bills two or more.
+1. **The constraint engine itself** (the §4 evaluator: form+JSON parsing, nested paths, ValueRules, capture constraints; plus honoring `direct_only`/`retriable_methods`). Ships once, unlocks every capability; all three sections above depend on it except X/Reddit. A more expressive DSL doesn't remove this — it *is* the DSL's implementation.
+2. **Twilio consent/opt-out/suppression + phone-ownership verification.** Stateful, cross-request, identity-bound: "this number belongs to the requesting user, consented, not suppressed, under velocity" is workflow over user identity (which today has no phone at all — `models/user.rs:115`), not request validation. No DSL removes it. Until it exists, Twilio SMS stays dark — for every operator, which is honest: we ship the engine and the constraint template; the operator inherits a *disabled-by-default* service whose enablement requires this code plus their own compliance posture.
+3. **The Duffel payment link surface.** Browser flow, card form, 3DS, server-side bill read — a PCI-boundary product feature. No DSL applies.
+4. **Send-idempotency for real-world writes** (SMS dedupe, and the general no-blind-retry discipline for non-idempotent POSTs beyond what `retriable_methods` expresses). Mostly engine work with the DB knob; the residual (per-message dedupe keys) belongs to the Twilio handler in item 2.
+5. **Not on the list, deliberately:** the ElevenLabs voice question (curated account = operator state, not code; the per-user-voice endpoint is an optional product upgrade) and X/Reddit app-only enforcement (an activation invariant an operator satisfies with credentials — though a cheap row-validation warning for OAuth-shaped credentials on platform rows would be a kindness, not a requirement).
 
-**And async polling cannot be made multi-tenant by configuration.** `GET /v2/agent/{id}` accepts any task id, and no method-and-path rule can prove the id was issued to the calling principal. If a job id reaches a support ticket, a log, or another agent's output, its research topic and results are readable by anyone. That needs either exclusion or a handler storing `(principal, job id)` and checking ownership.
+**Assumptions register:** ElevenLabs stock-voice acceptance outside the account library; Twilio non-master account topology and built-in STOP-handling coverage; Reddit commercial API terms and the token-exchange-on-platform-credential shape; Firecrawl response usage-headers presence; per-user fair-share on shared rate pools remains an open platform gap (tracked in the enablement plan).
 
-## Twitter/X reads — "what is being said"
+---
 
-Search, username lookup, and a selected user's posts. Writes are excluded outright — a platform credential posting means posting *as ChronoAI*. `/users/me` is excluded too, since it returns the platform's own identity.
+# The recommendation
 
-Review confirmed the three-route surface is clean: no DM, inbox, saved-item, blocked-list, following-list or quota operation exists in the overlay. **This is the one service that can switch on with merged code.**
+**Build one thing: the constraint engine.** Everything else is configuration, operator state, or a separate product surface.
 
-One condition, and it is not optional. The privacy result depends entirely on credential class, and the repo's existing X provider defaults to *user OAuth* (`services/provider_service.rs:590`, `:609`). With a shared **user-context** token, a caller could name a protected account that the shared account follows and read content visible only through that relationship. **App-only credentials must be a tested activation invariant, not an assumption.**
+That is the whole finding. Of the three capabilities, exactly one piece of Rust stands between us and all of them — the evaluator that reads a declarative rule from the database and checks a request against it before any side effect. It ships once. After it lands, Firecrawl, ElevenLabs and Duffel search-and-hold are configuration changes, and so is every service an operator adds later without our involvement.
 
-## Reddit reads — "monitor the conversation"
+**The order:**
 
-Technically the same shape as Twitter: configuration is sufficient, no handler needed. **What gates it is commercial, not technical.** Reddit's API terms for precisely this use — reselling access through a shared credential — are unverified, and this is the kind of term vendors actively enforce. The auth shape for a platform credential here also has no production precedent with us.
+1. **Ship X and Reddit reads now.** They need no engine, no constraints, no code — the existing method-and-path matcher is sufficient because the data is public. The single condition is an **app-only credential**, verified rather than assumed: our providers default to user OAuth, and a shared user-context token can see protected accounts and private subreddits. Reddit additionally needs its commercial terms checked, because reselling access through a shared credential is the kind of term vendors enforce.
 
-Both are marked as assumptions in the underlying document rather than waved through, and the terms check should happen before activation rather than after a suspension.
+2. **Build the constraint engine**, with `direct_only` and `retriable_methods` as row flags. The second matters more than it looks: it is the database knob that stops the MCP node executor retrying a POST across fallback nodes and billing the vendor twice for one caller result.
 
-## ElevenLabs — "give the agent a voice"
+3. **Then Firecrawl, ElevenLabs and Duffel become configuration.** Firecrawl gets bounded `limit` and `maxCredits` and `direct_only`; its async polling stays out until something records job ownership. ElevenLabs is write-only TTS against a curated account. Duffel is search and hold, with payment and cancellation as links.
 
-The TTS family under voice, model and length constraints is a well-bounded capability *once those constraints exist* — which is why this is "not yet" rather than "offer now". Quota burn is the residual risk beyond that.
+4. **Twilio last.** Not because SMS is hard, but because consent, opt-out, suppression and phone-ownership are stateful workflow over an identity that today has no phone at all. Ship it disabled-by-default with the constraint template ready, and let enablement wait on that code plus each operator's own compliance posture.
 
-Review also found a leak in the proposed operation set: **`/v1/voices` lists voices available to the shared account**, which includes private or cloned voices deliberately kept out of any curated subset. A caller can enumerate their names, ids and metadata; the TTS constraint might stop them being *used*, but it cannot retract the disclosure, and a method-and-path rule cannot filter a response body. Exclude it, publish the curated set as NyxID-owned metadata, or filter it in a handler. `/v1/models` does not have this problem.
+5. **The Duffel payment link is its own product surface** — browser flow, card form, 3DS. It is gated on Duffel Cards approval, which is external and worth requesting now, since that clock runs regardless of what we build.
 
-The exclusion of realtime and conversational AI *is* structurally sound — exact segment matching means the allowed POST rules cannot reach `/stream-input` or `/convai/...`, and WebSocket handshakes are GET upgrades that match nothing. One defence-in-depth gap worth noting: the shared HTTP client follows redirects by default while authorization checks only the initial path, so a same-origin 307/308 from an allowed endpoint would carry method, credential and body to a disallowed one. No caller-inducible redirect was found.
-
-The sharp finding here refined my own hypothesis. I had guessed ElevenLabs sat "between configuration and a handler, depending on streaming." The more accurate statement: **it is a configuration case if and only if the realtime and conversational-AI family stays excluded.** Include streaming conversations and it becomes a handler case — frame policy, per-session brokering — because realtime frame protocols are out of band and cannot be policed by method and path. **The scoping decision is the mechanism decision**, not a factor in it.
-
-## Twilio — "call or text someone for me"
-
-The one that has to wait, and the reason is instructive rather than merely cautious.
-
-Messages are the only candidate; **call creation is excluded** because `Url` and `Twiml` hand the caller the call's content and control flow, which no field constraint meaningfully bounds. The account-wide message and recording endpoints are excluded too — they have no tenant partition, so one user could read another's phone numbers and recordings.
-
-Even restricted to sending, configuration is not enough. `MessagingServiceSid` can select a sender outside any approved set, `To` is unconstrained, and `Body` is arbitrary. Constraining `From` alone does nothing.
-
-What a purpose-built handler can do that configuration cannot is the interesting part: **recipient verification** — permitting only numbers the *receiving* user has verified through NyxID, which turns "text anyone" into "text me" — plus server-constructed request bodies with no caller-supplied fields at all, content policy hooks, and per-user velocity limits.
-
-So Twilio is the clearest handler case in the set, and it needs a standing compliance decision on sender identity besides. Until both exist it stays dark.
-
-## What this settles about the hybrid
-
-The pattern holds, with one correction to my hypothesis. **Read surfaces are configuration cases** — the dangerous parameter space is thin, and a method-and-path rule genuinely bounds them. **Twilio is a handler case**, for the same reason `chrono-llm-public` is a handler: the safety needed is about *what the call does*, not which endpoint it reaches. **ElevenLabs is a configuration case because of scoping** — not despite it.
-
-That is still a much smaller first step than a universal constraint language — but the honest count is **one service this week, not three.** Twitter reads switch on with merged code, contingent on an app-only credential. Reddit joins it once the terms question and the same credential gate are cleared. Firecrawl and ElevenLabs are configuration cases *after* parameter constraints exist, not before. Twilio needs the handler.
-
-The correction is worth stating plainly because it generalises: **a service contract written against constraints we have not built is a wish, not a contract.** The value of the review was catching two of those before activation rather than after.
-
+**Why this order is defensible rather than merely cautious:** it front-loads the only capability that needs nothing, then builds the only thing that unlocks everything, then converts the rest to configuration. No step depends on a later one. And the one genuinely irreducible piece of code is the piece that makes the project configurable by people who are not us — which, for an open-source platform, is the point.
