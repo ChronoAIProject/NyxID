@@ -1,5 +1,7 @@
 # Platform Capability Surface — What We Have, What AsiaOne Is, What to Add
 
+> **Superseded (2026-08-20):** converged into the canonical `PLATFORM_CAPABILITY.md` (single article for the owner, fact-checked against the repo). Kept as working history.
+
 **Owner ask:** what NyxID already provides that can be offered as a **platform capability** (fungible account — the user wants the capability, not the account), what asiaone.com provides, and which additions cover the widest scope, with approach and risk. Identity-bound services (GitHub, Google, Slack, Lark, Microsoft, Discord) are out of scope by decision — those stay BYOK.
 
 **Governing constraints, applied throughout:** agent reads/searches/prepares — the human does anything irreversible via a link; the allowlist is the only boundary on a shared credential (#1436 and #1448 are merged; **nothing is enforced in production yet** — the only policy in `main` is a test fixture); billing is deferred, so access control is the near-term lever, which makes anything with per-call real-world cost or compliance exposure high-risk to offer broadly right now.
