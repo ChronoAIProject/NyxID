@@ -348,6 +348,78 @@ pub struct ApiKeyResponse {
     pub credential_source: crate::handlers::user_services_handler::CredentialSourceResponse,
 }
 
+/// Authorization evidence for one agent API key — the minimal projection of
+/// `ApiKeyResponse` that an assistant-action postcondition reader consumes,
+/// for the `key.create` and `key.rotate` verbs.
+///
+/// Exists for the same reason as `KeyAuthorizationEvidenceResponse` in
+/// `handlers::keys`: the evidence reader runs a recursive secret-shape scan
+/// over the whole document it receives, and `ApiKeyResponse` carries
+/// user-controlled free text that legitimately matches it — `description`,
+/// `allowed_services[].label` (the user's own service label), and
+/// `allowed_nodes[].name`. None of those three are evidence, so projecting
+/// them away removes the tripwire surface.
+///
+/// `name` is the irreducible remainder: the reader both requires it and scans
+/// it, so a key named e.g. `Bearer Bot` stays unverifiable no matter what
+/// NyxID serves. Closing that needs either a write-time restriction on key
+/// names or a reader that excludes its own required evidence properties from
+/// the scan; it cannot be closed by a projection.
+#[derive(Debug, Serialize, ToSchema)]
+pub struct ApiKeyAuthorizationEvidenceResponse {
+    pub id: String,
+    pub name: String,
+    pub scopes: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub platform: Option<String>,
+    pub is_active: bool,
+    pub allowed_service_ids: Vec<String>,
+    pub allow_all_services: bool,
+    pub allowed_node_ids: Vec<String>,
+    pub allow_all_nodes: bool,
+    pub created_at: String,
+    /// Rotation lineage. Emitted as a trio or not at all: the reader treats
+    /// all three absent as "no lineage evidence" but all three present with
+    /// `state_version <= 0` as a malformed document. Pre-lineage rows
+    /// (`state_version` 0) therefore have to omit the trio rather than
+    /// serialize a zero.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub rotation_predecessor_id: Option<Option<String>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub state_version: Option<i64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub updated_at: Option<Option<String>>,
+}
+
+impl ApiKeyAuthorizationEvidenceResponse {
+    /// Project the full detail response down to authorization evidence.
+    ///
+    /// Derived from `ApiKeyResponse` so the two representations report the
+    /// same values for every shared property.
+    fn from_api_key_response(response: ApiKeyResponse) -> Self {
+        // A row written before rotation lineage existed has no lineage to
+        // report. Serializing `state_version: 0` alongside two nulls is worse
+        // than silence: the reader reads it as a present-but-invalid trio and
+        // rejects the whole document.
+        let has_lineage = response.state_version >= 1;
+        Self {
+            id: response.id,
+            name: response.name,
+            scopes: response.scopes,
+            platform: response.platform,
+            is_active: response.is_active,
+            allowed_service_ids: response.allowed_service_ids,
+            allow_all_services: response.allow_all_services,
+            allowed_node_ids: response.allowed_node_ids,
+            allow_all_nodes: response.allow_all_nodes,
+            created_at: response.created_at,
+            rotation_predecessor_id: has_lineage.then_some(response.rotation_predecessor_id),
+            state_version: has_lineage.then_some(response.state_version),
+            updated_at: has_lineage.then_some(response.updated_at),
+        }
+    }
+}
+
 fn is_zero(v: &u64) -> bool {
     *v == 0
 }
@@ -1116,10 +1188,50 @@ pub async fn get_key(
     Path(key_id): Path<String>,
 ) -> AppResult<Json<ApiKeyResponse>> {
     let actor = auth_user.user_id.to_string();
-    let user_id_str = resolve_api_key_read_owner(&state, &actor, &key_id).await?;
-    let key = key_service::get_api_key(&state.db, &user_id_str, &key_id).await?;
-    let enriched = enrich_api_keys_batch(&state, &actor, &[key]).await?;
-    Ok(Json(enriched.into_iter().next().unwrap()))
+    Ok(Json(
+        resolve_api_key_response(&state, &actor, &key_id).await?,
+    ))
+}
+
+#[utoipa::path(
+    get,
+    path = "/api/v1/api-keys/{key_id}/authorization",
+    params(
+        ("key_id" = String, Path, description = "API key ID or name")
+    ),
+    responses(
+        (status = 200, description = "Authorization evidence", body = ApiKeyAuthorizationEvidenceResponse),
+        (status = 401, description = "Unauthorized", body = crate::errors::ErrorResponse),
+        (status = 404, description = "API key not found", body = crate::errors::ErrorResponse)
+    ),
+    tag = "API Keys"
+)]
+/// GET /api/v1/api-keys/{key_id}/authorization
+///
+/// Same resolution and ACL as `GET /api/v1/api-keys/{key_id}`, projected to
+/// the properties an assistant-action postcondition reader consumes.
+pub async fn get_key_authorization(
+    State(state): State<AppState>,
+    auth_user: AuthUser,
+    Path(key_id): Path<String>,
+) -> AppResult<Json<ApiKeyAuthorizationEvidenceResponse>> {
+    let actor = auth_user.user_id.to_string();
+    let response = resolve_api_key_response(&state, &actor, &key_id).await?;
+    Ok(Json(
+        ApiKeyAuthorizationEvidenceResponse::from_api_key_response(response),
+    ))
+}
+
+/// Shared body of the two API key detail reads.
+async fn resolve_api_key_response(
+    state: &AppState,
+    actor: &str,
+    key_id: &str,
+) -> AppResult<ApiKeyResponse> {
+    let user_id_str = resolve_api_key_read_owner(state, actor, key_id).await?;
+    let key = key_service::get_api_key(&state.db, &user_id_str, key_id).await?;
+    let enriched = enrich_api_keys_batch(state, actor, &[key]).await?;
+    Ok(enriched.into_iter().next().unwrap())
 }
 
 #[utoipa::path(
@@ -1847,6 +1959,137 @@ mod tests {
         assert!(json.get("full_key").is_none());
         assert!(json.get("key_hash").is_none());
         assert!(json.get("secret").is_none());
+    }
+
+    /// An `ApiKeyResponse` whose owner used three supported free-text fields
+    /// in ways that match the evidence reader's secret-shape tripwire: a
+    /// description mentioning a bearer token, a scoped service whose own
+    /// `UserEndpoint.label` is `Bearer Bot`, and a node display name.
+    fn poisoned_api_key_response(state_version: i64) -> ApiKeyResponse {
+        ApiKeyResponse {
+            id: "key-1".to_string(),
+            name: "release-agent".to_string(),
+            description: Some("rotate when the Bearer sk-live-abc123 header expires".to_string()),
+            key_prefix: "nyxid_ag_public".to_string(),
+            scopes: "proxy".to_string(),
+            last_used_at: None,
+            expires_at: None,
+            is_active: true,
+            created_at: "2026-08-11T00:00:00Z".to_string(),
+            rotation_predecessor_id: (state_version >= 1).then(|| "predecessor-id".to_string()),
+            state_version,
+            updated_at: (state_version >= 1).then(|| "2026-08-11T00:00:00Z".to_string()),
+            allowed_service_ids: vec!["service-1".to_string()],
+            allowed_node_ids: vec!["node-1".to_string()],
+            allow_all_services: false,
+            allow_all_nodes: false,
+            allowed_services: vec![super::AllowedServiceInfo {
+                id: "service-1".to_string(),
+                slug: "example".to_string(),
+                label: "Bearer Bot".to_string(),
+                catalog_service_name: None,
+            }],
+            allowed_nodes: vec![super::AllowedNodeInfo {
+                id: "node-1".to_string(),
+                name: "Bearer Bot node".to_string(),
+                status: "online".to_string(),
+            }],
+            rate_limit_per_second: None,
+            rate_limit_burst: None,
+            platform: Some("codex".to_string()),
+            callback_url: None,
+            purpose: Default::default(),
+            scheduled_write_enabled: false,
+            bindings_count: 0,
+            credential_source:
+                crate::handlers::user_services_handler::CredentialSourceResponse::Personal,
+        }
+    }
+
+    /// The hazard the projection exists for: the full detail response *does*
+    /// trip the evidence reader's scan, so serving it as `key.create` /
+    /// `key.rotate` evidence would make those keys permanently unverifiable.
+    #[test]
+    fn full_api_key_response_trips_the_aevatar_secret_scan() {
+        let json = serde_json::to_value(poisoned_api_key_response(1)).unwrap();
+        assert!(
+            crate::test_utils::aevatar_secret_free_violation(&json).is_some(),
+            "expected the full API key detail response to be rejected by the evidence scan"
+        );
+    }
+
+    #[test]
+    fn api_key_authorization_evidence_is_secret_free_for_a_poisoned_key() {
+        let evidence = serde_json::to_value(
+            super::ApiKeyAuthorizationEvidenceResponse::from_api_key_response(
+                poisoned_api_key_response(1),
+            ),
+        )
+        .unwrap();
+
+        assert_eq!(
+            crate::test_utils::aevatar_secret_free_violation(&evidence),
+            None,
+            "authorization evidence must never carry a secret-shaped value"
+        );
+
+        let properties: std::collections::BTreeSet<&str> = evidence
+            .as_object()
+            .unwrap()
+            .keys()
+            .map(String::as_str)
+            .collect();
+        assert_eq!(
+            properties,
+            [
+                "allow_all_nodes",
+                "allow_all_services",
+                "allowed_node_ids",
+                "allowed_service_ids",
+                "created_at",
+                "id",
+                "is_active",
+                "name",
+                "platform",
+                "rotation_predecessor_id",
+                "scopes",
+                "state_version",
+                "updated_at",
+            ]
+            .into_iter()
+            .collect::<std::collections::BTreeSet<&str>>()
+        );
+    }
+
+    /// A pre-lineage row must omit the trio entirely. Emitting
+    /// `state_version: 0` alongside two nulls reads to the evidence parser as
+    /// a present-but-invalid lineage and rejects the whole document.
+    #[test]
+    fn api_key_authorization_evidence_omits_the_lineage_trio_for_legacy_rows() {
+        let evidence = serde_json::to_value(
+            super::ApiKeyAuthorizationEvidenceResponse::from_api_key_response(
+                poisoned_api_key_response(0),
+            ),
+        )
+        .unwrap();
+
+        for property in ["rotation_predecessor_id", "state_version", "updated_at"] {
+            assert!(
+                evidence.get(property).is_none(),
+                "legacy rows must omit {property} rather than serialize a zero-version trio"
+            );
+        }
+    }
+
+    /// The same row today, straight off `GET /api/v1/api-keys/{id}`: all three
+    /// present, `state_version` zero. Documented so the projection's reason to
+    /// exist stays visible if anyone changes the detail response.
+    #[test]
+    fn full_api_key_response_still_emits_a_zero_version_lineage_trio() {
+        let json = serde_json::to_value(poisoned_api_key_response(0)).unwrap();
+        assert_eq!(json["state_version"], 0);
+        assert_eq!(json["rotation_predecessor_id"], serde_json::Value::Null);
+        assert_eq!(json["updated_at"], serde_json::Value::Null);
     }
 
     #[tokio::test]

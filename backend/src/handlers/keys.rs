@@ -564,6 +564,57 @@ pub struct KeyResponse {
     pub permission_setup_scopes: Option<Vec<String>>,
 }
 
+/// Authorization evidence for one user service — the minimal projection of
+/// `KeyResponse` that an assistant-action postcondition reader consumes.
+///
+/// Why this exists as its own representation rather than reusing the full
+/// `KeyResponse`: evidence readers run a recursive secret-shape scan over the
+/// *whole* document they receive, rejecting any string matching
+/// `Bearer\s+\S+` or a `nyxid_` key prefix. `KeyResponse` carries several
+/// user-controlled free-text carriers — `label` / `name`,
+/// `default_request_headers[].value`, and `ws_frame_injections[].template`,
+/// where `{"headers":{"Authorization":"Bearer ${credential}"}}` is an
+/// explicitly supported template (CLAUDE.md §6) — so a legitimately
+/// configured service could make its own authorization permanently
+/// unverifiable. None of those fields are evidence. Projecting to exactly the
+/// consumed properties removes the tripwire surface instead of asking users
+/// not to configure supported features.
+///
+/// Every property is serialized unconditionally except `api_key_id`, which
+/// mirrors `KeyResponse` (absent and null are equivalent to the reader).
+/// Readers distinguish an explicit null from a missing property, so no
+/// `skip_serializing_if` may be added to the remaining fields.
+#[derive(Debug, Serialize, ToSchema)]
+pub struct KeyAuthorizationEvidenceResponse {
+    pub id: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub api_key_id: Option<String>,
+    pub is_active: bool,
+    pub status: String,
+    pub connection_status: Option<String>,
+    pub granted_scopes: Option<Vec<String>>,
+    pub last_authorized_at: Option<String>,
+}
+
+impl KeyAuthorizationEvidenceResponse {
+    /// Project the full detail response down to authorization evidence.
+    ///
+    /// Deriving from `KeyResponse` rather than from `KeyView` keeps the two
+    /// representations from drifting: whatever `/keys/{id}` reports for these
+    /// seven properties is exactly what the evidence read reports.
+    fn from_key_response(response: KeyResponse) -> Self {
+        Self {
+            id: response.id,
+            api_key_id: response.api_key_id,
+            is_active: response.is_active,
+            status: response.status,
+            connection_status: response.connection_status,
+            granted_scopes: response.granted_scopes,
+            last_authorized_at: response.last_authorized_at,
+        }
+    }
+}
+
 #[derive(Debug, Serialize, ToSchema)]
 pub struct KeyRevocationResponse {
     pub revokes_grant: bool,
@@ -1092,7 +1143,58 @@ pub async fn get_key(
     Path(key_id): Path<String>,
 ) -> AppResult<Json<KeyResponse>> {
     let actor = auth_user.user_id.to_string();
-    let access = resolve_key_read_owner(&state, &actor, &key_id).await?;
+    let mut response = resolve_key_response(&state, &actor, &key_id).await?;
+    enrich_key_response(
+        &state.db,
+        &state.node_ws_manager,
+        &actor,
+        state.config.node_heartbeat_timeout_secs,
+        state.config.base_url.trim_end_matches('/'),
+        &mut response,
+    )
+    .await?;
+    Ok(Json(response))
+}
+
+#[utoipa::path(
+    get,
+    path = "/api/v1/keys/{key_id}/authorization",
+    params(
+        ("key_id" = String, Path, description = "User service ID or slug")
+    ),
+    responses(
+        (status = 200, description = "Authorization evidence", body = KeyAuthorizationEvidenceResponse),
+        (status = 401, description = "Unauthorized", body = crate::errors::ErrorResponse),
+        (status = 404, description = "Key not found", body = crate::errors::ErrorResponse)
+    ),
+    tag = "AI Services"
+)]
+/// GET /api/v1/keys/{key_id}/authorization
+///
+/// Same resolution, ACL, and lazy `pending_auth` reconciliation as
+/// `GET /api/v1/keys/{key_id}`, projected to authorization evidence. Node and
+/// proxy-URL enrichment is skipped because no evidence property depends on it.
+pub async fn get_key_authorization(
+    State(state): State<AppState>,
+    auth_user: AuthUser,
+    Path(key_id): Path<String>,
+) -> AppResult<Json<KeyAuthorizationEvidenceResponse>> {
+    let actor = auth_user.user_id.to_string();
+    let response = resolve_key_response(&state, &actor, &key_id).await?;
+    Ok(Json(KeyAuthorizationEvidenceResponse::from_key_response(
+        response,
+    )))
+}
+
+/// Shared body of the two key detail reads: ACL resolution, lazy OAuth
+/// placeholder reconciliation, and the view→response mapping. Returns the
+/// un-enriched response; callers add whatever their representation needs.
+async fn resolve_key_response(
+    state: &AppState,
+    actor: &str,
+    key_id: &str,
+) -> AppResult<KeyResponse> {
+    let access = resolve_key_read_owner(state, actor, key_id).await?;
 
     // Lazy reconciliation of pending_auth OAuth placeholders (issue #653).
     // Wizard polling hits this handler every ~2s; treating each poll as a
@@ -1138,7 +1240,7 @@ pub async fn get_key(
     let api_key_id = view.api_key_id.clone();
     let mut response = key_response_from_view(view);
     let (permission_url, permission_scopes) = derive_lark_permission_for_key(
-        &state,
+        state,
         &owner_id,
         catalog_id.as_deref(),
         catalog_slug.as_deref(),
@@ -1147,16 +1249,7 @@ pub async fn get_key(
     .await;
     response.permission_setup_url = permission_url;
     response.permission_setup_scopes = permission_scopes;
-    enrich_key_response(
-        &state.db,
-        &state.node_ws_manager,
-        &actor,
-        state.config.node_heartbeat_timeout_secs,
-        state.config.base_url.trim_end_matches('/'),
-        &mut response,
-    )
-    .await?;
-    Ok(Json(response))
+    Ok(response)
 }
 
 #[utoipa::path(
@@ -2689,62 +2782,148 @@ mod tests {
         assert_aevatar_secret_free(&response);
     }
 
-    fn assert_aevatar_secret_free(value: &serde_json::Value) {
-        const FORBIDDEN_NAMES: &[&str] = &[
-            "apikey",
-            "fullkey",
-            "keyhash",
-            "credential",
-            "credentials",
-            "accesstoken",
-            "refreshtoken",
-            "authorization",
-            "cookie",
-            "cookies",
-            "secret",
-            "secrets",
-            "clientsecret",
-            "password",
-            "token",
-            "passphrase",
-            "usercode",
-            "devicecode",
-            "rawbody",
-            "rawupstreambody",
-        ];
-        let secret_value =
-            regex::Regex::new(r"(?i)(?:Bearer\s+\S+|nyxid_(?:ag_)?[A-Za-z0-9_-]{16,})").unwrap();
+    /// A `KeyResponse` for a service whose owner used three supported
+    /// features whose free text happens to match the evidence reader's
+    /// secret-shape tripwire: a `Bearer …` service label, a custom request
+    /// header carrying a bearer value, and the `${credential}` WS auth
+    /// template that `ws_frame_injector::validate_template_does_not_embed_credentials`
+    /// explicitly permits (CLAUDE.md §6).
+    fn poisoned_key_response() -> super::KeyResponse {
+        use crate::models::default_request_header::DefaultRequestHeader;
+        use crate::models::ws_frame_injection::{
+            WsFrameDirection, WsFrameInjection, WsFrameKind, WsFrameTrigger,
+        };
 
-        fn visit(value: &serde_json::Value, secret_value: &regex::Regex) {
-            match value {
-                serde_json::Value::Object(properties) => {
-                    for (name, nested) in properties {
-                        let normalized: String = name
-                            .chars()
-                            .filter(char::is_ascii_alphanumeric)
-                            .map(|character| character.to_ascii_lowercase())
-                            .collect();
-                        assert!(
-                            !FORBIDDEN_NAMES.contains(&normalized.as_str()),
-                            "secret-bearing response property: {name}"
-                        );
-                        visit(nested, secret_value);
-                    }
-                }
-                serde_json::Value::Array(items) => {
-                    for item in items {
-                        visit(item, secret_value);
-                    }
-                }
-                serde_json::Value::String(text) => assert!(
-                    !secret_value.is_match(text),
-                    "secret-shaped response value at serialization boundary"
-                ),
-                _ => {}
-            }
+        let result = crate::services::unified_key_service::CreateKeyResult {
+            endpoint: test_user_endpoint(
+                "endpoint-1",
+                "user-1",
+                "Example",
+                "https://api.example.com",
+                None,
+                None,
+            ),
+            api_key: None,
+            service: test_user_service("service-1", "user-1", "example", "endpoint-1", None, None),
+            ssh_host: None,
+            ssh_port: None,
+            ssh_ca_public_key: None,
+            ssh_allowed_principals: None,
+            ssh_certificate_ttl_minutes: None,
+        };
+        let mut response = super::key_response_from_result(&result);
+        response.label = "Bearer Bot".to_string();
+        response.name = "Bearer Bot".to_string();
+        response.default_request_headers = Some(vec![DefaultRequestHeader {
+            name: "X-Upstream-Auth".to_string(),
+            value: "Bearer sk-live-abc123".to_string(),
+            overridable: false,
+            sensitive: false,
+        }]);
+        response.ws_frame_injections = vec![WsFrameInjection {
+            trigger: WsFrameTrigger::FirstFrameFromDownstream,
+            template: r#"{"headers":{"Authorization":"Bearer ${credential}"}}"#.to_string(),
+            frame_kind: WsFrameKind::Text,
+            consume_trigger: true,
+            direction: WsFrameDirection::Downstream,
+        }];
+        response.granted_scopes = Some(vec!["repo".to_string(), "read:user".to_string()]);
+        response.last_authorized_at = Some("2026-08-19T00:00:00+00:00".to_string());
+        response.api_key_id = Some("api-key-1".to_string());
+        response.connection_status = Some("connected".to_string());
+        response
+    }
+
+    /// The hazard this projection exists for. A fully populated detail
+    /// response *does* trip the evidence reader's scan, through three
+    /// separate user-controlled carriers — so serving the detail document as
+    /// authorization evidence would make those services permanently
+    /// unverifiable. If this assertion ever stops holding, the projection has
+    /// stopped being load-bearing and the reason for it should be re-checked,
+    /// not the assertion deleted.
+    #[test]
+    fn full_key_response_trips_the_aevatar_secret_scan() {
+        let response = serde_json::to_value(poisoned_key_response()).unwrap();
+        assert!(
+            crate::test_utils::aevatar_secret_free_violation(&response).is_some(),
+            "expected the full detail response to be rejected by the evidence scan"
+        );
+    }
+
+    #[test]
+    fn authorization_evidence_is_secret_free_for_a_poisoned_service() {
+        let evidence = serde_json::to_value(
+            super::KeyAuthorizationEvidenceResponse::from_key_response(poisoned_key_response()),
+        )
+        .unwrap();
+
+        assert_eq!(
+            crate::test_utils::aevatar_secret_free_violation(&evidence),
+            None,
+            "authorization evidence must never carry a secret-shaped value"
+        );
+
+        // Exactly the consumed properties, nothing more: every additional
+        // property is new tripwire surface on a read that cannot afford it.
+        let properties: std::collections::BTreeSet<&str> = evidence
+            .as_object()
+            .unwrap()
+            .keys()
+            .map(String::as_str)
+            .collect();
+        assert_eq!(
+            properties,
+            [
+                "api_key_id",
+                "connection_status",
+                "granted_scopes",
+                "id",
+                "is_active",
+                "last_authorized_at",
+                "status",
+            ]
+            .into_iter()
+            .collect::<std::collections::BTreeSet<&str>>()
+        );
+    }
+
+    #[test]
+    fn authorization_evidence_always_serializes_nullable_properties() {
+        let result = crate::services::unified_key_service::CreateKeyResult {
+            endpoint: test_user_endpoint(
+                "endpoint-1",
+                "user-1",
+                "Example",
+                "https://api.example.com",
+                None,
+                None,
+            ),
+            api_key: None,
+            service: test_user_service("service-1", "user-1", "example", "endpoint-1", None, None),
+            ssh_host: None,
+            ssh_port: None,
+            ssh_ca_public_key: None,
+            ssh_allowed_principals: None,
+            ssh_certificate_ttl_minutes: None,
+        };
+        let evidence =
+            serde_json::to_value(super::KeyAuthorizationEvidenceResponse::from_key_response(
+                super::key_response_from_result(&result),
+            ))
+            .unwrap();
+
+        // The reader distinguishes an explicit null from a missing property
+        // and treats a missing one as a malformed response.
+        for property in ["connection_status", "granted_scopes", "last_authorized_at"] {
+            assert_eq!(evidence.get(property), Some(&serde_json::Value::Null));
         }
+    }
 
-        visit(value, &secret_value);
+    fn assert_aevatar_secret_free(value: &serde_json::Value) {
+        assert_eq!(
+            crate::test_utils::aevatar_secret_free_violation(value),
+            None
+        );
     }
 
     async fn insert_user(db: &mongodb::Database, user_id: &str, user_type: UserType) {

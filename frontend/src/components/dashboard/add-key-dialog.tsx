@@ -3200,7 +3200,22 @@ export function AddKeyDialog({
         setAuthKey(repaired);
         return repaired;
       }
-      return reconnectKey;
+      // Re-read rather than returning the prop. The caller derives the
+      // reconnect freshness baseline (`last_authorized_at`) from whatever
+      // this returns, and `reconnectKey` was fetched when the dialog was
+      // opened — minutes earlier, in the assistant-card flow. A baseline that
+      // old lets an authorization completed in the meantime satisfy the gate.
+      // Deliberately not caught: a stale baseline can settle the card as
+      // re-authorized on someone else's authorization, so failing the Connect
+      // click is the safer outcome.
+      const fresh = await api.get<KeyInfo>(
+        `/keys/${encodeURIComponent(reconnectKey.id)}`,
+      );
+      if (fresh.id !== reconnectKey.id) {
+        throw new Error("NyxID returned a different service than requested");
+      }
+      setAuthKey(fresh);
+      return fresh;
     }
     if (authKey) {
       return authKey;

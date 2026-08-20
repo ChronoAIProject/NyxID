@@ -1038,6 +1038,70 @@ pub(crate) fn test_user_service(
     }
 }
 
+/// Mirror of the Aevatar assistant-action evidence reader's recursive
+/// secret-shape scan (`RejectSecretBearingRead`): forbidden property names,
+/// plus any string value matching `Bearer\s+\S+` or a long `nyxid_` prefix.
+///
+/// Returns the offending property or value instead of panicking so tests can
+/// assert both directions — that an evidence projection is clean, and that
+/// the full detail document it projects from is not.
+pub(crate) fn aevatar_secret_free_violation(value: &serde_json::Value) -> Option<String> {
+    const FORBIDDEN_NAMES: &[&str] = &[
+        "apikey",
+        "fullkey",
+        "keyhash",
+        "credential",
+        "credentials",
+        "accesstoken",
+        "refreshtoken",
+        "authorization",
+        "cookie",
+        "cookies",
+        "secret",
+        "secrets",
+        "clientsecret",
+        "password",
+        "token",
+        "passphrase",
+        "usercode",
+        "devicecode",
+        "rawbody",
+        "rawupstreambody",
+    ];
+    let secret_value =
+        regex::Regex::new(r"(?i)(?:Bearer\s+\S+|nyxid_(?:ag_)?[A-Za-z0-9_-]{16,})").unwrap();
+
+    fn visit(value: &serde_json::Value, secret_value: &regex::Regex) -> Option<String> {
+        match value {
+            serde_json::Value::Object(properties) => {
+                for (name, nested) in properties {
+                    let normalized: String = name
+                        .chars()
+                        .filter(char::is_ascii_alphanumeric)
+                        .map(|character| character.to_ascii_lowercase())
+                        .collect();
+                    if FORBIDDEN_NAMES.contains(&normalized.as_str()) {
+                        return Some(format!("secret-bearing response property: {name}"));
+                    }
+                    if let Some(violation) = visit(nested, secret_value) {
+                        return Some(violation);
+                    }
+                }
+                None
+            }
+            serde_json::Value::Array(items) => {
+                items.iter().find_map(|item| visit(item, secret_value))
+            }
+            serde_json::Value::String(text) => secret_value
+                .is_match(text)
+                .then(|| "secret-shaped response value at serialization boundary".to_string()),
+            _ => None,
+        }
+    }
+
+    visit(value, &secret_value)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

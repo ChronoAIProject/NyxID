@@ -17,6 +17,9 @@ const {
   initiateDeviceCodeMutateAsync,
   pollDeviceCodeMutate,
   mockApiDelete,
+  mockApiGet,
+  lastReconnectKey,
+  freshReconnectRead,
   mockHardRedirect,
   mockNavigate,
   pendingKeyStatus,
@@ -48,6 +51,13 @@ const {
   initiateDeviceCodeMutateAsync: vi.fn(),
   pollDeviceCodeMutate: vi.fn(),
   mockApiDelete: vi.fn(),
+  mockApiGet: vi.fn(),
+  // `ensureAuthKey` re-reads the key when Connect is clicked so the reconnect
+  // freshness baseline is current rather than as-of-dialog-open. These hold
+  // what that read returns: the reconnect key the test rendered, plus any
+  // per-test override simulating the row moving underneath the dialog.
+  lastReconnectKey: { value: null as Record<string, unknown> | null },
+  freshReconnectRead: { value: null as Record<string, unknown> | null },
   mockHardRedirect: vi.fn(),
   mockNavigate: vi.fn(),
   toastFns: { success: vi.fn(), error: vi.fn() },
@@ -127,6 +137,7 @@ vi.mock("@/lib/api-client", async () => {
     api: {
       ...actual.api,
       delete: mockApiDelete,
+      get: mockApiGet,
     },
   };
 });
@@ -198,6 +209,12 @@ const RFC8628_DEVICE_CODE_ENTRY = {
 } as unknown as CatalogEntry;
 
 function makeReconnectKey(overrides: Partial<KeyInfo> = {}): KeyInfo {
+  const key = buildReconnectKey(overrides);
+  lastReconnectKey.value = key as unknown as Record<string, unknown>;
+  return key;
+}
+
+function buildReconnectKey(overrides: Partial<KeyInfo> = {}): KeyInfo {
   return {
     id: "existing-service-1",
     label: "Existing GitHub",
@@ -241,6 +258,17 @@ beforeEach(() => {
   pendingKeyStatus.value = null;
   pendingLastAuthorizedAt.value = null;
   popupReceiverOptions.current = null;
+  lastReconnectKey.value = null;
+  freshReconnectRead.value = null;
+  // Default: the row is unchanged since the dialog opened, so the re-read
+  // returns the same key the test rendered.
+  mockApiGet.mockImplementation((path: string) => {
+    if (typeof path === "string" && path.startsWith("/keys/")) {
+      const base = lastReconnectKey.value ?? {};
+      return Promise.resolve({ ...base, ...(freshReconnectRead.value ?? {}) });
+    }
+    return Promise.reject(new Error(`Unexpected read: ${String(path)}`));
+  });
   createKeyMutateAsync.mockResolvedValue({ id: "created-service-1" });
   updateKeyMutateAsync.mockResolvedValue(makeReconnectKey());
   initiateOAuthMutateAsync.mockResolvedValue({
@@ -857,6 +885,74 @@ describe("AddKeyDialog — reconnect path", () => {
     expect(
       screen.queryByRole("button", { name: "Continue" }),
     ).not.toBeInTheDocument();
+  });
+
+  it("takes the freshness baseline from a read at Connect time, not from the prop", async () => {
+    catalog.entries = [OAUTH_ENTRY];
+    // The row was re-authorized somewhere else between the card being clicked
+    // and Connect being pressed. The stale prop still says 00:00:00; the
+    // server now says 00:05:00.
+    freshReconnectRead.value = {
+      last_authorized_at: "2026-01-01T00:05:00Z",
+    };
+    pendingKeyStatus.value = "active";
+    pendingLastAuthorizedAt.value = "2026-01-01T00:05:00Z";
+    const onAuthorizationPending = vi.fn();
+    const user = userEvent.setup();
+    render(
+      <AddKeyDialog
+        open
+        onOpenChange={vi.fn()}
+        reconnectKey={makeReconnectKey({ status: "active" })}
+        onAuthorizationPending={onAuthorizationPending}
+      />,
+    );
+
+    await user.click(
+      screen.getByRole("button", { name: /Connect with GitHub/i }),
+    );
+
+    await waitFor(() => expect(onAuthorizationPending).toHaveBeenCalled());
+    expect(onAuthorizationPending).toHaveBeenCalledWith(
+      expect.objectContaining({
+        previousAuthorizationAt: "2026-01-01T00:05:00Z",
+      }),
+    );
+    expect(mockApiGet).toHaveBeenCalledWith("/keys/existing-service-1");
+    // With the stale prop as the baseline this would have settled as freshly
+    // authorized on somebody else's authorization.
+    await waitFor(() => {
+      expect(screen.getByRole("status")).toHaveTextContent(
+        /Waiting for GitHub/i,
+      );
+    });
+    expect(
+      screen.queryByRole("button", { name: "Continue" }),
+    ).not.toBeInTheDocument();
+  });
+
+  it("fails the Connect click rather than falling back to a stale baseline", async () => {
+    catalog.entries = [OAUTH_ENTRY];
+    mockApiGet.mockRejectedValue(new Error("network down"));
+    const onAuthorizationPending = vi.fn();
+    const user = userEvent.setup();
+    render(
+      <AddKeyDialog
+        open
+        onOpenChange={vi.fn()}
+        reconnectKey={makeReconnectKey()}
+        onAuthorizationPending={onAuthorizationPending}
+      />,
+    );
+
+    await user.click(
+      screen.getByRole("button", { name: /Connect with GitHub/i }),
+    );
+
+    await waitFor(() =>
+      expect(initiateOAuthMutateAsync).not.toHaveBeenCalled(),
+    );
+    expect(onAuthorizationPending).not.toHaveBeenCalled();
   });
 
   it("offers a retry when the provider denies authorization", async () => {
