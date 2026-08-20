@@ -1,6 +1,7 @@
 import { render, screen } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { beforeEach, describe, expect, it, vi } from "vitest";
+import { formatWebAuthDeviceRemaining } from "@/lib/auth-device-time";
 import { WebDeviceLogin } from "./web-device-login";
 
 const { deviceState, mockStart, mockGenerateNew, mockClose, mockNavigate } =
@@ -43,6 +44,12 @@ beforeEach(() => {
 });
 
 describe("WebDeviceLogin", () => {
+  it("formats the countdown as mm:ss", () => {
+    expect(formatWebAuthDeviceRemaining(583)).toBe("9:43");
+    expect(formatWebAuthDeviceRemaining(0)).toBe("0:00");
+    expect(formatWebAuthDeviceRemaining(-1)).toBe("0:00");
+  });
+
   it("does not start a request on mount, then starts on explicit click", async () => {
     const user = userEvent.setup();
     render(<WebDeviceLogin />);
@@ -71,7 +78,7 @@ describe("WebDeviceLogin", () => {
     expect(screen.getByText("ABCD-EFGH")).toBeInTheDocument();
     expect(screen.getByText("https://id.example/login/device")).toBeInTheDocument();
     expect(screen.getByAltText("Scan this QR code with the NyxID app")).toBeInTheDocument();
-    expect(screen.getByText("Expires in 597s")).toBeInTheDocument();
+    expect(screen.getByText("Expires in 9:57")).toBeInTheDocument();
   });
 
   it("renders a denied terminal state with an explicit regenerate action", async () => {

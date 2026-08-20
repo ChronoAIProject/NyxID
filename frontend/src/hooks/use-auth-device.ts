@@ -86,6 +86,7 @@ export interface WebAuthDeviceLoginState {
 
 const POLL_SLOW_DOWN_INCREMENT_SECONDS = 5;
 const ACTION_THROTTLE_MS = 750;
+const MAX_CONSECUTIVE_POLL_FAILURES = 3;
 
 function getApiErrorCode(error: unknown): number | null {
   if (
@@ -151,6 +152,7 @@ export function useWebAuthDeviceLogin(): WebAuthDeviceLoginState & {
   const pollTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const lastActionAtRef = useRef(0);
   const stoppedRef = useRef(true);
+  const consecutiveFailuresRef = useRef(0);
 
   const clearPollTimer = useCallback(() => {
     if (pollTimerRef.current !== null) {
@@ -189,6 +191,7 @@ export function useWebAuthDeviceLogin(): WebAuthDeviceLoginState & {
       });
       const response = await api.post<unknown>("/auth/device/poll-web", body);
       pollWebResponseSchema.parse(response);
+      consecutiveFailuresRef.current = 0;
       stopPolling();
       await checkAuth();
       setCurrentPhase("success");
@@ -206,10 +209,18 @@ export function useWebAuthDeviceLogin(): WebAuthDeviceLoginState & {
         return;
       }
 
-      if (code === 11202 || code === 11203) {
-        if (code === 11203) {
+      if (code === 11202 || code === 11203 || code === 11206) {
+        if (code === 11202) {
+          consecutiveFailuresRef.current = 0;
+        } else {
           intervalRef.current += POLL_SLOW_DOWN_INCREMENT_SECONDS;
         }
+        schedulePollRef.current(intervalRef.current);
+        return;
+      }
+
+      consecutiveFailuresRef.current += 1;
+      if (consecutiveFailuresRef.current <= MAX_CONSECUTIVE_POLL_FAILURES) {
         schedulePollRef.current(intervalRef.current);
         return;
       }
@@ -241,6 +252,7 @@ export function useWebAuthDeviceLogin(): WebAuthDeviceLoginState & {
     setRequest(null);
     setRemainingSeconds(null);
     setError(null);
+    consecutiveFailuresRef.current = 0;
     stoppedRef.current = false;
     setCurrentPhase("requesting");
 

@@ -17,6 +17,7 @@ import {
 } from "@/schemas/auth-device";
 import { isTrustedAuthReturnTo } from "@/lib/return-url";
 import { copyToClipboard } from "@/lib/utils";
+import { formatWebAuthDeviceRemaining } from "@/lib/auth-device-time";
 import { useWebAuthDeviceLogin } from "@/hooks/use-auth-device";
 
 interface WebDeviceLoginProps {
@@ -188,7 +189,9 @@ export function WebDeviceLogin({ returnTo }: WebDeviceLoginProps) {
 
           <div className="flex items-center justify-center gap-1.5 text-[11px] text-warning">
             <Clock3 className="size-3.5" />
-            Expires in {String(deviceLogin.remainingSeconds ?? deviceLogin.request.expires_in)}s
+            Expires in {formatWebAuthDeviceRemaining(
+              deviceLogin.remainingSeconds ?? deviceLogin.request.expires_in,
+            )}
           </div>
         </div>
       )}

@@ -38,6 +38,7 @@ beforeEach(() => {
 });
 
 afterEach(() => {
+  vi.clearAllTimers();
   vi.useRealTimers();
 });
 
@@ -252,6 +253,100 @@ describe("useWebAuthDeviceLogin", () => {
     expect(mockPost).toHaveBeenCalledTimes(3);
     expect(result.current.phase).toBe("success");
     expect(mockCheckAuth).toHaveBeenCalledTimes(1);
+  });
+
+  it("treats rate limiting as backoff and keeps polling", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-08-20T10:00:00Z"));
+    mockPost.mockResolvedValueOnce(requestResponse);
+    const { result } = renderHook(() => useWebAuthDeviceLogin());
+    await act(async () => {
+      result.current.start();
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+
+    const rateLimited = {
+      errorCode: 11206,
+      errorResponse: {
+        error: "auth_device_rate_limited",
+        error_code: 11206,
+        message: "Rate limited",
+      },
+    };
+    mockPost.mockRejectedValueOnce(rateLimited).mockResolvedValueOnce({ ok: true });
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(5_000);
+    });
+    expect(mockPost).toHaveBeenCalledTimes(2);
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(9_999);
+    });
+    expect(mockPost).toHaveBeenCalledTimes(2);
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(1);
+    });
+    expect(mockPost).toHaveBeenCalledTimes(3);
+    expect(result.current.phase).toBe("success");
+  });
+
+  it("recovers from one transient poll failure", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-08-20T10:00:00Z"));
+    mockPost.mockResolvedValueOnce(requestResponse);
+    const { result } = renderHook(() => useWebAuthDeviceLogin());
+    await act(async () => {
+      result.current.start();
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+
+    mockPost
+      .mockRejectedValueOnce(new Error("temporary network failure"))
+      .mockResolvedValueOnce({ ok: true });
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(5_000);
+    });
+    expect(mockPost).toHaveBeenCalledTimes(2);
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(5_000);
+    });
+    expect(mockPost).toHaveBeenCalledTimes(3);
+    expect(result.current.phase).toBe("success");
+  });
+
+  it("enters error after the consecutive transient-failure budget", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-08-20T10:00:00Z"));
+    mockPost.mockResolvedValueOnce(requestResponse);
+    const { result } = renderHook(() => useWebAuthDeviceLogin());
+    await act(async () => {
+      result.current.start();
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+
+    mockPost
+      .mockRejectedValueOnce(new Error("network failure 1"))
+      .mockRejectedValueOnce(new Error("network failure 2"))
+      .mockRejectedValueOnce(new Error("network failure 3"))
+      .mockRejectedValueOnce(new Error("network failure 4"));
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(5_000);
+    });
+    expect(result.current.phase).toBe("pending");
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(5_000);
+    });
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(5_000);
+    });
+    expect(result.current.phase).toBe("pending");
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(5_000);
+    });
+    expect(result.current.phase).toBe("error");
+    expect(mockPost).toHaveBeenCalledTimes(5);
   });
 
   it("stops polling on denied and supports explicit regeneration", async () => {
