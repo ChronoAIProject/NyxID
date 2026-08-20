@@ -210,19 +210,31 @@ The workable order, given all of the above:
 
 # The five surfaces, in depth
 
-Billing is set aside here by decision. What follows is about **what each service safely offers on a shared credential**, and what it leaks. *Adversarial review of this section is in flight; verdicts may move.*
+Billing is set aside here by decision. What follows is about **what each service safely offers on a shared credential**, and what it leaks. *Verdicts below reflect adversarial review; two were downgraded from the first draft.*
 
-**At a glance:** Firecrawl **offer now** · Twitter reads **offer now** · Reddit reads **offer with constraints** (commercial terms) · ElevenLabs **offer with constraints** (TTS only) · Twilio **not yet**.
+**At a glance, after adversarial review:** Twitter reads **offer now** (with an app-only credential) · Reddit reads **gated** on commercial terms *and* app-only auth · Firecrawl **not yet** · ElevenLabs **not yet** · Twilio **not yet**.
+
+The first draft of this section said three services could switch on with configuration. Review downgraded two of them, for the same underlying reason in both cases: **the contracts assumed parameter constraints that do not exist in the merged code.** Only method and path are matched today (`services/proxy_authorization.rs:186`). A contract that reads "expose scrape with bounded limits" is not a contract until bounds are enforceable.
 
 ## Firecrawl — "read the web for me"
 
 Market research, competitor monitoring, reading a page an agent was pointed at. The synchronous operations are pure configuration: the parameter space carries no money and no impersonation, and a mis-scoped rule costs a failed scrape.
 
-One real caveat: **crawl submission is not idempotent under retry** through the MCP node path (`services/mcp_service.rs:3664-3739`), which can duplicate a submitted crawl and the provider quota it consumes. Synchronous operations are unaffected.
+Two findings moved this from "offer now" to "not yet".
+
+**The bodies are open and the bounds are imaginary.** The overlay leaves `scrape`, `search` and `map` bodies unconstrained; search accepts an unbounded `limit` plus arbitrary `scrapeOptions`, and agent submission makes `maxCredits` optional with no ceiling. The proposed contract depends on bounds the matcher cannot express.
+
+**Retry duplication is broader than I said.** The MCP node executor retries *every* method across fallback nodes with a fresh request id (`services/mcp_service.rs:3664`, `:3736`) — so `scrape` and `search` are affected, not only async submission. Platform tools resolve node bindings automatically, and there is no catalog-row `direct_only` control to prevent it. If a node completes a large search and its response is lost, the same body goes to the next node and can fall through to direct execution: the caller sees one result, the vendor bills two or more.
+
+**And async polling cannot be made multi-tenant by configuration.** `GET /v2/agent/{id}` accepts any task id, and no method-and-path rule can prove the id was issued to the calling principal. If a job id reaches a support ticket, a log, or another agent's output, its research topic and results are readable by anyone. That needs either exclusion or a handler storing `(principal, job id)` and checking ownership.
 
 ## Twitter/X reads — "what is being said"
 
-Search and public timeline reads. Writes are excluded outright — a platform credential posting means posting *as ChronoAI*, which is not a capability we want to hand an agent.
+Search, username lookup, and a selected user's posts. Writes are excluded outright — a platform credential posting means posting *as ChronoAI*. `/users/me` is excluded too, since it returns the platform's own identity.
+
+Review confirmed the three-route surface is clean: no DM, inbox, saved-item, blocked-list, following-list or quota operation exists in the overlay. **This is the one service that can switch on with merged code.**
+
+One condition, and it is not optional. The privacy result depends entirely on credential class, and the repo's existing X provider defaults to *user OAuth* (`services/provider_service.rs:590`, `:609`). With a shared **user-context** token, a caller could name a protected account that the shared account follows and read content visible only through that relationship. **App-only credentials must be a tested activation invariant, not an assumption.**
 
 ## Reddit reads — "monitor the conversation"
 
@@ -232,7 +244,11 @@ Both are marked as assumptions in the underlying document rather than waved thro
 
 ## ElevenLabs — "give the agent a voice"
 
-The TTS family under voice, model and length constraints is a well-bounded capability. Quota burn is the residual risk, shared across users.
+The TTS family under voice, model and length constraints is a well-bounded capability *once those constraints exist* — which is why this is "not yet" rather than "offer now". Quota burn is the residual risk beyond that.
+
+Review also found a leak in the proposed operation set: **`/v1/voices` lists voices available to the shared account**, which includes private or cloned voices deliberately kept out of any curated subset. A caller can enumerate their names, ids and metadata; the TTS constraint might stop them being *used*, but it cannot retract the disclosure, and a method-and-path rule cannot filter a response body. Exclude it, publish the curated set as NyxID-owned metadata, or filter it in a handler. `/v1/models` does not have this problem.
+
+The exclusion of realtime and conversational AI *is* structurally sound — exact segment matching means the allowed POST rules cannot reach `/stream-input` or `/convai/...`, and WebSocket handshakes are GET upgrades that match nothing. One defence-in-depth gap worth noting: the shared HTTP client follows redirects by default while authorization checks only the initial path, so a same-origin 307/308 from an allowed endpoint would carry method, credential and body to a disallowed one. No caller-inducible redirect was found.
 
 The sharp finding here refined my own hypothesis. I had guessed ElevenLabs sat "between configuration and a handler, depending on streaming." The more accurate statement: **it is a configuration case if and only if the realtime and conversational-AI family stays excluded.** Include streaming conversations and it becomes a handler case — frame policy, per-session brokering — because realtime frame protocols are out of band and cannot be policed by method and path. **The scoping decision is the mechanism decision**, not a factor in it.
 
@@ -252,5 +268,7 @@ So Twilio is the clearest handler case in the set, and it needs a standing compl
 
 The pattern holds, with one correction to my hypothesis. **Read surfaces are configuration cases** — the dangerous parameter space is thin, and a method-and-path rule genuinely bounds them. **Twilio is a handler case**, for the same reason `chrono-llm-public` is a handler: the safety needed is about *what the call does*, not which endpoint it reaches. **ElevenLabs is a configuration case because of scoping** — not despite it.
 
-That is a much smaller first step than a universal constraint language. Three services switch on with configuration this week. One waits on a commercial answer. One needs a handler, and we already know how to write one, because we wrote it for Chrono LLM.
+That is still a much smaller first step than a universal constraint language — but the honest count is **one service this week, not three.** Twitter reads switch on with merged code, contingent on an app-only credential. Reddit joins it once the terms question and the same credential gate are cleared. Firecrawl and ElevenLabs are configuration cases *after* parameter constraints exist, not before. Twilio needs the handler.
+
+The correction is worth stating plainly because it generalises: **a service contract written against constraints we have not built is a wish, not a contract.** The value of the review was catching two of those before activation rather than after.
 
