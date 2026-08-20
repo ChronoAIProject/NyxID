@@ -127,7 +127,7 @@ enum EncodedUpstreamEcho {
     Minimal(MinimalUpstreamEcho),
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Clone, Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 struct UpstreamEchoHeader {
     version: u8,
@@ -335,16 +335,19 @@ fn encode_header(header: &UpstreamEchoHeader) -> Option<String> {
     Some(base64::engine::general_purpose::STANDARD.encode(serialize_echoes(header).ok()?))
 }
 
-fn encoded_header_if_fits(
+fn selected_header_if_fits<F>(
     header: &UpstreamEchoHeader,
     rung: EchoEncodingRung,
     max_bytes: usize,
-) -> Option<(HeaderValue, EchoEncodingRung)> {
-    let encoded = encode_header(header)?;
-    if encoded.len() > max_bytes {
+    measure_bytes: F,
+) -> Option<(UpstreamEchoHeader, EchoEncodingRung)>
+where
+    F: Fn(&UpstreamEchoHeader) -> Option<usize>,
+{
+    if measure_bytes(header)? > max_bytes {
         return None;
     }
-    Some((HeaderValue::from_str(&encoded).ok()?, rung))
+    Some((header.clone(), rung))
 }
 
 fn encode_echo_header_with_rung(
@@ -357,11 +360,29 @@ fn encode_echo_header_with_limit(
     echoes: &[UpstreamEcho],
     max_bytes: usize,
 ) -> Option<(HeaderValue, EchoEncodingRung)> {
+    let measure_encoded_bytes =
+        |header: &UpstreamEchoHeader| encode_header(header).map(|v| v.len());
+    let (header, rung) = select_echo_header(echoes, max_bytes, measure_encoded_bytes)?;
+    let encoded = encode_header(&header)?;
+    Some((HeaderValue::from_str(&encoded).ok()?, rung))
+}
+
+fn select_echo_header<F>(
+    echoes: &[UpstreamEcho],
+    max_bytes: usize,
+    measure_bytes: F,
+) -> Option<(UpstreamEchoHeader, EchoEncodingRung)>
+where
+    F: Fn(&UpstreamEchoHeader) -> Option<usize> + Copy,
+{
     let mut candidates = echoes.to_vec();
-    if let Some(encoded) =
-        encoded_header_if_fits(&full_header(&candidates), EchoEncodingRung::Full, max_bytes)
-    {
-        return Some(encoded);
+    if let Some(selected) = selected_header_if_fits(
+        &full_header(&candidates),
+        EchoEncodingRung::Full,
+        max_bytes,
+        measure_bytes,
+    ) {
+        return Some(selected);
     }
 
     let mut bodies = candidates
@@ -378,10 +399,11 @@ fn encode_echo_header_with_limit(
     for (index, body) in bodies {
         candidates[index].body = serde_json::Value::String(String::new());
         candidates[index].truncated = true;
-        if encoded_header_if_fits(
+        if selected_header_if_fits(
             &full_header(&candidates),
             EchoEncodingRung::TruncatedBodies,
             max_bytes,
+            measure_bytes,
         )
         .is_none()
         {
@@ -395,10 +417,11 @@ fn encode_echo_header_with_limit(
             let middle = low + (high - low) / 2;
             let (prefix, _) = truncate_utf8(&body, middle);
             candidates[index].body = serde_json::Value::String(prefix);
-            if encoded_header_if_fits(
+            if selected_header_if_fits(
                 &full_header(&candidates),
                 EchoEncodingRung::TruncatedBodies,
                 max_bytes,
+                measure_bytes,
             )
             .is_some()
             {
@@ -416,10 +439,11 @@ fn encode_echo_header_with_limit(
         }
         candidates[index].body = serde_json::Value::String(best.clone());
         if best.len() >= DEBUG_UPSTREAM_MIN_TRUNCATED_BODY_BYTES {
-            return encoded_header_if_fits(
+            return selected_header_if_fits(
                 &full_header(&candidates),
                 EchoEncodingRung::TruncatedBodies,
                 max_bytes,
+                measure_bytes,
             );
         }
     }
@@ -435,12 +459,13 @@ fn encode_echo_header_with_limit(
             echo.truncated = true;
         }
     }
-    if let Some(encoded) = encoded_header_if_fits(
+    if let Some(selected) = selected_header_if_fits(
         &full_header(&candidates),
         EchoEncodingRung::DroppedBodies,
         max_bytes,
+        measure_bytes,
     ) {
-        return Some(encoded);
+        return Some(selected);
     }
 
     for echo in &mut candidates {
@@ -450,12 +475,13 @@ fn encode_echo_header_with_limit(
         }
         echo.dropped_headers = Some(true);
     }
-    if let Some(encoded) = encoded_header_if_fits(
+    if let Some(selected) = selected_header_if_fits(
         &full_header(&candidates),
         EchoEncodingRung::DroppedHeaders,
         max_bytes,
+        measure_bytes,
     ) {
-        return Some(encoded);
+        return Some(selected);
     }
 
     let mut minimal = UpstreamEchoHeader {
@@ -467,8 +493,13 @@ fn encode_echo_header_with_limit(
             .collect(),
         dropped_echo_count: 0,
     };
-    if let Some(encoded) = encoded_header_if_fits(&minimal, EchoEncodingRung::Minimal, max_bytes) {
-        return Some(encoded);
+    if let Some(selected) = selected_header_if_fits(
+        &minimal,
+        EchoEncodingRung::Minimal,
+        max_bytes,
+        measure_bytes,
+    ) {
+        return Some(selected);
     }
 
     let dropped = minimal
@@ -477,7 +508,12 @@ fn encode_echo_header_with_limit(
         .saturating_sub(DEBUG_UPSTREAM_MAX_ECHOES);
     minimal.echoes.truncate(DEBUG_UPSTREAM_MAX_ECHOES);
     minimal.dropped_echo_count = u32::try_from(dropped).unwrap_or(u32::MAX);
-    encoded_header_if_fits(&minimal, EchoEncodingRung::DroppedEchoes, max_bytes)
+    selected_header_if_fits(
+        &minimal,
+        EchoEncodingRung::DroppedEchoes,
+        max_bytes,
+        measure_bytes,
+    )
 }
 
 fn encode_echo_header(echoes: &[UpstreamEcho]) -> Option<HeaderValue> {
