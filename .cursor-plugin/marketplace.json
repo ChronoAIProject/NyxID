@@ -7,7 +7,6 @@
   "plugins": [
     {
       "name": "nyxid",
-      "displayName": "NyxID",
       "source": "integrations/cursor-plugin",
       "description": "Connect Cursor agents to NyxID for credential brokering, service discovery, and proxied downstream API calls without exposing upstream secrets.",
       "version": "0.1.0",
