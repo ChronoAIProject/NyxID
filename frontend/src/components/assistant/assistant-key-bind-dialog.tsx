@@ -101,7 +101,10 @@ export function AssistantKeyBindDialog({
   readonly onOpenChange: (open: boolean) => void;
   readonly actionRequestId: string;
   readonly params: AssistantKeyBindParams;
-  readonly onComplete: (keyId: string) => void;
+  readonly onComplete: (resource: {
+    readonly keyId: string;
+    readonly userServiceId: string;
+  }) => void;
 }) {
   const submittingRef = useRef(false);
   const verificationRef = useRef(false);
@@ -109,13 +112,11 @@ export function AssistantKeyBindDialog({
   const [verifying, setVerifying] = useState(false);
   const [verified, setVerified] = useState(false);
   const [resultKeyId, setResultKeyId] = useState<string | null>(null);
-  const [bindingId, setBindingId] = useState<string | null>(null);
   const [replayed, setReplayed] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
   function close() {
     setResultKeyId(null);
-    setBindingId(null);
     setError(null);
     setVerified(false);
     setReplayed(false);
@@ -128,7 +129,6 @@ export function AssistantKeyBindDialog({
 
   async function verifyBinding(
     keyId: string,
-    boundId: string,
     expected: AssistantKeyBindParams,
   ): Promise<void> {
     if (verificationRef.current) return;
@@ -137,12 +137,11 @@ export function AssistantKeyBindDialog({
     setVerified(false);
     try {
       const value = await api.get<unknown>(
-        `/api-keys/${encodeURIComponent(keyId)}/bindings/${encodeURIComponent(boundId)}/authorization`,
+        `/api-keys/${encodeURIComponent(keyId)}/bindings/by-service/${encodeURIComponent(expected.userServiceId)}/authorization`,
       );
       assertSecretFreeReadBack(value);
       const snapshot = bindingEvidenceSchema.parse(value);
       if (
-        snapshot.id !== boundId ||
         snapshot.api_key_id !== expected.keyId ||
         snapshot.user_service_id !== expected.userServiceId ||
         snapshot.user_api_key_id !== expected.externalKeyId
@@ -177,13 +176,8 @@ export function AssistantKeyBindDialog({
         }),
       );
       setResultKeyId(response.resource.keyId);
-      setBindingId(response.bindingId);
       setReplayed(response.replayed);
-      await verifyBinding(
-        response.resource.keyId,
-        response.bindingId,
-        expected,
-      );
+      await verifyBinding(response.resource.keyId, expected);
     } catch (caught) {
       setError(
         errorMessage(caught, "NyxID could not bind this credential."),
@@ -275,7 +269,7 @@ export function AssistantKeyBindDialog({
             </>
           ) : (
             <>
-              {!verified && bindingId ? (
+              {!verified ? (
                 <Button
                   type="button"
                   variant="outline"
@@ -283,7 +277,7 @@ export function AssistantKeyBindDialog({
                   onClick={() => {
                     const expected =
                       keyBindCredentialActionParamsSchema.parse(params);
-                    void verifyBinding(resultKeyId, bindingId, expected);
+                    void verifyBinding(resultKeyId, expected);
                   }}
                 >
                   <RefreshCw />
@@ -295,7 +289,10 @@ export function AssistantKeyBindDialog({
                 variant="primary"
                 disabled={!verified}
                 onClick={() => {
-                  onComplete(resultKeyId);
+                  onComplete({
+                    keyId: resultKeyId,
+                    userServiceId: params.userServiceId,
+                  });
                   close();
                 }}
               >

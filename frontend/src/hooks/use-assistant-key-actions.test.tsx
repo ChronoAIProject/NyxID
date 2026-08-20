@@ -104,7 +104,7 @@ describe("assistant key action hooks", () => {
     );
   });
 
-  it("POSTs key.bind_credential and reads binding evidence by id", async () => {
+  it("POSTs key.bind_credential and reads binding evidence by service", async () => {
     mockPost.mockResolvedValue({
       resource: { keyId: "key-1" },
       bindingId: "bind-1",
@@ -136,7 +136,7 @@ describe("assistant key action hooks", () => {
         externalKeyId: "cred-1",
       },
     );
-    await expect(readBindingAuthorization("key-1", "bind-1")).resolves.toEqual({
+    await expect(readBindingAuthorization("key-1", "svc-1")).resolves.toEqual({
       id: "bind-1",
       api_key_id: "key-1",
       user_service_id: "svc-1",
@@ -145,7 +145,7 @@ describe("assistant key action hooks", () => {
       updated_at: "2026-08-11T00:00:00Z",
     });
     expect(mockGet).toHaveBeenCalledWith(
-      "/api-keys/key-1/bindings/bind-1/authorization",
+      "/api-keys/key-1/bindings/by-service/svc-1/authorization",
     );
   });
 

@@ -143,9 +143,9 @@ export function readApiKeyAuthorization(
 
 export function readBindingAuthorization(
   keyId: string,
-  bindingId: string,
+  userServiceId: string,
 ): Promise<BindingAuthorizationEvidence> {
   return api.get<BindingAuthorizationEvidence>(
-    `/api-keys/${encodeURIComponent(keyId)}/bindings/${encodeURIComponent(bindingId)}/authorization`,
+    `/api-keys/${encodeURIComponent(keyId)}/bindings/by-service/${encodeURIComponent(userServiceId)}/authorization`,
   );
 }

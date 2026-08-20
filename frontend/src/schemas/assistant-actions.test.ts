@@ -738,6 +738,43 @@ describe("action continuation schema", () => {
         new Map([["act-1", "key.rotate"]]),
       ),
     ).toThrow("key.rotate completed reports must include resource.key.keyId");
+    expect(() =>
+      buildActionContinueBody(
+        "nyxid-chat-actor-1",
+        "request-1",
+        "turn-origin-1",
+        [
+          {
+            actionRequestId: "act-1",
+            originTurnId: "turn-origin-1",
+            disposition: "completed",
+            resource: { key: { keyId: "key-1" } },
+          },
+        ],
+        new Map([["act-1", "key.bind_credential"]]),
+      ),
+    ).toThrow(
+      "key.bind_credential completed reports must include resource.key.userServiceId",
+    );
+    const bindBody = buildActionContinueBody(
+      "nyxid-chat-actor-1",
+      "request-1",
+      "turn-origin-1",
+      [
+        {
+          actionRequestId: "act-1",
+          originTurnId: "turn-origin-1",
+          disposition: "completed",
+          resource: {
+            key: { keyId: "key-1", userServiceId: "svc-1" },
+          },
+        },
+      ],
+      new Map([["act-1", "key.bind_credential"]]),
+    );
+    expect(bindBody.actions[0]?.resource).toEqual({
+      key: { keyId: "key-1", userServiceId: "svc-1" },
+    });
   });
 
   it("round-trips all six safe resource variants when the action is neutral", () => {

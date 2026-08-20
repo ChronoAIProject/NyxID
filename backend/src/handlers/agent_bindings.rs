@@ -408,10 +408,58 @@ pub async fn get_binding_authorization(
     } = resolve_binding_owner(&state, &actor, &key_id, false).await?;
     let binding =
         agent_binding_service::get_binding(&state.db, &user_id, &key_id, &binding_id).await?;
+    project_binding_authorization(&state, access, binding).await
+}
+
+#[utoipa::path(
+    get,
+    path = "/api/v1/api-keys/{key_id}/bindings/by-service/{user_service_id}/authorization",
+    params(
+        ("key_id" = String, Path, description = "API key ID"),
+        ("user_service_id" = String, Path, description = "User service ID")
+    ),
+    responses(
+        (status = 200, description = "Binding authorization evidence", body = BindingAuthorizationEvidenceResponse),
+        (status = 401, description = "Unauthorized", body = crate::errors::ErrorResponse),
+        (status = 404, description = "Binding not found", body = crate::errors::ErrorResponse)
+    ),
+    tag = "Agent Bindings"
+)]
+/// GET /api/v1/api-keys/{key_id}/bindings/by-service/{user_service_id}/authorization
+///
+/// Addressable from a `key.bind_credential` report, which carries `keyId`
+/// plus `userServiceId` (the random binding UUID is not in the report).
+/// Same ACL and projection as [`get_binding_authorization`].
+pub async fn get_binding_authorization_by_service(
+    State(state): State<AppState>,
+    auth_user: AuthUser,
+    Path((key_id, user_service_id)): Path<(String, String)>,
+) -> AppResult<Json<BindingAuthorizationEvidenceResponse>> {
+    let actor = auth_user.user_id.to_string();
+    let BindingOwnerAccess {
+        user_id,
+        access,
+        platform: _,
+    } = resolve_binding_owner(&state, &actor, &key_id, false).await?;
+    let binding = agent_binding_service::get_binding_by_service(
+        &state.db,
+        &user_id,
+        &key_id,
+        &user_service_id,
+    )
+    .await?;
+    project_binding_authorization(&state, access, binding).await
+}
+
+async fn project_binding_authorization(
+    state: &AppState,
+    access: OwnerAccess,
+    binding: crate::models::agent_service_binding::AgentServiceBinding,
+) -> AppResult<Json<BindingAuthorizationEvidenceResponse>> {
     if !access.allows_resource(&binding.user_service_id) {
         return Err(AppError::NotFound("Binding not found".to_string()));
     }
-    let mut responses = enrich_bindings(&state, vec![binding]).await?;
+    let mut responses = enrich_bindings(state, vec![binding]).await?;
     let response = responses.remove(0);
     Ok(Json(
         BindingAuthorizationEvidenceResponse::from_binding_response(response),

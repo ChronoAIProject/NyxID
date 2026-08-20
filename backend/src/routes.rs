@@ -520,6 +520,14 @@ pub fn build_router() -> (Router<AppState>, Router<AppState>) {
                 .post(handlers::agent_bindings::create_binding),
         )
         .route(
+            "/{key_id}/bindings/by-service/{user_service_id}/authorization",
+            get(handlers::agent_bindings::get_binding_authorization_by_service),
+        )
+        .route(
+            "/{key_id}/bindings/{binding_id}/authorization",
+            get(handlers::agent_bindings::get_binding_authorization),
+        )
+        .route(
             "/{key_id}/bindings/{binding_id}",
             delete(handlers::agent_bindings::delete_binding),
         );

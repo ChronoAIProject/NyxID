@@ -5,15 +5,12 @@
 //! reserve a secret-free receipt before mutating, replay exact retries, and
 //! fail closed on identity reuse with different content. Evidence reads ride
 //! `GET /api-keys/{id}/authorization` for update/extend/delete, and
-//! `GET /api-keys/{id}/bindings/{binding_id}/authorization` for bind.
+//! `GET /api-keys/{id}/bindings/by-service/{user_service_id}/authorization`
+//! for bind (addressable from the report's `{keyId, userServiceId}`).
 
 use std::sync::LazyLock;
 
-use axum::{
-    Json, Router,
-    extract::State,
-    routing::{get, post},
-};
+use axum::{Json, Router, extract::State, routing::post};
 use regex::Regex;
 use serde::{Deserialize, Serialize};
 use utoipa::ToSchema;
@@ -21,10 +18,9 @@ use uuid::Uuid;
 
 use crate::AppState;
 use crate::errors::{AppError, AppResult};
-use crate::handlers::agent_bindings;
 use crate::models::agent_service_binding::AgentServiceBinding;
 use crate::models::api_key::{ApiKey, COLLECTION_NAME as API_KEYS};
-use crate::models::assistant_action_receipt::AssistantActionReceiptStatus;
+use crate::models::assistant_action_receipt::AssistantActionReceipt;
 use crate::models::user_service::{COLLECTION_NAME as USER_SERVICES, UserService};
 use crate::mw::auth::AuthUser;
 use crate::services::assistant_action_receipts::{
@@ -47,19 +43,15 @@ static SECRET_SHAPED_VALUE: LazyLock<Regex> = LazyLock::new(|| {
 
 /// Effect routes mounted at `/api/v1/assistant/actions/keys`.
 ///
-/// Binding evidence is also served here so the projection handler is
-/// reachable without a `routes.rs` edit this increment. The canonical
-/// mount is `GET /api/v1/api-keys/{key_id}/bindings/{binding_id}/authorization`.
+/// Binding evidence is served on the production API-key router:
+/// `GET /api/v1/api-keys/{key_id}/bindings/by-service/{user_service_id}/authorization`
+/// (and the binding-id sibling). This nest is effects only.
 pub fn router() -> Router<AppState> {
     Router::new()
         .route("/update", post(update_key))
         .route("/delete", post(delete_key))
         .route("/extend-scope", post(extend_scope))
         .route("/bind-credential", post(bind_credential))
-        .route(
-            "/{key_id}/bindings/{binding_id}/authorization",
-            get(agent_bindings::get_binding_authorization),
-        )
 }
 
 #[derive(Debug, Serialize, ToSchema)]
@@ -142,6 +134,7 @@ struct KeyUpdateFingerprint<'a> {
     name: Option<&'a str>,
     platform: Option<&'a str>,
     description: Option<&'a str>,
+    expected_state_version: Option<i64>,
 }
 
 #[derive(Serialize)]
@@ -149,6 +142,7 @@ struct KeyUpdateFingerprint<'a> {
 struct KeyDeleteFingerprint<'a> {
     action: &'static str,
     key_id: &'a str,
+    expected_state_version: i64,
 }
 
 #[derive(Serialize)]
@@ -157,6 +151,7 @@ struct KeyExtendScopeFingerprint<'a> {
     action: &'static str,
     key_id: &'a str,
     add_service_ids: &'a [String],
+    expected_state_version: Option<i64>,
 }
 
 #[derive(Serialize)]
@@ -347,16 +342,26 @@ async fn resolve_write_owner(
     Ok((key.user_id.clone(), key))
 }
 
-fn ensure_state_version(key: &ApiKey, expected: Option<i64>) -> AppResult<()> {
-    let Some(expected) = expected else {
-        return Ok(());
-    };
-    if key.state_version != expected {
-        return Err(AppError::Conflict(
-            "the API key changed since this action was prepared".to_string(),
-        ));
-    }
-    Ok(())
+fn stale_if_conflict(error: &AppError) -> bool {
+    matches!(error, AppError::Conflict(_))
+}
+
+fn update_already_applied(key: &ApiKey, request: &NormalizedUpdate) -> bool {
+    request.name.as_ref().is_none_or(|name| key.name == *name)
+        && request
+            .platform
+            .as_ref()
+            .is_none_or(|platform| key.platform.as_deref() == Some(platform.as_str()))
+        && request
+            .description
+            .as_ref()
+            .is_none_or(|description| key.description.as_deref() == Some(description.as_str()))
+}
+
+fn extend_already_applied(key: &ApiKey, add_service_ids: &[String]) -> bool {
+    add_service_ids
+        .iter()
+        .all(|id| key.allowed_service_ids.iter().any(|current| current == id))
 }
 
 async fn validate_personal_service_ids(
@@ -405,6 +410,7 @@ pub async fn update_key(
         name: request.name.as_deref(),
         platform: request.platform.as_deref(),
         description: request.description.as_deref(),
+        expected_state_version: request.expected_state_version,
     })?;
     let outcome = reserve_or_replay(
         &state.db,
@@ -416,44 +422,12 @@ pub async fn update_key(
     )
     .await?;
 
-    let replayed = match &outcome {
-        ReceiptOutcome::Replay(receipt)
-            if receipt.status == AssistantActionReceiptStatus::Completed =>
-        {
-            true
+    let replayed = match outcome {
+        ReceiptOutcome::Replay(_) => true,
+        ReceiptOutcome::InProgress(receipt) | ReceiptOutcome::Reserved(receipt) => {
+            commit_key_update(&state, &actor, &request, receipt).await?
         }
-        ReceiptOutcome::Replay(_) | ReceiptOutcome::Reserved(_) => false,
     };
-    if !replayed {
-        let receipt = match outcome {
-            ReceiptOutcome::Reserved(receipt) | ReceiptOutcome::Replay(receipt) => receipt,
-        };
-        let (owner_id, current) = resolve_write_owner(&state, &actor, &request.key_id).await?;
-        if !current.is_active {
-            return Err(AppError::NotFound("API key not found".to_string()));
-        }
-        ensure_state_version(&current, request.expected_state_version)?;
-        key_service::update_api_key_scope_with_scope_authorization(
-            &state.db,
-            &owner_id,
-            Some(&actor),
-            &request.key_id,
-            request.name.as_deref(),
-            request.description.as_deref(),
-            None,
-            None,
-            None,
-            None,
-            None,
-            None,
-            None,
-            request.platform.as_deref().map(Some),
-            None,
-            None,
-        )
-        .await?;
-        mark_completed(&state.db, &receipt).await?;
-    }
 
     Ok(Json(UpdateAssistantKeyResponse {
         resource: AssistantKeyResource {
@@ -475,6 +449,7 @@ pub async fn delete_key(
     let fingerprint = fingerprint_canonical(&KeyDeleteFingerprint {
         action: KEY_DELETE_ACTION,
         key_id: &request.key_id,
+        expected_state_version: request.expected_state_version,
     })?;
     let outcome = reserve_or_replay(
         &state.db,
@@ -486,26 +461,12 @@ pub async fn delete_key(
     )
     .await?;
 
-    let replayed = match &outcome {
-        ReceiptOutcome::Replay(receipt)
-            if receipt.status == AssistantActionReceiptStatus::Completed =>
-        {
-            true
+    let replayed = match outcome {
+        ReceiptOutcome::Replay(_) => true,
+        ReceiptOutcome::InProgress(receipt) | ReceiptOutcome::Reserved(receipt) => {
+            commit_key_delete(&state, &actor, &request, receipt).await?
         }
-        ReceiptOutcome::Replay(_) | ReceiptOutcome::Reserved(_) => false,
     };
-    if !replayed {
-        let receipt = match outcome {
-            ReceiptOutcome::Reserved(receipt) | ReceiptOutcome::Replay(receipt) => receipt,
-        };
-        let (owner_id, current) = resolve_write_owner(&state, &actor, &request.key_id).await?;
-        if !current.is_active {
-            return Err(AppError::NotFound("API key not found".to_string()));
-        }
-        ensure_state_version(&current, Some(request.expected_state_version))?;
-        key_service::delete_api_key(&state.db, &owner_id, &request.key_id).await?;
-        mark_completed(&state.db, &receipt).await?;
-    }
 
     Ok(Json(DeleteAssistantKeyResponse {
         resource: AssistantKeyResource {
@@ -528,6 +489,7 @@ pub async fn extend_scope(
         action: KEY_EXTEND_SCOPE_ACTION,
         key_id: &request.key_id,
         add_service_ids: &request.add_service_ids,
+        expected_state_version: request.expected_state_version,
     })?;
     let outcome = reserve_or_replay(
         &state.db,
@@ -539,51 +501,12 @@ pub async fn extend_scope(
     )
     .await?;
 
-    let replayed = match &outcome {
-        ReceiptOutcome::Replay(receipt)
-            if receipt.status == AssistantActionReceiptStatus::Completed =>
-        {
-            true
+    let replayed = match outcome {
+        ReceiptOutcome::Replay(_) => true,
+        ReceiptOutcome::InProgress(receipt) | ReceiptOutcome::Reserved(receipt) => {
+            commit_key_extend(&state, &actor, &request, receipt).await?
         }
-        ReceiptOutcome::Replay(_) | ReceiptOutcome::Reserved(_) => false,
     };
-    if !replayed {
-        let receipt = match outcome {
-            ReceiptOutcome::Reserved(receipt) | ReceiptOutcome::Replay(receipt) => receipt,
-        };
-        let (owner_id, current) = resolve_write_owner(&state, &actor, &request.key_id).await?;
-        if !current.is_active {
-            return Err(AppError::NotFound("API key not found".to_string()));
-        }
-        ensure_state_version(&current, request.expected_state_version)?;
-        if current.allow_all_services {
-            return Err(AppError::ValidationError(
-                "cannot extend scope on a key that already allows all services".to_string(),
-            ));
-        }
-        validate_personal_service_ids(&state.db, &owner_id, &request.add_service_ids).await?;
-        let merged = union_service_ids(&current.allowed_service_ids, &request.add_service_ids);
-        key_service::update_api_key_scope_with_scope_authorization(
-            &state.db,
-            &owner_id,
-            Some(&actor),
-            &request.key_id,
-            None,
-            None,
-            None,
-            Some(&merged),
-            None,
-            Some(false),
-            None,
-            None,
-            None,
-            None,
-            None,
-            None,
-        )
-        .await?;
-        mark_completed(&state.db, &receipt).await?;
-    }
 
     Ok(Json(ExtendAssistantKeyScopeResponse {
         resource: AssistantKeyResource {
@@ -624,9 +547,7 @@ pub async fn bind_credential(
     .await?;
 
     let (binding_id, replayed) = match outcome {
-        ReceiptOutcome::Replay(receipt)
-            if receipt.status == AssistantActionReceiptStatus::Completed =>
-        {
+        ReceiptOutcome::Replay(_) => {
             let binding = existing_binding(
                 &state.db,
                 &owner_id,
@@ -641,35 +562,8 @@ pub async fn bind_credential(
             })?;
             (binding.id, true)
         }
-        ReceiptOutcome::Replay(receipt) | ReceiptOutcome::Reserved(receipt) => {
-            let binding = match existing_binding(
-                &state.db,
-                &owner_id,
-                &request.key_id,
-                &request.user_service_id,
-            )
-            .await?
-            {
-                Some(existing) if existing.user_api_key_id == request.external_key_id => existing,
-                Some(_) => {
-                    return Err(AppError::Conflict(
-                        "Binding already exists for this API key and service".to_string(),
-                    ));
-                }
-                None => {
-                    agent_binding_service::create_binding_with_scope_authorization(
-                        &state.db,
-                        &owner_id,
-                        Some(&actor),
-                        &request.key_id,
-                        &request.user_service_id,
-                        &request.external_key_id,
-                    )
-                    .await?
-                }
-            };
-            mark_completed(&state.db, &receipt).await?;
-            (binding.id, false)
+        ReceiptOutcome::InProgress(receipt) | ReceiptOutcome::Reserved(receipt) => {
+            commit_key_bind(&state, &owner_id, &actor, &request, receipt).await?
         }
     };
 
@@ -680,6 +574,203 @@ pub async fn bind_credential(
         binding_id,
         replayed,
     }))
+}
+
+async fn commit_key_update(
+    state: &AppState,
+    actor: &str,
+    request: &NormalizedUpdate,
+    receipt: AssistantActionReceipt,
+) -> AppResult<bool> {
+    let (owner_id, current) = resolve_write_owner(state, actor, &request.key_id).await?;
+    if !current.is_active {
+        return Err(AppError::NotFound("API key not found".to_string()));
+    }
+    if update_already_applied(&current, request) {
+        mark_completed(&state.db, &receipt).await?;
+        return Ok(true);
+    }
+    match key_service::update_api_key_scope_with_expected_state_version(
+        &state.db,
+        &owner_id,
+        Some(actor),
+        &request.key_id,
+        request.name.as_deref(),
+        request.description.as_deref(),
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        request.platform.as_deref().map(Some),
+        None,
+        None,
+        request.expected_state_version,
+    )
+    .await
+    {
+        Ok(_) => {
+            mark_completed(&state.db, &receipt).await?;
+            Ok(false)
+        }
+        Err(error) if stale_if_conflict(&error) => {
+            let (_, latest) = resolve_write_owner(state, actor, &request.key_id).await?;
+            if update_already_applied(&latest, request) {
+                mark_completed(&state.db, &receipt).await?;
+                Ok(true)
+            } else {
+                Err(AppError::Conflict(
+                    "the API key changed since this action was prepared".to_string(),
+                ))
+            }
+        }
+        Err(error) => Err(error),
+    }
+}
+
+async fn commit_key_delete(
+    state: &AppState,
+    actor: &str,
+    request: &NormalizedDelete,
+    receipt: AssistantActionReceipt,
+) -> AppResult<bool> {
+    let (owner_id, current) = resolve_write_owner(state, actor, &request.key_id).await?;
+    if !current.is_active {
+        mark_completed(&state.db, &receipt).await?;
+        return Ok(true);
+    }
+    match key_service::delete_api_key_with_expected_state_version(
+        &state.db,
+        &owner_id,
+        &request.key_id,
+        Some(request.expected_state_version),
+    )
+    .await
+    {
+        Ok(()) => {
+            mark_completed(&state.db, &receipt).await?;
+            Ok(false)
+        }
+        Err(error) if stale_if_conflict(&error) => {
+            let (_, latest) = resolve_write_owner(state, actor, &request.key_id).await?;
+            if !latest.is_active {
+                mark_completed(&state.db, &receipt).await?;
+                Ok(true)
+            } else {
+                Err(AppError::Conflict(
+                    "the API key changed since this action was prepared".to_string(),
+                ))
+            }
+        }
+        Err(AppError::NotFound(_)) => {
+            mark_completed(&state.db, &receipt).await?;
+            Ok(true)
+        }
+        Err(error) => Err(error),
+    }
+}
+
+async fn commit_key_extend(
+    state: &AppState,
+    actor: &str,
+    request: &NormalizedExtend,
+    receipt: AssistantActionReceipt,
+) -> AppResult<bool> {
+    let (owner_id, current) = resolve_write_owner(state, actor, &request.key_id).await?;
+    if !current.is_active {
+        return Err(AppError::NotFound("API key not found".to_string()));
+    }
+    if current.allow_all_services {
+        return Err(AppError::ValidationError(
+            "cannot extend scope on a key that already allows all services".to_string(),
+        ));
+    }
+    if extend_already_applied(&current, &request.add_service_ids) {
+        mark_completed(&state.db, &receipt).await?;
+        return Ok(true);
+    }
+    validate_personal_service_ids(&state.db, &owner_id, &request.add_service_ids).await?;
+    let merged = union_service_ids(&current.allowed_service_ids, &request.add_service_ids);
+    match key_service::update_api_key_scope_with_expected_state_version(
+        &state.db,
+        &owner_id,
+        Some(actor),
+        &request.key_id,
+        None,
+        None,
+        None,
+        Some(&merged),
+        None,
+        Some(false),
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        request.expected_state_version,
+    )
+    .await
+    {
+        Ok(_) => {
+            mark_completed(&state.db, &receipt).await?;
+            Ok(false)
+        }
+        Err(error) if stale_if_conflict(&error) => {
+            let (_, latest) = resolve_write_owner(state, actor, &request.key_id).await?;
+            if extend_already_applied(&latest, &request.add_service_ids) {
+                mark_completed(&state.db, &receipt).await?;
+                Ok(true)
+            } else {
+                Err(AppError::Conflict(
+                    "the API key changed since this action was prepared".to_string(),
+                ))
+            }
+        }
+        Err(error) => Err(error),
+    }
+}
+
+async fn commit_key_bind(
+    state: &AppState,
+    owner_id: &str,
+    actor: &str,
+    request: &NormalizedBind,
+    receipt: AssistantActionReceipt,
+) -> AppResult<(String, bool)> {
+    let binding = match existing_binding(
+        &state.db,
+        owner_id,
+        &request.key_id,
+        &request.user_service_id,
+    )
+    .await?
+    {
+        Some(existing) if existing.user_api_key_id == request.external_key_id => {
+            mark_completed(&state.db, &receipt).await?;
+            return Ok((existing.id, true));
+        }
+        Some(_) => {
+            return Err(AppError::Conflict(
+                "Binding already exists for this API key and service".to_string(),
+            ));
+        }
+        None => {
+            agent_binding_service::create_binding_with_scope_authorization(
+                &state.db,
+                owner_id,
+                Some(actor),
+                &request.key_id,
+                &request.user_service_id,
+                &request.external_key_id,
+            )
+            .await?
+        }
+    };
+    mark_completed(&state.db, &receipt).await?;
+    Ok((binding.id, false))
 }
 
 async fn existing_binding(
@@ -702,7 +793,6 @@ mod tests {
         Router,
         body::{Body, to_bytes},
         http::{Request, StatusCode},
-        routing::get,
     };
     use mongodb::{IndexModel, bson::doc, options::IndexOptions};
     use serde_json::{Value, json};
@@ -710,9 +800,10 @@ mod tests {
     use uuid::Uuid;
 
     use super::*;
-    use crate::handlers::{agent_bindings, api_keys};
     use crate::models::api_key::{ApiKeyPurpose, COLLECTION_NAME as API_KEYS};
-    use crate::models::assistant_action_receipt::COLLECTION_NAME as ASSISTANT_ACTION_RECEIPTS;
+    use crate::models::assistant_action_receipt::{
+        AssistantActionReceiptStatus, COLLECTION_NAME as ASSISTANT_ACTION_RECEIPTS,
+    };
     use crate::models::user::{COLLECTION_NAME as USERS, User, UserType};
     use crate::models::user_api_key::{COLLECTION_NAME as USER_API_KEYS, UserApiKey};
     use crate::models::user_endpoint::{COLLECTION_NAME as USER_ENDPOINTS, UserEndpoint};
@@ -738,17 +829,8 @@ mod tests {
     }
 
     fn app(state: AppState) -> Router {
-        Router::new()
-            .nest("/assistant/actions/keys", super::router())
-            .route(
-                "/api-keys/{key_id}/authorization",
-                get(api_keys::get_key_authorization),
-            )
-            .route(
-                "/api-keys/{key_id}/bindings/{binding_id}/authorization",
-                get(agent_bindings::get_binding_authorization),
-            )
-            .with_state(state)
+        let (_, private) = crate::routes::build_router();
+        private.with_state(state)
     }
 
     async fn request(
@@ -988,7 +1070,7 @@ mod tests {
             app(state.clone()),
             &token,
             "POST",
-            "/assistant/actions/keys/update",
+            "/api/v1/assistant/actions/keys/update",
             Some(body.clone()),
         )
         .await;
@@ -1000,7 +1082,7 @@ mod tests {
             app(state.clone()),
             &token,
             "POST",
-            "/assistant/actions/keys/update",
+            "/api/v1/assistant/actions/keys/update",
             Some(body),
         )
         .await;
@@ -1013,7 +1095,7 @@ mod tests {
             app(state),
             &token,
             "GET",
-            &format!("/api-keys/{key_id}/authorization"),
+            &format!("/api/v1/api-keys/{key_id}/authorization"),
             None,
         )
         .await;
@@ -1036,7 +1118,7 @@ mod tests {
             app(state),
             &token,
             "POST",
-            "/assistant/actions/keys/update",
+            "/api/v1/assistant/actions/keys/update",
             Some(json!({
                 "actionRequestId": "update-secret",
                 "keyId": key_id,
@@ -1071,7 +1153,7 @@ mod tests {
             app(state.clone()),
             &token,
             "GET",
-            &format!("/api-keys/{key_id}/authorization"),
+            &format!("/api/v1/api-keys/{key_id}/authorization"),
             None,
         )
         .await;
@@ -1083,7 +1165,7 @@ mod tests {
             app(state.clone()),
             &token,
             "POST",
-            "/assistant/actions/keys/update",
+            "/api/v1/assistant/actions/keys/update",
             Some(json!({
                 "actionRequestId": "update-evidence",
                 "keyId": key_id,
@@ -1099,7 +1181,7 @@ mod tests {
             app(state),
             &token,
             "GET",
-            &format!("/api-keys/{key_id}/authorization"),
+            &format!("/api/v1/api-keys/{key_id}/authorization"),
             None,
         )
         .await;
@@ -1139,7 +1221,7 @@ mod tests {
             app(state.clone()),
             &token,
             "POST",
-            "/assistant/actions/keys/extend-scope",
+            "/api/v1/assistant/actions/keys/extend-scope",
             Some(json!({
                 "actionRequestId": "extend-cross-owner",
                 "keyId": key_id,
@@ -1154,7 +1236,7 @@ mod tests {
             app(state.clone()),
             &token,
             "POST",
-            "/assistant/actions/keys/extend-scope",
+            "/api/v1/assistant/actions/keys/extend-scope",
             Some(json!({
                 "actionRequestId": "extend-unknown",
                 "keyId": key_id,
@@ -1169,7 +1251,7 @@ mod tests {
             app(state.clone()),
             &token,
             "POST",
-            "/assistant/actions/keys/extend-scope",
+            "/api/v1/assistant/actions/keys/extend-scope",
             Some(json!({
                 "actionRequestId": "extend-valid",
                 "keyId": key_id,
@@ -1185,7 +1267,7 @@ mod tests {
             app(state),
             &token,
             "GET",
-            &format!("/api-keys/{key_id}/authorization"),
+            &format!("/api/v1/api-keys/{key_id}/authorization"),
             None,
         )
         .await;
@@ -1223,7 +1305,7 @@ mod tests {
             app(state.clone()),
             &token,
             "POST",
-            "/assistant/actions/keys/extend-scope",
+            "/api/v1/assistant/actions/keys/extend-scope",
             Some(json!({
                 "actionRequestId": "extend-conflict",
                 "keyId": key_id,
@@ -1238,7 +1320,7 @@ mod tests {
             app(state),
             &token,
             "POST",
-            "/assistant/actions/keys/extend-scope",
+            "/api/v1/assistant/actions/keys/extend-scope",
             Some(json!({
                 "actionRequestId": "extend-conflict",
                 "keyId": key_id,
@@ -1264,7 +1346,7 @@ mod tests {
             app(state.clone()),
             &token,
             "POST",
-            "/assistant/actions/keys/delete",
+            "/api/v1/assistant/actions/keys/delete",
             Some(json!({
                 "actionRequestId": "delete-stale",
                 "keyId": key_id,
@@ -1298,7 +1380,7 @@ mod tests {
             app(state.clone()),
             &token,
             "GET",
-            &format!("/api-keys/{key_id}/authorization"),
+            &format!("/api/v1/api-keys/{key_id}/authorization"),
             None,
         )
         .await;
@@ -1308,7 +1390,7 @@ mod tests {
             app(state.clone()),
             &token,
             "POST",
-            "/assistant/actions/keys/delete",
+            "/api/v1/assistant/actions/keys/delete",
             Some(json!({
                 "actionRequestId": "delete-exact",
                 "keyId": key_id,
@@ -1323,7 +1405,7 @@ mod tests {
             app(state.clone()),
             &token,
             "GET",
-            &format!("/api-keys/{key_id}/authorization"),
+            &format!("/api/v1/api-keys/{key_id}/authorization"),
             None,
         )
         .await;
@@ -1337,7 +1419,7 @@ mod tests {
             app(state),
             &token,
             "POST",
-            "/assistant/actions/keys/delete",
+            "/api/v1/assistant/actions/keys/delete",
             Some(json!({
                 "actionRequestId": "delete-exact",
                 "keyId": key_id,
@@ -1416,7 +1498,7 @@ mod tests {
             app(state),
             &token,
             "POST",
-            "/assistant/actions/keys/bind-credential",
+            "/api/v1/assistant/actions/keys/bind-credential",
             Some(json!({
                 "actionRequestId": "bind-cross-owner",
                 "keyId": key_id,
@@ -1487,7 +1569,7 @@ mod tests {
             app(state.clone()),
             &token,
             "POST",
-            "/assistant/actions/keys/bind-credential",
+            "/api/v1/assistant/actions/keys/bind-credential",
             Some(json!({
                 "actionRequestId": "bind-evidence",
                 "keyId": key_id,
@@ -1499,15 +1581,26 @@ mod tests {
         assert_eq!(status, StatusCode::OK, "{bound}");
         let binding_id = bound["bindingId"].as_str().expect("binding id");
 
+        let (status, by_id) = request(
+            app(state.clone()),
+            &token,
+            "GET",
+            &format!("/api/v1/api-keys/{key_id}/bindings/{binding_id}/authorization"),
+            None,
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{by_id}");
+
         let (status, evidence) = request(
             app(state),
             &token,
             "GET",
-            &format!("/api-keys/{key_id}/bindings/{binding_id}/authorization"),
+            &format!("/api/v1/api-keys/{key_id}/bindings/by-service/{service_id}/authorization"),
             None,
         )
         .await;
         assert_eq!(status, StatusCode::OK, "{evidence}");
+        assert_eq!(evidence, by_id);
         assert_eq!(evidence["id"], binding_id);
         assert_eq!(evidence["api_key_id"], key_id);
         assert_eq!(evidence["user_service_id"], service_id);
@@ -1529,6 +1622,312 @@ mod tests {
             crate::test_utils::aevatar_secret_free_violation(&evidence),
             None,
             "binding evidence must be secret-free: {evidence}"
+        );
+    }
+
+    #[test]
+    fn key_update_fingerprint_includes_expected_state_version() {
+        let version_one = fingerprint_canonical(&KeyUpdateFingerprint {
+            action: KEY_UPDATE_ACTION,
+            key_id: "key-1",
+            name: Some("renamed"),
+            platform: None,
+            description: None,
+            expected_state_version: Some(1),
+        })
+        .unwrap();
+        let version_ninety_nine = fingerprint_canonical(&KeyUpdateFingerprint {
+            action: KEY_UPDATE_ACTION,
+            key_id: "key-1",
+            name: Some("renamed"),
+            platform: None,
+            description: None,
+            expected_state_version: Some(99),
+        })
+        .unwrap();
+        let omitted = fingerprint_canonical(&KeyUpdateFingerprint {
+            action: KEY_UPDATE_ACTION,
+            key_id: "key-1",
+            name: Some("renamed"),
+            platform: None,
+            description: None,
+            expected_state_version: None,
+        })
+        .unwrap();
+        assert_ne!(version_one, version_ninety_nine);
+        assert_ne!(version_one, omitted);
+    }
+
+    #[tokio::test]
+    async fn key_update_identity_reuse_with_different_expected_state_version_conflicts() {
+        let Some((db, actor_id, key_id, _, _)) =
+            prepare_key_database("assistant_key_update_version_fp").await
+        else {
+            return;
+        };
+        let state = test_app_state(db.clone());
+        let token = access_token(&state, &actor_id);
+
+        let (status, stale) = request(
+            app(state.clone()),
+            &token,
+            "POST",
+            "/api/v1/assistant/actions/keys/update",
+            Some(json!({
+                "actionRequestId": "update-version-reuse",
+                "keyId": key_id,
+                "name": "renamed-agent",
+                "expectedStateVersion": 99,
+            })),
+        )
+        .await;
+        assert_eq!(status, StatusCode::CONFLICT, "{stale}");
+
+        let (status, reuse) = request(
+            app(state),
+            &token,
+            "POST",
+            "/api/v1/assistant/actions/keys/update",
+            Some(json!({
+                "actionRequestId": "update-version-reuse",
+                "keyId": key_id,
+                "name": "renamed-agent",
+                "expectedStateVersion": 1,
+            })),
+        )
+        .await;
+        assert_eq!(status, StatusCode::CONFLICT, "{reuse}");
+        let stored = db
+            .collection::<ApiKey>(API_KEYS)
+            .find_one(doc! { "_id": &key_id })
+            .await
+            .expect("load key")
+            .expect("key");
+        assert_eq!(stored.name, "coding-agent");
+        assert_eq!(stored.state_version, 1);
+    }
+
+    #[tokio::test]
+    async fn key_update_interrupted_retry_does_not_apply_twice() {
+        let Some((db, actor_id, key_id, _, _)) =
+            prepare_key_database("assistant_key_update_interrupted").await
+        else {
+            return;
+        };
+        let state = test_app_state(db.clone());
+        let token = access_token(&state, &actor_id);
+        let body = json!({
+            "actionRequestId": "update-interrupted",
+            "keyId": key_id,
+            "name": "renamed-agent",
+            "expectedStateVersion": 1,
+        });
+
+        let (status, first) = request(
+            app(state.clone()),
+            &token,
+            "POST",
+            "/api/v1/assistant/actions/keys/update",
+            Some(body.clone()),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{first}");
+        assert_eq!(first["replayed"], false);
+
+        db.collection::<mongodb::bson::Document>(ASSISTANT_ACTION_RECEIPTS)
+            .update_one(
+                doc! {
+                    "user_id": &actor_id,
+                    "action": KEY_UPDATE_ACTION,
+                    "action_request_id": "update-interrupted",
+                },
+                doc! {
+                    "$set": { "status": "pending" },
+                    "$unset": { "completed_at": "" },
+                },
+            )
+            .await
+            .expect("reopen receipt as pending");
+
+        let (status, retry) = request(
+            app(state),
+            &token,
+            "POST",
+            "/api/v1/assistant/actions/keys/update",
+            Some(body),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{retry}");
+        assert_eq!(retry["replayed"], true);
+
+        let stored = db
+            .collection::<ApiKey>(API_KEYS)
+            .find_one(doc! { "_id": &key_id })
+            .await
+            .expect("load key")
+            .expect("key");
+        assert_eq!(stored.name, "renamed-agent");
+        assert_eq!(
+            stored.state_version, 2,
+            "interrupted retry must not apply the update twice"
+        );
+        let receipt = db
+            .collection::<AssistantActionReceipt>(ASSISTANT_ACTION_RECEIPTS)
+            .find_one(doc! {
+                "user_id": &actor_id,
+                "action": KEY_UPDATE_ACTION,
+                "action_request_id": "update-interrupted",
+            })
+            .await
+            .expect("load receipt")
+            .expect("receipt");
+        assert_eq!(receipt.status, AssistantActionReceiptStatus::Completed);
+    }
+
+    #[tokio::test]
+    async fn key_update_concurrent_exact_requests_apply_once() {
+        let Some((db, actor_id, key_id, _, _)) =
+            prepare_key_database("assistant_key_update_concurrent").await
+        else {
+            return;
+        };
+        let state = test_app_state(db.clone());
+        let token = access_token(&state, &actor_id);
+        let body = json!({
+            "actionRequestId": "update-concurrent",
+            "keyId": key_id,
+            "name": "renamed-agent",
+            "expectedStateVersion": 1,
+        });
+
+        let first = request(
+            app(state.clone()),
+            &token,
+            "POST",
+            "/api/v1/assistant/actions/keys/update",
+            Some(body.clone()),
+        );
+        let second = request(
+            app(state),
+            &token,
+            "POST",
+            "/api/v1/assistant/actions/keys/update",
+            Some(body),
+        );
+        let ((status_a, body_a), (status_b, body_b)) = tokio::join!(first, second);
+
+        for (status, body) in [(status_a, &body_a), (status_b, &body_b)] {
+            assert!(
+                status == StatusCode::OK || status == StatusCode::CONFLICT,
+                "concurrent exact request returned {status}: {body}"
+            );
+        }
+        let successes = [(status_a, &body_a), (status_b, &body_b)]
+            .into_iter()
+            .filter(|(status, _)| *status == StatusCode::OK)
+            .collect::<Vec<_>>();
+        assert!(
+            !successes.is_empty(),
+            "at least one concurrent request must commit: {body_a} / {body_b}"
+        );
+        let first_commits = successes
+            .iter()
+            .filter(|(_, body)| body["replayed"] == false)
+            .count();
+        assert!(
+            first_commits <= 1,
+            "both concurrent requests claimed a first commit: {body_a} / {body_b}"
+        );
+
+        let stored = db
+            .collection::<ApiKey>(API_KEYS)
+            .find_one(doc! { "_id": &key_id })
+            .await
+            .expect("load key")
+            .expect("key");
+        assert_eq!(stored.name, "renamed-agent");
+        assert_eq!(
+            stored.state_version, 2,
+            "concurrent exact requests must advance state_version once, got {}",
+            stored.state_version
+        );
+    }
+
+    #[tokio::test]
+    async fn key_bind_credential_rejects_inactive_credential() {
+        let db = connect_transaction_test_database("assistant_key_bind_inactive").await;
+        ensure_receipt_index(&db).await;
+
+        let actor_id = Uuid::new_v4().to_string();
+        db.collection::<User>(USERS)
+            .insert_one(test_user(&actor_id, UserType::Person))
+            .await
+            .expect("insert user");
+
+        let endpoint_id = Uuid::new_v4().to_string();
+        let service_id = Uuid::new_v4().to_string();
+        let key_id = Uuid::new_v4().to_string();
+        let credential_id = Uuid::new_v4().to_string();
+
+        db.collection::<UserEndpoint>(USER_ENDPOINTS)
+            .insert_one(test_user_endpoint(
+                &endpoint_id,
+                &actor_id,
+                "Own EP",
+                "https://api.example.com",
+                None,
+                None,
+            ))
+            .await
+            .expect("insert endpoint");
+        db.collection::<UserService>(USER_SERVICES)
+            .insert_one(test_user_service(
+                &service_id,
+                &actor_id,
+                "own-svc",
+                &endpoint_id,
+                None,
+                None,
+            ))
+            .await
+            .expect("insert service");
+        db.collection::<ApiKey>(API_KEYS)
+            .insert_one(test_api_key(
+                &key_id,
+                &actor_id,
+                "coding-agent",
+                vec![service_id.clone()],
+            ))
+            .await
+            .expect("insert api key");
+        let mut credential = fixture_user_api_key(&credential_id, &actor_id);
+        credential.status = "revoked".to_string();
+        db.collection::<UserApiKey>(USER_API_KEYS)
+            .insert_one(credential)
+            .await
+            .expect("insert credential");
+
+        let state = test_app_state(db);
+        let token = access_token(&state, &actor_id);
+
+        let (status, rejected) = request(
+            app(state),
+            &token,
+            "POST",
+            "/api/v1/assistant/actions/keys/bind-credential",
+            Some(json!({
+                "actionRequestId": "bind-revoked",
+                "keyId": key_id,
+                "userServiceId": service_id,
+                "externalKeyId": credential_id,
+            })),
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{rejected}");
+        let message = rejected["message"].as_str().unwrap_or_default();
+        assert!(
+            message.contains("not active"),
+            "journey must receive a typed inactive-credential error: {rejected}"
         );
     }
 }

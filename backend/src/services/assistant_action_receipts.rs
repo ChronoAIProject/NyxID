@@ -16,17 +16,39 @@
 //! Caller contract per verb:
 //! 1. Normalize the typed request; build its fingerprint with
 //!    [`fingerprint_canonical`] over a struct that embeds the action name.
-//! 2. Call [`reserve_or_replay`]. On [`ReceiptOutcome::Replay`], return the
-//!    receipt's `resource_id` (and never any one-time material). On
-//!    [`ReceiptOutcome::Reserved`], perform the effect against
-//!    `receipt.resource_id`, then call [`mark_completed`].
+//! 2. Call [`reserve_or_replay`]. Match every [`ReceiptOutcome`] variant
+//!    explicitly — a pending reservation is **not** a replay:
+//!    - [`ReceiptOutcome::Replay`]: the receipt is `completed`. Answer from
+//!      it and never re-run the effect or return one-time material.
+//!    - [`ReceiptOutcome::Reserved`]: this caller owns performing the effect
+//!      against `receipt.resource_id`, then [`mark_completed`].
+//!    - [`ReceiptOutcome::InProgress`]: a matching pending reservation
+//!      already exists. Do **not** treat this as a fresh reservation.
 //! 3. For create-shaped verbs pass a freshly minted UUID as the resource
 //!    identity; for verbs acting on an existing resource pass that
 //!    resource's id, so the replay answer is stable either way.
-
-// WS-0 lands this module ahead of its consumers; the first Wave-2 effect
-// handler that uses it must remove this allow so dead paths surface again.
-#![allow(dead_code)]
+//!
+//! ## Pending-receipt semantics
+//!
+//! A pending receipt means the identity is reserved but [`mark_completed`]
+//! has not run. That covers (a) an in-flight first attempt, (b) a first
+//! attempt that committed the effect then failed to mark the receipt, and
+//! (c) two concurrent exact requests after the unique-index winner inserted.
+//!
+//! Chosen contract: **resume idempotently**. The helper cannot know whether
+//! the verb already committed, so it returns [`ReceiptOutcome::InProgress`]
+//! instead of [`ReceiptOutcome::Replay`] or [`ReceiptOutcome::Reserved`].
+//! Callers must either:
+//! - inspect resource state, apply the effect only if it has not already
+//!   committed, then [`mark_completed`] (so an interrupted-then-retried
+//!   delete replays success instead of 404, and an interrupted update does
+//!   not advance `state_version` twice), or
+//! - return [`in_progress_conflict`] when they cannot prove the effect is
+//!   already committed. That 409 is retryable; it is the safe fallback, not
+//!   a license to mutate.
+//!
+//! Matching `Replay(_)` loosely (or folding pending into the mutation
+//! branch) is the defect this variant exists to make a compile error.
 
 use mongodb::bson::doc;
 use serde::Serialize;
@@ -46,10 +68,20 @@ pub enum ReceiptOutcome {
     /// First appearance of this action identity: the caller owns performing
     /// the effect against `receipt.resource_id`, then [`mark_completed`].
     Reserved(AssistantActionReceipt),
-    /// Exact retry of an already-reserved identity: the caller must answer
-    /// from the receipt without re-running the effect and without returning
-    /// any one-time material.
+    /// Exact retry of a **completed** receipt: the caller must answer from
+    /// the receipt without re-running the effect and without returning any
+    /// one-time material. Never carries a pending row.
     Replay(AssistantActionReceipt),
+    /// Matching fingerprint, but the receipt is still `pending`. The caller
+    /// must resume without double-applying or return [`in_progress_conflict`].
+    /// Folding this into the mutation branch is the double-effect bug.
+    InProgress(AssistantActionReceipt),
+}
+
+/// Retryable 409 for an [`ReceiptOutcome::InProgress`] caller that cannot
+/// prove the original effect already committed.
+pub fn in_progress_conflict() -> AppError {
+    AppError::Conflict("this assistant action is already in progress; retry shortly".to_string())
 }
 
 /// Mirror of the browser control-identity rules for `actionRequestId`
@@ -124,8 +156,22 @@ fn check_fingerprint(
     Ok(receipt)
 }
 
-/// Reserve the receipt for `(user_id, action, action_request_id)` or replay
-/// the existing one. Fails closed with a conflict when the identity was
+fn existing_outcome(
+    receipt: AssistantActionReceipt,
+    fingerprint: &str,
+) -> AppResult<ReceiptOutcome> {
+    let receipt = check_fingerprint(receipt, fingerprint)?;
+    match receipt.status {
+        AssistantActionReceiptStatus::Completed => Ok(ReceiptOutcome::Replay(receipt)),
+        AssistantActionReceiptStatus::Pending => Ok(ReceiptOutcome::InProgress(receipt)),
+    }
+}
+
+/// Reserve the receipt for `(user_id, action, action_request_id)` or return
+/// the existing one. Completed matching receipts are [`ReceiptOutcome::Replay`];
+/// pending matching receipts are [`ReceiptOutcome::InProgress`] — never
+/// [`ReceiptOutcome::Replay`], so a caller cannot fall through to mutation by
+/// matching loosely. Fails closed with a conflict when the identity was
 /// already used with a different fingerprint; survives insert races through
 /// the unique index (duplicate key re-reads the winner).
 pub async fn reserve_or_replay(
@@ -137,10 +183,7 @@ pub async fn reserve_or_replay(
     resource_id: String,
 ) -> AppResult<ReceiptOutcome> {
     if let Some(existing) = find_receipt(db, user_id, action, action_request_id).await? {
-        return Ok(ReceiptOutcome::Replay(check_fingerprint(
-            existing,
-            fingerprint,
-        )?));
+        return existing_outcome(existing, fingerprint);
     }
 
     let receipt = AssistantActionReceipt {
@@ -166,10 +209,7 @@ pub async fn reserve_or_replay(
                 .ok_or_else(|| {
                     AppError::Conflict("assistant action receipt reservation raced".to_string())
                 })?;
-            Ok(ReceiptOutcome::Replay(check_fingerprint(
-                winner,
-                fingerprint,
-            )?))
+            existing_outcome(winner, fingerprint)
         }
         Err(error) => Err(error.into()),
     }
@@ -272,6 +312,44 @@ mod tests {
         assert!(matches!(
             check_fingerprint(receipt, "fingerprint-b"),
             Err(AppError::Conflict(_))
+        ));
+    }
+
+    #[test]
+    fn pending_matching_receipt_is_in_progress_not_replay() {
+        let pending = AssistantActionReceipt {
+            id: "receipt-pending".to_string(),
+            user_id: "user-1".to_string(),
+            action: "key.update".to_string(),
+            action_request_id: "act-1".to_string(),
+            request_fingerprint: "fingerprint-a".to_string(),
+            resource_id: "key-1".to_string(),
+            status: AssistantActionReceiptStatus::Pending,
+            created_at: utc_now_at_bson_precision(),
+            completed_at: None,
+        };
+        assert!(matches!(
+            existing_outcome(pending, "fingerprint-a"),
+            Ok(ReceiptOutcome::InProgress(_))
+        ));
+    }
+
+    #[test]
+    fn completed_matching_receipt_is_replay() {
+        let completed = AssistantActionReceipt {
+            id: "receipt-done".to_string(),
+            user_id: "user-1".to_string(),
+            action: "key.update".to_string(),
+            action_request_id: "act-1".to_string(),
+            request_fingerprint: "fingerprint-a".to_string(),
+            resource_id: "key-1".to_string(),
+            status: AssistantActionReceiptStatus::Completed,
+            created_at: utc_now_at_bson_precision(),
+            completed_at: Some(utc_now_at_bson_precision()),
+        };
+        assert!(matches!(
+            existing_outcome(completed, "fingerprint-a"),
+            Ok(ReceiptOutcome::Replay(_))
         ));
     }
 }

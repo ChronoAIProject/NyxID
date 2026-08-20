@@ -82,13 +82,16 @@ describe("AssistantKeyBindDialog", () => {
       },
     );
     expect(mockGet).toHaveBeenCalledWith(
-      `/api-keys/${PARAMS.keyId}/bindings/${BINDING_ID}/authorization`,
+      `/api-keys/${PARAMS.keyId}/bindings/by-service/${PARAMS.userServiceId}/authorization`,
     );
     expect(
       await screen.findByText("Exact binding evidence verified."),
     ).toBeInTheDocument();
     await userEvent.click(screen.getByRole("button", { name: "Done" }));
-    expect(onComplete).toHaveBeenCalledWith(PARAMS.keyId);
+    expect(onComplete).toHaveBeenCalledWith({
+      keyId: PARAMS.keyId,
+      userServiceId: PARAMS.userServiceId,
+    });
   });
 
   it("rejects evidence that still carries labels", async () => {

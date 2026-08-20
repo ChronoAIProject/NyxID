@@ -22,10 +22,9 @@ use crate::handlers::user_api_keys_external::{
     self, DeleteExternalApiKeyQuery, UpdateExternalApiKeyRequest,
 };
 use crate::handlers::user_endpoints::{self, UpdateEndpointRequest};
-use crate::models::assistant_action_receipt::AssistantActionReceiptStatus;
 use crate::mw::auth::AuthUser;
 use crate::services::assistant_action_receipts::{
-    self, ReceiptOutcome, fingerprint_canonical, normalize_action_request_id,
+    self, ReceiptOutcome, fingerprint_canonical, in_progress_conflict, normalize_action_request_id,
 };
 use crate::telemetry::TelemetryContext;
 
@@ -183,10 +182,6 @@ fn external_key_effect_response(
     }
 }
 
-fn replayed_completed(status: AssistantActionReceiptStatus) -> bool {
-    status == AssistantActionReceiptStatus::Completed
-}
-
 /// Update one user endpoint. URL shape (no userinfo, no fragment) is enforced
 /// before the receipt is reserved so a poisoned URL cannot occupy the identity.
 pub async fn update_endpoint(
@@ -237,10 +232,11 @@ pub async fn update_endpoint(
     )
     .await?
     {
-        ReceiptOutcome::Replay(receipt) if replayed_completed(receipt.status) => {
+        ReceiptOutcome::Replay(receipt) => {
             Ok(Json(endpoint_effect_response(receipt.resource_id, true)))
         }
-        ReceiptOutcome::Replay(receipt) | ReceiptOutcome::Reserved(receipt) => {
+        ReceiptOutcome::InProgress(_) => Err(in_progress_conflict()),
+        ReceiptOutcome::Reserved(receipt) => {
             let _updated = user_endpoints::update_endpoint(
                 State(state.clone()),
                 auth_user,
@@ -286,25 +282,10 @@ pub async fn delete_endpoint(
     )
     .await?
     {
-        ReceiptOutcome::Replay(receipt) if replayed_completed(receipt.status) => {
+        ReceiptOutcome::Replay(receipt) => {
             Ok(Json(endpoint_effect_response(receipt.resource_id, true)))
         }
-        ReceiptOutcome::Replay(receipt) => {
-            match user_endpoints::delete_endpoint(
-                State(state.clone()),
-                auth_user,
-                TelemetryContext::default(),
-                Path(endpoint_id.clone()),
-            )
-            .await
-            {
-                Ok(_) | Err(AppError::NotFound(_)) => {
-                    assistant_action_receipts::mark_completed(&state.db, &receipt).await?;
-                    Ok(Json(endpoint_effect_response(endpoint_id, false)))
-                }
-                Err(error) => Err(error),
-            }
-        }
+        ReceiptOutcome::InProgress(_) => Err(in_progress_conflict()),
         ReceiptOutcome::Reserved(receipt) => {
             match user_endpoints::delete_endpoint(
                 State(state.clone()),
@@ -356,10 +337,12 @@ pub async fn rotate_external_key(
     )
     .await?
     {
-        ReceiptOutcome::Replay(receipt) if replayed_completed(receipt.status) => Ok(Json(
-            external_key_effect_response(receipt.resource_id, true),
-        )),
-        ReceiptOutcome::Replay(receipt) | ReceiptOutcome::Reserved(receipt) => {
+        ReceiptOutcome::Replay(receipt) => Ok(Json(external_key_effect_response(
+            receipt.resource_id,
+            true,
+        ))),
+        ReceiptOutcome::InProgress(_) => Err(in_progress_conflict()),
+        ReceiptOutcome::Reserved(receipt) => {
             let _rotated = user_api_keys_external::update_external_api_key(
                 State(state.clone()),
                 auth_user,
@@ -402,29 +385,11 @@ pub async fn delete_external_key(
     )
     .await?
     {
-        ReceiptOutcome::Replay(receipt) if replayed_completed(receipt.status) => Ok(Json(
-            external_key_effect_response(receipt.resource_id, true),
-        )),
-        ReceiptOutcome::Replay(receipt) => {
-            match user_api_keys_external::delete_external_api_key(
-                State(state.clone()),
-                auth_user,
-                TelemetryContext::default(),
-                Path(external_key_id.clone()),
-                Query(DeleteExternalApiKeyQuery {
-                    cascade_grant: body.cascade_grant,
-                    grant_scope: body.grant_scope,
-                }),
-            )
-            .await
-            {
-                Ok(_) | Err(AppError::NotFound(_)) => {
-                    assistant_action_receipts::mark_completed(&state.db, &receipt).await?;
-                    Ok(Json(external_key_effect_response(external_key_id, false)))
-                }
-                Err(error) => Err(error),
-            }
-        }
+        ReceiptOutcome::Replay(receipt) => Ok(Json(external_key_effect_response(
+            receipt.resource_id,
+            true,
+        ))),
+        ReceiptOutcome::InProgress(_) => Err(in_progress_conflict()),
         ReceiptOutcome::Reserved(receipt) => {
             let _deleted = user_api_keys_external::delete_external_api_key(
                 State(state.clone()),
@@ -461,7 +426,8 @@ mod tests {
     use crate::handlers::user_api_keys_external;
     use crate::handlers::user_endpoints;
     use crate::models::assistant_action_receipt::{
-        AssistantActionReceipt, COLLECTION_NAME as ASSISTANT_ACTION_RECEIPTS,
+        AssistantActionReceipt, AssistantActionReceiptStatus,
+        COLLECTION_NAME as ASSISTANT_ACTION_RECEIPTS,
     };
     use crate::models::provider_config::{
         COLLECTION_NAME as PROVIDER_CONFIGS, ProviderConfig, RevocationConfig,

@@ -165,13 +165,20 @@ async fn create_binding_with_scope_authorization_inner(
                     .await?
                     .ok_or_else(|| AppError::NotFound("User service not found".to_string()))?;
 
-                db.collection::<UserApiKey>(USER_API_KEYS)
+                let credential = db
+                    .collection::<UserApiKey>(USER_API_KEYS)
                     .find_one(doc! { "_id": &user_api_key_id, "user_id": &user_id })
                     .session(&mut *session)
                     .await?
                     .ok_or_else(|| {
                         AppError::NotFound("External credential not found".to_string())
                     })?;
+                if credential.status != "active" {
+                    return Err(AppError::ValidationError(format!(
+                        "credential is not active (status: {})",
+                        credential.status
+                    )));
+                }
 
                 if db
                     .collection::<AgentServiceBinding>(AGENT_BINDINGS)
@@ -268,6 +275,25 @@ pub async fn get_binding(
         .find_one(doc! {
             "_id": binding_id,
             "api_key_id": api_key_id,
+            "user_id": user_id,
+        })
+        .await?
+        .ok_or_else(|| AppError::NotFound("Binding not found".to_string()))
+}
+
+/// Look up the binding for `(api_key_id, user_service_id)`, scoped to owner.
+/// Bindings are unique on that pair, so this is the addressable evidence key
+/// a `key.bind_credential` report can express without the random binding id.
+pub async fn get_binding_by_service(
+    db: &mongodb::Database,
+    user_id: &str,
+    api_key_id: &str,
+    user_service_id: &str,
+) -> AppResult<AgentServiceBinding> {
+    db.collection::<AgentServiceBinding>(AGENT_BINDINGS)
+        .find_one(doc! {
+            "api_key_id": api_key_id,
+            "user_service_id": user_service_id,
             "user_id": user_id,
         })
         .await?
@@ -714,6 +740,37 @@ mod tests {
         let err = create_binding(&db, &user_id, &ak_id, &us_id, &uak_id).await;
 
         assert!(err.is_err());
+    }
+
+    #[tokio::test]
+    async fn test_create_binding_rejects_inactive_credential() {
+        let db = connect_transaction_test_database("agent_bind_inactive_cred").await;
+        let user_id = Uuid::new_v4().to_string();
+        let (ak_id, us_id, uak_id) = seed_fixtures(&db, &user_id).await;
+        db.collection::<UserApiKey>(USER_API_KEYS)
+            .update_one(
+                doc! { "_id": &uak_id },
+                doc! { "$set": { "status": "revoked" } },
+            )
+            .await
+            .unwrap();
+
+        let err = create_binding(&db, &user_id, &ak_id, &us_id, &uak_id)
+            .await
+            .expect_err("revoked credential must not bind");
+        assert!(
+            matches!(err, AppError::ValidationError(message) if message.contains("not active")),
+            "expected typed inactive-credential error, got {err:?}"
+        );
+        let bound = db
+            .collection::<AgentServiceBinding>(AGENT_BINDINGS)
+            .find_one(doc! { "api_key_id": &ak_id, "user_service_id": &us_id })
+            .await
+            .unwrap();
+        assert!(
+            bound.is_none(),
+            "inactive credential must not create a binding"
+        );
     }
 
     #[tokio::test]

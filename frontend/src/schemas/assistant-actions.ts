@@ -387,7 +387,17 @@ const userServiceResourceSchema = z
   })
   .strict();
 const keyResourceSchema = z
-  .object({ key: z.object({ keyId: actionControlIdentitySchema }).strict() })
+  .object({
+    key: z
+      .object({
+        keyId: actionControlIdentitySchema,
+        // Present on key.bind_credential reports so the postcondition can
+        // address GET /api-keys/{keyId}/bindings/by-service/{userServiceId}/authorization.
+        // Other key verbs omit it.
+        userServiceId: actionControlIdentitySchema.optional(),
+      })
+      .strict(),
+  })
   .strict();
 const nodeResourceSchema = z
   .object({ node: z.object({ nodeId: actionControlIdentitySchema }).strict() })
@@ -539,6 +549,14 @@ function assertReportMatchesAction(
       `${action} completed reports must include resource.key.keyId`,
     );
   }
+  if (
+    action === "key.bind_credential" &&
+    (!("key" in report.resource) || !report.resource.key.userServiceId)
+  ) {
+    throw new Error(
+      "key.bind_credential completed reports must include resource.key.userServiceId",
+    );
+  }
 }
 
 function copyResource(resource: ActionResource): ActionResource {
@@ -547,7 +565,16 @@ function copyResource(resource: ActionResource): ActionResource {
       userService: { userServiceId: resource.userService.userServiceId },
     };
   }
-  if ("key" in resource) return { key: { keyId: resource.key.keyId } };
+  if ("key" in resource) {
+    return {
+      key: {
+        keyId: resource.key.keyId,
+        ...(resource.key.userServiceId
+          ? { userServiceId: resource.key.userServiceId }
+          : {}),
+      },
+    };
+  }
   if ("node" in resource) return { node: { nodeId: resource.node.nodeId } };
   if ("serviceAccount" in resource) {
     return {
