@@ -39,7 +39,10 @@
         crate::handlers::connect_links::cancel_hosted_connect_link,
         crate::handlers::connect_links::complete_connect_link,
         // Auth Device Login
+        crate::handlers::auth_device::request_auth_device,
+        crate::handlers::auth_device::poll_auth_device,
         crate::handlers::auth_device::preview_auth_device,
+        crate::handlers::auth_device::approve_auth_device,
         crate::handlers::auth_device::deny_auth_device,
         // Catalog
         crate::handlers::catalog::list_catalog,
@@ -118,8 +121,13 @@
             crate::handlers::connect_links::CompleteConnectLinkRequest,
             crate::handlers::connect_links::CompleteConnectLinkResponse,
             // Auth Device Login
+            crate::handlers::auth_device::AuthDeviceRequestBody,
+            crate::handlers::auth_device::AuthDeviceRequestResponse,
+            crate::handlers::auth_device::AuthDevicePollBody,
+            crate::handlers::auth_device::AuthDevicePollResponse,
             crate::handlers::auth_device::AuthDevicePreviewBody,
             crate::handlers::auth_device::AuthDevicePreviewResponse,
+            crate::handlers::auth_device::AuthDeviceApproveBody,
             crate::handlers::auth_device::AuthDeviceDenyBody,
             crate::handlers::auth_device::AuthDeviceDecisionResponse,
             // Catalog

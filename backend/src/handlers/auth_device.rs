@@ -80,6 +80,16 @@ pub struct AuthDevicePreviewResponse {
     pub status: String,
 }
 
+#[utoipa::path(
+    post,
+    path = "/api/v1/auth/device/request",
+    request_body = AuthDeviceRequestBody,
+    responses(
+        (status = 200, body = AuthDeviceRequestResponse),
+        (status = 429, body = crate::errors::ErrorResponse)
+    ),
+    tag = "Auth Device Login"
+)]
 #[tracing::instrument(skip_all, fields(client_ip_hash, route = "request"))]
 pub async fn request_auth_device(
     State(state): State<AppState>,
@@ -126,6 +136,20 @@ pub async fn request_auth_device(
     }))
 }
 
+#[utoipa::path(
+    post,
+    path = "/api/v1/auth/device/poll",
+    request_body = AuthDevicePollBody,
+    responses(
+        (status = 200, body = AuthDevicePollResponse),
+        (status = 400, body = crate::errors::ErrorResponse),
+        (status = 403, body = crate::errors::ErrorResponse),
+        (status = 404, body = crate::errors::ErrorResponse),
+        (status = 410, body = crate::errors::ErrorResponse),
+        (status = 429, body = crate::errors::ErrorResponse)
+    ),
+    tag = "Auth Device Login"
+)]
 #[tracing::instrument(skip_all, fields(client_ip_hash, route = "poll"))]
 pub async fn poll_auth_device(
     State(state): State<AppState>,
@@ -198,6 +222,21 @@ pub async fn poll_auth_device(
     }
 }
 
+#[utoipa::path(
+    post,
+    path = "/api/v1/auth/device/approve",
+    request_body = AuthDeviceApproveBody,
+    responses(
+        (status = 200, body = AuthDeviceDecisionResponse),
+        (status = 400, body = crate::errors::ErrorResponse),
+        (status = 401, body = crate::errors::ErrorResponse),
+        (status = 403, body = crate::errors::ErrorResponse),
+        (status = 410, body = crate::errors::ErrorResponse),
+        (status = 429, body = crate::errors::ErrorResponse)
+    ),
+    security(("bearer_auth" = [])),
+    tag = "Auth Device Login"
+)]
 #[tracing::instrument(skip_all, fields(client_ip_hash, route = "approve"))]
 pub async fn approve_auth_device(
     State(state): State<AppState>,
