@@ -436,11 +436,30 @@ async fn sync_provider_token_to_api_keys_impl(
         // signal that the wizard polls for.
         if let Some(ts) = last_authorized_at.as_ref() {
             set_doc.insert("last_authorized_at", ts);
-            // A fresh OAuth authorization is a user-initiated credential
-            // replacement. Background/lazy syncs pass `None` and must leave
-            // the epoch unchanged so routine token refreshes do not cause
-            // false execution-authority drift.
-            set_doc.insert("credential_epoch", credential_epoch_add_expr());
+        }
+
+        // A fresh OAuth authorization is a user-initiated credential
+        // replacement. Background/lazy syncs pass `None` and must leave the
+        // epoch unchanged so routine token refreshes do not cause false
+        // execution-authority drift.
+        //
+        // The bump is an aggregation expression, so it requires a *pipeline*
+        // update; it cannot ride along in `set_doc` below, which is a classic
+        // update document (MongoDB would store the literal `{$add: ...}`
+        // sub-document, corrupting the `i64` field). The credential write
+        // itself deliberately stays a classic update because `set_doc` carries
+        // provider-derived strings (`error_message`, `token_scopes`,
+        // `credential_type`) that a pipeline would reinterpret as field paths
+        // whenever they begin with `$`. Bumping first means a failure between
+        // the two writes fails closed: pending approvals drift rather than the
+        // credential being replaced with the epoch left stale.
+        if last_authorized_at.is_some() {
+            db.collection::<UserApiKey>(COLLECTION_NAME)
+                .update_one(
+                    doc! { "_id": &key.id },
+                    vec![doc! { "$set": { "credential_epoch": credential_epoch_add_expr() } }],
+                )
+                .await?;
         }
 
         db.collection::<UserApiKey>(COLLECTION_NAME)
