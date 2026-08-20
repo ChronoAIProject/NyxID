@@ -117,6 +117,15 @@ const ENDPOINT_DELETE_DESCRIPTION: &str = "Ask the user's browser to permanently
 const EXTERNAL_KEY_ROTATE_DESCRIPTION: &str = "Ask the user's browser to replace the secret of one exact stored external credential. Use when the user has a replacement API key for a connected provider. The replacement is entered only inside NyxID's browser journey; NyxID reports only the safe key reference. Never request, expose, or repeat credential material in chat.";
 const EXTERNAL_KEY_DELETE_DESCRIPTION: &str = "Ask the user's browser to permanently delete one exact stored external credential. Use when the user wants a stored provider key removed from NyxID. Deletion is destructive, confirmed in the browser every time, and may cascade an approval-grant review inside the journey; NyxID reports only the safe key reference. Never request, expose, or repeat credential material in chat.";
 
+const NODE_REGISTER_TOKEN_DESCRIPTION: &str = "Ask the user's browser to mint a one-time NyxID node registration token. Use when the user needs to enrol a new on-premise credential node. NyxID displays the token once in the browser and reports only a safe node reference. Never request, expose, or repeat the token in chat.";
+const NODE_ROTATE_TOKEN_DESCRIPTION: &str = "Ask the user's browser to rotate one exact node's auth token. Use when a node credential must be replaced. NyxID displays replacement material once in the browser and reports only the node reference. Never request, expose, or repeat token material in chat.";
+const NODE_DELETE_DESCRIPTION: &str = "Ask the user's browser to delete one exact credential node. Destructive: the node loses access and its local credential store is orphaned. NyxID confirms every time and reports only the node reference.";
+const NODE_TRANSFER_DESCRIPTION: &str = "Ask the user's browser to transfer one exact credential node to another owner. Destructive: the current owner loses control of the node. NyxID confirms every time and reports only the node reference.";
+const NODE_INJECT_CREDENTIAL_DESCRIPTION: &str = "Ask the user's browser to inject a credential into one exact node's local encrypted store. NyxID owns credential entry entirely; the secret is encrypted to the node and never travels through chat. Reports only a safe pending-credential reference. Never ask the user for the secret in chat.";
+const PENDING_CREDENTIAL_PUSH_DESCRIPTION: &str = "Ask the user's browser to queue a credential push to one exact node. NyxID owns credential entry and encryption; the assistant receives only a safe pending-credential reference. Never ask the user for the secret in chat.";
+const PENDING_CREDENTIAL_CANCEL_DESCRIPTION: &str = "Ask the user's browser to cancel one exact queued pending credential. Destructive: the queued secret is discarded. NyxID confirms every time and reports only the pending-credential reference.";
+const DEVICE_ONBOARD_DESCRIPTION: &str = "Ask the user's browser to onboard a headless device and issue its scoped provisioning credentials. NyxID owns the whole journey and shows provisioning material once in the browser, reporting only a safe device reference. Never request, expose, or repeat a device code or credential in chat.";
+
 #[derive(Serialize)]
 struct AssistantActionsManifest {
     schema_version: u32,
@@ -450,6 +459,141 @@ static MANIFEST_BODY: LazyLock<String> = LazyLock::new(|| {
                 tier: "v1",
                 remember_eligible: false,
             },
+            AssistantActionDescriptor {
+                action: "node.register_token",
+                description: NODE_REGISTER_TOKEN_DESCRIPTION,
+                params_schema: json!({
+                    "type": "object",
+                    "additionalProperties": false,
+                    "required": ["name"],
+                    "properties": {
+                        "name": { "type": "string" },
+                        "targetOrgId": { "type": "string" }
+                    }
+                }),
+                risk: "grant",
+                tier: "v1",
+                remember_eligible: false,
+            },
+            AssistantActionDescriptor {
+                action: "node.rotate_token",
+                description: NODE_ROTATE_TOKEN_DESCRIPTION,
+                params_schema: json!({
+                    "type": "object",
+                    "additionalProperties": false,
+                    "required": ["nodeId"],
+                    "properties": {
+                        "nodeId": { "type": "string" }
+                    }
+                }),
+                risk: "grant",
+                tier: "v1",
+                remember_eligible: false,
+            },
+            AssistantActionDescriptor {
+                action: "node.delete",
+                description: NODE_DELETE_DESCRIPTION,
+                params_schema: json!({
+                    "type": "object",
+                    "additionalProperties": false,
+                    "required": ["nodeId"],
+                    "properties": {
+                        "nodeId": { "type": "string" }
+                    }
+                }),
+                risk: "destructive",
+                tier: "v1",
+                remember_eligible: false,
+            },
+            AssistantActionDescriptor {
+                action: "node.transfer",
+                description: NODE_TRANSFER_DESCRIPTION,
+                params_schema: json!({
+                    "type": "object",
+                    "additionalProperties": false,
+                    "required": ["nodeId", "newOwnerUserId"],
+                    "properties": {
+                        "nodeId": { "type": "string" },
+                        "newOwnerUserId": { "type": "string" }
+                    }
+                }),
+                risk: "destructive",
+                tier: "v1",
+                remember_eligible: false,
+            },
+            AssistantActionDescriptor {
+                action: "node.inject_credential",
+                description: NODE_INJECT_CREDENTIAL_DESCRIPTION,
+                params_schema: json!({
+                    "type": "object",
+                    "additionalProperties": false,
+                    "required": ["nodeId", "serviceSlug", "injectionMethod", "fieldName"],
+                    "properties": {
+                        "nodeId": { "type": "string" },
+                        "serviceSlug": { "type": "string" },
+                        "injectionMethod": { "type": "string" },
+                        "fieldName": { "type": "string" },
+                        "targetUrl": { "type": "string" },
+                        "label": { "type": "string" }
+                    }
+                }),
+                risk: "grant",
+                tier: "v1",
+                remember_eligible: false,
+            },
+            AssistantActionDescriptor {
+                action: "pending_credential.push",
+                description: PENDING_CREDENTIAL_PUSH_DESCRIPTION,
+                params_schema: json!({
+                    "type": "object",
+                    "additionalProperties": false,
+                    "required": ["nodeId", "serviceSlug", "injectionMethod", "fieldName"],
+                    "properties": {
+                        "nodeId": { "type": "string" },
+                        "serviceSlug": { "type": "string" },
+                        "injectionMethod": { "type": "string" },
+                        "fieldName": { "type": "string" },
+                        "targetUrl": { "type": "string" },
+                        "label": { "type": "string" }
+                    }
+                }),
+                risk: "grant",
+                tier: "v1",
+                remember_eligible: false,
+            },
+            AssistantActionDescriptor {
+                action: "pending_credential.cancel",
+                description: PENDING_CREDENTIAL_CANCEL_DESCRIPTION,
+                params_schema: json!({
+                    "type": "object",
+                    "additionalProperties": false,
+                    "required": ["nodeId", "pendingCredentialId"],
+                    "properties": {
+                        "nodeId": { "type": "string" },
+                        "pendingCredentialId": { "type": "string" }
+                    }
+                }),
+                risk: "destructive",
+                tier: "v1",
+                remember_eligible: false,
+            },
+            AssistantActionDescriptor {
+                action: "device.onboard",
+                description: DEVICE_ONBOARD_DESCRIPTION,
+                params_schema: json!({
+                    "type": "object",
+                    "additionalProperties": false,
+                    "required": ["label"],
+                    "properties": {
+                        "label": { "type": "string" },
+                        "targetOrgId": { "type": "string" },
+                        "defaultServiceIds": { "type": "array", "items": { "type": "string" } }
+                    }
+                }),
+                risk: "grant",
+                tier: "v1",
+                remember_eligible: false,
+            },
         ],
     };
 
@@ -588,6 +732,10 @@ mod tests {
         "developer_app.create",
         "developer_app.rotate_secret",
         "account.mfa_setup",
+        "node.delete",
+        "node.transfer",
+        "pending_credential.push",
+        "pending_credential.cancel",
         "device.onboard",
         // Wave 2 (dormant; not pinned by any Aevatar revision yet)
         "key.update",
@@ -988,6 +1136,141 @@ mod tests {
                     "risk": "destructive",
                     "tier": "v1",
                     "remember_eligible": false
+                },
+                {
+                    "action": "node.register_token",
+                    "description": super::NODE_REGISTER_TOKEN_DESCRIPTION,
+                    "params_schema": {
+                        "type": "object",
+                        "additionalProperties": false,
+                        "required": ["name"],
+                        "properties": {
+                            "name": { "type": "string" },
+                            "targetOrgId": { "type": "string" }
+                        }
+                    },
+                    "risk": "grant",
+                    "tier": "v1",
+                    "remember_eligible": false
+                },
+                {
+                    "action": "node.rotate_token",
+                    "description": super::NODE_ROTATE_TOKEN_DESCRIPTION,
+                    "params_schema": {
+                        "type": "object",
+                        "additionalProperties": false,
+                        "required": ["nodeId"],
+                        "properties": {
+                            "nodeId": { "type": "string" }
+                        }
+                    },
+                    "risk": "grant",
+                    "tier": "v1",
+                    "remember_eligible": false
+                },
+                {
+                    "action": "node.delete",
+                    "description": super::NODE_DELETE_DESCRIPTION,
+                    "params_schema": {
+                        "type": "object",
+                        "additionalProperties": false,
+                        "required": ["nodeId"],
+                        "properties": {
+                            "nodeId": { "type": "string" }
+                        }
+                    },
+                    "risk": "destructive",
+                    "tier": "v1",
+                    "remember_eligible": false
+                },
+                {
+                    "action": "node.transfer",
+                    "description": super::NODE_TRANSFER_DESCRIPTION,
+                    "params_schema": {
+                        "type": "object",
+                        "additionalProperties": false,
+                        "required": ["nodeId", "newOwnerUserId"],
+                        "properties": {
+                            "nodeId": { "type": "string" },
+                            "newOwnerUserId": { "type": "string" }
+                        }
+                    },
+                    "risk": "destructive",
+                    "tier": "v1",
+                    "remember_eligible": false
+                },
+                {
+                    "action": "node.inject_credential",
+                    "description": super::NODE_INJECT_CREDENTIAL_DESCRIPTION,
+                    "params_schema": {
+                        "type": "object",
+                        "additionalProperties": false,
+                        "required": ["nodeId", "serviceSlug", "injectionMethod", "fieldName"],
+                        "properties": {
+                            "nodeId": { "type": "string" },
+                            "serviceSlug": { "type": "string" },
+                            "injectionMethod": { "type": "string" },
+                            "fieldName": { "type": "string" },
+                            "targetUrl": { "type": "string" },
+                            "label": { "type": "string" }
+                        }
+                    },
+                    "risk": "grant",
+                    "tier": "v1",
+                    "remember_eligible": false
+                },
+                {
+                    "action": "pending_credential.push",
+                    "description": super::PENDING_CREDENTIAL_PUSH_DESCRIPTION,
+                    "params_schema": {
+                        "type": "object",
+                        "additionalProperties": false,
+                        "required": ["nodeId", "serviceSlug", "injectionMethod", "fieldName"],
+                        "properties": {
+                            "nodeId": { "type": "string" },
+                            "serviceSlug": { "type": "string" },
+                            "injectionMethod": { "type": "string" },
+                            "fieldName": { "type": "string" },
+                            "targetUrl": { "type": "string" },
+                            "label": { "type": "string" }
+                        }
+                    },
+                    "risk": "grant",
+                    "tier": "v1",
+                    "remember_eligible": false
+                },
+                {
+                    "action": "pending_credential.cancel",
+                    "description": super::PENDING_CREDENTIAL_CANCEL_DESCRIPTION,
+                    "params_schema": {
+                        "type": "object",
+                        "additionalProperties": false,
+                        "required": ["nodeId", "pendingCredentialId"],
+                        "properties": {
+                            "nodeId": { "type": "string" },
+                            "pendingCredentialId": { "type": "string" }
+                        }
+                    },
+                    "risk": "destructive",
+                    "tier": "v1",
+                    "remember_eligible": false
+                },
+                {
+                    "action": "device.onboard",
+                    "description": super::DEVICE_ONBOARD_DESCRIPTION,
+                    "params_schema": {
+                        "type": "object",
+                        "additionalProperties": false,
+                        "required": ["label"],
+                        "properties": {
+                            "label": { "type": "string" },
+                            "targetOrgId": { "type": "string" },
+                            "defaultServiceIds": { "type": "array", "items": { "type": "string" } }
+                        }
+                    },
+                    "risk": "grant",
+                    "tier": "v1",
+                    "remember_eligible": false
                 }
             ]
         })
@@ -1348,7 +1631,7 @@ mod tests {
 
         assert_eq!(manifest["schema_version"], 4);
         assert_eq!(manifest["revision"], "nyxid-assistant-actions.v8");
-        assert_eq!(actions.len(), 16);
+        assert_eq!(actions.len(), 24);
         assert_eq!(actions[0]["action"], "service.connect");
         assert_eq!(actions[0]["risk"], "grant");
         assert_eq!(actions[0]["tier"], "v1");
@@ -1395,7 +1678,7 @@ mod tests {
     /// wave says so. A revision bump or a shipped-schema edit fails here
     /// before it can fail an Aevatar startup.
     #[test]
-    fn wave2_descriptors_are_dormant_appended_and_never_remembered() {
+    fn dormant_descriptors_are_appended_and_never_remembered() {
         let manifest: Value = serde_json::from_str(manifest_body()).unwrap();
         assert_eq!(manifest["revision"], "nyxid-assistant-actions.v8");
 
@@ -1412,6 +1695,9 @@ mod tests {
             "service.delete",
             "endpoint.delete",
             "external_key.delete",
+            "node.delete",
+            "node.transfer",
+            "pending_credential.cancel",
         ];
         let wave2: Vec<&str> = SUPPORTED_ACTIONS
             .iter()
@@ -1423,7 +1709,11 @@ mod tests {
                     .any(|entry| entry["action"].as_str() == Some(name))
             })
             .collect();
-        assert_eq!(wave2.len(), 12, "expected all 12 Wave-2 descriptors");
+        assert_eq!(
+            wave2.len(),
+            20,
+            "expected 12 Wave-2 + 8 Wave-3 dormant descriptors"
+        );
         for name in wave2 {
             let entry = actions
                 .iter()
@@ -1828,8 +2118,8 @@ mod tests {
             .collect();
         assert_eq!(
             dormant.len(),
-            12,
-            "expected the 12 Wave-2 dormant descriptors"
+            20,
+            "expected 12 Wave-2 + 8 Wave-3 dormant descriptors"
         );
 
         for (revision, action_names) in PINNED_ACTIONS_BY_REVISION {
