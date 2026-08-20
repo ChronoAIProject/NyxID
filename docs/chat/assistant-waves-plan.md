@@ -221,3 +221,70 @@ Criterion: the postcondition reader secret-scans the entire document (`Bearer\s+
 ```
 
 **Explicitly out of this increment:** Waves 3 and 4 (re-plan after Wave-2 cost re-measurement), `connection.revoke`, `provider.disconnect`, `provider.set_app_credentials` (deferral reasons in §5), G7 planner allowlist (upstream safety issue), G8 approval bridge, G9 batching.
+
+---
+
+## 8. Adversarial review findings (2026-08-20)
+
+All four streams were reviewed by an independent adversarial reviewer; **all four
+returned REWORK**. Every verb is dormant, so none of this is reachable in
+production. Recorded here so the backlog survives the session that found it.
+
+### Cross-repo (blocks the whole evidence design — NOT NyxID-fixable)
+
+**Aevatar never calls the `/authorization` projections.** `NyxIdApiClient` builds
+no such path: user-service evidence reads `/api/v1/keys/{id}` (`:280`) and agent-key
+evidence reads `/api/v1/api-keys/{id}` (`:1323`) — the full detail routes. Confirmed
+independently by two reviewers plus a direct grep of `origin/feature/integrate`.
+
+Consequences: the #1464 hardening shipped on our side and was never adopted;
+**shipped Wave-1 verbs** (`key.create`, `key.rotate`, `service.reauthorize`) verify
+against poison-prone detail responses today, so a user with a service labelled
+`Bearer Bot` can never confirm those actions; `docs/chat/06-actions-registry.md:188`
+documents intent, not reality; and all 12 Wave-2 projections are unread until
+upstream changes. Requires an upstream ask.
+
+### Pre-existing production bugs (found reviewing dormant code)
+
+| # | Bug | Status |
+|---|---|---|
+| P1 | `validate_endpoint_url` accepted userinfo + fragments on **every** scheme (`ssh://` skipped validation entirely; `validate_base_url` never checked userinfo), so `ssh://user:pass@host` and `https://user:pass@host` persisted into `UserEndpoint.url` and were served in list/detail responses | **FIXED** `6c814f5e` |
+| P2 | `update_api_key` special-cases only `oauth2`; other types leave `access_token_encrypted` untouched, so rotating a GCP service-account key keeps injecting the old token for up to 5 min while evidence reports `active` | open (T4) |
+
+### Systemic (hit all three effect modules)
+
+| # | Finding | Status |
+|---|---|---|
+| S1 | `reserve_or_replay` returned `Replay` for **pending** receipts; handlers guarded only on `Completed` and fell through to mutation, so an effect that commits then fails to mark complete is applied **twice** on retry | fixed via `ReceiptOutcome::InProgress` (`5c8b08e1`/`95e2c104`), needs verification |
+| S2 | Evidence routes mounted only under the nested `/assistant/actions/*` router, not the canonical production paths the dialogs call — so verification 404s after a successful mutation, and delete dialogs read that 404 as success. Tests masked it by mounting the missing route in their own test app | T2 partially, T4 open |
+| S3 | Receipt fingerprints omit semantic request content, so identity-reuse-with-different-content replays instead of failing closed (rotate discards the requested credential; delete collapses cascade options) | T2 done, T3/T4 open |
+| S4 | Tests do not prove their names: backend integration tests early-return without Mongo; `state_version` tests seed 1 and assert `>= 1`; e2e intercepts and synthesises every response | all streams open |
+
+### Per-stream
+
+- **T1 revision negotiation — FIXED (`eb3ff7a2`).** Served v5 composition used the
+  *current* `key.create` schema, but Aevatar does per-revision schema selection
+  (`ValidatePinnedContract`): v4/v5 pin the old schema, v6/v7/v8 the least-scope one.
+  A 200 that then fails `DeepEquals` disables the whole registry at startup.
+- **T2 keys** — state-version fence non-atomic (lost update); `expected_state_version`
+  absent from fingerprint; binding evidence unmounted and unaddressable from the
+  report; `bind_credential` accepted revoked credentials then confirmed the binding.
+- **T3 services** — non-atomic multi-write (`service.update` commits the endpoint name
+  then fails validation; `rotate_credential` orphans a successor and can wedge on the
+  unique `(source, source_id)` index); dialogs accept stale evidence; `service.delete`
+  never reads absence evidence.
+- **T4 endpoints/external keys** — delete-as-absence **falsely confirms** deletion of a
+  nonexistent or foreign id (retry marks the receipt completed and returns 200);
+  cascade confirmation not bound to the sibling set the user saw (TOCTOU);
+  update/rotate evidence proves no mutation; migrated `telegram_identity` rows 500 the
+  projection; `ssh_certificate` rotation strands the replacement.
+
+### Settled contract decisions
+
+- `external_key.*` must not reuse the `key` resource variant (`api_keys` vs
+  `user_api_keys` are different collections; the consumer resolves `key` against
+  `/api/v1/api-keys/{id}`). An `endpoint` cannot be proven through an owning
+  `userService` either — it may be orphaned, shared, or have no active service.
+  New variants required: `endpoint.endpointId`, `externalKey.externalKeyId`.
+- Upstream enum parsers are closed (`ParseCredentialStatus: _ => throw`), so any
+  served enum value set is pinned contract; adding a value is breaking, not additive.
