@@ -1196,6 +1196,12 @@ pub struct UserServiceResolution {
     pub node_id: Option<String>,
     pub user_service_id: String,
     pub has_server_credential: bool,
+    /// Identity of the UserApiKey injected after resolution. `None` for
+    /// no-auth and catalog master-credential paths.
+    pub api_key_id: Option<String>,
+    /// `UserApiKey.credential_epoch` of that key, or `1` when no user key
+    /// was resolved.
+    pub credential_epoch: i64,
     /// True when the injected credential is the catalog service's master
     /// credential (auto-provisioned UserService with no user key), not a
     /// key the user supplied. Drives resale credential classification.
@@ -2297,6 +2303,8 @@ async fn finish_resolution(
             node_id: user_service.node_id.clone(),
             user_service_id: user_service.id.clone(),
             has_server_credential: true,
+            api_key_id: None,
+            credential_epoch: 1,
             master_credential: false,
             org_routing,
             pool_selection,
@@ -2352,6 +2360,8 @@ async fn finish_resolution(
             node_id: user_service.node_id.clone(),
             user_service_id: user_service.id.clone(),
             has_server_credential: true,
+            api_key_id: None,
+            credential_epoch: 1,
             master_credential: true,
             org_routing,
             pool_selection,
@@ -2432,6 +2442,8 @@ async fn finish_resolution(
             node_id: user_service.node_id.clone(),
             user_service_id: user_service.id.clone(),
             has_server_credential,
+            api_key_id: Some(api_key.id.clone()),
+            credential_epoch: api_key.credential_epoch,
             master_credential: false,
             org_routing,
             pool_selection,
@@ -2485,6 +2497,8 @@ async fn finish_resolution(
         node_id: user_service.node_id.clone(),
         user_service_id: user_service.id.clone(),
         has_server_credential: true,
+        api_key_id: Some(api_key.id.clone()),
+        credential_epoch: api_key.credential_epoch,
         master_credential: false,
         org_routing,
         pool_selection,
@@ -2654,6 +2668,32 @@ pub async fn resolve_agent_credential_override(
     user_service_id: &str,
     connection_expiry_notifier: Option<&ConnectionExpiryNotifier>,
 ) -> AppResult<Option<String>> {
+    Ok(resolve_agent_credential_override_identity(
+        db,
+        encryption_keys,
+        user_id,
+        api_key_id,
+        user_service_id,
+        connection_expiry_notifier,
+    )
+    .await?
+    .map(|resolved| resolved.credential))
+}
+
+pub struct AgentCredentialOverride {
+    pub credential: String,
+    pub api_key_id: String,
+    pub credential_epoch: i64,
+}
+
+pub async fn resolve_agent_credential_override_identity(
+    db: &mongodb::Database,
+    encryption_keys: &EncryptionKeys,
+    user_id: &str,
+    api_key_id: &str,
+    user_service_id: &str,
+    connection_expiry_notifier: Option<&ConnectionExpiryNotifier>,
+) -> AppResult<Option<AgentCredentialOverride>> {
     let override_key_id = agent_binding_service::resolve_credential_override(
         db,
         api_key_id,
@@ -2705,7 +2745,11 @@ pub async fn resolve_agent_credential_override(
         });
     }
 
-    Ok(credential)
+    Ok(credential.map(|credential| AgentCredentialOverride {
+        credential,
+        api_key_id: api_key.id,
+        credential_epoch: api_key.credential_epoch,
+    }))
 }
 
 async fn maybe_refresh_provider_backed_api_key(
@@ -4604,6 +4648,7 @@ mod tests {
                 source_id: None,
                 created_at: Utc::now(),
                 updated_at: Utc::now(),
+                credential_epoch: 1,
             })
             .await
             .unwrap();
@@ -6900,6 +6945,7 @@ mod tests {
             user_oauth_client_secret_encrypted: None,
             created_at: chrono::Utc::now(),
             updated_at: chrono::Utc::now(),
+            credential_epoch: 1,
         };
         let err = missing_user_api_key_credential_error(&key);
         assert!(matches!(err, AppError::BadRequest(m) if m.contains("OAuth connection")));
@@ -6931,6 +6977,7 @@ mod tests {
             source_id: None,
             created_at: chrono::Utc::now(),
             updated_at: chrono::Utc::now(),
+            credential_epoch: 1,
         };
         let err = missing_user_api_key_credential_error(&key);
         assert!(matches!(err, AppError::BadRequest(m) if m.contains("No credential")));

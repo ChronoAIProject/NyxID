@@ -48,6 +48,7 @@ pub mod dpop_jti_cache;
 pub mod durable_operation_grant_service;
 pub mod event_dedup_cache;
 pub mod exact_service_approval_service;
+pub mod execution_authority;
 pub mod feature_flag_service;
 pub mod gcp_sa_service;
 pub mod group_service;

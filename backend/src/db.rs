@@ -3158,6 +3158,7 @@ async fn migrate_provider_tokens(db: &Database) -> Result<(), Box<dyn std::error
             source_id: Some(token.id.clone()),
             created_at: now,
             updated_at: now,
+            credential_epoch: 1,
         };
         if let Err(e) = db
             .collection::<UserApiKey>(USER_API_KEYS)
@@ -3400,6 +3401,7 @@ async fn migrate_service_connections(db: &Database) -> Result<(), Box<dyn std::e
             source_id: Some(conn.id.clone()),
             created_at: now,
             updated_at: now,
+            credential_epoch: 1,
         };
         if let Err(e) = db
             .collection::<UserApiKey>(USER_API_KEYS)
@@ -3658,6 +3660,7 @@ async fn migrate_node_service_bindings(db: &Database) -> Result<(), Box<dyn std:
             source_id: Some(binding.id.clone()),
             created_at: now,
             updated_at: now,
+            credential_epoch: 1,
         };
         if let Err(e) = db
             .collection::<UserApiKey>(USER_API_KEYS)

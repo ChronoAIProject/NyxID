@@ -283,6 +283,42 @@ pub async fn list_dispatchable_binding_node_ids(
     ))
 }
 
+/// Configured (not connectivity-filtered) binding node IDs for a catalog
+/// service, in priority order. Used by the execution-authority digest so a
+/// node connectivity blip cannot false-drift a pending approval.
+pub async fn list_configured_binding_node_ids(
+    db: &mongodb::Database,
+    user_id: &str,
+    service_id: &str,
+) -> AppResult<Vec<String>> {
+    let owner_user_id = effective_service_owner_id(db, user_id, service_id).await?;
+    Ok(collect_ordered_node_ids(
+        None,
+        load_configured_bindings(db, &owner_user_id, Some(service_id)).await?,
+    ))
+}
+
+async fn load_configured_bindings(
+    db: &mongodb::Database,
+    owner_user_id: &str,
+    service_id: Option<&str>,
+) -> AppResult<Vec<NodeServiceBinding>> {
+    let mut filter = doc! {
+        "user_id": owner_user_id,
+        "is_active": true,
+    };
+    if let Some(service_id) = service_id {
+        filter.insert("service_id", service_id);
+    }
+    Ok(db
+        .collection::<NodeServiceBinding>(NODE_SERVICE_BINDINGS)
+        .find(filter)
+        .sort(doc! { "priority": 1 })
+        .await?
+        .try_collect()
+        .await?)
+}
+
 async fn load_dispatchable_user_service_catalog_ids(
     db: &mongodb::Database,
     user_id: &str,

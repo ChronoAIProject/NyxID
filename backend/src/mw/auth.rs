@@ -2255,6 +2255,7 @@ mod tests {
                 source_id: None,
                 created_at: chrono::Utc::now(),
                 updated_at: chrono::Utc::now(),
+                credential_epoch: 1,
             })
             .await
             .unwrap();

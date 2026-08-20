@@ -8832,6 +8832,7 @@ mod proxy_resolution_integration_tests {
                 source_id: None,
                 created_at: now,
                 updated_at: now,
+                credential_epoch: 1,
             })
             .await
             .expect("insert org GCP SA key");

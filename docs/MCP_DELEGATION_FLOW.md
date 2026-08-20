@@ -446,6 +446,44 @@ User authenticates to NyxID via MCP client
 - **Consent verification:** Token exchange and refresh both verify user consent is still active
 - **Audit trail:** Token generation, usage, and refresh are all logged
 
+### Delegated Exact-Service Approvals
+
+A delegated caller that needs one precisely identified downstream operation
+goes through the exact-service approval journey rather than the generic proxy:
+discovery, create, human decision, redeem.
+
+1. **Discovery** — `GET /api/v1/delegation/operation-catalog` returns the
+   caller's *exact operation view*: only user-managed services publishing
+   declared typed operations, with generic-proxy targets excluded. The response
+   carries `catalog_digest` over the whole catalog, `exact_view_digest` over the
+   sorted generic-free projection, and an `endpoint_contract_digest` per
+   operation.
+2. **Create** — the caller submits the operation it intends to run, echoing the
+   digests from the discovery response. Every field is derivable from that
+   response: `operation_digest` is `canonical_sha256` over the contract version,
+   `user_service_id`, `endpoint_id`, `endpoint_contract_digest` and the caller's
+   arguments, so no second catalog read is needed.
+3. **Decision** — a human approves or denies using their own first-party
+   session. The delegated bearer is never used for the decision and does not
+   change across the journey.
+4. **Redeem** — the caller presents the fence it received at create, and the
+   server revalidates it against the live catalog before any effect.
+
+The digests fence two different things. `catalog_digest` and `exact_view_digest`
+bind what the caller was *shown*; `endpoint_contract_digest` and
+`operation_digest` bind the operation's *shape*. Neither binds the execution
+inputs — where the request goes and which credential pays for it. That is the
+execution-authority digest, described in
+[Granular Approvals Design](GRANULAR_APPROVALS_DESIGN.md#execution-authority-binding).
+
+Delegated callers must carry the exact `mcp:catalog:read` scope on create,
+status and redeem; a proxy-only delegated token is rejected with
+`403 delegated_catalog_scope_required`, so it can never reach these routes
+without live catalog-grant revalidation. Delegated callers must also supply
+`exact_view_digest` at create and redeem — omitted, empty, noncanonical and
+mismatched values all fail closed. Nondelegated callers keep the optional-fence
+behaviour.
+
 ### Route Access Control
 
 Delegation tokens can only access a subset of NyxID endpoints:

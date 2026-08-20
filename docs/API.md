@@ -4451,6 +4451,30 @@ returns `exact_service_redemption_conflict`. For **nondelegated** callers
 omission remains accepted, and the server still re-resolves the catalog and
 revalidates the digest persisted in the approval binding.
 
+Redeem and observe also revalidate a producer-owned **execution-authority
+digest** persisted on the approval binding at create. It binds the resolved
+destination URL, auth method, credential identity plus `credential_epoch`,
+identity-injection config, default headers, proxy operation policy, and the
+configured node-binding set. A mismatch returns HTTP 200 with
+`state: "drifted"` and `failure_code: "execution_authority_drift"` and does
+not dispatch downstream. Catalog/shape drift still uses `catalog_drift`.
+Rows created before this field existed (`execution_authority_digest: null`)
+skip the new gate until they expire.
+
+| Redeem / observe outcome | `state` | `failure_code` | Downstream effect |
+|---|---|---|---|
+| Catalog / exact-view / operation identity changed | `drifted` | `catalog_drift` | None |
+| Destination, credential identity/epoch, injection, headers, policy, or configured node set changed | `drifted` | `execution_authority_drift` | None |
+| Selector gone / out of scope | `revoked` | `selector_revoked` | None |
+| Background OAuth token refresh (epoch unchanged) | `redeemed` | omitted | Exactly one |
+| URL changed away and back (ABA) | `redeemed` | omitted | Exactly one |
+
+The current implementation keeps `operation_generation` as caller bookkeeping
+for wire compatibility. Its producer-freshness rationale (live
+`endpoint_contract_digest` plus the execution-authority digest) is the
+implementation's proposed interpretation, not a ratified contract decision.
+It remains open.
+
 Existing stored rows with no exact-view digest remain compatible for
 nondelegated callers and continue to use the other live fences. A delegated
 row created before this requirement still carries the server-resolved digest,
