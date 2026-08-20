@@ -759,7 +759,7 @@ mod tests {
             .await
             .expect_err("revoked credential must not bind");
         assert!(
-            matches!(err, AppError::ValidationError(message) if message.contains("not active")),
+            matches!(err, AppError::ValidationError(ref message) if message.contains("not active")),
             "expected typed inactive-credential error, got {err:?}"
         );
         let bound = db
