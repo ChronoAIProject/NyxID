@@ -135,6 +135,7 @@ export function AssistantExternalKeyRotateDialog({
     typeof assistantExternalKeyRotateResponseSchema
   > | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const beforeUpdatedAtRef = useRef<string | null>(null);
 
   function close() {
     setResult(null);
@@ -145,25 +146,47 @@ export function AssistantExternalKeyRotateDialog({
     verificationRef.current = false;
     setSubmitting(false);
     setVerifying(false);
+    beforeUpdatedAtRef.current = null;
     onOpenChange(false);
   }
 
-  async function verifyRotation(externalKeyId: string): Promise<void> {
+  async function readEvidence(externalKeyId: string) {
+    const value = await api.get<unknown>(
+      `/api-keys/external/${encodeURIComponent(externalKeyId)}/authorization`,
+    );
+    assertSecretFreeReadBack(value);
+    const evidence = externalKeyEvidenceSchema.parse(value);
+    if (evidence.id !== externalKeyId) {
+      throw new Error("NyxID returned a different external key identity.");
+    }
+    if ("label" in (value as object) || "error_message" in (value as object)) {
+      throw new Error("NyxID returned secret-bearing verification data.");
+    }
+    return evidence;
+  }
+
+  async function verifyRotation(
+    externalKeyId: string,
+    requireAdvance: boolean,
+  ): Promise<void> {
     if (verificationRef.current) return;
     verificationRef.current = true;
     setVerifying(true);
     setVerified(false);
     try {
-      const value = await api.get<unknown>(
-        `/api-keys/external/${encodeURIComponent(externalKeyId)}/authorization`,
-      );
-      assertSecretFreeReadBack(value);
-      const evidence = externalKeyEvidenceSchema.parse(value);
-      if (evidence.id !== externalKeyId) {
-        throw new Error("NyxID returned a different external key identity.");
-      }
-      if ("label" in (value as object) || "error_message" in (value as object)) {
-        throw new Error("NyxID returned secret-bearing verification data.");
+      const evidence = await readEvidence(externalKeyId);
+      if (requireAdvance) {
+        const before = Date.parse(beforeUpdatedAtRef.current ?? "");
+        const after = Date.parse(evidence.updated_at);
+        if (
+          !Number.isFinite(before) ||
+          !Number.isFinite(after) ||
+          after <= before
+        ) {
+          throw new Error(
+            "NyxID external-key evidence did not show the requested rotation.",
+          );
+        }
       }
       setVerified(true);
       setError(null);
@@ -191,6 +214,8 @@ export function AssistantExternalKeyRotateDialog({
     setError(null);
     try {
       const expected = externalKeyRotateActionParamsSchema.parse(params);
+      const before = await readEvidence(expected.externalKeyId);
+      beforeUpdatedAtRef.current = before.updated_at;
       const response = assistantExternalKeyRotateResponseSchema.parse(
         await api.post<unknown>(
           "/assistant/actions/endpoints/external-key-rotate",
@@ -203,7 +228,7 @@ export function AssistantExternalKeyRotateDialog({
       );
       setResult(response);
       setCredential("");
-      await verifyRotation(response.resource.externalKeyId);
+      await verifyRotation(response.resource.externalKeyId, !response.replayed);
     } catch (caught) {
       setError(
         errorMessage(caught, "NyxID could not rotate this external credential."),
@@ -297,7 +322,10 @@ export function AssistantExternalKeyRotateDialog({
                   variant="outline"
                   isLoading={verifying}
                   onClick={() =>
-                    void verifyRotation(result.resource.externalKeyId)
+                    void verifyRotation(
+                      result.resource.externalKeyId,
+                      !result.replayed,
+                    )
                   }
                 >
                   <RefreshCw />

@@ -65,7 +65,9 @@ describe("AssistantEndpointUpdateDialog", () => {
       resource: { endpointId: PARAMS.endpointId },
       replayed: false,
     });
-    mockGet.mockResolvedValue(evidence());
+    mockGet
+      .mockResolvedValueOnce(evidence())
+      .mockResolvedValueOnce(evidence({ updated_at: "2026-08-20T10:00:01Z" }));
     const { onComplete } = renderDialog();
 
     const submit = screen.getByRole("button", { name: "Update endpoint" });
@@ -82,7 +84,12 @@ describe("AssistantEndpointUpdateDialog", () => {
         endpointUrl: "https://api.example.com/v2",
       },
     );
-    expect(mockGet).toHaveBeenCalledWith(
+    expect(mockGet).toHaveBeenNthCalledWith(
+      1,
+      `/endpoints/${PARAMS.endpointId}/authorization`,
+    );
+    expect(mockGet).toHaveBeenNthCalledWith(
+      2,
       `/endpoints/${PARAMS.endpointId}/authorization`,
     );
     expect(
@@ -97,13 +104,31 @@ describe("AssistantEndpointUpdateDialog", () => {
       resource: { endpointId: PARAMS.endpointId },
       replayed: false,
     });
-    mockGet.mockResolvedValue({
-      ...evidence(),
-      label: "Bearer nyxid_ag_abcdefghijklmnopqrst",
-    });
+    mockGet
+      .mockResolvedValueOnce(evidence())
+      .mockResolvedValueOnce({
+        ...evidence({ updated_at: "2026-08-20T10:00:01Z" }),
+        label: "Bearer nyxid_ag_abcdefghijklmnopqrst",
+      });
     renderDialog();
     fireEvent.click(screen.getByRole("button", { name: "Update endpoint" }));
     expect(await screen.findByRole("alert")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Report endpoint" })).toBeDisabled();
+  });
+
+  it("refuses to finish when the mutation timestamp does not advance", async () => {
+    mockPost.mockResolvedValue({
+      resource: { endpointId: PARAMS.endpointId },
+      replayed: false,
+    });
+    mockGet
+      .mockResolvedValueOnce(evidence())
+      .mockResolvedValueOnce(evidence());
+    renderDialog();
+    fireEvent.click(screen.getByRole("button", { name: "Update endpoint" }));
+    expect(await screen.findByRole("alert")).toHaveTextContent(
+      "did not show the requested update",
+    );
     expect(screen.getByRole("button", { name: "Report endpoint" })).toBeDisabled();
   });
 });

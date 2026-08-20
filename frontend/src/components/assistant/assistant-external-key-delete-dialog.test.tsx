@@ -129,6 +129,7 @@ describe("AssistantExternalKeyDeleteDialog", () => {
         actionRequestId: "action-ext-delete",
         externalKeyId: PARAMS.externalKeyId,
         cascadeGrant: true,
+        cascadeSiblings: CASCADE_RESPONSE.details.siblings,
       },
     );
     expect(

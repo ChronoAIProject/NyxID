@@ -60,7 +60,9 @@ describe("AssistantExternalKeyRotateDialog", () => {
       resource: { externalKeyId: PARAMS.externalKeyId },
       replayed: false,
     });
-    mockGet.mockResolvedValue(evidence());
+    mockGet
+      .mockResolvedValueOnce(evidence())
+      .mockResolvedValueOnce(evidence({ updated_at: "2026-08-20T10:00:02Z" }));
     const { onComplete } = renderDialog();
 
     const submit = screen.getByRole("button", { name: "Rotate credential" });
@@ -82,7 +84,12 @@ describe("AssistantExternalKeyRotateDialog", () => {
         credential: "sk-replacement-secret",
       },
     );
-    expect(mockGet).toHaveBeenCalledWith(
+    expect(mockGet).toHaveBeenNthCalledWith(
+      1,
+      `/api-keys/external/${PARAMS.externalKeyId}/authorization`,
+    );
+    expect(mockGet).toHaveBeenNthCalledWith(
+      2,
       `/api-keys/external/${PARAMS.externalKeyId}/authorization`,
     );
     expect(
@@ -100,10 +107,12 @@ describe("AssistantExternalKeyRotateDialog", () => {
       resource: { externalKeyId: PARAMS.externalKeyId },
       replayed: false,
     });
-    mockGet.mockResolvedValue({
-      ...evidence(),
-      error_message: "Bearer nyxid_ag_abcdefghijklmnopqrst",
-    });
+    mockGet
+      .mockResolvedValueOnce(evidence())
+      .mockResolvedValueOnce({
+        ...evidence({ updated_at: "2026-08-20T10:00:02Z" }),
+        error_message: "Bearer nyxid_ag_abcdefghijklmnopqrst",
+      });
     renderDialog();
     await userEvent.type(
       screen.getByLabelText("Replacement credential"),
@@ -111,6 +120,24 @@ describe("AssistantExternalKeyRotateDialog", () => {
     );
     fireEvent.click(screen.getByRole("button", { name: "Rotate credential" }));
     expect(await screen.findByRole("alert")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Report rotation" })).toBeDisabled();
+  });
+
+  it("refuses to finish when the mutation timestamp does not advance", async () => {
+    mockPost.mockResolvedValue({
+      resource: { externalKeyId: PARAMS.externalKeyId },
+      replayed: false,
+    });
+    mockGet.mockResolvedValueOnce(evidence()).mockResolvedValueOnce(evidence());
+    renderDialog();
+    await userEvent.type(
+      screen.getByLabelText("Replacement credential"),
+      "sk-replacement-secret",
+    );
+    fireEvent.click(screen.getByRole("button", { name: "Rotate credential" }));
+    expect(await screen.findByRole("alert")).toHaveTextContent(
+      "did not show the requested rotation",
+    );
     expect(screen.getByRole("button", { name: "Report rotation" })).toBeDisabled();
   });
 });

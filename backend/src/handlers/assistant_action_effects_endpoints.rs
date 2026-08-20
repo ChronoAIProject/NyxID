@@ -165,7 +165,7 @@ struct ExternalKeyDeleteFingerprint<'a> {
 }
 
 #[derive(Debug, Deserialize, Serialize, ToSchema)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
+#[serde(deny_unknown_fields)]
 pub struct CascadeSiblingConfirmation {
     pub user_service_id: String,
     pub name: String,

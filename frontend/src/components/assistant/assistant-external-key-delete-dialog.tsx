@@ -132,6 +132,9 @@ export function AssistantExternalKeyDeleteDialog({
             externalKeyId: expected.externalKeyId,
             ...(options?.cascadeGrant ? { cascadeGrant: true } : {}),
             ...(options?.grantScope ? { grantScope: options.grantScope } : {}),
+            ...(options?.cascadeGrant && cascadeDetails
+              ? { cascadeSiblings: cascadeDetails.siblings }
+              : {}),
           },
         ),
       );

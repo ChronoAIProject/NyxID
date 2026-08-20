@@ -115,6 +115,7 @@ export function AssistantEndpointUpdateDialog({
     typeof assistantEndpointUpdateResponseSchema
   > | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const beforeUpdatedAtRef = useRef<string | null>(null);
 
   function close() {
     setResult(null);
@@ -124,25 +125,45 @@ export function AssistantEndpointUpdateDialog({
     verificationRef.current = false;
     setSubmitting(false);
     setVerifying(false);
+    beforeUpdatedAtRef.current = null;
     onOpenChange(false);
   }
 
-  async function verifyUpdate(endpointId: string): Promise<void> {
+  async function readEvidence(endpointId: string) {
+    const value = await api.get<unknown>(
+      `/endpoints/${encodeURIComponent(endpointId)}/authorization`,
+    );
+    assertSecretFreeReadBack(value);
+    const evidence = endpointEvidenceSchema.parse(value);
+    if (evidence.id !== endpointId) {
+      throw new Error("NyxID returned a different endpoint identity.");
+    }
+    if ("label" in (value as object) || "url" in (value as object)) {
+      throw new Error("NyxID returned secret-bearing verification data.");
+    }
+    return evidence;
+  }
+
+  async function verifyUpdate(
+    endpointId: string,
+    requireAdvance: boolean,
+  ): Promise<void> {
     if (verificationRef.current) return;
     verificationRef.current = true;
     setVerifying(true);
     setVerified(false);
     try {
-      const value = await api.get<unknown>(
-        `/endpoints/${encodeURIComponent(endpointId)}/authorization`,
-      );
-      assertSecretFreeReadBack(value);
-      const evidence = endpointEvidenceSchema.parse(value);
-      if (evidence.id !== endpointId) {
-        throw new Error("NyxID returned a different endpoint identity.");
-      }
-      if ("label" in (value as object) || "url" in (value as object)) {
-        throw new Error("NyxID returned secret-bearing verification data.");
+      const evidence = await readEvidence(endpointId);
+      if (requireAdvance) {
+        const before = Date.parse(beforeUpdatedAtRef.current ?? "");
+        const after = Date.parse(evidence.updated_at);
+        if (
+          !Number.isFinite(before) ||
+          !Number.isFinite(after) ||
+          after <= before
+        ) {
+          throw new Error("NyxID endpoint evidence did not show the requested update.");
+        }
       }
       setVerified(true);
       setError(null);
@@ -163,6 +184,8 @@ export function AssistantEndpointUpdateDialog({
     setError(null);
     try {
       const expected = endpointUpdateActionParamsSchema.parse(params);
+      const before = await readEvidence(expected.endpointId);
+      beforeUpdatedAtRef.current = before.updated_at;
       const response = assistantEndpointUpdateResponseSchema.parse(
         await api.post<unknown>("/assistant/actions/endpoints/update", {
           actionRequestId,
@@ -177,7 +200,7 @@ export function AssistantEndpointUpdateDialog({
         }),
       );
       setResult(response);
-      await verifyUpdate(response.resource.endpointId);
+      await verifyUpdate(response.resource.endpointId, !response.replayed);
     } catch (caught) {
       setError(errorMessage(caught, "NyxID could not update this endpoint."));
     } finally {
@@ -269,7 +292,7 @@ export function AssistantEndpointUpdateDialog({
                   variant="outline"
                   isLoading={verifying}
                   onClick={() =>
-                    void verifyUpdate(result.resource.endpointId)
+                    void verifyUpdate(result.resource.endpointId, !result.replayed)
                   }
                 >
                   <RefreshCw />
