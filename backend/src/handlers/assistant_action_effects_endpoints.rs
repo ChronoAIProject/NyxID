@@ -354,6 +354,17 @@ pub async fn rotate_external_key(
             "credential must not be empty".to_string(),
         ));
     }
+    let existing_key = user_api_keys_external::resolve_api_key_write_target(
+        &state,
+        &auth_user.user_id.to_string(),
+        &external_key_id,
+    )
+    .await?;
+    if existing_key.credential_type == "ssh_certificate" {
+        return Err(AppError::SshAuthModeUnsupportedForOperation(
+            "ssh_certificate credentials are rotated through the SSH certificate flow".to_string(),
+        ));
+    }
     let fingerprint = fingerprint_canonical(&ExternalKeyRotateFingerprint {
         action: EXTERNAL_KEY_ROTATE_ACTION,
         external_key_id: &external_key_id,
@@ -405,6 +416,11 @@ pub async fn delete_external_key(
     let external_key_id = normalize_action_request_id(body.external_key_id)?;
     let cascade_grant = body.cascade_grant.unwrap_or(false);
     let grant_scope = body.grant_scope.clone();
+    if cascade_grant && body.cascade_siblings.is_none() {
+        return Err(AppError::ValidationError(
+            "cascadeSiblings is required when cascadeGrant is true".to_string(),
+        ));
+    }
     let expected_siblings = body.cascade_siblings.as_ref().map(|siblings| {
         siblings
             .iter()
@@ -701,7 +717,7 @@ mod tests {
             return;
         };
         let ep_id = insert_endpoint(&db, &actor_id, "API", "https://api.example.com/v1").await;
-        let state = test_app_state(db);
+        let state = test_app_state(db.clone());
         let token = access_token(&state, &actor_id);
 
         for (label, url) in [
@@ -787,7 +803,7 @@ mod tests {
         assert!(replayed.get("credential").is_none());
 
         let (status, evidence) = request(
-            app(state),
+            app(state.clone()),
             &token,
             "GET",
             &format!("/api-keys/external/{key_id}/authorization"),
@@ -815,7 +831,7 @@ mod tests {
             ])
             .await
             .expect("insert keys");
-        let state = test_app_state(db);
+        let state = test_app_state(db.clone());
         let token = access_token(&state, &actor_id);
 
         let (status, first) = request(
@@ -833,13 +849,13 @@ mod tests {
         assert_eq!(status, StatusCode::OK, "{first}");
 
         let (status, conflict) = request(
-            app(state),
+            app(state.clone()),
             &token,
             "POST",
             "/assistant/actions/endpoints/external-key-rotate",
             Some(json!({
                 "actionRequestId": "rotate-conflict",
-                "externalKeyId": second_id,
+                "externalKeyId": first_id,
                 "credential": "sk-two",
             })),
         )
@@ -853,7 +869,7 @@ mod tests {
         let Some((db, actor_id)) = prepare_database("asst_ep_delete_stale").await else {
             return;
         };
-        let state = test_app_state(db);
+        let state = test_app_state(db.clone());
         let token = access_token(&state, &actor_id);
         let stale_id = Uuid::new_v4().to_string();
 
@@ -871,8 +887,22 @@ mod tests {
         assert_eq!(status, StatusCode::NOT_FOUND, "{deleted}");
         assert_ne!(status, StatusCode::INTERNAL_SERVER_ERROR);
 
+        let (status, replay) = request(
+            app(state.clone()),
+            &token,
+            "POST",
+            "/assistant/actions/endpoints/delete",
+            Some(json!({
+                "actionRequestId": "delete-stale",
+                "endpointId": stale_id,
+            })),
+        )
+        .await;
+        assert_eq!(status, StatusCode::NOT_FOUND, "{replay}");
+        assert_ne!(status, StatusCode::OK);
+
         let (status, evidence) = request(
-            app(state),
+            app(state.clone()),
             &token,
             "GET",
             &format!("/endpoints/{stale_id}/authorization"),
@@ -881,6 +911,89 @@ mod tests {
         .await;
         assert_eq!(status, StatusCode::NOT_FOUND, "{evidence}");
         assert_ne!(status, StatusCode::INTERNAL_SERVER_ERROR);
+
+        let foreign_user_id = Uuid::new_v4().to_string();
+        db.collection::<User>(USERS)
+            .insert_one(test_user(&foreign_user_id, UserType::Person))
+            .await
+            .expect("insert foreign user");
+        let foreign_endpoint_id =
+            insert_endpoint(&db, &foreign_user_id, "Foreign", "https://foreign.example").await;
+        let foreign_body = json!({
+            "actionRequestId": "delete-foreign",
+            "endpointId": foreign_endpoint_id,
+        });
+        let (status, first_foreign) = request(
+            app(state.clone()),
+            &token,
+            "POST",
+            "/assistant/actions/endpoints/delete",
+            Some(foreign_body.clone()),
+        )
+        .await;
+        assert_eq!(status, StatusCode::NOT_FOUND, "{first_foreign}");
+        let (status, replay_foreign) = request(
+            app(state),
+            &token,
+            "POST",
+            "/assistant/actions/endpoints/delete",
+            Some(foreign_body),
+        )
+        .await;
+        assert_eq!(status, StatusCode::NOT_FOUND, "{replay_foreign}");
+        assert_ne!(status, StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn external_key_delete_missing_or_foreign_id_never_replays_success() {
+        let Some((db, actor_id)) = prepare_database("asst_ext_delete_absence").await else {
+            return;
+        };
+        let foreign_user_id = Uuid::new_v4().to_string();
+        db.collection::<User>(USERS)
+            .insert_one(test_user(&foreign_user_id, UserType::Person))
+            .await
+            .expect("insert foreign user");
+        let foreign_key_id = Uuid::new_v4().to_string();
+        db.collection::<UserApiKey>(USER_API_KEYS)
+            .insert_one(fixture_external_key(
+                &foreign_key_id,
+                &foreign_user_id,
+                "Foreign",
+            ))
+            .await
+            .expect("insert foreign key");
+        let state = test_app_state(db);
+        let token = access_token(&state, &actor_id);
+
+        for (action_request_id, external_key_id) in [
+            ("delete-missing", Uuid::new_v4().to_string()),
+            ("delete-foreign", foreign_key_id),
+        ] {
+            let body = json!({
+                "actionRequestId": action_request_id,
+                "externalKeyId": external_key_id,
+            });
+            let (status, first) = request(
+                app(state.clone()),
+                &token,
+                "POST",
+                "/assistant/actions/endpoints/external-key-delete",
+                Some(body.clone()),
+            )
+            .await;
+            assert_eq!(status, StatusCode::NOT_FOUND, "{first}");
+            let (status, retry) = request(
+                app(state.clone()),
+                &token,
+                "POST",
+                "/assistant/actions/endpoints/external-key-delete",
+                Some(body),
+            )
+            .await;
+            assert_eq!(status, StatusCode::NOT_FOUND, "{retry}");
+            assert_ne!(status, StatusCode::OK);
+        }
     }
 
     #[tokio::test]
@@ -949,6 +1062,8 @@ mod tests {
         assert_eq!(first["error_code"], 11500);
         assert_ne!(status, StatusCode::INTERNAL_SERVER_ERROR);
 
+        let cascade_siblings = first["details"]["siblings"].clone();
+        assert!(cascade_siblings.is_array());
         let (status, confirmed) = request(
             app(state.clone()),
             &token,
@@ -958,6 +1073,7 @@ mod tests {
                 "actionRequestId": "delete-cascade",
                 "externalKeyId": primary_key,
                 "cascadeGrant": true,
+                "cascadeSiblings": cascade_siblings,
             })),
         )
         .await;

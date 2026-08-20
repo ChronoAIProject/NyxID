@@ -53,13 +53,13 @@ async fn load_readable_api_key(
 
 /// Look up the external API key without an ownership filter and check
 /// whether the actor may modify it (directly or as an org admin).
-/// Returns the effective owner_id (which may be an org user_id) for
-/// downstream service calls.
-pub(crate) async fn resolve_api_key_write_owner(
+/// Returns the key so action handlers can reject unsupported mutation modes
+/// before reserving an idempotency receipt.
+pub(crate) async fn resolve_api_key_write_target(
     state: &AppState,
     actor: &str,
     key_id: &str,
-) -> AppResult<String> {
+) -> AppResult<UserApiKey> {
     let key = load_readable_api_key(state, actor, key_id).await?;
     let access = org_service::resolve_owner_access(&state.db, actor, &key.user_id).await?;
     if !access.can_write() {
@@ -67,7 +67,18 @@ pub(crate) async fn resolve_api_key_write_owner(
             "you do not have permission to modify this API key".to_string(),
         ));
     }
-    Ok(key.user_id)
+    Ok(key)
+}
+
+/// Resolve the effective owner for service-layer mutations.
+pub(crate) async fn resolve_api_key_write_owner(
+    state: &AppState,
+    actor: &str,
+    key_id: &str,
+) -> AppResult<String> {
+    Ok(resolve_api_key_write_target(state, actor, key_id)
+        .await?
+        .user_id)
 }
 
 #[derive(Deserialize, ToSchema)]
@@ -1625,6 +1636,24 @@ mod tests {
             ]
             .into_iter()
             .collect::<std::collections::BTreeSet<&str>>()
+        );
+    }
+
+    #[test]
+    fn telegram_identity_evidence_uses_pinned_api_key_type() {
+        let mut response = poisoned_external_key_response();
+        response.credential_type = "telegram_identity".to_string();
+        response.label = "safe-label".to_string();
+        response.error_message = None;
+        let evidence =
+            ExternalApiKeyAuthorizationEvidenceResponse::from_external_api_key_response(response)
+                .expect("legacy telegram identity rows normalize safely");
+        assert_eq!(evidence.credential_type, "api_key");
+        assert_eq!(evidence.status, "failed");
+        let json = serde_json::to_value(evidence).unwrap();
+        assert_eq!(
+            crate::test_utils::aevatar_secret_free_violation(&json),
+            None
         );
     }
 
