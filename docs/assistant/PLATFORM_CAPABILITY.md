@@ -61,6 +61,24 @@ Here the assessment gets less comfortable, because the honest answer differs fro
 
 ---
 
+## The precedent we already run: `chrono-llm-public`
+
+Before treating any of this as new, it is worth noting that **NyxID already operates a platform-credentialed catalog service, and it works.**
+
+The direct assistant route resolves the slug `chrono-llm-public` (`services/assistant_direct.rs:6`) through the admin catalog — `resolve_admin_service_by_slug` at `handlers/assistant_direct.rs:158` — so it is an admin-managed row resolved identically for every caller, not a per-user row. Its billing shape is exactly the one proposed here: `service_category: "internal"`, `platform_billable: true`, `platform_metric: Tokens`, streaming enabled, behind a platform feature flag.
+
+That is the same three ingredients: **an internal catalog row carrying a platform credential, metered on a platform metric.** The catalogue strategy is therefore not a new architecture. It is the generalisation of something already in production.
+
+**But it is the easy case, and the two ways it is easy are precisely the two open problems.**
+
+*It picked the one metric that fits.* LLM usage bills in tokens; `BillingMetric::Tokens` exists; the proxy can count them. Firecrawl bills per page, ElevenLabs per character, Twilio per segment — none of which the three-variant metric enum can represent. `chrono-llm-public` sidesteps metric fidelity rather than solving it.
+
+*It got its safety from hand-written code, not configuration.* The route is text-only with no tool execution, and models, skills and effort levels are validated against fixed allowlists in Rust (`services/assistant_direct.rs:176-217`). That is **parameter-level authorization** — exactly what the generic allowlist cannot do. It is safe because someone wrote a purpose-built handler for one upstream.
+
+The catalogue system proposes to reach the same safety by *configuration* across arbitrary services. That is the right goal, and `chrono-llm-public` is both the proof the shape works and the clearest illustration of what the generic path still lacks: a configurable equivalent of the parameter validation it hard-codes.
+
+---
+
 ## Two problems that are structural, not editorial
 
 Most gaps in this space are schedule problems. Two are not, and they bear directly on whether the proposition works at all.
