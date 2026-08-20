@@ -19,7 +19,7 @@ use axum::{
     body::{Body, to_bytes},
     extract::{Path, State},
     http::{HeaderMap, HeaderValue, Method, Request, StatusCode, header},
-    response::Response,
+    response::{Json, Response},
 };
 use base64::Engine as _;
 use serde::Serialize;
@@ -33,7 +33,7 @@ use crate::errors::{AppError, AppResult};
 use crate::handlers::proxy::execute_admin_proxy;
 use crate::models::downstream_service::DownstreamService;
 use crate::mw::auth::{AuthMethod, AuthUser, PROXY_SCOPE, scope_allows_rest_proxy};
-use crate::services::{assistant_service, feature_flag_service};
+use crate::services::{assistant_service, assistant_wire_log_service, feature_flag_service};
 
 /// Conversation indexes carry titles, timestamps, and counts per row, so the
 /// list route gets its own buffering headroom before any merge/reshape.
@@ -59,6 +59,16 @@ const DEBUG_UPSTREAM_PATH_MAX_BYTES: usize = 256;
 const DEBUG_UPSTREAM_COMMAND_TYPE_MAX_BYTES: usize = 64;
 const DEBUG_UPSTREAM_HEADER_VALUE_MAX_BYTES: usize = 256;
 const DEBUG_UPSTREAM_MIN_TRUNCATED_BODY_BYTES: usize = 16;
+
+const WIRE_LOG_NOT_FOUND_MESSAGE: &str = "Wire log not found.";
+
+#[derive(Serialize)]
+pub struct WireLogResponse {
+    id: String,
+    conversation_id: Option<String>,
+    created_at: String,
+    payload: serde_json::Value,
+}
 
 #[derive(Clone, Debug, Serialize)]
 struct UpstreamIdentityEcho {
@@ -200,6 +210,47 @@ async fn upstream_echo_collector(
         return None;
     }
     Some(Vec::new())
+}
+
+/// Fetch one immutable, short-lived assistant wire log for its owner.
+pub async fn get_wire_log(
+    State(state): State<AppState>,
+    auth_user: AuthUser,
+    Path(id): Path<String>,
+) -> AppResult<Json<WireLogResponse>> {
+    uuid::Uuid::parse_str(&id)
+        .map_err(|_| AppError::NotFound(WIRE_LOG_NOT_FOUND_MESSAGE.to_string()))?;
+    let user_id = auth_user.user_id.to_string();
+    let enabled =
+        match feature_flag_service::aevatar_chat_wire_log_enabled(&state.db, &user_id).await {
+            Ok(enabled) => enabled,
+            Err(_) => {
+                tracing::warn!(
+                    wire_log_id = %id,
+                    "assistant: wire-log fetch flag resolution failed"
+                );
+                false
+            }
+        };
+    if !enabled {
+        return Err(AppError::NotFound(WIRE_LOG_NOT_FOUND_MESSAGE.to_string()));
+    }
+
+    let row = assistant_wire_log_service::fetch_for_user(&state.db, &user_id, &id)
+        .await?
+        .ok_or_else(|| AppError::NotFound(WIRE_LOG_NOT_FOUND_MESSAGE.to_string()))?;
+    let payload = serde_json::from_str(&row.payload).map_err(|_| {
+        AppError::Internal("assistant: stored wire-log payload is invalid".to_string())
+    })?;
+
+    Ok(Json(WireLogResponse {
+        id: row.id,
+        conversation_id: row.conversation_id,
+        created_at: row
+            .created_at
+            .to_rfc3339_opts(chrono::SecondsFormat::Millis, true),
+        payload,
+    }))
 }
 
 fn echoed_headers(
@@ -1344,6 +1395,136 @@ mod tests {
                 .is_none(),
             "a per-user override must not leak to another caller"
         );
+    }
+
+    #[tokio::test]
+    async fn get_wire_log_enforces_flag_owner_id_and_expiry() {
+        use crate::models::assistant_wire_log::AssistantWireLog;
+        use crate::services::assistant_wire_log_service;
+        use crate::services::feature_flag_service::{
+            AEVATAR_CHAT_WIRE_LOG_FLAG_KEY, FlagTarget, clear_platform_override,
+            set_platform_override,
+        };
+        use chrono::{Duration, Utc};
+
+        let Some(db) = crate::test_utils::connect_test_database("assistant_wire_log_fetch").await
+        else {
+            eprintln!("skipping assistant wire-log handler test: no local MongoDB available");
+            return;
+        };
+        let owner_id = seed_flag_user(&db).await;
+        let other_id = seed_flag_user(&db).await;
+        let state = crate::test_utils::test_app_state(db.clone());
+        set_platform_override(
+            &db,
+            AEVATAR_CHAT_WIRE_LOG_FLAG_KEY,
+            &FlagTarget::Global,
+            true,
+            "admin",
+        )
+        .await
+        .expect("enable the wire-log flag globally");
+
+        let payload = serde_json::json!({
+            "version": 2,
+            "echoes": [],
+            "droppedEchoCount": 0,
+        });
+        let id = assistant_wire_log_service::store(
+            &db,
+            &owner_id,
+            Some("nyxchat-fetch-test"),
+            serde_json::to_string(&payload).unwrap(),
+        )
+        .await
+        .expect("store handler test wire log");
+
+        let Json(response) = get_wire_log(
+            State(state.clone()),
+            crate::test_utils::test_auth_user(&owner_id),
+            Path(id.clone()),
+        )
+        .await
+        .expect("owner fetches wire log");
+        assert_eq!(response.id, id);
+        assert_eq!(
+            response.conversation_id.as_deref(),
+            Some("nyxchat-fetch-test")
+        );
+        assert!(response.created_at.ends_with('Z'));
+        assert_eq!(response.payload, payload);
+
+        for (user_id, requested_id) in [
+            (other_id.as_str(), id.clone()),
+            (owner_id.as_str(), uuid::Uuid::new_v4().to_string()),
+            (owner_id.as_str(), "not-a-uuid".to_string()),
+        ] {
+            let result = get_wire_log(
+                State(state.clone()),
+                crate::test_utils::test_auth_user(user_id),
+                Path(requested_id),
+            )
+            .await;
+            assert!(matches!(
+                result,
+                Err(AppError::NotFound(ref message)) if message == WIRE_LOG_NOT_FOUND_MESSAGE
+            ));
+        }
+
+        let expired = AssistantWireLog {
+            id: uuid::Uuid::new_v4().to_string(),
+            user_id: owner_id.clone(),
+            conversation_id: Some("nyxchat-expired".to_string()),
+            payload: serde_json::to_string(&payload).unwrap(),
+            created_at: Utc::now() - Duration::seconds(2),
+            expires_at: Utc::now() - Duration::seconds(1),
+        };
+        db.collection::<AssistantWireLog>(AssistantWireLog::COLLECTION_NAME)
+            .insert_one(&expired)
+            .await
+            .expect("insert expired wire log");
+        let expired_result = get_wire_log(
+            State(state.clone()),
+            crate::test_utils::test_auth_user(&owner_id),
+            Path(expired.id),
+        )
+        .await;
+        assert!(matches!(
+            expired_result,
+            Err(AppError::NotFound(ref message)) if message == WIRE_LOG_NOT_FOUND_MESSAGE
+        ));
+
+        clear_platform_override(&db, AEVATAR_CHAT_WIRE_LOG_FLAG_KEY, &FlagTarget::Global)
+            .await
+            .expect("disable the wire-log flag globally");
+        let flag_off_result = get_wire_log(
+            State(state),
+            crate::test_utils::test_auth_user(&owner_id),
+            Path(id),
+        )
+        .await;
+        assert!(matches!(
+            flag_off_result,
+            Err(AppError::NotFound(ref message)) if message == WIRE_LOG_NOT_FOUND_MESSAGE
+        ));
+    }
+
+    #[tokio::test]
+    async fn get_wire_log_flag_resolution_failure_is_not_found() {
+        let state = unreachable_db_state().await;
+        let auth_user = crate::test_utils::test_auth_user(&uuid::Uuid::new_v4().to_string());
+
+        let result = get_wire_log(
+            State(state),
+            auth_user,
+            Path(uuid::Uuid::new_v4().to_string()),
+        )
+        .await;
+
+        assert!(matches!(
+            result,
+            Err(AppError::NotFound(ref message)) if message == WIRE_LOG_NOT_FOUND_MESSAGE
+        ));
     }
 
     /// An `AppState` whose MongoDB handle points at a closed loopback port, so
