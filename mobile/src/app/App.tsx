@@ -12,7 +12,7 @@ SplashScreen.preventAutoHideAsync().catch(() => {
      been hidden, e.g. during fast refresh. Safe to ignore. */
 });
 import { ActivityIndicator, AppState, StyleSheet, Text, View } from "react-native";
-import { SafeAreaProvider } from "react-native-safe-area-context";
+import { SafeAreaProvider, useSafeAreaInsets } from "react-native-safe-area-context";
 import { onlineManager, QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import NetInfo from "@react-native-community/netinfo";
 import {
@@ -41,8 +41,10 @@ import {
   consumePendingPushSyncSignal,
   initializeNotificationRuntime,
   PushSyncSignal,
+  setForegroundNotificationHandler,
   setPushSyncHandler,
 } from "../lib/notifications/pushNotifications";
+import { ToastOverlay, type ToastState } from "../components/ToastOverlay";
 import { startPushPolling } from "../lib/notifications/pushPollingSignal";
 import { AuthSessionProvider } from "../features/auth/AuthSessionContext";
 import { MobileConsentProvider } from "../lib/consent";
@@ -92,6 +94,7 @@ export default function App() {
   const [isNyxOpen, setIsNyxOpen] = useState(false);
   const pendingChallengeFromTapRef = useRef<string | null>(null);
   const lastAppStateRef = useRef(AppState.currentState);
+  const [pushToast, setPushToast] = useState<ToastState | null>(null);
 
   const flushPendingChallengeTapNavigation = useCallback(() => {
     if (!navigationRef.isReady()) return;
@@ -107,6 +110,18 @@ export default function App() {
     pendingChallengeFromTapRef.current = null;
     navigationRef.navigate("Activity", { challengeId: pendingChallengeId });
   }, [navigationRef]);
+
+  // Tapping the in-app toast resolves to exactly the same navigation as
+  // tapping an OS notification, including the "Activity route not mounted
+  // yet" deferral -- the pending id survives until the navigator is ready
+  // and `onStateChange` flushes it.
+  const openChallengeFromNotification = useCallback(
+    (challengeId: string) => {
+      pendingChallengeFromTapRef.current = challengeId;
+      flushPendingChallengeTapNavigation();
+    },
+    [flushPendingChallengeTapNavigation]
+  );
 
   const [fontsLoaded] = useFonts({
     Manrope_400Regular,
@@ -246,6 +261,30 @@ export default function App() {
     };
   }, [flushPendingChallengeTapNavigation]);
 
+  // In-app replacement for the OS banner suppressed while the app is
+  // foregrounded (see `configureNotificationHandler`). Without this, a push
+  // arriving with the app open would be silent to the user. Reuses the same
+  // toast the rest of the app uses; the backend's push body is boilerplate
+  // ("A service is requesting access"), so the title alone loses nothing.
+  useEffect(() => {
+    return setForegroundNotificationHandler((notification) => {
+      const message = notification.title ?? notification.body;
+      if (!message) return;
+
+      const { challengeId } = notification;
+      setPushToast({
+        message,
+        kind: "info",
+        action: challengeId
+          ? {
+              label: "Review",
+              onPress: () => openChallengeFromNotification(challengeId),
+            }
+          : undefined,
+      });
+    });
+  }, [openChallengeFromNotification]);
+
   useEffect(() => {
     const onPushSyncSignal = (signal: PushSyncSignal) => {
       refreshQueryCacheFromPushSignal(signal);
@@ -308,6 +347,7 @@ export default function App() {
                     flushPendingChallengeTapNavigation={flushPendingChallengeTapNavigation}
                     isNyxOpen={isNyxOpen}
                     setIsNyxOpen={setIsNyxOpen}
+                    pushToast={pushToast}
                   />
                 </AuthSessionProvider>
               </MobileConsentProvider>
@@ -326,6 +366,7 @@ function ThemedAppShell({
   flushPendingChallengeTapNavigation,
   isNyxOpen,
   setIsNyxOpen,
+  pushToast,
 }: {
   navigationRef: ReturnType<typeof useNavigationContainerRef<RootStackParamList>>;
   currentRouteName: string | undefined;
@@ -333,8 +374,10 @@ function ThemedAppShell({
   flushPendingChallengeTapNavigation: () => void;
   isNyxOpen: boolean;
   setIsNyxOpen: (open: boolean) => void;
+  pushToast: ToastState | null;
 }) {
   const { mode } = useTheme();
+  const insets = useSafeAreaInsets();
 
   return (
     <>
@@ -367,6 +410,15 @@ function ThemedAppShell({
           // onNyxPress={() => setIsNyxOpen(true)} // TODO: re-enable when chat is ready
         />
       </NavigationContainer>
+      {/* ToastOverlay anchors to `top: 0` of its parent and relies on the
+          screen's SafeAreaView for inset. Mounted globally it has no such
+          parent, so give it explicit bounds below the notch. */}
+      <View
+        style={[pushToastStyles.overlay, { top: insets.top }]}
+        pointerEvents="box-none"
+      >
+        <ToastOverlay toast={pushToast} duration={6000} />
+      </View>
       {/* <NyxSheet isOpen={isNyxOpen} onClose={() => setIsNyxOpen(false)} /> */}{/* TODO: re-enable when chat is ready */}
     </>
   );
@@ -383,6 +435,15 @@ const appLoadingStyles = StyleSheet.create({
   text: {
     color: "#e8e4f0",
     fontSize: 16,
+  },
+});
+
+const pushToastStyles = StyleSheet.create({
+  overlay: {
+    position: "absolute",
+    left: 0,
+    right: 0,
+    bottom: 0,
   },
 });
 

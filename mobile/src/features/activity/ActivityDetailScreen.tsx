@@ -7,6 +7,7 @@ import { ScreenContainer } from "../../components/ScreenContainer";
 
 import { FullScreenLoading } from "../../components/FullScreenLoading";
 import { ToastOverlay, type ToastState } from "../../components/ToastOverlay";
+import { setActiveChallengeId } from "../../lib/notifications/pushNotifications";
 import { StatusBadge } from "../../components/StatusBadge";
 import { PrimaryButton } from "../../components/PrimaryButton";
 import { mobileApi } from "../../lib/api/mobileApi";
@@ -49,6 +50,13 @@ export function ActivityDetailScreen({ navigation, route }: Props) {
   const { challengeId } = route.params;
   const queryClient = useQueryClient();
   const [toast, setToast] = useState<ToastState | null>(null);
+
+  // Same gate as ActivityScreen: suppress the in-app toast for the approval
+  // that is already filling the screen.
+  useEffect(() => {
+    setActiveChallengeId(challengeId);
+    return () => setActiveChallengeId(null);
+  }, [challengeId]);
 
   useEffect(() => {
     if (!toast) return;
