@@ -151,28 +151,7 @@ pub async fn authorize_master_credential(
     service: &DownstreamService,
     actor: &EffectiveActor,
 ) -> AppResult<AuthorizedMasterCredential> {
-    if !is_valid_master_credential_service(service) {
-        tracing::warn!(
-            service_id = %service.id,
-            service_slug = %service.slug,
-            reason = "invalid_master_credential_service",
-            "Catalog master credential authorization denied"
-        );
-        return Err(AppError::NotFound("Service not found".to_string()));
-    }
-
-    // A row holding a platform credential must state what it may do. Absent
-    // policy is deny, not passthrough (V1_SPEC item 2). Present-but-empty
-    // policy still resolves here and denies at the operation layer.
-    if service.proxy_operation_policy.is_none() {
-        tracing::warn!(
-            service_id = %service.id,
-            service_slug = %service.slug,
-            reason = "master_credential_missing_operation_policy",
-            "Catalog master credential authorization denied"
-        );
-        return Err(AppError::NotFound("Service not found".to_string()));
-    }
+    validate_master_credential_service(service)?;
 
     match service.visibility.as_str() {
         "public" => {}
@@ -218,12 +197,6 @@ pub async fn authorize_master_credential(
         }
     }
 
-    crate::mw::rate_limit::enforce_platform_user_limit(
-        crate::mw::rate_limit::platform_user_rate_limiter(),
-        &service.id,
-        &actor.user_id,
-    )?;
-
     Ok(AuthorizedMasterCredential::new(
         &service.credential_encrypted,
     ))
@@ -246,7 +219,7 @@ pub async fn authorize_master_credential_server_chosen(
             "platform service does not require a master credential".to_string(),
         ));
     }
-    if service.visibility != "public" || !is_valid_master_credential_service(service) {
+    if service.visibility != "public" {
         tracing::error!(
             service_id = %service.id,
             service_slug = %service.slug,
@@ -255,9 +228,40 @@ pub async fn authorize_master_credential_server_chosen(
         );
         return Err(AppError::NotFound("Service not found".to_string()));
     }
+    validate_master_credential_service(service)?;
     Ok(AuthorizedMasterCredential::new(
         &service.credential_encrypted,
     ))
+}
+
+/// Validate the catalog row before any master credential is wrapped. Both
+/// actor-addressed and server-chosen surfaces use this gate so a platform
+/// credential cannot bypass the allowlist by selecting another entry point.
+fn validate_master_credential_service(service: &DownstreamService) -> AppResult<()> {
+    if !is_valid_master_credential_service(service) {
+        tracing::warn!(
+            service_id = %service.id,
+            service_slug = %service.slug,
+            reason = "invalid_master_credential_service",
+            "Catalog master credential authorization denied"
+        );
+        return Err(AppError::NotFound("Service not found".to_string()));
+    }
+
+    // A row holding a platform credential must state what it may do. Absent
+    // policy is deny, not passthrough (V1_SPEC item 2). Present-but-empty
+    // policy still resolves here and denies at the operation layer.
+    if service.proxy_operation_policy.is_none() {
+        tracing::warn!(
+            service_id = %service.id,
+            service_slug = %service.slug,
+            reason = "master_credential_missing_operation_policy",
+            "Catalog master credential authorization denied"
+        );
+        return Err(AppError::NotFound("Service not found".to_string()));
+    }
+
+    Ok(())
 }
 
 fn is_valid_master_credential_service(service: &DownstreamService) -> bool {
@@ -908,6 +912,12 @@ pub async fn resolve_admin_proxy_target(
 
     // SEC-M3: raw decrypted bytes stay wrapped so they zero on drop.
     let authorized = authorize_master_credential_server_chosen(db, &service).await?;
+    // Server-chosen requests have no actor to key on; enforce the explicit
+    // per-service bucket before the authorized ciphertext is decrypted.
+    crate::mw::rate_limit::enforce_platform_server_chosen_limit(
+        crate::mw::rate_limit::platform_user_rate_limiter(),
+        &service.id,
+    )?;
     let decrypted_bytes =
         Zeroizing::new(decrypt_authorized_master_credential(encryption_keys, &authorized).await?);
     let credential = String::from_utf8((*decrypted_bytes).clone()).map_err(|e| {
@@ -1031,12 +1041,13 @@ pub async fn resolve_proxy_target(
                 })?;
         decrypt_user_credential(encryption_keys, &credential_encrypted).await?
     } else if master_credential_required(&service) {
-        let authorized = authorize_master_credential(
-            db,
-            &service,
-            &EffectiveActor::from_user_id(user_id.to_string()),
-        )
-        .await?;
+        let actor = EffectiveActor::from_user_id(user_id.to_string());
+        let authorized = authorize_master_credential(db, &service, &actor).await?;
+        crate::mw::rate_limit::enforce_platform_user_limit(
+            crate::mw::rate_limit::platform_user_rate_limiter(),
+            &service.id,
+            &actor.user_id,
+        )?;
         decrypt_master_credential_string(encryption_keys, &authorized).await?
     } else {
         String::new()
@@ -1170,12 +1181,13 @@ pub async fn resolve_proxy_target_lenient(
             None => (String::new(), false),
         }
     } else if master_credential_required(&service) {
-        let authorized = authorize_master_credential(
-            db,
-            &service,
-            &EffectiveActor::from_user_id(user_id.to_string()),
-        )
-        .await?;
+        let actor = EffectiveActor::from_user_id(user_id.to_string());
+        let authorized = authorize_master_credential(db, &service, &actor).await?;
+        crate::mw::rate_limit::enforce_platform_user_limit(
+            crate::mw::rate_limit::platform_user_rate_limiter(),
+            &service.id,
+            &actor.user_id,
+        )?;
         (
             decrypt_master_credential_string(encryption_keys, &authorized).await?,
             true,
@@ -2340,12 +2352,13 @@ async fn finish_resolution(
             ));
         }
 
-        let authorized = authorize_master_credential(
-            db,
-            &catalog_service,
-            &EffectiveActor::from_user_id(effective_owner_id),
-        )
-        .await?;
+        let actor = EffectiveActor::from_user_id(effective_owner_id);
+        let authorized = authorize_master_credential(db, &catalog_service, &actor).await?;
+        crate::mw::rate_limit::enforce_platform_user_limit(
+            crate::mw::rate_limit::platform_user_rate_limiter(),
+            &catalog_service.id,
+            &actor.user_id,
+        )?;
         let decrypted_bytes = Zeroizing::new(
             decrypt_authorized_master_credential(encryption_keys, &authorized).await?,
         );
@@ -3562,6 +3575,16 @@ mod tests {
         );
     }
 
+    fn assert_service_not_found<T>(result: AppResult<T>, context: &str) {
+        match result {
+            Err(AppError::NotFound(message)) => {
+                assert_eq!(message, "Service not found", "{context}")
+            }
+            Err(error) => panic!("{context}: expected NotFound, got {error:?}"),
+            Ok(_) => panic!("{context}: expected authorization denial"),
+        }
+    }
+
     #[tokio::test]
     async fn server_chosen_master_credential_requires_public_valid_row() {
         let db = connect_test_database("proxy_master_credential_server_chosen").await;
@@ -3576,13 +3599,18 @@ mod tests {
         service.auth_method = "bearer".to_string();
         service.requires_user_credential = false;
         service.credential_encrypted = vec![1, 2, 3];
-        assert!(
-            authorize_master_credential_server_chosen(&db, &service)
-                .await
-                .is_err()
+        assert_service_not_found(
+            authorize_master_credential_server_chosen(&db, &service).await,
+            "private server-chosen rows must be rejected",
         );
 
         service.visibility = "public".to_string();
+        assert_service_not_found(
+            authorize_master_credential_server_chosen(&db, &service).await,
+            "server-chosen rows without a policy must fail closed",
+        );
+
+        service.proxy_operation_policy = Some(ProxyOperationPolicy { rules: vec![] });
         assert!(
             authorize_master_credential_server_chosen(&db, &service)
                 .await
@@ -3590,10 +3618,9 @@ mod tests {
         );
 
         service.service_category = "connection".to_string();
-        assert!(
-            authorize_master_credential_server_chosen(&db, &service)
-                .await
-                .is_err()
+        assert_service_not_found(
+            authorize_master_credential_server_chosen(&db, &service).await,
+            "server-chosen user-credential rows must be hidden",
         );
     }
 
@@ -3616,10 +3643,9 @@ mod tests {
         let service = valid_master_service(None);
         let actor = EffectiveActor::from_user_id(uuid::Uuid::new_v4().to_string());
 
-        assert!(
-            authorize_master_credential(&db, &service, &actor)
-                .await
-                .is_err()
+        assert_service_not_found(
+            authorize_master_credential(&db, &service, &actor).await,
+            "missing policy must fail closed before credential access",
         );
     }
 
@@ -3715,11 +3741,9 @@ mod tests {
 
         service.visibility = "private".to_string();
         service.developer_app_ids = Some(vec![app_id.clone()]);
-        assert!(
-            authorize_master_credential(&db, &service, &actor)
-                .await
-                .is_err(),
-            "private row without consent must be denied"
+        assert_service_not_found(
+            authorize_master_credential(&db, &service, &actor).await,
+            "private row without consent must be denied",
         );
 
         let consent = crate::models::consent::Consent {
@@ -3750,42 +3774,34 @@ mod tests {
             )
             .await
             .expect("expire consent");
-        assert!(
-            authorize_master_credential(&db, &service, &actor)
-                .await
-                .is_err(),
-            "expired consent must be denied"
+        assert_service_not_found(
+            authorize_master_credential(&db, &service, &actor).await,
+            "expired consent must be denied",
         );
 
         db.collection::<crate::models::consent::Consent>(crate::models::consent::COLLECTION_NAME)
             .delete_one(doc! { "_id": &consent.id })
             .await
             .expect("revoke consent");
-        assert!(
-            authorize_master_credential(&db, &service, &actor)
-                .await
-                .is_err(),
-            "revoked consent must be denied"
+        assert_service_not_found(
+            authorize_master_credential(&db, &service, &actor).await,
+            "revoked consent must be denied",
         );
 
         service.developer_app_ids = None;
-        assert!(
-            authorize_master_credential(&db, &service, &actor)
-                .await
-                .is_err(),
-            "private row without app ids must be denied"
+        assert_service_not_found(
+            authorize_master_credential(&db, &service, &actor).await,
+            "private row without app ids must be denied",
         );
         service.developer_app_ids = Some(Vec::new());
-        assert!(
-            authorize_master_credential(&db, &service, &actor)
-                .await
-                .is_err(),
-            "private row with empty app ids must be denied"
+        assert_service_not_found(
+            authorize_master_credential(&db, &service, &actor).await,
+            "private row with empty app ids must be denied",
         );
     }
 
     #[tokio::test]
-    async fn master_credential_rate_limit_uninitialized_is_unlimited() {
+    async fn master_credential_authorization_is_independent_of_limiter() {
         let Some(db) = connect_test_database("proxy_master_credential_uninitialized_limiter").await
         else {
             eprintln!("skipping: no MongoDB");

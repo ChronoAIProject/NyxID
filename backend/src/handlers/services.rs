@@ -3403,21 +3403,33 @@ mod tests {
     fn master_credential_shape_rejects_user_credential_category() {
         let error = validate_master_credential_shape("bearer", true, "connection", None)
             .expect_err("connection rows must not store master credentials");
-        assert!(matches!(error, AppError::ValidationError(_)));
+        assert!(matches!(
+            error,
+            AppError::ValidationError(message)
+                if message.contains("user-credential (connection) service")
+        ));
     }
 
     #[test]
     fn master_credential_shape_rejects_provider_linked_row() {
         let error = validate_master_credential_shape("bearer", true, "internal", Some("prov-id"))
             .expect_err("provider-linked rows must not store master credentials");
-        assert!(matches!(error, AppError::ValidationError(_)));
+        assert!(matches!(
+            error,
+            AppError::ValidationError(message)
+                if message.contains("provider_config_id")
+        ));
     }
 
     #[test]
     fn master_credential_shape_rejects_credential_without_auth() {
         let error = validate_master_credential_shape("none", true, "internal", None)
             .expect_err("none-auth rows cannot store an injected credential");
-        assert!(matches!(error, AppError::ValidationError(_)));
+        assert!(matches!(
+            error,
+            AppError::ValidationError(message)
+                if message.contains("requires an auth_method")
+        ));
     }
 
     #[test]
