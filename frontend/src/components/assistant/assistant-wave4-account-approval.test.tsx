@@ -58,6 +58,8 @@ describe("Wave 4 account journeys", () => {
     const onComplete = vi.fn();
     renderDialog(<AssistantAccountRevokeConsentDialog open onOpenChange={vi.fn()} actionRequestId="consent-1" params={{ clientId: IDS.client }} onComplete={onComplete} />);
     await userEvent.click(screen.getByRole("button", { name: "Revoke consent" }));
+    expect(mockGet).toHaveBeenNthCalledWith(1, `/users/me/consents/${IDS.client}/authorization`);
+    expect(mockGet).toHaveBeenNthCalledWith(2, `/users/me/consents/${IDS.client}/authorization`);
     await userEvent.click(await screen.findByRole("button", { name: "Done" }));
     expect(onComplete).toHaveBeenCalledWith(IDS.user);
   });
@@ -69,6 +71,8 @@ describe("Wave 4 account journeys", () => {
     await userEvent.type(screen.getByLabelText("Account email"), "owner@example.com");
     await userEvent.click(screen.getByRole("button", { name: "Delete account" }));
     expect(await screen.findByRole("button", { name: "Continue" })).toBeInTheDocument();
+    expect(mockGet).toHaveBeenNthCalledWith(2, "/users/me/authorization");
+    expect(mockGet).toHaveBeenNthCalledWith(3, "/users/me/authorization");
     expect(mockPost).toHaveBeenCalledWith("/assistant/actions/org/account/delete", { actionRequestId: "delete-1" });
   });
 
