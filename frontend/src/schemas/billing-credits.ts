@@ -100,6 +100,8 @@ export const issueGrantFormSchema = z
 export const issueGrantResponseSchema = z.object({
   batch_id: z.string(),
   created_count: z.number().int().positive(),
+  activated_count: z.number().int().nonnegative(),
+  pending_activation_count: z.number().int().nonnegative(),
 });
 
 export const usageAllowanceSchema = z.object({

@@ -18,6 +18,7 @@ import {
   allowanceFormSchema,
   issueGrantFormSchema,
   type AllowanceForm,
+  type CreditGrant,
   type IssueGrantForm,
   type UsageAllowance,
 } from "@/schemas/billing-credits";
@@ -99,6 +100,7 @@ export function AdminCreditsPage() {
   const [allowanceOpen, setAllowanceOpen] = useState(false);
   const [editingAllowance, setEditingAllowance] =
     useState<UsageAllowance | null>(null);
+  const [grantToRevoke, setGrantToRevoke] = useState<CreditGrant | null>(null);
 
   const grantForm = useAppForm<IssueGrantForm>({
     resolver: zodResolver(issueGrantFormSchema),
@@ -133,8 +135,11 @@ export function AdminCreditsPage() {
   async function submitGrant(value: IssueGrantForm) {
     try {
       const result = await issueGrant.mutateAsync(value);
+      const recipientLabel = `${String(result.created_count)} owner${result.created_count === 1 ? "" : "s"}`;
       toast.success(
-        `Issued credits to ${String(result.created_count)} owner${result.created_count === 1 ? "" : "s"}`,
+        result.pending_activation_count > 0
+          ? `Issued credits to ${recipientLabel}; ${String(result.pending_activation_count)} pending activation`
+          : `Issued credits to ${recipientLabel}`,
       );
       setGrantOpen(false);
     } catch (error) {
@@ -165,11 +170,12 @@ export function AdminCreditsPage() {
     }
   }
 
-  async function handleRevoke(grantId: string) {
-    if (!window.confirm("Revoke the remaining credits in this grant?")) return;
+  async function handleRevoke() {
+    if (!grantToRevoke) return;
     try {
-      await revokeGrant.mutateAsync(grantId);
+      await revokeGrant.mutateAsync(grantToRevoke.id);
       toast.success("Grant revoked");
+      setGrantToRevoke(null);
     } catch (error) {
       toast.error(errorMessage(error, "Failed to revoke grant"));
     }
@@ -288,7 +294,7 @@ export function AdminCreditsPage() {
                               grant.reserved_micros > 0 ||
                               revokeGrant.isPending
                             }
-                            onClick={() => void handleRevoke(grant.id)}
+                            onClick={() => setGrantToRevoke(grant)}
                           >
                             <Trash2 className="h-4 w-4" />
                           </Button>
@@ -449,6 +455,43 @@ export function AdminCreditsPage() {
         editing={editingAllowance !== null}
         onSubmit={submitAllowance}
       />
+      <Dialog
+        open={grantToRevoke !== null}
+        onOpenChange={(open) => {
+          if (!open && !revokeGrant.isPending) setGrantToRevoke(null);
+        }}
+      >
+        <DialogContent>
+          <DialogHeader>
+            <DialogTitle>Revoke credit grant</DialogTitle>
+            <DialogDescription>
+              Revoke the remaining {grantToRevoke?.remaining_micros
+                ? formatCredits(grantToRevoke.remaining_micros)
+                : "credits"} for {grantToRevoke?.recipient_display_name ||
+                grantToRevoke?.recipient_email ||
+                "this recipient"}? This cannot be undone.
+            </DialogDescription>
+          </DialogHeader>
+          <DialogFooter>
+            <Button
+              type="button"
+              variant="outline"
+              disabled={revokeGrant.isPending}
+              onClick={() => setGrantToRevoke(null)}
+            >
+              Cancel
+            </Button>
+            <Button
+              type="button"
+              variant="destructive"
+              isLoading={revokeGrant.isPending}
+              onClick={() => void handleRevoke()}
+            >
+              Revoke grant
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
     </div>
   );
 }

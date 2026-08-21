@@ -30,7 +30,12 @@ beforeEach(() => vi.clearAllMocks());
 
 describe("billing credit hooks", () => {
   it("normalizes all-owner and all-service grant payloads", async () => {
-    mockPost.mockResolvedValue({ batch_id: "batch-1", created_count: 3 });
+    mockPost.mockResolvedValue({
+      batch_id: "batch-1",
+      created_count: 3,
+      activated_count: 3,
+      pending_activation_count: 0,
+    });
     const { result } = renderHook(() => useIssueCreditGrant(), {
       wrapper: wrapperFactory(),
     });
