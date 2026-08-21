@@ -39,6 +39,9 @@ pub const MAX_VERIFY_LIMIT: i64 = 10_000;
 
 static BILLING_LEDGER_HMAC_KEY: OnceLock<Zeroizing<[u8; 32]>> = OnceLock::new();
 
+#[cfg(test)]
+pub(crate) const TEST_BILLING_LEDGER_HMAC_KEY: [u8; 32] = [3_u8; 32];
+
 pub fn init_billing_ledger_hmac_key(key: Zeroizing<[u8; 32]>) {
     if BILLING_LEDGER_HMAC_KEY.set(key).is_err() {
         tracing::warn!("billing-ledger HMAC key was already initialized");
@@ -128,6 +131,7 @@ pub fn record_usage_settled_async(db: mongodb::Database, row: UsageMeterRow, cre
             model: row.model.clone(),
             quantity: row.quantity,
             amount_credits: Some(credits),
+            amount_micros: None,
             balance_credits: None,
             dedupe_key: None,
             wallet_id: row.wallet_id.clone(),
@@ -184,6 +188,7 @@ pub async fn record_topup_created(
         model: None,
         quantity: None,
         amount_credits: Some(amount_credits),
+        amount_micros: None,
         balance_credits: None,
         dedupe_key: None,
         wallet_id: Some(lago_wallet_id.to_string()),
@@ -233,12 +238,146 @@ pub async fn record_wallet_credited(
         model: None,
         quantity: None,
         amount_credits: None,
+        amount_micros: None,
         balance_credits: Some(balance_credits),
         dedupe_key,
         wallet_id: None,
         created_at: Utc::now(),
     };
     append_best_effort(db, entry).await;
+}
+
+#[allow(clippy::too_many_arguments)]
+pub async fn record_grant_event(
+    db: &mongodb::Database,
+    event_type: BillingLedgerEventType,
+    owner_id: &str,
+    grant_id: &str,
+    amount_micros: i64,
+    usage_row: Option<&UsageMeterRow>,
+    dedupe_key: String,
+) -> bool {
+    if !matches!(
+        event_type,
+        BillingLedgerEventType::GrantIssued
+            | BillingLedgerEventType::GrantConsumed
+            | BillingLedgerEventType::GrantExpired
+            | BillingLedgerEventType::GrantRevoked
+    ) {
+        tracing::warn!(
+            event_type = event_type.as_str(),
+            "invalid event passed to grant ledger writer"
+        );
+        return false;
+    }
+    match ledger_dedupe_exists(db, &dedupe_key).await {
+        Ok(true) => return true,
+        Ok(false) => {}
+        Err(error) => {
+            tracing::warn!(%error, dedupe_key, "billing-ledger dedupe check failed");
+            return false;
+        }
+    }
+    let entry = BillingLedgerEntry {
+        id: Uuid::new_v4().to_string(),
+        seq: 0,
+        prev_hash: String::new(),
+        entry_hash: String::new(),
+        event_type,
+        owner_id: owner_id.to_string(),
+        reference_id: grant_id.to_string(),
+        transaction_id: usage_row.map(|row| row.transaction_id.clone()),
+        layer: usage_row.map(|row| row.layer),
+        metric: usage_row.map(|row| row.metric),
+        service_slug: usage_row.and_then(|row| row.service_slug.clone()),
+        model: usage_row.and_then(|row| row.model.clone()),
+        quantity: None,
+        amount_credits: (amount_micros % 1_000_000 == 0).then_some(amount_micros / 1_000_000),
+        amount_micros: Some(amount_micros),
+        balance_credits: None,
+        dedupe_key: Some(dedupe_key),
+        wallet_id: usage_row.and_then(|row| row.wallet_id.clone()),
+        created_at: Utc::now(),
+    };
+    append_and_confirm_dedupe(db, entry).await
+}
+
+pub async fn record_topup_expired(
+    db: &mongodb::Database,
+    owner_id: &str,
+    reference_id: &str,
+    wallet_id: &str,
+    amount_micros: i64,
+    void_transaction_id: &str,
+) {
+    let dedupe_key = format!("topup-expired:{reference_id}:{void_transaction_id}");
+    match ledger_dedupe_exists(db, &dedupe_key).await {
+        Ok(true) => return,
+        Ok(false) => {}
+        Err(error) => {
+            tracing::warn!(%error, dedupe_key, "billing-ledger dedupe check failed");
+            return;
+        }
+    }
+    let entry = BillingLedgerEntry {
+        id: Uuid::new_v4().to_string(),
+        seq: 0,
+        prev_hash: String::new(),
+        entry_hash: String::new(),
+        event_type: BillingLedgerEventType::TopupExpired,
+        owner_id: owner_id.to_string(),
+        reference_id: reference_id.to_string(),
+        transaction_id: Some(void_transaction_id.to_string()),
+        layer: None,
+        metric: None,
+        service_slug: None,
+        model: None,
+        quantity: None,
+        amount_credits: (amount_micros % 1_000_000 == 0).then_some(amount_micros / 1_000_000),
+        amount_micros: Some(amount_micros),
+        balance_credits: None,
+        dedupe_key: Some(dedupe_key),
+        wallet_id: Some(wallet_id.to_string()),
+        created_at: Utc::now(),
+    };
+    append_best_effort(db, entry).await;
+}
+
+async fn ledger_dedupe_exists(
+    db: &mongodb::Database,
+    dedupe_key: &str,
+) -> Result<bool, mongodb::error::Error> {
+    db.collection::<BillingLedgerEntry>(BILLING_LEDGER)
+        .count_documents(doc! { "dedupe_key": dedupe_key })
+        .await
+        .map(|count| count > 0)
+}
+
+async fn append_and_confirm_dedupe(db: &mongodb::Database, entry: BillingLedgerEntry) -> bool {
+    let Some(key) = billing_ledger_hmac_key() else {
+        tracing::warn!(
+            event_type = entry.event_type.as_str(),
+            reference_id = %entry.reference_id,
+            "billing-ledger HMAC key is not initialized; ledger entry skipped"
+        );
+        return false;
+    };
+    let dedupe_key = entry.dedupe_key.clone();
+    match append_chained_entry(db, entry, key).await {
+        Ok(_) => true,
+        Err(error) => {
+            // A concurrent writer may have won the unique dedupe-key race.
+            // Confirm that case before reporting a failed durable append.
+            let confirmed = match dedupe_key.as_deref() {
+                Some(dedupe_key) => ledger_dedupe_exists(db, dedupe_key).await.unwrap_or(false),
+                None => false,
+            };
+            if !confirmed {
+                tracing::warn!(%error, "failed to append billing ledger entry");
+            }
+            confirmed
+        }
+    }
 }
 
 async fn append_best_effort(db: &mongodb::Database, entry: BillingLedgerEntry) {
@@ -295,7 +434,7 @@ pub fn compute_entry_hash(entry: &BillingLedgerEntry, key: &[u8]) -> String {
 }
 
 fn canonical_entry_bytes(entry: &BillingLedgerEntry) -> Vec<u8> {
-    let fields = [
+    let mut fields = vec![
         entry.seq.to_string(),
         entry.prev_hash.clone(),
         entry.id.clone(),
@@ -329,6 +468,17 @@ fn canonical_entry_bytes(entry: &BillingLedgerEntry) -> Vec<u8> {
         entry.wallet_id.clone().unwrap_or_default(),
         entry.created_at.timestamp_millis().to_string(),
     ];
+    // Existing event hashes predate exact microcredit movements. Append the
+    // extension only for newly introduced event types so every historical
+    // usage/top-up/wallet entry retains its original canonical bytes.
+    if entry.event_type.uses_extended_encoding() {
+        fields.push(
+            entry
+                .amount_micros
+                .map(|micros| micros.to_string())
+                .unwrap_or_default(),
+        );
+    }
     join_record_fields(&fields)
 }
 
@@ -783,6 +933,7 @@ mod tests {
             model: None,
             quantity: Some(100),
             amount_credits: Some(5),
+            amount_micros: None,
             balance_credits: None,
             dedupe_key: None,
             wallet_id: Some("wallet-1".to_string()),
@@ -806,6 +957,48 @@ mod tests {
         let mut tampered = a.clone();
         tampered.owner_id = "owner-2".to_string();
         assert_ne!(hash, compute_entry_hash(&tampered, TEST_KEY));
+    }
+
+    #[test]
+    fn extended_microcredit_encoding_preserves_legacy_hashes() {
+        let mut legacy = entry("legacy");
+        legacy.created_at = truncate_to_bson_millis(legacy.created_at);
+        legacy.seq = 1;
+        legacy.prev_hash = GENESIS_PREV_HASH.to_string();
+        let original = compute_entry_hash(&legacy, TEST_KEY);
+        legacy.amount_micros = Some(123_456);
+        assert_eq!(
+            original,
+            compute_entry_hash(&legacy, TEST_KEY),
+            "fields introduced after the legacy event must not rewrite its canonical bytes"
+        );
+
+        let mut grant = legacy;
+        grant.event_type = BillingLedgerEventType::GrantConsumed;
+        let exact = compute_entry_hash(&grant, TEST_KEY);
+        grant.amount_micros = Some(123_457);
+        assert_ne!(exact, compute_entry_hash(&grant, TEST_KEY));
+    }
+
+    #[test]
+    fn new_money_event_names_are_stable() {
+        assert_eq!(BillingLedgerEventType::GrantIssued.as_str(), "grant_issued");
+        assert_eq!(
+            BillingLedgerEventType::GrantConsumed.as_str(),
+            "grant_consumed"
+        );
+        assert_eq!(
+            BillingLedgerEventType::GrantExpired.as_str(),
+            "grant_expired"
+        );
+        assert_eq!(
+            BillingLedgerEventType::GrantRevoked.as_str(),
+            "grant_revoked"
+        );
+        assert_eq!(
+            BillingLedgerEventType::TopupExpired.as_str(),
+            "topup_expired"
+        );
     }
 
     #[tokio::test]

@@ -29,6 +29,16 @@ pub struct BillingTopUpSession {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub payment_provider: Option<String>,
     pub status: BillingTopUpStatus,
+    #[serde(default, with = "crate::models::bson_datetime::optional")]
+    pub paid_at: Option<DateTime<Utc>>,
+    #[serde(default, with = "crate::models::bson_datetime::optional")]
+    pub credits_expire_at: Option<DateTime<Utc>>,
+    #[serde(default)]
+    pub expired_credits_micros: i64,
+    #[serde(default, with = "crate::models::bson_datetime::optional")]
+    pub credits_expired_at: Option<DateTime<Utc>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub expiry_void_transaction_id: Option<String>,
     #[serde(with = "bson::serde_helpers::chrono_datetime_as_bson_datetime")]
     pub created_at: DateTime<Utc>,
     #[serde(with = "bson::serde_helpers::chrono_datetime_as_bson_datetime")]

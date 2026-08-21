@@ -294,6 +294,18 @@ export const updateServiceSchema = z
     inject_delegation_token: z.boolean().optional(),
     platform_billable: z.boolean().optional(),
     platform_metric: z.enum(["auto", "tokens", "requests", "bytes"]).optional(),
+    platform_price: z
+      .string()
+      .trim()
+      .refine(
+        (value) => value === "" || /^\d+(?:\.\d{1,6})?$/.test(value),
+        "Use a non-negative decimal with at most 6 decimal places",
+      )
+      .refine(
+        (value) => value === "" || Number(value) <= 1_000_000,
+        "Price must not exceed 1,000,000 credits per unit",
+      )
+      .optional(),
     delegation_token_scope: z
       .string()
       .max(200, "Scope must be at most 200 characters")

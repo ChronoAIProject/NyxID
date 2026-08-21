@@ -10,6 +10,29 @@ pub enum BillingMetric {
     Bytes,
 }
 
+#[derive(Clone, Copy, Debug, Default, Serialize, Deserialize, ToSchema, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum PricingSyncStatus {
+    #[default]
+    Pending,
+    Synced,
+    Failed,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, ToSchema, PartialEq, Eq)]
+pub struct ServicePlatformPricing {
+    /// Decimal credits charged per metered unit. Stored as a string so the
+    /// value sent to Lago is exact and never passes through floating point.
+    pub credits_per_unit: String,
+    /// Stable, NyxID-owned Lago metric code for this catalog service.
+    #[serde(default)]
+    pub lago_metric_code: String,
+    #[serde(default)]
+    pub sync_status: PricingSyncStatus,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sync_error: Option<String>,
+}
+
 impl BillingMetric {
     /// Stable serde-matching name; used in ledger canonical encoding, so
     /// variant renames must not change these strings.
@@ -34,6 +57,16 @@ pub struct ServiceBilling {
     /// everything else meters requests).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub platform_metric: Option<BillingMetric>,
+    /// Present only when an admin explicitly set a NyxID-owned price. Older
+    /// services without this block continue using the legacy global platform
+    /// metric and Lago-authored plan price.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub platform_pricing: Option<ServicePlatformPricing>,
+    /// Durable cleanup marker used when an admin clears a NyxID-owned price.
+    /// Traffic immediately falls back to the legacy metric; reconciliation
+    /// removes this metric's charge from Lago before clearing the marker.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub platform_pricing_cleanup_metric_code: Option<String>,
     #[serde(default)]
     pub resale_billable: bool,
     #[serde(default)]
@@ -47,6 +80,8 @@ impl Default for ServiceBilling {
         Self {
             platform_billable: false,
             platform_metric: None,
+            platform_pricing: None,
+            platform_pricing_cleanup_metric_code: None,
             resale_billable: false,
             resale_metric: BillingMetric::Tokens,
             lago_resale_metric_code: None,
@@ -55,6 +90,14 @@ impl Default for ServiceBilling {
 }
 
 impl ServiceBilling {
+    pub fn active_platform_metric_code<'a>(&'a self, legacy_code: &'a str) -> &'a str {
+        self.platform_pricing
+            .as_ref()
+            .filter(|pricing| pricing.sync_status == PricingSyncStatus::Synced)
+            .map(|pricing| pricing.lago_metric_code.as_str())
+            .unwrap_or(legacy_code)
+    }
+
     pub fn active_resale_spec(&self) -> Option<ResaleSpec> {
         if !self.resale_billable {
             return None;
@@ -163,6 +206,8 @@ mod tests {
         let mut billing = ServiceBilling {
             platform_billable: false,
             platform_metric: None,
+            platform_pricing: None,
+            platform_pricing_cleanup_metric_code: None,
             resale_billable: true,
             resale_metric: BillingMetric::Requests,
             lago_resale_metric_code: None,

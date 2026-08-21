@@ -7,6 +7,8 @@ import {
   Info,
   Plus,
   WalletCards,
+  Coins,
+  Gauge,
 } from "lucide-react";
 import { ApiError } from "@/lib/api-client";
 import { openExternal } from "@/lib/navigation";
@@ -26,14 +28,13 @@ import {
   useTopUpHistory,
   openInvoiceReceipt,
 } from "@/hooks/use-billing";
+import {
+  useActiveCreditGrants,
+  useCurrentAllowances,
+} from "@/hooks/use-billing-credits";
 import { Button, ButtonIcon } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
-import {
-  Card,
-  CardContent,
-  CardHeader,
-  CardTitle,
-} from "@/components/ui/card";
+import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import {
   Dialog,
   DialogContent,
@@ -135,7 +136,10 @@ export function BillingPage() {
 
       {usageQuery.isError && (
         <ErrorBanner
-          message={errorMessage(usageQuery.error, "Failed to load billing usage.")}
+          message={errorMessage(
+            usageQuery.error,
+            "Failed to load billing usage.",
+          )}
           onRetry={() => void usageQuery.refetch()}
         />
       )}
@@ -159,6 +163,8 @@ export function BillingPage() {
         topUpPending={topUpBilling.isPending}
       />
 
+      <BillingBenefits />
+
       <UsageSummary
         rows={usageQuery.data?.rows ?? []}
         totals={usageQuery.data?.totals}
@@ -167,6 +173,118 @@ export function BillingPage() {
 
       <TopUpHistory key={period} period={period} />
     </div>
+  );
+}
+
+function BillingBenefits() {
+  const grantsQuery = useActiveCreditGrants();
+  const allowancesQuery = useCurrentAllowances();
+  const grants = grantsQuery.data?.grants ?? [];
+  const allowances = allowancesQuery.data?.allowances ?? [];
+  const rolloutHidden = [grantsQuery.error, allowancesQuery.error].every(
+    (error) => error instanceof ApiError && error.status === 403,
+  );
+
+  if (rolloutHidden) return null;
+  if (grantsQuery.isLoading || allowancesQuery.isLoading) {
+    return <Skeleton className="h-40 w-full" />;
+  }
+  const visibleError = [grantsQuery.error, allowancesQuery.error].find(
+    (error) => error && !(error instanceof ApiError && error.status === 403),
+  );
+  if (visibleError) {
+    return (
+      <ErrorBanner
+        message={errorMessage(visibleError, "Failed to load billing credits")}
+        onRetry={() => {
+          void grantsQuery.refetch();
+          void allowancesQuery.refetch();
+        }}
+      />
+    );
+  }
+  if (grants.length === 0 && allowances.length === 0) return null;
+
+  return (
+    <Card>
+      <CardHeader className="flex-row items-center justify-between space-y-0">
+        <CardTitle>Included credits</CardTitle>
+        <Coins className="h-4 w-4 text-text-tertiary" />
+      </CardHeader>
+      <CardContent className="grid gap-6 md:grid-cols-2">
+        <section className="min-w-0">
+          <div className="mb-2 flex items-center gap-2 text-[12px] font-medium">
+            <Coins className="h-3.5 w-3.5 text-success" /> Credit grants
+          </div>
+          {grants.length === 0 ? (
+            <p className="text-[12px] text-muted-foreground">
+              No active grants.
+            </p>
+          ) : (
+            <div className="divide-y divide-border">
+              {grants.map((grant) => (
+                <div
+                  key={grant.id}
+                  className="flex items-start justify-between gap-3 py-2 first:pt-0"
+                >
+                  <div className="min-w-0">
+                    <p className="truncate text-[12px] font-medium">
+                      {grant.scope.all_services
+                        ? "All services"
+                        : grant.scope.service_slugs.join(", ")}
+                    </p>
+                    <p className="text-[11px] text-muted-foreground">
+                      {grant.expires_at
+                        ? `Expires ${new Date(grant.expires_at).toLocaleString()}`
+                        : "No expiry"}
+                    </p>
+                  </div>
+                  <span className="shrink-0 text-[12px] font-medium">
+                    {formatEstimatedCredits(grant.remaining_micros)}
+                  </span>
+                </div>
+              ))}
+            </div>
+          )}
+        </section>
+        <section className="min-w-0">
+          <div className="mb-2 flex items-center gap-2 text-[12px] font-medium">
+            <Gauge className="h-3.5 w-3.5 text-info" /> Free usage
+          </div>
+          {allowances.length === 0 ? (
+            <p className="text-[12px] text-muted-foreground">
+              No active allowances.
+            </p>
+          ) : (
+            <div className="divide-y divide-border">
+              {allowances.map(
+                ({ allowance, remaining_quantity, period_end }) => (
+                  <div
+                    key={allowance.id}
+                    className="flex items-start justify-between gap-3 py-2 first:pt-0"
+                  >
+                    <div className="min-w-0">
+                      <p className="truncate text-[12px] font-medium">
+                        {allowance.service_slug}
+                      </p>
+                      <p className="text-[11px] text-muted-foreground">
+                        {labelize(allowance.metric)}
+                        {period_end
+                          ? ` / resets ${new Date(period_end).toLocaleString()}`
+                          : " / one time"}
+                      </p>
+                    </div>
+                    <span className="shrink-0 text-[12px] font-medium">
+                      {formatNumber(remaining_quantity)} left
+                    </span>
+                  </div>
+                ),
+              )}
+            </div>
+          )}
+        </section>
+      </CardContent>
+    </Card>
   );
 }
 
@@ -218,6 +336,7 @@ function TopUpHistory({ period }: { readonly period: BillingUsagePeriod }) {
               <TableRow>
                 <TableHead>Date</TableHead>
                 <TableHead className="text-right">Credits</TableHead>
+                <TableHead>Credit expiry</TableHead>
                 <TableHead>Invoice</TableHead>
                 <TableHead>Status</TableHead>
                 <TableHead className="text-right">Actions</TableHead>
@@ -226,7 +345,10 @@ function TopUpHistory({ period }: { readonly period: BillingUsagePeriod }) {
             <TableBody>
               {topups.length === 0 ? (
                 <TableRow>
-                  <TableCell colSpan={5} className="py-8 text-center text-muted-foreground">
+                  <TableCell
+                    colSpan={6}
+                    className="py-8 text-center text-muted-foreground"
+                  >
                     No top-ups yet.
                   </TableCell>
                 </TableRow>
@@ -238,6 +360,29 @@ function TopUpHistory({ period }: { readonly period: BillingUsagePeriod }) {
                     </TableCell>
                     <TableCell className="text-right">
                       {formatNumber(topup.amount_credits)}
+                    </TableCell>
+                    <TableCell className="text-muted-foreground">
+                      {topup.credits_expired_at ? (
+                        <div>
+                          <div>
+                            {new Date(
+                              topup.credits_expired_at,
+                            ).toLocaleDateString()}
+                          </div>
+                          <div className="text-[11px] text-text-tertiary">
+                            {formatCredits(
+                              topup.expired_credits_micros / 1_000_000,
+                            )}{" "}
+                            expired
+                          </div>
+                        </div>
+                      ) : topup.credits_expire_at ? (
+                        new Date(topup.credits_expire_at).toLocaleDateString()
+                      ) : topup.status === "paid" ? (
+                        "Pending sync"
+                      ) : (
+                        "—"
+                      )}
                     </TableCell>
                     <TableCell className="text-muted-foreground">
                       {topup.invoice_number ?? "—"}
@@ -389,26 +534,30 @@ function WalletCard({
         <div className="flex items-start justify-between gap-3">
           <div className="min-w-0">
             <div className="flex items-center gap-1.5">
-              <span className="text-[11px] text-muted-foreground">Balance</span>
+              <span className="text-[11px] text-muted-foreground">
+                Available
+              </span>
               <Tooltip>
                 <TooltipTrigger asChild>
                   <button
                     type="button"
-                    aria-label="What this balance means"
+                    aria-label="What available credits means"
                     className="text-text-tertiary transition-colors hover:text-foreground"
                   >
                     <Info className="h-3 w-3" />
                   </button>
                 </TooltipTrigger>
-                <TooltipContent side="top" className="max-w-[260px] leading-relaxed">
-                  Credits held with our billing provider — 1 credit is 1 USD. This
-                  is a synced figure, refreshed periodically rather than read live,
-                  so a top-up or very recent usage can take a few minutes to show.
+                <TooltipContent
+                  side="top"
+                  className="max-w-[260px] leading-relaxed"
+                >
+                  Credits spendable now after in-flight requests, unsettled
+                  usage, and purchased-credit expiry holds. 1 credit is 1 USD.
                 </TooltipContent>
               </Tooltip>
             </div>
             <div className="mt-1 truncate text-[28px] font-semibold leading-tight">
-              {formatCredits(wallet.balance_credits)}
+              {formatCredits(wallet.available_credits)}
             </div>
             <div className="mt-1 text-[11px] text-muted-foreground">
               Updated {formatRelativeTime(wallet.balance_synced_at)}
@@ -444,10 +593,9 @@ function WalletCard({
             </p>
             <div className="mt-3 space-y-1.5">
               <BreakdownRow
-                label="Available"
-                hint="Spendable right now"
-                value={formatCredits(wallet.available_credits)}
-                emphasis
+                label="Balance"
+                hint="Last provider-synced balance"
+                value={formatCredits(wallet.balance_credits)}
               />
               <BreakdownRow
                 label="Reserved"
@@ -459,6 +607,13 @@ function WalletCard({
                 hint="Charged, awaiting provider sync"
                 value={formatCredits(wallet.pending_lago_debits)}
               />
+              {wallet.pending_topup_expiry_credits > 0 && (
+                <BreakdownRow
+                  label="Expiring"
+                  hint="Held while expired purchases are removed"
+                  value={formatCredits(wallet.pending_topup_expiry_credits)}
+                />
+              )}
               {wallet.overdraft_cap_credits > 0 && (
                 <BreakdownRow
                   label="Overdraft"
@@ -470,10 +625,12 @@ function WalletCard({
             <hr className="my-3 border-border" />
             <div className="flex items-center justify-between text-[11px] text-muted-foreground">
               <span>Plan</span>
-              <span className="text-foreground">{labelize(wallet.plan_kind)}</span>
+              <span className="text-foreground">
+                {labelize(wallet.plan_kind)}
+              </span>
             </div>
             <p className="mt-2 text-[11px] text-muted-foreground">
-              Available = Balance − Reserved − Pending.
+              Available = Balance - Reserved - Pending - Expiring.
             </p>
           </div>
         )}
@@ -535,7 +692,7 @@ function AddCreditsDialog({
         <DialogHeader>
           <DialogTitle>Add credits</DialogTitle>
           <DialogDescription>
-            1 credit = 1 USD. Credits never expire.
+            1 credit = 1 USD. Purchased credits expire one year after payment.
           </DialogDescription>
         </DialogHeader>
 
@@ -641,7 +798,6 @@ function BreakdownRow({
   );
 }
 
-
 function UsageSummary({
   rows,
   totals,
@@ -690,8 +846,14 @@ function UsageSummary({
             label="Est. cost"
             value={formatEstimatedCredits(totals?.estimated_credits_micros)}
           />
-          <MetricBlock label="Tokens" value={formatNumber(metricTotals.tokens)} />
-          <MetricBlock label="Requests" value={formatNumber(metricTotals.requests)} />
+          <MetricBlock
+            label="Tokens"
+            value={formatNumber(metricTotals.tokens)}
+          />
+          <MetricBlock
+            label="Requests"
+            value={formatNumber(metricTotals.requests)}
+          />
           <MetricBlock label="Bytes" value={formatNumber(metricTotals.bytes)} />
         </div>
         <div className="overflow-hidden rounded-lg border border-border">
@@ -707,7 +869,10 @@ function UsageSummary({
             <TableBody>
               {services.length === 0 ? (
                 <TableRow>
-                  <TableCell colSpan={4} className="py-8 text-center text-muted-foreground">
+                  <TableCell
+                    colSpan={4}
+                    className="py-8 text-center text-muted-foreground"
+                  >
                     No usage in this period.
                   </TableCell>
                 </TableRow>
@@ -866,7 +1031,8 @@ function groupByService(
     const metrics = [...new Set(groupRows.map((row) => row.metric))];
     return {
       key,
-      label: groupRows[0]?.service_slug ?? groupRows[0]?.service_id ?? "Unknown",
+      label:
+        groupRows[0]?.service_slug ?? groupRows[0]?.service_id ?? "Unknown",
       rows: groupRows,
       costMicros: costs.length > 0 ? costs.reduce((a, b) => a + b, 0) : null,
       metrics,
@@ -878,7 +1044,9 @@ function groupByService(
 }
 
 /** Per-metric totals, so unlike units are never added into one number. */
-function sumByMetric(rows: readonly BillingUsageRow[]): Record<BillingMetric, number> {
+function sumByMetric(
+  rows: readonly BillingUsageRow[],
+): Record<BillingMetric, number> {
   const totals: Record<BillingMetric, number> = {
     tokens: 0,
     requests: 0,
@@ -910,11 +1078,19 @@ function describeAgent(row: BillingUsageRow): string {
   return "No agent key";
 }
 
-function MetricBlock({ label, value }: { readonly label: string; readonly value: string }) {
+function MetricBlock({
+  label,
+  value,
+}: {
+  readonly label: string;
+  readonly value: string;
+}) {
   return (
     <div className="rounded-lg border border-border/70 bg-overlay px-3 py-3">
       <div className="text-[11px] text-muted-foreground">{label}</div>
-      <div className="mt-1 truncate text-[20px] font-semibold leading-tight">{value}</div>
+      <div className="mt-1 truncate text-[20px] font-semibold leading-tight">
+        {value}
+      </div>
     </div>
   );
 }

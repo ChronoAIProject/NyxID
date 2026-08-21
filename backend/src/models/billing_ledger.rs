@@ -17,6 +17,16 @@ pub enum BillingLedgerEventType {
     TopupCreated,
     /// Lago reported paid credits landing on a wallet.
     WalletCredited,
+    /// An admin issued promotional credits to one recipient.
+    GrantIssued,
+    /// Promotional credits funded finalized usage.
+    GrantConsumed,
+    /// An unspent promotional balance reached its configured expiry.
+    GrantExpired,
+    /// An admin revoked an unspent promotional balance.
+    GrantRevoked,
+    /// Purchased credits reached their one-year lifetime and were voided.
+    TopupExpired,
 }
 
 /// One append-only, hash-chained billing ledger entry.
@@ -53,6 +63,10 @@ pub struct BillingLedgerEntry {
     /// requested amount for `topup_created`. Absent for balance snapshots.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub amount_credits: Option<i64>,
+    /// Exact promotional-credit movement. Present on grant events because a
+    /// partial usage charge may consume less than one whole credit.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub amount_micros: Option<i64>,
     /// Post-event wallet balance snapshot (`wallet_credited` only).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub balance_credits: Option<i64>,
@@ -72,6 +86,22 @@ impl BillingLedgerEventType {
             Self::UsageSettled => "usage_settled",
             Self::TopupCreated => "topup_created",
             Self::WalletCredited => "wallet_credited",
+            Self::GrantIssued => "grant_issued",
+            Self::GrantConsumed => "grant_consumed",
+            Self::GrantExpired => "grant_expired",
+            Self::GrantRevoked => "grant_revoked",
+            Self::TopupExpired => "topup_expired",
         }
+    }
+
+    pub fn uses_extended_encoding(self) -> bool {
+        matches!(
+            self,
+            Self::GrantIssued
+                | Self::GrantConsumed
+                | Self::GrantExpired
+                | Self::GrantRevoked
+                | Self::TopupExpired
+        )
     }
 }
