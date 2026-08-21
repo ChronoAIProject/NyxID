@@ -11,6 +11,31 @@ specced. Voice, Twilio, Duffel booking, Reddit, and the constraint DSL are out o
 
 ---
 
+
+## CORRECTION — Item 1 resolved, and it is a build
+
+Verified directly in the code, superseding the "pending" status elsewhere in this document.
+
+`is_poc_operation_eligible` (`backend/src/services/assistant_direct_agent_poc/tools.rs`) requires
+`operation_descriptor::derive_verb_from_method(&endpoint.method) == ApprovalVerb::Read`.
+That function maps **only `GET`, `HEAD`, `OPTIONS`** to `Read`; every other method, POST included, is `Write`.
+
+**Consequence:** the assistant tool registry admits GET operations only. It will not surface
+`POST /v2/scrape`, `POST /v2/search`, `POST /air/offer_requests`, or `POST /v1/text-to-speech/{voice_id}`.
+Of the planned capabilities, **only X search survives**, because it is a genuine GET.
+
+**Therefore:** v1 as specified below is still correct and shippable — X search is a GET and works with the
+current registry. But enabling assistant tool use is **real development, not a feature-flag flip**, for every
+other capability.
+
+**The trap to avoid when fixing it:** do not loosen `derive_verb_from_method`. It also drives approval
+classification (`models/service_approval_config::ApprovalVerb`), so treating POST as Read there would
+silently reclassify genuine writes as reads across the approval system. The correct shape is explicit
+per-endpoint metadata — a read marker on the `ServiceEndpoint` row consulted by the eligibility filter only.
+
+**Out of scope for v1.** Named here so it is not rediscovered later.
+
+
 ## How this is verified
 
 - **Docker is unavailable on the implementation machine, so the backend suite cannot run
