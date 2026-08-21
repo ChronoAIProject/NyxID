@@ -46,6 +46,15 @@ export function assertSecretFreeReadBack(value: unknown): void {
   }
 }
 
+/** Reject secret material supplied by the assistant instead of the browser. */
+export function assertNoSensitiveActionParams(value: unknown): void {
+  try {
+    assertSecretFreeReadBack(value);
+  } catch {
+    throw new Error("Sensitive values must be entered in the NyxID browser dialog, not supplied by chat.");
+  }
+}
+
 export function errorMessage(caught: unknown, fallback: string): string {
   if (caught instanceof ApiError) return caught.message;
   if (caught instanceof Error && caught.message.trim()) return caught.message;
