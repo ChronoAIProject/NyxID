@@ -431,6 +431,7 @@ async fn audit_resync_failure(
     }
 }
 
+#[allow(clippy::result_large_err)]
 async fn reconcile_catalog_revisions(
     db: &mongodb::Database,
     catalog_service_id: &str,
@@ -483,6 +484,7 @@ async fn reconcile_catalog_revisions(
     })
 }
 
+#[allow(clippy::result_large_err)]
 async fn reconcile_transition(
     db: &mongodb::Database,
     catalog_service_id: &str,

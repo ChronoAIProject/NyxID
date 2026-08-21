@@ -64,6 +64,7 @@ describe("ChatStreamWorkerClient", () => {
       requestId: id,
       status: 200,
       contentType: "text/event-stream",
+      debugUpstreamId: "wire-log-id",
     });
     worker.emit({
       type: "stream.batch",
@@ -80,6 +81,7 @@ describe("ChatStreamWorkerClient", () => {
       kind: "response",
       status: 200,
       contentType: "text/event-stream",
+      debugUpstreamId: "wire-log-id",
     });
     await expect(stream.completion).resolves.toEqual({ kind: "complete" });
     expect(delivered).toEqual([
@@ -193,6 +195,7 @@ describe("ChatStreamWorkerClient", () => {
       requestId: id,
       status: 401,
       body: '{"message":"unauthorized"}',
+      debugUpstreamId: "error-wire-log-id",
       debugUpstream: "encoded-error-envelope-array",
     });
 
@@ -200,6 +203,7 @@ describe("ChatStreamWorkerClient", () => {
       kind: "http_error",
       status: 401,
       body: '{"message":"unauthorized"}',
+      debugUpstreamId: "error-wire-log-id",
       debugUpstream: "encoded-error-envelope-array",
     } as const;
     await expect(stream.headers).resolves.toEqual(expected);
@@ -348,6 +352,7 @@ describe("ChatStreamWorkerClient", () => {
         status: 200,
         headers: {
           "Content-Type": "text/event-stream",
+          "X-NyxID-Debug-Upstream-Id": "wire-log-id",
           "X-NyxID-Debug-Upstream-Log": "encoded-envelope-array",
         },
       }),
@@ -368,6 +373,7 @@ describe("ChatStreamWorkerClient", () => {
       kind: "response",
       status: 200,
       contentType: "text/event-stream",
+      debugUpstreamId: "wire-log-id",
       debugUpstream: "encoded-envelope-array",
     });
     await expect(stream.completion).resolves.toEqual({ kind: "complete" });
@@ -383,6 +389,7 @@ describe("ChatStreamWorkerClient", () => {
         new Response('{"message":"unauthorized"}', {
           status: 401,
           headers: {
+            "X-NyxID-Debug-Upstream-Id": "error-wire-log-id",
             "X-NyxID-Debug-Upstream-Log": "encoded-error-envelope-array",
           },
         }),
@@ -401,6 +408,7 @@ describe("ChatStreamWorkerClient", () => {
       kind: "http_error",
       status: 401,
       body: '{"message":"unauthorized"}',
+      debugUpstreamId: "error-wire-log-id",
       debugUpstream: "encoded-error-envelope-array",
     } as const;
     await expect(stream.headers).resolves.toEqual(expected);

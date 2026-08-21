@@ -1497,6 +1497,7 @@ pub fn build_router() -> (Router<AppState>, Router<AppState>) {
         ),
     ));
     let assistant_routes = Router::new()
+        .route("/wire-logs/{id}", get(handlers::assistant::get_wire_log))
         .route(
             "/readiness",
             get(handlers::assistant_readiness::get_readiness),

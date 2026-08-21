@@ -9,6 +9,7 @@ use mongodb::{Client, Database, IndexModel};
 
 use crate::config::AppConfig;
 use crate::models::anonymous_endpoint_usage::COLLECTION_NAME as ANONYMOUS_ENDPOINT_USAGE;
+use crate::models::assistant_wire_log::AssistantWireLog;
 use crate::models::auth_device_code::{AuthDeviceCode, COLLECTION_NAME as AUTH_DEVICE_CODES};
 use crate::models::billing_topup_session::COLLECTION_NAME as BILLING_TOPUP_SESSIONS;
 use crate::models::catalog_delegation_grant::COLLECTION_NAME as CATALOG_DELEGATION_GRANTS;
@@ -90,6 +91,20 @@ pub async fn create_connection(config: &AppConfig) -> Result<DbHandle, mongodb::
 /// Uses `create_index` which is idempotent -- if the index already exists
 /// with the same specification it is a no-op.
 pub async fn ensure_indexes(db: &Database) -> Result<(), mongodb::error::Error> {
+    // ── assistant_wire_logs ──
+    db.collection::<AssistantWireLog>(AssistantWireLog::COLLECTION_NAME)
+        .create_index(
+            IndexModel::builder()
+                .keys(doc! { "expires_at": 1 })
+                .options(
+                    IndexOptions::builder()
+                        .expire_after(Duration::from_secs(0))
+                        .build(),
+                )
+                .build(),
+        )
+        .await?;
+
     // ── users ──
     let users = db.collection::<mongodb::bson::Document>("users");
     // Backfill user_type before changing the email index. Without this, legacy

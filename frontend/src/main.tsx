@@ -47,6 +47,7 @@ const queryClient = new QueryClient({
 
 subscribeAssistantIdentity(() => {
   queryClient.removeQueries({ queryKey: ["assistant", "direct"] });
+  queryClient.removeQueries({ queryKey: ["assistant-wire-log"] });
 });
 
 // Dev-only handle for the e2e harness (frontend/e2e/): flow specs assert on
