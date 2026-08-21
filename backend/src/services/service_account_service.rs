@@ -339,6 +339,16 @@ pub async fn revoke_all_tokens(db: &Database, sa_id: &str) -> AppResult<u64> {
         )
         .await?;
 
+    // Revocation is an observable service-account mutation even when there
+    // are no currently live tokens. Advance the account timestamp so the
+    // authorization projection can prove the action causally.
+    db.collection::<ServiceAccount>(SERVICE_ACCOUNTS)
+        .update_one(
+            doc! { "_id": sa_id },
+            doc! { "$set": { "updated_at": bson::DateTime::from_chrono(Utc::now()) } },
+        )
+        .await?;
+
     Ok(result.modified_count)
 }
 

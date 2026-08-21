@@ -17,6 +17,7 @@ use crate::telemetry::{TelemetryContext, TelemetryEvent, emit_event};
 pub struct NotificationSettingsResponse {
     pub id: String,
     pub telegram_connected: bool,
+    pub telegram_link_pending: bool,
     pub telegram_username: Option<String>,
     pub telegram_enabled: bool,
     pub approval_required: bool,
@@ -34,6 +35,7 @@ pub struct NotificationSettingsResponse {
 pub struct NotificationSettingsAuthorizationEvidenceResponse {
     pub id: String,
     pub telegram_connected: bool,
+    pub telegram_link_pending: bool,
     pub telegram_enabled: bool,
     pub approval_required: bool,
     pub approval_timeout_secs: u32,
@@ -48,6 +50,7 @@ impl NotificationSettingsAuthorizationEvidenceResponse {
         Self {
             id: response.id.clone(),
             telegram_connected: response.telegram_connected,
+            telegram_link_pending: response.telegram_link_pending,
             telegram_enabled: response.telegram_enabled,
             approval_required: response.approval_required,
             approval_timeout_secs: response.approval_timeout_secs,
@@ -345,6 +348,10 @@ fn to_settings_response(channel: &NotificationChannel) -> NotificationSettingsRe
     NotificationSettingsResponse {
         id: channel.id.clone(),
         telegram_connected: channel.telegram_chat_id.is_some(),
+        telegram_link_pending: channel.telegram_link_code.is_some()
+            && channel
+                .telegram_link_code_expires_at
+                .is_some_and(|expires_at| expires_at > Utc::now()),
         telegram_username: channel.telegram_username.clone(),
         telegram_enabled: channel.telegram_enabled,
         approval_required: channel.approval_required,
@@ -548,6 +555,22 @@ mod tests {
         assert_eq!(resp.grant_expiry_days, 7);
     }
 
+    #[test]
+    fn notification_authorization_projection_omits_telegram_username() {
+        let mut channel = make_channel();
+        channel.telegram_chat_id = Some(42);
+        channel.telegram_username = Some("Bearer nyxid_ag_abcdefghijklmnop".to_string());
+        channel.updated_at = Utc::now();
+        let detail = to_settings_response(&channel);
+        let value = serde_json::to_value(
+            NotificationSettingsAuthorizationEvidenceResponse::from_settings_response(&detail),
+        )
+        .unwrap();
+        assert!(value.get("telegram_username").is_none());
+        assert!(value.to_string().find("nyxid_").is_none());
+        assert_eq!(value["id"], channel.id);
+    }
+
     // --- Pure function tests: has_enabled_notification_channel_after_update edge cases ---
 
     #[test]
@@ -684,7 +707,9 @@ mod tests {
     #[test]
     fn notification_settings_response_serialization() {
         let resp = NotificationSettingsResponse {
+            id: "binding-1".to_string(),
             telegram_connected: true,
+            telegram_link_pending: false,
             telegram_username: Some("alice".to_string()),
             telegram_enabled: true,
             approval_required: false,
@@ -692,6 +717,7 @@ mod tests {
             grant_expiry_days: 14,
             push_enabled: true,
             push_device_count: 2,
+            updated_at: "2024-01-01T00:00:00Z".to_string(),
         };
         let json = serde_json::to_value(&resp).unwrap();
 
@@ -708,7 +734,9 @@ mod tests {
     #[test]
     fn notification_settings_response_null_username() {
         let resp = NotificationSettingsResponse {
+            id: "binding-1".to_string(),
             telegram_connected: false,
+            telegram_link_pending: false,
             telegram_username: None,
             telegram_enabled: false,
             approval_required: false,
@@ -716,6 +744,7 @@ mod tests {
             grant_expiry_days: 30,
             push_enabled: false,
             push_device_count: 0,
+            updated_at: "2024-01-01T00:00:00Z".to_string(),
         };
         let json = serde_json::to_value(&resp).unwrap();
 

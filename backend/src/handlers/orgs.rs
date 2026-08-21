@@ -16,6 +16,7 @@ use axum::{
     http::StatusCode,
     response::IntoResponse,
 };
+use chrono::Utc;
 use serde::{Deserialize, Serialize};
 use utoipa::ToSchema;
 use validator::Validate;
@@ -145,6 +146,10 @@ pub struct OrgResponse {
     /// Caller's role in this org. Always present in single-org responses.
     pub your_role: OrgRoleWire,
     pub member_count: u64,
+    /// Whether this org is the caller's selected primary organization.
+    pub is_primary: bool,
+    /// Number of pending, non-expired invites issued for this org.
+    pub active_invite_count: u64,
     /// Feature-flag keys enabled for the *calling member* in this org, already
     /// resolved server-side (per-user > per-role > per-org > code default).
     /// The frontend gates UI on membership in this list; see
@@ -177,6 +182,8 @@ pub struct OrgAuthorizationEvidenceResponse {
     pub id: String,
     pub your_role: OrgRoleWire,
     pub member_count: u64,
+    pub is_primary: bool,
+    pub active_invite_count: u64,
     pub remote_credential_integrity_verification_opt_out: bool,
     pub created_at: String,
     pub updated_at: String,
@@ -188,6 +195,8 @@ impl OrgAuthorizationEvidenceResponse {
             id: response.id.clone(),
             your_role: response.your_role,
             member_count: response.member_count,
+            is_primary: response.is_primary,
+            active_invite_count: response.active_invite_count,
             remote_credential_integrity_verification_opt_out: response
                 .remote_credential_integrity_verification_opt_out,
             created_at: response.created_at.clone(),
@@ -213,6 +222,36 @@ pub struct MemberResponse {
 #[derive(Debug, Serialize, ToSchema)]
 pub struct MemberListResponse {
     pub members: Vec<MemberResponse>,
+}
+
+/// Minimal assistant projection for one membership. User display data and
+/// email are intentionally omitted; the role, scope ids, and revocation
+/// timestamp are the only mutation-bearing fields needed by action journeys.
+#[derive(Debug, Serialize, ToSchema)]
+pub struct MemberAuthorizationEvidenceResponse {
+    pub membership_id: String,
+    pub user_id: String,
+    pub role: OrgRoleWire,
+    pub scope_source: MemberScopeSourceWire,
+    pub allowed_service_ids: Option<Vec<String>>,
+    pub effective_allowed_service_ids: Option<Vec<String>>,
+    pub created_at: String,
+    pub revoked_at: Option<String>,
+}
+
+impl MemberAuthorizationEvidenceResponse {
+    fn from_member_response(response: &MemberResponse) -> Self {
+        Self {
+            membership_id: response.membership_id.clone(),
+            user_id: response.user_id.clone(),
+            role: response.role,
+            scope_source: response.scope_source,
+            allowed_service_ids: response.allowed_service_ids.clone(),
+            effective_allowed_service_ids: response.effective_allowed_service_ids.clone(),
+            created_at: response.created_at.clone(),
+            revoked_at: response.revoked_at.clone(),
+        }
+    }
 }
 
 #[derive(Debug, Serialize, ToSchema)]
@@ -312,6 +351,28 @@ async fn fetch_user(db: &mongodb::Database, user_id: &str) -> AppResult<Option<U
         .find_one(doc! { "_id": user_id })
         .await?;
     Ok(row)
+}
+
+async fn org_state_for_actor(
+    db: &mongodb::Database,
+    actor: &str,
+    org_id: &str,
+) -> AppResult<(bool, u64)> {
+    use crate::models::user::COLLECTION_NAME as USERS;
+    let user = db
+        .collection::<User>(USERS)
+        .find_one(mongodb::bson::doc! { "_id": actor })
+        .await?;
+    let is_primary = user
+        .as_ref()
+        .and_then(|row| row.primary_org_id.as_deref())
+        .is_some_and(|primary| primary == org_id);
+    let active_invite_count = org_invite_service::list_invites_for_org(db, org_id)
+        .await?
+        .into_iter()
+        .filter(|invite| !invite.is_redeemed() && !invite.is_expired(Utc::now()))
+        .count() as u64;
+    Ok((is_primary, active_invite_count))
 }
 
 async fn membership_to_response(
@@ -470,6 +531,58 @@ async fn ensure_not_last_admin(
     Ok(())
 }
 
+async fn require_delegable_scope(
+    db: &mongodb::Database,
+    actor_user_id: &str,
+    org_user_id: &str,
+    requested_effective_scope: &Option<Vec<String>>,
+) -> AppResult<()> {
+    require_org_admin(db, actor_user_id, org_user_id).await?;
+    let actor_membership = org_service::get_active_membership(db, org_user_id, actor_user_id)
+        .await?
+        .ok_or(AppError::OrgMembershipRequired)?;
+    let actor_scope =
+        org_role_scope_service::effective_scope_for_membership(db, &actor_membership).await?;
+    let Some(actor_ids) = actor_scope else {
+        return Ok(());
+    };
+    let Some(requested_ids) = requested_effective_scope else {
+        return Err(AppError::OrgRoleInsufficient(
+            "a scoped admin cannot grant unrestricted service authority".to_string(),
+        ));
+    };
+    if requested_ids
+        .iter()
+        .all(|requested| actor_ids.iter().any(|held| held == requested))
+    {
+        Ok(())
+    } else {
+        Err(AppError::OrgRoleInsufficient(
+            "cannot grant service authority outside your own scope".to_string(),
+        ))
+    }
+}
+
+async fn effective_assignment_scope(
+    db: &mongodb::Database,
+    org_user_id: &str,
+    role: OrgRole,
+    scope_source: MemberScopeSource,
+    allowed_service_ids: Option<Vec<String>>,
+) -> AppResult<Option<Vec<String>>> {
+    let candidate = OrgMembership {
+        id: String::new(),
+        org_user_id: org_user_id.to_string(),
+        member_user_id: String::new(),
+        role,
+        scope_source,
+        allowed_service_ids,
+        created_at: Utc::now(),
+        revoked_at: None,
+    };
+    org_role_scope_service::effective_scope_for_membership(db, &candidate).await
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 // Handlers: Org CRUD
 // ─────────────────────────────────────────────────────────────────────────────
@@ -567,6 +680,7 @@ pub async fn create_org(
     let enabled_features =
         feature_flag_service::resolve_enabled_features(&state.db, &org.id, &actor, membership.role)
             .await?;
+    let (is_primary, active_invite_count) = org_state_for_actor(&state.db, &actor, &org.id).await?;
     Ok((
         StatusCode::CREATED,
         Json(OrgResponse {
@@ -580,6 +694,8 @@ pub async fn create_org(
             remote_credential_integrity_verification_opt_out: opt_out,
             your_role: membership.role.into(),
             member_count: 1,
+            is_primary,
+            active_invite_count,
             enabled_features,
         }),
     ))
@@ -633,6 +749,7 @@ pub async fn get_org(
     let enabled_features =
         feature_flag_service::resolve_enabled_features(&state.db, &org_id, &actor, membership.role)
             .await?;
+    let (is_primary, active_invite_count) = org_state_for_actor(&state.db, &actor, &org_id).await?;
 
     Ok(Json(OrgResponse {
         id: org.id,
@@ -645,6 +762,8 @@ pub async fn get_org(
         remote_credential_integrity_verification_opt_out: opt_out,
         your_role: membership.role.into(),
         member_count: members.len() as u64,
+        is_primary,
+        active_invite_count,
         enabled_features,
     }))
 }
@@ -721,6 +840,7 @@ pub async fn update_org(
     let enabled_features =
         feature_flag_service::resolve_enabled_features(&state.db, &org_id, &actor, membership.role)
             .await?;
+    let (is_primary, active_invite_count) = org_state_for_actor(&state.db, &actor, &org_id).await?;
 
     let contact_email_changed = body.contact_email.is_some();
     audit_service::log_for_user(
@@ -745,6 +865,8 @@ pub async fn update_org(
         remote_credential_integrity_verification_opt_out: opt_out,
         your_role: membership.role.into(),
         member_count: members.len() as u64,
+        is_primary,
+        active_invite_count,
         enabled_features,
     }))
 }
@@ -794,6 +916,30 @@ pub async fn list_members(
     Ok(Json(MemberListResponse { members }))
 }
 
+/// GET /api/v1/orgs/{org_id}/members/{member_id}/authorization
+pub async fn get_member_authorization(
+    State(state): State<AppState>,
+    auth_user: AuthUser,
+    Path((org_id, member_id)): Path<(String, String)>,
+) -> AppResult<Json<MemberAuthorizationEvidenceResponse>> {
+    let actor = auth_user.user_id.to_string();
+    let _ = require_org_member(&state.db, &actor, &org_id).await?;
+    let membership = state
+        .db
+        .collection::<OrgMembership>(crate::models::org_membership::COLLECTION_NAME)
+        .find_one(mongodb::bson::doc! {
+            "org_user_id": &org_id,
+            "member_user_id": &member_id,
+        })
+        .await?
+        .ok_or_else(|| AppError::NotFound("membership not found".to_string()))?;
+    let user = fetch_user(&state.db, &member_id).await?;
+    let detail = membership_to_response(&state.db, membership, user.as_ref()).await?;
+    Ok(Json(
+        MemberAuthorizationEvidenceResponse::from_member_response(&detail),
+    ))
+}
+
 /// POST /api/v1/orgs/{org_id}/members
 ///
 /// Direct add (without invite). Useful for admin tooling. End-user flows
@@ -805,10 +951,17 @@ pub async fn add_member(
     Json(body): Json<AddMemberRequest>,
 ) -> AppResult<(StatusCode, Json<MemberResponse>)> {
     let actor = auth_user.user_id.to_string();
-    require_org_admin(&state.db, &actor, &org_id).await?;
-
     let scope_source =
         resolve_scope_source_for_create(body.scope_source, body.allowed_service_ids.as_ref());
+    let requested_scope = effective_assignment_scope(
+        &state.db,
+        &org_id,
+        body.role.into(),
+        scope_source,
+        body.allowed_service_ids.clone(),
+    )
+    .await?;
+    require_delegable_scope(&state.db, &actor, &org_id, &requested_scope).await?;
     let membership = org_service::create_membership(
         &state.db,
         &org_id,
@@ -863,6 +1016,25 @@ pub async fn update_member(
             ensure_not_last_admin(&state.db, &org_id, &member_id).await?;
         }
     }
+
+    let mut candidate = current.clone();
+    if let Some(role) = body.role {
+        candidate.role = role.into();
+    }
+    match resolve_scope_source_for_update(body.scope_source, body.allowed_service_ids.as_ref()) {
+        Some(MemberScopeSource::Inherit) => {
+            candidate.scope_source = MemberScopeSource::Inherit;
+            candidate.allowed_service_ids = None;
+        }
+        Some(MemberScopeSource::Override) => {
+            candidate.scope_source = MemberScopeSource::Override;
+            candidate.allowed_service_ids = body.allowed_service_ids.clone().flatten();
+        }
+        None => {}
+    }
+    let requested_scope =
+        org_role_scope_service::effective_scope_for_membership(&state.db, &candidate).await?;
+    require_delegable_scope(&state.db, &actor, &org_id, &requested_scope).await?;
 
     let scope_source =
         resolve_scope_source_for_update(body.scope_source, body.allowed_service_ids.as_ref());
@@ -940,8 +1112,6 @@ pub async fn create_invite(
     Json(body): Json<CreateInviteRequest>,
 ) -> AppResult<(StatusCode, Json<InviteResponse>)> {
     let actor = auth_user.user_id.to_string();
-    require_org_admin(&state.db, &actor, &org_id).await?;
-
     // Bound `ttl_hours` server-side. The web schema caps it at 30 days but
     // raw API / CLI callers reach this without that gate, and
     // `chrono::Duration::hours` panics on i64 values that don't fit, so a
@@ -959,6 +1129,15 @@ pub async fn create_invite(
 
     let scope_source =
         resolve_scope_source_for_create(body.scope_source, body.allowed_service_ids.as_ref());
+    let requested_scope = effective_assignment_scope(
+        &state.db,
+        &org_id,
+        body.role.into(),
+        scope_source,
+        body.allowed_service_ids.clone(),
+    )
+    .await?;
+    require_delegable_scope(&state.db, &actor, &org_id, &requested_scope).await?;
     let invite = org_invite_service::create_invite(
         &state.db,
         &org_id,
@@ -1107,8 +1286,9 @@ pub async fn set_primary_org(
 #[cfg(test)]
 mod tests {
     use super::{
-        CreateOrgRequest, MemberScopeSourceWire, OrgRoleWire, UpdateMemberRequest,
-        UpdateOrgRequest, create_org, get_org, list_orgs, update_org,
+        AddMemberRequest, CreateOrgRequest, MemberScopeSourceWire, OrgRoleWire,
+        UpdateMemberRequest, UpdateOrgRequest, add_member, create_org, get_org, list_orgs,
+        update_member, update_org,
     };
     use crate::db::{ensure_indexes, migrate_backfill_org_slugs};
     use crate::errors::AppError;
@@ -1131,6 +1311,73 @@ mod tests {
     // serde's default `Option<Option<T>>` deserialization, `null` and
     // "field absent" both collapsed to outer `None`, so the service layer
     // skipped the update entirely. The nullable_field helper disambiguates.
+
+    #[tokio::test]
+    async fn scoped_admin_cannot_widen_authority_and_member_cannot_self_escalate() {
+        let Some(db) = connect_test_database("org_assistant_authority_boundary").await else {
+            eprintln!("Skipping MongoDB-backed test; no test database available");
+            return;
+        };
+        let org_id = Uuid::new_v4().to_string();
+        let admin_id = Uuid::new_v4().to_string();
+        let member_id = Uuid::new_v4().to_string();
+        db.collection::<User>(USERS)
+            .insert_many([
+                test_user(&org_id, UserType::Org),
+                test_user(&admin_id, UserType::Person),
+                test_user(&member_id, UserType::Person),
+            ])
+            .await
+            .expect("insert authority users");
+        db.collection::<OrgMembership>(ORG_MEMBERSHIPS)
+            .insert_many([
+                test_membership(
+                    &org_id,
+                    &admin_id,
+                    OrgRole::Admin,
+                    Some(vec!["svc-a".to_string()]),
+                ),
+                test_membership(
+                    &org_id,
+                    &member_id,
+                    OrgRole::Member,
+                    Some(vec!["svc-a".to_string()]),
+                ),
+            ])
+            .await
+            .expect("insert authority memberships");
+
+        let state = test_app_state(db);
+        let widened = add_member(
+            State(state.clone()),
+            test_auth_user(&admin_id),
+            Path(org_id.clone()),
+            Json(AddMemberRequest {
+                user_id: Uuid::new_v4().to_string(),
+                role: OrgRoleWire::Admin,
+                scope_source: Some(MemberScopeSourceWire::Override),
+                allowed_service_ids: None,
+            }),
+        )
+        .await;
+        assert!(matches!(widened, Err(AppError::OrgRoleInsufficient(_))));
+
+        let self_escalation = update_member(
+            State(state),
+            test_auth_user(&member_id),
+            Path((org_id, member_id)),
+            Json(UpdateMemberRequest {
+                role: Some(OrgRoleWire::Admin),
+                scope_source: None,
+                allowed_service_ids: None,
+            }),
+        )
+        .await;
+        assert!(matches!(
+            self_escalation,
+            Err(AppError::OrgRoleInsufficient(_))
+        ));
+    }
 
     #[test]
     fn allowed_service_ids_absent_leaves_scope_untouched() {
@@ -2024,6 +2271,8 @@ mod tests {
             remote_credential_integrity_verification_opt_out: false,
             your_role: OrgRoleWire::Admin,
             member_count: 5,
+            is_primary: false,
+            active_invite_count: 0,
             enabled_features: vec!["example_ui".to_string()],
         };
         let json = serde_json::to_value(&resp).unwrap();
@@ -2032,6 +2281,56 @@ mod tests {
         assert_eq!(json["your_role"], "admin");
         assert_eq!(json["member_count"], 5);
         assert_eq!(json["enabled_features"][0], "example_ui");
+    }
+
+    #[test]
+    fn org_authorization_projection_excludes_user_text() {
+        let detail = super::OrgResponse {
+            id: "org-1".to_string(),
+            slug: "Bearer Bot".to_string(),
+            display_name: Some("Bearer nyxid_ag_abcdefghijklmnop".to_string()),
+            avatar_url: Some("https://example.invalid/avatar".to_string()),
+            contact_email: Some("token@example.invalid".to_string()),
+            created_at: "2024-01-01T00:00:00Z".to_string(),
+            updated_at: "2024-01-02T00:00:00Z".to_string(),
+            remote_credential_integrity_verification_opt_out: false,
+            your_role: OrgRoleWire::Admin,
+            member_count: 1,
+            is_primary: false,
+            active_invite_count: 1,
+            enabled_features: vec!["Bearer secret".to_string()],
+        };
+        let value = serde_json::to_value(
+            super::OrgAuthorizationEvidenceResponse::from_org_response(&detail),
+        )
+        .unwrap();
+        assert!(value.get("display_name").is_none());
+        assert!(value.get("slug").is_none());
+        assert!(value.get("contact_email").is_none());
+        assert!(value.to_string().find("nyxid_").is_none());
+    }
+
+    #[test]
+    fn member_authorization_projection_excludes_profile_text() {
+        let detail = super::MemberResponse {
+            membership_id: "membership-1".to_string(),
+            user_id: "user-1".to_string(),
+            display_name: Some("Bearer nyxid_ag_abcdefghijklmnop".to_string()),
+            email: Some("secret@example.invalid".to_string()),
+            role: OrgRoleWire::Member,
+            scope_source: MemberScopeSourceWire::Override,
+            allowed_service_ids: Some(vec!["service-1".to_string()]),
+            effective_allowed_service_ids: Some(vec!["service-1".to_string()]),
+            created_at: "2024-01-01T00:00:00Z".to_string(),
+            revoked_at: None,
+        };
+        let value = serde_json::to_value(
+            super::MemberAuthorizationEvidenceResponse::from_member_response(&detail),
+        )
+        .unwrap();
+        assert!(value.get("display_name").is_none());
+        assert!(value.get("email").is_none());
+        assert!(value.to_string().find("nyxid_").is_none());
     }
 
     // ── ORG_INVITE_MAX_TTL_HOURS constant ───────────────────────────────

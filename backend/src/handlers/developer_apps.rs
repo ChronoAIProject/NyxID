@@ -150,7 +150,6 @@ pub struct DeveloperOAuthClientResponse {
 #[derive(Debug, Serialize)]
 pub struct DeveloperOAuthClientAuthorizationEvidenceResponse {
     pub id: String,
-    pub client_type: String,
     pub broker_capability_enabled: bool,
     pub connection_webhook_enabled: bool,
     pub is_active: bool,
@@ -162,7 +161,6 @@ impl DeveloperOAuthClientAuthorizationEvidenceResponse {
     pub fn from_client_response(response: &DeveloperOAuthClientResponse) -> Self {
         Self {
             id: response.id.clone(),
-            client_type: response.client_type.clone(),
             broker_capability_enabled: response.broker_capability_enabled,
             connection_webhook_enabled: response.connection_webhook_enabled,
             is_active: response.is_active,
@@ -1695,6 +1693,35 @@ mod tests {
         };
         let json = serde_json::to_value(&resp).unwrap();
         assert_eq!(json["client_secret"], "secret_abc");
+    }
+
+    #[test]
+    fn developer_app_authorization_projection_excludes_names_urls_and_secret() {
+        let detail = DeveloperOAuthClientResponse {
+            id: "client-1".to_string(),
+            client_name: "Bearer nyxid_ag_abcdefghijklmnop".to_string(),
+            client_type: "confidential".to_string(),
+            redirect_uris: vec!["https://example.invalid/Bearer-secret".to_string()],
+            allowed_scopes: "openid Bearer secret".to_string(),
+            delegation_scopes: "account:read".to_string(),
+            broker_capability_enabled: true,
+            revocation_webhook_url: Some("https://example.invalid/hook".to_string()),
+            connection_webhook_url: None,
+            connection_webhook_enabled: false,
+            is_active: true,
+            default_service_catalog_slugs: vec!["openai".to_string()],
+            client_secret: Some("secret_value".to_string()),
+            created_at: "2024-01-01T00:00:00Z".to_string(),
+            updated_at: "2024-01-02T00:00:00Z".to_string(),
+        };
+        let value = serde_json::to_value(
+            DeveloperOAuthClientAuthorizationEvidenceResponse::from_client_response(&detail),
+        )
+        .unwrap();
+        assert!(value.get("client_name").is_none());
+        assert!(value.get("redirect_uris").is_none());
+        assert!(value.get("client_secret").is_none());
+        assert!(value.to_string().find("secret").is_none());
     }
 
     #[tokio::test]

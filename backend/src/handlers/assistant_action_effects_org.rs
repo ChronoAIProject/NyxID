@@ -6,15 +6,13 @@
 //! pending receipt as a distinct state that may only be resumed after proving
 //! the requested state already exists.
 
-#![allow(dead_code)]
-
 use std::sync::LazyLock;
 
 use axum::{
     Json, Router,
     extract::{Path, Query, State},
-    http::{HeaderMap, StatusCode},
-    routing::{get, post},
+    http::HeaderMap,
+    routing::post,
 };
 use futures::TryStreamExt;
 use mongodb::bson::doc;
@@ -146,22 +144,6 @@ pub fn router() -> Router<AppState> {
             post(add_gcp_service_account_action),
         )
         .route("/openclaw/connect", post(connect_openclaw_action))
-        .route(
-            "/org/{org_id}/authorization",
-            get(orgs::get_org_authorization),
-        )
-        .route(
-            "/service-account/{service_account_id}/authorization",
-            get(admin_service_accounts::get_service_account_authorization),
-        )
-        .route(
-            "/developer-app/{client_id}/authorization",
-            get(developer_apps::get_my_oauth_client_authorization),
-        )
-        .route(
-            "/notifications/authorization",
-            get(notifications::get_settings_authorization),
-        )
 }
 
 #[derive(Debug, Clone, Serialize, ToSchema)]
@@ -320,15 +302,31 @@ pub struct AssistantNotificationResponse {
 }
 #[derive(Debug, Serialize, ToSchema)]
 #[serde(rename_all = "camelCase")]
+pub struct AssistantTelegramLinkResponse {
+    pub resource: AssistantNotificationBindingResource,
+    pub replayed: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub link_code: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub bot_username: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub expires_in_secs: Option<u32>,
+}
+#[derive(Debug, Serialize, ToSchema)]
+#[serde(rename_all = "camelCase")]
 pub struct AssistantServiceAccountResponse {
     pub resource: AssistantServiceAccountResource,
     pub replayed: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub client_secret: Option<String>,
 }
 #[derive(Debug, Serialize, ToSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct AssistantDeveloperAppResponse {
     pub resource: AssistantDeveloperAppResource,
     pub replayed: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub client_secret: Option<String>,
 }
 #[derive(Debug, Serialize, ToSchema)]
 #[serde(rename_all = "camelCase")]
@@ -1292,23 +1290,39 @@ fn action_fingerprint(action: &'static str, value: serde_json::Value) -> AppResu
     fingerprint_canonical(&serde_json::json!({ "action": action, "request": value }))
 }
 
-async fn reserve_wave4(
-    state: &AppState,
-    actor: &str,
-    action: &'static str,
-    request_id: String,
-    fingerprint: &str,
-    resource_id: String,
-) -> AppResult<ReceiptOutcome> {
-    reserve_or_replay(
-        &state.db,
-        actor,
-        action,
-        &normalize_action_request_id(request_id)?,
-        fingerprint,
-        resource_id,
+fn service_account_create_fingerprint(
+    name: &str,
+    description: Option<&str>,
+    allowed_scopes: Option<&str>,
+) -> AppResult<String> {
+    action_fingerprint(
+        SERVICE_ACCOUNT_CREATE_ACTION,
+        serde_json::json!({"name":name,"description":description,"allowedScopes":allowed_scopes}),
     )
-    .await
+}
+
+fn gcp_create_fingerprint(body: &AssistantGcpCreateRequest) -> AppResult<String> {
+    action_fingerprint(
+        EXTERNAL_KEY_ADD_GCP_ACTION,
+        serde_json::json!({
+            "label": body.label.as_deref(),
+            "keyJson": body.key_json.as_str(),
+            "scopes": body.scopes.as_deref(),
+            "serviceSlugs": body.service_slugs.as_deref(),
+            "targetOrgId": body.target_org_id.as_deref(),
+        }),
+    )
+}
+
+fn openclaw_connect_fingerprint(
+    gateway_url: &str,
+    credential: &str,
+    label: Option<&str>,
+) -> AppResult<String> {
+    action_fingerprint(
+        OPENCLAW_CONNECT_ACTION,
+        serde_json::json!({"gatewayUrl":gateway_url,"credential":credential,"label":label}),
+    )
 }
 
 async fn complete_wave4(
@@ -1343,7 +1357,7 @@ async fn create_org_action(
     State(state): State<AppState>,
     auth_user: AuthUser,
     Json(body): Json<AssistantOrgCreateRequest>,
-) -> AppResult<Json<AssistantUserServiceResponse>> {
+) -> AppResult<Json<AssistantOrgResponse>> {
     let actor = auth_user.user_id.to_string();
     let request_id = normalize_action_request_id(body.action_request_id)?;
     let fp = action_fingerprint(
@@ -1731,9 +1745,10 @@ async fn create_service_account_action(
 ) -> AppResult<Json<AssistantServiceAccountResponse>> {
     let actor = auth_user.user_id.to_string();
     let request_id = normalize_action_request_id(body.action_request_id)?;
-    let fp = action_fingerprint(
-        SERVICE_ACCOUNT_CREATE_ACTION,
-        serde_json::json!({"name":body.name,"description":body.description}),
+    let fp = service_account_create_fingerprint(
+        &body.name,
+        body.description.as_deref(),
+        body.allowed_scopes.as_deref(),
     )?;
     let outcome = reserve_or_replay(
         &state.db,
@@ -1750,6 +1765,7 @@ async fn create_service_account_action(
                 service_account_id: id,
             },
             replayed,
+            client_secret: None,
         }));
     }
     let receipt = match outcome {
@@ -1778,6 +1794,7 @@ async fn create_service_account_action(
             service_account_id: created.id,
         },
         replayed: false,
+        client_secret: Some(created.client_secret),
     }))
 }
 
@@ -1808,6 +1825,7 @@ async fn update_service_account_action(
                 service_account_id: id,
             },
             replayed,
+            client_secret: None,
         }));
     }
     let receipt = match outcome {
@@ -1836,6 +1854,7 @@ async fn update_service_account_action(
             service_account_id: id,
         },
         replayed: false,
+        client_secret: None,
     }))
 }
 
@@ -1863,6 +1882,7 @@ async fn delete_service_account_action(
                 service_account_id: id,
             },
             replayed,
+            client_secret: None,
         }));
     }
     let receipt = match outcome {
@@ -1884,6 +1904,7 @@ async fn delete_service_account_action(
             service_account_id: id,
         },
         replayed: false,
+        client_secret: None,
     }))
 }
 
@@ -1914,6 +1935,7 @@ async fn rotate_service_account_secret_action(
                 service_account_id: id,
             },
             replayed,
+            client_secret: None,
         }));
     }
     let receipt = match outcome {
@@ -1921,7 +1943,7 @@ async fn rotate_service_account_secret_action(
         ReceiptOutcome::InProgress(_) => return Err(in_progress_conflict()),
         ReceiptOutcome::Replay(_) => unreachable!(),
     };
-    let _ = admin_service_accounts::rotate_secret(
+    let rotated = admin_service_accounts::rotate_secret(
         State(state.clone()),
         auth_user,
         TelemetryContext::default(),
@@ -1929,12 +1951,14 @@ async fn rotate_service_account_secret_action(
         Path(id.clone()),
     )
     .await?;
+    let rotated_secret = rotated.0.client_secret;
     complete_wave4(&state, &receipt, &id).await?;
     Ok(Json(AssistantServiceAccountResponse {
         resource: AssistantServiceAccountResource {
             service_account_id: id,
         },
         replayed: false,
+        client_secret: Some(rotated_secret),
     }))
 }
 
@@ -1965,6 +1989,7 @@ async fn revoke_service_account_tokens_action(
                 service_account_id: id,
             },
             replayed,
+            client_secret: None,
         }));
     }
     let receipt = match outcome {
@@ -1985,6 +2010,7 @@ async fn revoke_service_account_tokens_action(
             service_account_id: id,
         },
         replayed: false,
+        client_secret: None,
     }))
 }
 
@@ -2012,6 +2038,7 @@ async fn create_developer_app_action(
         return Ok(Json(AssistantDeveloperAppResponse {
             resource: AssistantDeveloperAppResource { client_id: id },
             replayed,
+            client_secret: None,
         }));
     }
     let receipt = match outcome {
@@ -2043,6 +2070,7 @@ async fn create_developer_app_action(
             client_id: created.id,
         },
         replayed: false,
+        client_secret: created.client_secret,
     }))
 }
 
@@ -2071,6 +2099,7 @@ async fn update_developer_app_action(
         return Ok(Json(AssistantDeveloperAppResponse {
             resource: AssistantDeveloperAppResource { client_id: id },
             replayed,
+            client_secret: None,
         }));
     }
     let receipt = match outcome {
@@ -2098,6 +2127,7 @@ async fn update_developer_app_action(
     Ok(Json(AssistantDeveloperAppResponse {
         resource: AssistantDeveloperAppResource { client_id: id },
         replayed: false,
+        client_secret: None,
     }))
 }
 
@@ -2123,6 +2153,7 @@ async fn delete_developer_app_action(
         return Ok(Json(AssistantDeveloperAppResponse {
             resource: AssistantDeveloperAppResource { client_id: id },
             replayed,
+            client_secret: None,
         }));
     }
     let receipt = match outcome {
@@ -2137,6 +2168,7 @@ async fn delete_developer_app_action(
     Ok(Json(AssistantDeveloperAppResponse {
         resource: AssistantDeveloperAppResource { client_id: id },
         replayed: false,
+        client_secret: None,
     }))
 }
 
@@ -2165,6 +2197,7 @@ async fn rotate_developer_app_secret_action(
         return Ok(Json(AssistantDeveloperAppResponse {
             resource: AssistantDeveloperAppResource { client_id: id },
             replayed,
+            client_secret: None,
         }));
     }
     let receipt = match outcome {
@@ -2172,17 +2205,19 @@ async fn rotate_developer_app_secret_action(
         ReceiptOutcome::InProgress(_) => return Err(in_progress_conflict()),
         ReceiptOutcome::Replay(_) => unreachable!(),
     };
-    let _ = developer_apps::rotate_my_oauth_client_secret(
+    let rotated = developer_apps::rotate_my_oauth_client_secret(
         State(state.clone()),
         auth_user,
         TelemetryContext::default(),
         Path(id.clone()),
     )
     .await?;
+    let rotated_secret = rotated.0.client_secret;
     complete_wave4(&state, &receipt, &id).await?;
     Ok(Json(AssistantDeveloperAppResponse {
         resource: AssistantDeveloperAppResource { client_id: id },
         replayed: false,
+        client_secret: Some(rotated_secret),
     }))
 }
 
@@ -2229,8 +2264,7 @@ async fn update_notifications_action(
         }),
     )
     .await?;
-    let id = actor.clone();
-    let _ = settings;
+    let id = settings.id;
     complete_wave4(&state, &receipt, &id).await?;
     Ok(Json(AssistantNotificationResponse {
         resource: AssistantNotificationBindingResource { binding_id: id },
@@ -2242,7 +2276,7 @@ async fn link_telegram_action(
     State(state): State<AppState>,
     auth_user: AuthUser,
     Json(body): Json<AssistantActionRequestId>,
-) -> AppResult<Json<AssistantNotificationResponse>> {
+) -> AppResult<Json<AssistantTelegramLinkResponse>> {
     let actor = auth_user.user_id.to_string();
     let request_id = normalize_action_request_id(body.action_request_id)?;
     let fp = action_fingerprint(
@@ -2259,9 +2293,12 @@ async fn link_telegram_action(
     )
     .await?;
     if let Some((id, replayed)) = replayed_resource(&outcome) {
-        return Ok(Json(AssistantNotificationResponse {
+        return Ok(Json(AssistantTelegramLinkResponse {
             resource: AssistantNotificationBindingResource { binding_id: id },
             replayed,
+            link_code: None,
+            bot_username: None,
+            expires_in_secs: None,
         }));
     }
     let receipt = match outcome {
@@ -2269,11 +2306,17 @@ async fn link_telegram_action(
         ReceiptOutcome::InProgress(_) => return Err(in_progress_conflict()),
         ReceiptOutcome::Replay(_) => unreachable!(),
     };
-    let _ = notifications::telegram_link(State(state.clone()), auth_user).await?;
-    complete_wave4(&state, &receipt, &actor).await?;
-    Ok(Json(AssistantNotificationResponse {
-        resource: AssistantNotificationBindingResource { binding_id: actor },
+    let Json(link) = notifications::telegram_link(State(state.clone()), auth_user.clone()).await?;
+    let Json(settings) = notifications::get_settings(State(state.clone()), auth_user).await?;
+    complete_wave4(&state, &receipt, &settings.id).await?;
+    Ok(Json(AssistantTelegramLinkResponse {
+        resource: AssistantNotificationBindingResource {
+            binding_id: settings.id,
+        },
         replayed: false,
+        link_code: Some(link.link_code),
+        bot_username: Some(link.bot_username),
+        expires_in_secs: Some(link.expires_in_secs),
     }))
 }
 
@@ -2310,13 +2353,16 @@ async fn disconnect_telegram_action(
     };
     let _ = notifications::telegram_disconnect(
         State(state.clone()),
-        auth_user,
+        auth_user.clone(),
         TelemetryContext::default(),
     )
     .await?;
-    complete_wave4(&state, &receipt, &actor).await?;
+    let Json(settings) = notifications::get_settings(State(state.clone()), auth_user).await?;
+    complete_wave4(&state, &receipt, &settings.id).await?;
     Ok(Json(AssistantNotificationResponse {
-        resource: AssistantNotificationBindingResource { binding_id: actor },
+        resource: AssistantNotificationBindingResource {
+            binding_id: settings.id,
+        },
         replayed: false,
     }))
 }
@@ -2327,11 +2373,8 @@ async fn add_gcp_service_account_action(
     Json(body): Json<AssistantGcpCreateRequest>,
 ) -> AppResult<Json<AssistantExternalKeyResponse>> {
     let actor = auth_user.user_id.to_string();
+    let fp = gcp_create_fingerprint(&body)?;
     let request_id = normalize_action_request_id(body.action_request_id)?;
-    let fp = action_fingerprint(
-        EXTERNAL_KEY_ADD_GCP_ACTION,
-        serde_json::json!({"label":body.label,"scopes":body.scopes,"serviceSlugs":body.service_slugs,"targetOrgId":body.target_org_id}),
-    )?;
     let outcome = reserve_or_replay(
         &state.db,
         &actor,
@@ -2379,7 +2422,7 @@ async fn connect_openclaw_action(
     State(state): State<AppState>,
     auth_user: AuthUser,
     Json(body): Json<AssistantOpenClawConnectRequest>,
-) -> AppResult<Json<AssistantOrgResponse>> {
+) -> AppResult<Json<AssistantUserServiceResponse>> {
     let actor = auth_user.user_id.to_string();
     let request_id = normalize_action_request_id(body.action_request_id)?;
     let gateway_url = body.gateway_url.trim().to_string();
@@ -2400,10 +2443,7 @@ async fn connect_openclaw_action(
             "gatewayUrl must be HTTPS without userinfo or a fragment".to_string(),
         ));
     }
-    let fp = action_fingerprint(
-        OPENCLAW_CONNECT_ACTION,
-        serde_json::json!({"gatewayUrl":gateway_url,"label":body.label}),
-    )?;
+    let fp = openclaw_connect_fingerprint(&gateway_url, &credential, body.label.as_deref())?;
     let outcome = reserve_or_replay(
         &state.db,
         &actor,
@@ -2431,7 +2471,7 @@ async fn connect_openclaw_action(
         auth_user,
         TelemetryContext::default(),
         Json(keys::CreateKeyRequest {
-            service_slug: Some("openclaw".to_string()),
+            service_slug: Some("llm-openclaw".to_string()),
             credential: Some(credential),
             label: body.label.unwrap_or_else(|| "OpenClaw".to_string()),
             endpoint_url: Some(gateway_url),
@@ -2470,4 +2510,87 @@ async fn connect_openclaw_action(
         },
         replayed: false,
     }))
+}
+
+#[cfg(test)]
+mod wave4_effect_tests {
+    use super::*;
+
+    #[test]
+    fn fingerprints_include_semantic_request_content() {
+        let first = action_fingerprint(
+            ORG_UPDATE_ACTION,
+            serde_json::json!({ "orgId": "00000000-0000-0000-0000-000000000001", "displayName": "one" }),
+        )
+        .unwrap();
+        let second = action_fingerprint(
+            ORG_UPDATE_ACTION,
+            serde_json::json!({ "orgId": "00000000-0000-0000-0000-000000000001", "displayName": "two" }),
+        )
+        .unwrap();
+        assert_ne!(first, second);
+    }
+
+    #[test]
+    fn sensitive_request_debug_is_redacted() {
+        let request = AssistantOpenClawConnectRequest {
+            action_request_id: "request-1".to_string(),
+            gateway_url: "https://gateway.example".to_string(),
+            credential: "Bearer nyxid_ag_abcdefghijklmnop".to_string(),
+            label: Some("OpenClaw".to_string()),
+        };
+        let debug = format!("{request:?}");
+        assert!(!debug.contains("nyxid_ag_abcdefghijklmnop"));
+        assert!(debug.contains("REDACTED"));
+    }
+
+    #[test]
+    fn sensitive_and_browser_collected_inputs_change_fingerprints() {
+        let base = service_account_create_fingerprint("deploy", None, Some("proxy")).unwrap();
+        let widened =
+            service_account_create_fingerprint("deploy", None, Some("proxy admin")).unwrap();
+        assert_ne!(base, widened);
+
+        let gcp = AssistantGcpCreateRequest {
+            action_request_id: "request-gcp".to_string(),
+            label: Some("gcp".to_string()),
+            key_json: "{\"private_key\":\"one\"}".to_string(),
+            scopes: None,
+            service_slugs: None,
+            target_org_id: None,
+        };
+        let gcp_one = gcp_create_fingerprint(&gcp).unwrap();
+        let gcp_two = gcp_create_fingerprint(&AssistantGcpCreateRequest {
+            key_json: "{\"private_key\":\"two\"}".to_string(),
+            ..gcp
+        })
+        .unwrap();
+        assert_ne!(gcp_one, gcp_two);
+
+        let openclaw_one =
+            openclaw_connect_fingerprint("https://gateway.example", "bearer-one", None).unwrap();
+        let openclaw_two =
+            openclaw_connect_fingerprint("https://gateway.example", "bearer-two", None).unwrap();
+        assert_ne!(openclaw_one, openclaw_two);
+    }
+
+    #[test]
+    fn sensitive_descriptor_params_are_rejected() {
+        let service_account =
+            serde_json::from_value::<AssistantServiceAccountCreateRequest>(serde_json::json!({
+                "actionRequestId": "request-1",
+                "name": "deploy",
+                "credential": "Bearer forbidden",
+            }));
+        assert!(service_account.is_err());
+
+        let openclaw =
+            serde_json::from_value::<AssistantOpenClawConnectRequest>(serde_json::json!({
+                "actionRequestId": "request-2",
+                "gatewayUrl": "https://gateway.example",
+                "credential": "browser-only",
+                "clientSecret": "chat-supplied",
+            }));
+        assert!(openclaw.is_err());
+    }
 }

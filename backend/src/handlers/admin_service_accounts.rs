@@ -530,6 +530,34 @@ mod tests {
     use axum::http::HeaderMap;
     use uuid::Uuid;
 
+    #[test]
+    fn service_account_authorization_projection_excludes_free_text_and_secret_prefix() {
+        let item = ServiceAccountItem {
+            id: "sa-1".to_string(),
+            name: "Bearer nyxid_ag_abcdefghijklmnop".to_string(),
+            description: Some("Bearer secret".to_string()),
+            client_id: "sa_client".to_string(),
+            secret_prefix: "nyxid_ag".to_string(),
+            allowed_scopes: "proxy Bearer secret".to_string(),
+            role_ids: vec!["role-1".to_string()],
+            is_active: true,
+            rate_limit_override: Some(5),
+            created_by: "user-1".to_string(),
+            created_at: "2024-01-01T00:00:00Z".to_string(),
+            updated_at: "2024-01-02T00:00:00Z".to_string(),
+            last_authenticated_at: None,
+        };
+        let value = serde_json::to_value(
+            ServiceAccountAuthorizationEvidenceResponse::from_service_account_item(&item),
+        )
+        .unwrap();
+        assert!(value.get("name").is_none());
+        assert!(value.get("description").is_none());
+        assert!(value.get("secret_prefix").is_none());
+        assert!(value.get("allowed_scopes").is_none());
+        assert!(value.to_string().find("nyxid_").is_none());
+    }
+
     async fn seed_admin(db: &mongodb::Database) -> String {
         role_service::seed_system_roles(db)
             .await
@@ -842,11 +870,25 @@ mod tests {
         .await
         .expect("create");
 
-        let Json(resp) = revoke_tokens(State(state), auth, HeaderMap::new(), Path(created.id))
+        let before = service_account_service::get_service_account(&state.db, &created.id)
             .await
-            .expect("revoke should succeed");
+            .expect("load before revoke");
+        tokio::time::sleep(std::time::Duration::from_millis(2)).await;
+
+        let Json(resp) = revoke_tokens(
+            State(state.clone()),
+            auth,
+            HeaderMap::new(),
+            Path(created.id.clone()),
+        )
+        .await
+        .expect("revoke should succeed");
+        let after = service_account_service::get_service_account(&state.db, &created.id)
+            .await
+            .expect("load after revoke");
 
         assert_eq!(resp.revoked_count, 0);
         assert!(resp.message.contains("revoked"));
+        assert!(after.updated_at > before.updated_at);
     }
 }
