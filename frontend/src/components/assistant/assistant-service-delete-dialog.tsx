@@ -118,6 +118,9 @@ export function AssistantServiceDeleteDialog({
           actionRequestId,
           userServiceId: expected.userServiceId,
           ...(cascadeGrant ? { cascadeGrant: true } : {}),
+          ...(cascadeGrant && cascade
+            ? { cascadeSiblings: cascade.siblings }
+            : {}),
         }),
       );
       await verifyDeletion(response.resource.userServiceId);

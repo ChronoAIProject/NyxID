@@ -103,7 +103,7 @@ describe("AssistantServiceDeleteDialog", () => {
     ).not.toBeInTheDocument();
   });
 
-  it("honours grant cascade confirmation before deleting", async () => {
+  it("retries with the displayed sibling set after the real 11500 contract", async () => {
     mockPost.mockRejectedValueOnce(
       new ApiError(409, {
         error: "grant_cascade_confirmation_required",
@@ -154,6 +154,13 @@ describe("AssistantServiceDeleteDialog", () => {
         actionRequestId: "act-delete",
         userServiceId: SERVICE_ID,
         cascadeGrant: true,
+        cascadeSiblings: [
+          {
+            user_service_id: "sibling",
+            name: "other",
+            slug: "other",
+          },
+        ],
       },
     );
     expect(onComplete).toHaveBeenCalledWith(SERVICE_ID);
