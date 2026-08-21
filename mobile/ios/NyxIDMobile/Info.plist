@@ -57,6 +57,8 @@
     <array>
       <string>_expo._tcp</string>
     </array>
+    <key>NSCameraUsageDescription</key>
+    <string>Allow NyxID to scan login approval QR codes.</string>
     <key>NSFaceIDUsageDescription</key>
     <string>Allow $(PRODUCT_NAME) to access your Face ID biometric data.</string>
     <key>NSLocalNetworkUsageDescription</key>

@@ -8,8 +8,9 @@
     "android": "APP_ENV=dev expo run:android",
     "ios": "APP_ENV=dev expo run:ios",
     "web": "APP_ENV=dev expo start --web",
-    "test": "tsx --test src/lib/api/authDeviceSchema.test.ts",
+    "test": "tsx --test \"src/**/*.test.ts\"",
     "typecheck": "tsc --noEmit",
+    "check:native-sync": "node scripts/check-native-sync.js",
     "build:ios": "APP_ENV=prod node scripts/build-ios.js",
     "build:ios:dev": "APP_ENV=dev node scripts/build-ios.js",
     "build:android": "APP_ENV=prod node scripts/build-android.js",
@@ -81,6 +82,7 @@
     "zod": "^4.3.6"
   },
   "devDependencies": {
+    "@expo/plist": "^0.5.2",
     "@types/react": "~19.2.14",
     "dotenv": "^16.4.5",
     "googleapis": "^144.0.0",

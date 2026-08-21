@@ -14,10 +14,13 @@ function safeHost(url: string): string | null {
 export default ({ config }: ConfigContext): ExpoConfig => {
   const appEnv = (process.env.APP_ENV ?? "dev") as "dev" | "prod";
   const env = loadEnv();
-  const r = resolveProfile(appEnv, env);
+  const r = resolveProfile(appEnv, env, { warnOnFrontendUrlFallback: true });
   const ident = appIdentity(env);
 
   process.env.EXPO_PUBLIC_API_BASE_URL = r.apiBaseUrl;
+  process.env.EXPO_PUBLIC_FRONTEND_URL = r.frontendUrl;
+  process.env.EXPO_PUBLIC_UNIVERSAL_LINK_HOST = r.universalLinkHost;
+  process.env.EXPO_PUBLIC_APP_SCHEME = ident.scheme;
   process.env.EXPO_PUBLIC_ALLOWED_EMAILS = r.allowedEmails;
   process.env.EXPO_PUBLIC_DEV_MODE = appEnv === "dev" ? "true" : "false";
 
@@ -109,6 +112,7 @@ export default ({ config }: ConfigContext): ExpoConfig => {
         "expo-camera",
         {
           cameraPermission: "Allow NyxID to scan login approval QR codes.",
+          microphonePermission: false,
           recordAudioAndroid: false,
         },
       ],
