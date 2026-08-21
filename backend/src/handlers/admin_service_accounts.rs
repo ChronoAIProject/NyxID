@@ -145,6 +145,38 @@ pub struct ServiceAccountItem {
     pub last_authenticated_at: Option<String>,
 }
 
+/// Minimal assistant evidence projection.  Human-readable names, free-form
+/// descriptions, scope strings, and the secret prefix are deliberately
+/// excluded from this postcondition surface.
+#[derive(Debug, Serialize)]
+pub struct ServiceAccountAuthorizationEvidenceResponse {
+    pub id: String,
+    pub client_id: String,
+    pub role_ids: Vec<String>,
+    pub is_active: bool,
+    pub rate_limit_override: Option<u64>,
+    pub created_by: String,
+    pub created_at: String,
+    pub updated_at: String,
+    pub last_authenticated_at: Option<String>,
+}
+
+impl ServiceAccountAuthorizationEvidenceResponse {
+    pub fn from_service_account_item(item: &ServiceAccountItem) -> Self {
+        Self {
+            id: item.id.clone(),
+            client_id: item.client_id.clone(),
+            role_ids: item.role_ids.clone(),
+            is_active: item.is_active,
+            rate_limit_override: item.rate_limit_override,
+            created_by: item.created_by.clone(),
+            created_at: item.created_at.clone(),
+            updated_at: item.updated_at.clone(),
+            last_authenticated_at: item.last_authenticated_at.clone(),
+        }
+    }
+}
+
 #[derive(Debug, Serialize)]
 pub struct ServiceAccountListResponse {
     pub service_accounts: Vec<ServiceAccountItem>,
@@ -334,6 +366,20 @@ pub async fn get_service_account(
     require_admin_read_or_owning_org_admin(&state, &auth_user, &sa).await?;
 
     Ok(Json(sa_to_item(sa)))
+}
+
+/// GET /api/v1/admin/service-accounts/:sa_id/authorization
+pub async fn get_service_account_authorization(
+    State(state): State<AppState>,
+    auth_user: AuthUser,
+    Path(sa_id): Path<String>,
+) -> AppResult<Json<ServiceAccountAuthorizationEvidenceResponse>> {
+    let sa = service_account_service::get_service_account(&state.db, &sa_id).await?;
+    require_admin_read_or_owning_org_admin(&state, &auth_user, &sa).await?;
+    let item = sa_to_item(sa);
+    Ok(Json(
+        ServiceAccountAuthorizationEvidenceResponse::from_service_account_item(&item),
+    ))
 }
 
 /// PUT /api/v1/admin/service-accounts/:sa_id

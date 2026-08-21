@@ -13,8 +13,8 @@ use std::sync::LazyLock;
 use axum::{
     Json, Router,
     extract::{Path, Query, State},
-    http::HeaderMap,
-    routing::post,
+    http::{HeaderMap, StatusCode},
+    routing::{get, post},
 };
 use futures::TryStreamExt;
 use mongodb::bson::doc;
@@ -25,6 +25,9 @@ use uuid::Uuid;
 
 use crate::AppState;
 use crate::errors::{AppError, AppResult};
+use crate::handlers::{
+    admin_service_accounts, developer_apps, keys, notifications, orgs, user_api_keys_external,
+};
 use crate::handlers::{approvals, consent, mfa, users};
 use crate::models::approval_grant::{ApprovalGrant, COLLECTION_NAME as APPROVAL_GRANTS};
 use crate::models::consent::{COLLECTION_NAME as CONSENTS, Consent};
@@ -55,6 +58,28 @@ const APPROVAL_CONFIGURE_ACTION: &str = "approval.configure";
 const APPROVAL_ENABLE_ACTION: &str = "approval.enable";
 const APPROVAL_DISABLE_ACTION: &str = "approval.disable";
 const APPROVAL_REVOKE_GRANT_ACTION: &str = "approval.revoke_grant";
+const ORG_CREATE_ACTION: &str = "org.create";
+const ORG_UPDATE_ACTION: &str = "org.update";
+const ORG_DELETE_ACTION: &str = "org.delete";
+const ORG_MEMBER_ADD_ACTION: &str = "org.member_add";
+const ORG_MEMBER_REMOVE_ACTION: &str = "org.member_remove";
+const ORG_MEMBER_UPDATE_ROLE_ACTION: &str = "org.member_update_role";
+const ORG_INVITE_ACTION: &str = "org.invite";
+const ORG_SET_PRIMARY_ACTION: &str = "org.set_primary";
+const SERVICE_ACCOUNT_CREATE_ACTION: &str = "service_account.create";
+const SERVICE_ACCOUNT_UPDATE_ACTION: &str = "service_account.update";
+const SERVICE_ACCOUNT_DELETE_ACTION: &str = "service_account.delete";
+const SERVICE_ACCOUNT_ROTATE_SECRET_ACTION: &str = "service_account.rotate_secret";
+const SERVICE_ACCOUNT_REVOKE_TOKENS_ACTION: &str = "service_account.revoke_tokens";
+const DEVELOPER_APP_CREATE_ACTION: &str = "developer_app.create";
+const DEVELOPER_APP_UPDATE_ACTION: &str = "developer_app.update";
+const DEVELOPER_APP_DELETE_ACTION: &str = "developer_app.delete";
+const DEVELOPER_APP_ROTATE_SECRET_ACTION: &str = "developer_app.rotate_secret";
+const NOTIFICATIONS_UPDATE_ACTION: &str = "notifications.update";
+const NOTIFICATIONS_TELEGRAM_LINK_ACTION: &str = "notifications.telegram_link";
+const NOTIFICATIONS_TELEGRAM_DISCONNECT_ACTION: &str = "notifications.telegram_disconnect";
+const EXTERNAL_KEY_ADD_GCP_ACTION: &str = "external_key.add_gcp_service_account";
+const OPENCLAW_CONNECT_ACTION: &str = "openclaw.connect";
 
 static SECRET_SHAPED_VALUE: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(r"(?i)(?:Bearer\s+\S+|nyxid_(?:ag_)?[A-Za-z0-9_-]{16,})")
@@ -72,6 +97,71 @@ pub fn router() -> Router<AppState> {
         .route("/approval/enable", post(enable_approval))
         .route("/approval/disable", post(disable_approval))
         .route("/approval/revoke-grant", post(revoke_approval_grant))
+        .route("/org/create", post(create_org_action))
+        .route("/org/update", post(update_org_action))
+        .route("/org/delete", post(delete_org_action))
+        .route("/org/member-add", post(add_org_member_action))
+        .route("/org/member-remove", post(remove_org_member_action))
+        .route(
+            "/org/member-update-role",
+            post(update_org_member_role_action),
+        )
+        .route("/org/invite", post(invite_org_action))
+        .route("/org/set-primary", post(set_primary_org_action))
+        .route(
+            "/service-account/create",
+            post(create_service_account_action),
+        )
+        .route(
+            "/service-account/update",
+            post(update_service_account_action),
+        )
+        .route(
+            "/service-account/delete",
+            post(delete_service_account_action),
+        )
+        .route(
+            "/service-account/rotate-secret",
+            post(rotate_service_account_secret_action),
+        )
+        .route(
+            "/service-account/revoke-tokens",
+            post(revoke_service_account_tokens_action),
+        )
+        .route("/developer-app/create", post(create_developer_app_action))
+        .route("/developer-app/update", post(update_developer_app_action))
+        .route("/developer-app/delete", post(delete_developer_app_action))
+        .route(
+            "/developer-app/rotate-secret",
+            post(rotate_developer_app_secret_action),
+        )
+        .route("/notifications/update", post(update_notifications_action))
+        .route("/notifications/telegram-link", post(link_telegram_action))
+        .route(
+            "/notifications/telegram-disconnect",
+            post(disconnect_telegram_action),
+        )
+        .route(
+            "/external-key/add-gcp-service-account",
+            post(add_gcp_service_account_action),
+        )
+        .route("/openclaw/connect", post(connect_openclaw_action))
+        .route(
+            "/org/{org_id}/authorization",
+            get(orgs::get_org_authorization),
+        )
+        .route(
+            "/service-account/{service_account_id}/authorization",
+            get(admin_service_accounts::get_service_account_authorization),
+        )
+        .route(
+            "/developer-app/{client_id}/authorization",
+            get(developer_apps::get_my_oauth_client_authorization),
+        )
+        .route(
+            "/notifications/authorization",
+            get(notifications::get_settings_authorization),
+        )
 }
 
 #[derive(Debug, Clone, Serialize, ToSchema)]
@@ -188,6 +278,228 @@ pub struct RevokeAssistantGrantRequest {
 pub struct AssistantGrantResponse {
     pub resource: AssistantGrantResource,
     pub replayed: bool,
+}
+
+#[derive(Debug, Clone, Serialize, ToSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct AssistantOrgResource {
+    pub org_id: String,
+}
+#[derive(Debug, Clone, Serialize, ToSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct AssistantNotificationBindingResource {
+    pub binding_id: String,
+}
+#[derive(Debug, Clone, Serialize, ToSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct AssistantServiceAccountResource {
+    pub service_account_id: String,
+}
+#[derive(Debug, Clone, Serialize, ToSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct AssistantDeveloperAppResource {
+    pub client_id: String,
+}
+#[derive(Debug, Clone, Serialize, ToSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct AssistantExternalKeyResource {
+    pub external_key_id: String,
+}
+
+#[derive(Debug, Serialize, ToSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct AssistantOrgResponse {
+    pub resource: AssistantOrgResource,
+    pub replayed: bool,
+}
+#[derive(Debug, Serialize, ToSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct AssistantNotificationResponse {
+    pub resource: AssistantNotificationBindingResource,
+    pub replayed: bool,
+}
+#[derive(Debug, Serialize, ToSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct AssistantServiceAccountResponse {
+    pub resource: AssistantServiceAccountResource,
+    pub replayed: bool,
+}
+#[derive(Debug, Serialize, ToSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct AssistantDeveloperAppResponse {
+    pub resource: AssistantDeveloperAppResource,
+    pub replayed: bool,
+}
+#[derive(Debug, Serialize, ToSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct AssistantExternalKeyResponse {
+    pub resource: AssistantExternalKeyResource,
+    pub replayed: bool,
+}
+
+#[derive(Debug, Clone, Serialize, ToSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct AssistantUserServiceResource {
+    pub user_service_id: String,
+}
+
+#[derive(Debug, Serialize, ToSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct AssistantUserServiceResponse {
+    pub resource: AssistantUserServiceResource,
+    pub replayed: bool,
+}
+
+#[derive(Debug, Deserialize, ToSchema)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct AssistantOrgCreateRequest {
+    pub action_request_id: String,
+    pub display_name: String,
+    pub contact_email: Option<String>,
+    pub avatar_url: Option<String>,
+}
+#[derive(Debug, Deserialize, ToSchema)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct AssistantOrgUpdateRequest {
+    pub action_request_id: String,
+    pub org_id: String,
+    pub display_name: Option<String>,
+    pub slug: Option<String>,
+    pub contact_email: Option<String>,
+    pub avatar_url: Option<String>,
+}
+#[derive(Debug, Deserialize, ToSchema)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct AssistantOrgIdRequest {
+    pub action_request_id: String,
+    pub org_id: String,
+}
+#[derive(Debug, Deserialize, ToSchema)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct AssistantOrgMemberAddRequest {
+    pub action_request_id: String,
+    pub org_id: String,
+    pub user_id: String,
+    pub role: orgs::OrgRoleWire,
+    pub allowed_service_ids: Option<Vec<String>>,
+}
+#[derive(Debug, Deserialize, ToSchema)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct AssistantOrgMemberRequest {
+    pub action_request_id: String,
+    pub org_id: String,
+    pub member_id: String,
+}
+#[derive(Debug, Deserialize, ToSchema)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct AssistantOrgMemberRoleRequest {
+    pub action_request_id: String,
+    pub org_id: String,
+    pub member_id: String,
+    pub role: orgs::OrgRoleWire,
+}
+#[derive(Debug, Deserialize, ToSchema)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct AssistantOrgInviteRequest {
+    pub action_request_id: String,
+    pub org_id: String,
+    pub role: orgs::OrgRoleWire,
+    pub allowed_service_ids: Option<Vec<String>>,
+    pub ttl_hours: Option<i64>,
+}
+#[derive(Debug, Deserialize, ToSchema)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct AssistantServiceAccountCreateRequest {
+    pub action_request_id: String,
+    pub name: String,
+    pub description: Option<String>,
+    pub allowed_scopes: Option<String>,
+}
+#[derive(Debug, Deserialize, ToSchema)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct AssistantServiceAccountRequest {
+    pub action_request_id: String,
+    pub service_account_id: String,
+}
+#[derive(Debug, Deserialize, ToSchema)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct AssistantServiceAccountUpdateRequest {
+    pub action_request_id: String,
+    pub service_account_id: String,
+    pub name: Option<String>,
+    pub description: Option<String>,
+}
+#[derive(Debug, Deserialize, ToSchema)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct AssistantDeveloperAppCreateRequest {
+    pub action_request_id: String,
+    pub name: String,
+    pub redirect_uris: Vec<String>,
+}
+#[derive(Debug, Deserialize, ToSchema)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct AssistantDeveloperAppRequest {
+    pub action_request_id: String,
+    pub client_id: String,
+}
+#[derive(Debug, Deserialize, ToSchema)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct AssistantDeveloperAppUpdateRequest {
+    pub action_request_id: String,
+    pub client_id: String,
+    pub name: Option<String>,
+    pub redirect_uris: Option<Vec<String>>,
+}
+#[derive(Debug, Deserialize, ToSchema)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct AssistantNotificationsUpdateRequest {
+    pub action_request_id: String,
+    pub telegram_enabled: Option<bool>,
+    pub approval_required: Option<bool>,
+    pub approval_timeout_secs: Option<u32>,
+    pub grant_expiry_days: Option<u32>,
+    pub push_enabled: Option<bool>,
+}
+#[derive(Debug, Deserialize, ToSchema)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct AssistantActionRequestId {
+    pub action_request_id: String,
+}
+#[derive(Deserialize, ToSchema)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct AssistantGcpCreateRequest {
+    pub action_request_id: String,
+    pub label: Option<String>,
+    pub key_json: String,
+    pub scopes: Option<String>,
+    pub service_slugs: Option<Vec<String>>,
+    pub target_org_id: Option<String>,
+}
+impl std::fmt::Debug for AssistantGcpCreateRequest {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("AssistantGcpCreateRequest")
+            .field("action_request_id", &self.action_request_id)
+            .field("label", &self.label)
+            .field("key_json", &"[REDACTED]")
+            .finish()
+    }
+}
+#[derive(Deserialize, ToSchema)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct AssistantOpenClawConnectRequest {
+    pub action_request_id: String,
+    pub gateway_url: String,
+    pub credential: String,
+    pub label: Option<String>,
+}
+impl std::fmt::Debug for AssistantOpenClawConnectRequest {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("AssistantOpenClawConnectRequest")
+            .field("action_request_id", &self.action_request_id)
+            .field("gateway_url", &self.gateway_url)
+            .field("credential", &"[REDACTED]")
+            .finish()
+    }
 }
 
 #[derive(Serialize)]
@@ -969,5 +1281,1193 @@ async fn revoke_approval_grant(
     Ok(Json(AssistantGrantResponse {
         resource: AssistantGrantResource { grant_id },
         replayed,
+    }))
+}
+
+// ---------------------------------------------------------------------------
+// Wave-4 effects
+// ---------------------------------------------------------------------------
+
+fn action_fingerprint(action: &'static str, value: serde_json::Value) -> AppResult<String> {
+    fingerprint_canonical(&serde_json::json!({ "action": action, "request": value }))
+}
+
+async fn reserve_wave4(
+    state: &AppState,
+    actor: &str,
+    action: &'static str,
+    request_id: String,
+    fingerprint: &str,
+    resource_id: String,
+) -> AppResult<ReceiptOutcome> {
+    reserve_or_replay(
+        &state.db,
+        actor,
+        action,
+        &normalize_action_request_id(request_id)?,
+        fingerprint,
+        resource_id,
+    )
+    .await
+}
+
+async fn complete_wave4(
+    state: &AppState,
+    receipt: &crate::models::assistant_action_receipt::AssistantActionReceipt,
+    resource_id: &str,
+) -> AppResult<()> {
+    // Create-shaped actions reserve an identity before the service layer picks
+    // its UUID. Persist the authoritative id before marking the receipt done,
+    // so an exact retry can return the same typed reference.
+    state
+        .db
+        .collection::<crate::models::assistant_action_receipt::AssistantActionReceipt>(
+            crate::models::assistant_action_receipt::COLLECTION_NAME,
+        )
+        .update_one(
+            doc! { "_id": &receipt.id },
+            doc! { "$set": { "resource_id": resource_id } },
+        )
+        .await?;
+    mark_completed(&state.db, receipt).await
+}
+
+fn replayed_resource(outcome: &ReceiptOutcome) -> Option<(String, bool)> {
+    match outcome {
+        ReceiptOutcome::Replay(receipt) => Some((receipt.resource_id.clone(), true)),
+        _ => None,
+    }
+}
+
+async fn create_org_action(
+    State(state): State<AppState>,
+    auth_user: AuthUser,
+    Json(body): Json<AssistantOrgCreateRequest>,
+) -> AppResult<Json<AssistantUserServiceResponse>> {
+    let actor = auth_user.user_id.to_string();
+    let request_id = normalize_action_request_id(body.action_request_id)?;
+    let fp = action_fingerprint(
+        ORG_CREATE_ACTION,
+        serde_json::json!({
+            "displayName": body.display_name,
+            "contactEmail": body.contact_email,
+            "avatarUrl": body.avatar_url,
+        }),
+    )?;
+    let outcome = reserve_or_replay(
+        &state.db,
+        &actor,
+        ORG_CREATE_ACTION,
+        &request_id,
+        &fp,
+        Uuid::new_v4().to_string(),
+    )
+    .await?;
+    if let Some((org_id, replayed)) = replayed_resource(&outcome) {
+        return Ok(Json(AssistantOrgResponse {
+            resource: AssistantOrgResource { org_id },
+            replayed,
+        }));
+    }
+    let receipt = match outcome {
+        ReceiptOutcome::Reserved(r) => r,
+        ReceiptOutcome::InProgress(_) => return Err(in_progress_conflict()),
+        ReceiptOutcome::Replay(_) => unreachable!(),
+    };
+    let (_, Json(org)) = orgs::create_org(
+        State(state.clone()),
+        auth_user,
+        Json(orgs::CreateOrgRequest {
+            display_name: body.display_name,
+            contact_email: body.contact_email,
+            avatar_url: body.avatar_url,
+        }),
+    )
+    .await?;
+    complete_wave4(&state, &receipt, &org.id).await?;
+    Ok(Json(AssistantOrgResponse {
+        resource: AssistantOrgResource { org_id: org.id },
+        replayed: false,
+    }))
+}
+
+async fn update_org_action(
+    State(state): State<AppState>,
+    auth_user: AuthUser,
+    Json(body): Json<AssistantOrgUpdateRequest>,
+) -> AppResult<Json<AssistantOrgResponse>> {
+    let actor = auth_user.user_id.to_string();
+    let org_id = parse_uuid(&body.org_id, "orgId")?;
+    let request_id = normalize_action_request_id(body.action_request_id)?;
+    let fp = action_fingerprint(
+        ORG_UPDATE_ACTION,
+        serde_json::json!({"orgId":org_id,"displayName":body.display_name,"slug":body.slug,"contactEmail":body.contact_email,"avatarUrl":body.avatar_url}),
+    )?;
+    let outcome = reserve_or_replay(
+        &state.db,
+        &actor,
+        ORG_UPDATE_ACTION,
+        &request_id,
+        &fp,
+        org_id.clone(),
+    )
+    .await?;
+    if let Some((_, replayed)) = replayed_resource(&outcome) {
+        return Ok(Json(AssistantOrgResponse {
+            resource: AssistantOrgResource { org_id },
+            replayed,
+        }));
+    }
+    let receipt = match outcome {
+        ReceiptOutcome::Reserved(r) => r,
+        ReceiptOutcome::InProgress(_) => return Err(in_progress_conflict()),
+        ReceiptOutcome::Replay(_) => unreachable!(),
+    };
+    let _ = orgs::update_org(
+        State(state.clone()),
+        auth_user,
+        Path(org_id.clone()),
+        Json(orgs::UpdateOrgRequest {
+            display_name: body.display_name,
+            slug: body.slug,
+            avatar_url: body.avatar_url,
+            contact_email: body.contact_email,
+            remote_credential_integrity_verification_opt_out: None,
+        }),
+    )
+    .await?;
+    complete_wave4(&state, &receipt, &org_id).await?;
+    Ok(Json(AssistantOrgResponse {
+        resource: AssistantOrgResource { org_id },
+        replayed: false,
+    }))
+}
+
+async fn delete_org_action(
+    State(state): State<AppState>,
+    auth_user: AuthUser,
+    Json(body): Json<AssistantOrgIdRequest>,
+) -> AppResult<Json<AssistantOrgResponse>> {
+    let actor = auth_user.user_id.to_string();
+    let org_id = parse_uuid(&body.org_id, "orgId")?;
+    let request_id = normalize_action_request_id(body.action_request_id)?;
+    let fp = action_fingerprint(ORG_DELETE_ACTION, serde_json::json!({"orgId":org_id}))?;
+    let outcome = reserve_or_replay(
+        &state.db,
+        &actor,
+        ORG_DELETE_ACTION,
+        &request_id,
+        &fp,
+        org_id.clone(),
+    )
+    .await?;
+    if let Some((_, replayed)) = replayed_resource(&outcome) {
+        return Ok(Json(AssistantOrgResponse {
+            resource: AssistantOrgResource { org_id },
+            replayed,
+        }));
+    }
+    let receipt = match outcome {
+        ReceiptOutcome::Reserved(r) => r,
+        ReceiptOutcome::InProgress(_) => return Err(in_progress_conflict()),
+        ReceiptOutcome::Replay(_) => unreachable!(),
+    };
+    orgs::delete_org(State(state.clone()), auth_user, Path(org_id.clone())).await?;
+    complete_wave4(&state, &receipt, &org_id).await?;
+    Ok(Json(AssistantOrgResponse {
+        resource: AssistantOrgResource { org_id },
+        replayed: false,
+    }))
+}
+
+async fn add_org_member_action(
+    State(state): State<AppState>,
+    auth_user: AuthUser,
+    Json(body): Json<AssistantOrgMemberAddRequest>,
+) -> AppResult<Json<AssistantOrgResponse>> {
+    let actor = auth_user.user_id.to_string();
+    let org_id = parse_uuid(&body.org_id, "orgId")?;
+    let user_id = parse_uuid(&body.user_id, "userId")?;
+    let request_id = normalize_action_request_id(body.action_request_id)?;
+    let fp = action_fingerprint(
+        ORG_MEMBER_ADD_ACTION,
+        serde_json::json!({"orgId":org_id,"userId":user_id,"role":body.role,"allowedServiceIds":body.allowed_service_ids}),
+    )?;
+    let outcome = reserve_or_replay(
+        &state.db,
+        &actor,
+        ORG_MEMBER_ADD_ACTION,
+        &request_id,
+        &fp,
+        org_id.clone(),
+    )
+    .await?;
+    if let Some((_, replayed)) = replayed_resource(&outcome) {
+        return Ok(Json(AssistantOrgResponse {
+            resource: AssistantOrgResource { org_id },
+            replayed,
+        }));
+    }
+    let receipt = match outcome {
+        ReceiptOutcome::Reserved(r) => r,
+        ReceiptOutcome::InProgress(_) => return Err(in_progress_conflict()),
+        ReceiptOutcome::Replay(_) => unreachable!(),
+    };
+    let _ = orgs::add_member(
+        State(state.clone()),
+        auth_user,
+        Path(org_id.clone()),
+        Json(orgs::AddMemberRequest {
+            user_id,
+            role: body.role,
+            scope_source: None,
+            allowed_service_ids: body.allowed_service_ids,
+        }),
+    )
+    .await?;
+    complete_wave4(&state, &receipt, &org_id).await?;
+    Ok(Json(AssistantOrgResponse {
+        resource: AssistantOrgResource { org_id },
+        replayed: false,
+    }))
+}
+
+async fn remove_org_member_action(
+    State(state): State<AppState>,
+    auth_user: AuthUser,
+    Json(body): Json<AssistantOrgMemberRequest>,
+) -> AppResult<Json<AssistantOrgResponse>> {
+    let actor = auth_user.user_id.to_string();
+    let org_id = parse_uuid(&body.org_id, "orgId")?;
+    let member_id = parse_uuid(&body.member_id, "memberId")?;
+    let request_id = normalize_action_request_id(body.action_request_id)?;
+    let fp = action_fingerprint(
+        ORG_MEMBER_REMOVE_ACTION,
+        serde_json::json!({"orgId":org_id,"memberId":member_id}),
+    )?;
+    let outcome = reserve_or_replay(
+        &state.db,
+        &actor,
+        ORG_MEMBER_REMOVE_ACTION,
+        &request_id,
+        &fp,
+        org_id.clone(),
+    )
+    .await?;
+    if let Some((_, replayed)) = replayed_resource(&outcome) {
+        return Ok(Json(AssistantOrgResponse {
+            resource: AssistantOrgResource { org_id },
+            replayed,
+        }));
+    }
+    let receipt = match outcome {
+        ReceiptOutcome::Reserved(r) => r,
+        ReceiptOutcome::InProgress(_) => return Err(in_progress_conflict()),
+        ReceiptOutcome::Replay(_) => unreachable!(),
+    };
+    orgs::remove_member(
+        State(state.clone()),
+        auth_user,
+        Path((org_id.clone(), member_id)),
+    )
+    .await?;
+    complete_wave4(&state, &receipt, &org_id).await?;
+    Ok(Json(AssistantOrgResponse {
+        resource: AssistantOrgResource { org_id },
+        replayed: false,
+    }))
+}
+
+async fn update_org_member_role_action(
+    State(state): State<AppState>,
+    auth_user: AuthUser,
+    Json(body): Json<AssistantOrgMemberRoleRequest>,
+) -> AppResult<Json<AssistantOrgResponse>> {
+    let actor = auth_user.user_id.to_string();
+    let org_id = parse_uuid(&body.org_id, "orgId")?;
+    let member_id = parse_uuid(&body.member_id, "memberId")?;
+    let request_id = normalize_action_request_id(body.action_request_id)?;
+    let fp = action_fingerprint(
+        ORG_MEMBER_UPDATE_ROLE_ACTION,
+        serde_json::json!({"orgId":org_id,"memberId":member_id,"role":body.role}),
+    )?;
+    let outcome = reserve_or_replay(
+        &state.db,
+        &actor,
+        ORG_MEMBER_UPDATE_ROLE_ACTION,
+        &request_id,
+        &fp,
+        org_id.clone(),
+    )
+    .await?;
+    if let Some((_, replayed)) = replayed_resource(&outcome) {
+        return Ok(Json(AssistantOrgResponse {
+            resource: AssistantOrgResource { org_id },
+            replayed,
+        }));
+    }
+    let receipt = match outcome {
+        ReceiptOutcome::Reserved(r) => r,
+        ReceiptOutcome::InProgress(_) => return Err(in_progress_conflict()),
+        ReceiptOutcome::Replay(_) => unreachable!(),
+    };
+    let _ = orgs::update_member(
+        State(state.clone()),
+        auth_user,
+        Path((org_id.clone(), member_id)),
+        Json(orgs::UpdateMemberRequest {
+            role: Some(body.role),
+            scope_source: None,
+            allowed_service_ids: None,
+        }),
+    )
+    .await?;
+    complete_wave4(&state, &receipt, &org_id).await?;
+    Ok(Json(AssistantOrgResponse {
+        resource: AssistantOrgResource { org_id },
+        replayed: false,
+    }))
+}
+
+async fn invite_org_action(
+    State(state): State<AppState>,
+    auth_user: AuthUser,
+    Json(body): Json<AssistantOrgInviteRequest>,
+) -> AppResult<Json<AssistantOrgResponse>> {
+    let actor = auth_user.user_id.to_string();
+    let org_id = parse_uuid(&body.org_id, "orgId")?;
+    let request_id = normalize_action_request_id(body.action_request_id)?;
+    let fp = action_fingerprint(
+        ORG_INVITE_ACTION,
+        serde_json::json!({"orgId":org_id,"role":body.role,"allowedServiceIds":body.allowed_service_ids,"ttlHours":body.ttl_hours}),
+    )?;
+    let outcome = reserve_or_replay(
+        &state.db,
+        &actor,
+        ORG_INVITE_ACTION,
+        &request_id,
+        &fp,
+        org_id.clone(),
+    )
+    .await?;
+    if let Some((_, replayed)) = replayed_resource(&outcome) {
+        return Ok(Json(AssistantOrgResponse {
+            resource: AssistantOrgResource { org_id },
+            replayed,
+        }));
+    }
+    let receipt = match outcome {
+        ReceiptOutcome::Reserved(r) => r,
+        ReceiptOutcome::InProgress(_) => return Err(in_progress_conflict()),
+        ReceiptOutcome::Replay(_) => unreachable!(),
+    };
+    let _ = orgs::create_invite(
+        State(state.clone()),
+        auth_user,
+        Path(org_id.clone()),
+        Json(orgs::CreateInviteRequest {
+            role: body.role,
+            scope_source: None,
+            allowed_service_ids: body.allowed_service_ids,
+            ttl_hours: body.ttl_hours,
+        }),
+    )
+    .await?;
+    complete_wave4(&state, &receipt, &org_id).await?;
+    Ok(Json(AssistantOrgResponse {
+        resource: AssistantOrgResource { org_id },
+        replayed: false,
+    }))
+}
+
+async fn set_primary_org_action(
+    State(state): State<AppState>,
+    auth_user: AuthUser,
+    Json(body): Json<AssistantOrgIdRequest>,
+) -> AppResult<Json<AssistantOrgResponse>> {
+    let actor = auth_user.user_id.to_string();
+    let org_id = parse_uuid(&body.org_id, "orgId")?;
+    let request_id = normalize_action_request_id(body.action_request_id)?;
+    let fp = action_fingerprint(ORG_SET_PRIMARY_ACTION, serde_json::json!({"orgId":org_id}))?;
+    let outcome = reserve_or_replay(
+        &state.db,
+        &actor,
+        ORG_SET_PRIMARY_ACTION,
+        &request_id,
+        &fp,
+        org_id.clone(),
+    )
+    .await?;
+    if let Some((_, replayed)) = replayed_resource(&outcome) {
+        return Ok(Json(AssistantOrgResponse {
+            resource: AssistantOrgResource { org_id },
+            replayed,
+        }));
+    }
+    let receipt = match outcome {
+        ReceiptOutcome::Reserved(r) => r,
+        ReceiptOutcome::InProgress(_) => return Err(in_progress_conflict()),
+        ReceiptOutcome::Replay(_) => unreachable!(),
+    };
+    let _ = orgs::set_primary_org(
+        State(state.clone()),
+        auth_user,
+        Json(orgs::SetPrimaryOrgRequest {
+            primary_org_id: Some(org_id.clone()),
+        }),
+    )
+    .await?;
+    complete_wave4(&state, &receipt, &org_id).await?;
+    Ok(Json(AssistantOrgResponse {
+        resource: AssistantOrgResource { org_id },
+        replayed: false,
+    }))
+}
+
+async fn create_service_account_action(
+    State(state): State<AppState>,
+    auth_user: AuthUser,
+    Json(body): Json<AssistantServiceAccountCreateRequest>,
+) -> AppResult<Json<AssistantServiceAccountResponse>> {
+    let actor = auth_user.user_id.to_string();
+    let request_id = normalize_action_request_id(body.action_request_id)?;
+    let fp = action_fingerprint(
+        SERVICE_ACCOUNT_CREATE_ACTION,
+        serde_json::json!({"name":body.name,"description":body.description}),
+    )?;
+    let outcome = reserve_or_replay(
+        &state.db,
+        &actor,
+        SERVICE_ACCOUNT_CREATE_ACTION,
+        &request_id,
+        &fp,
+        Uuid::new_v4().to_string(),
+    )
+    .await?;
+    if let Some((id, replayed)) = replayed_resource(&outcome) {
+        return Ok(Json(AssistantServiceAccountResponse {
+            resource: AssistantServiceAccountResource {
+                service_account_id: id,
+            },
+            replayed,
+        }));
+    }
+    let receipt = match outcome {
+        ReceiptOutcome::Reserved(r) => r,
+        ReceiptOutcome::InProgress(_) => return Err(in_progress_conflict()),
+        ReceiptOutcome::Replay(_) => unreachable!(),
+    };
+    let Json(created) = admin_service_accounts::create_service_account(
+        State(state.clone()),
+        auth_user,
+        TelemetryContext::default(),
+        HeaderMap::new(),
+        Json(admin_service_accounts::CreateServiceAccountRequest {
+            name: body.name,
+            description: body.description,
+            allowed_scopes: body.allowed_scopes.unwrap_or_else(|| "proxy".to_string()),
+            role_ids: None,
+            rate_limit_override: None,
+            target_org_id: None,
+        }),
+    )
+    .await?;
+    complete_wave4(&state, &receipt, &created.id).await?;
+    Ok(Json(AssistantServiceAccountResponse {
+        resource: AssistantServiceAccountResource {
+            service_account_id: created.id,
+        },
+        replayed: false,
+    }))
+}
+
+async fn update_service_account_action(
+    State(state): State<AppState>,
+    auth_user: AuthUser,
+    Json(body): Json<AssistantServiceAccountUpdateRequest>,
+) -> AppResult<Json<AssistantServiceAccountResponse>> {
+    let actor = auth_user.user_id.to_string();
+    let id = parse_uuid(&body.service_account_id, "serviceAccountId")?;
+    let request_id = normalize_action_request_id(body.action_request_id)?;
+    let fp = action_fingerprint(
+        SERVICE_ACCOUNT_UPDATE_ACTION,
+        serde_json::json!({"id":id,"name":body.name,"description":body.description}),
+    )?;
+    let outcome = reserve_or_replay(
+        &state.db,
+        &actor,
+        SERVICE_ACCOUNT_UPDATE_ACTION,
+        &request_id,
+        &fp,
+        id.clone(),
+    )
+    .await?;
+    if let Some((_, replayed)) = replayed_resource(&outcome) {
+        return Ok(Json(AssistantServiceAccountResponse {
+            resource: AssistantServiceAccountResource {
+                service_account_id: id,
+            },
+            replayed,
+        }));
+    }
+    let receipt = match outcome {
+        ReceiptOutcome::Reserved(r) => r,
+        ReceiptOutcome::InProgress(_) => return Err(in_progress_conflict()),
+        ReceiptOutcome::Replay(_) => unreachable!(),
+    };
+    let _ = admin_service_accounts::update_service_account(
+        State(state.clone()),
+        auth_user,
+        HeaderMap::new(),
+        Path(id.clone()),
+        Json(admin_service_accounts::UpdateServiceAccountRequest {
+            name: body.name,
+            description: body.description,
+            allowed_scopes: None,
+            role_ids: None,
+            rate_limit_override: None,
+            is_active: None,
+        }),
+    )
+    .await?;
+    complete_wave4(&state, &receipt, &id).await?;
+    Ok(Json(AssistantServiceAccountResponse {
+        resource: AssistantServiceAccountResource {
+            service_account_id: id,
+        },
+        replayed: false,
+    }))
+}
+
+async fn delete_service_account_action(
+    State(state): State<AppState>,
+    auth_user: AuthUser,
+    Json(body): Json<AssistantServiceAccountRequest>,
+) -> AppResult<Json<AssistantServiceAccountResponse>> {
+    let actor = auth_user.user_id.to_string();
+    let id = parse_uuid(&body.service_account_id, "serviceAccountId")?;
+    let request_id = normalize_action_request_id(body.action_request_id)?;
+    let fp = action_fingerprint(SERVICE_ACCOUNT_DELETE_ACTION, serde_json::json!({"id":id}))?;
+    let outcome = reserve_or_replay(
+        &state.db,
+        &actor,
+        SERVICE_ACCOUNT_DELETE_ACTION,
+        &request_id,
+        &fp,
+        id.clone(),
+    )
+    .await?;
+    if let Some((_, replayed)) = replayed_resource(&outcome) {
+        return Ok(Json(AssistantServiceAccountResponse {
+            resource: AssistantServiceAccountResource {
+                service_account_id: id,
+            },
+            replayed,
+        }));
+    }
+    let receipt = match outcome {
+        ReceiptOutcome::Reserved(r) => r,
+        ReceiptOutcome::InProgress(_) => return Err(in_progress_conflict()),
+        ReceiptOutcome::Replay(_) => unreachable!(),
+    };
+    let _ = admin_service_accounts::delete_service_account(
+        State(state.clone()),
+        auth_user,
+        TelemetryContext::default(),
+        HeaderMap::new(),
+        Path(id.clone()),
+    )
+    .await?;
+    complete_wave4(&state, &receipt, &id).await?;
+    Ok(Json(AssistantServiceAccountResponse {
+        resource: AssistantServiceAccountResource {
+            service_account_id: id,
+        },
+        replayed: false,
+    }))
+}
+
+async fn rotate_service_account_secret_action(
+    State(state): State<AppState>,
+    auth_user: AuthUser,
+    Json(body): Json<AssistantServiceAccountRequest>,
+) -> AppResult<Json<AssistantServiceAccountResponse>> {
+    let actor = auth_user.user_id.to_string();
+    let id = parse_uuid(&body.service_account_id, "serviceAccountId")?;
+    let request_id = normalize_action_request_id(body.action_request_id)?;
+    let fp = action_fingerprint(
+        SERVICE_ACCOUNT_ROTATE_SECRET_ACTION,
+        serde_json::json!({"id":id}),
+    )?;
+    let outcome = reserve_or_replay(
+        &state.db,
+        &actor,
+        SERVICE_ACCOUNT_ROTATE_SECRET_ACTION,
+        &request_id,
+        &fp,
+        id.clone(),
+    )
+    .await?;
+    if let Some((_, replayed)) = replayed_resource(&outcome) {
+        return Ok(Json(AssistantServiceAccountResponse {
+            resource: AssistantServiceAccountResource {
+                service_account_id: id,
+            },
+            replayed,
+        }));
+    }
+    let receipt = match outcome {
+        ReceiptOutcome::Reserved(r) => r,
+        ReceiptOutcome::InProgress(_) => return Err(in_progress_conflict()),
+        ReceiptOutcome::Replay(_) => unreachable!(),
+    };
+    let _ = admin_service_accounts::rotate_secret(
+        State(state.clone()),
+        auth_user,
+        TelemetryContext::default(),
+        HeaderMap::new(),
+        Path(id.clone()),
+    )
+    .await?;
+    complete_wave4(&state, &receipt, &id).await?;
+    Ok(Json(AssistantServiceAccountResponse {
+        resource: AssistantServiceAccountResource {
+            service_account_id: id,
+        },
+        replayed: false,
+    }))
+}
+
+async fn revoke_service_account_tokens_action(
+    State(state): State<AppState>,
+    auth_user: AuthUser,
+    Json(body): Json<AssistantServiceAccountRequest>,
+) -> AppResult<Json<AssistantServiceAccountResponse>> {
+    let actor = auth_user.user_id.to_string();
+    let id = parse_uuid(&body.service_account_id, "serviceAccountId")?;
+    let request_id = normalize_action_request_id(body.action_request_id)?;
+    let fp = action_fingerprint(
+        SERVICE_ACCOUNT_REVOKE_TOKENS_ACTION,
+        serde_json::json!({"id":id}),
+    )?;
+    let outcome = reserve_or_replay(
+        &state.db,
+        &actor,
+        SERVICE_ACCOUNT_REVOKE_TOKENS_ACTION,
+        &request_id,
+        &fp,
+        id.clone(),
+    )
+    .await?;
+    if let Some((_, replayed)) = replayed_resource(&outcome) {
+        return Ok(Json(AssistantServiceAccountResponse {
+            resource: AssistantServiceAccountResource {
+                service_account_id: id,
+            },
+            replayed,
+        }));
+    }
+    let receipt = match outcome {
+        ReceiptOutcome::Reserved(r) => r,
+        ReceiptOutcome::InProgress(_) => return Err(in_progress_conflict()),
+        ReceiptOutcome::Replay(_) => unreachable!(),
+    };
+    let _ = admin_service_accounts::revoke_tokens(
+        State(state.clone()),
+        auth_user,
+        HeaderMap::new(),
+        Path(id.clone()),
+    )
+    .await?;
+    complete_wave4(&state, &receipt, &id).await?;
+    Ok(Json(AssistantServiceAccountResponse {
+        resource: AssistantServiceAccountResource {
+            service_account_id: id,
+        },
+        replayed: false,
+    }))
+}
+
+async fn create_developer_app_action(
+    State(state): State<AppState>,
+    auth_user: AuthUser,
+    Json(body): Json<AssistantDeveloperAppCreateRequest>,
+) -> AppResult<Json<AssistantDeveloperAppResponse>> {
+    let actor = auth_user.user_id.to_string();
+    let request_id = normalize_action_request_id(body.action_request_id)?;
+    let fp = action_fingerprint(
+        DEVELOPER_APP_CREATE_ACTION,
+        serde_json::json!({"name":body.name,"redirectUris":body.redirect_uris}),
+    )?;
+    let outcome = reserve_or_replay(
+        &state.db,
+        &actor,
+        DEVELOPER_APP_CREATE_ACTION,
+        &request_id,
+        &fp,
+        Uuid::new_v4().to_string(),
+    )
+    .await?;
+    if let Some((id, replayed)) = replayed_resource(&outcome) {
+        return Ok(Json(AssistantDeveloperAppResponse {
+            resource: AssistantDeveloperAppResource { client_id: id },
+            replayed,
+        }));
+    }
+    let receipt = match outcome {
+        ReceiptOutcome::Reserved(r) => r,
+        ReceiptOutcome::InProgress(_) => return Err(in_progress_conflict()),
+        ReceiptOutcome::Replay(_) => unreachable!(),
+    };
+    let Json(created) = developer_apps::create_my_oauth_client(
+        State(state.clone()),
+        auth_user,
+        TelemetryContext::default(),
+        Json(developer_apps::CreateDeveloperOAuthClientRequest {
+            name: body.name,
+            redirect_uris: body.redirect_uris,
+            client_type: Some("confidential".to_string()),
+            delegation_scopes: None,
+            broker_capability_enabled: None,
+            revocation_webhook_url: None,
+            revocation_webhook_secret: None,
+            allowed_scopes: None,
+            target_org_id: None,
+            default_service_catalog_slugs: None,
+        }),
+    )
+    .await?;
+    complete_wave4(&state, &receipt, &created.id).await?;
+    Ok(Json(AssistantDeveloperAppResponse {
+        resource: AssistantDeveloperAppResource {
+            client_id: created.id,
+        },
+        replayed: false,
+    }))
+}
+
+async fn update_developer_app_action(
+    State(state): State<AppState>,
+    auth_user: AuthUser,
+    Json(body): Json<AssistantDeveloperAppUpdateRequest>,
+) -> AppResult<Json<AssistantDeveloperAppResponse>> {
+    let actor = auth_user.user_id.to_string();
+    let id = parse_uuid(&body.client_id, "clientId")?;
+    let request_id = normalize_action_request_id(body.action_request_id)?;
+    let fp = action_fingerprint(
+        DEVELOPER_APP_UPDATE_ACTION,
+        serde_json::json!({"id":id,"name":body.name,"redirectUris":body.redirect_uris}),
+    )?;
+    let outcome = reserve_or_replay(
+        &state.db,
+        &actor,
+        DEVELOPER_APP_UPDATE_ACTION,
+        &request_id,
+        &fp,
+        id.clone(),
+    )
+    .await?;
+    if let Some((_, replayed)) = replayed_resource(&outcome) {
+        return Ok(Json(AssistantDeveloperAppResponse {
+            resource: AssistantDeveloperAppResource { client_id: id },
+            replayed,
+        }));
+    }
+    let receipt = match outcome {
+        ReceiptOutcome::Reserved(r) => r,
+        ReceiptOutcome::InProgress(_) => return Err(in_progress_conflict()),
+        ReceiptOutcome::Replay(_) => unreachable!(),
+    };
+    let _ = developer_apps::update_my_oauth_client(
+        State(state.clone()),
+        auth_user,
+        Path(id.clone()),
+        Json(developer_apps::UpdateDeveloperOAuthClientRequest {
+            name: body.name,
+            redirect_uris: body.redirect_uris,
+            delegation_scopes: None,
+            broker_capability_enabled: None,
+            revocation_webhook_url: None,
+            revocation_webhook_secret: None,
+            allowed_scopes: None,
+            default_service_catalog_slugs: None,
+        }),
+    )
+    .await?;
+    complete_wave4(&state, &receipt, &id).await?;
+    Ok(Json(AssistantDeveloperAppResponse {
+        resource: AssistantDeveloperAppResource { client_id: id },
+        replayed: false,
+    }))
+}
+
+async fn delete_developer_app_action(
+    State(state): State<AppState>,
+    auth_user: AuthUser,
+    Json(body): Json<AssistantDeveloperAppRequest>,
+) -> AppResult<Json<AssistantDeveloperAppResponse>> {
+    let actor = auth_user.user_id.to_string();
+    let id = parse_uuid(&body.client_id, "clientId")?;
+    let request_id = normalize_action_request_id(body.action_request_id)?;
+    let fp = action_fingerprint(DEVELOPER_APP_DELETE_ACTION, serde_json::json!({"id":id}))?;
+    let outcome = reserve_or_replay(
+        &state.db,
+        &actor,
+        DEVELOPER_APP_DELETE_ACTION,
+        &request_id,
+        &fp,
+        id.clone(),
+    )
+    .await?;
+    if let Some((_, replayed)) = replayed_resource(&outcome) {
+        return Ok(Json(AssistantDeveloperAppResponse {
+            resource: AssistantDeveloperAppResource { client_id: id },
+            replayed,
+        }));
+    }
+    let receipt = match outcome {
+        ReceiptOutcome::Reserved(r) => r,
+        ReceiptOutcome::InProgress(_) => return Err(in_progress_conflict()),
+        ReceiptOutcome::Replay(_) => unreachable!(),
+    };
+    let _ =
+        developer_apps::delete_my_oauth_client(State(state.clone()), auth_user, Path(id.clone()))
+            .await?;
+    complete_wave4(&state, &receipt, &id).await?;
+    Ok(Json(AssistantDeveloperAppResponse {
+        resource: AssistantDeveloperAppResource { client_id: id },
+        replayed: false,
+    }))
+}
+
+async fn rotate_developer_app_secret_action(
+    State(state): State<AppState>,
+    auth_user: AuthUser,
+    Json(body): Json<AssistantDeveloperAppRequest>,
+) -> AppResult<Json<AssistantDeveloperAppResponse>> {
+    let actor = auth_user.user_id.to_string();
+    let id = parse_uuid(&body.client_id, "clientId")?;
+    let request_id = normalize_action_request_id(body.action_request_id)?;
+    let fp = action_fingerprint(
+        DEVELOPER_APP_ROTATE_SECRET_ACTION,
+        serde_json::json!({"id":id}),
+    )?;
+    let outcome = reserve_or_replay(
+        &state.db,
+        &actor,
+        DEVELOPER_APP_ROTATE_SECRET_ACTION,
+        &request_id,
+        &fp,
+        id.clone(),
+    )
+    .await?;
+    if let Some((_, replayed)) = replayed_resource(&outcome) {
+        return Ok(Json(AssistantDeveloperAppResponse {
+            resource: AssistantDeveloperAppResource { client_id: id },
+            replayed,
+        }));
+    }
+    let receipt = match outcome {
+        ReceiptOutcome::Reserved(r) => r,
+        ReceiptOutcome::InProgress(_) => return Err(in_progress_conflict()),
+        ReceiptOutcome::Replay(_) => unreachable!(),
+    };
+    let _ = developer_apps::rotate_my_oauth_client_secret(
+        State(state.clone()),
+        auth_user,
+        TelemetryContext::default(),
+        Path(id.clone()),
+    )
+    .await?;
+    complete_wave4(&state, &receipt, &id).await?;
+    Ok(Json(AssistantDeveloperAppResponse {
+        resource: AssistantDeveloperAppResource { client_id: id },
+        replayed: false,
+    }))
+}
+
+async fn update_notifications_action(
+    State(state): State<AppState>,
+    auth_user: AuthUser,
+    Json(body): Json<AssistantNotificationsUpdateRequest>,
+) -> AppResult<Json<AssistantNotificationResponse>> {
+    let actor = auth_user.user_id.to_string();
+    let request_id = normalize_action_request_id(body.action_request_id)?;
+    let fp = action_fingerprint(
+        NOTIFICATIONS_UPDATE_ACTION,
+        serde_json::json!({"telegramEnabled":body.telegram_enabled,"approvalRequired":body.approval_required,"approvalTimeoutSecs":body.approval_timeout_secs,"grantExpiryDays":body.grant_expiry_days,"pushEnabled":body.push_enabled}),
+    )?;
+    let outcome = reserve_or_replay(
+        &state.db,
+        &actor,
+        NOTIFICATIONS_UPDATE_ACTION,
+        &request_id,
+        &fp,
+        actor.clone(),
+    )
+    .await?;
+    if let Some((id, replayed)) = replayed_resource(&outcome) {
+        return Ok(Json(AssistantNotificationResponse {
+            resource: AssistantNotificationBindingResource { binding_id: id },
+            replayed,
+        }));
+    }
+    let receipt = match outcome {
+        ReceiptOutcome::Reserved(r) => r,
+        ReceiptOutcome::InProgress(_) => return Err(in_progress_conflict()),
+        ReceiptOutcome::Replay(_) => unreachable!(),
+    };
+    let Json(settings) = notifications::update_settings(
+        State(state.clone()),
+        auth_user,
+        Json(notifications::UpdateNotificationSettingsRequest {
+            telegram_enabled: body.telegram_enabled,
+            approval_required: body.approval_required,
+            approval_timeout_secs: body.approval_timeout_secs,
+            grant_expiry_days: body.grant_expiry_days,
+            push_enabled: body.push_enabled,
+        }),
+    )
+    .await?;
+    let id = actor.clone();
+    let _ = settings;
+    complete_wave4(&state, &receipt, &id).await?;
+    Ok(Json(AssistantNotificationResponse {
+        resource: AssistantNotificationBindingResource { binding_id: id },
+        replayed: false,
+    }))
+}
+
+async fn link_telegram_action(
+    State(state): State<AppState>,
+    auth_user: AuthUser,
+    Json(body): Json<AssistantActionRequestId>,
+) -> AppResult<Json<AssistantNotificationResponse>> {
+    let actor = auth_user.user_id.to_string();
+    let request_id = normalize_action_request_id(body.action_request_id)?;
+    let fp = action_fingerprint(
+        NOTIFICATIONS_TELEGRAM_LINK_ACTION,
+        serde_json::json!({"userId":actor}),
+    )?;
+    let outcome = reserve_or_replay(
+        &state.db,
+        &actor,
+        NOTIFICATIONS_TELEGRAM_LINK_ACTION,
+        &request_id,
+        &fp,
+        actor.clone(),
+    )
+    .await?;
+    if let Some((id, replayed)) = replayed_resource(&outcome) {
+        return Ok(Json(AssistantNotificationResponse {
+            resource: AssistantNotificationBindingResource { binding_id: id },
+            replayed,
+        }));
+    }
+    let receipt = match outcome {
+        ReceiptOutcome::Reserved(r) => r,
+        ReceiptOutcome::InProgress(_) => return Err(in_progress_conflict()),
+        ReceiptOutcome::Replay(_) => unreachable!(),
+    };
+    let _ = notifications::telegram_link(State(state.clone()), auth_user).await?;
+    complete_wave4(&state, &receipt, &actor).await?;
+    Ok(Json(AssistantNotificationResponse {
+        resource: AssistantNotificationBindingResource { binding_id: actor },
+        replayed: false,
+    }))
+}
+
+async fn disconnect_telegram_action(
+    State(state): State<AppState>,
+    auth_user: AuthUser,
+    Json(body): Json<AssistantActionRequestId>,
+) -> AppResult<Json<AssistantNotificationResponse>> {
+    let actor = auth_user.user_id.to_string();
+    let request_id = normalize_action_request_id(body.action_request_id)?;
+    let fp = action_fingerprint(
+        NOTIFICATIONS_TELEGRAM_DISCONNECT_ACTION,
+        serde_json::json!({"userId":actor}),
+    )?;
+    let outcome = reserve_or_replay(
+        &state.db,
+        &actor,
+        NOTIFICATIONS_TELEGRAM_DISCONNECT_ACTION,
+        &request_id,
+        &fp,
+        actor.clone(),
+    )
+    .await?;
+    if let Some((id, replayed)) = replayed_resource(&outcome) {
+        return Ok(Json(AssistantNotificationResponse {
+            resource: AssistantNotificationBindingResource { binding_id: id },
+            replayed,
+        }));
+    }
+    let receipt = match outcome {
+        ReceiptOutcome::Reserved(r) => r,
+        ReceiptOutcome::InProgress(_) => return Err(in_progress_conflict()),
+        ReceiptOutcome::Replay(_) => unreachable!(),
+    };
+    let _ = notifications::telegram_disconnect(
+        State(state.clone()),
+        auth_user,
+        TelemetryContext::default(),
+    )
+    .await?;
+    complete_wave4(&state, &receipt, &actor).await?;
+    Ok(Json(AssistantNotificationResponse {
+        resource: AssistantNotificationBindingResource { binding_id: actor },
+        replayed: false,
+    }))
+}
+
+async fn add_gcp_service_account_action(
+    State(state): State<AppState>,
+    auth_user: AuthUser,
+    Json(body): Json<AssistantGcpCreateRequest>,
+) -> AppResult<Json<AssistantExternalKeyResponse>> {
+    let actor = auth_user.user_id.to_string();
+    let request_id = normalize_action_request_id(body.action_request_id)?;
+    let fp = action_fingerprint(
+        EXTERNAL_KEY_ADD_GCP_ACTION,
+        serde_json::json!({"label":body.label,"scopes":body.scopes,"serviceSlugs":body.service_slugs,"targetOrgId":body.target_org_id}),
+    )?;
+    let outcome = reserve_or_replay(
+        &state.db,
+        &actor,
+        EXTERNAL_KEY_ADD_GCP_ACTION,
+        &request_id,
+        &fp,
+        Uuid::new_v4().to_string(),
+    )
+    .await?;
+    if let Some((id, replayed)) = replayed_resource(&outcome) {
+        return Ok(Json(AssistantExternalKeyResponse {
+            resource: AssistantExternalKeyResource {
+                external_key_id: id,
+            },
+            replayed,
+        }));
+    }
+    let receipt = match outcome {
+        ReceiptOutcome::Reserved(r) => r,
+        ReceiptOutcome::InProgress(_) => return Err(in_progress_conflict()),
+        ReceiptOutcome::Replay(_) => unreachable!(),
+    };
+    let (_, Json(created)) = user_api_keys_external::create_gcp_service_account_key(
+        State(state.clone()),
+        auth_user,
+        Json(user_api_keys_external::CreateGcpServiceAccountRequest {
+            label: body.label,
+            key_json: body.key_json,
+            scopes: body.scopes,
+            service_slugs: body.service_slugs.unwrap_or_default(),
+            target_org_id: body.target_org_id,
+        }),
+    )
+    .await?;
+    complete_wave4(&state, &receipt, &created.id).await?;
+    Ok(Json(AssistantExternalKeyResponse {
+        resource: AssistantExternalKeyResource {
+            external_key_id: created.id,
+        },
+        replayed: false,
+    }))
+}
+
+async fn connect_openclaw_action(
+    State(state): State<AppState>,
+    auth_user: AuthUser,
+    Json(body): Json<AssistantOpenClawConnectRequest>,
+) -> AppResult<Json<AssistantOrgResponse>> {
+    let actor = auth_user.user_id.to_string();
+    let request_id = normalize_action_request_id(body.action_request_id)?;
+    let gateway_url = body.gateway_url.trim().to_string();
+    let credential = body.credential;
+    if gateway_url.is_empty() || credential.is_empty() {
+        return Err(AppError::ValidationError(
+            "gatewayUrl and credential are required".to_string(),
+        ));
+    }
+    let parsed = url::Url::parse(&gateway_url)
+        .map_err(|_| AppError::ValidationError("gatewayUrl must be a valid URL".to_string()))?;
+    if parsed.scheme() != "https"
+        || parsed.username() != ""
+        || parsed.password().is_some()
+        || parsed.fragment().is_some()
+    {
+        return Err(AppError::ValidationError(
+            "gatewayUrl must be HTTPS without userinfo or a fragment".to_string(),
+        ));
+    }
+    let fp = action_fingerprint(
+        OPENCLAW_CONNECT_ACTION,
+        serde_json::json!({"gatewayUrl":gateway_url,"label":body.label}),
+    )?;
+    let outcome = reserve_or_replay(
+        &state.db,
+        &actor,
+        OPENCLAW_CONNECT_ACTION,
+        &request_id,
+        &fp,
+        Uuid::new_v4().to_string(),
+    )
+    .await?;
+    if let Some((id, replayed)) = replayed_resource(&outcome) {
+        return Ok(Json(AssistantUserServiceResponse {
+            resource: AssistantUserServiceResource {
+                user_service_id: id,
+            },
+            replayed,
+        }));
+    }
+    let receipt = match outcome {
+        ReceiptOutcome::Reserved(r) => r,
+        ReceiptOutcome::InProgress(_) => return Err(in_progress_conflict()),
+        ReceiptOutcome::Replay(_) => unreachable!(),
+    };
+    let Json(created) = keys::create_key(
+        State(state.clone()),
+        auth_user,
+        TelemetryContext::default(),
+        Json(keys::CreateKeyRequest {
+            service_slug: Some("openclaw".to_string()),
+            credential: Some(credential),
+            label: body.label.unwrap_or_else(|| "OpenClaw".to_string()),
+            endpoint_url: Some(gateway_url),
+            slug: None,
+            auth_method: Some("bearer".to_string()),
+            auth_key_name: Some("Authorization".to_string()),
+            node_id: None,
+            admin_only: None,
+            ssh_host: None,
+            ssh_port: None,
+            ssh_certificate_auth: None,
+            ssh_auth_mode: None,
+            ssh_principals: None,
+            ssh_certificate_ttl_minutes: None,
+            identity_propagation_mode: None,
+            identity_include_user_id: None,
+            identity_include_email: None,
+            identity_include_name: None,
+            identity_jwt_audience: None,
+            forward_access_token: None,
+            inject_delegation_token: None,
+            delegation_token_scope: None,
+            target_org_id: None,
+            openapi_spec_url: None,
+            ws_frame_injections: None,
+            oauth_client_id: None,
+            oauth_client_secret: None,
+            copy_oauth_client_from: None,
+        }),
+    )
+    .await?;
+    complete_wave4(&state, &receipt, &created.id).await?;
+    Ok(Json(AssistantUserServiceResponse {
+        resource: AssistantUserServiceResource {
+            user_service_id: created.id,
+        },
+        replayed: false,
     }))
 }

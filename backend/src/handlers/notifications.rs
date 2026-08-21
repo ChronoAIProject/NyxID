@@ -15,6 +15,7 @@ use crate::telemetry::{TelemetryContext, TelemetryEvent, emit_event};
 
 #[derive(Debug, Serialize)]
 pub struct NotificationSettingsResponse {
+    pub id: String,
     pub telegram_connected: bool,
     pub telegram_username: Option<String>,
     pub telegram_enabled: bool,
@@ -23,6 +24,39 @@ pub struct NotificationSettingsResponse {
     pub grant_expiry_days: u32,
     pub push_enabled: bool,
     pub push_device_count: usize,
+    pub updated_at: String,
+}
+
+/// Assistant postcondition projection for notification settings.  The detail
+/// response may contain an upstream Telegram username; the projection omits
+/// it and retains only booleans, counters, the binding id, and a timestamp.
+#[derive(Debug, Serialize)]
+pub struct NotificationSettingsAuthorizationEvidenceResponse {
+    pub id: String,
+    pub telegram_connected: bool,
+    pub telegram_enabled: bool,
+    pub approval_required: bool,
+    pub approval_timeout_secs: u32,
+    pub grant_expiry_days: u32,
+    pub push_enabled: bool,
+    pub push_device_count: usize,
+    pub updated_at: String,
+}
+
+impl NotificationSettingsAuthorizationEvidenceResponse {
+    pub fn from_settings_response(response: &NotificationSettingsResponse) -> Self {
+        Self {
+            id: response.id.clone(),
+            telegram_connected: response.telegram_connected,
+            telegram_enabled: response.telegram_enabled,
+            approval_required: response.approval_required,
+            approval_timeout_secs: response.approval_timeout_secs,
+            grant_expiry_days: response.grant_expiry_days,
+            push_enabled: response.push_enabled,
+            push_device_count: response.push_device_count,
+            updated_at: response.updated_at.clone(),
+        }
+    }
 }
 
 #[derive(Debug, Deserialize)]
@@ -58,6 +92,17 @@ pub async fn get_settings(
     let channel = notification_service::get_or_create_channel(&state.db, &user_id).await?;
 
     Ok(Json(to_settings_response(&channel)))
+}
+
+/// GET /api/v1/notifications/settings/authorization
+pub async fn get_settings_authorization(
+    State(state): State<AppState>,
+    auth_user: AuthUser,
+) -> AppResult<Json<NotificationSettingsAuthorizationEvidenceResponse>> {
+    let Json(detail) = get_settings(State(state), auth_user).await?;
+    Ok(Json(
+        NotificationSettingsAuthorizationEvidenceResponse::from_settings_response(&detail),
+    ))
 }
 
 /// PUT /api/v1/notifications/settings
@@ -298,6 +343,7 @@ pub async fn telegram_disconnect(
 
 fn to_settings_response(channel: &NotificationChannel) -> NotificationSettingsResponse {
     NotificationSettingsResponse {
+        id: channel.id.clone(),
         telegram_connected: channel.telegram_chat_id.is_some(),
         telegram_username: channel.telegram_username.clone(),
         telegram_enabled: channel.telegram_enabled,
@@ -306,6 +352,7 @@ fn to_settings_response(channel: &NotificationChannel) -> NotificationSettingsRe
         grant_expiry_days: channel.grant_expiry_days,
         push_enabled: channel.push_enabled,
         push_device_count: channel.push_devices.len(),
+        updated_at: channel.updated_at.to_rfc3339(),
     }
 }
 

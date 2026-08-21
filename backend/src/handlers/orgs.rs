@@ -140,6 +140,7 @@ pub struct OrgResponse {
     /// from user-facing surfaces).
     pub contact_email: Option<String>,
     pub created_at: String,
+    pub updated_at: String,
     pub remote_credential_integrity_verification_opt_out: bool,
     /// Caller's role in this org. Always present in single-org responses.
     pub your_role: OrgRoleWire,
@@ -166,6 +167,33 @@ pub struct OrgListItem {
     pub contact_email: Option<String>,
     pub your_role: OrgRoleWire,
     pub created_at: String,
+}
+
+/// Minimal assistant postcondition projection.  The full org response carries
+/// user-authored display names, contact addresses, slugs, and avatar URLs, so
+/// it is not safe to feed to the recursive evidence reader.
+#[derive(Debug, Serialize, ToSchema)]
+pub struct OrgAuthorizationEvidenceResponse {
+    pub id: String,
+    pub your_role: OrgRoleWire,
+    pub member_count: u64,
+    pub remote_credential_integrity_verification_opt_out: bool,
+    pub created_at: String,
+    pub updated_at: String,
+}
+
+impl OrgAuthorizationEvidenceResponse {
+    pub fn from_org_response(response: &OrgResponse) -> Self {
+        Self {
+            id: response.id.clone(),
+            your_role: response.your_role,
+            member_count: response.member_count,
+            remote_credential_integrity_verification_opt_out: response
+                .remote_credential_integrity_verification_opt_out,
+            created_at: response.created_at.clone(),
+            updated_at: response.updated_at.clone(),
+        }
+    }
 }
 
 #[derive(Debug, Serialize, ToSchema)]
@@ -548,6 +576,7 @@ pub async fn create_org(
             avatar_url: org.avatar_url,
             contact_email,
             created_at: org.created_at.to_rfc3339(),
+            updated_at: org.updated_at.to_rfc3339(),
             remote_credential_integrity_verification_opt_out: opt_out,
             your_role: membership.role.into(),
             member_count: 1,
@@ -612,11 +641,27 @@ pub async fn get_org(
         avatar_url: org.avatar_url,
         contact_email,
         created_at: org.created_at.to_rfc3339(),
+        updated_at: org.updated_at.to_rfc3339(),
         remote_credential_integrity_verification_opt_out: opt_out,
         your_role: membership.role.into(),
         member_count: members.len() as u64,
         enabled_features,
     }))
+}
+
+/// GET /api/v1/orgs/{key}/authorization
+///
+/// Assistant evidence projection.  Keep the ACL exactly aligned with
+/// `get_org`; only the typed, non-free-text fields are emitted.
+pub async fn get_org_authorization(
+    State(state): State<AppState>,
+    auth_user: AuthUser,
+    Path(key): Path<String>,
+) -> AppResult<Json<OrgAuthorizationEvidenceResponse>> {
+    let Json(detail) = get_org(State(state), auth_user, Path(key)).await?;
+    Ok(Json(OrgAuthorizationEvidenceResponse::from_org_response(
+        &detail,
+    )))
 }
 
 /// PATCH /api/v1/orgs/{org_id}
@@ -696,6 +741,7 @@ pub async fn update_org(
         avatar_url: org.avatar_url,
         contact_email,
         created_at: org.created_at.to_rfc3339(),
+        updated_at: org.updated_at.to_rfc3339(),
         remote_credential_integrity_verification_opt_out: opt_out,
         your_role: membership.role.into(),
         member_count: members.len() as u64,
@@ -1974,6 +2020,7 @@ mod tests {
             avatar_url: None,
             contact_email: Some("admin@acme.com".to_string()),
             created_at: "2024-01-01T00:00:00Z".to_string(),
+            updated_at: "2024-01-01T00:00:00Z".to_string(),
             remote_credential_integrity_verification_opt_out: false,
             your_role: OrgRoleWire::Admin,
             member_count: 5,
