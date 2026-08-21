@@ -1,0 +1,7 @@
+name: NyxID CodeQL config
+
+# The CLI wizard bundle is generated third-party/minified output. Its source
+# files are analyzed through the frontend build; scanning the committed bundle
+# produces findings in embedded vendor code that cannot be remediated here.
+paths-ignore:
+  - cli/src/wizard/assets/index.html
