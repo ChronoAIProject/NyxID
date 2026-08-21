@@ -518,6 +518,37 @@ fn derive_http_service_category(
     }
 }
 
+/// A stored (master) credential is only coherent on an internal, provider-less
+/// row that does not require a user credential. OIDC's generated client secret
+/// is excluded because it is not an operator-supplied downstream credential.
+fn validate_master_credential_shape(
+    auth_method: &str,
+    credential_present: bool,
+    service_category: &str,
+    provider_config_id: Option<&str>,
+) -> AppResult<()> {
+    if !credential_present {
+        return Ok(());
+    }
+    if auth_method == "none" {
+        return Err(AppError::ValidationError(
+            "A stored credential requires an auth_method; auth_method \"none\" never injects it"
+                .into(),
+        ));
+    }
+    if service_category == "connection" {
+        return Err(AppError::ValidationError(
+            "A stored master credential cannot be combined with a user-credential (connection) service; create an internal-category row for platform credentials".into(),
+        ));
+    }
+    if provider_config_id.is_some() {
+        return Err(AppError::ValidationError(
+            "A stored master credential cannot be combined with a provider_config_id; platform rows must be provider-less".into(),
+        ));
+    }
+    Ok(())
+}
+
 fn derive_ssh_service_category(service_category: Option<&str>) -> AppResult<String> {
     match service_category {
         Some("provider") => Err(AppError::ValidationError(
@@ -895,6 +926,16 @@ pub async fn create_service(
 
         validate_base_url(base_url)?;
 
+        let service_category =
+            derive_http_service_category(&auth_method, body.service_category.as_deref())?;
+        let requires_user_credential = service_category == "connection";
+        validate_master_credential_shape(
+            &auth_method,
+            !credential.is_empty() && auth_method != "oidc",
+            &service_category,
+            None,
+        )?;
+
         let (encrypted_cred, oauth_client_id) = if auth_method == "oidc" {
             let callback_url = format!("{}/callback", base_url.trim_end_matches('/'));
             let client_name = format!("{} OIDC Client", body.name);
@@ -927,9 +968,6 @@ pub async fn create_service(
         };
 
         let docs_metadata = api_docs_service::discover_service_docs(base_url, None, None).await;
-        let service_category =
-            derive_http_service_category(&auth_method, body.service_category.as_deref())?;
-        let requires_user_credential = service_category == "connection";
 
         (
             base_url.to_string(),
@@ -2434,6 +2472,7 @@ mod tests {
         CreateServiceRequest, UpdateServiceRequest, create_service, derive_http_service_category,
         derive_ssh_service_category, derive_visibility, identity_update_fields,
         normalize_service_type, resolve_spec_url_update, resync_service_identity, update_service,
+        validate_master_credential_shape,
     };
     use crate::errors::{AppError, AppResult};
     use crate::models::audit_log::COLLECTION_NAME as AUDIT_LOGS;
@@ -3353,6 +3392,38 @@ mod tests {
     #[test]
     fn derive_http_service_category_rejects_provider_for_non_oidc() {
         assert!(derive_http_service_category("bearer", Some("provider")).is_err());
+    }
+
+    #[test]
+    fn master_credential_shape_allows_internal_credentialed_row() {
+        assert!(validate_master_credential_shape("bearer", true, "internal", None).is_ok());
+    }
+
+    #[test]
+    fn master_credential_shape_rejects_user_credential_category() {
+        let error = validate_master_credential_shape("bearer", true, "connection", None)
+            .expect_err("connection rows must not store master credentials");
+        assert!(matches!(error, AppError::ValidationError(_)));
+    }
+
+    #[test]
+    fn master_credential_shape_rejects_provider_linked_row() {
+        let error = validate_master_credential_shape("bearer", true, "internal", Some("prov-id"))
+            .expect_err("provider-linked rows must not store master credentials");
+        assert!(matches!(error, AppError::ValidationError(_)));
+    }
+
+    #[test]
+    fn master_credential_shape_rejects_credential_without_auth() {
+        let error = validate_master_credential_shape("none", true, "internal", None)
+            .expect_err("none-auth rows cannot store an injected credential");
+        assert!(matches!(error, AppError::ValidationError(_)));
+    }
+
+    #[test]
+    fn master_credential_shape_ignores_absent_credential() {
+        assert!(validate_master_credential_shape("bearer", false, "connection", None).is_ok());
+        assert!(validate_master_credential_shape("none", false, "internal", None).is_ok());
     }
 
     #[test]

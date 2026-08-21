@@ -161,6 +161,19 @@ pub async fn authorize_master_credential(
         return Err(AppError::NotFound("Service not found".to_string()));
     }
 
+    // A row holding a platform credential must state what it may do. Absent
+    // policy is deny, not passthrough (V1_SPEC item 2). Present-but-empty
+    // policy still resolves here and denies at the operation layer.
+    if service.proxy_operation_policy.is_none() {
+        tracing::warn!(
+            service_id = %service.id,
+            service_slug = %service.slug,
+            reason = "master_credential_missing_operation_policy",
+            "Catalog master credential authorization denied"
+        );
+        return Err(AppError::NotFound("Service not found".to_string()));
+    }
+
     match service.visibility.as_str() {
         "public" => {}
         "private" => {
@@ -204,6 +217,12 @@ pub async fn authorize_master_credential(
             return Err(AppError::NotFound("Service not found".to_string()));
         }
     }
+
+    crate::mw::rate_limit::enforce_platform_user_limit(
+        crate::mw::rate_limit::platform_user_rate_limiter(),
+        &service.id,
+        &actor.user_id,
+    )?;
 
     Ok(AuthorizedMasterCredential::new(
         &service.credential_encrypted,
@@ -3578,6 +3597,69 @@ mod tests {
         );
     }
 
+    fn valid_master_service(policy: Option<ProxyOperationPolicy>) -> DownstreamService {
+        let mut service = dummy_service();
+        service.service_category = "internal".to_string();
+        service.auth_method = "bearer".to_string();
+        service.requires_user_credential = false;
+        service.credential_encrypted = vec![1, 2, 3];
+        service.proxy_operation_policy = policy;
+        service
+    }
+
+    #[tokio::test]
+    async fn master_credential_without_policy_is_denied() {
+        let Some(db) = connect_test_database("proxy_master_credential_missing_policy").await else {
+            eprintln!("skipping: no MongoDB");
+            return;
+        };
+        let service = valid_master_service(None);
+        let actor = EffectiveActor::from_user_id(uuid::Uuid::new_v4().to_string());
+
+        assert!(
+            authorize_master_credential(&db, &service, &actor)
+                .await
+                .is_err()
+        );
+    }
+
+    #[tokio::test]
+    async fn master_credential_with_empty_policy_resolves() {
+        let Some(db) = connect_test_database("proxy_master_credential_empty_policy").await else {
+            eprintln!("skipping: no MongoDB");
+            return;
+        };
+        let service = valid_master_service(Some(ProxyOperationPolicy { rules: vec![] }));
+        let actor = EffectiveActor::from_user_id(uuid::Uuid::new_v4().to_string());
+
+        assert!(
+            authorize_master_credential(&db, &service, &actor)
+                .await
+                .is_ok()
+        );
+    }
+
+    #[tokio::test]
+    async fn master_credential_with_policy_resolves() {
+        let Some(db) = connect_test_database("proxy_master_credential_policy").await else {
+            eprintln!("skipping: no MongoDB");
+            return;
+        };
+        let service = valid_master_service(Some(ProxyOperationPolicy {
+            rules: vec![crate::models::downstream_service::ProxyOperationRule {
+                method: "GET".to_string(),
+                path_template: "/health".to_string(),
+            }],
+        }));
+        let actor = EffectiveActor::from_user_id(uuid::Uuid::new_v4().to_string());
+
+        assert!(
+            authorize_master_credential(&db, &service, &actor)
+                .await
+                .is_ok()
+        );
+    }
+
     #[tokio::test]
     async fn master_credential_authorization_covers_visibility_and_consent() {
         let Some(db) = connect_test_database("proxy_master_credential_authorization").await else {
@@ -3621,6 +3703,7 @@ mod tests {
         service.service_category = "internal".to_string();
         service.auth_method = "bearer".to_string();
         service.credential_encrypted = vec![1, 2, 3];
+        service.proxy_operation_policy = Some(ProxyOperationPolicy { rules: vec![] });
         let actor = EffectiveActor::from_user_id(actor_id.clone());
 
         assert!(
@@ -3702,6 +3785,25 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn master_credential_rate_limit_uninitialized_is_unlimited() {
+        let Some(db) = connect_test_database("proxy_master_credential_uninitialized_limiter").await
+        else {
+            eprintln!("skipping: no MongoDB");
+            return;
+        };
+        let service = valid_master_service(Some(ProxyOperationPolicy { rules: vec![] }));
+        let actor = EffectiveActor::from_user_id(uuid::Uuid::new_v4().to_string());
+
+        for _ in 0..3 {
+            assert!(
+                authorize_master_credential(&db, &service, &actor)
+                    .await
+                    .is_ok()
+            );
+        }
+    }
+
+    #[tokio::test]
     async fn assistant_shaped_server_target_without_credential_resolves() {
         let Some(db) = connect_test_database("proxy_assistant_no_master_credential").await else {
             panic!("MongoDB is required for assistant target regression test");
@@ -3760,6 +3862,7 @@ mod tests {
         service.inject_delegation_token = true;
         service.visibility = "public".to_string();
         service.provider_config_id = None;
+        service.proxy_operation_policy = Some(ProxyOperationPolicy { rules: vec![] });
         service.credential_encrypted = test_encryption_keys()
             .encrypt(b"catalog-secret")
             .await
