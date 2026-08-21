@@ -308,24 +308,33 @@ fn validate_expected_state_version(expected_state_version: i64) -> AppResult<i64
     Ok(expected_state_version)
 }
 
-/// Read the authority projection's version after a receipt is reserved. The
-/// node model intentionally remains backward-compatible with rows that predate
-/// the projection; those rows are treated as version one, matching the public
-/// authorization endpoint. The mutation service still performs the write, so
-/// this check prevents a stale confirmation from entering that path.
+/// Compare-and-set the authority projection's version after a receipt is
+/// reserved. The node model intentionally remains backward-compatible with
+/// rows that predate the projection; those rows are treated as version one,
+/// matching the public authorization endpoint, and get the explicit version
+/// field as part of this no-op write. A stale confirmation therefore cannot
+/// pass the database write predicate into the mutation service.
 async fn ensure_expected_node_state_version(
     state: &AppState,
     node_id: &str,
     expected_state_version: i64,
 ) -> AppResult<()> {
-    let authority = state
+    let result = state
         .db
         .collection::<Document>(NODES)
-        .find_one(doc! { "_id": node_id, "is_active": true })
-        .await?
-        .ok_or_else(|| AppError::NodeNotFound("Node not found".to_string()))?;
-    let current_state_version = authority.get_i64("state_version").unwrap_or(1).max(1);
-    if current_state_version != expected_state_version {
+        .update_one(
+            doc! {
+                "_id": node_id,
+                "is_active": true,
+                "$or": [
+                    { "state_version": expected_state_version },
+                    { "state_version": { "$exists": false } },
+                ],
+            },
+            doc! { "$set": { "state_version": expected_state_version } },
+        )
+        .await?;
+    if result.matched_count != 1 {
         return Err(AppError::Conflict(
             "the node changed since this action was prepared".to_string(),
         ));
