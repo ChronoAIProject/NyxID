@@ -845,6 +845,24 @@ pub fn build_router() -> (Router<AppState>, Router<AppState>) {
             get(handlers::admin::verify_billing_ledger),
         )
         .route(
+            "/credits/grants",
+            get(handlers::billing_credits::admin_list_grants)
+                .post(handlers::billing_credits::issue_grant),
+        )
+        .route(
+            "/credits/grants/{grant_id}",
+            delete(handlers::billing_credits::revoke_grant),
+        )
+        .route(
+            "/credits/allowances",
+            get(handlers::billing_credits::admin_list_allowances)
+                .post(handlers::billing_credits::create_allowance),
+        )
+        .route(
+            "/credits/allowances/{allowance_id}",
+            patch(handlers::billing_credits::update_allowance),
+        )
+        .route(
             "/chain-verification",
             get(handlers::admin::get_chain_verification),
         )
@@ -1199,6 +1217,11 @@ pub fn build_router() -> (Router<AppState>, Router<AppState>) {
         )
         .route("/topup", post(handlers::billing::create_topup))
         .route("/topups", get(handlers::billing::list_topups))
+        .route("/grants", get(handlers::billing_credits::user_list_grants))
+        .route(
+            "/allowances",
+            get(handlers::billing_credits::user_list_allowances),
+        )
         .route(
             "/invoices/{invoice_id}/download",
             get(handlers::billing::download_invoice),

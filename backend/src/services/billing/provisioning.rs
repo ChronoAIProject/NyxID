@@ -74,10 +74,13 @@ pub async fn ensure_owner_wallet(
         balance_credits: lago_wallet.balance_credits,
         reserved_credits: 0,
         pending_lago_debits: 0,
+        pending_topup_expiry_credits: 0,
         has_payment_instrument: false,
         overdraft_cap_credits: default_overdraft_cap_credits,
         suspended: false,
         collection_state: CollectionState::Good,
+        topup_expiry_checked_at: None,
+        active_topup_expiry: None,
         balance_synced_at: now,
         created_at: now,
         updated_at: now,
@@ -164,6 +167,11 @@ pub async fn create_topup_checkout(
         payment_url: None,
         payment_provider: None,
         status: BillingTopUpStatus::Pending,
+        paid_at: None,
+        credits_expire_at: None,
+        expired_credits_micros: 0,
+        credits_expired_at: None,
+        expiry_void_transaction_id: None,
         created_at: now,
         updated_at: now,
     };
@@ -563,7 +571,9 @@ mod tests {
         let Some(db) = connect_test_database("billing_topup_checkout").await else {
             return;
         };
-        super::super::ledger::init_billing_ledger_hmac_key(zeroize::Zeroizing::new([3u8; 32]));
+        super::super::ledger::init_billing_ledger_hmac_key(zeroize::Zeroizing::new(
+            super::super::ledger::TEST_BILLING_LEDGER_HMAC_KEY,
+        ));
         let owner_id = insert_owner(&db, "topup@example.com").await;
         let lago = FakeLago::default();
 

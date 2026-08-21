@@ -83,6 +83,14 @@
         crate::handlers::billing::create_topup,
         crate::handlers::billing::list_topups,
         crate::handlers::billing::download_invoice,
+        crate::handlers::billing_credits::issue_grant,
+        crate::handlers::billing_credits::admin_list_grants,
+        crate::handlers::billing_credits::revoke_grant,
+        crate::handlers::billing_credits::user_list_grants,
+        crate::handlers::billing_credits::create_allowance,
+        crate::handlers::billing_credits::admin_list_allowances,
+        crate::handlers::billing_credits::update_allowance,
+        crate::handlers::billing_credits::user_list_allowances,
         // Demo
         crate::handlers::demo::get_demo
     ),
@@ -201,6 +209,20 @@
             crate::handlers::billing::TopUpRequest,
             crate::handlers::billing::BillingWalletResponse,
             crate::handlers::billing::TopUpResponse,
+            crate::handlers::billing_credits::IssueGrantRequest,
+            crate::handlers::billing_credits::IssueGrantResponse,
+            crate::handlers::billing_credits::CreditGrantResponse,
+            crate::handlers::billing_credits::CreditGrantListResponse,
+            crate::handlers::billing_credits::CreateAllowanceRequest,
+            crate::handlers::billing_credits::UpdateAllowanceRequest,
+            crate::handlers::billing_credits::UsageAllowanceResponse,
+            crate::handlers::billing_credits::UsageAllowanceListResponse,
+            crate::handlers::billing_credits::UserAllowanceBalanceResponse,
+            crate::handlers::billing_credits::UserAllowanceListResponse,
+            crate::models::billing_target::BillingTargetKind,
+            crate::models::billing_target::BillingServiceScope,
+            crate::models::credit_grant::CreditGrantStatus,
+            crate::models::usage_allowance::AllowanceRecurrence,
             // Demo
             crate::handlers::demo::DemoResponse
         )
@@ -220,6 +242,7 @@
         (name = "User Services", description = "User's proxy routing configuration"),
         (name = "API Keys", description = "NyxID API keys with service and node scope"),
         (name = "Billing", description = "Owner billing wallet and usage endpoints"),
+        (name = "Admin Credits", description = "Promotional credit grants and recurring usage allowances"),
         (name = "Demo", description = "First-success verification: returns 200 with no downstream call")
     )
 )]
