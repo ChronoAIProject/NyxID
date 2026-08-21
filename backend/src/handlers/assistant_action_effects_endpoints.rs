@@ -14,18 +14,21 @@ use axum::{
     routing::{get, post},
 };
 use serde::{Deserialize, Serialize};
-use sha2::{Digest, Sha256};
 use utoipa::ToSchema;
 
 use crate::AppState;
 use crate::errors::{AppError, AppResult};
 use crate::handlers::user_api_keys_external::{self, UpdateExternalApiKeyRequest};
 use crate::handlers::user_endpoints::{self, UpdateEndpointRequest};
+use crate::models::user_endpoint::{COLLECTION_NAME as USER_ENDPOINTS, UserEndpoint};
 use crate::mw::auth::AuthUser;
 use crate::services::assistant_action_receipts::{
-    self, ReceiptOutcome, fingerprint_canonical, in_progress_conflict, normalize_action_request_id,
+    self, ReceiptOutcome, fingerprint_canonical, fingerprint_sensitive_material, mark_completed,
+    normalize_action_request_id,
 };
-use crate::services::{audit_service::AuditActor, unified_key_service};
+use crate::services::{
+    audit_service::AuditActor, org_service, unified_key_service, user_endpoint_service,
+};
 use crate::telemetry::TelemetryContext;
 
 const ENDPOINT_UPDATE_ACTION: &str = "endpoint.update";
@@ -150,7 +153,7 @@ struct EndpointDeleteFingerprint<'a> {
 struct ExternalKeyRotateFingerprint<'a> {
     action: &'static str,
     external_key_id: &'a str,
-    credential_sha256: String,
+    credential_fingerprint: String,
 }
 
 #[derive(Serialize)]
@@ -197,6 +200,256 @@ fn canonical_cascade_siblings<'a>(
             .then_with(|| left.slug.cmp(right.slug))
     });
     Some(fingerprints)
+}
+
+async fn release_receipt(
+    db: &mongodb::Database,
+    receipt: &crate::models::assistant_action_receipt::AssistantActionReceipt,
+) -> AppResult<()> {
+    db.collection::<crate::models::assistant_action_receipt::AssistantActionReceipt>(
+        crate::models::assistant_action_receipt::COLLECTION_NAME,
+    )
+    .delete_one(mongodb::bson::doc! { "_id": &receipt.id })
+    .await?;
+    Ok(())
+}
+
+async fn receipt_exists(
+    db: &mongodb::Database,
+    actor: &str,
+    action: &str,
+    action_request_id: &str,
+) -> AppResult<bool> {
+    Ok(db
+        .collection::<crate::models::assistant_action_receipt::AssistantActionReceipt>(
+            crate::models::assistant_action_receipt::COLLECTION_NAME,
+        )
+        .find_one(mongodb::bson::doc! {
+            "user_id": actor,
+            "action": action,
+            "action_request_id": action_request_id,
+        })
+        .await?
+        .is_some())
+}
+
+async fn external_key_credential_matches(
+    state: &AppState,
+    key: &crate::models::user_api_key::UserApiKey,
+    credential: &str,
+) -> AppResult<bool> {
+    let ciphertext = if key.credential_type == "oauth2" {
+        key.access_token_encrypted.as_deref()
+    } else {
+        key.credential_encrypted.as_deref()
+    };
+    let Some(ciphertext) = ciphertext else {
+        return Ok(false);
+    };
+    Ok(state.encryption_keys.decrypt(ciphertext).await? == credential.as_bytes())
+}
+
+async fn resolve_endpoint_owner(
+    state: &AppState,
+    actor: &str,
+    endpoint_id: &str,
+) -> AppResult<String> {
+    let endpoint = state
+        .db
+        .collection::<UserEndpoint>(USER_ENDPOINTS)
+        .find_one(mongodb::bson::doc! { "_id": endpoint_id })
+        .await?
+        .ok_or_else(|| AppError::NotFound("Endpoint not found".to_string()))?;
+    let access = org_service::resolve_owner_access(&state.db, actor, &endpoint.user_id).await?;
+    if !access.can_read() {
+        return Err(AppError::NotFound("Endpoint not found".to_string()));
+    }
+    let services = crate::services::user_service_service::user_service_ids_for_endpoint(
+        &state.db,
+        &endpoint.user_id,
+        endpoint_id,
+    )
+    .await?;
+    if !access.allows_any_resource(&services) {
+        return Err(AppError::NotFound("Endpoint not found".to_string()));
+    }
+    if !access.can_write() {
+        return Err(AppError::OrgRoleInsufficient(
+            "you do not have permission to modify this endpoint".to_string(),
+        ));
+    }
+    Ok(endpoint.user_id)
+}
+
+async fn commit_endpoint_update(
+    state: &AppState,
+    auth_user: &AuthUser,
+    actor: &str,
+    endpoint_id: &str,
+    label: Option<String>,
+    endpoint_url: Option<String>,
+    openapi_spec_url: Option<String>,
+    receipt: crate::models::assistant_action_receipt::AssistantActionReceipt,
+    was_in_progress: bool,
+) -> AppResult<bool> {
+    let owner_id = resolve_endpoint_owner(state, actor, endpoint_id).await?;
+    let current = user_endpoint_service::get_endpoint(&state.db, &owner_id, endpoint_id).await?;
+    if was_in_progress
+        && label.as_deref().is_none_or(|value| value == current.label)
+        && endpoint_url
+            .as_deref()
+            .is_none_or(|value| value == current.url)
+        && openapi_spec_url
+            .as_deref()
+            .is_none_or(|value| current.openapi_spec_url.as_deref() == Some(value))
+    {
+        mark_completed(&state.db, &receipt).await?;
+        return Ok(true);
+    }
+    let _updated = user_endpoints::update_endpoint(
+        State(state.clone()),
+        auth_user.clone(),
+        TelemetryContext::default(),
+        Path(endpoint_id.to_string()),
+        Json(UpdateEndpointRequest {
+            url: endpoint_url,
+            label,
+            openapi_spec_url,
+            recommended_skills: None,
+        }),
+    )
+    .await?;
+    mark_completed(&state.db, &receipt).await?;
+    Ok(false)
+}
+
+async fn commit_endpoint_delete(
+    state: &AppState,
+    auth_user: &AuthUser,
+    endpoint_id: &str,
+    receipt: crate::models::assistant_action_receipt::AssistantActionReceipt,
+    was_in_progress: bool,
+) -> AppResult<bool> {
+    let exists = state
+        .db
+        .collection::<UserEndpoint>(USER_ENDPOINTS)
+        .find_one(mongodb::bson::doc! { "_id": endpoint_id })
+        .await?
+        .is_some();
+    if !exists {
+        if was_in_progress {
+            mark_completed(&state.db, &receipt).await?;
+            return Ok(true);
+        }
+        release_receipt(&state.db, &receipt).await?;
+        return Err(AppError::NotFound("Endpoint not found".to_string()));
+    }
+    user_endpoints::delete_endpoint(
+        State(state.clone()),
+        auth_user.clone(),
+        TelemetryContext::default(),
+        Path(endpoint_id.to_string()),
+    )
+    .await?;
+    mark_completed(&state.db, &receipt).await?;
+    Ok(false)
+}
+
+async fn commit_external_key_rotate(
+    state: &AppState,
+    auth_user: &AuthUser,
+    external_key_id: &str,
+    credential: String,
+    current_key: crate::models::user_api_key::UserApiKey,
+    receipt: crate::models::assistant_action_receipt::AssistantActionReceipt,
+    was_in_progress: bool,
+) -> AppResult<bool> {
+    if was_in_progress && external_key_credential_matches(state, &current_key, &credential).await? {
+        mark_completed(&state.db, &receipt).await?;
+        return Ok(true);
+    }
+    let _ = user_api_keys_external::update_external_api_key(
+        State(state.clone()),
+        auth_user.clone(),
+        Path(external_key_id.to_string()),
+        Json(UpdateExternalApiKeyRequest {
+            label: None,
+            credential: Some(credential),
+        }),
+    )
+    .await?;
+    mark_completed(&state.db, &receipt).await?;
+    Ok(false)
+}
+
+async fn commit_external_key_delete(
+    state: &AppState,
+    actor: &str,
+    audit_actor: &AuditActor,
+    external_key_id: &str,
+    options: unified_key_service::DisconnectOptions,
+    expected_siblings: Option<&[(String, String, String)]>,
+    receipt: crate::models::assistant_action_receipt::AssistantActionReceipt,
+    was_in_progress: bool,
+) -> AppResult<bool> {
+    let exists = state
+        .db
+        .collection::<crate::models::user_api_key::UserApiKey>(
+            crate::models::user_api_key::COLLECTION_NAME,
+        )
+        .find_one(mongodb::bson::doc! { "_id": external_key_id })
+        .await?
+        .is_some();
+    if !exists {
+        if was_in_progress {
+            mark_completed(&state.db, &receipt).await?;
+            return Ok(true);
+        }
+        release_receipt(&state.db, &receipt).await?;
+        return Err(AppError::NotFound("API key not found".to_string()));
+    }
+    let owner_id =
+        user_api_keys_external::resolve_api_key_write_owner(state, actor, external_key_id).await?;
+    match unified_key_service::disconnect_credentials_with_expected_siblings(
+        &state.db,
+        &state.encryption_keys,
+        &owner_id,
+        audit_actor,
+        unified_key_service::DisconnectTarget::UserApiKey(external_key_id),
+        options,
+        expected_siblings,
+    )
+    .await
+    {
+        Ok(_) => {
+            mark_completed(&state.db, &receipt).await?;
+            Ok(false)
+        }
+        Err(error @ AppError::NotFound(_)) => {
+            if was_in_progress {
+                mark_completed(&state.db, &receipt).await?;
+                Ok(true)
+            } else {
+                release_receipt(&state.db, &receipt).await?;
+                Err(error)
+            }
+        }
+        Err(error @ AppError::GrantCascadeConfirmationRequired(_)) => {
+            release_receipt(&state.db, &receipt).await?;
+            Err(error)
+        }
+        Err(error)
+            if matches!(
+                &error,
+                AppError::Conflict(message)
+                    if message == "the grant-cascade sibling set changed; review the confirmation again"
+            ) =>
+        {
+            release_receipt(&state.db, &receipt).await?;
+            Err(error)
+        }
+        Err(error) => Err(error),
+    }
 }
 
 fn optional_trimmed(value: Option<String>) -> Option<String> {
@@ -276,23 +529,35 @@ pub async fn update_endpoint(
         ReceiptOutcome::Replay(receipt) => {
             Ok(Json(endpoint_effect_response(receipt.resource_id, true)))
         }
-        ReceiptOutcome::InProgress(_) => Err(in_progress_conflict()),
-        ReceiptOutcome::Reserved(receipt) => {
-            let _updated = user_endpoints::update_endpoint(
-                State(state.clone()),
-                auth_user,
-                TelemetryContext::default(),
-                Path(endpoint_id.clone()),
-                Json(UpdateEndpointRequest {
-                    url: endpoint_url,
-                    label,
-                    openapi_spec_url,
-                    recommended_skills: None,
-                }),
+        ReceiptOutcome::InProgress(receipt) => {
+            let replayed = commit_endpoint_update(
+                &state,
+                &auth_user,
+                &actor,
+                &endpoint_id,
+                label,
+                endpoint_url,
+                openapi_spec_url,
+                receipt,
+                true,
             )
             .await?;
-            assistant_action_receipts::mark_completed(&state.db, &receipt).await?;
-            Ok(Json(endpoint_effect_response(endpoint_id, false)))
+            Ok(Json(endpoint_effect_response(endpoint_id, replayed)))
+        }
+        ReceiptOutcome::Reserved(receipt) => {
+            let replayed = commit_endpoint_update(
+                &state,
+                &auth_user,
+                &actor,
+                &endpoint_id,
+                label,
+                endpoint_url,
+                openapi_spec_url,
+                receipt,
+                false,
+            )
+            .await?;
+            Ok(Json(endpoint_effect_response(endpoint_id, replayed)))
         }
     }
 }
@@ -313,6 +578,22 @@ pub async fn delete_endpoint(
         endpoint_id: &endpoint_id,
     })?;
     let actor = auth_user.user_id.to_string();
+    let already_reserved = receipt_exists(
+        &state.db,
+        &actor,
+        ENDPOINT_DELETE_ACTION,
+        &action_request_id,
+    )
+    .await?;
+    if !already_reserved {
+        let owner_id = resolve_endpoint_owner(&state, &actor, &endpoint_id).await?;
+        crate::services::user_service_service::ensure_user_managed_endpoint(
+            &state.db,
+            &owner_id,
+            &endpoint_id,
+        )
+        .await?;
+    }
     match assistant_action_receipts::reserve_or_replay(
         &state.db,
         &actor,
@@ -326,33 +607,14 @@ pub async fn delete_endpoint(
         ReceiptOutcome::Replay(receipt) => {
             Ok(Json(endpoint_effect_response(receipt.resource_id, true)))
         }
-        ReceiptOutcome::InProgress(_) => Err(in_progress_conflict()),
-        ReceiptOutcome::Reserved(receipt) => {
-            match user_endpoints::delete_endpoint(
-                State(state.clone()),
-                auth_user,
-                TelemetryContext::default(),
-                Path(endpoint_id.clone()),
-            )
-            .await
-            {
-                Ok(_) => {
-                    assistant_action_receipts::mark_completed(&state.db, &receipt).await?;
-                    Ok(Json(endpoint_effect_response(endpoint_id, false)))
-                }
-                Err(AppError::NotFound(message)) => {
-                    state
-                        .db
-                        .collection::<crate::models::assistant_action_receipt::AssistantActionReceipt>(
-                            crate::models::assistant_action_receipt::COLLECTION_NAME,
-                        )
-                        .delete_one(mongodb::bson::doc! { "_id": &receipt.id })
-                        .await?;
-                    Err(AppError::NotFound(message))
-                }
-                Err(error) => Err(error),
-            }
-        }
+        ReceiptOutcome::InProgress(receipt) => Ok(Json(endpoint_effect_response(
+            endpoint_id.clone(),
+            commit_endpoint_delete(&state, &auth_user, &endpoint_id, receipt, true).await?,
+        ))),
+        ReceiptOutcome::Reserved(receipt) => Ok(Json(endpoint_effect_response(
+            endpoint_id.clone(),
+            commit_endpoint_delete(&state, &auth_user, &endpoint_id, receipt, false).await?,
+        ))),
     }
 }
 
@@ -387,7 +649,7 @@ pub async fn rotate_external_key(
     let fingerprint = fingerprint_canonical(&ExternalKeyRotateFingerprint {
         action: EXTERNAL_KEY_ROTATE_ACTION,
         external_key_id: &external_key_id,
-        credential_sha256: hex::encode(Sha256::digest(credential.as_bytes())),
+        credential_fingerprint: fingerprint_sensitive_material(&credential),
     })?;
     let actor = auth_user.user_id.to_string();
     match assistant_action_receipts::reserve_or_replay(
@@ -404,20 +666,37 @@ pub async fn rotate_external_key(
             receipt.resource_id,
             true,
         ))),
-        ReceiptOutcome::InProgress(_) => Err(in_progress_conflict()),
-        ReceiptOutcome::Reserved(receipt) => {
-            let _rotated = user_api_keys_external::update_external_api_key(
-                State(state.clone()),
-                auth_user,
-                Path(external_key_id.clone()),
-                Json(UpdateExternalApiKeyRequest {
-                    label: None,
-                    credential: Some(credential),
-                }),
+        ReceiptOutcome::InProgress(receipt) => {
+            let replayed = commit_external_key_rotate(
+                &state,
+                &auth_user,
+                &external_key_id,
+                credential,
+                existing_key,
+                receipt,
+                true,
             )
             .await?;
-            assistant_action_receipts::mark_completed(&state.db, &receipt).await?;
-            Ok(Json(external_key_effect_response(external_key_id, false)))
+            Ok(Json(external_key_effect_response(
+                external_key_id,
+                replayed,
+            )))
+        }
+        ReceiptOutcome::Reserved(receipt) => {
+            let replayed = commit_external_key_rotate(
+                &state,
+                &auth_user,
+                &external_key_id,
+                credential,
+                existing_key,
+                receipt,
+                false,
+            )
+            .await?;
+            Ok(Json(external_key_effect_response(
+                external_key_id,
+                replayed,
+            )))
         }
     }
 }
@@ -453,22 +732,31 @@ pub async fn delete_external_key(
             .collect::<Vec<_>>()
     });
     let actor = auth_user.user_id.to_string();
-    let owner_id =
-        user_api_keys_external::resolve_api_key_write_owner(&state, &actor, &external_key_id)
-            .await?;
     let options = unified_key_service::DisconnectOptions {
         cascade_grant,
         grant_scope: grant_scope.clone(),
     };
-    if !cascade_grant && grant_scope.as_deref() != Some("token") {
-        unified_key_service::ensure_disconnect_confirmation(
-            &state.db,
-            &state.encryption_keys,
-            &owner_id,
-            unified_key_service::DisconnectTarget::UserApiKey(&external_key_id),
-            options.clone(),
-        )
-        .await?;
+    let already_reserved = receipt_exists(
+        &state.db,
+        &actor,
+        EXTERNAL_KEY_DELETE_ACTION,
+        &action_request_id,
+    )
+    .await?;
+    if !already_reserved {
+        let owner_id =
+            user_api_keys_external::resolve_api_key_write_owner(&state, &actor, &external_key_id)
+                .await?;
+        if !cascade_grant && grant_scope.as_deref() != Some("token") {
+            unified_key_service::ensure_disconnect_confirmation(
+                &state.db,
+                &state.encryption_keys,
+                &owner_id,
+                unified_key_service::DisconnectTarget::UserApiKey(&external_key_id),
+                options.clone(),
+            )
+            .await?;
+        }
     }
     let fingerprint = fingerprint_canonical(&ExternalKeyDeleteFingerprint {
         action: EXTERNAL_KEY_DELETE_ACTION,
@@ -477,7 +765,6 @@ pub async fn delete_external_key(
         grant_scope: grant_scope.as_deref(),
         cascade_siblings: canonical_cascade_siblings(body.cascade_siblings.as_deref()),
     })?;
-    let actor = auth_user.user_id.to_string();
     match assistant_action_receipts::reserve_or_replay(
         &state.db,
         &actor,
@@ -492,52 +779,41 @@ pub async fn delete_external_key(
             receipt.resource_id,
             true,
         ))),
-        ReceiptOutcome::InProgress(_) => Err(in_progress_conflict()),
-        ReceiptOutcome::Reserved(receipt) => {
+        ReceiptOutcome::InProgress(receipt) => {
             let audit_actor = AuditActor::from_auth_user(&auth_user);
-            let deleted = unified_key_service::disconnect_credentials_with_expected_siblings(
-                &state.db,
-                &state.encryption_keys,
-                &owner_id,
+            let replayed = commit_external_key_delete(
+                &state,
+                &actor,
                 &audit_actor,
-                unified_key_service::DisconnectTarget::UserApiKey(&external_key_id),
+                &external_key_id,
                 options,
                 expected_siblings.as_deref(),
+                receipt,
+                true,
             )
-            .await;
-            match deleted {
-                Err(error @ AppError::NotFound(_))
-                | Err(error @ AppError::GrantCascadeConfirmationRequired(_)) => {
-                    state
-                        .db
-                        .collection::<crate::models::assistant_action_receipt::AssistantActionReceipt>(
-                            crate::models::assistant_action_receipt::COLLECTION_NAME,
-                        )
-                        .delete_one(mongodb::bson::doc! { "_id": &receipt.id })
-                        .await?;
-                    return Err(error);
-                }
-                Err(error) => {
-                    if matches!(
-                        &error,
-                        AppError::Conflict(message)
-                            if message
-                                == "the grant-cascade sibling set changed; review the confirmation again"
-                    ) {
-                        state
-                            .db
-                            .collection::<crate::models::assistant_action_receipt::AssistantActionReceipt>(
-                                crate::models::assistant_action_receipt::COLLECTION_NAME,
-                            )
-                            .delete_one(mongodb::bson::doc! { "_id": &receipt.id })
-                            .await?;
-                    }
-                    return Err(error);
-                }
-                Ok(_) => {}
-            }
-            assistant_action_receipts::mark_completed(&state.db, &receipt).await?;
-            Ok(Json(external_key_effect_response(external_key_id, false)))
+            .await?;
+            Ok(Json(external_key_effect_response(
+                external_key_id,
+                replayed,
+            )))
+        }
+        ReceiptOutcome::Reserved(receipt) => {
+            let audit_actor = AuditActor::from_auth_user(&auth_user);
+            let replayed = commit_external_key_delete(
+                &state,
+                &actor,
+                &audit_actor,
+                &external_key_id,
+                options,
+                expected_siblings.as_deref(),
+                receipt,
+                false,
+            )
+            .await?;
+            Ok(Json(external_key_effect_response(
+                external_key_id,
+                replayed,
+            )))
         }
     }
 }
@@ -553,6 +829,7 @@ mod tests {
     use futures::TryStreamExt;
     use mongodb::{IndexModel, bson::doc, options::IndexOptions};
     use serde_json::{Value, json};
+    use sha2::{Digest, Sha256};
     use tower::ServiceExt;
     use uuid::Uuid;
 
@@ -770,6 +1047,85 @@ mod tests {
             assert_eq!(status, StatusCode::BAD_REQUEST, "{label}: {response}");
             assert_ne!(status, StatusCode::INTERNAL_SERVER_ERROR);
         }
+    }
+
+    #[tokio::test]
+    async fn endpoint_update_interrupted_retry_resumes_and_completes() {
+        // Falsifier: restore the unconditional InProgress 409 or reapply the
+        // endpoint mutation; the retry then fails or overwrites `sentinel`.
+        let Some((db, actor_id)) = prepare_database("asst_ep_update_interrupted").await else {
+            return;
+        };
+        let endpoint_id =
+            insert_endpoint(&db, &actor_id, "Before", "https://api.example.com").await;
+        let state = test_app_state(db.clone());
+        let token = access_token(&state, &actor_id);
+        let body = json!({
+            "actionRequestId": "endpoint-update-interrupted",
+            "endpointId": endpoint_id,
+            "label": "After",
+        });
+        let (status, first) = request(
+            app(state.clone()),
+            &token,
+            "POST",
+            "/assistant/actions/endpoints/update",
+            Some(body.clone()),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{first}");
+        assert_eq!(first["replayed"], false);
+        let sentinel = mongodb::bson::DateTime::from_millis(2_000_000_000_000);
+        db.collection::<mongodb::bson::Document>(USER_ENDPOINTS)
+            .update_one(
+                doc! { "_id": &endpoint_id },
+                doc! { "$set": { "updated_at": sentinel } },
+            )
+            .await
+            .expect("set sentinel timestamp");
+        db.collection::<mongodb::bson::Document>(ASSISTANT_ACTION_RECEIPTS)
+            .update_one(
+                doc! {
+                    "user_id": &actor_id,
+                    "action": ENDPOINT_UPDATE_ACTION,
+                    "action_request_id": "endpoint-update-interrupted",
+                },
+                doc! {
+                    "$set": { "status": "pending" },
+                    "$unset": { "completed_at": "" },
+                },
+            )
+            .await
+            .expect("reopen receipt as pending");
+        let (status, retry) = request(
+            app(state),
+            &token,
+            "POST",
+            "/assistant/actions/endpoints/update",
+            Some(body),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{retry}");
+        assert_eq!(retry["replayed"], true);
+        let endpoint = db
+            .collection::<UserEndpoint>(USER_ENDPOINTS)
+            .find_one(doc! { "_id": &endpoint_id })
+            .await
+            .expect("load endpoint")
+            .expect("endpoint");
+        assert_eq!(endpoint.label, "After");
+        assert_eq!(endpoint.updated_at, sentinel.to_chrono());
+        let receipt = db
+            .collection::<AssistantActionReceipt>(ASSISTANT_ACTION_RECEIPTS)
+            .find_one(doc! {
+                "user_id": &actor_id,
+                "action": ENDPOINT_UPDATE_ACTION,
+                "action_request_id": "endpoint-update-interrupted",
+            })
+            .await
+            .expect("load receipt")
+            .expect("receipt");
+        assert_eq!(receipt.status, AssistantActionReceiptStatus::Completed);
     }
 
     #[tokio::test]
@@ -1274,6 +1630,23 @@ mod tests {
                 "resource": { "externalKeyId": "external-1" },
                 "replayed": true,
             })
+        );
+    }
+
+    #[test]
+    fn external_key_rotate_fingerprint_is_keyed() {
+        // Falsifier: revert the rotate call site to plain SHA-256; the stored
+        // field then equals the offline-oracle digest of caller material.
+        let fingerprint = fingerprint_sensitive_material("credential-a");
+        let serialized = serde_json::to_value(ExternalKeyRotateFingerprint {
+            action: EXTERNAL_KEY_ROTATE_ACTION,
+            external_key_id: "external-1",
+            credential_fingerprint: fingerprint,
+        })
+        .expect("serialize fingerprint");
+        assert_ne!(
+            serialized["credentialFingerprint"],
+            hex::encode(Sha256::digest(b"credential-a"))
         );
     }
 }
