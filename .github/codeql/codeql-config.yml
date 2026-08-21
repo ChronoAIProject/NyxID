@@ -1,5 +1,7 @@
 name: NyxID CodeQL config
 
+# Consumed by `.github/workflows/codeql.yml`; repository Default Setup is
+# disabled so this checked-in configuration is the single CodeQL policy.
 # The CLI wizard bundle is generated third-party/minified output. Its source
 # files are analyzed through the frontend build; scanning the committed bundle
 # produces findings in embedded vendor code that cannot be remediated here.
