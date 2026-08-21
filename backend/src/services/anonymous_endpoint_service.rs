@@ -594,6 +594,7 @@ mod tests {
             platform_billable: false,
             platform_metric: None,
             platform_pricing: None,
+            platform_pricing_cleanup_metric_code: None,
             resale_billable: true,
             resale_metric: crate::models::service_billing::BillingMetric::Requests,
             lago_resale_metric_code: Some("resale_requests".to_string()),

@@ -106,7 +106,7 @@ pub async fn expire_purchased_credits(
         let wallet_balance_micros = if has_traceable_purchase_balances(&transactions) {
             0
         } else {
-            match lago.wallet_balance_micros(&wallet.lago_customer_id).await {
+            match wallet_balance_after_accrued_usage_micros(lago, &wallet).await {
                 Ok(balance) => balance,
                 Err(error) => {
                     tracing::warn!(owner_id = %wallet.owner_id, %error, "failed to read exact Lago wallet balance for expiry");
@@ -303,7 +303,11 @@ async fn complete_expiry_operation(
     };
 
     if !operation.wallet_balance_applied {
-        let balance_micros = lago.wallet_balance_micros(&wallet.lago_customer_id).await?;
+        // credits_balance is the reliable OSS Lago field, but it does not
+        // include the current period's un-invoiced usage. Subtract the same
+        // current_usage amount as refresh_wallet_balances before publishing
+        // the post-void local balance, or expiry could re-expose spent credit.
+        let balance_micros = wallet_balance_after_accrued_usage_micros(lago, wallet).await?;
         // Availability is whole-credit based, so flooring the exact provider
         // balance is the only conservative conversion after an expiry debit.
         let balance_credits = balance_micros.max(0) / 1_000_000;
@@ -392,6 +396,26 @@ fn operation_filter(
 
 fn micros_to_held_credits(amount_micros: i64) -> i64 {
     amount_micros.max(0).saturating_add(999_999) / 1_000_000
+}
+
+async fn wallet_balance_after_accrued_usage_micros(
+    lago: &dyn LagoApi,
+    wallet: &BillingWallet,
+) -> AppResult<i64> {
+    let balance_micros = lago.wallet_balance_micros(&wallet.lago_customer_id).await?;
+    let accrued_micros = match wallet.lago_subscription_id.as_deref() {
+        Some(subscription_id) => {
+            let usage = lago
+                .current_usage(&wallet.lago_customer_id, subscription_id)
+                .await?;
+            super::lago_client::extract_current_usage_amount_cents(&usage.raw)
+                .unwrap_or(0)
+                .max(0)
+                .saturating_mul(10_000)
+        }
+        None => 0,
+    };
+    Ok(balance_micros.saturating_sub(accrued_micros))
 }
 
 fn has_traceable_purchase_balances(transactions: &[LagoWalletTransaction]) -> bool {
@@ -633,6 +657,7 @@ mod tests {
 
     struct ExpiryLago {
         transaction: LagoWalletTransaction,
+        current_usage_cents: i64,
         void_calls: AtomicUsize,
         reserve_before_return: Option<(mongodb::Database, String)>,
         reservation_applied: AtomicBool,
@@ -685,7 +710,11 @@ mod tests {
             Ok(LagoUsage {
                 customer_id: customer_id.to_string(),
                 subscription_id: subscription_id.to_string(),
-                raw: serde_json::json!({}),
+                raw: serde_json::json!({
+                    "customer_usage": {
+                        "total_amount_cents": self.current_usage_cents,
+                    }
+                }),
             })
         }
 
@@ -789,6 +818,7 @@ mod tests {
             .expect("insert top-up session");
         let lago = ExpiryLago {
             transaction: transaction("purchase-1", 5_000_000, Some(3_000_000), paid_at),
+            current_usage_cents: 100,
             void_calls: AtomicUsize::new(0),
             reserve_before_return: None,
             reservation_applied: AtomicBool::new(false),
@@ -819,7 +849,7 @@ mod tests {
 
         assert_eq!(expired, 1);
         assert_eq!(lago.void_calls.load(Ordering::SeqCst), 1);
-        assert_eq!(wallet.balance_credits, 7);
+        assert_eq!(wallet.balance_credits, 6);
         assert_eq!(session.paid_at, Some(paid_at));
         assert_eq!(
             session.credits_expire_at,
@@ -894,6 +924,7 @@ mod tests {
         recovered_transaction.name = Some(purchased_credit_expiry_transaction_name(operation_id));
         let lago = ExpiryLago {
             transaction: recovered_transaction,
+            current_usage_cents: 0,
             void_calls: AtomicUsize::new(0),
             reserve_before_return: None,
             reservation_applied: AtomicBool::new(false),
@@ -957,6 +988,7 @@ mod tests {
             .expect("insert wallet");
         let lago = ExpiryLago {
             transaction: transaction("purchase-race", 3_000_000, Some(3_000_000), paid_at),
+            current_usage_cents: 0,
             void_calls: AtomicUsize::new(0),
             reserve_before_return: Some((db.clone(), "wallet-race".to_string())),
             reservation_applied: AtomicBool::new(false),

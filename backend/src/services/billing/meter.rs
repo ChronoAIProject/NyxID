@@ -60,11 +60,31 @@ pub(crate) async fn has_complete_meter(
     if transaction_ids.is_empty() {
         return Ok(false);
     }
-    let count = db
+    let rows: Vec<UsageMeterRow> = db
         .collection::<UsageMeterRow>(USAGE_METER)
-        .count_documents(doc! { "transaction_id": { "$in": &transaction_ids } })
+        .find(doc! { "transaction_id": { "$in": &transaction_ids } })
+        .await?
+        .try_collect()
         .await?;
-    Ok(count == transaction_ids.len() as u64)
+    if rows.is_empty() {
+        return Ok(false);
+    }
+    let active_count = rows
+        .iter()
+        .filter(|row| {
+            matches!(
+                row.status,
+                UsageStatus::Reserved | UsageStatus::Forwarded | UsageStatus::Finalized
+            )
+        })
+        .count();
+    if rows.len() == transaction_ids.len() && active_count == transaction_ids.len() {
+        return Ok(true);
+    }
+    Err(AppError::Conflict(
+        "billing request id belongs to released or incomplete usage; retry with a fresh billing request id"
+            .to_string(),
+    ))
 }
 
 pub async fn open(
@@ -627,6 +647,7 @@ mod tests {
             platform_billable: true,
             platform_metric: None,
             platform_pricing: None,
+            platform_pricing_cleanup_metric_code: None,
             resale_billable: true,
             resale_metric: BillingMetric::Tokens,
             lago_resale_metric_code: Some("resale_tokens".to_string()),
@@ -897,6 +918,7 @@ mod tests {
             platform_billable: true,
             platform_metric: None,
             platform_pricing: None,
+            platform_pricing_cleanup_metric_code: None,
             resale_billable: true,
             resale_metric: BillingMetric::Tokens,
             lago_resale_metric_code: Some("resale_tokens".to_string()),

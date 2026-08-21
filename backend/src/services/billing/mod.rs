@@ -363,6 +363,7 @@ mod tests {
             platform_billable: true,
             platform_metric: None,
             platform_pricing: None,
+            platform_pricing_cleanup_metric_code: None,
             resale_billable: true,
             resale_metric: BillingMetric::Requests,
             lago_resale_metric_code: Some("resale_requests".to_string()),
@@ -587,6 +588,82 @@ mod tests {
 
         assert_eq!(wallet.reserved_credits, 1);
         assert_eq!(row_count, 1);
+    }
+
+    #[tokio::test]
+    async fn released_meter_retry_requires_a_fresh_billing_request_id() {
+        let Some(db) = connect_test_database("billing_released_open_conflict").await else {
+            return;
+        };
+        db.collection::<mongodb::bson::Document>(crate::models::usage_meter::COLLECTION_NAME)
+            .create_index(
+                mongodb::IndexModel::builder()
+                    .keys(doc! { "transaction_id": 1 })
+                    .options(
+                        mongodb::options::IndexOptions::builder()
+                            .unique(true)
+                            .build(),
+                    )
+                    .build(),
+            )
+            .await
+            .expect("create usage transaction index");
+        let owner_id = "owner-released-open";
+        insert_wallet(&db, owner_id).await;
+        insert_platform_rate(&db, 1).await;
+        let mut config = test_app_config();
+        config.billing_enabled = true;
+        let service = BillingService::new_with_lago(
+            db.clone(),
+            Arc::new(config),
+            Arc::new(FakeLago::default()),
+        );
+        let billing = ServiceBilling {
+            platform_billable: true,
+            ..Default::default()
+        };
+        let ctx = BillingRouteContext::new(
+            BillingIngress::Proxy,
+            "released-billing-request".to_string(),
+            owner_id.to_string(),
+            owner_id.to_string(),
+            None,
+            Some("user-service-1".to_string()),
+            Some("catalog-1".to_string()),
+            Some("service-one".to_string()),
+            NodeIntent::Direct,
+            "bearer".to_string(),
+            CredentialClass::UserOwned,
+            BillingMetric::Requests,
+            Some(&billing),
+            false,
+        );
+
+        let metered = service.open(&ctx).await.expect("first open");
+        service
+            .fail(&metered, "downstream failed before forwarding")
+            .await
+            .expect("release failed request");
+        let error = service
+            .open(&ctx)
+            .await
+            .expect_err("released billing id must conflict");
+
+        assert!(matches!(error, crate::errors::AppError::Conflict(_)));
+        let wallet = db
+            .collection::<BillingWallet>(crate::models::billing_wallet::COLLECTION_NAME)
+            .find_one(doc! { "owner_id": owner_id })
+            .await
+            .expect("find wallet")
+            .expect("wallet exists");
+        let row = db
+            .collection::<UsageMeterRow>(crate::models::usage_meter::COLLECTION_NAME)
+            .find_one(doc! { "billing_request_id": "released-billing-request" })
+            .await
+            .expect("find usage row")
+            .expect("usage row exists");
+        assert_eq!(wallet.reserved_credits, 0);
+        assert_eq!(row.status, crate::models::usage_meter::UsageStatus::Failed);
     }
 
     #[tokio::test]

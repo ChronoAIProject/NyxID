@@ -1363,6 +1363,10 @@ pub async fn update_service(
             // Sync state and Lago metric identity are server-owned. Preserve
             // them when ordinary service edits echo an unchanged price.
             billing.platform_pricing = current_pricing.cloned();
+            billing.platform_pricing_cleanup_metric_code = service
+                .billing
+                .as_ref()
+                .and_then(|current| current.platform_pricing_cleanup_metric_code.clone());
         }
     }
 
@@ -1981,9 +1985,7 @@ pub async fn update_service(
             .as_ref()
             .and_then(|billing| billing.platform_pricing.as_ref())
             .is_some();
-        if has_price {
-            state.billing.sync_service_price(&committed_service).await?;
-        }
+        state.billing.sync_service_price(&committed_service).await?;
         audit_service::log_for_user(
             state.db.clone(),
             &auth_user,
@@ -1995,8 +1997,9 @@ pub async fn update_service(
             Some(serde_json::json!({
                 "service_id": &service_id,
                 "metric_code": committed_service.billing.as_ref()
-                    .and_then(|billing| billing.platform_pricing.as_ref())
-                    .map(|pricing| pricing.lago_metric_code.as_str()),
+                    .and_then(|billing| billing.platform_pricing.as_ref()
+                        .map(|pricing| pricing.lago_metric_code.as_str())
+                        .or(billing.platform_pricing_cleanup_metric_code.as_deref())),
             })),
         );
     }

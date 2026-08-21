@@ -62,6 +62,11 @@ pub struct ServiceBilling {
     /// metric and Lago-authored plan price.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub platform_pricing: Option<ServicePlatformPricing>,
+    /// Durable cleanup marker used when an admin clears a NyxID-owned price.
+    /// Traffic immediately falls back to the legacy metric; reconciliation
+    /// removes this metric's charge from Lago before clearing the marker.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub platform_pricing_cleanup_metric_code: Option<String>,
     #[serde(default)]
     pub resale_billable: bool,
     #[serde(default)]
@@ -76,6 +81,7 @@ impl Default for ServiceBilling {
             platform_billable: false,
             platform_metric: None,
             platform_pricing: None,
+            platform_pricing_cleanup_metric_code: None,
             resale_billable: false,
             resale_metric: BillingMetric::Tokens,
             lago_resale_metric_code: None,
@@ -201,6 +207,7 @@ mod tests {
             platform_billable: false,
             platform_metric: None,
             platform_pricing: None,
+            platform_pricing_cleanup_metric_code: None,
             resale_billable: true,
             resale_metric: BillingMetric::Requests,
             lago_resale_metric_code: None,

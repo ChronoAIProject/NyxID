@@ -20,6 +20,13 @@ pub fn normalize_platform_pricing(
     requested: &mut ServiceBilling,
 ) -> AppResult<()> {
     let Some(pricing) = requested.platform_pricing.as_mut() else {
+        requested.platform_pricing_cleanup_metric_code = current
+            .and_then(|billing| billing.platform_pricing.as_ref())
+            .map(|pricing| pricing.lago_metric_code.clone())
+            .filter(|code| !code.trim().is_empty())
+            .or_else(|| {
+                current.and_then(|billing| billing.platform_pricing_cleanup_metric_code.clone())
+            });
         return Ok(());
     };
 
@@ -31,6 +38,7 @@ pub fn normalize_platform_pricing(
         .unwrap_or_else(|| metric_code_for_service(service_slug));
     pricing.sync_status = PricingSyncStatus::Pending;
     pricing.sync_error = None;
+    requested.platform_pricing_cleanup_metric_code = None;
     Ok(())
 }
 
@@ -80,12 +88,33 @@ pub async fn sync_service_price(
     plan_code: &str,
     service: &DownstreamService,
 ) -> AppResult<bool> {
-    let Some(pricing) = service
-        .billing
-        .as_ref()
-        .and_then(|billing| billing.platform_pricing.as_ref())
-    else {
+    let Some(billing) = service.billing.as_ref() else {
         return Ok(false);
+    };
+    let Some(pricing) = billing.platform_pricing.as_ref() else {
+        let Some(metric_code) = billing
+            .platform_pricing_cleanup_metric_code
+            .as_deref()
+            .filter(|code| !code.trim().is_empty())
+        else {
+            return Ok(false);
+        };
+        match lago.remove_standard_charge(plan_code, metric_code).await {
+            Ok(()) => {
+                complete_price_removal(db, &service.id, metric_code).await?;
+                return Ok(true);
+            }
+            Err(error) => {
+                tracing::warn!(
+                    service_id = %service.id,
+                    service_slug = %service.slug,
+                    metric_code,
+                    error = %error,
+                    "Service price removal failed; reconciliation will retry"
+                );
+                return Ok(false);
+            }
+        }
     };
     let input = ServicePriceSync {
         metric_code: pricing.lago_metric_code.clone(),
@@ -169,6 +198,31 @@ pub async fn sync_service_price(
     }
 }
 
+async fn complete_price_removal(
+    db: &mongodb::Database,
+    service_id: &str,
+    metric_code: &str,
+) -> AppResult<()> {
+    // Keep the cleanup marker until after the cache delete. A crash between
+    // these writes makes reconciliation repeat an idempotent Lago removal and
+    // cache delete instead of permanently orphaning the local rate.
+    db.collection::<BillingRateCache>(crate::models::billing_rate_cache::COLLECTION_NAME)
+        .delete_many(doc! { "lago_metric_code": metric_code })
+        .await?;
+    db.collection::<DownstreamService>(DOWNSTREAM_SERVICES)
+        .update_one(
+            doc! {
+                "_id": service_id,
+                "billing.platform_pricing_cleanup_metric_code": metric_code,
+            },
+            doc! { "$unset": {
+                "billing.platform_pricing_cleanup_metric_code": "",
+            } },
+        )
+        .await?;
+    Ok(())
+}
+
 pub async fn retry_pending_service_prices(
     db: &mongodb::Database,
     lago: &dyn LagoApi,
@@ -177,8 +231,18 @@ pub async fn retry_pending_service_prices(
     let services: Vec<DownstreamService> = db
         .collection::<DownstreamService>(DOWNSTREAM_SERVICES)
         .find(doc! {
-            "billing.platform_pricing.sync_status": { "$in": ["pending", "failed"] },
-            "billing.platform_pricing.credits_per_unit": { "$type": "string" },
+            "$or": [
+                {
+                    "billing.platform_pricing.sync_status": { "$in": ["pending", "failed"] },
+                    "billing.platform_pricing.credits_per_unit": { "$type": "string" },
+                },
+                {
+                    "billing.platform_pricing_cleanup_metric_code": {
+                        "$type": "string",
+                        "$ne": "",
+                    },
+                },
+            ],
         })
         .limit(MAX_PENDING_SYNC_BATCH)
         .await?
@@ -240,7 +304,20 @@ fn format_micros(micros: i64) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{metric_code_for_service, normalize_price};
+    use chrono::Utc;
+    use mongodb::bson::doc;
+
+    use crate::models::billing_rate_cache::BillingRateCache;
+    use crate::test_utils::connect_test_database;
+
+    use crate::models::service_billing::{
+        PricingSyncStatus, ServiceBilling, ServicePlatformPricing,
+    };
+
+    use super::{
+        DOWNSTREAM_SERVICES, complete_price_removal, metric_code_for_service,
+        normalize_platform_pricing, normalize_price,
+    };
 
     #[test]
     fn price_normalization_is_exact_and_bounded() {
@@ -256,6 +333,81 @@ mod tests {
         assert_eq!(
             metric_code_for_service("llm-openai"),
             "platform_svc_llm-openai"
+        );
+    }
+
+    #[test]
+    fn clearing_price_persists_metric_cleanup_marker() {
+        let current = ServiceBilling {
+            platform_pricing: Some(ServicePlatformPricing {
+                credits_per_unit: "0.125".to_string(),
+                lago_metric_code: "platform_svc_llm-openai".to_string(),
+                sync_status: PricingSyncStatus::Synced,
+                sync_error: None,
+            }),
+            ..Default::default()
+        };
+        let mut requested = ServiceBilling::default();
+
+        normalize_platform_pricing("llm-openai", Some(&current), &mut requested)
+            .expect("normalize clear");
+
+        assert!(requested.platform_pricing.is_none());
+        assert_eq!(
+            requested.platform_pricing_cleanup_metric_code.as_deref(),
+            Some("platform_svc_llm-openai")
+        );
+    }
+
+    #[tokio::test]
+    async fn completed_price_removal_deletes_rate_and_cleanup_marker() {
+        let Some(db) = connect_test_database("service_price_cleanup").await else {
+            return;
+        };
+        let metric_code = "platform_svc_llm-openai";
+        db.collection::<mongodb::bson::Document>(DOWNSTREAM_SERVICES)
+            .insert_one(doc! {
+                "_id": "service-1",
+                "billing": {
+                    "platform_pricing_cleanup_metric_code": metric_code,
+                },
+            })
+            .await
+            .expect("insert service cleanup marker");
+        db.collection::<BillingRateCache>(crate::models::billing_rate_cache::COLLECTION_NAME)
+            .insert_one(BillingRateCache {
+                id: BillingRateCache::cache_id(metric_code, None),
+                lago_metric_code: metric_code.to_string(),
+                model: None,
+                credits_per_unit_micros: 125_000,
+                synced_at: Utc::now(),
+            })
+            .await
+            .expect("insert stale service rate");
+
+        complete_price_removal(&db, "service-1", metric_code)
+            .await
+            .expect("complete price removal");
+
+        let service = db
+            .collection::<mongodb::bson::Document>(DOWNSTREAM_SERVICES)
+            .find_one(doc! { "_id": "service-1" })
+            .await
+            .expect("find service")
+            .expect("service exists");
+        assert!(
+            service
+                .get_document("billing")
+                .expect("billing")
+                .get("platform_pricing_cleanup_metric_code")
+                .is_none()
+        );
+        assert_eq!(
+            db.collection::<BillingRateCache>(crate::models::billing_rate_cache::COLLECTION_NAME,)
+                .count_documents(doc! { "lago_metric_code": metric_code })
+                .await
+                .expect("count rates"),
+            0
         );
     }
 }

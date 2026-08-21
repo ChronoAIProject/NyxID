@@ -22,6 +22,7 @@ pub const MAX_SCOPED_SERVICES: usize = 100;
 pub const MAX_GRANT_REASON_LEN: usize = 2_000;
 const EXPIRY_SWEEP_BATCH: i64 = 500;
 const LEDGER_RECOVERY_BATCH: i64 = 500;
+pub const INLINE_ISSUANCE_LEDGER_LIMIT: usize = 50;
 
 pub fn available_grant_micros(grant: &CreditGrant) -> i64 {
     grant
@@ -77,7 +78,7 @@ pub async fn issue_grants(
         .filter(|value| !value.is_empty())
         .map(ToString::to_string);
 
-    let grants: Vec<CreditGrant> = recipients
+    let mut grants: Vec<CreditGrant> = recipients
         .into_iter()
         .map(|recipient_user_id| CreditGrant {
             id: Uuid::new_v4().to_string(),
@@ -108,7 +109,10 @@ pub async fn issue_grants(
     db.collection::<CreditGrant>(CREDIT_GRANTS)
         .insert_many(&grants)
         .await?;
-    for grant in &grants {
+    // Hash-chain appends serialize on the ledger head. Keep the admin request
+    // bounded for platform-wide batches; remaining grants stay deliberately
+    // unspendable until recover_unledgered_events journals them.
+    for grant in grants.iter_mut().take(INLINE_ISSUANCE_LEDGER_LIMIT) {
         if super::ledger::record_grant_event(
             db,
             BillingLedgerEventType::GrantIssued,
@@ -119,9 +123,13 @@ pub async fn issue_grants(
             format!("grant-issued:{}", grant.id),
         )
         .await
-            && let Err(error) = mark_issued_ledgered(db, &grant.id, now).await
         {
-            tracing::warn!(grant_id = %grant.id, %error, "grant issuance ledger marker will retry");
+            match mark_issued_ledgered(db, &grant.id, now).await {
+                Ok(()) => grant.issued_ledgered_at = Some(now),
+                Err(error) => {
+                    tracing::warn!(grant_id = %grant.id, %error, "grant issuance ledger marker will retry");
+                }
+            }
         }
     }
     Ok(grants)
@@ -657,6 +665,75 @@ mod tests {
                 .await
                 .expect("count grant ledger entries"),
             2
+        );
+    }
+
+    #[tokio::test]
+    async fn large_batch_defers_activation_until_ledger_recovery() {
+        let Some(db) = connect_test_database("credit_grant_deferred_activation").await else {
+            return;
+        };
+        super::super::ledger::init_billing_ledger_hmac_key(zeroize::Zeroizing::new(
+            super::super::ledger::TEST_BILLING_LEDGER_HMAC_KEY,
+        ));
+        let users: Vec<User> = (0..=INLINE_ISSUANCE_LEDGER_LIMIT)
+            .map(|index| user(&format!("owner-{index:03}"), UserType::Person, true))
+            .collect();
+        db.collection::<User>(USERS)
+            .insert_many(users)
+            .await
+            .expect("insert billing owners");
+
+        let grants = issue_grants(
+            &db,
+            IssueCreditGrantInput {
+                amount_credits: 10,
+                target_kind: BillingTargetKind::AllUsers,
+                target_user_ids: Vec::new(),
+                all_services: true,
+                service_refs: Vec::new(),
+                expires_at: None,
+                reason: Some("large launch batch".to_string()),
+                granted_by: "admin-1".to_string(),
+            },
+        )
+        .await
+        .expect("issue large batch");
+
+        assert_eq!(grants.len(), INLINE_ISSUANCE_LEDGER_LIMIT + 1);
+        assert_eq!(
+            grants
+                .iter()
+                .filter(|grant| grant.issued_ledgered_at.is_some())
+                .count(),
+            INLINE_ISSUANCE_LEDGER_LIMIT
+        );
+        let pending_owner = grants
+            .iter()
+            .find(|grant| grant.issued_ledgered_at.is_none())
+            .expect("one deferred grant")
+            .recipient_user_id
+            .clone();
+        assert!(
+            list_active_for_user(&db, &pending_owner, Utc::now())
+                .await
+                .expect("list pending owner's grants")
+                .is_empty(),
+            "a deferred grant must remain unspendable"
+        );
+
+        assert_eq!(
+            recover_unledgered_events(&db, Utc::now())
+                .await
+                .expect("recover deferred issuance"),
+            1
+        );
+        assert_eq!(
+            list_active_for_user(&db, &pending_owner, Utc::now())
+                .await
+                .expect("list activated grants")
+                .len(),
+            1
         );
     }
 

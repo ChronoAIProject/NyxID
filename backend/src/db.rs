@@ -2408,20 +2408,7 @@ pub async fn ensure_indexes(db: &Database) -> Result<(), mongodb::error::Error> 
                 .build(),
         )
         .await?;
-    billing_ledger
-        .create_index(
-            IndexModel::builder()
-                .keys(doc! { "dedupe_key": 1 })
-                .options(
-                    IndexOptions::builder()
-                        .name("billing_ledger_dedupe_unique".to_string())
-                        .unique(true)
-                        .sparse(true)
-                        .build(),
-                )
-                .build(),
-        )
-        .await?;
+    ensure_billing_ledger_dedupe_index(&billing_ledger).await?;
     billing_ledger
         .create_index(
             IndexModel::builder()
@@ -2477,6 +2464,59 @@ pub async fn ensure_indexes(db: &Database) -> Result<(), mongodb::error::Error> 
     purge_legacy_channel_message_content(db).await?;
 
     Ok(())
+}
+
+async fn ensure_billing_ledger_dedupe_index(
+    billing_ledger: &mongodb::Collection<Document>,
+) -> Result<(), mongodb::error::Error> {
+    let unique = IndexModel::builder()
+        .keys(doc! { "dedupe_key": 1 })
+        .options(
+            IndexOptions::builder()
+                .name("billing_ledger_dedupe_unique".to_string())
+                .unique(true)
+                .sparse(true)
+                .build(),
+        )
+        .build();
+    match billing_ledger.create_index(unique).await {
+        Ok(_) => Ok(()),
+        Err(error) if is_duplicate_key_error_including_commands(&error) => {
+            // dedupe_key participates in canonical ledger hashes, so repairing
+            // historical duplicates in place would invalidate the chain. Boot
+            // with a lookup index and retain best-effort check-then-append
+            // behavior until operators investigate the duplicate delivery.
+            tracing::error!(
+                error = %error,
+                "Cannot create unique billing_ledger dedupe index because immutable historical dedupe_key duplicates exist. The server will boot with a non-unique lookup index. Remediation: verify the billing ledger, investigate duplicate Lago webhook delivery, and rebuild the unique index only after an append-only migration; never edit existing ledger rows."
+            );
+            billing_ledger
+                .create_index(
+                    IndexModel::builder()
+                        .keys(doc! { "dedupe_key": 1 })
+                        .options(
+                            IndexOptions::builder()
+                                .name("billing_ledger_dedupe_lookup".to_string())
+                                .sparse(true)
+                                .build(),
+                        )
+                        .build(),
+                )
+                .await?;
+            Ok(())
+        }
+        Err(error) => Err(error),
+    }
+}
+
+fn is_duplicate_key_error_including_commands(error: &mongodb::error::Error) -> bool {
+    match error.kind.as_ref() {
+        mongodb::error::ErrorKind::Command(command) => command.code == 11000,
+        mongodb::error::ErrorKind::Write(mongodb::error::WriteFailure::WriteError(write)) => {
+            write.code == 11000
+        }
+        _ => false,
+    }
 }
 
 /// Name of the `schema_migrations` collection used to track one-off
@@ -3893,6 +3933,56 @@ async fn migrate_node_service_bindings(db: &Database) -> Result<(), Box<dyn std:
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn billing_ledger_dedupe_index_falls_back_on_historical_duplicates() {
+        let Some(db) =
+            crate::test_utils::connect_test_database("ledger_dedupe_index_fallback").await
+        else {
+            return;
+        };
+        let ledger = db.collection::<Document>(crate::models::billing_ledger::COLLECTION_NAME);
+        ledger
+            .insert_many([
+                doc! { "_id": "legacy-1", "dedupe_key": "invoice:duplicate" },
+                doc! { "_id": "legacy-2", "dedupe_key": "invoice:duplicate" },
+            ])
+            .await
+            .expect("insert historical duplicates");
+
+        ensure_billing_ledger_dedupe_index(&ledger)
+            .await
+            .expect("fallback index must keep startup viable");
+
+        let indexes: Vec<IndexModel> = ledger
+            .list_indexes()
+            .await
+            .expect("list indexes")
+            .try_collect()
+            .await
+            .expect("collect indexes");
+        let fallback = indexes
+            .iter()
+            .find(|index| {
+                index
+                    .options
+                    .as_ref()
+                    .and_then(|options| options.name.as_deref())
+                    == Some("billing_ledger_dedupe_lookup")
+            })
+            .expect("non-unique fallback index");
+        assert_ne!(
+            fallback.options.as_ref().and_then(|options| options.unique),
+            Some(true)
+        );
+        assert!(indexes.iter().all(|index| {
+            index
+                .options
+                .as_ref()
+                .and_then(|options| options.name.as_deref())
+                != Some("billing_ledger_dedupe_unique")
+        }));
+    }
 
     fn sample_downstream_service() -> DownstreamService {
         DownstreamService {

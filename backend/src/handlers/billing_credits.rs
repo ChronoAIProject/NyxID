@@ -37,6 +37,11 @@ pub struct IssueGrantRequest {
 pub struct IssueGrantResponse {
     pub batch_id: String,
     pub created_count: usize,
+    /// Recipients whose immutable issuance ledger entry was confirmed inline.
+    pub activated_count: usize,
+    /// Recipients that remain unspendable until the reconcile sweep journals
+    /// their issuance. Large batches deliberately use this bounded path.
+    pub pending_activation_count: usize,
 }
 
 #[derive(Debug, Deserialize)]
@@ -148,6 +153,9 @@ pub struct UserAllowanceListResponse {
     responses((status = 200, body = IssueGrantResponse)),
     security(("bearer_auth" = []))
 )]
+/// Issue a grant batch. At most 50 recipients are activated inline; larger
+/// batches are fully created but report pending activation until reconciliation
+/// confirms each remaining hash-chain ledger entry.
 pub async fn issue_grant(
     State(state): State<AppState>,
     auth_user: AuthUser,
@@ -172,6 +180,10 @@ pub async fn issue_grant(
         .first()
         .map(|grant| grant.batch_id.clone())
         .ok_or_else(|| AppError::Internal("credit grant batch was empty".to_string()))?;
+    let activated_count = grants
+        .iter()
+        .filter(|grant| grant.issued_ledgered_at.is_some())
+        .count();
     audit_service::log_for_user(
         state.db.clone(),
         &auth_user,
@@ -185,6 +197,8 @@ pub async fn issue_grant(
     Ok(Json(IssueGrantResponse {
         batch_id,
         created_count: grants.len(),
+        activated_count,
+        pending_activation_count: grants.len().saturating_sub(activated_count),
     }))
 }
 
