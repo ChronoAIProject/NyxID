@@ -1306,7 +1306,12 @@ fn gcp_create_fingerprint(body: &AssistantGcpCreateRequest) -> AppResult<String>
         EXTERNAL_KEY_ADD_GCP_ACTION,
         serde_json::json!({
             "label": body.label.as_deref(),
-            "keyJson": body.key_json.as_str(),
+            // Keyed, not plain: the receipt is stored, so an unkeyed digest of
+            // caller-supplied material is an offline oracle against a database
+            // snapshot. Identifiers below stay plain -- they are not secret.
+            "keyJson": crate::services::assistant_action_receipts::fingerprint_sensitive_material(
+                body.key_json.as_str(),
+            ),
             "scopes": body.scopes.as_deref(),
             "serviceSlugs": body.service_slugs.as_deref(),
             "targetOrgId": body.target_org_id.as_deref(),
@@ -1321,7 +1326,13 @@ fn openclaw_connect_fingerprint(
 ) -> AppResult<String> {
     action_fingerprint(
         OPENCLAW_CONNECT_ACTION,
-        serde_json::json!({"gatewayUrl":gateway_url,"credential":credential,"label":label}),
+        serde_json::json!({
+            "gatewayUrl": gateway_url,
+            "credential": crate::services::assistant_action_receipts::fingerprint_sensitive_material(
+                credential,
+            ),
+            "label": label,
+        }),
     )
 }
 

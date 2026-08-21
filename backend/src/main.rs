@@ -386,6 +386,16 @@ async fn main() {
     );
     services::audit_service::init_audit_chain_hmac_key(audit_chain_hmac_key.clone());
     let audit_chain_hmac_key = Arc::new(audit_chain_hmac_key);
+    // Keys the receipt fingerprints that cover caller-supplied material.
+    // Receipts are stored, so an unkeyed digest of a low-entropy value would
+    // be an offline oracle against a database snapshot.
+    services::assistant_action_receipts::init_action_fingerprint_hmac_key(
+        crypto::hmac_keys::derive_hmac_key(
+            "assistant-action-fingerprint",
+            config.encryption_key.as_deref().map(str::as_bytes),
+            &jwt_private_key_pem,
+        ),
+    );
     let billing_ledger_hmac_key = services::billing::ledger::derive_billing_ledger_hmac_key(
         config.billing_ledger_hmac_key.as_deref(),
         config.encryption_key.as_deref(),

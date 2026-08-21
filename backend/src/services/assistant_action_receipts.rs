@@ -144,6 +144,46 @@ async fn find_receipt(
         .await?)
 }
 
+/// Domain-separated key for fingerprinting one-time material, initialised at
+/// startup alongside the other derived HMAC keys.
+static ACTION_FINGERPRINT_HMAC_KEY: std::sync::OnceLock<zeroize::Zeroizing<[u8; 32]>> =
+    std::sync::OnceLock::new();
+
+pub fn init_action_fingerprint_hmac_key(key: zeroize::Zeroizing<[u8; 32]>) {
+    if ACTION_FINGERPRINT_HMAC_KEY.set(key).is_err() {
+        tracing::warn!("assistant action fingerprint HMAC key was already initialized");
+    }
+}
+
+/// Fingerprint caller-supplied material that may be low-entropy.
+///
+/// A receipt fingerprint is a plain SHA-256 over the canonical request, which
+/// is correct for identifiers but wrong for material a user chooses: receipts
+/// are stored, so an unkeyed digest of a weak value is an offline
+/// brute-force oracle against a database snapshot. This keys the digest with
+/// a domain-separated HMAC so a snapshot alone proves nothing -- the same
+/// threat model the project already applies to CLI pairing codes.
+///
+/// Falls back to the unkeyed digest only when the key was never initialised
+/// (tests and tooling that never see real material), and says so in the
+/// prefix so the two can never silently compare equal.
+pub fn fingerprint_sensitive_material(material: &str) -> String {
+    match ACTION_FINGERPRINT_HMAC_KEY.get() {
+        Some(key) => {
+            use hmac::{Hmac, Mac};
+            let mut mac = <Hmac<Sha256> as Mac>::new_from_slice(key.as_ref())
+                .expect("HMAC accepts a 32-byte key");
+            mac.update(material.as_bytes());
+            format!("hmac-sha256:{}", hex::encode(mac.finalize().into_bytes()))
+        }
+        None => {
+            let mut hasher = Sha256::new();
+            hasher.update(material.as_bytes());
+            format!("unkeyed-sha256:{}", hex::encode(hasher.finalize()))
+        }
+    }
+}
+
 fn check_fingerprint(
     receipt: AssistantActionReceipt,
     fingerprint: &str,
@@ -234,6 +274,39 @@ pub async fn mark_completed(
 
 #[cfg(test)]
 mod tests {
+    use super::*;
+
+    /// Receipts are stored, so an unkeyed digest of caller-supplied material
+    /// is an offline brute-force oracle against a database snapshot. The
+    /// fingerprint must therefore never be a bare digest of the material.
+    ///
+    /// Falsifier: revert `fingerprint_sensitive_material` to a plain SHA-256
+    /// (or leave the key uninitialised, which takes the labelled fallback
+    /// branch) and this fails -- the output ends with the bare hex digest.
+    #[test]
+    fn sensitive_material_fingerprint_is_keyed_not_a_bare_digest() {
+        // Idempotent: another test in this process may have set it already.
+        let _ = ACTION_FINGERPRINT_HMAC_KEY.set(zeroize::Zeroizing::new([7u8; 32]));
+
+        let material = "low-entropy-value";
+        let fingerprint = fingerprint_sensitive_material(material);
+
+        let mut hasher = Sha256::new();
+        hasher.update(material.as_bytes());
+        let bare = hex::encode(hasher.finalize());
+
+        assert!(
+            !fingerprint.ends_with(&bare),
+            "fingerprint must not be a bare digest of the material: {fingerprint}"
+        );
+        assert!(fingerprint.starts_with("hmac-sha256:"), "{fingerprint}");
+        assert_eq!(
+            fingerprint,
+            fingerprint_sensitive_material(material),
+            "fingerprints must stay deterministic or replay detection breaks"
+        );
+    }
+
     use super::*;
 
     #[derive(Serialize)]
