@@ -475,12 +475,17 @@ mod assistant_evidence_mount_tests {
     /// point, so a future unmounting fails the build instead of silently
     /// re-arming the defect.
     #[tokio::test]
-    async fn wave4_evidence_routes_are_mounted_on_the_production_router() {
+    async fn assistant_evidence_routes_are_mounted_on_the_production_router() {
         let paths = [
             "/api/v1/users/me/authorization",
             "/api/v1/users/me/consents/client-1/authorization",
             "/api/v1/approvals/grants/grant-1/authorization",
             "/api/v1/approvals/service-configs/svc-1/authorization",
+            "/api/v1/orgs/org-1/authorization",
+            "/api/v1/orgs/org-1/members/member-1/authorization",
+            "/api/v1/admin/service-accounts/sa-1/authorization",
+            "/api/v1/developer/oauth-clients/client-1/authorization",
+            "/api/v1/notifications/settings/authorization",
         ];
 
         for path in paths {

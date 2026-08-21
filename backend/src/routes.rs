@@ -707,6 +707,10 @@ pub fn build_router() -> (Router<AppState>, Router<AppState>) {
                 .delete(handlers::admin_service_accounts::delete_service_account),
         )
         .route(
+            "/{sa_id}/authorization",
+            get(handlers::admin_service_accounts::get_service_account_authorization),
+        )
+        .route(
             "/{sa_id}/rotate-secret",
             post(handlers::admin_service_accounts::rotate_secret),
         )
@@ -942,6 +946,10 @@ pub fn build_router() -> (Router<AppState>, Router<AppState>) {
             "/settings",
             get(handlers::notifications::get_settings)
                 .put(handlers::notifications::update_settings),
+        )
+        .route(
+            "/settings/authorization",
+            get(handlers::notifications::get_settings_authorization),
         )
         .route(
             "/telegram/link",
@@ -1256,12 +1264,20 @@ pub fn build_router() -> (Router<AppState>, Router<AppState>) {
                 .delete(handlers::orgs::delete_org),
         )
         .route(
+            "/{org_id}/authorization",
+            get(handlers::orgs::get_org_authorization),
+        )
+        .route(
             "/{org_id}/members",
             get(handlers::orgs::list_members).post(handlers::orgs::add_member),
         )
         .route(
             "/{org_id}/members/{member_id}",
             patch(handlers::orgs::update_member).delete(handlers::orgs::remove_member),
+        )
+        .route(
+            "/{org_id}/members/{member_id}/authorization",
+            get(handlers::orgs::get_member_authorization),
         )
         .route(
             "/{org_id}/role-scopes",
@@ -1375,6 +1391,10 @@ pub fn build_router() -> (Router<AppState>, Router<AppState>) {
             get(handlers::developer_apps::get_my_oauth_client)
                 .patch(handlers::developer_apps::update_my_oauth_client)
                 .delete(handlers::developer_apps::delete_my_oauth_client),
+        )
+        .route(
+            "/oauth-clients/{client_id}/authorization",
+            get(handlers::developer_apps::get_my_oauth_client_authorization),
         )
         .route(
             "/oauth-clients/{client_id}/rotate-secret",
