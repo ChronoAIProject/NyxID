@@ -74,6 +74,17 @@ pub trait LagoApi: Send + Sync {
     ) -> AppResult<Vec<(String, String)>> {
         Ok(Vec::new())
     }
+    /// Create or update a NyxID-owned sum metric and its standard charge on
+    /// the configured plan. Fakes opt out unless a pricing test needs it.
+    async fn sync_standard_charge(
+        &self,
+        _plan_code: &str,
+        _input: &ServicePriceSync,
+    ) -> AppResult<()> {
+        Err(AppError::BillingProviderUnavailable(
+            "Lago service-price synchronization is not supported".to_string(),
+        ))
+    }
 }
 
 /// A trimmed Lago invoice used for top-up history and receipt downloads.
@@ -96,6 +107,14 @@ pub struct InvoiceSummary {
 pub struct PlanRate {
     pub lago_metric_code: String,
     pub credits_per_unit_micros: i64,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ServicePriceSync {
+    pub metric_code: String,
+    pub metric_name: String,
+    pub metric_description: String,
+    pub credits_per_unit: String,
 }
 
 #[derive(Clone)]
@@ -598,6 +617,125 @@ impl LagoApi for LagoClient {
             });
         }
         Ok(rates)
+    }
+
+    async fn sync_standard_charge(
+        &self,
+        plan_code: &str,
+        input: &ServicePriceSync,
+    ) -> AppResult<()> {
+        let metric_path = format!(
+            "billable_metrics/{}",
+            urlencoding::encode(&input.metric_code)
+        );
+        let metric = match self
+            .json_request(reqwest::Method::GET, &metric_path, None)
+            .await
+        {
+            Ok(value) => value,
+            Err(error) if error.status == Some(StatusCode::NOT_FOUND) => {
+                let body = json!({
+                    "billable_metric": {
+                        "name": input.metric_name,
+                        "code": input.metric_code,
+                        "description": input.metric_description,
+                        "aggregation_type": "sum_agg",
+                        "field_name": "quantity",
+                        "recurring": false,
+                    }
+                });
+                self.json_request(reqwest::Method::POST, "billable_metrics", Some(body))
+                    .await
+                    .map_err(lago_error_to_app)?
+            }
+            Err(error) => return Err(lago_error_to_app(error)),
+        };
+        let metric = metric.get("billable_metric").unwrap_or(&metric);
+        let metric_id = value_string(metric, &["lago_id", "id"]).ok_or_else(|| {
+            AppError::BillingProviderUnavailable(
+                "Lago billable metric response did not include an id".to_string(),
+            )
+        })?;
+        let aggregation = value_string(metric, &["aggregation_type"]).unwrap_or_default();
+        let field_name = value_string(metric, &["field_name"]).unwrap_or_default();
+        if aggregation != "sum_agg" || field_name != "quantity" {
+            return Err(AppError::BillingProviderUnavailable(format!(
+                "Lago metric '{}' exists with incompatible aggregation; expected sum_agg(quantity)",
+                input.metric_code
+            )));
+        }
+
+        // Names and descriptions remain NyxID-owned too. Lago does not allow
+        // changing aggregation semantics once a metric has attached usage,
+        // so only descriptive fields are updated on an existing metric.
+        self.json_request(
+            reqwest::Method::PUT,
+            &metric_path,
+            Some(json!({
+                "billable_metric": {
+                    "name": input.metric_name,
+                    "description": input.metric_description,
+                }
+            })),
+        )
+        .await
+        .map_err(lago_error_to_app)?;
+
+        let plan_path = format!("plans/{}", urlencoding::encode(plan_code));
+        let plan = self
+            .json_request(reqwest::Method::GET, &plan_path, None)
+            .await
+            .map_err(lago_error_to_app)?;
+        let existing_charge = plan
+            .get("plan")
+            .and_then(|plan| plan.get("charges"))
+            .and_then(Value::as_array)
+            .and_then(|charges| {
+                charges.iter().find(|charge| {
+                    value_string(charge, &["billable_metric_id"]).as_deref()
+                        == Some(metric_id.as_str())
+                        || value_string(charge, &["billable_metric_code"]).as_deref()
+                            == Some(input.metric_code.as_str())
+                        || charge
+                            .get("billable_metric")
+                            .and_then(|metric| value_string(metric, &["code"]))
+                            .as_deref()
+                            == Some(input.metric_code.as_str())
+                })
+            });
+
+        let charge_body = json!({
+            "charge": {
+                "billable_metric_id": metric_id,
+                "code": format!("nyxid_{}_charge", input.metric_code),
+                "charge_model": "standard",
+                "invoiceable": true,
+                "pay_in_advance": false,
+                "prorated": false,
+                "properties": { "amount": input.credits_per_unit },
+            }
+        });
+        if let Some(charge) = existing_charge {
+            let charge_code = value_string(charge, &["code"]).ok_or_else(|| {
+                AppError::BillingProviderUnavailable(
+                    "Lago plan charge response did not include a charge code".to_string(),
+                )
+            })?;
+            let path = format!(
+                "plans/{}/charges/{}",
+                urlencoding::encode(plan_code),
+                urlencoding::encode(&charge_code)
+            );
+            self.json_request(reqwest::Method::PUT, &path, Some(charge_body))
+                .await
+                .map_err(lago_error_to_app)?;
+        } else {
+            let path = format!("plans/{}/charges", urlencoding::encode(plan_code));
+            self.json_request(reqwest::Method::POST, &path, Some(charge_body))
+                .await
+                .map_err(lago_error_to_app)?;
+        }
+        Ok(())
     }
 }
 
@@ -1317,8 +1455,9 @@ mod tests {
 
     use super::{
         LagoApi, LagoClient, LagoError, LagoErrorKind, LagoEvent, LagoEventProperties,
-        OwnerProvisionInput, PlanRate, classify_lago_failure, decimal_credits_to_micros,
-        extract_active_wallet, extract_wallet_balance_credits, subscription_external_id,
+        OwnerProvisionInput, PlanRate, ServicePriceSync, classify_lago_failure,
+        decimal_credits_to_micros, extract_active_wallet, extract_wallet_balance_credits,
+        subscription_external_id,
     };
 
     async fn spawn_lago_mock(app: axum::Router) -> String {
@@ -1330,6 +1469,157 @@ mod tests {
             axum::serve(listener, app).await.expect("mock Lago server");
         });
         format!("http://{addr}")
+    }
+
+    fn service_price_sync() -> ServicePriceSync {
+        ServicePriceSync {
+            metric_code: "platform_svc_llm-openai".to_string(),
+            metric_name: "OpenAI platform usage".to_string(),
+            metric_description: "NyxID-managed platform usage price".to_string(),
+            credits_per_unit: "0.125".to_string(),
+        }
+    }
+
+    #[tokio::test]
+    async fn service_price_sync_creates_missing_metric_and_charge() {
+        async fn metric_missing() -> axum::http::StatusCode {
+            axum::http::StatusCode::NOT_FOUND
+        }
+        async fn create_metric(
+            axum::Json(body): axum::Json<serde_json::Value>,
+        ) -> axum::Json<serde_json::Value> {
+            assert_eq!(body["billable_metric"]["code"], "platform_svc_llm-openai");
+            assert_eq!(body["billable_metric"]["aggregation_type"], "sum_agg");
+            assert_eq!(body["billable_metric"]["field_name"], "quantity");
+            axum::Json(json!({
+                "billable_metric": {
+                    "lago_id": "metric-1",
+                    "aggregation_type": "sum_agg",
+                    "field_name": "quantity"
+                }
+            }))
+        }
+        async fn update_metric() -> axum::Json<serde_json::Value> {
+            axum::Json(json!({ "billable_metric": { "lago_id": "metric-1" } }))
+        }
+        async fn get_plan() -> axum::Json<serde_json::Value> {
+            axum::Json(json!({ "plan": { "charges": [] } }))
+        }
+        async fn create_charge(
+            axum::Json(body): axum::Json<serde_json::Value>,
+        ) -> axum::Json<serde_json::Value> {
+            let charge = &body["charge"];
+            assert_eq!(charge["billable_metric_id"], "metric-1");
+            assert_eq!(charge["code"], "nyxid_platform_svc_llm-openai_charge");
+            assert_eq!(charge["charge_model"], "standard");
+            assert_eq!(charge["properties"]["amount"], "0.125");
+            axum::Json(json!({ "charge": { "lago_id": "charge-1" } }))
+        }
+
+        let base_url = spawn_lago_mock(
+            axum::Router::new()
+                .route(
+                    "/api/v1/billable_metrics/platform_svc_llm-openai",
+                    axum::routing::get(metric_missing).put(update_metric),
+                )
+                .route(
+                    "/api/v1/billable_metrics",
+                    axum::routing::post(create_metric),
+                )
+                .route("/api/v1/plans/standard", axum::routing::get(get_plan))
+                .route(
+                    "/api/v1/plans/standard/charges",
+                    axum::routing::post(create_charge),
+                ),
+        )
+        .await;
+        let client = LagoClient::new(base_url, "test-key".to_string()).expect("client");
+
+        client
+            .sync_standard_charge("standard", &service_price_sync())
+            .await
+            .expect("sync service price");
+    }
+
+    #[tokio::test]
+    async fn service_price_sync_updates_existing_metric_and_charge() {
+        async fn get_metric() -> axum::Json<serde_json::Value> {
+            axum::Json(json!({
+                "billable_metric": {
+                    "lago_id": "metric-1",
+                    "aggregation_type": "sum_agg",
+                    "field_name": "quantity"
+                }
+            }))
+        }
+        async fn update_metric(
+            axum::Json(body): axum::Json<serde_json::Value>,
+        ) -> axum::Json<serde_json::Value> {
+            assert_eq!(body["billable_metric"]["name"], "OpenAI platform usage");
+            axum::Json(json!({ "billable_metric": { "lago_id": "metric-1" } }))
+        }
+        async fn get_plan() -> axum::Json<serde_json::Value> {
+            axum::Json(json!({
+                "plan": {
+                    "charges": [{
+                        "code": "existing-charge",
+                        "billable_metric_id": "metric-1"
+                    }]
+                }
+            }))
+        }
+        async fn update_charge(
+            axum::Json(body): axum::Json<serde_json::Value>,
+        ) -> axum::Json<serde_json::Value> {
+            assert_eq!(body["charge"]["properties"]["amount"], "0.125");
+            axum::Json(json!({ "charge": { "lago_id": "charge-1" } }))
+        }
+
+        let base_url = spawn_lago_mock(
+            axum::Router::new()
+                .route(
+                    "/api/v1/billable_metrics/platform_svc_llm-openai",
+                    axum::routing::get(get_metric).put(update_metric),
+                )
+                .route("/api/v1/plans/standard", axum::routing::get(get_plan))
+                .route(
+                    "/api/v1/plans/standard/charges/existing-charge",
+                    axum::routing::put(update_charge),
+                ),
+        )
+        .await;
+        let client = LagoClient::new(base_url, "test-key".to_string()).expect("client");
+
+        client
+            .sync_standard_charge("standard", &service_price_sync())
+            .await
+            .expect("sync service price");
+    }
+
+    #[tokio::test]
+    async fn service_price_sync_rejects_incompatible_existing_metric() {
+        async fn get_metric() -> axum::Json<serde_json::Value> {
+            axum::Json(json!({
+                "billable_metric": {
+                    "lago_id": "metric-1",
+                    "aggregation_type": "count_agg",
+                    "field_name": null
+                }
+            }))
+        }
+        let base_url = spawn_lago_mock(axum::Router::new().route(
+            "/api/v1/billable_metrics/platform_svc_llm-openai",
+            axum::routing::get(get_metric),
+        ))
+        .await;
+        let client = LagoClient::new(base_url, "test-key".to_string()).expect("client");
+
+        let error = client
+            .sync_standard_charge("standard", &service_price_sync())
+            .await
+            .expect_err("incompatible metric must fail");
+
+        assert!(error.to_string().contains("incompatible aggregation"));
     }
 
     #[test]

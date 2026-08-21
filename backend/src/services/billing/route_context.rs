@@ -24,6 +24,7 @@ pub struct BillingRouteContext {
     pub auth_method: String,
     pub credential_class: CredentialClass,
     pub platform_metric: BillingMetric,
+    pub platform_lago_metric_code: String,
     pub resale: Option<ResaleSpec>,
     /// Admin opt-in from the service's billing config: only services
     /// explicitly marked platform_billable charge the platform layer.
@@ -59,6 +60,11 @@ impl BillingRouteContext {
             .flatten();
         let service_platform_billable =
             service_billing.is_some_and(|billing| billing.platform_billable);
+        let legacy_metric_code = super::meter::platform_metric_code(platform_metric);
+        let platform_lago_metric_code = service_billing
+            .map(|billing| billing.active_platform_metric_code(legacy_metric_code))
+            .unwrap_or(legacy_metric_code)
+            .to_string();
 
         Self {
             ingress,
@@ -73,6 +79,7 @@ impl BillingRouteContext {
             auth_method,
             credential_class,
             platform_metric,
+            platform_lago_metric_code,
             resale,
             service_platform_billable,
             platform_metered: false,
@@ -110,6 +117,7 @@ mod tests {
         let billing = ServiceBilling {
             platform_billable: false,
             platform_metric: None,
+            platform_pricing: None,
             resale_billable: true,
             resale_metric: BillingMetric::Tokens,
             lago_resale_metric_code: Some("resale_tokens".to_string()),
@@ -154,6 +162,7 @@ mod tests {
         let billing = ServiceBilling {
             platform_billable: false,
             platform_metric: None,
+            platform_pricing: None,
             resale_billable: true,
             resale_metric: BillingMetric::Tokens,
             lago_resale_metric_code: Some("resale_tokens".to_string()),

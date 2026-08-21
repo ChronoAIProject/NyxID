@@ -47,7 +47,7 @@ pub async fn open(
             ctx,
             BillingLayer::Platform,
             ctx.platform_metric,
-            platform_metric_code(ctx.platform_metric).to_string(),
+            ctx.platform_lago_metric_code.clone(),
             reservation,
             None,
         )
@@ -530,6 +530,7 @@ mod tests {
         let billing = ServiceBilling {
             platform_billable: true,
             platform_metric: None,
+            platform_pricing: None,
             resale_billable: true,
             resale_metric: BillingMetric::Tokens,
             lago_resale_metric_code: Some("resale_tokens".to_string()),
@@ -791,6 +792,7 @@ mod tests {
         let billing = ServiceBilling {
             platform_billable: true,
             platform_metric: None,
+            platform_pricing: None,
             resale_billable: true,
             resale_metric: BillingMetric::Tokens,
             lago_resale_metric_code: Some("resale_tokens".to_string()),

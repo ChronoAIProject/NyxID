@@ -347,6 +347,7 @@ mod tests {
         billable_svc.billing = Some(ServiceBilling {
             platform_billable: false,
             platform_metric: None,
+            platform_pricing: None,
             resale_billable: true,
             resale_metric: BillingMetric::Tokens,
             lago_resale_metric_code: Some("resale_tokens".to_string()),

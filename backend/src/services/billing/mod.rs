@@ -2,6 +2,7 @@ pub mod lago_client;
 pub mod ledger;
 pub mod meter;
 pub mod owner_resolver;
+pub mod pricing;
 pub mod provisioning;
 pub mod reconcile;
 pub mod reservation;
@@ -86,6 +87,31 @@ impl BillingService {
 
     pub fn lago_client(&self) -> Option<Arc<dyn LagoApi>> {
         self.lago.clone()
+    }
+
+    pub async fn sync_service_price(
+        &self,
+        service: &crate::models::downstream_service::DownstreamService,
+    ) -> AppResult<bool> {
+        let Some(lago) = self.lago.as_deref() else {
+            if let Some(pricing) = service
+                .billing
+                .as_ref()
+                .and_then(|billing| billing.platform_pricing.as_ref())
+            {
+                pricing::set_sync_state(
+                    &self.db,
+                    &service.id,
+                    &pricing.lago_metric_code,
+                    &pricing.credits_per_unit,
+                    crate::models::service_billing::PricingSyncStatus::Failed,
+                    Some("Lago is not configured; the reconcile sweep will retry"),
+                )
+                .await?;
+            }
+            return Ok(false);
+        };
+        pricing::sync_service_price(&self.db, lago, &self.config.lago_plan_code, service).await
     }
 
     pub fn reconciler(&self) -> reconcile::BillingReconciler {
@@ -309,6 +335,7 @@ mod tests {
         let billing = ServiceBilling {
             platform_billable: true,
             platform_metric: None,
+            platform_pricing: None,
             resale_billable: true,
             resale_metric: BillingMetric::Requests,
             lago_resale_metric_code: Some("resale_requests".to_string()),

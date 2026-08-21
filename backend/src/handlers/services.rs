@@ -708,7 +708,7 @@ pub async fn create_service(
     State(state): State<AppState>,
     auth_user: AuthUser,
     tele: TelemetryContext,
-    Json(body): Json<CreateServiceRequest>,
+    Json(mut body): Json<CreateServiceRequest>,
 ) -> AppResult<Json<ServiceResponse>> {
     require_admin(&state, &auth_user).await?;
 
@@ -1058,6 +1058,9 @@ pub async fn create_service(
         .clone()
         .map(crate::services::proxy_authorization::normalize_policy)
         .transpose()?;
+    if let Some(billing) = body.billing.as_mut() {
+        crate::services::billing::pricing::normalize_platform_pricing(&slug, None, billing)?;
+    }
     validate_service_billing(body.billing.as_ref())?;
 
     let new_service = DownstreamService {
@@ -1118,6 +1121,26 @@ pub async fn create_service(
         .insert_one(&new_service)
         .await?;
 
+    if new_service
+        .billing
+        .as_ref()
+        .and_then(|billing| billing.platform_pricing.as_ref())
+        .is_some()
+    {
+        state.billing.sync_service_price(&new_service).await?;
+        audit_service::log_for_user(
+            state.db.clone(),
+            &auth_user,
+            "service_platform_price_set",
+            Some(serde_json::json!({
+                "service_id": &id,
+                "metric_code": new_service.billing.as_ref()
+                    .and_then(|billing| billing.platform_pricing.as_ref())
+                    .map(|pricing| pricing.lago_metric_code.as_str()),
+            })),
+        );
+    }
+
     tracing::info!(service_id = %id, name = %body.name, created_by = %auth_user.user_id, "Service created");
 
     // CR-1: Audit log for service creation
@@ -1152,7 +1175,8 @@ pub async fn create_service(
     // Brand-new catalog row -- no `UserService` can reference it yet,
     // so the viewer-routing fields default to "no binding" without a
     // lookup query.
-    Ok(Json(service_to_response_with_viewer(new_service, None)))
+    let created = fetch_service(&state, &id).await?;
+    Ok(Json(service_to_response_with_viewer(created, None)))
 }
 
 /// DELETE /api/v1/services/:service_id
@@ -1313,10 +1337,34 @@ pub async fn update_service(
     auth_user: AuthUser,
     tele: TelemetryContext,
     Path(service_id): Path<String>,
-    Json(body): Json<UpdateServiceRequest>,
+    Json(mut body): Json<UpdateServiceRequest>,
 ) -> AppResult<Json<ServiceResponse>> {
     let service = fetch_service(&state, &service_id).await?;
     require_admin_or_creator(&state, &auth_user, &service.created_by).await?;
+    let mut platform_price_changed = false;
+    if let Some(billing) = body.billing.as_mut() {
+        let current_pricing = service
+            .billing
+            .as_ref()
+            .and_then(|current| current.platform_pricing.as_ref());
+        platform_price_changed = billing
+            .platform_pricing
+            .as_ref()
+            .map(|pricing| pricing.credits_per_unit.trim())
+            != current_pricing.map(|pricing| pricing.credits_per_unit.as_str());
+        if platform_price_changed {
+            require_admin(&state, &auth_user).await?;
+            crate::services::billing::pricing::normalize_platform_pricing(
+                &service.slug,
+                service.billing.as_ref(),
+                billing,
+            )?;
+        } else {
+            // Sync state and Lago metric identity are server-owned. Preserve
+            // them when ordinary service edits echo an unchanged price.
+            billing.platform_pricing = current_pricing.cloned();
+        }
+    }
 
     // Build the $set document with only provided fields
     let mut set_doc = doc! {};
@@ -1631,6 +1679,7 @@ pub async fn update_service(
         let next_billing = body.billing.clone().filter(|billing| {
             billing.platform_billable
                 || billing.platform_metric.is_some()
+                || billing.platform_pricing.is_some()
                 || billing.resale_billable
                 || billing.lago_resale_metric_code.is_some()
         });
@@ -1925,6 +1974,32 @@ pub async fn update_service(
                 AppError::NotFound("Service not found".to_string())
             }
         })?;
+
+    if platform_price_changed {
+        let has_price = committed_service
+            .billing
+            .as_ref()
+            .and_then(|billing| billing.platform_pricing.as_ref())
+            .is_some();
+        if has_price {
+            state.billing.sync_service_price(&committed_service).await?;
+        }
+        audit_service::log_for_user(
+            state.db.clone(),
+            &auth_user,
+            if has_price {
+                "service_platform_price_set"
+            } else {
+                "service_platform_price_cleared"
+            },
+            Some(serde_json::json!({
+                "service_id": &service_id,
+                "metric_code": committed_service.billing.as_ref()
+                    .and_then(|billing| billing.platform_pricing.as_ref())
+                    .map(|pricing| pricing.lago_metric_code.as_str()),
+            })),
+        );
+    }
 
     if identity_changed {
         catalog_identity_service::propagate_catalog_update(

@@ -39,6 +39,7 @@ pub struct ReconcileStats {
     pub drift_alerts: u64,
     pub wallet_balance_refreshes: u64,
     pub rate_cache_refreshes: u64,
+    pub service_price_syncs: u64,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -78,6 +79,12 @@ impl BillingReconciler {
             return Ok(stats);
         };
 
+        stats.service_price_syncs += super::pricing::retry_pending_service_prices(
+            &self.db,
+            lago.as_ref(),
+            &self.config.lago_plan_code,
+        )
+        .await?;
         self.push_unacked(lago.as_ref(), &mut stats).await?;
         self.compare_finalized_usage(lago.as_ref(), &mut stats)
             .await?;

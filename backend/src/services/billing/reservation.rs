@@ -13,7 +13,6 @@ use crate::models::usage_meter::{
 };
 
 use super::lago_client::{Entitlement, LagoApi};
-use super::meter::platform_metric_code;
 use super::route_context::BillingRouteContext;
 
 const CREDIT_MICROS: i64 = 1_000_000;
@@ -1063,11 +1062,16 @@ async fn estimate_layer_reservations(
     let mut reservations = Vec::new();
 
     if ctx.platform_billable {
-        let metric_code = platform_metric_code(ctx.platform_metric);
         reservations.push(LayerReservation {
             layer: BillingLayer::Platform,
-            reserved_credits: estimate_fresh_credits(db, metric_code, None, 1, rate_cache_ttl_secs)
-                .await?,
+            reserved_credits: estimate_fresh_credits(
+                db,
+                &ctx.platform_lago_metric_code,
+                None,
+                1,
+                rate_cache_ttl_secs,
+            )
+            .await?,
         });
     }
 
